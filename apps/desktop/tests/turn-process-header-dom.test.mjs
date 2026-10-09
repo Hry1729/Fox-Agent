@@ -151,7 +151,18 @@ test('a recoverable tool error stays in the process while a completed run has no
   fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   await waitFor(() => assert.match(view.container.textContent, /工具调用未成功/))
   fireEvent.click(view.container.querySelector('.fox-runtime-step-trigger'))
-  assert.match(view.container.textContent, /not_found|missing.txt/)
+  // Failure state and diagnostics are separate checks:
+  //  1. the row keeps stating the failure in the whitelisted wording, and the
+  //     internal diagnostic body is never rendered (this test used to require the
+  //     raw `not_found` text, which the whitelist policy deliberately withholds);
+  assert.match(view.container.textContent, /工具调用未成功|本次操作未能完成/)
+  assert.doesNotMatch(view.container.textContent, /not_found/)
+  //  2. the source path is verified where the interface really shows one — the
+  //     successful sibling read of README.md — so a missing path on an errored row
+  //     can never be confused with a missing error state. (In this harness no open
+  //     handler is provided, so the path renders as row text rather than as the
+  //     clickable `.fox-runtime-step-path` element.)
+  assert.match(view.container.textContent, /README\.md/)
   assert.doesNotMatch(view.container.querySelector('.fox-process-turn-header').textContent, /过程未完成/)
 })
 
@@ -166,5 +177,127 @@ test('reader focus protects the process at automatic completion; verbose mode re
   await React.act(async () => persistProcessDisplayMode('verbose'))
   assert.equal(stages(view).filter(stage => stage.hidden).length, 0)
   assert.equal(view.container.querySelectorAll('.fox-runtime-process-disclosure[aria-hidden="false"]').length, 2)
+})
+
+/** The header's visible line is the toggle's own text plus the separator the header
+ *  renders only when there is status text, plus the one whole-round timer. */
+const header = (view) => view.container.querySelector('.fox-process-turn-header')
+const toggle = (view, state = '收起') => view.getByRole('button', { name: new RegExp(`${state}过程`) })
+
+test('the round header joins its own fields: no leading separator, and one whole-round timer', async () => {
+  const view = render(live())
+  await waitFor(() => assert.equal(stages(view).length, 2))
+  // Running and expanded: [avatar] [chevron] 正在处理 · 已用时 N秒
+  assert.equal(toggle(view).textContent, '正在处理')
+  assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在处理')
+  assert.equal(toggle(view).getAttribute('title'), '收起过程')
+  assert.equal(toggle(view).getAttribute('aria-expanded'), 'true')
+  // A native button keeps Enter/Space working; nothing about the line changed that.
+  assert.equal(toggle(view).tagName, 'BUTTON')
+  assert.equal(toggle(view).getAttribute('type'), 'button')
+  assert.match(header(view).textContent, /^正在处理·已用时 \d+秒$/)
+  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 1)
+
+  // Collapsed: the same fields, folded — the status text is never rewritten.
+  fireEvent.click(toggle(view))
+  assert.equal(toggle(view, '展开').getAttribute('aria-expanded'), 'false')
+  assert.equal(toggle(view, '展开').textContent, '正在处理')
+  assert.equal(toggle(view, '展开').getAttribute('aria-label'), '展开过程 · 正在处理')
+  assert.match(header(view).textContent, /^正在处理·已用时 \d+秒$/)
+  fireEvent.click(toggle(view, '展开'))
+  assert.equal(toggle(view).getAttribute('aria-expanded'), 'true')
+  assert.equal(toggle(view).textContent, '正在处理')
+})
+
+test('a settled turn leaves no dangling separator and shows the whole-round time once', async () => {
+  const view = render(timeline())
+  await waitFor(() => assert.equal(stages(view).length, 2))
+  // 工作过程 is the settled default, not a state: the line holds nothing before the
+  // timer, and a settled turn folds itself, so the control reads 展开过程.
+  const settled = () => view.getByRole('button', { name: /^(展开|收起)过程$/ })
+  assert.equal(settled().getAttribute('aria-expanded'), 'false')
+  assert.equal(settled().textContent, '')
+  assert.equal(settled().getAttribute('aria-label'), '展开过程')
+  assert.equal(header(view).textContent, '用时 6秒')
+  assert.doesNotMatch(header(view).textContent, /·/)
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
+  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
+  // Both fold states read the same: the fields are independent of the disclosure.
+  fireEvent.click(settled())
+  assert.equal(view.getByRole('button', { name: '收起过程' }).textContent, '')
+  assert.equal(header(view).textContent, '用时 6秒')
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
+})
+
+test('failed, cancelled and interrupted turns keep their own status as the first field', async () => {
+  const cases = [
+    { name: 'failed', events: [...events.slice(0, -1), event(7, 'run.failed', { code: 'provider_error', message: '失败' })],
+      status: '过程未完成', headerText: '过程未完成·用时 6秒' },
+    { name: 'cancelled', events: [...events.slice(0, -1), event(7, 'run.cancelled')],
+      status: '过程已取消', headerText: '过程已取消·用时 6秒' },
+    // Interrupted before the run recorded an end: there is no whole-round time to
+    // separate the status from, so the header must not leave a dangling separator.
+    { name: 'interrupted', events: events.slice(0, -1), messages: [user, { ...assistant, status: 'interrupted' }],
+      status: '过程已中断', headerText: '过程已中断' },
+  ]
+  for (const item of cases) {
+    const view = render(item.messages ? timeline(item.events, { messages: item.messages }) : timeline(item.events))
+    await waitFor(() => assert.equal(stages(view).length, 2))
+    const toggleText = toggle(view).textContent
+    // Exactly one state word, never prefixed by a separator of its own.
+    assert.equal(toggleText, item.status, item.name)
+    assert.equal(toggle(view).getAttribute('aria-label'), `收起过程 · ${item.status}`)
+    assert.equal(header(view).textContent, item.headerText, item.name)
+    if (item.name === 'interrupted') {
+      assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
+      assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
+    } else {
+      assert.equal((header(view).textContent.match(/·/g) ?? []).length, 1)
+    }
+    fireEvent.click(toggle(view))
+    assert.equal(toggle(view, '展开').textContent, item.status)
+    assert.equal(header(view).textContent, item.headerText, item.name)
+    cleanup()
+  }
+})
+
+test('a turn waiting on the model says so without a leading separator', async () => {
+  const waiting = [
+    event(1, 'run.started'),
+    event(2, 'run.model_waiting', { phase: 'model_response', requestId: 'req-1', dispatchSeq: 1,
+      startedAt: baseTime + 1000, elapsedMs: 1000, remainingMs: 1000, outcomeKnown: false }),
+  ]
+  const view = render(live(waiting))
+  await waitFor(() => assert.equal(toggle(view).textContent, '正在等待回复'))
+  assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在等待回复')
+  assert.match(header(view).textContent, /^正在等待回复·已用时 \d+秒$/)
+  assert.doesNotMatch(header(view).textContent, /^·/)
+})
+
+test('a planned tool retry keeps its note joined to the state by exactly one separator', async () => {
+  const retrying = [
+    event(1, 'run.started'),
+    event(2, 'tool.started', { toolCallId: 'read', tool: 'read', input: { path: 'README.md' } }),
+    event(3, 'tool.completed', { toolCallId: 'read', tool: 'read', isError: true, result: { code: 'tool.unknown' } }),
+  ]
+  const view = render(live(retrying))
+  await waitFor(() => assert.equal(toggle(view).textContent, '正在处理 · 工具调用待调整'))
+  assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在处理 · 工具调用待调整')
+  assert.match(header(view).textContent, /^正在处理 · 工具调用待调整·已用时 \d+秒$/)
+  // The separator belongs to the join: the state line has exactly one, and the
+  // header adds exactly one more before the timer.
+  assert.equal((header(view).textContent.match(/·/g) ?? []).length, 2)
+})
+
+test('a header without a fold control keeps its own word and joins the timer to it', async () => {
+  await React.act(async () => persistProcessDisplayMode('verbose'))
+  const view = render(timeline())
+  await waitFor(() => assert.ok(view.container.querySelector('.fox-process-turn-toggle.is-status')))
+  const status = view.container.querySelector('.fox-process-turn-toggle.is-status')
+  assert.equal(status.textContent, '工作过程')
+  assert.equal(status.getAttribute('role'), 'status')
+  assert.equal(header(view).textContent, '工作过程·用时 6秒')
+  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
 })
 

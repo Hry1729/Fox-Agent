@@ -35,6 +35,7 @@ pub use recovery::{
 pub use controller::{
     approval_effect_key, batch_delivery_effect_key, batch_delivery_idempotency_key,
     dispatch_effect_key, dispatch_idempotency_key, persist_events, Effect, KernelPersistCommand,
+    ModelRetryAdmission,
     PersistApprovalResolution, PersistBatch, PersistEvent, PersistOutboxEffect, PersistTool,
     RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController, WaitingJobFact, INITIAL_MODEL_EFFECT_KEY,
     INITIAL_MODEL_IDEMPOTENCY_KEY, STEERING_COMPETITION, JOB_NOTICE_COMPETITION,
@@ -44,6 +45,7 @@ pub use ports::{
     KernelSnapshot, OutboxEffect, OutboxEffectKind, OutboxStatus, PolicyDecision,
     PolicyDecisionPort, RetryState, RunFrozenConfig, RunSnapshot, SnapshotProjectionPort,
     SnapshotToolBatch, SnapshotToolCall, ToolCallRequest, ToolDispatchPort,
+    MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS, MODEL_RETRY_MAX_ATTEMPTS,
 };
 pub use state::{
     ApprovalDecision, EngineId, KernelError, KernelMode, RunOutcome, RunState, ToolCallState,

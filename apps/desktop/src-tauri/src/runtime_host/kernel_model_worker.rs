@@ -16,19 +16,6 @@ use std::{
 
 const MAX_FRAME: usize = 1_048_576;
 
-/// A bounded, single-line excerpt of a worker payload for stderr diagnostics.
-///
-/// Capped so a large payload cannot flood a log, and never returned to the
-/// caller: durable diagnostics must not absorb child/provider text.
-fn bounded_diagnostic(payload: &Value) -> String {
-    let text = payload
-        .get("error")
-        .map(|error| error.to_string())
-        .or_else(|| payload.get("message").map(|message| message.to_string()))
-        .unwrap_or_else(|| payload.to_string());
-    text.chars().take(600).collect::<String>().replace('\n', " ")
-}
-
 /// Which identity field of a worker response disagrees with its request.
 ///
 /// The transport comparison is unchanged; this only replaces a bare "mismatch"
@@ -42,17 +29,14 @@ fn response_identity_mismatch(request: &Value, response: &Value) -> Option<Strin
         return Some("version".into());
     }
     if response["kind"] != "response" {
-        return Some(format!("kind={}", response["kind"]));
+        return Some("kind".into());
     }
     if response["requestId"] != request["id"] {
         return Some("requestId".into());
     }
     for key in ["runId", "conversationId", "runtimeSessionId"] {
         if response[key] != request[key] {
-            return Some(format!(
-                "{key}: request={} response={}",
-                request[key], response[key]
-            ));
+            return Some(key.into());
         }
     }
     None
@@ -69,6 +53,94 @@ pub(super) const MODEL_WINDOW_EXPIRED: &str = "Kernel model window expired befor
 mod worker_job;
 
 const SETTLED_FAILURE_PREFIX: &str = "kernel.settled_model_failure:";
+const RESPONSE_ADMISSION_PREFIX: &str = "kernel.response_admission_failed:";
+
+/// Classification comes from a fixed owned transport branch. Worker facts stay
+/// explicitly marked as observations and never grant retry or tool authority.
+pub(super) fn response_failure_code(error: &str) -> Option<(&'static str, &'static str)> {
+    match error.strip_prefix(RESPONSE_ADMISSION_PREFIX)? {
+        "length" | "truncated_tool_proposal" | "incomplete_response" => Some(("kernel.model_response_incomplete", "模型响应未完整结束，本轮提案未接纳，未自动重放。")),
+        "protocol_invalid" | "invalid_tool_arguments" => Some(("kernel.model_response_invalid", "模型响应或工具参数无效，本轮提案未接纳，未自动重放。")),
+        "argument_validation_unavailable" => Some(("kernel.model_response_unverified", "工具参数完整性检查超出有界预算，本轮提案未接纳，未自动重放。")),
+        "stream_interrupted" => Some(("kernel.model_response_interrupted", "模型响应流中断，结果未确认，未自动重放。")),
+        "worker_exception" | "unknown" => Some(("kernel.model_worker_failed", "模型 worker 未返回可接纳结果，原因见有界诊断，未自动重放。")),
+        _ => None,
+    }
+}
+
+fn diagnostic_enum(value: &Value, key: &str, allowed: &[&str]) -> String {
+    value[key].as_str().filter(|item| allowed.contains(item)).unwrap_or("unknown").into()
+}
+
+fn sanitized_response_diagnostic(source: &Value) -> Value {
+    let number = |key: &str| source[key].as_u64().filter(|value| *value <= 67_108_864);
+    let usage_request = source["usageRequestId"].as_str().filter(|value| !value.is_empty() && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'_')));
+    json!({"schemaVersion":1,"source":"worker_observation",
+        "stage":diagnostic_enum(source,"stage",&["provider_stream","response_projection","tool_proposal","worker_result"]),
+        "category":diagnostic_enum(source,"category",&["length","invalid_tool_arguments","truncated_tool_proposal",
+            "protocol_invalid","stream_interrupted","worker_exception","cancelled","incomplete_response","argument_validation_unavailable"]),
+        "providerFinishReason":diagnostic_enum(source,"providerFinishReason",&["stop","length","tool_calls","function_call","content_filter"]),
+        "adapterStopReason":diagnostic_enum(source,"adapterStopReason",&["stop","length","toolUse","error","aborted"]),
+        "maxOutputTokens":number("maxOutputTokens"),"outputTokens":number("outputTokens"),
+        "usageRequestId":usage_request,"resultComplete":false})
+}
+
+fn model_payload_without_diagnostic(payload: &Value) -> Value {
+    let mut value = payload.clone();
+    if let Some(object) = value.as_object_mut() { object.remove("responseDiagnostic"); }
+    value
+}
+
+/// The worker's own branch name, admitted only through this allow-list.
+///
+/// `incomplete_response` covers several distinct causes, so the branch has to survive
+/// the category — but a worker string the Host does not recognise must never cross
+/// verbatim, and neither may free-form worker text. Anything unlisted reads `unknown`.
+/// `incomplete_tool_proposal` and `stream_interrupted` are listed because those exits
+/// are already distinguishable elsewhere; naming them here keeps one vocabulary.
+fn model_failure_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("empty_final_answer") => "empty_final_answer",
+        Some("missing_final_marker") => "missing_final_marker",
+        Some("output_length_limit") => "output_length_limit",
+        Some("incomplete_tool_proposal") => "incomplete_tool_proposal",
+        Some("stream_interrupted") => "stream_interrupted",
+        Some("transport_no_output") => "transport_no_output",
+        _ => "unknown",
+    }
+}
+
+/// A settled model failure's own observations, projected into bounded JSON for the
+/// Run's durable response diagnostic.
+///
+/// Each field is admitted only when the worker actually reported it, so an unobserved
+/// fact stays absent and a reader can tell "never seen" from "seen as zero". Only
+/// enumerated values, bounded counters and internal dispatch identity cross: no
+/// credential, prompt text, model input or tool argument.
+fn sanitized_model_failure_diagnostic(failure: &fox_engine_protocol::KernelModelFailure) -> Value {
+    let token = |value: &Option<String>, limit: usize| -> Option<String> {
+        value.as_ref()
+            .filter(|text| !text.is_empty() && text.len() <= limit
+                && text.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')))
+            .cloned()
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("reason".into(), json!(model_failure_reason(
+        failure.diagnostic.as_ref().and_then(|item| item.reason.as_deref()))));
+    if let Some(item) = &failure.diagnostic {
+        if let Some(stop) = token(&item.stop_reason, 32) { out.insert("stopReason".into(), json!(stop)); }
+        if let Some(value) = item.text_chars { out.insert("textChars".into(), json!(value)); }
+        if let Some(value) = item.thinking_chars { out.insert("thinkingChars".into(), json!(value)); }
+        if let Some(value) = item.tool_call_count { out.insert("toolCallCount".into(), json!(value)); }
+        if let Some(value) = item.completion_required { out.insert("completionRequired".into(), json!(value)); }
+        if let Some(value) = item.marker_seen { out.insert("markerSeen".into(), json!(value)); }
+        if let Some(dispatch) = token(&item.dispatch_id, 200) { out.insert("dispatchId".into(), json!(dispatch)); }
+        if let Some(effect) = token(&item.effect_key, 200) { out.insert("effectKey".into(), json!(effect)); }
+    }
+    Value::Object(out)
+}
 /// These errors originate in the owned transport. Only retry after its Worker
 /// has been dropped (including process reaping); protocol/identity errors stay fatal.
 pub(super) fn is_reaped_transport_failure(error: &str) -> bool {
@@ -128,6 +200,11 @@ pub(super) fn describe(
         return Err("Kernel description added unsupported resource tools".into());
     }
     Ok(config)
+}
+
+pub(super) fn bind_runtime_capabilities(config: &mut KernelModelConfig, binding: &RunControlBinding, manifest_hash: &str) {
+    let facts=super::host_runtime_capabilities(manifest_hash,&binding.execution_profile_id);
+    config.system_prompt.push_str(&format!("\n\nHost runtime availability for this frozen manifest/profile:\n{facts}\nTool schemas declare contracts; they do not prove environment availability. Do not call unavailable actions or repeat them to seek approval. Approval cannot provide a missing backend. Command status/output/cancel do not start a process. Use available in-process computation and report required capabilities that are unavailable. Host rechecks availability before approval and dispatch."));
 }
 
 // Drop always terminates/reaps only the child created here, then joins bounded
@@ -347,6 +424,27 @@ fn wait_opts<T>(
     }
 }
 
+fn wait_observed<T>(receiver: &Receiver<T>, token: &CancellationToken, deadline: Instant,
+    database: Option<&crate::database::Database>, run_id: &str, request_id: &str,
+    phase: &str, started: Instant, last_notice: &mut i64, identity: Option<(i64,i64)>) -> Result<T, String> {
+    loop {
+        token.check()?;
+        let now = Instant::now();
+        let remaining = deadline.checked_duration_since(now).ok_or("Kernel worker deadline exceeded; reconcile delivery")?;
+        let elapsed = now.duration_since(started).as_millis().min(i64::MAX as u128) as i64;
+        if elapsed >= *last_notice + 15_000 {
+            *last_notice = elapsed;
+            if let Some(database) = database { let _ = database.record_kernel_model_waiting(run_id, request_id,
+                elapsed, remaining.as_millis().min(i64::MAX as u128) as i64, phase, identity); }
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
+            Ok(value) => { token.check()?; return Ok(value); }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Kernel worker disconnected; reconcile delivery".into()),
+        }
+    }
+}
+
 /// How the worker's stderr is wired.
 ///
 /// The worker's stderr is discarded by default: it may carry model input
@@ -375,6 +473,47 @@ fn stderr_mode(requested: Option<&str>) -> StderrMode {
 }
 
 impl Worker {
+    fn record_response_failure(&self, request: &Value, cursor: u64,
+        identity: Option<(i64,i64)>, source: &Value, host_category: &str) -> Result<Value,String> {
+        let turn = binding_turn(request["type"].as_str().unwrap_or_default(),request);
+        let matches = source["schemaVersion"] == 1 && source["turnId"] == turn
+            && source["checkpointSeq"].as_u64() == Some(cursor);
+        let diagnostic = sanitized_response_diagnostic(if matches {source} else {&Value::Null});
+        self.persist_response_diagnostic(request,turn,cursor,identity,&diagnostic,host_category);
+        Ok(diagnostic)
+    }
+    /// Record a settled model failure together with the round facts its worker actually
+    /// observed. The provider-neutral category cannot tell an empty answer from one that
+    /// never closed its answer, so without this projection the Run keeps only
+    /// `incomplete_response` and the branch behind it is lost. The projection is
+    /// allow-listed and bounded: no worker string crosses verbatim.
+    fn record_settled_model_failure(&self, request: &Value, cursor: u64,
+        identity: Option<(i64,i64)>, source: &Value,
+        failure: &fox_engine_protocol::KernelModelFailure) -> Result<(),String> {
+        let turn = binding_turn(request["type"].as_str().unwrap_or_default(),request);
+        let matches = source["schemaVersion"] == 1 && source["turnId"] == turn
+            && source["checkpointSeq"].as_u64() == Some(cursor);
+        let mut diagnostic = sanitized_response_diagnostic(if matches {source} else {&Value::Null});
+        if let Some(object) = diagnostic.as_object_mut() {
+            object.insert("modelFailure".into(), sanitized_model_failure_diagnostic(failure));
+        }
+        self.persist_response_diagnostic(request,turn,cursor,identity,&diagnostic,"settled_model_failure");
+        Ok(())
+    }
+    fn persist_response_diagnostic(&self, request: &Value, turn: &str, cursor: u64,
+        identity: Option<(i64,i64)>, diagnostic: &Value, host_category: &str) {
+        if let Some(database) = &self.usage_database {
+            if database.record_kernel_response_diagnostic(request["runId"].as_str().unwrap_or_default(),
+                request["id"].as_str().unwrap_or_default(),turn,cursor,diagnostic,host_category,identity)
+                .is_err() { eprintln!("[kernel-worker] response diagnostic persistence unavailable"); }
+        }
+    }
+    fn observe_transport_error(&self, request:&Value,cursor:u64,identity:Option<(i64,i64)>,error:String)->String {
+        let category=if is_reaped_transport_failure(&error) {"transport_outcome_unknown"} else {"protocol_invalid"};
+        let _=self.record_response_failure(request,cursor,identity,&Value::Null,category);
+        error
+    }
+
     fn spawn(runtime: &RuntimeCommand) -> Result<Self, String> {
         let mut command = Command::new(&runtime.program);
         if let Some(script) = &runtime.script { command.arg(script); }
@@ -470,9 +609,21 @@ impl Worker {
         }
         let mut first_model_event_seen = false;
         let mut revision = 0;
+        let waiting_started = Instant::now();
+        let mut last_waiting_notice = 0;
+        let waiting_identity = self.usage_database.as_ref().and_then(|db| db.kernel_model_wait_identity(run_id).ok().flatten());
+        let cursor = request["payload"].get("initialModel").or_else(||request["payload"].get("batchResume"))
+            .and_then(|frame|frame["checkpointSeq"].as_u64()).unwrap_or(0);
         loop {
-            let response = wait(&self.messages, token, deadline)??;
+            let response = if model_round || expected == "kernel.compaction_result" {
+                wait_observed(&self.messages, token, deadline, self.usage_database.as_ref(), run_id,
+                    attempt_id, if model_round {"model_response"} else {"context_compaction"}, waiting_started, &mut last_waiting_notice, waiting_identity)
+                    .and_then(|result|result).map_err(|error|if model_round {
+                        self.observe_transport_error(&request,cursor,waiting_identity,error)
+                    } else {error})?
+            } else { wait(&self.messages, token, deadline)?? };
             if let Some(reason) = response_identity_mismatch(&request, &response) {
+                if model_round { self.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?; }
                 // No child message/provider error is copied into durable
                 // diagnostics, but the *field* that disagreed is a Host fact and
                 // is what makes this failure attributable.
@@ -525,9 +676,9 @@ impl Worker {
             }
             if response["type"] == "kernel.model_failure" && expected == "kernel.model_response" {
                 let failure: fox_engine_protocol::KernelModelFailure =
-                    serde_json::from_value(response["payload"].clone())
-                        .map_err(|_| "invalid settled Kernel model failure")?;
-                failure.validate()?;
+                    serde_json::from_value(model_payload_without_diagnostic(&response["payload"]))
+                        .map_err(|_|self.observe_transport_error(&request,cursor,waiting_identity,"invalid settled Kernel model failure".into()))?;
+                failure.validate().map_err(|error|self.observe_transport_error(&request,cursor,waiting_identity,error))?;
                 let frame = request["payload"]
                     .get("initialModel")
                     .or_else(|| request["payload"].get("batchResume"))
@@ -539,6 +690,7 @@ impl Worker {
                     || Some(&Value::String(failure.turn_id.clone())) != turn
                     || failure.checkpoint_seq != frame["checkpointSeq"]
                 {
+                    self.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?;
                     return Err("Kernel failure belongs to another model request".into());
                 }
                 if model_round && !first_model_event_seen {
@@ -549,21 +701,29 @@ impl Worker {
                         );
                     }
                 }
+                self.record_settled_model_failure(&request,cursor,waiting_identity,&response["payload"]["responseDiagnostic"],&failure)?;
                 return Err(format!(
                     "{SETTLED_FAILURE_PREFIX}{}",
                     serde_json::to_string(&failure).map_err(|_| "invalid failure")?
                 ));
             }
             if response["type"] != expected {
-                // The worker rejected the frame. Its message is deliberately NOT
-                // copied into the returned error (which can become a durable
-                // diagnostic), but without any trace at all this failure is
-                // unattributable, so a bounded excerpt goes to stderr only.
-                eprintln!(
-                    "[kernel-worker] unexpected response type {} while expecting {expected}: {}",
-                    response["type"],
-                    bounded_diagnostic(&response["payload"]),
-                );
+                if model_round {
+                    let diagnostic=self.record_response_failure(&request,cursor,waiting_identity,
+                        &response["payload"]["responseDiagnostic"],if response["type"]=="request_failed" {"worker_rejected"} else {"protocol_invalid"})?;
+                    let category=if response["type"]=="request_failed" {diagnostic["category"].as_str().unwrap_or("unknown")} else {"protocol_invalid"};
+                    return Err(format!("{RESPONSE_ADMISSION_PREFIX}{category}"));
+                }
+                if expected == "kernel.compaction_result" && response["type"] == "kernel.compaction_failure" {
+                    let source=&response["payload"];
+                    if source["runId"] != request["runId"] || source["compactionId"] != request["payload"]["compaction"]["compactionId"] || source["schemaVersion"] != 1 {
+                        return Err("Kernel compaction failure identity mismatch".into());
+                    }
+                    let mut diagnostic=source.clone();
+                    if let Some(object)=diagnostic.as_object_mut(){object.retain(|key,_|matches!(key.as_str(),"schemaVersion"|"category"|"httpStatus"|"upstreamMessage"|"upstreamCode"|"outcomeKnown"|"retryable"));}
+                    diagnostic["upstreamMessage"]=json!(super::redact_execution_diagnostic(source["upstreamMessage"].as_str().unwrap_or("No upstream message was supplied"),600));
+                    return Err(format!("kernel.compaction_worker_failure:{diagnostic}"));
+                }
                 return Err(format!(
                     "Kernel worker response identity/type mismatch (expected {expected}, got {}); reconcile delivery",
                     response["type"]
@@ -742,6 +902,7 @@ fn call_model(
     // the worker must not open the live round loop on this path.
     initialization["execution"] = json!("once");
     initialization["usageRecords"] = json!(database.is_some());
+    initialization["responseDiagnostics"] = json!(1);
     // Diagnostic-only: the timeline measures spawn→ready cost. In a production
     // build there is no timeline, so the instant itself must not exist.
     #[cfg(test)]
@@ -788,14 +949,33 @@ fn call_model(
     } else {
         "kernel.model_response"
     };
-    worker.exchange_with_preview(
-        request(kind, request_payload),
+    let request=request(kind, request_payload);
+    let cursor=request["payload"].get("initialModel").or_else(||request["payload"].get("batchResume"))
+        .and_then(|frame|frame["checkpointSeq"].as_u64()).unwrap_or(0);
+    let identity=database.and_then(|db|db.kernel_model_wait_identity(&binding.run_id).ok().flatten());
+    let payload=worker.exchange_with_preview(
+        request.clone(),
         expected,
         token,
         deadline,
         preview,
         diagnostic_attempt,
-    )
+    )?;
+    if expected=="kernel.model_response" {
+        let source=&payload["response"];
+        let valid=if kind=="kernel.start_initial" {
+            serde_json::from_value::<fox_engine_protocol::KernelInitialModelResponse>(source.clone())
+                .map_err(|_|"invalid Kernel model result".into()).and_then(|value|value.validate())
+        } else {
+            serde_json::from_value::<KernelModelResponse>(source.clone())
+                .map_err(|_|"invalid Kernel model result".into()).and_then(|value|value.validate())
+        };
+        if valid.is_err() {
+            worker.record_response_failure(&request,cursor,identity,&Value::Null,"protocol_invalid")?;
+            return Err(format!("{RESPONSE_ADMISSION_PREFIX}protocol_invalid"));
+        }
+    }
+    Ok(payload)
 }
 
 pub(super) fn compact_context(
@@ -895,6 +1075,7 @@ impl LiveKernelSession {
         // The whole authoritative Run is driven through one live loop session.
         initialization["execution"] = json!("loop");
         initialization["usageRecords"] = json!(true);
+        initialization["responseDiagnostics"] = json!(1);
         let ready = worker.exchange(
             Self::envelope("kernel.initialize", initialization, binding, &session_id),
             "kernel.ready",
@@ -955,6 +1136,11 @@ impl LiveKernelSession {
         }
         result?;
         let mut revision = 0u64;
+        let mut waiting_started = Instant::now();
+        let mut last_waiting_notice = 0;
+        let mut waiting_identity = self.worker.usage_database.as_ref().and_then(|db| db.kernel_model_wait_identity(&binding.run_id).ok().flatten());
+        let mut cursor = request["payload"].get("initialModel").or_else(||request["payload"].get("batchResume"))
+            .and_then(|frame|frame["checkpointSeq"].as_u64()).unwrap_or(0);
         // Set once the Host commits Final, before writing its directive. The
         // terminal commit cancels the Run token. One fixed deadline bounds
         // both the Final write and its acknowledgement, with no further work.
@@ -963,7 +1149,9 @@ impl LiveKernelSession {
             let response = if let Some(drain_deadline) = final_deadline {
                 wait_final(&self.worker.messages, drain_deadline)??
             } else {
-                wait(&self.worker.messages, cancel, deadline_for()?)??
+                wait_observed(&self.worker.messages, cancel, deadline_for()?, self.worker.usage_database.as_ref(),
+                    &binding.run_id, request["id"].as_str().unwrap_or_default(), "model_response", waiting_started, &mut last_waiting_notice, waiting_identity)
+                    .and_then(|result|result).map_err(|error|self.worker.observe_transport_error(&request,cursor,waiting_identity,error))?
             };
             if response["protocol"] != PROTOCOL_NAME
                 || response["version"] != PROTOCOL_VERSION
@@ -971,6 +1159,7 @@ impl LiveKernelSession {
                     .iter()
                     .any(|key| response[key] != request[key])
             {
+                self.worker.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?;
                 return Err(
                     "Kernel worker response identity/type mismatch; reconcile delivery".into(),
                 );
@@ -984,6 +1173,7 @@ impl LiveKernelSession {
             }
             if response["kind"] == "request" {
                 if response["type"] != "kernel.round_output" {
+                    self.worker.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?;
                     return Err("unexpected Kernel worker request; reconcile delivery".into());
                 }
                 let envelope: fox_engine_protocol::RuntimeEnvelope =
@@ -991,16 +1181,21 @@ impl LiveKernelSession {
                         .map_err(|_| "invalid Kernel round output envelope")?;
                 let frame: fox_engine_protocol::KernelRoundOutputFrame =
                     serde_json::from_value(response["payload"].clone())
-                        .map_err(|_| "invalid Kernel round output frame")?;
-                frame.validate()?;
+                        .map_err(|_|self.worker.observe_transport_error(&request,cursor,waiting_identity,"invalid Kernel round output frame".into()))?;
+                frame.validate().map_err(|error|self.worker.observe_transport_error(&request,cursor,waiting_identity,error))?;
                 if frame.turn_id != binding_turn(request_type, &request) {
+                    self.worker.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?;
                     return Err("Kernel round output belongs to another turn".into());
                 }
                 if response["runId"].as_str() != Some(binding.run_id.as_str()) {
                     return Err("Kernel round output belongs to another run".into());
                 }
                 let directive = on_round(frame)?;
+                waiting_started = Instant::now();
+                last_waiting_notice = 0;
+                waiting_identity = self.worker.usage_database.as_ref().and_then(|db| db.kernel_model_wait_identity(&binding.run_id).ok().flatten());
                 directive.validate()?;
+                if let Some(next)=directive.checkpoint_seq.or(directive.preview_seq) {cursor=next;}
                 let is_final =
                     directive.kind == fox_engine_protocol::KernelRoundDirectiveKind::Final;
                 if is_final {
@@ -1040,6 +1235,7 @@ impl LiveKernelSession {
                 continue;
             }
             if response["kind"] != "response" || response["requestId"] != request["id"] {
+                self.worker.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?;
                 return Err(
                     "Kernel worker response identity/type mismatch; reconcile delivery".into(),
                 );
@@ -1067,21 +1263,29 @@ impl LiveKernelSession {
             }
             if response["type"] == "kernel.model_failure" {
                 let failure: fox_engine_protocol::KernelModelFailure =
-                    serde_json::from_value(response["payload"].clone())
-                        .map_err(|error| format!("invalid settled Kernel model failure: {error}"))?;
-                failure.validate()?;
-                if failure.run_id != binding.run_id {
+                    serde_json::from_value(model_payload_without_diagnostic(&response["payload"]))
+                        .map_err(|_|self.worker.observe_transport_error(&request,cursor,waiting_identity,"invalid settled Kernel model failure".into()))?;
+                failure.validate().map_err(|error|self.worker.observe_transport_error(&request,cursor,waiting_identity,error))?;
+                if failure.run_id != binding.run_id || failure.turn_id != binding_turn(request_type,&request)
+                    || failure.checkpoint_seq != cursor {
+                    self.worker.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?;
                     return Err("Kernel failure belongs to another run".into());
                 }
+                self.worker.record_settled_model_failure(&request,cursor,waiting_identity,&response["payload"]["responseDiagnostic"],&failure)?;
                 return Err(format!(
                     "{SETTLED_FAILURE_PREFIX}{}",
                     serde_json::to_string(&failure).map_err(|_| "invalid failure")?
                 ));
             }
             if response["type"] != "kernel.model_response" {
-                return Err(
-                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
-                );
+                let diagnostic=self.worker.record_response_failure(&request,cursor,waiting_identity,
+                    &response["payload"]["responseDiagnostic"],if response["type"]=="request_failed" {"worker_rejected"} else {"protocol_invalid"})?;
+                let category=if response["type"]=="request_failed" {diagnostic["category"].as_str().unwrap_or("unknown")} else {"protocol_invalid"};
+                return Err(format!("{RESPONSE_ADMISSION_PREFIX}{category}"));
+            }
+            if final_deadline.is_none() {
+                self.worker.record_response_failure(&request,cursor,waiting_identity,&Value::Null,"protocol_invalid")?;
+                return Err(format!("{RESPONSE_ADMISSION_PREFIX}protocol_invalid"));
             }
             return Ok(response["payload"].clone());
         }
@@ -1291,5 +1495,135 @@ createInterface({input:process.stdin}).on('line',line=>{
         assert!(wait_final(&receiver,deadline).unwrap_err().contains("deadline"));
         // Reusing an elapsed deadline must fail immediately, not renew it.
         assert!(wait_final(&receiver,deadline).unwrap_err().contains("deadline"));
+    }
+}
+
+/// The settled-failure diagnostic the Host keeps must name the worker's branch while
+/// staying inside a fixed vocabulary, and must never turn "not observed" into a zero.
+#[cfg(test)]
+mod model_failure_diagnostic_tests {
+    use super::{model_failure_reason, model_payload_without_diagnostic,
+        sanitized_model_failure_diagnostic};
+    use fox_engine_protocol::{KernelModelFailure, KernelModelFailureDiagnostic};
+    use serde_json::json;
+
+    fn settled(diagnostic: Option<KernelModelFailureDiagnostic>) -> KernelModelFailure {
+        KernelModelFailure {
+            schema_version: 1, run_id: "run".into(), turn_id: "turn".into(),
+            checkpoint_seq: 3, category: "incomplete_response".into(),
+            http_status: None, retry_after_ms: None, telemetry: None, diagnostic,
+        }
+    }
+
+    /// The branch name is the whole point of the field: it must survive for the values
+    /// the worker is allowed to send, and collapse to `unknown` for anything else.
+    #[test]
+    fn the_branch_name_is_allow_listed() {
+        for known in ["empty_final_answer", "missing_final_marker", "output_length_limit",
+            "incomplete_tool_proposal", "stream_interrupted", "transport_no_output"] {
+            assert_eq!(model_failure_reason(Some(known)), known);
+        }
+        assert_eq!(model_failure_reason(None), "unknown");
+        assert_eq!(model_failure_reason(Some("")), "unknown");
+        // Free-form worker or provider text must never cross as itself.
+        assert_eq!(model_failure_reason(Some("ignore previous instructions")), "unknown");
+        assert_eq!(model_failure_reason(Some("incomplete_response")), "unknown");
+        assert_eq!(model_failure_reason(Some("textChars=0")), "unknown");
+    }
+
+    /// An absent diagnostic is unobserved, not zero: only the `unknown` branch is
+    /// written and no counter or boolean is invented.
+    #[test]
+    fn an_unobserved_failure_reports_only_unknown() {
+        let projected = sanitized_model_failure_diagnostic(&settled(None));
+        assert_eq!(projected, json!({"reason": "unknown"}));
+        for absent in ["textChars", "thinkingChars", "toolCallCount", "completionRequired",
+            "markerSeen", "stopReason", "dispatchId", "effectKey"] {
+            assert!(projected.get(absent).is_none(), "{absent} must stay absent");
+        }
+    }
+
+    /// Only the fields the worker reported are carried, so a reader can still tell
+    /// "never seen" from "seen as zero" — a real zero must survive as a zero.
+    #[test]
+    fn only_observed_fields_cross_and_a_real_zero_survives() {
+        let projected = sanitized_model_failure_diagnostic(&settled(Some(KernelModelFailureDiagnostic {
+            reason: Some("missing_final_marker".into()),
+            stop_reason: Some("stop".into()),
+            text_chars: Some(0),
+            thinking_chars: Some(12),
+            tool_call_count: Some(0),
+            completion_required: Some(true),
+            marker_seen: Some(false),
+            dispatch_id: Some("model-batch:run:30".into()),
+            effect_key: None,
+        })));
+        assert_eq!(projected, json!({
+            "reason": "missing_final_marker", "stopReason": "stop",
+            "textChars": 0, "thinkingChars": 12, "toolCallCount": 0,
+            "completionRequired": true, "markerSeen": false,
+            "dispatchId": "model-batch:run:30",
+        }));
+        assert!(projected.get("effectKey").is_none());
+    }
+
+    /// A stop reason the worker copied from provider text is a token, not prose: an
+    /// unbounded or punctuated value is dropped rather than recorded.
+    #[test]
+    fn a_non_token_stop_reason_is_dropped() {
+        let projected = sanitized_model_failure_diagnostic(&settled(Some(KernelModelFailureDiagnostic {
+            reason: Some("output_length_limit".into()),
+            stop_reason: Some("stopped because\n the model said so".into()),
+            ..Default::default()
+        })));
+        assert_eq!(projected, json!({"reason": "output_length_limit"}));
+    }
+
+    /// Compatibility direction: a payload an older sidecar sends — with no `diagnostic`
+    /// at all — must still be accepted and validated by this Host.
+    #[test]
+    fn an_old_sidecar_payload_without_a_diagnostic_is_still_accepted() {
+        let legacy: KernelModelFailure = serde_json::from_value(json!({
+            "schemaVersion": 1, "runId": "r", "turnId": "t", "checkpointSeq": 2,
+            "category": "incomplete_response", "httpStatus": null, "retryAfterMs": null,
+        })).expect("the older wire shape must still deserialize");
+        assert!(legacy.validate().is_ok(), "and it must still validate");
+        assert!(legacy.diagnostic.is_none());
+        assert_eq!(sanitized_model_failure_diagnostic(&legacy), json!({"reason": "unknown"}));
+    }
+
+    /// The new shape also has to survive the exact path the Host uses on the wire:
+    /// strip the side-channel `responseDiagnostic`, then deserialize and validate.
+    #[test]
+    fn the_new_shape_survives_the_host_wire_path() {
+        let payload = json!({
+            "schemaVersion": 1, "runId": "r", "turnId": "t", "checkpointSeq": 2,
+            "category": "incomplete_response", "httpStatus": null, "retryAfterMs": null,
+            "diagnostic": {"reason": "transport_no_output", "textChars": 0,
+                "completionRequired": false, "markerSeen": false},
+            "responseDiagnostic": {"schemaVersion": 1, "stage": "provider_stream"},
+        });
+        let stripped = model_payload_without_diagnostic(&payload);
+        assert!(stripped.get("responseDiagnostic").is_none(), "the side channel is stripped first");
+        let failure: KernelModelFailure = serde_json::from_value(stripped)
+            .expect("the settled failure must deserialize with deny_unknown_fields intact");
+        assert!(failure.validate().is_ok());
+        assert_eq!(sanitized_model_failure_diagnostic(&failure), json!({
+            "reason": "transport_no_output", "textChars": 0,
+            "completionRequired": false, "markerSeen": false,
+        }));
+    }
+
+    /// A worker that sends a field this Host does not know is a protocol error, not a
+    /// silently accepted payload: `deny_unknown_fields` must still hold inside the
+    /// nested diagnostic, or a future field could disable diagnosis unnoticed.
+    #[test]
+    fn an_unknown_diagnostic_field_is_rejected() {
+        let rejected = serde_json::from_value::<KernelModelFailure>(json!({
+            "schemaVersion": 1, "runId": "r", "turnId": "t", "checkpointSeq": 2,
+            "category": "incomplete_response", "httpStatus": null, "retryAfterMs": null,
+            "diagnostic": {"reason": "empty_final_answer", "futureField": 1},
+        }));
+        assert!(rejected.is_err(), "an unknown nested field must fail closed");
     }
 }

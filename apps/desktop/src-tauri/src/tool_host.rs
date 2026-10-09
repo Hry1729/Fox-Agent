@@ -59,6 +59,12 @@ pub enum ToolErrorCode {
     TimedOut,
     /// Run or tool cancellation was requested.
     Cancelled,
+    /// The in-process computation rejected or failed user-supplied code.
+    ComputationFailed,
+    ComputationSyntax,
+    ComputationRuntime,
+    ComputationTimedOut,
+    SandboxUnavailable,
     /// The operation failed for a reason the executor cannot classify, or the
     /// effect of a side-effecting operation is genuinely unknown.
     Unknown,
@@ -75,6 +81,11 @@ impl ToolErrorCode {
             Self::ReadOnlyInput => "tool.read_only_input",
             Self::TimedOut => "tool.timed_out",
             Self::Cancelled => "tool.cancelled",
+            Self::ComputationFailed => "tool.computation_failed",
+            Self::ComputationSyntax => "tool.computation_syntax",
+            Self::ComputationRuntime => "tool.computation_runtime",
+            Self::ComputationTimedOut => "tool.computation_timed_out",
+            Self::SandboxUnavailable => "tool.sandbox_unavailable",
             Self::Unknown => "tool.unknown",
         }
     }
@@ -107,6 +118,11 @@ impl ToolErrorCode {
             (Self::ReadOnlyInput.as_str(), Self::ReadOnlyInput),
             (Self::TimedOut.as_str(), Self::TimedOut),
             (Self::Cancelled.as_str(), Self::Cancelled),
+            (Self::ComputationFailed.as_str(), Self::ComputationFailed),
+            (Self::ComputationSyntax.as_str(), Self::ComputationSyntax),
+            (Self::ComputationRuntime.as_str(), Self::ComputationRuntime),
+            (Self::ComputationTimedOut.as_str(), Self::ComputationTimedOut),
+            (Self::SandboxUnavailable.as_str(), Self::SandboxUnavailable),
             (Self::Unknown.as_str(), Self::Unknown),
         ]
         .into_iter()
@@ -140,7 +156,8 @@ pub enum PreparedToolAction {
     WriteFile {
         root: PathBuf,
         path: PathBuf,
-        content: String,
+        content: Vec<u8>,
+        binary: bool,
         expected_version: String,
         create_directories: bool,
         preview: ToolPreview,
@@ -224,6 +241,53 @@ pub(crate) fn prepare_admitted_file(tool: &str, input: &Value, root: &str,
     let object = trusted.as_object_mut().ok_or("file input must be an object")?;
     object.insert("expectedVersion".into(), Value::String(baseline.into()));
     prepare(tool, &trusted, root)
+}
+
+/// Binary/text artifacts are resolved by the Host's own conversation context,
+/// never a model source path. The returned action uses the normal write gate.
+pub(crate) fn prepare_with_artifact_context(tool:&str,input:&Value,root:&str,
+    database:&crate::database::Database,sessions_dir:&Path,conversation_id:&str,
+) -> Result<PreparedToolAction,String> {
+    if tool!="write_file" || input.get("artifactId").is_none(){return prepare(tool,input,root);}
+    if input.get("content").is_some(){return Err(ToolErrorCode::InvalidInput.error("write_file accepts exactly one of content or artifactId"));}
+    let id=required_string(input,"artifactId")?;
+    let artifact=database.artifact_for_conversation(conversation_id,&id)?.ok_or_else(||ToolErrorCode::PermissionDenied.error("Artifact does not belong to this conversation"))?;
+    let owned=crate::runtime_host::attachment_compute::authorized_artifact_root(sessions_dir,conversation_id)?
+        .ok_or_else(||ToolErrorCode::PermissionDenied.error("No computed artifacts exist in this conversation"))?;
+    if artifact.byte_size<0 || artifact.byte_size>crate::data_compute::MAX_FILE_BYTES as i64 {return Err(ToolErrorCode::InvalidInput.error("Artifact exceeds 16 MiB publication limit"));}
+    let source=crate::artifact_gateway::validate_record(&artifact,&[owned]).map_err(|e|ToolErrorCode::InvalidInput.error(e.message))?;
+    crate::data_compute::validate_input_path(&source)?;
+    let mut open=fs::OpenOptions::new();open.read(true);
+    #[cfg(windows)]
+    {use std::os::windows::fs::OpenOptionsExt;open.share_mode(1).custom_flags(0x200000);}
+    let file=open.open(&source).map_err(|e|ToolErrorCode::InvalidInput.error(format!("Cannot read computed artifact: {e}")))?;
+    #[cfg(windows)]
+    if crate::runtime_host::attachment_compute::opened_final_path(&file)? != source {
+        return Err(ToolErrorCode::PermissionDenied.error("Computed artifact identity changed before publication"));
+    }
+    let mut bytes=Vec::new();file.take(crate::data_compute::MAX_FILE_BYTES as u64+1).read_to_end(&mut bytes)
+        .map_err(|e|ToolErrorCode::InvalidInput.error(format!("Cannot snapshot computed artifact: {e}")))?;
+    if bytes.len()>crate::data_compute::MAX_FILE_BYTES || bytes.len() as i64!=artifact.byte_size
+        || !artifact.sha256.as_deref().is_some_and(|hash|file_version(&bytes).strip_prefix("sha256:").unwrap_or_default().eq_ignore_ascii_case(hash.strip_prefix("sha256:").unwrap_or(hash))) {
+        return Err(ToolErrorCode::InvalidInput.error("Computed artifact changed during publication preparation"));
+    }
+    let root=canonical_directory(Path::new(root),"project folder")?;
+    let target=resolve_write_target(&root,&required_string(input,"path")?)?;
+    let version=current_version_of(&target,true)?.unwrap_or_else(||"missing".into());
+    let expected=input["expectedVersion"].as_str().filter(|s|!s.trim().is_empty()).unwrap_or("missing");
+    ensure_unchanged(expected,if version=="missing" {None}else{Some(&version)})?;
+    let preview=ToolPreview{tool:"write_file".into(),title:if version=="missing"{"创建文件".into()}else{"修改文件".into()},
+        target:target.to_string_lossy().into_owned(),summary:format!("Publish verified computed artifact {} ({} bytes, {})",artifact.display_name,bytes.len(),file_version(&bytes)),
+        diff:None,command:None,cwd:None};
+    Ok(PreparedToolAction::WriteFile{root,path:target,content:bytes,binary:true,expected_version:expected.into(),
+        create_directories:input["createDirectories"].as_bool().unwrap_or(true),preview})
+}
+
+pub(crate) fn prepare_admitted_file_with_artifact_context(tool:&str,input:&Value,root:&str,baseline:&str,
+    database:&crate::database::Database,sessions_dir:&Path,conversation_id:&str,
+) -> Result<PreparedToolAction,String> {
+    let mut trusted=input.clone();trusted.as_object_mut().ok_or("file input must be an object")?.insert("expectedVersion".into(),json!(baseline));
+    prepare_with_artifact_context(tool,&trusted,root,database,sessions_dir,conversation_id)
 }
 
 /// The version a managed write may commit against, or the refusal that says why.
@@ -312,10 +376,10 @@ pub(crate) fn execute_file_with_context(
     cancellation: Option<&crate::kernel::CancellationToken>,
     context: &mut dyn FileCommitContext,
 ) -> Result<Value, String> {
-    let (root, path, content, create_directories) = match action {
-        PreparedToolAction::WriteFile { root, path, content, create_directories, .. } =>
-            (root, path, content, create_directories),
-        PreparedToolAction::EditFile { root, path, content, .. } => (root, path, content, false),
+    let (root, path, content, create_directories, binary) = match action {
+        PreparedToolAction::WriteFile { root, path, content, create_directories, binary, .. } =>
+            (root, path, content, create_directories, binary),
+        PreparedToolAction::EditFile { root, path, content, .. } => (root, path, content.into_bytes(), false, false),
         _ => return Err("file admission cannot execute a non-file action".into()),
     };
     check_cancellation(cancellation)?;
@@ -333,10 +397,10 @@ pub(crate) fn execute_file_with_context(
             }
         }
     }
-    atomic_write_with_context(&root, &path, content.as_bytes(), &expected,
-        cancellation, Some(context))?;
+    atomic_write_with_context_mode(&root, &path, &content, &expected,
+        cancellation, Some(context), binary)?;
     Ok(text_result(format!("Wrote {} bytes to {}", content.len(), path.display()),
-        json!({"path":path,"bytes":content.len(),"operation":if expected == "missing" { "created" } else { "modified" },"readVersion":file_version(content.as_bytes())})))
+        json!({"path":path,"bytes":content.len(),"operation":if expected == "missing" { "created" } else { "modified" },"readVersion":file_version(&content)})))
 }
 
 pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
@@ -360,6 +424,7 @@ pub fn execute_with_cancellation(
             content,
             expected_version,
             create_directories,
+            binary,
             ..
         } => {
             revalidate_target(&root, &path, None)?;
@@ -375,10 +440,10 @@ pub fn execute_with_cancellation(
                 }
             }
             check_cancellation(cancellation)?;
-            atomic_write(&root, &path, content.as_bytes(), &expected_version, cancellation)?;
+            atomic_write_with_context_mode(&root, &path, &content, &expected_version, cancellation, None, binary)?;
             Ok(text_result(
                 format!("Wrote {} bytes to {}", content.len(), path.display()),
-                json!({ "path": path, "bytes": content.len(), "operation": operation, "readVersion": file_version(content.as_bytes()) }),
+                json!({ "path": path, "bytes": content.len(), "operation": operation, "readVersion": file_version(&content) }),
             ))
         }
         PreparedToolAction::EditFile {
@@ -404,7 +469,7 @@ pub fn execute_with_cancellation(
             ..
         } => {
             crate::process_jobs::authorize_execution().map_err(|error|
-                ToolErrorCode::PermissionDenied.error(format!("sandbox_unavailable: {error:?}")))?;
+                ToolErrorCode::SandboxUnavailable.error(error.reason()))?;
             revalidate_target(&root, &cwd, Some(true))?;
             execute_command(&command, &cwd, timeout, cancellation)
         }
@@ -1179,7 +1244,8 @@ fn prepare_write(input: &Value, root: &Path) -> Result<PreparedToolAction, Strin
     Ok(PreparedToolAction::WriteFile {
         root: root.to_path_buf(),
         path: target,
-        content,
+        content: content.into_bytes(),
+        binary: false,
         expected_version,
         create_directories,
         preview,

@@ -35,6 +35,13 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "delivery_content_requirements.rs"]
+mod content_requirements;
+
+pub(crate) fn ensure_frozen_content_writable(database:&Database,run:&str,task:Option<&str>,root:&str,target:&Path)->Result<(),String> {
+    content_requirements::ensure_concat_writable(database,run,task,root,target)
+}
+
 /// Independent bounded-repair budget, separate from both the stop-review
 /// continuation limit and from provider/turn model-failure retries.
 pub(crate) const DELIVERY_REPAIR_LIMIT: i64 = 2;
@@ -123,6 +130,7 @@ const PRODUCTION_VERBS: &[&str] = &[
     // "整理为 out/report.md" promised a deliverable just as plainly as the "成" forms,
     // and a ledger that only understands one spelling makes trust depend on wording.
     "汇总到", "整理为", "更新",
+    "合并为", "合并成",
 ];
 
 const FILE_EXTENSIONS: &[&str] = &[
@@ -147,6 +155,463 @@ const KIND_KEYWORDS: &[&str] = &[
 const MAX_SEEDED_ITEMS: usize = 12;
 const MAX_VERIFY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SCAN_DEPTH: usize = 5;
+const RECOGNITION_ITEM: &str = "recognition:delivery_unresolved";
+
+fn mention_is_example(text: &str, at: usize) -> bool {
+    let before = sentence_tail(&text[..at]);
+    let clause = before
+        .rsplit(['，', ','])
+        .next()
+        .unwrap_or(before)
+        .to_lowercase();
+    let offset = at - clause.len();
+    let mentions = collect_mentions(text);
+    ["示例", "例如", "举例", "example", "e.g."]
+        .iter()
+        .any(|marker| {
+            clause.match_indices(marker).any(|(position, _)| {
+                verb_boundary_ok(&clause, position, position + marker.len())
+                    && !mentions.iter().any(|m| {
+                        offset + position >= m.name_start
+                            && offset + position < m.name_start + m.name.len()
+                    })
+            })
+        })
+}
+
+fn is_explanation_request(text: &str, at: usize) -> bool {
+    let prefix = sentence_tail(&text[..at]);
+    let prefix = prefix.rsplit(['，', ',']).next().unwrap_or(prefix);
+    let lowered = ascii_lowercase(prefix);
+    [
+        "解释",
+        "说明如何",
+        "告诉我如何",
+        "告诉我怎么",
+        "explain",
+        "how to",
+        "how do",
+    ]
+    .iter()
+    .any(|marker| {
+        lowered.starts_with(marker)
+            || lowered.starts_with(&format!("请{marker}"))
+            || lowered.starts_with(&format!("please {marker}"))
+    })
+}
+
+fn local_action_at(text: &str, at: usize) -> Option<(usize, MentionRole)> {
+    let prefix = sentence_tail(&text[..at]);
+    let offset = at - prefix.len();
+    let lowered = ascii_lowercase(prefix);
+    let mentions = collect_mentions(text);
+    let mut best = None;
+    // Counted outputs also use production-only verbs such as 产出. Keep
+    // their scope local; an earlier task-wide production verb grants nothing.
+    for (verb, role) in TARGET_OUTPUT_VERBS.iter().chain(PRODUCTION_VERBS.iter())
+        .map(|verb| (*verb, MentionRole::Output))
+        .chain(SOURCE_INPUT_VERBS.iter().map(|verb| (*verb, MentionRole::Input))) {
+            for (position, _) in lowered.match_indices(verb) {
+                let absolute = offset + position;
+                // In “两份 Excel 汇总表与一份 Word”, 汇总表 is the counted
+                // output's noun. It does not introduce a new input action.
+                if role==MentionRole::Input && verb=="汇总"
+                    && prefix[position+verb.len()..].starts_with('表') {continue;}
+                if verb_boundary_ok(prefix, position, position + verb.len())
+                    && !mentions
+                        .iter()
+                        .any(|m| absolute >= m.name_start && absolute < m.name_start + m.name.len())
+                    && best.is_none_or(|(previous, _)| absolute > previous)
+                {
+                    best = Some((
+                        absolute,
+                        if negates_verb(&prefix[..position]) {
+                            MentionRole::Input
+                        } else {
+                            role
+                        },
+                    ));
+                }
+            }
+    }
+    best
+}
+
+/// The nearest actual instruction in this bounded clause owns counted kinds
+/// and directories; a production verb in another sentence is not evidence.
+fn local_intent_role(text: &str, at: usize) -> Option<MentionRole> {
+    if is_explanation_request(text, at) {
+        return None;
+    }
+    local_action_at(text, at).map(|(_, role)| role)
+}
+
+fn same_output_requirement(text: &str, at: usize, mention: &Mention) -> bool {
+    if local_action_at(text, mention.name_start) == local_action_at(text, at) {
+        return true;
+    }
+    if mention.name_start <= at {
+        return false;
+    }
+    let gap = &text[at..mention.name_start];
+    !gap.contains(is_sentence_terminator)
+        && !gap.contains(['，', ','])
+        && ["并保存为", "并另存为", "命名为", "named ", "and save as"]
+            .iter()
+            .any(|marker| ascii_lowercase(gap).contains(marker))
+}
+
+fn post_path_output_role(text: &str, mention: &Mention) -> bool {
+    let head =
+        tail_window(&text[..mention.name_start], 8).trim_end_matches([' ', '"', '`', '“', '「']);
+    if !head.ends_with('在') && !head.to_ascii_lowercase().ends_with(" in") {
+        return false;
+    }
+    let after = text[mention.name_start + mention.name.len()..]
+        .trim_start_matches([' ', '"', '`', '”', '」']);
+    let after = after
+        .strip_prefix('中')
+        .or_else(|| after.strip_prefix('内'))
+        .unwrap_or(after)
+        .trim_start();
+    ["给出", "写入", "输出", "保存", "write ", "save ", "record "]
+        .iter()
+        .any(|verb| after.starts_with(verb))
+}
+
+/// Only explicit directory syntax is recognized. Unknown/unsafe syntax stays
+/// a target error; it never silently turns into the default folder.
+fn target_directory_for(text: &str, at: usize) -> Option<String> {
+    use std::sync::OnceLock;
+    static LABEL: OnceLock<regex::Regex> = OnceLock::new();
+    static LOCAL: OnceLock<regex::Regex> = OnceLock::new();
+    let label=LABEL.get_or_init(||regex::Regex::new(r#"(?i)(?:输出目录|交付目录|保存目录|output\s+(?:directory|folder))\s*(?:为|是|:|：|=)?\s*(?P<dir>`[^`\r\n]+`|"[^"\r\n]+"|“[^”\r\n]+”|[^\s,，;；。]+)"#).unwrap());
+    let local=LOCAL.get_or_init(||regex::Regex::new(r#"(?i)(?:到|在|\bto\b|\binto\b|\bin\b|\bunder\b)\s*(?P<dir>`[^`\r\n]+[/\\]`|"[^"\r\n]+[/\\]"|“[^”\r\n]+[/\\]”|[^\s,，:：;；。]+[/\\])"#).unwrap());
+    let mut chosen = None;
+    for capture in label.captures_iter(&text[..at]) {
+        let dir = capture.name("dir").unwrap();
+        let position = capture.get(0).unwrap().start();
+        if !mention_is_example(text, position)
+            && !mention_is_prohibited(text, position)
+            && !is_explanation_request(text, position)
+        {
+            chosen = Some((dir.start(), dir.as_str().to_owned()));
+        }
+    }
+    let start = text[..at]
+        .char_indices()
+        .filter(|(_, c)| is_sentence_terminator(*c))
+        .map(|(i, c)| i + c.len_utf8())
+        .next_back()
+        .unwrap_or(0);
+    let end = text[at..]
+        .char_indices()
+        .find(|(_, c)| is_sentence_terminator(*c) || matches!(c, ',' | '，'))
+        .map(|(i, _)| at + i)
+        .unwrap_or(text.len());
+    for capture in local.captures_iter(&text[start..end]) {
+        let dir = capture.name("dir").unwrap();
+        let position = start + dir.start();
+        let suffix = text[start + dir.end()..end].trim_start_matches([' ', '`', '"', '”']);
+        let suffix = suffix
+            .strip_prefix('中')
+            .or_else(|| suffix.strip_prefix('内'))
+            .unwrap_or(suffix)
+            .trim_start();
+        let leading_output = TARGET_OUTPUT_VERBS
+            .iter().chain(PRODUCTION_VERBS.iter())
+            .any(|verb| suffix.starts_with(verb));
+        // A future directory belongs to this action only when it is a trailing
+        // placement clause, never when it introduces another production verb.
+        if position > at && leading_output {
+            continue;
+        }
+        if !mention_is_example(text, position)
+            && !mention_is_prohibited(text, position)
+            && (local_intent_role(text, start + capture.get(0).unwrap().start())
+                == Some(MentionRole::Output)
+                || leading_output)
+        {
+            if chosen.as_ref().is_none_or(|(old, _)| position > *old) {
+                chosen = Some((position, dir.as_str().to_owned()));
+            }
+        }
+    }
+    for marker in ["根目录", "项目根", "project root"] {
+        if let Some(relative) = ascii_lowercase(&text[start..at]).rfind(marker) {
+            let position = start + relative;
+            let suffix =
+                text[position + marker.len()..at].trim_start_matches([' ', '的', '中', '内']);
+            let output_scope = local_intent_role(text, position) == Some(MentionRole::Output)
+                || TARGET_OUTPUT_VERBS
+                    .iter().chain(PRODUCTION_VERBS.iter())
+                    .any(|verb| suffix.starts_with(verb));
+            if !mention_is_example(text, position)
+                && !mention_is_prohibited(text, position)
+                && output_scope
+                && chosen.as_ref().is_none_or(|(old, _)| position > *old)
+            {
+                chosen = Some((position, ".".into()));
+            }
+        }
+    }
+    chosen.map(|(_, value)| {
+        value
+            .trim_matches(['`', '"', '“', '”'])
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_owned()
+    })
+}
+
+fn resolved_output_name(text: &str, mention: &Mention) -> String {
+    let name = mention.name.replace('\\', "/");
+    if name.contains('/') || name.contains(':') {
+        return name;
+    }
+    match target_directory_for(text, mention.name_start) {
+        Some(directory) if directory != "." => format!("{directory}/{name}"),
+        _ => name,
+    }
+}
+
+fn directory_requirement(key: &str, directory: &str) -> StoredRequirement {
+    StoredRequirement {
+        item_key: Some(key.into()),
+        id: format!("host.target_directory:{key}"),
+        kind: StoredRequirementKind::TargetDirectory {
+            directory: directory.into(),
+        },
+        source_text: "Host 冻结的交付目录".into(),
+    }
+}
+
+fn unresolved_delivery_intent(text: &str, seeds: &[DeliveryChecklistSeed]) -> bool {
+    let mentions = collect_mentions(text);
+    let roles = classify_mentions(text, &mentions);
+    if roles
+        .iter()
+        .filter(|role| **role == MentionRole::Output)
+        .count()
+        > MAX_SEEDED_ITEMS
+    {
+        return true;
+    }
+    for (mention, role) in mentions.iter().zip(roles) {
+        if role == MentionRole::Unclassified
+            && !mention_is_example(text, mention.name_start)
+            && !mention_is_prohibited(text, mention.name_start)
+            && local_intent_role(text, mention.name_start) == Some(MentionRole::Output)
+        {
+            return true;
+        }
+    }
+    for word in ["文件", "报告", "文档", "表格", "file", "report", "document"] {
+        for (at, _) in ascii_lowercase(text).match_indices(word) {
+            if mentions
+                .iter()
+                .any(|m| at >= m.name_start && at < m.name_start + m.name.len())
+            {
+                continue;
+            }
+            if !mention_is_example(text, at)
+                && !mention_is_prohibited(text, at)
+                && local_intent_role(text, at) == Some(MentionRole::Output)
+                && !mentions
+                    .iter()
+                    .zip(classify_mentions(text, &mentions))
+                    .any(|(m, role)| {
+                        role == MentionRole::Output && same_output_requirement(text, at, m)
+                    })
+                && !recognized_count_in_action(text, at, seeds)
+            {
+                return true;
+            }
+        }
+    }
+    for keyword in KIND_KEYWORDS {
+        for (at, _) in ascii_lowercase(text).match_indices(ascii_lowercase(keyword).as_str()) {
+            if mentions
+                .iter()
+                .any(|m| at >= m.name_start && at < m.name_start + m.name.len())
+            {
+                continue;
+            }
+            if !mention_is_example(text, at)
+                && !mention_is_prohibited(text, at)
+                && local_intent_role(text, at) == Some(MentionRole::Output)
+                && !seeds.iter().any(|seed| {
+                    seed.target_path.is_none()
+                        && seed.display_name.starts_with(keyword)
+                        && seed.requirements.iter().find_map(|r| match &r.kind {
+                            StoredRequirementKind::TargetDirectory { directory } => {
+                                Some(directory.clone())
+                            }
+                            _ => None,
+                        }) == target_directory_for(text, at)
+                })
+                && !mentions
+                    .iter()
+                    .zip(classify_mentions(text, &mentions))
+                    .any(|(m, role)| {
+                        role == MentionRole::Output && same_output_requirement(text, at, m)
+                    })
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn recognized_count_in_action(text: &str, at: usize, seeds: &[DeliveryChecklistSeed]) -> bool {
+    let lowered = ascii_lowercase(text);
+    KIND_KEYWORDS.iter().any(|keyword| {
+        let Some((_, extension)) = ArtifactKind::from_keyword(keyword) else {
+            return false;
+        };
+        lowered
+            .match_indices(ascii_lowercase(keyword).as_str())
+            .any(|(position, _)| {
+                position < at
+                    && local_action_at(text, position) == local_action_at(text, at)
+                    && seeds.iter().any(|seed| {
+                        seed.target_path.is_none()
+                            && seed.item_key.starts_with(&format!("slot:{extension}:"))
+                            && seed.requirements.iter().find_map(|r| match &r.kind {
+                                StoredRequirementKind::TargetDirectory { directory } => {
+                                    Some(directory.clone())
+                                }
+                                _ => None,
+                            }) == target_directory_for(text, position)
+                    })
+            })
+    })
+}
+
+pub(crate) fn task_delivery_reference(text: &str, project_context: &Value) -> Value {
+    let seeds = expectations_from_task(text);
+    let unresolved = unresolved_delivery_intent(text, &seeds);
+    json!({"schemaVersion":1,"recognition":if unresolved {"unresolved"} else if seeds.is_empty() {"no_file_deliverables"} else {"recognized"},
+        "defaultDirectory":project_context["deliverableRoot"],"targets":seeds.iter().map(|seed|json!({"itemKey":seed.item_key,
+            "path":seed.target_path,"directory":seed.requirements.iter().find_map(|r|match &r.kind {
+                StoredRequirementKind::TargetDirectory{directory}=>Some(directory.as_str()),_=>None}).map(Value::from)
+                .unwrap_or_else(||if seed.target_path.is_none(){project_context["deliverableRoot"].clone()}else{Value::Null})})).collect::<Vec<_>>()})
+}
+
+/// Production startup seam: one parse/placement result is persisted, then the
+/// model reference is read back from those exact rows. No prompt-side parsing.
+pub(crate) fn freeze_task_delivery(
+    database: &Database,
+    run_id: &str,
+    text: &str,
+    project_context: &Value,
+    project_root: Option<&str>,
+) -> Result<(), String> {
+    if !database.delivery_checklist(run_id)?.is_empty() {
+        return Ok(());
+    }
+    let mut seeds = expectations_from_task(text);
+    let mut unresolved = unresolved_delivery_intent(text, &seeds);
+    let placements = seeds
+        .iter()
+        .map(|s| (s.item_key.clone(), s.requirements.clone()))
+        .collect::<Vec<_>>();
+    let authorized_root = super::attachment_compute::authorized_delivery_root(database, run_id);
+    let requirements = requirements_from_task(text)
+        .into_iter()
+        .map(|requirement| match &authorized_root {
+            Ok(root) => bind_source_distribution(root, requirement),
+            Err(reason) if matches!(requirement.kind, RequirementKind::SourceDistribution {..}) => unbound_requirement(format!("统计源授权未绑定：{reason}")),
+            Err(_) => requirement,
+        })
+        .collect::<Vec<_>>();
+    if !requirements.is_empty() {
+        attach_requirements_to_seeds(&mut seeds, &requirements, text);
+    }
+    for seed in &mut seeds {
+        seed.requirements
+            .retain(|r| !matches!(r.kind, StoredRequirementKind::TargetDirectory { .. }));
+        if let Some((_, metadata)) = placements.iter().find(|(key, _)| *key == seed.item_key) {
+            seed.requirements.extend(metadata.clone());
+        }
+        if seed.target_path.is_none()
+            && !seed
+                .requirements
+                .iter()
+                .any(|r| matches!(r.kind, StoredRequirementKind::TargetDirectory { .. }))
+        {
+            if let Some(directory) = project_context["deliverableRoot"].as_str() {
+                seed.requirements
+                    .push(directory_requirement(&seed.item_key, directory));
+            }
+        }
+        if let Some(target) = seed.target_path.as_deref() {
+            resolve_under_root(project_root.map(Path::new), target)?;
+        } else {
+            let directory = seed.requirements.iter().find_map(|r| match &r.kind {
+                StoredRequirementKind::TargetDirectory { directory } => Some(directory),
+                _ => None,
+            });
+            match directory {
+                Some(directory)
+                    if Database::delivery_target_matches_directory(
+                        &if directory == "." {
+                            "probe.txt".into()
+                        } else {
+                            format!("{directory}/probe.txt")
+                        },
+                        directory,
+                    ) => {}
+                Some(_) => return Err("交付目录不是安全的项目相对目录，不能降级到默认目录".into()),
+                None => unresolved = true,
+            }
+        }
+    }
+    if unresolved {
+        seeds.push(DeliveryChecklistSeed {
+            item_key: RECOGNITION_ITEM.into(),
+            target_path: None,
+            artifact_id: None,
+            display_name: "交付要求未可靠识别".into(),
+            checks: vec!["recognition".into()],
+            requirements: vec![StoredRequirement {
+                item_key: Some(RECOGNITION_ITEM.into()),
+                id: RECOGNITION_ITEM.into(),
+                source_text: "任务存在文件输出意图，但无法确认完整目标集合".into(),
+                kind: StoredRequirementKind::RecognitionUnresolved {
+                    reason: "请明确要交付的文件名、类型或目录；当前没有可靠目标可自动修复".into(),
+                },
+            }],
+        });
+    }
+    content_requirements::freeze(database, run_id, text, &mut seeds)?;
+    database.seed_delivery_checklist(run_id, &seeds, crate::database::now_ms())
+}
+
+pub(crate) fn frozen_delivery_reference(
+    database: &Database,
+    run_id: &str,
+    project_context: &Value,
+) -> Result<Value, String> {
+    let items = database.delivery_checklist(run_id)?;
+    let mut targets = Vec::new();
+    for item in items
+        .iter()
+        .filter(|item| item.item_key != RECOGNITION_ITEM)
+    {
+        let requirements = database.delivery_item_requirements(run_id, &item.item_key)?;
+        targets.push(json!({"itemKey":item.item_key,"path":item.target_path,
+            "directory":requirements.iter().find_map(|r|match &r.kind {StoredRequirementKind::TargetDirectory{directory}=>Some(directory),_=>None}),
+            "contentRequirements":requirements.iter().filter_map(|r|match &r.kind {
+                StoredRequirementKind::ContentContract{spec}=>Some(json!({"id":r.id,"sourceText":r.source_text,"contract":content_requirements::model_reference(spec)})),_=>None}).collect::<Vec<_>>() }));
+    }
+    Ok(
+        json!({"schemaVersion":1,"recognition":if items.iter().any(|item|item.item_key==RECOGNITION_ITEM){"unresolved"}
+        else if items.is_empty(){"no_file_deliverables"}else{"recognized"},"defaultDirectory":project_context["deliverableRoot"],
+        "targets":targets}),
+    )
+}
 /// Backtracking from an explicit extension stops at these CJK characters,
 /// which mark the prose before the actual file name (`生成AGV报告.xlsx`).
 const CJK_NAME_STOPS: &[char] = &[
@@ -228,21 +693,6 @@ fn is_extension_end_boundary(character: Option<char>) -> bool {
     }
 }
 
-/// Number of already-planned explicit files matching an artifact kind.
-fn explicit_kind_count(seeds: &[DeliveryChecklistSeed], wanted: ArtifactKind) -> usize {
-    seeds
-        .iter()
-        .filter(|seed| {
-            Path::new(seed.target_path.as_deref().unwrap_or(""))
-                .extension()
-                .and_then(|value| value.to_str())
-                .and_then(ArtifactKind::from_extension)
-                .as_ref()
-                == Some(&wanted)
-        })
-        .count()
-}
-
 /// Deterministically derive the lightweight delivery checklist for a task.
 ///
 /// Two conservative signals are recognised:
@@ -299,8 +749,8 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
             &mut seeds,
             &mut used_keys,
             DeliveryChecklistSeed {
-                item_key: format!("file:{}", mention.path_key),
-                target_path: Some(mention.name.replace('\\', "/")),
+                item_key: format!("file:{}", path_key(&resolved_output_name(text,mention))),
+                target_path: Some(resolved_output_name(text,mention)),
                 artifact_id: None,
                 display_name: mention.name.clone(),
                 checks: kind
@@ -332,6 +782,10 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
                     && (!is_word_boundary(text[..at].chars().next_back())
                         || !is_word_boundary(text[search_from..].chars().next()))
                 {
+                    continue;
+                }
+                if local_intent_role(text,at) != Some(MentionRole::Output)
+                    || mention_is_example(text,at) || mention_is_prohibited(text,at) {
                     continue;
                 }
                 // Walk back over an optional measure word 份/个/张/篇/部.
@@ -386,17 +840,19 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
                 if !(1..=6).contains(&count) {
                     continue;
                 }
-                let explicit = explicit_kind_count(&seeds, kind) as i64;
+                let explicit=mentions.iter().zip(&roles).filter(|(mention,role)|**role==MentionRole::Output
+                    && mention.kind==kind && same_output_requirement(text,at,mention)).count() as i64;
                 for ordinal in 1..=count {
                     if ordinal <= explicit {
                         continue;
                     }
                     slot_for_keyword += 1;
+                    let key=format!("slot:{expected_extension}:{slot_for_keyword}");
                     push(
                         &mut seeds,
                         &mut used_keys,
                         DeliveryChecklistSeed {
-                            item_key: format!("slot:{expected_extension}:{slot_for_keyword}"),
+                            item_key: key.clone(),
                             target_path: None,
                             artifact_id: None,
                             display_name: format!("{keyword} 成果 {ordinal}/{count}"),
@@ -405,7 +861,8 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
                                 .iter()
                                 .map(|value| (*value).to_owned())
                                 .collect(),
-                            requirements: Vec::new(),
+                            requirements: target_directory_for(text,at).map(|directory|vec![directory_requirement(&key,&directory)])
+                                .unwrap_or_default(),
                         },
                     );
                     if seeds.len() >= MAX_SEEDED_ITEMS {
@@ -502,7 +959,7 @@ pub(crate) fn read_only_path_roles(text: &str, project_root: Option<&str>) -> Pa
         .iter()
         .zip(roles.iter())
         .filter(|(_, role)| **role == MentionRole::Output)
-        .map(|(mention, _)| mention.path_key.clone())
+        .map(|(mention, _)| path_key(&resolved_output_name(text,mention)))
         .collect();
     let mut resolved = PathRoles::default();
     for (mention, role) in mentions.iter().zip(roles.iter()) {
@@ -591,25 +1048,131 @@ fn directory_identity(relative: &str) -> Option<String> {
     Some(path_key(trimmed))
 }
 
+/// Unify the several legitimate Windows spellings of one path, keeping case.
+///
+/// The Host is handed the same file in more than one spelling: a model-authored
+/// or frozen path is usually plain (`D:\work`), while `std::fs::canonicalize`
+/// answers in the extended-length namespace (`\\?\D:\work`), and a share may be
+/// spelled `\\server\share` or `\\?\UNC\server\share`. Deciding containment on
+/// two of those spellings as raw text — or with `Path::strip_prefix`, whose
+/// `PrefixComponent` kinds are not equal — makes a file inside the project look
+/// like it is outside it. So separators are unified and the namespace prefixes
+/// are folded onto the ordinary spelling *for both sides*; case is left alone
+/// here because the comparison decides that separately.
+fn fold_windows_spelling(value: &str) -> String {
+    let unified = value.trim().replace('\\', "/");
+    let Some(without_prefix) = unified
+        .strip_prefix("//?/")
+        .or_else(|| unified.strip_prefix("//./"))
+    else {
+        return unified;
+    };
+    // `\\?\UNC\server\share` is the verbatim spelling of `\\server\share`: the
+    // marker is a namespace, not a directory named `UNC`. Only a namespaced path
+    // is read this way, so a genuine relative `UNC/` folder keeps its name.
+    match without_prefix.get(..4) {
+        Some(marker) if marker.eq_ignore_ascii_case("unc/") => format!("//{}", &without_prefix[4..]),
+        _ => without_prefix.to_owned(),
+    }
+}
+
+/// One path in the comparison space containment is decided in.
+struct PathIdentity {
+    /// `d:` for a drive, `//host/share` for a UNC share, `/` for a POSIX root,
+    /// empty for a relative path. Folded to lower case.
+    anchor: String,
+    /// `true` for an anchored path. A relative name is already relative to the
+    /// project the caller froze, so it is never re-anchored here.
+    absolute: bool,
+    /// The Windows filesystem compares a drive path or a share without regard to
+    /// case; a POSIX path is still compared exactly.
+    case_insensitive: bool,
+    /// `.` and `..` resolved, original spelling kept.
+    segments: Vec<String>,
+}
+
+fn path_identity(value: &str) -> PathIdentity {
+    let folded = fold_windows_spelling(value);
+    let (anchor, rest, case_insensitive) = match folded.strip_prefix("//") {
+        Some(share) => {
+            let mut parts = share.splitn(3, '/');
+            let server = parts.next().unwrap_or_default();
+            let name = parts.next().unwrap_or_default();
+            (
+                format!("//{server}/{name}").to_lowercase(),
+                parts.next().unwrap_or_default().to_owned(),
+                true,
+            )
+        }
+        None => match folded.as_bytes() {
+            [drive, b':', ..] if drive.is_ascii_alphabetic() => {
+                (folded[..2].to_lowercase(), folded[2..].to_owned(), true)
+            }
+            [b'/', ..] => ("/".to_owned(), folded[1..].to_owned(), false),
+            _ => (String::new(), folded.clone(), false),
+        },
+    };
+    let mut segments: Vec<String> = Vec::new();
+    for segment in rest.split('/') {
+        match segment {
+            "" | "." => {}
+            // `..` can only cancel the segment it names; one above the anchor
+            // has nothing left to cancel, so it is dropped rather than allowed
+            // to rewrite the anchor itself.
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other.to_owned()),
+        }
+    }
+    PathIdentity {
+        absolute: !anchor.is_empty(),
+        anchor,
+        case_insensitive,
+        segments,
+    }
+}
+
+impl PathIdentity {
+    fn segment_matches(&self, left: &str, right: &str) -> bool {
+        if self.case_insensitive {
+            left.eq_ignore_ascii_case(right)
+        } else {
+            left == right
+        }
+    }
+
+    /// `true` when this path is the root itself or lives below it.
+    fn within(&self, root: &PathIdentity) -> bool {
+        self.absolute
+            && root.absolute
+            && self.anchor == root.anchor
+            && self.segments.len() >= root.segments.len()
+            && self
+                .segments
+                .iter()
+                .zip(&root.segments)
+                .all(|(left, right)| self.segment_matches(left, right))
+    }
+}
+
 /// Fold a named path to its project-relative, forward-slash form when it is
 /// inside the frozen project; `None` for a path this gate has no business
 /// bounding (outside the root, or resolvable only by the OS).
 fn project_relative_path(named: &str, project_root: Option<&str>) -> Option<String> {
-    let normalized = named.trim().replace('\\', "/");
-    let without_prefix = normalized
-        .strip_prefix("//?/")
-        .or_else(|| normalized.strip_prefix("\\\\?\\"))
-        .unwrap_or(&normalized);
-    let candidate = Path::new(without_prefix);
-    if !candidate.is_absolute() {
-        let trimmed = without_prefix.trim_start_matches("./");
+    let target = path_identity(named);
+    if !target.absolute {
+        let folded = fold_windows_spelling(named);
+        let trimmed = folded.trim_start_matches("./");
         return (!trimmed.is_empty()).then(|| trimmed.to_owned());
     }
-    let root = Path::new(project_root?).to_path_buf();
-    let root = normalize(&root);
-    let absolute = normalize(candidate);
-    let relative = absolute.strip_prefix(&root).ok()?;
-    let text = relative.to_string_lossy().replace('\\', "/");
+    let root = path_identity(project_root?);
+    // The root itself is not a managed target: every write names something
+    // *inside* the frozen project.
+    if !target.within(&root) || target.segments.len() <= root.segments.len() {
+        return None;
+    }
+    let text = target.segments[root.segments.len()..].join("/");
     (!text.is_empty()).then_some(text)
 }
 
@@ -718,6 +1281,19 @@ fn collect_mentions(text: &str) -> Vec<Mention> {
         if let Some(extended) = extend_to_absolute_path(text, start) {
             start = extended;
         }
+        // Explicit quoting makes spaces and CJK particles part of the filename,
+        // rather than instruction text. The quotes themselves are not a path.
+        for (open,close) in [('"','"'),('\'','\''),('`','`'),('“','”'),('「','」')] {
+            if text[end..].starts_with(close) {
+                if let Some(at)=text[..dot].rfind(open) {
+                    let candidate=&text[at+open.len_utf8()..end];
+                    if !candidate.contains(['\n','\r']) && candidate.chars().all(|c|
+                        c.is_alphanumeric() || matches!(c,' '|'_'|'-'|'.'|'/'|'\\'|':')) {
+                        start=at+open.len_utf8();break;
+                    }
+                }
+            }
+        }
         let name = text[start..end].trim();
         let name_start = end - name.len();
         let traverses_root = name.replace('\\', "/").split('/').any(|segment| {
@@ -809,12 +1385,20 @@ fn extend_to_absolute_path(text: &str, start: usize) -> Option<usize> {
 fn classify_mentions(text: &str, mentions: &[Mention]) -> Vec<MentionRole> {
     let mut roles: Vec<MentionRole> = Vec::with_capacity(mentions.len());
     for (index, mention) in mentions.iter().enumerate() {
+        if mention_is_example(text,mention.name_start) || is_explanation_request(text,mention.name_start) {
+            roles.push(MentionRole::Unclassified);
+            continue;
+        }
         if mention_is_prohibited(text, mention.name_start) {
             roles.push(MentionRole::Input);
             continue;
         }
         if mention_is_intermediate(text, mentions, index) {
             roles.push(MentionRole::Intermediate);
+            continue;
+        }
+        if post_path_output_role(text,mention) {
+            roles.push(MentionRole::Output);
             continue;
         }
         // The verb standing in front of the name decides it: "生成 out/a.csv"
@@ -982,7 +1566,8 @@ pub(crate) fn explicit_file_purpose(
     let roles = classify_mentions(text, &mentions);
     let mut purpose = None;
     for (mention, role) in mentions.iter().zip(roles.iter()) {
-        let key = path_key(&normalize_path_text(&mention.name));
+        let named=if *role==MentionRole::Output {resolved_output_name(text,mention)}else{mention.name.clone()};
+        let key = path_key(&normalize_path_text(&named));
         if key != relative_key && key != absolute_key {
             continue;
         }
@@ -1131,11 +1716,13 @@ pub(crate) fn evaluate_stop(
             &mut assigned,
         )?);
     }
-    apply_delivery_requirements(run_id, &checklist, &requirements, root.as_deref(), &mut verdicts)?;
+    let source_root = super::attachment_compute::authorized_delivery_root(database, run_id).ok();
+    apply_delivery_requirements(run_id, &checklist, &requirements, source_root.as_deref(), &mut verdicts)?;
     // Task-stated field conventions on a JSON artifact are checked here: the
     // Host cannot judge whether evidence was sufficient, but it can decide the
     // invariant the task wrote down (marker and empty evidence field agree).
     apply_field_convention(database, run_id, &mut verdicts)?;
+    content_requirements::apply(database, run_id, &checklist, &mut verdicts)?;
     // Writes this task committed that no checklist item declared. Recorded on
     // the first item's finding so a passed checklist is never read as "the Run
     // wrote nothing else", and so an under-read promise is visible.
@@ -1157,6 +1744,10 @@ pub(crate) fn evaluate_stop(
     }
     if verdicts.iter().all(|verdict| verdict.passed) {
         return Ok(DeliveryStop::Passed { items: verdicts });
+    }
+    if checklist.iter().any(|item|item.item_key==RECOGNITION_ITEM) {
+        // Recognition needs user clarification, not an empty-path repair loop.
+        return Ok(DeliveryStop::Exhausted {items:verdicts});
     }
     // The repair budget ledger is written by the live loop right after the
     // continuation decision commits; kernel event lane counters stay
@@ -1476,6 +2067,16 @@ fn verify_item(
     receipts: &[RunWriteReceipt],
     assigned: &mut BTreeSet<String>,
 ) -> Result<ItemVerdict, String> {
+    let item_requirements=database.delivery_item_requirements(run_id,&item.item_key)?;
+    if let Some(reason)=item_requirements.iter().find_map(|r|match &r.kind {
+        StoredRequirementKind::RecognitionUnresolved{reason}=>Some(reason),_=>None}) {
+        return Ok(ItemVerdict {item_key:item.item_key.clone(),passed:false,bound_path:None,
+            finding_json:json!({"itemKey":item.item_key,"displayName":item.display_name,
+                "reasonCode":"delivery.requirements_unresolved","verificationStatus":"unverified",
+                "reason":reason,"checks":{"recognition":"unverified"},"stats":Value::Null}).to_string()});
+    }
+    let target_directory=item_requirements.iter().find_map(|r|match &r.kind {
+        StoredRequirementKind::TargetDirectory{directory}=>Some(directory.as_str()),_=>None});
     // Pathless slots carry their expected extension in the key
     // (`slot:xlsx:1`); explicit items carry it in the target path.
     let kind = item
@@ -1495,6 +2096,9 @@ fn verify_item(
     // newer files appear during later repair rounds.
     let mut untouched_target: Option<PathBuf> = None;
     let bound = if let Some(target) = item.target_path.as_deref() {
+        if target_directory.is_some_and(|directory|!Database::delivery_target_matches_directory(target,directory)) {
+            return Ok(missing_verdict(item,receipts,root,target_directory));
+        }
         let path = resolve_under_root(root, target)?;
         // The task's own ledger is asked first, and outranks discovery: a path
         // this Run (or the Run it continues) really committed is a deliverable
@@ -1538,15 +2142,28 @@ fn verify_item(
                 None
             })
     } else {
-        bind_pathless_slot(kind, candidates, assigned)
+        let mut eligible=candidates.to_vec();
+        for receipt in receipts {
+            let path=PathBuf::from(&receipt.storage_path);
+            if path.is_file() && !eligible.iter().any(|c|same_managed_path(&receipt.storage_path,&c.path)) {
+                eligible.push(Candidate{path,artifact_id:None,artifact_sha:None,source:"receipt",modified_ms:receipt.created_at});
+            }
+        }
+        if let Some(directory)=target_directory {
+            eligible.retain(|candidate| {
+                project_relative_candidate(root,&candidate.path).is_some_and(|relative|
+                    Database::delivery_target_matches_directory(&relative,directory))
+                    && (candidate.source=="artifact" || receipt_for_path(receipts,&candidate.path).is_some())
+            });
+        }
+        bind_pathless_slot(kind, &eligible, assigned)
     };
 
     // The first successful slot binding is made durable so later rounds
     // re-verify the same artifact instead of drifting to a newer file.
     if item.target_path.is_none() {
         if let Some(candidate) = &bound {
-            if let Some(relative) = root.and_then(|root| candidate.path.strip_prefix(root).ok()) {
-                let relative = relative.to_string_lossy().replace('\\', "/");
+            if let Some(relative) = project_relative_candidate(root,&candidate.path) {
                 database.bind_delivery_item(
                     run_id,
                     &item.item_key,
@@ -1560,7 +2177,7 @@ fn verify_item(
     let Some(candidate) = bound else {
         return Ok(match untouched_target {
             Some(path) => untouched_verdict(item, &path),
-            None => missing_verdict(item),
+            None => missing_verdict(item,receipts,root,target_directory),
         });
     };
 
@@ -1761,6 +2378,8 @@ fn verify_item(
     let finding = json!({
         "itemKey": item.item_key,
         "displayName": item.display_name,
+        "expectedTarget": item.target_path,
+        "targetDirectory": target_directory,
         "boundPath": candidate.path.to_string_lossy(),
         "managedVersionId": version.map(|receipt| receipt.version_id.as_str()),
         "managedVersionNo": version.map(|receipt| receipt.version_no),
@@ -1782,10 +2401,31 @@ fn verify_item(
     })
 }
 
-fn missing_verdict(item: &DeliveryChecklistItem) -> ItemVerdict {
+/// The path a receipt or an artifact records, in its project-relative form.
+///
+/// Delegates to [`project_relative_path`] so receipt identities and write-gate
+/// identities are folded in exactly the same space: a stored extended-length
+/// path, a differently-cased drive and a verbatim UNC share all resolve to the
+/// same project-relative text.
+fn project_relative_candidate(root: Option<&Path>, path: &Path) -> Option<String> {
+    project_relative_path(&path.to_string_lossy(), Some(&root?.to_string_lossy()))
+}
+
+fn missing_verdict(item: &DeliveryChecklistItem,receipts:&[RunWriteReceipt],root:Option<&Path>,target_directory:Option<&str>) -> ItemVerdict {
+    let expected=item.target_path.as_deref();
+    let basename=expected.and_then(|p|Path::new(p).file_name()).and_then(|p|p.to_str());
+    let actual=receipts.iter().filter_map(|r| {
+        let relative=project_relative_candidate(root,Path::new(&r.storage_path))?;
+        (basename.is_some_and(|name|Path::new(&relative).file_name().and_then(|n|n.to_str()).is_some_and(|n|n.eq_ignore_ascii_case(name)))
+            && expected.is_some_and(|wanted|normalize_path_text(wanted)!=normalize_path_text(&relative))).then_some(relative)
+    }).collect::<BTreeSet<_>>();
     let finding = json!({
         "itemKey": item.item_key,
         "displayName": item.display_name,
+        "expectedTarget":expected,
+        "targetDirectory":target_directory,
+        "actualWrittenPaths":actual,
+        "reasonCode":if actual.is_empty(){"delivery.missing_artifact"}else{"delivery.path_mismatch"},
         "reason": format!("未找到与交付项「{}」绑定的真实产物（Run 期间项目目录内无匹配文件）", item.display_name),
         "checks": {},
         "stats": Value::Null,
@@ -1835,14 +2475,10 @@ fn receipt_for_path<'a>(
         .max_by_key(|receipt| receipt.created_at)
 }
 
-/// One path spelling for comparisons: no extended-length prefix, forward
-/// slashes, folded case.
+/// One path spelling for comparisons: namespace prefix folded away (including
+/// the verbatim UNC marker), forward slashes, folded case.
 fn normalize_path_text(value: &str) -> String {
-    let without_prefix = value
-        .strip_prefix(r"\\?\")
-        .or_else(|| value.strip_prefix("//?/"))
-        .unwrap_or(value);
-    without_prefix.replace('\\', "/").to_lowercase()
+    fold_windows_spelling(value).to_lowercase()
 }
 
 /// Hash the file on disk and compare it with what the receipt recorded.
@@ -1874,6 +2510,7 @@ fn untouched_verdict(item: &DeliveryChecklistItem, path: &Path) -> ItemVerdict {
     let finding = json!({
         "itemKey": item.item_key,
         "displayName": item.display_name,
+        "expectedTarget": item.target_path,
         "boundPath": path.to_string_lossy(),
         "source": "pre_existing",
         "provenance": "pre_existing",
@@ -1982,18 +2619,24 @@ fn resolve_under_root(root: Option<&Path>, target: &str) -> Result<PathBuf, Stri
             .join(candidate)
     };
     if let Some(root) = root {
-        let normalized_root = normalize(root);
-        let normalized = normalize(&path);
-        if !normalized.starts_with(&normalized_root) {
+        // Containment is decided in the folded identity space, so the same file
+        // reached through an extended-length spelling, a differently-cased drive
+        // or a verbatim UNC share is not mistaken for an escape — while a real
+        // escape is still refused.
+        let resolved = path_identity(&path.to_string_lossy());
+        if !resolved.within(&path_identity(&root.to_string_lossy())) {
             return Err(format!("交付路径越出冻结项目目录：{target}"));
         }
     }
     Ok(normalize(&path))
 }
 
+/// Resolve `.` and `..` and fold the namespace spelling, so two spellings of
+/// one path compare equal from either side.
 fn normalize(path: &Path) -> PathBuf {
+    let folded = fold_windows_spelling(&path.to_string_lossy());
     let mut out = PathBuf::new();
-    for component in path.components() {
+    for component in Path::new(&folded).components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
@@ -2309,8 +2952,10 @@ impl RequirementKind {
         }
     }
 
-    fn from_stored(kind: &StoredRequirementKind) -> RequirementKind {
-        match kind {
+    fn from_stored(kind: &StoredRequirementKind) -> Option<RequirementKind> {
+        Some(match kind {
+            StoredRequirementKind::TargetDirectory {..} | StoredRequirementKind::RecognitionUnresolved {..}
+                | StoredRequirementKind::ContentContract {..}=>return None,
             StoredRequirementKind::Charts { count, per_sheet } => RequirementKind::Charts {
                 count: *count,
                 per_sheet: *per_sheet,
@@ -2353,7 +2998,7 @@ impl RequirementKind {
                 marker_value: marker_value.clone(),
                 evidence_field: evidence_field.clone(),
             },
-        }
+        })
     }
 }
 
@@ -2460,7 +3105,7 @@ const TARGET_OUTPUT_VERBS: &[&str] = &[
     "改动", "编辑", "改写", "填充", "追加", "导出", "输出", "生成", "创建", "新建", "制作",
     "整理成", "汇总成", "撰写", "编写", "制备", "出具", "打印成", "交付",
     // See PRODUCTION_VERBS: the "到/为" variants are ordinary user phrasings.
-    "汇总到", "整理为",
+    "汇总到", "整理为", "合并为", "合并成", "命名为",
     "save", "write", "append", "overwrite", "update", "modify", "edit", "export",
     "generate", "create", "produce",
 ];
@@ -2479,7 +3124,14 @@ pub(crate) fn source_statistics_demand(text: &str) -> Option<DeliveryRequirement
     if !asks_for_statistics(text) {
         return None;
     }
+    let mentions=collect_mentions(text);
+    let roles=classify_mentions(text,&mentions);
+    let inputs=mentions.iter().zip(roles).filter(|(m,role)|*role==MentionRole::Input
+        && Path::new(&m.name).extension().and_then(|e|e.to_str()).is_some_and(|e|matches!(e.to_ascii_lowercase().as_str(),"xlsx"|"xlsm"|"csv"|"tsv")))
+        .map(|(m,_)|normalize_path_text(&m.name)).collect::<BTreeSet<_>>();
+    if inputs.len()>1 {return Some(unbound_requirement("任务明确列出多个统计源；当前有限口径需要唯一源文件".into()));}
     let (candidates, header) = source_statistics_binding(text)?;
+    let sheet=match source_sheet_from_task(text) {Ok(sheet)=>sheet,Err(reason)=>return Some(unbound_requirement(reason))};
     match (candidates.split_first(), header) {
         (Some((source, alternates)), Some(label_header)) => {
             let source_text = format!("任务要求按源数据统计：{source}");
@@ -2492,7 +3144,7 @@ pub(crate) fn source_statistics_demand(text: &str) -> Option<DeliveryRequirement
                     // Filled in by the Host, which can read the file.
                     source_sha256: String::new(),
                     label_header,
-                    sheet: None,
+                    sheet,
                 },
                 source_text,
             })
@@ -2583,6 +3235,11 @@ fn source_statistics_binding(text: &str) -> Option<(Vec<String>, Option<String>)
             // include the extension itself.
             let strict = backtrack_name(text, end, true);
             let maximal = backtrack_name(text, end, false);
+            let mention_at = end.saturating_sub(strict.trim().len());
+            if matches!(local_action_at(text, mention_at).map(|(_,role)|role), Some(MentionRole::Output))
+                || mention_is_example(text,mention_at) || is_explanation_request(text,mention_at) {
+                continue;
+            }
             for (name, strict_reading) in [(&strict, true), (&maximal, false)] {
                 let name = name.trim();
                 if name.len() <= needle.len()
@@ -2609,12 +3266,6 @@ fn source_statistics_binding(text: &str) -> Option<(Vec<String>, Option<String>)
                     candidates.push(name.to_owned());
                 }
             }
-            if !candidates.is_empty() {
-                break;
-            }
-        }
-        if !candidates.is_empty() {
-            break;
         }
     }
 
@@ -2643,9 +3294,8 @@ fn source_statistics_binding(text: &str) -> Option<(Vec<String>, Option<String>)
                 })
                 .trim();
             if candidate.chars().count() >= 2
-                && candidate.chars().count() <= 16
-                && !candidate.chars().any(|character| character.is_ascii_digit())
-                && !candidate.contains(char::is_whitespace)
+                && candidate.chars().count() <= 128
+                && !candidate.chars().any(char::is_control)
             {
                 header = Some(candidate.to_owned());
                 break;
@@ -2659,6 +3309,21 @@ fn source_statistics_binding(text: &str) -> Option<(Vec<String>, Option<String>)
         return Some((candidates, header));
     }
     Some((candidates, header))
+}
+
+fn source_sheet_from_task(text:&str)->Result<Option<String>,String> {
+    use std::sync::OnceLock;
+    static SHEET:OnceLock<regex::Regex>=OnceLock::new();
+    let matcher=SHEET.get_or_init(||regex::Regex::new(r#"(?i)(?:sheet|工作表)\s*(?:为|是|:|：)?\s*[\"“'`](?P<name>[^\"”'`\r\n]{1,128})[\"”'`]|[\"“'`](?P<before>[^\"”'`\r\n]{1,128})[\"”'`]\s*(?:sheet|工作表)"#).unwrap());
+    let mut values=matcher.captures_iter(text).filter_map(|c|c.name("name").or_else(||c.name("before")))
+        .map(|name|name.as_str().trim().to_owned()).collect::<BTreeSet<_>>();
+    let factual=regex::Regex::new(r#"以\s*([^，。；：\r\n]{1,128}?)\s*为事实明细"#).unwrap();
+    for captures in factual.captures_iter(text) {
+        let name=captures[1].trim().trim_matches(['“','”','"','\'','`']);
+        if !name.is_empty(){values.insert(name.to_owned());}
+    }
+    if values.len()>1 {return Err("任务明确指定多个工作表，当前统计契约需要唯一工作表".into());}
+    Ok(values.into_iter().next())
 }
 
 /// The name that ends at `end`, walking back over filename characters. With
@@ -3135,6 +3800,7 @@ pub(crate) fn bind_source_distribution(
         source,
         alternates,
         label_header,
+        sheet,
         ..
     } = &requirement.kind
     else {
@@ -3144,13 +3810,14 @@ pub(crate) fn bind_source_distribution(
     // Host can. Only an existing file with the declared column is ever bound, so
     // a wrong reading cannot become an expectation.
     let mut rejected: Vec<String> = Vec::new();
+    let mut bound=Vec::new();
     for candidate in std::iter::once(source).chain(alternates.iter()) {
-        let path = root.join(candidate.replace('\\', "/"));
-        let Ok(bytes) = fs::read(&path) else {
+        let Some(relative)=project_relative_path(candidate,root.to_str()) else {return unbound_requirement("统计源不在授权项目内".into());};
+        let Ok(bytes) = super::attachment_compute::read_authorized_delivery_bytes(root,&relative,MAX_VERIFY_BYTES) else {
             rejected.push(candidate.clone());
             continue;
         };
-        if let Err(reason) = source_distribution_records(&bytes, None, label_header) {
+        if let Err(reason) = source_distribution_records(&bytes, sheet.as_deref(), label_header) {
             return unbound_requirement(format!(
                 "源文件 {candidate} 中无法按「{label_header}」统计：{reason}"
             ));
@@ -3158,20 +3825,24 @@ pub(crate) fn bind_source_distribution(
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let sha256 = hex::encode(hasher.finalize());
-        return DeliveryRequirement {
-            item_key: requirement.item_key,
+        bound.push(DeliveryRequirement {
+            item_key: requirement.item_key.clone(),
             id: format!("source:{candidate}#{label_header}"),
             kind: RequirementKind::SourceDistribution {
-                source: candidate.clone(),
+                source: relative,
                 // Bound: the alternatives have served their purpose.
                 alternates: Vec::new(),
                 source_sha256: sha256,
                 label_header: label_header.clone(),
-                sheet: None,
+                sheet: sheet.clone(),
             },
-            source_text: requirement.source_text,
-        };
+            source_text: requirement.source_text.clone(),
+        });
     }
+    bound.dedup_by(|left,right|match (&left.kind,&right.kind) {
+        (RequirementKind::SourceDistribution{source:a,..},RequirementKind::SourceDistribution{source:b,..})=>normalize_path_text(a)==normalize_path_text(b),_=>false});
+    if bound.len()==1 {return bound.pop().unwrap();}
+    if bound.len()>1 {return unbound_requirement("存在多个不同统计源，无法唯一绑定；请明确项目文件".into());}
     unbound_requirement(format!(
         "任务按源文件统计，但项目目录中找不到该文件（尝试过：{}）",
         rejected.join("、")
@@ -3204,7 +3875,8 @@ fn source_distribution_records(
     sheet: Option<&str>,
     label_header: &str,
 ) -> Result<Vec<(String, u64)>, String> {
-    let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes.to_vec()))
+    crate::data_compute::validate_zip_expansion("statistics source",bytes)?;
+    let workbook = open_workbook_auto_from_rs(Cursor::new(bytes.to_vec()))
         .map_err(|error| format!("源工作簿无法打开：{error:?}"))?;
     let names = workbook.sheet_names().to_owned();
     let candidates: Vec<String> = match sheet {
@@ -3222,26 +3894,28 @@ fn source_distribution_records(
         });
     }
     let mut last_error = String::new();
+    let mut matches=Vec::new();
     for name in candidates {
-        let Ok(range) = workbook.worksheet_range(&name) else {
-            continue;
-        };
+        let range = content_requirements::workbook_matrix(bytes,&name)?;
         let rows = range
-            .rows()
+            .iter()
             .take(SOURCE_HEADER_SCAN_ROWS)
             .enumerate()
             .collect::<Vec<_>>();
         let Some((header_row, header_column)) = rows.iter().find_map(|(index, row)| {
             row.iter()
-                .position(|cell| cell_text(cell).trim() == label_header.trim())
+                .position(|cell| cell.trim() == label_header.trim())
                 .map(|column| (*index, column))
         }) else {
             last_error = format!("工作表 {name} 没有「{label_header}」表头");
             continue;
         };
+        if rows.iter().find(|(index,_)|*index==header_row).is_some_and(|(_,row)|row.iter().filter(|cell|cell.trim()==label_header.trim()).count()>1) {
+            return Err(format!("工作表 {name} 的「{label_header}」表头重复，字段歧义"));
+        }
         let mut counts: Vec<(String, u64)> = Vec::new();
-        for row in range.rows().skip(header_row + 1) {
-            let label = row.get(header_column).map(cell_text).unwrap_or_default();
+        for row in range.iter().skip(header_row + 1) {
+            let label = row.get(header_column).cloned().unwrap_or_default();
             let label = label.trim();
             if label.is_empty() {
                 continue;
@@ -3255,8 +3929,10 @@ fn source_distribution_records(
             last_error = format!("工作表 {name} 在「{label_header}」列下没有记录");
             continue;
         }
-        return Ok(counts);
+        matches.push((name,counts));
     }
+    if matches.len()==1 {return Ok(matches.pop().unwrap().1);}
+    if matches.len()>1 {return Err(format!("多个工作表含「{label_header}」字段，请明确工作表：{}",matches.iter().map(|(name,_)|name.as_str()).collect::<Vec<_>>().join("、")));}
     Err(if last_error.is_empty() {
         "源工作簿中没有匹配的工作表".to_owned()
     } else {
@@ -4306,22 +4982,19 @@ fn evaluate_requirement(
         } => {
             let mut saw_artifact = false;
             // The source is resolved inside the Run's authorized project folder.
-            let resolved = {
-                let declared = Path::new(source.as_str());
-                match root {
-                    Some(root) if declared.is_relative() => root.join(declared),
-                    _ => declared.to_path_buf(),
-                }
-            };
-            let Ok(bytes) = fs::read(&resolved) else {
+            let Some(root) = root else {return RequirementVerdict::Unverified("统计源当前授权不可用".into());};
+            let Some(relative)=project_relative_path(source,root.to_str()) else {return RequirementVerdict::Unverified("统计源不在当前授权项目内".into());};
+            let Ok(bytes) = super::attachment_compute::read_authorized_delivery_bytes(root,&relative,MAX_VERIFY_BYTES) else {
                 return RequirementVerdict::Unverified(format!(
-                    "源数据 {source} 在核验时不可读（{}），统计口径无法重算",
-                    resolved.display()
+                    "源数据 {source} 在核验时不可安全读取，统计口径无法重算"
                 ));
             };
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let current_sha = hex::encode(hasher.finalize());
+            if !source_sha256.is_empty() && current_sha != *source_sha256 {
+                return RequirementVerdict::Unverified(format!("源数据 {source} 已偏离冻结哈希，统计口径未核验"));
+            }
             // Expectations are recomputed from the source records *now*: a source
             // that changed since the task ran simply produces different expected
             // values, and an artifact still holding the old ones fails below.
@@ -4649,12 +5322,12 @@ pub(crate) fn stored_requirements(
 ) -> Vec<DeliveryRequirement> {
     stored
         .iter()
-        .map(|item| DeliveryRequirement {
+        .filter_map(|item| Some(DeliveryRequirement {
             item_key: item.item_key.clone(),
             id: item.id.clone(),
-            kind: RequirementKind::from_stored(&item.kind),
+            kind: RequirementKind::from_stored(&item.kind)?,
             source_text: item.source_text.clone(),
-        })
+        }))
         .collect()
 }
 
@@ -5421,11 +6094,23 @@ fn repair_prompt(findings: &[Value]) -> String {
         let name = finding["displayName"].as_str().unwrap_or("交付项");
         let reason = finding["reason"].as_str().unwrap_or("核验未通过");
         body.push_str(&format!("- {name}：{reason}\n"));
+        if let Some(expected)=finding["expectedTarget"].as_str() {
+            body.push_str(&format!("    Host 冻结的目标路径：{expected}。按此项目相对路径写入，不拼接默认目录。\n"));
+        } else if let Some(directory)=finding["targetDirectory"].as_str() {
+            body.push_str(&format!("    Host 冻结的目标目录：{directory}。交付文件必须直接位于该目录。\n"));
+        }
+        if let Some(paths)=finding["actualWrittenPaths"].as_array().filter(|paths|!paths.is_empty()) {
+            body.push_str(&format!("    本 Run 实际写入了其他路径：{}。这些文件不满足上述目标；继续覆盖同一错误路径不会完成此项。\n",
+                paths.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、")));
+        }
         if let Some(checks) = finding["checks"].as_object() {
             for (check, result) in checks {
                 if result["state"] == "failed" {
                     let detail = result["reason"].as_str().unwrap_or("");
                     body.push_str(&format!("    · {check} 未通过：{detail}\n"));
+                    if let (Some(path),Some(hash))=(result["sourcePath"].as_str(),result["sourceHash"].as_str()) {
+                        body.push_str(&format!("      冻结来源：{path}；SHA256：{hash}。只读来源；依据原材料修复指定产物。\n"));
+                    }
                 }
             }
         }
@@ -5441,6 +6126,20 @@ fn repair_prompt(findings: &[Value]) -> String {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "delivery_r2_tests.rs"]
+mod r2_tests;
+
+#[cfg(test)]
+#[path = "delivery_r3_tests.rs"]
+mod r3_tests;
+
+/// Regression coverage for the Windows project-path identity the write gate
+/// decides containment in, and for the failure detail a policy denial keeps.
+#[cfg(test)]
+#[path = "delivery_path_identity_tests.rs"]
+mod path_identity_tests;
 
 #[cfg(test)]
 mod tests {

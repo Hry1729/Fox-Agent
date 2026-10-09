@@ -138,6 +138,16 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
   if (!current || current.conversation.id !== persisted.conversation.id) return persisted
   const lastRun = preferRun(persisted, current)
   const kernelSnapshot = mergeKernelSnapshot(persisted, current, lastRun?.id)
+  const persistedSnapshot = snapshotForRun(persisted)
+  const currentSnapshot = snapshotForRun(current)
+  const staleRunRead = Boolean(persisted.lastRun?.id !== lastRun?.id
+    || persisted.lastRun?.id === current.lastRun?.id && (persisted.lastRun?.lastSeq ?? 0) < (current.lastRun?.lastSeq ?? 0)
+    || persistedSnapshot?.runId === currentSnapshot?.runId && persistedSnapshot && currentSnapshot
+      && BigInt(persistedSnapshot.lastEventSeq) < BigInt(currentSnapshot.lastEventSeq))
+  const deliverySource = staleRunRead ? current : persisted
+  // A checklist belongs to one Run. Do not borrow older task verdicts when a
+  // slow conversation read loses to the currently observed execution revision.
+  const deliveryChecklist = deliverySource.deliveryChecklist?.filter(item => item.runId === lastRun?.id)
   const runtimeEvents = mergeRecords(
     persisted.runtimeEvents,
     current.runtimeEvents,
@@ -147,6 +157,8 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
   return {
     ...persisted,
     kernelSnapshot,
+    deliveryChecklist,
+    deliveryChecklistTruncated: deliverySource.deliveryChecklistTruncated,
     messages: mergeMessages(persisted.messages, current.messages.filter(message => {
       if (!previewBelongsToSnapshot(message, kernelSnapshot)) return false
       // A complete run window omitting a settled Kernel row means the Host
@@ -183,10 +195,13 @@ const processEventTypes = new Set([
   'run.started',
   'run.request_snapshot',
   'run.phase',
+  'run.model_waiting',
   'run.retrying',
   'run.retry.completed',
   'context.compaction.started',
+  'context.compaction.dispatched',
   'context.compaction.completed',
+  'context.compaction.failed',
   'planner.started',
   'planner.completed',
   'planner.failed',

@@ -14,14 +14,20 @@ export type ToolAttemptReason = 'permission' | 'cancelled' | 'arguments' | 'envi
 function resultCode(output: unknown): string {
   if (!output || typeof output !== 'object' || Array.isArray(output)) return ''
   const value = output as Record<string, unknown>
+  const details = value.details && typeof value.details === 'object' && !Array.isArray(value.details)
+    ? value.details as Record<string, unknown> : null
   const nested = value.error && typeof value.error === 'object' && !Array.isArray(value.error)
     ? value.error as Record<string, unknown> : null
-  return [value.code, value.errorCode, value.status, nested?.code, nested?.errorCode]
+  return [value.code, value.errorCode, value.status, nested?.code, nested?.errorCode, details?.errorCode, details?.underlyingCode]
     .filter((part): part is string => typeof part === 'string').join(' ').toLowerCase()
 }
 
-export function toolAttemptReason(output: unknown): ToolAttemptReason {
-  const code = resultCode(output)
+export function toolAttemptReason(output: unknown, toolName?: string): ToolAttemptReason {
+  const observedCode = resultCode(output)
+  // Connector text/foreign code prefixes do not establish Host-local provenance.
+  const code = toolName === 'call_mcp_tool' || toolName === 'list_mcp_tools'
+    ? observedCode.split(' ').filter(part => /^mcp\.(timed_out|connection_unavailable|configuration_changed|remote_failure)$/.test(part)).join(' ')
+    : observedCode
   if (/cancel|abort|user_stop/.test(code)) return 'cancelled'
   if (/permission|approval|denied|forbidden|unauthori[sz]ed/.test(code)) return 'permission'
   if (/invalid|argument|parameter|schema|parse/.test(code)) return 'arguments'
@@ -36,8 +42,8 @@ export function toolAttemptState(
   runState: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted',
 ): ToolAttemptState {
   if (attempts.some((later) => later.seq > attempt.lastSeq && later.name === attempt.name && later.completed && !later.isError)) return 'recovered'
-  if (toolAttemptReason(attempt.output) === 'cancelled' || runState === 'cancelled') return 'cancelled'
-  if (toolAttemptReason(attempt.output) === 'permission') return 'denied'
+  if (toolAttemptReason(attempt.output, attempt.name) === 'cancelled' || runState === 'cancelled') return 'cancelled'
+  if (toolAttemptReason(attempt.output, attempt.name) === 'permission') return 'denied'
   if (runState === 'failed' || runState === 'interrupted') return 'blocked'
   if (runState === 'completed' || latestEventSeq > attempt.lastSeq) return 'continued'
   return 'pending'

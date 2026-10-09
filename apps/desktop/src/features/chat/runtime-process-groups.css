@@ -26,7 +26,11 @@
 .fox-process-turn-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fox-process-turn-toggle > svg { flex: 0 0 13px; }
 .fox-process-turn-elapsed { flex: 0 0 auto; color: var(--fox-muted); font-size: 11px; white-space: nowrap; }
-.fox-process-turn-elapsed::before { content: '·'; margin-right: 7px; }
+/* The dot between the status text and the whole-round timer is rendered by the
+   header only when there is status text to separate the timer from (see
+   turn-process-header.tsx), so a settled turn never opens on a dangling "·" and a
+   status-less header keeps no leftover gap. The header's own 7px gap spaces it. */
+.fox-process-turn-separator { flex: 0 0 auto; color: var(--fox-muted); font-size: 11px; line-height: 1; }
 
 .fox-process-turn-toggle:hover { color: var(--fox-text); }
 .fox-process-turn-toggle:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 2px; }

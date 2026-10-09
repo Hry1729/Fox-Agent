@@ -4,6 +4,7 @@ mod artifact_gateway;
 mod commands;
 mod database;
 mod data_compute;
+mod report_pdf;
 mod digital_colleagues;
 mod expert_packages;
 mod expert_teams;

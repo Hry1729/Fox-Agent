@@ -1,5 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+
+test('placement gives named Host targets priority over default placement and exposes unknown recognition', () => {
+  assert.match(FOX_RUNTIME_INSTRUCTIONS, /bare filename at the project root/u)
+  assert.match(FOX_RUNTIME_INSTRUCTIONS, /Host-frozen target/u)
+  assert.match(FOX_RUNTIME_INSTRUCTIONS, /unverified/u)
+  assert.doesNotMatch(FOX_RUNTIME_INSTRUCTIONS, /a CSV the user asked for is a deliverable and belongs under deliverableRoot/u)
+})
 import {
   APPROVAL_DEMO_TURN_INSTRUCTIONS,
   FOX_LANGUAGE_CONTRACT,

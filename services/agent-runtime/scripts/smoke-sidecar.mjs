@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
+import { canonicalPermission } from '../src/control-binding.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runtimePath = resolve(root, 'dist', 'fox-agent-runtime-x86_64-pc-windows-msvc.exe')
@@ -78,7 +79,7 @@ try {
   await waitFor((message) => message.requestId === createSession.id && message.type === 'session_created')
 
   const runId = 'sidecar-smoke-run'
-  const permission = { mode: 'ask', projectRoot: null, grants: [] }
+  const permission = canonicalPermission({ mode: 'ask', projectRoot: null, grants: [] })
   const controlBinding = {
     schemaVersion: 1, runId, conversationId, engineId: 'pi', executionProfileId: 'legacy',
     authority: 'legacy', readOnlyExecutor: 'runtime', permission,
@@ -92,7 +93,7 @@ try {
   const rejection = await waitFor(message => message.requestId === rejected.id)
   assert.equal(rejection.type, 'request_failed')
   assert.equal(messages.some(message => message.runId === runId && message.type === 'runtime_event'), false)
-  send('prompt', {
+  const acceptedPrompt = send('prompt', {
     conversationId,
     runtimeSessionId,
     runId,
@@ -102,6 +103,8 @@ try {
       messages: [{ role: 'user', content: 'Verify the compiled Fox Runtime.' }],
     },
   })
+  const acceptance = await waitFor(message => message.requestId === acceptedPrompt.id)
+  assert.equal(acceptance.type, 'request_succeeded', acceptance.payload?.message)
   await waitFor((message) => message.runId === runId && message.payload?.type === 'message.delta')
   await waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
 

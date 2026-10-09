@@ -19,6 +19,7 @@ const server = await createServer({
 const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
 const { persistProcessDisplayMode } = await server.ssrLoadModule('/src/features/chat/process-display-mode.ts')
 const { answerDeltaFingerprint } = await server.ssrLoadModule('/src/features/conversations/model/runtime-delta-fingerprint.ts')
+const { runPhaseTiming } = await server.ssrLoadModule('/src/features/chat/run-phase.ts')
 afterEach(() => { cleanup(); persistProcessDisplayMode('standard') })
 // Late animation callbacks from rendered controls can outlive the final test.
 // The test file runs in its own process, so leave its DOM registered until exit.
@@ -53,11 +54,23 @@ test('a run still waiting for an execution slot says so, with its real queue wai
     ],
   })
   const view = render(queued)
-  // No run.started yet: this Run is holding a place in the shared execution queue,
-  // which must not be reported as "analysing the request".
-  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /排队等待执行/))
-  assert.match(view.container.querySelector('.fox-runtime-process-summary').textContent, /已排队 \d+分/)
-  assert.doesNotMatch(view.container.textContent, /正在分析请求/)
+  // No run.started yet: this Run is holding a place in the shared execution queue.
+  // The queued stage has its own label — RUN_PHASE_LABELS.queued is 准备执行
+  // (run-phase.ts) and no source string produces 排队等待执行 — and it must never be
+  // reported as "analysing the request".
+  const summary = view.container.querySelector('.fox-runtime-process-summary')
+  await waitFor(() => assert.match(summary?.textContent ?? '', /准备执行/))
+  assert.doesNotMatch(summary.textContent, /正在分析请求/)
+  // The queue wait is a timing fact of the same projection, not a second timer glued
+  // into the status line (run-phase.ts runPhaseTitle; tests/run-phase.test.ts pins the
+  // same 585_000 ms for exactly this enqueue time, and the run's single timer only
+  // starts at run.started). A queued row therefore claims no execution time, while
+  // the wait itself is still derived from the real enqueue time.
+  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
+  const timing = runPhaseTiming([], { queuedAt: promptedAt, now: Date.now() })
+  assert.equal(timing.phase, 'queued')
+  assert.ok(timing.queueMs !== null && Math.abs(timing.queueMs - 585_000) < 5_000, `real queue wait, got ${timing.queueMs}`)
+  assert.equal(timing.executionMs, null)
 })
 
 test('a started run reports the model wait and the generation stage separately', async () => {
@@ -72,7 +85,11 @@ test('a started run reports the model wait and the generation stage separately',
   })
   const view = render(queuedFirst)
   await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /等待模型响应/))
-  assert.match(view.container.querySelector('.fox-runtime-process-summary').textContent, /已等待 3[0-9]秒/)
+  // The length of the wait is the run's single timer beside the avatar, not part of
+  // the status line (run-phase.ts: the elapsed time is *not* glued onto the label
+  // because the header already renders the run's one timer). run.started is 36s old,
+  // so the model wait is that elapsed 36s.
+  await waitFor(() => assert.match(view.container.querySelector('.fox-process-turn-elapsed')?.textContent ?? '', /已用时 3[0-9]秒/))
 
   await React.act(async () => {
     view.rerender(timeline([started, event(2, 'reasoning.delta', { delta: '先分析' })], {
@@ -112,9 +129,15 @@ test('answer segments remain once and in order while the whole process is collap
 
 test('old history with missing answer deltas keeps one answer body', () => {
   const view = render(timeline(events.filter(item => item.eventType !== 'message.delta')))
-  assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 0)
-  assert.equal(view.container.querySelectorAll('.fox-answer-body').length, 1)
-  assert.match(view.container.querySelector('.fox-answer-body').textContent, /第一段第二段/)
+  // Both paths render one turn UI (workbench.tsx: "using the SAME turn UI"), so an
+  // answer node is `fox-answer-body fox-answer-segment`. What this case must prove is
+  // that no delta boundary was fabricated: exactly one answer node, the saved reply
+  // once, as the turn's single final answer.
+  const bodies = view.container.querySelectorAll('.fox-answer-body')
+  assert.equal(bodies.length, 1)
+  assert.equal(bodies[0].classList.contains('fox-answer-segment'), true)
+  assert.equal(bodies[0].classList.contains('is-final'), true)
+  assert.match(bodies[0].textContent, /第一段第二段/)
 })
 
 test('streaming a later stage keeps an earlier disclosure open', async () => {
@@ -148,7 +171,10 @@ test('failed, cancelled, and waiting groups retain their visible status after gr
 test('run notices remain visible when process rows are collapsed', async () => {
   const view = render(timeline([...events, event(6, 'run.retrying')]))
   await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
-  assert.match(view.container.querySelector('.fox-process-notice').textContent, /正在重试/)
+  // A planned retry is not an executed retry (run-status-facts.ts
+  // runtimeStatusNotice), so the notice reads 已安排重试 — no source string produces
+  // 正在重试. The notice must stay mounted and readable while the process rows fold.
+  assert.equal(view.container.querySelector('.fox-process-notice').textContent, '已安排重试')
 })
 
 test('Kernel messages and multiple assistant messages in one run use the safe legacy display after grouping loads', async () => {
@@ -157,14 +183,23 @@ test('Kernel messages and multiple assistant messages in one run use the safe le
   kernel.rerender(timeline(events, {
     messages: [messages[0], { ...messages[1], id: 'kernel-message:run:1' }],
   }))
-  assert.equal(kernel.container.querySelectorAll('.fox-answer-segment').length, 0)
+  // Grouping cannot own this history, so the safe legacy display renders the saved
+  // reply as one answer node (`fox-answer-body fox-answer-segment`, the unified turn
+  // UI) that is the turn's final answer — never several fabricated segments.
+  const kernelBody = kernel.container.querySelectorAll('.fox-answer-body')
+  assert.equal(kernelBody.length, 1)
+  assert.equal(kernelBody[0].classList.contains('fox-answer-segment'), true)
+  assert.equal(kernelBody[0].classList.contains('is-final'), true)
+  assert.match(kernelBody[0].textContent, /第一段第二段/)
   cleanup()
   const multiple = render(timeline(events))
   await waitFor(() => assert.equal(multiple.container.querySelectorAll('.fox-answer-segment').length, 2))
   multiple.rerender(timeline(events, {
     messages: [messages[0], { ...messages[1], content: '第一段', id: 'earlier' }, { ...messages[1], id: 'assistant-run', content: '第二段', ordinal: 3 }],
   }))
-  assert.equal(multiple.container.querySelectorAll('.fox-answer-segment').length, 0)
+  const multipleBody = multiple.container.querySelectorAll('.fox-answer-body')
+  assert.equal(multipleBody.length, 1)
+  assert.equal(multipleBody[0].classList.contains('is-final'), true)
   assert.match(multiple.container.querySelector('.fox-answer-body').textContent, /第一段/)
   assert.match(multiple.container.querySelector('.fox-answer-body').textContent, /第二段/)
 })
@@ -174,8 +209,22 @@ test('a failed tool stays visible in its stage and in the collapsed turn summary
     ? event(4, 'tool.completed', { toolCallId: 'read', tool: 'read', result: { error: 'permission denied' }, isError: true }) : item)
   const view = render(timeline(failedToolEvents))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2))
-  assert.match(view.container.querySelectorAll('.fox-runtime-process-summary')[1].textContent, /失败/)
-  assert.match(view.getByRole('button', { name: /展开过程/ }).textContent, /失败/)
+  // The failed stage is still part of the folded turn; its group summary stays the
+  // activity line (runtime-process-groups.ts processGroupTitle).
+  assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2)
+  assert.match(view.container.querySelectorAll('.fox-runtime-process-summary')[1].textContent, /读取了文件/)
+  // The failure wording is now its own slot on the failed row — the row restructure
+  // put it in `.fox-run-step-action` ('工具调用未成功') plus the whitelisted sentence
+  // in `.fox-run-step-summary` (workbench.tsx toolRowSlots, tool.isError branch). The
+  // row lives inside the disclosure, so open the turn and the tool's stage to read it.
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
+  fireEvent.click(view.container.querySelectorAll('.fox-chain-of-thought-header')[1])
+  assert.equal(view.container.querySelectorAll('.fox-run-step-action').length, 1)
+  assert.match(view.container.querySelector('.fox-run-step-action').textContent, /工具调用未成功/)
+  assert.match(view.container.querySelector('.fox-run-step-summary').textContent, /本次操作未能完成/)
+  // A tool result describes one attempt, not the task (tool-attempt-status.ts), so a
+  // completed run keeps no run-failure status — the failure stays in its stage.
+  assert.doesNotMatch(view.getByRole('button', { name: /收起过程/ }).textContent, /失败/)
 })
 
 test('a reply closes its preceding process group even when a tool has no result yet', async () => {
@@ -257,10 +306,20 @@ test('mode changes keep manual group and reasoning disclosure state', async () =
   const thought = view.container.querySelector('.fox-runtime-step-row')
   fireEvent.click(thought.querySelector('.fox-runtime-step-trigger'))
   await waitFor(() => assert.ok(thought.querySelector('.fox-reasoning-text [data-streamdown="strong"]')), { timeout: 3000 })
-  assert.equal(thought.querySelector('.fox-run-status-prefix').textContent, '深度思考')
+  // The prefix comes from the row's own state and its preview text, so it keeps its
+  // separator even while the open row hides the summary (workbench.tsx
+  // RuntimeReasoningItem + RuntimeProcessRow: opening a row never rewrites the state
+  // prefix). Only the summary label is hidden.
+  assert.equal(thought.querySelector('.fox-run-status-prefix').textContent, '深度思考 ·')
   assert.equal(thought.querySelector('.fox-run-status-label').textContent, '')
   await React.act(async () => persistProcessDisplayMode('verbose'))
-  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 2)
+  // Verbose expands every group — both disclosures are open — but only the group the
+  // reader never decided on carries the automatic-expansion marker: `autoExpanded`
+  // requires `open === null` (workbench.tsx), so the manual choice here is kept
+  // rather than re-marked (this is exactly what this test is about, and
+  // turn-process-header-dom.test.mjs reads verbose expansion from aria-hidden too).
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process-disclosure[aria-hidden="false"]').length, 2)
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 1)
   assert.equal(thought.getAttribute('data-state'), 'open')
   await React.act(async () => persistProcessDisplayMode('standard'))
   assert.equal(thought.getAttribute('data-state'), 'open')
@@ -299,12 +358,15 @@ test('streaming thought preview advances only after a paragraph first line compl
   assert.equal(label(), '带空白首行 第二段未完成')
   await React.act(async () => { view.rerender(renderReasoning('尚未换行', true)) })
   assert.equal(label(), '尚未换行')
-  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考 ·')
+  // The live trailing thought is 正在思考 ·, not 深度思考 ·: the prefix is the row's
+  // own state (workbench.tsx RuntimeReasoningItem).
+  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '正在思考 ·')
   await React.act(async () => { view.rerender(renderReasoning('**结算首行**\n后续正文', false)) })
   assert.equal(label(), '结算首行 后续正文')
   assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考 ·')
   fireEvent.click(view.container.querySelector('.fox-runtime-step-row .fox-runtime-step-trigger'))
-  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考')
+  // Opening the row hides its one-line summary but must not rewrite the prefix.
+  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考 ·')
   assert.equal(label(), '')
 })
 
@@ -381,8 +443,11 @@ test('compact mode previews only the live reasoning row in a running group', asy
   fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-runtime-step-row').length, 2))
   const rows = view.container.querySelectorAll('.fox-runtime-step-row')
-  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-prefix')?.textContent), ['深度思考', '深度思考 ·'])
-  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-label')?.textContent), ['', '最新首行 最新续行'])
+  // Each row's prefix is its own state — the settled first row is 深度思考 · and the
+  // live trailing row is 正在思考 · — and every row now shows its own one-line
+  // summary, so a settled thought is no longer blank.
+  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-prefix')?.textContent), ['深度思考 ·', '正在思考 ·'])
+  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-label')?.textContent), ['旧首行 旧续行', '最新首行 最新续行'])
 })
 
 test('detailed mode opens only running groups and compact mode hides settled thought previews', async () => {
@@ -399,8 +464,11 @@ test('detailed mode opens only running groups and compact mode hides settled tho
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   const thought = view.container.querySelector('.fox-runtime-step-row')
-  assert.equal(thought.querySelector('.fox-run-status-prefix').textContent, '深度思考')
-  assert.equal(thought.querySelector('.fox-run-status-label').textContent, '')
+  // A settled row keeps its own state prefix and now shows its one-line summary: the
+  // settled blank summary (and the 深度思考 without separator) was deliberately
+  // removed in favour of the row-state model.
+  assert.equal(thought.querySelector('.fox-run-status-prefix').textContent, '深度思考 ·')
+  assert.equal(thought.querySelector('.fox-run-status-label').textContent, '先分析')
 })
 
 test('prepending an older Kernel reasoning round keeps the existing open group and turn', async () => {

@@ -547,8 +547,8 @@ impl Database {
             // Carry delivery requirements forward atomically. Recheck every
             // artifact; a previous pass is not proof the file is still intact.
             transaction.execute("INSERT INTO delivery_checklist_items
-                (run_id,item_key,target_path,artifact_id,display_name,checks_json,status,finding_json,checked_at,updated_at)
-                SELECT ?1,item_key,target_path,NULL,display_name,checks_json,'pending',NULL,NULL,?3
+                (run_id,item_key,target_path,artifact_id,display_name,checks_json,requirements_json,status,finding_json,checked_at,updated_at)
+                SELECT ?1,item_key,target_path,NULL,display_name,checks_json,requirements_json,'pending',NULL,NULL,?3
                 FROM delivery_checklist_items WHERE run_id=?2",
                 params![started.run.id,request.source_run_id,now])?;
             // Auditable re-verification fact: the source attempt records which

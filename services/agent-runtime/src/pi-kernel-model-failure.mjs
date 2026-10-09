@@ -1,6 +1,10 @@
+import { incompleteResponseReason, modelFailureDiagnostic } from './kernel-completion.mjs'
 // Observe the public per-request fetch hook. Never infer retry permission from
 // arbitrary error strings, and never copy provider bodies/headers into the wire.
-export function observeKernelModelTransport(session, fetchImpl = globalThis.fetch) {
+// `completionRequired` is the frozen prompt's own contract, passed in by the worker
+// that read it: without it this exit could not tell "answered but never closed the
+// answer" from "answered", and the Host would only ever see one unnamed branch.
+export function observeKernelModelTransport(session, fetchImpl = globalThis.fetch, { completionRequired = false } = {}) {
   let calls = 0
   let rejection
   let thrown = null
@@ -64,8 +68,17 @@ export function observeKernelModelTransport(session, fetchImpl = globalThis.fetc
             ? { category: 'model_transport_failure', httpStatus: null, retryAfterMs: null }
             : null
       if (!evidence) return null
+      // Name the branch behind the category and carry the round facts the worker
+      // could actually see; anything it could not see stays absent.
+      const settled = final?.role === 'assistant' ? final : null
+      const diagnostic = evidence.category === 'incomplete_response'
+        ? modelFailureDiagnostic({ message: settled,
+            reason: incompleteResponseReason(settled, completionRequired),
+            completionRequired,
+            dispatchId: typeof request?.id === 'string' ? request.id : undefined })
+        : modelFailureDiagnostic({ message: settled, completionRequired })
       return { schemaVersion: 1, runId: request.runId, turnId: frame.input?.turnId ?? frame.turnId,
-        checkpointSeq: frame.checkpointSeq, ...evidence }
+        checkpointSeq: frame.checkpointSeq, ...evidence, ...(diagnostic ? { diagnostic } : {}) }
     },
   }
 }

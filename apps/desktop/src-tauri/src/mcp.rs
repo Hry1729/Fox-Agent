@@ -143,7 +143,7 @@ fn with_client<T>(
     result
 }
 
-fn server_fingerprint(server: &McpServerRecord) -> u64 {
+pub(crate) fn server_fingerprint(server: &McpServerRecord) -> u64 {
     let mut hasher = DefaultHasher::new();
     server.id.hash(&mut hasher);
     server.transport.hash(&mut hasher);

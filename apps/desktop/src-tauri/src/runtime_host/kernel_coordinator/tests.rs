@@ -2,6 +2,12 @@
 mod unified_tests;
 #[path = "limit_fix_tests.rs"]
 mod limit_fix_tests;
+#[path = "r1_response_tests.rs"]
+mod r1_response_tests;
+#[path = "model_retry_policy_tests.rs"]
+mod model_retry_policy_tests;
+#[path = "length_recovery_tests.rs"]
+mod length_recovery_tests;
 use super::*;
 #[path = "reconciliation_tests.rs"]
 mod reconciliation_tests;
@@ -44,6 +50,10 @@ fn acceptance_task4_external_marker_survives_lost_result_without_duplicate_execu
 mod compaction_tests;
 #[path = "display_tests.rs"]
 mod display_tests;
+#[path = "o14_pipeline_tests.rs"]
+mod o14_pipeline_tests;
+#[path = "o14_gate_a_tests.rs"]
+mod o14_gate_a_tests;
 #[path = "tool_result_read_tests.rs"]
 mod tool_result_read_tests;
 #[path = "skill_load_tests.rs"]
@@ -212,6 +222,10 @@ fn fixture_with_budgets_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<
 
 /// C4 varies only the flag frozen into the Kernel Run at creation.
 fn fixture_with_budgets_notice_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool, budgets: TimeBudgets, notice_enabled: bool) -> (Database, PathBuf, String) {
+    fixture_with_budgets_notice_permission_opt(clock,prompt_hash,model,initial,prepared,retries,has_project,budgets,notice_enabled,PermissionMode::ReadOnly)
+}
+
+fn fixture_with_budgets_notice_permission_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool, budgets: TimeBudgets, notice_enabled: bool, permission_mode: PermissionMode) -> (Database, PathBuf, String) {
     let engine = model.map(|model| model.engine_id.as_str()).unwrap_or("pi");
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
@@ -222,7 +236,7 @@ fn fixture_with_budgets_notice_opt(clock: &dyn Clock, prompt_hash: &str, model: 
             db.default_agent_id(),
             None,
             if has_project {Some(root.to_str().unwrap())} else {None},
-            Some("read_only"),
+            Some(permission_mode.as_str()),
         )
         .unwrap();
     let run_id = db
@@ -231,7 +245,7 @@ fn fixture_with_budgets_notice_opt(clock: &dyn Clock, prompt_hash: &str, model: 
         .run
         .id;
     let permission = FrozenPermission {
-        mode: PermissionMode::ReadOnly,
+        mode: permission_mode,
         project_root: has_project.then(||root.to_string_lossy().into_owned()),
         grants: vec![],
         approval_epoch: None,
@@ -1955,7 +1969,12 @@ fn settled_initial_retry_survives_reopen_and_honors_server_delay() {
     drop(db);
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
-    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS - 1);
+    // The wait is whatever the classified policy scheduled from the server's own
+    // `Retry-After` (2s here, longer than the 1s first ladder rung): one
+    // millisecond before the durable due time it is still a wait, never a dispatch.
+    let due = coordinator.snapshot().unwrap().retry.due_wall_ms.unwrap();
+    assert!(due >= 1_000 + 2_000, "Retry-After must not be shortened by jitter or the ladder");
+    clock.advance(due - 1 - clock.get());
     coordinator.tick().unwrap();
     assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
     clock.advance(1);
@@ -3074,16 +3093,23 @@ fn host_live_transport_failure_retry_reaches_due_and_exhausts_once() {
     assert_eq!(snapshot.state, "failed");
     assert!(snapshot.tool_calls.is_empty());
     let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
-    let retry: (String, i64, i64) = connection.query_row(
+    let retry: (String, i64, i64, String) = connection.query_row(
         "SELECT json_extract(payload_json,'$.kind'),
                 json_extract(payload_json,'$.scheduledAtWallMs'),
-                json_extract(payload_json,'$.dueWallMs')
+                json_extract(payload_json,'$.dueWallMs'),
+                json_extract(payload_json,'$.class')
          FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
-        [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).unwrap();
     assert_eq!(retry.0, "model_transport_failure");
-    // The retry interval is a fixed 10s (2026-10-04 policy), not the old backoff.
-    assert_eq!(retry.2 - retry.1, 10_000);
+    // A reaped transport loss is the transient-connection class: the classified
+    // ladder starts at 1s (±10% jitter), it is not the old flat interval.
+    assert_eq!(retry.3, "transient_connection_failure");
+    let ladder = retry.2 - retry.1;
+    assert!(
+        (900..=1_100).contains(&ladder),
+        "the first ladder rung must be 1s ±10%, got {ladder}"
+    );
     let dispatch_times: Vec<i64> = {
         let mut query = connection.prepare(
             "SELECT created_at FROM kernel_events

@@ -506,11 +506,20 @@ impl GatewayPolicy {
                         prepared.target_path(),
                     ) {
                         let task_text = database.run_task_text(&self.binding.run_id)?;
+                        // Only this branch knows the call is a *mutating Office
+                        // write*, so it names that class on the refusal it
+                        // produces. The runtime copies the bounded token into the
+                        // persisted refusal (`operationKind`) and the interface
+                        // reads it instead of guessing from the tool name — the
+                        // model names `call_mcp_tool` either way.
                         crate::tool_host::ensure_writable_target(
                             task_text.as_deref(),
                             root,
                             target,
-                        )?;
+                        )
+                        .map_err(|error| format!("{error}[operation_kind:office_write]"))?;
+                        super::delivery::ensure_frozen_content_writable(database,&self.binding.run_id,task_text.as_deref(),root,target)
+                            .map_err(|error| format!("{error}[operation_kind:office_write]"))?;
                     }
                 }
             } else if self.current_mode()? == PermissionMode::ReadOnly {
@@ -533,7 +542,11 @@ impl GatewayPolicy {
             if matches!(tool, "write_file" | "edit_file") {
                 if let Some(db) = &self.database {
                     let path_text = input["path"].as_str().ok_or("[tool.invalid_input] missing file path")?;
-                    let target = crate::tool_host::canonical_file_identity(std::path::Path::new(root), path_text)?;
+                    // Every refusal on this path is a refused *file write*; the
+                    // class is named here so the persisted refusal carries it
+                    // (`operationKind`) instead of the interface inferring it.
+                    let target = crate::tool_host::canonical_file_identity(std::path::Path::new(root), path_text)
+                        .map_err(|error| format!("{error}[operation_kind:file_write]"))?;
                     // The task's own file roles bound this Run's writes: a path it
                     // introduced as input material is refused at the same boundary
                     // an approval would otherwise widen.
@@ -542,7 +555,10 @@ impl GatewayPolicy {
                         task_text.as_deref(),
                         root,
                         std::path::Path::new(&target),
-                    )?;
+                    )
+                    .map_err(|error| format!("{error}[operation_kind:file_write]"))?;
+                    super::delivery::ensure_frozen_content_writable(db,&self.binding.run_id,task_text.as_deref(),root,std::path::Path::new(&target))
+                        .map_err(|error| format!("{error}[operation_kind:file_write]"))?;
                     // REV-01: the model's declared `expectedVersion` is a
                     // *precondition claim*. It is verified against this Run's
                     // observations and never silently upgraded to the newest
@@ -576,7 +592,12 @@ impl GatewayPolicy {
                     }
                 }
             }
-            crate::tool_host::prepare(tool, &checked, root)?;
+            if let (Some(database),Some(sessions_dir)) = (&self.database,&self.sessions_dir) {
+                crate::tool_host::prepare_with_artifact_context(tool,&checked,root,database,sessions_dir,&self.binding.conversation_id)?;
+            } else {
+                if checked.get("artifactId").is_some() {return Err(crate::tool_host::ToolErrorCode::PermissionDenied.error("artifact publication requires Host conversation context"));}
+                crate::tool_host::prepare(tool, &checked, root)?;
+            }
         }
         Ok(())
     }
@@ -825,7 +846,7 @@ impl GatewayPolicy {
                 if input.get("timeoutMs").is_none() || input["timeoutMs"].is_u64() {
                     bounded["timeoutMs"]=json!(input["timeoutMs"].as_u64().unwrap_or(15_000).min(remaining));
                 }
-                super::attachment_compute::execute(
+                super::attachment_compute::execute_for_run(
                 database,
                 attachments_dir,
                 sessions_dir,
@@ -1144,11 +1165,15 @@ impl GatewayPolicy {
             self.execute_reader(database, tool, input,
                 &format!("host-read:{}", uuid::Uuid::new_v4()), token)
         } else {
-            let mut action = crate::tool_host::prepare(
-                tool,
-                input,
-                self.binding.permission.project_root.as_deref().unwrap(),
-            )?;
+            let root = self.binding.permission.project_root.as_deref().unwrap();
+            let mut action = if input.get("artifactId").is_some() {
+                crate::tool_host::prepare_with_artifact_context(tool,input,root,database,
+                    self.sessions_dir.as_deref().ok_or("missing Host artifact publication context")?,&self.binding.conversation_id)?
+            } else {
+                // Ordinary text writes/edits and commands have never required
+                // an artifact store. Do not widen the context requirement.
+                crate::tool_host::prepare(tool,input,root)?
+            };
             if let crate::tool_host::PreparedToolAction::CommandJob {root,input,..} = &action {
                 return super::command_jobs::execute(database,&self.binding.run_id,input,root,token,self.remaining_budget(database)?);
             }
@@ -1214,7 +1239,10 @@ impl GatewayPolicy {
         let mut servers = Vec::new();
         for id in self.scope.mcp_server_hashes.keys() {
             let server = load(id)?;
-            let tools = if server.id == crate::office::SERVER_ID {
+            let manifest_hash=super::runtime_shadow_hash(&serde_json::to_string(&self.scope).map_err(|_|"invalid resource scope")?);
+            let (tools, metadata) = super::mcp_catalog::catalog(&self.binding, &manifest_hash, &server, token, remaining()?,
+                self.scope.office_tools.contains("office_help"), || {
+                let tools = if server.id == crate::office::SERVER_ID {
                 remaining()?;
                 crate::office::verify_binary(std::path::Path::new(&server.command))?;
                 crate::office::tool_definitions()
@@ -1230,7 +1258,9 @@ impl GatewayPolicy {
                     .as_array()
                     .cloned()
                     .ok_or("missing MCP catalog")?
-            };
+                };
+                Ok(tools)
+            })?;
             let tools = tools
                 .into_iter()
                 .filter(|tool: &Value| {
@@ -1238,7 +1268,8 @@ impl GatewayPolicy {
                 })
                 .collect::<Vec<_>>();
             if !tools.is_empty() {
-                servers.push(json!({"serverId":server.id,"serverName":server.name,"tools":tools}));
+                servers.push(json!({"serverId":server.id,"serverName":server.name,
+                    "tools":super::mcp_catalog::compact_tools(tools),"catalog":metadata}));
             }
         }
         token.check()?;
@@ -1279,8 +1310,19 @@ impl PolicyDecisionPort for GatewayPolicy {
                     reason: super::redact_execution_diagnostic(&error, 2000),
                 };
             }
+            // A refusal the error tags do not classify still carries its
+            // redacted cause: swallowed to one generic sentence, the model keeps
+            // re-issuing the same call with a different path instead of fixing
+            // what was actually refused — which is how one unclassified Host
+            // error turned into dozens of blind retries.
+            let cause = super::redact_execution_diagnostic(&error, 2000);
+            let cause = cause.trim();
             return PolicyDecision::Deny {
-                reason: "Tool is not permitted by the frozen resource policy".into(),
+                reason: if cause.is_empty() {
+                    "Tool is not permitted by the frozen resource policy".into()
+                } else {
+                    format!("Tool is not permitted by the frozen resource policy: {cause}")
+                },
             };
         }
         // The absent-target baseline is established HERE, while the write is
@@ -1295,6 +1337,12 @@ impl PolicyDecisionPort for GatewayPolicy {
         }
         if tool == "task_repair_escalate_start" {
             return PolicyDecision::RequireApproval;
+        }
+        // Availability precedes every approval, including declarative Hooks.
+        if tool == "run_command" {
+            if let Err(message) = crate::process_jobs::command_start_availability(input.as_ref().ok().and_then(|v| v["action"].as_str())) {
+                return PolicyDecision::Reject { code:"tool.sandbox_unavailable".into(), message };
+            }
         }
         if self.scope.lifecycle_hooks.iter().any(|hook| {
             hook.event == "before_tool"
@@ -1399,6 +1447,25 @@ impl GatewayPolicy {
 #[cfg(test)]
 mod revision_tests {
     use super::*;
+    #[test]
+    fn o14_unavailable_command_refuses_before_any_approval_and_manage_remains_available() {
+        use fox_engine_protocol::{FrozenPermission,TimeBudgets,ExecutionAuthority,ResourceExecutor};
+        let root=std::env::temp_dir();
+        for mode in [PermissionMode::Ask,PermissionMode::Allow] {
+            let permission=FrozenPermission{mode,project_root:Some(root.to_string_lossy().into()),grants:vec![],approval_epoch:None};
+            let policy=GatewayPolicy{binding:RunControlBinding{schema_version:1,run_id:"r".into(),conversation_id:"c".into(),engine_id:"pi".into(),
+                execution_profile_id:"legacy".into(),authority:ExecutionAuthority::Authoritative,read_only_executor:ResourceExecutor::Rust,
+                permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),permission,budgets:TimeBudgets::default()},
+                scope:KernelHostScope{schema_version:1,tool_names:["run_command".into()].into_iter().collect(),mcp_server_hashes:Default::default(),
+                    knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:vec![]},
+                database:None,sessions_dir:None,artifacts_dir:None};
+            let decision=policy.decide("r","t","run_command",&json!({"action":"start","command":"echo blocked"}).to_string());
+            assert!(matches!(decision,PolicyDecision::Reject{ref code,..} if code=="tool.sandbox_unavailable"),"{decision:?}");
+            for action in ["status","output","cancel"] {
+                assert!(matches!(policy.decide("r","m","run_command",&json!({"action":action,"jobId":"owned"}).to_string()),PolicyDecision::Allow));
+            }
+        }
+    }
 
     /// Regression, 2026-10-01 fix verification (O11): two new files proposed in
     /// one turn must each get their own absent-target observation. A dispatch-

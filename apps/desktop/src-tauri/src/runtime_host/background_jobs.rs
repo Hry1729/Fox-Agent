@@ -52,7 +52,7 @@ pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
             } else {
                 let key=input["idempotencyKey"].as_str().filter(|s| !s.trim().is_empty()).ok_or("idempotencyKey is required")?;
                 let params=input["params"].clone();
-                allowed_fields(&params,&["attachmentIds","artifactIds","code","processing","profile"])?;
+                allowed_fields(&params,&["attachmentIds","artifactIds","projectPaths","code","processing","profile"])?;
                 if params.get("processing").is_some_and(|v|v!="chunked") {return Err("background jobs require processing=chunked and onChunk/onFinish; use attachment_compute for whole mode".into());}
                 if params["code"].as_str().is_none_or(|v|v.is_empty()||v.len()>131072) {return Err("code must be nonempty JavaScript within 128 KiB".into());}
                 let row=database.kernel_job_start(&JobStartRequest {run_id:run_id.into(),kind:"attachment_compute".into(),idempotency_key:key.into(),params:params.clone(),deadline_ms:Some(crate::database::now_ms()+budget.as_millis().min(i64::MAX as u128) as i64),progress_total:None})?;

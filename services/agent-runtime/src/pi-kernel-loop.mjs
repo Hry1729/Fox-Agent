@@ -5,12 +5,13 @@
 // resource: an installed executor without a settled Host directive throws, and
 // replacement sessions are refused when they retain executable tools.
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
-import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
+import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError, incompleteResponseReason, modelFailureDiagnostic } from './kernel-completion.mjs'
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
 import { effectiveBoundableTool, modelToolResultContent, toolResultRef } from './tool-view.mjs'
 import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
 import { hostJobNoticeMessage, validateHostJobNotices } from './host-job-notice.mjs'
 import { describeKernelError, diagnosticLine } from './pi-kernel-diagnostics.mjs'
+import { responseAdmissionError } from './pi-kernel-response-diagnostic.mjs'
 
 export { steeringNoticeText }
 
@@ -33,8 +34,11 @@ function canonical(value, omitUndefined = false) {
 /** Canonicalize and validate one engine round output before it leaves the worker. */
 export function prepareRoundOutput(assistantMessage, { turnId, requireCompletion = false } = {}) {
   for (const block of assistantMessage?.content ?? []) {
-    if (block?.type === 'toolCall') canonical(block.arguments)
+    if (block?.type === 'toolCall') {
+      try { canonical(block.arguments) } catch { throw responseAdmissionError('invalid_tool_arguments', 'tool_proposal') }
+    }
   }
+  try {
   let message = canonical(assistantMessage, true)
   message = finalizeKernelAnswer(message, requireCompletion)
   const frame = { schemaVersion: 1, turnId, assistantMessage: message }
@@ -42,7 +46,20 @@ export function prepareRoundOutput(assistantMessage, { turnId, requireCompletion
   if (Buffer.byteLength(JSON.stringify(frame), 'utf8') > 1_048_576) fail('round output exceeds the protocol size limit')
   const errors = validateWireValue('KernelRoundOutputFrame', frame)
   if (errors.length) fail(errors.join('; '))
+  const calls = message.content?.filter(block => block?.type === 'toolCall') ?? []
+  if (calls.length) {
+    const ids = new Set()
+    if (calls.length > 64) fail('invalid next tool batch size')
+    for (const call of calls) {
+      if (!nonempty(call.id) || ids.has(call.id) || !knownTools.has(call.name) || !record(call.arguments)) fail('invalid next tool proposal')
+      ids.add(call.id)
+    }
+  }
   return frame
+  } catch (error) {
+    if (error instanceof KernelIncompleteResponseError) throw error
+    throw responseAdmissionError('protocol_invalid')
+  }
 }
 
 /** Durable settled result projected into the Pi tool-result shape. */
@@ -274,6 +291,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   }
 
   let roundCursor = prepared.checkpointSeq
+  hooks?.onCursor?.(roundCursor)
   // Preview-attribution cursor for the current round. Tool/initial rounds use
   // the durable checkpoint cursor; a continuation round uses the Host-provided
   // previewSeq so its streamed message never reuses the previous round's id.
@@ -372,7 +390,8 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
     // Commit the proposal durably before the engine can execute anything.
     // Blocking inside this awaited listener stops the engine at the boundary.
     try {
-      if (message.stopReason !== 'toolUse') fail('engine produced a truncated tool proposal')
+      hooks?.assertProposal?.(message)
+      if (message.stopReason !== 'toolUse') throw responseAdmissionError('truncated_tool_proposal', 'tool_proposal')
       const output = prepareRoundOutput(message, { turnId: prepared.turnId, requireCompletion })
       pendingBatch = null
       hooks?.onSettled?.(null)
@@ -382,6 +401,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         fail('Host returned a non-batch directive for a tool proposal')
       }
       roundCursor = directive.checkpointSeq
+      hooks?.onCursor?.(roundCursor)
       resetPreviewRound(directive.checkpointSeq)
       const settled = new Map()
       for (const item of directive.tools) settled.set(item.toolCallId, settledToolResult(item, request.runId))
@@ -491,6 +511,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         // tool round's message id.
         resetPreviewRound(directive.previewSeq)
         roundCursor = previewCursor
+        hooks?.onCursor?.(roundCursor)
         session.agent.state.messages = [...session.agent.state.messages,
           { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: 0 }]
         // Spliced after the review prompt at the next provider request.
@@ -514,11 +535,28 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
     // by definition, so that is the category of last resort.
     const resolved = typeof category === 'string' && category ? category : 'model_transport_failure'
     const error = new Error('Kernel model round failed; the Host owns retry admission')
+    // The round's own message is the only source for the sub-category and counts; a
+    // round that produced no settled message leaves them unobserved (absent), which
+    // the Host reads as unknown rather than as a zero.
+    const failureMessage = session?.agent?.state?.messages?.at(-1)
+    const settled = failureMessage?.role === 'assistant' ? failureMessage : null
+    const diagnostic = resolved === 'incomplete_response' || settled
+      ? modelFailureDiagnostic({
+          message: settled,
+          // Whether this request required the final marker is an observed fact — it comes
+          // from the same frozen prompt this round was issued with — so the branch can
+          // tell "produced an answer but never closed it" from "produced nothing".
+          reason: resolved === 'incomplete_response' ? incompleteResponseReason(settled, requireCompletion) : undefined,
+          completionRequired: requireCompletion,
+          dispatchId: typeof request?.id === 'string' ? request.id : undefined,
+        })
+      : null
     error.evidence = {
       schemaVersion: 1, runId: request.runId, turnId: prepared.turnId,
       checkpointSeq: roundCursor, category: resolved,
       httpStatus: resolved === 'provider_unavailable' ? rejection?.httpStatus ?? null : null,
       retryAfterMs: resolved === 'provider_unavailable' ? rejection?.retryAfterMs ?? null : null,
+      ...(diagnostic ? { diagnostic } : {}),
     }
     return error
   }

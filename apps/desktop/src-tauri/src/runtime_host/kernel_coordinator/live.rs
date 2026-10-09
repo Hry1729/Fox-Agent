@@ -1344,7 +1344,11 @@ impl KernelCoordinator<'_> {
             self.ensure_context_with_worker(context_key,
                 planned_steering_bytes.saturating_add(4096),owner,runtime,api_key)?;
         }
-        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        // The one controlled length recovery changes the request itself: the
+        // session below is created with the derived configuration, and the frame
+        // built from the same durable record carries the recovery instruction.
+        let (config, _) = self.dispatch_model_config(
+            continuation_key.unwrap_or(kernel::INITIAL_MODEL_EFFECT_KEY))?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
         // Spawn and initialize before the durable dispatch commit: the ready

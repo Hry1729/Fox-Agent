@@ -8,6 +8,89 @@
 
 use super::*;
 
+fn bounded_display_text(value: &str, limit: usize) -> String {
+    value.chars().filter(|c| !c.is_control() || matches!(c,'\n'|'\t')).take(limit).collect()
+}
+
+fn safe_finding(value: &Value) -> Option<Value> {
+    let source=value.as_object()?;
+    let mut result=serde_json::Map::new();
+    let requirements=source.get("requirementFindings").or_else(||source.get("requirements")).and_then(Value::as_array);
+    let semantic=requirements.filter(|entries|!entries.is_empty()).map(|entries| {
+        if entries.iter().any(|entry|matches!(entry["state"].as_str().or_else(||entry["status"].as_str()),Some("failed"|"unmet"))) {"unmet"}
+        else if entries.iter().any(|entry|!matches!(entry["state"].as_str().or_else(||entry["status"].as_str()),Some("passed"|"met"))) {"unverified"}
+        else {"met"}
+    });
+    let mut requirements_truncated=requirements.is_some_and(|entries|entries.len()>16);
+    for key in ["reasonCode","verificationStatus","semanticStatus","reason","expectedTarget","targetDirectory",
+        "boundPath","managedVersionId","managedVersionNo","sourceRunId","sourceToolCallId","checkedHash","provenance","cancelled",
+        "actualWrittenPaths","requirementFindings"] {
+        let value=source.get(key).or_else(||(key=="requirementFindings").then(||source.get("requirements")).flatten());
+        let Some(value)=value else {continue;};
+        let projected=match value {
+            Value::String(text)=>Some(Value::String(bounded_display_text(text,if key=="reason" {1536}else{512}))),
+            Value::Number(number) if key=="managedVersionNo"=>Some(Value::Number(number.clone())),
+            Value::Bool(value) if key=="cancelled"=>Some(Value::Bool(*value)),
+            Value::Array(values) if key=="actualWrittenPaths"=>Some(json!(values.iter().take(8)
+                .filter_map(Value::as_str).map(|s|bounded_display_text(s,512)).collect::<Vec<_>>())),
+            Value::Array(values) if key=="requirementFindings"=>Some(Value::Array(values.iter().take(16).filter_map(|finding| {
+                let source=finding.as_object()?;let mut entry=serde_json::Map::new();
+                for field in ["id","requirementId","kind","check","status","state","reasonCode","reason","verificationStatus","sourcePath","sourceHash"] {
+                    if let Some(text)=source.get(field).and_then(Value::as_str) {entry.insert(field.into(),json!(bounded_display_text(text,512)));}
+                }
+                (!entry.is_empty()).then_some(Value::Object(entry))
+            }).collect())),
+            _=>None,
+        };
+        if let Some(projected)=projected {
+            result.insert(key.into(),projected);
+            if serde_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
+                result.remove(key);
+                if key=="requirementFindings" {requirements_truncated=true;}
+            }
+        }
+    }
+    if let Some(semantic)=semantic {
+        result.insert("semanticStatus".into(),json!(semantic));
+        if semantic=="unmet" {result.insert("verificationStatus".into(),json!("failed"));}
+        else if semantic=="unverified" {result.insert("verificationStatus".into(),json!("unverified"));}
+    }
+    if requirements_truncated {result.insert("requirementsTruncated".into(),json!(true));}
+    Some(Value::Object(result))
+}
+
+/// A single latest Run, owned by this conversation. All callers use the same
+/// persisted rows; absent files and unbound/non-file items remain visible.
+pub(super) fn query_current_checklist_view(connection:&rusqlite::Connection,conversation:&str,run:Option<&str>)
+    ->rusqlite::Result<(Vec<super::super::DeliveryChecklistView>,bool)> {
+    let Some(run)=run else {return Ok((Vec::new(),false));};
+    let mut statement=connection.prepare("SELECT i.item_key,i.target_path,
+        (SELECT a.id FROM artifacts a WHERE a.id=i.artifact_id AND a.conversation_id=?1),
+        i.display_name,i.status,i.finding_json,i.checked_at
+        FROM delivery_checklist_items i JOIN runs r ON r.id=i.run_id
+        WHERE r.conversation_id=?1 AND i.run_id=?2 ORDER BY i.item_key LIMIT 257")?;
+    let mut rows=statement.query_map(params![conversation,run],|row| {
+        let item_key:String=row.get(0)?;let target_path:Option<String>=row.get(1)?;
+        let raw:Option<String>=row.get(5)?;
+        let finding=raw.as_deref().map(|body|serde_json::from_str::<Value>(body).ok().and_then(|v|safe_finding(&v))
+            .unwrap_or_else(||json!({"reasonCode":"delivery.invalid_finding","verificationStatus":"unverified","reason":"持久核验记录无法安全读取"})));
+        let read_version=finding.as_ref().and_then(|v|v["checkedHash"].as_str()).filter(|value| {
+            let digest=value.strip_prefix("sha256:").unwrap_or(value);digest.len()==64 && digest.bytes().all(|c|c.is_ascii_hexdigit())
+        }).map(str::to_owned);
+        let extension=target_path.as_deref().and_then(|path|std::path::Path::new(path).extension()).and_then(|s|s.to_str())
+            .or_else(||item_key.strip_prefix("slot:").and_then(|rest|rest.split(':').next())).unwrap_or("").to_ascii_lowercase();
+        let kind=if item_key.starts_with("recognition:") {"non_file"}else{match extension.as_str() {
+            "xlsx"|"xls"|"xlsm"=>"spreadsheet","docx"|"doc"=>"word","pptx"|"ppt"=>"slides","pdf"=>"pdf",
+            "csv"|"tsv"=>"csv","json"=>"json","txt"|"md"|"html"=>"text","png"|"svg"|"jpg"=>"image",_=>"unknown"}};
+        let status:String=row.get(4)?;
+        Ok(super::super::DeliveryChecklistView{run_id:run.into(),item_key:bounded_display_text(&item_key,2048),
+            description:bounded_display_text(&row.get::<_,String>(3)?,512),artifact_kind:kind.into(),
+            target_path:target_path.map(|s|bounded_display_text(&s,2048)),artifact_id:row.get(2)?,read_version,
+            status:if matches!(status.as_str(),"pending"|"passed"|"failed") {status}else{"pending".into()},finding,checked_at:row.get(6)?})
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let truncated=rows.len()>256;rows.truncate(256);Ok((rows,truncated))
+}
+
 /// One structured, machine-decidable demand taken from the task text and stored
 /// with the checklist item that has to satisfy it.
 ///
@@ -32,6 +115,15 @@ pub(crate) struct DeliveryRequirement {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(crate) enum RequirementKind {
+    /// Host placement metadata for an unnamed artifact. It is not a content
+    /// requirement and must not replace or erase the other requirements.
+    TargetDirectory { directory: String },
+    /// A real file-output intent whose complete target set was not recognized.
+    /// This is a non-file state, never an invented filename to repair.
+    RecognitionUnresolved { reason: String },
+    /// Versioned Host-frozen content contract. The runtime consumer validates
+    /// its finite schema; old semantic requirements remain separately readable.
+    ContentContract { spec: serde_json::Value },
     Charts {
         count: usize,
         /// The task demanded the charts per worksheet ("每个 Sheet 配一张图表").
@@ -245,7 +337,35 @@ fn same_delivery_artifact(left: &str, right: &str) -> bool {
     long.ends_with(short) && long.as_bytes()[long.len() - short.len() - 1] == b'/'
 }
 
+/// Cancellation is not a verification verdict. Preserve pending and checked_at
+/// while attaching a reason to every item which still needs verification.
+pub(super) fn cancelled_unverified(transaction: &rusqlite::Transaction<'_>, run_id: &str, now: i64) -> rusqlite::Result<()> {
+    transaction.execute("UPDATE delivery_checklist_items SET finding_json=?2, updated_at=?3
+        WHERE run_id=?1 AND status='pending' AND checked_at IS NULL AND finding_json IS NULL",
+        params![run_id, serde_json::json!({"reasonCode":"delivery.cancelled_unverified",
+            "reason":"运行已取消，此交付项未完成核验","verificationStatus":"unverified","cancelled":true}).to_string(), now])?;
+    Ok(())
+}
+
 impl Database {
+    /// Read per-item placement metadata without Run-wide semantic de-duplication.
+    pub(crate) fn delivery_item_requirements(&self,run_id:&str,item_key:&str)->Result<Vec<DeliveryRequirement>,String> {
+        self.with_connection(|conn| {
+            let body:String=conn.query_row("SELECT requirements_json FROM delivery_checklist_items WHERE run_id=?1 AND item_key=?2",
+                params![run_id,item_key],|row|row.get(0))?;
+            serde_json::from_str(&body).map_err(|_|rusqlite::Error::InvalidParameterName("invalid frozen delivery requirements".into()))
+        })
+    }
+    /// An unnamed artifact is bound to the immediate frozen output directory,
+    /// never another directory with a similarly named or same-type file.
+    pub(crate) fn delivery_target_matches_directory(target:&str,directory:&str)->bool {
+        let target=target.replace('\\',"/");let directory=directory.replace('\\',"/");
+        let directory=directory.trim_end_matches('/');
+        let safe=|value:&str|!value.starts_with('/') && !value.contains(':') && value.split('/').all(|part|!part.is_empty() && part!="." && part!="..");
+        if !safe(&target) || directory!="." && !safe(directory) {return false;}
+        let parent=target.rsplit_once('/').map(|(parent,_)|parent).unwrap_or("");
+        parent.eq_ignore_ascii_case(if directory=="." {""} else {directory})
+    }
     /// Insert checklist items that were not planned yet. Existing items (a
     /// repaired run may re-check the same target) keep their identity.
     pub(crate) fn seed_delivery_checklist(
@@ -255,8 +375,9 @@ impl Database {
         now: i64,
     ) -> Result<(), String> {
         self.with_connection(|conn| {
+            let transaction=conn.unchecked_transaction()?;
             for seed in seeds {
-                conn.execute(
+                transaction.execute(
                     "INSERT OR IGNORE INTO delivery_checklist_items(
                         run_id, item_key, target_path, artifact_id, display_name,
                         checks_json, requirements_json, status, updated_at)
@@ -273,6 +394,7 @@ impl Database {
                     ],
                 )?;
             }
+            transaction.commit()?;
             Ok(())
         })
     }
@@ -298,6 +420,9 @@ impl Database {
                 let stored: Vec<DeliveryRequirement> =
                     serde_json::from_str(&body).unwrap_or_default();
                 for mut item in stored {
+                    // Placement and recognition belong to their original item,
+                    // not to the de-duplicated Run-wide semantic demands.
+                    if matches!(item.kind,RequirementKind::TargetDirectory{..}|RequirementKind::RecognitionUnresolved{..}|RequirementKind::ContentContract{..}) {continue;}
                     item.item_key = None;
                     if !requirements
                         .iter()
@@ -887,7 +1012,20 @@ impl Database {
         artifact_id: Option<&str>,
     ) -> Result<(), String> {
         self.with_connection(|conn| {
-            conn.execute(
+            let transaction=conn.unchecked_transaction()?;
+            let (body,existing):(String,Option<String>)=transaction.query_row("SELECT requirements_json,target_path FROM delivery_checklist_items WHERE run_id=?1 AND item_key=?2",
+                params![run_id,item_key],|row|Ok((row.get(0)?,row.get(1)?)))?;
+            let requirements:Vec<DeliveryRequirement>=serde_json::from_str(&body)
+                .map_err(|_|rusqlite::Error::InvalidParameterName("invalid frozen delivery requirements".into()))?;
+            if requirements.iter().any(|requirement|match &requirement.kind {
+                RequirementKind::TargetDirectory{directory}=>!Self::delivery_target_matches_directory(target_path,directory),
+                RequirementKind::RecognitionUnresolved{..}=>true,_=>false}) {
+                return Err(rusqlite::Error::InvalidParameterName("delivery target differs from the frozen directory or is unresolved".into()));
+            }
+            if existing.as_deref().is_some_and(|path|!path.eq_ignore_ascii_case(target_path)) {
+                return Err(rusqlite::Error::InvalidParameterName("delivery item is already bound to another target".into()));
+            }
+            transaction.execute(
                 "UPDATE delivery_checklist_items
                  SET target_path=?1,
                      artifact_id=COALESCE(?2, artifact_id),
@@ -895,6 +1033,7 @@ impl Database {
                  WHERE run_id=?4 AND item_key=?5 AND target_path IS NULL",
                 params![target_path, artifact_id, now_ms(), run_id, item_key],
             )?;
+            transaction.commit()?;
             Ok(())
         })
     }

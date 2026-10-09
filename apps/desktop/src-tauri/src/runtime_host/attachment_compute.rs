@@ -75,8 +75,34 @@ fn stream_snapshot(
     total_bytes: &mut u64,
     total_limit: usize,
 ) -> Result<(String, u64), String> {
-    let before = fs::metadata(source)
-        .map_err(|error| format!("Unable to inspect input: {error}"))?;
+    stream_snapshot_with_root(source, destination, per_file_limit, cancelled, deadline, total_bytes, total_limit, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_snapshot_with_root(
+    source: &Path, destination: &Path, per_file_limit: u64, cancelled: &dyn Fn() -> bool,
+    deadline: Instant, total_bytes: &mut u64, total_limit: usize, authorized_root: Option<&Path>,
+) -> Result<(String, u64), String> {
+    crate::data_compute::validate_input_path(source)?;
+    let mut reader = open_input_handle(source)?;
+    let before = reader.metadata().map_err(|error| format!("Unable to inspect opened input: {error}"))?;
+    #[cfg(windows)]
+    let before_identity = opened_file_identity(&reader)?;
+    #[cfg(windows)]
+    { use std::os::windows::fs::MetadataExt;
+      if before.file_attributes() & 0x400 != 0 { return Err("[tool.path_denied] Opened input is a reparse point".into()); }
+      let final_path = opened_final_path(&reader)?;
+      if final_path != fs::canonicalize(source).map_err(|e| e.to_string())?
+          || authorized_root.is_some_and(|root| !final_path.starts_with(root)) {
+          return Err("[tool.path_denied] Input identity changed or escaped the authorized project".into());
+      }
+    }
+    #[cfg(not(windows))]
+    if let Some(root) = authorized_root {
+        if !fs::canonicalize(source).map_err(|e|e.to_string())?.starts_with(root) {
+            return Err("[tool.path_denied] Input escaped the authorized project".into());
+        }
+    }
     if !before.is_file() {
         return Err("Input is not a regular file".into());
     }
@@ -87,8 +113,6 @@ fn stream_snapshot(
             per_file_limit,
         ));
     }
-    let mut reader =
-        fs::File::open(source).map_err(|error| format!("Unable to read input: {error}"))?;
     let mut writer = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -127,16 +151,98 @@ fn stream_snapshot(
         .flush()
         .map_err(|error| format!("Unable to flush the private snapshot: {error}"))?;
     drop(writer);
+    drop(reader);
     // A source that changed while it was copied would produce a snapshot that
     // matches no recorded state: reject instead of computing on mixed bytes.
     #[cfg(test)]
     run_post_copy_hook();
     let after = fs::metadata(source)
         .map_err(|error| format!("Unable to re-inspect input: {error}"))?;
+    #[cfg(windows)]
+    {
+        let after_file = open_input_handle(source)?;
+        if opened_file_identity(&after_file)? != before_identity {
+            return Err("[tool.path_denied] Input file identity changed while snapshotting".into());
+        }
+    }
     if after.len() != before.len() || after.modified().ok() != before.modified().ok() {
         return Err("输入在快照期间发生变化；请在文件稳定后重试".into());
     }
+    crate::data_compute::validate_input_path(source)?;
+    if authorized_root.is_some_and(|root| !fs::canonicalize(source).map(|p|p.starts_with(root)).unwrap_or(false)) {
+        return Err("[tool.path_denied] Input authorization changed while snapshotting".into());
+    }
     Ok((hex::encode(hasher.finalize()), copied))
+}
+
+fn open_input_handle(source:&Path)->Result<fs::File,String> {
+    let mut open=fs::OpenOptions::new();open.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT,FILE_SHARE_READ};
+        open.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0).share_mode(FILE_SHARE_READ.0);
+    }
+    open.open(source).map_err(|error|format!("Unable to read input: {error}"))
+}
+
+/// Delivery verification shares the compute snapshot's protected handle open.
+/// No temporary copy, writer or project mutation is created here.
+pub(crate) fn read_authorized_delivery_bytes(root:&Path,relative:&str,limit:u64)->Result<Vec<u8>,String> {
+    let root=super::capability_tools::canonical_directory(root,"project folder")?;
+    let source=super::capability_tools::resolve_project_path(&root,relative,true)?;
+    crate::data_compute::validate_input_path(&source)?;
+    let mut reader=open_input_handle(&source)?;let before=reader.metadata().map_err(|e|e.to_string())?;
+    if !before.is_file() || before.len()>limit {return Err("Delivery source is not a regular bounded file".into());}
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if before.file_attributes()&0x400!=0 || !opened_final_path(&reader)?.starts_with(&root)
+            || opened_final_path(&reader)?!=fs::canonicalize(&source).map_err(|e|e.to_string())? {
+            return Err("[tool.path_denied] Opened delivery source escaped its project".into());
+        }
+    }
+    let mut bytes=Vec::new();std::io::Read::by_ref(&mut reader).take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+    if bytes.len() as u64>limit {return Err("Delivery source exceeds read budget".into());}
+    let after=reader.metadata().map_err(|e|e.to_string())?;
+    if after.len()!=before.len() || after.modified().ok()!=before.modified().ok() || bytes.len() as u64!=before.len() {
+        return Err("Delivery source changed during read".into());
+    }
+    crate::data_compute::validate_input_path(&source)?;
+    if !fs::canonicalize(&source).map_err(|e|e.to_string())?.starts_with(&root) {return Err("[tool.path_denied] Delivery source escaped during read".into());}
+    #[cfg(windows)]
+    if opened_final_path(&reader)?!=fs::canonicalize(&source).map_err(|e|e.to_string())? {return Err("Delivery source identity changed during read".into());}
+    #[cfg(unix)]
+    {use std::os::unix::fs::MetadataExt;let live=fs::metadata(&source).map_err(|e|e.to_string())?;
+        if live.dev()!=after.dev() || live.ino()!=after.ino(){return Err("Delivery source identity changed during read".into());}}
+    Ok(bytes)
+}
+
+pub(crate) fn authorized_delivery_root(database:&Database,run:&str)->Result<PathBuf,String> {
+    let binding=database.run_control_binding(run)?.ok_or("Delivery source needs a frozen Run binding")?;binding.validate()?;
+    let root=super::capability_tools::canonical_directory(Path::new(binding.permission.project_root.as_deref().ok_or("No frozen project root")?),"project folder")?;
+    let live=database.conversation_project_access(&binding.conversation_id)?.ok_or("Project access was removed")?;
+    if super::capability_tools::canonical_directory(Path::new(&live.0),"project folder")?!=root {return Err("Project authorization changed".into());}
+    Ok(root)
+}
+
+#[cfg(windows)]
+pub(crate) fn opened_final_path(file: &fs::File) -> Result<PathBuf, String> {
+    use std::os::windows::{io::AsRawHandle, ffi::OsStringExt};
+    use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFinalPathNameByHandleW, GETFINALPATHNAMEBYHANDLE_FLAGS}};
+    let mut buffer=vec![0u16;32768];
+    let size=unsafe {GetFinalPathNameByHandleW(HANDLE(file.as_raw_handle()), &mut buffer, GETFINALPATHNAMEBYHANDLE_FLAGS(0))} as usize;
+    if size==0 || size>=buffer.len() {return Err("[tool.path_denied] Unable to verify opened input identity".into());}
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..size])))
+}
+
+#[cfg(windows)]
+fn opened_file_identity(file:&fs::File)->Result<(u32,u32,u32),String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFileInformationByHandle,BY_HANDLE_FILE_INFORMATION}};
+    let mut info=BY_HANDLE_FILE_INFORMATION::default();
+    unsafe{GetFileInformationByHandle(HANDLE(file.as_raw_handle()),&mut info)}.map_err(|_|"[tool.path_denied] Unable to verify input file identity")?;
+    Ok((info.dwVolumeSerialNumber,info.nFileIndexHigh,info.nFileIndexLow))
 }
 
 /// Deterministic seam for the "source changed while snapshotting" test: the
@@ -352,6 +458,128 @@ pub(crate) fn execute(
     )
 }
 
+/// Project authorization belongs to the Host, before the compute engine. The
+/// engine receives private snapshots only; it never receives a project root.
+pub(crate) fn execute_for_run(
+    database:&Database, attachments_dir:&Path, sessions_dir:&Path, conversation_id:&str, run_id:&str,
+    input:&Value, cancelled:impl Fn()->bool+'static,
+) -> Result<Value,String> {
+    let project_inputs=authorize_project_inputs(database,conversation_id,run_id,input)?;
+    execute_with_options(database,attachments_dir,sessions_dir,conversation_id,run_id,input,cancelled,
+        ComputeOptions {project_inputs:Some(&project_inputs),..Default::default()})
+}
+
+#[derive(Clone)]
+pub(crate) struct ProjectInput {relative:String, source:PathBuf, root:PathBuf}
+
+/// Whether `id` names an existing file inside the conversation's project folder.
+///
+/// A read-only existence probe used only to word the refusal: it authorizes
+/// nothing, accepts no absolute path and no `..` segment, and requires the
+/// canonical target to stay inside the canonical root.
+fn project_file_exists(project_root: Option<&str>, id: &str) -> bool {
+    let Some(root) = project_root else { return false };
+    let normalized = id.replace('\\', "/");
+    if normalized.is_empty() || normalized.starts_with('/') || normalized.contains(':') {
+        return false;
+    }
+    if normalized.split('/').any(|part| part.is_empty() || part == ".." || part == ".") {
+        return false;
+    }
+    let Ok(root) = Path::new(root).canonicalize() else { return false };
+    let Ok(candidate) = root.join(&normalized).canonicalize() else { return false };
+    candidate.starts_with(&root) && candidate.is_file()
+}
+
+/// Why an `attachmentIds` entry could not be resolved, and which field it belongs
+/// in.
+///
+/// The overwhelmingly common cause is a *project* file named as an attachment: the
+/// compute tool reads project files through `projectPaths`, while `attachmentIds`
+/// may only name this conversation's uploaded attachments. Saying just "not found
+/// in this conversation" made the model resend the identical call — the O14
+/// acceptance run spent two identical calls on exactly that loop — so the message
+/// names the id, states which field it belongs in, and says whether the file is
+/// actually present in the project folder (the O14 request passed only
+/// `attachmentIds`, so this probe — not the authorized-input list — is what makes
+/// that case specific).
+pub(crate) fn missing_attachment_message(
+    id: &str,
+    project_inputs: &[ProjectInput],
+    project_root: Option<&str>,
+) -> String {
+    let normalized = id.replace('\\', "/");
+    let leaf = normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized)
+        .to_ascii_lowercase();
+    let authorized_project_input = project_inputs.iter().any(|input| {
+        let relative = input.relative.replace('\\', "/");
+        relative.eq_ignore_ascii_case(&normalized)
+            || relative
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&leaf))
+    });
+    if authorized_project_input {
+        format!(
+            "attachmentIds 里的 `{id}` 已作为本次运行的项目输入授权，不要再放进 attachmentIds；\
+             项目输入请只放在 projectPaths"
+        )
+    } else if project_file_exists(project_root, id) {
+        format!(
+            "attachmentIds 里的 `{id}` 是项目里的文件（本次调用没有传 projectPaths）：\
+             请把它放进 projectPaths，attachmentIds 只能填本会话上传的附件 ID"
+        )
+    } else {
+        format!(
+            "attachmentIds 里的 `{id}` 不是本会话的附件 ID；\
+             附件必须来自本会话，项目内的文件请改放在 projectPaths"
+        )
+    }
+}
+
+pub(crate) fn authorize_project_inputs(database:&Database,conversation_id:&str,run_id:&str,input:&Value)->Result<Vec<ProjectInput>,String> {
+    let Some(values)=input.get("projectPaths") else {return Ok(Vec::new())};
+    let values=values.as_array().ok_or("[tool.invalid_input] projectPaths must be an array")?;
+    if values.is_empty(){return Err("[tool.invalid_input] projectPaths must not be empty".into());}
+    let binding=database.run_control_binding(run_id)?.ok_or("[tool.permission_denied] Project computation needs a frozen Run binding")?;
+    if binding.conversation_id!=conversation_id{return Err("[tool.permission_denied] Compute conversation does not own this Run".into());}
+    binding.validate()?;
+    let expected=binding.permission.project_root.as_deref().ok_or("[tool.permission_denied] No project is authorized for this Run")?;
+    let root=super::capability_tools::canonical_directory(Path::new(expected),"project folder")?;
+    let live=database.conversation_project_access(conversation_id)?.ok_or("[tool.permission_denied] Project access was removed")?;
+    if super::capability_tools::canonical_directory(Path::new(&live.0),"project folder")?!=root {
+        return Err("[tool.permission_denied] Project authorization changed; start a new Run".into());
+    }
+    let mut seen=std::collections::HashSet::new();let mut inputs=Vec::new();
+    for value in values {
+        let relative=value.as_str().filter(|s|!s.trim().is_empty()).ok_or("[tool.invalid_input] projectPaths entries must be nonempty relative paths")?;
+        if relative.len()>1024 {return Err("[tool.invalid_input] Project input path exceeds 1024 bytes".into());}
+        // Resolve with the same project policy as read/office. Reject Windows
+        // reserved device/ADS names on every component before opening anything.
+        for part in relative.split(['/', '\\']) {
+            let stem=part.split('.').next().unwrap_or_default().trim_end_matches([' ','.']).to_ascii_uppercase();
+            let numbered=stem.len()==4 && (stem.starts_with("COM")||stem.starts_with("LPT")) && matches!(stem.as_bytes()[3],b'1'..=b'9');
+            if part.contains(':') || matches!(stem.as_str(),"CON"|"PRN"|"AUX"|"NUL") || numbered || part.ends_with([' ','.']) {
+                return Err("[tool.path_denied] Project input uses a reserved device or ambiguous path".into());
+            }
+        }
+        let joined=root.join(relative);
+        crate::data_compute::validate_input_path(&joined)?;
+        let source=super::capability_tools::resolve_project_path(&root,relative,true)?;
+        let extension=source.extension().and_then(|x|x.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !matches!(extension.as_str(),"xlsx"|"xls"|"xlsb"|"xlsm"|"ods"|"csv"|"tsv"|"json"|"txt"){
+            return Err("[tool.invalid_input] Project inputs must be XLSX, XLS, XLSB, XLSM, ODS, CSV, TSV, JSON or TXT".into());
+        }
+        if !fs::metadata(&source).map_err(|e|e.to_string())?.is_file(){return Err("[tool.invalid_input] Project input must be a regular file".into());}
+        if !seen.insert(source.clone()){return Err("[tool.invalid_input] Duplicate project input".into());}
+        inputs.push(ProjectInput{relative:relative.into(),source,root:root.clone()});
+    }
+    Ok(inputs)
+}
+
 /// Explicit execution options. The synchronous tool path derives everything
 /// from the model input; the background-job path passes its own deadline and
 /// progress sink (CONTRACTS §4: waiting and execution budgets stay separate).
@@ -362,6 +590,7 @@ pub(crate) struct ComputeOptions<'a> {
     pub deadline: Option<Instant>,
     /// Per-chunk progress sink (rows processed). Sync callers pass None.
     pub progress: Option<&'a dyn Fn(crate::data_compute::chunked::ChunkProgress)>,
+    pub project_inputs: Option<&'a [ProjectInput]>,
 }
 
 /// The single rule for the submitted-program parameter, shared by the
@@ -422,10 +651,13 @@ pub(crate) fn execute_with_options(
         .map(|v| v.as_array().ok_or("artifactIds must be an array"))
         .transpose()?
         .unwrap_or(&empty);
-    if ids.len() + artifacts.len() > tier.max_inputs {
+    let project_inputs=options.project_inputs.unwrap_or(&[]);
+    let requested_project_count=input.get("projectPaths").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    if requested_project_count!=project_inputs.len(){return Err("[tool.permission_denied] Project inputs must be authorized by the Host".into());}
+    if ids.len() + artifacts.len()+project_inputs.len() > tier.max_inputs {
         return Err(format!(
             "选择了 {} 个输入，超过 {} 档位的 {} 个上限；请减少附件或分批计算",
-            ids.len() + artifacts.len(),
+            ids.len() + artifacts.len()+project_inputs.len(),
             tier.name,
             tier.max_inputs,
         ));
@@ -489,7 +721,10 @@ pub(crate) fn execute_with_options(
         }
         let a = database
             .attachment_for_conversation(conversation_id, id)?
-            .ok_or("Attachment was not found in this conversation")?;
+            .ok_or_else(|| {
+                let project_root = database.conversation_project_root(conversation_id).ok().flatten();
+                missing_attachment_message(id, project_inputs, project_root.as_deref())
+            })?;
         let path = fs::canonicalize(&a.storage_path).map_err(|e| e.to_string())?;
         let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
         if !path.starts_with(&storage)
@@ -566,6 +801,28 @@ pub(crate) fn execute_with_options(
             snapshot(id, &extension, &path, tier.max_artifact_bytes as u64, &mut paths)?;
         }
     }
+    // The closure above accounts attachment/artifact bytes. Release its borrow
+    // before copying the separately authorized project files through the same
+    // cumulative budget and bounded streaming copier.
+    drop(snapshot);
+    let mut input_sources=Vec::new();
+    for project in project_inputs {
+        check_snapshot_progress(&cancelled,snapshot_deadline)?;
+        let extension=project.source.extension().and_then(|x|x.to_str()).unwrap_or("txt").to_ascii_lowercase();
+        let id=format!("project:{}",project.relative.replace('\\',"/"));
+        let destination=input_root.join(format!("{}.{}",hex::encode(Sha256::digest(id.as_bytes())),extension));
+        // Re-resolve the original spelling immediately before opening. The open
+        // handle is then verified and write/delete sharing denied on Windows.
+        crate::data_compute::validate_input_path(&project.root.join(&project.relative))?;
+        if super::capability_tools::resolve_project_path(&project.root,&project.relative,true)?!=project.source {
+            return Err("[tool.path_denied] Project input identity changed before snapshotting".into());
+        }
+        let (digest,copied)=stream_snapshot_with_root(&project.source,&destination,tier.max_attachment_bytes,&cancelled,snapshot_deadline,&mut total,tier.max_total_input_bytes,Some(&project.root))?;
+        let live=authorize_project_inputs(database,conversation_id,run_id,input)?;
+        if !live.iter().any(|p|p.relative==project.relative && p.source==project.source && p.root==project.root){return Err("[tool.permission_denied] Project authorization changed while snapshotting".into());}
+        input_sources.push(json!({"id":id,"kind":"project_snapshot","projectPath":project.relative,"sha256":digest,"bytes":copied}));
+        paths.push((id,destination));
+    }
     let mut normalized = input.clone();
     normalized["attachmentIds"] = json!(paths.iter().map(|(id, _)| id).collect::<Vec<_>>());
     let mut result = if processing == "chunked" {
@@ -597,6 +854,7 @@ pub(crate) fn execute_with_options(
     }
     result["computedBy"] = json!("fox-quickjs");
     result["attachmentIds"] = json!(ids);
+    result["inputSources"]=json!(input_sources);
     // Only a completed computation keeps its workspace: outputs referenced by
     // the result live there. Any earlier failure, cancellation or limit breach
     // dropped the guard and removed the partial snapshot set.
@@ -713,6 +971,7 @@ mod tests {
         ComputeOptions {
             deadline: Some(Instant::now() + Duration::from_secs(300)),
             progress,
+            project_inputs: None,
         }
     }
 
@@ -1116,5 +1375,96 @@ mod tests {
         assert!(json_import.is_err_and(|error| error.contains("不一致")));
 
         let _ = fs::remove_dir_all(&fixture.root);
+    }
+
+    /// The O14 acceptance shape: the call passes **only** `attachmentIds` (no
+    /// `projectPaths`), so the authorized-input list is empty. The project folder
+    /// is what makes the answer specific, and this test drives the real entry
+    /// (`execute`) rather than the message helper in isolation.
+    #[test]
+    fn attachment_ids_naming_a_project_file_is_diagnosed_at_the_real_entry() {
+        let fixture = Fixture::new("attachment-field-entry");
+        let project = fixture.root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("6-1.xlsx"), b"placeholder").unwrap();
+        let conversation = fixture
+            .database
+            .create_conversation(
+                fixture.database.default_agent_id(),
+                None,
+                Some(project.to_str().unwrap()),
+                Some("ask"),
+            )
+            .unwrap();
+        let run = fixture
+            .database
+            .create_run(&conversation.id, "读取 6-1.xlsx，生成 metrics.csv。", None)
+            .unwrap()
+            .run
+            .id;
+        let error = execute(
+            &fixture.database,
+            &fixture.storage,
+            &fixture.sessions,
+            &conversation.id,
+            &run,
+            &json!({"attachmentIds": ["6-1.xlsx"], "code": "return 1;"}),
+            || false,
+        )
+        .unwrap_err();
+        assert!(error.contains("6-1.xlsx"), "{error}");
+        assert!(error.contains("projectPaths"), "{error}");
+        assert!(error.contains("项目里的文件"), "{error}");
+        // A name that is not a project file gets the generic hint, not a claim.
+        let unknown = execute(
+            &fixture.database,
+            &fixture.storage,
+            &fixture.sessions,
+            &conversation.id,
+            &run,
+            &json!({"attachmentIds": ["ghost.pdf"], "code": "return 1;"}),
+            || false,
+        )
+        .unwrap_err();
+        assert!(unknown.contains("ghost.pdf"), "{unknown}");
+        assert!(!unknown.contains("项目里的文件"), "{unknown}");
+    }
+
+    /// The helper stays honest for the odd case where the same name is *both* an
+    /// authorized project input and an attachment id, and never probes outside the
+    /// project root.
+    #[test]
+    fn a_project_file_named_as_an_attachment_says_which_field_it_belongs_in() {
+        let project = ProjectInput {
+            relative: "6-1.xlsx".to_owned(),
+            source: PathBuf::from("C:/project/6-1.xlsx"),
+            root: PathBuf::from("C:/project"),
+        };
+        let message = missing_attachment_message("6-1.xlsx", std::slice::from_ref(&project), None);
+        assert!(message.contains("6-1.xlsx"), "{message}");
+        assert!(message.contains("projectPaths"), "{message}");
+        assert!(message.contains("已作为本次运行的项目输入授权"), "{message}");
+
+        // A longer spelling of the same authorized file still matches by leaf name.
+        let nested = missing_attachment_message("in\\6-1.xlsx", std::slice::from_ref(&project), None);
+        assert!(nested.contains("已作为本次运行的项目输入授权"), "{nested}");
+
+        // An unknown id gets the generic hint without claiming the Host authorized it.
+        let unknown = missing_attachment_message("ghost.pdf", &[], None);
+        assert!(unknown.contains("ghost.pdf"), "{unknown}");
+        assert!(unknown.contains("projectPaths"), "{unknown}");
+        assert!(!unknown.contains("已作为"), "{unknown}");
+
+        // Existence probing accepts no absolute path and no parent traversal.
+        let root = std::env::temp_dir().join(format!("fox-msg-root-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("inside")).unwrap();
+        fs::write(root.join("inside/report.csv"), b"a\n").unwrap();
+        fs::write(root.join("outside.csv"), b"a\n").unwrap();
+        let root_text = root.to_str().unwrap();
+        assert!(project_file_exists(Some(root_text), "inside/report.csv"));
+        assert!(!project_file_exists(Some(root_text), "../outside.csv"));
+        assert!(!project_file_exists(Some(root_text), root.join("inside/report.csv").to_str().unwrap()));
+        assert!(!project_file_exists(None, "inside/report.csv"));
+        let _ = fs::remove_dir_all(&root);
     }
 }

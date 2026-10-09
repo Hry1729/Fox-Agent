@@ -206,7 +206,66 @@ pub(super) fn project(
                 updated_at=?3,completed_at=?3 WHERE parent_run_id=?1 AND status='running'",params![run_id,kind,now])?;
         }
     }
+    project_request_progress(tx,run_id,previous_seq)?;
     project_hooks(tx, run_id, now)?;
+    Ok(())
+}
+
+/// Display-only facts use run_events' own sequence. Kernel dispatch identity
+/// stays a separate field, and clocks come from the actual dispatch payload.
+fn project_request_progress(tx:&Transaction<'_>,run:&str,previous_seq:i64)->rusqlite::Result<()> {
+    let mut statement=tx.prepare("SELECT seq,event_type,payload_json,created_at FROM kernel_events
+        WHERE run_id=?1 AND seq>?2 AND event_type IN ('engine.initial_dispatched','engine.batch_dispatched',
+        'engine.continuation_dispatched','context.compaction.started','context.compaction.dispatched',
+        'context.compaction.completed','context.compaction.failed') ORDER BY seq")?;
+    let rows=statement.query_map(params![run,previous_seq],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,
+        row.get::<_,String>(2)?,row.get::<_,i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (seq,kind,body,created) in rows {
+        let source:Value=serde_json::from_str(&body).map_err(|_|rusqlite::Error::InvalidQuery)?;
+        let dispatched=kind.ends_with("dispatched");
+        let compaction=kind.starts_with("context.compaction.");
+        let mut payload=if !compaction {json!({"type":"run.phase","phase":"request_sent","authority":"kernel"})}
+            else {json!({"type":kind,"phase":"context_compaction","authority":"kernel"})};
+        payload["kernelSeq"]=json!(seq);
+        if compaction {
+            if let Some(id)=source["id"].as_str().filter(|id|id.len()<=512 && !id.chars().any(char::is_control)) {
+                payload["id"]=json!(id);
+            }
+            if let Some(attempt)=source["attempt"].as_i64().filter(|attempt|*attempt>=0) {
+                payload["attempt"]=json!(attempt);
+            }
+        }
+        let identity=if dispatched {Some((seq,source["startedAt"].as_i64()))}else if matches!(kind.as_str(),"context.compaction.failed"|"context.compaction.completed") {
+            tx.query_row("SELECT seq,json_extract(payload_json,'$.startedAt') FROM kernel_events WHERE run_id=?1 AND seq<?2
+                AND event_type='context.compaction.dispatched' ORDER BY seq DESC LIMIT 1",params![run,seq],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,Option<i64>>(1)?))).optional()?
+        }else{None};
+        if let Some((dispatch,started))=identity {
+            payload["dispatchSeq"]=json!(dispatch);payload["startedAt"]=json!(started);
+            let cutoff=source["failedAt"].as_i64().unwrap_or(created);
+            // A shared compaction dispatch may have later worker attempts.
+            // Never borrow a future waiting request for an earlier failure.
+            let request:Option<String>=if dispatched {None}else {tx.query_row("SELECT json_extract(event_json,'$.requestId') FROM run_events
+                WHERE run_id=?1 AND event_type='run.model_waiting' AND json_extract(event_json,'$.dispatchSeq')=?2
+                  AND created_at<=?3 ORDER BY seq DESC LIMIT 1",
+                params![run,dispatch,cutoff],|row|row.get(0)).optional()?.flatten()};
+            payload["requestId"]=json!(request.filter(|id|id.len()<=128));
+        }
+        if kind=="context.compaction.failed" {
+            for field in ["failure","category","retryTimeline"] {
+                if let Some(value)=source[field].as_str().filter(|s|s.len()<=128 && s.chars().all(|c|c.is_ascii_alphanumeric() || matches!(c,'.'|'_'|'-'))) {
+                    payload[field]=json!(value);
+                }
+            }
+            for field in ["attempt","elapsedMs","remainingMs","failedAt","httpStatus"] {
+                if let Some(value)=source[field].as_i64().filter(|n|*n>=0) {payload[field]=json!(value);}
+            }
+            for field in ["retryable","outcomeKnown"] {if let Some(value)=source[field].as_bool(){payload[field]=json!(value);}}
+            payload["message"]=json!("上下文压缩请求未完成，请检查本次失败类别与重试状态。");
+        } else if kind=="context.compaction.completed" {
+            if let Some(aborted)=source["aborted"].as_bool(){payload["aborted"]=json!(aborted);}
+        }
+        super::kernel_display::event(tx,run,&format!("request-progress:{seq}"),&payload,created)?;
+    }
     Ok(())
 }
 

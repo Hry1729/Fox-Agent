@@ -2,10 +2,41 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   composeFoxPrompt,
+  buildFilePlacement,
   contextBlock,
   serializeWorkSnapshotForPrompt,
   stablePromptHash,
 } from '../src/prompt-composer.mjs'
+
+test('uses the Host frozen delivery targets verbatim for prompt placement', () => {
+  const deliveryTargets = { schemaVersion: 1, recognition: 'recognized', defaultDirectory: 'fox/session-results', targets: [
+    { itemKey: 'file:root-report.md', path: 'root-report.md', directory: null },
+    { itemKey: 'file:out/details.csv', path: 'out/details.csv', directory: null },
+    { itemKey: 'slot:pdf:1', path: null, directory: 'exports' },
+  ] }
+  const filePlacement = buildFilePlacement({ deliverableRoot: 'fox/session-results', deliveryTargets })
+  assert.deepEqual(filePlacement.deliveryTargets, deliveryTargets)
+  const { prompt } = composeFoxPrompt({ systemPrompt: 'Fox', runtimeInstructions: 'Use Host placement.', context: {
+    projectRoot: 'D:/synthetic-project', filePlacement,
+  } })
+  assert.match(prompt, /"path": "root-report\.md"/u)
+  assert.match(prompt, /"directory": "exports"/u)
+  assert.match(prompt, /never prepend deliverableRoot/u)
+  assert.doesNotMatch(prompt, /Do not create a new file at the project root/u)
+  assert.doesNotMatch(prompt, /fox\/session-results\/root-report/u)
+})
+
+test('retains unresolved Host state without manufacturing target filenames', () => {
+  const deliveryTargets = { schemaVersion: 1, recognition: 'unresolved', defaultDirectory: null, targets: [] }
+  const filePlacement = buildFilePlacement({ deliveryTargets })
+  assert.deepEqual(filePlacement.deliveryTargets, deliveryTargets)
+  assert.equal(filePlacement.deliverableRoot, null)
+  const { prompt } = composeFoxPrompt({ systemPrompt: 'Fox', context: { filePlacement } })
+  assert.match(prompt, /"recognition": "unresolved"/u)
+  assert.match(prompt, /requirements remain unverified/u)
+  assert.equal(buildFilePlacement(null), null)
+  assert.equal(buildFilePlacement({}), null)
+})
 
 function workSnapshotBlock(prompt) {
   const matches = [...prompt.matchAll(/<fox_context_block kind="work_snapshot" authority="host">\n([\s\S]*?)\n<\/fox_context_block>/gu)]

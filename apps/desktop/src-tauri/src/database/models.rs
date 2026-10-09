@@ -1045,6 +1045,9 @@ pub struct ConversationDetail {
     pub approvals: Vec<ApprovalRecord>,
     pub attachments: Vec<AttachmentRecord>,
     pub artifacts: Vec<ArtifactRecord>,
+    /// Latest Run only. Empty/missing/truncated never means business acceptance.
+    pub delivery_checklist: Vec<DeliveryChecklistView>,
+    pub delivery_checklist_truncated: bool,
     pub knowledge_bindings: Vec<KnowledgeBindingRecord>,
     pub last_run: Option<RunRecord>,
     /// Terminal state of every run referenced by the loaded messages. Exposes
@@ -1060,6 +1063,22 @@ pub struct ConversationDetail {
     pub child_runs: Vec<ChildRunRecord>,
     pub expert_workflow: Option<ExpertWorkflowSnapshot>,
     pub expert_team: Option<ExpertTeamSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryChecklistView {
+    pub run_id: String,
+    pub item_key: String,
+    pub description: String,
+    pub artifact_kind: String,
+    pub target_path: Option<String>,
+    pub artifact_id: Option<String>,
+    pub read_version: Option<String>,
+    pub status: String,
+    /// Host-owned, bounded white-list projection. No source bodies/tool inputs.
+    pub finding: Option<Value>,
+    pub checked_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

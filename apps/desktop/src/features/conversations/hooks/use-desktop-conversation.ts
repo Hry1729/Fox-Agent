@@ -780,7 +780,8 @@ export function useDesktopConversation(): DesktopConversationState {
       setRunOverlay((current) => applyRunEventToOverlay(current, notification, Date.now()))
     },
   })
-  useKernelStateStream({ conversationId: detail?.conversation.id ?? null, setDetail, setError, setErrorDetails })
+  useKernelStateStream({ conversationId: detail?.conversation.id ?? null,
+    active: Boolean(detail && snapshotForRun(detail) && conversationRunIsActive(detail)), setDetail, setError, setErrorDetails })
 
   useEffect(() => {
     if (!desktopRuntimeAvailable) return

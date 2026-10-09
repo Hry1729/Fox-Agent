@@ -2301,6 +2301,8 @@ impl Database {
             let knowledge_bindings = query_knowledge_bindings(connection, id)?;
             let expert_bindings = query_conversation_expert_bindings(connection, id)?;
             let last_run = query_last_run(connection, id)?;
+            let (delivery_checklist,delivery_checklist_truncated)=delivery_checks::query_current_checklist_view(
+                connection,id,last_run.as_ref().map(|run|run.id.as_str()))?;
             let run_ids = messages
                 .iter()
                 .filter_map(|message| message.run_id.clone())
@@ -2320,6 +2322,8 @@ impl Database {
                 approvals,
                 attachments,
                 artifacts,
+                delivery_checklist,
+                delivery_checklist_truncated,
                 knowledge_bindings,
                 last_run,
                 runs,
@@ -7452,9 +7456,9 @@ fn query_runtime_events_window(
            AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = r.id AND m.role = 'user'
                       AND m.ordinal >= ?2 AND (?3 IS NULL OR m.ordinal < ?3))
            AND e.event_type IN (
-               'run.started', 'run.request_snapshot', 'run.phase',
+               'run.started', 'run.request_snapshot', 'run.phase', 'run.model_waiting',
                'run.retrying', 'run.retry.completed',
-               'context.compaction.started', 'context.compaction.completed',
+               'context.compaction.started', 'context.compaction.dispatched', 'context.compaction.completed', 'context.compaction.failed',
                'planner.started', 'planner.completed', 'planner.failed',
                'message.started', 'message.delta', 'reasoning.delta',
                'tool.started', 'tool.updated', 'tool.completed',

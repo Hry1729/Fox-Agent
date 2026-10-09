@@ -13,6 +13,18 @@ impl KernelCoordinator<'_> {
 
     pub(super) fn model_retry_context(&self, target: &str, mut view: Vec<Value>) -> Result<Vec<Value>, String> {
         let effect_key = if target == "initial" { "initial-model".to_string() } else if target.starts_with("continuation:") { target.to_owned() } else { format!("deliver-batch:{target}") };
+        // The one controlled length recovery owns this dispatch's instruction: it
+        // is the exact text recorded durably when the recovery was scheduled, so a
+        // restart cannot change what the model is asked, and it is generated from
+        // the Run's own delivery facts instead of a fixed task script.
+        if let Some(instruction) = self.length_recovery_instruction(&effect_key)? {
+            view.push(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": instruction}],
+                "timestamp": 0,
+            }));
+            return Ok(view);
+        }
         if self.database.kernel_model_retry_needs_completion(&self.binding.run_id, &effect_key)? {
             // This fixed recovery instruction fits within the dispatch's 4096
             // reserved bytes. The durable source/compaction history is unchanged.
@@ -209,7 +221,9 @@ impl KernelCoordinator<'_> {
                 Ok(response) => break response,
                 Err(error) => {
                     let failure = classify_compaction_failure(&error, &token);
-                    let elapsed_ms = attempt_now.wall_ms.saturating_sub(since);
+                    let failed_now = self.clock.read();
+                    let elapsed_ms = failed_now.wall_ms.saturating_sub(since);
+                    let remaining = remaining.min(deadline_wall_ms.saturating_sub(failed_now.wall_ms)).max(0);
                     // A retry needs a settled, retryable failure, a fresh attempt
                     // inside the same window, and enough of that window left to be
                     // worth spending.
@@ -217,6 +231,11 @@ impl KernelCoordinator<'_> {
                         && attempt < context::RETRY_LIMIT
                         && remaining >= context::MIN_RETRY_BUDGET_MS;
                     let (category, http_status) = compaction_failure_evidence(&error);
+                    let diagnostic = compaction_worker_diagnostic(&error);
+                    let upstream = diagnostic.as_ref().and_then(|v| v["upstreamMessage"].as_str()).unwrap_or(&error);
+                    let upstream = super::super::redact_execution_diagnostic(upstream, 600);
+                    let outcome_known = diagnostic.as_ref().is_some_and(|v| v["outcomeKnown"] == true)
+                        || matches!(failure, context::CompactionFailure::SettledRejection | context::CompactionFailure::InvalidResult);
                     self.apply(None, |controller, _| {
                         controller.fail_context_compaction(
                             &pending.id,
@@ -228,6 +247,9 @@ impl KernelCoordinator<'_> {
                             category.as_deref(),
                             http_status,
                             retry,
+                            &upstream,
+                            outcome_known,
+                            failed_now.wall_ms,
                         )
                     })?;
                     if !retry {
@@ -292,6 +314,14 @@ fn classify_compaction_failure(error: &str, token: &kernel::CancellationToken) -
     if token.is_cancelled() {
         return context::CompactionFailure::Cancelled;
     }
+    if let Some(diagnostic) = compaction_worker_diagnostic(error) {
+        return match diagnostic["category"].as_str() {
+            Some("provider_unavailable") if diagnostic["outcomeKnown"] == true && diagnostic["retryable"] == true => context::CompactionFailure::SettledRejection,
+            Some("invalid_result") => context::CompactionFailure::InvalidResult,
+            Some("cancelled") => context::CompactionFailure::Cancelled,
+            _ => context::CompactionFailure::UnknownOutcome,
+        };
+    }
     if let Some(evidence) = kernel_model_worker::settled_failure(error) {
         // Only a rejection that happened before generation is retryable.
         return if evidence.category == "provider_unavailable" {
@@ -312,13 +342,21 @@ fn classify_compaction_failure(error: &str, token: &kernel::CancellationToken) -
     if error.to_ascii_lowercase().contains("cancel") {
         return context::CompactionFailure::Cancelled;
     }
-    context::CompactionFailure::Unclassified
+    context::CompactionFailure::UnknownOutcome
+}
+
+fn compaction_worker_diagnostic(error: &str) -> Option<Value> {
+    let diagnostic: Value = serde_json::from_str(error.strip_prefix("kernel.compaction_worker_failure:")?).ok()?;
+    (diagnostic["schemaVersion"] == 1).then_some(diagnostic)
 }
 
 /// The provider-side evidence of a settled failure, for the durable event only.
 fn compaction_failure_evidence(error: &str) -> (Option<String>, Option<u16>) {
     match super::super::kernel_model_worker::settled_failure(error) {
         Some(evidence) => (Some(evidence.category), evidence.http_status),
-        None => (None, None),
+        None => match compaction_worker_diagnostic(error) {
+            Some(v) => (Some(v["category"].as_str().unwrap_or("unknown").into()), v["httpStatus"].as_u64().and_then(|v| u16::try_from(v).ok())),
+            None => (Some(if super::super::kernel_model_worker::is_reaped_transport_failure(error) {"transport_outcome_unknown"} else {"unknown"}.into()), None),
+        },
     }
 }

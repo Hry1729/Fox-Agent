@@ -59,6 +59,11 @@
   --fox-blue: #3978c5;
   --fox-blue-soft: #e8f4ff;
   --fox-blue-soft-hover: #deefff;
+  /* The send control is blue in both themes: a light blue disc by day, kept
+     clearly lighter than the deep-blue night disc so the white glyph reads on
+     either. */
+  --fox-send-surface: #5b9bf0;
+  --fox-send-ink: #ffffff;
   --fox-hover: color-mix(in oklch, var(--fox-panel) 78%, var(--fox-card));
   --fox-border: var(--border);
   --fox-border-strong: color-mix(in oklch, var(--border) 72%, var(--foreground) 28%);
@@ -168,6 +173,10 @@
   --fox-blue: #78aee8;
   --fox-blue-soft: #233b53;
   --fox-blue-soft-hover: #294965;
+  /* Night keeps the same blue identity but deep enough to read as "blue", not as
+     the inverted white disc the card/text pair used to paint. */
+  --fox-send-surface: #1d4ed8;
+  --fox-send-ink: #ffffff;
   --fox-hover: color-mix(in oklch, var(--fox-panel) 82%, var(--fox-card));
   --fox-border: var(--border);
   --fox-border-strong: color-mix(in oklch, var(--border) 65%, var(--foreground) 35%);

@@ -533,6 +533,9 @@ export interface ConversationDetail {
   approvals: ApprovalRecord[]
   attachments: AttachmentRecord[]
   artifacts: ArtifactRecord[]
+  /** Host read projection of this conversation's current last Run. Missing is not a verdict. */
+  deliveryChecklist?: DeliveryChecklistRecord[]
+  deliveryChecklistTruncated?: boolean
   knowledgeBindings: KnowledgeBindingRecord[]
   knowledgeReferences?: KnowledgeReference[]
   expertBindings: ConversationExpertBinding[]
@@ -549,6 +552,19 @@ export interface ConversationDetail {
   childRuns: ChildRunRecord[]
   expertWorkflow: ExpertWorkflowSnapshot | null
   expertTeam: ExpertTeamSnapshot | null
+}
+
+export interface DeliveryChecklistRecord {
+  runId: string
+  itemKey: string
+  description: string
+  artifactKind: string
+  targetPath: string | null
+  artifactId: string | null
+  readVersion: string | null
+  status: 'pending' | 'passed' | 'failed'
+  finding: Record<string, unknown> | null
+  checkedAt: number | null
 }
 
 export interface ConversationHistoryPage {

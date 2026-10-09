@@ -39,31 +39,61 @@ function isPreviewArtifact(artifact: ArtifactRecord) {
   return artifact.mediaType === 'text/html' && artifact.artifactOrigin === 'host_private'
 }
 
-function formatFileSize(bytes: number) {
+export function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+/** The verification state in the user's words, shared with the file detail view. */
+export function artifactVerificationLabel(status: string | undefined) {
+  return {
+    passed: '验收通过', limited: '有限核验', failed: '验收失败',
+    stale: '版本已变化', unavailable: '文件不可用', unverified: '未核验',
+  }[status ?? 'unverified']
+}
+
+/**
+ * One warning word per delivery state that changes what the user can expect.
+ *
+ * A failed *content verification* is not a failed *publish*: the file did reach the
+ * project, and saying "发布未通过" next to "已发布到项目" contradicts itself. The
+ * publish fact stays the base phrase; these words describe the verification result.
+ */
+const DELIVERY_WARNINGS: Record<string, string> = {
+  failed: '内容需核对',
+  stale: '版本已变化',
+  unavailable: '文件不可用',
+}
+
+/**
+ * One short line about what this file *is*, for the card in the answer.
+ *
+ * Version numbers, byte sizes, verification tallies and the delivery sentence are
+ * diagnostics: they belong to the file's detail view. The only extra word here is
+ * a warning when the delivery itself failed, because that changes what the user
+ * can expect from the file (and it is one phrase, not a metadata join).
+ */
+export function artifactSummaryLine(artifact: ArtifactRecord) {
+  const warning = DELIVERY_WARNINGS[artifact.delivery?.verificationStatus ?? '']
+  if (isPreviewArtifact(artifact)) return '预览'
+  const published = artifact.artifactOrigin === 'project' && Boolean(artifact.delivery?.versionId && artifact.delivery?.sourceToolCallId)
+  const base = published ? '已发布到项目'
+    : artifact.artifactOrigin === 'host_private' ? '中间产物 · 未发布' : '项目文件'
+  return warning ? `${base} · ${warning}` : base
+}
+
 function ArtifactResultCard({ artifact, onOpenArtifact }: { artifact: ArtifactRecord; onOpenArtifact?: (artifact: ArtifactRecord) => void }) {
   const isWeb = artifact.mediaType === 'text/html' || /html|web/i.test(artifact.artifactType)
   const ArtifactIcon = isWeb ? Globe2 : artifact.mediaType?.startsWith('image/') ? ImagePlus : FileText
-  const changeLabel = artifact.artifactType === 'created_file' ? '新建' : artifact.artifactType === 'modified_file' ? '已修改' : '文件结果'
-  const classLabel = isPreviewArtifact(artifact) ? '预览' : null
-  const verificationLabel = {
-    passed: '验收通过', limited: '有限核验', failed: '验收失败',
-    stale: '版本已变化', unavailable: '文件不可用', unverified: '未核验',
-  }[artifact.delivery?.verificationStatus ?? 'unverified']
-  const detail = [classLabel, changeLabel,
-    artifact.delivery?.versionNo ? `v${artifact.delivery.versionNo}` : null,
-    artifact.delivery ? verificationLabel : null].filter(Boolean).join(' · ')
-  const needsAttention = ['failed', 'stale', 'unavailable'].includes(artifact.delivery?.verificationStatus ?? '')
+  // Name, one summary line, icon. The directory is the hover title, so a long
+  // canonical path never crowds the card.
   return <button type="button" className="fox-message-artifact-trigger" onClick={() => onOpenArtifact?.(artifact)}>
-    <Artifact className="fox-message-artifact" title={artifact.displayName}>
+    <Artifact className="fox-message-artifact" title={artifact.storagePath ?? artifact.displayName}>
       <ArtifactHeader className="fox-message-artifact-head">
         <div className="fox-message-artifact-title">
           <span className="fox-message-artifact-icon"><ArtifactIcon size={18} /></span>
-          <div><ArtifactTitle>{artifact.displayName}</ArtifactTitle><ArtifactDescription title={artifact.delivery?.summary}>{detail} · {formatFileSize(artifact.byteSize)}</ArtifactDescription>{needsAttention && <small className="fox-message-artifact-verification">{artifact.delivery?.summary}</small>}</div>
+          <div><ArtifactTitle title={artifact.storagePath ?? undefined}>{artifact.displayName}</ArtifactTitle><ArtifactDescription>{artifactSummaryLine(artifact)}</ArtifactDescription></div>
         </div>
         <ChevronRight size={14} />
       </ArtifactHeader>

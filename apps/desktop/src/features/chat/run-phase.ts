@@ -22,11 +22,16 @@
 
 import type { RunEventRecord } from '@/features/conversations/model/types'
 import { TERMINAL_RUN_EVENT_TYPES, formatRunElapsed } from './turn-process-timing'
+import { activeModelWaiting, modelWaitingTitle, type ModelWaitingFact } from './run-status-facts'
 
 export type RunPhase =
   | 'queued'
   | 'preparing'
   | 'awaiting_response'
+  | 'awaiting_compaction'
+  | 'preparing_compaction'
+  | 'retry_scheduled'
+  | 'compaction_failed'
   | 'streaming'
   | 'finalizing'
   | 'settled'
@@ -35,6 +40,10 @@ export const RUN_PHASE_LABELS: Record<RunPhase, string> = {
   queued: '准备执行',
   preparing: '正在准备上下文',
   awaiting_response: '等待模型响应',
+  awaiting_compaction: '等待压缩响应',
+  preparing_compaction: '正在准备压缩',
+  retry_scheduled: '已安排重试',
+  compaction_failed: '压缩未完成',
   streaming: '正在生成',
   finalizing: '正在收尾',
   settled: '已完成',
@@ -59,6 +68,7 @@ export interface RunPhaseTiming {
   queueMs: number | null
   /** Execution time: execution started → now or terminal. `null` before execution starts. */
   executionMs: number | null
+  modelWaiting?: ModelWaitingFact | null
 }
 
 function earliestEvent(events: readonly RunEventRecord[], eventType: string) {
@@ -76,6 +86,12 @@ const KNOWN_PHASES = new Set(['preparing', 'request_sent', 'streaming', 'finaliz
 function latestPhase(events: readonly RunEventRecord[]) {
   for (let index = events.length - 1; index >= 0; index--) {
     const item = events[index]
+    if (CONTENT_EVENT_TYPES.has(item.eventType)) return 'streaming'
+    if (item.eventType === 'context.compaction.failed') return 'compaction_failed'
+    if (item.eventType === 'context.compaction.completed') return 'preparing'
+    if (item.eventType === 'context.compaction.started') return 'preparing_compaction'
+    if (item.eventType === 'context.compaction.dispatched') return 'context_compaction'
+    if (item.eventType === 'run.retrying') return 'retry_scheduled'
     if (item.eventType !== 'run.phase') continue
     const phase = item.event?.phase
     // An unrecognised phase (a future or unrelated one) neither becomes a stage of
@@ -92,8 +108,9 @@ function latestPhase(events: readonly RunEventRecord[]) {
  */
 export function runPhaseTiming(
   events: readonly RunEventRecord[],
-  options: { queuedAt?: number | null; now: number },
+  options: { queuedAt?: number | null; now: number; runState?: string | null },
 ): RunPhaseTiming {
+  events = [...events].sort((a, b) => a.seq - b.seq)
   const started = earliestEvent(events, 'run.started')
   const terminal = [...events]
     .reverse()
@@ -102,11 +119,12 @@ export function runPhaseTiming(
     ? options.queuedAt
     : null
   const endedAt = terminal?.createdAt ?? null
+  const settled = Boolean(terminal || options.runState && ['completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'approval_expired'].includes(options.runState))
 
   if (!started) {
     // No execution start yet: this Run is still holding a place in the queue.
     return {
-      phase: terminal ? 'settled' : 'queued',
+      phase: settled ? 'settled' : 'queued',
       startedAt: null,
       endedAt,
       queueMs: queuedAt === null ? null : Math.max(0, (endedAt ?? options.now) - queuedAt),
@@ -117,9 +135,20 @@ export function runPhaseTiming(
   const startedAt = started.createdAt
   const queueMs = queuedAt === null ? null : Math.max(0, startedAt - queuedAt)
   const executionMs = Math.max(0, (endedAt ?? options.now) - startedAt)
-  if (terminal) return { phase: 'settled', startedAt, endedAt, queueMs, executionMs }
+  if (settled) return { phase: 'settled', startedAt, endedAt, queueMs, executionMs }
+
+  const modelWaiting = activeModelWaiting(events, { runState: options.runState })
+  if (modelWaiting) return {
+    phase: modelWaiting.phase === 'context_compaction' ? 'awaiting_compaction' : 'awaiting_response',
+    startedAt, endedAt, queueMs, executionMs, modelWaiting,
+  }
 
   const explicitPhase = latestPhase(events)
+  if (options.runState === 'retry_scheduled') return { phase: 'retry_scheduled', startedAt, endedAt, queueMs, executionMs }
+  if (explicitPhase === 'compaction_failed') return { phase: 'compaction_failed', startedAt, endedAt, queueMs, executionMs }
+  if (explicitPhase === 'preparing_compaction') return { phase: 'preparing_compaction', startedAt, endedAt, queueMs, executionMs }
+  if (explicitPhase === 'context_compaction') return { phase: 'awaiting_compaction', startedAt, endedAt, queueMs, executionMs }
+  if (explicitPhase === 'retry_scheduled') return { phase: 'retry_scheduled', startedAt, endedAt, queueMs, executionMs }
   if (explicitPhase === 'finalizing') return { phase: 'finalizing', startedAt, endedAt, queueMs, executionMs }
   if (explicitPhase === 'preparing') return { phase: 'preparing', startedAt, endedAt, queueMs, executionMs }
   if (explicitPhase === 'request_sent') return { phase: 'awaiting_response', startedAt, endedAt, queueMs, executionMs }
@@ -132,19 +161,14 @@ export function runPhaseTiming(
 }
 
 /**
- * Header text for a live Run. Time before dispatch and execution time are
- * reported separately without attributing pre-dispatch delay to a capacity gate.
+ * Header text for a live Run.
+ *
+ * The label is the phase itself; the elapsed time is *not* glued onto it here,
+ * because the header already renders the run's single timer next to the avatar.
+ * Two timers in one row (one inside the label, one beside the avatar) reported the
+ * same interval twice and made one state look like two.
  */
 export function runPhaseTitle(timing: RunPhaseTiming): string {
-  const label = RUN_PHASE_LABELS[timing.phase]
-  if (timing.phase === 'queued') {
-    return timing.queueMs === null ? label : `${label} · 已等待 ${formatRunElapsed(timing.queueMs)}`
-  }
-  if (timing.phase === 'awaiting_response' || timing.phase === 'preparing') {
-    return timing.executionMs === null ? label : `${label} · 已等待 ${formatRunElapsed(timing.executionMs)}`
-  }
-  if (timing.phase === 'streaming' || timing.phase === 'finalizing') {
-    return timing.executionMs === null ? label : `${label} · 已用时 ${formatRunElapsed(timing.executionMs)}`
-  }
-  return label
+  if (timing.modelWaiting) return modelWaitingTitle(timing.modelWaiting)
+  return RUN_PHASE_LABELS[timing.phase]
 }

@@ -72,6 +72,62 @@ describe('reply file results', () => {
     expect(screen.getByRole('region', { name: '过程文件' })).toBeTruthy()
   })
 
+  test('a card shows the file name and keeps the long storage path for hover only', () => {
+    const longPath = '\\\\?\\D:\\python\\projects\\Fox\\output\\fox-merge-verify-20261004\\human-tests-20261007-r2\\O06-project\\out\\slides_outline.json'
+    const record = { ...artifact('deliverable', 'deliverable', 'slides_outline.json'), storagePath: longPath }
+    render(React.createElement(RuntimeArtifacts, { artifacts: [record] }))
+    fireEvent.click(screen.getByRole('button', { name: /本次文件结果/ }))
+    const card = screen.getByRole('button', { name: /slides_outline\.json/ })
+    // The card itself paints the name and the summary, never the raw path.
+    expect(card.textContent).toContain('slides_outline.json')
+    expect(card.textContent).not.toContain('python\\projects')
+    expect(card.textContent).not.toContain('human-tests-20261007-r2')
+    // The directory is still one hover away.
+    const titled = Array.from(card.querySelectorAll<HTMLElement>('[title]'))
+      .map((element) => element.getAttribute('title'))
+    expect(titled).toContain(longPath)
+  })
+
+  test('a card carries one short summary and leaves the metadata to the detail view', () => {
+    const published = {
+      ...artifact('deliverable', 'deliverable', 'slides_outline.json'),
+      byteSize: 4012,
+      delivery: {
+        versionId: 'version-1', versionNo: 3, sourceToolCallId: 'call-1', toolName: 'write_file',
+        verificationStatus: 'passed', summary: '验收通过：结构与指标均已核对', targetPath: 'out/slides_outline.json',
+      },
+    }
+    render(React.createElement(RuntimeArtifacts, { artifacts: [published] }))
+    fireEvent.click(screen.getByRole('button', { name: /本次文件结果/ }))
+    const card = screen.getByRole('button', { name: /slides_outline\.json/ })
+    expect(card.textContent).toContain('已发布到项目')
+    // Size, version, change kind and the verification tally are diagnostics: they
+    // belong to the file detail view, not to this one line.
+    for (const leaked of ['4.0 KB', '4012', 'v3', '验收通过', '新建', '验收']) {
+      expect(card.textContent).not.toContain(leaked)
+    }
+  })
+
+  test('a failed verification says the content needs checking, not that publishing failed', () => {
+    const failed = {
+      ...artifact('deliverable', 'deliverable', 'metrics.csv'),
+      delivery: {
+        versionId: 'version-2', versionNo: 1, sourceToolCallId: 'call-2', toolName: 'write_file',
+        verificationStatus: 'failed', summary: '交付核验失败：列名与契约不一致（metric,key,value）',
+        targetPath: 'metrics.csv',
+      },
+    }
+    render(React.createElement(RuntimeArtifacts, { artifacts: [failed] }))
+    fireEvent.click(screen.getByRole('button', { name: /本次文件结果/ }))
+    const card = screen.getByRole('button', { name: /metrics\.csv/ })
+    // A published file whose *content* failed verification: the base phrase keeps
+    // the publish fact, and the warning describes the verification, not the write.
+    expect(card.textContent).toContain('已发布到项目')
+    expect(card.textContent).toContain('内容需核对')
+    expect(card.textContent).not.toContain('发布未通过')
+    expect(card.textContent).not.toContain('列名与契约不一致')
+  })
+
   test('Host classification keeps a requested CSV deliverable separate from a process DOCX', () => {
     render(React.createElement(RuntimeArtifacts, {
       artifacts: [

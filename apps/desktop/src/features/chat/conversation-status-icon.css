@@ -1,7 +1,12 @@
 .fox-status-matrix {
-  --fox-status-blue: #397fc7;
-  --fox-status-yellow: #f0c400;
-  --fox-status-green: #159c6c;
+  /* Slightly lighter than the base status palette so the three states read as a
+     set rather than as pure signal colours; still clearly blue/yellow/green. */
+  --fox-status-blue: #4788cb;
+  --fox-status-yellow: #f1c812;
+  --fox-status-green: #25a376;
+  /* One breathe is two shape-change beats; the icon supplies the exact value
+     from the shared tempo and this fallback only covers a bare icon. */
+  --fox-status-breathe: 1186.8ms;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -16,10 +21,15 @@
   transform: scale(.8333333333);
   transform-origin: center;
 }
+/* A dot the shape has left behind is gone, not dim: the glyph is given
+   `floorOpacity={0}`, so its inline opacity reaches exactly 0 and no pale
+   nine-dot backdrop survives the shape change. Off-pattern cells keep the
+   loader's own `.dmx-inactive` (already fully transparent); the grid itself is
+   never display:none, so the remaining dots never reflow. */
 .dark .fox-status-matrix, [data-theme="dark"] .fox-status-matrix {
-  --fox-status-blue: #83b9f3;
-  --fox-status-yellow: #ffd64b;
-  --fox-status-green: #64d3a3;
+  --fox-status-blue: #8abdf4;
+  --fox-status-yellow: #ffd856;
+  --fox-status-green: #6dd6a9;
 }
 .fox-status-ring-grid {
   display: grid;
@@ -36,15 +46,56 @@
   border-radius: 50%;
   background: currentColor;
 }
+/* The hub never lights up: a ring, not a full nine-dot block. */
 .fox-status-ring-dot.is-center { visibility: hidden; }
-.fox-status-matrix.is-animated .fox-status-ring-grid {
-  animation: foxStatusRingBreathe 3s ease-in-out infinite;
+/* Each dot carries the breathe, not the grid, so the per-dot phase offsets the
+   component sets (the same row+column wave the glyph uses) can apply. The static
+   grid opacity above stays as the no-animation fallback; while animated the dot's
+   own opacity is the only thing painting, so the peak is not dimmed twice. */
+.fox-status-matrix.is-animated .fox-status-ring-grid { opacity: 1; }
+/* Each dot changes on the glyph's own rule: the change starts later for a later
+   dot and every dot is finished at the *same* deadline, so the whole group changes
+   inside one morph window. A single keyframe set plus `animation-delay` cannot
+   express that — a delay moves the end as well — hence one set per stagger step.
+   The percentages are derived from GLYPH_HOLD_RATIO / GLYPH_MORPH_RATIO (26% hold,
+   17% change per form at the 7:2 tempo) and `conversation-status-icon.tsx`'s test
+   asserts them against those constants, so the two cannot drift apart.
+   The within-window curve is the browser's `ease-in-out`, the closest CSS match to
+   the glyph's smoothstep; the hold lengths, the start offsets and the shared
+   deadline are exact.
+   The trough is *fully* transparent: the ring must not leave a pale eight-dot ghost
+   behind when it has faded out. The static `opacity: .85` on
+   `.fox-status-ring-grid` stays as the no-animation fallback (reduced motion,
+   hidden page, or a bare icon), so that state remains visible. */
+@keyframes foxStatusRingDot0 { 0%, 26% { opacity: 0; } 43%, 76% { opacity: .95; } 93%, 100% { opacity: 0; } }
+@keyframes foxStatusRingDot1 { 0%, 30.25% { opacity: 0; } 43%, 80.25% { opacity: .95; } 93%, 100% { opacity: 0; } }
+@keyframes foxStatusRingDot2 { 0%, 34.5% { opacity: 0; } 43%, 84.5% { opacity: .95; } 93%, 100% { opacity: 0; } }
+@keyframes foxStatusRingDot3 { 0%, 38.75% { opacity: 0; } 43%, 88.75% { opacity: .95; } 93%, 100% { opacity: 0; } }
+/* The last step starts exactly at the deadline, so it has to *snap*: the glyph's
+   clamped progress gives that dot an instant change. Two things do NOT produce it
+   — `ease-in-out` would fade the dot early, and writing the same offset twice does
+   not either (CSS keeps only the last declaration for a duplicated offset, so
+   `0%,43%{0} 43%,93%{.95}` collapses into a single 43% keyframe and the browser
+   interpolates from 0% to it). An explicit per-segment step function is what makes
+   the change instant: each segment holds its start value until its own end. */
+@keyframes foxStatusRingDot4 {
+  0% { opacity: 0; animation-timing-function: steps(1, end); }
+  43% { opacity: .95; animation-timing-function: steps(1, end); }
+  93%, 100% { opacity: 0; }
+}
+
+.fox-status-matrix.is-animated .fox-status-ring-dot {
+  animation-duration: var(--fox-status-breathe);
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
   will-change: opacity;
 }
-@keyframes foxStatusRingBreathe {
-  0%,100% { opacity: .32; }
-  50% { opacity: .95; }
-}
+.fox-status-matrix.is-animated .fox-status-ring-dot.is-stagger-0 { animation-name: foxStatusRingDot0; }
+.fox-status-matrix.is-animated .fox-status-ring-dot.is-stagger-1 { animation-name: foxStatusRingDot1; }
+.fox-status-matrix.is-animated .fox-status-ring-dot.is-stagger-2 { animation-name: foxStatusRingDot2; }
+.fox-status-matrix.is-animated .fox-status-ring-dot.is-stagger-3 { animation-name: foxStatusRingDot3; }
+.fox-status-matrix.is-animated .fox-status-ring-dot.is-stagger-4 { animation-name: foxStatusRingDot4; }
 @media (prefers-reduced-motion: reduce) {
-  .fox-status-matrix.is-animated .fox-status-ring-grid { animation: none !important; }
+  .fox-status-matrix.is-animated .fox-status-ring-dot { animation: none !important; }
+  .fox-status-matrix.is-animated .fox-status-ring-grid { opacity: .85; }
 }

@@ -315,6 +315,25 @@ pub struct OutboxEffect {
     pub attempts: u32,
 }
 
+/// Hard upper bound on automatic model retries for one unrecovered model
+/// request, counted cumulatively across every category, class and effect key.
+///
+/// Deliberately a *single* Run-scoped budget: "5 retries per round x 5 rounds"
+/// (25 attempts for one request chain) is exactly the stacking this bound
+/// forbids. The whole-run elapsed budget still applies independently.
+pub const MODEL_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+/// How many **controlled length-truncation recoveries** one Run may spend.
+///
+/// One, and only one: a length-truncated round has no acceptable body and no
+/// acceptable tool proposal, so the identical request can never fix it. The
+/// single recovery changes the request (lowered reasoning level and/or a
+/// state-derived instruction) and must be enough — a second truncation ends the
+/// Run honestly rather than looping. The allowance is never refreshed by a
+/// restart, an error-category change, a new effect key or a later accepted
+/// response.
+pub const MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS: u32 = 1;
+
 /// Provider-HTTP vs whole-turn retry accounting. The two are independent.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RetryState {
@@ -329,6 +348,44 @@ pub struct RetryState {
     pub completion_effect_key: Option<String>,
     #[serde(default)]
     pub completion_attempts: u32,
+    /// Automatic model retries this Run has actually spent, counted across
+    /// **every** category, class and effect key.
+    ///
+    /// The per-category counters above are scope-local accounting (provider vs
+    /// whole-turn vs per-request); this one is the Run-scoped cumulative budget
+    /// the Host admits retries against. A change of error category and a new
+    /// effect key must never reset it — only a model response that was actually
+    /// accepted does, because that is the only event that ends recovery.
+    /// `RetryResume`/dispatch delivery do not count as recovery.
+    #[serde(default)]
+    pub model_attempts: u32,
+    /// Host classification token of the last admitted retry, for durable
+    /// display. Bounded and sanitized by the Host; never free-form provider text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_retry_class: Option<String>,
+    /// How many **controlled length-truncation recoveries** this Run has spent.
+    ///
+    /// A length-truncated round produced no acceptable body and no acceptable
+    /// tool proposal, so re-sending the identical request cannot help: the Host
+    /// changes the request once instead (a lowered reasoning level and/or a
+    /// state-derived recovery instruction). This is therefore not a network
+    /// retry, and the allowance is deliberately **once per Run**: it is never
+    /// refreshed by a restart, by a change of error category, by a new effect
+    /// key, or by a later accepted response. It also spends `model_attempts`, so
+    /// it can never bypass the Run's unified count/time/cost bounds.
+    ///
+    /// Bounded by [`crate::ports::MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS`].
+    #[serde(default)]
+    pub length_recovery_attempts: u32,
+    /// The audit record of that one recovery: the trigger evidence actually
+    /// observed, the Host-side original and recovery parameters, the request
+    /// identity, the exact instruction sent, and (once the request was armed)
+    /// when it was applied. Opaque to the Kernel — the Host owns its shape — but
+    /// bounded and validated here so a corrupt blob fails closed instead of
+    /// authorizing a dispatch. `appliedAtWallMs` is the durable "this recovery
+    /// has been used" mark, written by the same commit that arms the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length_recovery_json: Option<String>,
     /// Durable wall-clock anchor and due time for a scheduled whole-turn retry.
     /// Both are needed to survive restart and to fail closed on wall-clock rollback.
     #[serde(default)]
@@ -339,6 +396,23 @@ pub struct RetryState {
     /// legacy observed retry, resuming the delay must not arm the model clock.
     #[serde(default)]
     pub model_dispatch_pending: bool,
+}
+
+impl RetryState {
+    /// The Host's recovery id from the durable audit record, when one exists.
+    /// Display/audit only: the recovery's authority comes from
+    /// `length_recovery_attempts`, never from this string.
+    pub fn length_recovery_id(&self) -> Option<String> {
+        self.length_recovery_json
+            .as_deref()
+            .and_then(|record| serde_json::from_str::<serde_json::Value>(record).ok())
+            .and_then(|value| {
+                value
+                    .get("recoveryId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+    }
 }
 
 /// Context-compaction accounting, kept distinct from retry.

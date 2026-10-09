@@ -23,6 +23,66 @@ use crate::ports::{
 };
 use crate::state::{ApprovalDecision, KernelError, RunOutcome, RunState, ToolCallState};
 
+/// Host-owned admission for a settled model failure.
+///
+/// A settled failure is evidence, never a retry permission: the Host classifies
+/// it (category, sub-category, HTTP status, server-directed wait) and decides
+/// whether re-issuing the **identical** request may help. The Kernel keeps the
+/// durable accounting, the monotone Run-scoped budget, the settled delivery
+/// lease and the terminal write, so a Host decision can never bypass them.
+///
+/// The Host provides the text (a classification token, an optional bounded
+/// explanation, and for the length recovery an audit record) because both can be
+/// derived from live durable facts; the Kernel decides what may be admitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelRetryAdmission {
+    /// The classified failure admits one more attempt after `delay_ms`.
+    /// `class` is the Host's bounded classification token; it is recorded on the
+    /// durable `run.retrying` event so the waiting state, its reason and the due
+    /// time all come from the actual scheduling event.
+    Retry { class: String },
+    /// The Host proved the cause cannot be cured by re-sending the same request.
+    /// The settled failure terminates through the same atomic commit, so its
+    /// dispatch lease is released exactly as on exhaustion. `message` is the
+    /// Host's bounded, user-facing explanation; `class` is recorded for durable
+    /// diagnosis.
+    Terminal { class: String, message: String },
+    /// The one controlled length-truncation recovery. A length-truncated round
+    /// produced no acceptable body and no acceptable tool proposal, so the
+    /// identical request can never fix it: the Host changes the request itself
+    /// (a lowered reasoning level and/or a recovery instruction derived from
+    /// durable delivery facts) exactly once per Run.
+    ///
+    /// `record_json` is the Host-owned audit record — the trigger evidence
+    /// actually observed, the Host-side original and recovery parameters, the
+    /// request identity and the exact instruction — kept durably so the recovery
+    /// can be cross-checked afterwards and marked applied by the commit that arms
+    /// the request. Spending this admission increments BOTH
+    /// `length_recovery_attempts` (hard-capped at
+    /// [`crate::ports::MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS`]) and the unified
+    /// `model_attempts` budget, so a recovery can never bypass the Run's bounds.
+    RecoverLength { class: String, record_json: String },
+}
+
+impl ModelRetryAdmission {
+    /// Bounded classification token of this admission.
+    pub fn class(&self) -> &str {
+        match self {
+            ModelRetryAdmission::Retry { class } => class,
+            ModelRetryAdmission::Terminal { class, .. } => class,
+            ModelRetryAdmission::RecoverLength { class, .. } => class,
+        }
+    }
+
+    /// The Host-owned length-recovery record, when this admission is that recovery.
+    pub fn length_recovery_record(&self) -> Option<&str> {
+        match self {
+            ModelRetryAdmission::RecoverLength { record_json, .. } => Some(record_json),
+            _ => None,
+        }
+    }
+}
+
 /// Ordered effects the host adapter must persist in the decision transaction.
 /// External variants are performed only after commit; bookkeeping variants are
 /// consumed inside that same transaction.
@@ -341,7 +401,7 @@ impl RunController {
         controller.retry.provider_max = controller.config.provider_max_retries;
         controller.retry.turn_max = controller.config.turn_max_retries;
         // The run dispatches its first model request immediately.
-        controller.arm_model_request(reading.monotonic_ms, reading.wall_ms);
+        controller.arm_model_request(reading.monotonic_ms, reading.wall_ms, Some(INITIAL_MODEL_EFFECT_KEY));
         let mut effects = vec![controller.append_event(
             "run.started",
             serde_json::json!({
@@ -393,7 +453,7 @@ impl RunController {
                 "initial model request has already advanced".into(),
             ));
         }
-        self.arm_model_request(monotonic_ms, wall_ms);
+        self.arm_model_request(monotonic_ms, wall_ms, Some(INITIAL_MODEL_EFFECT_KEY));
         Ok(vec![self.append_event("engine.initial_dispatched", serde_json::json!({
             "turnId":self.turn_id, "idempotencyKey":INITIAL_MODEL_IDEMPOTENCY_KEY, "startedAt":wall_ms,
         }))])
@@ -415,6 +475,7 @@ impl RunController {
         let response: serde_json::Value = serde_json::from_str(response_json)
             .map_err(|_| KernelError::FailClosed("invalid initial model response".into()))?;
         self.settle_model_request();
+        self.note_model_response_accepted();
         Ok(self.append_event(
             "engine.initial_response",
             serde_json::json!({"response":response}),
@@ -497,6 +558,26 @@ impl RunController {
             || (data.retry.turn_attempts > data.retry.turn_max && !terminal_retry_exhausted)
             || data.retry.completion_attempts > data.retry.turn_max
             || (data.retry.completion_attempts > 0 && data.retry.completion_effect_key.is_none())
+            // The Run-scoped cumulative budget is a hard ceiling: no persisted
+            // state may carry more admitted retries than the frozen policy
+            // allows, whatever the category/effect-key counters say.
+            || data.retry.model_attempts
+                > data.config.provider_max_retries.max(data.config.turn_max_retries)
+                    .min(crate::ports::MODEL_RETRY_MAX_ATTEMPTS)
+            || data.retry.model_retry_class.as_deref().is_some_and(|class| {
+                class.is_empty() || class.len() > 64
+                    || !class.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+            // The one controlled length recovery: at most one per Run, and its
+            // audit record must be a bounded JSON object. A corrupt record fails
+            // closed instead of authorizing a dispatch.
+            || data.retry.length_recovery_attempts
+                > crate::ports::MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS
+            || data.retry.length_recovery_json.as_deref().is_some_and(|record| {
+                record.len() > 4096
+                    || !matches!(serde_json::from_str::<serde_json::Value>(record),
+                        Ok(serde_json::Value::Object(_)))
+            })
         {
             return Err(KernelError::FailClosed(
                 "rehydrated retry state disagrees with frozen retry policy".into(),
@@ -1213,14 +1294,48 @@ impl RunController {
                     })));
                 }
                 crate::ports::PolicyDecision::Deny { reason } => {
-                    self.tools.get_mut(&call.tool_call_id).unwrap().state = ToolCallState::Failed;
+                    // A policy denial is a *failed* call that really happened, so
+                    // it carries the same real failure record the reevaluation
+                    // path writes: state Failed, `isError`, the refusal text and
+                    // `executionStarted:false`. Leaving `result_json` empty made
+                    // the persisted tool call look like a failure with no reason
+                    // while the event held one, so neither the model nor the
+                    // user could see why the call was refused.
+                    //
+                    // `reasonCode` carries the Host's own category (for example
+                    // `tool.read_only_input`) as a structured fact, so a consumer
+                    // can word the refusal for a person without reading the
+                    // sentence — the sentence itself is never rendered.
+                    // `operationKind` carries the class the Host actually gated
+                    // (a mutating Office write vs a file write), and `operation`
+                    // the identifier from the durable call input; without them a
+                    // refused `call_mcp_tool` cannot be told apart from any other
+                    // connector call. `diagnosticSource` marks the result as
+                    // authored here, never by a remote connector.
+                    let reason_code = host_reason_code(&reason);
+                    let operation_kind = host_operation_kind(&reason);
+                    let operation = call_operation(&call.tool, &call.canonical_input_json);
+                    let result = serde_json::json!({"isError":true,"content":[{"type":"text","text":&reason}],
+                        "details":{"errorCode":"kernel.policy_denied","reasonCode":&reason_code,
+                            "operationKind":&operation_kind,"operation":&operation,
+                            "diagnosticSource":"host",
+                            "stage":"policy","executionStarted":false}});
+                    let tool = self.tools.get_mut(&call.tool_call_id).unwrap();
+                    tool.state = ToolCallState::Failed;
+                    tool.result_json = Some(result.to_string());
                     effects.push(self.append_event(
                         "tool.failed",
                         serde_json::json!({
                             "toolCallId": call.tool_call_id,
                             "tool": call.tool,
                             "code": "kernel.policy_denied",
-                            "message": reason,
+                            "reasonCode": &reason_code,
+                            "operationKind": &operation_kind,
+                            "operation": &operation,
+                            "diagnosticSource": "host",
+                            "stage": "policy",
+                            "message": &reason,
+                            "executionStarted": false,
                         }),
                     ));
                 }
@@ -1290,14 +1405,22 @@ impl RunController {
                 effects.push(Effect::RequestApproval { tool_call_id: tool_call_id.into(), tool: tool_name, input_json });
             }
             crate::ports::PolicyDecision::Deny { reason } => {
-                let result = serde_json::json!({"isError":true,"content":[{"type":"text","text":reason}],
-                    "details":{"errorCode":"kernel.policy_denied","executionStarted":false}});
+                let reason_code = host_reason_code(&reason);
+                let operation_kind = host_operation_kind(&reason);
+                let operation = call_operation(&tool_name, &input_json);
+                let result = serde_json::json!({"isError":true,"content":[{"type":"text","text":&reason}],
+                    "details":{"errorCode":"kernel.policy_denied","reasonCode":&reason_code,
+                        "operationKind":&operation_kind,"operation":&operation,
+                        "diagnosticSource":"host",
+                        "stage":"policy","executionStarted":false}});
                 let tool = self.tools.get_mut(tool_call_id).unwrap();
                 tool.state = ToolCallState::Failed;
                 tool.result_json = Some(result.to_string());
                 effects.push(self.append_event("tool.failed", serde_json::json!({
-                    "toolCallId":tool_call_id,"tool":tool_name,"code":"kernel.policy_denied","message":reason,
-                    "executionStarted":false})));
+                    "toolCallId":tool_call_id,"tool":tool_name,"code":"kernel.policy_denied",
+                    "reasonCode":&reason_code,"operationKind":&operation_kind,"operation":&operation,
+                    "diagnosticSource":"host","stage":"policy",
+                    "message":&reason,"executionStarted":false})));
             }
             crate::ports::PolicyDecision::Reject { code, message } => {
                 let result = serde_json::json!({"isError":true,"content":[{"type":"text","text":message}],
@@ -1751,6 +1874,28 @@ impl RunController {
     pub fn schedule_model_retry(&mut self, now_monotonic_ms: i64, now_wall_ms: i64,
         effect_key: &str, failure_json: &str, provider: bool, delay_ms: i64,
     ) -> Result<Vec<Effect>, KernelError> {
+        self.schedule_model_retry_admitted(now_monotonic_ms, now_wall_ms, effect_key,
+            failure_json, provider, delay_ms,
+            ModelRetryAdmission::Retry { class: "unclassified".into() })
+    }
+
+    /// Retry admission the Host owns: it classified the settled failure and says
+    /// whether re-issuing the identical request may help at all.
+    ///
+    /// The Kernel still owns everything that must be durable and monotone:
+    /// * the Run-scoped cumulative budget ([`RunController::model_retry_budget`])
+    ///   — a category switch or a new effect key can never buy more attempts;
+    /// * the whole-run elapsed bound, which is checked on every admission;
+    /// * the settled dispatch lease and the terminal write.
+    ///
+    /// `ModelRetryAdmission::Terminal` is how the Host refuses a resend for a
+    /// cause it proved cannot be cured by re-sending (a length-truncated round,
+    /// for example). That refusal still runs through this transition so the
+    /// settled delivery lease is released by the same atomic commit.
+    pub fn schedule_model_retry_admitted(&mut self, now_monotonic_ms: i64, now_wall_ms: i64,
+        effect_key: &str, failure_json: &str, provider: bool, delay_ms: i64,
+        admission: ModelRetryAdmission,
+    ) -> Result<Vec<Effect>, KernelError> {
         self.ensure_live()?;
         if self.state != RunState::Running
             || !self.model_request_in_flight
@@ -1789,28 +1934,69 @@ impl RunController {
                 self.retry.turn_max,
             )
         };
+        // The Run-scoped cumulative budget is the admission limit that no
+        // category switch, class change or new effect key may reset. The
+        // per-category scope above stays as accounting; it can never *widen*
+        // the cumulative bound.
+        let cumulative_spent = self.retry.model_attempts >= self.model_retry_budget();
+        // The controlled length recovery is a *once per Run* allowance, and it is
+        // not refreshed by a restart, a category change, a new effect key or a
+        // later accepted response. It also spends the cumulative budget above.
+        let recovery_record = admission.length_recovery_record();
+        if let Some(record) = recovery_record {
+            if record.len() > 4096
+                || !matches!(serde_json::from_str::<serde_json::Value>(record),
+                    Ok(serde_json::Value::Object(_)))
+            {
+                return Err(KernelError::FailClosed(
+                    "invalid Host length-recovery record".into(),
+                ));
+            }
+        }
+        let recovery_spent = recovery_record.is_some()
+            && self.retry.length_recovery_attempts
+                >= crate::ports::MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS;
+        let host_refused = matches!(admission, ModelRetryAdmission::Terminal { .. });
+        let elapsed_refused = self.config.run_execution_limited
+            && delay_ms >= self.config.run_execution_budget_ms.saturating_sub(self.running_elapsed_ms);
         self.suspend_running_clock(now_monotonic_ms);
         self.settle_model_request();
         let mut effects = vec![self.append_event(
             "engine.model_rejected",
             serde_json::json!({ "effectKey": effect_key, "failure": failure }),
         )];
-        if used >= maximum || (self.config.run_execution_limited && delay_ms >= self.config.run_execution_budget_ms.saturating_sub(self.running_elapsed_ms)) {
+        if host_refused || cumulative_spent || recovery_spent || used >= maximum || elapsed_refused {
             self.retry.model_dispatch_pending = false;
-            let (code, message) = if failure["category"] == "incomplete_response" {
+            let host_message = match &admission {
+                ModelRetryAdmission::Terminal { message, .. } if !message.trim().is_empty()
+                    && message.len() <= 4096 => Some(message.clone()),
+                _ => None,
+            };
+            let (code, base) = if failure["category"] == "incomplete_response" {
                 ("kernel.model_incomplete", "模型未完成本轮答复，自动续答次数已用完。已完成的工具结果已保留；请发送“继续完成剩余工作”。")
             } else if timeout {
                 ("kernel.model_retry_exhausted", "模型请求多次超时（无首响应/流停滞/整轮超限），自动重试已停止。已完成的工具结果已保留；已执行的外部操作不会被重放，请检查后继续。")
             } else {
                 ("kernel.model_retry_exhausted", "模型服务请求失败，自动重试已停止。已完成的工具结果已保留，请稍后继续。")
             };
-            effects.extend(self.terminate(RunOutcome::Failed { code: code.into(), message: message.into() }));
+            let message = host_message.unwrap_or_else(|| base.to_owned());
+            self.retry.model_retry_class = Some(admission.class().to_owned());
+            effects.extend(self.terminate(RunOutcome::Failed { code: code.into(), message }));
             return Ok(effects);
         }
         self.state = RunState::RetryScheduled;
         self.retry.scheduled_at_wall_ms = Some(now_wall_ms);
         self.retry.due_wall_ms = Some(now_wall_ms.saturating_add(delay_ms));
         self.retry.model_dispatch_pending = true;
+        self.retry.model_attempts = self.retry.model_attempts.saturating_add(1);
+        self.retry.model_retry_class = Some(admission.class().to_owned());
+        if let Some(record) = admission.length_recovery_record() {
+            // Durable before the request is armed, so a crash between scheduling
+            // and dispatch cannot hand the Run a second recovery. `appliedAtWallMs`
+            // is filled by the commit that arms the request (`arm_model_request`).
+            self.retry.length_recovery_attempts = self.retry.length_recovery_attempts.saturating_add(1);
+            self.retry.length_recovery_json = Some(record.to_owned());
+        }
         if provider {
             self.retry.provider_attempts += 1;
         } else if turn_failure {
@@ -1822,7 +2008,18 @@ impl RunController {
         effects.push(self.append_event(
             "run.retrying",
             serde_json::json!({
-                "kind": if provider { "provider" } else if timeout { "model_timeout" } else if transport { "model_transport_failure" } else { "completion" }, "attempt": used + 1,
+                "kind": if provider { "provider" } else if timeout { "model_timeout" } else if transport { "model_transport_failure" } else { "completion" },
+                "attempt": used + 1,
+                // Run-scoped cumulative accounting: `attempt` above stays the
+                // per-category attempt so existing readers keep their meaning.
+                "modelAttempt": self.retry.model_attempts,
+                "modelMaxAttempts": self.model_retry_budget(),
+                // The Host's own classification token: why this wait is what it
+                // is. The UI reads the reason from this actual scheduling event.
+                "class": admission.class(),
+                "lengthRecoveryAttempt": self.retry.length_recovery_attempts,
+                "lengthRecoveryMax": crate::ports::MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS,
+                "recoveryId": self.retry.length_recovery_id(),
                 "effectKey": effect_key,
                 "maxAttempts": maximum, "delayMs": delay_ms, "scheduledAtWallMs": now_wall_ms,
                 "dueWallMs": self.retry.due_wall_ms,
@@ -1830,6 +2027,55 @@ impl RunController {
         ));
         effects.push(Effect::PublishSnapshot);
         Ok(effects)
+    }
+
+    /// Cumulative automatic-model-retry budget of this Run.
+    ///
+    /// One unrecovered model request may spend at most this many retries in
+    /// total — across provider, timeout/transport and completion categories,
+    /// across every effect key and every Host retry class. It is derived from
+    /// the frozen per-category maxima (so an existing Run keeps its configured
+    /// strictness) and is hard-capped by [`crate::ports::MODEL_RETRY_MAX_ATTEMPTS`].
+    /// It is deliberately NOT `provider_max * turn_max`.
+    pub fn model_retry_budget(&self) -> u32 {
+        self.config
+            .provider_max_retries
+            .max(self.config.turn_max_retries)
+            .min(crate::ports::MODEL_RETRY_MAX_ATTEMPTS)
+    }
+
+    /// A model response was actually accepted: recovery for this request chain
+    /// is over, so the cumulative retry budget starts fresh for whatever comes
+    /// next. Only this (a real accepted response) may reset it — a dispatch
+    /// delivery, a worker start or a successful retry resume may not.
+    ///
+    /// The controlled length-recovery allowance is deliberately NOT refreshed
+    /// here: it is one per Run, so a later accepted response cannot buy a second
+    /// recovery for a later truncation.
+    fn note_model_response_accepted(&mut self) {
+        self.retry.model_attempts = 0;
+        self.retry.model_retry_class = None;
+    }
+
+    /// How many controlled length recoveries this Run has already spent.
+    pub fn length_recovery_attempts(&self) -> u32 {
+        self.retry.length_recovery_attempts
+    }
+
+    /// The durable length-recovery audit record, when one was scheduled.
+    pub fn length_recovery_record(&self) -> Option<&str> {
+        self.retry.length_recovery_json.as_deref()
+    }
+
+    /// Whether the scheduled length recovery has already been spent on an armed
+    /// request. A record whose `appliedAtWallMs` is absent is still pending.
+    pub fn length_recovery_pending(&self) -> bool {
+        self.retry.length_recovery_json.as_deref().is_some_and(|record| {
+            serde_json::from_str::<serde_json::Value>(record)
+                .ok()
+                .and_then(|value| value.get("appliedAtWallMs").cloned())
+                .is_some_and(|applied| applied.is_null())
+        })
     }
 
     /// Resume after a scheduled turn retry.
@@ -1866,7 +2112,7 @@ impl RunController {
         self.running_since_mono_ms = Some(now_monotonic_ms);
         // The retried turn dispatches a fresh model request.
         if !self.retry.model_dispatch_pending {
-            self.arm_model_request(now_monotonic_ms, now_wall_ms);
+            self.arm_model_request(now_monotonic_ms, now_wall_ms, None);
         }
         let mut effects = vec![self.append_event(
             "run.retry.completed",
@@ -2005,7 +2251,7 @@ impl RunController {
             ));
         }
         self.compaction.pending.as_mut().unwrap().owner = Some(owner.into());
-        self.arm_model_request(monotonic_ms, wall_ms);
+        self.arm_model_request(monotonic_ms, wall_ms, None);
         Ok(vec![self.append_event(
             "context.compaction.dispatched",
             serde_json::json!({"id":id,"owner":owner,"startedAt":wall_ms}),
@@ -2060,6 +2306,9 @@ impl RunController {
         category: Option<&str>,
         http_status: Option<u16>,
         retryable: bool,
+        upstream_message: &str,
+        outcome_known: bool,
+        failed_at: i64,
     ) -> Result<Vec<Effect>, KernelError> {
         if self.state != RunState::Compacting
             || !self.model_request_in_flight
@@ -2088,6 +2337,10 @@ impl RunController {
                 "category": category,
                 "httpStatus": http_status,
                 "retryable": retryable,
+                "upstreamMessage": upstream_message.chars().take(600).collect::<String>(),
+                "outcomeKnown": outcome_known,
+                "failedAt": failed_at,
+                "retryTimeline": if retryable {"next_attempt_inside_same_deadline"} else {"no_run_retry_event_on_compaction_path"},
             }),
         )])
     }
@@ -2409,7 +2662,7 @@ impl RunController {
     /// model-request timeout; the wall anchor is persisted so a crash does not
     /// reset the timeout window.
     pub fn begin_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) {
-        self.arm_model_request(monotonic_ms, wall_ms);
+        self.arm_model_request(monotonic_ms, wall_ms, None);
     }
 
     /// The host must persist this decision together with its batch-delivery
@@ -2431,7 +2684,7 @@ impl RunController {
                 "model dispatch requires a settled batch and no in-flight request".into(),
             ));
         }
-        self.arm_model_request(monotonic_ms, wall_ms);
+        self.arm_model_request(monotonic_ms, wall_ms, Some(&batch_delivery_effect_key(batch_id)));
         Ok(vec![self.append_event(
             "engine.batch_dispatched",
             serde_json::json!({
@@ -2466,6 +2719,7 @@ impl RunController {
             ));
         }
         self.settle_model_request();
+        self.note_model_response_accepted();
         Ok(self.append_event("engine.batch_response", serde_json::json!({
             "batchId": batch_id, "turnId": self.turn_id, "engineId": self.config.engine_id, "response": response,
         })))
@@ -2586,7 +2840,7 @@ impl RunController {
             || !effect_key.starts_with("continuation:") {
             return Err(KernelError::FailClosed("continuation cannot dispatch with unresolved work".into()));
         }
-        self.arm_model_request(monotonic_ms, wall_ms);
+        self.arm_model_request(monotonic_ms, wall_ms, Some(effect_key));
         Ok(vec![self.append_event("engine.continuation_dispatched", serde_json::json!({
             "turnId":self.turn_id,"effectKey":effect_key,"startedAt":wall_ms,
         }))])
@@ -2614,6 +2868,7 @@ impl RunController {
             ));
         }
         self.settle_model_request();
+        self.note_model_response_accepted();
         Ok(self.append_event(
             "engine.continuation_response",
             serde_json::json!({"turnId": self.turn_id, "response": response}),
@@ -2653,7 +2908,36 @@ impl RunController {
         self.model_request_last_progress_wall_ms = Some(wall_ms);
     }
 
-    fn arm_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) {
+    fn arm_model_request(&mut self, monotonic_ms: i64, wall_ms: i64, dispatch_effect_key: Option<&str>) {
+        // Arming IS the durable dispatch: this commit carries the armed request,
+        // so it is also the point where the one controlled length recovery is
+        // consumed. Marking it here (rather than in a second write) means a crash
+        // between scheduling and dispatch cannot hand the Run a second recovery,
+        // while a dispatch whose commit fails leaves the record pending.
+        //
+        // Only an arm that knows which model effect it is dispatching may consume
+        // it, and only for the effect key the recovery was scheduled for: a
+        // different lane can never swallow another lane's recovery.
+        if let Some(effect_key) = dispatch_effect_key {
+            if let Some(record) = self.retry.length_recovery_json.take() {
+                let mut kept = Some(record.clone());
+                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&record) {
+                    let matches = value.get("effectKey").and_then(|item| item.as_str()).is_none_or(
+                        |recorded| recorded == effect_key);
+                    if matches
+                        && value.get("appliedAtWallMs").is_some_and(|applied| applied.is_null())
+                    {
+                        value["appliedAtWallMs"] = serde_json::json!(wall_ms);
+                        if let Ok(encoded) = serde_json::to_string(&value) {
+                            kept = Some(encoded);
+                        }
+                    } else if matches {
+                        kept = Some(record.clone());
+                    }
+                }
+                self.retry.length_recovery_json = kept;
+            }
+        }
         self.retry.model_dispatch_pending = false;
         self.model_request_in_flight = true;
         self.model_request_since_mono_ms = Some(monotonic_ms);
@@ -2726,6 +3010,86 @@ pub fn persist_events(
         }
     }
     Ok(())
+}
+
+/// The Host's own failure-code tag carried by an actionable refusal.
+///
+/// The Host-to-Runtime failure text contract tags a classified refusal as
+/// `[tool.<code>] …` (see the desktop `tool_host` contract), so the Runtime can
+/// copy that category verbatim onto the persisted refusal instead of leaving a
+/// consumer to read the sentence. The tag is never invented: an untagged reason
+/// stays untagged, and a malformed one is dropped rather than stored. The tag is
+/// owned so it can be stored alongside the reason it was read from.
+fn host_reason_code(reason: &str) -> Option<String> {
+    let rest = reason.trim_start().strip_prefix('[')?;
+    let (tag, _) = rest.split_once(']')?;
+    let tag = tag.trim();
+    (!tag.is_empty()
+        && tag.len() <= 64
+        && tag
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '.' || character == '_'))
+    .then(|| tag.to_owned())
+}
+
+/// The optional operation class the Host named on a refusal.
+///
+/// The Host is the only layer that knows whether a `call_mcp_tool` refusal was a
+/// *mutating Office write* or a read-only Office operation, so it tags the class
+/// it gated (`[operation_kind:office_write]`, `[operation_kind:file_write]`).
+/// The token is copied as a structured fact and bounded to the Host's own
+/// vocabulary shape; anything else is dropped rather than stored.
+fn host_operation_kind(reason: &str) -> Option<String> {
+    let mut rest = reason;
+    while let Some(open) = rest.find('[') {
+        let tail = &rest[open + 1..];
+        let close = tail.find(']')?;
+        let token = &tail[..close];
+        if let Some(value) = token.strip_prefix("operation_kind:") {
+            let value = value.trim();
+            if !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_lowercase() || character == '_')
+            {
+                return Some(value.to_owned());
+            }
+        }
+        rest = &tail[close + 1..];
+    }
+    None
+}
+
+/// The operation identity of one call, taken from the durable canonical input.
+///
+/// Same convention the Host uses for its own failure diagnostics: an MCP call
+/// reports the remote tool it named, anything else reports the tool itself. Only
+/// the identifier travels — never arguments, commands or credentials — and it is
+/// bounded so a long or malformed name is dropped rather than stored.
+///
+/// This is a *display* identity and never a classification: a connector may name
+/// its tool `office_create` without being a built-in Office write, so consumers
+/// must decide what an operation was from the Host's own identity and its
+/// `operationKind`, not from this name. (No `serverId` check is needed here for
+/// exactly that reason; adding one would only invite name-based classification.)
+fn call_operation(tool: &str, canonical_input_json: &str) -> Option<String> {
+    let candidate = if tool == "call_mcp_tool" {
+        serde_json::from_str::<serde_json::Value>(canonical_input_json)
+            .ok()?
+            .get("tool")
+            .and_then(serde_json::Value::as_str)?
+            .to_owned()
+    } else {
+        tool.to_owned()
+    };
+    let candidate = candidate.trim();
+    (!candidate.is_empty()
+        && candidate.len() <= 64
+        && candidate
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')))
+    .then(|| candidate.to_owned())
 }
 
 /// One durable event to append in the decision transaction.
@@ -3023,5 +3387,53 @@ mod dispatch_identity_tests {
     fn dispatch_identity_uses_utf8_byte_lengths_and_preserves_colons() {
         assert_eq!(super::dispatch_idempotency_key("运行:a","call:b"),"tool-dispatch:8:运行:a:call:b");
         assert_ne!(super::dispatch_idempotency_key("a:b","c"),super::dispatch_idempotency_key("a","b:c"));
+    }
+}
+
+/// The facts a refusal carries must be the Host's own, bounded, and never the
+/// sentence: the interface words the refusal from these, not from prose.
+#[cfg(test)]
+mod refusal_fact_tests {
+    #[test]
+    fn a_refusal_carries_the_host_operation_class() {
+        let reason = "[tool.read_only_input][operation_kind:office_write] 「zeta.txt」是 Host 冻结的初始合并输入";
+        assert_eq!(super::host_reason_code(reason).as_deref(), Some("tool.read_only_input"));
+        assert_eq!(super::host_operation_kind(reason).as_deref(), Some("office_write"));
+        // An untagged or malformed class is dropped, never stored.
+        assert_eq!(super::host_operation_kind("[tool.read_only_input] plain refusal").as_deref(), None);
+        assert_eq!(super::host_operation_kind("[operation_kind:Office Write] nope").as_deref(), None);
+        assert_eq!(super::host_operation_kind("[operation_kind:../../etc] nope").as_deref(), None);
+        assert_eq!(super::host_operation_kind("[operation_kind:] nope").as_deref(), None);
+        let long = format!("[operation_kind:{}]", "a".repeat(33));
+        assert_eq!(super::host_operation_kind(&long).as_deref(), None);
+        // A later token is still found after an unrelated bracket.
+        assert_eq!(
+            super::host_operation_kind("[tool.timed_out][note:x][operation_kind:file_write]").as_deref(),
+            Some("file_write")
+        );
+    }
+
+    #[test]
+    fn the_operation_identity_comes_from_the_durable_input_and_stays_bounded() {
+        assert_eq!(
+            super::call_operation("write_file", r#"{"path":"a.txt"}"#).as_deref(),
+            Some("write_file")
+        );
+        assert_eq!(
+            super::call_operation(
+                "call_mcp_tool",
+                r#"{"serverId":"office","tool":"office_create","arguments":{}}"#
+            )
+            .as_deref(),
+            Some("office_create")
+        );
+        // A malformed input, a missing name or a hostile value is dropped.
+        assert_eq!(super::call_operation("call_mcp_tool", "not json"), None);
+        assert_eq!(super::call_operation("call_mcp_tool", r#"{"serverId":"office"}"#), None);
+        assert_eq!(super::call_operation("call_mcp_tool", r#"{"tool":"../../etc/passwd"}"#), None);
+        assert_eq!(
+            super::call_operation("call_mcp_tool", &format!(r#"{{"tool":"{}"}}"#, "x".repeat(65))),
+            None
+        );
     }
 }

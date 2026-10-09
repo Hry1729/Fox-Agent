@@ -1,5 +1,6 @@
 import type { ConversationMessage, RunEventRecord } from '@/features/conversations/model/types'
 import { answerDeltaFingerprint } from '@/features/conversations/model/runtime-delta-fingerprint'
+import { activeModelWaiting, runtimeStatusNotice } from './run-status-facts'
 
 export type RuntimeProcessGroup = {
   kind: 'process'
@@ -29,8 +30,6 @@ export type ProcessActivityKind =
 export type ProcessActivityCount = { kind: ProcessActivityKind; count: number }
 
 const boundaryLabels: Record<string, string> = {
-  'run.retrying': '正在重试',
-  'run.retry.completed': '已恢复并继续',
   'user.question.requested': '等待你的回答',
   'user.question.responded': '已收到回答',
   'run.failed': '运行失败',
@@ -71,8 +70,9 @@ export function projectKernelGroups(runId: string, messages: readonly Conversati
       const round = typeof checkpoint === 'string' ? roundFor(checkpoint) : null
       if (!round) return null // Old/partial history remains readable through the existing fallback.
       ;(event.eventType === 'reasoning.delta' ? round.reasoning : round.tools).push(event)
-    } else if (Object.hasOwn(boundaryLabels, event.eventType)) {
-      notices.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label: boundaryLabels[event.eventType] })
+    } else {
+      const label = runtimeStatusNotice(event, events) ?? boundaryLabels[event.eventType]
+      if (label) notices.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label })
     }
   }
   const groups: RuntimeDisplayGroup[] = []
@@ -94,7 +94,9 @@ export function projectKernelGroups(runId: string, messages: readonly Conversati
     if (round.message?.content.trim()) groups.push({ kind: 'response', key: `${runId}:kernel:${checkpoint}:response`, text: round.message.content })
     appendProcess(`${runId}:kernel:${checkpoint}:tools`, round.tools)
   }
-  return [...groups, ...notices]
+  const waiting = activeModelWaiting(events, { runId })
+  const waitingEvent = waiting && events.find(item => item.runId === runId && item.seq === waiting.seq)
+  return [...groups, ...notices, ...(waiting && waitingEvent ? [{ kind: 'process' as const, key: `${runId}:waiting:${waiting.dispatchSeq}`, events: [waitingEvent] }] : [])]
 }
 
 /** A bounded read projection: the answer lives once in messages.content. */
@@ -137,9 +139,10 @@ export function projectRuntimeGroups(runId: string, content: string, events: rea
       }
       continue
     }
-    if (Object.hasOwn(boundaryLabels, event.eventType)) {
+    const noticeLabel = runtimeStatusNotice(event, ordered) ?? boundaryLabels[event.eventType]
+    if (noticeLabel) {
       flush()
-      groups.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label: boundaryLabels[event.eventType] })
+      groups.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label: noticeLabel })
       continue
     }
     if (!processEvents.has(event.eventType)) continue
@@ -250,15 +253,16 @@ export function activeProcessGroupTitle(name?: string, input?: unknown) {
   return labels[processActivityKind(name, input)]
 }
 
-/** The process header is a user-facing status line, never a transcript of the
- *  model's private thinking. Raw reasoning may legitimately be written in
- *  English, so the `reasoning` caller falls back to a neutral Chinese status
- *  whenever the candidate text carries no Han character. The full reasoning
- *  still renders inside the expanded row, and machine text (identifiers, paths,
- *  commands) keeps its original form. */
-const HAN_PATTERN = /\p{Script=Han}/u
-const REASONING_STATUS_FALLBACK = '正在思考'
-
+/**
+ * The process row's one-line detail, taken from real event fields only.
+ *
+ * This line is user-facing, so it must not claim a state it was not told about.
+ * An earlier version replaced any candidate text without a Han character with the
+ * Chinese status 正在思考 — a script test cannot establish that a thought is still
+ * running, and it silently erased reasoning the model wrote in another language.
+ * The row's state now comes from the row (active or settled) and the text stays as
+ * the model wrote it; identifiers, paths and commands keep their original form.
+ */
 export function activeProcessDetail(name?: string, input?: unknown): string {
   if (!name) return ''
   const data = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {}
@@ -270,11 +274,13 @@ export function activeProcessDetail(name?: string, input?: unknown): string {
       : ''
     if (typeof detail === 'string' && detail.trim()) {
       const segments = [...new Intl.Segmenter().segment(detail.replace(/\s+/g, ' ').trim())].map(item => item.segment)
-      const text = segments.length > 160 ? `${segments.slice(0, 159).join('')}…` : segments.join('')
-      if (name === 'reasoning' && !HAN_PATTERN.test(text)) return REASONING_STATUS_FALLBACK
-      return text
+      return segments.length > 160 ? `${segments.slice(0, 159).join('')}…` : segments.join('')
     }
   }
-  if (name === 'reasoning') return REASONING_STATUS_FALLBACK
-  return name
+  // No evidence in the input: a tool row keeps its own action name (the caller
+  // renders it through the tool's label), while a reasoning row keeps nothing
+  // rather than a status this function cannot know.
+  return name === 'reasoning' ? '' : name
 }
+
+export { stepExtraSource } from './step-source-summary'

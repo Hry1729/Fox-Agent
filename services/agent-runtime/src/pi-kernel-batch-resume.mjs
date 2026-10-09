@@ -4,7 +4,8 @@
 import { validateKernelControl } from './control-binding.mjs'
 import { sanitizeProviderHistory } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
-import { finalizeKernelAnswer, completionPreview } from './kernel-completion.mjs'
+import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
+import { responseAdmissionError } from './pi-kernel-response-diagnostic.mjs'
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
 import { modelToolResultContent, toolResultRef } from './tool-view.mjs'
 import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
@@ -44,8 +45,11 @@ export function prepareKernelModelResponse(assistantMessage, prepared) {
   // Pi uses undefined for absent optional metadata. Omit those object fields
   // as JSON transport does, but never repair non-JSON proposed arguments.
   for (const block of assistantMessage?.content ?? []) {
-    if (block?.type === 'toolCall') canonical(block.arguments)
+    if (block?.type === 'toolCall') {
+      try { canonical(block.arguments) } catch { throw responseAdmissionError('invalid_tool_arguments', 'tool_proposal') }
+    }
   }
+  try {
   assistantMessage = canonical(assistantMessage, true)
   assistantMessage = finalizeKernelAnswer(assistantMessage, prepared.requireCompletion)
   const response = { schemaVersion: 1, runId: prepared.runId, turnId: prepared.turnId,
@@ -69,6 +73,10 @@ export function prepareKernelModelResponse(assistantMessage, prepared) {
     fail('model continuation has no completed response')
   }
   return structuredClone(response)
+  } catch (error) {
+    if (error instanceof KernelIncompleteResponseError) throw error
+    throw responseAdmissionError('protocol_invalid')
+  }
 }
 
 function assertCompleteHistory(history) {
@@ -233,7 +241,7 @@ export function prepareKernelInitialModel(request, identity) {
  * normal output here: the Host approves and executes it in the next durable
  * delivery.
  */
-export async function runPiKernelModel(session, request, prepared, signal, preview, { allowProposals = false } = {}) {
+export async function runPiKernelModel(session, request, prepared, signal, preview, { allowProposals = false, assertProposal } = {}) {
   if (!session?.agent?.state || typeof session.agent.continue !== 'function' || typeof session.abort !== 'function') fail('missing public Pi session adapter')
   if (!signal || typeof signal.addEventListener !== 'function') fail('missing Host cancellation signal')
   if (signal.aborted) fail('Host cancelled the resume')
@@ -273,6 +281,7 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
   }, 250)
   timer.unref?.()
   let proposed
+  let proposalFailure
   const stopMarker = `fox-kernel-proposal-boundary:${request.runId}:${prepared.idempotencyKey}`
   let unsubscribe
   let previewRevision = 0
@@ -308,7 +317,14 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
       if (!allowProposals) return
       if (event.type !== 'message_end' || event.message?.role !== 'assistant'
           || event.message.stopReason !== 'toolUse' && !event.message.content?.some?.(block => block?.type === 'toolCall')) return
-      proposed = prepareKernelModelResponse(event.message, prepared)
+      try {
+        assertProposal?.(event.message)
+        proposed = prepareKernelModelResponse(event.message, prepared)
+      } catch (error) {
+        proposalFailure = error
+        session.agent.abort()
+        throw error
+      }
       // Throwing from this awaited public event prevents even tool preparation.
       // Do not await session.abort() here: it waits on the same event listener.
       session.agent.abort()
@@ -317,6 +333,7 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
     // Pi 0.84's documented public state setter copies the message array.
     session.agent.state.messages = prepared.messages
     await session.agent.continue()
+    if (proposalFailure) throw proposalFailure
     if (aborting) await aborting
     if (abortError) fail(`engine cancellation failed: ${abortError.message ?? String(abortError)}`)
     if (timedOut) {

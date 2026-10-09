@@ -20,6 +20,13 @@ pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
 mod kernel_gateway;
+mod mcp_catalog;
+
+pub(super) fn host_runtime_capabilities(manifest_hash: &str, profile_id: &str) -> Value {
+    let mut facts=crate::process_jobs::runtime_capabilities(manifest_hash,profile_id);
+    facts["tools"]["attachment_compute"]=json!({"availability":"available","projectPaths":true,"reportPdf":crate::report_pdf::availability()});
+    facts
+}
 mod kernel_delegation;
 mod protocol;
 pub(crate) mod shadow_reconcile;
@@ -2148,6 +2155,11 @@ impl RuntimeHost {
         )?;
         let context = self.agent_prompt_context(&request.conversation_id, &prompt_text, "primary")?;
         let conversation_id = request.conversation_id.clone();
+        let mut project_context=project_context_for(&self.database,&self.sessions_dir,&conversation_id,&verified.permission);
+        // This new attempt inherits the source rows after preparation. Describe
+        // the same frozen targets before that insertion, without reparsing the
+        // generated continuation prompt or changing historical checklist rows.
+        project_context["deliveryTargets"]=delivery::frozen_delivery_reference(&self.database,&request.source_run_id,&project_context)?;
         let prompt = json!({
             "text": prompt_text,
             "messages": messages,
@@ -2157,7 +2169,7 @@ impl RuntimeHost {
             "assistantPackage": context.assistant_package,
             "expertPackage": context.expert_package,
             "expertBinding": context.expert_binding_payload,
-            "projectContext": project_context_for(&self.database, &self.sessions_dir, &conversation_id, &verified.permission),
+            "projectContext": project_context,
             "workSnapshot": work_tools::snapshot(&self.database, &request.conversation_id)?,
             "memoryContext": self.database.recall_memories(&request.conversation_id, None, &prompt_text, 8, 6_000)?,
             "runContext": {
@@ -2195,7 +2207,7 @@ impl RuntimeHost {
         ))?;
         let mut supported = kernel_gateway::supported_tools();
         // 3. Describe against the verified scope, exactly like a fresh start.
-        let config = {
+        let mut config = {
             let describe_binding = verified_binding.clone();
             kernel_model_worker::describe(
                 &runtime,
@@ -2206,10 +2218,12 @@ impl RuntimeHost {
                 &token,
             )?
         };
-        let hash = config.hash()?;
-        let input = kernel_host::initial_input(&verified_binding, &prompt, &hash)?;
         let scope =
             kernel_gateway::freeze_scope(&self.database, &verified_binding, &prompt, &config)?;
+        let manifest_hash=runtime_shadow_hash(&serde_json::to_string(&scope).map_err(|_|"invalid resource scope")?);
+        kernel_model_worker::bind_runtime_capabilities(&mut config,&verified_binding,&manifest_hash);
+        let hash = config.hash()?;
+        let input = kernel_host::initial_input(&verified_binding, &prompt, &hash)?;
         let frozen = crate::kernel::RunFrozenConfig {
             engine_id: verified_binding.engine_id.clone(),
             kernel_mode: "authoritative".into(),
@@ -2440,6 +2454,9 @@ impl RuntimeHost {
             || control_binding.execution_profile_id != execution_profile.id() {
             return Err("Startup cannot replace the frozen Run engine/authority/profile/conversation".into());
         }
+        let mut project_context = project_context_for(
+            &self.database,&self.sessions_dir,&started.run.conversation_id,&control_binding.permission,
+        );
         // Ordinary user-facing tasks that explicitly promise files get a
         // lightweight, artifact-bound delivery checklist. Questions, analysis
         // and delegated child Runs seed nothing; the ledger is evaluated by
@@ -2448,32 +2465,8 @@ impl RuntimeHost {
         if authority == fox_engine_protocol::ExecutionAuthority::Authoritative
             && run_role == "user_facing_lead"
         {
-            let mut delivery_seeds = delivery::expectations_from_task(text);
-            if !delivery_seeds.is_empty() {
-                // Structured demands the task states in a machine-decidable form
-                // are bound to the items that must satisfy them, so the stop gate
-                // verifies exactly what this task promised. Expectations that must
-                // be recomputed from source data are bound here, where the
-                // authorized project root is known: the file's bytes, its hash and
-                // the column's presence are Host facts, not task-text guesses.
-                let requirements = delivery::requirements_from_task(text)
-                    .into_iter()
-                    .map(|requirement| match control_binding.permission.project_root.as_deref() {
-                        Some(root) => {
-                            delivery::bind_source_distribution(std::path::Path::new(root), requirement)
-                        }
-                        None => requirement,
-                    })
-                    .collect::<Vec<_>>();
-                if !requirements.is_empty() {
-                    delivery::attach_requirements_to_seeds(&mut delivery_seeds, &requirements, text);
-                }
-                self.database.seed_delivery_checklist(
-                    &started.run.id,
-                    &delivery_seeds,
-                    crate::database::now_ms(),
-                )?;
-            }
+            delivery::freeze_task_delivery(&self.database,&started.run.id,text,&project_context,
+                control_binding.permission.project_root.as_deref())?;
             // A user-authored resume of an interrupted task keeps that task's
             // promised deliverables, even when this round declares nothing of its
             // own. See `delivery::inherit_interrupted_deliverables` for the bound.
@@ -2484,6 +2477,11 @@ impl RuntimeHost {
                 control_binding.permission.project_root.as_deref(),
                 text,
             )?;
+            project_context["deliveryTargets"]=delivery::frozen_delivery_reference(&self.database,&started.run.id,&project_context)?;
+        } else {
+            // Legacy receives the same placement rule, without claiming the
+            // authoritative Kernel's durable business verification.
+            project_context["deliveryTargets"]=delivery::task_delivery_reference(text,&project_context);
         }
         // Host-decided placement for user-facing files. The folder is decided
         // once per (conversation, project) and persisted, so a continuation,
@@ -2491,12 +2489,6 @@ impl RuntimeHost {
         // same result folder, while two conversations can never overwrite each
         // other. It is reference data for the model; the Host still resolves
         // and admits every real path.
-        let project_context = project_context_for(
-            &self.database,
-            &self.sessions_dir,
-            &started.run.conversation_id,
-            &control_binding.permission,
-        );
         let work_snapshot = work_tools::snapshot(&self.database, &started.run.conversation_id)?;
         let memory_context = self.database.recall_memories(
             &started.run.conversation_id,
@@ -2577,6 +2569,7 @@ impl RuntimeHost {
                 "runContext": context.run_context,
                 "projectContext": project_context,
                 "controlBinding": control_binding,
+                "hostRuntimeCapabilities": host_runtime_capabilities(&runtime_shadow_hash(&format!("manifest|pi|v2|{}",self.shadow_capabilities_json().unwrap_or_default())), &control_binding.execution_profile_id),
                 "workSnapshot": work_snapshot,
                 "memoryContext": memory_context,
                 "promptBudget": { "maxPromptTokens": input_tokens },
@@ -7879,6 +7872,9 @@ fn execute_mcp_tool_request(
                 .unwrap_or_default()
                 .to_ascii_lowercase();
             let mut items = Vec::new();
+            let binding=database.run_control_binding(run_id)?.ok_or("MCP catalog requires a frozen Run")?;
+            let manifest_hash=runtime_shadow_hash(&format!("manifest|pi|v2|{}",state.lock().map_err(|_|"runtime lock poisoned")?.capabilities));
+            let catalog_token=state.lock().map_err(|_|"runtime lock poisoned")?.cancellation.tool_token(run_id,tool_call_id)?;
             for server in database
                 .list_mcp_servers()?
                 .into_iter()
@@ -7890,15 +7886,16 @@ fn execute_mcp_tool_request(
                 })
             {
                 let health_started = Instant::now();
-                match crate::mcp::list_tools(&server) {
-                    Ok(tools) => {
-                        let _ = database.record_mcp_health(
+                match mcp_catalog::catalog(&binding,&manifest_hash,&server,&catalog_token,Duration::from_secs(15),true,
+                    || crate::mcp::list_tools(&server)) {
+                    Ok((tools,metadata)) => {
+                        if metadata["cacheHit"] != true { let _ = database.record_mcp_health(
                             &server.id,
                             "connected",
                             None,
                             Some(health_started.elapsed().as_millis() as i64),
                             Some(tools.len() as i64),
-                        );
+                        ); }
                         let tools = tools
                             .into_iter()
                             .filter(|item| {
@@ -7907,7 +7904,8 @@ fn execute_mcp_tool_request(
                             })
                             .collect::<Vec<_>>();
                         if !tools.is_empty() {
-                            items.push(json!({ "serverId": server.id, "serverName": server.name, "tools": tools }));
+                            items.push(json!({ "serverId": server.id, "serverName": server.name,
+                                "tools": mcp_catalog::compact_tools(tools),"catalog":metadata }));
                         }
                     }
                     Err(error) => {
@@ -8378,7 +8376,7 @@ fn execute_attachment_tool_request(
         }
         let mut result = if tool == "attachment_compute" {
             let token=state.lock().map_err(|_| "runtime state lock poisoned")?.cancellation.tool_token(run_id,tool_call_id)?;
-            attachment_compute::execute(database,attachments_dir,sessions_dir,conversation_id,run_id,&input,move || token.is_cancelled())?
+            attachment_compute::execute_for_run(database,attachments_dir,sessions_dir,conversation_id,run_id,&input,move || token.is_cancelled())?
         } else {
             let id=input["attachmentId"].as_str().ok_or("attachmentId is required")?;
             read_attachment_text(database,attachments_dir,conversation_id,id,&input)?
@@ -8410,7 +8408,10 @@ fn read_attachment_text(
 ) -> Result<Value, String> {
     let attachment = database
         .attachment_for_conversation(conversation_id, attachment_id)?
-        .ok_or_else(|| "Attachment was not found in this conversation".to_owned())?;
+        .ok_or_else(|| {
+            let project_root = database.conversation_project_root(conversation_id).ok().flatten();
+            attachment_compute::missing_attachment_message(attachment_id, &[], project_root.as_deref())
+        })?;
     if attachment.byte_size < 0 || attachment.byte_size as u64 > MAX_ATTACHMENT_FILE_BYTES {
         return Err("Attachment is too large to read (maximum 5 MiB)".to_owned());
     }
@@ -9458,6 +9459,13 @@ fn require_rust_reader_binding(database: &Database, envelope: &RuntimeEnvelope) 
     Ok(binding)
 }
 
+fn legacy_artifact_sessions_dir(app: &AppHandle,input: &Value) -> Result<PathBuf,String> {
+    if input.get("artifactId").is_none() {return Ok(PathBuf::new());}
+    use tauri::Manager;
+    app.try_state::<crate::app_state::AppState>().map(|state|state.runtime_host.sessions_dir.clone())
+        .ok_or_else(||crate::tool_host::ToolErrorCode::PermissionDenied.error("artifact publication requires Host conversation context"))
+}
+
 fn execute_host_tool_request(
     app: &AppHandle,
     database: &Database,
@@ -9507,6 +9515,7 @@ fn execute_host_tool_request(
         .conversation_project_access(conversation_id)?
         .ok_or_else(|| "this conversation has no authorized project folder".to_owned())?;
     let manage_command = tool == "run_command" && matches!(input["action"].as_str(), Some("status" | "output" | "cancel"));
+    if tool == "run_command" { crate::process_jobs::command_start_availability(input["action"].as_str())?; }
     if permission_mode == "read_only" && !manage_command {
         return Err(format!("tool {tool} is blocked in read-only mode"));
     }
@@ -9576,8 +9585,12 @@ fn execute_host_tool_request(
         // `baseline` is the observation the DECLARED precondition selected (or
         // `missing` for a new file), so binding it here preserves the claim
         // instead of replacing it with the newest observation.
-        crate::tool_host::prepare_admitted_file(tool, &input, &project_root, baseline)?
-    } else { crate::tool_host::prepare(tool, &input, &project_root)? };
+        let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
+        crate::tool_host::prepare_admitted_file_with_artifact_context(tool, &input, &project_root, baseline,database,&sessions_dir,conversation_id)?
+    } else {
+        let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
+        crate::tool_host::prepare_with_artifact_context(tool, &input, &project_root,database,&sessions_dir,conversation_id)?
+    };
     let permission_scope = host_permission_scope(tool, prepared.preview());
     let has_conversation_permission = match permission_scope.as_deref() {
         Some(scope) => {

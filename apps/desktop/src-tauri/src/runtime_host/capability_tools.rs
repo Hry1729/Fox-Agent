@@ -3235,7 +3235,7 @@ impl DataInput {
     }
 }
 
-fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+pub(super) fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
     let canonical =
         fs::canonicalize(path).map_err(|error| format!("failed to resolve {label}: {error}"))?;
     if !canonical.is_dir() {
@@ -3244,7 +3244,7 @@ fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn resolve_project_path(root: &Path, requested: &str, must_exist: bool) -> Result<PathBuf, String> {
+pub(super) fn resolve_project_path(root: &Path, requested: &str, must_exist: bool) -> Result<PathBuf, String> {
     let requested = Path::new(requested);
     if requested.components().any(|component| {
         matches!(

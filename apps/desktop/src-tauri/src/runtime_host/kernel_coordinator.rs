@@ -9,7 +9,7 @@ use crate::{
     },
 };
 use fox_engine_protocol::{ExecutionAuthority, RunControlBinding};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 
@@ -174,9 +174,872 @@ impl CompletionDelivery {
     }
 }
 
-/// The fixed wait between model retries. One definition, so the policy cannot drift
-/// between the scheduler and the tests that guard the retry lane.
+/// The flat wait a retry must never beat for the classes that are **not** a
+/// provably transient connection/server loss, and the last rung of the ladder.
+/// One definition, so the policy cannot drift between the scheduler and the
+/// tests that guard the retry lane.
 pub(crate) const MODEL_RETRY_INTERVAL_MS: i64 = 10_000;
+
+/// ---------------------------------------------------------------------------
+/// Classified model-retry policy
+/// ---------------------------------------------------------------------------
+///
+/// A settled model failure is evidence, never a retry permission. The Host
+/// classifies it and decides whether re-issuing the **identical** request can
+/// plausibly help; the Kernel owns the durable accounting, the Run-scoped
+/// budget and the terminal write (`RunController::schedule_model_retry_admitted`).
+///
+/// DELAY / COUNT TABLE (one unrecovered model request)
+///
+/// | settled evidence                                        | class                     | retried | wait                                    |
+/// |---------------------------------------------------------|---------------------------|---------|-----------------------------------------|
+/// | provider 500/502/503/504/529, no server wait             | transient_server_error    | yes     | ladder 1s,2s,4s,8s,10s ±10% jitter      |
+/// | model_transport_failure with no diagnostic (the Host itself observed the loss: reaped worker / expired model window) | transient_connection_failure | yes | ladder 1s,2s,4s,8s,10s ±10% jitter |
+/// | model_transport_failure `stream_interrupted`             | stream_interrupted        | yes     | ladder                                  |
+/// | model_transport_failure `reason=unknown` (auth / permission / invalid-argument / thrown connection error — not distinguishable on today's wire) | unknown_evidence | yes | flat 10s, never dense |
+/// | incomplete_response `stream_interrupted`                 | stream_interrupted        | yes     | ladder (first rung 1s)                  |
+/// | incomplete_response `empty_final_answer`, stop != length  | empty_answer              | yes     | ladder (first rung 1s)                  |
+/// | any retryable category with Retry-After / Retry-After-Ms | server_directed_wait      | yes     | max(Retry-After, ladder rung); jitter only upward |
+/// | provider 429, no server wait (rate/quota)                | rate_limited              | yes     | flat 10s (never dense)                  |
+/// | model_timeout (first-response / idle / whole round)      | model_timeout             | yes     | flat 10s (never a 1 s retry)            |
+/// | incomplete_response `missing_final_marker`               | missing_final_marker      | yes     | flat 10s; the resend carries the Host continuation prompt |
+/// | incomplete_response `incomplete_tool_proposal`           | incomplete_tool_proposal  | yes     | flat 10s                                |
+/// | incomplete_response reason absent/unrecognised           | unknown_evidence          | yes     | flat 10s; recorded as `unknown`, never guessed |
+/// | provider status outside the protocol's transient set      | provider_error_not_retryable | **no** | terminal now                           |
+/// | unrecognised category                                    | unknown_category          | **no**  | terminal now                            |
+/// | Run-scoped cumulative budget already spent               | retry_budget_spent        | **no**  | terminal now                            |
+/// | next wait does not fit the whole-Run elapsed bound        | run_budget_exhausted      | **no**  | terminal now                            |
+///
+/// LENGTH TRUNCATION (`stopReason=length`, so no acceptable body and no
+/// acceptable tool proposal exist) is its own family, decided before the ladder:
+/// it is never re-sent on the network rungs. Instead the Run gets **one**
+/// controlled recovery, and that recovery may only be dispatched when it really
+/// changes the request — a request with no effective change is refused.
+///
+/// The lever is decided from the adapter's **own** request-boundary record (the
+/// `config.sent` layer of this Run's durable `usage.request`), never from a local
+/// level enumeration, never from a configuration difference and never from the
+/// `resolved` layer:
+///
+/// | settled evidence                                        | class                        | next                                    |
+/// |---------------------------------------------------------|------------------------------|-----------------------------------------|
+/// | `length` + no body counters (`textChars=0`, no tool call) | `length_truncated_no_body`   | one controlled recovery (30s, not a ladder rung) |
+/// | `length` + public text produced                          | `length_truncated_partial_body` | one controlled recovery              |
+/// | `length` + a tool proposal                               | `length_truncated_tool_proposal` | one controlled recovery              |
+/// | `length` with no body counters observed                   | `length_truncated_unknown_body` | one controlled recovery              |
+/// | recovery already spent by this Run                        | `length_recovery_spent`      | terminal, Host explanation from durable facts |
+/// | unified retry budget already spent                        | `length_recovery_unavailable_budget` | terminal, Host explanation        |
+/// | no proven effective lever (parameter not serialized **and** instruction undeliverable) | `length_recovery_no_effective_lever` | terminal, Host explanation |
+///
+/// Three exits, all recorded with the evidence behind them:
+///  1. the wire record shows the adapter serializes `reasoning_effort` and the
+///     lowered level changes that value → the parameter alone is the lever;
+///  2. the adapter is not shown to serialize it, but the instruction can be
+///     delivered → **instruction-only** recovery: no local parameter is applied at
+///     all, and the record says so (`effective:false`, `lever:"instruction_only"`,
+///     `recoveryParameters:{}`);
+///  3. neither → the recovery is **refused**: no request is dispatched and the Run
+///     ends through the existing honest terminal.
+///
+/// COUNTING RULE: one unrecovered model request may spend at most
+/// `min(5, max(provider_max, turn_max))` automatic retries **in total**, counted
+/// across every category, retry class and effect key
+/// (`RetryState::model_attempts`). A change of error category or of effect key
+/// never resets it. Only a model response that was actually accepted resets it.
+/// This is deliberately not "5 retries per round × 5 rounds".
+///
+/// TOTAL-DURATION RULE: the retry ladder is bounded by the Run-scoped budget
+/// above and, independently, by the whole-Run elapsed budget: a retry whose wait
+/// cannot fit inside the remaining Run budget is refused (and an effect-key
+/// change cannot bypass that, because the bound is measured from the Run's own
+/// accumulated running time, not from the effect key).
+pub(crate) const MODEL_RETRY_LADDER_MS: [i64; 5] = [1_000, 2_000, 4_000, 8_000, 10_000];
+
+/// ±10% jitter, expressed in per-mille units.
+pub(crate) const MODEL_RETRY_JITTER_PERMILLE: i64 = 100;
+
+/// Hard bound on automatic model retries for one unrecovered model request.
+pub(crate) const MODEL_RETRY_MAX_ATTEMPTS: u32 = kernel::MODEL_RETRY_MAX_ATTEMPTS;
+
+/// A length-truncated round gets exactly one controlled recovery per Run, and
+/// that recovery spends the unified retry budget as well.
+pub(crate) const MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS: u32 = kernel::MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS;
+
+/// Wait before the one controlled length recovery.
+///
+/// Deliberately **not** a rung of the network ladder (1/2/4/8/10 s) and not the
+/// flat completion interval: the request itself changes, so this is a one-off
+/// scheduling pause for the provider to settle a fresh request shape — and it is
+/// still measured against the whole-Run elapsed bound before it is admitted.
+pub(crate) const MODEL_LENGTH_RECOVERY_INTERVAL_MS: i64 = 30_000;
+
+/// Bounds on what the recovery may add to the model input and record durably.
+pub(crate) const LENGTH_RECOVERY_MAX_INSTRUCTION_BYTES: usize = 3_072;
+pub(crate) const LENGTH_RECOVERY_MAX_RECORD_BYTES: usize = 4_096;
+/// How many outstanding checklist items the instruction may name.
+pub(crate) const LENGTH_RECOVERY_MAX_NAMED_ITEMS: usize = 5;
+/// How long one named item may be after sanitization.
+pub(crate) const LENGTH_RECOVERY_MAX_ITEM_CHARS: usize = 80;
+
+/// The reasoning levels the worker's own profile resolution accepts, lowest
+/// first. Lowering means moving *down* this list; nothing above the original is
+/// ever requested.
+pub(crate) const MODEL_THINKING_LEVELS: [&str; 6] =
+    ["off", "low", "medium", "high", "xhigh", "max"];
+
+/// The levels a recovery may actually request.
+///
+/// `off` is deliberately excluded: the worker's own request builder maps the
+/// resolved level onto the provider's `reasoning_effort` for the generic
+/// OpenAI-compatible transport, whose portable values start at `low`. Asking for
+/// `off` there would send an effort value the provider need not accept, so the
+/// recovery stops at `low` and reports the instruction-only fallback instead of
+/// inventing a parameter.
+pub(crate) const MODEL_PORTABLE_THINKING_LEVELS: [&str; 5] =
+    ["low", "medium", "high", "xhigh", "max"];
+
+/// The exact Host sentence for a length-truncated Run whose answer never
+/// completed. Never claims completion, and never pretends to be a model reply.
+pub(crate) const LENGTH_TRUNCATED_TERMINAL: &str =
+    "模型响应达到长度上限。已保留现有文件，最终答复未完成。";
+
+/// How a classified failure may be re-issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryWait {
+    /// Classified ladder rung, scaled by ±10% jitter.
+    Ladder,
+    /// Never earlier than the server's own wait; jitter is applied upward only.
+    ServerDirected,
+    /// A resend is allowed, but only at the conservative flat interval.
+    Flat,
+    /// The one controlled length-truncation recovery: the request itself changes
+    /// (lowered reasoning level and/or a recovery instruction derived from durable
+    /// delivery facts), so it is not a network-backoff rung and happens once.
+    ControlledRecovery,
+    /// Refused: an identical resend cannot cure this cause.
+    Refused,
+}
+
+/// One Host classification of a settled model failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModelRetryClass {
+    /// Bounded token recorded on the durable scheduling event and the retry state.
+    pub(crate) token: &'static str,
+    pub(crate) wait: RetryWait,
+    /// User-facing explanation used when `wait == Refused`.
+    pub(crate) refusal: &'static str,
+}
+
+const fn retry_class(token: &'static str, wait: RetryWait) -> ModelRetryClass {
+    ModelRetryClass { token, wait, refusal: "" }
+}
+
+const fn refused_class(token: &'static str, refusal: &'static str) -> ModelRetryClass {
+    ModelRetryClass { token, wait: RetryWait::Refused, refusal }
+}
+
+/// The one controlled length recovery, and the fact that its instruction is only
+/// a **soft** constraint: it can ask the model to stop planning and answer now,
+/// but nothing in the prompt can guarantee that a model with a large reasoning
+/// budget stops thinking. The hard lever is a lowered reasoning level *that the
+/// adapter is proven to serialize* (see [`plan_length_recovery_lever`]); when no
+/// such parameter exists the instruction alone is the lever, and when that cannot
+/// be delivered either the recovery is refused and the Run ends truthfully.
+pub(crate) const RETRY_REFUSAL_PROVIDER_STATUS: &str =
+    "模型服务以不可重试的方式拒绝了请求，自动重试已停止。已完成的工具结果已保留，请检查配置或凭据后继续。";
+pub(crate) const RETRY_REFUSAL_UNKNOWN_CATEGORY: &str =
+    "模型失败类别无法识别，为避免盲目重发，自动重试已停止。已完成的工具结果已保留，请稍后继续。";
+pub(crate) const RETRY_REFUSAL_BUDGET_SPENT: &str =
+    "自动重试次数已用完（同一次未恢复的模型请求最多 5 次，跨失败类别累计）。已完成的工具结果已保留；请发送“继续完成剩余工作”。";
+pub(crate) const RETRY_REFUSAL_RUN_BUDGET: &str =
+    "剩余运行时长不足以容纳下一次自动重试，自动重试已停止。已完成的工具结果已保留，请稍后继续。";
+
+pub(crate) const RETRY_CLASS_TRANSIENT_SERVER: ModelRetryClass =
+    retry_class("transient_server_error", RetryWait::Ladder);
+pub(crate) const RETRY_CLASS_TRANSIENT_CONNECTION: ModelRetryClass =
+    retry_class("transient_connection_failure", RetryWait::Ladder);
+pub(crate) const RETRY_CLASS_STREAM_INTERRUPTED: ModelRetryClass =
+    retry_class("stream_interrupted", RetryWait::Ladder);
+pub(crate) const RETRY_CLASS_EMPTY_ANSWER: ModelRetryClass =
+    retry_class("empty_answer", RetryWait::Ladder);
+pub(crate) const RETRY_CLASS_SERVER_DIRECTED: ModelRetryClass =
+    retry_class("server_directed_wait", RetryWait::ServerDirected);
+pub(crate) const RETRY_CLASS_RATE_LIMITED: ModelRetryClass =
+    retry_class("rate_limited", RetryWait::Flat);
+pub(crate) const RETRY_CLASS_MODEL_TIMEOUT: ModelRetryClass =
+    retry_class("model_timeout", RetryWait::Flat);
+pub(crate) const RETRY_CLASS_MISSING_MARKER: ModelRetryClass =
+    retry_class("missing_final_marker", RetryWait::Flat);
+pub(crate) const RETRY_CLASS_INCOMPLETE_TOOL_PROPOSAL: ModelRetryClass =
+    retry_class("incomplete_tool_proposal", RetryWait::Flat);
+pub(crate) const RETRY_CLASS_UNKNOWN_EVIDENCE: ModelRetryClass =
+    retry_class("unknown_evidence", RetryWait::Flat);
+pub(crate) const RETRY_CLASS_PROVIDER_NOT_RETRYABLE: ModelRetryClass =
+    refused_class("provider_error_not_retryable", RETRY_REFUSAL_PROVIDER_STATUS);
+pub(crate) const RETRY_CLASS_UNKNOWN_CATEGORY: ModelRetryClass =
+    refused_class("unknown_category", RETRY_REFUSAL_UNKNOWN_CATEGORY);
+pub(crate) const RETRY_CLASS_BUDGET_SPENT: ModelRetryClass =
+    refused_class("retry_budget_spent", RETRY_REFUSAL_BUDGET_SPENT);
+pub(crate) const RETRY_CLASS_RUN_BUDGET: ModelRetryClass =
+    refused_class("run_budget_exhausted", RETRY_REFUSAL_RUN_BUDGET);
+
+/// Length truncation is its **own** class family: the provider's output limit was
+/// reached, so `empty_final_answer` / `missing_final_marker` are only symptoms
+/// and the class token must name the length cause. The three shapes the worker
+/// can observe stay distinguishable, and an unobserved body shape is reported as
+/// unknown rather than guessed.
+pub(crate) const RETRY_CLASS_LENGTH_NO_BODY: ModelRetryClass =
+    retry_class("length_truncated_no_body", RetryWait::ControlledRecovery);
+pub(crate) const RETRY_CLASS_LENGTH_PARTIAL_BODY: ModelRetryClass =
+    retry_class("length_truncated_partial_body", RetryWait::ControlledRecovery);
+pub(crate) const RETRY_CLASS_LENGTH_TOOL_PROPOSAL: ModelRetryClass =
+    retry_class("length_truncated_tool_proposal", RetryWait::ControlledRecovery);
+pub(crate) const RETRY_CLASS_LENGTH_UNKNOWN_BODY: ModelRetryClass =
+    retry_class("length_truncated_unknown_body", RetryWait::ControlledRecovery);
+/// The one recovery was already spent by this Run (or its budget is gone).
+pub(crate) const RETRY_CLASS_LENGTH_RECOVERY_SPENT: ModelRetryClass =
+    refused_class("length_recovery_spent", LENGTH_TRUNCATED_TERMINAL);
+pub(crate) const RETRY_CLASS_LENGTH_RECOVERY_BUDGET: ModelRetryClass =
+    refused_class("length_recovery_unavailable_budget", LENGTH_TRUNCATED_TERMINAL);
+/// No proven effective lever: the adapter is not shown to serialize the lowered
+/// parameter and this Run cannot deliver the instruction either, so the one
+/// recovery would be a request with no real change. It is refused instead.
+pub(crate) const RETRY_CLASS_LENGTH_RECOVERY_NO_LEVER: ModelRetryClass =
+    refused_class("length_recovery_no_effective_lever", LENGTH_TRUNCATED_TERMINAL);
+
+/// Whether this classification is the length-truncation family.
+pub(crate) fn is_length_truncation(class: ModelRetryClass) -> bool {
+    class.wait == RetryWait::ControlledRecovery
+}
+
+/// The three body shapes a length-truncated round can show, plus the honest
+/// "only the stop reason was observed" case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LengthTruncationShape {
+    /// Thinking (or nothing) was produced, but no acceptable public body.
+    NoBody,
+    /// Public text was produced and cut off mid-answer.
+    PartialBody,
+    /// A tool proposal was cut off, so no acceptable proposal exists.
+    ToolProposal,
+    /// The round was rejected for length, but the worker observed no body counters.
+    UnknownBody,
+}
+
+impl LengthTruncationShape {
+    pub(crate) fn class(self) -> ModelRetryClass {
+        match self {
+            LengthTruncationShape::NoBody => RETRY_CLASS_LENGTH_NO_BODY,
+            LengthTruncationShape::PartialBody => RETRY_CLASS_LENGTH_PARTIAL_BODY,
+            LengthTruncationShape::ToolProposal => RETRY_CLASS_LENGTH_TOOL_PROPOSAL,
+            LengthTruncationShape::UnknownBody => RETRY_CLASS_LENGTH_UNKNOWN_BODY,
+        }
+    }
+
+    pub(crate) fn token(self) -> &'static str {
+        self.class().token
+    }
+}
+
+/// The consequence of one classification, before the Kernel's durable guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ModelRetryPlan {
+    pub(crate) class: &'static str,
+    /// How this wait was chosen; `ControlledRecovery` is the only one that
+    /// changes the request instead of just re-sending it.
+    pub(crate) wait: RetryWait,
+    /// `None` refuses every automatic resend for this settled failure.
+    pub(crate) delay_ms: Option<i64>,
+    pub(crate) refusal: &'static str,
+}
+
+impl ModelRetryPlan {
+    pub(crate) fn retry(class: ModelRetryClass, delay_ms: i64) -> Self {
+        Self {
+            class: class.token,
+            wait: class.wait,
+            delay_ms: Some(delay_ms.max(1)),
+            refusal: "",
+        }
+    }
+
+    pub(crate) fn refused(class: ModelRetryClass) -> Self {
+        Self { class: class.token, wait: RetryWait::Refused, delay_ms: None, refusal: class.refusal }
+    }
+
+    /// Whether a plan needs a Host-owned length-recovery record attached.
+    pub(crate) fn needs_recovery_record(&self) -> bool {
+        self.wait == RetryWait::ControlledRecovery && self.delay_ms.is_some()
+    }
+}
+
+/// Whether the settled failure is reliable evidence of a **length-truncated**
+/// round: the provider hit its output limit, so no resend of the identical
+/// request can produce more room for an answer.
+///
+/// Two observed forms are admitted, and the durable record says which one was
+/// seen:
+///  * the provider's own stop reason is `length`;
+///  * the worker's sub-category is `output_length_limit`, which its own branch
+///    only emits when the round's message carried stop reason `length`.
+///
+/// An absent observation is never guessed: a failure carrying neither form is not
+/// a length truncation, whatever else it looks like.
+pub(crate) fn length_truncation_evidence(
+    failure: &fox_engine_protocol::KernelModelFailure,
+) -> Option<&'static str> {
+    if failure.category != "incomplete_response" {
+        return None;
+    }
+    let diagnostic = failure.diagnostic.as_ref();
+    let reason = diagnostic.and_then(|item| item.reason.as_deref());
+    let stop_reason = diagnostic.and_then(|item| item.stop_reason.as_deref());
+    match (stop_reason, reason) {
+        (Some("length"), _) => Some("stop_reason_length"),
+        (_, Some("output_length_limit")) => Some("worker_output_length_limit"),
+        _ => None,
+    }
+}
+
+/// Which shape a length-truncated round showed, from the counters the worker
+/// actually observed. Absent counters produce `UnknownBody`, never a fabricated 0.
+pub(crate) fn length_truncation_shape(
+    failure: &fox_engine_protocol::KernelModelFailure,
+) -> LengthTruncationShape {
+    let diagnostic = failure.diagnostic.as_ref();
+    let text = diagnostic.and_then(|item| item.text_chars);
+    let tools = diagnostic.and_then(|item| item.tool_call_count);
+    let reason = diagnostic.and_then(|item| item.reason.as_deref());
+    if tools.is_some_and(|count| count > 0) || reason == Some("incomplete_tool_proposal") {
+        return LengthTruncationShape::ToolProposal;
+    }
+    match text {
+        Some(0) => LengthTruncationShape::NoBody,
+        Some(_) => LengthTruncationShape::PartialBody,
+        // The worker's own branch only names `output_length_limit` when the round
+        // did produce public text, so that naming is itself evidence of a partial
+        // body — the counter stays absent rather than being invented.
+        None if reason == Some("output_length_limit") => LengthTruncationShape::PartialBody,
+        None if reason == Some("empty_final_answer") => LengthTruncationShape::NoBody,
+        None => LengthTruncationShape::UnknownBody,
+    }
+}
+
+/// Classify one settled failure from the evidence it actually carries.
+///
+/// Only enumerated, Host-sanitized facts are read: the category, the admitted
+/// HTTP status, a server-directed wait, and the diagnostic sub-category plus the
+/// provider stop reason. An absent or unrecognised reason is classified as
+/// `unknown_evidence`; it is never guessed into a dense ladder.
+pub(crate) fn classify_model_failure(
+    failure: &fox_engine_protocol::KernelModelFailure,
+) -> ModelRetryClass {
+    let reason = failure
+        .diagnostic
+        .as_ref()
+        .and_then(|diagnostic| diagnostic.reason.as_deref())
+        .unwrap_or("unknown");
+    match failure.category.as_str() {
+        "provider_unavailable" => {
+            if failure.retry_after_ms.is_some_and(|delay| delay > 0) {
+                RETRY_CLASS_SERVER_DIRECTED
+            } else if failure.http_status == Some(429) {
+                // A rate/quota limit with no server-directed wait. A dense ladder
+                // would hammer a budget that is already spent.
+                RETRY_CLASS_RATE_LIMITED
+            } else if matches!(failure.http_status, Some(500 | 502 | 503 | 504 | 529)) {
+                RETRY_CLASS_TRANSIENT_SERVER
+            } else {
+                // Not a status the frozen protocol admits as retryable: an auth,
+                // permission or invalid-argument rejection is never dense-retried.
+                RETRY_CLASS_PROVIDER_NOT_RETRYABLE
+            }
+        }
+        "model_timeout" => RETRY_CLASS_MODEL_TIMEOUT,
+        // The transport category covers two very different evidence states:
+        //
+        //  * the Host itself observed the loss (its own model window expired, or
+        //    the worker/pipe died and was reaped) — the request never completed
+        //    and no provider verdict ever arrived. That is a transient connection
+        //    failure, and it is the only transport shape admitted to the ladder.
+        //  * the worker reported a round that "ended without a successful stop"
+        //    and named no cause (`reason=unknown`). That is the shape an auth,
+        //    permission or invalid-argument rejection takes on today's wire, where
+        //    the provider's non-retryable status is deliberately never carried.
+        //    The Host cannot tell it from a thrown connection error, so it must
+        //    not dense-retry it: it gets the conservative flat interval instead.
+        "model_transport_failure" => {
+            match failure.diagnostic.as_ref().and_then(|diagnostic| {
+                diagnostic.reason.as_deref()
+            }) {
+                // A named transport branch is evidence of its own.
+                Some("stream_interrupted") => RETRY_CLASS_STREAM_INTERRUPTED,
+                None => RETRY_CLASS_TRANSIENT_CONNECTION,
+                Some(_) => RETRY_CLASS_UNKNOWN_EVIDENCE,
+            }
+        }
+        // Length truncation outranks the symptom: a round the provider cut off at
+        // its output limit is `length_truncated_*`, never a bare
+        // `empty_final_answer` or `missing_final_marker`. Everything else keeps
+        // its own sub-category.
+        "incomplete_response" => {
+            if length_truncation_evidence(failure).is_some() {
+                return length_truncation_shape(failure).class();
+            }
+            match reason {
+                "empty_final_answer" => RETRY_CLASS_EMPTY_ANSWER,
+                "stream_interrupted" => RETRY_CLASS_STREAM_INTERRUPTED,
+                "incomplete_tool_proposal" => RETRY_CLASS_INCOMPLETE_TOOL_PROPOSAL,
+                "missing_final_marker" => RETRY_CLASS_MISSING_MARKER,
+                _ => RETRY_CLASS_UNKNOWN_EVIDENCE,
+            }
+        }
+        _ => RETRY_CLASS_UNKNOWN_CATEGORY,
+    }
+}
+
+/// Deterministic jitter in `[-100, +100]` per-mille.
+///
+/// Derived from durable identity instead of a random source, so a scheduled
+/// retry's due time is reproducible and a restart never re-rolls it (the due
+/// time is persisted anyway), and so a test can assert an exact value.
+pub(crate) fn model_retry_jitter_permille(run_id: &str, effect_key: &str, attempt: u32) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(run_id.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(effect_key.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(attempt.to_le_bytes());
+    let digest = hasher.finalize();
+    let raw = u64::from_le_bytes(digest[..8].try_into().expect("sha256 prefix"));
+    (raw % (2 * MODEL_RETRY_JITTER_PERMILLE as u64 + 1)) as i64 - MODEL_RETRY_JITTER_PERMILLE
+}
+
+/// Ladder rung for the `attempt`-th retry of this Run (0-based).
+pub(crate) fn model_retry_ladder_ms(attempt: u32) -> i64 {
+    MODEL_RETRY_LADDER_MS[(attempt as usize).min(MODEL_RETRY_LADDER_MS.len() - 1)]
+}
+
+/// Plan the next automatic retry for one settled failure.
+///
+/// `retry` is the durable Run-scoped state: `model_attempts` is the cumulative
+/// count that no category change and no new effect key may reset, and
+/// `model_attempts`/`provider_max`/`turn_max` together define the budget.
+pub(crate) fn plan_model_retry(
+    failure: &fox_engine_protocol::KernelModelFailure,
+    retry: &kernel::RetryState,
+    run_id: &str,
+    effect_key: &str,
+) -> ModelRetryPlan {
+    let class = classify_model_failure(failure);
+    if class.wait == RetryWait::Refused {
+        return ModelRetryPlan::refused(class);
+    }
+    let budget = retry
+        .provider_max
+        .max(retry.turn_max)
+        .min(MODEL_RETRY_MAX_ATTEMPTS);
+    // A length truncation is decided before the ladder: the request itself has to
+    // change, and the Run's own evidence rules govern it.
+    if class.wait == RetryWait::ControlledRecovery {
+        if retry.length_recovery_attempts >= MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS {
+            // One recovery per Run. A restart, a category change, a new effect key
+            // and a later accepted response all keep this counter, so the Run ends
+            // honestly instead of looping the same truncation.
+            return ModelRetryPlan::refused(RETRY_CLASS_LENGTH_RECOVERY_SPENT);
+        }
+        if retry.model_attempts >= budget {
+            // The recovery spends the unified budget; it may not bypass it.
+            return ModelRetryPlan::refused(RETRY_CLASS_LENGTH_RECOVERY_BUDGET);
+        }
+        return ModelRetryPlan::retry(class, MODEL_LENGTH_RECOVERY_INTERVAL_MS);
+    }
+    if retry.model_attempts >= budget {
+        return ModelRetryPlan::refused(RETRY_CLASS_BUDGET_SPENT);
+    }
+    let attempt = retry.model_attempts;
+    let jitter = model_retry_jitter_permille(run_id, effect_key, attempt);
+    let ladder = model_retry_ladder_ms(attempt);
+    let delay = match class.wait {
+        RetryWait::Ladder => {
+            // ±10% around the rung; never negative and never zero-length.
+            (ladder * (1_000 + jitter) / 1_000).max(1)
+        }
+        RetryWait::ServerDirected => {
+            // The server's own wait always wins and is never shortened: the
+            // jitter is added upward only.
+            let server_wait = failure.retry_after_ms.unwrap_or(0) as i64;
+            let base = server_wait.max(ladder);
+            base + (base * jitter.max(0) / 1_000)
+        }
+        RetryWait::Flat => MODEL_RETRY_INTERVAL_MS,
+        RetryWait::ControlledRecovery | RetryWait::Refused => {
+            unreachable!("length recovery and refusals return above")
+        }
+    };
+    ModelRetryPlan::retry(class, delay)
+}
+
+// ---------------------------------------------------------------------------
+// The one controlled length-truncation recovery
+// ---------------------------------------------------------------------------
+
+/// What the durable delivery facts say about the Run's promised artifacts, from
+/// which the recovery instruction is generated. Never a hard-coded task, file or
+/// answer: only the Host's own checklist statuses and bounded display names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LengthRecoveryDeliveryKind {
+    /// Every promised artifact passed deterministic verification.
+    VerifiedDeliverables,
+    /// Artifacts exist but their content is unverified / still pending checks.
+    UnverifiedArtifacts,
+    /// A promised artifact is missing or failed its checks.
+    IncompleteDeliverables,
+    /// No file checklist at all: the ledger cannot decide, so completion is
+    /// unknown and must not be claimed.
+    NoChecklist,
+}
+
+impl LengthRecoveryDeliveryKind {
+    pub(crate) fn token(&self) -> &'static str {
+        match self {
+            LengthRecoveryDeliveryKind::VerifiedDeliverables => "verified_deliverables",
+            LengthRecoveryDeliveryKind::UnverifiedArtifacts => "unverified_artifacts",
+            LengthRecoveryDeliveryKind::IncompleteDeliverables => "incomplete_deliverables",
+            LengthRecoveryDeliveryKind::NoChecklist => "no_checklist",
+        }
+    }
+}
+
+/// Bounded, state-derived facts for one recovery instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LengthRecoveryDelivery {
+    pub(crate) kind: LengthRecoveryDeliveryKind,
+    pub(crate) passed: usize,
+    pub(crate) failed: usize,
+    pub(crate) pending: usize,
+    /// Bounded, sanitized display names of items that are not verified passed.
+    pub(crate) outstanding: Vec<String>,
+}
+
+impl LengthRecoveryDelivery {
+    /// The instruction the model actually receives. It is a **soft** constraint:
+    /// a prompt can ask the model to stop planning, but it cannot guarantee that
+    /// a model with a large reasoning budget stops thinking.
+    pub(crate) fn instruction(&self) -> String {
+        let items = if self.outstanding.is_empty() {
+            String::new()
+        } else {
+            format!("未完成的核验项：{}。", self.outstanding.join("、"))
+        };
+        let body = match self.kind {
+            LengthRecoveryDeliveryKind::VerifiedDeliverables => format!(
+                "Fox 长度恢复提示：上一条回复被模型输出长度上限截断，没有得到最终答复。Host 已核验本次任务的交付物全部通过（{} 项）。请只给出一段简短的完成说明：不要重复读取、计算或写入任何文件，不要展开长篇分析或规划，直接遵守系统提示中的最终答复格式结束本轮。",
+                self.passed
+            ),
+            LengthRecoveryDeliveryKind::UnverifiedArtifacts => format!(
+                "Fox 长度恢复提示：上一条回复被模型输出长度上限截断。Host 已生成 {} 项交付物，但其中 {} 项内容尚未通过核验，因此**任务还未完成**。请立即用简短答复说明：已经确认的事实、仍然需要核验或补做的工作{items}。不要重复已经成功的写入，不要再展开长篇分析，直接遵守系统提示中的最终答复格式结束本轮。",
+                self.passed + self.pending + self.failed,
+                self.pending + self.failed,
+                items = items
+            ),
+            LengthRecoveryDeliveryKind::IncompleteDeliverables => format!(
+                "Fox 长度恢复提示：上一条回复被模型输出长度上限截断。Host 的核验结果显示交付物缺失或不合格（已通过 {} 项，未通过 {} 项），因此**任务尚未完成**。请立即用简短答复说明：已完成的部分、缺失或不合格的具体交付物、以及当前的具体阻塞{items}。不要只给出成功结论，不要重复已经成功的写入，也不要展开长篇分析，直接遵守系统提示中的最终答复格式结束本轮。",
+                self.passed, self.failed,
+                items = items
+            ),
+            LengthRecoveryDeliveryKind::NoChecklist => format!(
+                "Fox 长度恢复提示：上一条回复被模型输出长度上限截断。Host 没有可用于内容核验的交付物清单，因此**无法确认任务是否完成**。请立即用简短答复说明：已经确认的事实、尚未核验的部分{items}。不要声称任务已完成，不要重复已经成功的写入，也不要展开长篇分析，直接遵守系统提示中的最终答复格式结束本轮。",
+                items = items
+            ),
+        };
+        bound_instruction(body)
+    }
+}
+
+/// Keep the instruction inside the dispatch's reserved bytes, and never cut a
+/// multi-byte character in half.
+fn bound_instruction(text: String) -> String {
+    if text.len() <= LENGTH_RECOVERY_MAX_INSTRUCTION_BYTES {
+        return text;
+    }
+    let mut end = LENGTH_RECOVERY_MAX_INSTRUCTION_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// Sanitize one checklist display name into a bounded, single-line fact.
+fn bound_item_name(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut bounded: String = trimmed.chars().take(LENGTH_RECOVERY_MAX_ITEM_CHARS).collect();
+    if trimmed.chars().count() > LENGTH_RECOVERY_MAX_ITEM_CHARS {
+        bounded.push('…');
+    }
+    Some(bounded)
+}
+
+/// The Host-side original parameters of the request that was truncated, as the
+/// frozen configuration actually requested them. Only fields the Host set are
+/// present — an absent value stays absent, it is not defaulted here.
+pub(crate) fn original_model_parameters(service: &Value) -> Value {
+    let mut original = serde_json::Map::new();
+    let profile = service.get("modelProfile");
+    for key in ["reasoning", "thinkingLevel", "maxOutputTokens"] {
+        let value = service
+            .get(key)
+            .or_else(|| profile.and_then(|profile| profile.get(key)));
+        if let Some(value) = value {
+            original.insert(key.to_owned(), value.clone());
+        }
+    }
+    Value::Object(original)
+}
+
+/// The reasoning level the worker's resolution actually applied for this Run:
+/// an explicit request when present, else the family default. `None` means the
+/// Host has no evidence of a reasoning parameter at all.
+fn requested_thinking_level(service: &Value) -> Option<&str> {
+    let profile = service.get("modelProfile");
+    profile
+        .and_then(|profile| profile.get("thinkingLevel"))
+        .or_else(|| service.get("thinkingLevel"))
+        .and_then(Value::as_str)
+}
+
+/// Whether the frozen configuration explicitly disabled reasoning.
+fn reasoning_disabled(service: &Value) -> bool {
+    service
+        .get("reasoning")
+        .or_else(|| service.get("modelProfile").and_then(|profile| profile.get("reasoning")))
+        == Some(&Value::Bool(false))
+}
+
+/// Lower one thinking level by moving **down** the portable level list. Returns
+/// `None` when there is no lower level the recovery may safely request: the level
+/// is already `low` (the floor the generic transport supports), or the frozen
+/// configuration explicitly turns reasoning off.
+pub(crate) fn lower_thinking_level(level: Option<&str>) -> Option<&'static str> {
+    let Some(level) = level else {
+        // No explicit level: the worker's own family heuristics default a
+        // reasoning-capable model to "medium", so "low" is a strict lowering and
+        // is ignored outright when the model turns out not to reason at all.
+        return Some("low");
+    };
+    let index = MODEL_PORTABLE_THINKING_LEVELS
+        .iter()
+        .position(|item| *item == level)?;
+    MODEL_PORTABLE_THINKING_LEVELS.get(index.checked_sub(1)?).copied()
+}
+
+/// The adapter's *observed* ability to serialize a reasoning parameter for this
+/// Run's model and transport.
+///
+/// The signal is deliberately a **wire fact**, not a local intention: it is the
+/// `config.sent` layer of this Run's own durable `usage.request` record — the
+/// layer the runtime writes from the request body it actually serialized
+/// (`services/agent-runtime/src/model-usage-runtime.mjs::safeSentConfig`). The
+/// `resolved` layer is explicitly **not** accepted as evidence: it describes what
+/// capability resolution produced, not what was sent.
+///
+/// Only the field whose code path has been read and verified is accepted:
+/// `reasoning_effort`, which the OpenAI-completions adapter writes from the
+/// resolved thinking level solely when that transport's compat declares
+/// `supportsReasoningEffort`. Other shapes (`reasoning.effort`, `thinking.*`) are
+/// not tied to the level by any path this recovery can verify, so they are
+/// reported as not effective rather than assumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdapterReasoningEvidence {
+    /// The whole observed `sent` layer of the previous model attempt, when the
+    /// runtime recorded one. Absent means "no wire record", never "no field".
+    pub(crate) observed_sent: Option<Value>,
+    /// The reasoning-effort value the adapter really serialized, when it did.
+    pub(crate) serialized_effort: Option<String>,
+}
+
+impl AdapterReasoningEvidence {
+    /// How this evidence was obtained, recorded durably with the recovery.
+    pub(crate) const SOURCE: &'static str =
+        "durable usage.request config.sent layer of this Run's previous model attempt";
+
+    pub(crate) fn from_sent(sent: Option<Value>) -> Self {
+        let serialized_effort = sent
+            .as_ref()
+            .and_then(|sent| sent.get("reasoning_effort"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        Self { observed_sent: sent, serialized_effort }
+    }
+}
+
+/// The lever the one controlled recovery will actually pull.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LengthRecoveryLever {
+    /// What the Host *intended* to change locally (may be empty).
+    pub(crate) intended: Value,
+    /// What is really applied to the derived request configuration. Empty when the
+    /// parameter cannot be shown to change the request.
+    pub(crate) applied: Value,
+    /// Whether the lowered parameter is proven to enter the real request.
+    pub(crate) effective: bool,
+    /// The wire evidence behind `effective`.
+    pub(crate) evidence: AdapterReasoningEvidence,
+    /// What the adapter is expected to serialize after the change (from the same
+    /// verified field), for the record — never presented as an observation.
+    pub(crate) expected_sent: Value,
+    /// Why the parameter is or is not effective.
+    pub(crate) reason: &'static str,
+}
+
+impl LengthRecoveryLever {
+    pub(crate) fn lever(&self) -> &'static str {
+        if self.effective {
+            "parameters"
+        } else {
+            "instruction_only"
+        }
+    }
+}
+
+/// Decide whether lowering the reasoning level can be **shown** to change the real
+/// request, from the adapter's own serialization record.
+///
+/// This replaces the earlier (and wrong) rule that treated a legal, lowerable
+/// local `thinkingLevel` as proof of effectiveness: a local configuration change
+/// that the adapter never serializes would otherwise buy a request with no
+/// effective change at all. The three honest outcomes are:
+///  * the wire record shows the reasoning field and the lowered value differs →
+///    the parameter really changes the request;
+///  * the wire record shows no such field (or no wire record exists) → the
+///    parameter cannot be shown to change anything, so it is **not** applied and
+///    the recovery falls back to the instruction alone;
+///  * neither a proven parameter nor a deliverable instruction → the caller
+///    refuses the recovery instead of dispatching a request with no real change.
+pub(crate) fn plan_length_recovery_lever(
+    service: &Value,
+    evidence: AdapterReasoningEvidence,
+) -> LengthRecoveryLever {
+    let intended = if reasoning_disabled(service) {
+        json!({})
+    } else {
+        match lower_thinking_level(requested_thinking_level(service)) {
+            Some(level) => json!({"thinkingLevel": level}),
+            None => json!({}),
+        }
+    };
+    let intended_level = intended.get("thinkingLevel").and_then(Value::as_str);
+    let (effective, reason, expected_sent) = match (intended_level, evidence.serialized_effort.as_deref()) {
+        (None, _) => (
+            false,
+            "no supported reasoning parameter to lower for this frozen configuration",
+            json!({}),
+        ),
+        (Some(_), None) if evidence.observed_sent.is_none() => (
+            false,
+            "no durable wire record for this Run's previous attempt: effectiveness is unproven",
+            json!({}),
+        ),
+        (Some(_), None) => (
+            false,
+            "the adapter's own sent layer carried no reasoning_effort: the level is not serialized by this transport",
+            json!({}),
+        ),
+        (Some(level), Some(serialized)) if serialized == level => (
+            false,
+            "the lowered level equals the value already serialized: no observable change",
+            json!({}),
+        ),
+        (Some(level), Some(_)) => (
+            true,
+            "the adapter serialized reasoning_effort before, and the lowered level changes that value",
+            json!({"reasoning_effort": level}),
+        ),
+    };
+    LengthRecoveryLever {
+        applied: if effective { intended.clone() } else { json!({}) },
+        intended,
+        effective,
+        evidence,
+        expected_sent,
+        reason,
+    }
+}
+
+/// Apply the recovery parameters to a frozen model service. Returns the derived
+/// service and the keys it actually changed.
+pub(crate) fn apply_recovery_parameters(
+    service: &Value,
+    parameters: &Value,
+) -> Result<(Value, Vec<String>), String> {
+    let mut derived = service
+        .clone()
+        .as_object()
+        .cloned()
+        .ok_or("invalid Kernel model service")?;
+    let mut changed = Vec::new();
+    for (key, value) in parameters
+        .as_object()
+        .ok_or("invalid length-recovery parameters")?
+    {
+        if !matches!(key.as_str(), "thinkingLevel" | "reasoning") {
+            return Err("length recovery may only lower reasoning parameters".into());
+        }
+        if derived.get(key) == Some(value) {
+            continue;
+        }
+        derived.insert(key.clone(), value.clone());
+        changed.push(key.clone());
+    }
+    Ok((Value::Object(derived), changed))
+}
+
+/// Recompute the recovery dispatch's model configuration from the frozen one and
+/// the durable record.
+///
+/// Pure and deterministic, so the parameters that reached the wire can be
+/// re-derived from durable facts at any time — and so a dispatch can never be
+/// handed a configuration the record does not authorize. The record's
+/// `recoveryParameters` are accepted only when they are exactly what the recorded
+/// capability decision allowed: an empty set for an instruction-only recovery, or
+/// the intended lowering when the parameter was proven effective.
+pub(crate) fn derive_length_recovery_config(
+    frozen: &crate::kernel_model_config::KernelModelConfig,
+    record: &Value,
+) -> Result<crate::kernel_model_config::KernelModelConfig, String> {
+    let parameters = record
+        .get("recoveryParameters")
+        .ok_or("length-recovery record has no parameters")?;
+    let effect = record
+        .get("parameterEffect")
+        .ok_or("length-recovery record has no parameter effect")?;
+    let effective = effect.get("effective").and_then(Value::as_bool)
+        .ok_or("length-recovery record has no effectiveness")?;
+    let intended = effect
+        .get("locallyIntendedParameters")
+        .ok_or("length-recovery record has no intended parameters")?;
+    if effective != (parameters == intended && !parameters.as_object().is_some_and(|map| map.is_empty()))
+    {
+        return Err("length-recovery parameters disagree with the recorded effect".into());
+    }
+    let (service, changed) = apply_recovery_parameters(&frozen.model_service, parameters)?;
+    if !effective && !changed.is_empty() {
+        return Err("an ineffective parameter must not change the request".into());
+    }
+    let mut derived = frozen.clone();
+    derived.model_service = service;
+    derived.hash()?;
+    Ok(derived)
+}
 
 pub(crate) struct KernelCoordinator<'a> {
     database: &'a Database,
@@ -860,6 +1723,336 @@ impl<'a> KernelCoordinator<'a> {
             .kernel_build_full_snapshot(&self.binding.run_id)
     }
 
+    // -----------------------------------------------------------------------
+    // The one controlled length-truncation recovery
+    // -----------------------------------------------------------------------
+
+    /// The durable delivery facts the recovery instruction is generated from.
+    ///
+    /// Nothing here is invented and nothing is hard-coded per task: the Host's own
+    /// checklist statuses decide whether the promised artifacts were verified,
+    /// are unverified, or are missing, and only bounded display names of the
+    /// outstanding items are quoted back to the model.
+    fn length_recovery_delivery(&self) -> Result<LengthRecoveryDelivery, String> {
+        let stop = super::delivery::evaluate_stop(
+            &self.database,
+            self.binding.permission.project_root.as_deref(),
+            &self.binding.run_id,
+        )?;
+        let items = self.database.delivery_checklist(&self.binding.run_id)?;
+        let passed = items.iter().filter(|item| item.status == "passed").count();
+        let failed = items.iter().filter(|item| item.status == "failed").count();
+        let pending = items.iter().filter(|item| item.status == "pending").count();
+        let kind = match &stop {
+            super::delivery::DeliveryStop::NoChecklist => LengthRecoveryDeliveryKind::NoChecklist,
+            super::delivery::DeliveryStop::Passed { .. } => {
+                LengthRecoveryDeliveryKind::VerifiedDeliverables
+            }
+            // A promise that failed its checks is a different fact from a promise
+            // whose content simply was never verified, and the model is told which
+            // one it is.
+            super::delivery::DeliveryStop::Repair { .. }
+            | super::delivery::DeliveryStop::Exhausted { .. } => {
+                if failed > 0 {
+                    LengthRecoveryDeliveryKind::IncompleteDeliverables
+                } else {
+                    LengthRecoveryDeliveryKind::UnverifiedArtifacts
+                }
+            }
+        };
+        let outstanding = items
+            .iter()
+            .filter(|item| item.status != "passed")
+            .filter_map(|item| bound_item_name(&item.display_name))
+            .take(LENGTH_RECOVERY_MAX_NAMED_ITEMS)
+            .collect();
+        Ok(LengthRecoveryDelivery { kind, passed, failed, pending, outstanding })
+    }
+
+    /// The adapter's observed serialization ability for this Run.
+    ///
+    /// Read-only, bounded, and deliberately taken from the runtime's own request
+    /// boundary record (`usage.request` → `config.sent`) instead of from any local
+    /// configuration or from the `resolved` layer. Absence of a record is reported
+    /// as absence, so effectiveness can never be claimed without a wire fact.
+    fn adapter_reasoning_evidence(&self) -> Result<AdapterReasoningEvidence, String> {
+        let sent = self.database.with_connection(|connection| {
+            let mut query = connection.prepare(
+                "SELECT event_json FROM run_events
+                  WHERE run_id=?1 AND event_type='usage.request'
+                  ORDER BY seq DESC LIMIT 16",
+            )?;
+            let rows = query.query_map([&self.binding.run_id], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let event: Value = match serde_json::from_str(&row?) {
+                    Ok(event) => event,
+                    Err(_) => continue,
+                };
+                let sent = &event["record"]["config"]["sent"];
+                if sent.is_object() {
+                    return Ok(Some(sent.clone()));
+                }
+            }
+            Ok(None)
+        })?;
+        Ok(AdapterReasoningEvidence::from_sent(sent))
+    }
+
+    /// Build the durable audit record for the one recovery.
+    ///
+    /// It records what was actually observed (the trigger form and the counters
+    /// the worker reported — absent facts stay absent), the three parameter layers
+    /// (locally intended / really applied / the wire evidence they rest on) and
+    /// whether the instruction is really delivered, the request identity of the
+    /// dispatch that will carry it, and the exact instruction text.
+    /// `appliedAtWallMs` stays null until the commit that arms the request, which
+    /// is also what makes the allowance single-use.
+    fn length_recovery_record(
+        &self,
+        failure: &fox_engine_protocol::KernelModelFailure,
+        class: &str,
+        effect_key: &str,
+        owner: &str,
+        turn_id: &str,
+        checkpoint_seq: u64,
+        scheduled_at_wall_ms: i64,
+        due_wall_ms: i64,
+        delivery: &LengthRecoveryDelivery,
+        lever: &LengthRecoveryLever,
+    ) -> Result<String, String> {
+        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        let original = original_model_parameters(&config.model_service);
+        let recovery = lever.applied.clone();
+        let (derived_service, changed) =
+            apply_recovery_parameters(&config.model_service, &recovery)?;
+        let diagnostic = failure.diagnostic.as_ref();
+        let mut evidence = serde_json::Map::new();
+        evidence.insert(
+            "form".into(),
+            json!(length_truncation_evidence(failure).unwrap_or("unknown")),
+        );
+        if let Some(value) = diagnostic.and_then(|item| item.stop_reason.as_ref()) {
+            evidence.insert("stopReason".into(), json!(value));
+        }
+        if let Some(value) = diagnostic.and_then(|item| item.reason.as_ref()) {
+            evidence.insert("reason".into(), json!(value));
+        }
+        if let Some(value) = diagnostic.and_then(|item| item.text_chars) {
+            evidence.insert("textChars".into(), json!(value));
+        }
+        if let Some(value) = diagnostic.and_then(|item| item.thinking_chars) {
+            evidence.insert("thinkingChars".into(), json!(value));
+        }
+        if let Some(value) = diagnostic.and_then(|item| item.tool_call_count) {
+            evidence.insert("toolCallCount".into(), json!(value));
+        }
+        if let Some(value) = diagnostic.and_then(|item| item.completion_required) {
+            evidence.insert("completionRequired".into(), json!(value));
+        }
+        if let Some(value) = diagnostic.and_then(|item| item.dispatch_id.as_ref()) {
+            evidence.insert("workerDispatchId".into(), json!(value));
+        }
+        evidence.insert("truncatedShape".into(), json!(length_truncation_shape(failure).token()));
+        let instruction = delivery.instruction();
+        // The recovery instruction is a Host-authored model-view message. A Run
+        // with the typed Host-job-notice lane validates its retried frames against
+        // the durable frozen sources, so a Host message cannot be added there: the
+        // instruction is then reported as undeliverable instead of silently
+        // dropped. The parameter lever is independent of that lane, but only when
+        // it is proven effective — otherwise there is no real change at all and
+        // the caller refuses the recovery instead of dispatching it.
+        let instruction_lane = !self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+        if !instruction_lane && !lever.effective {
+            return Err("length recovery has no deliverable levers for this Run".into());
+        }
+        let record = json!({
+            "schemaVersion": 1,
+            "recoveryId": uuid::Uuid::new_v4().to_string(),
+            "trigger": class,
+            "evidence": Value::Object(evidence),
+            "delivery": {
+                "kind": delivery.kind.token(),
+                "passed": delivery.passed,
+                "failed": delivery.failed,
+                "pending": delivery.pending,
+                "outstanding": delivery.outstanding,
+            },
+            // Three layers, kept apart: what the Host intended locally, what is
+            // really applied to the request, and the wire fact the decision rests on.
+            "parametersMode": lever.lever(),
+            "parameterEffect": {
+                "effective": lever.effective,
+                "lever": lever.lever(),
+                "reason": lever.reason,
+                "signalSource": AdapterReasoningEvidence::SOURCE,
+                "signalNote": "the resolved layer is deliberately NOT evidence: only the request boundary record counts",
+                "observedSentParameters": lever.evidence.observed_sent.clone().unwrap_or(Value::Null),
+                "observedReasoningEffort": lever.evidence.serialized_effort.clone().map(Value::String).unwrap_or(Value::Null),
+                "locallyIntendedParameters": lever.intended,
+                "expectedSentParameters": lever.expected_sent,
+                "expectedSentNote": "expected, derived from the same verified field; the authoritative check is the durable usage record of the recovery attempt itself",
+            },
+            "originalParameters": original,
+            "recoveryParameters": recovery,
+            "changedServiceFields": changed,
+            "instructionIsSoftConstraint": true,
+            "instructionKind": delivery.kind.token(),
+            "instructionDelivered": instruction_lane,
+            "instructionDelivery": if instruction_lane { "model_view_message" } else { "unavailable_notice_lane" },
+            "instruction": instruction,
+            "runId": self.binding.run_id,
+            "turnId": turn_id,
+            "effectKey": effect_key,
+            "owner": owner,
+            "checkpointSeq": checkpoint_seq,
+            "scheduledAtWallMs": scheduled_at_wall_ms,
+            "dueWallMs": due_wall_ms,
+            "appliedAtWallMs": Value::Null,
+        });
+        // The derived configuration must be exactly what the record authorizes,
+        // and it must still be a valid Kernel model configuration.
+        let mut derived = config.clone();
+        derived.model_service = derived_service;
+        derived.hash()?;
+        let encoded = serde_json::to_string(&record).map_err(|_| "invalid length-recovery record")?;
+        if encoded.len() > LENGTH_RECOVERY_MAX_RECORD_BYTES {
+            return Err("length-recovery record exceeds its durable bound".into());
+        }
+        Ok(encoded)
+    }
+
+    /// The recovery scheduled for the dispatch that is about to be built, if any.
+    ///
+    /// Pending means: the record exists, it has not been applied to a request yet,
+    /// and it names this dispatch's effect key. A different lane can therefore
+    /// never swallow another lane's recovery.
+    fn pending_length_recovery(&self, effect_key: &str) -> Result<Option<Value>, String> {
+        let guard = self
+            .controller
+            .lock()
+            .map_err(|_| "Kernel coordinator lock poisoned")?;
+        if !guard.length_recovery_pending() {
+            return Ok(None);
+        }
+        let record = guard
+            .length_recovery_record()
+            .ok_or("length-recovery record disappeared")?;
+        let value: Value =
+            serde_json::from_str(record).map_err(|_| "invalid length-recovery record")?;
+        if value.get("effectKey").and_then(Value::as_str) != Some(effect_key) {
+            return Ok(None);
+        }
+        Ok(Some(value))
+    }
+
+    /// The model configuration a dispatch must use, and the pending recovery that
+    /// authorized a parameter change.
+    ///
+    /// The frozen configuration is returned unchanged unless the durable record
+    /// names exactly this effect key; the derived configuration is recomputed from
+    /// the frozen service plus the recorded parameters, so what reaches the wire is
+    /// always re-derivable from durable facts and a stale or tampered record cannot
+    /// smuggle in a different provider request.
+    fn dispatch_model_config(
+        &self,
+        effect_key: &str,
+    ) -> Result<(crate::kernel_model_config::KernelModelConfig, Option<Value>), String> {
+        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        let recovery = self.pending_length_recovery(effect_key)?;
+        let Some(record) = recovery else {
+            return Ok((config, None));
+        };
+        let derived = derive_length_recovery_config(&config, &record)?;
+        Ok((derived, Some(record)))
+    }
+
+    /// The instruction to append to the dispatch named by `effect_key`, when the
+    /// pending recovery is that dispatch's.
+    pub(super) fn length_recovery_instruction(&self, effect_key: &str) -> Result<Option<String>, String> {
+        let Some(record) = self.pending_length_recovery(effect_key)? else {
+            return Ok(None);
+        };
+        let instruction = record
+            .get("instruction")
+            .and_then(Value::as_str)
+            .ok_or("length-recovery record has no instruction")?
+            .to_owned();
+        if instruction.len() > LENGTH_RECOVERY_MAX_INSTRUCTION_BYTES {
+            return Err("length-recovery instruction exceeds its bound".into());
+        }
+        Ok(Some(instruction))
+    }
+
+    /// The model-configuration hash this dispatch is allowed to present: the
+    /// frozen one, or — for the one controlled length recovery — the hash of the
+    /// configuration re-derived from the frozen configuration plus the recorded
+    /// parameters. Rejecting anything else keeps the freeze meaningful while still
+    /// letting that single recovery change the request.
+    fn expected_dispatch_config_hash(
+        &self,
+        effect_key: &str,
+        frozen_hash: &str,
+    ) -> Result<String, String> {
+        let Some(record) = self.pending_length_recovery(effect_key)? else {
+            return Ok(frozen_hash.to_owned());
+        };
+        let frozen = self.database.kernel_model_config(&self.binding.run_id)?;
+        Ok(derive_length_recovery_config(&frozen, &record)?.hash()?)
+    }
+
+    /// The Host's honest Chinese account of a Run that could not finish its answer
+    /// because the provider's output limit was reached.
+    ///
+    /// It is written on the Run's own failure, from durable facts, and never
+    /// claims completion unless the content checks actually passed; it is a Host
+    /// status, never a fabricated model reply.
+    fn length_truncated_terminal_message(
+        &self,
+        delivery: Option<&LengthRecoveryDelivery>,
+        recovery_spent: bool,
+    ) -> String {
+        let mut message = LENGTH_TRUNCATED_TERMINAL.to_owned();
+        if let Some(delivery) = delivery {
+            match delivery.kind {
+                LengthRecoveryDeliveryKind::VerifiedDeliverables => {
+                    message.push_str(&format!(
+                        "已核验通过的交付物 {} 项。",
+                        delivery.passed
+                    ));
+                }
+                LengthRecoveryDeliveryKind::UnverifiedArtifacts => {
+                    message.push_str(&format!(
+                        "已通过核验 {} 项，内容尚未核验 {} 项。",
+                        delivery.passed,
+                        delivery.pending + delivery.failed
+                    ));
+                }
+                LengthRecoveryDeliveryKind::IncompleteDeliverables => {
+                    message.push_str(&format!(
+                        "已通过核验 {} 项，缺失或不合格 {} 项。",
+                        delivery.passed, delivery.failed
+                    ));
+                }
+                LengthRecoveryDeliveryKind::NoChecklist => {
+                    message.push_str("没有可用于内容核验的交付物清单。");
+                }
+            }
+            if !delivery.outstanding.is_empty() {
+                message.push_str(&format!(
+                    "未完成项：{}。",
+                    delivery.outstanding.join("、")
+                ));
+            }
+        }
+        message.push_str(if recovery_spent {
+            "本次运行的受控长度恢复已使用过一次，不会再重复同一请求。"
+        } else {
+            "剩余运行预算不足以再发起一次受控恢复。"
+        });
+        message.push_str("已完成的工具结果已保留，可继续完成剩余工作。");
+        message
+    }
+
     /// Project a committed result barrier for a replacement engine session.
     /// The caller supplies the original engine checkpoint, never fresh model
     /// output. This read does not claim or complete the batch-delivery outbox.
@@ -937,7 +2130,7 @@ impl<'a> KernelCoordinator<'a> {
             &self.binding.run_id, &prepare_attempt, "context_prepare_started", observed_at,
         );
         self.ensure_context_with_worker("initial", 4096, owner, runtime, api_key)?;
-        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        let (config, _) = self.dispatch_model_config(kernel::INITIAL_MODEL_EFFECT_KEY)?;
         let observed_at = crate::database::now_ms();
         let _ = self.database.record_host_stage_point(
             &self.binding.run_id, &prepare_attempt, "context_prepare_finished", observed_at,
@@ -992,7 +2185,9 @@ impl<'a> KernelCoordinator<'a> {
         if lane.as_deref() != Some("job_notice") {
             self.ensure_context_with_worker(effect_key,4096,owner,runtime,api_key)?;
         }
-        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        // The one controlled length recovery changes the request itself, so the
+        // derived configuration is what this dispatch must actually send.
+        let (config, _) = self.dispatch_model_config(effect_key)?;
         let observed_at = crate::database::now_ms();
         let _ = self.database.record_host_stage_point(
             &self.binding.run_id, &prepare_attempt, "context_prepare_finished", observed_at,
@@ -1020,6 +2215,18 @@ impl<'a> KernelCoordinator<'a> {
             now.wall_ms.saturating_sub(since) >= self.binding.budgets.model_request_ms))
     }
 
+    /// Classify and schedule the retry of a settled model failure.
+    ///
+    /// Timeouts first: this is called only after the owning transport has
+    /// dropped/reaped its worker (`deliver_*` returned the error, or the Host's
+    /// own model window expired), and the durable decision below refuses unless
+    /// the same dispatch lease still exclusively owns the model request **and
+    /// every tool is already settled**. So a first-response / stream-stall /
+    /// whole-round timeout confirms the old request, its worker and its tool
+    /// results before another request is admitted — and it is never turned into a
+    /// 1-second retry (see the classification table above).
+    ///
+    /// A missing terminal frame is recoverable while those conditions hold.
     fn retry_settled_model(
         &self,
         effect_key: &str,
@@ -1027,9 +2234,6 @@ impl<'a> KernelCoordinator<'a> {
         cursor: u64,
         error: String,
     ) -> Result<(), String> {
-        // This is called only after the owning transport has dropped/reaped its
-        // worker. A missing terminal frame is recoverable while the same dispatch
-        // lease still owns the model request and every tool is already settled.
         let failure = match super::kernel_model_worker::settled_failure(&error) {
             Some(failure) => failure,
             None if super::kernel_model_worker::is_reaped_transport_failure(&error) => {
@@ -1041,6 +2245,9 @@ impl<'a> KernelCoordinator<'a> {
                         "model_transport_failure".into()
                     } else { "model_timeout".into() }, http_status: None,
                     retry_after_ms: None, telemetry: None,
+                    // The worker was reaped, so no round facts were ever observed:
+                    // the diagnostic stays absent rather than being reported as zeros.
+                    diagnostic: None,
                 }
             }
             None => return Err(error),
@@ -1051,23 +2258,126 @@ impl<'a> KernelCoordinator<'a> {
         self.tick_settled_model()?;
         self.cancellation.run_token(&self.binding.run_id)?.check()?;
         let failure_json = serde_json::to_string(&failure).map_err(|_| "invalid model failure")?;
+        // A length truncation needs the Host's own delivery facts to build its one
+        // recovery instruction, and the adapter's own wire record to decide whether
+        // a lowered parameter can change the request at all. Both are read before
+        // the decision, so no filesystem/SQLite work happens under the controller
+        // lock, and the classification decides whether that work is needed.
+        let length_class = classify_model_failure(&failure);
+        let (recovery_delivery, recovery_lever, instruction_lane) =
+            if is_length_truncation(length_class) {
+                let config = self.database.kernel_model_config(&self.binding.run_id)?;
+                let evidence = self.adapter_reasoning_evidence()?;
+                (
+                    Some(self.length_recovery_delivery()?),
+                    Some(plan_length_recovery_lever(&config.model_service, evidence)),
+                    !self.database.compute_job_notice_enabled(&self.binding.run_id)?,
+                )
+            } else {
+                (None, None, false)
+            };
+        let turn_id = self
+            .controller
+            .lock()
+            .map_err(|_| "Kernel coordinator lock poisoned")?
+            .shadow_checkpoint(self.clock.now_monotonic_ms())
+            .turn_id;
         self.apply(
             Some(DecisionLease::ModelRetry(effect_key, owner)),
             |controller, now| {
-                let (providers, _, turns, _) = controller.retry_counters();
+                let facts = controller.shadow_checkpoint(now.monotonic_ms);
+                let mut plan = plan_model_retry(
+                    &failure,
+                    &facts.retry,
+                    &self.binding.run_id,
+                    effect_key,
+                );
+                // The whole-Run elapsed bound is checked here as well as in the
+                // Kernel, so the durable reason names the real cause instead of
+                // being reported as exhausted retries. Measured from the Run's own
+                // accumulated running time: an effect-key change cannot bypass it.
+                if let Some(delay) = plan.delay_ms {
+                    if self.binding.budgets.run_execution_limited
+                        && delay
+                            >= self.binding.budgets.run_execution_ms
+                                .saturating_sub(facts.running_elapsed_ms)
+                    {
+                        plan = ModelRetryPlan::refused(RETRY_CLASS_RUN_BUDGET);
+                    }
+                }
+                // The one recovery may only be dispatched when it really changes the
+                // request: a parameter the adapter is proven to serialize, or an
+                // instruction this Run can actually deliver. Neither → refuse, and
+                // end honestly instead of spending a request with no effect.
+                let lever_available = recovery_lever
+                    .as_ref()
+                    .is_some_and(|lever| lever.effective || instruction_lane);
+                if plan.needs_recovery_record() && !lever_available {
+                    plan = ModelRetryPlan::refused(RETRY_CLASS_LENGTH_RECOVERY_NO_LEVER);
+                }
                 let provider = failure.category == "provider_unavailable";
-                // A fixed interval between retries: predictable for the provider and
-                // for the user watching the Run. A provider that asks for longer
-                // still wins, because that is its rate-limit contract, not our backoff.
-                let delay = MODEL_RETRY_INTERVAL_MS
-                    .max(failure.retry_after_ms.unwrap_or(0) as i64);
-                controller.schedule_model_retry(
+                let refusal_message = match (plan.delay_ms, recovery_delivery.as_ref()) {
+                    // A truncated Run ends with the Host's own honest account of
+                    // what its durable facts say — never a completion claim and
+                    // never a fabricated model reply.
+                    (None, _) if is_length_truncation(length_class) => {
+                        self.length_truncated_terminal_message(
+                            recovery_delivery.as_ref(),
+                            facts.retry.length_recovery_attempts
+                                >= MODEL_LENGTH_RECOVERY_MAX_ATTEMPTS,
+                        )
+                    }
+                    _ => plan.refusal.to_owned(),
+                };
+                let admission = match plan.delay_ms {
+                    // The controlled recovery changes the request itself, so it is
+                    // admitted separately from every re-send lane.
+                    Some(_) if plan.needs_recovery_record() => {
+                        let delivery = recovery_delivery
+                            .as_ref()
+                            .ok_or_else(|| KernelError::FailClosed(
+                                "length recovery has no delivery facts".into(),
+                            ))?;
+                        let lever = recovery_lever
+                            .as_ref()
+                            .ok_or_else(|| KernelError::FailClosed(
+                                "length recovery has no capability decision".into(),
+                            ))?;
+                        let record = self
+                            .length_recovery_record(
+                                &failure,
+                                plan.class,
+                                effect_key,
+                                owner,
+                                &turn_id,
+                                cursor,
+                                now.wall_ms,
+                                now.wall_ms.saturating_add(plan.delay_ms.unwrap_or(0)),
+                                delivery,
+                                lever,
+                            )
+                            .map_err(KernelError::FailClosed)?;
+                        kernel::ModelRetryAdmission::RecoverLength {
+                            class: plan.class.to_owned(),
+                            record_json: record,
+                        }
+                    }
+                    Some(_) => kernel::ModelRetryAdmission::Retry {
+                        class: plan.class.to_owned(),
+                    },
+                    None => kernel::ModelRetryAdmission::Terminal {
+                        class: plan.class.to_owned(),
+                        message: refusal_message,
+                    },
+                };
+                controller.schedule_model_retry_admitted(
                     now.monotonic_ms,
                     now.wall_ms,
                     effect_key,
                     &failure_json,
                     provider,
-                    delay,
+                    plan.delay_ms.unwrap_or(0),
+                    admission,
                 )
             },
         )
@@ -1112,7 +2422,19 @@ impl<'a> KernelCoordinator<'a> {
         };
         input.messages=self.database.kernel_bound_initial_frame_messages(
             &self.binding.run_id,continuation_key,&dispatch_key)?;
-        let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+        // A retried initial/continuation request may carry the Host's retry
+        // instruction — the one controlled length recovery's recorded text, or the
+        // ordinary completion prompt — but only when this Run has no typed
+        // Host-job-notice lane: that lane's commit validates the frame's messages
+        // against the durable frozen sources, so appending a Host message there
+        // would fail closed. Without the lane the append is the same Host-owned
+        // model view the batch retry already uses.
+        let notice_lane = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+        if !notice_lane {
+            let retry_target = continuation_key.unwrap_or("initial");
+            input.messages = self.model_retry_context(retry_target, input.messages.clone())?;
+        }
+        let notice_mode = notice_lane;
         let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
         let new_notices = self.pending_host_job_notices(&input.messages)?;
         if continuation_lane.as_deref()==Some("job_notice") && new_notices!=frozen_notices {
@@ -1394,7 +2716,10 @@ impl<'a> KernelCoordinator<'a> {
         let _ = self.database.record_host_stage_point(
             &self.binding.run_id, &prepare_attempt, "context_prepare_started", observed_at,
         );
-        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        // The one controlled length recovery changes the request itself, so the
+        // derived configuration is what this dispatch must actually send. The
+        // frame built below carries the matching recorded instruction.
+        let (config, _) = self.dispatch_model_config(&kernel::batch_delivery_effect_key(batch_id))?;
         let frame = self.prepare_stored_batch_resume(batch_id)?;
         let extra = crate::kernel_compaction::bytes(&frame.assistant_message)?
             .saturating_add(crate::kernel_compaction::bytes(&frame.tools)?)
@@ -1426,7 +2751,18 @@ impl<'a> KernelCoordinator<'a> {
     ) -> Result<(), String> {
         let stored = self.database.kernel_rehydrate(&self.binding.run_id)?
             .ok_or("Kernel Run is missing")?;
-        if config.hash()? != stored.config.prompt_config_hash
+        // The identity guard is narrowed, never removed: a dispatch may carry the
+        // frozen configuration, or — only for the one controlled length recovery —
+        // the configuration re-derived from the frozen one plus the parameters the
+        // durable record authorizes. `derive_length_recovery_config` recomputes
+        // that derivation, so a stale or tampered record cannot smuggle in a
+        // different provider request.
+        let actual = config.hash()?;
+        let expected = self.expected_dispatch_config_hash(
+            &kernel::batch_delivery_effect_key(batch_id),
+            &stored.config.prompt_config_hash,
+        )?;
+        if actual != expected
             || config.execution_profile_id != self.binding.execution_profile_id {
             return Err("Kernel model configuration differs from the frozen Run".into());
         }

@@ -24,6 +24,30 @@ function objectProperties(schema) {
   return schema.properties
 }
 
+test('project compute and artifact publication preserve explicit Host inputs', async () => {
+  const requests = []
+  const tools = createHostTools(async (_type, payload) => {
+    requests.push(payload)
+    return { payload: { result: { files: [] } } }
+  })
+  const compute = toolByName(tools, 'attachment_compute')
+  const params = { projectPaths: ['材料/账本.xlsx'], code: 'return attachments[0].sheets.length;' }
+  assert.equal(Check(compute.parameters, params), true)
+  assert.equal(Check(compute.parameters, { ...params, projectRoot: 'C:/secret' }), false)
+  assert.equal(Check(compute.parameters, { ...params, projectPaths: ['x'.repeat(1025)] }), false)
+  assert.match(compute.description, /savePdf/)
+  assert.match(compute.description, /saveChart/)
+  await compute.execute('compute', params, new AbortController().signal)
+  assert.deepEqual(requests[0].input, params)
+  const write = toolByName(tools, 'write_file')
+  const publication = { path: 'report.pdf', artifactId: 'compute-artifact:verified' }
+  assert.equal(Check(write.parameters, publication), true)
+  await write.execute('publish', publication, new AbortController().signal)
+  assert.deepEqual(requests[1].input, publication)
+  const job = toolByName(tools, 'compute_job_start')
+  assert.equal(Check(job.parameters, { idempotencyKey: 'job', params: { ...params, processing: 'chunked' } }), true)
+})
+
 test('attachment pages retain continuation offsets and reject oversized page requests', async () => {
   const requests = []
   const tool = toolByName(createHostTools(async (type, payload) => {

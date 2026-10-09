@@ -98,6 +98,78 @@ fn project_settled_tools_on(
 }
 
 impl Database {
+    pub(crate) fn kernel_model_wait_identity(&self, run_id: &str) -> Result<Option<(i64,i64)>,String> {
+        self.with_connection(|connection| connection.query_row("SELECT model_request_since_wall_ms,
+            (SELECT MAX(seq) FROM kernel_events WHERE run_id=?1 AND event_type IN
+            ('engine.initial_dispatched','engine.batch_dispatched','engine.continuation_dispatched','context.compaction.dispatched'))
+            FROM kernel_runs WHERE run_id=?1 AND state IN ('running','compacting') AND model_request_since_wall_ms IS NOT NULL",
+            [run_id], |row| Ok((row.get(0)?, row.get(1)?))).optional())
+    }
+    /// Presentation telemetry, independent of the authoritative Kernel event
+    /// sequence. Only an open model request can produce a waiting notice.
+    pub(crate) fn record_kernel_model_waiting(&self, run_id: &str, request_id: &str,
+        elapsed_ms: i64, remaining_ms: i64, phase: &str, identity: Option<(i64,i64)>) -> Result<(), String> {
+        if !matches!(phase, "model_response" | "context_compaction") || elapsed_ms < 0 || remaining_ms < 0
+            || request_id.len() > 128 || request_id.is_empty() { return Err("invalid model waiting notice".into()); }
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let Some((since,dispatch_seq)) = identity else { return Ok(()); };
+            let active: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM kernel_runs WHERE run_id=?1
+                AND state IN ('running','compacting') AND model_request_since_wall_ms=?2 AND ?3=(SELECT MAX(seq)
+                FROM kernel_events WHERE run_id=?1 AND event_type IN ('engine.initial_dispatched','engine.batch_dispatched',
+                'engine.continuation_dispatched','context.compaction.dispatched')))", params![run_id,since,dispatch_seq], |row| row.get(0))?;
+            if active {
+                super::kernel_display::event(&transaction, run_id, &format!("model-waiting:{request_id}:{dispatch_seq}:{}", elapsed_ms/15_000),
+                    &serde_json::json!({"type":"run.model_waiting","phase":phase,"elapsedMs":elapsed_ms,"remainingMs":remaining_ms,
+                        "requestId":request_id,"dispatchSeq":dispatch_seq,"startedAt":since,
+                        "message":"仍在等待模型响应","outcomeKnown":false}), now_ms())?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+    /// Owned transport diagnostics use the presentation sequence, never the
+    /// Kernel decision sequence. The exact active dispatch must still own them.
+    pub(crate) fn record_kernel_response_diagnostic(&self, run_id: &str, request_id: &str,
+        turn_id: &str, checkpoint_seq: u64, worker: &Value, host_category: &str,
+        identity: Option<(i64,i64)>) -> Result<bool,String> {
+        if request_id.is_empty() || request_id.len() > 128 || turn_id.len() > 512
+            || worker.to_string().len() > 2048 || !matches!(host_category,
+                "worker_rejected"|"settled_model_failure"|"protocol_invalid"|"transport_outcome_unknown") {
+            return Err("invalid response diagnostic".into());
+        }
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let Some((since, dispatch_seq)) = identity else { return Ok(false); };
+            let active:bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM kernel_runs r
+                WHERE r.run_id=?1 AND r.state='running' AND r.model_request_since_wall_ms=?2
+                AND ?3=(SELECT MAX(seq) FROM kernel_events WHERE run_id=?1 AND event_type IN
+                ('engine.initial_dispatched','engine.batch_dispatched','engine.continuation_dispatched','context.compaction.dispatched'))
+                AND NOT EXISTS(SELECT 1 FROM kernel_host_commands WHERE run_id=?1 AND kind='cancel'))",
+                params![run_id,since,dispatch_seq],|row|row.get(0))?;
+            if !active { return Ok(false); }
+            let event:Value = transaction.query_row("SELECT payload_json FROM kernel_events WHERE run_id=?1 AND seq=?2",
+                params![run_id,dispatch_seq],|row|row.get::<_,String>(0))?
+                .parse().map_err(|_|notice_error("invalid dispatch diagnostic identity"))?;
+            if event["turnId"].as_str() != Some(turn_id) { return Ok(false); }
+            let batch_id=event["batchId"].as_str();
+            let effect:Option<(String,String,String,i64)> = transaction.query_row(
+                "SELECT effect_key,effect_type,status,attempts FROM kernel_effect_outbox WHERE run_id=?1
+                 AND status='leased' AND effect_type IN ('initial_model','continuation_model','deliver_tool_batch')
+                 AND ((?2 IS NOT NULL AND batch_id=?2) OR (?2 IS NULL AND batch_id IS NULL)) ORDER BY leased_at DESC LIMIT 1",
+                params![run_id,batch_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+            let Some((effect_key,effect_type,status,attempts))=effect else { return Ok(false); };
+            super::kernel_display::event(&transaction,run_id,&format!("response-diagnostic:{request_id}:{dispatch_seq}"),
+                &serde_json::json!({"type":"run.model_response_diagnostic","schemaVersion":1,"source":"host_response_admission",
+                    "runId":run_id,"requestId":request_id,"turnId":turn_id,"checkpointSeq":checkpoint_seq,
+                    "dispatchSeq":dispatch_seq,"startedAt":since,"batchId":batch_id,
+                    "effectKey":effect_key,"effectType":effect_type,"outboxStatus":status,"attempts":attempts,
+                    "hostCategory":host_category,"worker":worker,"resultAccepted":false,
+                    "externalEffectStatus":"unknown","replayDecision":"not_authorized_by_diagnostic"}),now_ms())?;
+            transaction.commit()?;
+            Ok(true)
+        })
+    }
     pub(crate) fn kernel_project_settled_tools(
         &self, run: &str, batch_id: &str, ordered: &[String],
     ) -> Result<Vec<fox_engine_protocol::KernelSettledToolResult>, String> {
@@ -3358,6 +3430,9 @@ impl Database {
                 )));
             }
             if cmd.run_state.is_terminal() {
+                if cmd.run_state == crate::kernel::RunState::Cancelled {
+                    super::delivery_checks::cancelled_unverified(&transaction, run_id, wall_now_ms)?;
+                }
                 transaction.execute(
                     "UPDATE kernel_approvals
                         SET state='cancelled', decided_at=?2

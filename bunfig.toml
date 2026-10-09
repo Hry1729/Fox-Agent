@@ -1,0 +1,8 @@
+# Register the DOM before any test module is evaluated.
+#
+# `react-dom/client` and `@radix-ui/react-use-layout-effect` each freeze a module-level
+# decision at first import; a per-file `GlobalRegistrator.register()` runs too late, because
+# a file's static imports are evaluated before its body. See
+# apps/desktop/tests/preload-happy-dom.ts for the full mechanism.
+[test]
+preload = ["./apps/desktop/tests/preload-happy-dom.ts"]

@@ -314,6 +314,10 @@ fn response(
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0]["failure"], "unknown_outcome");
         assert_eq!(failures[0]["retryable"], false);
+        assert_eq!(failures[0]["category"],"transport_outcome_unknown");
+        assert_eq!(failures[0]["outcomeKnown"],false);
+        assert!(failures[0]["upstreamMessage"].is_string());
+        assert_eq!(failures[0]["retryTimeline"],"no_run_retry_event_on_compaction_path");
     }
 
     /// Only a settled rejection may be retried; the classifier is the single place

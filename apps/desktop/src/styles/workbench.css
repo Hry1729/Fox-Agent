@@ -1,5 +1,12 @@
 .fox-shell {
   --fox-shell-chrome: rgba(255, 255, 255, .34);
+  /* One vertical rhythm for the sidebar's project and conversation rows: a
+     32px row built from a 28px inner control plus a 2px gap, so a project row,
+     a project's child conversation and a standalone conversation all read at the
+     same density. Knowledge-base navigation and notification rows keep their own
+     metrics; a semantic group distance stays available for group headers. */
+  --fox-sidebar-row-gap: var(--fox-space-micro);
+  --fox-sidebar-group-gap: var(--fox-space-s);
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -1054,7 +1061,7 @@
 .fox-shell .fox-project-row,
 .fox-shell .fox-project-action {
   width: 100%;
-  min-height: 34px;
+  min-height: var(--fox-sidebar-row-height);
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1070,10 +1077,10 @@
   transition: background 130ms ease, color 130ms ease;
 }
 
-/* The project title row stacked the 28px inner control inside 6px padding and ended
-   up 40px tall, four pixels taller than a conversation row. 3px lines them up. */
+/* The project title row stacks a 28px inner control; with the shared row gap as
+   padding it is exactly one 32px row, level with a conversation row. */
 .fox-shell .fox-project-row {
-  padding: 3px 10px;
+  padding: var(--fox-sidebar-row-gap) 10px;
 }
 
 .fox-shell .fox-sidebar-command {
@@ -1272,7 +1279,7 @@
 }
 
 .fox-project-group + .fox-project-group {
-  margin-top: 5px;
+  margin-top: var(--fox-sidebar-group-gap);
 }
 
 .fox-project-row-main {
@@ -1329,8 +1336,35 @@
 
 .fox-project-children {
   position: relative;
-  margin: 3px 0 0;
+  margin: var(--fox-sidebar-row-gap) 0 0;
   padding-left: 0;
+  /* Adjacent conversations inside a project take the same 2px step as the
+     standalone list; the semantic group distance above stays the one set on the
+     project group. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--fox-sidebar-row-gap);
+}
+
+/* Project children and standalone conversations share one row metric: a 32px
+   row whose inner control is the same 28px height the project row uses.
+   The selectors carry two classes on purpose: `.fox-sidebar-tree-row` is
+   declared later in this file with the same single-class specificity, so a bare
+   `.fox-project-conversation-row` rule lost its `min-height` back to 34px and
+   project children ended up a different height from standalone rows. Both
+   selectors stay scoped to the two conversation lists: knowledge-base
+   navigation and notification rows share `.fox-sidebar-tree-row` and keep their
+   own metrics. */
+.fox-project-children .fox-sidebar-tree-row,
+.fox-conversation-list .fox-sidebar-tree-row {
+  min-height: var(--fox-sidebar-row-height);
+  padding-block: var(--fox-sidebar-row-gap);
+}
+
+.fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
+.fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main {
+  min-height: var(--fox-inline-action-height);
+  height: var(--fox-inline-action-height);
 }
 
 /* A fixed trailing slot keeps status changes from moving the conversation title. */
@@ -1645,7 +1679,7 @@
 .fox-conversation-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: var(--fox-sidebar-row-gap);
 }
 
 .fox-sidebar-spacer {
@@ -2376,7 +2410,7 @@ button.fox-chat-project-row:disabled {
   border-bottom: 1px solid var(--fox-border);
 }
 
-.fox-summary-model > div:not(.fox-summary-context-track) {
+.fox-summary-model > div {
   min-width: 0;
   display: flex;
   align-items: center;
@@ -2401,23 +2435,9 @@ button.fox-chat-project-row:disabled {
   white-space: nowrap;
 }
 
-.fox-summary-context-copy strong {
-  font-variant-numeric: tabular-nums;
-}
-
-.fox-summary-context-track {
-  height: 4px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--fox-hover);
-}
-
-.fox-summary-context-track span {
-  height: 100%;
-  display: block;
-  border-radius: inherit;
-  background: var(--fox-accent);
-}
+/* The context-window usage readout, its percentage copy and its progress track
+   were removed from this header summary: context accounting is an internal
+   fact. Their dedicated rules are gone with them. */
 
 .fox-summary-list {
   display: grid;
@@ -3620,6 +3640,67 @@ img[src='/avatars/fox-assistant.png'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* No fixed fade here. `text-overflow` already draws the ellipsis only when the
+     line really does not fit; the soft trailing fade is added by
+     `.is-overflowing` below, which a real measurement toggles
+     (features/chat/row-overflow.ts). A short title therefore paints in full,
+     and the icon and action wording outside this element are never masked. */
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+/* The fade, once the element has been measured as cut. It is short, and it opens
+   back up over the last em so the ellipsis the browser paints at the right edge
+   stays fully opaque instead of dissolving into the fade — the ellipsis reads as
+   truncation, not as a smudge. */
+.fox-run-status-label.is-overflowing,
+.fox-run-step-tail.is-overflowing {
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 2.2em), transparent calc(100% - 1.2em), #000 calc(100% - 1em), #000 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 2.2em), transparent calc(100% - 1.2em), #000 calc(100% - 1em), #000 100%);
+}
+
+/* A row whose label is built from independent slots (action / path / source /
+   summary). The slots are laid out on one line, and only the trailing
+   source+summary region carries the ellipsis and the right-edge fade: the action
+   name and the row glyph must never be masked or clipped, however narrow the
+   panel is. The mask therefore lives on `.fox-run-step-tail`, not on the row, the
+   trigger or the whole label. */
+.fox-run-status-label.has-slots {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+.fox-run-step-action {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.fox-run-step-separator {
+  flex: 0 0 auto;
+  white-space: pre;
+}
+
+.fox-run-step-path-slot {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-run-step-tail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* The trailing source/summary region is the only part of a slotted row allowed
+     to fade, and only once it is measured as cut (see `.is-overflowing` above). */
+  mask-image: none;
+  -webkit-mask-image: none;
 }
 
 /* Running status text keeps the lighter thinking grey instead of falling back to
@@ -3868,6 +3949,13 @@ img[src='/avatars/fox-assistant.png'] {
   outline: 2px solid var(--fox-accent);
   outline-offset: 1px;
   border-radius: 3px;
+}
+
+/* Without an open handler the row still names its path, as ordinary text: no
+   button role, no pointer cursor, nothing that promises an action it cannot do. */
+.fox-runtime-step-path-plain {
+  color: inherit;
+  font: inherit;
 }
 
 .fox-runtime-path-menu {
@@ -6383,8 +6471,10 @@ img[src='/avatars/fox-assistant.png'] {
   height: 30px !important;
   flex: 0 0 30px;
   border-radius: 50% !important;
-  background: var(--fox-text) !important;
-  color: var(--fox-card) !important;
+  /* Blue in both themes: light blue by day, deep blue by night. The card/text
+     pair it used before inverted with the theme (black by day, white by night). */
+  background: var(--fox-send-surface) !important;
+  color: var(--fox-send-ink) !important;
   box-shadow: none !important;
 }
 
@@ -6397,9 +6487,13 @@ img[src='/avatars/fox-assistant.png'] {
   opacity: .86;
 }
 
+.fox-send-button:disabled {
+  opacity: .55;
+}
+
 .dark .fox-send-button {
-  background: var(--fox-text) !important;
-  color: var(--fox-canvas) !important;
+  background: var(--fox-send-surface) !important;
+  color: var(--fox-send-ink) !important;
 }
 
 .fox-resize-divider {
@@ -11167,8 +11261,35 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-result-detail {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   overflow: hidden;
+}
+
+/* The file's diagnostics live here, not on the answer card: change kind, publish
+   state, size, delivery version and verification state, then the delivery note. */
+.fox-result-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 0 12px 8px;
+  color: var(--fox-muted);
+  font-size: 11px;
+}
+
+.fox-result-file-meta span + span::before {
+  content: '·';
+  margin-right: 10px;
+  opacity: .55;
+}
+
+.fox-result-delivery-note {
+  margin: 0 12px 10px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: color-mix(in oklch, var(--fox-warning) 12%, var(--fox-card));
+  color: var(--fox-text);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .fox-result-detail-head {

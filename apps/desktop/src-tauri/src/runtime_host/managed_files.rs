@@ -292,7 +292,10 @@ pub(crate) fn verified_managed_write(
     let root_string = root.to_string_lossy().into_owned();
     match tool {
         "write_file" | "edit_file" => {
-            let target = crate::tool_host::prepare(tool, input, &root_string)
+            let prepared = if let Some(context) = context.filter(|c|c.sessions_dir.is_some()) {
+                crate::tool_host::prepare_with_artifact_context(tool,input,&root_string,context.database,context.sessions_dir.unwrap(),context.conversation_id)
+            } else {crate::tool_host::prepare(tool,input,&root_string)};
+            let target = prepared
                 .ok()?
                 .target_path()?
                 .to_path_buf();
@@ -547,14 +550,16 @@ pub(crate) fn execute_admitted_file(
     let Some(baseline) = credential.file_baseline.as_ref() else {
         return (Err("observation_incomplete".into()), ExecutionEvidence::NotStarted);
     };
-    let prepared = match crate::tool_host::prepare_admitted_file(tool, input,
-        context.project_root.unwrap_or_default(), &baseline.version) {
+    let prepare_result = if let Some(sessions)=context.sessions_dir {
+        crate::tool_host::prepare_admitted_file_with_artifact_context(tool,input,context.project_root.unwrap_or_default(),&baseline.version,context.database,sessions,context.conversation_id)
+    } else {crate::tool_host::prepare_admitted_file(tool,input,context.project_root.unwrap_or_default(),&baseline.version)};
+    let prepared = match prepare_result {
         Ok(prepared) => prepared,
         Err(error) => return (Err(error), ExecutionEvidence::NotStarted),
     };
     let expected_after_version = match &prepared {
-        crate::tool_host::PreparedToolAction::WriteFile { content, .. }
-        | crate::tool_host::PreparedToolAction::EditFile { content, .. } => crate::tool_host::file_version(content.as_bytes()),
+        crate::tool_host::PreparedToolAction::WriteFile { content, .. } => crate::tool_host::file_version(content),
+        crate::tool_host::PreparedToolAction::EditFile { content, .. } => crate::tool_host::file_version(content.as_bytes()),
         _ => return (Err("file admission cannot execute a non-file action".into()), ExecutionEvidence::NotStarted),
     };
     let mut hooks = Hooks { context, tool, tool_call_id, credential, before: None,

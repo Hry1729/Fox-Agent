@@ -5,8 +5,9 @@ import { mergeConversationDetail } from '../model/runtime-event-reducer'
 import { applyKernelModelPreview } from '../model/kernel-model-preview'
 import type { ConversationDetail, DesktopErrorDetails } from '../model/types'
 
-export function useKernelStateStream({ conversationId, setDetail, setError, setErrorDetails }: {
+export function useKernelStateStream({ conversationId, active = false, setDetail, setError, setErrorDetails }: {
   conversationId: string | null
+  active?: boolean
   setDetail: Dispatch<SetStateAction<ConversationDetail | null>>
   setError: Dispatch<SetStateAction<string | null>>
   setErrorDetails: Dispatch<SetStateAction<DesktopErrorDetails | null>>
@@ -55,6 +56,10 @@ export function useKernelStateStream({ conversationId, setDetail, setError, setE
     }).then(stop => { if (disposed) stop(); else stopPreviews = stop }).catch(() => {
       // Transient display is optional; durable state still refreshes normally.
     })
-    return () => { disposed = true; refresh.dispose(); unlisten?.(); stopPreviews?.() }
-  }, [conversationId, setDetail, setError, setErrorDetails])
+    // Waiting telemetry is durable presentation data; it does not advance the
+    // Kernel decision sequence or emit a state invalidation. Read it only while
+    // this selected Kernel run is active, using the same serialized merge path.
+    const timer = active ? window.setInterval(() => refresh.invalidate(), 2_500) : null
+    return () => { disposed = true; if (timer !== null) window.clearInterval(timer); refresh.dispose(); unlisten?.(); stopPreviews?.() }
+  }, [conversationId, active, setDetail, setError, setErrorDetails])
 }

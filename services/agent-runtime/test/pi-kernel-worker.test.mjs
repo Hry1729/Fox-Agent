@@ -287,7 +287,13 @@ test('HTTP rejection reports bounded evidence without SDK retry or provider cont
   const response = await child.request('kernel.resume_batch',resumePayload())
   assert.equal(response.type,'kernel.model_failure')
   assert.deepEqual(response.payload,{schemaVersion:1,runId:identity.runId,turnId:'turn-k',checkpointSeq:8,
-    category:'provider_unavailable',httpStatus:429,retryAfterMs:2000})
+    category:'provider_unavailable',httpStatus:429,retryAfterMs:2000,
+    // The settled failure carries the round facts the worker actually observed. Every
+    // value here is a real observation — the round settled with `stopReason: 'error'`
+    // and produced no text — so the counters are true zeros, not inferred ones. Nothing
+    // from the provider body crosses, which the leak assertion below still proves.
+    diagnostic:{stopReason:'error',textChars:0,thinkingChars:0,toolCallCount:0,
+      markerSeen:false,completionRequired:false}})
   assert.equal(calls,1)
   assert.doesNotMatch(JSON.stringify(response),/private|credentials|local-test-only|x-secret/)
   assert.equal((await child.request('kernel.resume_batch',resumePayload())).type,'request_failed')
@@ -371,7 +377,10 @@ test('Host cancellation aborts an active compaction and prevents any late result
   await new Promise(resolve=>setTimeout(resolve,150))
   const started=performance.now()
   assert.equal((await child.request('kernel.cancel')).type,'kernel.cancelling')
-  assert.equal((await pending).type,'request_failed')
+  const failure=await pending
+  assert.equal(failure.type,'kernel.compaction_failure')
+  assert.equal(failure.payload.category,'cancelled')
+  assert.equal(failure.payload.retryable,false)
   assert.ok(performance.now()-started<5000)
   assert.ok(child.events.every(event=>event.type!=='kernel.compaction_result'))
   assert.equal((await child.request('kernel.compact_context',compactionPayload())).type,'request_failed')
@@ -413,7 +422,10 @@ test('compaction rejects retained tool proposals, overlong summaries and model t
     const child=await worker(t)
     await child.request('kernel.initialize',initialization({proposalTools:[],modelService:{apiType:'faux',modelId:'summary-test',
       baseUrl:'http://localhost',fauxResponses:[response]}}))
-    assert.equal((await child.request('kernel.compact_context',compactionPayload())).type,'request_failed')
+    const failure=await child.request('kernel.compact_context',compactionPayload())
+    assert.equal(failure.type,'kernel.compaction_failure')
+    assert.equal(failure.payload.retryable,false)
+    assert.ok(failure.payload.upstreamMessage)
     assert.ok(child.events.every(event=>event.kind==='response'))
   }
 })
@@ -757,5 +769,89 @@ test('opt-in model previews keep provider reasoning separate from answer text wi
     assert.ok(previews[i].revision>(previews[i-1]?.revision ?? 0))
     assert.doesNotMatch(previews[i].text,/供应商提供的思考说明/)
     if (previews[i].progressBytes !== undefined) assert.ok(Number.isFinite(previews[i].progressBytes))
+  }
+})
+
+test('R1 real worker separates finish evidence, strict proposals and usage success', { timeout: 60000 }, async t => {
+  const cases = [
+    { name: 'cap-stop', finish: 'stop', text: 'complete', response: 'kernel.model_response' },
+    { name: 'length', finish: 'length', text: 'partial', response: 'kernel.model_failure', category: 'length' },
+    { name: 'truncated-tool', finish: 'length', arguments: '{"path":"never.txt"', response: 'request_failed', category: 'truncated_tool_proposal' },
+    { name: 'invalid-arguments', finish: 'tool_calls', arguments: '{"path":"never.txt"', response: 'request_failed', category: 'invalid_tool_arguments' },
+    { name: 'id-only-arguments', finish: 'tool_calls', noIndex: true, arguments: '{"path":"never.txt"', response: 'request_failed', category: 'invalid_tool_arguments' },
+    { name: 'over-observation-budget', finish: 'tool_calls', arguments: ' '.repeat(1_048_600) + '{"path":"never.txt"', response: 'request_failed', category: 'argument_validation_unavailable' },
+    { name: 'unknown-finish', arguments: '{"path":"never.txt"', response: 'request_failed', category: 'truncated_tool_proposal' },
+    { name: 'unknown-tool', finish: 'tool_calls', tool: 'private-upstream-command', arguments: '{}', response: 'request_failed', category: 'protocol_invalid' },
+  ]
+  for (const loop of [false, true]) for (const item of cases) {
+    let requests = 0
+    const server = createServer(async (req, res) => {
+      for await (const _ of req) {}
+      requests++
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const delta = item.arguments === undefined ? { role: 'assistant', content: item.text }
+        : { role: 'assistant', tool_calls: [{ ...(item.noIndex ? {} : { index: 0 }), id: 'proposal-r1', type: 'function',
+          function: { name: item.tool ?? 'read', arguments: item.arguments } }] }
+      res.write(`data: ${JSON.stringify({ id: 'r1', object: 'chat.completion.chunk', created: 1, model: 'r1-local',
+        choices: [{ index: 0, delta, ...(item.finish ? { finish_reason: item.finish } : {}) }],
+        usage: { prompt_tokens: 3, completion_tokens: 8192, total_tokens: 8195 } })}\n\n`)
+      res.end('data: [DONE]\n\n')
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    t.after(() => { server.closeAllConnections(); server.close() })
+    const child = await worker(t, ['--kernel-worker'], loop ? { onRoundOutput: () => ({ schemaVersion: 1, kind: 'final' }) } : {})
+    await child.request('kernel.initialize', initialization({ responseDiagnostics: 1, usageRecords: true,
+      modelService: { apiType: 'openai-completions', modelId: 'r1-local', maxOutputTokens: 8192,
+        baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'private-r1-key' } }))
+    const response = await child.request('kernel.resume_batch', resumePayload())
+    assert.equal(response.type, item.response, `${item.name} loop=${loop}`)
+    assert.equal(requests, 1, 'the worker never replays a failed proposal')
+    if (item.category) {
+      const diagnostic = response.payload.responseDiagnostic
+      assert.equal(diagnostic.category, item.category, `${item.name} loop=${loop}`)
+      assert.equal(diagnostic.providerFinishReason, item.name === 'over-observation-budget' ? 'unknown' : item.finish ?? 'unknown')
+      assert.equal(diagnostic.maxOutputTokens, 8192)
+      assert.equal(diagnostic.outputTokens, 8192)
+      assert.equal(diagnostic.checkpointSeq, 8)
+      assert.equal(diagnostic.resultComplete, false)
+      assert.doesNotMatch(JSON.stringify(diagnostic), /never.txt|private-upstream|private-r1-key|Read the file/)
+      assert.equal(child.roundOutputs.length, 0, 'invalid proposals cannot reach Host execution')
+    }
+    assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'request_failed')
+  }
+})
+
+test('R1 real worker accepts SDK-compatible SSE framing and complete large proposals', { timeout: 60000 }, async t => {
+  for (const framing of ['multiline', 'cr', 'wrong-content-type', 'after-done', 'large']) {
+    let requests = 0
+    const path = framing === 'large' ? 'p'.repeat(128 * 1024) : 'proof.txt'
+    const server = createServer(async (req, res) => {
+      for await (const _ of req) {}
+      const first = requests++ === 0
+      res.writeHead(200, { 'content-type': framing === 'wrong-content-type' ? 'application/json' : 'text/event-stream' })
+      const frame = { id: 'r1-compatible', object: 'chat.completion.chunk', created: 1, model: 'r1-local',
+        choices: [{ index: 0, delta: first ? { role: 'assistant', tool_calls: [{ id: 'r1-complete', type: 'function',
+          function: { name: 'read', arguments: JSON.stringify({ path }) } }] } : { role: 'assistant', content: 'complete' },
+          finish_reason: first ? 'tool_calls' : 'stop' }] }
+      let body = framing === 'multiline' ? JSON.stringify(frame, null, 2).split('\n').map(line => `data: ${line}`).join('\n') + '\n\n'
+        : `data: ${JSON.stringify(frame)}\n\n`
+      body += 'data: [DONE]\n\n'
+      if (framing === 'after-done') body += `data: ${'x'.repeat(1_048_600)}\n\n`
+      if (framing === 'cr') body = body.replaceAll('\n', '\r')
+      res.end(body)
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    t.after(() => { server.closeAllConnections(); server.close() })
+    const child = await worker(t, ['--kernel-worker'], { onRoundOutput: frame => frame.assistantMessage.stopReason === 'toolUse'
+      ? { schemaVersion: 1, kind: 'batch', batchId: 'complete-batch', checkpointSeq: 20,
+        tools: [{ toolCallId: 'r1-complete', tool: 'read', sourceOrder: 0, canonicalInput: { path }, state: 'completed',
+          result: { content: [{ type: 'text', text: 'Host settled' }] } }] }
+      : { schemaVersion: 1, kind: 'final' } })
+    await child.request('kernel.initialize', initialization({ responseDiagnostics: 1, modelService: {
+      apiType: 'openai-completions', modelId: 'r1-local', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-only' } }))
+    const response = await child.request('kernel.resume_batch', resumePayload())
+    assert.equal(response.type, 'kernel.model_response', framing)
+    assert.equal(requests, 2)
+    assert.equal(child.roundOutputs[0].assistantMessage.content.find(block => block.type === 'toolCall').arguments.path, path)
   }
 })

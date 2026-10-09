@@ -35,6 +35,8 @@ export function describeKernelRun(request) {
     expertBinding: prompt.expertBinding,
     skillPrompt: prompt.skillPrompt,
     runContext: prompt.runContext,
+    hostRuntimeCapabilities: prompt.hostRuntimeCapabilities,
+    capabilityManifestHash: prompt.hostRuntimeCapabilities?.capabilityManifestHash,
     conversationId: request.conversationId,
     model: modelService.modelId,
     executionProfile: executionProfileSnapshot(profile),

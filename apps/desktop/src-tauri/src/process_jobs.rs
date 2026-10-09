@@ -381,6 +381,32 @@ pub fn execution_availability() -> BackendAvailability {
     HostVerifiedBackend.availability()
 }
 
+/// Environment facts, separate from the engine's schema manifest. A catalog
+/// declares tool contracts; only the Host proof can declare start availability.
+pub fn runtime_capabilities(manifest_hash: &str, profile_id: &str) -> serde_json::Value {
+    let availability = execution_availability();
+    let (state, reason) = match &availability {
+        BackendAvailability::Available { .. } => ("available", None),
+        BackendAvailability::Unavailable(refusal) => ("unavailable", Some(refusal.reason())),
+    };
+    serde_json::json!({
+        "schemaVersion":1,"capabilityManifestHash":manifest_hash,"executionProfileId":profile_id,
+        "tools":{"run_command":{
+            "availability":state,"reasonCode":if availability.is_available(){None}else{Some("sandbox_unavailable")},
+            "reason":reason,"source":"HostVerifiedBackend",
+            "actions":{"start":state,"status":"available","output":"available","cancel":"available"}
+        }}
+    })
+}
+
+/// Check before approval and again before dispatch. Control-plane operations
+/// never start an external process and remain available.
+pub fn command_start_availability(action: Option<&str>) -> Result<(), String> {
+    if matches!(action, Some("status" | "output" | "cancel")) { return Ok(()); }
+    authorize_execution().map(|_| ()).map_err(|refusal|
+        format!("[tool.sandbox_unavailable] {}. No process was started. Use available in-process tools; retrying this command cannot provide a backend.", refusal.reason()))
+}
+
 /// The production authorization seam: always refuses on this Host.
 ///
 /// Callers that own no injectable proof use this, which keeps them fail-closed.

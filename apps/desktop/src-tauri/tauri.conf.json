@@ -33,6 +33,7 @@
     "targets": "all",
     "resources": {
       "resources/officecli/*": "officecli/",
+      "resources/pdf-renderer/*": "pdf-renderer/",
       "../../../services/agent-runtime/src/fake-runtime.mjs": "agent-runtime/fake-runtime.mjs",
       "../../../services/agent-runtime/src/pi-runtime.mjs": "agent-runtime/pi-runtime.mjs",
       "../../../services/agent-runtime/src/offline-evaluator.mjs": "agent-runtime/offline-evaluator.mjs",

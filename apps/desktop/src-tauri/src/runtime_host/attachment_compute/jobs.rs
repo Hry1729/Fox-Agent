@@ -598,6 +598,8 @@ pub(crate) fn run(
     }
     let progress = Arc::clone(&context.progress);
     let stop = context.stop.clone();
+    let project_inputs = super::authorize_project_inputs(&context.database, &context.conversation_id, &context.run_id, &input)
+        .map_err(|message| ComputeJobError { code: codes::INVALID_PARAMS, message })?;
     let result = super::execute_with_options(
         &context.database,
         &context.attachments_dir,
@@ -609,6 +611,7 @@ pub(crate) fn run(
         super::ComputeOptions {
             deadline: Some(context.deadline),
             progress: Some(&*progress),
+            project_inputs: Some(&project_inputs),
         },
     );
     match result {

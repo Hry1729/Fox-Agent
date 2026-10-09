@@ -2,6 +2,22 @@
 import { validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { validateKernelControl } from './control-binding.mjs'
 import { runPiKernelModel } from './pi-kernel-batch-resume.mjs'
+import { describeKernelError } from './pi-kernel-diagnostics.mjs'
+
+export function compactionFailureDiagnostic(error, request, { rejection, final, cancelled = false } = {}) {
+  const detail = describeKernelError(error) ?? {}
+  const noOutput = final?.role === 'assistant' && final.stopReason === 'error'
+    && !(final.content ?? []).some(block => block?.type === 'toolCall' || block?.text?.length || block?.thinking?.length)
+  const settled = noOutput && rejection?.category === 'provider_unavailable'
+  const invalid = /Invalid Host context compaction|Invalid Host context compaction request or result/i.test(detail.message ?? '')
+  return { schemaVersion: 1, runId: request.runId, compactionId: request.payload?.compaction?.compactionId,
+    category: settled ? 'provider_unavailable' : cancelled ? 'cancelled' : invalid ? 'invalid_result' : 'unknown',
+    httpStatus: settled ? rejection.httpStatus : detail.status ?? null,
+    upstreamMessage: detail.message ?? 'No upstream message was supplied',
+    upstreamCode: detail.code ?? detail.name ?? null,
+    outcomeKnown: settled || invalid,
+    retryable: settled }
+}
 
 const fail = () => { throw new Error('Invalid Host context compaction request or result') }
 // Bounded summarizer request frame (#14): 256 KiB of UTF-8 JSON. This is a

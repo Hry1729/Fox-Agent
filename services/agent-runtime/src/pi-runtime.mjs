@@ -539,6 +539,8 @@ async function executePrompt(request) {
     expertBinding: request.payload?.expertBinding,
     expertPackage: request.payload?.expertPackage,
     runContext: request.payload?.runContext,
+    hostRuntimeCapabilities: request.payload?.hostRuntimeCapabilities,
+    capabilityManifestHash: request.payload?.controlBinding?.capabilityManifestHash,
     conversationId: request.conversationId,
     runtimeSessionId: request.runtimeSessionId,
     model: modelService.modelId,

@@ -1009,6 +1009,27 @@ fn schema_requires_output_or_name(schema: &Value) -> bool {
         })
 }
 
+/// Whether a built-in Office call of this tool is a mutating one, given that
+/// tool's own parameters.
+///
+/// `arguments` is the Office tool's parameter object (the `arguments` member of
+/// the MCP call), **not** the call envelope: the write targets live at
+/// `arguments.output` / `arguments.name`, so passing the envelope would read the
+/// wrong level and classify every ordinary write as a read.
+///
+/// This is a *diagnostic rule mapping*, not a shared implementation: it mirrors
+/// the target-resolution rule in `prepare_with_context` — `office_render` always
+/// writes a Host-side output, and every other tool mutates once it resolved an
+/// `output`/`name` target — and the two are kept consistent by review rather than
+/// by calling one from the other. The Host consults this only after establishing
+/// the built-in Office identity (the frozen `serverId`), so an operation class is
+/// never named for a connector tool that happens to share a name.
+pub(crate) fn tool_mutates(tool: &str, arguments: &Value) -> bool {
+    tool == "office_render"
+        || arguments.get("output").and_then(Value::as_str).is_some()
+        || arguments.get("name").and_then(Value::as_str).is_some()
+}
+
 pub fn prepare_with_context(
     tool: &str,
     input: &Value,

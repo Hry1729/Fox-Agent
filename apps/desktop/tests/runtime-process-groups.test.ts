@@ -125,15 +125,18 @@ test('ranks distinct call IDs by count and first appearance, including knowledge
   expect(activeProcessGroupTitle('search_code')).toBe('正在搜索代码')
 })
 
-test('the process header never quotes non-Chinese private reasoning', () => {
-  // The header line is user-facing. Raw model thinking may be English, so the
-  // reasoning caller falls back to a Chinese status instead of echoing it.
-  expect(activeProcessDetail('reasoning', { title: 'The user wants me to inspect the file and then' })).toBe('正在思考')
-  expect(activeProcessDetail('reasoning', { title: '' })).toBe('正在思考')
-  expect(activeProcessDetail('reasoning')).toBe('正在思考')
-  // Genuine Chinese thinking still wins: the summary keeps the real state.
+test('the process detail line reports what it was given, in the language it was given in', () => {
+  // A script test cannot establish that a thought is still running, so the line no
+  // longer substitutes a Chinese status for reasoning the model wrote otherwise: the
+  // row's own state supplies 正在思考 / 深度思考 and the text stays as written.
+  expect(activeProcessDetail('reasoning', { title: 'The user wants me to inspect the file and then' }))
+    .toBe('The user wants me to inspect the file and then')
   expect(activeProcessDetail('reasoning', { title: '正在核对表格的合计行' })).toBe('正在核对表格的合计行')
-  // Tool callers keep their own identifiers, paths and commands verbatim.
+  // No reasoning text at all: nothing is invented — the row keeps only its prefix.
+  expect(activeProcessDetail('reasoning', { title: '' })).toBe('')
+  expect(activeProcessDetail('reasoning')).toBe('')
+  // Tool callers keep their own identifiers, paths and commands verbatim, and an
+  // evidence-free tool row keeps its action name rather than a guessed status.
   expect(activeProcessDetail('read', { path: 'src/main.rs' })).toBe('src/main.rs')
   expect(activeProcessDetail('run_command', { command: 'pnpm exec tsc --noEmit' })).toBe('pnpm exec tsc --noEmit')
   expect(activeProcessDetail('read')).toBe('read')

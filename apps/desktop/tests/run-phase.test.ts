@@ -14,7 +14,9 @@ describe('run phase from durable events', () => {
     // 585 seconds waiting for an execution slot, as observed in the production runs.
     expect(timing.queueMs).toBe(585_000)
     expect(timing.executionMs).toBeNull()
-    expect(runPhaseTitle(timing)).toBe('准备执行 · 已等待 9分45秒')
+    // The label is the phase alone: the run's single timer sits beside the avatar,
+    // so gluing the same interval into this line reported it twice.
+    expect(runPhaseTitle(timing)).toBe('准备执行')
   })
 
   test('an unknown enqueue time stays unknown instead of being estimated', () => {
@@ -32,14 +34,16 @@ describe('run phase from durable events', () => {
     expect(waiting.phase).toBe('awaiting_response')
     expect(waiting.queueMs).toBe(1000)
     expect(waiting.executionMs).toBe(36_000)
-    expect(runPhaseTitle(waiting)).toBe('等待模型响应 · 已等待 36秒')
+    // The wait is still reported — as the timing facts above, not as a second timer
+    // glued into the status line.
+    expect(runPhaseTitle(waiting)).toBe('等待模型响应')
 
     const streaming = runPhaseTiming(
       [started, event(2, 'reasoning.delta', { delta: '先分析' }, 3000)],
       { queuedAt: 1000, now: 10_000 },
     )
     expect(streaming.phase).toBe('streaming')
-    expect(runPhaseTitle(streaming)).toBe('正在生成 · 已用时 8秒')
+    expect(runPhaseTitle(streaming)).toBe('正在生成')
   })
 
   test('a streamed answer segment counts as generation, not as a wait', () => {

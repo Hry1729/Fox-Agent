@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { hostRuntimeCapabilitiesPrompt } from './host-runtime-capabilities.mjs'
 import {
   buildPromptCacheIdentity,
   renderPromptPrefix,
@@ -849,14 +850,15 @@ export function stablePromptHash(prompt) {
  * drift apart.
  */
 export function buildFilePlacement(projectContext) {
-  if (!projectContext || typeof projectContext.deliverableRoot !== 'string' || !projectContext.deliverableRoot) {
+  if (!projectContext || (!projectContext.deliveryTargets && (typeof projectContext.deliverableRoot !== 'string' || !projectContext.deliverableRoot))) {
     return null
   }
   return {
-    deliverableRoot: projectContext.deliverableRoot,
+    deliverableRoot: projectContext.deliverableRoot ?? null,
     deliverableFolder: projectContext.deliverableFolder ?? null,
     processFilePolicy: projectContext.processFilePolicy ?? null,
     previewPolicy: projectContext.previewPolicy ?? null,
+    deliveryTargets: projectContext.deliveryTargets ?? null,
   }
 }
 
@@ -931,6 +933,17 @@ export function composeFoxPrompt({
   }
 
   const sections = [
+    ...(hostRuntimeCapabilitiesPrompt(context.hostRuntimeCapabilities, {
+      capabilityManifestHash: context.capabilityManifestHash,
+      executionProfileId: context.executionProfile?.id,
+    }) ? [typedSection({
+      id: 'host_runtime_availability', kind: 'runtime', authority: 'runtime', priority: 100,
+      minimumChars: 2_000, maxChars: 6_000, lifecycle: 'session',
+      content: hostRuntimeCapabilitiesPrompt(context.hostRuntimeCapabilities, {
+        capabilityManifestHash: context.capabilityManifestHash,
+        executionProfileId: context.executionProfile?.id,
+      }),
+    })] : []),
     ...(assistantPersona ? [typedSection({
       id: 'assistant_persona', kind: 'assistant_persona', authority: 'runtime', priority: 80, minimumChars: 512, maxChars: 12_000, lifecycle: 'session',
       content: bounded([
@@ -992,7 +1005,7 @@ export function composeFoxPrompt({
       id: 'workspace', kind: 'workspace', authority: 'workspace', priority: 40, minimumChars: 256, maxChars: 4_500, lifecycle: 'session',
       content: bounded([
         'Workspace paths and permission information are reference data. Follow Fox tools for authorization.',
-        'filePlacement tells you where a produced file belongs. deliverableRoot is the Host-chosen result folder for this conversation: use it for new final results, reuse it for a continuation of the same task, and do not create new results in the project root. Intermediate computation stays in the Host private workspace and is reused by artifactId. Previews are Host-private and reached through the saved result. An explicit path the user named, and the original path of a file being edited, always win.',
+        'filePlacement.deliveryTargets is the Host-resolved target set for this task. A named target path wins exactly, including a bare filename at the project root; never prepend deliverableRoot to such a path. An unnamed target uses its frozen directory; only a genuinely unspecified result uses deliverableRoot. Reuse the same frozen targets for repair and continuation. If recognition is unresolved, state that file-delivery requirements remain unverified and request clarification; do not invent targets or claim verification. The original path of an explicitly edited file wins. Intermediate computation and previews stay Host-private.',
         jsonBlock({
           projectRoot: context.projectRoot || null,
           permissionMode,

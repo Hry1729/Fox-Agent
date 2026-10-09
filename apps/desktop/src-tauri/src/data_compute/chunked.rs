@@ -252,7 +252,7 @@ where
                 return Err("data-compute was cancelled".to_owned());
             }
             if interrupt == INTERRUPT_TIMEOUT {
-                return Err("data-compute timed out".to_owned());
+                return Err("[tool.computation_timed_out] data-compute timed out".to_owned());
             }
             return Err(error);
         }
@@ -261,7 +261,7 @@ where
         return Err("data-compute was cancelled".to_owned());
     }
     if interrupted.load(Ordering::Relaxed) == INTERRUPT_TIMEOUT || Instant::now() >= deadline {
-        return Err("data-compute timed out".to_owned());
+        return Err("[tool.computation_timed_out] data-compute timed out".to_owned());
     }
     if envelope.as_bytes().len() > MAX_SCRIPT_RESULT_BYTES {
         return Err(format!(
@@ -280,7 +280,7 @@ where
             MAX_RESULT_BYTES
         ));
     }
-    let output_specs = parse_output_specs(envelope.get("files"))?;
+    let output_specs = super::parse_output_specs_with_limits(envelope.get("files"), &*cancelled, deadline)?;
     let files = write_outputs(output_root, output_specs)?;
     let output_bytes = files
         .iter()
@@ -902,6 +902,13 @@ fn build_chunked_script(code: &str) -> (String, usize) {
   };
   globalThis.attachments = attachments;
   globalThis.saveFile = saveFile;
+  globalThis.savePdf = (name, spec) => { __foxSavedFiles.push({name: String(name), format: "pdf", spec}); return {name: String(name)}; };
+  globalThis.saveChart = (name, spec) => { __foxSavedFiles.push({name: String(name), format: "chart", spec}); return {name: String(name)}; };
+"#,
+    );
+    script.push_str(super::TABLE_HELPERS);
+    script.push_str(
+        r#"
   (() => {
     "use strict";
 "#,
@@ -935,6 +942,21 @@ fn build_chunked_script(code: &str) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
+    // Authored for a later user run; not executed by R3B.
+    #[test]
+    fn r3b_chunked_installs_the_same_table_export_and_hash_contract() {
+        let root=workspace("r3b-table");let source=csv_fixture(&root,3);
+        let response=execute(&[("a".to_owned(),source)],&root.join("out"),&json!({"code":r#"
+            let count=0;
+            function onChunk(chunk){for(const row of chunk.rows){if(row[0]!=='id')count++;}}
+            function onFinish(){saveTable('summary.csv',{columns:['key','count'],keyColumns:['key'],rows:[[scalarKey('rows'),count]]});return count;}
+        "#}),||false,deadline(5),&|_|{}).unwrap();
+        assert_eq!(response["result"],3);
+        let file=&response["files"][0];let bytes=fs::read(file["path"].as_str().unwrap()).unwrap();
+        assert_eq!(hex::encode(sha2::Sha256::digest(&bytes)),file["renderedHash"].as_str().unwrap());
+        assert_eq!(file["dataContract"]["keyColumns"],json!(["key"]));
+    }
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 

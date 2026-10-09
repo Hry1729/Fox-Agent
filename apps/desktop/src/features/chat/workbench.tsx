@@ -7,16 +7,19 @@ import { RuntimeApprovalPrompt } from './components/RuntimeApprovalPrompt'
 import type { ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { runtimeProcessActivity } from './runtime-process-activity'
 import { runPhaseTiming, runPhaseTitle } from './run-phase'
+import { stepExtraSource, attachmentSourceNames } from './step-source-summary'
 import type { ConversationRunIndicator } from './conversation-run-indicator'
 import { useProcessScroll } from './use-process-scroll'
 import { useProcessDisplayMode, type ProcessDisplayMode } from './process-display-mode'
 import { TurnProcessHeader } from './turn-process-header'
+import { OVERFLOW_CLASS, useOverflowFade } from './row-overflow'
 import { ConversationStatusIcon } from './conversation-status-icon'
 import { useVisibleCompletionAcknowledgement } from './use-conversation-completion-notices'
 import { sidebarProjectGroups, type SidebarProjectGroup } from './sidebar-project-groups'
 import { useProjectCatalog } from '@/features/conversations/hooks/use-project-catalog'
 import { toolAttemptReason, toolAttemptState, TOOL_ATTEMPT_REASON_LABELS, TOOL_ATTEMPT_STATE_LABELS, type ToolAttemptState } from './tool-attempt-status'
-import { RuntimeArtifacts } from './runtime-artifacts'
+import { RuntimeArtifacts, artifactSummaryLine, artifactVerificationLabel, formatFileSize } from './runtime-artifacts'
+import { activeModelWaiting, compactionFailurePresentation, modelWaitingTitle, safeDiagnosticText, toolFailurePresentation } from './run-status-facts'
 import './runtime-process-groups.css'
 import './runtime-process-row.css'
 import { executionReceiptPresentation, type ExecutionReceiptPresentation } from './execution-receipt'
@@ -265,7 +268,7 @@ import { useGoalProgress, type GoalProgressData } from './hooks/use-goal-progres
 import type { MessageResponseProps } from '@/components/ai-elements/message-response'
 import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
 import { UserProfileDialog, useUserProfile, type UserProfile } from '@/features/profile/user-profile'
-import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, latestConversationContextUsage, normalizeBrowserUrl, webActivitySummary, type ConversationUsage } from './sidebar-model'
+import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, normalizeBrowserUrl, webActivitySummary } from './sidebar-model'
 import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords, latestRunAssistantId, groupAssistantContinuations } from './runtime-timeline-performance'
 import { deriveRunTerminalStates, type RunFailure } from '../conversations/model/run-failure'
 
@@ -403,12 +406,6 @@ function requestConversationFork(messageId: string) {
 function isConfirmationQuestion(question: RuntimeQuestion) {
   if (question.options.length !== 2 || question.multiSelect) return false
   return question.options.every((option) => /确认|取消|同意|拒绝|继续|停止|是|否|yes|no/i.test(option.label))
-}
-
-function compactTokenCount(value: number) {
-  if (value < 1000) return String(value)
-  const compact = value >= 10000 ? Math.round(value / 1000) : Math.round(value / 100) / 10
-  return `${compact}k`
 }
 
 async function copyTextWithFeedback(text: string, successMessage: string) {
@@ -1314,7 +1311,10 @@ export function Sidebar({
               return <div className="fox-project-group" key={project.key}>
                 <ContextMenu>
                   <ContextMenuTrigger asChild>
-                    <div className={`fox-project-row ${project.items.some((item) => item.active) ? 'is-active' : ''}`}>
+                    {/* The project row is a container, not a selected row: a child
+                        conversation being active must not light up its project
+                        as well, or the sidebar shows two selections at once. */}
+                    <div className="fox-project-row">
                       <button type="button" className="fox-project-row-main" title={project.root} aria-expanded={open} onClick={() => setProjectOpen((current) => ({ ...current, [project.key]: !open }))}>
                         {open ? <FolderOpen size={15} /> : <Folder size={15} />}
                         <strong>{project.name}</strong>
@@ -1882,13 +1882,10 @@ function attachmentIds(input: Record<string, unknown>) {
   return [...new Set(ids)]
 }
 
-function abbreviateId(value: string) {
-  return value.length > 14 ? `${value.slice(0, 12)}…` : value
-}
-
 /** The name an attachment tool acts on. The model usually passes only an id, so
  *  the settled result's `displayName` and the conversation's attachment list are
- *  consulted before falling back to a shortened id. */
+ *  consulted. An id neither of them can name contributes nothing: a shortened
+ *  internal identifier is not a file name and must never reach the row. */
 function attachmentSubject(tool: RuntimeToolStep, attachmentNames?: ReadonlyMap<string, string>) {
   const input = toolInput(tool)
   const named = compactValue(input.name || input.title || input.attachmentName || input.fileName || input.displayName)
@@ -1907,7 +1904,9 @@ function attachmentSubject(tool: RuntimeToolStep, attachmentNames?: ReadonlyMap<
   const resolved = ids.map((id) => attachmentNames?.get(id)).filter((value): value is string => Boolean(value))
   if (resolved.length > 1) return `${resolved.length} 个附件`
   if (resolved.length === 1) return resolved[0]
-  return ids.length > 1 ? `${ids.length} 个附件` : abbreviateId(ids[0])
+  // Counted, never named: how many attachments a call touched is a fact, the id
+  // itself is an internal handle the reader has no use for.
+  return ids.length > 1 ? `${ids.length} 个附件` : ''
 }
 
 /** `call_mcp_tool` hides the real Office tool inside its payload, so the row
@@ -1920,59 +1919,99 @@ function officeToolSubject(tool: RuntimeToolStep) {
   return tool.name
 }
 
-/** One verbed line per tool call, e.g. `读取文件 · src/a.ts`, `执行命令 · pnpm test`. */
-function toolActivity(tool: RuntimeToolStep, attachmentNames?: ReadonlyMap<string, string>) {
+/** One row's line, split into independent slots.
+ *
+ *  Interaction is decided on the slots themselves — "is there a path and a
+ *  handler?" — and never by reading the rendered string back. Appending a source
+ *  therefore cannot take the path's click away, and cannot reorder the line. */
+type RuntimeStepSlots = {
+  /** The verb/action name only: never the path and never the source. */
+  action: string
+  /** The file or directory the call names, when the call names one. */
+  path: string
+  /** The real source: a worksheet, a page title/host, the conversation's name for
+   *  an uploaded attachment. Never an internal id, argument body or diagnostic. */
+  source: string
+  /** A supplementary one-line summary: a query, a command, a URL, a tool name. */
+  summary: string
+}
+
+/** The flat wording of a slotted row — the accessible text and the line a caller
+ *  that renders plain text (the collapsed process title) still needs. */
+function stepSlotsText(slots: RuntimeStepSlots) {
+  return [slots.action, slots.path, slots.source, slots.summary].filter(Boolean).join(' · ')
+}
+
+/** One verbed line per tool call, split into its slots, e.g.
+ *  `读取文件 · src/a.ts · 工作表「明细」`. The action slot is the verb alone; the
+ *  path slot is the path the reader can open; the source slot is evidence from the
+ *  call's own fields or its result, resolved through the conversation's own tables. */
+function toolRowSlots(tool: RuntimeToolStep, attachmentNames?: ReadonlyMap<string, string>): RuntimeStepSlots {
   const input = toolInput(tool)
   const path = toolSubjectPath(tool)
   const query = compactValue(input.pattern || input.query || input.search)
   const command = compactValue(input.command || input.cmd || input.script)
   const url = compactValue(input.url || input.href || input.link)
-  const subject = path || query || command || url
-  const detail = subject ? ` · ${subject}` : ''
   const category = toolCategory(tool)
-  const attachment = attachmentSubject(tool, attachmentNames)
-  const attachmentDetail = attachment ? ` · ${attachment}` : ''
-  if (category === 'ask') return tool.awaitingUser ? '等待你的回答' : '正在向你提问'
+  const extraSource = stepExtraSource(tool.name, tool.input, tool.output)
+  // An attachment id is resolved to the conversation's own name for it; an id that
+  // cannot be resolved contributes nothing rather than surfacing as an internal id.
+  const attachmentSource = attachmentSourceNames(tool.input, attachmentNames)
+  if (category === 'ask') return { action: tool.awaitingUser ? '等待你的回答' : '正在向你提问', path: '', source: '', summary: '' }
   if (tool.isError) {
-    const errorName = category === 'office' ? officeToolSubject(tool) || tool.name : tool.name
-    const errorDetail = category === 'attachment' || category === 'compute' ? attachmentDetail : detail
-    return `工具调用未成功 · ${errorName}${errorDetail}`
+    // The same whitelist sentence the expanded row shows. `failure.operation`,
+    // `target` and `summary` are already display facts; the raw diagnostic body
+    // stays in the durable record and is never transcribed into any slot.
+    const failure = toolFailurePresentation(tool.name, tool.output)
+    return {
+      action: '工具调用未成功',
+      path,
+      source: extraSource || attachmentSource,
+      summary: [failure.operation, failure.target, failure.summary].filter(Boolean).join(' · '),
+    }
   }
-
+  // Attached-workbook calls name their file: a worksheet the call reported, a
+  // project path the caller named, or the conversation's name for the upload.
+  const attachment = category === 'attachment' || category === 'compute'
+    ? attachmentSubject(tool, attachmentNames)
+    : ''
+  const source = extraSource || attachmentSource || attachment
   // Named tools stay verbed so every call reads as its own status line.
   switch (category) {
     case 'attachment':
-      return `${tool.completed ? '读取附件' : '正在读取附件'}${attachmentDetail}`
+      return { action: tool.completed ? '读取附件' : '正在读取附件', path, source, summary: '' }
     case 'compute':
-      return `${tool.completed ? '计算附件数据' : '正在计算附件数据'}${attachmentDetail}`
-    case 'office': {
-      const target = officeToolSubject(tool)
-      return `${tool.completed ? '调用工具' : '正在调用'}${target ? ` · ${target}` : ''}`
-    }
+      return { action: tool.completed ? '计算附件数据' : '正在计算附件数据', path, source, summary: '' }
+    case 'office':
+      return { action: tool.completed ? '调用工具' : '正在调用', path, source, summary: officeToolSubject(tool) }
     case 'connector':
-      return '列出连接器工具'
+      return { action: '列出连接器工具', path: '', source, summary: '' }
     case 'directory':
-      return `${tool.completed ? '查看目录' : '正在查看目录'}${detail}`
+      return { action: tool.completed ? '查看目录' : '正在查看目录', path, source, summary: '' }
     case 'find':
-      return `${tool.completed ? '查找文件' : '正在查找'}${query ? ` · ${query}` : ''}${path ? ` · ${path}` : ''}`
+      return { action: tool.completed ? '查找文件' : '正在查找', path, source, summary: query }
     case 'search':
-      return `${tool.completed ? '搜索内容' : '正在搜索'}${query ? ` · ${query}` : ''}${path ? ` · ${path}` : ''}`
+      return { action: tool.completed ? '搜索内容' : '正在搜索', path, source, summary: query }
     case 'command':
-      return `${tool.completed ? '执行命令' : '正在执行'}${detail}`
+      return { action: tool.completed ? '执行命令' : '正在执行', path, source, summary: command }
     case 'web':
-      return `${tool.completed ? '访问网页' : '正在访问'}${detail}`
+      return { action: tool.completed ? '访问网页' : '正在访问', path, source, summary: url }
     case 'skill':
-      return `${tool.completed ? '加载技能' : '正在加载技能'}${detail}`
+      return { action: tool.completed ? '加载技能' : '正在加载技能', path, source, summary: query || command || url }
     case 'file':
-      return `${tool.completed ? '读取文件' : '正在读取'}${detail}`
+      return { action: tool.completed ? '读取文件' : '正在读取', path, source, summary: query || command || url }
     case 'edit':
-      return `${tool.completed ? '已编辑' : '正在编辑'}${detail}`
+      return { action: tool.completed ? '已编辑' : '正在编辑', path, source, summary: query || command || url }
     case 'data':
-      return `${tool.completed ? '读取数据' : '正在读取'}${detail}`
+      return { action: tool.completed ? '读取数据' : '正在读取', path, source, summary: query || command || url }
     default:
       // Generic tools read as `调用工具 · <name>` (single separator, like 深度思考 · …).
-      return `${tool.completed ? '调用工具' : '正在调用'} · ${tool.name}`
+      return { action: tool.completed ? '调用工具' : '正在调用', path, source, summary: tool.name }
   }
+}
+
+function toolActivity(tool: RuntimeToolStep, attachmentNames?: ReadonlyMap<string, string>) {
+  return stepSlotsText(toolRowSlots(tool, attachmentNames))
 }
 
 /** The glyph follows the row's verb family: files stay files and commands stay
@@ -2090,31 +2129,6 @@ function runtimeProcess(events: RunEventRecord[]) {
   }
 }
 
-function latestRuntimeDiagnostics(events: RunEventRecord[]) {
-  const snapshot = [...events].reverse().find((item) => item.eventType === 'run.request_snapshot')?.event
-  const phase = [...events].reverse().find((item) => item.eventType === 'run.phase')?.event.phase
-  const retries = events.filter((item) => item.eventType === 'run.retrying').length
-  const compactions = events.filter((item) => item.eventType === 'context.compaction.completed').length
-  const planner = [...events].reverse().find((item) => (
-    item.eventType === 'planner.completed' || item.eventType === 'planner.failed'
-  ))
-  const toolNames = Array.isArray(snapshot?.toolNames)
-    ? snapshot.toolNames.filter((name): name is string => typeof name === 'string')
-    : []
-  return {
-    provider: typeof snapshot?.provider === 'string' ? snapshot.provider : '',
-    apiType: typeof snapshot?.apiType === 'string' ? snapshot.apiType : '',
-    baseUrl: typeof snapshot?.baseUrl === 'string' ? snapshot.baseUrl : '',
-    phase: typeof phase === 'string' ? phase : '',
-    retries,
-    compactions,
-    plannerStatus: planner?.eventType === 'planner.completed'
-      ? '计划已生成'
-      : planner?.eventType === 'planner.failed' ? '计划已回退' : '',
-    toolCount: toolNames.length,
-  }
-}
-
 function RuntimeSources({ sources, knowledgeBindings = [], onOpenSource }: { sources: RuntimeSource[]; knowledgeBindings?: KnowledgeBindingRecord[]; onOpenSource?: (source: RuntimeSource) => void }) {
   const [selectedSource, setSelectedSource] = useState<RuntimeSource | null>(null)
   const selectedKnowledgeName = selectedSource
@@ -2152,7 +2166,7 @@ function isFoldableProcessTarget(root: HTMLElement | null, node: Node | null) {
 }
 
 function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, kernelMessages, running, runInProgress = false, hasInterleavedInput = false, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled, queuedAt }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; runInProgress?: boolean; hasInterleavedInput?: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean; /** When the prompt that started this run was written, so queue wait is real. */ queuedAt?: number | null }) {
-  const { authoritativeRunId } = useContext(TimelineRuntimeContext)
+  const { authoritativeRunId, authoritativeRunState } = useContext(TimelineRuntimeContext)
   const processDisplayMode = useProcessDisplayMode()
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
   const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
@@ -2160,9 +2174,15 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   // live can be a later slice that no longer contains `run.started`.
   const liveNow = useLiveNow(running)
   const phaseTitle = useMemo(
-    () => runPhaseTitle(runPhaseTiming(processEvents, { queuedAt, now: liveNow })),
-    [liveNow, processEvents, queuedAt],
+    () => runPhaseTitle(runPhaseTiming(processEvents, { queuedAt, now: liveNow,
+      runState: message.runId === authoritativeRunId ? authoritativeRunState : undefined })),
+    [liveNow, processEvents, queuedAt, message.runId, authoritativeRunId, authoritativeRunState],
   )
+  const modelWaiting = useMemo(() => running || runInProgress ? activeModelWaiting(processEvents, {
+    runId: message.runId ?? undefined, runState: message.runId === authoritativeRunId ? authoritativeRunState : undefined,
+  }) : null, [processEvents, running, runInProgress, message.runId, authoritativeRunId, authoritativeRunState])
+  const compactionFailures = useMemo(() => processEvents.map(item => ({ item, presentation: compactionFailurePresentation(item) }))
+    .filter(({ presentation }) => presentation !== null), [processEvents])
   const projectedGroups = useMemo(() => {
     if (groupHelpers && message.runId && (kernelMessages?.length || !message.content && (message.runId === authoritativeRunId
       || processEvents.some(item => typeof item.event.kernelCheckpointSeq === 'string')))) {
@@ -2244,7 +2264,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   const turnProcessStatus = failureReason || message.status === 'failed' ? '过程未完成'
     : cancelled || message.status === 'cancelled' ? '过程已取消'
       : message.status === 'interrupted' ? '过程已中断'
-        : runInProgress || running ? '正在处理' : '工作过程'
+        : modelWaiting ? modelWaitingTitle(modelWaiting) : runInProgress || running ? '正在处理' : '工作过程'
   const replyTime = new Date(message.updatedAt || message.createdAt).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -2317,6 +2337,9 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
                 </div>)}
             </div>
           </>
+          {compactionFailures.map(({ item, presentation }) => presentation && <div key={`compaction-failure-${item.seq}`} className="fox-process-notice" role="status">
+            {presentation.label}
+          </div>)}
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
         </MessageContent>
@@ -2327,7 +2350,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
             <MessageAction tooltip="这条回答有帮助" className={feedback === 'positive' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'positive'} disabled={running || feedbackSaving} onClick={() => void submitPositiveFeedback()}><ThumbsUp size={14} /></MessageAction>
             <MessageAction tooltip="这条回答需要改进" className={feedback === 'negative' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'negative'} disabled={running || feedbackSaving} onClick={() => setFeedbackOpen(true)}><ThumbsDown size={14} /></MessageAction>
           </MessageActions>
-          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && !failureReason && !cancelled && <span>已中断 · 内容已保存</span>}{cancelled && <span className="fox-message-cancelled-meta">运行已取消</span>}{failureReason && <span className="fox-message-failure-meta" title={`错误码: ${failureReason.code}`}>{failureReason.kind === 'interrupted' ? '运行中断' : '运行失败'} · {failureReason.message}</span>}</div>
+          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && !failureReason && !cancelled && <span>已中断 · 内容已保存</span>}{cancelled && <span className="fox-message-cancelled-meta">运行已取消</span>}{failureReason && <span className="fox-message-failure-meta">{failureReason.kind === 'interrupted' ? '运行中断' : '运行失败'} · {failureReason.message}</span>}</div>
         </div>
       </Message>
       <Dialog open={feedbackOpen} onOpenChange={setFeedbackOpen}>
@@ -2380,9 +2403,12 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
 
 function RuntimeReasoningItem({ detail, running = false, preview = true }: { detail: string; running?: boolean; preview?: boolean }) {
   const summary = preview ? reasoningSummary(detail) : ''
+  // The row's own state supplies the prefix: the live trailing thought is
+  // 正在思考, a settled one is 深度思考. The prefix is never derived from the text.
+  const prefix = running ? (summary ? '正在思考 ·' : '正在思考') : (summary ? '深度思考 ·' : '深度思考')
   return <RuntimeProcessRow
     icon={<Brain className="fox-runtime-step-icon-glyph" />}
-    fixedPrefix={summary ? '深度思考 ·' : '深度思考'}
+    fixedPrefix={prefix}
     label={summary}
     hideSummaryWhenOpen
     reasoning
@@ -2404,11 +2430,11 @@ function RuntimeReasoningItem({ detail, running = false, preview = true }: { det
 const REASONING_SUMMARY_SCAN_LIMIT = 512
 function reasoningSummary(text: string) {
   const window = text.length > REASONING_SUMMARY_SCAN_LIMIT ? text.slice(0, REASONING_SUMMARY_SCAN_LIMIT) : text
-  const summary = rawReasoningSummary(window)
-  // This line is addressed to the user, so a model that reasoned in another language
-  // must not paste that prose here. The expanded detail below keeps the original
-  // reasoning verbatim; only this one-line progress summary falls back to Chinese.
-  return /\p{Script=Han}/u.test(summary) ? summary : (summary ? '正在思考' : '')
+  // The summary is the model's own first line, in whatever language it reasoned in:
+  // a Chinese status is *not* substituted for foreign reasoning (a script test
+  // cannot tell that a thought is still running, and rewriting the line would hide
+  // what the model actually said). The row's state prefix carries the state.
+  return rawReasoningSummary(window)
 }
 
 function rawReasoningSummary(window: string) {
@@ -2422,41 +2448,30 @@ function rawReasoningSummary(window: string) {
 
 function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attemptState?: ToolAttemptState; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
   const execution = executionReceiptPresentation(tool.output)
+  const failure = tool.isError ? toolFailurePresentation(tool.name, tool.output) : null
   const ToolIcon = tool.isError || execution?.requiresAttention
     ? AlertTriangle
     : tool.awaitingUser
       ? CircleHelp
       : toolIcon(tool)
-  const label = toolActivity(tool, attachmentNames)
-  const path = toolSubjectPath(tool)
-  // Only a row whose label ends in its own path gets a clickable file name.
-  const suffix = path ? ` · ${path}` : ''
-  const pathIsClickable = Boolean(path && suffix && label.endsWith(suffix) && (onOpenFileInSidebar || onRevealFileInExplorer))
-  const openPathInSidebar = () => onOpenFileInSidebar?.(path)
-  const attemptContext = tool.isError && attemptState
-    ? `${TOOL_ATTEMPT_REASON_LABELS[toolAttemptReason(tool.output)]}问题 · ${TOOL_ATTEMPT_STATE_LABELS[attemptState]}` : undefined
-  const executionError = execution?.requiresAttention
-    ? `${execution.statusLabel}${execution.code ? `（${execution.code}）` : ''}`
-    : tool.isError && execution
-      ? `${execution.statusLabel} · ${attemptContext ?? '工具调用未成功'}`
-      : tool.isError
-        ? attemptContext ?? '工具调用未成功'
-        : undefined
-  return <RuntimeProcessRow
-    icon={<ToolIcon className="fox-runtime-step-icon-glyph" />}
-    label={label}
-    labelContent={pathIsClickable ? <>
-      {label.slice(0, label.length - suffix.length)}
-      {' · '}
-      {/* The file name stays a span: it lives inside the row's disclosure
-          button, and clicking it must never toggle that row. */}
+  // The row is built from independent slots (action / path / source / summary).
+  // A path is interactive because the row *has* a path and a handler — the
+  // decision never reads the rendered string, so gaining a source cannot take the
+  // click away and the visible order can never change underneath the reader.
+  const slots = toolRowSlots(tool, attachmentNames)
+  const pathIsInteractive = Boolean(slots.path && (onOpenFileInSidebar || onRevealFileInExplorer))
+  const openPathInSidebar = () => onOpenFileInSidebar?.(slots.path)
+  const pathContent = !slots.path ? undefined : pathIsInteractive
+    ? (
+      /* The file name stays a span: it lives inside the row's disclosure
+          button, and clicking it must never toggle that row. */
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <span
             className="fox-runtime-step-path"
             role="button"
             tabIndex={0}
-            title={path}
+            title={slots.path}
             onClick={(event) => { event.stopPropagation(); openPathInSidebar() }}
             onKeyDown={(event) => {
               if (event.key !== 'Enter' && event.key !== ' ') return
@@ -2464,40 +2479,78 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
               event.stopPropagation()
               openPathInSidebar()
             }}
-          >{path}</span>
+          >{slots.path}</span>
         </ContextMenuTrigger>
         <ContextMenuContent className="fox-runtime-path-menu">
-          <ContextMenuItem onSelect={() => onRevealFileInExplorer?.(path)}><FolderOpen />在文件管理器打开</ContextMenuItem>
-          <ContextMenuItem onSelect={() => onRevealFileInExplorer?.(path)}><FolderSearch />打开文件位置</ContextMenuItem>
+          <ContextMenuItem onSelect={() => onRevealFileInExplorer?.(slots.path)}><FolderOpen />在文件管理器打开</ContextMenuItem>
+          <ContextMenuItem onSelect={() => onRevealFileInExplorer?.(slots.path)}><FolderSearch />打开文件位置</ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
-    </> : undefined}
+    )
+    // No handler: the path is still shown, as plain row text rather than as a
+    // control that could not do anything.
+    : <span className="fox-runtime-step-path-plain" title={slots.path}>{slots.path}</span>
+  const attemptContext = tool.isError && attemptState
+    ? `${TOOL_ATTEMPT_REASON_LABELS[toolAttemptReason(tool.output, tool.name)]}问题 · ${TOOL_ATTEMPT_STATE_LABELS[attemptState]}` : undefined
+  const executionError = execution?.requiresAttention
+    ? execution.statusLabel
+    : tool.isError && execution
+      ? `${execution.statusLabel} · ${attemptContext ?? '工具调用未成功'}`
+      : tool.isError
+        ? attemptContext ?? failure?.summary ?? '工具调用未成功'
+        : undefined
+  return <RuntimeProcessRow
+    icon={<ToolIcon className="fox-runtime-step-icon-glyph" />}
+    label={stepSlotsText(slots)}
+    actionText={slots.action}
+    pathContent={pathContent}
+    sourceContent={slots.source || undefined}
+    summaryContent={slots.summary || undefined}
     active={active}
     status={tool.awaitingUser ? 'pending' : active ? 'active' : 'complete'}
   >
-    <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />
-    {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={tool.output as never} errorText={executionError} />}
+    {!tool.isError && <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />}
+    {/* The expanded row shows the same whitelist sentence and next step as the
+        row label. The Host's raw diagnostic (codes, frozen-scope wording, budget
+        numbers, connector bodies) stays in the durable record and is never
+        transcribed here. */}
+    {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={(failure
+      ? { 说明: failure.summary, ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}) }
+      : tool.output) as never} errorText={executionError} />}
   </RuntimeProcessRow>
 }
 
-/** A step row is exactly one line tall, however long the thought grows. The label
- *  is clipped at the right edge by CSS; the row never scrolls sideways to follow
- *  the newest characters, so a streaming thought cannot drift or jitter. */
-function StepStatusText({ text, active, fixedPrefix, children }: { text: string; active: boolean; fixedPrefix?: string; children?: ReactNode }) {
-  // An interactive tool path must never be rendered a second time. Plain text
-  // can use one inert decorative layer for a shared title/preview sweep.
-  const decorate = active && children === undefined
+/** A step row is exactly one line tall, however long the thought grows. Plain text
+ *  is clipped at the right edge by CSS; a row built from slots carries its own
+ *  structure, so only its source/summary region is clipped and faded while the
+ *  action wording stays fully painted. Both regions fade only when a real
+ *  measurement says the line is cut (row-overflow.ts) — a short summary is never
+ *  dimmed. The row never scrolls sideways, so a streaming thought cannot drift or
+ *  jitter. */
+function StepStatusText({ text, active, fixedPrefix, slots }: { text: string; active: boolean; fixedPrefix?: string; slots?: ReactNode }) {
+  const slotted = slots !== undefined
+  // An interactive tool path must never be rendered a second time. Only a row
+  // without slots can afford one inert decorative layer for a shared title sweep.
+  const decorate = active && !slotted
+  // A plain label clips its own single line, so it is the element that has to earn
+  // the trailing fade. A slotted label never carries one: its source/summary tail
+  // does, and it is measured there (RuntimeProcessRow), which is what keeps the
+  // action name and the clickable path fully painted.
+  const { ref: labelRef, overflowing } = useOverflowFade<HTMLSpanElement>(text, !slotted)
+  const labelClass = `fox-run-status-label${slotted ? ' has-slots' : ''}${!slotted && overflowing ? ` ${OVERFLOW_CLASS}` : ''}`
   return <span className={`fox-run-status-text fox-run-status-step${fixedPrefix ? ' has-fixed-prefix' : ''}${decorate ? ' fox-row-shimmer' : ''}`} data-active={active}>
     {fixedPrefix && <span className="fox-run-status-prefix">{fixedPrefix}</span>}
     <span className="fox-run-status-viewport">
-      <span className="fox-run-status-label">{children ?? text}</span>
+      <span ref={labelRef} className={labelClass}>{slots ?? text}</span>
     </span>
     {decorate && <span className="fox-row-shimmer-decoration" aria-hidden="true" inert>
       <span className="fox-row-shimmer-sweep">
         <span className={`fox-row-shimmer-highlight fox-run-status-step-highlight${fixedPrefix ? ' has-fixed-prefix' : ''}`}>
           {fixedPrefix && <span className="fox-run-status-prefix" data-shimmer-text={fixedPrefix} />}
           <span className="fox-run-status-viewport">
-            <span className="fox-run-status-label" data-shimmer-text={text} />
+            {/* The decorative copy paints the same glyphs, so it takes the same
+                measured state; a second measurement would only drift from it. */}
+            <span className={labelClass} data-shimmer-text={text} />
           </span>
         </span>
       </span>
@@ -2505,10 +2558,39 @@ function StepStatusText({ text, active, fixedPrefix, children }: { text: string;
   </span>
 }
 
-/** Every thought segment and every tool call is one independently collapsible row. */
-function RuntimeProcessRow({ icon, label, fixedPrefix, labelContent, hideSummaryWhenOpen = false, reasoning = false, active = false, status = 'complete', children }: { icon: ReactNode; label: string; fixedPrefix?: string; labelContent?: ReactNode; hideSummaryWhenOpen?: boolean; reasoning?: boolean; active?: boolean; status?: 'complete' | 'active' | 'pending'; children: ReactNode }) {
+/** Every thought segment and every tool call is one independently collapsible row.
+ *
+ *  `label` is the row's whole line as text (accessible name, shimmer, plain-text
+ *  fallback). `actionText` / `pathContent` / `sourceContent` / `summaryContent` are
+ *  the same line as independent slots, and they — never `label` — carry the
+ *  structure the row's interactions are decided on. */
+function RuntimeProcessRow({ icon, label, fixedPrefix, actionText, pathContent, sourceContent, summaryContent, hideSummaryWhenOpen = false, reasoning = false, active = false, status = 'complete', children }: { icon: ReactNode; label: string; fixedPrefix?: string; actionText?: ReactNode; pathContent?: ReactNode; sourceContent?: ReactNode; summaryContent?: ReactNode; hideSummaryWhenOpen?: boolean; reasoning?: boolean; active?: boolean; status?: 'complete' | 'active' | 'pending'; children: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
+  const summaryHidden = hideSummaryWhenOpen && open
+  const hasTail = sourceContent !== undefined || summaryContent !== undefined
+  // The tail is the one region allowed to fade, so it is also the one region that is
+  // measured: the fade appears only when the browser says this element really cuts
+  // its own line, never because the text merely looks long.
+  const { ref: tailRef, overflowing: tailOverflowing } = useOverflowFade<HTMLSpanElement>(label, hasTail)
+  // Reading order: action · path · source · summary. The action and the path are
+  // their own elements; the trailing source/summary region is the only part that
+  // is clipped and faded, so neither the verb nor the glyph can ever be masked.
+  const slots = actionText === undefined ? undefined : <>
+    <span className="fox-run-step-action">{actionText}</span>
+    {pathContent !== undefined && <>
+      <span className="fox-run-step-separator" aria-hidden="true"> · </span>
+      <span className="fox-run-step-path-slot">{pathContent}</span>
+    </>}
+    {hasTail && <>
+      <span className="fox-run-step-separator" aria-hidden="true"> · </span>
+      <span ref={tailRef} className={`fox-run-step-tail${tailOverflowing ? ` ${OVERFLOW_CLASS}` : ''}`}>
+        {sourceContent !== undefined && <span className="fox-run-step-source">{sourceContent}</span>}
+        {sourceContent !== undefined && summaryContent !== undefined && <span className="fox-run-step-separator" aria-hidden="true"> · </span>}
+        {summaryContent !== undefined && <span className="fox-run-step-summary">{summaryContent}</span>}
+      </span>
+    </>}
+  </>
   return (
     <Collapsible
       className={`fox-runtime-step-detail fox-runtime-step-row is-${status}${reasoning ? ' is-reasoning' : ''}`}
@@ -2525,7 +2607,9 @@ function RuntimeProcessRow({ icon, label, fixedPrefix, labelContent, hideSummary
       </div>
       <div className="fox-runtime-step-body">
         <CollapsibleTrigger className="fox-runtime-step-trigger">
-          <StepStatusText text={hideSummaryWhenOpen && open ? '' : label} active={active} fixedPrefix={hideSummaryWhenOpen && open ? '深度思考' : fixedPrefix}>{hideSummaryWhenOpen && open ? undefined : labelContent}</StepStatusText>
+          {/* Opening a row hides its one-line summary but must never rewrite the
+              state prefix: an open live row is still 正在思考, not 深度思考. */}
+          <StepStatusText text={summaryHidden ? '' : label} active={active} fixedPrefix={fixedPrefix} slots={summaryHidden ? undefined : slots} />
         </CollapsibleTrigger>
         {visited && <CollapsibleContent forceMount className="fox-runtime-step-content" aria-hidden={!open} inert={!open}>
           <div className="fox-runtime-detail-clip"><div className="fox-runtime-detail-panel">{children}</div></div>
@@ -2591,7 +2675,7 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displa
   const awaitingUser = process.tools.some(tool => tool.awaitingUser) || terminalEvent?.eventType === 'run.completed'
     && terminalEvent.event.completionReason === 'awaiting_user'
   const lifecycleLabel = running
-    ? '正在理解你的请求'
+    ? phaseTitle ?? '正在理解你的请求'
     : awaitingUser
       ? '等待你的回答'
     : lifecycleFailed
@@ -2657,7 +2741,7 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displa
               // Only the trailing thought can be live; earlier rows are complete.
               const isLastReasoning = [...process.steps].reverse().find((item) => item.kind === 'reasoning') === step
               const reasoningRunning = isLastReasoning && activity.reasoning
-              return <RuntimeReasoningItem key={`reason-${step.id}`} detail={step.text} running={reasoningRunning} preview={displayMode !== 'compact' || reasoningRunning} />
+              return <RuntimeReasoningItem key={`reason-${step.id}`} detail={step.text} running={reasoningRunning} preview />
             }
             const tool = process.tools.find((item) => item.id === step.id)
             if (!tool) return null
@@ -3221,7 +3305,11 @@ type ComposerRuntimeContextValue = {
 
 type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,
   'knowledgeBindings' | 'onOpenSource' | 'assistantName' | 'runModel'
-> & { recoveryPanel?: ReactNode; userProfile?: UserProfile; authoritativeRunId?: string }
+> & {
+  recoveryPanel?: ReactNode; userProfile?: UserProfile; authoritativeRunId?: string; authoritativeRunState?: string | null
+  deliveryRunId?: string; deliveryRunState?: string | null
+  deliveryChecklist?: ConversationDetail['deliveryChecklist']; deliveryChecklistTruncated?: boolean
+}
 
 const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ knowledgeBindings: [] })
 const TimelineRuntimeContext = createContext<TimelineRuntimeContextValue>({ knowledgeBindings: [] })
@@ -3284,7 +3372,7 @@ function readStoredSeenChanges() {
   }
 }
 
-function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
+function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const resolveRuntimeApproval = onResolveApproval
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
@@ -4345,7 +4433,15 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
         </div>
       </div>
       <div className="fox-result-detail">
-        {error && <div className="fox-result-error" role="alert"><AlertTriangle size={15} /><div><strong>{error.code}</strong><span>{error.message}</span>{error.retryable && <small>可以稍后重试。</small>}</div></div>}
+        {artifact && <div className="fox-result-file-meta">
+          <span>{artifact.artifactType === 'created_file' ? '新建' : artifact.artifactType === 'modified_file' ? '已修改' : '文件结果'}</span>
+          <span>{artifactSummaryLine(artifact)}</span>
+          <span>{formatFileSize(artifact.byteSize)}</span>
+          {artifact.delivery?.versionNo ? <span>v{artifact.delivery.versionNo}</span> : null}
+          {artifact.delivery ? <span>{artifactVerificationLabel(artifact.delivery.verificationStatus)}</span> : null}
+        </div>}
+        {artifact?.delivery?.summary ? <p className="fox-result-delivery-note">{safeDiagnosticText(artifact.delivery.summary)}</p> : null}
+        {error && <div className="fox-result-error" role="alert"><AlertTriangle size={15} /><div><strong>操作未能完成</strong><span>{error.message}</span>{error.retryable && <small>可以稍后重试。</small>}</div></div>}
         {feedback && <p className="fox-result-feedback" role="status">{feedback}</p>}
         <div className="fox-result-raw">
           {inspection?.preview.available && inspection.preview.content !== null
@@ -4359,7 +4455,14 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
 }
 
 function toolResultPreview(tool: ToolCallRecord) {
-  if (tool.errorMessage) return tool.errorMessage
+  // A failed or denied record reads as the same whitelist sentence the process
+  // row shows: the Host's raw diagnostic (`errorMessage`, codes, frozen-scope
+  // wording) stays in the durable record. The category, never the prose, decides
+  // the sentence — and a missing category stays deliberately limited.
+  if (tool.status === 'failed' || tool.status === 'denied') {
+    const failure = toolFailurePresentation(tool.toolName, tool.result)
+    return [failure.summary, failure.hint].filter(Boolean).join(' · ')
+  }
   if (typeof tool.result === 'string') return tool.result.trim().slice(0, 420)
   if (tool.result === null || tool.result === undefined) return '尚未返回结果'
   try {
@@ -4477,11 +4580,9 @@ function childRunFailureTitle(run: ChildRunRecord) {
 }
 
 function childRunFailureMessage(run: ChildRunRecord) {
-  if (childRunFailureTitle(run) === '运行超时') {
-    return run.budget.maxDurationMs
-      ? `超过 ${formatDurationMs(run.budget.maxDurationMs)}执行上限，结果未采用`
-      : '运行超过执行上限，结果未采用'
-  }
+  // The concrete execution cap is internal accounting: the user reads that the
+  // sub-task did not finish in time and that its result was not used.
+  if (childRunFailureTitle(run) === '运行超时') return '子任务未在限定时间内完成，结果未采用'
   return run.errorMessage ?? (run.status === 'interrupted' ? '运行意外中断，本次结果未采用' : '子 Agent 未返回可采用结果')
 }
 
@@ -4675,7 +4776,7 @@ function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildR
         {childRunIsActive(run) && <div className="fox-agent-live-line"><LoaderCircle className="animate-spin" />子 Agent 正在运行，消息会自动更新</div>}
         {(run.status === 'failed' || run.status === 'interrupted') && <div className="fox-agent-run-error" role="alert">
           <AlertTriangle />
-          <div><strong>{childRunFailureTitle(run)}</strong>{run.errorCode && <code>{run.errorCode}</code>}<p>{childRunFailureMessage(run)}</p></div>
+          <div><strong>{childRunFailureTitle(run)}</strong><p>{childRunFailureMessage(run)}</p></div>
         </div>}
       </div>
     </section>
@@ -4760,7 +4861,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
           <div className="fox-diff-head">{isCommand ? <Terminal size={14} /> : <FileEdit size={14} />}<strong>{activeChange ? (isCommand ? activeChange.toolName : toolTarget(activeChange)) : '更改详情'}</strong><span><Badge variant={activeChange?.status === 'failed' || activeExecution?.requiresAttention ? 'destructive' : 'outline'}>{activeChange ? toolStatusLabel(activeChange, activeExecution) : '未知'}</Badge>{linkedEvidence.length > 0 && <Badge variant="secondary">{linkedEvidence.length} 条证据</Badge>}</span></div>
           {linkedEvidence.length > 0 && <div className="fox-linked-evidence">{linkedEvidence.map((evidence) => <button type="button" key={evidence.id} disabled={!onOpenEvidence} onClick={() => onOpenEvidence?.(evidence)}><ShieldCheck size={12} /><span>{evidence.summary}</span><small>{evidence.validityStatus}</small></button>)}</div>}
           {isCommand && activeChange && command ? <div className="fox-command-detail">
-            <div className="fox-command-facts">{command.execution && <span title={command.execution.statusLabel}>执行 <b>{command.execution.statusLabel}</b></span>}{command.execution?.code && <span title={command.execution.rawCodes.join(' / ')}>原因 <b>{command.execution.code}</b></span>}<span>退出码 <b>{command.exitCode === null ? '—' : command.exitCode}</b></span><span>耗时 <b>{command.duration === null ? '进行中' : `${command.duration} ms`}</b></span>{command.cwd && <span title={command.cwd}>目录 <b>{command.cwd}</b></span>}</div>
+            <div className="fox-command-facts">{command.execution && <span>执行 <b>{command.execution.statusLabel}</b></span>}{command.execution?.requiresAttention && <span>原因 <b>{command.execution.uncertain ? '结果未知，未自动重试' : '已拒绝'}</b></span>}<span>退出码 <b>{command.exitCode === null ? '—' : command.exitCode}</b></span><span>耗时 <b>{command.duration === null ? '进行中' : formatDurationMs(command.duration)}</b></span>{command.cwd && <span title={command.cwd}>目录 <b>{command.cwd}</b></span>}</div>
             <ScrollArea className="fox-command-output"><pre>{command.output || activeChange.errorMessage || '命令没有返回输出。'}</pre></ScrollArea>
           </div> : <ScrollArea className="fox-diff-scroll"><code>{diffLines.map(([tone, line], index) => <span key={index} className={`is-${tone}`}><i>{index + 1}</i><b>{line || ' '}</b></span>)}</code></ScrollArea>}
         </div>
@@ -4786,7 +4887,10 @@ const rightItems: Array<[RightMode, string, ReactNode]> = [
   ['agents', '子 Agent', <Bot size={16} />]
 ]
 
-function RightPanel({ mode, tabs, detail, activity, width, compact = false, maximized = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; activity: Omit<ActivityDetailPanelProps, 'detail'>; width: number; compact?: boolean; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
+/** The right-hand sidebar: opened pages (including one tab per open file), the
+ *  `＋` page menu, and the page body. Exported so its DOM can be driven directly by
+ *  the acceptance tests without mounting the whole Workbench. */
+export function RightPanel({ mode, tabs, detail, activity, width, compact = false, maximized = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; activity: Omit<ActivityDetailPanelProps, 'detail'>; width: number; compact?: boolean; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
   const activeChildAgentRun = activeChildAgent
     ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
     : null
@@ -4805,6 +4909,10 @@ function RightPanel({ mode, tabs, detail, activity, width, compact = false, maxi
           {tabs.map((tabMode) => {
             const item = rightItems.find(([id]) => id === tabMode)
             if (!item) return null
+            // A file tab *is* the files view. Keeping the mode tab beside it left a
+            // second, default-looking tab for the same panel — the file tabs own it
+            // while any are open, and the list stays reachable from the + menu.
+            if (tabMode === 'files' && fileTabs.length > 0) return null
             const active = tabMode === mode && (tabMode !== 'files' || activeFileTabId === null)
             return <div key={tabMode} className={`fox-context-tab ${active ? 'is-active' : ''}`}>
               <button type="button" role="tab" aria-selected={active} title={item[1]} onClick={() => onMode(tabMode)}>{item[2]}<span>{item[1]}</span></button>
@@ -4862,32 +4970,24 @@ function SidebarResizeDivider({ onResize }: { onResize: (delta: number) => void 
   return <div className="fox-sidebar-resize-divider" role="separator" aria-label="调整侧边栏宽度" aria-orientation="vertical" onPointerDown={(event) => { start.current = { x: event.clientX }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { if (!start.current) return; const delta = event.clientX - start.current.x; start.current = { x: event.clientX }; onResize(delta) }} onPointerUp={() => { start.current = null }}><span /></div>
 }
 
-function ConversationSummaryPopover({ detail, modelName, usage, contextWindow, onOpenRightMode }: { detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number; onOpenRightMode: (mode: RightMode) => void }) {
+function ConversationSummaryPopover({ detail, modelName, onOpenRightMode }: { detail: ConversationDetail | null; modelName: string; onOpenRightMode: (mode: RightMode) => void }) {
   const [open, setOpen] = useState(false)
-  const hasContextWindow = contextWindow > 0
-  const contextPercent = hasContextWindow ? Math.min(100, Math.round((usage.totalTokens / contextWindow) * 100)) : 0
-  const cacheEligibleTokens = usage.inputTokens + usage.cacheReadTokens
-  const cacheHitRate = cacheEligibleTokens ? Math.round(usage.cacheReadTokens / cacheEligibleTokens * 100) : 0
   const artifacts = detail?.artifacts ?? []
   const tasks = detail?.tasks ?? []
   const activeProcesses = (detail?.toolCalls ?? []).filter((tool) => !['completed', 'failed', 'denied', 'cancelled'].includes(tool.status))
   const subAgents = detail?.childRuns ?? []
   const sources = runtimeProcess(detail?.runtimeEvents ?? []).sources
-  const diagnostics = latestRuntimeDiagnostics(detail?.runtimeEvents ?? [])
-  const diagnosticDetail = [
-    diagnostics.provider || diagnostics.apiType,
-    diagnostics.phase ? `阶段 ${diagnostics.phase}` : '',
-    diagnostics.retries ? `重试 ${diagnostics.retries}` : '',
-    diagnostics.compactions ? `压缩 ${diagnostics.compactions}` : '',
-    diagnostics.plannerStatus,
-  ].filter(Boolean).join(' · ')
+  // Only things a person recognises: produced files, the plan, running
+  // processes, sub-agents and sources. Context-window accounting (percent used,
+  // remaining room, the usage track), token counts, provider identity,
+  // phase/retry/compaction counters and tool-call counts are internal facts:
+  // they stay in the durable records, not in an ordinary chat header.
   const summaryItems: Array<{ icon: ReactNode; label: string; count: number; detail: string; mode: RightMode }> = [
     { icon: <FileText size={15} />, label: '文件输出', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、'), mode: 'files' },
     { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、'), mode: 'activity' },
     { icon: <Terminal size={15} />, label: '后台进程', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、'), mode: 'activity' },
     { icon: <Bot size={15} />, label: '子专家', count: subAgents.length, detail: subAgents.slice(-2).map((item) => `${item.workerAgentName} · ${item.status}`).join('、'), mode: 'agents' },
     { icon: <BookOpen size={15} />, label: '来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、'), mode: 'knowledge' },
-    { icon: <Wrench size={15} />, label: '运行诊断', count: diagnostics.toolCount, detail: diagnosticDetail, mode: 'activity' },
   ]
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -4898,11 +4998,6 @@ function ConversationSummaryPopover({ detail, modelName, usage, contextWindow, o
       <PopoverContent align="end" sideOffset={8} className="fox-conversation-summary">
         <div className="fox-summary-model">
           <div><span>模型</span><strong title={modelName}>{modelName}</strong></div>
-          <div className="fox-summary-context-copy"><span>上下文</span><strong>{compactTokenCount(usage.totalTokens)} / {hasContextWindow ? compactTokenCount(contextWindow) : '未知'}</strong></div>
-          <div className="fox-summary-context-track"><span style={{ width: `${contextPercent}%` }} /></div>
-          <small>{hasContextWindow ? `${contextPercent}% 已使用` : '未配置上下文上限'} · 本次输入 {compactTokenCount(usage.inputTokens)} · 输出 {compactTokenCount(usage.outputTokens)}</small>
-          <small>缓存读取 {compactTokenCount(usage.cacheReadTokens)} · 写入 {compactTokenCount(usage.cacheWriteTokens)} · 命中率 {cacheHitRate}%</small>
-          {(diagnostics.provider || diagnostics.apiType) && <small title={diagnostics.baseUrl || undefined}>{[diagnostics.provider, diagnostics.apiType].filter(Boolean).join(' · ')}</small>}
         </div>
         <div className="fox-summary-list">
           {summaryItems.map((item) => <button type="button" key={item.label} className="fox-summary-item" aria-label={`打开${item.label}侧边栏`} onClick={() => { setOpen(false); onOpenRightMode(item.mode) }}>
@@ -4916,8 +5011,10 @@ function ConversationSummaryPopover({ detail, modelName, usage, contextWindow, o
   )
 }
 
-function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onOpenRightMode, conversation, detail, modelName, usage, contextWindow, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
+function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
+  const waiting = detail && detail.conversation.id === conversation?.id
+    ? activeModelWaiting(detail.runtimeEvents, { runId: detail.lastRun?.id, runState: conversationRunState(detail) }) : null
   const projectRoot = conversation?.projectRoot?.trim() ?? ''
   const normalizedProjectRoot = projectRoot.replace(/[\\/]+$/, '')
   const projectName = normalizedProjectRoot.split(/[\\/]/).at(-1) || '未绑定项目'
@@ -4959,8 +5056,8 @@ function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onOpenRightMo
         </div>
       </div>
       <div className="fox-chat-top-actions">
-        <ConversationSummaryPopover detail={detail} modelName={modelName} usage={usage} contextWindow={contextWindow} onOpenRightMode={onOpenRightMode} />
-        {state === 'running' && <Badge className="fox-running-badge"><span />运行中</Badge>}
+        <ConversationSummaryPopover detail={detail} modelName={modelName} onOpenRightMode={onOpenRightMode} />
+        {state === 'running' && <Badge className="fox-running-badge" title={waiting ? modelWaitingTitle(waiting) : undefined}><span />{waiting ? modelWaitingTitle(waiting) : '运行中'}</Badge>}
         {state === 'question' && <Badge className="fox-question-badge"><CircleHelp size={12} />等待回答</Badge>}
         {state === 'approval' && <Badge className="fox-approval-badge"><ShieldCheck size={12} />等待批准</Badge>}
         {state === 'error' && <Badge className="fox-error-badge"><AlertTriangle size={12} />运行错误</Badge>}
@@ -5075,7 +5172,6 @@ export function Workbench() {
   const activeProject = projects.find((item) => item.id === desktopConversation.detail?.conversation.projectId)
     ?? (desktopConversation.draftProjectRoot ? matchingProject(desktopConversation.draftProjectRoot, projects) : undefined)
     ?? null
-  const conversationUsage = useMemo(() => latestConversationContextUsage(desktopConversation.detail?.runtimeEvents ?? []), [desktopConversation.detail?.runtimeEvents])
   const runtimeQuestion = useMemo(() => pendingRuntimeQuestion(desktopConversation.detail), [desktopConversation.detail])
   const goalProgressData = useGoalProgress(desktopConversation.detail)
   const conversationAgentId = desktopConversation.detail?.conversation.agentId
@@ -5810,7 +5906,15 @@ export function Workbench() {
     recoveryPanel,
     userProfile,
     authoritativeRunId: desktopConversation.detail?.kernelSnapshot?.runId,
-  }), [desktopConversation.knowledgeBindings, desktopConversation.detail?.kernelSnapshot?.runId, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel, recoveryPanel, userProfile.name, userProfile.avatar, userProfile.initial])
+    authoritativeRunState: desktopConversation.detail?.kernelSnapshot?.state,
+    deliveryRunId: desktopConversation.detail?.lastRun?.id,
+    deliveryRunState: conversationRunState(desktopConversation.detail),
+    deliveryChecklist: desktopConversation.detail?.deliveryChecklist,
+    deliveryChecklistTruncated: desktopConversation.detail?.deliveryChecklistTruncated,
+  }), [desktopConversation.knowledgeBindings, desktopConversation.detail?.kernelSnapshot?.runId, desktopConversation.detail?.kernelSnapshot?.state,
+    desktopConversation.detail?.lastRun?.id, desktopConversation.detail?.lastRun?.status, desktopConversation.detail?.deliveryChecklist,
+    desktopConversation.detail?.deliveryChecklistTruncated, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel, recoveryPanel,
+    userProfile.name, userProfile.avatar, userProfile.initial])
   const composerRuntimeContextValue = useMemo<ComposerRuntimeContextValue>(() => ({
     ...timelineRuntimeContextValue,
     remoteKnowledgeBases: knowledge.items,
@@ -6040,8 +6144,8 @@ export function Workbench() {
           /></Suspense>}
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
-          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRuns={desktopConversation.enabled ? desktopConversation.detail?.runs : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
+          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRuns={desktopConversation.enabled ? desktopConversation.detail?.runs : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>

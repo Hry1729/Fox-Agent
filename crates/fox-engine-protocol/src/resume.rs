@@ -95,6 +95,46 @@ pub struct KernelModelFailure {
     /// workers and for non-timeout categories.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<KernelModelTelemetry>,
+    /// Which internal branch produced the category, plus the round facts the worker
+    /// actually observed. Optional by design: a field the worker could not observe is
+    /// **absent**, never `false` or `0`, so a reader can tell "not seen" from "seen as
+    /// zero". Nothing here is retry evidence — Host admission still decides that from
+    /// durable tool state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<KernelModelFailureDiagnostic>,
+}
+
+/// Sanitized sub-category and round facts for a settled model failure.
+///
+/// One category (`incomplete_response`) covers several distinct causes, so the
+/// sub-category names which branch fired. Contents stay enumerated and bounded:
+/// counters, provider stop vocabulary and internal dispatch identity only — never a
+/// credential, model input, prompt text or tool argument.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelModelFailureDiagnostic {
+    /// Internal branch, for example `empty_final_answer`, `output_length_limit`,
+    /// `transport_no_output`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_chars: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_chars: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_count: Option<u32>,
+    /// Whether the frozen prompt required the Fox final-answer marker at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_required: Option<bool>,
+    /// Whether the round's own text carried the marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_seen: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_key: Option<String>,
 }
 
 /// Byte/time counters for one failed model round. All values are worker-side
@@ -129,6 +169,24 @@ impl KernelModelFailure {
                 || telemetry.text_bytes > 67_108_864 || telemetry.reasoning_bytes > 67_108_864
                 || telemetry.tool_param_bytes > 67_108_864 {
                 return Err("invalid Kernel model failure telemetry".into());
+            }
+        }
+        if let Some(diagnostic) = &self.diagnostic {
+            let is_token = |value: &str, limit: usize| {
+                !value.is_empty() && value.len() <= limit
+                    && value.chars().all(|character| character.is_ascii_alphanumeric()
+                        || matches!(character, '_' | '-' | '.' | ':' | '/'))
+            };
+            if diagnostic.reason.as_deref().is_some_and(|value| !is_token(value, 64))
+                || diagnostic.stop_reason.as_deref().is_some_and(|value| !is_token(value, 32))
+                || diagnostic.dispatch_id.as_deref().is_some_and(|value| !is_token(value, 200))
+                || diagnostic.effect_key.as_deref().is_some_and(|value| !is_token(value, 200))
+                || diagnostic.text_chars.is_some_and(|value| value > 67_108_864)
+                || diagnostic.thinking_chars.is_some_and(|value| value > 67_108_864)
+                || diagnostic.tool_call_count.is_some_and(|value| value > 256)
+                || diagnostic.text_chars.unwrap_or(0).saturating_add(diagnostic.thinking_chars.unwrap_or(0))
+                    > 268_435_456 {
+                return Err("invalid Kernel model failure diagnostic".into());
             }
         }
         if self.schema_version != 1 || !category_valid
@@ -876,8 +934,62 @@ fn restored_continuation_has_a_distinct_validated_delivery_identity() {
         assert!(frame.validate().is_err());
     }
     let mut failure = KernelModelFailure { schema_version:1, run_id:"r".into(), turn_id:"t".into(), checkpoint_seq:2,
-        category:"model_transport_failure".into(), http_status:None, retry_after_ms:None, telemetry:None };
+        category:"model_transport_failure".into(), http_status:None, retry_after_ms:None, telemetry:None, diagnostic:None };
     failure.validate().unwrap();
     failure.http_status = Some(429);
     assert!(failure.validate().is_err(), "transport loss must not forge provider rejection evidence");
+}
+
+/// The diagnostic is optional in both directions: an older worker that never sends it
+/// stays valid, and a newer worker that observed only some facts reports only those —
+/// an unobserved field is absent, never a fabricated `false` or `0`.
+#[test]
+fn a_model_failure_diagnostic_stays_optional_and_never_invents_absent_facts() {
+    let legacy: KernelModelFailure = serde_json::from_value(serde_json::json!({
+        "schemaVersion": 1, "runId": "r", "turnId": "t", "checkpointSeq": 2,
+        "category": "incomplete_response", "httpStatus": null, "retryAfterMs": null,
+    })).unwrap();
+    legacy.validate().unwrap();
+    assert!(legacy.diagnostic.is_none());
+
+    let observed: KernelModelFailure = serde_json::from_value(serde_json::json!({
+        "schemaVersion": 1, "runId": "r", "turnId": "t", "checkpointSeq": 2,
+        "category": "incomplete_response", "httpStatus": null, "retryAfterMs": null,
+        "diagnostic": { "reason": "empty_final_answer", "stopReason": "stop",
+            "textChars": 0, "completionRequired": true, "dispatchId": "model-batch:r:30" },
+    })).unwrap();
+    observed.validate().unwrap();
+    let wire = serde_json::to_value(&observed).unwrap();
+    assert_eq!(wire["diagnostic"]["reason"], "empty_final_answer");
+    assert_eq!(wire["diagnostic"]["textChars"], 0, "an observed zero is a real observation");
+    for absent in ["thinkingChars", "toolCallCount", "markerSeen", "effectKey"] {
+        assert!(wire["diagnostic"].get(absent).is_none(), "{absent} must stay absent when unobserved");
+    }
+
+    // Strictness is retained: an unknown key at either level is still rejected.
+    for payload in [
+        serde_json::json!({ "schemaVersion": 1, "runId": "r", "turnId": "t", "checkpointSeq": 2,
+            "category": "incomplete_response", "httpStatus": null, "retryAfterMs": null,
+            "diagnostic": { "reason": "empty_final_answer", "inventedZero": 0 } }),
+        serde_json::json!({ "schemaVersion": 1, "runId": "r", "turnId": "t", "checkpointSeq": 2,
+            "category": "incomplete_response", "httpStatus": null, "retryAfterMs": null, "invented": true }),
+    ] {
+        assert!(serde_json::from_value::<KernelModelFailure>(payload).is_err(),
+            "deny_unknown_fields must stay in force");
+    }
+
+    // Bounds apply only to values that are present.
+    let mut out_of_range = observed.clone();
+    out_of_range.diagnostic = Some(KernelModelFailureDiagnostic { reason: Some("A".repeat(65)), ..Default::default() });
+    assert!(out_of_range.validate().is_err());
+    let mut too_many_calls = observed.clone();
+    too_many_calls.diagnostic = Some(KernelModelFailureDiagnostic { tool_call_count: Some(257), ..Default::default() });
+    assert!(too_many_calls.validate().is_err());
+    let mut too_long_effect = observed.clone();
+    too_long_effect.diagnostic = Some(KernelModelFailureDiagnostic { effect_key: Some("x".repeat(201)), ..Default::default() });
+    assert!(too_long_effect.validate().is_err());
+    // A diagnostic that observed nothing at all is still a valid shape.
+    let mut empty = observed.clone();
+    empty.diagnostic = Some(KernelModelFailureDiagnostic::default());
+    empty.validate().unwrap();
 }
