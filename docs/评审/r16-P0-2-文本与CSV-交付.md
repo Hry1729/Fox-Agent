@@ -8,7 +8,7 @@
 
 | 文件 | 变更 |
 |---|---|
-| `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/text_csv.rs` | 由 C0 占位改为**真实实现**：`check_text_concat`、`parse_table`、`check_table_columns` + 42 项测试 |
+| `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/text_csv.rs` | 由 C0 占位改为**真实实现**：`check_text_concat`、`parse_table`、`check_table_columns`；随后按 G 审查修正文本公共路径（`f61a288`，见 §4.1）。**本文件共 30 项测试** |
 | `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/mod.rs` | 接口扩展 3 处（见 §2）：`equivalence` 字段与 `passed_with_equivalence`；2 个行结束 reason code；`TableError.limit` 与 `TableError::budget` |
 
 **未变更**：`delivery.rs`、`delivery_content_requirements.rs`、`data_compute.rs`、`Cargo.*`、数据库、前端。本模块**尚未接入任何生产路径**，因此不可能因为"忘记接线"而改变现有运行行为，也不可能因为占位而误放行。
@@ -72,6 +72,28 @@
 
 **每个用到的 reason code 都至少有一条断言**（`TEXT_EOF_MISMATCH`、`TEXT_CONTENT_MISMATCH`、`TEXT_SEPARATOR_MISMATCH`、`TEXT_ORDER_MISMATCH`、`TEXT_SOURCE_MISSING`、`TEXT_LINE_ENDING_VIOLATION`、`TEXT_LINE_ENDING_UNSUPPORTED`、`CONTRACT_UNREADABLE`、`TABLE_ENCODING_UNSUPPORTED`、`TABLE_UNTERMINATED_QUOTE`、`TABLE_UNESCAPED_QUOTE`、`TABLE_CHARACTER_AFTER_QUOTE`、`TABLE_HEADER_EMPTY`、`TABLE_HEADER_DUPLICATE`、`TABLE_WIDTH_MISMATCH`、`TABLE_ZERO_RECORDS`、`TABLE_DIALECT_UNSUPPORTED`、`BUDGET_EXCEEDED`）。其中 `TABLE_CHARACTER_AFTER_QUOTE` 与 `TABLE_DIALECT_UNSUPPORTED` **尚无直接用例**——见 §8 已知缺口。
 
+### 4.1 F-P02 逐项处置（依据 `G-P02-review.md`，修正提交 `f61a288`）
+
+所有修正都在 `text_csv.rs` 的文本路径内；未改表格 parser、共享生产入口、`mod.rs`、公共 DTO、数据库、前端或 Cargo。
+
+| 编号 | 级别 | 处置 | 定点证据 |
+|---|---|---|---|
+| F-P02-01 | P0 | **已修**。v1 完整保留旧字节比较：不匹配即确定 `failed` 且**阻断**，不再因含 CR/CRLF 降级为 `unverified`。依据：旧 `Contract::Concat` 只做 `bytes == expected`；且 `freeze_concat` 在 `delivery_content_requirements.rs:309` 直接拒绝含 `\r` 的来源，所以冻结的 v1 合并无 CR、比较完全可判定 | `f_p02_01_v1_keeps_a_total_byte_comparison`（覆盖字节相同／尾部 LF／CRLF／孤立 CR／真正文变化） |
+| F-P02-02 | P0 | **已修**。行结束裁决不再抢先返回：只有在字节**没有**证明出"行结束无法解释的差异"时才报未核验；否则保持阻断失败并保留定位。判定用的行结束归一化**只用于在 `failed`/`unverified` 之间选择，永不产生通过** | `f_p02_02_a_known_body_error_behind_crlf_still_blocks` |
+| F-P02-03 | P0 | **已修**。`RequireTrailingLf` 在任何候选上执行，且**先于**字节相同早退。反例可达的原因：`expected_concat` 末段不补 LF | `f_p02_03_require_trailing_lf_survives_byte_equality` |
+| F-P02-04 | P0 | **已修**。明确声明的行结束政策不再被"等于构造"豁免，分两种情形：候选违反声明 → `failed`/`TEXT_LINE_ENDING_VIOLATION`；**冻结来源自身**与声明矛盾（合同自相矛盾）→ `unverified` 并附"矛盾"诊断，**不修改来源、不静默放行** | `f_p02_04_a_contradictory_contract_is_reported_not_waived`（字节相同反例）+ `r05_crlf_against_an_lf_declaration_is_a_located_violation`（候选违反） |
+| F-P02-06 | P1 | **已修**。`RequireTrailingLf` 的通过不再记 `optionalFinalLf`，改为普通 `passed`（`equivalence = None`）：满足硬性要求不等于"依赖可选容忍"。G 报告原示例实测是**字节相同**、走不到所声称的不等路径，故本卡改用**可达**反例（来源无 LF、候选恰好 1 个 LF）核实后处理 | `f_p02_06_require_trailing_lf_never_claims_the_optional_equivalence` |
+| F-P02-08 | P1 | **部分处置，仍未关闭**。已收窄为"仅当差异确实只限行结束"才未核验，真正文错误恢复阻断；`Any` 语义按裁定明确为"允许出现某种字节 ≠ 允许两种字节相等"，故 CRLF 候选仍不能通过。**要让 CRLF 文本产物可判等，必须新增一条被声明的等价规则（公共接口变更），本卡按"不新增转换规则"只提提案、不实现** | `f_p02_02_...` 后半 + `r05_an_undeclared_convention_is_never_silently_converted_and_never_a_false_reject` |
+| F-P02-05 / 07 / 09 / 10 / 11 / 12 | P1/P2 | **本卡范围外**（表格 parser 零记录、文本/两侧预算、覆盖率与死分支、表头 `trim` 口径、诊断标签启发式）。其中 **F-P02-11 的表述已在本文件更正**（见下） | 见 §9 与交付卡"本卡完成不代表"清单 |
+
+**新增的最小接口提案（未实施，待协调者/用户裁定）**
+1. 需要一个新的 reason code 表达"**合同自相矛盾**"（例如 `delivery.check.text.contract_conflict`）。当前以 `TEXT_LINE_ENDING_UNSUPPORTED` + 明确文案替代：语义可辨，但不够专用。
+2. 若要让行结束差异可判等，需要新增一条**被声明的**等价（例如 `EofPolicy` / `equivalence` 上的 `lineEndingNormalized`）。这会扩大等价范围，必须明确授权；本卡按边界未实现。
+
+**期望变更记录（保留原样本，不静默修改）**
+- **移除** `r04_a_contract_without_sources_is_unverified_not_failed`。其原断言为：`check(&envelope, &[], b"anything")` → `Unverified` / `CONTRACT_UNREADABLE`。该期望是我此前**自行发明、无证据支持**的第三种语义，且偏离旧 checker 对空期望的行为。替代权威：`empty_selection_mirrors_the_old_byte_comparison`。证据：`delivery_content_requirements.rs:284-285`（选择数量被限制在 `1..=64`）、`:313`、`:316`（`selected.len() == count`）、`:626`（真正的"未绑定"是**独立契约变体** `Contract::Unbound` → `Unverified`，不能与空 `Concat` 混同）。原断言的文本与理由已**就地保留在源码注释**中，可审计。
+- **F-P02-11 更正**：本模块过滤器总数为 **47** = `mod.rs` 14 + `text_csv.rs` 30 + 3 个叶子占位。`text_csv.rs` 为 **30** 项。此前交付单写"42 = 本次文本模块新增"**不准确**，已在此更正。
+
 ## 5 仍需接线（本轮未做，属 P0-1 / P0-3）
 
 本模块是**叶子**，方案规定的接线只能改共享生产文件。以下三项必须做，且**必须由同一人串行完成**以免双写：
@@ -126,7 +148,11 @@
 | C0 基点 | `6e0bb5d` |
 | 构建/测试命令 | `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`；`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml delivery_checks_v2` |
 | 共用 target | `CARGO_TARGET_DIR=D:\python\projects\Fox\Fox\apps\desktop\src-tauri\target` |
-| 本模块测试 | **42 passed / 0 failed**（1575 filtered out） |
+| 本模块测试（修正后） | **47 passed / 0 failed**（1575 filtered out）；`text_csv.rs` 30 项、`mod.rs` 14 项、叶子占位 3 项 |
+| 修前反例证据 | **6 条反例在修正前 HEAD（`07c2657`）上全部失败**，逐条对应一个缺陷；日志 `A-P02-logs/01b-counterexample-before-fix-recompiled.log` |
+| 修正提交 | `f61a288`（`r16/a-contract`，仅 `text_csv.rs`，439 insertions / 140 deletions） |
+| 修后证据 | `A-P02-logs/03-after-fix-final.log`，含 `Compiling fox-agent-kernel … (…/r16-a-20261010/crates/…)` 等三行，证明从**本工作树**编译 |
+| **测试环境告警（重要，影响证据可信度）** | 共享 `CARGO_TARGET_DIR` 在**多个不同提交的工作树之间发生了产物复用**：本树源码完整（`ModelRetryAdmission` 确实存在于 `crates/fox-agent-kernel/src/controller.rs:38`），但编译一度链接到**非本树**的内核 crate，报 22 个 API 不匹配错误。因此**每次取证都必须记录 `Compiling <pkg> (<本树路径>)` 行**，并且正在被多个提交共享的 target 目录里的日志名不能证明编译身份。**本文件早前记录的 169/17 对照与 42/42 运行是在同一共享目录下取得的，尚未按"强制从本树重编"的纪律复核，不应作为最终证据使用。** |
 | `delivery_checks_v2` 相关警告 | **0** |
 | 既有交付回归 | 见 §9.1 |
 | 未运行 | 真实四题重跑、GUI/安装包验收、影子比对、端到端接线验证 |
