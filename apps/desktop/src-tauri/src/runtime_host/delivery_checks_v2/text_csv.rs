@@ -1221,16 +1221,42 @@ pub(crate) fn check_table_columns(request: &TableCheckRequest<'_>) -> CheckObser
     let binding = request.binding;
 
     if parsed.records.is_empty() {
-        let mut observation = failed(
-            request.rule_id,
-            check,
-            reason_code::TABLE_ZERO_RECORDS,
-            binding,
-            "候选没有任何记录（连表头都没有）".to_owned(),
-        );
-        observation.expected = Some("至少一条记录".to_owned());
-        observation.actual = Some("0 条记录".to_owned());
-        return observation;
+        // A truly empty table (empty file, BOM only, or blank lines the dialect
+        // skips) is decided by *two* independent declarations:
+        //
+        //   * `HeaderPolicy::Required` demands a header, and no other declaration
+        //     may waive it: `allow_zero_records` speaks about **data rows**, so it
+        //     cannot be silently widened into "a required header may be missing";
+        //   * otherwise the contract itself may declare that zero records are legal.
+        if parsed.dialect.header == HeaderPolicy::Required {
+            let mut observation = failed(
+                request.rule_id,
+                check,
+                reason_code::TABLE_ZERO_RECORDS,
+                binding,
+                "冻结合同要求表头，但候选没有任何记录（空文件、仅 BOM 或仅被跳过的空行）；缺的是必需表头，声明允许零数据行不能豁免"
+                    .to_owned(),
+            );
+            observation.expected = Some("至少一条表头记录".to_owned());
+            observation.actual = Some("0 条记录".to_owned());
+            return observation;
+        }
+        if !request.allow_zero_records {
+            let mut observation = failed(
+                request.rule_id,
+                check,
+                reason_code::TABLE_ZERO_RECORDS,
+                binding,
+                "候选没有任何记录，而冻结合同未声明允许零记录".to_owned(),
+            );
+            observation.expected = Some("至少一条记录".to_owned());
+            observation.actual = Some("0 条记录".to_owned());
+            return observation;
+        }
+        // `HeaderPolicy::Optional` and the contract declares zero records legal:
+        // there is no header to require and no data row to demand, so the artifact
+        // satisfies exactly what was declared.
+        return passed(request.rule_id, check, binding);
     }
 
     let header = parsed.header();
