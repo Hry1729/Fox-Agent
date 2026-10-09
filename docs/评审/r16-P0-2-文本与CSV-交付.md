@@ -151,11 +151,39 @@
 | R1 | **已修**。行结束"无法判定"只可由**授予了至少一条等价**的政策到达（`TextSegments` + `AllowSingleTrailingLf`/`RequireTrailingLf`）；`BytesExact`、以及 `TextSegments` 下的 `ByteExact`/`SourceVerbatim` **自行判定**每个字节差异。修前 `Any`+CRLF 必然先落到 `Unsupported`，把已判定的失败报成 `blocking=false` 的未核验。 | `r1_strict_modes_decide_every_difference`（5 种严格组合 × 4 种候选 = 20 个用例，**全部执行后一次性报告**，首条失败不遮蔽其余）；G 的 `g_v2_strict_modes_fail_on_a_crlf_only_difference` 由失败转绿 |
 | R2 | **已修**。冲突只在残差**完全**可由"未决约定 + 至多声明的 EOF 容忍"解释时才报未核验；否则保留**准确的**失败结论（内容/EOF/分隔）及其定位与 reason code，并把冲突说明**追加**到 detail。 | `r2_conflict_plus_a_provable_body_error_still_blocks`、`r2_conflict_plus_allowed_eof_difference_stays_undecided`；G 的 `g_contract_conflict_must_not_swallow_a_provable_body_error` 由失败转绿 |
 | R3 | **已修**。归因分侧：`Crlf` 声明被**构造器自身**的 LF 字节违反（任何候选都无法满足），`Lf` 声明只可能被**来源正文**的 CRLF 违反。政策仍约束**整个产物**——构造器字节参与检测、不被豁免。**未改** `expected_concat` 的历史字节、未把标题转成 CRLF、未缩小政策范围；无解的 `Crlf` 组合明确报未核验。 | `r3_a_crlf_declaration_blames_the_constructor_format_not_the_source`、`r3_an_lf_declaration_blames_the_source_body`；G 的 `g_declared_crlf_records_whether_any_candidate_can_pass` 保持绿 |
-| R6 | **已按"标注"口径处置**。v1 空集合现有**明确对照**测试（记录旧字节语义，并注明该状态不可达、**不是**业务验收）；v2 空集合被标注为**畸形合同、行为未决**——只断言唯一确定的安全属性（非空候选绝不通过），**不主张**"与 v1 一致"即验收通过，并登记为需要独立接口决定的开放项。 | `v1_empty_selection_documents_the_legacy_byte_comparison`、`v2_empty_selection_is_a_malformed_contract_left_undecided` |
+| R6 | **已被章程 §21 D-1 取代并实现**（见 §4.5）。v1 空集合保持既有字节比较（明确对照测试，并注明该状态不可达、**不是**业务验收）；v2 空集合现按冻结期望报**畸形合同**：`Unverified`/`CONTRACT_UNREADABLE`、不阻断、无候选 expected/actual/locator，空/非空候选同判。 | `v1_empty_selection_documents_the_legacy_byte_comparison`、`v2_empty_selection_is_a_malformed_contract` |
 
 **与 G 观测值的一处行为变化（须记录）**：`Any` + CRLF + 多一个末尾 LF 的候选，修前为 `Failed(source_missing)`，修后为 `Unverified`。理由：该残差 = 未授权的 CRLF↔LF 转换（未决）+ 已声明的单个末尾 LF 容忍（允许），两者都不构成"可独立证明的正文错误"，故未核验比"内容失败"更准确；安全属性（**绝不 Passed**）保持不变，G 自己的断言只要求 `!= Passed`，仍为绿。且修前那种情况报的 `source_missing` 正是 G 记为 R4 的**码不准**问题，此变化顺带移除了一条码不准的路径。
 
-**与 G 的一处分歧（未擅自处理）**：R6 要求"v2 空集合行为单独标注为畸形合同未决项"；而 G 的 overlay 测试 `g_v2_empty_selection_is_recorded_not_prescribed` **断言** v2 空集合 = `Passed`/`Failed`（即把 v1 行为钉在 v2 上，尽管其测试名说"recorded not prescribed"）。本卡**未改行为**（以免破坏独立期望），改在**文档与自有测试**中标注未决。若协调者要求连状态一起改为未核验，需同时裁定 G 的该条测试。
+**与 G 的一处分歧（已由协调者裁定）**：R6 曾要求"v2 空集合行为单独标注为畸形合同未决项"；而 G 的 round-1 overlay 测试 `g_v2_empty_selection_is_recorded_not_prescribed` **断言** v2 空集合 = `Passed`/`Failed`。当时本卡**未改行为**、只在文档与自有测试中标注未决。**章程 §21 D-1 已裁定**：v2 空来源为 `Unverified` + `CONTRACT_UNREADABLE`、空/非空候选同判、v1 历史行为保留、原 Passed/Failed 观察测试保留为历史且**不由实现者擅改**。该裁定已在 `bec156a` 实现（见 §4.5），并由 G 的新版 fixture 模块 `g_boundary_module.rs` 覆盖 16 种组合独立验证。
+
+### 4.5 A7（v2 空来源）与 F-P02-05（表格零记录）实现
+
+依据：章程 §21（D-1/D-2）、§22、§23，与 G 的冻结 fixture 模块 `g_boundary_module.rs`（SHA-256 `21F72DAE…C636`）。
+
+**A7 —— v2 `segments=[]` 报畸形合同**（提交 `bec156a`）
+- 判定位置：紧接 v1 分支之后，**早于**冲突检测、强制 EOF、字节相同与授权 EOF 差额分支 ⇒ 结论不依赖任何 EOF 政策或候选内容。
+- 统一结论：`Unverified`、`blocking=false`、`CONTRACT_UNREADABLE`、`equivalence=None`、**无**候选 `expected`/`actual`/`locator`，detail 点名"选择集合为空"；覆盖 2 比较模式 × 4 EOF 政策 × 空/非空候选 = **16 种组合全一致**。
+- v1 历史字节比较**不动**；**不**改写为 `Contract::Unbound`（那是冻结入口产生的另一变体）；未改 `from_spec`。
+- 自有测试 `v2_empty_selection_is_a_malformed_contract_left_undecided` **升格**为冻结期望断言 `v2_empty_selection_is_a_malformed_contract`，并**就地保留**旧观测断言与"行为未决"表述作为变更记录（章程 §21 D-1 依据）。G 的旧 round-1 观测测试**未改**（保留为历史）。
+
+**F-P02-05 —— 真正零记录按表头政策与声明容忍判定**（提交 `e7055d3`）
+- `HeaderPolicy::Required` → `Failed`/`TABLE_ZERO_RECORDS`，detail 明确"缺的是必需表头"，**`allow_zero_records=true` 也不能豁免**（空文件／仅 BOM／仅被跳过的空行同判）。
+- `HeaderPolicy::Optional` + `allow_zero_records=true` → `Passed`（无表头可要求、无数据行可要求，正好符合声明）。
+- `HeaderPolicy::Optional` + `false` → `Failed`/`TABLE_ZERO_RECORDS`。
+- 非零记录路径**未改**：quoted-empty 表头、`Record` 政策空行、仅表头、真错宽全部保持。
+- 复用 `TABLE_ZERO_RECORDS`（与 `:1208` 死分支既有意图一致），**未新增 reason code**、**未改 `TableCheckRequest` 字段**。
+
+**验证（我自己的独占 target harness；未跑正式 crate）**
+
+| 档 | 状态 | 结果 | 日志 |
+|---|---|---|---|
+| A7-only（中间态） | `bec156a` 内容 | **58 / 0** | `23-harness5-A7-only.log` |
+| 零记录-only（最终提交态） | `e7055d3` 内容（哈希 `DC4BEB65…`，与 T-A/T-B 已测字节一致） | **58 / 0** | `24-harness5-zero-records-only.log` |
+| 模块基线（最终） | `DC4BEB65…` | **58 / 0** | `21-harness5-module-baseline-postfix.log` |
+| + G 边界 fixture（原样追加 467 行） | 叠加后 `1CA42F27…` | **63 / 0** | `22-harness5-plus-GB.log` |
+
+GB-A7 的 **16 行**逐行实测均为 `Unverified/false/contract_unreadable/None`；GB-Z 的 **18 行**逐行实测：Z-06/Z-07 由 `Failed` 转为 `Passed`（本卡新增契约），其余 16 行与冻结期望一致（含 Z-03c 的 parser `Err` 与 Z-12 的错宽），`GB-SUMMARY … unimplemented_new_contract=[]`。v1 观察（GB-V1-01/02）与 `from_spec` 通道（GB-FS-01/02/03）保持不变。
 
 ## 5 仍需接线（本轮未做，属 P0-1 / P0-3）
 
@@ -211,7 +239,7 @@
 | C0 基点 | `6e0bb5d` |
 | 构建/测试命令 | `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`；`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml delivery_checks_v2` |
 | 共用 target | `CARGO_TARGET_DIR=D:\python\projects\Fox\Fox\apps\desktop\src-tauri\target` |
-| 本模块测试（`b01de0e`） | 独占 target harness 四档：模块基线 **58 / 0**；+ 旧 G18 = **76 / 0**；+ G26 = **84 / 0**；+ G26 + G3 六项 = **90 / 0**（G 的 18、8、6 全绿）。**完整 crate 的独立构建本轮未运行**（BLOCKED，见本节 E2 行） |
+| 本模块测试（`e7055d3`） | 独占 target harness：模块基线 **58 / 0**；+ G 边界 fixture（原样追加 467 行，叠加后 `1CA42F27…`）= **63 / 0**。A7-only 中间态 `bec156a` 亦为 **58 / 0**。**完整 crate 的独立构建本轮未运行**（见本节 E2 行） |
 | R8 定点探针 | `19-probe-r8-prefix.log`（修前）与 `20-probe-r8-postfix.log`（修后）：证明 `midCRLF/allow/realConversion` 修前修后同为 `Failed/content_mismatch`，而两条 R8 用例由 `Unverified` 变为 `Passed` |
 | 修正提交 | `f61a288`（F-P02 文本路径）、`8b4b063`（R1/R2/R3/R6），均在 `r16/a-contract` |
 | 精简 harness 证据（独占 target） | **71 passed / 0 failed** = 模块 53 + G overlay 18（G 的 18 条全部通过，含此前失败的 R1/R2 两条）。harness 位于仓库之外 `D:\python\projects\Fox\a-p02-scratch\a-harness`，独占 target `D:\python\projects\Fox\a-p02-harness-target`。经核验：其五个被测文件与 G 复制件**去 CR 后逐字节一致**（G 的副本是 CRLF，哈希对换行敏感），overlay 由 `G-P02-logs/g-overlay.patch` 原样追加 526 行、未改 patch |
