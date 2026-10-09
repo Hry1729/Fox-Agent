@@ -338,27 +338,33 @@ fn only_separators_differ(actual: &[u8], segments: &[TextSegment<'_>]) -> bool {
 ///    downgraded to `unverified` (F-P02-01). `freeze_concat` refuses any source
 ///    containing CR (`delivery_content_requirements.rs:309`), so a frozen v1
 ///    merge is CR-free and the comparison is fully decidable.
-/// 2. **Declared constraints hold for every candidate**, including one that
-///    equals the construction byte for byte (F-P02-03, F-P02-04).
-/// 3. **A strict comparison decides every difference itself.** The line-ending
+/// 2. **A mandatory final newline is enforced before everything else, and on every
+///    candidate** — including one that equals the construction byte for byte,
+///    because the construction never adds a trailing LF of its own. Missing or
+///    excess trailing LFs are pure byte properties needing no line-ending
+///    adjudication, so neither a contract contradiction nor an "undecidable
+///    convention" verdict may absorb them (R7, F-P02-03).
+/// 3. **The candidate's declared line-ending policy is enforced** next, also
+///    before any byte-equality shortcut (F-P02-04).
+/// 4. **A strict comparison decides every difference itself.** The line-ending
 ///    "cannot decide" verdict may only be reached by a policy that grants at
 ///    least one equivalence; otherwise any byte difference is a blocking failure
 ///    (R1). It is never allowed to pre-empt the strict branch.
-/// 4. **A contradictory contract is reported, not waived, and it never swallows a
+/// 5. **A contradictory contract is reported, not waived, and it never swallows a
 ///    provable failure.** If the frozen bytes contradict the declared policy the
 ///    outcome is `unverified` *unless* the bytes also prove a difference that
-///    neither the line-ending convention nor the declared EOF tolerance explains,
-///    in which case the failure still blocks and keeps its location and reason
-///    code, with the contradiction appended (R2).
-/// 5. **The contradiction names the side that is at fault**: a `Crlf` declaration
+///    neither the line-ending convention nor the EOF shape the contract itself
+///    asked for explains, in which case the failure still blocks and keeps its
+///    location and reason code, with the contradiction appended (R2).
+/// 6. **The contradiction names the side that is at fault**: a `Crlf` declaration
 ///    is contradicted by the constructor's own LF bytes (no candidate can satisfy
 ///    it), while an `Lf` declaration can only be contradicted by a source body
 ///    (R3). The policy still governs the whole artifact — the constructor's bytes
 ///    are never exempted.
-/// 6. **A known failure is never demoted.** The line-ending "cannot decide"
+/// 7. **A known failure is never demoted.** The line-ending "cannot decide"
 ///    verdict is reported only when the residual difference is fully explained by
 ///    the undecidable convention (F-P02-02).
-/// 7. **An equivalence is recorded only when the pass relied on it** (F-P02-06).
+/// 8. **An equivalence is recorded only when the pass relied on it** (F-P02-06).
 pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObservation {
     let check = check_name::TEXT_CONCAT;
     let policy = &request.envelope.policy;
@@ -398,37 +404,86 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         };
     }
 
-    // (2) A contract whose own frozen bytes contradict the declared line-ending
-    //     policy. This is checked **before** any candidate-facing verdict derived
-    //     from that policy: when the contract cannot be satisfied, a
-    //     candidate-facing finding from that policy means nothing, and reporting
-    //     "the candidate violates Lf" for a contradiction the merge format itself
-    //     creates would blame the wrong side (R3). `expected` is the whole
-    //     artifact the policy governs, so the constructor's own header and
-    //     separator LF bytes take part in this check and are never exempted in
-    //     favour of examining the source bodies alone.
-    if matches!(
+    // (2) The declared line-ending policy applied to the **frozen artifact
+    //     itself**: if no candidate can satisfy the contract, that is recorded
+    //     here and attributed to the side actually at fault (R3).
+    //
+    //     Detection runs over the whole `expected`, so the constructor's own
+    //     header and separator LF bytes take part and are never exempted in favour
+    //     of examining the source bodies alone. The *verdict* derived from it
+    //     deliberately waits until after the mandatory final-newline requirement
+    //     below, so a contradiction can never absorb an independently decidable
+    //     hard requirement (R7).
+    let conflict = if matches!(
         line_ending_verdict(&expected, declared),
         LineEndingVerdict::Violation(_)
     ) {
-        let conflict = conflict_attribution(request.segments, declared);
+        Some(conflict_attribution(request.segments, declared))
+    } else {
+        None
+    };
 
-        // A difference the bytes prove *independently of the line-ending
-        // question* still blocks: a contract contradiction must not swallow a
-        // real body error (R2). Under a policy that grants no equivalence every
-        // byte difference is decided outright, so the contradiction cannot
-        // rescue that either (R1). Only when the residual difference is fully
-        // explained by the undecidable convention (plus at most the declared EOF
-        // tolerance) is the contradiction itself the outcome.
+    let actual_lf = trailing_lf_count(request.actual);
+    let expected_lf = trailing_lf_count(&expected);
+
+    // (3) A declared final-newline **requirement** is a hard, independently
+    //     decidable property: the number of trailing LF bytes needs no
+    //     line-ending adjudication at all. It therefore runs before the
+    //     contradiction branch, before the candidate-policy branch and before any
+    //     byte-equality shortcut, so nothing can swallow it (R7), and it is never
+    //     an "either zero or one" tolerance. The construction never adds a
+    //     trailing LF of its own, so a candidate can even equal it and still miss
+    //     the LF the contract demands.
+    if policy.eof == EofPolicy::RequireTrailingLf && actual_lf != 1 {
+        let mut detail = format!("冻结合同要求恰好一个终止 LF，候选有 {actual_lf} 个");
+        if let Some(conflict) = &conflict {
+            // The contradiction is the contract's problem, the missing hard
+            // requirement is the candidate's: report both and blame neither
+            // wrongly.
+            detail.push_str(&format!("；另外，{conflict}"));
+        }
+        let mut observation = failed(
+            request.rule_id,
+            check,
+            reason_code::TEXT_EOF_MISMATCH,
+            request.binding,
+            detail,
+        );
+        observation.expected = Some("末尾 LF 1 个".to_owned());
+        observation.actual = Some(format!("末尾 LF {actual_lf} 个"));
+        // Point at the byte where the trailing run starts, so the finding is
+        // positionable instead of a whole-file complaint.
+        observation.locator =
+            Some(RecordLocator::default().at_byte((request.actual.len() - actual_lf) as u64));
+        return observation;
+    }
+
+    // (4) The contradiction's verdict. Checked before any candidate-facing verdict
+    //     derived from the same policy: when the contract cannot be satisfied, a
+    //     candidate-facing finding from that policy means nothing, and reporting
+    //     "the candidate violates Lf" for a contradiction the merge format itself
+    //     creates would blame the wrong side (R3).
+    if let Some(conflict) = &conflict {
+        // A difference the bytes prove *independently of the line-ending question*
+        // still blocks (R2). `discounts_one_trailing_lf` removes only the EOF shape
+        // the contract itself asked for, so a difference that survives it is not
+        // explained by the undecidable convention and must keep its accurate
+        // failing verdict. Under a policy that grants no equivalence every byte
+        // difference is decided outright, so the contradiction cannot rescue that
+        // either (R1).
         if request.actual != expected.as_slice()
             && (!grants_equivalence
-                || proves_independent_difference(&expected, request.actual, grants_equivalence))
+                || proves_independent_difference(
+                    &expected,
+                    request.actual,
+                    discounts_one_trailing_lf(policy),
+                ))
         {
             let mut observation = diagnose(&expected, request.actual);
             let note = format!("；另外，{conflict}");
             match observation.detail.as_mut() {
                 Some(detail) => detail.push_str(&note),
-                None => observation.detail = Some(conflict),
+                None => observation.detail = Some(conflict.clone()),
             }
             return observation;
         }
@@ -438,12 +493,12 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
             check,
             reason_code::TEXT_LINE_ENDING_UNSUPPORTED,
             request.binding,
-            conflict,
+            conflict.clone(),
         );
     }
 
-    // (3) The declared line-ending policy, enforced on the candidate itself and
-    //     therefore *before* any byte-equality shortcut.
+    // (5) The candidate's own declared line-ending policy, enforced before any
+    //     byte-equality shortcut.
     let candidate_endings = line_ending_verdict(request.actual, declared);
     if let LineEndingVerdict::Violation(detail) = &candidate_endings {
         let mut observation = failed(
@@ -458,34 +513,15 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         return observation;
     }
 
-    // (4) A declared final-newline *requirement* also holds for every candidate,
-    //     so it too runs before the byte-equality shortcut: `expected_concat` never
-    //     adds a trailing LF of its own, so a candidate can match the construction
-    //     exactly and still miss the LF the contract demands.
-    let actual_lf = trailing_lf_count(request.actual);
-    let expected_lf = trailing_lf_count(&expected);
-    if policy.eof == EofPolicy::RequireTrailingLf && actual_lf != 1 {
-        let mut observation = failed(
-            request.rule_id,
-            check,
-            reason_code::TEXT_EOF_MISMATCH,
-            request.binding,
-            format!("冻结合同要求恰好一个终止 LF，候选有 {actual_lf} 个"),
-        );
-        observation.expected = Some("末尾 LF 1 个".to_owned());
-        observation.actual = Some(format!("末尾 LF {actual_lf} 个"));
-        return observation;
-    }
-
-    // (4) Byte-identical: nothing was tolerated, so nothing is recorded.
+    // (6) Byte-identical: nothing was tolerated, so nothing is recorded.
     if request.actual == expected.as_slice() {
         return passed(request.rule_id, check, request.binding);
     }
 
-    // (4) Line endings the declaration does not decide. Reported as undecidable
-    //     *only* when nothing else is already wrong: `differs_beyond_line_endings`
-    //     is used here to choose between `failed` and `unverified`, and can never
-    //     produce a pass.
+    // (7) Line endings the declaration does not decide. Reported as undecidable
+    //     *only* when nothing else is already wrong:
+    //     `proves_independent_difference` is used here to choose between `failed`
+    //     and `unverified`, and can never produce a pass.
     if let LineEndingVerdict::Unsupported(detail) = candidate_endings {
         // A strict comparison decides every byte difference on its own, so the
         // line-ending "cannot decide" verdict must not pre-empt it (R1): byte
@@ -493,7 +529,11 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         if !grants_equivalence {
             return diagnose(&expected, request.actual);
         }
-        if !proves_independent_difference(&expected, request.actual, grants_equivalence) {
+        if !proves_independent_difference(
+            &expected,
+            request.actual,
+            discounts_one_trailing_lf(policy),
+        ) {
             return unverified(
                 request.rule_id,
                 check,
@@ -513,7 +553,7 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         return diagnose(&expected, request.actual);
     }
 
-    // (5) The one tolerated equivalence: at most one terminating LF on each side.
+    // (8) The one tolerated equivalence: at most one terminating LF on each side.
     //     Two or more is an extra blank line, which is never equivalent.
     let equivalence_available = actual_lf <= 1 && expected_lf <= 1;
     let bodies_equal = strip_one_trailing_lf(request.actual) == strip_one_trailing_lf(&expected);
@@ -665,6 +705,29 @@ fn policy_grants_equivalence(policy: &RulePolicy) -> bool {
             policy.eof,
             EofPolicy::AllowSingleTrailingLf | EofPolicy::RequireTrailingLf
         )
+}
+
+/// The policy's own permission to discount **one** terminating LF on each side
+/// while testing whether a *further*, independent difference exists.
+///
+/// This answers a different question from [`policy_grants_equivalence`] (which
+/// decides whether an uncovered difference may stay undecided at all), so the two
+/// are named separately even though they currently agree. It is deliberately true
+/// for **both** policies that declare an EOF equivalence, and narrowing it to
+/// `AllowSingleTrailingLf` would be wrong:
+///
+/// * `AllowSingleTrailingLf` declares "zero or one on each side".
+/// * `RequireTrailingLf` declares "exactly one", but `expected_concat` never adds
+///   one, so a candidate that **satisfied** the requirement — enforced before this
+///   predicate is consulted — differs from the construction by exactly the LF the
+///   contract demanded. Discounting that is what the contract asked for, not an
+///   extra tolerance; narrowing the predicate would report a compliant artifact as
+///   an independent body difference.
+///
+/// A *missing* or *excess* LF under `RequireTrailingLf` never reaches this
+/// predicate, because the hard requirement is enforced first (R7).
+fn discounts_one_trailing_lf(policy: &RulePolicy) -> bool {
+    policy_grants_equivalence(policy)
 }
 
 /// True when the bytes prove a difference that neither a line-ending convention
@@ -2189,5 +2252,238 @@ mod tests {
             "the constructor format must not be blamed: {detail}"
         );
         assert_ne!(observation.state, CheckState::Passed);
+    }
+
+    // -----------------------------------------------------------------------
+    // R7：强制 EOF（RequireTrailingLf）与可选 EOF（AllowSingleTrailingLf）必须分开
+    // -----------------------------------------------------------------------
+
+    /// `construction` with exactly `count` trailing LFs.
+    fn eof_counted(concat: &[u8], count: usize) -> Vec<u8> {
+        let mut out = concat.to_vec();
+        while out.last() == Some(&b'\n') {
+            out.pop();
+        }
+        for _ in 0..count {
+            out.push(b'\n');
+        }
+        out
+    }
+
+    /// One row of the mandatory-vs-optional EOF matrix. Every row states the
+    /// expected three-state verdict, whether it must block, which equivalence (if
+    /// any) may be recorded, and whether the failure must carry the EOF code.
+    struct EofCase {
+        label: &'static str,
+        policy: EofPolicy,
+        declared: LineEnding,
+        source: &'static [u8],
+        candidate_eof: usize,
+        state: CheckState,
+        blocking: bool,
+        equivalence: Option<&'static str>,
+        eof_code: bool,
+    }
+
+    /// **R7 交叉矩阵：来源末尾 0/1 LF × 候选 0/1/2 LF × 无冲突／来源冲突／构造冲突 ×
+    /// Require／Allow。**
+    ///
+    /// 全部行先执行、再一次性汇总，因此首条不符合不会遮蔽其余行；`executed` 断言防止
+    /// 某行被静默跳过。
+    ///
+    /// 关键区分（本卡语义 3）：
+    /// * `RequireTrailingLf` **不是**"0/1 任选"的可选容忍——缺失（0）与多余（≥2）都是
+    ///   可独立判定的硬性违规，必须 `Failed` 且阻断；
+    /// * 候选**已满足**强制要求（恰 1 个 LF）且其余内容正确时，不得因为构造原本 0 个
+    ///   LF 就把那个被要求的 LF 误报为正文差异；
+    /// * `AllowSingleTrailingLf` 的原有允许范围（每侧 0 或 1）不变，2 个 LF 仍必须失败。
+    #[test]
+    fn r7_mandatory_and_optional_eof_matrix() {
+        let cases = vec![
+            // ---- RequireTrailingLf, no conflict (declared Any) ----
+            EofCase { label: "REQ/any/src0lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/any/src0lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "REQ/any/src0lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/any/src1lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/any/src1lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "REQ/any/src1lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            // ---- RequireTrailingLf under a source-body conflict (declared Lf) ----
+            EofCase { label: "REQ/srcConflict/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/srcConflict/cand1-identical", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            // The "candidate keeps exactly the mandated LF but ends the body with
+            // LF only" variant is not expressible as a trailing-LF count from the
+            // construction, so it is covered separately by
+            // `r7_a_satisfied_mandatory_eof_with_an_lf_ending_stays_undecided`.
+            EofCase { label: "REQ/srcConflict/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            // ---- RequireTrailingLf + conflict where the construction has NO trailing LF ----
+            // This is the row that proves narrowing the discount to
+            // `AllowSingleTrailingLf` alone would be wrong: the candidate satisfied
+            // the mandated LF, so the single LF is what the contract asked for and
+            // must not be reported as an independent body difference.
+            EofCase { label: "REQ/srcConflictMid/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\nbeta", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/srcConflictMid/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\nbeta", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "REQ/srcConflictMid/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\nbeta", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            // ---- RequireTrailingLf under a constructor-format conflict (declared Crlf) ----
+            EofCase { label: "REQ/ctorConflict/src0lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/ctorConflict/src0lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "REQ/ctorConflict/src0lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/ctorConflict/src1lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha\n", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "REQ/ctorConflict/src1lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha\n", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "REQ/ctorConflict/src1lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            // ---- AllowSingleTrailingLf controls: the existing window is unchanged ----
+            EofCase { label: "ALLOW/any/src0lf/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 0, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "ALLOW/any/src0lf/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: Some(equivalence::OPTIONAL_FINAL_LF), eof_code: false },
+            EofCase { label: "ALLOW/any/src0lf/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "ALLOW/any/src1lf/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 0, state: CheckState::Passed, blocking: false, equivalence: Some(equivalence::OPTIONAL_FINAL_LF), eof_code: false },
+            EofCase { label: "ALLOW/any/src1lf/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "ALLOW/any/src1lf/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "ALLOW/srcConflict/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 0, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "ALLOW/srcConflict/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "ALLOW/srcConflict/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase { label: "ALLOW/ctorConflict/src0lf/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 0, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "ALLOW/ctorConflict/src0lf/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase { label: "ALLOW/ctorConflict/src0lf/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+        ];
+
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut executed = 0usize;
+        for case in &cases {
+            let segments = [segment("in/a.txt", case.source)];
+            let concat = concat_of(&segments);
+            let actual = eof_counted(&concat, case.candidate_eof);
+            let mut envelope = v2_with(ComparisonMode::TextSegments, case.policy);
+            envelope.policy.table.line_ending = case.declared;
+            let observation = check(&envelope, &segments, &actual);
+            executed += 1;
+
+            let mut problems = Vec::new();
+            if observation.state != case.state {
+                problems.push(format!("state={:?}", observation.state));
+            }
+            if observation.blocking != case.blocking {
+                problems.push(format!("blocking={}", observation.blocking));
+            }
+            if observation.equivalence.as_deref() != case.equivalence {
+                problems.push(format!("equivalence={:?}", observation.equivalence));
+            }
+            if case.eof_code
+                && observation.reason_code.as_deref() != Some(reason_code::TEXT_EOF_MISMATCH)
+            {
+                problems.push(format!("code={:?}", observation.reason_code));
+            }
+            if !problems.is_empty() {
+                mismatches.push(format!(
+                    "{}: {} (code={:?})",
+                    case.label,
+                    problems.join(", "),
+                    observation.reason_code
+                ));
+            }
+        }
+
+        assert_eq!(executed, cases.len(), "every matrix row must run");
+        assert_eq!(executed, 30, "the matrix has 30 rows");
+        assert!(
+            mismatches.is_empty(),
+            "mandatory vs optional EOF matrix mismatches ({} rows executed): {mismatches:#?}",
+            executed
+        );
+    }
+
+    /// **R7 缺失侧**：强制 EOF 缺失必须带 EOF 码、位置与冲突说明，不得被记成来源或正文问题。
+    #[test]
+    fn r7_a_missing_mandatory_eof_keeps_its_code_location_and_conflict_note() {
+        let segments = [segment("in/a.txt", b"alpha\r\n")];
+        let mut envelope = v2_text(EofPolicy::RequireTrailingLf);
+        envelope.policy.table.line_ending = LineEnding::Lf;
+
+        let observation = check(&envelope, &segments, b"a.txt\nalpha");
+        assert_eq!(observation.state, CheckState::Failed);
+        assert!(observation.blocking);
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_EOF_MISMATCH),
+            "the missing hard requirement must not be reported as a source or content problem"
+        );
+        assert_eq!(observation.expected.as_deref(), Some("末尾 LF 1 个"));
+        assert_eq!(observation.actual.as_deref(), Some("末尾 LF 0 个"));
+        assert_eq!(
+            observation.locator.as_ref().and_then(|l| l.byte_offset),
+            Some(11),
+            "the position where the trailing run would start must be reported"
+        );
+        assert!(
+            observation
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("矛盾")),
+            "the contradiction must be retained alongside the hard-requirement failure: {:?}",
+            observation.detail
+        );
+    }
+
+    /// **R7 满足侧（LF 结尾变体）**：候选保留了强制要求的那个 LF，只是正文自身以 LF
+    /// 结束（来源是 CRLF）。合同无解，故按现行裁定未核验，且**不得**记录任何等价。
+    #[test]
+    fn r7_a_satisfied_mandatory_eof_with_an_lf_ending_stays_undecided() {
+        let segments = [segment("in/a.txt", b"alpha\r\n")];
+        let mut envelope = v2_text(EofPolicy::RequireTrailingLf);
+        envelope.policy.table.line_ending = LineEnding::Lf;
+
+        let observation = check(&envelope, &segments, b"a.txt\nalpha\n");
+        assert_eq!(
+            observation.state,
+            CheckState::Unverified,
+            "the mandated LF is satisfied; only the unsolvable convention question remains"
+        );
+        assert!(!observation.blocking);
+        assert_eq!(
+            observation.equivalence, None,
+            "an undecided outcome is not a pass and records no equivalence"
+        );
+    }
+
+    /// **R7 满足侧**：`RequireTrailingLf` 不是"0/1 任选"的容忍，而"为满足它补上的 LF"
+    /// 也不是正文差异——两侧对照同一条规则。
+    #[test]
+    fn r7_require_trailing_lf_is_not_an_either_or_tolerance() {
+        let segments = [segment("in/a.txt", b"alpha")];
+        let required = v2_text(EofPolicy::RequireTrailingLf);
+
+        // Unsatisfied (0) and excess (2) are hard violations.
+        for count in [0usize, 2] {
+            let observation = check(&required, &segments, &eof_counted(&concat_of(&segments), count));
+            assert_eq!(observation.state, CheckState::Failed, "{count} trailing LFs");
+            assert!(observation.blocking, "{count} trailing LFs");
+            assert_eq!(
+                observation.reason_code.as_deref(),
+                Some(reason_code::TEXT_EOF_MISMATCH),
+                "{count} trailing LFs"
+            );
+        }
+
+        // Exactly one satisfies the contract, and that is a plain pass: the LF was
+        // required, not tolerated, so no equivalence may be claimed.
+        let satisfied = check(&required, &segments, &eof_counted(&concat_of(&segments), 1));
+        assert_eq!(satisfied.state, CheckState::Passed);
+        assert!(!satisfied.blocking);
+        assert_eq!(
+            satisfied.equivalence, None,
+            "a satisfied hard requirement is not the optional `0-or-1` equivalence"
+        );
+
+        // Control: the optional policy does treat the same shape as a tolerance,
+        // and it is the only policy that may record the equivalence.
+        let optional = check(
+            &v2_text(EofPolicy::AllowSingleTrailingLf),
+            &segments,
+            &eof_counted(&concat_of(&segments), 1),
+        );
+        assert_eq!(optional.state, CheckState::Passed);
+        assert_eq!(
+            optional.equivalence.as_deref(),
+            Some(equivalence::OPTIONAL_FINAL_LF),
+            "only AllowSingleTrailingLf may claim the optional equivalence"
+        );
     }
 }
