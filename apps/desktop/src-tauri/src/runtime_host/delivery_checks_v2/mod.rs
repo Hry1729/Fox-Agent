@@ -91,6 +91,16 @@ pub(crate) mod reason_code {
     pub(crate) const TEXT_CONTENT_MISMATCH: &str = "delivery.check.text.content_mismatch";
     /// The two spellings of "one optional final LF" no longer agree.
     pub(crate) const TEXT_EOF_MISMATCH: &str = "delivery.check.text.eof_mismatch";
+    /// The bytes contradict a line-ending declaration the frozen contract
+    /// actually made. A declared policy is enforced, so this is `failed`.
+    pub(crate) const TEXT_LINE_ENDING_VIOLATION: &str =
+        "delivery.check.text.line_ending_violation";
+    /// Nothing in the declaration decides these line endings, so no faithful
+    /// comparison exists. Reported as `unverified`: "we cannot compare this" is
+    /// not evidence that the content is wrong, and converting silently is
+    /// forbidden (R05).
+    pub(crate) const TEXT_LINE_ENDING_UNSUPPORTED: &str =
+        "delivery.check.text.line_ending_unsupported";
 
     // Delimited tables (F02).
     pub(crate) const TABLE_ENCODING_UNSUPPORTED: &str =
@@ -146,6 +156,16 @@ pub(crate) mod check_name {
     pub(crate) const TYPED_METRIC: &str = "typed_metric";
     pub(crate) const LINEAGE: &str = "lineage";
     pub(crate) const PDF_STRUCTURE: &str = "pdf_structure";
+}
+
+/// The equivalences a frozen policy may rely on. Stable literals: they are
+/// persisted on the observation and shown to the user, so a pass that needed one
+/// is auditable rather than implied by free text.
+pub(crate) mod equivalence {
+    /// Zero or one terminating LF are equivalent
+    /// ([`EofPolicy::AllowSingleTrailingLf`]). The only tolerated width in the
+    /// whole text comparison; never a licence to trim the body (plan §4.1).
+    pub(crate) const OPTIONAL_FINAL_LF: &str = "optionalFinalLf";
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +847,12 @@ pub(crate) struct CheckObservation {
     pub blocking: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<CandidateBinding>,
+    /// Set **only** on a `passed` observation, and only when the pass relied on
+    /// an equivalence the frozen policy explicitly allows (see [`equivalence`]).
+    /// A plain byte match leaves this `None`, so "R01: passed *and* the
+    /// equivalence was recorded" is observable instead of assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equivalence: Option<String>,
 }
 
 /// A real, checkable mismatch. `blocking` is set because a failed item is what
@@ -851,6 +877,7 @@ pub(crate) fn failed(
         limit: None,
         blocking: true,
         candidate: Some(binding.clone()),
+        equivalence: None,
     }
 }
 
@@ -869,7 +896,24 @@ pub(crate) fn passed(rule_id: &str, check: &str, binding: &CandidateBinding) -> 
         limit: None,
         blocking: false,
         candidate: Some(binding.clone()),
+        equivalence: None,
     }
+}
+
+/// A pass that **relied on** an explicitly allowed equivalence. The equivalence
+/// literal is frozen ([`equivalence`]) and is persisted with the observation, so
+/// a reviewer can tell "byte-identical" from "allowed to differ by one final LF".
+pub(crate) fn passed_with_equivalence(
+    rule_id: &str,
+    check: &str,
+    binding: &CandidateBinding,
+    equivalence: &str,
+    detail: impl Into<String>,
+) -> CheckObservation {
+    let mut observation = passed(rule_id, check, binding);
+    observation.equivalence = Some(equivalence.to_owned());
+    observation.detail = Some(detail.into());
+    observation
 }
 
 /// A demand this round cannot decide. Never a pass, never blocking.
@@ -893,6 +937,7 @@ pub(crate) fn unverified(
         limit: None,
         blocking: false,
         candidate: Some(binding.clone()),
+        equivalence: None,
     }
 }
 
@@ -1123,6 +1168,10 @@ pub(crate) struct TableError {
     pub code: String,
     pub locator: RecordLocator,
     pub detail: String,
+    /// Set only for an over-limit stop, so the caller can render the same
+    /// explicit over-limit report a direct observation uses. A budget stop is
+    /// never a content error (plan §7 P0-2).
+    pub limit: Option<LimitKind>,
 }
 
 impl TableError {
@@ -1131,6 +1180,26 @@ impl TableError {
             code: code.to_owned(),
             locator,
             detail: detail.into(),
+            limit: None,
+        }
+    }
+
+    /// A parse that stopped at a declared ceiling. Names the ceiling so the
+    /// caller does not have to guess which one from the message.
+    pub(crate) fn budget(
+        limit: LimitKind,
+        ceiling: u64,
+        observed: u64,
+        locator: RecordLocator,
+    ) -> Self {
+        Self {
+            code: reason_code::BUDGET_EXCEEDED.to_owned(),
+            locator,
+            detail: format!(
+                "解析达到资源上限 {}（上限 {ceiling}，实际 {observed}）；本轮不重试，也不据此判定内容错误",
+                limit.as_str()
+            ),
+            limit: Some(limit),
         }
     }
 }
