@@ -338,6 +338,11 @@ fn only_separators_differ(actual: &[u8], segments: &[TextSegment<'_>]) -> bool {
 ///    downgraded to `unverified` (F-P02-01). `freeze_concat` refuses any source
 ///    containing CR (`delivery_content_requirements.rs:309`), so a frozen v1
 ///    merge is CR-free and the comparison is fully decidable.
+/// 1b. **A v2 envelope with an empty frozen selection is a malformed contract.**
+///    The freeze precondition excludes it, the finding belongs to the contract
+///    rather than the candidate (no expected/actual/locator), and it is decided
+///    before every other v2 step. It is never rewritten into `Contract::Unbound`,
+///    and v1 history keeps its own byte comparison (charter §21 D-1).
 /// 2. **A mandatory final newline is enforced before everything else, and on every
 ///    candidate** — including one that equals the construction byte for byte,
 ///    because the construction never adds a trailing LF of its own. Missing or
@@ -410,6 +415,31 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         } else {
             diagnose(&expected, request.actual)
         };
+    }
+
+    // (1b) A v2 envelope whose frozen selection is empty is a **malformed
+    //      contract**: the freeze precondition requires `1..=64` sources
+    //      (`delivery_content_requirements.rs:284-285`, `:313`, `:316`), so this
+    //      state is unreachable for a legitimately frozen rule and can only come
+    //      from a hand-written or damaged persisted spec. The finding is about the
+    //      *contract*, not the candidate, so it carries no candidate
+    //      expected/actual/locator, and it is decided **before** every other v2
+    //      step — the contradiction branch, the mandatory-EOF check, byte equality
+    //      and the authorized-EOF pass — so no later branch can turn it into a
+    //      pass or into a candidate failure.
+    //
+    //      It is deliberately **not** rewritten into `Contract::Unbound`, which is
+    //      a different variant produced by the freeze entry, and v1 history keeps
+    //      its own byte comparison above.
+    if request.segments.is_empty() {
+        return unverified(
+            request.rule_id,
+            check,
+            reason_code::CONTRACT_UNREADABLE,
+            request.binding,
+            "冻结合同的选择集合为空：这是畸形合同（冻结前置条件要求 1..=64 个来源），本项按未核验处理"
+                .to_owned(),
+        );
     }
 
     // (2) The declared line-ending policy applied to the **frozen artifact
@@ -2061,33 +2091,65 @@ mod tests {
         );
     }
 
-    /// **v2 空集合 = 畸形合同，行为未决（单独标注，不外推为验收通过）。**
+    /// **v2 空集合 = 畸形合同（章程 §21 D-1 冻结的期望）。**
     ///
-    /// 空集合被冻结前置条件排除，所以 v2 遇到它意味着合同已畸形，本卡**不为它
-    /// 规定业务语义**，也不主张"与 v1 行为一致"就是正确验收。这里只固定唯一确定
-    /// 的安全属性：非空候选绝不能被判为通过。观察到的具体状态只作记录。
+    /// 空集合被冻结前置条件排除（`delivery_content_requirements.rs:284-285` 的
+    /// `count∈1..=64`、`:313`、`:316`），所以 v2 遇到它意味着合同已畸形：本项报
+    /// `Unverified`/`CONTRACT_UNREADABLE`，**不携带候选侧的 expected/actual/locator**，
+    /// 空候选与非空候选**同判**——不得因为"候选也是空"就当作通过。判定发生在
+    /// 强制 EOF 与字节相同分支**之前**，因此也不依赖任何 EOF 政策。
     ///
-    /// 需要一份独立、专用的畸形合同结论（reason code）时，属公共接口卡的范围。
+    /// **期望变更记录（章程 §21 D-1）**：本测试原为**行为观测**，只断言
+    /// "`state != Failed`"与"非空候选 `!= Passed`"，并在注释中写明"行为未决、
+    /// 不主张与 v1 行为一致即验收"。§21 D-1 冻结后，本测试升格为回归断言
+    /// （旧两条断言的语义仍成立，现由更强的断言覆盖），旧表述保留于此作为记录。
+    /// 旧版观测测试（G 的 round-1 `g_v2_empty_selection_is_recorded_not_prescribed`）
+    /// 属历史观察，由 G 的新版独立期望取代，本卡不改 G 测试。
     #[test]
-    fn v2_empty_selection_is_a_malformed_contract_left_undecided() {
-        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
-
-        let empty = check(&envelope, &[], b"");
-        let non_empty = check(&envelope, &[], b"anything");
-        // Recorded, not prescribed: the exact state of a malformed contract is an
-        // open question, so only the safety property is asserted.
-        assert_ne!(
-            empty.state,
-            CheckState::Failed,
-            "observed: {} / {:?}",
-            empty.state.as_str(),
-            empty.reason_code
-        );
-        assert_ne!(
-            non_empty.state,
-            CheckState::Passed,
-            "a non-empty candidate must never pass an empty expectation"
-        );
+    fn v2_empty_selection_is_a_malformed_contract() {
+        for comparison in [ComparisonMode::BytesExact, ComparisonMode::TextSegments] {
+            for eof in [
+                EofPolicy::ByteExact,
+                EofPolicy::SourceVerbatim,
+                EofPolicy::AllowSingleTrailingLf,
+                EofPolicy::RequireTrailingLf,
+            ] {
+                for candidate in [&b""[..], &b"anything"[..]] {
+                    let envelope = v2_with(comparison, eof);
+                    let observation = check(&envelope, &[], candidate);
+                    let label = format!("{comparison:?}/{eof:?}/{candidate:?}");
+                    assert_eq!(
+                        observation.state,
+                        CheckState::Unverified,
+                        "state must not depend on the comparison mode, the EOF policy \
+                         or the candidate being empty: {label}"
+                    );
+                    assert!(!observation.blocking, "{label}");
+                    assert_eq!(
+                        observation.reason_code.as_deref(),
+                        Some(reason_code::CONTRACT_UNREADABLE),
+                        "{label}"
+                    );
+                    assert_eq!(observation.equivalence, None, "{label}");
+                    assert!(
+                        observation.expected.is_none() && observation.actual.is_none(),
+                        "a contract-side finding carries no candidate expected/actual: {label}"
+                    );
+                    assert!(
+                        observation.locator.is_none(),
+                        "a contract-side finding carries no candidate locator: {label}"
+                    );
+                    assert!(
+                        observation
+                            .detail
+                            .as_deref()
+                            .is_some_and(|detail| detail.contains("选择集合为空")),
+                        "the malformed selection must be named: {label} / {:?}",
+                        observation.detail
+                    );
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
