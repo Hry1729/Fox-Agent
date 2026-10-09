@@ -8,7 +8,7 @@
 
 | 文件 | 变更 |
 |---|---|
-| `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/text_csv.rs` | 由 C0 占位改为**真实实现**：`check_text_concat`、`parse_table`、`check_table_columns`；随后按 G 审查修正（`f61a288`，见 §4.1），再按 G 独立复验修正 R1/R2/R3（`8b4b063`，见 §4.2）。**本文件共 36 项测试** |
+| `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/text_csv.rs` | 由 C0 占位改为**真实实现**：`check_text_concat`、`parse_table`、`check_table_columns`；随后按 G 审查修正（`f61a288`，见 §4.1）、按 G 独立复验修正 R1/R2/R3（`8b4b063`，见 §4.2）、按 G 第二轮复验修正 R7（`05a92a5`，见 §4.3）。**本文件共 40 项测试** |
 | `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/mod.rs` | 接口扩展 3 处（见 §2）：`equivalence` 字段与 `passed_with_equivalence`；2 个行结束 reason code；`TableError.limit` 与 `TableError::budget` |
 
 **未变更**：`delivery.rs`、`delivery_content_requirements.rs`、`data_compute.rs`、`Cargo.*`、数据库、前端。本模块**尚未接入任何生产路径**，因此不可能因为"忘记接线"而改变现有运行行为，也不可能因为占位而误放行。
@@ -92,7 +92,29 @@
 
 **期望变更记录（保留原样本，不静默修改）**
 - **移除** `r04_a_contract_without_sources_is_unverified_not_failed`。其原断言为：`check(&envelope, &[], b"anything")` → `Unverified` / `CONTRACT_UNREADABLE`。该期望是我此前**自行发明、无证据支持**的第三种语义，且偏离旧 checker 对空期望的行为。替代权威：`empty_selection_mirrors_the_old_byte_comparison`。证据：`delivery_content_requirements.rs:284-285`（选择数量被限制在 `1..=64`）、`:313`、`:316`（`selected.len() == count`）、`:626`（真正的"未绑定"是**独立契约变体** `Contract::Unbound` → `Unverified`，不能与空 `Concat` 混同）。原断言的文本与理由已**就地保留在源码注释**中，可审计。
-- **F-P02-11 更正**：本模块过滤器总数在 `f61a288` 时为 **47** = `mod.rs` 14 + `text_csv.rs` 30 + 3 个叶子占位；在 `8b4b063`（见 §4.2）后为 **53** = `mod.rs` 14 + `text_csv.rs` **36** + 3 个叶子占位。此前交付单写"42 = 本次文本模块新增"**不准确**，已在此更正。
+- **F-P02-11 更正**：本模块过滤器总数在 `f61a288` 时为 **47** = `mod.rs` 14 + `text_csv.rs` 30 + 3 个叶子占位；`8b4b063` 后为 **53** = 14 + **36** + 3；`05a92a5`（见 §4.3）后为 **57** = 14 + **40** + 3。此前交付单写"42 = 本次文本模块新增"**不准确**，已在此更正。
+
+### 4.3 R7 处置（依据 `G-P02-text-reverify-2-result.md`，修正提交 `05a92a5`）
+
+**缺陷**：合同冲突（`Lf`+CRLF 源，或 `Crlf`+构造器 LF）下，`RequireTrailingLf` 的**缺失**强制 EOF（0 个）被当成可选容忍 → `Unverified, blocking=false`；而**多余**（2 个）却被拒 → 内部不对称，可独立判定的硬性要求被吞掉。
+
+**修法（用两侧反例证明，非机械照抄布尔位）**
+
+1. **强制 EOF 提前**：`RequireTrailingLf` 的判定移到冲突分支、候选政策分支与字节相同早退**之前**。末尾 LF 数量是纯字节性质、不需要行结束裁定，因此 0 或 ≥2 一律 `Failed` 且阻断，携带 `TEXT_EOF_MISMATCH`、期望/实际个数与"末尾 LF 起点"的字节定位；存在冲突时把矛盾说明**追加**到 detail（保留其说明）。失败不再被误记为来源缺失或正文差异。
+2. **折扣位独立命名，并保留其正确语义**：新增 `discounts_one_trailing_lf`，与 `policy_grants_equivalence` 分开命名（两者当前同值，但回答不同问题）。它**故意仍对 `RequireTrailingLf` 为真**：该政策声明"恰好一个"，而 `expected_concat` 永不补 LF，所以**已满足要求**的候选与构造之差恰是合同自己要求的那个 LF；把它当"独立差异"会误报合规产物（矩阵行 `REQ/srcConflictMid/cand1` 与两个定点测试固定此点）。**G 建议的"把容忍位限定为 `AllowSingleTrailingLf`"若单独套用会破坏这一侧**（会输出 `Failed`），故未采纳其布尔位写法。缺失/多余 LF 现在根本到不了该判定，因为第 1 步已先行强制。
+
+**验证（我自己的独占 target harness；未用共享 target、未跑完整 crate）**
+
+| 阶段 | 结果 |
+|---|---|
+| 修前（`7de178d` 源 + G combined overlay） | **77 passed / 2 failed** —— 失败项正是 R7 两条交叉反例 |
+| 修后 · 模块基线 | **57 / 0**（`text_csv.rs` 40、`mod.rs` 14、叶子占位 3） |
+| 修后 · 模块 + 旧 G18 | **75 / 0** |
+| 修后 · 模块 + combined G26 | **83 / 0**（G 的旧 18 与新 8 **全部通过**） |
+
+**修前/修后同一批用例**：`conflict+requireLf/zero-lf` 由 `Unverified, blocking=false` 变为 `Failed, blocking=true`；同组 `two-lf` 由 `content_mismatch` 变为准确的 `eof_mismatch`；`crlfConflict+requireLf/{lf,crlf}-source/zero-lf` 同样由 `Unverified` 变为 `Failed`。
+
+**新增测试**：30 行"强制/可选 EOF"交叉矩阵（来源末尾 0/1 LF × 候选 0/1/2 LF × 无冲突/来源冲突/构造冲突 × Require/Allow），**每行写明预期三态、blocking 与 equivalence，全部执行后一次性汇总**（首条不符不遮蔽其余，并以 `executed == cases.len()` 防静默跳过）；另加"缺失侧"（码/个数/定位/冲突说明）、"满足侧 LF 结尾"与"`RequireTrailingLf` 不是 0/1 任选容忍"三个定点测试。
 
 ### 4.2 R1/R2/R3/R6 处置（依据 `G-P02-text-reverify-result.md`，修正提交 `8b4b063`）
 
@@ -161,10 +183,10 @@
 | C0 基点 | `6e0bb5d` |
 | 构建/测试命令 | `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`；`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml delivery_checks_v2` |
 | 共用 target | `CARGO_TARGET_DIR=D:\python\projects\Fox\Fox\apps\desktop\src-tauri\target` |
-| 本模块测试（`8b4b063`） | **53 passed / 0 failed**（1575 filtered out）；`text_csv.rs` **36** 项、`mod.rs` 14 项、叶子占位 3 项 |
+| 本模块测试（`05a92a5`） | 独占 target harness：模块基线 **57 / 0**（`text_csv.rs` **40**、`mod.rs` 14、叶子占位 3）；+ 旧 G18 = **75 / 0**；+ combined G26 = **83 / 0**。**完整 crate 的独立构建本轮未运行**（BLOCKED，见本节 E2 行） |
 | 修正提交 | `f61a288`（F-P02 文本路径）、`8b4b063`（R1/R2/R3/R6），均在 `r16/a-contract` |
 | 精简 harness 证据（独占 target） | **71 passed / 0 failed** = 模块 53 + G overlay 18（G 的 18 条全部通过，含此前失败的 R1/R2 两条）。harness 位于仓库之外 `D:\python\projects\Fox\a-p02-scratch\a-harness`，独占 target `D:\python\projects\Fox\a-p02-harness-target`。经核验：其五个被测文件与 G 复制件**去 CR 后逐字节一致**（G 的副本是 CRLF，哈希对换行敏感），overlay 由 `G-P02-logs/g-overlay.patch` 原样追加 526 行、未改 patch |
-| 正式 crate 状态（E2） | 本轮**未被 E2 阻塞**：`cargo check` 9.74s 通过，且正式 crate 的 `delivery_checks_v2` 过滤测试 **53 passed / 0 failed**，日志含本树 `Compiling fox-engine-protocol / fox-agent-kernel / fox-desktop` 三行。**这不能用于宣称"E2 已排除"**——它是特定窗口下的观察，与 G 窗口的失败并不矛盾（章程 §13 点 5） |
+| 正式 crate 状态（E2） | **本轮未运行正式 crate，也不以共享 target 结果替代验收**（按章程 §14/§15）。完整 crate 的**独立**构建仍 **BLOCKED**（E2，本轮未重试、未处理 ACL、未改 build.rs、未扩权限）。上一轮曾在共享 target 下观察到 `cargo check` 通过，那是**辅助证据而非门槛**，本轮刻意不再重复该做法 |
 | 修前反例证据 | **6 条反例在修正前 HEAD（`07c2657`）上全部失败**，逐条对应一个缺陷；日志 `A-P02-logs/01b-counterexample-before-fix-recompiled.log` |
 | 修正提交 | `f61a288`（`r16/a-contract`，仅 `text_csv.rs`，439 insertions / 140 deletions） |
 | 修后证据 | `A-P02-logs/03-after-fix-final.log`，含 `Compiling fox-agent-kernel … (…/r16-a-20261010/crates/…)` 等三行，证明从**本工作树**编译 |
