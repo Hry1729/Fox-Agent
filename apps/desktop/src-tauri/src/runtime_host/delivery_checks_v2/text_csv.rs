@@ -361,10 +361,18 @@ fn only_separators_differ(actual: &[u8], segments: &[TextSegment<'_>]) -> bool {
 ///    it), while an `Lf` declaration can only be contradicted by a source body
 ///    (R3). The policy still governs the whole artifact — the constructor's bytes
 ///    are never exempted.
-/// 7. **A known failure is never demoted.** The line-ending "cannot decide"
+/// 7. **The authorized EOF difference is decided on the original bytes**, before
+///    the undecidable verdict. If both sides are byte-identical once the declared
+///    trailing LF is discounted, the pass follows from the frozen bytes plus the
+///    contract's own EOF rule — never from normalising. A body that both sides
+///    hold with the same CRLF bytes therefore passes (R8), while a genuine
+///    LF↔CRLF replacement is not raw-byte equal and still reaches the undecidable
+///    branch below.
+/// 8. **A known failure is never demoted.** The line-ending "cannot decide"
 ///    verdict is reported only when the residual difference is fully explained by
-///    the undecidable convention (F-P02-02).
-/// 8. **An equivalence is recorded only when the pass relied on it** (F-P02-06).
+///    the undecidable convention and is not already an authorized EOF difference
+///    (F-P02-02).
+/// 9. **An equivalence is recorded only when the pass relied on it** (F-P02-06).
 pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObservation {
     let check = check_name::TEXT_CONCAT;
     let policy = &request.envelope.policy;
@@ -518,7 +526,48 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         return passed(request.rule_id, check, request.binding);
     }
 
-    // (7) Line endings the declaration does not decide. Reported as undecidable
+    // (7) The EOF difference the contract itself authorized, decided on the
+    //     **original bytes** — never on a normalized form. This is what separates a
+    //     compliant artifact from a line-ending conversion: when both sides are
+    //     byte-identical once the authorized trailing LF is discounted, the only
+    //     difference is the EOF shape the contract declared, even if the body
+    //     contains CRLF bytes that both sides hold verbatim (R8). A genuine
+    //     LF<->CRLF replacement is *not* raw-byte equal, so it cannot pass here and
+    //     still reaches the undecidable verdict below.
+    //
+    //     Only a policy that actually declares an EOF equivalence may take this
+    //     path, so v1, `BytesExact` and `SourceVerbatim` are untouched.
+    if policy.comparison == ComparisonMode::TextSegments {
+        let equivalence_available = actual_lf <= 1 && expected_lf <= 1;
+        let raw_bodies_equal =
+            strip_one_trailing_lf(request.actual) == strip_one_trailing_lf(&expected);
+        if equivalence_available && raw_bodies_equal {
+            match policy.eof {
+                EofPolicy::AllowSingleTrailingLf => {
+                    return passed_with_equivalence(
+                        request.rule_id,
+                        check,
+                        request.binding,
+                        equivalence::OPTIONAL_FINAL_LF,
+                        format!(
+                            "正文与段间结构与冻结合并逐字节一致；按冻结合同允许的等价，末尾终止 LF 的有／无视为等价（候选 {actual_lf} 个，期望 {expected_lf} 个）"
+                        ),
+                    );
+                }
+                EofPolicy::RequireTrailingLf => {
+                    // The requirement was enforced above, so this pass rests on the
+                    // contract's own requirement rather than on a tolerated
+                    // difference; recording `optionalFinalLf` would mislabel a
+                    // satisfied hard requirement as an optional equivalence
+                    // (F-P02-06).
+                    return passed(request.rule_id, check, request.binding);
+                }
+                EofPolicy::ByteExact | EofPolicy::SourceVerbatim => {}
+            }
+        }
+    }
+
+    // (8) Line endings the declaration does not decide. Reported as undecidable
     //     *only* when nothing else is already wrong:
     //     `proves_independent_difference` is used here to choose between `failed`
     //     and `unverified`, and can never produce a pass.
@@ -553,34 +602,9 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         return diagnose(&expected, request.actual);
     }
 
-    // (8) The one tolerated equivalence: at most one terminating LF on each side.
-    //     Two or more is an extra blank line, which is never equivalent.
-    let equivalence_available = actual_lf <= 1 && expected_lf <= 1;
-    let bodies_equal = strip_one_trailing_lf(request.actual) == strip_one_trailing_lf(&expected);
-
-    match policy.eof {
-        EofPolicy::ByteExact | EofPolicy::SourceVerbatim => {}
-        EofPolicy::AllowSingleTrailingLf if equivalence_available && bodies_equal => {
-            return passed_with_equivalence(
-                request.rule_id,
-                check,
-                request.binding,
-                equivalence::OPTIONAL_FINAL_LF,
-                format!(
-                    "正文与段间结构与冻结合并一致；按冻结合同允许的等价，末尾终止 LF 的有／无视为等价（候选 {actual_lf} 个，期望 {expected_lf} 个）"
-                ),
-            );
-        }
-        // The required LF was already enforced above, so this pass rests on the
-        // contract's own requirement rather than on a tolerated difference.
-        // Recording `optionalFinalLf` here would mislabel a satisfied hard
-        // requirement as an optional equivalence (F-P02-06).
-        EofPolicy::RequireTrailingLf if equivalence_available && bodies_equal => {
-            return passed(request.rule_id, check, request.binding);
-        }
-        EofPolicy::AllowSingleTrailingLf | EofPolicy::RequireTrailingLf => {}
-    }
-
+    // The authorized EOF pass was already attempted on the raw bytes in (7), so
+    // reaching here means the difference is not one this contract allows. Report
+    // the most accurate failure.
     diagnose(&expected, request.actual)
 }
 
@@ -2484,6 +2508,197 @@ mod tests {
             optional.equivalence.as_deref(),
             Some(equivalence::OPTIONAL_FINAL_LF),
             "only AllowSingleTrailingLf may claim the optional equivalence"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // R8：两侧原样相同的 CRLF 正文 + 合同自己声明/要求的 EOF 差额
+    // -----------------------------------------------------------------------
+
+    struct R8Case {
+        label: &'static str,
+        policy: EofPolicy,
+        declared: LineEnding,
+        source: &'static [u8],
+        candidate: &'static [u8],
+        state: CheckState,
+        blocking: bool,
+        equivalence: Option<&'static str>,
+        /// Required reason code when the row is a failure.
+        code: Option<&'static str>,
+    }
+
+    /// **R8 回归：判定键必须是原始字节，而不是"候选里是否含 CRLF"。**
+    ///
+    /// 当两侧持有的 CRLF 正文逐字节相同时，两者之差**只有**合同自己声明或要求的那个
+    /// 末尾 LF，因此必须按声明通过（Allow 记等价、Require 记普通通过）。同一张表里
+    /// 同时放了"归一化后才相等"的真实换行替换行：只要判定回落到
+    /// `normalize_line_endings`，这些行就会立刻暴露。
+    #[test]
+    fn r8_authorized_eof_difference_is_decided_on_original_bytes() {
+        let cases = vec![
+            // -- 正文中段含 CRLF、两侧逐字节相同（R8 的定点反例）--
+            R8Case {
+                label: "midCRLF/require/plus1LF",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\r\nbeta",
+                candidate: b"a.txt\nalpha\r\nbeta\n",
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: None,
+                code: None,
+            },
+            R8Case {
+                label: "midCRLF/allow/plus1LF",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\r\nbeta",
+                candidate: b"a.txt\nalpha\r\nbeta\n",
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: Some(equivalence::OPTIONAL_FINAL_LF),
+                code: None,
+            },
+            R8Case {
+                label: "midCRLF/require/noLF",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\r\nbeta",
+                candidate: b"a.txt\nalpha\r\nbeta",
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                code: Some(reason_code::TEXT_EOF_MISMATCH),
+            },
+            R8Case {
+                label: "midCRLF/allow/byteIdentical",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\r\nbeta",
+                candidate: b"a.txt\nalpha\r\nbeta",
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: None,
+                code: None,
+            },
+            R8Case {
+                label: "midCRLF/allow/plus2LF",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\r\nbeta",
+                candidate: b"a.txt\nalpha\r\nbeta\n\n",
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                code: None,
+            },
+            R8Case {
+                label: "midCRLF/allow/bodyChange",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\r\nbeta",
+                candidate: b"a.txt\nalpha\r\nbetX\n",
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                code: None,
+            },
+            // The CRLF -> LF direction of a real conversion: the candidate carries no
+            // CRLF at all, so the "undecidable convention" verdict never applies and
+            // the strict byte comparison decides. This is **pre-existing** behaviour,
+            // not a product of the R8 change: the probe in `A-P02-logs/19-…` (pre-fix)
+            // and `20-…` (post-fix) return the same `Failed/content_mismatch` for this
+            // fixture. The opposite direction (`lfBody/allow/realConversion`) stays
+            // `Unverified`, and that asymmetry belongs to the still-open
+            // declared-conversion-equivalence item, not to R8.
+            R8Case {
+                label: "midCRLF/allow/realConversion",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\r\nbeta",
+                candidate: b"a.txt\nalpha\nbeta",
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                code: Some(reason_code::TEXT_CONTENT_MISMATCH),
+            },
+            // -- 纯 LF 正文对照：同样的形态必须得到同样的结论 --
+            R8Case {
+                label: "lfBody/require/plus1LF",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\nbeta",
+                candidate: b"a.txt\nalpha\nbeta\n",
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: None,
+                code: None,
+            },
+            R8Case {
+                label: "lfBody/allow/plus1LF",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\nbeta",
+                candidate: b"a.txt\nalpha\nbeta\n",
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: Some(equivalence::OPTIONAL_FINAL_LF),
+                code: None,
+            },
+            R8Case {
+                label: "lfBody/allow/realConversion",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\nbeta",
+                candidate: b"a.txt\nalpha\r\nbeta\n",
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                code: None,
+            },
+        ];
+
+        let mut mismatches: Vec<String> = Vec::new();
+        let mut executed = 0usize;
+        for case in &cases {
+            let segments = [segment("in/a.txt", case.source)];
+            let mut envelope = v2_with(ComparisonMode::TextSegments, case.policy);
+            envelope.policy.table.line_ending = case.declared;
+            let observation = check(&envelope, &segments, case.candidate);
+            executed += 1;
+
+            let mut problems = Vec::new();
+            if observation.state != case.state {
+                problems.push(format!("state={:?}", observation.state));
+            }
+            if observation.blocking != case.blocking {
+                problems.push(format!("blocking={}", observation.blocking));
+            }
+            if observation.equivalence.as_deref() != case.equivalence {
+                problems.push(format!("equivalence={:?}", observation.equivalence));
+            }
+            if let Some(code) = case.code {
+                if observation.reason_code.as_deref() != Some(code) {
+                    problems.push(format!("code={:?}", observation.reason_code));
+                }
+            }
+            if !problems.is_empty() {
+                mismatches.push(format!(
+                    "{}: {} (code={:?})",
+                    case.label,
+                    problems.join(", "),
+                    observation.reason_code
+                ));
+            }
+        }
+
+        assert_eq!(executed, cases.len(), "every R8 row must run");
+        assert_eq!(executed, 10, "the R8 table has 10 rows");
+        assert!(
+            mismatches.is_empty(),
+            "R8 rows must be decided on the original bytes ({} rows executed): {mismatches:#?}",
+            executed
         );
     }
 }
