@@ -310,3 +310,17 @@ button:disabled,
   font-size: var(--fox-type-caption) !important;
   line-height: 1.35;
 }
+
+/* 状态圆点：6px；实心 = 可用，空心 = 缺失，红/橙只标出问题的项 */
+.fox-status-dot {
+  flex: none;
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--fox-muted);
+}
+.fox-status-dot.is-ok { background: var(--success); }
+.fox-status-dot.is-error { background: var(--destructive); }
+.fox-status-dot.is-warning { background: var(--warning); }
+.fox-status-dot.is-empty { background: transparent; border: 1px solid var(--fox-muted); }
