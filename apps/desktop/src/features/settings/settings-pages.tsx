@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Activity, Archive, BellRing, Bot, Cable, Check, ChevronDown, ChevronRight, Copy, Download, ExternalLink, FileText, FileWarning, FolderOpen, HardDrive, Info, Keyboard, LoaderCircle, LogIn, MessageSquare, Minus, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Server, Shield, ShieldCheck, Sparkles, Trash2, Volume2, Wrench, Zap } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
+import { cn } from '@/lib/utils'
 import { AnimatePresence, motion } from 'motion/react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -565,13 +566,6 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
   return (
     <WorkspacePage title="模型供应商" subtitle="API 与模型连接" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
       <SettingsScaffold kicker="模型连接" title="模型供应商" description="管理 Fox 原生 Agent 可使用的模型供应商、API 凭证和模型能力。">
-        <div className="fox-provider-toolbar">
-          <div>
-            <b>{resource.items.length} 个已配置供应商</b>
-            <small>{resource.items.reduce((sum, item) => sum + item.models.length, 0)} 个可用模型 · {unconfiguredPresets.length} 个内置供应商待配置</small>
-          </div>
-          <Button size="sm" onClick={() => openEditor()}><Plus />添加供应商</Button>
-        </div>
         <Dialog open={editingId === 'new'} onOpenChange={(open) => { if (!open) { setEditingId(null); setForm(null) } }}>
           <DialogContent className="fox-provider-dialog">
             <DialogHeader><DialogTitle>添加模型供应商</DialogTitle><DialogDescription>配置 API 连接和 Fox 可以使用的模型。保存后仍可随时编辑。</DialogDescription></DialogHeader>
@@ -579,36 +573,38 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
           </DialogContent>
         </Dialog>
         {resource.loading && <Card className="fox-settings-section"><LoaderCircle className="animate-spin" />正在读取供应商…</Card>}
-        <div className="fox-provider-list">
-          {resource.items.map((provider) => {
-            const icon = providerIcon(provider.name, provider.baseUrl, provider.icon)
-            return <div className="fox-provider-entry" key={provider.id}>
-              <Card className="fox-provider-card">
-                <div className="fox-provider-mark">{icon ? <img src={icon} alt="" /> : <Server />}</div>
-                <div className="fox-provider-card-main">
-                  <div><h2>{provider.name}</h2>{provider.isDefault && <Badge variant="secondary">默认</Badge>}<Badge variant="outline">{provider.apiType === 'anthropic-messages' ? 'Anthropic' : 'OpenAI'}</Badge></div>
-                  <p>{provider.baseUrl}</p>
-                  <div className="fox-provider-model-tags">{provider.models.slice(0, 4).map((model) => <Badge key={model.id} variant="secondary">{model.displayName}{model.supportsImageInput ? ' · 多模态' : ''}</Badge>)}{provider.models.length > 4 && <span>+{provider.models.length - 4}</span>}</div>
+        {!resource.loading && <div className="fox-provider-groups">
+          <section className="fox-provider-group">
+            <h3>已配置</h3>
+            {resource.items.length === 0 && <p className="fox-provider-group-empty">添加一个供应商开始使用。</p>}
+            <div className="fox-provider-compact-list">
+              {resource.items.map((provider) => {
+                const icon = providerIcon(provider.name, provider.baseUrl, provider.icon)
+                return <div className="fox-provider-entry" key={provider.id}>
+                  <div className={cn('fox-provider-row', editingId === provider.id && 'is-open')}>
+                    <button type="button" className="fox-provider-row-main" onClick={() => openEditor(provider)} aria-expanded={editingId === provider.id}>
+                      <span className="fox-provider-mark">{icon ? <img src={icon} alt="" /> : <Server />}</span>
+                      <span className="fox-provider-row-name"><strong>{provider.name}</strong><small>{provider.models.length} 个模型{provider.isDefault ? ' · 默认' : ''}</small></span>
+                      <span className="fox-provider-row-status"><i className={cn('fox-status-dot', provider.lastStatus === 'connected' ? 'is-ok' : 'is-empty')} aria-hidden="true" />{serviceStatusLabel(provider.lastStatus)}{provider.lastLatencyMs != null ? ` · ${provider.lastLatencyMs} ms` : ''}</span>
+                    </button>
+                    <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal size={18} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void rename(provider)}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => openEditor(provider)}><Wrench />编辑</DropdownMenuItem><DropdownMenuItem onSelect={() => void desktopClient.testModelService(provider.baseUrl, undefined, provider.apiType, provider.models.find((item) => item.isDefault)?.modelId ?? provider.models[0]?.modelId).then((result) => { void resource.refresh(); toast.success(`连接成功，发现 ${result.models.length} 个模型`) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)))}><Zap />验证连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={provider.isDefault} onSelect={() => void remove(provider)}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                  </div>
+                  {editingId === provider.id && form && <ProviderEditor form={form} busy={testing || resource.busyId === provider.id} credentialConfigured={provider.credentialConfigured} testing={testing} connectionStatus={connectionStatus} error={resource.error} onChange={(next) => { setConnectionStatus(null); setForm(next) }} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onDelete={() => void remove(provider)} onTest={() => void test()} />}
                 </div>
-                <div className="fox-provider-card-status"><i className={provider.lastStatus === 'connected' ? '' : 'is-muted'} /><span><b>{serviceStatusLabel(provider.lastStatus)}</b><small>{provider.lastLatencyMs != null ? `${provider.lastLatencyMs} ms` : `${provider.models.length} 个模型`}</small></span></div>
-                <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal size={18} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void rename(provider)}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => openEditor(provider)}><Wrench />编辑</DropdownMenuItem><DropdownMenuItem onSelect={() => void desktopClient.testModelService(provider.baseUrl, undefined, provider.apiType, provider.models.find((item) => item.isDefault)?.modelId ?? provider.models[0]?.modelId).then((result) => { void resource.refresh(); toast.success(`连接成功，发现 ${result.models.length} 个模型`) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)))}><Zap />验证连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={provider.isDefault} onSelect={() => void remove(provider)}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
-              </Card>
-              {editingId === provider.id && form && <ProviderEditor form={form} busy={testing || resource.busyId === provider.id} credentialConfigured={provider.credentialConfigured} testing={testing} connectionStatus={connectionStatus} error={resource.error} onChange={(next) => { setConnectionStatus(null); setForm(next) }} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onDelete={() => void remove(provider)} onTest={() => void test()} />}
+              })}
             </div>
-          })}
-          {!resource.loading && unconfiguredPresets.map((preset) => <div className="fox-provider-entry" key={preset.id}>
-            <Card className="fox-provider-card fox-provider-card-preset" onClick={() => openPreset(preset)}>
-              <div className="fox-provider-mark"><img src={`/providers/${preset.icon}`} alt="" /></div>
-              <div className="fox-provider-card-main">
-                <div><h2>{preset.name}</h2><Badge variant="secondary">内置</Badge><Badge variant="outline">OpenAI</Badge></div>
-                <p>{preset.baseUrl}</p>
-                <div className="fox-provider-model-tags"><Badge variant="secondary">{preset.modelPlaceholder}</Badge></div>
-              </div>
-              <div className="fox-provider-card-status"><i className="is-muted" /><span><b>未配置</b><small>填写 API Key 与默认模型</small></span></div>
-              <Button variant="ghost" size="icon" className="fox-provider-more" aria-label={`配置 ${preset.name}`} onClick={(event) => { event.stopPropagation(); openPreset(preset) }}><MoreHorizontal size={18} /></Button>
-            </Card>
-          </div>)}
-        </div>
+          </section>
+          {unconfiguredPresets.length > 0 && <section className="fox-provider-group">
+            <h3>可添加</h3>
+            <div className="fox-provider-compact-list">
+              {unconfiguredPresets.map((preset) => <button type="button" key={preset.id} className="fox-provider-row" onClick={() => openPreset(preset)}>
+                <span className="fox-provider-mark"><img src={`/providers/${preset.icon}`} alt="" /></span>
+                <span className="fox-provider-row-name"><strong>{preset.name}</strong></span>
+                <Plus className="fox-provider-row-add" aria-hidden="true" />
+              </button>)}
+            </div>
+          </section>}
+        </div>}
       </SettingsScaffold>
     </WorkspacePage>
   )
@@ -980,6 +976,7 @@ export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sid
   const [busy, setBusy] = useState<string | null>(null)
   const [lastPath, setLastPath] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [showOkChecks, setShowOkChecks] = useState(false)
   const run = async (key: string, operation: () => Promise<{ message: string; path: string | null; restartRequired: boolean }>) => {
     setBusy(key); setError(null)
     try { const result = await operation(); setLastPath(result.path); toast.success(result.message); if (result.restartRequired) toast('请关闭并重新启动 Fox 以应用恢复') }
@@ -1078,13 +1075,15 @@ export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sid
     void runFullDiagnostics()
     void refreshPreviewCache()
   }, [])
+  const problemChecks = diagnosticChecks.filter((item) => item.status !== 'ok')
+  const okChecks = diagnosticChecks.filter((item) => item.status === 'ok')
   const cacheRatio = previewCache?.limitBytes ? Math.min(1, previewCache.totalBytes / previewCache.limitBytes) : 0
   const clearableBytes = Math.max(0, (previewCache?.totalBytes ?? 0) - (previewCache?.activeBytes ?? 0))
   return <WorkspacePage title="数据与诊断" subtitle="备份、恢复与维护" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('settings')}>
     <div className="fox-settings-layout">
       <main><header><span>系统维护</span><h1>数据与诊断</h1><p>管理 Fox 本地数据。备份不包含 API Key、Token 或其他系统凭证库内容。</p></header>
         {error && <SettingsLoadError message="操作没有完成，请稍后再试" detail={error} />}
-        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>统一诊断</h2><p>检查 Runtime、模型、知识库、向量、扩展与系统路径；摘要不包含凭证、正文或文件内容。</p></div><Badge variant={diagnosticChecks.some((item) => item.status === 'error') ? 'destructive' : 'secondary'}>{diagnosticsLoading ? '检测中' : diagnosticChecks.some((item) => item.status === 'error') ? '发现异常' : '检查完成'}</Badge></div><div className="fox-diagnostic-checks" aria-live="polite">{diagnosticsLoading && diagnosticChecks.length === 0 ? <div className="fox-diagnostic-loading"><LoaderCircle className="animate-spin" />正在逐项运行自检</div> : diagnosticChecks.map((item) => <div key={item.id} className={`is-${item.status}`}><span>{item.status === 'ok' ? <Check /> : item.status === 'warning' ? <FileWarning /> : item.status === 'offline' ? <Minus /> : <FileWarning />}</span><p><b>{item.label}</b><small>{item.summary}</small></p><Badge className="fox-diagnostic-status" variant={item.status === 'error' ? 'destructive' : 'outline'}>{diagnosticStatusLabel(item.status)}</Badge>{item.route && <Button variant="ghost" size="sm" onClick={() => navigate(item.route!)}>{item.actionLabel ?? '查看'}<ChevronRight /></Button>}</div>)}</div><div className="fox-maintenance-stats"><span><b>{diagnostics?.runtime ?? '--'}</b><small>Runtime</small></span><span><b>v{diagnostics?.protocolVersion ?? '--'}</b><small>协议</small></span><span><b>{diagnostics?.sessionFileCount ?? '--'}</b><small>Session</small></span><span><b>{diagnostics?.recoveryAttempts ?? 0}</b><small>恢复尝试</small></span></div><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={diagnosticsLoading || busy != null} onClick={() => void runFullDiagnostics()}><RotateCcw className={diagnosticsLoading ? 'animate-spin' : undefined} />重新检查</Button><Button variant="outline" size="sm" disabled={!diagnosticChecks.length} onClick={() => void copyDiagnosticSummary()}><Copy />复制脱敏摘要</Button><Button size="sm" disabled={busy != null} onClick={() => void run('diagnostics', desktopClient.exportDiagnostics)}>{busy === 'diagnostics' ? <LoaderCircle className="animate-spin" /> : <Download />}导出诊断包</Button></div></Card>
+        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>统一诊断</h2><p>检查 Runtime、模型、知识库、向量、扩展与系统路径；摘要不包含凭证、正文或文件内容。</p></div><Button variant="outline" size="sm" disabled={diagnosticsLoading || busy != null} onClick={() => void runFullDiagnostics()}><RotateCcw className={diagnosticsLoading ? 'animate-spin' : undefined} />重新诊断</Button></div><div className="fox-diagnostic-summary" aria-live="polite">{diagnosticsLoading && diagnosticChecks.length === 0 ? <span className="fox-diagnostic-loading"><LoaderCircle className="animate-spin" />正在逐项运行自检</span> : problemChecks.length > 0 ? <><i className={cn('fox-status-dot', problemChecks.some((item) => item.status === 'error') ? 'is-error' : 'is-warning')} aria-hidden="true" /><b>{problemChecks.length} 项需要处理</b></> : <><i className="fox-status-dot is-ok" aria-hidden="true" /><b>全部正常</b></>}</div>{problemChecks.length > 0 && <div className="fox-diagnostic-checks" aria-live="polite">{problemChecks.map((item) => <div key={item.id} className={`is-${item.status}`}><i className={cn('fox-status-dot', item.status === 'error' ? 'is-error' : 'is-warning')} aria-hidden="true" /><p><b>{item.label}</b><small>{item.summary}</small></p>{item.route && <Button variant="ghost" size="sm" onClick={() => navigate(item.route!)}>{item.actionLabel ?? '查看'}<ChevronRight /></Button>}</div>)}</div>}{okChecks.length > 0 && <><button type="button" className="fox-diagnostic-ok-toggle" aria-expanded={showOkChecks} onClick={() => setShowOkChecks((open) => !open)}><ChevronDown />{okChecks.length} 项正常</button>{showOkChecks && <div className="fox-diagnostic-checks is-ok-items">{okChecks.map((item) => <div key={item.id} className="is-ok"><i className="fox-status-dot is-ok" aria-hidden="true" /><p><b>{item.label}</b><small>{item.summary}</small></p></div>)}</div>}</>}<div className="fox-maintenance-stats"><span><b>{diagnostics?.runtime ?? '--'}</b><small>Runtime</small></span><span><b>v{diagnostics?.protocolVersion ?? '--'}</b><small>协议</small></span><span><b>{diagnostics?.sessionFileCount ?? '--'}</b><small>Session</small></span><span><b>{diagnostics?.recoveryAttempts ?? 0}</b><small>恢复尝试</small></span></div><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={!diagnosticChecks.length} onClick={() => void copyDiagnosticSummary()}><Copy />复制脱敏摘要</Button><Button size="sm" disabled={busy != null} onClick={() => void run('diagnostics', desktopClient.exportDiagnostics)}>{busy === 'diagnostics' ? <LoaderCircle className="animate-spin" /> : <Download />}导出诊断包</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>预览缓存</h2><p>Fox 缓存知识库原文件以加快再次预览，达到上限后会自动按最近使用时间清理。</p></div><Badge variant="secondary">{previewCache ? `${Math.round(cacheRatio * 100)}%` : '读取中'}</Badge></div><div className="fox-preview-cache-meter" aria-label="预览缓存占用"><i style={{ width: `${cacheRatio * 100}%` }} /></div><div className="fox-maintenance-stats"><span><b>{previewCache ? formatStorageSize(previewCache.totalBytes) : '--'}</b><small>已使用</small></span><span><b>{previewCache ? formatStorageSize(clearableBytes) : '--'}</b><small>可清理</small></span><span><b>{previewCache?.activeFiles ?? '--'}</b><small>正在使用</small></span><span><b>{previewCache ? formatStorageSize(previewCache.limitBytes) : '--'}</b><small>缓存上限</small></span></div><PreferenceRow title="最大缓存空间" description="调小后会立即淘汰未使用的旧文件，正在打开的预览会保留"><Select value={previewCache ? String(previewCache.limitBytes) : undefined} disabled={busy != null || !previewCache} onValueChange={(value) => void updatePreviewCacheLimit(value)}><SelectTrigger className="fox-settings-select"><SelectValue placeholder="选择上限" /></SelectTrigger><SelectContent><SelectItem value={String(250 * 1024 * 1024)}>250 MB</SelectItem><SelectItem value={String(500 * 1024 * 1024)}>500 MB</SelectItem><SelectItem value={String(1024 * 1024 * 1024)}>1 GB</SelectItem><SelectItem value={String(2 * 1024 * 1024 * 1024)}>2 GB</SelectItem><SelectItem value={String(5 * 1024 * 1024 * 1024)}>5 GB</SelectItem></SelectContent></Select></PreferenceRow><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={busy != null} onClick={() => void refreshPreviewCache()}><RotateCcw />刷新占用</Button><Button variant="outline" size="sm" disabled={busy != null || !previewCache || clearableBytes === 0} onClick={() => { if (window.confirm('清理所有未使用的知识库预览缓存？正在打开的文件会保留。')) void clearPreviewCache() }}>{busy === 'preview-cache' ? <LoaderCircle className="animate-spin" /> : <Trash2 />}清理未使用缓存</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>备份 Fox</h2><p>包含 SQLite、附件、技能与 Runtime Session。Session 仅尽力跨版本恢复。</p></div><Archive /></div><div className="fox-setting-actions"><Button disabled={busy != null} onClick={() => void run('backup', desktopClient.createBackup)}>{busy === 'backup' ? <LoaderCircle className="animate-spin" /> : <HardDrive />}创建备份</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>恢复备份</h2><p>先验证清单、哈希、路径与数据库完整性，下次启动 Fox 时应用。</p></div><FileWarning /></div><label className="fox-maintenance-field">备份文件路径<Input value={restorePath} onChange={(event) => setRestorePath(event.target.value)} placeholder="D:\\Backups\\fox-backup-....foxbackup" /></label><div className="fox-setting-actions"><Button variant="outline" disabled={busy != null || !restorePath.trim()} onClick={() => { if (window.confirm('恢复会在下次启动时替换当前 Fox 核心数据，是否继续？')) void run('restore', () => desktopClient.restoreBackup(restorePath.trim())) }}>{busy === 'restore' ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}验证并安排恢复</Button></div></Card>

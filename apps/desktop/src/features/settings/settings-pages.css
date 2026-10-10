@@ -558,3 +558,89 @@
   color: var(--muted-foreground);
   font-size: var(--fox-type-chrome) !important;
 }
+
+/* 第 6 步：数据与诊断 —— 总结行 + 问题优先 + 正常项收起 */
+.fox-settings-layout .fox-diagnostic-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: var(--fox-space-l);
+  color: var(--foreground);
+  font-size: var(--fox-type-workbench);
+}
+.fox-settings-layout .fox-diagnostic-summary b { font-weight: var(--fox-weight-medium); }
+.fox-settings-layout .fox-diagnostic-summary .fox-diagnostic-loading { display: inline-flex; align-items: center; gap: 8px; color: var(--muted-foreground); font-size: var(--fox-type-caption); }
+.fox-settings-layout .fox-diagnostic-checks > div {
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  justify-items: start;
+  min-height: 44px;
+  padding: 10px 0;
+}
+.fox-settings-layout .fox-diagnostic-checks.is-ok-items { margin-top: 0; }
+.fox-settings-layout .fox-diagnostic-ok-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--fox-space-m);
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  cursor: pointer;
+}
+.fox-settings-layout .fox-diagnostic-ok-toggle:hover { color: var(--foreground); }
+.fox-settings-layout .fox-diagnostic-ok-toggle svg { width: 14px; height: 14px; transition: transform var(--fox-transition-base); }
+.fox-settings-layout .fox-diagnostic-ok-toggle[aria-expanded='true'] svg { transform: rotate(180deg); }
+
+/* 第 6 步：模型供应商 —— 已配置 / 可添加 两组紧凑列表 */
+.fox-settings-layout .fox-provider-groups { display: flex; flex-direction: column; gap: var(--fox-space-3xl); }
+.fox-settings-layout .fox-provider-group h3 { margin: 0 0 var(--fox-space-s); font-size: var(--fox-type-title); font-weight: var(--fox-weight-semibold); }
+.fox-settings-layout .fox-provider-group-empty { margin: 0; color: var(--muted-foreground); font-size: var(--fox-type-chrome); }
+.fox-settings-layout .fox-provider-compact-list { display: flex; flex-direction: column; }
+.fox-settings-layout .fox-provider-row {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-m);
+  min-height: 36px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  padding: var(--fox-space-xs) 0;
+  background: none;
+  color: var(--foreground);
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+}
+.fox-settings-layout .fox-provider-compact-list > .fox-provider-entry:last-child .fox-provider-row,
+.fox-settings-layout .fox-provider-compact-list > button:last-child { border-bottom: 0; }
+.fox-settings-layout .fox-provider-row.is-open { background: var(--fox-hover); }
+.fox-settings-layout .fox-provider-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-m);
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.fox-settings-layout .fox-provider-row .fox-provider-mark {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  color: var(--muted-foreground);
+}
+.fox-settings-layout .fox-provider-row .fox-provider-mark img { width: 18px; height: 18px; -o-object-fit: contain; object-fit: contain; }
+.fox-settings-layout .fox-provider-row .fox-provider-mark svg { width: 16px; height: 16px; }
+.fox-settings-layout .fox-provider-row-name { min-width: 0; display: flex; align-items: baseline; gap: var(--fox-space-m); }
+.fox-settings-layout .fox-provider-row-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fox-type-chrome); font-weight: var(--fox-weight-medium); }
+.fox-settings-layout .fox-provider-row-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); font-size: var(--fox-type-caption); }
+.fox-settings-layout .fox-provider-row-status { flex: none; display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: var(--fox-type-caption); font-variant-numeric: tabular-nums; }
+.fox-settings-layout .fox-provider-row-add { flex: none; width: 16px; height: 16px; color: var(--muted-foreground); }
+.fox-settings-layout .fox-provider-row:hover .fox-provider-row-name strong { color: var(--foreground); }
