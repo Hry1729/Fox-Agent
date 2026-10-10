@@ -6,6 +6,8 @@
  */
 export type FoxChatEngine = 'legacy' | 'assistant-ui'
 
+import './fox-chat-engine.css'
+
 export const FOX_CHAT_ENGINE_KEY = 'fox.ui.chatEngine'
 
 export function readChatEnginePreference(): FoxChatEngine {

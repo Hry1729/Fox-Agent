@@ -392,12 +392,3 @@
   align-items: center;
   gap: var(--fox-space-m);
 }
-
-.fox-thread-engine-switch {
-  position: absolute;
-  top: var(--fox-space-m);
-  right: var(--fox-space-3xl);
-  z-index: 5;
-  font-size: var(--fox-type-caption);
-  color: var(--muted-foreground);
-}
