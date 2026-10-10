@@ -258,34 +258,100 @@
   gap: var(--fox-space-m);
 }
 
-/* --- interim composer (replaced in 5D) --- */
+/* --- composer (step 5D): one border, large radius, tool row + single primary --- */
 
-.fox-thread-composer {
+.fox-thread-composer-wrap {
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
   gap: var(--fox-space-m);
-  padding: var(--fox-space-m) var(--fox-space-3xl) var(--fox-space-xl);
+  padding: 0 var(--fox-space-3xl) var(--fox-space-xl);
+}
+
+.fox-thread-composer-form {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-large);
+  background: var(--background);
+  padding: var(--fox-space-m) var(--fox-space-l);
+}
+
+.fox-thread-composer-form:focus-within {
+  border-color: color-mix(in oklch, var(--foreground) 32%, var(--border));
+}
+
+.fox-thread-composer-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--fox-space-xs);
+  padding-bottom: var(--fox-space-m);
+}
+
+.fox-composer-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: var(--fox-radius-pill);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  cursor: pointer;
+}
+
+.fox-composer-context-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-composer-context-chip.is-attachment:hover {
+  background: color-mix(in oklch, var(--destructive) 12%, var(--muted));
+  color: var(--destructive);
 }
 
 .fox-thread-composer-input {
-  flex: 1;
   resize: none;
-  border: 1px solid var(--border);
-  border-radius: var(--fox-radius-large);
-  padding: var(--fox-space-m) var(--fox-space-l);
-  min-height: var(--fox-control-lg);
-  font-size: var(--fox-type-workbench);
-  background: var(--background);
+  border: 0;
+  padding: 0;
+  min-height: calc(var(--fox-control-lg) - 8px);
+  max-height: 220px;
+  background: transparent;
   color: var(--foreground);
+  font-size: var(--fox-type-workbench);
+  line-height: 1.6;
 }
 
 .fox-thread-composer-input:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: -1px;
+  outline: none;
 }
 
-.fox-thread-composer-send,
-.fox-thread-composer-cancel {
+.fox-thread-composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fox-space-m);
+  padding-top: var(--fox-space-m);
+}
+
+.fox-thread-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-xs);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.fox-thread-composer-submit {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-m);
+}
+
+.fox-thread-send-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -298,9 +364,33 @@
   cursor: pointer;
 }
 
-.fox-thread-composer-send:disabled {
-  opacity: 0.5;
+.fox-thread-send-button:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
+}
+
+.fox-thread-stop-button {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.fox-execution-control {
+  color: var(--muted-foreground);
+}
+
+.fox-execution-control > span {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- steering mode (running): two lanes + separate stop ---------------------- */
+
+.fox-steering-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fox-space-m);
 }
 
 .fox-thread-engine-switch {
