@@ -1,17 +1,10 @@
-/* Minimal assistant-ui thread surface (migration step 5B).
-   Only specification variables from UI-PLAN.md「设计规范」are used; the full
-   visual pass happens in 5C/5D. */
+/* The assistant-ui thread (migration steps 5C/5D).
+   Only specification variables from UI-PLAN.md「设计规范」are used; legacy
+   global classes (empty state, turn rail, bottom dock, dialogs) keep living in
+   workbench.css and are reused by name. */
 
-.fox-thread-shell {
+.fox-thread {
   position: relative;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-height: 0;
-  height: 100%;
-}
-
-.fox-thread-minimal {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -24,6 +17,7 @@
   flex: 1;
   flex-direction: column;
   min-height: 0;
+  position: relative;
 }
 
 .fox-thread-viewport {
@@ -36,51 +30,241 @@
   gap: var(--fox-space-l);
 }
 
-.fox-thread-empty {
-  margin: auto;
-  color: var(--muted-foreground);
-  font-size: var(--fox-type-workbench);
-}
-
+/* One content column: every message sits inside the same 720px cap. */
 .fox-thread-msg {
-  max-width: 720px;
   width: 100%;
+  max-width: 720px;
   margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
-.fox-thread-msg.is-user .fox-thread-msg-content {
-  background: var(--muted);
-  border-radius: var(--fox-radius-large);
-  padding: var(--fox-space-m) var(--fox-space-l);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* --- assistant message: no frame, no background --- */
 
-.fox-thread-msg.is-assistant .fox-thread-msg-content {
+.fox-thread-msg.is-assistant {
   color: var(--foreground);
-  white-space: pre-wrap;
-  word-break: break-word;
+  font-size: var(--fox-type-workbench);
+  line-height: 1.6;
 }
 
-.fox-thread-load-earlier {
-  align-self: center;
-  color: var(--muted-foreground);
-  font-size: var(--fox-type-chrome);
-  cursor: pointer;
-  padding: var(--fox-space-xs) var(--fox-space-m);
+.fox-thread-assistant-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--fox-space-xs);
+}
+
+.fox-thread-answer {
+  overflow-wrap: anywhere;
+}
+
+.fox-thread-process {
+  min-width: 0;
+}
+
+/* --- user message: the only bubble with a background --- */
+
+.fox-thread-msg.is-user > .fox-thread-attachments {
+  align-self: flex-end;
+  margin-bottom: var(--fox-space-xs);
+}
+
+.fox-thread-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fox-space-xs);
+}
+
+.fox-thread-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 4px 10px;
   border-radius: var(--fox-radius-control);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
 }
 
-.fox-thread-load-earlier:hover {
-  background: var(--muted);
+.fox-thread-attachment > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+/* --- hover-revealed action rows --- */
+
+.fox-thread-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--fox-radius-control);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.fox-thread-action-button:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.fox-thread-action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.fox-thread-msg .fox-user-meta {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.fox-thread-msg .fox-user-meta .fox-user-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.fox-thread-msg.is-user:hover .fox-user-actions,
+.fox-thread-msg.is-user:focus-within .fox-user-actions {
+  opacity: 1;
+}
+
+/* The last assistant message keeps its action row visible: ActionBarPrimitive
+   autohide="not-last" only renders the floating state for earlier messages. */
+
+/* --- compact sources: one line of small text labels --- */
+
+.fox-thread-sources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--fox-space-xs);
+  margin-top: var(--fox-space-m);
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-thread-sources-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted-foreground);
+}
+
+.fox-thread-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 1px 8px;
+  border: 0;
+  border-radius: var(--fox-radius-pill);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  cursor: pointer;
+}
+
+.fox-thread-source-chip:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.fox-thread-source-chip > span:first-child {
+  flex: none;
+}
+
+.fox-thread-source-index {
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.fox-thread-source-chip > span:not(.fox-thread-source-index) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- failure line --- */
+
+.fox-thread-error {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-m);
+  margin-top: var(--fox-space-m);
+  padding: var(--fox-space-m) var(--fox-space-l);
+  border: 1px solid color-mix(in oklch, var(--destructive) 28%, transparent);
+  border-radius: var(--fox-radius-card);
+  color: var(--destructive);
+  font-size: var(--fox-type-chrome);
+}
+
+.fox-thread-error-icon {
+  flex: none;
+  display: inline-flex;
+}
+
+.fox-thread-error-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-thread-error-retry {
+  flex: none;
+}
+
+/* --- edit composer (last user message) --- */
+
+.fox-edit-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fox-space-m);
+  padding: var(--fox-space-m);
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-large);
+  background: var(--background);
+}
+
+.fox-edit-composer-input {
+  resize: vertical;
+  border: 0;
+  padding: 0;
+  min-height: 60px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: var(--fox-type-workbench);
+  line-height: 1.6;
+}
+
+.fox-edit-composer-input:focus-visible {
+  outline: none;
+}
+
+.fox-edit-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--fox-space-m);
+}
+
+/* --- interim composer (replaced in 5D) --- */
 
 .fox-thread-composer {
   display: flex;
   align-items: flex-end;
   gap: var(--fox-space-m);
   padding: var(--fox-space-m) var(--fox-space-3xl) var(--fox-space-xl);
-  border-top: 1px solid var(--border);
 }
 
 .fox-thread-composer-input {
@@ -102,13 +286,15 @@
 
 .fox-thread-composer-send,
 .fox-thread-composer-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--fox-control-lg);
   height: var(--fox-control-lg);
-  padding: 0 var(--fox-space-l);
+  border: 0;
   border-radius: var(--fox-radius-control);
   background: var(--primary);
   color: var(--primary-foreground);
-  font-size: var(--fox-type-chrome);
-  font-weight: var(--fox-weight-medium);
   cursor: pointer;
 }
 

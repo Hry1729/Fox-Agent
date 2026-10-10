@@ -84,7 +84,9 @@ function convertFoxThreadMessage(message: FoxThreadMessage): ThreadMessageLike {
     id: message.id,
     createdAt: new Date(message.createdAt),
     content: message.content,
-    status: foxMessageStatus(message),
+    // This assistant-ui release rejects `status` on user messages
+    // ("status is only supported for assistant messages").
+    status: message.role === 'assistant' ? foxMessageStatus(message) : undefined,
     attachments: message.attachments.length ? message.attachments : undefined,
     metadata: message.optimistic ? { isOptimistic: true } : undefined,
   }
