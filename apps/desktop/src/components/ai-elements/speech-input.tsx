@@ -50,12 +50,8 @@ interface SpeechRecognitionErrorEvent extends Event {
   error: string;
 }
 
-declare global {
-  interface Window {
-    SpeechRecognition: new () => SpeechRecognition;
-    webkitSpeechRecognition: new () => SpeechRecognition;
-  }
-}
+// Window.SpeechRecognition 全局类型由 @assistant-ui/core 的
+// adapters/speech.d.ts 提供（可选属性）；本文件不再重复声明以免合并冲突。
 
 type SpeechInputMode = "speech-recognition" | "media-recorder" | "none";
 
@@ -118,9 +114,14 @@ export const SpeechInput = ({
       return;
     }
 
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-    const speechRecognition = new SpeechRecognition();
+    const SpeechRecognitionCtor = (window.SpeechRecognition ??
+      window.webkitSpeechRecognition) as unknown as
+      | (new () => SpeechRecognition)
+      | undefined;
+    if (!SpeechRecognitionCtor) {
+      return;
+    }
+    const speechRecognition = new SpeechRecognitionCtor();
 
     speechRecognition.continuous = true;
     speechRecognition.interimResults = true;

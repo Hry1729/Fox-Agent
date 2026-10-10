@@ -5,7 +5,7 @@ import { type RunEventRecord } from '@/features/conversations/model/types'
 import { normalizeKnowledgeSourceLocator } from '@/features/knowledge/knowledge-source-locator'
 import { type KnowledgeSourceLocator } from '@/features/workspace/types'
 import { FileEdit, FileText, FolderOpen, FolderSearch, Globe2, Search, Sparkles, Terminal, WandSparkles } from 'lucide-react'
-import { isCommandTool } from '../composer/fox-composer'
+import { isCommandTool } from '../composer/fox-tool-classification'
 
 export type RuntimeToolStep = {
   id: string

@@ -2,7 +2,7 @@ import type { FileUIPart } from "ai";
 import type { AttachmentItem } from "./prompt-input";
 
 /** Read an already-selected file. Rejects instead of resolving a placeholder. */
-const readBlobAsDataUrl = (blob: Blob): Promise<string> =>
+export const readBlobAsDataUrl = (blob: Blob): Promise<string> =>
   // FileReader uses callback-based API, wrapping in Promise is necessary
   // oxlint-disable-next-line eslint-plugin-promise(avoid-new)
   new Promise((resolve, reject) => {

@@ -8,7 +8,7 @@ import { Attachment, AttachmentInfo, AttachmentPreview, Attachments } from '@/co
 import { Conversation, ConversationAutoScroll, ConversationContent, ConversationScrollButton, ConversationViewportState } from '@/components/ai-elements/conversation'
 import { Message, MessageAction, MessageContent } from '@/components/ai-elements/message'
 import { Button } from '@/components/ui/button'
-import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
+import { splitAssistantContent } from './fox-assistant-content'
 import { type AgentRecord, type ArtifactRecord, type AttachmentRecord, type ConversationMessage, type DesktopErrorDetails, type RunEventRecord, type RunRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
 import { ArrowUp, Copy, FileEdit, GitFork, ListTodo, LoaderCircle } from 'lucide-react'
@@ -19,15 +19,8 @@ import { MemoizedRuntimeAssistantMessage, type RuntimeGroupHelpers } from './fox
 import { type RuntimeSource } from './fox-runtime-process-model'
 import { ConversationTurnRail } from './fox-timeline'
 
-export function splitAssistantContent(content: string) {
-  const reasoning: string[] = []
-  const answer = normalizeAssistantMarkdown(content.replace(/<((?:mm:)?(?:think|thinking|analysis))>([\s\S]*?)<\/\1>|<(?:(?:mm:)?(?:think|thinking|analysis))>([\s\S]*)$|^[\s\S]*?<\/(?:(?:mm:)?(?:think|thinking|analysis))>\s*/gi, (_match, _tag: string | undefined, closed: string | undefined, open: string | undefined) => {
-    const value = (closed ?? open ?? '').trim()
-    if (value) reasoning.push(value)
-    return ''
-  }).replace(/<\/(?:(?:mm:)?(?:think|thinking|analysis))>/gi, '').trim())
-  return { answer, reasoning: normalizeAssistantMarkdown(reasoning.join('\n\n')) }
-}
+// Re-exported from the pure module so existing imports keep working.
+export { splitAssistantContent } from './fox-assistant-content'
 
 function SentMessageAttachments({ attachments }: { attachments: AttachmentRecord[] }) {
   if (attachments.length === 0) return null

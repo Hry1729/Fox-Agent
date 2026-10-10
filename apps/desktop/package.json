@@ -20,6 +20,7 @@
   "dependencies": {
     "@aiden0z/pptx-renderer": "^1.2.4",
     "@antv/g6": "5.1.1",
+    "@assistant-ui/react": "~0.15.26",
     "@js-preview/excel": "^1.7.14",
     "@radix-ui/react-use-controllable-state": "^1.2.3",
     "@rive-app/react-webgl2": "^4.29.5",

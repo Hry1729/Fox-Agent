@@ -69,17 +69,9 @@ function ComposerAttachmentCommandBridge({ openRef }: { openRef: { current: () =
   return null
 }
 
-function isFileChangeTool(toolName: string) {
-  return toolName === 'write_file' || toolName === 'edit_file'
-}
-
-export function isCommandTool(toolName: string) {
-  return /^(run_command|test_run|code_check|format_code|shell|command)$/i.test(toolName)
-}
-
-export function isChangeOrCommandTool(toolName: string) {
-  return isFileChangeTool(toolName) || isCommandTool(toolName)
-}
+// The tool-name classifiers live in a dependency-free module; re-exported here
+// so existing imports from the composer keep working.
+export { isFileChangeTool, isCommandTool, isChangeOrCommandTool } from './fox-tool-classification'
 
 function toolResultDetails(tool: ToolCallRecord) {
   const result = tool.result && typeof tool.result === 'object' && !Array.isArray(tool.result)

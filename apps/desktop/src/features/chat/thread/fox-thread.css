@@ -1,0 +1,127 @@
+/* Minimal assistant-ui thread surface (migration step 5B).
+   Only specification variables from UI-PLAN.md「设计规范」are used; the full
+   visual pass happens in 5C/5D. */
+
+.fox-thread-shell {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.fox-thread-minimal {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.fox-thread-root {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fox-thread-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--fox-space-xl) var(--fox-space-3xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--fox-space-l);
+}
+
+.fox-thread-empty {
+  margin: auto;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-workbench);
+}
+
+.fox-thread-msg {
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.fox-thread-msg.is-user .fox-thread-msg-content {
+  background: var(--muted);
+  border-radius: var(--fox-radius-large);
+  padding: var(--fox-space-m) var(--fox-space-l);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fox-thread-msg.is-assistant .fox-thread-msg-content {
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fox-thread-load-earlier {
+  align-self: center;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome);
+  cursor: pointer;
+  padding: var(--fox-space-xs) var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
+}
+
+.fox-thread-load-earlier:hover {
+  background: var(--muted);
+}
+
+.fox-thread-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--fox-space-m);
+  padding: var(--fox-space-m) var(--fox-space-3xl) var(--fox-space-xl);
+  border-top: 1px solid var(--border);
+}
+
+.fox-thread-composer-input {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-large);
+  padding: var(--fox-space-m) var(--fox-space-l);
+  min-height: var(--fox-control-lg);
+  font-size: var(--fox-type-workbench);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.fox-thread-composer-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+}
+
+.fox-thread-composer-send,
+.fox-thread-composer-cancel {
+  height: var(--fox-control-lg);
+  padding: 0 var(--fox-space-l);
+  border-radius: var(--fox-radius-control);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-medium);
+  cursor: pointer;
+}
+
+.fox-thread-composer-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fox-thread-engine-switch {
+  position: absolute;
+  top: var(--fox-space-m);
+  right: var(--fox-space-3xl);
+  z-index: 5;
+  font-size: var(--fox-type-caption);
+  color: var(--muted-foreground);
+}
