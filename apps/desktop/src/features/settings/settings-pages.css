@@ -1,0 +1,560 @@
+/*
+ * Settings pages presentation. This sheet is imported by the lazily loaded
+ * settings module, so it lands after the global workspace stylesheets; the
+ * `!important` flags are only there to beat the global `.fox-shell` type-scale
+ * and legacy `.fox-settings-*` overrides that are themselves `!important`.
+ */
+
+/* Layout: one centred 760px content column; the scroller reserves its gutter so
+   pages with and without a scrollbar keep the same left edge. */
+.fox-settings-layout {
+  scrollbar-gutter: stable;
+}
+
+.fox-page-shell .fox-settings-layout > main,
+.fox-settings-layout > main {
+  width: min(824px, calc(100% - 48px)) !important;
+  max-width: none;
+  padding: 32px 32px 64px !important;
+}
+
+.fox-settings-layout > main > header {
+  margin-bottom: 24px !important;
+}
+
+.fox-settings-layout > main > header h1 {
+  margin: 0 0 4px !important;
+  font-size: var(--fox-type-page) !important;
+  font-weight: 600;
+  line-height: 1.33;
+}
+
+.fox-settings-layout > main > header p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome) !important;
+}
+
+/* Section card */
+.fox-settings-layout .fox-settings-section {
+  margin-bottom: 16px;
+  padding: 16px !important;
+}
+
+.fox-settings-layout .fox-settings-section-head {
+  min-height: var(--fox-control-md);
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.fox-settings-layout .fox-settings-section-head:last-child {
+  margin-bottom: 0;
+}
+
+.fox-settings-layout .fox-settings-section-head h2 {
+  margin: 0;
+  font-size: var(--fox-type-title) !important;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.fox-settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fox-settings-section-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-settings-layout .fox-setting-actions {
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* Preference rows */
+.fox-settings-layout .fox-setting-row-bordered {
+  min-height: 56px;
+  gap: 16px;
+  padding: 12px 0 !important;
+}
+
+.fox-settings-layout .fox-setting-row-bordered:last-child {
+  padding-bottom: 0 !important;
+}
+
+.fox-settings-layout .fox-setting-row-bordered > span {
+  padding-right: 0;
+}
+
+.fox-settings-layout .fox-setting-row b,
+.fox-settings-layout .fox-profile-setting b {
+  font-size: var(--fox-type-workbench) !important;
+  font-weight: 500;
+  line-height: 1.43;
+}
+
+.fox-settings-layout .fox-setting-row small,
+.fox-settings-layout .fox-profile-setting small,
+.fox-settings-layout .fox-profile-setting em {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+  line-height: 1.5;
+}
+
+/* Read-only values sit as plain muted text so they do not read as buttons. */
+.fox-settings-layout .fox-setting-value {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome) !important;
+  white-space: nowrap;
+}
+
+.fox-settings-layout [data-slot='kbd'] {
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-setting-kbd-group {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.fox-settings-layout .fox-setting-kbd-group > span {
+  font-size: var(--fox-type-caption) !important;
+}
+
+/* Badges are pills with the shared badge height. */
+.fox-settings-layout [data-slot='badge'] {
+  height: var(--fox-badge-height) !important;
+  min-height: 0 !important;
+  gap: 4px !important;
+  padding: 0 8px !important;
+  border-radius: var(--fox-radius-pill) !important;
+  font-size: var(--fox-type-caption) !important;
+  font-weight: 500 !important;
+  line-height: 1 !important;
+}
+
+.fox-settings-version {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 应用: text size slider and stepper share one row. */
+.fox-text-scale-control {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-text-scale-control > input[type='range'] {
+  width: 160px;
+  margin: 0;
+}
+
+.fox-settings-layout .fox-text-scale-a {
+  color: var(--muted-foreground);
+  font-weight: 500;
+  line-height: 1;
+}
+
+.fox-settings-layout .fox-text-scale-a.is-small {
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-settings-layout .fox-text-scale-a.is-large {
+  font-size: var(--fox-type-title) !important;
+}
+
+.fox-text-scale-stepper {
+  height: var(--fox-control-md);
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  padding: 0 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-control);
+  background: var(--card);
+}
+
+.fox-settings-layout .fox-text-scale-stepper [data-slot='button'] {
+  width: var(--fox-control-sm) !important;
+  height: var(--fox-control-sm) !important;
+  min-height: var(--fox-control-sm) !important;
+  border-radius: var(--fox-radius-small);
+  color: var(--muted-foreground);
+}
+
+.fox-settings-layout .fox-text-scale-stepper [data-slot='button']:hover {
+  color: var(--foreground);
+}
+
+.fox-text-scale-stepper > label {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  min-width: 48px;
+}
+
+.fox-settings-layout .fox-text-scale-stepper input[type='number'] {
+  width: 3ch;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: var(--fox-type-chrome) !important;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.fox-text-scale-stepper input[type='number']::-webkit-inner-spin-button,
+.fox-text-scale-stepper input[type='number']::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.fox-settings-layout .fox-text-scale-stepper label > span {
+  margin-left: 1px;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome) !important;
+}
+
+.fox-text-scale-stepper:focus-within {
+  border-color: var(--ring);
+}
+
+.fox-settings-layout .fox-notification-sound-control {
+  min-width: 0;
+  gap: 12px;
+}
+
+/* Profile */
+.fox-settings-layout .fox-profile-setting {
+  gap: 12px;
+}
+
+/* Linked rows (知识库服务, 扩展): one flat row with hover background instead
+   of a bordered card inside the section card. */
+.fox-settings-layout .fox-service-card {
+  width: calc(100% + 16px);
+  min-height: 48px;
+  gap: 12px;
+  margin: 0 -8px;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--fox-radius-control);
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.fox-settings-layout .fox-service-card:hover,
+.dark .fox-settings-layout .fox-service-card:hover {
+  border-color: transparent !important;
+  background: var(--accent) !important;
+}
+
+.fox-settings-layout .fox-service-card:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.fox-settings-layout .fox-service-card > span {
+  width: var(--fox-control-md);
+  height: var(--fox-control-md);
+  flex: 0 0 auto;
+  border-radius: var(--fox-radius-control);
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fox-settings-layout .fox-service-card > span svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+}
+
+.fox-settings-layout .fox-service-card p {
+  min-width: 0;
+}
+
+.fox-settings-layout .fox-service-card p b {
+  font-size: var(--fox-type-workbench) !important;
+  font-weight: 500;
+}
+
+.fox-settings-layout .fox-service-card p small {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-layout .fox-service-card em b {
+  font-size: var(--fox-type-chrome) !important;
+  font-weight: 500;
+}
+
+.fox-settings-layout .fox-service-card em b.is-empty {
+  color: var(--muted-foreground);
+  font-weight: 400;
+}
+
+.fox-settings-layout .fox-service-card em small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-settings-layout .fox-service-card > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+/* 助手 */
+.fox-settings-layout .fox-assistant-settings-summary {
+  min-height: 0;
+  grid-template-columns: var(--fox-control-md) minmax(0, 1fr);
+  gap: 12px;
+  padding-top: 0;
+}
+
+.fox-settings-layout .fox-assistant-settings-summary > span {
+  width: var(--fox-control-md);
+  height: var(--fox-control-md);
+  border-radius: var(--fox-radius-control);
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fox-settings-layout .fox-assistant-settings-summary > span img {
+  width: 24px;
+  height: 24px;
+}
+
+.fox-settings-layout .fox-assistant-settings-summary > span svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+}
+
+.fox-settings-layout .fox-assistant-settings-summary b {
+  font-size: var(--fox-type-workbench) !important;
+  font-weight: 500;
+}
+
+.fox-settings-layout .fox-assistant-settings-summary small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+/* 模型供应商: denser two-line cards. */
+.fox-settings-layout .fox-provider-toolbar {
+  min-height: var(--fox-control-md);
+  margin-bottom: 16px;
+}
+
+.fox-settings-layout .fox-provider-toolbar b {
+  font-size: var(--fox-type-workbench) !important;
+  font-weight: 500;
+}
+
+.fox-settings-layout .fox-provider-toolbar small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-settings-layout .fox-provider-list {
+  gap: 8px;
+}
+
+.fox-settings-layout .fox-provider-card {
+  min-height: 0;
+  grid-template-columns: 24px minmax(0, 1fr) auto var(--fox-control-sm);
+  gap: 12px;
+  padding: 12px 12px 12px 16px !important;
+  border-radius: var(--fox-radius-card);
+}
+
+.fox-settings-layout .fox-provider-mark {
+  width: 24px;
+  height: 24px;
+  align-self: start;
+  margin-top: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-small);
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fox-settings-layout .fox-provider-mark img {
+  width: 16px;
+  height: 16px;
+}
+
+.fox-settings-layout .fox-provider-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+.fox-settings-layout .fox-provider-card-main {
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 4px;
+}
+
+.fox-settings-layout .fox-provider-card-main > div:first-child {
+  min-height: 24px;
+  grid-column: 1 / -1;
+  gap: 8px;
+}
+
+.fox-settings-layout .fox-provider-card-main h2 {
+  font-size: var(--fox-type-workbench) !important;
+  font-weight: 600;
+  line-height: 1.43;
+}
+
+.fox-settings-layout .fox-provider-card-main > p {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-settings-layout .fox-provider-model-tags {
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.fox-settings-layout .fox-provider-model-tags > span:not([data-slot='badge']) {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-settings-layout .fox-provider-card-status {
+  gap: 8px;
+}
+
+.fox-settings-layout .fox-provider-card-status > i {
+  width: 6px;
+  height: 6px;
+}
+
+.fox-settings-layout .fox-provider-card-status b {
+  font-size: var(--fox-type-chrome) !important;
+  font-weight: 500;
+}
+
+.fox-settings-layout .fox-provider-card-status small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-settings-layout .fox-provider-more svg {
+  width: var(--fox-icon-size) !important;
+  height: var(--fox-icon-size) !important;
+}
+
+/* 数据与诊断: status colour stays on the icon and badge only. */
+.fox-settings-layout .fox-diagnostic-checks {
+  margin-top: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.fox-settings-layout .fox-diagnostic-checks > div {
+  min-height: 56px;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.fox-settings-layout .fox-diagnostic-checks > div:is(.is-ok, .is-warning, .is-error, .is-offline) {
+  color: var(--foreground) !important;
+}
+
+.fox-settings-layout .fox-diagnostic-checks > div > span {
+  background: var(--muted);
+}
+
+.fox-settings-layout .fox-diagnostic-checks p b {
+  font-size: var(--fox-type-workbench) !important;
+  font-weight: 500;
+}
+
+.fox-settings-layout .fox-diagnostic-checks p small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+.fox-settings-layout .fox-diagnostic-checks [data-slot='button'] {
+  height: var(--fox-control-sm) !important;
+  min-height: var(--fox-control-sm) !important;
+  color: var(--foreground);
+}
+
+.fox-settings-layout .fox-diagnostic-checks > div.is-warning .fox-diagnostic-status {
+  border-color: color-mix(in oklch, var(--warning) 40%, transparent);
+  color: var(--warning);
+}
+
+.fox-settings-layout .fox-maintenance-stats {
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.fox-settings-layout .fox-maintenance-stats span {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-card);
+  background: var(--card);
+}
+
+.fox-settings-layout .fox-maintenance-stats b {
+  font-size: var(--fox-type-workbench) !important;
+  font-weight: 600;
+}
+
+.fox-settings-layout .fox-maintenance-stats small {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+}
+
+/* 关于 */
+.fox-settings-layout .fox-about-product {
+  min-height: 0;
+  gap: 16px !important;
+}
+
+.fox-settings-layout .fox-about-product > img {
+  width: 64px;
+  height: 64px;
+}
+
+.fox-settings-layout .fox-about-product > div {
+  justify-items: start;
+  gap: 4px;
+}
+
+.fox-settings-layout .fox-about-product h2 {
+  font-size: var(--fox-type-title) !important;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.fox-settings-layout .fox-about-product p {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome) !important;
+}

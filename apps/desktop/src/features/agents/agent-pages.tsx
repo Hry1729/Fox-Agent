@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
+import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Users, Wrench } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -1183,14 +1183,14 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
           <Select value={environment} onValueChange={(value) => setEnvironment(value as typeof environment)}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部环境</SelectItem><SelectItem value="local">本机</SelectItem><SelectItem value="knowledge">知识库</SelectItem></SelectContent></Select>
           <Select value={category} onValueChange={setCategory}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部分类</SelectItem>{agentCategoryOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
           <span className="fox-agent-result-count">{filteredCards.length} 个结果</span>
-          <Button variant="ghost" size="sm" disabled={resource.syncing} onClick={() => void resource.refresh()}>{resource.syncing && <LoaderCircle className="animate-spin" />}刷新</Button>
+          <Button variant="outline" size="sm" className="fox-agent-refresh" disabled={resource.syncing} title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}</Button>
           <input ref={packageInputRef} hidden type="file" accept=".foxexpert,.json,application/json" onChange={(event) => void inspectPackageFile(event.target.files?.[0])} />
           <Button variant="outline" size="sm" disabled={packageBusy || !desktopRuntimeAvailable} onClick={() => packageInputRef.current?.click()}>{packageBusy ? <LoaderCircle className="animate-spin" /> : <FileUp size={14} />}导入能力包</Button>
           <Button variant="outline" size="sm" disabled={!desktopRuntimeAvailable} onClick={() => setDigitalColleaguesOpen(true)}><Clock3 size={14} />数字同事</Button>
           <Button size="sm" onClick={openCreate}><Plus size={14} />新建专家</Button>
         </div>
         {resource.error && <p className="fox-page-error">{resource.error}</p>}
-        {resource.loading && cards.length === 0 ? <p className="fox-page-empty fox-agent-list-empty">正在加载专家...</p> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onViewDetail={() => openView(agent)} />)}</div> : <p className="fox-page-empty fox-agent-list-empty">没有符合当前筛选条件的专家。</p>}
+        {resource.loading && cards.length === 0 ? <p className="fox-page-empty fox-agent-list-empty">正在加载专家...</p> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onViewDetail={() => openView(agent)} />)}</div> : <div className="fox-page-empty fox-agent-list-empty"><span className="fox-agent-list-empty-icon"><Users /></span><p>没有符合当前筛选条件的专家。</p><Button variant="outline" size="sm" onClick={openCreate}><Plus size={14} />新建专家</Button></div>}
       </section>
       <DigitalColleagueManager open={digitalColleaguesOpen} onOpenChange={setDigitalColleaguesOpen} experts={resource.agents} />
       <AgentDetailDialog agent={detailAgent} open={detailOpen} onOpenChange={setDetailOpen} onManage={enterManage} onUse={(agent) => { setDetailOpen(false); navigate('chat', agent.id) }} />

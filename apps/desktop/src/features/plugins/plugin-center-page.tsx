@@ -327,11 +327,13 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
     return (
       <div className={`fox-plugin-center fox-plugin-installed-page ${className ?? ''}`}>
         <header className="fox-plugin-installed-page-header">
-          <h1 className="sr-only">插件</h1>
+          <div className="fox-plugin-page-intro">
+            <h1>插件</h1>
+            <label className="fox-plugin-search" htmlFor="fox-plugin-installed-search-input"><Search /><Input id="fox-plugin-installed-search-input" value={installedSearch} onChange={(event) => setInstalledSearch(event.target.value)} placeholder={`搜索${pluginKindLabel(kind)}`} /></label>
+          </div>
           <Tabs value={kind} onValueChange={(value) => { if (kindOrder.includes(value as PluginKind)) { setKind(value as PluginKind); setCategory(undefined) } }}>
             <TabsList className="fox-plugin-kind-tabs">{kindOrder.map((item) => <TabsTrigger key={item} value={item}><KindIcon kind={item} />{pluginKindLabel(item)}</TabsTrigger>)}</TabsList>
           </Tabs>
-          <label className="fox-plugin-search" htmlFor="fox-plugin-installed-search-input"><Search /><Input id="fox-plugin-installed-search-input" value={installedSearch} onChange={(event) => setInstalledSearch(event.target.value)} placeholder={`搜索${pluginKindLabel(kind)}`} /></label>
         </header>
         {error && <div className="fox-plugin-error"><CircleAlert /><span>{error}</span><Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button></div>}
         <main className="fox-plugin-installed-content">
@@ -349,14 +351,17 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
   return (
     <div className={`fox-plugin-center ${className ?? ''}`}>
       <header className="fox-plugin-topbar">
+        <div className="fox-plugin-page-intro">
+          <h1>插件</h1>
+          <div className="fox-plugin-topbar-actions">
+            <label className="fox-plugin-search" htmlFor="fox-plugin-search-input"><Search /><Input id="fox-plugin-search-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${pluginKindLabel(kind)}`} /></label>
+            <Button className="fox-plugin-toolbar-action" type="button" variant="outline" onClick={() => void reload()}><RefreshCw />刷新<Badge variant="secondary">{installedCount}</Badge></Button>
+            {onAddPlugin && <Button className="fox-plugin-toolbar-action" type="button" onClick={onAddPlugin}><Plus />添加插件</Button>}
+          </div>
+        </div>
         <Tabs value={kind} onValueChange={(value) => { if (kindOrder.includes(value as PluginKind)) { setKind(value as PluginKind); setCategory(undefined) } }}>
           <TabsList className="fox-plugin-kind-tabs">{kindOrder.map((item) => <TabsTrigger key={item} value={item}><KindIcon kind={item} />{pluginKindLabel(item)}</TabsTrigger>)}</TabsList>
         </Tabs>
-        <div className="fox-plugin-topbar-actions">
-          <label className="fox-plugin-search" htmlFor="fox-plugin-search-input"><Search /><Input id="fox-plugin-search-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${pluginKindLabel(kind)}`} /></label>
-          <Button className="fox-plugin-toolbar-action" type="button" variant="outline" onClick={() => void reload()}><RefreshCw />刷新<Badge variant="secondary">{installedCount}</Badge></Button>
-          {onAddPlugin && <Button className="fox-plugin-toolbar-action" type="button" onClick={onAddPlugin}><Plus />添加插件</Button>}
-        </div>
       </header>
 
       {error && <div className="fox-plugin-error"><CircleAlert /><span>{error}</span><Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button></div>}

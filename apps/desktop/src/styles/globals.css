@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "./themes.css";
 @import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css";
 @import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css";
 @import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css";
@@ -38,6 +39,19 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-soft: var(--brand-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-user-bubble: var(--user-bubble);
+  --color-user-bubble-foreground: var(--user-bubble-foreground);
+  --color-shell: var(--shell);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -56,31 +70,30 @@
   --fox-card: var(--card);
   --fox-panel: var(--muted);
   --fox-elevated: color-mix(in oklch, var(--card) 94%, transparent);
-  --fox-blue: #3978c5;
-  --fox-blue-soft: #e8f4ff;
-  --fox-blue-soft-hover: #deefff;
-  /* The send control is blue in both themes: a light blue disc by day, kept
-     clearly lighter than the deep-blue night disc so the white glyph reads on
-     either. */
-  --fox-send-surface: #5b9bf0;
-  --fox-send-ink: #ffffff;
+  /* Legacy --fox-* colours are aliases of the theme tokens in themes.css, so
+     every colour theme and both modes flow through them without overrides. */
+  --fox-blue: var(--brand);
+  --fox-blue-soft: var(--brand-soft);
+  --fox-blue-soft-hover: color-mix(in oklch, var(--brand-soft) 86%, var(--brand));
+  --fox-send-surface: var(--primary);
+  --fox-send-ink: var(--primary-foreground);
   --fox-hover: color-mix(in oklch, var(--fox-panel) 78%, var(--fox-card));
   --fox-border: var(--border);
   --fox-border-strong: color-mix(in oklch, var(--border) 72%, var(--foreground) 28%);
   --fox-text: var(--foreground);
   --fox-muted: var(--muted-foreground);
   /* Thinking/status text is deliberately lighter than body copy, and its sweep is
-     a pale blue rather than a grey wash, so a running thought reads as activity
-     without dropping to an unreadable tint. Both themes set their own pair; the
-     component is never made transparent to fake the effect. */
-  --fox-thinking-text: #6a7381;
-  --fox-thinking-shimmer: #6f9fd8;
-  --fox-thinking-shimmer-soft: #a6c4e6;
+     the brand colour rather than a grey wash, so a running thought reads as
+     activity without dropping to an unreadable tint. The component is never
+     made transparent to fake the effect. */
+  --fox-thinking-text: var(--muted-foreground);
+  --fox-thinking-shimmer: color-mix(in oklch, var(--brand) 80%, var(--background));
+  --fox-thinking-shimmer-soft: color-mix(in oklch, var(--brand) 45%, var(--background));
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
   --fox-accent: var(--fox-blue);
   --fox-accent-soft: var(--fox-blue-soft);
-  --fox-success: #20845d;
-  --fox-warning: #a66a14;
+  --fox-success: var(--success);
+  --fox-warning: var(--warning);
   --fox-surface-subtle: color-mix(in oklch, var(--fox-panel) 32%, var(--fox-card));
   --fox-surface-muted: color-mix(in srgb, var(--fox-panel) 48%, var(--fox-card));
   --fox-surface-strong: color-mix(in srgb, var(--fox-panel) 58%, var(--fox-card));
@@ -96,13 +109,21 @@
   --fox-success-surface: color-mix(in srgb, var(--fox-success) 8%, var(--fox-card));
   --fox-focus-ring: color-mix(in srgb, var(--ring) 22%, transparent);
   --fox-scrim: color-mix(in srgb, black 30%, transparent);
-  --fox-user: #eaf5ff;
-  --fox-user-foreground: #243447;
-  --fox-shadow: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
-  --fox-action-height: 34px;
-  --fox-inline-action-height: 28px;
+  --fox-user: var(--user-bubble);
+  --fox-user-foreground: var(--user-bubble-foreground);
+  /* Three elevation steps: sm for raised controls, md for menus and popovers,
+     lg for dialogs. No inset highlights. */
+  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--foreground) 6%, transparent);
+  --fox-shadow-md: 0 4px 16px color-mix(in oklch, var(--foreground) 9%, transparent);
+  --fox-shadow-lg: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
+  --fox-shadow: var(--fox-shadow-lg);
+  --fox-control-sm: 28px;
+  --fox-control-md: 32px;
+  --fox-control-lg: 36px;
+  --fox-action-height: var(--fox-control-md);
+  --fox-inline-action-height: var(--fox-control-sm);
   --fox-sidebar-row-height: 32px;
-  --fox-sidebar-icon-size: 18px;
+  --fox-sidebar-icon-size: 16px;
   --fox-command-row-height: 32px;
   --fox-badge-height: 20px;
   --fox-library-card-tag-height: 20px;
@@ -126,31 +147,29 @@
   --fox-space-5xl: 40px;
   --fox-space-6xl: 48px;
   --fox-space-8xl: 64px;
-  --fox-radius-small: 6px;
-  --fox-radius-control: 8px;
-  --fox-radius-card: 10px;
-  --fox-radius-large: 12px;
-  --fox-radius-overlay: 16px;
+  /* --fox-radius-small/control/card/large/overlay are set per theme in themes.css. */
   --fox-radius-pill: 999px;
   --fox-text-scale: 1;
-  /* One primary reading size for chat and both workbench sidebars. */
-  --fox-type-workbench: calc(13.5px * var(--fox-text-scale));
-  --fox-type-chrome: var(--fox-type-workbench);
-  --fox-type-caption: calc(11.5px * var(--fox-text-scale));
-  --fox-type-card-stat: calc(10.5px * var(--fox-text-scale));
+  /* Type scale: 12 / 13 / 14 / 16 / 24, nothing smaller than 12. Chat reads at
+     14; sidebars, menus and controls sit one step down at 13. */
+  --fox-type-workbench: calc(14px * var(--fox-text-scale));
+  --fox-type-chrome: calc(13px * var(--fox-text-scale));
+  --fox-type-caption: calc(12px * var(--fox-text-scale));
+  --fox-type-card-stat: calc(12px * var(--fox-text-scale));
   --fox-type-meta: calc(13px * var(--fox-text-scale));
-  --fox-type-control: var(--fox-type-workbench);
+  --fox-type-control: var(--fox-type-chrome);
   --fox-type-body: calc(14px * var(--fox-text-scale));
   --fox-type-ui: calc(14px * var(--fox-text-scale));
-  --fox-type-title: calc(15px * var(--fox-text-scale));
+  --fox-type-title: calc(16px * var(--fox-text-scale));
   --fox-type-card-title: calc(16px * var(--fox-text-scale));
-  --fox-type-section: calc(18px * var(--fox-text-scale));
+  --fox-type-section: calc(16px * var(--fox-text-scale));
   --fox-type-page: calc(24px * var(--fox-text-scale));
   --fox-type-display: calc(32px * var(--fox-text-scale));
   --fox-weight-regular: 400;
   --fox-weight-medium: 500;
   --fox-weight-semibold: 600;
-  --fox-weight-bold: 700;
+  /* Weights stop at 600; bold is kept as an alias so old rules land on the scale. */
+  --fox-weight-bold: 600;
   --fox-transition-fast: 120ms ease;
   --fox-transition-base: 160ms ease;
 }
@@ -163,38 +182,22 @@
   box-shadow: none !important;
 }
 
+/* Colours come from the theme tokens; dark mode only changes how they are mixed. */
 .dark {
   color-scheme: dark;
-  --fox-canvas: var(--background);
-  --fox-sidebar: var(--sidebar);
-  --fox-card: var(--card);
-  --fox-panel: var(--muted);
   --fox-elevated: color-mix(in oklch, var(--card) 96%, transparent);
-  --fox-blue: #78aee8;
-  --fox-blue-soft: #233b53;
-  --fox-blue-soft-hover: #294965;
-  /* Night keeps the same blue identity but deep enough to read as "blue", not as
-     the inverted white disc the card/text pair used to paint. */
-  --fox-send-surface: #1d4ed8;
-  --fox-send-ink: #ffffff;
   --fox-hover: color-mix(in oklch, var(--fox-panel) 82%, var(--fox-card));
-  --fox-border: var(--border);
   --fox-border-strong: color-mix(in oklch, var(--border) 65%, var(--foreground) 35%);
-  --fox-text: var(--foreground);
-  --fox-muted: var(--muted-foreground);
-  /* Dark theme needs a lighter grey than the muted baseline and a brighter blue,
-     because the same colour on a dark surface loses the sweep entirely. */
-  --fox-thinking-text: #c3cbd6;
-  --fox-thinking-shimmer: #8fbcf0;
-  --fox-thinking-shimmer-soft: #c3dcf8;
-  --fox-faint: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
-  --fox-accent: var(--fox-blue);
-  --fox-accent-soft: var(--fox-blue-soft);
-  --fox-success: #66c69d;
-  --fox-warning: #e2ad5b;
-  --fox-user: #203a50;
-  --fox-user-foreground: #eaf5ff;
-  --fox-shadow: 0 18px 55px color-mix(in oklch, black 35%, transparent);
+  /* On a dark surface the muted grey and the brand sweep both read too dim. */
+  --fox-thinking-text: color-mix(in oklch, var(--muted-foreground) 70%, var(--foreground));
+  --fox-thinking-shimmer: var(--brand);
+  --fox-thinking-shimmer-soft: color-mix(in oklch, var(--brand) 60%, var(--foreground));
+  /* Opaque, so contrast does not depend on the surface underneath: keeps 12px
+     secondary text at or above 4.5:1 on background, card, popover and muted. */
+  --fox-faint: color-mix(in oklch, var(--muted-foreground) 88%, var(--background));
+  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, black 30%, transparent);
+  --fox-shadow-md: 0 6px 20px color-mix(in oklch, black 32%, transparent);
+  --fox-shadow-lg: 0 18px 55px color-mix(in oklch, black 35%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -207,6 +210,12 @@ html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
    Radix thumb on hover. Hiding it here keeps every ScrollArea identical in both. */
 [data-slot="scroll-area-viewport"] {
   scrollbar-width: none;
+}
+/* Every other scroller gets the same thin, neutral bar instead of the classic
+   Windows one, which is especially loud in dark mode. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
 }
 [data-slot="scroll-area-viewport"]::-webkit-scrollbar {
   display: none;
@@ -238,73 +247,7 @@ button:disabled,
     --font-heading: var(--font-sans);
     --font-sans: 'HarmonyOS Sans SC', 'Segoe UI', system-ui, sans-serif;
   }
-  :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.148 0.004 228.8);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.148 0.004 228.8);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.148 0.004 228.8);
-    --primary: #3978c5;
-    --primary-foreground: #ffffff;
-    --secondary: oklch(0.972 0 0);
-    --secondary-foreground: oklch(0.21 0.006 285.885);
-    --muted: oklch(0.963 0.002 197.1);
-    --muted-foreground: oklch(0.56 0.021 213.5);
-    --accent: oklch(0.958 0 0);
-    --accent-foreground: oklch(0.218 0.008 223.9);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.925 0.005 214.3);
-    --input: oklch(0.925 0.005 214.3);
-    --ring: #8eb9e2;
-    --chart-1: oklch(0.809 0.105 251.813);
-    --chart-2: oklch(0.623 0.214 259.815);
-    --chart-3: oklch(0.546 0.245 262.881);
-    --chart-4: oklch(0.488 0.243 264.376);
-    --chart-5: oklch(0.424 0.199 265.638);
-    --radius: 0.625rem;
-    --sidebar: oklch(0.987 0.002 197.1);
-    --sidebar-foreground: oklch(0.148 0.004 228.8);
-    --sidebar-primary: #3978c5;
-    --sidebar-primary-foreground: #ffffff;
-    --sidebar-accent: oklch(0.958 0 0);
-    --sidebar-accent-foreground: oklch(0.218 0.008 223.9);
-    --sidebar-border: oklch(0.925 0.005 214.3);
-    --sidebar-ring: oklch(0.723 0.014 214.4);
-  }
-  .dark {
-    --background: oklch(0.148 0.004 228.8);
-    --foreground: oklch(0.987 0.002 197.1);
-    --card: oklch(0.218 0.008 223.9);
-    --card-foreground: oklch(0.987 0.002 197.1);
-    --popover: oklch(0.218 0.008 223.9);
-    --popover-foreground: oklch(0.987 0.002 197.1);
-    --primary: #3978c5;
-    --primary-foreground: #ffffff;
-    --secondary: oklch(0.274 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.275 0.011 216.9);
-    --muted-foreground: oklch(0.723 0.014 214.4);
-    --accent: oklch(0.275 0 0);
-    --accent-foreground: oklch(0.987 0.002 197.1);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: #6b9ed3;
-    --chart-1: oklch(0.809 0.105 251.813);
-    --chart-2: oklch(0.623 0.214 259.815);
-    --chart-3: oklch(0.546 0.245 262.881);
-    --chart-4: oklch(0.488 0.243 264.376);
-    --chart-5: oklch(0.424 0.199 265.638);
-    --sidebar: oklch(0.218 0.008 223.9);
-    --sidebar-foreground: oklch(0.987 0.002 197.1);
-    --sidebar-primary: #3978c5;
-    --sidebar-primary-foreground: #ffffff;
-    --sidebar-accent: oklch(0.275 0 0);
-    --sidebar-accent-foreground: oklch(0.987 0.002 197.1);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.56 0.021 213.5);
-  }
+  /* Colour tokens live in themes.css. */
   * {
     @apply border-border outline-ring/50;
   }

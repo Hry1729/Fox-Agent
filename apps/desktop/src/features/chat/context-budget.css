@@ -27,17 +27,17 @@
 }
 
 .fox-context-budget-badge {
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 8px;
   border-radius: 999px;
   background: rgba(127, 127, 127, 0.16);
-  color: var(--muted-foreground, #666);
+  color: var(--muted-foreground);
   white-space: nowrap;
 }
 
 .fox-context-budget-badge.is-measured {
   background: rgba(34, 139, 34, 0.15);
-  color: var(--foreground, #1a7f37);
+  color: var(--foreground);
 }
 
 .fox-context-budget-bar {
@@ -51,17 +51,17 @@
 .fox-context-budget-bar-fill {
   height: 100%;
   border-radius: 999px;
-  background: var(--primary, #3b82f6);
+  background: var(--primary);
   transition: width 160ms ease-out;
 }
 
 .fox-context-budget-bar-fill.is-high {
-  background: var(--destructive, #dc2626);
+  background: var(--destructive);
 }
 
 .fox-context-budget-reason {
   margin: 2px 0 0;
-  color: var(--muted-foreground, #666);
+  color: var(--muted-foreground);
 }
 
 .fox-context-budget-body {
@@ -84,7 +84,7 @@
 }
 
 .fox-context-budget-row dt {
-  color: var(--muted-foreground, #666);
+  color: var(--muted-foreground);
 }
 
 .fox-context-budget-row dd {
@@ -100,11 +100,11 @@
 }
 
 .fox-context-budget-tag {
-  font-size: 11px;
+  font-size: 12px;
   padding: 0 6px;
   border-radius: 999px;
   background: rgba(127, 127, 127, 0.14);
-  color: var(--muted-foreground, #666);
+  color: var(--muted-foreground);
   white-space: nowrap;
 }
 
@@ -114,6 +114,6 @@
 
 .fox-context-budget-note {
   margin: 6px 0 0;
-  color: var(--muted-foreground, #666);
+  color: var(--muted-foreground);
   font-size: 12px;
 }

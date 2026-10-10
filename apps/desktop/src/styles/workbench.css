@@ -1,5 +1,5 @@
 .fox-shell {
-  --fox-shell-chrome: rgba(255, 255, 255, .34);
+  --fox-shell-chrome: color-mix(in oklch, var(--background) 34%, transparent);
   /* One vertical rhythm for the sidebar's project and conversation rows: a
      32px row built from a 28px inner control plus a 2px gap, so a project row,
      a project's child conversation and a standalone conversation all read at the
@@ -13,7 +13,7 @@
   overflow: hidden;
   display: grid;
   grid-template-rows: 30px minmax(0, 1fr);
-  background: #f1f5f8;
+  background: var(--shell);
   color: var(--fox-text);
 }
 
@@ -27,8 +27,6 @@
   border-bottom: 0;
   background: var(--fox-shell-chrome);
   box-shadow: none;
-  backdrop-filter: blur(34px) saturate(1.38);
-  -webkit-backdrop-filter: blur(34px) saturate(1.38);
   user-select: none;
 }
 
@@ -57,7 +55,7 @@
 
 .fox-window-product > strong {
   font-size: var(--fox-type-chrome) !important;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-window-product nav {
@@ -83,7 +81,7 @@
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--fox-radius-control);
   background: transparent;
   color: var(--fox-muted);
   cursor: pointer;
@@ -132,12 +130,6 @@
 
 .fox-window-menu-content {
   min-width: 225px;
-  border: 1px solid var(--fox-border);
-  border-radius: 8px;
-  background: var(--fox-shell-chrome);
-  box-shadow: 0 18px 48px color-mix(in oklch, var(--fox-text) 18%, transparent);
-  backdrop-filter: blur(34px) saturate(1.38);
-  -webkit-backdrop-filter: blur(34px) saturate(1.38);
 }
 
 .fox-window-controls {
@@ -156,12 +148,12 @@
   z-index: 12;
   top: 13px;
   right: 12px;
-  width: 28px;
-  height: 28px;
+  width: var(--fox-control-sm);
+  height: var(--fox-control-sm);
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 50%;
+  border-radius: var(--fox-radius-control);
   background: transparent;
   color: var(--fox-muted);
   cursor: pointer;
@@ -342,7 +334,7 @@
   justify-content: flex-start;
   padding: 0 7px 6px;
   color: var(--fox-faint);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
   text-align: left;
 }
@@ -799,7 +791,7 @@
 }
 
 .fox-window-controls button.is-close:hover {
-  background: #d93025;
+  background: var(--destructive);
   color: white;
 }
 
@@ -815,8 +807,11 @@
   display: flex;
   overflow: visible;
   background: var(--fox-shell-chrome);
-  backdrop-filter: blur(34px) saturate(1.38);
-  -webkit-backdrop-filter: blur(34px) saturate(1.38);
+  /* Besides the light frost, the filter makes this element the containing block
+     for position: fixed overlays inside it (notification toasts, the local
+     fullscreen table), keeping them below the title bar. Do not drop it. */
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .fox-sidebar {
@@ -932,10 +927,10 @@
   height: 32px !important;
   flex: 0 0 32px;
   border: 1px solid transparent !important;
-  border-radius: 14px !important;
-  background: color-mix(in oklch, var(--fox-card) 38%, transparent) !important;
+  border-radius: var(--fox-radius-control) !important;
+  background: transparent !important;
   color: var(--fox-muted) !important;
-  box-shadow: inset 0 1px 0 color-mix(in oklch, var(--fox-card) 68%, transparent);
+  box-shadow: none;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
 }
 
@@ -978,46 +973,63 @@
   flex: 0 1 146px;
 }
 
+/* Same geometry as the shadcn Tabs default variant (muted track, 3px inset,
+   raised active trigger), expressed in px because the root font size is 14px
+   and the component's rem-based utilities would land between the radius steps. */
 .fox-mode-tabs [data-slot='tabs-list'] {
   width: 100%;
-  height: 30px;
+  height: var(--fox-control-md);
   display: flex;
-  gap: 3px;
-  border-radius: var(--fox-radius-pill);
-  background: color-mix(in oklch, var(--fox-panel) 88%, transparent);
-  padding: 2px;
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--fox-border) 70%, transparent);
+  gap: 0;
+  border-radius: var(--fox-radius-card);
+  background: var(--muted);
+  padding: 3px;
+  box-shadow: none;
 }
 
 .fox-mode-tabs [data-slot='tabs-trigger'] {
-  min-height: 26px;
-  border-radius: var(--fox-radius-pill);
-  gap: 4px;
-  font-size: 12.5px;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid transparent;
+  border-radius: var(--fox-radius-control);
+  gap: var(--fox-space-s);
+  padding: 0 var(--fox-space-m);
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome) !important;
   font-weight: var(--fox-weight-medium);
 }
 
+.fox-mode-tabs [data-slot='tabs-trigger']:hover {
+  color: var(--foreground);
+}
+
 .fox-mode-tabs [data-slot='tabs-trigger'] svg {
-  width: 14px;
-  height: 14px;
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
   stroke-width: 1.8;
 }
 
 .fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] {
-  border-color: var(--fox-border);
-  background: var(--fox-card);
-  color: var(--fox-text);
-  box-shadow: 0 1px 2px color-mix(in oklch, var(--fox-text) 8%, transparent);
+  border-color: transparent;
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: var(--fox-shadow-sm);
+}
+
+.dark .fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] {
+  border-color: var(--input);
+  background: color-mix(in oklch, var(--input) 30%, var(--muted));
+  box-shadow: none;
 }
 
 .fox-sidebar-search-trigger {
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
+  width: var(--fox-control-sm);
+  height: var(--fox-control-sm);
+  flex: 0 0 var(--fox-control-sm);
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 50%;
+  border-radius: var(--fox-radius-control);
   background: transparent;
   color: var(--fox-muted);
   cursor: pointer;
@@ -1105,7 +1117,7 @@
   background: transparent;
   padding: 0 8px;
   color: var(--fox-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
   transition: border-color 130ms ease, background 130ms ease, color 130ms ease;
@@ -1154,7 +1166,7 @@
 .fox-sidebar-command kbd {
   align-self: center;
   color: var(--fox-faint);
-  font: 10px/1.2 "HarmonyOS Sans SC", sans-serif;
+  font: var(--fox-type-caption)/1.2 "HarmonyOS Sans SC", sans-serif;
 }
 
 .fox-shell .fox-sidebar-command > svg {
@@ -1233,23 +1245,30 @@
   display: flex;
   align-items: end;
   justify-content: space-between;
-  padding: 0 7px 7px;
+  padding: 0 var(--fox-space-m) var(--fox-space-xs);
   color: var(--fox-faint);
-  font-size: 11px;
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-medium);
   background: transparent;
+}
+
+/* The shell-wide type reset pins every span to 14px with !important. */
+.fox-section-head > span:first-child {
+  font-size: var(--fox-type-caption) !important;
 }
 
 .fox-section-head > span:last-child {
   display: flex;
-  gap: 1px;
+  gap: 0;
+  margin-right: calc(-1 * var(--fox-space-xs));
 }
 
 .fox-section-head .fox-icon-button,
 .fox-sidebar-row-actions .fox-icon-button {
-  width: 27px !important;
-  height: 27px !important;
-  flex-basis: 27px;
-  border-radius: 7px !important;
+  width: var(--fox-control-sm) !important;
+  height: var(--fox-control-sm) !important;
+  flex-basis: var(--fox-control-sm);
+  border-radius: var(--fox-radius-control) !important;
   background: transparent !important;
   box-shadow: none;
 }
@@ -1518,8 +1537,8 @@
 .fox-sidebar-tree-row:hover .fox-sidebar-row-actions,
 .fox-sidebar-tree-row:focus-within .fox-sidebar-row-actions,
 .fox-sidebar-tree-row:has(.fox-sidebar-row-actions [data-state='open']) .fox-sidebar-row-actions {
-  width: 27px;
-  flex-basis: 27px;
+  width: var(--fox-control-sm);
+  flex-basis: var(--fox-control-sm);
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
@@ -1534,7 +1553,7 @@
   min-height: 31px;
   padding-left: 8px;
   color: var(--fox-faint);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-conversation-section {
@@ -1551,13 +1570,12 @@
   gap: 0 !important;
   padding: 0 !important;
   border-radius: var(--fox-radius-overlay) !important;
-  background: color-mix(in srgb, var(--fox-card) 96%, transparent) !important;
-  box-shadow: 0 24px 64px color-mix(in srgb, var(--fox-text) 18%, transparent) !important;
-  backdrop-filter: blur(24px) saturate(1.18);
+  background: var(--popover) !important;
+  box-shadow: var(--fox-shadow-lg) !important;
 }
 
 .fox-global-search-input-shell {
-  min-height: 54px;
+  min-height: 48px;
   display: flex;
   align-items: center;
   gap: var(--fox-space-m);
@@ -1567,9 +1585,9 @@
 }
 
 .fox-global-search-input-shell > svg {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  flex: 0 0 var(--fox-icon-size);
 }
 
 .fox-global-search-input-shell input {
@@ -1603,7 +1621,7 @@
   outline: none;
 }
 
-.fox-global-search-input-shell button svg { width: 15px; height: 15px; }
+.fox-global-search-input-shell button svg { width: var(--fox-icon-size-small); height: var(--fox-icon-size-small); }
 
 .fox-global-search-results {
   max-height: min(520px, calc(100vh - 220px));
@@ -1711,7 +1729,7 @@
   align-items: center;
   gap: 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--fox-radius-card);
   background: transparent;
   padding: 4px;
   color: var(--fox-text);
@@ -1723,12 +1741,13 @@
 
 .fox-profile:hover,
 .fox-profile[data-state='open'] {
-  background: var(--fox-card);
-  box-shadow: inset 0 0 0 1px var(--fox-border);
+  background: var(--fox-panel);
+  box-shadow: none;
 }
 
 .fox-profile:focus-visible {
-  box-shadow: 0 0 0 2px var(--fox-accent-soft);
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
 }
 
 .fox-profile-copy {
@@ -1737,9 +1756,9 @@
   flex-direction: column;
 }
 
-.fox-profile strong {
-  font-size: 10.5px;
-  font-weight: 600;
+.fox-shell .fox-profile strong {
+  font-size: var(--fox-type-chrome) !important;
+  font-weight: var(--fox-weight-medium);
 }
 
 .fox-profile small {
@@ -1747,7 +1766,7 @@
   align-items: center;
   gap: 4px;
   color: var(--fox-faint);
-  font-size: 8.5px;
+  font-size: var(--fox-type-caption);
 }
 
 .fox-profile small i,
@@ -1756,8 +1775,8 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #31a46c;
-  box-shadow: 0 0 0 2px color-mix(in oklch, #31a46c 18%, transparent);
+  background: var(--success);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--success) 18%, transparent);
 }
 
 .fox-profile small i.is-muted,
@@ -1816,15 +1835,15 @@
 }
 
 .fox-sidebar-collapsed-sections > .fox-sidebar-collapsed-entry > button {
-  width: 34px;
-  height: 34px;
-  min-width: 34px;
-  min-height: 34px;
+  width: var(--fox-sidebar-row-height);
+  height: var(--fox-sidebar-row-height);
+  min-width: var(--fox-sidebar-row-height);
+  min-height: var(--fox-sidebar-row-height);
   display: grid;
   place-items: center;
   position: relative;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--fox-radius-card);
   background: transparent;
   color: var(--fox-muted);
   cursor: pointer;
@@ -1845,8 +1864,8 @@
 }
 
 .fox-sidebar-collapsed-sections > .fox-sidebar-collapsed-entry > button > svg {
-  width: 17px;
-  height: 17px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
 }
 
 .fox-sidebar-collapsed-count {
@@ -1855,7 +1874,7 @@
   right: -4px;
   min-width: 14px;
   color: var(--fox-muted);
-  font-size: 9px;
+  font-size: var(--fox-type-caption);
   font-weight: var(--fox-weight-semibold);
   line-height: 1;
   text-align: center;
@@ -1869,32 +1888,31 @@
   width: 224px;
   max-height: min(360px, calc(100vh - 120px));
   overflow: auto;
-  padding: 7px;
+  padding: var(--fox-space-xs);
   border: 1px solid var(--fox-border);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--fox-card) 98%, transparent);
-  box-shadow: 0 18px 42px color-mix(in srgb, var(--fox-text) 15%, transparent);
-  backdrop-filter: blur(18px) saturate(1.12);
+  border-radius: var(--fox-radius-card);
+  background: var(--popover);
+  box-shadow: var(--fox-shadow-md);
 }
 
 .fox-sidebar-collapsed-popover > header {
-  padding: 5px 8px 7px;
-  color: var(--fox-faint);
+  padding: 6px 8px;
+  color: var(--fox-muted);
   font-size: var(--fox-type-caption);
-  font-weight: var(--fox-weight-semibold);
+  font-weight: var(--fox-weight-medium);
 }
 
 .fox-sidebar-collapsed-popover button {
   width: 100%;
-  min-height: 34px;
+  min-height: var(--fox-control-md);
   display: flex;
   align-items: center;
   gap: 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--fox-radius-control);
   background: transparent;
   color: var(--fox-muted);
-  padding: 6px 8px;
+  padding: 0 8px;
   text-align: left;
   cursor: pointer;
 }
@@ -1908,8 +1926,8 @@
 }
 
 .fox-sidebar-collapsed-popover button > svg {
-  width: 15px;
-  height: 15px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
   flex: 0 0 auto;
   stroke-width: 1.8;
 }
@@ -1972,43 +1990,37 @@
 
 .fox-profile-menu {
   min-width: 228px;
-  border: 1px solid var(--fox-border);
-  border-radius: 14px;
-  background: color-mix(in oklch, var(--fox-card) 96%, transparent);
-  padding: 6px;
-  box-shadow: 0 18px 48px color-mix(in oklch, var(--fox-text) 16%, transparent);
-  backdrop-filter: blur(18px);
 }
 
 .fox-profile-menu-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 8px 8px;
+  gap: var(--fox-space-m);
+  padding: 6px 8px;
 }
 
 .fox-profile-edit {
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
+  width: var(--fox-control-sm);
+  height: var(--fox-control-sm);
+  flex: 0 0 var(--fox-control-sm);
   display: grid;
   place-items: center;
   margin-left: auto;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--fox-radius-control);
   background: transparent;
   color: var(--fox-muted);
   cursor: pointer;
 }
 
 .fox-profile-edit:hover {
-  background: var(--fox-blue-soft-hover);
-  color: var(--fox-accent);
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 
 .fox-profile-edit svg {
-  width: 14px;
-  height: 14px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
 }
 
 .fox-profile-menu-head [data-slot='avatar'] {
@@ -2026,34 +2038,41 @@
 .fox-profile-menu-status strong {
   color: var(--fox-text);
   font-size: var(--fox-type-control);
-  font-weight: 620;
+  font-weight: var(--fox-weight-semibold);
+}
+
+.fox-profile-menu-status strong {
+  font-weight: var(--fox-weight-regular);
 }
 
 .fox-profile-menu-head small,
 .fox-profile-menu-status small {
-  color: var(--fox-faint);
+  color: var(--muted-foreground);
   font-size: var(--fox-type-caption);
-  font-weight: 450;
+  font-weight: 400;
 }
 
+/* A read-only status line laid out on the menu-item grid: the dot sits in the
+   16px icon column so the label lines up with the item labels above it. */
 .fox-profile-menu-status {
-  min-height: var(--fox-inline-action-height);
+  min-height: var(--fox-control-md);
   display: flex;
   align-items: center;
-  gap: 9px;
-  margin: 2px;
-  border-radius: 9px;
-  background: #eef7ff;
-  padding: var(--fox-space-s) var(--fox-space-m);
+  gap: var(--fox-space-m);
+  margin: 0;
+  border-radius: var(--fox-radius-control);
+  background: transparent;
+  padding: 0 var(--fox-space-m);
 }
 
 .fox-profile-menu-status > i {
   width: 8px;
   height: 8px;
   flex: 0 0 8px;
+  margin-inline: 4px;
   border-radius: 50%;
-  background: #31a46c;
-  box-shadow: 0 0 0 3px color-mix(in oklch, #31a46c 16%, transparent);
+  background: var(--success);
+  box-shadow: none;
 }
 
 .fox-content-card {
@@ -2064,7 +2083,7 @@
   overflow: visible;
   margin: 3px 0 0;
   border: 0;
-  border-radius: 14px 14px 14px 0;
+  border-radius: var(--fox-radius-large) var(--fox-radius-large) var(--fox-radius-large) 0;
   background: transparent;
   box-shadow: none;
   filter: none;
@@ -2073,22 +2092,17 @@
 .fox-content-card::before {
   content: '';
   position: absolute;
-  z-index: 0;
-  inset: -2px 0 0 -2px;
-  border-top: 1px solid rgba(128, 160, 184, .3);
-  border-radius: 16px 16px 0 0;
-  filter: blur(3.2px);
+  z-index: 2;
+  inset: 0;
+  border-top: 1px solid var(--fox-border);
+  border-left: 1px solid var(--fox-border);
+  border-radius: inherit;
+  border-bottom-left-radius: 0;
   pointer-events: none;
 }
 
 .fox-content-card::after {
-  content: '';
-  position: absolute;
-  z-index: 0;
-  inset: -2px 0 0 -2px;
-  border-left: 1px solid rgba(151, 181, 202, .3);
-  border-radius: 16px 0 0 0;
-  filter: blur(2.2px);
+  content: none;
   pointer-events: none;
 }
 
@@ -2252,8 +2266,8 @@ button.fox-chat-project-row:disabled {
 .fox-workspace-heading strong {
   overflow: hidden;
   color: var(--fox-text);
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2263,8 +2277,8 @@ button.fox-chat-project-row:disabled {
   flex: 0 1 auto;
   overflow: hidden;
   color: var(--fox-text);
-  font-size: 12.5px;
-  font-weight: 520;
+  font-size: 13px;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2301,8 +2315,8 @@ button.fox-chat-project-row:disabled {
   height: 26px;
   gap: 6px;
   border-radius: 999px;
-  background: color-mix(in oklch, #31a46c 10%, var(--fox-card));
-  color: color-mix(in oklch, #248757 82%, var(--fox-text));
+  background: color-mix(in oklch, var(--success) 10%, var(--fox-card));
+  color: color-mix(in oklch, var(--success) 82%, var(--fox-text));
   font-size: 9.5px;
   font-weight: 600;
 }
@@ -2364,32 +2378,54 @@ button.fox-chat-project-row:disabled {
 .fox-add-menu,
 .fox-editor-menu {
   min-width: 190px;
-  border-radius: 14px;
-  border: 1px solid var(--fox-border);
-  background: color-mix(in oklch, var(--fox-card) 96%, transparent);
-  box-shadow: 0 18px 48px color-mix(in oklch, var(--fox-text) 16%, transparent);
-  backdrop-filter: blur(18px);
 }
 
 .fox-editor-menu {
   min-width: 238px;
 }
 
-.fox-add-menu [role='menuitem'] {
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0 10px;
-  font-size: 13px;
-  line-height: 1;
+/* Shell menus (title bar, sidebar, chat title, composer "+", profile) share one
+   surface and one row metric: 8px panel, 4px inset, 32px rows with 8px side
+   padding, 16px icons and an 8px icon gap. The base components are rem-based
+   and the root font size is 14px, so the values are pinned in px here. */
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) {
+  padding: var(--fox-space-xs);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-card);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--fox-shadow-md);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
-.fox-add-menu [role='menuitem'] svg {
-  width: 16px;
-  height: 16px;
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) :is([data-slot='dropdown-menu-item'], [data-slot='dropdown-menu-sub-trigger'], [data-slot='dropdown-menu-checkbox-item'], [data-slot='dropdown-menu-radio-item'], [data-slot='context-menu-item']) {
+  min-height: var(--fox-control-md);
+  gap: var(--fox-space-m);
+  padding-block: 0;
+  padding-inline: var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
+  font-size: var(--fox-type-chrome);
+  line-height: 1.45;
+}
+
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) :is([data-slot='dropdown-menu-item'], [data-slot='dropdown-menu-sub-trigger'], [data-slot='context-menu-item']) > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
   margin: 0;
   flex: none;
+}
+
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) [data-slot='dropdown-menu-label']:not(.fox-profile-menu-head) {
+  padding: 6px var(--fox-space-m);
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption) !important;
+  font-weight: var(--fox-weight-medium);
+}
+
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) :is([data-slot='dropdown-menu-separator'], [data-slot='context-menu-separator']) {
+  margin: var(--fox-space-xs) calc(-1 * var(--fox-space-xs));
+  background: var(--fox-border);
 }
 
 .fox-conversation-summary {
@@ -2399,7 +2435,7 @@ button.fox-chat-project-row:disabled {
   border-radius: 10px;
   background: color-mix(in oklch, var(--fox-card) 97%, transparent);
   padding: 0;
-  box-shadow: 0 16px 42px color-mix(in oklch, var(--fox-text) 14%, transparent);
+  box-shadow: var(--fox-shadow-md);
   backdrop-filter: blur(20px);
 }
 
@@ -2430,7 +2466,7 @@ button.fox-chat-project-row:disabled {
   overflow: hidden;
   color: var(--fox-text);
   font-size: var(--fox-type-control);
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2499,7 +2535,7 @@ button.fox-chat-project-row:disabled {
 .fox-summary-item strong {
   color: var(--fox-text);
   font-size: var(--fox-type-meta);
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .fox-summary-item-tail {
@@ -2514,7 +2550,7 @@ button.fox-chat-project-row:disabled {
   min-width: 22px;
   color: var(--fox-muted);
   font-size: var(--fox-type-meta);
-  font-weight: 650;
+  font-weight: 600;
   text-align: right;
 }
 
@@ -2650,12 +2686,12 @@ button.fox-chat-project-row:disabled {
 
 .fox-turn-preview strong {
   color: var(--fox-text);
-  font-size: 13.5px;
+  font-size: 14px;
 }
 
 .fox-turn-preview span {
   color: var(--fox-muted);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -2752,13 +2788,13 @@ button.fox-chat-project-row:disabled {
   margin: 0;
   color: var(--fox-text);
   font-size: 32px;
-  font-weight: 680;
+  font-weight: 600;
 }
 
 .fox-empty-conversation p {
   margin: 0;
   color: var(--fox-muted);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -2851,8 +2887,8 @@ button.fox-chat-project-row:disabled {
   min-width: 0;
   overflow: hidden;
   color: var(--fox-text);
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2861,7 +2897,7 @@ button.fox-chat-project-row:disabled {
   margin: 3px 0 5px;
   overflow: hidden;
   color: var(--fox-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2886,7 +2922,7 @@ button.fox-chat-project-row:disabled {
   background: transparent;
   padding: 0 9px;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -2906,7 +2942,7 @@ button.fox-chat-project-row:disabled {
   padding: 2px 6px;
   color: var(--fox-muted);
   font-size: 9.5px;
-  font-weight: 560;
+  font-weight: 500;
 }
 
 .fox-expert-availability.is-available {
@@ -2927,7 +2963,7 @@ button.fox-chat-project-row:disabled {
   gap: 5px;
   margin-right: 4px;
   color: var(--fox-faint);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-user-meta > span:last-child {
@@ -2995,7 +3031,7 @@ button.fox-chat-project-row:disabled {
   min-height: 28px;
   margin-top: 5px;
   color: var(--fox-muted);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .fox-user-bubble-toggle:hover { color: var(--fox-text); }
 .fox-user-bubble-toggle:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 2px; }
@@ -3066,8 +3102,8 @@ button.fox-chat-project-row:disabled {
 
 .fox-answer-body h2 {
   margin: 0 0 10px;
-  font-size: 18px;
-  font-weight: 680;
+  font-size: 16px;
+  font-weight: 600;
 }
 
 .fox-answer-body p {
@@ -3077,7 +3113,7 @@ button.fox-chat-project-row:disabled {
 .fox-answer-body h3 {
   margin: 18px 0 8px;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .fox-answer-body ol,
@@ -3190,7 +3226,7 @@ button.fox-chat-project-row:disabled {
   border-radius: 12px;
   background: color-mix(in oklch, var(--fox-card) 97%, transparent);
   color: var(--fox-text);
-  box-shadow: 0 18px 48px color-mix(in oklch, var(--fox-text) 15%, transparent);
+  box-shadow: var(--fox-shadow-md);
   backdrop-filter: blur(20px);
 }
 
@@ -3264,13 +3300,13 @@ button.fox-chat-project-row:disabled {
 .fox-question-heading strong {
   color: var(--fox-text);
   font-size: 13px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .fox-question-heading p {
   margin: 3px 0 0;
   color: var(--fox-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -3326,8 +3362,8 @@ button.fox-chat-project-row:disabled {
 
 .fox-question-options strong {
   color: var(--fox-text);
-  font-size: 11.5px;
-  font-weight: 620;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .fox-question-options small {
@@ -3403,7 +3439,7 @@ button.fox-chat-project-row:disabled {
 .fox-denied-prompt strong {
   color: var(--fox-text);
   font-size: 13px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .fox-confirmation-body p {
@@ -3434,7 +3470,7 @@ button.fox-chat-project-row:disabled {
 
 .fox-confirmation-actions button {
   border-radius: 8px;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-error-prompt {
@@ -3455,14 +3491,14 @@ button.fox-chat-project-row:disabled {
 .fox-error-prompt p {
   margin: 3px 0 4px;
   color: var(--fox-muted);
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .fox-error-prompt button {
   flex: 0 0 auto;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-denied-prompt {
@@ -3533,8 +3569,8 @@ button.fox-chat-project-row:disabled {
   border-radius: 6px;
   padding: 4px 7px 4px 0;
   color: var(--fox-muted);
-  font-size: 14.5px;
-  font-weight: 540;
+  font-size: 14px;
+  font-weight: 500;
   line-height: 20px;
 }
 
@@ -3758,8 +3794,8 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-chain-of-thought-header small {
   color: var(--fox-faint);
-  font-size: 11.5px;
-  font-weight: 440;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .fox-chain-of-thought-header .fox-runtime-step-count {
@@ -3774,7 +3810,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-accent-soft);
   color: var(--fox-accent);
   font-size: 10px;
-  font-weight: 680;
+  font-weight: 600;
   line-height: 1;
 }
 
@@ -3802,15 +3838,15 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 6px;
   margin-bottom: 5px;
   color: var(--fox-muted);
-  font-size: 12.5px;
-  font-weight: 560;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .fox-live-reasoning-head small {
   margin-left: auto;
   color: var(--fox-faint);
   font-size: 10px;
-  font-weight: 450;
+  font-weight: 400;
 }
 
 .fox-live-reasoning-scroll {
@@ -3965,7 +4001,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-runtime-step-trigger > small {
   color: var(--fox-faint);
   font-size: 10px;
-  font-weight: 450;
+  font-weight: 400;
 }
 
 /* One row = one thought segment or one tool call. The leading glyph doubles as
@@ -4067,7 +4103,7 @@ img[src='/avatars/fox-assistant.png'] {
   padding: 9px 11px;
 }
 
-.fox-reasoning-text { font-size: 12.5px; line-height: 1.55; user-select: text; }
+.fox-reasoning-text { font-size: 13px; line-height: 1.55; user-select: text; }
 .fox-reasoning-text :is(p, ul, ol, blockquote) { margin-block: 0 6px; }
 .fox-reasoning-text :is(ul, ol) { padding-left: 20px; }
 .fox-reasoning-text :is(pre, code) { overflow-wrap: anywhere; }
@@ -4290,7 +4326,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-collapsible-code-preview pre,
 .fox-collapsible-code-content pre {
   padding: 11px 12px;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -4354,7 +4390,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-accent-soft);
   color: var(--fox-accent);
   font-size: 9px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .fox-sources a > span:nth-child(2) {
@@ -4411,7 +4447,7 @@ img[src='/avatars/fox-assistant.png'] {
   flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
-  color: #E87171;
+  color: var(--destructive);
   cursor: help;
   font-size: var(--fox-type-meta, 12px);
   white-space: nowrap;
@@ -4499,7 +4535,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-message-artifact .fox-message-artifact-title p:first-child {
   color: var(--fox-text);
   font-size: 14px;
-  font-weight: 450;
+  font-weight: 400;
 }
 
 .fox-message-artifact .fox-message-artifact-title p:last-child {
@@ -4677,29 +4713,29 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-user-edit-actions .fox-user-edit-cancel {
-  border: 1px solid color-mix(in oklch, #fff 72%, var(--fox-border));
-  background: #fff !important;
-  color: #242424 !important;
+  border: 1px solid var(--border);
+  background: var(--card) !important;
+  color: var(--foreground) !important;
 }
 
 .fox-user-edit-actions .fox-user-edit-cancel:hover {
-  background: #f4f4f4 !important;
+  background: var(--muted) !important;
 }
 
 .fox-user-edit-actions .fox-user-edit-send {
-  border: 1px solid #151515;
-  background: #151515 !important;
-  color: #fff !important;
+  border: 1px solid var(--primary);
+  background: var(--primary) !important;
+  color: var(--primary-foreground) !important;
 }
 
 .fox-user-edit-actions .fox-user-edit-send:hover {
-  background: #000 !important;
+  background: color-mix(in oklch, var(--primary) 86%, var(--background)) !important;
 }
 
 .fox-user-edit-actions .fox-user-edit-send:disabled {
-  border-color: #151515;
-  background: #151515 !important;
-  color: #fff !important;
+  border-color: var(--primary);
+  background: var(--primary) !important;
+  color: var(--primary-foreground) !important;
   opacity: .48;
 }
 
@@ -4725,15 +4761,15 @@ img[src='/avatars/fox-assistant.png'] {
   min-height: 150px;
   border: 1px solid color-mix(in srgb, var(--fox-accent) 24%, var(--fox-border));
   border-radius: 24px;
-  background: color-mix(in srgb, var(--fox-card) 97%, #e8f4ff 3%);
+  background: color-mix(in srgb, var(--fox-card) 97%, var(--brand-soft) 3%);
   box-shadow: 0 12px 30px color-mix(in srgb, var(--fox-text) 10%, transparent);
   animation: foxQuestionDrawerIn 180ms cubic-bezier(.2,.8,.2,1);
 }
 
 .fox-prompt-shell.is-decision.is-approval {
-  border-color: #93c5fd;
+  border-color: color-mix(in oklch, var(--brand) 55%, var(--border));
   box-shadow:
-    0 0 0 1px color-mix(in srgb, #93c5fd 24%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--brand) 24%, transparent),
     0 12px 30px color-mix(in srgb, var(--fox-text) 10%, transparent);
 }
 
@@ -4774,7 +4810,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-decision-card .fox-question-suggestions [data-variant='default'] {
   border-color: var(--fox-accent);
   background: var(--fox-accent) !important;
-  color: #fff !important;
+  color: var(--brand-foreground) !important;
 }
 
 .fox-decision-approval-list {
@@ -4810,7 +4846,7 @@ img[src='/avatars/fox-assistant.png'] {
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #e8f4ff;
+  background: var(--brand-soft);
   color: var(--fox-accent);
 }
 
@@ -4824,7 +4860,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-question-decision-content > header strong {
   color: var(--fox-text);
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-question-decision-content > header small {
@@ -4902,7 +4938,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-runtime-confirmation {
   min-height: 124px;
   justify-content: center;
-  background: color-mix(in srgb, var(--fox-card) 96%, #e8f4ff 4%) !important;
+  background: color-mix(in srgb, var(--fox-card) 96%, var(--brand-soft) 4%) !important;
 }
 
 .fox-runtime-confirmation .fox-confirmation-body {
@@ -4919,7 +4955,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-runtime-confirmation [data-slot='alert-description'] {
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.45;
 }
 
@@ -4929,7 +4965,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-runtime-confirmation .fox-confirmation-body small {
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
@@ -4947,7 +4983,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-question-field b {
   color: var(--fox-text);
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-question-decision-list {
@@ -5001,7 +5037,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-question-confirmation [data-slot='alert-description'] {
   color: var(--fox-text);
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-question-confirmation button {
@@ -5036,7 +5072,7 @@ img[src='/avatars/fox-assistant.png'] {
   width: 22px;
   height: 22px;
   border: 2px solid color-mix(in oklch, var(--fox-accent) 18%, transparent);
-  border-top-color: color-mix(in oklch, var(--fox-accent) 65%, #e8f4ff);
+  border-top-color: color-mix(in oklch, var(--fox-accent) 65%, var(--brand-soft));
   border-radius: 50%;
   animation: fox-route-loading-spin .8s linear infinite;
 }
@@ -5251,7 +5287,7 @@ img[src='/avatars/fox-assistant.png'] {
   box-shadow: 0 -5px 16px color-mix(in srgb, var(--fox-text) 4%, transparent);
   -webkit-backdrop-filter: blur(18px) saturate(1.08);
   backdrop-filter: blur(18px) saturate(1.08);
-  font-size: 11.5px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
@@ -5349,7 +5385,7 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
   overflow: hidden;
   color: color-mix(in srgb, var(--fox-faint) 68%, transparent);
-  font-size: 11.5px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5381,8 +5417,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-goal-floater.is-complete .fox-goal-copy [data-slot='badge'] {
-  background: color-mix(in oklch, #31a46c 13%, transparent);
-  color: color-mix(in oklch, #24875d 84%, var(--fox-text));
+  background: color-mix(in oklch, var(--success) 13%, transparent);
+  color: color-mix(in oklch, var(--success) 84%, var(--fox-text));
 }
 
 .fox-goal-floater.is-error .fox-goal-copy [data-slot='badge'] {
@@ -5608,7 +5644,7 @@ img[src='/avatars/fox-assistant.png'] {
   width: 100%;
   padding: 4px 0 !important;
   color: var(--fox-text);
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.45;
   overflow-y: auto;
   resize: none;
@@ -5752,7 +5788,7 @@ img[src='/avatars/fox-assistant.png'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-knowledge-binding-command [cmdk-item] small {
@@ -5770,7 +5806,7 @@ img[src='/avatars/fox-assistant.png'] {
   place-items: center;
   border: 1px solid var(--fox-border);
   border-radius: 4px;
-  color: white;
+  color: var(--brand-foreground);
 }
 
 .fox-knowledge-check.is-checked {
@@ -6090,7 +6126,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: color-mix(in srgb, var(--fox-accent-soft) 58%, var(--fox-card));
   padding: 0 7px;
   color: var(--fox-accent);
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -6173,7 +6209,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: color-mix(in oklch, var(--fox-card) 78%, var(--fox-accent) 8%);
   color: var(--fox-accent);
   font-size: 9px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .fox-expert-icon img {
@@ -6318,7 +6354,7 @@ img[src='/avatars/fox-assistant.png'] {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .fox-external-link-dialog code {
@@ -6329,7 +6365,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-subtle);
   padding: 9px 10px;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -6428,7 +6464,7 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 12px;
   background: color-mix(in oklch, var(--fox-card) 96%, transparent);
   color: var(--fox-text);
-  box-shadow: 0 18px 48px color-mix(in oklch, var(--fox-text) 15%, transparent);
+  box-shadow: var(--fox-shadow-md);
   backdrop-filter: blur(20px);
 }
 
@@ -6692,7 +6728,7 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
   overflow: hidden;
   font-size: var(--fox-type-chrome);
-  font-weight: 580;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -6778,7 +6814,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-context-home button span {
   overflow: hidden;
   font-size: var(--fox-type-chrome);
-  font-weight: 540;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -6969,7 +7005,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-context-head strong {
   overflow: hidden;
   font-size: var(--fox-type-chrome);
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -6982,9 +7018,11 @@ img[src='/avatars/fox-assistant.png'] {
   white-space: nowrap;
 }
 
+/* In dark mode the chrome (title bar and sidebar) shows the --shell colour
+   directly, which is a step darker than the content canvas. Tinting it towards
+   the foreground made the sidebar lighter than the content it frames. */
 .dark .fox-shell {
-  --fox-shell-chrome: rgba(255, 255, 255, .045);
-  background: #172630;
+  --fox-shell-chrome: transparent;
 }
 
 .dark .fox-window-titlebar {
@@ -7002,14 +7040,6 @@ img[src='/avatars/fox-assistant.png'] {
   filter: none;
 }
 
-.dark .fox-content-card::before {
-  border-top-color: rgba(8, 17, 24, .28);
-}
-
-.dark .fox-content-card::after {
-  border-left-color: rgba(8, 17, 24, .27);
-}
-
 .dark .fox-icon-button:hover,
 .dark .fox-icon-button.is-active,
 .dark .fox-icon-button[aria-expanded='true'] {
@@ -7018,9 +7048,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .dark .fox-profile:hover,
-.dark .fox-profile[data-state='open'],
-.dark .fox-profile-menu-status {
-  background: var(--fox-card);
+.dark .fox-profile[data-state='open'] {
+  background: var(--fox-panel);
 }
 
 .fox-file-panel {
@@ -7391,7 +7420,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: color-mix(in oklch, var(--fox-card) 94%, transparent) !important;
   color: var(--fox-text) !important;
   font-size: 12px !important;
-  font-weight: 550;
+  font-weight: 500;
   box-shadow: 0 1px 2px color-mix(in oklch, var(--fox-text) 8%, transparent);
 }
 
@@ -7466,7 +7495,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-file-artifact-title [class*='text-foreground'] {
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-file-artifact-title [class*='text-muted'] {
@@ -7488,7 +7517,7 @@ img[src='/avatars/fox-assistant.png'] {
   border: 0;
   border-radius: 0;
   background: color-mix(in oklch, var(--fox-canvas) 98%, var(--fox-card));
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-file-code-head {
@@ -7596,7 +7625,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: transparent;
   padding: 0 8px;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-file-tabbar > button:not(.fox-icon-button):hover,
@@ -7618,7 +7647,7 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 10px;
   padding: 0 11px;
   color: var(--fox-muted);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-file-breadcrumbs > span {
@@ -7637,7 +7666,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-file-breadcrumbs b {
   min-width: 0;
   overflow: hidden;
-  font-weight: 450;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -7834,12 +7863,12 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-change-panel b,
 .fox-diff-view .is-added {
-  color: #24875d;
+  color: var(--success);
 }
 
 .fox-change-panel em,
 .fox-diff-view .is-removed {
-  color: #c94e62;
+  color: var(--destructive);
   font-style: normal;
 }
 
@@ -7866,7 +7895,7 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
   flex: 1;
   font-size: var(--fox-type-chrome);
-  font-weight: 550;
+  font-weight: 500;
   line-height: 1.4;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -7898,11 +7927,11 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-diff-scroll code > span.is-added {
-  background: color-mix(in oklch, #24875d 9%, transparent);
+  background: color-mix(in oklch, var(--success) 9%, transparent);
 }
 
 .fox-diff-scroll code > span.is-removed {
-  background: color-mix(in oklch, #c94e62 9%, transparent);
+  background: color-mix(in oklch, var(--destructive) 9%, transparent);
 }
 
 .fox-diff-scroll code > span.is-meta {
@@ -8215,8 +8244,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-browser-activity-icon.is-failed {
-  background: color-mix(in oklch, #dc3545 10%, transparent);
-  color: #c23946;
+  background: color-mix(in oklch, var(--destructive) 10%, transparent);
+  color: var(--destructive);
 }
 
 .fox-browser-activity button > div,
@@ -8353,8 +8382,8 @@ img[src='/avatars/fox-assistant.png'] {
   align-self: flex-end;
   margin: 0 0 -1px -9px;
   border-width: 2px;
-  background: color-mix(in srgb, #31a46c 16%, var(--fox-card));
-  color: #24875d;
+  background: color-mix(in srgb, var(--success) 16%, var(--fox-card));
+  color: var(--success);
 }
 
 .fox-agent-heading {
@@ -8377,8 +8406,8 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-agent-heading > div span:not([data-slot='badge']) {
   overflow: hidden;
-  font-size: 11.5px;
-  font-weight: 620;
+  font-size: 12px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -8434,7 +8463,7 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 8px;
   background: transparent;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-agent-content > * + * {
@@ -8500,8 +8529,8 @@ img[src='/avatars/fox-assistant.png'] {
   display: grid;
   place-items: center;
   border-radius: 6px;
-  background: color-mix(in oklch, #31a46c 12%, transparent);
-  color: #24875d;
+  background: color-mix(in oklch, var(--success) 12%, transparent);
+  color: var(--success);
 }
 
 .fox-agent-state.is-running,
@@ -8512,8 +8541,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-agent-state.is-failed {
-  background: color-mix(in oklch, #dc3545 11%, transparent);
-  color: #c23946;
+  background: color-mix(in oklch, var(--destructive) 11%, transparent);
+  color: var(--destructive);
 }
 
 .fox-agent-state.is-cancelled,
@@ -8532,7 +8561,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-agent-metrics strong {
   color: var(--fox-text);
   font-size: 10px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .fox-agent-metrics small {
@@ -8614,7 +8643,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-agent-detail-head strong {
   color: var(--fox-text);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-agent-detail-head small,
@@ -8630,7 +8659,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-agent-detail label {
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: .02em;
 }
 
@@ -8937,15 +8966,15 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-agent-heading > div span:not([data-slot='badge']) {
-  font-size: 17px;
-  font-weight: 680;
+  font-size: 16px;
+  font-weight: 600;
 }
 
 .fox-agent-summary [data-slot='badge'] {
   height: 25px;
   border-radius: 7px;
   padding-inline: 7px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -8960,8 +8989,8 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 9px;
   background: var(--fox-card);
   color: var(--fox-text);
-  font-size: 12.5px;
-  font-weight: 570;
+  font-size: 13px;
+  font-weight: 500;
   box-shadow: 0 2px 8px color-mix(in srgb, var(--fox-text) 5%, transparent);
   transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
 }
@@ -9048,7 +9077,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-agent-task-card-head b {
   color: var(--fox-text);
   font-size: 14px;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .fox-agent-task-card-head small {
@@ -9066,7 +9095,7 @@ img[src='/avatars/fox-assistant.png'] {
   overflow: hidden;
   color: var(--fox-muted);
   font-size: 13px;
-  font-weight: 540;
+  font-weight: 500;
   line-height: 1.45;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -9166,8 +9195,8 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-agent-run-hero strong {
   overflow: hidden;
   color: var(--fox-text);
-  font-size: 21px;
-  font-weight: 680;
+  font-size: 24px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -9192,7 +9221,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-agent-run-hero p b {
   margin-right: 4px;
   color: var(--fox-faint);
-  font-weight: 560;
+  font-weight: 500;
 }
 
 .fox-agent-detail-metrics {
@@ -9232,13 +9261,13 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-agent-detail-metrics small {
   color: var(--fox-faint);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-agent-detail-metrics strong {
   color: var(--fox-text);
-  font-size: 15px;
-  font-weight: 640;
+  font-size: 16px;
+  font-weight: 600;
 }
 
 .fox-agent-live-section {
@@ -9250,7 +9279,7 @@ img[src='/avatars/fox-assistant.png'] {
   margin: 0 0 12px;
   color: var(--fox-muted);
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-agent-live-status {
@@ -9270,8 +9299,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-agent-live-status.is-success {
-  border-color: color-mix(in srgb, #31a46c 20%, transparent);
-  background: color-mix(in srgb, #31a46c 7%, var(--fox-card));
+  border-color: color-mix(in srgb, var(--success) 20%, transparent);
+  background: color-mix(in srgb, var(--success) 7%, var(--fox-card));
 }
 
 .fox-agent-live-status.is-danger {
@@ -9294,7 +9323,7 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-accent);
 }
 
-.fox-agent-live-status.is-success .fox-agent-live-icon { color: #24875d; }
+.fox-agent-live-status.is-success .fox-agent-live-icon { color: var(--success); }
 .fox-agent-live-status.is-danger .fox-agent-live-icon { color: var(--destructive); }
 .fox-agent-live-status.is-neutral .fox-agent-live-icon { color: var(--fox-muted); }
 
@@ -9307,14 +9336,14 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-agent-live-status p strong {
   color: var(--fox-text);
-  font-size: 15px;
-  font-weight: 660;
+  font-size: 16px;
+  font-weight: 600;
 }
 
 .fox-agent-live-status p small,
 .fox-agent-live-status time {
   color: var(--fox-faint);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-agent-live-status time {
@@ -9332,7 +9361,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-card);
   padding: 0 9px;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-agent-live-status > button svg {
@@ -9374,8 +9403,8 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-agent-failure-alert strong {
   color: color-mix(in srgb, var(--destructive) 84%, var(--fox-text));
-  font-size: 15px;
-  font-weight: 660;
+  font-size: 16px;
+  font-weight: 600;
 }
 
 .fox-agent-failure-alert p {
@@ -9387,7 +9416,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-agent-failure-alert time {
   flex: none;
   color: color-mix(in srgb, var(--destructive) 44%, var(--fox-muted));
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -9417,7 +9446,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-card);
   padding: 0 10px;
   color: var(--fox-text);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .fox-agent-failure-actions button.is-primary {
@@ -9459,7 +9488,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-agent-disclosure-trigger > strong {
   font-size: 14px;
-  font-weight: 640;
+  font-weight: 600;
 }
 
 .fox-agent-disclosure-trigger > svg {
@@ -9486,7 +9515,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: color-mix(in srgb, var(--fox-hover) 82%, transparent);
   padding: 4px 10px;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -9530,7 +9559,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-agent-context-grid label {
   color: var(--fox-faint);
   font-size: 9px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-agent-context-grid p {
@@ -9593,7 +9622,7 @@ img[src='/avatars/fox-assistant.png'] {
     height: 26px;
   }
 
-  .fox-agent-heading > div span:not([data-slot='badge']) { font-size: 15px; }
+  .fox-agent-heading > div span:not([data-slot='badge']) { font-size: 16px; }
 
   .fox-agent-summary [data-slot='badge'] {
     height: 20px;
@@ -9606,7 +9635,7 @@ img[src='/avatars/fox-assistant.png'] {
     height: 34px;
     gap: 5px;
     padding-inline: 9px;
-    font-size: 11.5px;
+    font-size: 12px;
   }
 
   .fox-agent-delegate svg {
@@ -9638,7 +9667,7 @@ img[src='/avatars/fox-assistant.png'] {
   .fox-agent-task-card-head b { font-size: 12px; }
 
   .fox-agent-task-card > strong {
-    font-size: 11px;
+    font-size: 12px;
     line-height: 1.42;
     -webkit-line-clamp: 1;
   }
@@ -9706,7 +9735,7 @@ img[src='/avatars/fox-assistant.png'] {
     gap: 7px;
   }
 
-  .fox-agent-run-hero strong { font-size: 15.5px; }
+  .fox-agent-run-hero strong { font-size: 16px; }
 
   .fox-agent-run-hero [data-slot='badge'] {
     height: 21px;
@@ -9715,7 +9744,7 @@ img[src='/avatars/fox-assistant.png'] {
   }
 
   .fox-agent-run-hero p {
-    font-size: 11.5px;
+    font-size: 12px;
     line-height: 1.5;
     -webkit-line-clamp: 2;
   }
@@ -9744,7 +9773,7 @@ img[src='/avatars/fox-assistant.png'] {
 
   .fox-agent-detail-metrics strong {
     overflow: hidden;
-    font-size: 12.5px;
+    font-size: 13px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -9753,7 +9782,7 @@ img[src='/avatars/fox-assistant.png'] {
 
   .fox-agent-live-section h3 {
     margin-bottom: 8px;
-    font-size: 12.5px;
+    font-size: 13px;
   }
 
   .fox-agent-live-status {
@@ -9831,7 +9860,7 @@ img[src='/avatars/fox-assistant.png'] {
     padding: 8px 11px;
   }
 
-  .fox-agent-disclosure-trigger > strong { font-size: 12.5px; }
+  .fox-agent-disclosure-trigger > strong { font-size: 13px; }
 
   .fox-agent-disclosure-icon svg {
     width: 16px;
@@ -9849,7 +9878,7 @@ img[src='/avatars/fox-assistant.png'] {
   .fox-agent-result-summary > pre {
     max-height: 310px;
     padding: 12px;
-    font-size: 11.5px;
+    font-size: 12px;
     line-height: 1.6;
   }
 }
@@ -9909,7 +9938,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-agent-summary-title > strong {
   font-size: var(--fox-type-chrome);
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -.01em;
 }
 
@@ -10022,7 +10051,7 @@ img[src='/avatars/fox-assistant.png'] {
   overflow: hidden;
   color: inherit;
   font-size: var(--fox-type-chrome);
-  font-weight: 610;
+  font-weight: 600;
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -10043,7 +10072,7 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-muted);
   font-size: var(--fox-type-caption);
   font-style: normal;
-  font-weight: 520;
+  font-weight: 500;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -10086,7 +10115,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: transparent;
   color: var(--fox-muted);
   font-size: var(--fox-type-chrome);
-  font-weight: 560;
+  font-weight: 500;
   transition: color 120ms ease, background 120ms ease;
 }
 
@@ -10173,7 +10202,7 @@ img[src='/avatars/fox-assistant.png'] {
   overflow: hidden;
   color: var(--fox-text);
   font-size: var(--fox-type-chrome);
-  font-weight: 640;
+  font-weight: 600;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -10198,7 +10227,7 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-muted);
   padding: 0 8px;
   font-size: var(--fox-type-caption);
-  font-weight: 540;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -10441,8 +10470,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-agent-run-error strong {
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .fox-agent-run-error code {
@@ -10456,7 +10485,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-agent-run-error p {
   margin: 0;
   color: color-mix(in srgb, var(--destructive) 78%, var(--fox-text));
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -10696,17 +10725,6 @@ img[src='/avatars/fox-assistant.png'] {
   }
 }
 
-/* Final sidebar interaction colors: avoid transparent OKLCH mixing in WebView. */
-.fox-mode-tabs [data-slot='tabs-list'] {
-  background: color-mix(in oklch, var(--fox-panel) 88%, transparent) !important;
-}
-
-.fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] {
-  border-color: var(--fox-border) !important;
-  background: var(--fox-card) !important;
-  color: var(--fox-text) !important;
-}
-
 .fox-section-head {
   background: transparent !important;
 }
@@ -10715,16 +10733,6 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-sidebar-tree-row.is-active {
   background: var(--fox-card) !important;
   box-shadow: inset 0 0 0 1px var(--fox-border) !important;
-}
-
-.dark .fox-mode-tabs [data-slot='tabs-list'] {
-  background: color-mix(in oklch, var(--fox-panel) 88%, transparent) !important;
-}
-
-.dark .fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] {
-  border-color: var(--fox-border) !important;
-  background: var(--fox-card) !important;
-  color: var(--fox-text) !important;
 }
 
 .dark .fox-project-row.is-active,
@@ -10771,7 +10779,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-context-sidebar-head strong {
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-context-sidebar-head small {
@@ -10850,7 +10858,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-knowledge-sidebar-explorer > header small {
   min-width: 20px;
   text-align: right;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-knowledge-sidebar-tree {
@@ -10917,7 +10925,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: transparent;
   padding: 6px 10px;
   color: var(--fox-muted);
-  font-size: 12.5px;
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
   transition: background 130ms ease, color 130ms ease;
@@ -11013,7 +11021,7 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 10px;
   background: color-mix(in oklch, var(--fox-card) 96%, transparent);
   padding: 12px;
-  box-shadow: 0 16px 44px color-mix(in oklch, var(--fox-text) 16%, transparent);
+  box-shadow: var(--fox-shadow-md);
   opacity: 0;
   pointer-events: none;
   transform: translate(-5px, -50%);
@@ -11088,7 +11096,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-conversation-preview-answer > small {
   color: var(--fox-faint);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -11122,7 +11130,7 @@ img[src='/avatars/fox-assistant.png'] {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  font-weight: 550;
+  font-weight: 500;
 }
 
 .fox-conversation-resources .is-fallback {
@@ -11185,7 +11193,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-result-list-head strong {
   font-size: 10.5px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-result-list-head small {
@@ -11249,8 +11257,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-result-list-scroll strong {
-  font-size: 11px;
-  font-weight: 550;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .fox-result-list-scroll small {
@@ -11273,7 +11281,7 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 6px 10px;
   padding: 0 12px 8px;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-result-file-meta span + span::before {
@@ -11288,7 +11296,7 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 7px;
   background: color-mix(in oklch, var(--fox-warning) 12%, var(--fox-card));
   color: var(--fox-text);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -11311,7 +11319,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-result-detail-head strong {
   overflow-wrap: anywhere;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .fox-result-detail-head small {
@@ -11343,10 +11351,10 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 7px;
   margin: 0 12px 8px;
   padding: 8px;
-  border: 1px solid color-mix(in oklch, #c94e62 42%, var(--fox-border));
+  border: 1px solid color-mix(in oklch, var(--destructive) 42%, var(--fox-border));
   border-radius: 6px;
-  background: color-mix(in oklch, #c94e62 8%, transparent);
-  color: #c94e62;
+  background: color-mix(in oklch, var(--destructive) 8%, transparent);
+  color: var(--destructive);
 }
 
 .fox-result-error > div {
@@ -11449,7 +11457,7 @@ img[src='/avatars/fox-assistant.png'] {
   white-space: nowrap;
   color: var(--fox-muted);
   font: 9px Consolas, monospace;
-  font-weight: 550;
+  font-weight: 500;
 }
 
 .fox-command-output {
@@ -11529,7 +11537,7 @@ img[src='/avatars/fox-assistant.png'] {
   align-items: center;
   gap: 6px;
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .fox-message-file-results-head.fox-message-artifact-group-trigger {
@@ -11806,7 +11814,7 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 999px;
   background: var(--fox-accent);
   color: var(--fox-canvas);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
 .fox-steering-chevron { margin-left: auto; transition: transform .18s ease; }
@@ -11854,7 +11862,7 @@ img[src='/avatars/fox-assistant.png'] {
   border: 1px solid var(--fox-border);
   color: var(--fox-muted);
   background: var(--fox-panel);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.6;
 }
 .fox-steering-item.is-delivered .fox-steering-status {
@@ -11915,7 +11923,7 @@ img[src='/avatars/fox-assistant.png'] {
   flex: none;
   height: 22px;
   padding: 0 7px;
-  font-size: 11px;
+  font-size: 12px;
 }
 .fox-steering-error {
   margin: 0;
@@ -11994,10 +12002,10 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 999px;
   border: 1px solid var(--fox-border);
   color: var(--fox-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
 }
-.fox-managed-warn-icon { color: #d9a14b; }
+.fox-managed-warn-icon { color: var(--warning); }
 .fox-managed-chevron { margin-left: auto; transition: transform .18s ease; }
 .fox-managed-chevron.is-open { transform: rotate(180deg); }
 .fox-managed-body {
@@ -12048,8 +12056,8 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 3px;
   padding: 1px 8px;
   border-radius: 999px;
-  font-size: 11px;
-  color: #b5791f;
+  font-size: 12px;
+  color: var(--warning);
   background: rgba(217, 161, 75, 0.12);
   white-space: nowrap;
 }
@@ -12078,22 +12086,22 @@ img[src='/avatars/fox-assistant.png'] {
   padding: 0 7px;
   border-radius: 999px;
   border: 1px solid var(--fox-border);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.7;
   color: var(--fox-muted);
 }
-.fox-managed-kind.is-created { color: #2e8b57; border-color: rgba(46, 139, 87, 0.5); }
+.fox-managed-kind.is-created { color: var(--success); border-color: rgba(46, 139, 87, 0.5); }
 .fox-managed-kind.is-modified { color: var(--fox-accent); border-color: var(--fox-accent); }
 .fox-managed-kind.is-restored { color: #8a5cf6; border-color: rgba(138, 92, 246, 0.5); }
 .fox-managed-no { color: var(--fox-faint); font-variant-numeric: tabular-nums; }
 .fox-managed-meta { color: var(--fox-faint); }
-.fox-managed-source { color: #8a5cf6; font-size: 11px; }
+.fox-managed-source { color: #8a5cf6; font-size: 12px; }
 .fox-managed-version-actions { margin-left: auto; display: inline-flex; align-items: center; }
-.fox-managed-current { color: var(--fox-faint); font-size: 11px; }
+.fox-managed-current { color: var(--fox-faint); font-size: 12px; }
 .fox-managed-force-hint {
   flex-basis: 100%;
   margin: 2px 0 0;
-  color: #b5791f;
+  color: var(--warning);
   line-height: 1.5;
 }
 .fox-managed-force-hint button {

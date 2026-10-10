@@ -1,9 +1,9 @@
 import { cn } from "@/lib/utils"
-import { RiLoaderLine } from "@remixicon/react"
+import { LoaderCircleIcon } from "lucide-react"
 
-function Spinner({ className, ...props }: React.ComponentProps<typeof RiLoaderLine>) {
+function Spinner({ className, ...props }: React.ComponentProps<typeof LoaderCircleIcon>) {
   return (
-    <RiLoaderLine data-slot="spinner" role="status" aria-label="Loading" className={cn("size-4 animate-spin", className)} {...props} />
+    <LoaderCircleIcon data-slot="spinner" role="status" aria-label="Loading" className={cn("size-4 animate-spin", className)} {...props} />
   )
 }
 

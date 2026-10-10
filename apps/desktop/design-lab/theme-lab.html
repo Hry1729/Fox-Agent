@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fox 主题样稿</title>
+    <script>
+      // ?app=light|dark[&theme=id] opens the real app with onboarding skipped, for captures.
+      (function () {
+        var params = new URLSearchParams(location.search)
+        var mode = params.get('app')
+        if (mode) {
+          localStorage.setItem('fox.onboarding.status', 'skipped')
+          localStorage.setItem('fox.theme', mode === 'dark' ? 'dark' : 'light')
+          localStorage.setItem('fox.preferences.colorTheme', params.get('theme') || 'graphite')
+          location.replace('/' + (params.get('view') ? '#' + params.get('view') : ''))
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./theme-lab.tsx"></script>
+  </body>
+</html>

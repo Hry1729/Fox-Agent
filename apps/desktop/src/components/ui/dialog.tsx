@@ -3,7 +3,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import { RiCloseLine } from "@remixicon/react"
+import { XIcon } from "lucide-react"
 
 function Dialog({
   ...props
@@ -38,7 +38,7 @@ function DialogOverlay({
       data-slot="dialog-overlay"
       className={cn(
         "fixed inset-0 isolate z-[100] duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
-        "bg-[var(--fox-shell-chrome)] backdrop-blur-[34px] saturate-[1.38]",
+        "bg-black/20 supports-backdrop-filter:backdrop-blur-xs dark:bg-black/50",
         className
       )}
       {...props}
@@ -74,7 +74,7 @@ function DialogContent({
               size="icon"
               aria-label="关闭弹窗"
             >
-              <RiCloseLine
+              <XIcon
               />
               <span className="sr-only">关闭弹窗</span>
             </Button>
@@ -107,7 +107,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse items-center gap-2 sm:flex-row sm:justify-center",
+        "flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end",
         className
       )}
       {...props}

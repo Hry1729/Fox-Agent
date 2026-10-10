@@ -17,45 +17,88 @@
 }
 
 .fox-plugin-topbar {
-  min-height: 88px;
   display: flex;
-  align-items: center;
-  gap: var(--fox-space-2xl);
-  padding: var(--fox-space-4xl) var(--fox-space-3xl) var(--fox-space-xl);
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--fox-space-xl);
+  padding: var(--fox-space-4xl) var(--fox-space-3xl) var(--fox-space-2xl);
 }
 
 .fox-plugin-topbar > [data-slot='tabs'] {
   flex: none;
+  align-self: flex-start;
 }
 
+.fox-plugin-page-intro {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fox-space-2xl);
+}
+
+.fox-plugin-page-intro h1 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--fox-text);
+  font-size: var(--fox-type-page);
+  font-weight: var(--fox-weight-semibold);
+  line-height: var(--fox-control-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-page-intro > .fox-plugin-search {
+  margin-left: auto;
+}
+
+/* Segmented kind switcher: the stock shadcn Tabs shape on graphite tokens, */
+/* matching the shared segmented filter used on the knowledge pages. */
 .fox-plugin-kind-tabs {
-  height: 36px !important;
-  gap: 2px !important;
+  width: max-content;
+  height: var(--fox-control-md) !important;
+  gap: var(--fox-space-micro) !important;
   padding: 3px !important;
-  border-radius: var(--fox-radius-control) !important;
-  background: var(--fox-panel) !important;
+  border: 0;
+  border-radius: var(--fox-radius-card) !important;
+  background: var(--muted) !important;
 }
 
 .fox-plugin-kind-tabs [data-slot='tabs-trigger'] {
-  flex: none;
-  min-width: 82px;
+  min-width: 72px;
+  flex: 0 0 auto;
   gap: var(--fox-space-s);
   padding-inline: var(--fox-space-l);
-  border-radius: calc(var(--fox-radius-control) - 2px);
-  color: var(--fox-muted);
-  font-size: var(--fox-type-ui);
+  border: 1px solid transparent;
+  border-radius: var(--fox-radius-control);
+  color: var(--muted-foreground);
+  background: transparent;
+  box-shadow: none;
+  font-size: var(--fox-type-chrome);
   font-weight: var(--fox-weight-medium);
 }
 
 .fox-plugin-kind-tabs [data-slot='tabs-trigger'] svg {
-  width: var(--fox-icon-size-compact);
-  height: var(--fox-icon-size-compact);
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
 }
 
-.fox-plugin-kind-tabs [data-slot='tabs-trigger'][data-active] {
-  color: var(--fox-text);
-  background: var(--fox-card);
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--fox-text) 10%, transparent);
+.fox-plugin-kind-tabs [data-slot='tabs-trigger']:hover {
+  color: var(--foreground);
+}
+
+.fox-plugin-kind-tabs [data-slot='tabs-trigger'][data-active],
+.fox-plugin-kind-tabs [data-slot='tabs-trigger'][data-state='active'] {
+  border-color: transparent;
+  color: var(--foreground);
+  background: var(--background);
+  box-shadow: var(--fox-shadow-sm);
+}
+
+.dark .fox-plugin-kind-tabs [data-slot='tabs-trigger'][data-active],
+.dark .fox-plugin-kind-tabs [data-slot='tabs-trigger'][data-state='active'] {
+  border-color: var(--border);
+  background: var(--card);
 }
 
 .fox-plugin-topbar-actions {
@@ -264,29 +307,16 @@
 }
 
 .fox-plugin-installed-page-header {
-  min-height: 88px;
   display: flex;
-  align-items: center;
-  gap: var(--fox-space-2xl);
-  padding: var(--fox-space-4xl) var(--fox-space-3xl) var(--fox-space-xl);
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--fox-space-xl);
+  padding: var(--fox-space-4xl) var(--fox-space-3xl) var(--fox-space-2xl);
 }
 
-.fox-plugin-installed-page-title {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--fox-space-m);
-}
-
-.fox-plugin-installed-page-title h1 {
-  margin: 0;
-  overflow: hidden;
-  color: var(--fox-text);
-  font-size: var(--fox-type-page);
-  font-weight: var(--fox-weight-semibold);
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.fox-plugin-installed-page-header > [data-slot='tabs'] {
+  flex: none;
+  align-self: flex-start;
 }
 
 .fox-plugin-installed-back {
@@ -300,11 +330,6 @@
   height: var(--fox-icon-size-compact);
 }
 
-.fox-plugin-installed-page-header > .fox-plugin-search {
-  margin-left: auto;
-}
-
-.fox-plugin-installed-page-title > .badge,
 .fox-plugin-installed-card .badge {
   min-width: var(--fox-badge-height);
   min-height: var(--fox-badge-height);
@@ -680,12 +705,12 @@
 
 .fox-plugin-scope-dialog > footer {
   display: flex;
-  justify-content: center;
+  justify-content: flex-end;
   padding: var(--fox-space-l) var(--fox-space-xl) var(--fox-space-xl);
 }
 
 @media (max-width: 980px) {
-  .fox-plugin-topbar {
+  .fox-plugin-page-intro {
     align-items: flex-start;
     flex-wrap: wrap;
   }
@@ -705,8 +730,6 @@
 @media (max-width: 700px) {
   .fox-plugin-topbar,
   .fox-plugin-installed-page-header {
-    align-items: stretch;
-    flex-direction: column;
     gap: var(--fox-space-l);
   }
 
@@ -737,7 +760,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .fox-plugin-installed-page-header > .fox-plugin-search {
+  .fox-plugin-page-intro > .fox-plugin-search {
     margin-left: 0;
   }
 }

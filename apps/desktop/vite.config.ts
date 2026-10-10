@@ -99,7 +99,7 @@ export default defineConfig(({ mode }) => {
             if (id.includes('@aiden0z/pptx-renderer')) return 'viewer-pptx'
             if (id.includes('@xyflow/react')) return 'graph-flow'
             if (id.includes('motion')) return 'motion-vendor'
-            if (id.includes('lucide-react') || id.includes('@remixicon/react')) return 'icons-vendor'
+            if (id.includes('lucide-react')) return 'icons-vendor'
             return undefined
           },
         },

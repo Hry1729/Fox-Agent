@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, LogIn, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RotateCcw, Search, Server, Sparkles, X } from 'lucide-react'
+import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, LogIn, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RefreshCw, RotateCcw, Search, Server, Sparkles, X } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -64,19 +64,19 @@ export function KnowledgeListPage({ sidebarCollapsed, onSidebar, navigate }: { s
     navigate('login')
   }
   return (
-    <WorkspacePage title="知识库" subtitle="浏览你有权限访问的资料" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <WorkspacePage title="远程知识库" subtitle="浏览你有权限访问的资料" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
       <section className="fox-page-content fox-knowledge-list-page">
-        <div className="fox-page-intro fox-list-page-intro"><h1>知识库</h1><label className="fox-list-page-search"><Search size={14} /><Input aria-label="搜索知识库" placeholder="搜索知识库..." value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>
+        <div className="fox-page-intro fox-list-page-intro"><h1>远程知识库</h1><label className="fox-list-page-search"><Search size={14} /><Input aria-label="搜索知识库" placeholder="搜索知识库..." value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>
         <div className="fox-page-toolbar fox-agent-toolbar fox-knowledge-toolbar">
           <Select value={statusFilter} onValueChange={setStatusFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="ready">已就绪</SelectItem><SelectItem value="processing">处理中</SelectItem><SelectItem value="pending">待处理</SelectItem></SelectContent></Select>
           <Select value={typeFilter} onValueChange={setTypeFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部类型</SelectItem>{typeOptions.map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select>
           <Select value={contentFilter} onValueChange={setContentFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部内容</SelectItem><SelectItem value="populated">包含文件</SelectItem><SelectItem value="empty">空知识库</SelectItem></SelectContent></Select>
           <span className="fox-agent-result-count">{cards.length} 个结果</span>
-          <Button variant="ghost" size="sm" onClick={() => void resource.refresh()}>刷新</Button>
+          <Button variant="outline" size="sm" className="fox-agent-refresh" title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}><RefreshCw /></Button>
         </div>
         {resource.error && <p className="fox-page-error">{resource.error}</p>}
-        {!yuxi.loading && !yuxi.service && <div className="fox-page-empty-state"><Server /><span><b>尚未配置知识库服务</b><small>先连接知识库服务，再登录账户访问资料。</small></span><Button size="lg" onClick={openService}>配置服务</Button></div>}
-        {!yuxi.loading && yuxi.service && !yuxiUser.loading && !yuxiUser.user && <div className="fox-page-empty-state"><LogIn /><span><b>{connected ? '知识库服务已连接，账户尚未登录' : '需要登录知识库'}</b><small>{yuxiUser.error ?? '浏览器中的登录态不会与 Fox 自动共享，请在 Fox 中登录一次。'}</small></span><Button size="lg" onClick={openLogin}>知识库登录</Button></div>}
+        {!yuxi.loading && !yuxi.service && <div className="fox-page-empty-state"><Server /><span><b>尚未配置知识库服务</b><small>先连接知识库服务，再登录账户访问资料。</small></span><Button onClick={openService}>配置服务</Button></div>}
+        {!yuxi.loading && yuxi.service && !yuxiUser.loading && !yuxiUser.user && <div className="fox-page-empty-state"><LogIn /><span><b>{connected ? '知识库服务已连接，账户尚未登录' : '需要登录知识库'}</b><small>{yuxiUser.error ?? '浏览器中的登录态不会与 Fox 自动共享，请在 Fox 中登录一次。'}</small></span><Button onClick={openLogin}>知识库登录</Button></div>}
         {!resource.loading && yuxiUser.user && resource.items.length === 0 && <p className="fox-page-empty">当前账户暂无可访问的知识库。</p>}
         {!resource.loading && yuxiUser.user && resource.items.length > 0 && cards.length === 0 && <p className="fox-page-empty">没有匹配“{query.trim()}”的知识库。</p>}
         <div className="fox-entity-grid fox-shadcn-entity-grid fox-knowledge-grid">{cards.map((knowledge) => <KnowledgeCard key={knowledge.id} knowledge={knowledge} onOpen={() => navigate('knowledge-detail', knowledge.id)} />)}</div>

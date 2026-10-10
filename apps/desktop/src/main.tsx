@@ -3,12 +3,14 @@ import ReactDOM from 'react-dom/client'
 import { App } from './app/App'
 import './styles/globals.css'
 import { applyStoredTextScale } from './features/settings/text-scale'
+import { applyStoredColorTheme } from './features/settings/color-theme'
 import './styles/workbench.css'
 import './styles/workspace-pages.css'
 
 document.addEventListener('contextmenu', (event) => event.preventDefault())
 
 applyStoredTextScale()
+applyStoredColorTheme()
 
 // Static compile-time constant (vite define). False in normal builds, so the
 // lazy() below is dead-code eliminated and no profiling chunk ships to release.

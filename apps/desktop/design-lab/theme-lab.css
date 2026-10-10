@@ -1,0 +1,3 @@
+/* Palettes come from the app's own src/styles/themes.css via globals.css. */
+@import "../src/styles/globals.css";
+@source "./theme-lab.tsx";

@@ -565,8 +565,8 @@ function CreateKnowledgeBaseDialog({
             <label htmlFor="local-knowledge-base-description">描述 <small>（可选）</small></label>
             <Textarea id="local-knowledge-base-description" className="fox-local-kb-create-textarea" placeholder="简要说明这个知识库的用途" value={description} onChange={(event) => setDescription(event.target.value)} disabled={submitting} />
           </div>
-          <fieldset className="fox-local-kb-index-settings">
-            <legend>索引与检索</legend>
+          <div className="fox-local-kb-index-settings">
+            <h3 className="fox-local-kb-index-settings-title">索引与检索</h3>
             <label>向量模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword') }} disabled={submitting || modelsLoading}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用向量模型</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
             <label>检索模式<Select value={searchMode} onValueChange={(value) => setSearchMode(value as KnowledgeSearchMode)} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="keyword">关键词检索</SelectItem><SelectItem value="vector" disabled={embeddingModelId === 'none'}>向量检索</SelectItem><SelectItem value="hybrid" disabled={embeddingModelId === 'none'}>混合检索</SelectItem></SelectContent></Select></label>
             <label>分块大小<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => setChunkSize(event.target.value)} disabled={submitting} /></label>
@@ -576,7 +576,7 @@ function CreateKnowledgeBaseDialog({
             {!modelsLoading && !modelsLoadError && models.length === 0 && <p><Cpu />还没有可用的向量模型。可先创建关键词知识库，再到“向量模型”页面安装。</p>}
             {!modelsLoading && models.length > 0 && !models.some(isSelectableEmbeddingModel) && <p><Info />已显示可安装模型；请先在“向量模型”页面完成安装与测试，之后即可选择。</p>}
             {models.some(isSelectableEmbeddingModel) && embeddingModelId !== 'none' && <p><Info />可用模型已选中。导入文档后，请在知识库“向量索引”步骤点击构建。</p>}
-          </fieldset>
+          </div>
           {(validationError || error) && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{validationError ?? error}</p>}
           <DialogFooter className="fox-local-kb-create-actions">
             <Button type="button" variant="outline" onClick={() => requestOpenChange(false)} disabled={submitting}>取消</Button>
@@ -682,13 +682,13 @@ function EditKnowledgeBaseDialog({
             <label htmlFor="local-knowledge-base-edit-description">描述 <small>（可选）</small></label>
             <Textarea id="local-knowledge-base-edit-description" className="fox-local-kb-create-textarea" value={description} onChange={(event) => { setDescription(event.target.value); setDirty(true) }} disabled={submitting} />
           </div>
-          <fieldset className="fox-local-kb-index-settings">
-            <legend>索引与检索</legend>
+          <div className="fox-local-kb-index-settings">
+            <h3 className="fox-local-kb-index-settings-title">索引与检索</h3>
             <label>向量模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword'); setDirty(true) }} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用向量模型</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
             <label>检索模式<Select value={searchMode} onValueChange={(value) => { setSearchMode(value as KnowledgeSearchMode); setDirty(true) }} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="keyword">关键词检索</SelectItem><SelectItem value="vector" disabled={embeddingModelId === 'none'}>向量检索</SelectItem><SelectItem value="hybrid" disabled={embeddingModelId === 'none'}>混合检索</SelectItem></SelectContent></Select></label>
             <label>分块大小<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => { setChunkSize(event.target.value); setDirty(true) }} disabled={submitting} /></label>
             <label>重叠长度<Input type="number" min={0} step={1} value={chunkOverlap} onChange={(event) => { setChunkOverlap(event.target.value); setDirty(true) }} disabled={submitting} /></label>
-          </fieldset>
+          </div>
           {(validationError || error) && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{validationError ?? error}</p>}
           <DialogFooter className="fox-local-kb-create-actions">
             <Button type="button" variant="outline" onClick={() => requestOpenChange(false)} disabled={submitting}>取消</Button>
@@ -1424,10 +1424,10 @@ export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway,
             <div className="fox-local-kb-home-greeting-copy">
               <h1>今天想一起读点什么？</h1>
               <div className="fox-local-kb-home-actions">
-                <button type="button" onClick={() => onNavigate?.('files')}>整理本地文件</button>
-                <button type="button" onClick={() => onNavigate?.('list')}>本地知识库</button>
-                <button type="button" onClick={() => onNavigate?.('jobs')}>任务中心{activeJobs > 0 && <small>{activeJobs}</small>}</button>
-                {guide && <button type="button" onClick={() => onNavigate?.('documents', guide.id)}>查看使用指南</button>}
+                <Button type="button" variant="outline" onClick={() => onNavigate?.('files')}>整理本地文件</Button>
+                <Button type="button" variant="outline" onClick={() => onNavigate?.('list')}>本地知识库</Button>
+                <Button type="button" variant="outline" onClick={() => onNavigate?.('jobs')}>任务中心{activeJobs > 0 && <Badge variant="secondary">{activeJobs}</Badge>}</Button>
+                {guide && <Button type="button" variant="outline" onClick={() => onNavigate?.('documents', guide.id)}>查看使用指南</Button>}
               </div>
             </div>
           </div>
@@ -1502,11 +1502,12 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
   return (
     <div className={cn('fox-local-kb-page', className)}>
       <div className="fox-local-kb-content">
-        <LocalKnowledgeHeader title="本地知识库" description="" actions={<><Button variant="outline" onClick={() => setStorageOpen(true)}><HardDrive />存储位置</Button><Button onClick={openCreateDialog}><Database />新建知识库</Button></>} />
+        <LocalKnowledgeHeader title="本地知识库" description="" actions={<label className="fox-local-kb-search"><Search /><Input aria-label="搜索本地知识库" placeholder="搜索知识库..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>} />
         <div className="fox-local-kb-toolbar">
-          <label className="fox-local-kb-search"><Search /><Input aria-label="搜索本地知识库" placeholder="搜索知识库..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
           <span className="fox-local-kb-result-count">{filteredItems.length} 个知识库</span>
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'animate-spin' : undefined} />刷新</Button>
+          <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'animate-spin' : undefined} />刷新</Button>
+          <Button variant="outline" size="sm" onClick={() => setStorageOpen(true)}><HardDrive />存储位置</Button>
+          <Button size="sm" onClick={openCreateDialog}><Database />新建知识库</Button>
         </div>
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
@@ -2488,7 +2489,7 @@ function modelStatusLabel(model: LocalEmbeddingModel): string {
   return '未安装'
 }
 
-export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGateway, className, onBack }: LocalKnowledgeNavigationProps) {
+export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGateway, className }: LocalKnowledgeNavigationProps) {
   const [models, setModels] = useState<LocalEmbeddingModel[]>([])
   const [health, setHealth] = useState<VectorBackendHealth | null>(null)
   const [filesModel, setFilesModel] = useState<LocalEmbeddingModel | null>(null)
@@ -2599,7 +2600,7 @@ export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGatewa
   return (
     <div className={cn('fox-local-kb-page', className)}>
       <div className="fox-local-kb-content fox-local-models-page">
-        <LocalKnowledgeHeader title="向量模型" description="" onBack={onBack} actions={<Button variant="outline" onClick={() => void importPackage()} disabled={busyId != null}><PackageOpen />导入模型包</Button>} />
+        <LocalKnowledgeHeader title="向量模型" description="" actions={<Button variant="outline" onClick={() => void importPackage()} disabled={busyId != null}><PackageOpen />导入模型包</Button>} />
         {health && <div className={cn('fox-local-model-health', health.readWriteVerified ? 'is-ready' : 'is-warning')}><Gauge /><div><strong>{health.backend}</strong><span>{health.message}</span></div><Badge variant="secondary">{health.fallbackActive ? '兼容模式' : '原生模式'}</Badge></div>}
         <div className="fox-local-model-health is-guide"><Info /><div><strong>使用方法</strong><span>安装模型 → 测试 → 设为默认；然后进入知识库“向量索引”，点击“构建向量索引”。默认模型不会替代已经绑定到知识库的模型。</span></div><Badge variant="secondary">3 步</Badge></div>
         {loading && <LocalKnowledgeLoading />}
@@ -2616,11 +2617,11 @@ export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGatewa
                 </span>
               </CardHeader>
               <div className="fox-local-model-primary-action">
-                {model.status === 'not_installed' && <Button onClick={() => void run(model.id, () => gateway.startEmbeddingModelInstall(model.id), '模型下载任务已创建。')} disabled={busy}>安装</Button>}
-                {installing && model.download && <Button variant="outline" onClick={() => void run(model.id, () => gateway.cancelEmbeddingModelDownload(model.download!.id), '下载已取消，可随时继续。')} disabled={busy}>取消</Button>}
-                {(model.status === 'error' || model.download?.status === 'cancelled' || model.download?.status === 'failed') && model.download && <Button onClick={() => void run(model.id, () => gateway.retryEmbeddingModelDownload(model.download!.id), '已从断点继续下载。')} disabled={busy}><RotateCcw />继续</Button>}
+                {model.status === 'not_installed' && <Button size="sm" onClick={() => void run(model.id, () => gateway.startEmbeddingModelInstall(model.id), '模型下载任务已创建。')} disabled={busy}>安装</Button>}
+                {installing && model.download && <Button variant="outline" size="sm" onClick={() => void run(model.id, () => gateway.cancelEmbeddingModelDownload(model.download!.id), '下载已取消，可随时继续。')} disabled={busy}>取消</Button>}
+                {(model.status === 'error' || model.download?.status === 'cancelled' || model.download?.status === 'failed') && model.download && <Button onClick={() => void run(model.id, () => gateway.retryEmbeddingModelDownload(model.download!.id), '已从断点继续下载。')} disabled={busy} size="sm"><RotateCcw />继续</Button>}
                 {model.status === 'ready' && <DropdownMenu>
-                  <DropdownMenuTrigger asChild><Button className="fox-local-model-more" variant="ghost" size="icon" aria-label={`管理 ${model.name}`} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
+                  <DropdownMenuTrigger asChild><Button className="fox-local-model-more" variant="ghost" size="icon-sm" aria-label={`管理 ${model.name}`} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
                   <DropdownMenuContent className="fox-local-model-menu" align="end" sideOffset={5}>
                     <DropdownMenuItem onSelect={() => void testModel(model)}><FlaskConical />隔离测试</DropdownMenuItem>
                     <DropdownMenuItem disabled={model.isDefault || !model.loadReady} onSelect={() => void run(model.id, () => gateway.setDefaultEmbeddingModel(model.id), '已设为默认向量模型；未绑定模型的知识库将在构建向量索引时自动采用它。')}><Star />设为默认</DropdownMenuItem>
