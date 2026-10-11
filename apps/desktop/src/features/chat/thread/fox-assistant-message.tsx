@@ -77,6 +77,11 @@ export function FoxAssistantMessage() {
   const messageId = useAuiState((state) => state.message.id)
   const createdAt = useAuiState((state) => state.message.createdAt)
   const status = useAuiState((state) => state.message.status)
+  // Messages that carry a process part render the avatar on the process head
+  // line (FoxProcessPart's `leading`), matching the legacy TurnProcessHeader
+  // where the avatar shares the status row. Only text-only messages — history
+  // rows without run events — fall back to a standalone avatar row.
+  const hasProcessPart = useAuiState((state) => state.message.content.some((part) => part.type === 'data' && part.name === 'fox-process'))
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const statusReason = status?.type === 'incomplete' ? status.reason : undefined
   const cancelled = statusReason === 'cancelled'
@@ -87,7 +92,7 @@ export function FoxAssistantMessage() {
   return (
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
       <MessagePrimitive.Root className="fox-thread-msg is-assistant">
-        <div className="fox-thread-assistant-head"><FoxAssistantAvatar /></div>
+        {!hasProcessPart && <div className="fox-thread-assistant-head"><FoxAssistantAvatar /></div>}
         <MessagePrimitive.Parts components={FOX_PART_COMPONENTS} />
         <div className="fox-message-footer">
           <ActionBarPrimitive.Root hideWhenRunning autohide="not-last" className="fox-message-actions">

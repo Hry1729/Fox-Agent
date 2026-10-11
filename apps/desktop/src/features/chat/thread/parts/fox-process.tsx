@@ -3,6 +3,7 @@ import type { DataMessagePartProps } from '@assistant-ui/react'
 import { type FoxProcessData } from '../convert-detail'
 import { useFoxThread } from '../fox-thread-context'
 import { RuntimeProcess } from '../../timeline/fox-runtime-process-view'
+import { FoxAssistantAvatar } from '../../components/FoxAssistantAvatar'
 import { FoxSources } from './fox-sources'
 
 /**
@@ -39,6 +40,9 @@ export function FoxProcessPart(part: DataMessagePartProps<FoxProcessData>) {
         running={running}
         runInProgress={running}
         outcome={outcome}
+        /* The avatar leads the process head line, the same visual relation as
+         * the legacy TurnProcessHeader (avatar + status on one row). */
+        leading={<FoxAssistantAvatar />}
         attachmentNames={fox.attachmentNames}
         onOpenFileInSidebar={fox.onOpenFileInSidebar}
         onRevealFileInExplorer={fox.onRevealFileInExplorer}

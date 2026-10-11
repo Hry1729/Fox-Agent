@@ -17,30 +17,42 @@ import { type ChatState, MarkdownResponse } from '../fox-shared'
 import { type RuntimeSource } from './fox-runtime-process-model'
 import { ConversationBottomDock, RuntimeTimeline, splitAssistantContent } from './fox-runtime-timeline'
 
-function Timeline({ empty, state, prompt, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRuns, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, planRevisions, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onFork, onAnswer, onStart, onOpenSource, onOpenArtifact, onViewExpert, onOpenFileInSidebar, onRevealFileInExplorer }: { empty: boolean; state: ChatState; prompt: string; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRuns?: RunRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevisions?: GoalProgressData['planRevisions']; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
-  const running = state === 'running'
-  const latestPlanRevision = planRevisions?.reduce((latest, plan) => !latest || plan.revision > latest.revision ? plan : latest, undefined as GoalProgressData['planRevisions'][number] | undefined)
-  const starterSuggestions = openingSuggestions?.map((item) => item.trim()).filter(Boolean).slice(0, 6)
+/**
+ * The classic new-conversation empty state: mascot heading plus the expert's
+ * opening suggestions (or the default four). Clicking a suggestion fills the
+ * composer draft via `onStart`. Shared by the legacy timeline and the
+ * assistant-ui thread's empty state so both engines show the same screen.
+ */
+export function ConversationEmptyPrompt({ suggestions, onStart }: { suggestions?: string[]; onStart: (suggestion: string) => void }) {
+  const starterSuggestions = suggestions?.map((item) => item.trim()).filter(Boolean).slice(0, 6)
   const visibleSuggestions = starterSuggestions?.length ? starterSuggestions : [
     '整理这个项目中的文档',
     '从知识库查找相关资料',
     '读取一个文件并帮我分析',
     '帮我规划并完成一个任务',
   ]
+  return (
+    <ConversationEmptyState className="fox-empty-conversation">
+      <div className="fox-empty-heading">
+        <NewConversationMascot />
+        <div className="fox-empty-heading-copy"><h2>今天想一起做点什么？</h2><p>Fox 可以和你对话、处理本地文件，也可以从知识库中检索资料。</p></div>
+      </div>
+      <Suggestions className="fox-starter-suggestions">
+        {visibleSuggestions.map((suggestion) => <Suggestion key={suggestion} suggestion={suggestion} onClick={onStart} />)}
+      </Suggestions>
+    </ConversationEmptyState>
+  )
+}
+
+function Timeline({ empty, state, prompt, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRuns, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, planRevisions, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onFork, onAnswer, onStart, onOpenSource, onOpenArtifact, onViewExpert, onOpenFileInSidebar, onRevealFileInExplorer }: { empty: boolean; state: ChatState; prompt: string; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRuns?: RunRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevisions?: GoalProgressData['planRevisions']; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
+  const running = state === 'running'
+  const latestPlanRevision = planRevisions?.reduce((latest, plan) => !latest || plan.revision > latest.revision ? plan : latest, undefined as GoalProgressData['planRevisions'][number] | undefined)
 
   if (empty) {
     return (
         <Conversation className="fox-conversation">
         <ConversationViewportState />
-        <ConversationEmptyState className="fox-empty-conversation">
-          <div className="fox-empty-heading">
-            <NewConversationMascot />
-            <div className="fox-empty-heading-copy"><h2>今天想一起做点什么？</h2><p>Fox 可以和你对话、处理本地文件，也可以从知识库中检索资料。</p></div>
-          </div>
-          <Suggestions className="fox-starter-suggestions">
-            {visibleSuggestions.map((suggestion) => <Suggestion key={suggestion} suggestion={suggestion} onClick={onStart} />)}
-          </Suggestions>
-        </ConversationEmptyState>
+        <ConversationEmptyPrompt suggestions={openingSuggestions} onStart={onStart} />
       </Conversation>
     )
   }

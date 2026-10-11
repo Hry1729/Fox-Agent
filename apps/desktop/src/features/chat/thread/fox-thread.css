@@ -3,6 +3,27 @@
    global classes (empty state, turn rail, bottom dock, dialogs) keep living in
    workbench.css and are reused by name. */
 
+/* The workbench mounts the thread inside this shell (hybrid rollback): the
+   classic composer is an absolutely-positioned overlay on `.fox-chat-stage`,
+   exactly like the legacy branch, so the shell must constrain the thread's
+   height and reserve the composer's occlusion area. Without this, the shell is
+   an auto-height block: `.fox-thread`'s `height: 100%` resolves to auto, the
+   viewport grows past the stage and `.fox-chat-stage`'s `overflow: hidden`
+   clips it — the message list cannot scroll. */
+.fox-thread-shell {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding-bottom: var(--fox-composer-occlusion, 180px);
+}
+
+/* Empty conversations centre the classic composer on the stage itself
+   (`fox-composer-wrap.is-empty`), so the thread must not reserve the dock. */
+.fox-chat-stage.is-empty .fox-thread-shell {
+  padding-bottom: 0;
+}
+
 .fox-thread {
   position: relative;
   display: flex;
@@ -28,6 +49,14 @@
   display: flex;
   flex-direction: column;
   gap: var(--fox-space-l);
+}
+
+/* Flex children must keep their natural height: the default `flex-shrink: 1`
+   lets messages compress toward min-content before the viewport overflows, so
+   long conversations never reach a real scroll range and the auto-scroll
+   anchor math (`isViewportAtBottom`) breaks. */
+.fox-thread-viewport > * {
+  flex-shrink: 0;
 }
 
 /* One content column: every message sits inside the same 720px cap. */

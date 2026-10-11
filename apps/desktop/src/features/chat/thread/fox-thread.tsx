@@ -1,10 +1,9 @@
 import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { type GoalProgressData } from '../hooks/use-goal-progress'
 import type { ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
-import { ConversationTurnRail } from '../timeline/fox-timeline'
+import { ConversationEmptyPrompt, ConversationTurnRail } from '../timeline/fox-timeline'
 import { ListTodo } from 'lucide-react'
 import { FoxAssistantMessage } from './fox-assistant-message'
-import { FoxThreadEmpty } from './fox-thread-empty'
 import { FoxThreadContext, type FoxThreadContextValue } from './fox-thread-context'
 import { FoxUserMessage } from './fox-user-message'
 import './fox-thread.css'
@@ -13,6 +12,8 @@ export interface FoxThreadProps {
   fox: FoxThreadContextValue
   /** Opening suggestions for the empty state (expert-defined or default). */
   suggestions?: string[]
+  /** Fills the composer draft when an empty-state suggestion is clicked. */
+  onStart?: (suggestion: string) => void
   /** Latest plan revision, shown as the bottom-dock floater. */
   planRevision?: GoalProgressData['planRevisions'][number]
   /** Raw conversation rows for the turn rail (id anchors live on messages). */
@@ -69,15 +70,17 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  * at the mount site, so switching conversations rebuilds the runtime state
  * instead of mixing message streams.
  */
-export default function FoxThread({ fox, suggestions, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
+export default function FoxThread({ fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
   return (
     <FoxThreadContext.Provider value={fox}>
       <div className="fox-thread">
         <ConversationTurnRail messages={turnRailMessages ?? []} artifacts={turnRailArtifacts ?? []} />
         <ThreadPrimitive.Root className="fox-thread-root">
           <ThreadPrimitive.Viewport className="fox-thread-viewport" autoScroll>
+            {/* Hybrid rollback: the empty conversation keeps the classic
+                mascot + suggestions screen from the legacy timeline. */}
             <ThreadPrimitive.Empty>
-              <FoxThreadEmpty suggestions={suggestions} />
+              <ConversationEmptyPrompt suggestions={suggestions} onStart={onStart ?? (() => undefined)} />
             </ThreadPrimitive.Empty>
             <FoxThreadLoadEarlier />
             <ThreadPrimitive.If empty={false}>
