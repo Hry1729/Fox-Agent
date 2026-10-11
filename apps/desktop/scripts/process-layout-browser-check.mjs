@@ -90,8 +90,11 @@ try {
     if(!markdownReady)throw Error(scenario.name+': answer markdown did not hydrate')
     await client.evaluate(`(()=>{const b=document.querySelector('button.fox-process-turn-toggle');if(b?.getAttribute('aria-expanded')==='false')b.click()})()`)
     await sleep(100)
-    const result=await client.evaluate(`(()=>{const rect=e=>e.getBoundingClientRect();const turn=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');const avatar=turn.querySelector('.fox-assistant-avatar');const toggle=turn.querySelector('.fox-process-turn-toggle');const stages=[...turn.querySelectorAll('.fox-process-stage')];const a=rect(avatar),b=rect(toggle),s=stages.map(rect);const footer=turn.querySelector('.fox-message-footer');const v={sameHeaderRow:Math.abs((a.top+a.height/2)-(b.top+b.height/2))<6,buttonRight:b.left>=a.right-1,allStagesBelow:s.every(r=>r.top>=Math.max(a.bottom,b.bottom)-1),stageAlignment:s.every(r=>Math.abs(r.left-s[0].left)<1),avatarCount:turn.querySelectorAll('.fox-assistant-avatar').length,footerVisible:!!footer&&rect(footer).height>0,finalVisible:[...turn.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),overflow:document.documentElement.scrollWidth>innerWidth+1};return v})()`)
-    for(const key of ['sameHeaderRow','buttonRight','allStagesBelow','stageAlignment','footerVisible','finalVisible'])if(!result[key])throw Error(scenario.name+': '+key+' '+JSON.stringify(result))
+    const result=await client.evaluate(`(()=>{const rect=e=>e.getBoundingClientRect();const turn=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');const avatar=turn.querySelector('.fox-assistant-avatar');const toggle=turn.querySelector('.fox-process-turn-toggle');const stages=[...turn.querySelectorAll('.fox-process-stage')];const a=rect(avatar),b=rect(toggle),s=stages.map(rect);const footer=turn.querySelector('.fox-message-footer');const inside=(e,x,y)=>{const hit=document.elementFromPoint(x,y);return !!e&&!!hit&&(hit===e||e.contains(hit))};const row=rect(toggle.closest('.fox-process-turn-header'));const head=[...turn.querySelectorAll('.fox-process-stage .fox-chain-of-thought-header')].find(e=>rect(e).width>0);const hr=head?rect(head):null,headRow=head?rect(head.parentElement):null;const tailX=headRow?headRow.right-6:0,tailY=hr?hr.top+hr.height/2:0;const hh=head?document.elementFromPoint(tailX,tailY):null;const v={sameHeaderRow:Math.abs((a.top+a.height/2)-(b.top+b.height/2))<6,buttonRight:b.left>=a.right-1,allStagesBelow:s.every(r=>r.top>=Math.max(a.bottom,b.bottom)-1),stageAlignment:s.every(r=>Math.abs(r.left-s[0].left)<1),avatarCount:turn.querySelectorAll('.fox-assistant-avatar').length,footerVisible:!!footer&&rect(footer).height>0,finalVisible:[...turn.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),overflow:document.documentElement.scrollWidth>innerWidth+1,rowTailHit:inside(toggle,row.right-6,row.top+row.height/2),toggleTailGap:Math.round(row.right-b.right),timerHit:inside(toggle,...(r=>[r.left+r.width/2,r.top+r.height/2])(rect(toggle.querySelector('[role=timer]')??toggle))),avatarInert:!inside(toggle,a.left+a.width/2,a.top+a.height/2),headTailHit:head?inside(head,tailX,tailY):null,headTailGap:hr?Math.round(headRow.right-hr.right):null,headHit:hh?hh.tagName+'.'+(typeof hh.className==='string'?hh.className.slice(0,70):''):'none'};return v})()`)
+    for(const key of ['sameHeaderRow','buttonRight','allStagesBelow','stageAlignment','footerVisible','finalVisible','rowTailHit','timerHit','avatarInert'])if(!result[key])throw Error(scenario.name+': '+key+' '+JSON.stringify(result))
+    if(result.toggleTailGap>2||result.headTailGap>2)throw Error(scenario.name+': the fold trigger does not span its row '+JSON.stringify(result))
+    // 详细模式下阶段头没有折叠控件（零尺寸），那时这项不适用，只在有 trigger 时断言。
+    if(result.headTailHit===false)throw Error(scenario.name+': head tail is not the fold trigger '+JSON.stringify(result))
     if(result.avatarCount!==1||result.overflow)throw Error(scenario.name+': duplicate avatar or overflow '+JSON.stringify(result))
     if(await client.evaluate('!!document.querySelector(".fox-live-reasoning")'))throw Error(scenario.name+': old reasoning card returned')
     if(scenario.detailed) {
@@ -160,6 +163,34 @@ try {
     if(decision?.id!=='kernel-approval:run:write:v7'||decision?.decision!=='allow_once')throw Error('approval ticket/decision changed')
     results.push({scenario:'approval-'+width,initial,expanded,decision})
   }
+  // 圆形滚动到底按钮：思考中是点阵、空闲是箭头；必须是正圆、居中，且点阵颜色跟主题
+  // 走（石墨/暖纸/雾蓝）。视口压到 300px 高才有得滚，等自动贴底的定时器跑完再离开底部。
+  await client.send('Emulation.setDeviceMetricsOverride',{width:900,height:300,deviceScaleFactor:1,mobile:false})
+  const dotColors={}
+  for(const [theme,live] of [['graphite',1],['paper',1],['mist',0]]) {
+    const previous=await client.evaluate('window.__processCase.generation')
+    await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/process-layout-check.html?live=${live}`})
+    let mounted=false
+    for(let i=0;i<300;i++){mounted=await client.evaluate(`window.__processCase?.generation!==${JSON.stringify(previous)} && !!document.querySelector('.fox-conversation-content')`);if(mounted)break;await sleep(200)}
+    if(!mounted)throw Error('scroll fixture did not mount '+theme)
+    await sleep(500)
+    await client.evaluate(`document.documentElement.dataset.colorTheme=${JSON.stringify(theme)}`)
+    const scroller=await client.evaluate(`(()=>{const box=[...document.querySelectorAll('div')].find(e=>e.scrollHeight>e.clientHeight+8&&/(auto|scroll)/.test(getComputedStyle(e).overflowY));if(!box)return null;box.scrollTop=0;return {overflow:box.scrollHeight-box.clientHeight}})()`)
+    if(!scroller)throw Error('no scrollable conversation viewport at '+theme)
+    let shown=false
+    for(let i=0;i<60;i++){shown=await client.evaluate(`!!document.querySelector('.fox-conversation-bottom-dock .fox-scroll-button')`);if(shown)break;await sleep(100)}
+    if(!shown)throw Error('scroll button never appeared '+JSON.stringify({theme,live,scroller}))
+    const v=await client.evaluate(`(()=>{const b=document.querySelector('.fox-conversation-bottom-dock .fox-scroll-button'),r=b.getBoundingClientRect(),s=getComputedStyle(b),dots=[...b.querySelectorAll('.fox-thinking-dots > i')],p=b.offsetParent?b.offsetParent.getBoundingClientRect():{left:0,width:document.documentElement.clientWidth};return {size:[Math.round(r.width),Math.round(r.height)],radius:s.borderRadius,dots:dots.length,color:dots[0]?getComputedStyle(dots[0]).color:null,arrow:!!b.querySelector('svg'),offset:Math.round(r.left+r.width/2-(p.left+p.width/2)),label:b.getAttribute('aria-label')}})()`)
+    dotColors[theme]=v.color
+    // offset 只记录、不断言：按钮居中由 .fox-conversation-bottom-dock 的既有 CSS 决定，
+    // 而这里的参考系是检查页自己的 16px 内边距壳，不是应用里的聊天列。
+    if(v.size[0]!==32||v.size[1]!==32||v.radius!=='50%'||v.label!=='定位到最新消息')throw Error('scroll button geometry '+theme+' '+JSON.stringify(v))
+    if(live?(v.dots!==3||v.arrow):(v.dots!==0||!v.arrow))throw Error('scroll button state '+theme+' '+JSON.stringify(v))
+    const name='scroll-'+theme+(live?'-running':'-idle')
+    results.push({scenario:name,...v})
+    const shot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,name+'.png'),Buffer.from(shot.data,'base64'))
+  }
+  if(new Set(Object.values(dotColors)).size<2)throw Error('thinking dots ignore the theme '+JSON.stringify(dotColors))
   const generation=await client.evaluate('window.__processCase.generation')
   await client.send('Emulation.setDeviceMetricsOverride',{width:360,height:900,deviceScaleFactor:1,mobile:false})
   await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/process-layout-check.html?live=1&shimmer=1`})
@@ -172,8 +203,11 @@ try {
     await sleep(100)
   }
   if(!await client.evaluate(`!!document.querySelector('.fox-run-status-step')`))throw Error('missing reasoning row '+await client.evaluate(`JSON.stringify({headers:[...document.querySelectorAll('.fox-chain-of-thought-header')].map(e=>({text:e.textContent,expanded:e.getAttribute('aria-expanded')})),stages:document.querySelectorAll('.fox-process-stage').length,steps:document.querySelectorAll('.fox-runtime-step-row').length,html:document.querySelector('.fox-turn-anchor')?.outerHTML.slice(0,1800)})`))
-  const shimmer=await client.evaluate(`(()=>{const row=document.querySelector('.fox-run-status-step');const label=row.querySelector(':scope > .fox-run-status-viewport > .fox-run-status-label');const copy=row.querySelector('.fox-row-shimmer-highlight .fox-run-status-label');const prefix=row.querySelector(':scope > .fox-run-status-prefix');const values=[row,document.querySelector('#status-probe .fox-row-shimmer')].map(box=>{const sweep=box.querySelector('.fox-row-shimmer-sweep'),highlight=box.querySelector('.fox-row-shimmer-highlight');return {sweep:getComputedStyle(sweep).animationName,highlight:getComputedStyle(highlight).animationName,decorationHidden:box.querySelector('.fox-row-shimmer-decoration').getAttribute('aria-hidden')==='true',inert:box.querySelector('.fox-row-shimmer-decoration').hasAttribute('inert')}});return {values,title:prefix.textContent,titleMask:getComputedStyle(prefix).maskImage,scroll:label.scrollLeft,copyScroll:copy?.scrollLeft,bodyCount:row.textContent.split('检查布局').length-1}})()`)
-  if(shimmer.values.some(v=>v.sweep!=='fox-row-shimmer-sweep'||v.highlight!=='fox-row-shimmer-highlight'||!v.decorationHidden||!v.inert)||shimmer.titleMask!=='none'||shimmer.scroll<=0||Math.abs(shimmer.scroll-shimmer.copyScroll)>1||shimmer.bodyCount!==50)throw Error('shimmer regression '+JSON.stringify(shimmer))
+  // The row's contract (fox-runtime-process-view.tsx StepStatusText): a cut line is
+  // clipped and faded, never scrolled, and the decorative copy shares the label's one
+  // measurement so the two masks can never drift. A short label stays fully painted.
+  const shimmer=await client.evaluate(`(()=>{const row=document.querySelector('.fox-run-status-step');const label=row.querySelector(':scope > .fox-run-status-viewport > .fox-run-status-label');const copy=row.querySelector('.fox-row-shimmer-highlight .fox-run-status-label');const prefix=row.querySelector(':scope > .fox-run-status-prefix');const probe=document.querySelector('#status-probe .fox-run-status-label');const values=[row,document.querySelector('#status-probe .fox-row-shimmer')].map(box=>{const sweep=box.querySelector('.fox-row-shimmer-sweep'),highlight=box.querySelector('.fox-row-shimmer-highlight');return {sweep:getComputedStyle(sweep).animationName,highlight:getComputedStyle(highlight).animationName,decorationHidden:box.querySelector('.fox-row-shimmer-decoration').getAttribute('aria-hidden')==='true',inert:box.querySelector('.fox-row-shimmer-decoration').hasAttribute('inert')}});const cut=(e)=>e.className.includes('is-overflowing')&&getComputedStyle(e).maskImage!=='none';return {values,title:prefix.textContent,titleMask:getComputedStyle(prefix).maskImage,scroll:label.scrollLeft,copyScroll:copy?.scrollLeft,clipped:!!copy&&cut(label)&&cut(copy),sharedMask:!!copy&&getComputedStyle(label).maskImage===getComputedStyle(copy).maskImage,fits:probe.className.includes('is-overflowing')===false&&getComputedStyle(probe).maskImage==='none',box:[label.scrollWidth,label.clientWidth],bodyCount:row.textContent.split('检查布局').length-1}})()`)
+  if(shimmer.values.some(v=>v.sweep!=='fox-row-shimmer-sweep'||v.highlight!=='fox-row-shimmer-highlight'||!v.decorationHidden||!v.inert)||shimmer.titleMask!=='none'||shimmer.scroll!==0||shimmer.copyScroll!==0||!shimmer.clipped||!shimmer.sharedMask||!shimmer.fits||shimmer.bodyCount!==50)throw Error('shimmer regression '+JSON.stringify(shimmer))
   results.push({scenario:'shimmer-narrow',...shimmer})
   const shimmerShot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,'shimmer-narrow.png'),Buffer.from(shimmerShot.data,'base64'))
   writeFileSync(join(output,'result.json'),JSON.stringify({results},null,2));rmSync(join(output,'failure.json'),{force:true});console.log(JSON.stringify({results},null,2))
