@@ -9,10 +9,12 @@
 
 .fox-process-turn-header > .fox-assistant-avatar { flex: 0 0 28px; margin: 0; }
 
+/* 头行里除了头像都是触发器：按钮吃掉剩余宽度，点在状态文字、计时器或右侧空白都能开合。 */
 .fox-process-turn-toggle {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  flex: 1 1 auto;
   min-width: 0;
   min-height: 25px;
   border: 0;
@@ -23,13 +25,13 @@
   cursor: pointer;
 }
 
-.fox-process-turn-toggle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fox-process-turn-toggle > .fox-process-turn-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fox-process-turn-toggle > svg { flex: 0 0 13px; }
 .fox-process-turn-elapsed { flex: 0 0 auto; color: var(--fox-muted); font-size: 12px; white-space: nowrap; }
-/* The dot between the status text and the whole-round timer is rendered by the
-   header only when there is status text to separate the timer from (see
-   turn-process-header.tsx), so a settled turn never opens on a dangling "·" and a
-   status-less header keeps no leftover gap. The header's own 7px gap spaces it. */
+/* The dot between the status text and the whole-round timer is rendered only when
+   there is status text to separate the timer from (see turn-process-header.tsx), so a
+   settled turn never opens on a dangling "·" and a status-less header keeps no leftover
+   gap. Inside the trigger it rides in the button's own 5px gap. */
 .fox-process-turn-separator { flex: 0 0 auto; color: var(--fox-muted); font-size: 12px; line-height: 1; }
 
 .fox-process-turn-toggle:hover { color: var(--fox-text); }

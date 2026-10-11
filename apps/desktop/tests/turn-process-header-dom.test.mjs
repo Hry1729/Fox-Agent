@@ -179,16 +179,19 @@ test('reader focus protects the process at automatic completion; verbose mode re
   assert.equal(view.container.querySelectorAll('.fox-runtime-process-disclosure[aria-hidden="false"]').length, 2)
 })
 
-/** The header's visible line is the toggle's own text plus the separator the header
- *  renders only when there is status text, plus the one whole-round timer. */
+/** The header's visible line is the toggle's own label, plus the separator the header
+ *  renders only when there is status text, plus the one whole-round timer. The label is
+ *  read from `.fox-process-turn-label` because the separator and the timer live inside
+ *  the trigger as well — everything right of the avatar folds the round. */
 const header = (view) => view.container.querySelector('.fox-process-turn-header')
 const toggle = (view, state = '收起') => view.getByRole('button', { name: new RegExp(`${state}过程`) })
+const toggleText = (view, state = '收起') => toggle(view, state).querySelector('.fox-process-turn-label')?.textContent ?? ''
 
 test('the round header joins its own fields: no leading separator, and one whole-round timer', async () => {
   const view = render(live())
   await waitFor(() => assert.equal(stages(view).length, 2))
   // Running and expanded: [avatar] [chevron] 正在处理 · 已用时 N秒
-  assert.equal(toggle(view).textContent, '正在处理')
+  assert.equal(toggleText(view), '正在处理')
   assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在处理')
   assert.equal(toggle(view).getAttribute('title'), '收起过程')
   assert.equal(toggle(view).getAttribute('aria-expanded'), 'true')
@@ -202,12 +205,17 @@ test('the round header joins its own fields: no leading separator, and one whole
   // Collapsed: the same fields, folded — the status text is never rewritten.
   fireEvent.click(toggle(view))
   assert.equal(toggle(view, '展开').getAttribute('aria-expanded'), 'false')
-  assert.equal(toggle(view, '展开').textContent, '正在处理')
+  assert.equal(toggleText(view, '展开'), '正在处理')
   assert.equal(toggle(view, '展开').getAttribute('aria-label'), '展开过程 · 正在处理')
   assert.match(header(view).textContent, /^正在处理·已用时 \d+秒$/)
   fireEvent.click(toggle(view, '展开'))
   assert.equal(toggle(view).getAttribute('aria-expanded'), 'true')
-  assert.equal(toggle(view).textContent, '正在处理')
+  assert.equal(toggleText(view), '正在处理')
+
+  // 计时器与分隔点都在触发区里：点头像右侧任意一处都能开合，这是本轮改动的目的。
+  assert.equal(toggle(view).contains(view.container.querySelector('[role="timer"]')), true)
+  fireEvent.click(view.container.querySelector('[role="timer"]'))
+  assert.equal(toggle(view, '展开').getAttribute('aria-expanded'), 'false')
 })
 
 test('a settled turn leaves no dangling separator and shows the whole-round time once', async () => {
@@ -217,7 +225,8 @@ test('a settled turn leaves no dangling separator and shows the whole-round time
   // timer, and a settled turn folds itself, so the control reads 展开过程.
   const settled = () => view.getByRole('button', { name: /^(展开|收起)过程$/ })
   assert.equal(settled().getAttribute('aria-expanded'), 'false')
-  assert.equal(settled().textContent, '')
+  //  settled 轮次没有状态行，触发区里只剩 chevron 与计时器。
+  assert.equal(settled().querySelector('.fox-process-turn-label'), null)
   assert.equal(settled().getAttribute('aria-label'), '展开过程')
   assert.equal(header(view).textContent, '用时 6秒')
   assert.doesNotMatch(header(view).textContent, /·/)
@@ -225,7 +234,7 @@ test('a settled turn leaves no dangling separator and shows the whole-round time
   assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
   // Both fold states read the same: the fields are independent of the disclosure.
   fireEvent.click(settled())
-  assert.equal(view.getByRole('button', { name: '收起过程' }).textContent, '')
+  assert.equal(view.getByRole('button', { name: '收起过程' }).querySelector('.fox-process-turn-label'), null)
   assert.equal(header(view).textContent, '用时 6秒')
   assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
 })
@@ -244,9 +253,9 @@ test('failed, cancelled and interrupted turns keep their own status as the first
   for (const item of cases) {
     const view = render(item.messages ? timeline(item.events, { messages: item.messages }) : timeline(item.events))
     await waitFor(() => assert.equal(stages(view).length, 2))
-    const toggleText = toggle(view).textContent
+    const toggleLabel = toggleText(view)
     // Exactly one state word, never prefixed by a separator of its own.
-    assert.equal(toggleText, item.status, item.name)
+    assert.equal(toggleLabel, item.status, item.name)
     assert.equal(toggle(view).getAttribute('aria-label'), `收起过程 · ${item.status}`)
     assert.equal(header(view).textContent, item.headerText, item.name)
     if (item.name === 'interrupted') {
@@ -256,7 +265,7 @@ test('failed, cancelled and interrupted turns keep their own status as the first
       assert.equal((header(view).textContent.match(/·/g) ?? []).length, 1)
     }
     fireEvent.click(toggle(view))
-    assert.equal(toggle(view, '展开').textContent, item.status)
+    assert.equal(toggleText(view, '展开'), item.status)
     assert.equal(header(view).textContent, item.headerText, item.name)
     cleanup()
   }
@@ -269,7 +278,7 @@ test('a turn waiting on the model says so without a leading separator', async ()
       startedAt: baseTime + 1000, elapsedMs: 1000, remainingMs: 1000, outcomeKnown: false }),
   ]
   const view = render(live(waiting))
-  await waitFor(() => assert.equal(toggle(view).textContent, '正在等待回复'))
+  await waitFor(() => assert.equal(toggleText(view), '正在等待回复'))
   assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在等待回复')
   assert.match(header(view).textContent, /^正在等待回复·已用时 \d+秒$/)
   assert.doesNotMatch(header(view).textContent, /^·/)
@@ -282,7 +291,7 @@ test('a planned tool retry keeps its note joined to the state by exactly one sep
     event(3, 'tool.completed', { toolCallId: 'read', tool: 'read', isError: true, result: { code: 'tool.unknown' } }),
   ]
   const view = render(live(retrying))
-  await waitFor(() => assert.equal(toggle(view).textContent, '正在处理 · 工具调用待调整'))
+  await waitFor(() => assert.equal(toggleText(view), '正在处理 · 工具调用待调整'))
   assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在处理 · 工具调用待调整')
   assert.match(header(view).textContent, /^正在处理 · 工具调用待调整·已用时 \d+秒$/)
   // The separator belongs to the join: the state line has exactly one, and the

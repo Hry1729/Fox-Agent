@@ -3617,7 +3617,7 @@ button.fox-chat-project-row:disabled {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 0;
 }
 
 .fox-runtime-process-head > .fox-assistant-avatar {
@@ -3625,12 +3625,14 @@ button.fox-chat-project-row:disabled {
   margin: 0;
 }
 
-/* The trigger keeps hugging its own content, exactly as it did when the avatar
-   was its first child, so only the badge/summary/chevron stay clickable — but the
-   row itself grows, so the summary can use the full available width. */
+/* Everything right of the avatar is the trigger: the hugging `fit-content` width is
+   released here and the 7px avatar gap becomes the trigger's own left padding, so there
+   is no dead strip between the avatar and the status text that ignores a click. */
 .fox-runtime-process-head > .fox-chain-of-thought-header {
+  width: 100%;
   flex: 1 1 auto;
   min-width: 0;
+  padding-left: 7px;
 }
 
 /* One shrinkable column keeps the label inside the flex remainder, so long text

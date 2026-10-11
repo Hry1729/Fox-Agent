@@ -5,14 +5,17 @@ import { mergeExpertBindingsIntoTimeline } from '../components/expert-binding-ui
 import { type GoalProgressData } from '../hooks/use-goal-progress'
 import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupAssistantContinuations, groupRuntimeRecords, latestRunAssistantId } from '../runtime-timeline-performance'
 import { Attachment, AttachmentInfo, AttachmentPreview, Attachments } from '@/components/ai-elements/attachments'
-import { Conversation, ConversationAutoScroll, ConversationContent, ConversationScrollButton, ConversationViewportState } from '@/components/ai-elements/conversation'
+import { Conversation, ConversationAutoScroll, ConversationContent, ConversationViewportState } from '@/components/ai-elements/conversation'
 import { Message, MessageAction, MessageContent } from '@/components/ai-elements/message'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { FoxThinkingDots } from '../components/FoxThinkingDots'
 import { splitAssistantContent } from './fox-assistant-content'
 import { type AgentRecord, type ArtifactRecord, type AttachmentRecord, type ConversationMessage, type DesktopErrorDetails, type RunEventRecord, type RunRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { ArrowUp, Copy, FileEdit, GitFork, ListTodo, LoaderCircle } from 'lucide-react'
+import { ArrowDown, ArrowUp, Copy, FileEdit, GitFork, ListTodo, LoaderCircle } from 'lucide-react'
 import { useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useStickToBottomContext } from 'use-stick-to-bottom'
 import { ErrorPrompt } from '../demo/fox-demo-prompts'
 import { type ChatState, EMPTY_CONVERSATION_ATTACHMENTS, TimelineRuntimeContext, copyTextWithFeedback, requestConversationFork } from '../fox-shared'
 import { MemoizedRuntimeAssistantMessage, type RuntimeGroupHelpers } from './fox-runtime-assistant-message'
@@ -40,7 +43,29 @@ function SentMessageAttachments({ attachments }: { attachments: AttachmentRecord
   </Attachments>
 }
 
-export function ConversationBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][number] }) {
+/** 底栏里的滚动到底按钮。思考中显示点阵、空闲显示箭头；类名沿用 ai-elements 版本，
+ *  这样深色模式底色不会因为换了实现而偏移。 */
+function FoxConversationScrollButton({ running }: { running: boolean }) {
+  const { isAtBottom, scrollToBottom } = useStickToBottomContext()
+  if (isAtBottom) return null
+  return (
+    <Button
+      className={cn(
+        'absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted',
+        'fox-scroll-button'
+      )}
+      onClick={() => scrollToBottom()}
+      size="icon"
+      type="button"
+      variant="outline"
+      aria-label="定位到最新消息"
+    >
+      {running ? <FoxThinkingDots /> : <ArrowDown className="size-4" />}
+    </Button>
+  )
+}
+
+export function ConversationBottomDock({ plan, running = false }: { plan?: GoalProgressData['planRevisions'][number]; running?: boolean }) {
   const planStatus = plan?.status === 'proposed'
     ? '待批准'
     : plan?.status === 'approved'
@@ -50,7 +75,7 @@ export function ConversationBottomDock({ plan }: { plan?: GoalProgressData['plan
         : '已更新'
   return (
     <div className={`fox-conversation-bottom-dock ${plan ? 'has-plan' : ''}`}>
-      <ConversationScrollButton className="fox-scroll-button" aria-label="定位到最新消息" />
+      <FoxConversationScrollButton running={running} />
       {plan && <div className={`fox-plan-floater is-${plan.status}`} role="status" title={[plan.title, plan.summary].filter(Boolean).join('\n')}>
         <ListTodo size={12} />
         <strong>{plan.title || `计划 v${plan.revision}`}</strong>
@@ -329,7 +354,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
         {runtimeContext.recoveryPanel}
       </ConversationContent>
-      <ConversationBottomDock plan={planRevision} />
+      <ConversationBottomDock plan={planRevision} running={runtimeRunning} />
     </Conversation>
   )
 }

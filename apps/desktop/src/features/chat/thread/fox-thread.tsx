@@ -2,6 +2,7 @@ import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { type GoalProgressData } from '../hooks/use-goal-progress'
 import type { ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
 import { ConversationEmptyPrompt, ConversationTurnRail } from '../timeline/fox-timeline'
+import { FoxThinkingDots } from '../components/FoxThinkingDots'
 import { ListTodo } from 'lucide-react'
 import { FoxAssistantMessage } from './fox-assistant-message'
 import { FoxThreadContext, type FoxThreadContextValue } from './fox-thread-context'
@@ -34,16 +35,19 @@ function FoxThreadLoadEarlier() {
 function FoxScrollToBottom() {
   const isRunning = useAuiState((state) => state.thread.isRunning)
   const isEmpty = useAuiState((state) => state.thread.isEmpty)
-  if (isRunning || isEmpty) return null
+  if (isEmpty) return null
+  // ScrollToBottom 自己会在"已经到底"时返回 null，所以这里只决定形态：思考中给点阵，
+  // 空闲给箭头。以前运行中直接隐藏，恰好把最需要它的场景（被新内容吸走又看不到）拿掉了。
   return (
     <ThreadPrimitive.ScrollToBottom className="fox-scroll-button" aria-label="定位到最新消息">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+      {isRunning ? <FoxThinkingDots /> : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>}
     </ThreadPrimitive.ScrollToBottom>
   )
 }
 
 /** The bottom dock: scroll-to-bottom button plus the plan floater, mirroring
- * the legacy ConversationBottomDock. */
+ * the legacy ConversationBottomDock. The button reads the run state from the AUI
+ * store itself, so the dock needs no extra prop. */
 function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][number] }) {
   const planStatus = plan?.status === 'proposed'
     ? '待批准'

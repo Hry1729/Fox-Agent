@@ -1,0 +1,30 @@
+/* 思考态点阵：给"模型正在思考"提供一处可复用的静态几何。
+   颜色取 --fox-thinking-shimmer（由 --brand 派生），所以石墨/暖纸/雾蓝三套主题与
+   深浅模式都自动跟随，不需要为组件单独调色。 */
+.fox-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3.5px;
+  color: var(--fox-thinking-shimmer, var(--brand));
+}
+
+.fox-thinking-dots > i {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: fox-thinking-dot 1.4s ease-in-out infinite;
+}
+
+.fox-thinking-dots > i:nth-child(2) { animation-delay: 0.18s; }
+.fox-thinking-dots > i:nth-child(3) { animation-delay: 0.36s; }
+
+@keyframes fox-thinking-dot {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-1.5px); }
+}
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .fox-thinking-dots > i { animation: none; opacity: 1; }
+}
