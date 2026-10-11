@@ -6,10 +6,5 @@ allowBuilds:
   '@google/genai': true
   esbuild: true
   protobufjs: true
-minimumReleaseAgeExclude:
-  - '@assistant-ui/core@0.3.25'
-  - '@assistant-ui/react@0.15.26'
-  - '@assistant-ui/store@0.3.18'
-  - '@assistant-ui/tap@0.9.22'
-  - assistant-cloud@0.2.6
-  - assistant-stream@0.3.49
+# 这里不设 minimumReleaseAge，因此曾经挂着的 6 条 @assistant-ui 豁免是空操作（已删除）。
+# 若将来启用发布时间门槛，新装/新升的包需在窗口期内临时加入 minimumReleaseAgeExclude。
