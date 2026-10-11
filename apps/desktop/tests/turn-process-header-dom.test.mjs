@@ -15,7 +15,7 @@ const server = await createServer({
   optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false, watch: { ignored: ['**/*'] } },
   resolve: { alias: { '@': path.join(root, 'src') } }, esbuild: { jsx: 'automatic' },
 })
-const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
+const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/timeline/fox-runtime-timeline.tsx')
 const { TurnProcessHeader } = await server.ssrLoadModule('/src/features/chat/turn-process-header.tsx')
 const { persistProcessDisplayMode } = await server.ssrLoadModule('/src/features/chat/process-display-mode.ts')
 const { answerDeltaFingerprint } = await server.ssrLoadModule('/src/features/conversations/model/runtime-delta-fingerprint.ts')

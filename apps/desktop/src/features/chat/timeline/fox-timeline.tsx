@@ -1,21 +1,10 @@
-import { type ExpertBindingView } from '../components/ExpertBindingChip'
-import { FoxAssistantAvatar, RunStatusText } from '../components/FoxAssistantAvatar'
 import { NewConversationMascot } from '../components/NewConversationMascot'
-import { UserMessageBubble } from '../components/UserMessageBubble'
-import { type GoalProgressData } from '../hooks/use-goal-progress'
-import { citations } from '../mock-data'
-import { Conversation, ConversationContent, ConversationEmptyState, ConversationViewportState } from '@/components/ai-elements/conversation'
-import { Message, MessageAction, MessageActions, MessageContent } from '@/components/ai-elements/message'
-import { Source, Sources, SourcesContent, SourcesTrigger } from '@/components/ai-elements/sources'
+import { ConversationEmptyState } from '@/components/ai-elements/conversation'
 import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
-import { type AgentRecord, type ArtifactRecord, type AttachmentRecord, type ConversationMessage, type DesktopErrorDetails, type RunEventRecord, type RunRecord } from '@/features/conversations/model/types'
-import { notify as toast } from '@/features/notifications'
-import { ChevronDown, ChevronRight, Copy, FileEdit, FileText, Globe2, ImagePlus, MessageCircleMore, Sparkles } from 'lucide-react'
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { AssistantProcess, DeniedPrompt, ErrorPrompt, LicenseInlineCitation, licenseAnswerMarkdown } from '../demo/fox-demo-prompts'
-import { type ChatState, MarkdownResponse } from '../fox-shared'
-import { type RuntimeSource } from './fox-runtime-process-model'
-import { ConversationBottomDock, RuntimeTimeline, splitAssistantContent } from './fox-runtime-timeline'
+import { type ArtifactRecord, type ConversationMessage } from '@/features/conversations/model/types'
+import { FileText, Globe2, ImagePlus, MessageCircleMore, Sparkles } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { splitAssistantContent } from './fox-assistant-content'
 
 /**
  * The classic new-conversation empty state: mascot heading plus the expert's
@@ -43,71 +32,6 @@ export function ConversationEmptyPrompt({ suggestions, onStart }: { suggestions?
     </ConversationEmptyState>
   )
 }
-
-function Timeline({ empty, state, prompt, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRuns, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, planRevisions, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onFork, onAnswer, onStart, onOpenSource, onOpenArtifact, onViewExpert, onOpenFileInSidebar, onRevealFileInExplorer }: { empty: boolean; state: ChatState; prompt: string; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRuns?: RunRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevisions?: GoalProgressData['planRevisions']; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
-  const running = state === 'running'
-  const latestPlanRevision = planRevisions?.reduce((latest, plan) => !latest || plan.revision > latest.revision ? plan : latest, undefined as GoalProgressData['planRevisions'][number] | undefined)
-
-  if (empty) {
-    return (
-        <Conversation className="fox-conversation">
-        <ConversationViewportState />
-        <ConversationEmptyPrompt suggestions={openingSuggestions} onStart={onStart} />
-      </Conversation>
-    )
-  }
-  if (runtimeMessages) {
-    return <RuntimeTimeline messages={runtimeMessages} attachments={runtimeAttachments ?? []} artifacts={runtimeArtifacts ?? []} expertBindings={expertBindings} agents={agents} pendingMessage={pendingMessage} events={runtimeEvents ?? []} runs={runtimeRuns} activeRunId={runtimeRunId} activeRunModel={runtimeRunModel} runtimeRunning={runtimeRunning} state={state} streamingText={runtimeReply ?? ''} runtimeError={runtimeError} runtimeErrorDetails={runtimeErrorDetails} assistantName={assistantName} planRevision={latestPlanRevision} hasEarlierMessages={hasEarlierMessages} loadingEarlierMessages={loadingEarlierMessages} onLoadEarlierMessages={onLoadEarlierMessages} onRetry={onRetry} onRerun={onRerun} onFork={onFork} onOpenSource={onOpenSource} onOpenArtifact={onOpenArtifact} onViewExpert={onViewExpert} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
-  }
-  return (
-    <Conversation className="fox-conversation">
-      <ConversationViewportState />
-      <ConversationContent className="fox-conversation-content" scrollClassName="fox-conversation-scroll">
-        <div className="fox-thread-date"><span>今天</span></div>
-        <div className="fox-turn-anchor">
-        <Message from="user" className="fox-message fox-user-message">
-          <UserMessageBubble>{prompt}</UserMessageBubble>
-          <div className="fox-user-meta"><span>DeepSeek V3.2 · 刚刚</span><span><MessageAction tooltip="复制"><Copy size={13} /></MessageAction><MessageAction tooltip="编辑"><FileEdit size={13} /></MessageAction></span></div>
-        </Message>
-        </div>
-        <div className="fox-turn-anchor">
-        <Message from="assistant" className="fox-message fox-assistant-message">
-          <MessageContent className="fox-assistant-content">
-            {(state === 'running' || state === 'complete') && <AssistantProcess running={running} />}
-            {state === 'question' ? null : state === 'error' ? <ErrorPrompt onRetry={onRetry} /> : state === 'denied' ? <DeniedPrompt /> : state === 'approval' ? null : running ? (
-              <div className="fox-live-response"><FoxAssistantAvatar /><RunStatusText text="正在连接知识库并整理结果" /><i><b /><b /><b /></i></div>
-            ) : <>
-              <div className="fox-answer-body">
-                <h2>Kun 的许可证</h2>
-                <p><LicenseInlineCitation />，允许个人学习、研究、实验和其他非商业用途，也可以在许可范围内进行二次开发。</p>
-                <MarkdownResponse className="fox-answer-response">{licenseAnswerMarkdown}</MarkdownResponse>
-              </div>
-              <Sources defaultOpen className="fox-sources">
-              <SourcesTrigger count={citations.length}>引用了 {citations.length} 个来源<ChevronDown size={14} /></SourcesTrigger>
-              <SourcesContent>
-                {citations.map((item, index) => (
-                  <Source key={item.id} href="#" title={item.title} onClick={(event) => event.preventDefault()}>
-                    <span className="fox-citation-index">{index + 1}</span>
-                    <span><strong>{item.title}</strong><small>{item.detail}</small></span>
-                    <ChevronRight size={14} />
-                  </Source>
-                ))}
-              </SourcesContent>
-              </Sources>
-            </>}
-          </MessageContent>
-          {state === 'complete' && <MessageActions className="fox-message-actions">
-            <MessageAction tooltip="复制" onClick={() => { void navigator.clipboard?.writeText('Kun 使用 PolyForm Noncommercial License 1.0.0，企业商业使用需要单独授权。'); toast.success('已复制回复') }}><Copy size={14} /></MessageAction>
-          </MessageActions>}
-        </Message>
-        </div>
-      </ConversationContent>
-      <ConversationBottomDock plan={latestPlanRevision} />
-    </Conversation>
-  )
-}
-
-export const MemoizedTimeline = memo(Timeline)
 
 export function ConversationTurnRail({ messages, artifacts }: { messages: ConversationMessage[]; artifacts: ArtifactRecord[] }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null)

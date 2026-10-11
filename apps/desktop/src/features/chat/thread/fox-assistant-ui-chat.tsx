@@ -7,7 +7,6 @@ import { TimelineRuntimeContext } from '../fox-shared'
 import { useContext, useEffect, useMemo, useState } from 'react'
 import FoxThread from './fox-thread'
 import { useFoxRuntime, type FoxRuntimeCallbacks } from './use-fox-runtime'
-import { Button } from '@/components/ui/button'
 
 type DesktopConversationState = ReturnType<typeof useDesktopConversation>
 
@@ -28,10 +27,8 @@ export interface AssistantUiChatProps {
 }
 
 /**
- * The assistant-ui message list (migration step 5C, hybrid rollback). Mounted
- * only while the `fox.ui.chatEngine` switch is set to `assistant-ui`, and
- * loaded as its own lazy chunk so the legacy path and the first-screen budget
- * stay untouched.
+ * The assistant-ui message list (migration step 5C). It is the only chat path;
+ * loaded as its own lazy chunk so the first-screen budget stays untouched.
  *
  * After the hybrid rollback this container renders ONLY the message list: the
  * empty state and the composer are the classic legacy components again, mounted
@@ -97,13 +94,4 @@ export default function AssistantUiChat({ conversation, callbacks, pendingMessag
     </AssistantRuntimeProvider>
   )
 }
-
-/** Temporary engine switch for the development rounds; removed when the
- * switch default flips in 5E. */
-export function ChatEngineSwitch({ engine, onChange }: { engine: 'legacy' | 'assistant-ui'; onChange: (engine: 'legacy' | 'assistant-ui') => void }) {
-  return (
-    <Button variant="ghost" size="sm" className="fox-thread-engine-switch" onClick={() => onChange(engine === 'legacy' ? 'assistant-ui' : 'legacy')}>
-      {engine === 'legacy' ? '试用 assistant-ui 界面' : '返回经典界面'}
-    </Button>
-  )
-}
+

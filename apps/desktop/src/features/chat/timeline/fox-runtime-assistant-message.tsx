@@ -22,7 +22,7 @@ import { TimelineRuntimeContext, copyTextWithFeedback, requestConversationFork }
 import { type RuntimeSource, runtimeProcess } from './fox-runtime-process-model'
 import { RuntimeProcess, useLiveNow } from './fox-runtime-process-view'
 import { RuntimeSources } from './fox-runtime-sources'
-import { splitAssistantContent } from './fox-runtime-timeline'
+import { splitAssistantContent } from './fox-assistant-content'
 
 export type RuntimeGroupHelpers = typeof import('../runtime-process-groups')
 

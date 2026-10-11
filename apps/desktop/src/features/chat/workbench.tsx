@@ -40,8 +40,6 @@ import { ChatTopbar } from './shell/fox-chat-topbar'
 import { MemoizedSidebar } from './shell/fox-sidebar'
 import { MemoizedWindowTitlebar } from './shell/fox-window-titlebar'
 import { type RuntimeSource } from './timeline/fox-runtime-process-model'
-import { MemoizedTimeline } from './timeline/fox-timeline'
-import { readChatEnginePreference, writeChatEnginePreference, type FoxChatEngine } from './thread/fox-chat-engine'
 import './runtime-process-groups.css'
 import './runtime-process-row.css'
 
@@ -61,7 +59,6 @@ const ExpertPickerDialog = lazy(() => import('@/features/agents/ExpertPickerDial
 // The assistant-ui chat branch ships as its own lazy chunk so the legacy path
 // and the first-screen budget stay untouched while the migration runs.
 const AssistantUiChat = lazy(() => import('./thread/fox-assistant-ui-chat'))
-const ChatEngineSwitch = lazy(() => import('./thread/fox-assistant-ui-chat').then((module) => ({ default: module.ChatEngineSwitch })))
 
 export const LOCAL_KNOWLEDGE_WORKSPACE_VIEWS: WorkspaceView[] = [
   'local-knowledge-home',
@@ -162,13 +159,6 @@ export function Workbench() {
   const [composerResetKey, setComposerResetKey] = useState(0)
   const [composerDraft, setComposerDraft] = useState('')
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
-  // Migration step 5B: `legacy` is the pre-5B implementation and the default;
-  // `assistant-ui` mounts the external-store-driven thread instead.
-  const [chatEngine, setChatEngine] = useState<FoxChatEngine>(readChatEnginePreference)
-  const toggleChatEngine = (engine: FoxChatEngine) => {
-    writeChatEnginePreference(engine)
-    setChatEngine(engine)
-  }
   useEffect(() => {
     const handleFork = (event: Event) => {
       const messageId = (event as CustomEvent<{ messageId?: string }>).detail?.messageId
@@ -1170,7 +1160,7 @@ export function Workbench() {
     <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
   )
   const assistantUiThreadPanel = (
-    <Suspense fallback={<div className="fox-app-loading"><img src={FOX_ASSISTANT_AVATAR} alt="" /><p>Fox 正在准备新界面</p></div>}><div className="fox-thread-shell"><ChatEngineSwitch engine={chatEngine} onChange={toggleChatEngine} /><AssistantUiChat key={desktopConversation.detail?.conversation.id ?? 'draft'} conversation={desktopConversation} pendingMessage={pendingUserMessage} isSendDisabled={expertReadOnly} suggestions={activeAgent?.openingSuggestions} onStart={handleTimelineStart} planRevision={assistantUiPlanRevision} onOpenArtifact={handleTimelineOpenArtifact} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} callbacks={{ onSubmit: (prompt, files) => handleComposerSubmitPrompt(prompt, undefined, files), onOptimistic: handleComposerPromptCommit, onEdit: (messageId, prompt) => handleTimelineRerun(messageId, prompt), onReload: () => retryLatestRun() }} /></div></Suspense>
+    <Suspense fallback={<div className="fox-app-loading"><img src={FOX_ASSISTANT_AVATAR} alt="" /><p>Fox 正在准备新界面</p></div>}><div className="fox-thread-shell"><AssistantUiChat key={desktopConversation.detail?.conversation.id ?? 'draft'} conversation={desktopConversation} pendingMessage={pendingUserMessage} isSendDisabled={expertReadOnly} suggestions={activeAgent?.openingSuggestions} onStart={handleTimelineStart} planRevision={assistantUiPlanRevision} onOpenArtifact={handleTimelineOpenArtifact} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} callbacks={{ onSubmit: (prompt, files) => handleComposerSubmitPrompt(prompt, undefined, files), onOptimistic: handleComposerPromptCommit, onEdit: (messageId, prompt) => handleTimelineRerun(messageId, prompt), onReload: () => retryLatestRun() }} /></div></Suspense>
   )
 
   if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading"><img src={FOX_ASSISTANT_AVATAR} alt="" /><p>Fox 正在准备引导页</p></div>}><OnboardingPage dark={dark} navigate={navigate} onExit={finishOnboarding} /></Suspense>
@@ -1195,7 +1185,7 @@ export function Workbench() {
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}>{chatEngine === 'assistant-ui' ? (<>{assistantUiThreadPanel}{composerPanel}</>) : (<><Button variant="ghost" size="sm" className="fox-thread-engine-switch" onClick={() => toggleChatEngine('assistant-ui')}>试用 assistant-ui 界面</Button><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRuns={desktopConversation.enabled ? desktopConversation.detail?.runs : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} /></Profiler>{composerPanel}</>)}</div></>}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}>{assistantUiThreadPanel}{composerPanel}</div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>
@@ -1216,6 +1206,5 @@ export function Workbench() {
 }
 
 export { Sidebar } from './shell/fox-sidebar'
-export { RuntimeTimeline } from './timeline/fox-runtime-timeline'
 export { RightPanel } from './right-panel/fox-right-panel'
 export { KnowledgeBindingDialog } from './conversation-dialogs'

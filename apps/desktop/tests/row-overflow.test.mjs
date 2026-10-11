@@ -24,7 +24,7 @@ const server = await createServer({
   resolve: { alias: { '@': path.join(root, 'src') } }, esbuild: { jsx: 'automatic' },
 })
 const { isOverflowing, useOverflowFade, OVERFLOW_CLASS } = await server.ssrLoadModule('/src/features/chat/row-overflow.ts')
-const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
+const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/timeline/fox-runtime-timeline.tsx')
 const { persistProcessDisplayMode } = await server.ssrLoadModule('/src/features/chat/process-display-mode.ts')
 
 const teardowns = []

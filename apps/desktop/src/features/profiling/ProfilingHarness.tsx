@@ -16,7 +16,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import type { ConversationDetail, RunEventRecord, ConversationMessage } from '@/features/conversations/model/types'
 import { reduceRuntimeNotifications } from '@/features/conversations/model/runtime-event-reducer'
 import { enqueueRuntimeEvent, takeRuntimeEventFrame } from '@/features/conversations/model/runtime-event-queue'
-import { RuntimeTimeline } from '@/features/chat/workbench'
+import { RuntimeTimeline } from '@/features/chat/timeline/fox-runtime-timeline'
 import type { RuntimeEventNotification } from '@/features/conversations/model/types'
 import {
   buildHistoryDetail,
