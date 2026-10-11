@@ -1,0 +1,370 @@
+{
+  "retrievedAt": "2026-10-11",
+  "distribution": "assistant-ui Elements shadcn registry source",
+  "license": "MIT",
+  "registry": [
+    {
+      "name": "elements-approval-card",
+      "registryUrl": "https://r.assistant-ui.com/elements-approval-card.json",
+      "registrySha256": "f74ce8c1131c7b72d31be7b5958271f201c9e3ef4ea2ad230f1aaddcb81b0f45",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json",
+        "https://r.assistant-ui.com/elements-receipt-focus.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/approval-card.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/approval-card.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-collapsible-root",
+      "registryUrl": "https://r.assistant-ui.com/elements-collapsible-root.json",
+      "registrySha256": "d94d35a03158ca55288f3e36adfed63f97d414feee95e5df91c4152701375d63",
+      "dependencies": [
+        "radix-ui"
+      ],
+      "registryDependencies": [
+        null
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/collapsible-root.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/collapsible-root.radix.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-composer",
+      "registryUrl": "https://r.assistant-ui.com/elements-composer.json",
+      "registrySha256": "373dab51309e68c6612a6129f60c7cf3e0d5e4be9f272a4dc0948bb9d8895b13",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json",
+        "https://r.assistant-ui.com/elements-range.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/composer.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/composer.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-edit-message",
+      "registryUrl": "https://r.assistant-ui.com/elements-edit-message.json",
+      "registrySha256": "a5cb422c8040c876ea7d731f93cb90f471fdee9932c3a9084312c470322eab05",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/edit-message.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/edit-message.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-error-state",
+      "registryUrl": "https://r.assistant-ui.com/elements-error-state.json",
+      "registrySha256": "bb3bc8503196a122b31399cf878d13c8a4ac7dd0aeb5a9cd1bb477935a18e3bd",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/error-state.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/error-state.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-feedback-dialog",
+      "registryUrl": "https://r.assistant-ui.com/elements-feedback-dialog.json",
+      "registrySha256": "1e2a4816c81116c9269def5a811d5176a4d70575df36cd027ef03cbc5db0e404",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/feedback-dialog.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/feedback-dialog.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-media-player",
+      "registryUrl": "https://r.assistant-ui.com/elements-media-player.json",
+      "registrySha256": "3bc9e03b56dc78cc6b71b5de97040a35e189346e50bd27eaf56fd9f161c82cdf",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/media-player.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/media-player.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-message-actions",
+      "registryUrl": "https://r.assistant-ui.com/elements-message-actions.json",
+      "registrySha256": "c4c1e2def52f07aad99f20c59268dfba2decc1d00d610b9f2605c10ef5f935a9",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/message-actions.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/message-actions.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-permission-grant",
+      "registryUrl": "https://r.assistant-ui.com/elements-permission-grant.json",
+      "registrySha256": "503f44645a59373738718de0bbd1ebb37d628c26ca9a3d7765813c1a7961adc6",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json",
+        "https://r.assistant-ui.com/elements-receipt-focus.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/permission-grant.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/permission-grant.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-range",
+      "registryUrl": "https://r.assistant-ui.com/elements-range.json",
+      "registrySha256": "6d3305f7fc3821666fb943d1bcb3a1ac3cae32188c7562ce3590101c6ffd2d1b",
+      "dependencies": [
+        null
+      ],
+      "registryDependencies": [
+        null
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/utils/range.ts",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/utils/range.ts"
+        }
+      ]
+    },
+    {
+      "name": "elements-receipt-focus",
+      "registryUrl": "https://r.assistant-ui.com/elements-receipt-focus.json",
+      "registrySha256": "e872888ed866cc82118bf3da66aea6c7803ccf40f5755540466702f507c3ea70",
+      "dependencies": [
+        null
+      ],
+      "registryDependencies": [
+        null
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/receipt-focus.ts",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/receipt-focus.ts"
+        },
+        {
+          "path": "components/assistant-ui/utils/useIsomorphicLayoutEffect.ts",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/utils/useIsomorphicLayoutEffect.ts"
+        }
+      ]
+    },
+    {
+      "name": "elements-run-activity",
+      "registryUrl": "https://r.assistant-ui.com/elements-run-activity.json",
+      "registrySha256": "521a2f3fb71b785a1f356c00ce01f4a089832792e985597a864b513323d3cabe",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json",
+        "https://r.assistant-ui.com/elements-collapsible-root.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/run-activity.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/run-activity.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-stopped-run",
+      "registryUrl": "https://r.assistant-ui.com/elements-stopped-run.json",
+      "registrySha256": "1d99a1e60b278845a9abab7db0c9c50b47555bb21f6c624205d7b277ad351a1e",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/stopped-run.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/stopped-run.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-streaming-text",
+      "registryUrl": "https://r.assistant-ui.com/elements-streaming-text.json",
+      "registrySha256": "f715c8bc44f1d8b02218a00ead0923d7f074ae29bb9ffc280be53fbd152b0504",
+      "dependencies": [
+        null
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-range.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/streaming-text.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/streaming-text.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-surfaces",
+      "registryUrl": "https://r.assistant-ui.com/elements-surfaces.json",
+      "registrySha256": "c0451466fc4ee51a4fb0c1cdb404bf7576e637c7f74a73f9c1625f94e0fc73db",
+      "dependencies": [
+        "tw-shimmer@^0.4.13"
+      ],
+      "registryDependencies": [
+        null
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/surfaces.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/surfaces.tsx"
+        },
+        {
+          "path": "components/assistant-ui/utils/useIsomorphicLayoutEffect.ts",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/utils/useIsomorphicLayoutEffect.ts"
+        }
+      ]
+    },
+    {
+      "name": "elements-thinking-indicator",
+      "registryUrl": "https://r.assistant-ui.com/elements-thinking-indicator.json",
+      "registrySha256": "cf131ecd0c7ac2224145d3442887b06df41d72b80607c01e01b9dc293e3b6586",
+      "dependencies": [
+        null
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/thinking-indicator.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/thinking-indicator.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-tool-call",
+      "registryUrl": "https://r.assistant-ui.com/elements-tool-call.json",
+      "registrySha256": "23a9267ba471511c162051ab9866b1d90e86f0f750451ee09843e1274242bcf2",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json",
+        "https://r.assistant-ui.com/elements-collapsible-root.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/tool-call.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/tool-call.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-tool-timeline",
+      "registryUrl": "https://r.assistant-ui.com/elements-tool-timeline.json",
+      "registrySha256": "41b6037f0394254c98b54f2ede5fad75ad401912ec89e10ec3d4269d7c5f4257",
+      "dependencies": [
+        "lucide-react"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json",
+        "https://r.assistant-ui.com/elements-range.json",
+        "https://r.assistant-ui.com/elements-collapsible-root.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/tool-timeline.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/tool-timeline.tsx"
+        }
+      ]
+    },
+    {
+      "name": "elements-typing-indicator",
+      "registryUrl": "https://r.assistant-ui.com/elements-typing-indicator.json",
+      "registrySha256": "357a97c74cf3c4ce26304a8e073b7da650d327da7536ea4c87d2af7ad009a5a4",
+      "dependencies": [
+        null
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-surfaces.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/typing-indicator.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/typing-indicator.tsx"
+        }
+      ]
+    },
+    {
+      "name": "file",
+      "registryUrl": "https://r.assistant-ui.com/file.json",
+      "registrySha256": "839c76f0c0cf9f4f9c6e69782aa94ff37496233d1b6dbeda601fdfa0290e3278",
+      "dependencies": [
+        "@assistant-ui/react@^0.15.27",
+        "lucide-react",
+        "class-variance-authority"
+      ],
+      "registryDependencies": [
+        "https://r.assistant-ui.com/elements-media-player.json"
+      ],
+      "files": [
+        {
+          "path": "components/assistant-ui/elements/file.tsx",
+          "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/file.tsx"
+        }
+      ]
+    }
+  ],
+  "additionalDependency": {
+    "name": "tw-shimmer",
+    "version": "0.4.13",
+    "source": "https://registry.npmjs.org/tw-shimmer/-/tw-shimmer-0.4.13.tgz",
+    "license": "MIT"
+  }
+}
