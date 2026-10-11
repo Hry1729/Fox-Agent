@@ -1,0 +1,25 @@
+# 仓库内容统一存 LF；检出也强制 LF。
+# Windows 上 Git 默认 core.autocrlf=true 会把检出文件变成 CRLF，而 generate-*.mjs
+# 一类脚本写回的是 LF，于是每次构建都把工作树标记成"已修改"（本分支曾据此误判依赖损坏）。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.onnx binary
+*.dll binary
+*.lib binary
+*.exe binary
+*.zip binary
+
+# Windows 批处理必须保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
