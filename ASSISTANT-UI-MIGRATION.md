@@ -7,7 +7,7 @@
 - **工作目录**：只在 `D:\python\projects\Fox\worktrees\ui-improvements-20261009`（分支 `ui/improvements-20261009`）工作。不要进入或修改 `D:\python\projects\Fox\Fox`（main）。
 - **只换界面层，不换后端**：`useDesktopConversation()`（`src/features/conversations/hooks/use-desktop-conversation.ts`）、`desktopClient`、Tauri 事件、`runtime-event-reducer.ts` 都保持不动。assistant-ui 通过 `ExternalStoreRuntime` 读它们的数据、调用它们的方法。
 - **端口**：1421 是用户自己的开发服务器，不能占用、不能杀。截图/预览用独立端口（例如 Vite 1440–1449、Edge CDP 9350–9359，`--strictPort`），临时 vite 配置文件用唯一名字，结束后删除，只停自己启动的进程。
-- **换行符**：仓库文件是 CRLF，编辑后保持 CRLF。
+- **换行符**：仓库内容为 LF，`.gitattributes` 已把检出也固定为 LF（Windows 系统级 `core.autocrlf=true` 不再生效）。用 LF 写文件，不要把 CRLF 写回去。
 - **设计规范**：只用 `UI-PLAN.md`「设计规范」表里的档位和变量（圆角、间距、字号、字重、控件高度、阴影、颜色）。按钮、输入框、菜单、对话框用 `src/components/ui` 的 shadcn 组件。新样式不再写进 `src/styles/workbench.css`，放在新组件旁边的 CSS 文件或用 Tailwind 类。
 - **页面整洁规则**：遵守 `PAGE-REDESIGN.md` 第 1 节的 10 条通用规则（容器层级、主按钮数量、状态表达等）。
 - **验证命令**（每个阶段结束都要跑，全部通过才算完成）：

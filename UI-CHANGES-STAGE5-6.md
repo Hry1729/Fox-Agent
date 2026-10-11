@@ -192,8 +192,8 @@
 
 | # | 问题 | 说明 |
 |---|---|---|
-| 1 | **lockfile 隐患** | 当前提交的 `pnpm-lock.yaml` 从未在本机干净安装过（node_modules 为手工修复状态）。换机器/CI 会类型报错。建议 5E 前重新生成。 |
-| 2 | **本 worktree 禁跑 `pnpm install`** | 会重新物化依赖并破坏 tsc（2026-10-10 曾爆 60+ 类型错误，靠恢复旧虚拟商店 + 补 border-beam junction 救回）。已写入项目记忆。 |
+| 1 | ~~lockfile 隐患~~ **已排除（2026-10-11 验证）** | 原判断错了。两个独立干净克隆 + 独立 store 跑 `pnpm install --frozen-lockfile` 均 exit 0，锁文件字节不变；`tsc` 0 错误（覆盖 280 个 src 文件，反向对照能报错）、桌面测试 583 通过、构建 236.6/307.6 KiB。当时的 60+ 错误来自 node_modules 链接未物化，不是版本不一致，**不需要重新生成 lockfile**。 |
+| 2 | 本 worktree 的 node_modules 是手工修复态 | 禁令成立但理由要改：问题在这个工作树的 node_modules，不在锁文件。修法（已在克隆里验证）：移走 `node_modules/.pnpm-workspace-state-v1.json`，再跑 `pnpm install --frozen-lockfile`，链接会重建、tsc 回到 0。反面教训：用 `ln -s` 手工补 junction 会让该位置变成普通目录占位，pnpm 自检和 `--force` 都判"已最新"，类型却退化成 any（实测残留 22 个错误）。 |
 | 3 | 滚动性能未测 | 500 条合成时间线滚动测量（第 5 步计划项）未做。 |
 | 4 | 死代码 | `fox-thread-empty.tsx`、`fox-thread-composer.tsx` 未渲染未删除。 |
 | 5 | 构建垃圾 | 根目录多个 `dist.old.*`、`node_modules/.pnpm.clean` 备份目录（约 1–2 GB），删除受沙箱护栏拦，待手动清理。 |
@@ -202,4 +202,4 @@
 
 ### 环境事故记录（2026-10-10）
 
-5B agent 手工修复 pnpm 依赖链接后停滞。接管时发现 node_modules 与已提交 lockfile **假一致**（`node_modules/.pnpm-workspace-state-v1.json` 状态文件骗过 pnpm 自检，"已最新"判断失灵）。干净重装后 tsc 爆 60+ 类型错误（依赖图被解析到另一套版本），最终恢复 agent 验证过的旧虚拟商店（`.pnpm.old5b`）并补回丢失的 `border-beam` junction，全量复验通过。教训：**此环境下不要动 node_modules 的物化状态**。
+5B agent 手工修复 pnpm 依赖链接后停滞。接管时发现 node_modules 与已提交 lockfile **假一致**（`node_modules/.pnpm-workspace-state-v1.json` 状态文件骗过 pnpm 自检，"已最新"判断失灵）。干净重装后 tsc 爆 60+ 类型错误，当时推断是"依赖图被解析到另一套版本"，**这个推断已于 2026-10-11 推翻**：同一份 lockfile 在独立克隆里冻结安装 exit 0、tsc 0 错误；那批错误是部分链接没物化成功导致的模块解析失败（实测删掉 `@assistant-ui/react` 一个链接就得到 38 条 TS2307/TS7006 级联）。最终恢复旧虚拟商店（`.pnpm.old5b`）并补回 `border-beam` junction 后复验通过，但手工补链接这条路本身有问题，见遗留问题 #2。教训：**此环境下不要动 node_modules 的物化状态**；真要修就走状态文件那条路，不要用 `ln -s`。
