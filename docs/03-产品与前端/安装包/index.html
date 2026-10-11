@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Fox 安装包（NSIS）· 设计稿</title>
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css" />
+<script src="../首次启动设置/icons.js"></script>
+<style>
+:root {
+  --ink: oklch(0.145 0 0);
+  --muted: oklch(0.556 0 0);
+  --line: oklch(0.922 0 0);
+  --card: #fff;
+  --page: oklch(0.965 0 0);
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); }
+svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+code, pre { font-family: "Cascadia Mono", Consolas, monospace; }
+
+/* ---------- Doc ---------- */
+.doc { width: 1180px; margin: 0 auto; padding: 56px 40px 120px; }
+.hero h1 { margin: 0 0 8px; font-size: 32px; font-weight: 600; letter-spacing: -.02em; }
+.hero p { margin: 0; max-width: 860px; color: var(--muted); font-size: 14px; line-height: 1.75; }
+.block { margin-top: 24px; padding: 28px 32px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); }
+.block h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; }
+.cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+.cols3 b { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.cols3 p, .cols3 li { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.75; }
+.cols3 ul { margin: 0; padding-left: 18px; }
+.toolbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px; margin: 40px -40px 0; padding: 12px 40px; background: color-mix(in oklch, var(--page) 88%, transparent); backdrop-filter: blur(8px); font-size: 13px; color: var(--muted); }
+.seg { display: inline-flex; padding: 3px; border-radius: 8px; background: oklch(0.93 0 0); }
+.seg button { height: 26px; padding: 0 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-weight: 500; cursor: pointer; }
+.seg .on { background: #fff; color: var(--ink); border-color: var(--line); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+.frame { margin-top: 56px; }
+.frame-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+.frame-head .no { color: var(--muted); font-size: 13px; }
+.frame-head h2 { margin: 0; font-size: 24px; font-weight: 600; }
+.frame-head p { margin: 0; color: var(--muted); font-size: 14px; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.pair > div { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 28px 0; border-radius: 12px; background: oklch(0.94 0.005 250); }
+.pair > div:last-child { background: oklch(0.935 0.01 250); }
+.pair .tag { font-size: 12px; font-weight: 500; color: var(--muted); }
+.pair .tag b { color: var(--ink); }
+.zoomer { zoom: var(--z, 1); }
+.notes { margin: 14px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.assets { display: flex; gap: 40px; align-items: flex-end; flex-wrap: wrap; }
+.asset { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--muted); }
+.asset b { color: var(--ink); font-weight: 500; font-size: 13px; }
+.asset .px { outline: 1px dashed oklch(0.8 0 0); outline-offset: 2px; }
+pre.cfg { margin: 0; padding: 16px 18px; overflow: auto; border-radius: 8px; background: oklch(0.97 0 0); border: 1px solid var(--line); font-size: 12px; line-height: 1.7; color: oklch(0.3 0 0); }
+pre.cfg .c { color: oklch(0.6 0 0); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.two h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+
+/* ---------- Windows 11 NSIS dialog (real 100% size) ---------- */
+.nw { width: 503px; display: flex; flex-direction: column; overflow: hidden; border-radius: 8px; background: #f0f0f0; border: 1px solid rgba(0,0,0,.18); box-shadow: 0 8px 32px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.08); color: #000; font: 12px "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+.nw.zh { font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif; }
+.nw-title { height: 31px; display: flex; align-items: center; gap: 8px; padding-left: 9px; background: #fff; font-size: 12px; }
+.nw-title .ico { width: 16px; height: 16px; border-radius: 3px; }
+.nw-title .ico.nsis { background: linear-gradient(135deg, #f2b33d, #d46b08); position: relative; }
+.nw-title .ico.nsis::after { content: ''; position: absolute; inset: 4px 3px 3px 4px; border: 1.5px solid #fff; border-radius: 1px; }
+.nw-title .grow { flex: 1; }
+.nw-title .x { width: 46px; height: 31px; display: grid; place-items: center; }
+.nw-title .x svg { width: 14px; height: 14px; stroke-width: 1.25; }
+.nw-body { position: relative; height: 360px; }
+
+/* Welcome / finish */
+.nw-side { position: absolute; left: 0; top: 0; width: 164px; height: 314px; overflow: hidden; }
+.nw-right { position: absolute; left: 164px; right: 0; top: 0; height: 314px; padding: 10px 14px 0 16px; background: #fff; }
+.nw-right h1 { margin: 0 0 16px; font-size: 16px; line-height: 22px; font-weight: 700; }
+.zh .nw-right h1 { font-weight: 700; }
+.nw-right p { margin: 0 0 12px; line-height: 17px; white-space: pre-line; }
+
+/* Inner pages */
+.nw-head { position: absolute; left: 0; right: 0; top: 0; height: 57px; background: #fff; border-bottom: 1px solid #a0a0a0; box-shadow: 0 1px 0 #fff; }
+.nw-head b { position: absolute; left: 10px; top: 8px; font-weight: 700; }
+.nw-head span { position: absolute; left: 16px; top: 26px; }
+.nw-head .himg { position: absolute; right: 0; top: 0; width: 150px; height: 57px; }
+.nw-content { position: absolute; left: 22px; right: 22px; top: 72px; bottom: 50px; }
+.nw-content p { margin: 0 0 14px; line-height: 17px; white-space: pre-line; }
+
+/* Bottom bar */
+.nw-sep { position: absolute; left: 0; right: 0; top: 314px; border-top: 1px solid #a0a0a0; box-shadow: 0 1px 0 #fff inset; }
+.nw-brand { position: absolute; left: 6px; top: 307px; padding-right: 4px; background: #f0f0f0; color: #a0a0a0; font-size: 12px; line-height: 14px; }
+.nw-btns { position: absolute; right: 10px; top: 326px; display: flex; }
+.nw-btns .gap { width: 10px; }
+
+/* Win11 common controls */
+.b { width: 75px; height: 23px; display: inline-grid; place-items: center; border-radius: 4px; border: 1px solid #d0d0d0; border-bottom-color: #b8b8b8; background: #fdfdfd; font-size: 12px; }
+.b.def { border: 1px solid #005fb8; box-shadow: 0 0 0 1px #005fb8 inset; }
+.b.off { color: #a0a0a0; background: #f5f5f5; border-color: #e0e0e0; }
+.b.w { width: auto; padding: 0 10px; }
+.chk, .rad { display: flex; align-items: center; gap: 7px; margin: 0 0 9px; line-height: 15px; }
+.chk i { width: 13px; height: 13px; flex: none; border-radius: 3px; border: 1px solid #8a8a8a; background: #fff; display: grid; place-items: center; }
+.chk.on i { border-color: #005fb8; background: #005fb8; }
+.chk.on i::after { content: ''; width: 6px; height: 3px; margin-top: -2px; border-left: 1.5px solid #fff; border-bottom: 1.5px solid #fff; transform: rotate(-45deg); }
+.rad i { width: 13px; height: 13px; flex: none; border-radius: 50%; border: 1px solid #8a8a8a; background: #fff; }
+.rad.on i { border: 4px solid #005fb8; }
+.grp { position: relative; margin-top: 18px; padding: 18px 12px 12px; border: 1px solid #dcdcdc; border-radius: 3px; }
+.grp > span { position: absolute; left: 8px; top: -8px; padding: 0 3px; background: #f0f0f0; }
+.inp-row { display: flex; gap: 8px; }
+.inp { flex: 1; height: 23px; display: flex; align-items: center; padding: 0 6px; border: 1px solid #c8c8c8; border-bottom-color: #8a8a8a; border-radius: 3px; background: #fff; overflow: hidden; white-space: nowrap; }
+.small { line-height: 17px; }
+.prog { height: 15px; margin: 8px 0 12px; border: 1px solid #bcbcbc; background: #e6e6e6; }
+.prog span { display: block; height: 100%; background: #06b025; }
+.path-line { padding: 3px 6px; border: 1px solid #c8c8c8; border-radius: 3px; background: #fff; }
+
+/* ---------- Bitmaps (exported to 24-bit BMP) ---------- */
+.bmp-side-default { width: 164px; height: 314px; background: linear-gradient(180deg, #2b5aa6 0%, #4f86c9 55%, #8db6e3 100%); position: relative; }
+.bmp-side-default::before { content: ''; position: absolute; left: 34px; top: 92px; width: 96px; height: 70px; border-radius: 3px; background: linear-gradient(135deg, #e9eef6, #b9c8de); box-shadow: 8px 10px 0 rgba(0,0,0,.18); }
+.bmp-side-default::after { content: ''; position: absolute; left: 52px; top: 176px; width: 60px; height: 60px; border-radius: 50%; background: radial-gradient(circle, #fff 0 8px, #c8d4e6 9px 26px, #9fb3d1 27px); }
+
+.bmp-side { width: 164px; height: 314px; position: relative; overflow: hidden; background: #171717; font-family: "HarmonyOS Sans SC", "Microsoft YaHei UI", sans-serif; }
+.bmp-side .ring { position: absolute; left: 50%; bottom: -70px; width: 260px; height: 260px; margin-left: -130px; border-radius: 50%; background: radial-gradient(circle, #2a2a2a 0 45%, #202020 46% 70%, #1b1b1b 71%); }
+.bmp-side .word { position: absolute; left: 20px; top: 26px; display: flex; align-items: center; gap: 8px; color: #fff; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+.bmp-side .word img { width: 24px; height: 24px; border-radius: 6px; }
+.bmp-side .tag { position: absolute; left: 20px; top: 60px; color: #8f8f8f; font-size: 11px; line-height: 16px; }
+.bmp-side .m { position: absolute; left: 50%; bottom: 14px; width: 132px; margin-left: -66px; }
+.bmp-side.bye .m { width: 120px; margin-left: -60px; }
+
+.bmp-head { width: 150px; height: 57px; position: relative; overflow: hidden; background: #fff; }
+.bmp-head img { position: absolute; right: 10px; top: 4px; height: 50px; }
+.bmp-head::before { content: ''; position: absolute; right: -14px; top: -20px; width: 96px; height: 96px; border-radius: 50%; background: #f4f4f4; }
+.bmp-head.bye::before { background: #f4f4f4; }
+</style>
+</head>
+<body>
+<div class="doc" id="doc"></div>
+<script>
+const ASSET = '../../../apps/desktop/public'
+const I = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${window.FOX_ICONS[name] || ''}</svg>`
+const M = { hi: `${ASSET}/mascot/fox/status/fox_sayhi.png`, read: `${ASSET}/mascot/fox/idle/fox_read_book.png`, bow: `${ASSET}/mascot/fox/status/fox_shy_bow.png`, logo: `${ASSET}/avatars/fox-assistant.png` }
+
+const sideBmp = (custom) => custom
+  ? `<div class="bmp-side"><div class="ring"></div><div class="word"><img src="${M.logo}" alt="">Fox</div><div class="tag">装在你电脑上的<br>AI 助手</div><img class="m" src="${M.hi}" alt=""></div>`
+  : `<div class="bmp-side-default"></div>`
+const headBmp = (custom, bye = false) => custom ? `<div class="bmp-head ${bye ? 'bye' : ''}"><img src="${bye ? M.bow : M.read}" alt=""></div>` : ''
+
+/* One dialog. `c` = customised. */
+function win(c, { caption, body }) {
+  return `<div class="nw ${c ? 'zh' : ''}">
+    <div class="nw-title">${c ? `<img class="ico" src="${M.logo}" alt="">` : '<i class="ico nsis"></i>'}<span>${caption}</span><span class="grow"></span><span class="x">${I('x')}</span></div>
+    <div class="nw-body">${body}</div>
+  </div>`
+}
+const bottom = (c, buttons, version = '0.1.0') => `<div class="nw-sep"></div><div class="nw-brand">${c ? `Fox ${version}` : 'Nullsoft Install System v3.10'}</div><div class="nw-btns">${buttons}</div>`
+const btn = (t, cls = '') => `<span class="b ${cls}">${t}</span>`
+const wizardBtns = (back, next, cancel, { backOff = false, nextOff = false, cancelOff = false } = {}) =>
+  `${back ? btn(back, backOff ? 'off' : '') : ''}${btn(next, nextOff ? 'off' : 'def')}<span class="gap"></span>${btn(cancel, cancelOff ? 'off' : '')}`
+const sidePage = (c, title, text, extra = '') => `<div class="nw-side">${sideBmp(c)}</div><div class="nw-right"><h1>${title}</h1><p>${text}</p>${extra}</div>`
+const innerPage = (c, title, sub, content, bye = false) => `<div class="nw-head"><b>${title}</b><span>${sub}</span>${c ? `<div class="himg">${headBmp(c, bye)}</div>` : ''}</div><div class="nw-content">${content}</div>`
+
+const pages = [
+  {
+    title: '欢迎', desc: '双击安装包看到的第一页。',
+    before: () => win(false, { caption: 'Fox Setup', body: sidePage(false, 'Welcome to Fox Setup', 'Setup will guide you through the installation of Fox.\n\nIt is recommended that you close all other applications before starting Setup. This will make it possible to update relevant system files without having to reboot your computer.\n\nClick Next to continue.') + bottom(false, wizardBtns(null, 'Next >', 'Cancel')) }),
+    after: () => win(true, { caption: '安装 Fox', body: sidePage(true, '安装 Fox', 'Fox 是装在你电脑上的 AI 助手，资料只保存在本机。\n\n安装大约需要半分钟。') + bottom(true, wizardBtns(null, '下一步', '取消')) }),
+    notes: ['左侧换成 Fox 自己的侧边图：石墨黑底、Fox 标志和打招呼的狐狸', '标题和说明改成中文短句，去掉「关闭其他程序」这类老式提示', '左下角「Nullsoft Install System」换成「Fox 0.1.0」，标题栏换成 Fox 图标'],
+  },
+  {
+    title: '已经装过（升级时）', desc: '电脑上已有旧版本时才出现。',
+    before: () => win(false, { caption: 'Fox Setup', body: innerPage(false, 'Already Installed', 'Choose how you want to install Fox.', `<p>An older version of Fox is installed on your system. It's recommended that you uninstall the current version before installing. Select the operation you want to perform and click Next to continue.</p><div class="rad on"><i></i>Uninstall before installing</div><div class="rad"><i></i>Do not uninstall</div>`) + bottom(false, wizardBtns('< Back', 'Next >', 'Cancel')) }),
+    after: () => win(true, { caption: '安装 Fox', body: innerPage(true, '已经装过 Fox', '这次会升级到 0.1.0。', `<p>这台电脑上已经有 Fox 0.0.9。你的资料和设置都会保留。</p><div class="rad on"><i></i>清理旧版本后安装（推荐）</div><div class="rad"><i></i>直接覆盖安装</div>`) + bottom(true, wizardBtns('上一步', '下一步', '取消')) }),
+    notes: ['先说清楚「资料和设置会保留」，用户最担心的就是这个', '两个选项改成大白话，推荐项标出来', '这些文字在 Tauri 的语言文件里，用 customLanguageFiles 就能改，不需要改模板'],
+  },
+  {
+    title: '选择安装位置', desc: '大多数人直接点「安装」。',
+    before: () => win(false, { caption: 'Fox Setup', body: innerPage(false, 'Choose Install Location', 'Choose the folder in which to install Fox.', `<p>Setup will install Fox in the following folder. To install in a different folder, click Browse and select another folder. Click Install to start the installation.</p><div class="grp"><span>Destination Folder</span><div class="inp-row"><span class="inp">C:\\Users\\Hury\\AppData\\Local\\Fox</span>${btn('Browse...')}</div></div><div class="small" style="margin-top:14px">Space required: 186.2 MB<br>Space available: 212.4 GB</div>`) + bottom(false, wizardBtns('< Back', 'Install', 'Cancel')) }),
+    after: () => win(true, { caption: '安装 Fox', body: innerPage(true, '选择安装位置', 'Fox 程序会装在这里。', `<p>你的资料不会放在这个文件夹。第一次打开 Fox 时，可以另外选择资料的存放位置。</p><div class="grp"><span>安装到</span><div class="inp-row"><span class="inp">C:\\Users\\Hury\\AppData\\Local\\Fox</span>${btn('更改…')}</div></div><div class="small" style="margin-top:14px;color:#5c5c5c">需要 186 MB，剩余 212 GB</div>`) + bottom(true, wizardBtns('上一步', '安装', '取消')) }),
+    notes: ['说清楚程序位置和资料位置是两回事，避免用户担心装到 C 盘会占空间', '空间信息合成一行', '按钮直接叫「安装」'],
+  },
+  {
+    title: '正在安装', desc: '只看进度，不显示文件列表。',
+    before: () => win(false, { caption: 'Fox Setup', body: innerPage(false, 'Installing', 'Please wait while Fox is being installed.', `<div>Extract: zvec_c_api.dll... 100%</div><div class="prog"><span style="width:58%"></span></div>${btn('Show details', 'w')}`) + bottom(false, wizardBtns('< Back', 'Next >', 'Cancel', { backOff: true, nextOff: true })) }),
+    after: () => win(true, { caption: '安装 Fox', body: innerPage(true, '正在安装', '大约需要半分钟。', `<div>正在复制文件…</div><div class="prog"><span style="width:58%"></span></div>`) + bottom(true, wizardBtns('上一步', '下一步', '取消', { backOff: true, nextOff: true })) }),
+    notes: ['用 ShowInstDetails nevershow 去掉「Show details」和文件名列表', '状态文字固定为「正在复制文件…」，不再滚动显示 dll 名称', '进度条颜色由 Windows 决定（绿色），开启视觉样式后改不了'],
+  },
+  {
+    title: '完成', desc: '默认勾选「立即打开」，接上首次启动设置。',
+    before: () => win(false, { caption: 'Fox Setup', body: sidePage(false, 'Completing Fox Setup', 'Fox has been installed on your computer.\n\nClick Finish to close Setup.', `<div style="margin-top:20px"><div class="chk on"><i></i>Run Fox</div><div class="chk on"><i></i>Create desktop shortcut</div></div>`) + bottom(false, wizardBtns('< Back', 'Finish', 'Cancel', { backOff: true, cancelOff: true })) }),
+    after: () => win(true, { caption: '安装 Fox', body: sidePage(true, 'Fox 装好了', '第一次打开时，Fox 会花大约 1 分钟做准备，之后就能直接用。', `<div style="margin-top:20px"><div class="chk on"><i></i>立即打开 Fox</div><div class="chk on"><i></i>在桌面创建快捷方式</div></div>`) + bottom(true, btn('完成', 'def')) }),
+    notes: ['提前告诉用户第一次打开会有 1 分钟准备，和首次启动设置窗口衔接', '只留一个「完成」按钮（自定义模板里去掉灰掉的「上一步」「取消」）', '复选框文字改成中文'],
+  },
+  {
+    title: '卸载', desc: '从「设置 › 应用」卸载时看到。',
+    before: () => win(false, { caption: 'Fox Uninstall', body: innerPage(false, 'Uninstall Fox', 'Remove Fox from your computer.', `<p>Fox will be uninstalled from the following folder. Click Uninstall to start the uninstallation.</p><div style="display:flex;align-items:center;gap:8px;margin-bottom:16px"><span>Uninstalling from:</span><span class="path-line" style="flex:1">C:\\Users\\Hury\\AppData\\Local\\Fox</span></div><div class="chk"><i></i>Delete the application data</div>`) + bottom(false, wizardBtns(null, 'Uninstall', 'Cancel')) }),
+    after: () => win(true, { caption: '卸载 Fox', body: innerPage(true, '卸载 Fox', '从这台电脑上移除 Fox。', `<p>会删除下面文件夹里的 Fox 程序。</p><div style="margin-bottom:16px"><span class="path-line" style="display:block">C:\\Users\\Hury\\AppData\\Local\\Fox</span></div><div class="chk"><i></i>同时删除 Fox 的设置和缓存（无法恢复）</div>`, true) + bottom(true, wizardBtns(null, '卸载', '取消')) }),
+    notes: ['右上角换成鞠躬道别的狐狸（卸载用单独的顶部图）', '删除数据的选项默认不勾，并写明「无法恢复」', '按钮叫「卸载」，不再有英文'],
+  },
+]
+
+function render(zoom = 1) {
+  document.getElementById('doc').innerHTML = `
+  <header class="hero"><h1>Fox 安装包（NSIS）</h1><p>Windows 安装包用的是 Tauri 自带的 NSIS 向导。它的窗口大小、按钮和字体都由 Windows 绘制，没法做成网页那样，但图片、图标、文字、语言和页面顺序都能改。下面每一页左边是现在打出来的样子，右边是改后的样子，都按 100% 缩放下的真实像素画。</p></header>
+  <section class="block"><h2>能改什么</h2><div class="cols3">
+    <div><b>只改配置就行</b><ul><li>安装器图标</li><li>欢迎页和完成页左侧的大图（164 × 314）</li><li>其他页右上角的小图（150 × 57）</li><li>语言：改成简体中文，不弹语言选择</li><li>升级、卸载页里的文字（语言文件）</li></ul></div>
+    <div><b>需要一份自定义模板</b><ul><li>欢迎页、完成页的标题和正文</li><li>窗口标题、左下角的「Nullsoft Install System」</li><li>字体改成微软雅黑 UI</li><li>隐藏「Show details」文件列表</li><li>小图放到右侧；完成页只留「完成」按钮</li></ul></div>
+    <div><b>改不了的</b><ul><li>窗口大小和整体布局</li><li>按钮、复选框、进度条的样式和颜色（Windows 原生控件）</li><li>圆角卡片、动画、深色模式</li><li>图片必须是 BMP，高分屏下会被拉伸。所以按 2 倍尺寸导出，让 Windows 缩小而不是放大</li></ul></div>
+  </div></section>
+
+  <div class="toolbar"><span>缩放</span><div class="seg">${[1, 1.25, 1.5].map((z) => `<button class="${z === zoom ? 'on' : ''}" onclick="render(${z})">${z * 100}%</button>`).join('')}</div><span>（Windows 显示缩放是 125% / 150% 时，窗口实际会这么大）</span></div>
+
+  ${pages.map((p, i) => `<section class="frame"><div class="frame-head"><span class="no">${String(i + 1).padStart(2, '0')}</span><h2>${p.title}</h2><p>${p.desc}</p></div>
+    <div class="pair"><div><span class="tag">现在</span><div class="zoomer" style="--z:${zoom}">${p.before()}</div></div><div><span class="tag"><b>改后</b></span><div class="zoomer" style="--z:${zoom}">${p.after()}</div></div></div>
+    <ul class="notes">${p.notes.map((n) => `<li>${n}</li>`).join('')}</ul></section>`).join('')}
+
+  <section class="block" style="margin-top:56px"><h2>需要准备的图片</h2>
+    <div class="assets">
+      <div class="asset"><b>sidebar.bmp</b>欢迎页、完成页左侧 · 164 × 314，导出 328 × 628<div class="px">${sideBmp(true)}</div></div>
+      <div class="asset"><b>header.bmp</b>安装页右上角 · 150 × 57，导出 300 × 114<div class="px">${headBmp(true)}</div></div>
+      <div class="asset"><b>uninstall-header.bmp</b>卸载页右上角 · 150 × 57<div class="px">${headBmp(true, true)}</div></div>
+      <div class="asset"><b>icon.ico</b>安装器图标，直接用现有的 <code>icons/icon.ico</code><div class="px" style="width:48px;height:48px"><img src="${M.logo}" alt="" style="width:48px;height:48px;border-radius:10px"></div></div>
+    </div>
+    <p class="notes" style="padding:0;margin-top:20px">图片要存成 24 位 BMP，不支持透明，所以底色直接画进图里：大图是石墨黑 #171717，小图是白色（和 NSIS 顶部背景一致）。狐狸用现有的吉祥物图片。</p>
+  </section>
+
+  <section class="block"><h2>怎么接进项目</h2><div class="two">
+    <div><h3>1. tauri.conf.json</h3><pre class="cfg">"bundle": {
+  "windows": {
+    "nsis": {
+      "installerIcon": "icons/icon.ico",
+      "sidebarImage": "installer/sidebar.bmp",
+      "headerImage": "installer/header.bmp",
+      "uninstallerHeaderImage": "installer/uninstall-header.bmp",
+      "languages": ["SimpChinese"],
+      "displayLanguageSelector": false,
+      "customLanguageFiles": {
+        "SimpChinese": "installer/SimpChinese.nsh"
+      },
+      "installMode": "currentUser",
+      "template": "installer/installer.nsi"
+    }
+  }
+}</pre></div>
+    <div><h3>2. installer/installer.nsi（复制 Tauri 自带模板后加这些）</h3><pre class="cfg"><span class="c">; 全局</span>
+Caption "安装 Fox"
+BrandingText "Fox \${VERSION}"
+SetFont "Microsoft YaHei UI" 9
+ShowInstDetails nevershow
+!define MUI_HEADERIMAGE_RIGHT
+!define MUI_ABORTWARNING
+!define MUI_ABORTWARNING_TEXT "确定要取消安装吗？"
+
+<span class="c">; 写在 MUI_PAGE_WELCOME 前</span>
+!define MUI_WELCOMEPAGE_TITLE "安装 Fox"
+!define MUI_WELCOMEPAGE_TEXT "Fox 是装在你电脑上的 AI 助手……"
+
+<span class="c">; 写在 MUI_PAGE_DIRECTORY 前</span>
+!define MUI_DIRECTORYPAGE_TEXT_TOP "你的资料不会放在这个文件夹……"
+
+<span class="c">; 写在 MUI_PAGE_FINISH 前</span>
+!define MUI_FINISHPAGE_TITLE "Fox 装好了"
+!define MUI_FINISHPAGE_TEXT "第一次打开时……"
+!define MUI_FINISHPAGE_RUN_TEXT "立即打开 Fox"
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "在桌面创建快捷方式"</pre></div>
+  </div>
+  <p class="notes" style="padding:0;margin-top:16px">升级页和卸载页的文字（如 uninstallBeforeInstalling、deleteAppData）放在 installer/SimpChinese.nsh 里，从 Tauri 自带的中文语言文件复制后改写。改完用 <code>pnpm tauri build</code> 打一次包，在 100% 和 150% 缩放下各装一遍确认图片清晰。</p>
+  </section>`
+}
+render()
+</script>
+</body>
+</html>

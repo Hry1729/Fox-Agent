@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="graphite">
+<head>
+<meta charset="utf-8" />
+<title>Fox 首次启动设置 · 设计稿</title>
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css" />
+<link rel="stylesheet" href="../../../apps/desktop/src/styles/themes.css" />
+<script src="icons.js"></script>
+<script>
+  (() => {
+    const theme = localStorage.getItem('fox-mock-theme') || 'graphite'
+    const mode = localStorage.getItem('fox-mock-mode') || 'light'
+    document.documentElement.dataset.colorTheme = theme
+    document.documentElement.classList.toggle('dark', mode === 'dark')
+  })()
+</script>
+<style>
+/* Proposed Paper accent (warm ink instead of Fox blue); same override as the knowledge mockup. */
+:root[data-color-theme="paper"]:not(.dark) {
+  --primary: oklch(0.3 0.02 60); --primary-foreground: oklch(0.985 0.005 85);
+  --brand: oklch(0.3 0.02 60); --brand-foreground: oklch(0.985 0.005 85); --brand-soft: oklch(0.93 0.016 80);
+  --ring: oklch(0.62 0.03 65);
+}
+:root[data-color-theme="paper"].dark {
+  --primary: oklch(0.93 0.012 85); --primary-foreground: oklch(0.24 0.012 60);
+  --brand: oklch(0.9 0.015 85); --brand-foreground: oklch(0.24 0.012 60); --brand-soft: oklch(0.33 0.012 70);
+  --ring: oklch(0.6 0.02 75);
+}
+:root {
+  --faint: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
+  --shadow-sm: 0 1px 2px color-mix(in oklch, var(--foreground) 6%, transparent);
+  --shadow-md: 0 4px 16px color-mix(in oklch, var(--foreground) 9%, transparent);
+  --shadow-lg: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+.dark {
+  color-scheme: dark;
+  --faint: color-mix(in oklch, var(--muted-foreground) 88%, var(--background));
+  --shadow-sm: 0 1px 2px color-mix(in oklch, black 30%, transparent);
+  --shadow-md: 0 6px 20px color-mix(in oklch, black 32%, transparent);
+  --shadow-lg: 0 18px 55px color-mix(in oklch, black 35%, transparent);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: color-mix(in oklch, var(--shell) 70%, var(--muted)); }
+svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } .iwin, .bar span { transition: none !important; } }
+
+/* ---------- Doc ---------- */
+.doc { width: 1160px; margin: 0 auto; padding: 56px 40px 120px; }
+.doc-hero h1 { margin: 0 0 8px; font-size: 32px; font-weight: 600; letter-spacing: -.02em; }
+.doc-hero p { margin: 0; max-width: 820px; color: var(--muted-foreground); font-size: 14px; line-height: 1.75; }
+.block { margin-top: 24px; padding: 28px 32px; border-radius: var(--fox-radius-large); background: var(--card); border: 1px solid var(--border); }
+.block h2 { margin: 0 0 16px; font-size: 16px; font-weight: 600; }
+.ways { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.ways b { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.ways em { font-style: normal; font-size: 12px; font-weight: 500; color: var(--muted-foreground); padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); }
+.ways em.rec { color: var(--primary-foreground); background: var(--primary); border-color: transparent; }
+.ways p { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.75; }
+.principles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+.principles b { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.principles span { color: var(--muted-foreground); font-size: 13px; line-height: 1.7; }
+.frame { margin-top: 64px; }
+.frame-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+.frame-head .no { color: var(--faint); font-size: 13px; }
+.frame-head h2 { margin: 0; font-size: 24px; font-weight: 600; }
+.frame-head p { margin: 0; color: var(--muted-foreground); font-size: 14px; }
+.stage { display: grid; place-items: center; min-height: 620px; padding: 40px; border-radius: var(--fox-radius-large); background: var(--shell); border: 1px solid var(--border); }
+.notes { margin: 16px 0 0; padding-left: 18px; color: var(--muted-foreground); font-size: 13px; line-height: 1.8; }
+.switcher { position: fixed; top: 16px; right: 16px; z-index: 50; display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; border-radius: var(--fox-radius-large); background: var(--popover); border: 1px solid var(--border); box-shadow: var(--shadow-md); color: var(--muted-foreground); font-size: 13px; }
+.switcher svg { width: 15px; height: 15px; }
+
+/* ---------- Shared controls ---------- */
+.seg { display: inline-flex; padding: 3px; border-radius: var(--fox-radius-card); background: var(--muted); }
+.seg button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid transparent; border-radius: calc(var(--fox-radius-card) - 2px); background: transparent; color: var(--muted-foreground); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
+.seg .on { background: var(--background); color: var(--foreground); border-color: var(--border); box-shadow: var(--shadow-sm); }
+.btn { height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 14px; border-radius: var(--fox-radius-control); border: 1px solid var(--border); background: var(--background); color: var(--foreground); font: inherit; font-size: 13px; font-weight: 500; white-space: nowrap; box-shadow: var(--shadow-sm); cursor: pointer; }
+.btn.primary { border-color: transparent; background: var(--primary); color: var(--primary-foreground); }
+.btn.ghost { border-color: transparent; background: transparent; box-shadow: none; color: var(--muted-foreground); padding: 0 8px; }
+.btn.lg { height: 36px; padding: 0 20px; }
+.btn svg { width: 15px; height: 15px; }
+.bar { height: 4px; border-radius: 99px; background: var(--muted); overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: inherit; background: var(--brand); transition: width .4s ease; }
+.link { color: var(--foreground); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border); cursor: pointer; }
+
+/* ---------- Installer window ---------- */
+.iwin { width: 720px; height: 500px; display: flex; flex-direction: column; overflow: hidden; border-radius: 10px; background: var(--background); border: 1px solid var(--border); box-shadow: var(--shadow-lg); color: var(--foreground); font-size: 13px; transition: width .25s ease, height .25s ease; }
+.iwin.wide { width: 1000px; height: 560px; }
+.tbar { height: 36px; flex: none; display: flex; align-items: center; gap: 8px; padding-left: 12px; color: var(--muted-foreground); font-size: 12px; }
+.tbar img { width: 18px; height: 18px; border-radius: 5px; }
+.tbar .grow { flex: 1; }
+.tbar .wc { width: 46px; height: 100%; display: grid; place-items: center; }
+.tbar .wc svg { width: 15px; height: 15px; }
+.ibody { flex: 1; min-height: 0; padding: 8px 40px 0; }
+.ifoot { height: 64px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 24px; border-top: 1px solid var(--border); }
+.ifoot .grow { flex: 1; }
+.ifoot .note { color: var(--muted-foreground); font-size: 12px; }
+
+.ihead { display: flex; align-items: center; gap: 16px; }
+.ihead img { width: 60px; height: 60px; object-fit: contain; flex: none; }
+.ihead h1 { margin: 0 0 4px; font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -.01em; }
+.ihead p { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.6; }
+
+.cols { display: grid; grid-template-columns: 1fr; gap: 32px; margin-top: 24px; }
+.wide .cols { grid-template-columns: 380px 1fr; }
+.prog-top { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
+.steps { margin-top: 12px; }
+.step { display: flex; align-items: center; gap: 12px; min-height: 34px; color: var(--faint); font-size: 14px; }
+.step .ic { width: 16px; height: 16px; display: grid; place-items: center; flex: none; }
+.step .ic .hollow { width: 6px; height: 6px; border-radius: 50%; box-shadow: 0 0 0 1.25px var(--faint) inset; }
+.step .nm { flex: 1; }
+.step .nm small { display: block; margin-top: 1px; color: var(--muted-foreground); font-size: 12px; font-weight: 400; }
+.step .t { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.step.finish { color: var(--muted-foreground); }
+.step.done .ic { color: var(--muted-foreground); }
+.step.active { color: var(--foreground); font-weight: 600; }
+.step.active .ic { color: var(--brand); }
+.step.active .t { color: var(--muted-foreground); }
+.step.error { color: var(--foreground); font-weight: 600; }
+.step.error .ic { color: var(--warning); }
+.step.error .t { color: var(--warning); font-weight: 500; }
+.step.skipped { color: var(--muted-foreground); }
+
+.log { display: flex; flex-direction: column; min-height: 0; height: 366px; }
+.log-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 12px; font-weight: 500; }
+.log-head span { color: var(--faint); font-weight: 400; }
+.log pre { flex: 1; margin: 0; padding: 12px 14px; overflow: hidden; border-radius: var(--fox-radius-card); background: var(--muted); color: var(--muted-foreground); font: 12px/1.75 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; display: flex; flex-direction: column; justify-content: flex-end; }
+.log pre b { color: var(--foreground); font-weight: 400; }
+
+/* Welcome */
+.welcome { display: flex; flex-direction: column; height: 100%; padding-top: 28px; }
+.welcome img { width: 84px; height: 84px; object-fit: contain; }
+.welcome h1 { margin: 16px 0 6px; font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -.01em; }
+.welcome > p { margin: 0; color: var(--muted-foreground); font-size: 14px; line-height: 1.7; }
+.opt { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.opt:first-of-type { margin-top: 28px; border-top: 1px solid var(--border); }
+.opt > svg { width: 18px; height: 18px; color: var(--muted-foreground); }
+.opt .tx { flex: 1; min-width: 0; }
+.opt .tx b { display: block; font-size: 13px; font-weight: 500; }
+.opt .tx small { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 12px; }
+.opt code { font: 12px "Cascadia Mono", Consolas, monospace; color: var(--foreground); }
+.switch { width: 32px; height: 18px; flex: none; border-radius: 99px; background: var(--input); position: relative; }
+.switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--background); box-shadow: var(--shadow-sm); }
+.switch.on { background: var(--primary); }
+.switch.on::after { left: 16px; background: var(--primary-foreground); }
+
+/* Done */
+.finish { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; }
+.finish img { width: 112px; height: 112px; object-fit: contain; }
+.finish h1 { margin: 16px 0 6px; font-size: 24px; line-height: 32px; font-weight: 600; }
+.finish p { margin: 0; color: var(--muted-foreground); font-size: 14px; line-height: 1.7; }
+.finish .next { display: flex; gap: 8px; margin-top: 24px; }
+.finish .next span { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: var(--fox-radius-control); border: 1px solid var(--border); color: var(--muted-foreground); font-size: 12px; }
+.finish .next svg { width: 14px; height: 14px; }
+.alert { display: flex; gap: 10px; margin-top: 16px; padding: 12px 14px; border-radius: var(--fox-radius-card); background: color-mix(in oklch, var(--warning) 10%, var(--background)); font-size: 13px; line-height: 1.6; }
+.alert svg { margin-top: 2px; color: var(--warning); }
+.alert b { font-weight: 500; }
+.alert span { color: var(--muted-foreground); }
+</style>
+</head>
+<body>
+<div class="switcher" id="switcher"></div>
+<div class="doc" id="doc"></div>
+<script>
+const ASSET = '../../../apps/desktop/public'
+const MASCOT = { hi: `${ASSET}/mascot/fox/status/fox_sayhi.png`, read: `${ASSET}/mascot/fox/idle/fox_read_book.png`, worried: `${ASSET}/mascot/fox/status/fox_worried.png`, cheer: `${ASSET}/mascot/fox/status/fox_celebrate.png` }
+const I = (name, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${window.FOX_ICONS[name] || ''}</svg>`
+
+const STEPS = [
+  { name: '检查电脑环境', time: 2, log: ['检查 Windows 版本 … Windows 11 23H2', '检查 WebView2 运行时 … 已安装 130.0.2849', '检查 VC++ 运行库 … 随安装包附带，跳过'] },
+  { name: '准备运行组件', time: 9, log: ['解压 agent-runtime … 214 个文件', '校验 agent-runtime 签名 … 通过', '启动自检进程 … 正常退出 (0)'] },
+  { name: '准备文档阅读组件', time: 6, log: ['解压 officecli … 支持 docx / xlsx / pptx', '解压 pdf-renderer … 完成', '试读 sample.docx … 1.2 KB 文本'] },
+  { name: '创建资料存放位置', time: 2, log: ['创建目录 D:\\FoxData', '初始化数据库 schema v12 … 完成', '向量存储读写自检 … 通过'] },
+  { name: '放入使用指南', time: 3, log: ['导入「Fox 使用指南」… 11 份资料', '分段 38 个，建立文字索引 … 完成'] },
+  { name: '下载搜索模型', time: 14, size: 23, log: ['下载 bge-small-zh-v1.5 … 23.3 MB', '校验 SHA-256 … 通过', '设为默认搜索模型'] },
+]
+
+/* ---------------- Installer window ---------------- */
+// view: welcome | progress | error | done
+function installer({ view, current = 0, pct = 0, elapsed = 0, wide = false, live = false, downloaded = 0 }) {
+  const on = (fn) => live ? `onclick="${fn}"` : ''
+  const tbar = `<div class="tbar"><img src="${ASSET}/avatars/fox-assistant.png" alt="">Fox<div class="grow"></div><span class="wc">${I('minus')}</span><span class="wc">${I('x')}</span></div>`
+
+  if (view === 'welcome') return `<div class="iwin">${tbar}
+    <div class="ibody"><div class="welcome">
+      <img src="${MASCOT.hi}" alt="">
+      <h1>欢迎使用 Fox</h1>
+      <p>开始之前，Fox 需要做一次准备，大约 1 分钟。以后打开会直接进入。</p>
+      <div class="opt">${I('folder')}<div class="tx"><b>资料存放位置</b><small><code>D:\\FoxData</code> · 剩余 212 GB · 只保存在这台电脑上</small></div><span class="btn ghost">更改</span></div>
+      <div class="opt">${I('sparkles')}<div class="tx"><b>同时下载搜索模型</b><small>23 MB，让搜索能理解意思相近的说法。也可以以后再装</small></div><span class="switch on"></span></div>
+    </div></div>
+    <div class="ifoot"><span class="note">${I('shield-check')}</span><span class="note">不会上传你的任何资料</span><div class="grow"></div><button class="btn primary lg" ${on('demoStart()')}>开始准备${I('arrow-right')}</button></div>
+  </div>`
+
+  if (view === 'done') return `<div class="iwin">${tbar}
+    <div class="ibody"><div class="finish">
+      <img src="${MASCOT.cheer}" alt="">
+      <h1>准备好了</h1>
+      <p>用时 ${elapsed || 36} 秒。我们放了一份使用指南，打开就能看。</p>
+      <div class="next"><span>${I('book-open')}看看使用指南</span><span>${I('folder')}添加本地文件</span></div>
+    </div></div>
+    <div class="ifoot"><span class="note">下次打开 Fox 会直接进入</span><div class="grow"></div>${live ? `<button class="btn ghost" onclick="demoReset()">${I('rotate-ccw')}重新演示</button>` : ''}<button class="btn primary lg">开始使用</button></div>
+  </div>`
+
+  const error = view === 'error'
+  const doneCount = error ? current : current
+  const steps = STEPS.map((s, i) => {
+    if (i < current) return `<div class="step done"><span class="ic">${I('check')}</span><span class="nm">${s.name}</span><span class="t">${s.time}s</span></div>`
+    if (i === current && error) return `<div class="step error"><span class="ic">${I('circle-alert')}</span><span class="nm">${s.name}<small>网络连接中断，已下载 12.4 / 23 MB</small></span><span class="t">没完成</span></div>`
+    if (i === current) {
+      const sub = s.size ? `<small>${downloaded.toFixed(1)} / ${s.size} MB</small>` : ''
+      return `<div class="step active"><span class="ic">${I('loader-circle', 'spin')}</span><span class="nm">${s.name}${sub}</span><span class="t">${elapsed}s</span></div>`
+    }
+    return `<div class="step"><span class="ic"><i class="hollow"></i></span><span class="nm">${s.name}</span></div>`
+  }).join('')
+  const lines = STEPS.slice(0, Math.min(current + 1, STEPS.length)).flatMap((s, i) => (i < current ? s.log : s.log.slice(0, 1)).map((l, j) => `<b>[10:24:${String(3 + i * 4 + j).padStart(2, '0')}]</b> ${l}`))
+  if (error) lines.push('<b>[10:24:41]</b> 下载中断：connection reset by peer (os error 10054)')
+  const log = `<div class="log"><div class="log-head">详细信息<span>${lines.length} 行 ${I('copy')}</span></div><pre>${lines.map((l) => `<div>${l}</div>`).join('')}</pre></div>`
+
+  const head = error
+    ? `<div class="ihead"><img src="${MASCOT.worried}" alt=""><div><h1>还差一步没完成</h1><p>其他准备都好了。搜索模型可以现在重试，也可以先跳过，之后在「向量模型」里再装。</p></div></div>`
+    : `<div class="ihead"><img src="${MASCOT.read}" alt=""><div><h1>正在为第一次使用做准备</h1><p>只需要做一次，大约 1 分钟。准备好后会自动进入 Fox。</p></div></div>`
+
+  const toggle = `<button class="btn ghost" ${on('demoToggle()')}>${I('file-text')}${wide ? '隐藏详细信息' : '显示详细信息'}${I(wide ? 'chevron-up' : 'chevron-down')}</button>`
+  const actions = error
+    ? `<button class="btn">跳过，以后再装</button><button class="btn primary">${I('rotate-ccw')}重试</button>`
+    : `<button class="btn">取消</button>`
+
+  return `<div class="iwin ${wide ? 'wide' : ''}">${tbar}
+    <div class="ibody">
+      ${head}
+      <div class="cols">
+        <div>
+          <div class="prog-top"><span>${doneCount} / ${STEPS.length} 步</span><span>${Math.round(pct)}%</span></div>
+          <div class="bar"><span style="width:${pct}%"></span></div>
+          <div class="steps">${steps}</div>
+        </div>
+        ${wide ? log : ''}
+      </div>
+    </div>
+    <div class="ifoot">${toggle}<div class="grow"></div>${actions}</div>
+  </div>`
+}
+
+/* ---------------- Live demo ---------------- */
+const demo = { view: 'welcome', current: 0, pct: 0, elapsed: 0, total: 0, wide: false, downloaded: 0, timer: null }
+function demoDraw() { const el = document.getElementById('demo'); if (el) el.innerHTML = installer({ ...demo, live: true }) }
+function demoStart() {
+  Object.assign(demo, { view: 'progress', current: 0, pct: 0, elapsed: 0, total: 0, downloaded: 0 })
+  clearInterval(demo.timer)
+  demo.timer = setInterval(() => {
+    const step = STEPS[demo.current]
+    demo.elapsed += 1
+    demo.total += 1
+    if (step.size) demo.downloaded = Math.min(step.size, demo.downloaded + step.size / step.time)
+    const before = STEPS.slice(0, demo.current).reduce((n, s) => n + s.time, 0)
+    const all = STEPS.reduce((n, s) => n + s.time, 0)
+    demo.pct = Math.min(100, ((before + Math.min(demo.elapsed, step.time)) / all) * 100)
+    if (demo.elapsed >= step.time) { demo.current += 1; demo.elapsed = 0 }
+    if (demo.current >= STEPS.length) { clearInterval(demo.timer); demo.view = 'done'; demo.elapsed = demo.total; demo.wide = false }
+    demoDraw()
+  }, 220)
+  demoDraw()
+}
+function demoToggle() { demo.wide = !demo.wide; demoDraw() }
+function demoReset() { clearInterval(demo.timer); Object.assign(demo, { view: 'welcome', wide: false }); demoDraw() }
+
+/* ---------------- Theme switcher ---------------- */
+const THEMES = [['graphite', '石墨'], ['paper', '暖纸'], ['mist', '雾蓝']]
+function setTheme(theme, mode) {
+  const root = document.documentElement
+  if (theme) { root.dataset.colorTheme = theme; localStorage.setItem('fox-mock-theme', theme) }
+  if (mode) { root.classList.toggle('dark', mode === 'dark'); localStorage.setItem('fox-mock-mode', mode) }
+  renderSwitcher()
+}
+function renderSwitcher() {
+  const root = document.documentElement
+  const theme = root.dataset.colorTheme
+  const mode = root.classList.contains('dark') ? 'dark' : 'light'
+  document.getElementById('switcher').innerHTML = `${I('palette')}
+    <div class="seg">${THEMES.map(([k, l]) => `<button class="${theme === k ? 'on' : ''}" onclick="setTheme('${k}')">${l}</button>`).join('')}</div>
+    <div class="seg"><button class="${mode === 'light' ? 'on' : ''}" onclick="setTheme(null,'light')">${I('sun')}浅色</button><button class="${mode === 'dark' ? 'on' : ''}" onclick="setTheme(null,'dark')">${I('moon')}深色</button></div>`
+}
+
+/* ---------------- Doc ---------------- */
+const frames = [
+  { title: '开始', desc: '第一次打开 Fox 时看到的窗口。', html: installer({ view: 'welcome' }),
+    notes: ['只问一件事：资料放在哪。默认值可以直接用，所以用户只需要点「开始准备」', '搜索模型默认一起下载，用开关表示，关掉也不影响使用', '程序装在哪由安装包决定，这里不再问'] },
+  { title: '准备中', desc: '默认只看步骤和进度，不显示日志。', html: installer({ view: 'progress', current: 2, pct: 41, elapsed: 4 }),
+    notes: ['步骤名都是大白话，正在做的一步加粗并转圈，做完的变灰并显示用时', '标题下一句话说清楚：只做一次、大约多久、做完会怎样', '底部只有「显示详细信息」和「取消」'] },
+  { title: '准备中 · 展开详细信息', desc: '需要排查问题时再看，窗口向右展开。', html: installer({ view: 'progress', current: 5, pct: 78, elapsed: 6, downloaded: 9.8, wide: true }),
+    notes: ['日志放在右侧灰底面板，带时间，可以一键复制给客服', '技术细节（版本号、文件数、校验结果）只出现在这里', '下载类的步骤在步骤名下面显示「已下载 / 总大小」'] },
+  { title: '出了问题', desc: '说清楚哪一步没完成、能怎么办。', html: installer({ view: 'error', current: 5, pct: 80, wide: false }),
+    notes: ['标题不用「错误」「失败」，而是「还差一步没完成」，并说明其他步骤已经好了', '只有出问题的那一步用黄色图标，原始报错只在详细信息里', '能跳过的步骤给出「跳过，以后再装」；不能跳过的只给「重试」和「换个位置」'] },
+  { title: '准备好了', desc: '结束时给一个明确的下一步。', html: installer({ view: 'done', elapsed: 36 }),
+    notes: ['一个主按钮「开始使用」，点击后关闭这个窗口并打开主界面', '下面两个小入口直接带用户去最常用的地方', '下次启动会检查准备是否完整，完整就直接进入'] },
+]
+document.getElementById('doc').innerHTML = `
+  <header class="doc-hero"><h1>Fox 首次启动设置</h1><p>参考 Hermes 的安装界面，做成 Fox 第一次打开时的准备窗口。颜色、圆角和三套主题都直接引用 <code>apps/desktop/src/styles/themes.css</code>，右上角可以切换。下面第一个窗口可以点击操作，演示完整流程。</p></header>
+  <section class="block"><h2>能不能做</h2><div class="ways">
+    <div><b>Tauri 自带的安装包</b><p>Tauri 在 Windows 上打出 NSIS（.exe）和 MSI 两种安装包。NSIS 可以换图标、顶部图片、侧边图片、语言，也可以换一份自己的 .nsi 模板，但始终是 Windows 传统的「下一步」向导，做不出这种网页式界面。</p></div>
+    <div><b>首次启动设置窗口 <em class="rec">推荐</em></b><p>Hermes 这个界面其实就是应用第一次打开时的准备窗口（它写着「只需要做一次，之后启动会跳过」）。我们也这样做：安装包尽量精简，只负责把文件放到电脑上；第一次打开 Fox 时先显示这个窗口，完成检查环境、创建资料目录、放入使用指南、下载搜索模型等步骤。界面完全用我们自己的 React 和主题来写。</p></div>
+    <div><b>自己写一个安装器程序 <em>工作量大</em></b><p>另外用 Tauri 做一个小的安装器程序，由它解压并安装 Fox。界面也能完全自定义，但要自己处理开始菜单、卸载、升级、管理员权限和签名，这些现在都是 NSIS 帮我们做的。</p></div>
+  </div></section>
+  <section class="block"><h2>设计原则</h2><div class="principles">
+    <div><b>默认不看日志</b><span>普通用户只看步骤和进度，日志收在「显示详细信息」后面，展开时窗口向右变宽。</span></div>
+    <div><b>只问一件事</b><span>开始前只问资料放在哪，其他全用默认值。</span></div>
+    <div><b>出问题时说怎么办</b><span>说明哪一步没完成、其他是否已经好了，给出重试或跳过。</span></div>
+    <div><b>和主界面同一套主题</b><span>跟随系统的浅色 / 深色，三套主题都能用，装完进入主界面不会突然换风格。</span></div>
+  </div></section>
+  <section class="frame"><div class="frame-head"><span class="no">演示</span><h2>可以点的完整流程</h2><p>点「开始准备」，准备中可以展开详细信息。</p></div><div class="stage" id="demo"></div></section>
+  ${frames.map((f, i) => `<section class="frame"><div class="frame-head"><span class="no">${String(i + 1).padStart(2, '0')}</span><h2>${f.title}</h2><p>${f.desc}</p></div><div class="stage">${f.html}</div><ul class="notes">${f.notes.map((n) => `<li>${n}</li>`).join('')}</ul></section>`).join('')}`
+renderSwitcher()
+demoDraw()
+</script>
+</body>
+</html>
