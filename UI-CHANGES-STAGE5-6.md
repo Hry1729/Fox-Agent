@@ -138,6 +138,33 @@
 
 **保留的死代码**：`fox-thread-empty.tsx`、`fox-thread-composer.tsx` 及其 3 个测试文件未删（后续优化再决定去留），测试为组件级挂载，照常通过。
 
+### 1.7 阶段 5E-1 —— 头行整行可点 + 圆形滚动到底按钮（**未提交**）
+
+**需求（用户实测后提出）**：① 头像右侧的思考指示器尽量跟随主题色（石墨/暖纸/雾蓝），不行就算了；② 头像所在行除头像本身外整行可点折叠；③ 滚动到底按钮改成圆形，模型还在思考就显示思考点阵，思考结束显示箭头。
+
+**改动**：
+
+| 文件 | 改动 |
+|---|---|
+| `components/FoxThinkingDots.tsx` + `fox-thinking-dots.css`（新） | 三颗 3.5px 点，`color: var(--fox-thinking-shimmer, var(--brand))`；reduced-motion / forced-colors 下静止 |
+| `turn-process-header.tsx` | 分隔点与计时器移进 trigger（`useId` + `aria-describedby`，聚焦仍读得到用时）；状态文字加 `.fox-process-turn-label` |
+| `runtime-process-groups.css` | trigger `flex:1 1 auto`；省略号规则收窄到 `> .fox-process-turn-label`，不再误伤计时器 |
+| `styles/workbench.css` | `.fox-runtime-process-head` gap 归 0、阶段头 `width:100%` + `padding-left:7px`——头像与状态文字之间不再有死区 |
+| `timeline/fox-runtime-timeline.tsx` | 底栏按钮换成 `FoxConversationScrollButton`（自读 `useStickToBottomContext`），思考中点阵、空闲箭头；类名沿用 ai-elements 版，深色底色不偏移 |
+| `thread/fox-thread.tsx` | 新引擎同款：不再在 running 时整块隐藏。到底时该原语自己返回 null（`ThreadScrollToBottom.js:28`），原先的早返回恰好把最需要它的场景拿掉了 |
+
+**主题跟随（浏览器实测，非推断）**：同一个按钮 graphite 下 `oklch(0.364 0 0)`、paper 下 `oklch(0.6204 0.1056 220.2)`。点阵色取自 `--fox-thinking-shimmer`（`globals.css:90` = `color-mix(--brand 80%, --background)`），所以三套主题与深浅模式自动跟随，组件本身不需要调色板。
+
+**`process-layout-browser-check.mjs` 的三处修正**：
+
+1. `shimmer` 用例断言的是「状态行横向滚动（`scrollLeft>0`）」，而组件早已改成「裁剪 + 末位淡出、永不横滚」（`fox-runtime-process-view.tsx:139-145`、`workbench.css:3675-3698`）。A/B 对照证明这条断言在本次改动前后**同样失败**（`{"scroll":0,"copyScroll":0,"titleMask":"none"}`），属过期断言而非回归。已改为断言现行契约：被裁剪的两份文字都带 `is-overflowing` 且 mask 逐字相同（同一测量、不会漂移），`scrollLeft` 恒为 0，短标题（`#status-probe`）不加淡出。
+2. 新增 `scroll-graphite-running` / `scroll-paper-running` / `scroll-mist-idle` 三个用例：正圆（32×32、`border-radius:50%`）、思考态 3 点且无箭头、结束态有箭头且无点阵、`aria-label` 不变、点阵色随主题变化（两主题色不同才放行）。
+3. 头行可点新增 `rowTailHit` / `headTailHit` / `toggleTailGap` / `headTailGap` / `avatarInert` / `timerHit`。**反向对照**：撤掉 `flex:1 1 auto` 与阶段头 `width:100%` 后，`rowTailHit` 立刻 false、`toggleTailGap` 报出 657px 死区、命中元素退化成 `DIV.fox-runtime-process-head`——证明断言不是空跑。详细模式下阶段头没有折叠控件（零尺寸），该项记为 `null` 并按「不适用」跳过。
+
+**验证**：tsc 0 错误；测试 **585 通过 / 2 跳过 / 0 失败**；浏览器检查 **13 个用例全绿**（15 张截图，`output/process-layout-browser/`）；`vite build` 通过，体积门槛 **entry 236.7 / 首屏 JS 307.7 KiB**，release 隔离检查 OK。
+
+**过程事故（值得记）**：这批改动一度从工作树「消失」。原因不是别的 agent 覆盖，而是我自己写的 A/B 脚本——`restore` trap 在 `cd apps/desktop` 之后才执行，trap 里的相对路径全部解析失败（`cp` 静默报错），工作树停在 HEAD，而备份完好。教训：EXIT trap 里的路径一律绝对化，且脚本自报的「还原成功」不可信，要拿 `cmp` 对 HEAD 复核。
+
 ---
 
 ## 2. 第 6 步：页面重设计（苹果设计视角，**未完成，已暂停**）
