@@ -46,7 +46,7 @@ function ConversationRunStatus({ indicator, className = 'fox-sidebar-conversatio
     title={label}
     data-run-indicator={indicator ?? undefined}
   >
-    <ConversationStatusIcon state={state} />
+    <ConversationStatusIcon state={state} size={9.8} />
   </span>
 }
 

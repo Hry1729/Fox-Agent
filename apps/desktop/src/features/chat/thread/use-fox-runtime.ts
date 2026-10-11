@@ -88,7 +88,7 @@ function convertFoxThreadMessage(message: FoxThreadMessage): ThreadMessageLike {
     // ("status is only supported for assistant messages").
     status: message.role === 'assistant' ? foxMessageStatus(message) : undefined,
     attachments: message.attachments.length ? message.attachments : undefined,
-    metadata: message.optimistic ? { isOptimistic: true } : undefined,
+    metadata: { custom: { fox: message }, ...(message.optimistic ? { isOptimistic: true } : {}) },
   }
 }
 

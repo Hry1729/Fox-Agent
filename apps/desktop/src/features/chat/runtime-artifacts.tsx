@@ -1,6 +1,6 @@
 import { useId, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, FileEdit, FileText, Globe2, ImagePlus } from 'lucide-react'
-import { Artifact, ArtifactDescription, ArtifactHeader, ArtifactTitle } from '@/components/ai-elements/artifact'
+import { File as MessageFile } from '@/components/assistant-ui/elements/file'
 import type { ArtifactRecord } from '@/features/conversations/model/types'
 
 /** Host classification wins; legacy rows use the historical extension heuristic. */
@@ -84,24 +84,12 @@ export function artifactSummaryLine(artifact: ArtifactRecord) {
 }
 
 function ArtifactResultCard({ artifact, onOpenArtifact }: { artifact: ArtifactRecord; onOpenArtifact?: (artifact: ArtifactRecord) => void }) {
-  const isWeb = artifact.mediaType === 'text/html' || /html|web/i.test(artifact.artifactType)
-  const ArtifactIcon = isWeb ? Globe2 : artifact.mediaType?.startsWith('image/') ? ImagePlus : FileText
-  // Name, one summary line, icon. The directory is the hover title, so a long
-  // canonical path never crowds the card.
-  return <button type="button" className="fox-message-artifact-trigger" onClick={() => onOpenArtifact?.(artifact)}>
-    <Artifact className="fox-message-artifact" title={artifact.storagePath ?? artifact.displayName}>
-      <ArtifactHeader className="fox-message-artifact-head">
-        <div className="fox-message-artifact-title">
-          <span className="fox-message-artifact-icon"><ArtifactIcon size={18} /></span>
-          <div><ArtifactTitle title={artifact.storagePath ?? undefined}>{artifact.displayName}</ArtifactTitle><ArtifactDescription>{artifactSummaryLine(artifact)}</ArtifactDescription></div>
-        </div>
-        <ChevronRight size={14} />
-      </ArtifactHeader>
-    </Artifact>
+  return <button type="button" className="fox-message-artifact-trigger" title={artifactSummaryLine(artifact)} onClick={() => onOpenArtifact?.(artifact)}>
+    <MessageFile className="fox-message-artifact" title={artifact.storagePath ?? artifact.displayName} name={artifact.displayName} mediaType={artifact.mediaType} bytes={artifact.byteSize} canOpen={Boolean(onOpenArtifact)} />
   </button>
 }
 
-/** Keep both file categories on one row; the selected category opens below it. */
+/** A few files stay visible; larger batches keep their category disclosures. */
 export function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRecord[]; onOpenArtifact?: (artifact: ArtifactRecord) => void }) {
   const [openGroup, setOpenGroup] = useState<'result' | 'process' | null>(null)
   const panelId = useId()
@@ -118,16 +106,23 @@ export function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: Art
   }, [artifacts])
   if (!artifacts.length) return null
 
+  if (artifacts.length <= 3) return <section className="fox-message-file-results is-direct" aria-label="文件结果">
+    {([['本次文件结果', deliverables], ['过程文件', processFiles]] as const).map(([label, files]) => files.length > 0 && <div key={label} role="region" aria-label={label}>
+      <div className="fox-message-file-results-head"><strong>{label}</strong><span>{files.length}</span></div>
+      <div className="fox-message-artifacts">{files.map(artifact => <ArtifactResultCard key={artifact.id} artifact={artifact} onOpenArtifact={onOpenArtifact} />)}</div>
+    </div>)}
+  </section>
+
   const activeGroup = openGroup === 'result' && deliverables.length ? 'result'
     : openGroup === 'process' && processFiles.length ? 'process' : null
   return <section className="fox-message-file-results" aria-label="文件结果">
     <div className="fox-message-file-results-row">
-      <button type="button" className="fox-message-file-results-head fox-message-artifact-group-trigger" aria-expanded={activeGroup === 'result'} aria-controls={`${panelId}-result`} disabled={!deliverables.length} onClick={() => setOpenGroup(openGroup === 'result' ? null : 'result')}>
+      {deliverables.length > 0 && <button type="button" className="fox-message-file-results-head fox-message-artifact-group-trigger" aria-expanded={activeGroup === 'result'} aria-controls={`${panelId}-result`} onClick={() => setOpenGroup(openGroup === 'result' ? null : 'result')}>
         <FileEdit size={13} /><strong>本次文件结果</strong><span>{deliverables.length}</span>{activeGroup === 'result' ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-      </button>
-      <button type="button" className="fox-message-file-results-head fox-message-artifact-group-trigger" aria-expanded={activeGroup === 'process'} aria-controls={`${panelId}-process`} disabled={!processFiles.length} onClick={() => setOpenGroup(openGroup === 'process' ? null : 'process')}>
+      </button>}
+      {processFiles.length > 0 && <button type="button" className="fox-message-file-results-head fox-message-artifact-group-trigger" aria-expanded={activeGroup === 'process'} aria-controls={`${panelId}-process`} onClick={() => setOpenGroup(openGroup === 'process' ? null : 'process')}>
         <strong>过程文件</strong><span>{processFiles.length}</span>{activeGroup === 'process' ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-      </button>
+      </button>}
     </div>
     <div id={`${panelId}-result`} className="fox-message-artifact-group-content" role="region" aria-label="本次文件结果" hidden={activeGroup !== 'result'}>
       {activeGroup === 'result' && <div className="fox-message-artifacts">

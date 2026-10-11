@@ -200,6 +200,7 @@ export function globalSearchKindLabel(kind: GlobalSearchRecord['kind']): string 
 }
 
 export type ComposerRuntimeContextValue = {
+  mentionFiles?: readonly string[]
   knowledgeBindings: KnowledgeBindingRecord[]
   onKnowledge?: () => void
   onOpenSource?: (source: RuntimeSource) => void

@@ -2,7 +2,6 @@ import { ExpertBindingChip } from '../components/ExpertBindingChip'
 import { GoalProgress } from '../components/GoalProgress'
 import { ManagedFilesPanel } from '../components/ManagedFilesPanel'
 import { RunSteeringStrip } from '../components/RunSteeringStrip'
-import { RuntimeApprovalPrompt } from '../components/RuntimeApprovalPrompt'
 import { type ExpertToolAvailability } from '../components/expert-binding-ui'
 import { steeringComposerView, steeringSubmitMode } from '../components/steering-presentation'
 import { type ExecutionReceiptPresentation, executionReceiptPresentation } from '../execution-receipt'
@@ -10,6 +9,10 @@ import { type GoalProgressData } from '../hooks/use-goal-progress'
 import { useRunSteering } from '../hooks/use-run-steering'
 import { localKnowledgePickerState } from '../knowledge-picker-state'
 import { conversationModelOverride, yuxiModelOverrideAllowed } from '../model-selection'
+import { ComposerMenu, Models } from '@/components/assistant-ui/elements/composer'
+import { useMentionFiles } from './use-mention-files'
+import { ComposerCommandItem, ComposerPersonItem, useMentionMatches, applyMention as insertMention } from '@/components/assistant-ui/upstream/elements/composer'
+import { CommandItem as CommandPrimitiveItem } from 'cmdk'
 import { Attachment, AttachmentInfo, AttachmentPreview, AttachmentRemove, Attachments } from '@/components/ai-elements/attachments'
 import { Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle } from '@/components/ai-elements/confirmation'
 import { PromptInput, PromptInputActionAddAttachments, PromptInputActionMenu, PromptInputActionMenuContent, PromptInputActionMenuItem, PromptInputActionMenuTrigger, PromptInputBody, PromptInputFooter, PromptInputSelect, PromptInputSelectContent, PromptInputSelectItem, PromptInputSelectTrigger, PromptInputSelectValue, PromptInputSubmit, PromptInputTextarea, PromptInputTools, usePromptInputAttachments } from '@/components/ai-elements/prompt-input'
@@ -26,7 +29,7 @@ import { type RuntimeQuestion, type RuntimeQuestionRequest } from '@/features/co
 import { type AgentRecord, type ApprovalDecision, type ApprovalRecord, type KnowledgeBindingRecord, type KnowledgeReference, type ModelServiceRecord, type ProjectRecord, type TaskEvidenceRecord, type ToolCallRecord, type YuxiModelRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
 import { ArrowUp, Check, ChevronDown, CircleHelp, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, X } from 'lucide-react'
-import { type ChangeEvent, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction, Suspense, lazy, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { type ChangeEvent, type ComponentProps, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction, Suspense, lazy, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { type SlashCommand, slashCommandRuntimeText, slashCommands } from './fox-slash-commands'
 import { ApprovalPrompt, QuestionPrompt } from '../demo/fox-demo-prompts'
@@ -36,6 +39,11 @@ import { compactValue } from '../timeline/fox-runtime-process-model'
 // Keep the send button's decorative metal ring out of the entry bundle; it
 // degrades to the plain button until its chunk lands.
 const MetalSendButton = lazy(() => import('@/components/effects/metal-send-button'))
+const RuntimeApprovalPrompt = lazy(() => import('../components/RuntimeApprovalPrompt').then(module => ({ default: module.RuntimeApprovalPrompt })))
+
+function ComposerBorderBeam({ enabled, ...props }: ComponentProps<typeof BorderBeam> & { enabled: boolean }) {
+  return enabled ? <BorderBeam {...props} /> : <>{props.children}</>
+}
 
 function ComposerAttachmentPreview({ projectRoot, knowledgeChips = [], onProject, onKnowledge }: { projectRoot?: string | null; knowledgeChips?: Array<{ key: string; name: string }>; onProject?: () => void; onKnowledge?: () => void }) {
   const attachments = usePromptInputAttachments()
@@ -119,7 +127,7 @@ export function readStoredSeenChanges() {
   }
 }
 
-function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
+function Composer({ resetKey, draft, setDraft, chatState, centered = false, newConversation, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const resolveRuntimeApproval = onResolveApproval
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
@@ -165,6 +173,8 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
   const [commandView, setCommandView] = useState<'commands' | 'knowledge'>('commands')
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<SlashCommand | null>(null)
   const [mentionOpen, setMentionOpen] = useState(false)
+  const [commandHighlight, setCommandHighlight] = useState('目标')
+  const [mentionHighlight, setMentionHighlight] = useState('')
   const [steeringStripOpen, setSteeringStripOpen] = useState(false)
   const submitTimer = useRef<number | null>(null)
   const cancelPendingRef = useRef(false)
@@ -172,6 +182,18 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
   const composerRef = useRef<HTMLDivElement | null>(null)
   const promptRef = useRef<HTMLDivElement | null>(null)
   const commandMenuRef = useRef<HTMLDivElement | null>(null)
+  const mentionMenuRef = useRef<HTMLDivElement | null>(null)
+  const mentionChoices = useMentionFiles(mentionOpen, steeringConversationId, runtimeContext.mentionFiles)
+  const mentionQuery = draft.match(/@([^\s@]*)$/u)?.[1].toLocaleLowerCase() ?? ''
+  const mentionFiles = useMentionMatches(draft, mentionChoices.files.map(name => ({ name, role: 'file' as const })))
+  const commandQuery = draft.trimStart().slice(1).toLocaleLowerCase()
+  const matchingCommands = slashCommands.filter(command => command.id.toLocaleLowerCase().startsWith(commandQuery))
+  useEffect(() => {
+    if (commandView === 'commands' && !matchingCommands.some(command => command.id === commandHighlight)) setCommandHighlight(matchingCommands[0]?.id ?? '')
+  }, [commandView, matchingCommands, commandHighlight])
+  useEffect(() => {
+    if (!mentionFiles.some(person => person.name === mentionHighlight)) setMentionHighlight(mentionFiles[0]?.name ?? '')
+  }, [mentionFiles, mentionHighlight])
   const attachmentDialogRef = useRef<() => void>(() => undefined)
 
   useEffect(() => () => {
@@ -270,7 +292,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
   }
 
   const applyMention = (path: string) => {
-    setDraft((value) => value.replace(/@[^\s@]*$/u, `@${path} `))
+    setDraft(value => insertMention(value, path))
     setMentionOpen(false)
   }
 
@@ -280,9 +302,10 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
     const menuEnter = event.key === 'Enter'
       && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
       && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229
-    if (commandOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || menuEnter)) {
+    if ((commandOpen || mentionOpen) && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || menuEnter)) {
       event.preventDefault()
-      commandMenuRef.current?.dispatchEvent(new globalThis.KeyboardEvent('keydown', {
+      const menu = commandOpen ? commandMenuRef : mentionMenuRef
+      menu.current?.dispatchEvent(new globalThis.KeyboardEvent('keydown', {
         key: event.key,
         bubbles: true,
         cancelable: true,
@@ -501,7 +524,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
         {decisionPending ? <div className="fox-decision-card">
           {demoApprovalPending && onApprove && onDeny && <ApprovalPrompt onApprove={onApprove} onDeny={onDeny} />}
           {activeApproval && resolveRuntimeApproval && <div className="fox-decision-approval-list">
-            <RuntimeApprovalPrompt key={activeApproval.id} approval={activeApproval} onResolve={resolveRuntimeApproval} />
+            <Suspense fallback={<p role="status">正在读取审批…</p>}><RuntimeApprovalPrompt key={activeApproval.id} approval={activeApproval} onResolve={resolveRuntimeApproval} /></Suspense>
           </div>}
           {pendingApprovals.length === 0 && !demoApprovalPending && demoQuestionPending && onAnswer && <QuestionPrompt onAnswer={onAnswer} />}
           {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && activeQuestionRequest && <div className="fox-question-decision-content">
@@ -534,7 +557,8 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
           {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && !activeQuestionRequest && (goalConfirmationPending || planRevisionPending || workflowGatePending) && goalProgressData && <div className="fox-goal-decision-content">
             <GoalProgress data={goalProgressData} defaultExpanded={false} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />
           </div>}
-        </div> : <BorderBeam
+        </div> : <ComposerBorderBeam
+          enabled={newConversation ?? (centered && !steeringConversationId)}
           active={status === 'streaming' || (centered && focused)}
           brightness={1.5}
           className="fox-prompt-border-beam"
@@ -545,12 +569,12 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
           strength={1}
           theme={dark ? 'dark' : 'light'}
         >
-        {commandOpen && <Command ref={commandMenuRef} loop className={`fox-slash-menu ${commandView === 'knowledge' ? 'is-knowledge' : ''}`}>
+        <ComposerMenu open={commandOpen}><Command ref={commandMenuRef} value={commandHighlight} onValueChange={setCommandHighlight} loop className={`fox-slash-menu ${commandView === 'knowledge' ? 'is-knowledge' : ''}`}>
           <CommandList>
             {commandView === 'commands' ? <>
               <CommandEmpty>没有匹配的命令</CommandEmpty>
               <CommandGroup>
-                {slashCommands.map((command) => <CommandItem key={command.id} value={command.id} onSelect={() => applySlashCommand(command)}><span className="fox-command-icon">{command.icon}</span><span className="fox-command-copy"><strong>/{command.id}</strong><small>{command.title} · {command.detail}</small></span></CommandItem>)}
+                {matchingCommands.map(command => <CommandPrimitiveItem asChild key={command.id} value={command.id} onSelect={() => applySlashCommand(command)}><ComposerCommandItem command={{ name: command.id, description: command.title, icon: command.Icon }} active={commandHighlight === command.id} onMouseDown={event => event.preventDefault()} className="w-full rounded-[var(--fox-radius-control)]" /></CommandPrimitiveItem>)}
               </CommandGroup>
             </> : <>
               <CommandEmpty>{runtimeContext.knowledgeLoading ? '正在读取知识库…' : runtimeContext.knowledgeError || '当前没有可使用的知识库'}</CommandEmpty>
@@ -572,8 +596,8 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
               </CommandGroup>
             </>}
           </CommandList>
-        </Command>}
-        {mentionOpen && <div className="fox-mention-menu"><div className="fox-command-title"><span>引用工作区文件</span><kbd>@</kbd></div>{['docs/FOX_ARCHITECTURE.md', 'apps/desktop/src/features/chat/workbench.tsx', 'apps/desktop/src/styles/workbench.css'].map((path) => <button type="button" key={path} onMouseDown={(event) => event.preventDefault()} onClick={() => applyMention(path)}><FileText size={14} /><span>{path}</span></button>)}</div>}
+        </Command></ComposerMenu>
+        <ComposerMenu open={mentionOpen}><Command ref={mentionMenuRef} value={mentionHighlight} onValueChange={setMentionHighlight} loop className="fox-mention-menu"><div className="fox-command-title"><span>引用项目文件</span><kbd>@</kbd></div><CommandList><CommandEmpty>{mentionChoices.loading ? '正在读取文件…' : mentionChoices.error || (projectRoot ? '没有匹配的项目文件' : '选择项目后可引用文件')}</CommandEmpty><CommandGroup>{mentionFiles.map(person => <CommandPrimitiveItem asChild key={person.name} value={person.name} onSelect={() => applyMention(person.name)}><ComposerPersonItem person={person} active={mentionHighlight === person.name} title={person.name} onMouseDown={event => event.preventDefault()} className="w-full rounded-[var(--fox-radius-control)]" /></CommandPrimitiveItem>)}</CommandGroup></CommandList></Command></ComposerMenu>
         {runtimeControlled && <RunSteeringStrip steering={steering} open={steeringStripOpen} onOpenChange={setSteeringStripOpen} onQueueForNextTask={(content) => setDraft((value) => (value.trim() ? `${value}\n${content}` : content))} />}
         {runtimeControlled && steeringView.retainedForNextTask && steeringView.retainedNotice && (
           <p className="fox-steering-composer-notice" data-testid="fox-steering-retained">
@@ -720,18 +744,15 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
             {activeExpert && onViewExpert && onChangeExpert && onRemoveExpert && <ExpertBindingChip expert={activeExpert} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={onViewExpert} onChange={onChangeExpert} onRemove={onRemoveExpert} />}
           </PromptInputTools>
           <div className="fox-composer-submit">
-            <PromptInputSelect value={activeAgent?.id ?? ''} onValueChange={(value) => value && value !== activeAgent?.id && onAgentChange?.(value)} disabled={!activeAgent}>
-              <PromptInputSelectTrigger className="fox-agent-control"><Sparkles size={14} /><PromptInputSelectValue /></PromptInputSelectTrigger>
-              <PromptInputSelectContent position="popper" side="top" align="end" sideOffset={6}>
-                {activeAgent && !selectableAgents.some((item) => item.id === activeAgent.id) && <PromptInputSelectItem value={activeAgent.id} disabled>{activeAgent.name}</PromptInputSelectItem>}
-                {selectableAgents.map((item) => <PromptInputSelectItem key={item.id} value={item.id} disabled={!item.available}>{item.name}</PromptInputSelectItem>)}
-              </PromptInputSelectContent>
-            </PromptInputSelect>
+            <Models value={activeAgent?.id} disabled={!activeAgent} onValueChange={value => value !== activeAgent?.id && onAgentChange?.(value)} options={[
+              ...(activeAgent && !selectableAgents.some(item => item.id === activeAgent.id) ? [{ id: activeAgent.id, name: activeAgent.name, meta: '当前助手', disabled: true }] : []),
+              ...selectableAgents.map(item => ({ id: item.id, name: item.name, meta: item.defaultModel === 'configured-model' ? modelService?.modelId || '按助手配置' : item.defaultModel, disabled: !item.available })),
+            ]} />
             {steeringMode ? steeringControls : sendControls}
           </div>
         </PromptInputFooter>
         </PromptInput>
-        </BorderBeam>}
+        </ComposerBorderBeam>}
       </div>
     </div>
   )

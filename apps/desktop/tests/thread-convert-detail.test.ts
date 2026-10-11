@@ -80,6 +80,25 @@ function processPart(fox: FoxThreadMessage) {
 }
 
 describe('deriveFoxThreadMessages', () => {
+  test('同一Run的Kernel round合为一条展示，保留原始round供过程顺序投影', () => {
+    const rounds = [message({ id: 'kernel-message:r1:1', role: 'assistant', runId: 'r1', content: '先读取文件' }), message({ id: 'kernel-message:r1:2', role: 'assistant', runId: 'r1', content: '最终答案', ordinal: 2 })]
+    const rows = deriveFoxThreadMessages({ detail: detail({ messages: rounds, lastRun: run({ id: 'r1', status: 'completed' }) }) })
+    expect(rows).toHaveLength(1)
+    expect(rows[0].id).toBe('kernel-message:r1:2')
+    expect(rows[0].source?.kernelMessages).toEqual(rounds)
+    expect(textOf(rows[0])).toBe('先读取文件\n\n最终答案')
+    expect(rows[0].isActiveRun).toBe(false)
+    expect(rows[0].status).toBe('completed')
+  })
+  test('同长度合成流式替换也刷新内容，不复用旧帧', () => {
+    const cache = createFoxThreadCache()
+    const current = detail({ lastRun: run({ id: 'r1', status: 'running' }) })
+    const first = deriveFoxThreadMessages({ detail: current, streamingText: '旧内容' }, cache)
+    const next = deriveFoxThreadMessages({ detail: current, streamingText: '新内容' }, cache)
+    expect(next[0]).not.toBe(first[0])
+    expect(textOf(next[0])).toBe('新内容')
+    expect(next[0].source?.content).toBe('新内容')
+  })
   test('普通问答：user + assistant 文本各成一条，id 保持', () => {
     const foxes = deriveFoxThreadMessages({
       detail: detail({

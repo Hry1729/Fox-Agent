@@ -1,4 +1,5 @@
 import { FOX_ASSISTANT_AVATAR, RunStatusText } from '../components/FoxAssistantAvatar'
+import { ErrorState } from '@/components/assistant-ui/elements/error-state'
 import { expertErrorPresentation } from '../components/expert-binding-ui'
 import { ChainOfThought, ChainOfThoughtContent, ChainOfThoughtHeader, ChainOfThoughtSearchResult, ChainOfThoughtSearchResults, ChainOfThoughtStep } from '@/components/ai-elements/chain-of-thought'
 import { Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRejected, ConfirmationRequest, ConfirmationTitle } from '@/components/ai-elements/confirmation'
@@ -139,15 +140,9 @@ function errorPresentation(error?: string | null, details?: DesktopErrorDetails 
   }
 }
 
-export function ErrorPrompt({ onRetry, error, errorDetails }: { onRetry: () => void; error?: string | null; errorDetails?: DesktopErrorDetails | null }) {
+export function ErrorPrompt({ onRetry, error, errorDetails }: { onRetry?: () => void; error?: string | null; errorDetails?: DesktopErrorDetails | null }) {
   const presentation = errorPresentation(error, errorDetails)
-  return (
-    <div className="fox-error-prompt" role="alert">
-      <span className="fox-prompt-figure"><img src={FOX_ASSISTANT_AVATAR} alt="" /></span>
-      <div><strong>{presentation.title}</strong><p>{presentation.description}</p>{presentation.detail && <small>{presentation.detail}</small>}</div>
-      {presentation.retryable !== false && <Button size="sm" variant="outline" onClick={onRetry}><RotateCcw size={14} />{presentation.retryLabel ?? '重试'}</Button>}
-    </div>
-  )
+  return <ErrorState title={presentation.title} detail={presentation.description} diagnostic={presentation.detail} onRetry={presentation.retryable === false ? undefined : onRetry} retryLabel={presentation.retryLabel} />
 }
 
 const clarificationOptions = [

@@ -157,7 +157,7 @@ test('tool path remains one interactive node and opens the sidebar without toggl
   fireEvent.click(path)
   assert.deepEqual(opened, ['README.md'])
   assert.equal(row.getAttribute('data-state'), 'closed')
-  fireEvent.click(row.querySelector('.fox-runtime-step-trigger'))
+  fireEvent.click(row.querySelector('.fox-element-tool-trigger'))
   assert.equal(row.getAttribute('data-state'), 'open')
 })
 
@@ -169,7 +169,7 @@ test('a row with both a path and a worksheet keeps the path clickable and in its
   ]
   const view = render(timeline('', { events, onOpenFileInSidebar: path => opened.push(path) }))
   const row = await openFirstRow(view)
-  const label = row.querySelector('.fox-run-status-label')
+  const label = row.querySelector('.fox-element-tool-trigger')
   const action = label.querySelector('.fox-run-step-action')
   const pathNode = label.querySelector('.fox-runtime-step-path')
   const tail = label.querySelector('.fox-run-step-tail')
@@ -179,7 +179,7 @@ test('a row with both a path and a worksheet keeps the path clickable and in its
   assert.equal(pathNode.textContent, 'src/明细/a.ts')
   assert.equal(pathNode.getAttribute('role'), 'button')
   assert.equal(pathNode.getAttribute('tabindex'), '0')
-  assert.equal(label.textContent, '读取文件 · src/明细/a.ts · 明细')
+  assert.equal(label.getAttribute('aria-label'), '读取文件 · src/明细/a.ts · 明细')
   assert.equal(tail.textContent, '明细')
   assert.equal(row.querySelectorAll('.fox-runtime-step-path').length, 1)
   // Neither the action nor the path is inside the clipped/faded region.
@@ -207,14 +207,14 @@ test('an attachment id renders only through the conversation name table', async 
   ]
   const view = render(timeline('', { events: computeEvents([mappedId]), attachments }))
   const mappedRow = await openFirstRow(view)
-  assert.equal(mappedRow.querySelector('.fox-run-status-label').textContent, '计算附件数据 · 6-1.xlsx')
+  assert.equal(mappedRow.querySelector('.fox-element-tool-trigger').getAttribute('aria-label'), '计算附件数据 · 6-1.xlsx')
   cleanup()
   const unmapped = render(timeline('', { events: computeEvents([unmappedId]), attachments }))
   const unmappedRow = await openFirstRow(unmapped)
-  const unmappedLabel = unmappedRow.querySelector('.fox-run-status-label')
+  const unmappedLabel = unmappedRow.querySelector('.fox-element-tool-trigger').getAttribute('aria-label')
   // Nothing: no id, no truncated id, no invented file name.
-  assert.equal(unmappedLabel.textContent, '计算附件数据')
-  assert.doesNotMatch(unmappedLabel.textContent, /4969408f|compute-artifact|…/)
+  assert.equal(unmappedLabel, '计算附件数据')
+  assert.doesNotMatch(unmappedLabel, /4969408f|compute-artifact|…/)
   assert.doesNotMatch(unmapped.container.textContent, /4969408f|compute-artifact/)
 })
 
@@ -232,10 +232,10 @@ test('a failed row keeps its status and its real source without the raw diagnost
   ]
   const view = render(timeline('', { events, attachments }))
   const row = await openFirstRow(view)
-  const label = row.querySelector('.fox-run-status-label')
-  assert.match(label.textContent, /工具调用未成功/)
+  const label = row.querySelector('.fox-element-tool-trigger').getAttribute('aria-label')
+  assert.match(label, /工具调用未成功/)
   // The legitimate source survives the failure.
-  assert.match(label.textContent, /6-1\.xlsx/)
+  assert.match(label, /6-1\.xlsx/)
   // The Host's raw diagnostic body does not.
   assert.doesNotMatch(view.container.textContent, new RegExp(rawCode))
   assert.doesNotMatch(view.container.textContent, /120000ms|scope=/)
@@ -254,7 +254,7 @@ test('a narrow row keeps the action name out of the clipped region', async () =>
   const view = render(React.createElement('div', { className: 'fox-sidebar-narrow', style: { width: '240px' } },
     timeline('', { events, onOpenFileInSidebar: () => {} })))
   const row = await openFirstRow(view)
-  const label = row.querySelector('.fox-run-status-label')
+  const label = row.querySelector('.fox-element-tool-trigger')
   const action = label.querySelector('.fox-run-step-action')
   const tail = label.querySelector('.fox-run-step-tail')
   const pathSlot = label.querySelector('.fox-run-step-path-slot')
@@ -264,10 +264,8 @@ test('a narrow row keeps the action name out of the clipped region', async () =>
   assert.equal(tail.textContent, longSource)
   assert.equal(tail.textContent.includes('读取文件'), false)
   // The action really is the first thing on the line, before the path and the tail.
-  assert.deepEqual([...label.children].map(node => node.className), [
-    'fox-run-step-action', 'fox-run-step-separator', 'fox-run-step-path-slot',
-    'fox-run-step-separator', 'fox-run-step-tail',
-  ])
+  assert.ok(action.compareDocumentPosition(pathSlot) & Node.DOCUMENT_POSITION_FOLLOWING)
+  assert.ok(pathSlot.compareDocumentPosition(tail) & Node.DOCUMENT_POSITION_FOLLOWING)
 })
 
 test('the whole-run elapsed time stays a single header timer beside the Fox avatar', async () => {

@@ -1,5 +1,5 @@
-import { ComposerPrimitive, useAuiState } from '@assistant-ui/react'
-import { Button } from '@/components/ui/button'
+import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react'
+import { EditMessage } from '@/components/assistant-ui/elements/edit-message'
 
 /**
  * The edit surface for the last user message (migration step 5C). The composer
@@ -8,26 +8,17 @@ import { Button } from '@/components/ui/button'
  * later messages).
  */
 export function FoxEditComposer() {
+  const aui = useAui()
   const isEditing = useAuiState((state) => state.message.composer.isEditing)
+  const value = useAuiState(state => state.message.composer.text)
+  const discardedReplies = useAuiState(state => {
+    const index = state.thread.messages.findIndex(message => message.id === state.message.id)
+    return state.thread.messages.slice(index + 1).filter(message => message.role === 'assistant').length
+  })
   if (!isEditing) return null
   return (
     <ComposerPrimitive.Root className="fox-edit-composer">
-      <ComposerPrimitive.Input className="fox-edit-composer-input" rows={3} autoFocus aria-label="编辑最新消息" />
-      <div className="fox-edit-composer-actions">
-        <ComposerPrimitive.Cancel asChild>
-          <Button variant="ghost" size="sm" className="fox-edit-composer-cancel">取消</Button>
-        </ComposerPrimitive.Cancel>
-        <ComposerPrimitive.Send asChild>
-          <Button size="sm" className="fox-edit-composer-send">
-            <ArrowUpGlyph />
-            发送
-          </Button>
-        </ComposerPrimitive.Send>
-      </div>
+      <EditMessage value={value} onValueChange={text => aui.composer.setText(text)} onSave={() => aui.composer.send()} onCancel={() => aui.composer.cancel()} saving={false} discardedReplies={discardedReplies} />
     </ComposerPrimitive.Root>
   )
-}
-
-function ArrowUpGlyph() {
-  return <svg className="fox-edit-composer-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 12 7-7 7 7" /><path d="M12 19V5" /></svg>
 }

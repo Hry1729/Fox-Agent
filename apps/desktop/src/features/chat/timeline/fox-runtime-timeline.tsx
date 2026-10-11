@@ -10,6 +10,8 @@ import { Message, MessageAction, MessageContent } from '@/components/ai-elements
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { FoxThinkingDots } from '../components/FoxThinkingDots'
+import { EditMessage } from '@/components/assistant-ui/elements/edit-message'
+import { File as MessageFile } from '@/components/assistant-ui/elements/file'
 import { splitAssistantContent } from './fox-assistant-content'
 import { type AgentRecord, type ArtifactRecord, type AttachmentRecord, type ConversationMessage, type DesktopErrorDetails, type RunEventRecord, type RunRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
@@ -29,16 +31,7 @@ function SentMessageAttachments({ attachments }: { attachments: AttachmentRecord
   if (attachments.length === 0) return null
   return <Attachments variant="inline" className="fox-message-attachments">
     {attachments.map((attachment) => (
-      <Attachment key={attachment.id} data={{
-        id: attachment.id,
-        type: 'file',
-        filename: attachment.displayName,
-        mediaType: attachment.mediaType ?? 'application/octet-stream',
-        url: '',
-      }}>
-        <AttachmentPreview />
-        <AttachmentInfo />
-      </Attachment>
+      <MessageFile key={attachment.id} name={attachment.displayName} mediaType={attachment.mediaType} bytes={attachment.byteSize} />
     ))}
   </Attachments>
 }
@@ -182,6 +175,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
   }, [visibleMessages])
   const streamTargetId = useMemo(() => latestRunAssistantId(visibleMessages, activeRunId), [visibleMessages, activeRunId])
   const groupedMessages = useMemo(() => groupAssistantContinuations(visibleMessages, streamTargetId, streamingText), [visibleMessages, streamTargetId, streamingText])
+  const latestAssistantId = groupedMessages.findLast(message => message.role === 'assistant')?.id
   const interleavedRuns = useMemo(() => {
     const seen = new Set<string>()
     const interleaved = new Set<string>()
@@ -236,12 +230,6 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
       setRerunning(false)
     }
   }
-  const currentAssistantActivity = useMemo(() => activeRunId
-    ? visibleMessages.find((message) => message.role === 'assistant' && message.runId === activeRunId)
-    : undefined, [activeRunId, visibleMessages])
-  const currentRunLastSeq = useMemo(() => activeRunId
-    ? (eventsByRunId.get(activeRunId) ?? EMPTY_RUNTIME_EVENTS).reduce((highest, item) => Math.max(highest, item.seq), 0)
-    : 0, [activeRunId, eventsByRunId])
   // The Run row and its user message are written in one transaction, so the
   // prompt's timestamp is the enqueue time: the difference to `run.started` is the
   // real queue wait, not a guess.
@@ -254,12 +242,9 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
     }
     return queuedAt
   }, [visibleMessages])
-  const autoScrollKey = runtimeRunning
-    ? [latestUserMessageId, activeRunId, currentRunLastSeq > 0 || currentAssistantActivity ? 'active' : 'waiting'].join(':')
-    : latestUserMessageId
   return (
     <Conversation className="fox-conversation">
-      <ConversationAutoScroll scrollKey={autoScrollKey} />
+      <ConversationAutoScroll scrollKey={latestUserMessageId} />
       <ConversationViewportState />
       <ConversationTurnRail messages={groupedMessages} artifacts={artifacts} />
       <ConversationContent className="fox-conversation-content" scrollClassName="fox-conversation-scroll">
@@ -278,26 +263,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
             return <div id={`fox-turn-${message.id}`} key={message.id} className="fox-turn-anchor" data-turn-message-id={message.id}>
               <Message from="user" className={`fox-message fox-user-message ${editing ? 'is-editing' : ''}`}>
                 {editing ? <MessageContent className="fox-user-edit">
-                  <textarea
-                    autoFocus
-                    aria-label="编辑最新消息"
-                    value={editingText}
-                    onChange={(event) => setEditingText(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') cancelEditing()
-                      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-                        event.preventDefault()
-                        void rerunEditedMessage()
-                      }
-                    }}
-                  />
-                  <div className="fox-user-edit-actions">
-                    <Button className="fox-user-edit-cancel" variant="ghost" size="sm" disabled={rerunning} onClick={cancelEditing}>取消</Button>
-                    <Button className="fox-user-edit-send" size="sm" disabled={rerunning || !editingText.trim()} onClick={() => void rerunEditedMessage()}>
-                      {rerunning ? <LoaderCircle className="animate-spin" size={13} /> : <ArrowUp size={13} />}
-                      发送
-                    </Button>
-                  </div>
+                  <EditMessage value={editingText} onValueChange={setEditingText} onSave={() => void rerunEditedMessage()} onCancel={cancelEditing} saving={rerunning} discardedReplies={visibleMessages.slice(visibleMessages.findIndex(item => item.id === message.id) + 1).filter(item => item.role === 'assistant').length} />
                 </MessageContent> : <UserMessageBubble>{message.content}</UserMessageBubble>}
                 <SentMessageAttachments attachments={messageAttachments} />
                 {!editing && <div className="fox-user-meta">
@@ -349,7 +315,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           const isRunTail = Boolean(message.runId && lastAssistantMessageIdByRun.get(message.runId) === message.id)
           const failureReason = isRunTail && message.runId ? failureByRunId.get(message.runId) : undefined
           const cancelled = Boolean(isRunTail && message.runId && cancelledRunIds.has(message.runId))
-          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} groupHelpers={groupHelpers} kernelMessages={message.kernelMessages} singleRunMessage={Boolean(message.runId && assistantMessageCountByRun.get(message.runId) === 1)} running={running} runInProgress={isCurrentRun && runtimeRunning} hasInterleavedInput={Boolean(message.runId && interleavedRuns.has(message.runId))} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} queuedAt={queuedAtByMessageId.get(message.id) ?? null} /></div>
+          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} groupHelpers={groupHelpers} kernelMessages={message.kernelMessages} singleRunMessage={Boolean(message.runId && assistantMessageCountByRun.get(message.runId) === 1)} running={running} runInProgress={isCurrentRun && runtimeRunning} hasInterleavedInput={Boolean(message.runId && interleavedRuns.has(message.runId))} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} queuedAt={queuedAtByMessageId.get(message.id) ?? null} onRetry={message.id === latestAssistantId ? onRetry : undefined} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
         {runtimeContext.recoveryPanel}

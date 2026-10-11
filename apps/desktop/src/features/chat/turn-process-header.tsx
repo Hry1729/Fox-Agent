@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ThinkingIndicator } from '@/components/assistant-ui/elements/thinking-indicator'
 import type { RunEventRecord } from '@/features/conversations/model/types'
 import { formatRunElapsed, runElapsedBounds } from './turn-process-timing'
 
@@ -42,15 +43,7 @@ export function TurnProcessHeader({ avatar, events, active, canToggle, collapsed
   toolStatus?: string
   onToggle: () => void
 }) {
-  // 工作过程 is the settled turn's default word, not a state to report, so it
-  // contributes no field to the toggle's line. Everything else — 正在处理, 正在等待回复,
-  // 过程未完成, 过程已取消, 过程已中断 — is that line's first field.
-  const reportedStatus = status === '工作过程' ? undefined : status
-  const toggleLine = joinStatusFields([reportedStatus, toolStatus])
-  // Without a fold control the word is the label of the whole line, so it stays
-  // even when it is the default one; only the joining changes.
-  const plainLine = joinStatusFields([status, toolStatus])
-  const statusLine = canToggle ? toggleLine : plainLine
+  const toggleLine = joinStatusFields([status, toolStatus])
   const { startedAt, endedAt } = useMemo(() => runElapsedBounds(events), [events])
   const elapsed = hasElapsedTime(startedAt, endedAt, active)
   const toggleLabel = collapsed ? '展开过程' : '收起过程'
@@ -62,9 +55,14 @@ export function TurnProcessHeader({ avatar, events, active, canToggle, collapsed
   // The separator belongs to the join, not to the timer: it exists exactly when there
   // is both a status line to read and a whole-round time to separate it from, so a turn
   // never opens on a dangling "·". Inside the trigger the row's own 5px gap spaces it.
-  const separator = statusLine && elapsed
+  const separator = toggleLine && elapsed
     ? <span className="fox-process-turn-separator" aria-hidden="true">·</span>
     : null
+  const statusRow = <>
+    {toggleLine && <ThinkingIndicator className="fox-process-turn-label" label={toggleLine} active={active} showDot />}
+    {separator}
+    {timer}
+  </>
   return <div className="fox-process-turn-header">
     {avatar}
     {canToggle ? <button type="button" className="fox-process-turn-toggle"
@@ -73,18 +71,8 @@ export function TurnProcessHeader({ avatar, events, active, canToggle, collapsed
       aria-describedby={elapsed ? timerId : undefined}
       title={toggleLabel}
       onClick={(event) => { event.currentTarget.focus(); onToggle() }}>
-      {/* The visible row keeps only the chevron and the run's own status: the
-          words 展开/收起过程 are for assistive technology and the tooltip, so the
-          header reads as state rather than as a verb, and the avatar stays the
-          identity rather than a second expand control. */}
-      {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-      {toggleLine ? <span className="fox-process-turn-label">{toggleLine}</span> : null}
-      {separator}
-      {timer}
-    </button> : <>
-      {plainLine ? <span className="fox-process-turn-toggle is-status" role="status">{plainLine}</span> : null}
-      {separator}
-      {timer}
-    </>}
+      {collapsed ? <ChevronRight className="fox-process-turn-disclosure-icon" size={13} aria-hidden="true" /> : <ChevronDown className="fox-process-turn-disclosure-icon" size={13} aria-hidden="true" />}
+      {statusRow}
+    </button> : <span className="fox-process-turn-toggle is-status" role="status">{statusRow}</span>}
   </div>
 }

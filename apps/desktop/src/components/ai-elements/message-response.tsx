@@ -2,8 +2,10 @@
 
 import { cjk } from "@streamdown/cjk";
 import { math } from "@streamdown/math";
-import { memo, useEffect, useState, type ComponentProps } from "react";
-import { Streamdown, type CustomRendererProps, type LinkSafetyModalProps } from "streamdown";
+import { memo, useContext, useEffect, useState, type ComponentProps } from "react";
+import { Streamdown, StreamdownContext, type CustomRendererProps, type LinkSafetyModalProps } from "streamdown";
+import { StreamingText as ElementStreamingText } from "@/components/assistant-ui/upstream/elements/streaming-text";
+import "streamdown/styles.css";
 import { ExternalLink } from "lucide-react";
 import { notify as toast } from "@/features/notifications";
 import { beautifulMermaidPlugin } from "./beautiful-mermaid-diagram";
@@ -29,6 +31,14 @@ import { installMermaidWheelIntent } from "./mermaid-wheel-intent";
 import "./message-response-controls.css";
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
+
+function StreamingLeaf({ children, node: _node, ref: _ref, ...props }: ComponentProps<'span'> & { node?: unknown; 'data-sd-animate'?: boolean | string }) {
+  const context = useContext(StreamdownContext);
+  if (!Object.hasOwn(props, 'data-sd-animate') || typeof children !== 'string') return <span {...props}>{children}</span>;
+  const duration = (props.style as Record<string, string> | undefined)?.['--sd-duration'];
+  return <ElementStreamingText inline cursor={false} segments={[{ text: children }]} count={1} streaming={context?.isAnimating ?? false} fresh={duration !== '0ms'} {...props} />;
+}
+const streamingComponents = { span: StreamingLeaf };
 
 const labelUnspecifiedCodeFences = (markdown: string) => {
   const lines = markdown.split("\n");
@@ -196,6 +206,7 @@ export const MessageResponse = memo(
         linkSafety={linkSafety}
         mermaid={mermaidOptions}
         plugins={streamdownPlugins}
+        components={streamingComponents}
         {...props}
       >
         {normalizedChildren}

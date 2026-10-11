@@ -7,14 +7,7 @@
 // ticket in the same transaction that consumes it, so the prompt must never
 // invent, re-key, or reuse an approval identity of its own.
 import { useRef, useState } from 'react'
-import { Terminal } from 'lucide-react'
-import {
-  Confirmation,
-  ConfirmationAction,
-  ConfirmationActions,
-  ConfirmationRequest,
-  ConfirmationTitle,
-} from '@/components/ai-elements/confirmation'
+import { ApprovalCard, PermissionGrant } from '@/components/assistant-ui/elements/approval-card'
 import { approvalPresentation } from '@/features/conversations/model/approval-presentation'
 import {
   allowedApprovalDecisions,
@@ -23,6 +16,20 @@ import {
   resolveAllowedApprovalDecision,
 } from '@/features/conversations/model/approval-decision-policy'
 import type { ApprovalDecision, ApprovalRecord } from '@/features/conversations/model/types'
+import type { GrantScope } from '@/components/assistant-ui/upstream/elements/permission-grant'
+
+const conversationScopeNote = '“本次对话内允许”只登记本会话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者会话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。'
+
+/** Only a path-only read request uses the permission surface; mutations retain their operation review. */
+function isReadScopeRequest(approval: ApprovalRecord, presentation: ReturnType<typeof approvalPresentation>) {
+  const input = approval.request.input
+  return approval.toolName === 'read_file'
+    && !presentation.command && !presentation.diff && presentation.content === undefined
+    && !presentation.wholeFileReplacement && !presentation.officeReuse && !isRepairOverrideApproval(approval.request)
+    && input !== null && typeof input === 'object' && !Array.isArray(input)
+    && Object.entries(input).some(([key, value]) => ['path', 'file_path'].includes(key) && typeof value === 'string' && value.trim().length > 0)
+    && Object.keys(input).every(key => ['path', 'file_path', 'cwd'].includes(key))
+}
 
 export function RuntimeApprovalPrompt({
   approval,
@@ -57,19 +64,39 @@ export function RuntimeApprovalPrompt({
       }
     }
   }
+  if (isReadScopeRequest(approval, presentation)) {
+    const decisionScopes: Partial<Record<ApprovalDecision, GrantScope>> = { deny: 'denied', allow_once: 'once', allow_conversation: 'conversation' }
+    const scopes = (['deny', 'allow_conversation', 'allow_once'] as const).filter(decision => allowedDecisions.includes(decision)).map(decision => decisionScopes[decision]).filter((scope): scope is GrantScope => Boolean(scope))
+    return <PermissionGrant className="aui-permission-grant fox-confirmation fox-runtime-confirmation is-compact max-w-none" capability="读取文件" requester="Fox" reach={[presentation.target]} scope="pending" allowedScopes={scopes} busy={submitting}
+      onGrant={scope => { const decision = scope === 'denied' ? 'deny' : scope === 'once' ? 'allow_once' : scope === 'conversation' ? 'allow_conversation' : null; if (decision) void resolve(decision) }}
+      detailsContent={<>{allowedDecisions.includes('allow_conversation') && <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>查看授权详情</summary><div role="region" aria-label="授权详情"><p>{presentation.summary}</p><p className="fox-approval-scope-note">“本次对话内允许”仅授权当前对话中的该工具和此目标，可随时撤销；权限模式变化后失效，不包含写入或执行命令。</p></div></details>}{error && <p role="alert" className="fox-approval-error">{error}</p>}</>} />
+  }
+  const replacement = presentation.wholeFileReplacement
+  const title = repairOverride ? '追加修复' : replacement ? replacement.baselineVersion === 'missing' ? '新建文件' : '替换文件'
+    : presentation.officeReuse ? '修改文档' : presentation.command ? '执行命令' : presentation.content !== undefined ? '写入文件'
+      : /delete|remove/i.test(approval.toolName) ? '删除文件' : '执行操作'
+  const operationSummary = presentation.content !== undefined ? `拟写入 ${presentation.content.split('\n').length} 行。`
+    : (presentation.summary || approval.toolName).replaceAll(presentation.target, '此目标')
+  const briefScope = repairOverride ? repairDetails ? '仅追加本次修复。' : '审批详情不完整，请拒绝后重新发起。'
+    : replacement?.baselineVersion === 'missing' ? '新建，不覆盖已有内容。'
+      : replacement ? '替换全部内容；授权绑定此版本与内容。'
+        : presentation.officeReuse ? `仅此文件的 ${presentation.officeReuse.selectors.length} 处位置和属性；会话授权可撤销。`
+          : allowedDecisions.includes('allow_conversation') ? '会话授权仅限此工具和此目标，可撤销。' : '仅授权本次操作。'
+  const target = replacement?.targetIdentity ?? presentation.officeReuse?.target ?? presentation.target
+  const operation = presentation.command && presentation.command !== target ? `${target}\n${presentation.command}` : target
   return (
-    <Confirmation approval={{ id: approval.id }} state="approval-requested" className="fox-confirmation fox-runtime-confirmation">
-      <ConfirmationRequest>
-        <div className="fox-approval-details-scroll" role="region" aria-label="审批详情" tabIndex={0}>
-        <div className="fox-confirmation-body">
-          <div className="fox-confirmation-content"><ConfirmationTitle>{presentation.title}</ConfirmationTitle><p><code>{presentation.target}</code></p><small>{presentation.summary}</small></div>
-        </div>
+    <ApprovalCard state="request" title={title} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
+      onDeny={() => void resolve('deny')}
+      onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
+      onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
+      detailsContent={<>
+        <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>{presentation.content !== undefined ? <>查看拟写入内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}</summary>
+        <div role="region" aria-label="审批详情">
         {repairOverride && <div className={`fox-approval-context ${repairDetails ? '' : 'is-invalid'}`}>
           {repairDetails
             ? <><p><strong>为什么还要再修一次：</strong>{repairDetails.rootCause}</p><p><strong>关联的审查问题：</strong>{repairDetails.findingIds.join('、')}</p></>
             : <p><strong>审批详情不完整。</strong>请先拒绝，并让 Fox 带上根因和关联审查问题重新发起。</p>}
         </div>}
-        {presentation.command && <div className="fox-approval-command"><Terminal size={13} /><code>{presentation.command}</code></div>}
         {presentation.wholeFileReplacement && <div className="fox-approval-scope">
           {presentation.wholeFileReplacement.baselineVersion === 'missing'
             ? <p className="fox-approval-scope-note">目标文件尚不存在，本次将新建该文件并写入以下完整内容。新建不覆盖任何已有内容；写入前仍会校验目标版本，若文件已被并发创建，本次写入会被拒绝而不是覆盖它。</p>
@@ -77,17 +104,15 @@ export function RuntimeApprovalPrompt({
         </div>}
         {presentation.officeReuse && <div className="fox-approval-scope">
           <p className="fox-approval-scope-note">若选择“本次对话内允许”，本次打开 Fox 期间只可重复修改此文件的以下位置和属性。换文件、换位置、增删文档元素、另存或导出均需重新确认；文件版本仍需校验。</p>
-          <p><strong>文件：</strong><code>{presentation.officeReuse.target}</code></p>
           <p><strong>允许修改：</strong>{presentation.officeReuse.selectors.join('、')}</p>
         </div>}
-        {presentation.diff && <details className="fox-approval-disclosure"><summary>查看拟修改差异</summary><pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre></details>}
-        {presentation.content !== undefined && <details className="fox-approval-disclosure"><summary>查看拟写入内容 <span>{presentation.content.split('\n').length} 行</span></summary><pre className="fox-approval-diff" aria-label="拟写入内容"><code>{presentation.content || '（空文件）'}</code></pre></details>}
+        {presentation.diff && <pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre>}
+        {presentation.content !== undefined && <pre className="fox-approval-diff fox-approval-write-preview" aria-label="拟写入内容" tabIndex={0}><code>{presentation.content || '（空文件）'}</code></pre>}
         {presentation.wholeFileReplacement && <div className="fox-approval-replacement">
           <details className="fox-approval-disclosure">
             <summary>查看授权校验信息</summary>
             <div className="fox-approval-context">
               <p><strong>用途：</strong>{presentation.wholeFileReplacement.purpose}（这不是普通写入审批）</p>
-              <p><strong>目标：</strong><code>{presentation.wholeFileReplacement.targetIdentity}</code></p>
               <p><strong>基线版本：</strong><code>{presentation.wholeFileReplacement.baselineVersion}</code></p>
               <p><strong>内容指纹：</strong><code>{presentation.wholeFileReplacement.candidateDigest}</code></p>
               <p><strong>请求指纹：</strong><code>{presentation.wholeFileReplacement.requestDigest}</code></p>
@@ -95,17 +120,11 @@ export function RuntimeApprovalPrompt({
             </div>
           </details>
         </div>}
-        {allowedDecisions.includes('allow_conversation') && !presentation.officeReuse && <div className="fox-approval-scope">
-          <p className="fox-approval-scope-note">“本次对话内允许”只登记本会话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者会话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。</p>
-        </div>}
-        {error && <p role="alert" className="fox-approval-error">{error}</p>}
+        {allowedDecisions.includes('allow_conversation') && !presentation.officeReuse && <div className="fox-approval-scope"><p className="fox-approval-scope-note">{conversationScopeNote}</p></div>}
         </div>
-        <ConfirmationActions className="fox-confirmation-actions">
-          <ConfirmationAction variant="ghost" disabled={submitting} onClick={() => void resolve('deny')}>拒绝</ConfirmationAction>
-          {allowedDecisions.includes('allow_once') && <ConfirmationAction variant={allowedDecisions.includes('allow_conversation') ? 'outline' : 'default'} disabled={submitting} onClick={() => void resolve('allow_once')}>{submitting ? '处理中…' : '只允许这一次'}</ConfirmationAction>}
-          {allowedDecisions.includes('allow_conversation') && <ConfirmationAction disabled={submitting} onClick={() => void resolve('allow_conversation')}>{submitting ? '处理中…' : '本次对话内允许'}</ConfirmationAction>}
-        </ConfirmationActions>
-      </ConfirmationRequest>
-    </Confirmation>
+        </details>
+        {error && <p role="alert" className="fox-approval-error">{error}</p>}
+      </>}
+    />
   )
 }

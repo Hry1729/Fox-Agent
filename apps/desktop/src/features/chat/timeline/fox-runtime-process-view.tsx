@@ -6,7 +6,8 @@ import { toolFailurePresentation } from '../run-status-facts'
 import { runtimeProcessActivity } from '../runtime-process-activity'
 import { TOOL_ATTEMPT_REASON_LABELS, TOOL_ATTEMPT_STATE_LABELS, type ToolAttemptState, toolAttemptReason, toolAttemptState } from '../tool-attempt-status'
 import { useProcessScroll } from '../use-process-scroll'
-import { ChainOfThought, ChainOfThoughtContent, ChainOfThoughtHeader, ChainOfThoughtStep } from '@/components/ai-elements/chain-of-thought'
+import { ToolTimeline } from '@/components/assistant-ui/elements/tool-timeline'
+import { ToolCall } from '@/components/assistant-ui/elements/tool-call'
 import { ToolInput as AIToolInput, ToolOutput as AIToolOutput } from '@/components/ai-elements/tool'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
@@ -63,6 +64,7 @@ function rawReasoningSummary(window: string) {
 }
 
 function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attemptState?: ToolAttemptState; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
+  const [open, setOpen] = useState(false)
   const execution = executionReceiptPresentation(tool.output)
   const failure = tool.isError ? toolFailurePresentation(tool.name, tool.output) : null
   const ToolIcon = tool.isError || execution?.requiresAttention
@@ -75,6 +77,7 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
   // decision never reads the rendered string, so gaining a source cannot take the
   // click away and the visible order can never change underneath the reader.
   const slots = toolRowSlots(tool, attachmentNames)
+  const { ref: tailRef, overflowing: tailOverflowing } = useOverflowFade<HTMLSpanElement>(`${slots.source} ${slots.summary}`, Boolean(slots.source || slots.summary))
   const pathIsInteractive = Boolean(slots.path && (onOpenFileInSidebar || onRevealFileInExplorer))
   const openPathInSidebar = () => onOpenFileInSidebar?.(slots.path)
   const pathContent = !slots.path ? undefined : pathIsInteractive
@@ -115,25 +118,14 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
       : tool.isError
         ? attemptContext ?? failure?.summary ?? '工具调用未成功'
         : undefined
-  return <RuntimeProcessRow
+  const action = <span className="fox-run-step-action">{slots.action}</span>
+  return <ToolCall className="fox-element-tool-call fox-runtime-step-row max-w-none" open={open} onOpenChange={setOpen} running={active} completed={tool.completed && !tool.awaitingUser} label={action} activeLabel={action} ariaLabel={stepSlotsText(slots)}
     icon={<ToolIcon className="fox-runtime-step-icon-glyph" />}
-    label={stepSlotsText(slots)}
-    actionText={slots.action}
-    pathContent={pathContent}
-    sourceContent={slots.source || undefined}
-    summaryContent={slots.summary || undefined}
-    active={active}
-    status={tool.awaitingUser ? 'pending' : active ? 'active' : 'complete'}
-  >
-    {!tool.isError && <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />}
-    {/* The expanded row shows the same whitelist sentence and next step as the
-        row label. The Host's raw diagnostic (codes, frozen-scope wording, budget
-        numbers, connector bodies) stays in the durable record and is never
-        transcribed here. */}
-    {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={(failure
+    query={<><span className="fox-run-step-path-slot">{pathContent}</span>{(slots.source || slots.summary) && <><span aria-hidden="true"> · </span><span ref={tailRef} className={`fox-run-step-tail${tailOverflowing ? ` ${OVERFLOW_CLASS}` : ''}`}>{slots.source && <span className="fox-run-step-source">{slots.source}</span>}{slots.source && slots.summary && <span aria-hidden="true"> · </span>}{slots.summary && <span className="fox-run-step-summary">{slots.summary}</span>}</span></>}</>}
+    request={!tool.isError ? <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} /> : undefined}
+    result={tool.completed ? <AIToolOutput className="fox-runtime-tool-detail" output={(failure
       ? { 说明: failure.summary, ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}) }
-      : tool.output) as never} errorText={executionError} />}
-  </RuntimeProcessRow>
+      : tool.output) as never} errorText={undefined} /> : undefined} error={executionError} />
 }
 
 /** A step row is exactly one line tall, however long the thought grows. Plain text
@@ -268,8 +260,7 @@ export function useLiveNow(active: boolean) {
 }
 
 export function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displayMode = 'standard', runInProgress = false, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer, phaseTitle }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; displayMode?: ProcessDisplayMode; runInProgress?: boolean; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; /** Stage label for the whole Run, computed where its full event list is known. */ phaseTitle?: string }) {
-  const [open, setOpen] = useState<boolean | null>(null)
-  const [visited, setVisited] = useState(false)
+  const [open, setOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
@@ -280,10 +271,9 @@ export function RuntimeProcess({ events, process: preparedProcess, groupHelpers,
   ))
   const processStepCount = process.steps.length
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
-  const autoExpanded = open === null && grouped && (displayMode === 'verbose' || displayMode === 'detailed' && runInProgress)
-  const groupOpen = autoExpanded || open === true
+  const groupOpen = open
   const { edges: scrollEdges, events: scrollEvents, initialize: initializeScroll } = useProcessScroll(
-    scrollRef, contentRef, groupOpen, !autoExpanded, events,
+    scrollRef, contentRef, groupOpen, true, events,
   )
   const activeTool = [...process.tools].reverse().find((tool) => activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser)
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
@@ -331,49 +321,26 @@ export function RuntimeProcess({ events, process: preparedProcess, groupHelpers,
     : activityKind === 'office' ? FileEdit : activityKind === 'plan' ? ListTodo
     : activityKind === 'subagents' ? Bot : activityKind === 'other' ? Wrench : Brain
 
-  useEffect(() => {
-    if (autoExpanded) setVisited(true)
-  }, [autoExpanded])
-
   if (processStepCount === 0 && !running && !lifecycleOnly) return leading ? <>{leading}</> : null
   return (
-    <ChainOfThought open={groupOpen} onOpenChange={(next) => { if (next) initializeScroll(running ? 'bottom' : 'top'); setOpen(next); if (next) setVisited(true) }} className={`fox-chain-of-thought fox-runtime-process${autoExpanded ? ' is-fully-expanded' : ''}`}>
-      {/* The avatar shares the header line but stays outside the disclosure
-          trigger, so clicking it is never a toggle. */}
-      <div className="fox-runtime-process-head">
-        {leading}
-        <ChainOfThoughtHeader className="fox-chain-of-thought-header" leading={<GroupIcon className="fox-runtime-group-icon" size={15} aria-hidden="true" />}>
-          <span className={`fox-runtime-process-summary ${running ? 'is-running' : ''}`}>
-            <RunStatusText text={processTitle} active={running} />
-          </span>
-        </ChainOfThoughtHeader>
-      </div>
-      {(visited || autoExpanded) && <ChainOfThoughtContent forceMount className="fox-chain-of-thought-content fox-runtime-process-disclosure" aria-hidden={!groupOpen} inert={!groupOpen}>
-        <div className="fox-runtime-process-clip" data-scroll-up={scrollEdges.up || undefined} data-scroll-down={scrollEdges.down || undefined}><div ref={scrollRef} className="fox-runtime-process-scroll" {...scrollEvents}>
-        <div ref={contentRef} className="fox-runtime-process-content">
-        {processStepCount > 0 ? <>
-          {process.steps.map((step) => {
+    <ToolTimeline open={groupOpen} onOpenChange={(next) => { if (next) initializeScroll(running ? 'bottom' : 'top'); setOpen(next) }} className="max-w-none fox-chain-of-thought fox-runtime-process"
+      leading={leading} groupIcon={<GroupIcon className="fox-runtime-group-icon" size={15} aria-hidden="true" />}
+      streaming={running} visibleSteps={processStepCount || 1} restingLabel={processTitle} activeLabel={processTitle} stats={[]}
+      renderContent={content => <div className="fox-runtime-process-clip" data-scroll-up={scrollEdges.up || undefined} data-scroll-down={scrollEdges.down || undefined}><div ref={scrollRef} className="fox-runtime-process-scroll" {...scrollEvents}><div ref={contentRef} className="fox-element-process-content">{content}</div></div></div>}
+      steps={processStepCount > 0 ? process.steps.map(step => {
+        let content: ReactNode
             if (step.kind === 'reasoning') {
               // Only the trailing thought can be live; earlier rows are complete.
               const isLastReasoning = [...process.steps].reverse().find((item) => item.kind === 'reasoning') === step
               const reasoningRunning = isLastReasoning && activity.reasoning
-              return <RuntimeReasoningItem key={`reason-${step.id}`} detail={step.text} running={reasoningRunning} preview />
-            }
-            const tool = process.tools.find((item) => item.id === step.id)
-            if (!tool) return null
+              content = <RuntimeReasoningItem detail={step.text} running={reasoningRunning} preview />
+            } else {
+            const tool = process.tools.find(item => item.id === step.id)!
             const runState = outcome === 'failed' || lifecycleFailed ? 'failed' : outcome === 'cancelled' || lifecycleCancelled ? 'cancelled' : runInProgress || running ? 'running' : 'completed'
             const attemptState = tool.isError ? toolAttemptState(tool, process.tools, events.reduce((latest, event) => Math.max(latest, event.seq), 0), runState) : undefined
-            return <RuntimeToolItem key={tool.id} tool={tool} attemptState={attemptState} active={activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
-          })}
-        </> : <ChainOfThoughtStep
-          className={`fox-runtime-empty-step ${running ? 'is-running' : 'is-complete'}`}
-          icon={running ? LoaderCircle : awaitingUser ? CircleHelp : lifecycleFailed ? AlertTriangle : Check}
-          label={<RunStatusText text={lifecycleLabel} active={running} />}
-          status={running ? 'active' : awaitingUser ? 'pending' : 'complete'}
-        />}
-        </div>
-        </div></div>
-      </ChainOfThoughtContent>}
-    </ChainOfThought>
+            content = <RuntimeToolItem tool={tool} attemptState={attemptState} active={activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
+            }
+        return { id: step.id, verb: '', chip: '', icon: GroupIcon, content }
+      }) : [{ id: 'lifecycle', verb: lifecycleLabel, chip: '', icon: GroupIcon, content: <div className={`fox-runtime-empty-step ${running ? 'is-running' : 'is-complete'}`} role="status"><RunStatusText text={lifecycleLabel} active={running} /></div> }]} />
   )
 }

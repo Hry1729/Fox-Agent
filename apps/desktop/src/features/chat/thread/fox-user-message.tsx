@@ -3,7 +3,8 @@ import type { TextMessagePartProps, Attachment as AuiAttachment } from '@assista
 import { UserMessageBubble } from '../components/UserMessageBubble'
 import { requestConversationFork } from '../fox-shared'
 import { FoxEditComposer } from './fox-edit-composer'
-import { Copy, FileEdit, FileText, GitFork, Image } from 'lucide-react'
+import { Copy, FileEdit, GitFork } from 'lucide-react'
+import { File as MessageFile } from '@/components/assistant-ui/elements/file'
 
 /** Raw user text — never markdown-rendered, same as the legacy bubble. */
 function FoxUserText(part: TextMessagePartProps) {
@@ -12,18 +13,14 @@ function FoxUserText(part: TextMessagePartProps) {
 }
 
 function FoxUserAttachment({ attachment }: { attachment: AuiAttachment }) {
-  const isImage = attachment.type === 'image'
   return (
-    <span className="fox-thread-attachment" title={attachment.name}>
-      {isImage ? <Image size={13} /> : <FileText size={13} />}
-      <span>{attachment.name}</span>
-    </span>
+    <MessageFile className="fox-thread-attachment" name={attachment.name} mediaType={attachment.contentType} />
   )
 }
 
 /**
  * The user message (migration step 5C): the only bubble with a background —
- * `--muted` with the large radius — plus its attachments and a hover-revealed
+ * `--muted` with the large radius — plus its attachments and a visible
  * action row (复制 / 分叉 / 编辑). Only the last user message offers 编辑;
  * editing reruns from this message and truncates everything after it.
  */
@@ -31,6 +28,8 @@ export function FoxUserMessage() {
   const aui = useAui()
   const messageId = useAuiState((state) => state.message.id)
   const isEditing = useAuiState((state) => state.message.composer.isEditing)
+  const running = useAuiState(state => state.thread.isRunning)
+  const isLatestUser = useAuiState(state => state.thread.messages.findLast(message => message.role === 'user')?.id === state.message.id)
   return (
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
       <MessagePrimitive.Root className="fox-thread-msg is-user">
@@ -44,18 +43,16 @@ export function FoxUserMessage() {
         <MessagePrimitive.Parts components={{ Text: FoxUserText }} />
         <FoxEditComposer />
         {!isEditing && <div className="fox-user-meta">
-            <ActionBarPrimitive.Root hideWhenRunning autohide="always" className="fox-user-actions">
+            <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
               <ActionBarPrimitive.Copy asChild>
                 <button type="button" className="fox-thread-action-button" aria-label="复制消息"><Copy size={13} /></button>
               </ActionBarPrimitive.Copy>
-              <button type="button" className="fox-thread-action-button" aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
+              <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
                 <GitFork size={13} />
               </button>
-              <MessagePrimitive.If last>
-                <ActionBarPrimitive.Edit asChild>
+              {isLatestUser && <ActionBarPrimitive.Edit asChild disabled={running}>
                   <button type="button" className="fox-thread-action-button" aria-label="编辑并重新发送" title="编辑并重新发送"><FileEdit size={13} /></button>
-                </ActionBarPrimitive.Edit>
-              </MessagePrimitive.If>
+                </ActionBarPrimitive.Edit>}
             </ActionBarPrimitive.Root>
           </div>}
       </MessagePrimitive.Root>

@@ -7,16 +7,18 @@ import { RuntimeArtifacts } from '../runtime-artifacts'
 import { runtimeProcessActivity } from '../runtime-process-activity'
 import { toolAttemptState } from '../tool-attempt-status'
 import { TurnProcessHeader } from '../turn-process-header'
-import { Message, MessageAction, MessageActions, MessageContent } from '@/components/ai-elements/message'
-import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Textarea } from '@/components/ui/textarea'
+import { StreamingText } from '../components/StreamingText'
+import { RunActivity } from '@/components/assistant-ui/elements/run-activity'
+import { StoppedRun } from '@/components/assistant-ui/elements/error-state'
+import { MessageActions as AssistantMessageActions } from '@/components/assistant-ui/elements/message-actions'
+import { FeedbackDialog as FeedbackDialogSurface } from '@/components/assistant-ui/elements/feedback-dialog'
+import { ErrorPrompt } from '../demo/fox-demo-prompts'
+import { Message, MessageContent } from '@/components/ai-elements/message'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 import { type ArtifactRecord, type ConversationMessage, type KnowledgeBindingRecord, type RunEventRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { Copy, GitFork, LoaderCircle, ThumbsDown, ThumbsUp } from 'lucide-react'
-import { memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { MarkdownResponse, TimelineRuntimeContext, copyTextWithFeedback, requestConversationFork } from '../fox-shared'
+import { memo, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { TimelineRuntimeContext, copyTextWithFeedback, requestConversationFork } from '../fox-shared'
 import { type RuntimeSource, runtimeProcess } from './fox-runtime-process-model'
 import { RuntimeProcess, useLiveNow } from './fox-runtime-process-view'
 import { RuntimeSources } from './fox-runtime-sources'
@@ -24,13 +26,7 @@ import { splitAssistantContent } from './fox-runtime-timeline'
 
 export type RuntimeGroupHelpers = typeof import('../runtime-process-groups')
 
-function isFoldableProcessTarget(root: HTMLElement | null, node: Node | null) {
-  const element = node?.nodeType === 1 ? node as Element : node?.parentElement
-  return Boolean(root && node && root.contains(node)
-    && element?.closest('.fox-process-stage, .fox-answer-segment:not(.is-final)'))
-}
-
-function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, kernelMessages, running, runInProgress = false, hasInterleavedInput = false, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled, queuedAt }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; runInProgress?: boolean; hasInterleavedInput?: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean; /** When the prompt that started this run was written, so queue wait is real. */ queuedAt?: number | null }) {
+function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, kernelMessages, running, runInProgress = false, hasInterleavedInput = false, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled, queuedAt, hideFooter = false, onRetry }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; runInProgress?: boolean; hasInterleavedInput?: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean; /** When the prompt that started this run was written, so queue wait is real. */ queuedAt?: number | null; hideFooter?: boolean; onRetry?: () => void }) {
   const { authoritativeRunId, authoritativeRunState } = useContext(TimelineRuntimeContext)
   const processDisplayMode = useProcessDisplayMode()
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
@@ -70,25 +66,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   ], [projectedGroups, processEvents, running, message.id, parsed.answer])
   const [turnProcessChoice, setTurnProcessChoice] = useState<'open' | 'closed' | null>(null)
   const [collapseVersion, setCollapseVersion] = useState(0)
-  const processContentRef = useRef<HTMLDivElement>(null)
-  const [processFocusInside, setProcessFocusInside] = useState(false)
-  const [processSelectionInside, setProcessSelectionInside] = useState(false)
   const processGroupCount = orderedGroups?.filter(group => group.kind === 'process').length ?? 0
-  const observeProcessSelection = processGroupCount > 0 && (running || runInProgress)
-    && turnProcessChoice === null && !hasInterleavedInput && !failureReason && !cancelled
-    && message.status !== 'failed' && message.status !== 'cancelled' && processDisplayMode !== 'verbose'
-  useEffect(() => {
-    if (!observeProcessSelection) return
-    const updateSelection = () => {
-      const root = processContentRef.current
-      const selection = document.getSelection()
-      setProcessSelectionInside(Boolean(root && selection && !selection.isCollapsed
-        && (isFoldableProcessTarget(root, selection.anchorNode) || isFoldableProcessTarget(root, selection.focusNode))))
-    }
-    updateSelection()
-    document.addEventListener('selectionchange', updateSelection)
-    return () => document.removeEventListener('selectionchange', updateSelection)
-  }, [observeProcessSelection])
   const previousProcessGroups = useRef<{ sourceKey: string; renderKey: string; eventIds: Set<string> }[]>([])
   const renderGroups = useMemo(() => {
     const used = new Set<string>()
@@ -113,15 +91,8 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
     && toolAttemptState(tool, process.tools, latestProcessSeq, runAttemptState) === 'pending')
   const runActive = useMemo(() => runtimeProcessActivity(processEvents, running).running, [processEvents, running])
   const completed = !running && ['completed', 'interrupted', 'failed', 'cancelled'].includes(message.status)
-  const canToggleTurn = processGroupCount > 0 && processDisplayMode !== 'verbose'
-  const defaultCollapsed = completed && !runInProgress && message.status === 'completed'
-    && !failureReason && !cancelled && !hasInterleavedInput
-  const turnProcessCollapsed = canToggleTurn && (turnProcessChoice === 'closed'
-    || turnProcessChoice === null && defaultCollapsed && !processFocusInside && !processSelectionInside)
-  useLayoutEffect(() => {
-    if (canToggleTurn && defaultCollapsed && turnProcessChoice === null
-      && (processFocusInside || processSelectionInside)) setTurnProcessChoice('open')
-  }, [canToggleTurn, defaultCollapsed, turnProcessChoice, processFocusInside, processSelectionInside])
+  const canToggleTurn = processGroupCount > 0
+  const turnProcessCollapsed = canToggleTurn && turnProcessChoice !== 'open'
   // The current trailing reply stays readable while the process is folded,
   // including when it is still streaming. Earlier replies remain in the fold.
   const visibleResponseIndex = orderedGroups?.reduce((last, group, index) =>
@@ -166,26 +137,19 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
     <div className="fox-turn-anchor">
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
-          <>
+            <RunActivity status={runAttemptState === 'completed' ? 'complete' : runAttemptState === 'failed' ? 'error' : runAttemptState} statusLabel={turnProcessStatus} open={!turnProcessCollapsed} onOpenChange={next => setTurnProcessChoice(next ? 'open' : 'closed')} className="fox-process-turn-content"
+              header={
             <TurnProcessHeader avatar={<FoxAssistantAvatar />} events={processEvents} active={running || runInProgress}
               canToggle={canToggleTurn} collapsed={turnProcessCollapsed} status={turnProcessStatus}
               toolStatus={pendingToolAttempt ? '工具调用待调整' : undefined} onToggle={() => {
                 if (!turnProcessCollapsed) setCollapseVersion(value => value + 1)
-                setProcessFocusInside(false)
-                setProcessSelectionInside(false)
                 setTurnProcessChoice(turnProcessCollapsed ? 'open' : 'closed')
-              }} />
-            <div ref={processContentRef} className="fox-process-turn-content"
-              onFocusCapture={(event) => setProcessFocusInside(isFoldableProcessTarget(event.currentTarget, event.target))}
-              onBlurCapture={(event) => setProcessFocusInside(isFoldableProcessTarget(event.currentTarget, event.relatedTarget))}
-              onMouseUpCapture={() => {
-                const root = processContentRef.current
-                const selection = document.getSelection()
-                setProcessSelectionInside(Boolean(root && selection && !selection.isCollapsed
-                  && (isFoldableProcessTarget(root, selection.anchorNode) || isFoldableProcessTarget(root, selection.focusNode))))
-              }}>
-            {renderGroups?.map(({ group, renderKey }, index) => group.kind === 'process'
-              ? <div key={`${renderKey}:${collapseVersion}`} hidden={turnProcessCollapsed} className="fox-process-stage">
+              }} />}
+              entries={renderGroups.flatMap(({ group, renderKey }, index) => group.kind === 'notice' || index === visibleResponseIndex ? [] : [{
+                id: group.kind === 'process' ? `${renderKey}:${collapseVersion}` : group.key,
+                kind: group.kind === 'process' ? 'tool' as const : 'commentary' as const,
+                label: group.kind === 'process' ? '' : group.text,
+                content: group.kind === 'process' ? <div hidden={turnProcessCollapsed} className="fox-process-stage">
                   <RuntimeProcess
                     events={group.events} grouped groupHelpers={groupHelpers} displayMode={processDisplayMode} runInProgress={runInProgress} running={runActive && index === orderedGroups.length - 1}
                     outcome={index === lastProcessIndex ? failureReason ? 'failed' : cancelled ? 'cancelled' : undefined : undefined}
@@ -193,46 +157,29 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
                     phaseTitle={phaseTitle}
                     onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer}
                   />
-                </div>
-               : group.kind === 'notice' ? <div key={group.key} className="fox-process-notice" role="status">
-                   {group.label}
-                 </div>
-               : <div key={group.key} hidden={turnProcessCollapsed && index !== visibleResponseIndex} className={`fox-answer-body fox-answer-segment${index === visibleResponseIndex ? ' is-final' : ''}`}>
-                  <MarkdownResponse className="fox-answer-response">{group.text}</MarkdownResponse>
-                </div>)}
-            </div>
-          </>
+                </div> : <div hidden={turnProcessCollapsed} className="fox-answer-body fox-answer-segment"><StreamingText className="fox-answer-response" text={group.text} streaming={false} /></div>,
+              }])}
+              attention={renderGroups.filter(({ group }) => group.kind === 'notice').map(({ group }) => group.kind === 'notice' && <div key={group.key} className="fox-process-notice" role="status">{group.label}</div>)}
+            >
+            {renderGroups.map(({ group }, index) => group.kind === 'response' && index === visibleResponseIndex && <div key={group.key} className="fox-answer-body fox-answer-segment is-final"><StreamingText className="fox-answer-response" text={group.text} streaming={running} /></div>)}
+            </RunActivity>
           {compactionFailures.map(({ item, presentation }) => presentation && <div key={`compaction-failure-${item.seq}`} className="fox-process-notice" role="status">
             {presentation.label}
           </div>)}
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
+          {failureReason && !hideFooter && <ErrorPrompt error={failureReason.message} onRetry={onRetry} />}
+          {cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
         </MessageContent>
-        <div className="fox-message-footer">
-          <MessageActions className="fox-message-actions">
-            <MessageAction tooltip="复制" onClick={() => parsed.answer ? void copyTextWithFeedback(parsed.answer, '已复制回复') : toast('暂无可复制内容')}><Copy size={14} /></MessageAction>
-            <MessageAction tooltip={running ? '运行完成后可创建分支' : '从此消息创建分支'} disabled={running} onClick={() => onFork ? onFork(message.id) : requestConversationFork(message.id)}><GitFork size={14} /></MessageAction>
-            <MessageAction tooltip="这条回答有帮助" className={feedback === 'positive' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'positive'} disabled={running || feedbackSaving} onClick={() => void submitPositiveFeedback()}><ThumbsUp size={14} /></MessageAction>
-            <MessageAction tooltip="这条回答需要改进" className={feedback === 'negative' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'negative'} disabled={running || feedbackSaving} onClick={() => setFeedbackOpen(true)}><ThumbsDown size={14} /></MessageAction>
-          </MessageActions>
-          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && !failureReason && !cancelled && <span>已中断 · 内容已保存</span>}{cancelled && <span className="fox-message-cancelled-meta">运行已取消</span>}{failureReason && <span className="fox-message-failure-meta">{failureReason.kind === 'interrupted' ? '运行中断' : '运行失败'} · {failureReason.message}</span>}</div>
-        </div>
+        {!hideFooter && !running && !runInProgress && <div className="fox-message-footer">
+          <AssistantMessageActions reaction={feedback} running={running || runInProgress} busy={feedbackSaving}
+            onCopy={() => parsed.answer ? void copyTextWithFeedback(parsed.answer, '已复制回复') : toast('暂无可复制内容')}
+            onFork={() => onFork ? onFork(message.id) : requestConversationFork(message.id)}
+            onPositive={() => void submitPositiveFeedback()} onNegative={() => setFeedbackOpen(true)} onRegenerate={onRetry} />
+          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && !failureReason && !cancelled && <span>已中断 · 内容已保存</span>}{cancelled && <span className="fox-message-cancelled-meta">运行已取消</span>}{failureReason && <span className="fox-message-failure-meta">{failureReason.kind === 'interrupted' ? '运行中断' : '运行失败'}</span>}</div>
+        </div>}
       </Message>
-      <Dialog open={feedbackOpen} onOpenChange={setFeedbackOpen}>
-        <DialogContent className="fox-feedback-dialog">
-          <DialogHeader><DialogTitle>这条回答哪里需要改进？</DialogTitle><DialogDescription>只保存分类、备注和运行标识，不保存回答正文、文件内容或推理过程。</DialogDescription></DialogHeader>
-          <div className="fox-feedback-categories" role="radiogroup" aria-label="反馈分类">
-            {([
-              ['irrelevant', '答非所问'],
-              ['code_error', '代码错误'],
-              ['misunderstanding', '理解偏差'],
-              ['other', '其他'],
-            ] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={feedbackCategory === value} className={feedbackCategory === value ? 'is-selected' : ''} key={value} onClick={() => setFeedbackCategory(value)}>{label}</button>)}
-          </div>
-          <label className="fox-feedback-comment"><span>补充说明 <small>可选</small></span><Textarea value={feedbackComment} maxLength={1000} placeholder="告诉我们具体问题，最多 1000 字" onChange={(event) => setFeedbackComment(event.target.value)} /><small>{feedbackComment.length} / 1000</small></label>
-          <DialogFooter><Button variant="outline" onClick={() => setFeedbackOpen(false)}>取消</Button><Button disabled={feedbackSaving} onClick={() => void submitNegativeFeedback()}>{feedbackSaving && <LoaderCircle className="animate-spin" />}提交反馈</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <FeedbackDialogSurface open={feedbackOpen} onOpenChange={setFeedbackOpen} category={feedbackCategory} onCategoryChange={setFeedbackCategory} note={feedbackComment} onNoteChange={setFeedbackComment} saving={feedbackSaving} onSubmit={() => void submitNegativeFeedback()} />
     </div>
   )
 }
@@ -264,4 +211,6 @@ export const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (pr
   && previous.failureReason === next.failureReason
   && previous.cancelled === next.cancelled
   && previous.queuedAt === next.queuedAt
+  && previous.hideFooter === next.hideFooter
+  && previous.onRetry === next.onRetry
 ))

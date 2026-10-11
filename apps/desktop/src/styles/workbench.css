@@ -1388,23 +1388,23 @@
 
 /* A fixed trailing slot keeps status changes from moving the conversation title. */
 .fox-sidebar-conversation-status {
-  width: 20px;
-  min-width: 20px;
+  width: 16px;
+  min-width: 16px;
   height: 20px;
-  flex: 0 0 20px;
+  flex: 0 0 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-right: 6px;
+  margin-right: 2px;
 }
 
-/* Align the glyph with the title's optical center, above its line-box center. */
+/* Keep the smaller sidebar glyph vertically centered in its fixed slot. */
 .fox-sidebar-conversation-status > .fox-status-matrix,
 .fox-sidebar-collapsed-run > .fox-status-matrix {
-  transform: translateY(-1px);
+  transform: none;
 }
 
-/* All sidebar surfaces use a 14px matrix in the existing fixed slot. */
+/* Sidebar matrices use 70% of their original 14px size in the fixed slot. */
 .fox-sidebar-collapsed-run {
   display: inline-flex;
   align-items: center;
@@ -1483,6 +1483,8 @@
 .fox-project-conversation-row > .fox-sidebar-tree-main {
   padding-left: 34px;
 }
+.fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
+.fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main { padding-right: 2px; }
 
 .fox-shell .fox-sidebar-tree-main span {
   min-width: 0;
@@ -2968,8 +2970,7 @@ button.fox-chat-project-row:disabled {
 
 .fox-user-meta > span:last-child {
   display: flex;
-  opacity: 0;
-  transition: opacity 120ms ease;
+  opacity: 1;
 }
 
 .fox-user-message:hover .fox-user-meta > span:last-child,
@@ -4481,11 +4482,11 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-message-artifacts {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 180px));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 280px));
   justify-content: start;
   gap: 8px;
   width: min(100%, 760px);
-  margin-top: 2px;
+  margin-top: 8px;
 }
 
 .fox-message-artifact {
@@ -4769,10 +4770,10 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-prompt-shell.is-decision.is-approval {
-  border-color: color-mix(in oklch, var(--brand) 55%, var(--border));
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--brand) 24%, transparent),
-    0 12px 30px color-mix(in srgb, var(--fox-text) 10%, transparent);
+  border: 1px solid var(--fox-border);
+  border-radius: 20px;
+  background: var(--fox-card);
+  box-shadow: none;
 }
 
 .fox-prompt-shell.is-decision .fox-composer-mascot {
@@ -6049,6 +6050,12 @@ img[src='/avatars/fox-assistant.png'] {
   line-height: 1.55;
   white-space: pre;
 }
+.fox-approval-disclosure .fox-approval-write-preview { max-height: 240px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.fox-approval-write-preview, .fox-approval-write-preview > code { color: var(--fox-muted); }
+.fox-approval-details-scroll:has(.fox-approval-write-preview) { flex: 0 0 auto; max-height: none; max-block-size: none; overflow: visible; }
+.fox-approval-details-scroll:has(.fox-approval-write-preview) .fox-approval-scope-note { color: var(--fox-muted); }
+.fox-runtime-confirmation:has(.fox-approval-write-preview),
+.fox-decision-approval-list:has(.fox-approval-write-preview) { max-height: none; max-block-size: none; overflow: visible; }
 
 .fox-prompt-toolbar {
   position: relative;
@@ -11523,9 +11530,12 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-message-file-results {
   width: min(100%, 760px);
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin-top: 8px;
 }
+.fox-assistant-message:has(.fox-message-file-results) { gap: 8px; }
+.fox-assistant-message:has(.fox-message-file-results) > .fox-message-footer { margin-top: 0; }
+.fox-thread-msg.is-assistant:has(.fox-message-file-results) > .fox-message-footer { margin-top: 8px; }
 
 .fox-message-file-results-row {
   display: flex;
@@ -11564,7 +11574,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-message-artifact-trigger {
   min-width: 0;
   border: 0;
-  border-radius: 14px;
+  border-radius: 8px;
   background: transparent;
   padding: 0;
   color: inherit;

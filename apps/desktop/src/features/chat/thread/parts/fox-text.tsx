@@ -1,4 +1,5 @@
-import { MarkdownResponse } from '../../fox-shared'
+import { StreamingText } from '../../components/StreamingText'
+import { useAuiState } from '@assistant-ui/react'
 import type { TextMessagePartProps } from '@assistant-ui/react'
 
 /**
@@ -7,6 +8,7 @@ import type { TextMessagePartProps } from '@assistant-ui/react'
  * the legacy timeline used, lazily loaded through `MarkdownResponse`.
  */
 export function FoxTextPart(part: TextMessagePartProps) {
+  const streaming = useAuiState(state => state.message.status?.type === 'running')
   if (!part.text) return null
-  return <MarkdownResponse className="fox-thread-answer">{part.text}</MarkdownResponse>
+  return <StreamingText className="fox-thread-answer" text={part.text} streaming={streaming} />
 }

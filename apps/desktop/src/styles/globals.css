@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import '../components/assistant-ui/upstream/tw-shimmer/index.css';
 @import "shadcn/tailwind.css";
 @import "./themes.css";
 @import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css";

@@ -4,6 +4,7 @@ import { deriveRunTerminalStates, type RunFailure } from '../../conversations/mo
 import type { ArtifactRecord, AttachmentRecord, ConversationDetail, ConversationMessage, RunEventRecord, RunRecord } from '../../conversations/model/types'
 import { splitAssistantContent } from '../timeline/fox-assistant-content'
 import { runtimeProcess, type RuntimeSource, type RuntimeToolStep } from '../timeline/fox-runtime-process-model'
+import { groupAssistantContinuations, latestRunAssistantId, type RuntimeTimelineMessage } from '../runtime-timeline-performance'
 
 /**
  * The Fox-side intermediate message model for the assistant-ui external store
@@ -44,6 +45,7 @@ export type FoxThreadPart =
   | { type: 'data-fox-error'; data: RunFailure }
 
 export interface FoxThreadMessage {
+  source?: RuntimeTimelineMessage
   id: string
   role: 'user' | 'assistant'
   /** The run this message belongs to (null for the draft-pending message). */
@@ -119,7 +121,8 @@ export function deriveFoxThreadMessages(input: FoxThreadInput, cache: FoxThreadC
   const attachmentsByMessage = groupAttachments(detail.attachments)
   const artifactsByRun = groupArtifacts(detail.artifacts)
   const messages: FoxThreadMessage[] = []
-  for (const message of detail.messages) {
+  const projectedMessages = groupAssistantContinuations(detail.messages.filter(message => message.role === 'user' || message.role === 'assistant'), latestRunAssistantId(detail.messages, activeRunId ?? undefined), streamingText)
+  for (const message of projectedMessages) {
     if (message.role !== 'user' && message.role !== 'assistant') continue
     messages.push(toFoxThreadMessage({ message, detail, runTerminalStates, attachmentsByMessage, artifactsByRun, activeRunId, cache }))
   }
@@ -185,7 +188,7 @@ function hasProcessData(process: FoxProcessData) {
 }
 
 function toFoxThreadMessage(args: {
-  message: ConversationMessage
+  message: RuntimeTimelineMessage
   detail: ConversationDetail
   runTerminalStates: RunTerminalStates
   attachmentsByMessage: Map<string, AttachmentRecord[]>
@@ -202,7 +205,7 @@ function toFoxThreadMessage(args: {
   // event stream advanced, or its run's terminal state arrived. Static history
   // messages never change keys, so the converter keeps reusing their objects.
   const version = runVersion(events, message.runId)
-  const key = `${message.id}:${message.updatedAt}:${message.status}:${version}:${isActiveRun ? 1 : 0}:${failure ? failure.code : ''}:${cancelled ? 1 : 0}`
+  const key = `${message.id}:${message.updatedAt}:${message.status}:${version}:${isActiveRun ? 1 : 0}:${failure ? failure.code : ''}:${cancelled ? 1 : 0}:${message.content}`
   const cached = cache.get(message.id)
   if (cached && cached.key === key) return cached.message
   const attachments = (attachmentsByMessage.get(message.id) ?? []).map(attachmentToFoxAttachment)
@@ -230,6 +233,7 @@ function toFoxThreadMessage(args: {
     parts.push({ type: 'text', text: message.content })
   }
   const fox: FoxThreadMessage = {
+    source: message,
     id: message.id,
     // The caller filters to user/assistant roles before this point.
     role: message.role as 'user' | 'assistant',
@@ -290,7 +294,7 @@ function syntheticAssistantMessage(
   const version = runVersion(detail.runtimeEvents, activeRunId)
   const failure = runTerminalStates.failures.get(activeRunId) ?? null
   const cancelled = runTerminalStates.cancelled.has(activeRunId)
-  const key = `assistant-${activeRunId}:streaming:${streamingText.length}:${version}`
+  const key = `assistant-${activeRunId}:streaming:${streamingText}:${version}`
   const cached = cache.get(`assistant-${activeRunId}`)
   if (cached && cached.key === key) return cached.message
   const parts: FoxThreadPart[] = []
@@ -305,6 +309,7 @@ function syntheticAssistantMessage(
   if (runArtifacts?.length) parts.push({ type: 'data-fox-artifacts', data: runArtifacts })
   if (failure) parts.push({ type: 'data-fox-error', data: failure })
   const fox: FoxThreadMessage = {
+    source: { id: `assistant-${activeRunId}`, timelineKey: `assistant-run-${activeRunId}`, conversationId: detail.conversation.id, role: 'assistant', runId: activeRunId, kind: 'text', content: streamingText, status: 'streaming', ordinal: detail.messages.length + 1, createdAt: detail.lastRun?.startedAt ?? Date.now(), updatedAt: eventsForRun.at(-1)?.createdAt ?? Date.now() },
     id: `assistant-${activeRunId}`,
     role: 'assistant',
     runId: activeRunId,

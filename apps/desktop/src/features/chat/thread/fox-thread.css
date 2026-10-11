@@ -32,6 +32,7 @@
   min-height: 0;
   height: 100%;
 }
+.fox-thread .fox-scroll-button:disabled { display: none; }
 
 .fox-thread-root {
   display: flex;
@@ -122,7 +123,7 @@
   white-space: nowrap;
 }
 
-/* --- hover-revealed action rows --- */
+/* --- message action rows --- */
 
 .fox-thread-action-button {
   display: inline-flex;
@@ -158,8 +159,7 @@
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
-  transition: opacity 120ms ease;
+  opacity: 1;
 }
 
 .fox-thread-msg.is-user:hover .fox-user-actions,
@@ -167,8 +167,7 @@
   opacity: 1;
 }
 
-/* The last assistant message keeps its action row visible: ActionBarPrimitive
-   autohide="not-last" only renders the floating state for earlier messages. */
+/* ActionBarPrimitive uses autohide="never"; unavailable actions stay disabled. */
 
 /* --- compact sources: one line of small text labels --- */
 

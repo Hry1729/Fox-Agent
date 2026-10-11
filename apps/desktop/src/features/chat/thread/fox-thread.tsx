@@ -36,8 +36,8 @@ function FoxScrollToBottom() {
   const isRunning = useAuiState((state) => state.thread.isRunning)
   const isEmpty = useAuiState((state) => state.thread.isEmpty)
   if (isEmpty) return null
-  // ScrollToBottom 自己会在"已经到底"时返回 null，所以这里只决定形态：思考中给点阵，
-  // 空闲给箭头。以前运行中直接隐藏，恰好把最需要它的场景（被新内容吸走又看不到）拿掉了。
+  // The primitive disables its button at bottom; scoped CSS hides that state.
+  // Running determines only the dots/arrow, not whether scrolling is available.
   return (
     <ThreadPrimitive.ScrollToBottom className="fox-scroll-button" aria-label="定位到最新消息">
       {isRunning ? <FoxThinkingDots /> : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>}

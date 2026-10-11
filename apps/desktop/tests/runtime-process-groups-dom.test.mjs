@@ -219,7 +219,9 @@ test('a failed tool stays visible in its stage and in the collapsed turn summary
   // row lives inside the disclosure, so open the turn and the tool's stage to read it.
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   fireEvent.click(view.container.querySelectorAll('.fox-chain-of-thought-header')[1])
-  assert.equal(view.container.querySelectorAll('.fox-run-step-action').length, 1)
+  // SwapLabel retains an aria-hidden animation layer; the active layer must
+  // expose exactly one action rather than counting its decorative copy.
+  assert.equal(view.container.querySelectorAll('.fox-element-tool-trigger [aria-hidden="false"] .fox-run-step-action').length, 1)
   assert.match(view.container.querySelector('.fox-run-step-action').textContent, /工具调用未成功/)
   assert.match(view.container.querySelector('.fox-run-step-summary').textContent, /本次操作未能完成/)
   // A tool result describes one attempt, not the task (tool-attempt-status.ts), so a
@@ -313,13 +315,8 @@ test('mode changes keep manual group and reasoning disclosure state', async () =
   assert.equal(thought.querySelector('.fox-run-status-prefix').textContent, '深度思考 ·')
   assert.equal(thought.querySelector('.fox-run-status-label').textContent, '')
   await React.act(async () => persistProcessDisplayMode('verbose'))
-  // Verbose expands every group — both disclosures are open — but only the group the
-  // reader never decided on carries the automatic-expansion marker: `autoExpanded`
-  // requires `open === null` (workbench.tsx), so the manual choice here is kept
-  // rather than re-marked (this is exactly what this test is about, and
-  // turn-process-header-dom.test.mjs reads verbose expansion from aria-hidden too).
-  assert.equal(view.container.querySelectorAll('.fox-runtime-process-disclosure[aria-hidden="false"]').length, 2)
-  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 1)
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process-disclosure[aria-hidden="false"]').length, 1)
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 0)
   assert.equal(thought.getAttribute('data-state'), 'open')
   await React.act(async () => persistProcessDisplayMode('standard'))
   assert.equal(thought.getAttribute('data-state'), 'open')
@@ -370,27 +367,28 @@ test('streaming thought preview advances only after a paragraph first line compl
   assert.equal(label(), '')
 })
 
-test('running turn stays visible and settles to a folded process with its answer exposed', async () => {
+test('a running turn stays folded through completion while its final answer remains exposed', async () => {
   const live = timeline(events.filter(item => item.seq !== 4), {
     runtimeRunning: true, activeRunId: 'run', state: 'streaming',
     messages: [messages[0], { ...messages[1], status: 'streaming' }],
   })
   const view = render(live)
-  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage:not([hidden])').length, 2))
-  assert.equal(view.getByRole('button', { name: /收起过程/ }).getAttribute('aria-expanded'), 'true')
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2))
+  assert.equal(view.getByRole('button', { name: /展开过程/ }).getAttribute('aria-expanded'), 'false')
   view.rerender(timeline(events))
   await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
   assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
   assert.equal(view.container.querySelectorAll('.fox-answer-segment:not([hidden])').length, 1)
 })
 
-test('automatic completion fold does not hide a focused process control', async () => {
+test('completion preserves a manually opened process and focused control', async () => {
   const live = timeline(events.filter(item => item.seq !== 4), {
     runtimeRunning: true, activeRunId: 'run', state: 'streaming',
     messages: [messages[0], { ...messages[1], status: 'streaming' }],
   })
   const view = render(live)
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2))
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   const row = view.container.querySelector('.fox-runtime-step-trigger')
   await React.act(async () => { row.focus() })
@@ -406,13 +404,14 @@ test('automatic completion fold does not hide a focused process control', async 
   assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
 })
 
-test('automatic completion fold keeps selected process text until the reader closes it', async () => {
+test('completion preserves a manually opened process and selected text until the reader closes it', async () => {
   const live = timeline(events.filter(item => item.seq !== 4), {
     runtimeRunning: true, activeRunId: 'run', state: 'streaming',
     messages: [messages[0], { ...messages[1], status: 'streaming' }],
   })
   const view = render(live)
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2))
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   const label = view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix')
   const range = document.createRange()
@@ -450,15 +449,18 @@ test('compact mode previews only the live reasoning row in a running group', asy
   assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-label')?.textContent), ['旧首行 旧续行', '最新首行 最新续行'])
 })
 
-test('detailed mode opens only running groups and compact mode hides settled thought previews', async () => {
+test('detailed and compact modes never open the turn or groups without a user click', async () => {
   await React.act(async () => persistProcessDisplayMode('detailed'))
   const live = timeline(events.filter(item => item.seq !== 4), {
     runtimeRunning: true, activeRunId: 'run', state: 'streaming',
     messages: [messages[0], { ...messages[1], status: 'streaming' }],
   })
   const view = render(live)
-  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 2))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2))
+  assert.equal(view.getByRole('button', { name: /展开过程/ }).getAttribute('aria-expanded'), 'false')
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 0)
   view.rerender(timeline(events))
+  assert.equal(view.getByRole('button', { name: /展开过程/ }).getAttribute('aria-expanded'), 'false')
   assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 0)
   await React.act(async () => persistProcessDisplayMode('compact'))
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
@@ -494,6 +496,8 @@ test('a user input after process evidence stays visible when the reader folds th
     kernelPreview: { checkpointSeq: 1, revision: 1, reasoning: '先查证' } }
   const steering = { ...messages[0], id: 'steering', ordinal: 3, content: '继续检查' }
   const view = render(timeline([], { messages: [messages[0], assistant, steering] }))
+  await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 1))
   assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle.is-status').length, 0)
   assert.equal(view.container.querySelector('.fox-process-turn-toggle').getAttribute('aria-expanded'), 'true')

@@ -21,13 +21,14 @@ function artifact(id: string, artifactClass: string, displayName: string): Artif
 }
 
 describe('reply file results', () => {
-  test('two buttons share one row and clicking either shows only its files below', () => {
+  test('larger batches keep category disclosures and opening a file keeps its Host identity', () => {
     const opened: string[] = []
     render(React.createElement(RuntimeArtifacts, {
       artifacts: [
         artifact('deliverable', 'deliverable', '报告.docx'),
         artifact('preview', 'preview', '预览.html'),
         artifact('process', 'process', '计算.csv'),
+        artifact('process-2', 'process', '日志.txt'),
       ],
       onOpenArtifact: (item: ArtifactRecord) => opened.push(item.id),
     }))
@@ -61,22 +62,25 @@ describe('reply file results', () => {
     expect(process.getAttribute('aria-expanded')).toBe('false')
   })
 
-  test('an empty category stays visible but cannot open a blank panel', () => {
-    render(React.createElement(RuntimeArtifacts, { artifacts: [artifact('process', 'process', '计算.csv')] }))
-    const result = screen.getByRole('button', { name: /本次文件结果/ })
-    const process = screen.getByRole('button', { name: /过程文件/ })
-    expect((result as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(result)
+  test('one process file is directly visible and no empty result category is rendered', () => {
+    const record = artifact('process', 'process', '计算.csv')
+    let opened: ArtifactRecord | undefined
+    const view = render(React.createElement(RuntimeArtifacts, { artifacts: [record], onOpenArtifact: item => { opened = item } }))
+    expect(screen.queryByText('本次文件结果')).toBeNull()
     expect(screen.queryByRole('region', { name: '本次文件结果' })).toBeNull()
-    fireEvent.click(process)
     expect(screen.getByRole('region', { name: '过程文件' })).toBeTruthy()
+    expect(view.container.querySelector('[data-slot="file-root"]')).not.toBeNull()
+    expect(view.container.querySelector('[data-slot="file-icon"] svg')).not.toBeNull()
+    expect(view.container.querySelector('[data-slot="file-name"]')?.textContent).toBe('计算.csv')
+    expect(view.container.querySelector('[data-slot="file-size"]')?.textContent).toBe('1.0 KB')
+    fireEvent.click(screen.getByRole('button', { name: /计算.csv/ }))
+    expect(opened).toBe(record)
   })
 
   test('a card shows the file name and keeps the long storage path for hover only', () => {
     const longPath = '\\\\?\\D:\\python\\projects\\Fox\\output\\fox-merge-verify-20261004\\human-tests-20261007-r2\\O06-project\\out\\slides_outline.json'
     const record = { ...artifact('deliverable', 'deliverable', 'slides_outline.json'), storagePath: longPath }
     render(React.createElement(RuntimeArtifacts, { artifacts: [record] }))
-    fireEvent.click(screen.getByRole('button', { name: /本次文件结果/ }))
     const card = screen.getByRole('button', { name: /slides_outline\.json/ })
     // The card itself paints the name and the summary, never the raw path.
     expect(card.textContent).toContain('slides_outline.json')
@@ -88,7 +92,7 @@ describe('reply file results', () => {
     expect(titled).toContain(longPath)
   })
 
-  test('a card carries one short summary and leaves the metadata to the detail view', () => {
+  test('the compact official row shows filename and size, with delivery metadata in its tooltip', () => {
     const published = {
       ...artifact('deliverable', 'deliverable', 'slides_outline.json'),
       byteSize: 4012,
@@ -98,12 +102,12 @@ describe('reply file results', () => {
       },
     }
     render(React.createElement(RuntimeArtifacts, { artifacts: [published] }))
-    fireEvent.click(screen.getByRole('button', { name: /本次文件结果/ }))
     const card = screen.getByRole('button', { name: /slides_outline\.json/ })
-    expect(card.textContent).toContain('已发布到项目')
-    // Size, version, change kind and the verification tally are diagnostics: they
-    // belong to the file detail view, not to this one line.
-    for (const leaked of ['4.0 KB', '4012', 'v3', '验收通过', '新建', '验收']) {
+    expect(card.textContent).not.toContain('已发布到项目')
+    expect(card.getAttribute('title')).toBe('已发布到项目')
+    expect(card.querySelector('[data-slot="file-size"]')?.textContent).toBe('3.9 KB')
+    expect(card.querySelector('[data-slot="file-name"]')?.parentElement).toBe(card.querySelector('[data-slot="file-size"]')?.parentElement)
+    for (const leaked of ['4012', 'v3', '验收通过', '新建', '验收']) {
       expect(card.textContent).not.toContain(leaked)
     }
   })
@@ -118,12 +122,11 @@ describe('reply file results', () => {
       },
     }
     render(React.createElement(RuntimeArtifacts, { artifacts: [failed] }))
-    fireEvent.click(screen.getByRole('button', { name: /本次文件结果/ }))
     const card = screen.getByRole('button', { name: /metrics\.csv/ })
     // A published file whose *content* failed verification: the base phrase keeps
     // the publish fact, and the warning describes the verification, not the write.
-    expect(card.textContent).toContain('已发布到项目')
-    expect(card.textContent).toContain('内容需核对')
+    expect(card.getAttribute('title')).toContain('已发布到项目')
+    expect(card.getAttribute('title')).toContain('内容需核对')
     expect(card.textContent).not.toContain('发布未通过')
     expect(card.textContent).not.toContain('列名与契约不一致')
   })
@@ -135,11 +138,24 @@ describe('reply file results', () => {
         artifact('intermediate-docx', 'process', '草稿.docx'),
       ],
     }))
-    fireEvent.click(screen.getByRole('button', { name: /本次文件结果/ }))
-    expect(screen.getByRole('button', { name: /交付数据.csv/ })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /草稿.docx/ })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: /过程文件/ }))
-    expect(screen.getByRole('button', { name: /草稿.docx/ })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /交付数据.csv/ })).toBeNull()
+    expect(within(screen.getByRole('region', { name: '本次文件结果' })).getByRole('button', { name: /交付数据.csv/ })).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '过程文件' })).getByRole('button', { name: /草稿.docx/ })).toBeTruthy()
+  })
+
+  test('a long filename keeps its full tooltip and shares a column with the independent size row', () => {
+    const name='审批验证_保留完整中文文件名_approval_execution_integration_repeated_checks_20261011.py'
+    const record={...artifact('long-name','process',name),byteSize:127}
+    let opened: ArtifactRecord | undefined
+    const view=render(React.createElement(RuntimeArtifacts,{artifacts:[record],onOpenArtifact: item=>{opened=item}}))
+    const card=screen.getByRole('button',{name:new RegExp(name)})
+    const filename=card.querySelector('[data-slot="file-name"]')!
+    const size=card.querySelector('[data-slot="file-size"]')!
+    expect(filename.textContent).toBe(name)
+    expect(filename.getAttribute('title')).toBe(name)
+    expect(size.textContent).toBe('127 B')
+    expect(filename.parentElement).toBe(size.parentElement)
+    expect(view.container.querySelector('.aui-file-open-icon')).not.toBeNull()
+    fireEvent.click(card)
+    expect(opened).toBe(record)
   })
 })

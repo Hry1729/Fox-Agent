@@ -323,7 +323,7 @@ describe('RuntimeApprovalPrompt (real DOM clicks)', () => {
     expect(text).toContain('整文件替换')
     expect(text).toContain('这不是普通写入审批')
     expect(text).toContain('sha256:req-abc')
-    expect(text).toContain('C:/tmp/a.txt')
+    expect(document.querySelector('[data-slot="approval-card"] > .aui-approval-operation')?.textContent).toBe('C:/tmp/a.txt')
     expect(text).toContain('sha256:base-1')
     expect(text).toContain('sha256:cand-2')
 
