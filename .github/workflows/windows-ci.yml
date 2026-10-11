@@ -38,10 +38,31 @@ jobs:
       - name: Configure Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Pinned: the desktop suite is validated against this runner version.
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # A frozen install must not rewrite dependency declarations. If it does,
+      # the lockfile and package.json files have drifted apart.
+      - name: Verify install left dependency files untouched
+        shell: pwsh
+        run: |
+          git diff --exit-code -- pnpm-lock.yaml pnpm-workspace.yaml package.json apps/desktop/package.json
+          if ($LASTEXITCODE -ne 0) { Write-Error 'pnpm install --frozen-lockfile rewrote the lockfile or dependency declarations'; exit 1 }
+
+      # Two React copies reach the bundle as two runtimes; the root-level
+      # border-beam declaration used to pull a second react-dom peer in.
+      - name: Verify a single React copy
+        shell: pwsh
+        run: |
+          $pkgs = Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'node_modules\.pnpm') -Directory |
+            Where-Object { $_.Name -match '^(react|react-dom)@' } |
+            ForEach-Object { ($_.Name -split '_')[0] } |
+            Sort-Object -Unique
+          if ($pkgs.Count -gt 2) { Write-Error "Multiple React copies found: $($pkgs -join ', ')"; exit 1 }
+          "React copies: $($pkgs -join ', ')"
 
       - name: Verify contract fixtures
         run: pnpm contract-fixtures:verify
