@@ -58,9 +58,9 @@ function capabilitySummary(expert?: AgentRecord) {
 
 function availability(expert?: AgentRecord) {
   if (!expert) return { label: '版本不可用', status: 'missing', icon: PackageX }
-  if (!expert.available) return { label: '服务离线', status: 'offline', icon: WifiOff }
+  if (!expert.available) return { label: '无法连接', status: 'offline', icon: WifiOff }
   const resources = expert.resources.skills.length + expert.resources.knowledges.length + expert.resources.mcps.length + expert.resources.tools.length
-  if (resources === 0) return { label: '资源缺失', status: 'missing', icon: PackageX }
+  if (resources === 0) return { label: '缺少资源', status: 'missing', icon: PackageX }
   return { label: '可用', status: 'available', icon: CheckCircle2 }
 }
 
@@ -90,7 +90,7 @@ export function ExpertActivationCard({ binding, expert, onView }: {
           <strong>已启用 {snapshot.name}</strong>
           <span className={`fox-expert-availability is-${state.status}`}><StatusIcon size={11} />{state.label}</span>
         </header>
-        <p>{snapshot.description || expert?.description || '此专家已作为当前对话的专业能力包启用。'}</p>
+        <p>{snapshot.description || expert?.description || '此专家已作为当前对话的专家包启用。'}</p>
         <footer>
           {(snapshot.category || expert?.category) && <span>{snapshot.category || expert?.category}</span>}
           {capabilities.map((item) => <span key={item}>{item}</span>)}

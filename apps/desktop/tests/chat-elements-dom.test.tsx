@@ -102,7 +102,7 @@ test('反馈单选支持箭头，保存字段保持单分类与备注', async ()
   expect(saved).toEqual({ category: 'code_error', note: '代码未运行' })
 })
 
-test('真实Composer恢复Fox原附件结构，移除保留项目知识库和原File身份', async () => {
+test('真实Composer恢复Fox原附件结构，移除保留项目资料库和原File身份', async () => {
   const { MemoizedComposer }=await import('../src/features/chat/composer/fox-composer')
   const { PromptInputProvider,usePromptInputController }=await import('../src/components/ai-elements/prompt-input')
   const { TooltipProvider }=await import('../src/components/ui/tooltip')
@@ -122,7 +122,7 @@ test('真实Composer恢复Fox原附件结构，移除保留项目知识库和原
   }
   function Harness() {
     const [draft,setDraft]=React.useState('')
-    return <TooltipProvider><PromptInputProvider><Seed/><ComposerRuntimeContext.Provider value={{knowledgeBindings:[],knowledgeReferences:[{source:'local',id:'kb'}],localKnowledgeBases:[{id:'kb',name:'项目知识库'} as any]}}><MemoizedComposer resetKey={0} draft={draft} setDraft={setDraft} chatState="idle" runtimeControlled projectRoot="D:/projects/aipath-main" onProject={()=>projectClicks++} onKnowledge={()=>knowledgeClicks++}/></ComposerRuntimeContext.Provider></PromptInputProvider></TooltipProvider>
+    return <TooltipProvider><PromptInputProvider><Seed/><ComposerRuntimeContext.Provider value={{knowledgeBindings:[],knowledgeReferences:[{source:'local',id:'kb'}],localKnowledgeBases:[{id:'kb',name:'项目资料库'} as any]}}><MemoizedComposer resetKey={0} draft={draft} setDraft={setDraft} chatState="idle" runtimeControlled projectRoot="D:/projects/aipath-main" onProject={()=>projectClicks++} onKnowledge={()=>knowledgeClicks++}/></ComposerRuntimeContext.Provider></PromptInputProvider></TooltipProvider>
   }
   const view=render(<Harness />)
   try {
@@ -131,7 +131,7 @@ test('真实Composer恢复Fox原附件结构，移除保留项目知识库和原
     expect(controller!.attachments.files[0].file).toBe(sample)
     const id=controller!.attachments.files[0].id
     fireEvent.click(view.getByRole('button',{name:'aipath-main'}))
-    fireEvent.click(view.getByRole('button',{name:'项目知识库'}))
+    fireEvent.click(view.getByRole('button',{name:'项目资料库'}))
     expect(projectClicks).toBe(1)
     expect(knowledgeClicks).toBe(1)
     expect(controller!.attachments.files[0].id).toBe(id)
@@ -139,7 +139,7 @@ test('真实Composer恢复Fox原附件结构，移除保留项目知识库和原
     expect(controller!.attachments.files).toHaveLength(0)
     expect(view.queryByText('输入附件示例.txt')).toBeNull()
     expect(view.getByRole('button',{name:'aipath-main'})).toBeDefined()
-    expect(view.getByRole('button',{name:'项目知识库'})).toBeDefined()
+    expect(view.getByRole('button',{name:'项目资料库'})).toBeDefined()
     expect(revoked).toContain('blob:attachment-preview')
   } finally {
     await act(async()=>view.unmount())
@@ -183,9 +183,9 @@ test('AUI运行中隐藏当前助手footer，历史保留，终态整体显示�
   expect(edit.closest('[data-turn-message-id]')?.getAttribute('data-turn-message-id')).toBe('u2')
   expect((edit as HTMLButtonElement).disabled).toBe(false)
   fireEvent.click(edit)
-  await waitFor(() => expect(view.getByRole('textbox', { name: '编辑最新消息' })).toBeDefined())
+  await waitFor(() => expect(view.getByRole('textbox', { name: '编辑消息' })).toBeDefined())
   fireEvent.click(view.getByRole('button', { name: '取消' }))
-  await waitFor(() => expect(view.queryByRole('textbox', { name: '编辑最新消息' })).toBeNull())
+  await waitFor(() => expect(view.queryByRole('textbox', { name: '编辑消息' })).toBeNull())
   await act(async () => view.rerender(<Harness running />))
   expect((view.getByRole('button', { name: '编辑并重新发送' }) as HTMLButtonElement).disabled).toBe(true)
   expect(view.container.querySelector('[data-turn-message-id="a2"] .fox-message-footer')).toBeNull()

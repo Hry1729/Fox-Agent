@@ -5,6 +5,7 @@ import type { KnowledgeSourceLocator } from '@/features/workspace/types'
 import type { DocumentViewPosition } from './document-activity-model'
 import { assertSafeZipArchive } from './knowledge-archive-safety'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
+import './knowledge-reader-viewers.css'
 import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
 
 const MAX_DOCX_BYTES = 64 * 1024 * 1024
@@ -173,7 +174,7 @@ export default function KnowledgeDocxViewer({
   }
 
   return (
-    <div className="fox-docx-preview-shell">
+    <div className="fox-docx-preview-shell" data-knowledge-viewer="docx">
       <div className="fox-preview-surface fox-docx-preview-surface">
         <PreviewToolbar>
           <span className="fox-preview-toolbar-label">{pageCount ? continuous ? '连续文档' : `第 ${page} / ${pageCount} 页` : '正在读取文档页面'}</span>

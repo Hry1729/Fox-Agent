@@ -278,7 +278,7 @@ export function runtimeProcess(events: RunEventRecord[]) {
       const id = compactValue(item.event.id, `source-${item.seq}`)
       sources.set(id, {
         id,
-        title: compactValue(item.event.title, '知识库来源'),
+        title: compactValue(item.event.title, '资料库来源'),
         knowledgeBaseId: compactValue(item.event.knowledgeBaseId),
         documentId: compactValue(item.event.documentId),
         excerpt: compactValue(item.event.excerpt),

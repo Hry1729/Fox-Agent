@@ -3,7 +3,7 @@ import { NewConversationMascot } from '../components/NewConversationMascot'
 
 const DEFAULT_SUGGESTIONS = [
   '整理这个项目中的文档',
-  '从知识库查找相关资料',
+  '从资料库查找相关资料',
   '读取一个文件并帮我分析',
   '帮我规划并完成一个任务',
 ]
@@ -20,7 +20,7 @@ export function FoxThreadEmpty({ suggestions }: { suggestions?: string[] }) {
     <div className="fox-empty-conversation">
       <div className="fox-empty-heading">
         <NewConversationMascot />
-        <div className="fox-empty-heading-copy"><h2>今天想一起做点什么？</h2><p>Fox 可以和你对话、处理本地文件，也可以从知识库中检索资料。</p></div>
+        <div className="fox-empty-heading-copy"><h2>今天想做什么？</h2><p>Fox 可以和你对话、处理本机文件，也可以从资料库中检索资料。</p></div>
       </div>
       <div className="fox-starter-suggestions">
         {prompts.map((prompt) => (

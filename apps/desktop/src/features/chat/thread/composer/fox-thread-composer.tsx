@@ -325,7 +325,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
       className="fox-steering-submit"
       data-testid="fox-steering-submit"
       disabled={steering.busy || !composerText.trim()}
-      title="补充到当前任务：在下一个安全分发边界交给模型，不停止当前任务，不新增工具授权"
+      title="加入当前任务：在下一个安全分发边界交给模型，不停止当前任务，不新增工具授权"
       onClick={() => void submitSteering('current')}
     >
       {steering.busy ? <LoaderCircle className="animate-spin" size={13} /> : <CornerDownLeft size={13} />}
@@ -390,21 +390,21 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
               {slashCommands.map((command) => <CommandItem key={command.id} value={command.id} onSelect={() => applySlashCommand(command)}><span className="fox-command-icon">{command.icon}</span><span className="fox-command-copy"><strong>/{command.id}</strong><small>{command.title} · {command.detail}</small></span></CommandItem>)}
             </CommandGroup>
           </> : <>
-            <CommandEmpty>{runtimeContext.knowledgeLoading ? '正在读取知识库…' : runtimeContext.knowledgeError || '当前没有可使用的知识库'}</CommandEmpty>
-            <CommandGroup heading="远程知识库">
+            <CommandEmpty>{runtimeContext.knowledgeLoading ? '正在读取资料库…' : runtimeContext.knowledgeError || '当前没有可使用的资料库'}</CommandEmpty>
+            <CommandGroup heading="远程资料库">
               {(runtimeContext.remoteKnowledgeBases ?? []).map((item) => {
                 const reference: KnowledgeReference = { source: 'remote', providerKey: 'yuxi-primary', connectionId: 'yuxi-primary', id: item.id }
                 const selected = selectedKnowledgeReferenceKeys.has(knowledgeReferenceKey(reference))
-                return <CommandItem key={`remote:${item.id}`} value={`远程知识库 ${item.name} ${item.description}`} onSelect={() => { if (!runtimeContext.knowledgeLoading) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.fileCount} 个文件`}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
+                return <CommandItem key={`remote:${item.id}`} value={`远程资料库 ${item.name} ${item.description}`} onSelect={() => { if (!runtimeContext.knowledgeLoading) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.fileCount} 个文件`}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
               })}
             </CommandGroup>
             <div className="fox-slash-knowledge-separator" aria-hidden="true" />
-            <CommandGroup heading="本地知识库">
+            <CommandGroup heading="本机资料库">
               {(runtimeContext.localKnowledgeBases ?? []).map((item) => {
                 const reference: KnowledgeReference = { source: 'local', providerKey: 'local', id: item.id }
                 const selected = selectedKnowledgeReferenceKeys.has(knowledgeReferenceKey(reference))
                 const availability = localKnowledgePickerState(item)
-                return <CommandItem key={`local:${item.id}`} disabled={!selected && !availability.available} value={`本地知识库 ${item.name} ${item.description ?? ''}`} onSelect={() => { if (!runtimeContext.knowledgeLoading && (selected || availability.available)) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.documentCount} 个文档`} · {availability.status}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
+                return <CommandItem key={`local:${item.id}`} disabled={!selected && !availability.available} value={`本机资料库 ${item.name} ${item.description ?? ''}`} onSelect={() => { if (!runtimeContext.knowledgeLoading && (selected || availability.available)) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.documentCount} 个文档`} · {availability.status}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
               })}
             </CommandGroup>
           </>}
@@ -452,7 +452,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
             {steeringMode ? steeringControls
               : isRunning
                 ? <ComposerPrimitive.Cancel asChild>
-                    <Button type="button" size="icon" className="fox-thread-stop-button" aria-label="停止" title="停止当前任务"><CircleStop size={16} /></Button>
+                    <Button type="button" size="icon" className="fox-thread-stop-button" aria-label="停止" title="停止任务"><CircleStop size={16} /></Button>
                   </ComposerPrimitive.Cancel>
                 : <Tooltip>
                     <TooltipTrigger asChild>

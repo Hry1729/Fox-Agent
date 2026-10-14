@@ -578,7 +578,7 @@ impl LocalKnowledgeStore {
         self.connection()?.execute(
             "INSERT INTO local_knowledge_bases(id, name, description, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description",
+             ON CONFLICT(id) DO NOTHING",
             params![
                 DEFAULT_FOX_GUIDE_ID,
                 DEFAULT_FOX_GUIDE_NAME,
@@ -1959,11 +1959,6 @@ impl LocalKnowledgeStore {
         &self,
         request: UpdateLocalKnowledgeBaseRequest,
     ) -> Result<LocalKnowledgeBase, LocalKnowledgeError> {
-        if request.id == DEFAULT_FOX_GUIDE_ID {
-            return Err(LocalKnowledgeError::conflict(
-                "Fox 使用指南是内置知识库，不能修改",
-            ));
-        }
         let name = normalized_name(&request.name)?;
         let connection = self.connection()?;
         let existing = connection
@@ -4127,6 +4122,61 @@ mod tests {
             .iter()
             .any(|document| document.relative_path == "03-插件中心/01-插件中心.md"));
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edits_default_fox_guide_settings_without_changing_identity_or_deletion_protection() {
+        let (store, root) = test_store();
+        store.ensure_default_fox_guide().unwrap();
+        let before = store
+            .list_documents(LocalKnowledgeDocumentsRequest {
+                knowledge_base_id: DEFAULT_FOX_GUIDE_ID.to_owned(),
+                query: None,
+            })
+            .unwrap();
+        let updated = store
+            .update_base(UpdateLocalKnowledgeBaseRequest {
+                id: DEFAULT_FOX_GUIDE_ID.to_owned(),
+                name: "我的 Fox 使用指南".to_owned(),
+                description: Some("工作时使用的说明".to_owned()),
+                embedding_model_id: None,
+                chunk_size: Some(640),
+                chunk_overlap: Some(64),
+                search_mode: Some("keyword".to_owned()),
+            })
+            .unwrap();
+        assert_eq!(updated.id, DEFAULT_FOX_GUIDE_ID);
+        assert_eq!(updated.chunk_size, 640);
+        assert_eq!(updated.chunk_overlap, 64);
+        store.ensure_default_fox_guide().unwrap();
+        let seeded = store.get_base(DEFAULT_FOX_GUIDE_ID).unwrap();
+        assert_eq!(seeded.name, "我的 Fox 使用指南");
+        assert_eq!(seeded.description.as_deref(), Some("工作时使用的说明"));
+        assert_eq!(seeded.chunk_size, 640);
+        assert_eq!(seeded.chunk_overlap, 64);
+        let after = store
+            .list_documents(LocalKnowledgeDocumentsRequest {
+                knowledge_base_id: DEFAULT_FOX_GUIDE_ID.to_owned(),
+                query: None,
+            })
+            .unwrap();
+        assert_eq!(before.len(), after.len());
+        for original in before {
+            let document = after.iter().find(|document| document.id == original.id).unwrap();
+            assert_eq!(document.relative_path, original.relative_path);
+            assert_eq!(document.knowledge_base_id, original.knowledge_base_id);
+            assert_eq!(document.current_revision, original.current_revision);
+            let source = root
+                .join("knowledge-bases")
+                .join(DEFAULT_FOX_GUIDE_ID)
+                .join("documents")
+                .join(&document.relative_path);
+            assert!(source.is_file());
+        }
+        assert!(store.delete_base(DEFAULT_FOX_GUIDE_ID).is_err());
+        assert!(store.get_base(DEFAULT_FOX_GUIDE_ID).is_ok());
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }

@@ -25,14 +25,14 @@ test('an active Run offers the composer lanes and shows every state distinctly',
   expect(view.visible).toBe(true)
   expect(view.editable).toBe(true)
   expect(view.historyOnly).toBe(false)
-  expect(view.label).toBe('运行中补充要求')
+  expect(view.label).toBe('补充要求')
   expect(view.pending).toBe(2)
   // Each durable state names exactly what the Host proves, and nothing more.
-  expect(steeringStatusCopy('received').label).toBe('已接收')
+  expect(steeringStatusCopy('received').label).toBe('已收到')
   expect(steeringStatusCopy('received').title).toContain('尚未交给模型')
-  expect(steeringStatusCopy('delivered').label).toBe('已交给模型')
-  expect(steeringStatusCopy('applied').label).toBe('已应用')
-  expect(steeringStatusCopy('cancelled').label).toBe('未应用')
+  expect(steeringStatusCopy('delivered').label).toBe('已发出')
+  expect(steeringStatusCopy('applied').label).toBe('已回复')
+  expect(steeringStatusCopy('cancelled').label).toBe('未发出')
   // "received" never claims the model followed the request.
   expect(steeringStatusCopy('received').label).not.toContain('模型')
   expect(steeringStatusCopy('received').label).not.toContain('应用')
@@ -111,7 +111,7 @@ test('a queued next-turn request is labelled as waiting, never as delivered', ()
   expect(view.pending).toBe(1)
   expect(view.queued.map((entry) => entry.messageId)).toEqual(['later'])
   // A queued row must not be described with the current lane's wording.
-  expect(steeringStatusCopy('received', 'next-turn').label).toBe('等待生效')
+  expect(steeringStatusCopy('received', 'next-turn').label).toBe('下一轮处理')
   expect(steeringStatusCopy('received', 'next-turn').title).toContain('当前任务不会处理它')
   // The queued bytes are not charged to the active dispatch's context budget.
   expect(view.outstanding).toBe(Buffer.byteLength('改成中文', 'utf8'))
@@ -146,8 +146,8 @@ test('the composer offers both lanes only while the Run accepts input', () => {
   })
   expect(running.canSubmitToCurrentTask).toBe(true)
   expect(running.canQueueForNextTurn).toBe(true)
-  expect(running.primaryLabel).toBe('补充到当前任务')
-  expect(running.secondaryLabel).toBe('排队，下一轮处理')
+  expect(running.primaryLabel).toBe('加入当前任务')
+  expect(running.secondaryLabel).toBe('下一轮再处理')
   // Stop is never the same control as a submit lane.
   expect(running.stopIsSeparateControl).toBe(true)
 

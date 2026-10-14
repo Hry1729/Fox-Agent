@@ -51,7 +51,7 @@ export function validateReadRange(size: number, start: number, end: number) {
 }
 
 export function validateSourceSize(size: number) {
-  if (!Number.isSafeInteger(size) || size < 0) throw new Error('知识库文件大小超出当前预览器可安全处理的范围。')
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error('资料库文件大小超出当前预览器可安全处理的范围。')
 }
 
 function formatBytes(bytes: number) {

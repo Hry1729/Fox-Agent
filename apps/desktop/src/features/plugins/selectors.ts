@@ -32,10 +32,10 @@ export function pluginKindLabel(kind: PluginKind): string {
 }
 
 export function pluginOriginLabel(origin: PluginCardView['origin']): string {
-  if (origin === 'builtin') return '内建'
+  if (origin === 'builtin') return '内置'
   if (origin === 'official') return '官方'
   if (origin === 'community') return '社区'
-  return '本地'
+  return '本机'
 }
 
 export function pluginInstallStatusLabel(status: PluginInstallStatus): string {
@@ -51,7 +51,7 @@ export type PluginAction = 'install' | 'update' | 'uninstall' | 'none'
 
 export function pluginInstallAction(card: PluginCardView): { action: PluginAction; label: string; disabled: boolean } {
   if (card.installStatus === 'not_installed' || card.installStatus === 'install_failed') {
-    return { action: 'install', label: card.installStatus === 'install_failed' ? '重试安装' : '安装', disabled: !card.compatible }
+    return { action: 'install', label: card.installStatus === 'install_failed' ? '重试' : '安装', disabled: !card.compatible }
   }
   if (card.installStatus === 'installing' || card.installStatus === 'uninstalling') {
     return { action: 'none', label: pluginInstallStatusLabel(card.installStatus), disabled: true }
@@ -63,9 +63,9 @@ export function pluginInstallAction(card: PluginCardView): { action: PluginActio
 }
 
 export function activationSummary(activation: PluginActivation): string {
-  if (activation.mode === 'global') return activation.enabled ? '全局已启用' : '全局未启用'
+  if (activation.mode === 'global') return activation.enabled ? '已全局启用' : '未全局启用'
   if (activation.mode === 'per_agent') return `${activation.enabledAgentCount} 个 Agent 已启用`
-  return '由 Host 管理'
+  return '由应用管理'
 }
 
 export function sortPluginCards(cards: PluginCardView[]): PluginCardView[] {

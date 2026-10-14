@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+"""Render the before/after page for the animated-icon change set.
+
+  §01  现在就在播的 11 枚 animate-ui  ->  lucide-animated 的同名组件
+  §02  这次新加、站点直接可用的 8 枚
+  §03  这次新加、站点没有需要自写的 4 枚
+  §04  明确不做的
+  §05  落地必须一起处理的事
+
+Every motion figure is transcribed from the registry JSON at
+lucide-animated.com/r/<slug>.json and from the in-repo
+components/animate-ui/icons/*.tsx. Glyph verdicts come from
+apps/desktop/scripts/... compare (attribute-level diff, see verify_changes.py).
+"""
+import json, sys, html, os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from la_inner import LA_INNER
+
+FINAL, OUT = sys.argv[1:3]
+data = json.load(open(FINAL, encoding="utf-8"))
+
+glyph = {}
+for it in data["lucide"]:
+    glyph[it["name"]] = it["inner"]
+for it in data["animated"]:
+    glyph.setdefault(it["name"], it["inner"])
+
+
+def svg(name, cls="gl"):
+    inner = glyph.get(name, "")
+    return '<svg viewBox="0 0 24 24" aria-hidden="true">' + inner + "</svg>"
+
+
+def la_svg(name):
+    """The site's own glyph, so the drift is visible rather than just claimed."""
+    inner = LA_INNER.get(name)
+    if not inner:
+        return ""
+    return ('<svg class="lasvg" viewBox="0 0 24 24" aria-hidden="true">'
+            + inner + "</svg>")
+
+
+# ---------------------------------------------------------------- §01 current
+# (icon, app name, la component, before spec, after spec, note)
+CURRENT = [
+    ("Bell", "Bell", "BellIcon",
+     "整枚 svg 绕上中转动 <code>[0,20,-10,10,-5,3,0]</code>，0.9s；铃舌另走 "
+     "<code>x [0,-6,5,-5,4,-3,2,0]</code>，1.1s",
+     "整枚 svg 摇 <code>[0,-10,10,-10,0]</code>，0.5s，无补间参数",
+     "幅度减半、时间减半，而且铃舌不再单独动。站点这枚的字形也是旧版——铃身是"
+     "<code>M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9</code>，和仓库现在的"
+     "<code>M3.262 15.326A1 1 0 0 0 4 17h16…</code> 是两个形状。"),
+    ("Blocks", "Blocks", "BlocksIcon",
+     "两块方块换位 <code>x 2 / y -2</code> 与 <code>x -2 / y 2</code>，并在 0.3s 后"
+     "整体改写路径 <code>d</code>，0.4s",
+     "只有右上那块小方块平移 <code>translate(-4,4)</code>，0.5s",
+     "站点用的是旧版几何：小方块是 <code>d=\"M14 3h7v7h-7z\"</code>（直角），"
+     "仓库是 <code>&lt;rect rx=\"1\"&gt;</code>（圆角）。动效从「两块一起换位」"
+     "退化成「一块挪一下」。"),
+    ("MessageCirclePlus", "MessageCirclePlus", "MessageCirclePlusIcon",
+     "气泡绕左下转 <code>[0,8,-8,2,0]</code>，0.8s；加号两笔各自转 45°",
+     "加号两笔用 <code>pathLength [0,1]</code> 重新描出来，竖笔先、横笔延后 0.2s",
+     "完全不同的动作：现在是「转一下」，新的是「重新画一遍加号」。字形逐点一致。"),
+    ("Search", "Search", "SearchIcon",
+     "放大镜绕右下甩 <code>[0,17,-10,5,-1,0]</code>，0.8s",
+     "整枚走一个小方角轨迹 <code>x [0,0,-3,0] / y [0,-4,0,0]</code>，1s，bounce 0.3",
+     "从「甩」变成「挪」。字形有 0.04 的差别：站点 <code>m21 21-4.3-4.3</code>，"
+     "仓库 <code>m21 21-4.34-4.34</code>。"),
+    ("Settings", "Settings", "SettingsIcon",
+     "齿轮转 <code>[0,90,180]</code>，1.25s，easeInOut",
+     "齿轮转 180°，弹簧 <code>stiffness 50 / damping 10</code>，约 1.5s",
+     "同样是「转半圈」，但换成弹簧后起步慢、收尾有余量，观感更重。字形不同："
+     "站点是 2.34 半径的内齿，仓库是 <code>M9.671 4.136a2.34 2.34…</code>。"),
+    ("SunMoon", "SunMoon", "SunMoonIcon",
+     "月亮路径转 <code>[0,-10,10,0]</code>，0.6s；三条光线依次用 "
+     "<code>pathLength</code> 画出（错峰 0.15s）",
+     "月亮转 <code>[0,-5,5,-2,2,0]</code>，1.5s；<b>八条</b>光线依次淡入"
+     "（<code>delay = i × 0.1</code>）",
+     "站点版本把八条光线全部纳入动画，仓库只动三条；月亮幅度减半但时间翻倍。"
+     "字形也不同——站点是 <code>M14.837 16.385a6 6 0 1 1-7.223-7.222…</code>。"),
+    ("Users", "Users", "UsersIcon",
+     "四条路径各自上下小幅错峰摆动（<code>y [0,2,-2,0]</code> 等），0.6s",
+     "只有右侧两条线从左侧 <code>-6</code> 弹回原位，弹簧 200 / 13，延后 0.1s",
+     "现在四个人一起点头，新的是右侧两条线滑进来。字形差 0.002：站点 "
+     "<code>M16 3.13a4 4 0 0 1 0 7.75</code>，仓库 <code>3.128 / 7.744</code>。"),
+    ("Maximize", "Maximize", "MaximizeIcon",
+     "四角各自向外扩 <code>2px</code>，0.3s easeInOut",
+     "四角各自向外扩 <code>2px</code>，弹簧 <code>250 / 25</code>",
+     "同名、同向、同幅度，只有缓动从 easeInOut 换成弹簧。字形逐点一致。"),
+    ("Minimize", "Minimize", "MinimizeIcon",
+     "四角各自向内收 <code>2px</code>，0.3s easeInOut",
+     "四角各自向内收 <code>2px</code>，弹簧 <code>250 / 25</code>",
+     "同上，逐点一致。"),
+    ("PanelLeft", "PanelLeft", "@NONE",
+     "分栏线 <code>x1/x2: 9 &rarr; 7</code>，弹簧 <code>200 / 18</code>",
+     "站点没有 <code>panel-left</code> 这个组件名",
+     "见下方「PanelLeft / PanelRight 不能直接换」。" ),
+    ("PanelRight", "PanelRight", "@NONE",
+     "分栏线 <code>x1/x2: 15 &rarr; 17</code>，弹簧 <code>200 / 18</code>",
+     "站点没有任何 panel-right 组件",
+     "见下方说明。" ),
+]
+
+# ------------------------------------------------- §02 available in LA (new)
+AVAILABLE = [
+    ("Sparkles", "sparkles", "SparklesIcon", "侧栏 助手·资料 切换按钮（按钮上显示的那一枚）",
+     "主星 <code>y [0,-1,0,0]</code> 并填充 <code>currentColor</code>，1s bounce 0.3；"
+     "四颗小星延后 1s 错峰眨眼，2s 弹簧"),
+    ("Maximize", "maximize", "MaximizeIcon", "标题栏 · 最大化",
+     "四角外扩 2px，弹簧 250 / 25"),
+    ("Minimize", "minimize", "MinimizeIcon", "标题栏 · 还原",
+     "四角内收 2px，弹簧 250 / 25"),
+    ("Plus", "plus", "PlusIcon", "资料库 · 新建按钮",
+     "整枚转 180°，弹簧 100 / 15"),
+]
+
+# ------------------------------------------- §03 not on LA (self-authored)
+# (icon, app name, where, motion, glyph source, note)
+#
+# `impl` is the provenance of the svg children: "仓库字形" means the motion is
+# wrapped around the app's own existing lucide paths, so the static rendering is
+# byte-identical to today. That is the whole reason these are cheap: the glyph is
+# already in the repo, only the wrapper is new.
+NAV = [
+    ("Database", "数据库", "本机资料库 · 侧栏导航",
+     "顶盖椭圆抬起 <code>y [0,-1,0]</code>，中间那道弧 <code>y [0,1.4,0]</code>——"
+     "一层从筒身里抽出来再落回去，0.6s easeInOut",
+     "仓库字形",
+     "站点没有 <code>database</code> 这枚（只有 <code>database-backup</code>，字形不同）。"),
+    ("Library", "图书馆", "远程资料库 · 侧栏导航",
+     "四根书脊绕各自的底端 <code>transformOrigin</code> 依次外扇 "
+     "<code>rotate [0,-3,0] / [0,6,-2,0] / [0,8,-3,0] / [0,10,-4,0]</code>，"
+     "错峰 0.05s，0.6–0.8s",
+     "仓库字形",
+     "站点没有 <code>library</code>。四根线要各自定轴，否则整枚会剪切成一片。"),
+    ("Orbit", "轨道", "向量模型 · 侧栏导航",
+     "两段轨道作为一体转 <code>[0,8,-4,0]</code>，0.9s；中心球 <code>scale [1,1.12,1]</code>。"
+     "两颗卫星<b>不参与变换</b>——见右侧说明",
+     "仓库字形",
+     "站点没有 <code>orbit</code>。这一枚有个真陷阱：轨道弧的端点就是卫星的圆心，"
+     "一旦让弧线自己转，卫星就会从弧端脱开。必须把弧和卫星当成一体。"),
+    ("ListTodo", "清单", "处理进度 · 侧栏导航",
+     "对勾先 <code>pathLength [0,1]</code> 画出来（0.35s easeOut），三条横杠再逐条落下 "
+     "<code>opacity [0,1] + y [3,0]</code>，错峰 0.12s",
+     "仓库字形",
+     "站点没有 <code>list-todo</code>。这是六个里唯一一处真有状态语义的入口"
+     "（待处理 → 已处理），所以允许它在点击时真的「做一遍」而不是抖一下。"),
+    ("Files", "文件堆", "本机文件 · 侧栏导航",
+     "后面那张纸 <code>x [0,-1.6,0] / y [0,1.4,0]</code>——两页从错开合拢，0.6s easeInOut",
+     "仓库字形",
+     "站点有 <code>file-stack</code>，但字形是两页齐边堆叠，和仓库的 "
+     "<code>files</code>（后页五边形轮廓 + 前页折角）不是同一个形状，硬用会看出不一样。"),
+    ("BookCopy", "叠书", "侧栏 助手·资料 切换按钮",
+     "后册书绕 <code>9px 20px</code> 倾斜 <code>rotate [0,-5,2,0] + y [0,-1,0]</code>，"
+     "下面那册跟着抬 <code>x/y [0,1,0]</code>，延后 0.06s",
+     "仓库字形",
+     "站点 book 系列只有 <code>book-text</code>（单册书），字形不同。"),
+]
+
+# ------------------------------------------------------------------- §03 note
+NAV_NOTE = (
+    "这六枚的共同点：<b>字形已经在仓库里了</b>（就是现在这些 <code>lucide-react</code> 图标），"
+    "要新增的只有外面那层 motion 包装。所以动的过程中、以及静止帧，形状都和现在<b>一模一样</b>——"
+    "不存在 §01 那种「换了库导致字形漂移」的问题。<br><br>"
+    "六个文件都按 animate-ui 现有的 <code>icons/</code> 契约写好了"
+    "（<code>getVariants</code> + <code>useAnimateIconContext</code> + <code>IconWrapper</code>，"
+    "对外导出 <code>X</code> / <code>XIcon</code> / <code>animations</code>），"
+    "放进 <code>apps/desktop/src/components/animate-ui/icons/</code> 就能用，"
+    "不需要引入任何新依赖。调用点那一行的写法完全不用改——"
+    "<code>&lt;Icon size={18} /&gt;</code> 换成换过去的组件即可。<br><br>"
+    "六个文件已经过 <code>tsc --strict</code> 编译通过（连同 animate-ui 的 "
+    "<code>icon.tsx</code> 一起做类型检查，零报错）。"
+    "<b>但「能编译」和「16px 下好看」是两件事</b>——文末 §05 第五条写了验收要求。"
+)
+
+# --------------------------------------------------------------- §04 skip
+SKIP = [
+    ("X", "标题栏 · 关闭",
+     "站点<b>有</b> <code>x</code> 这枚（两笔用 <code>pathLength</code> 依次画出），"
+     "但关闭是系统级窗口控件——它一动会让人以为窗口出了问题，而且它就在窗口右上角、"
+     "是要精确命中的目标，任何位移都会降低可点性。"),
+    ("Minus", "标题栏 · 最小化",
+     "站点没有 <code>minus</code>（只有 <code>folder-minus</code> 这类变体）。"
+     "而且它的图形只是一根 14px 的横线，没有可映射的动作。"),
+    ("LoaderCircle", "文件加载中",
+     "它现在已经在用 CSS 的 <code>animate-spin</code> 转；站点版本是 motion 驱动的无限旋转。"
+     "两个都能转，但同时挂着就是两套系统驱动同一个图形，相位迟早对不上。"
+     "<b>二选一，不要都留</b>——保留 CSS 版本即可。"),
+    ("ChevronRight", "目录树的展开箭头",
+     "站点有 <code>chevron-right</code>，但这一枚已经在转、而且转得对："
+     "<code>local-knowledge.css:2305</code> 给它挂了 "
+     "<code>transition: transform 120ms ease</code>，"
+     "<code>[aria-expanded='true']</code> 那条再把它 <code>rotate(90deg)</code>。"
+     "换过去就是 motion 和 CSS 抢着改同一个 transform，相位对不上。"
+     "另外这一枚一屏会出现十几个，同屏一起动是典型的干扰源。"),
+    ("Folder / FolderOpen", "目录树的文件夹",
+     "站点没有 <code>folder</code>——只有 <code>folder-open</code> / <code>folder-minus</code> "
+     "这类变体。而且这一整行的可点区域是整个 <code>row</code>，行里还带着"
+     "文件夹名和文件数徽标，图标偏离中心一个像素，整行的视觉重心都跟着偏。"
+     "同样是一屏十几行的情况。"),
+    ("House", "侧栏「专家介绍」· 与知识库「最近」共用同一枚",
+     "站点上<b>没有</b> <code>house</code>，只有 <code>home</code>；而且 <code>home</code> "
+     "的字形和仓库的 <code>House</code> 不是同一个——屋顶那条线仓库写作 "
+     "<code>l7-6</code>，站点是 <code>l7-5.999</code>。"
+     "真正的问题是<b>它被两处共用</b>：知识库导航的「最近」和侧栏的「专家介绍」。"
+     "换过去只换了一处，两处就会长得不一样；两处都换，就把字形漂移也带进去了。"
+     "如果决定要动，<b>先决定这两处是不是同一个入口</b>。"),
+]
+
+# --------------------------------------------- §05 landing gotchas
+GOTCHAS = [
+    ("一", "两条 <code>&gt; svg</code> 直接子选择器会失效",
+     "animate-ui 渲染出的 <code>motion.svg</code> 是按钮的直接子元素；lucide-animated 多包了一层 "
+     "<code>&lt;div&gt;</code>，svg 变成孙元素。会踩到 "
+     "<code>workbench.css:1172</code> 的 <code>.fox-shell .fox-sidebar-command &gt; svg</code>"
+     "（尺寸 + <code>flex: 0 0 …</code> 防挤压 + <code>stroke-width: 1.8</code>）和 "
+     "<code>workbench.css:175</code> 的 <code>.fox-notification-trigger &gt; svg</code>。"
+     "知识库导航栏用的正是前者。"
+     "<br>注意 <code>workbench.css:99</code>（<code>.fox-titlebar-sidebar-controls button svg</code>）"
+     "和 <code>workbench.css:1051</code>（<code>.fox-sidebar-search-trigger svg</code>）是"
+     "<b>后代</b>选择器，不受影响。"),
+    ("二", "描边会整体变粗",
+     "lucide-animated 每个文件都硬编码 <code>strokeWidth=\"2\"</code>，而全站是 1.65–1.8"
+     "（侧栏 1.8、标题栏 1.65）。好在源码是拷进仓库的，把 <code>strokeWidth</code> 属性删掉、"
+     "让 CSS 接管即可。"),
+    ("三", "hover 的可点区域会缩小，而且现有触发层驱动不了新组件",
+     "现在 <code>AnimatedIconTrigger</code> 包在按钮外面，整个按钮（含文字标签）都能触发。"
+     "lucide-animated 的 <code>onMouseEnter</code> 挂在图标自己那个 <code>&lt;div&gt;</code> 上，"
+     "而它默认是行内收缩的——结果是必须戳中图标才播。给该 div 加 <code>display:flex</code> "
+     "撑满按钮即可。另外 lucide-animated 不读 <code>AnimateIconContext</code>，它暴露的是 "
+     "<code>forwardRef</code> + <code>useImperativeHandle</code> 的 "
+     "<code>{ startAnimation, stopAnimation }</code>；现有 50 处 <code>AnimatedIconTrigger</code> "
+     "驱动不了它们，过渡期需要包装层按 ref 分流。"),
+    ("四", "字形版本会漂移，同屏混用会看出粗细不一",
+     "把站点 16 枚的字形和仓库的同名图标逐属性比对，只有 "
+     "<b>Maximize / Minimize / MessageCirclePlus / Plus / ChevronRight / FolderOpen / "
+     "LoaderCircle / X</b> 这 8 枚完全一致。"
+     "<b>Bell / Blocks / Search / Settings / SunMoon / Users / Sparkles / House</b> 这 8 枚"
+     "站点用的是旧版几何（House 的 <code>l7-5.999</code> vs 仓库 <code>l7-6</code>、"
+     "Bell 整个铃身形状不同、Blocks 的圆角方块退回直角）。它们和仓库里其余 150 多枚静态 "
+     "lucide 图标会并排出现，比例差异虽小但看得见。"),
+    ("五", "§03 那六枚是自写的，没有现成动效可以照抄——必须补一步验收",
+     "§01/§02 的十四个文件都是从站点 registry 拷下来的，参数别人已经调过。"
+     "<b>§03 的六枚没有这个保证</b>：它们能编译、能跑，但「在 16px 下是否读得出来」"
+     "是设计问题，不是编译问题。至少要手动看一眼这四件事：<br>"
+     "① <code>transformOrigin</code> 写的是<b>用户坐标</b>（<code>4px 20px</code> 这种），"
+     "在 svg 的 24 单位 viewBox 里 <code>px</code> 和用户单位是 1:1，所以没问题；"
+     "但一旦以后把 viewBox 改成别的比例，这几个数字全要跟着改。<br>"
+     "② 四根书脊（Library）各自转轴、错峰 0.05s，在 16px 下 5 毫秒级的错峰几乎看不出来，"
+     "可能得把错峰拉到 0.08–0.1s 才有「依次」的感觉。<br>"
+     "③ 幅度是为 24px 设计的观感，侧栏实际是 16px（<code>--fox-sidebar-icon-size</code>），"
+     "位移会被等比缩到 2/3。真要上台，要么整体放大 1.4 倍，要么接受它是「极轻的一下」。<br>"
+     "④ 必须走一遍 <code>prefers-reduced-motion</code>——animate-ui 的 "
+     "<code>IconWrapper</code> 目前没有内置这个判断，六个文件都要确认在减弱动效下是静止的。"),
+]
+
+
+def glyphpair(name):
+    """repo glyph | site glyph (in a box), with per-column captions."""
+    g_repo = svg(name)
+    g_site = la_svg(name)
+    return ('<span class="cgl">'
+            '<span class="glg"><i>仓库</i>%s</span>'
+            '<span class="glg is-site"><i>站点</i>%s</span>'
+            "</span>") % (g_repo, g_site)
+
+
+def row_cur(name, appname, comp, before, after, note):
+    if comp == "@NONE":
+        compcell = '<span class="none">站点无此组件</span>'
+    else:
+        compcell = ("<code>%s</code> <span class=\"arrow\">&larr;</span> <code>%s</code>"
+                    % (html.escape(comp), html.escape(appname)))
+    notehtml = '<div class="cnote">%s</div>' % note if note else ""
+    return ('<div class="crow">'
+            '%s'
+            '<span class="cname"><code>%s</code>%s</span>'
+            '<span class="cbefore">%s</span>'
+            '<span class="cafter">%s</span>'
+            "</div>%s") % (glyphpair(name), html.escape(appname), compcell,
+                           before, after, notehtml)
+
+
+def row_avail(name, slug, comp, where, motion):
+    return ('<div class="arow">'
+            '<span class="agl">%s</span>'
+            '<span class="aname"><code>%s</code><span class="aslug">/r/%s</span></span>'
+            '<span class="awhere">%s</span>'
+            '<span class="amotion">%s</span>'
+            "</div>") % (svg(name), html.escape(comp), html.escape(slug),
+                         html.escape(where), motion)
+
+
+def row_nav(name, appname, where, motion, impl, note):
+    return ('<div class="arow is-self">'
+            '<span class="agl">%s</span>'
+            '<span class="aname"><code>%s</code>'
+            '<span class="aslug">%s</span></span>'
+            '<span class="awhere">%s</span>'
+            '<span class="amotion">%s<span class="why">%s</span></span>'
+            "</div>") % (svg(name), html.escape(name), html.escape(impl),
+                         html.escape(where), motion, note)
+
+
+def row_skip(names, where, why):
+    return ('<div class="skiprow">'
+            '<span class="sname">%s</span>'
+            '<span class="swhere">%s</span>'
+            '<span class="swhy">%s</span>'
+            "</div>") % (html.escape(names), html.escape(where), why)
+
+
+def row_gotcha(num, title, body):
+    return ('<div class="grow">'
+            '<span class="gnum">%s</span>'
+            '<span class="gbody"><b>%s</b><span class="gtext">%s</span></span>'
+            "</div>") % (html.escape(num), title, body)
+
+
+cur_rows = "".join(row_cur(*r) for r in CURRENT)
+avail_rows = "".join(row_avail(*r) for r in AVAILABLE)
+nav_rows = "".join(row_nav(*r) for r in NAV)
+skip_rows = "".join(row_skip(*r) for r in SKIP)
+gotcha_rows = "".join(row_gotcha(*r) for r in GOTCHAS)
+
+TEMPLATE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fox 动效图标 · 修改前 / 修改后</title>
+<style>
+  :root {
+    color-scheme: light;
+    --paper:#f4f1ea; --raise:#faf8f3; --ink:#26241f; --soft:#5c574d;
+    --faint:#a09a8d; --rule:#ded8ca; --dot:#ddd7c8; --accent:#1f5fd0;
+    --go:#1f7a4d; --go-bg:#e7f1ea;
+    --warn:#9a6410; --warn-bg:#f6eedd;
+    --stop:#8a4a42; --stop-bg:#f2e8e5;
+    --sans:"HarmonyOS Sans SC","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"Cascadia Code",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;font-family:var(--sans);color:var(--ink);line-height:1.58;
+    background-color:var(--paper);
+    background-image:radial-gradient(var(--dot) .8px,transparent .8px);
+    background-size:18px 18px;background-position:-1px -1px;
+  }
+  .shell{max-width:1160px;margin:0 auto;padding:0 26px 110px}
+
+  header{padding:54px 0 26px;border-bottom:1px solid var(--rule);margin-bottom:6px}
+  h1{margin:0 0 10px;font-size:29px;font-weight:600;letter-spacing:-.015em;line-height:1.18}
+  .lede{margin:0;font-size:14.5px;color:var(--soft);max-width:80ch}
+  .lede b{font-weight:600;color:var(--ink)}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));
+    gap:18px 26px;margin-top:22px}
+  .stat{display:flex;flex-direction:column;gap:2px}
+  .stat b{font-size:21px;font-weight:600;letter-spacing:-.01em}
+  .stat span{font-size:12px;color:var(--faint)}
+
+  h2{font-size:17px;font-weight:600;margin:46px 0 6px;letter-spacing:-.005em}
+  h2 .num{color:var(--faint);font-weight:500;margin-right:8px}
+  h3{font-size:13.5px;font-weight:600;margin:24px 0 10px;color:var(--soft)}
+  .sub{margin:0 0 18px;font-size:13.5px;color:var(--soft);max-width:80ch}
+  .sub b{color:var(--ink);font-weight:600}
+
+  code{font-family:var(--mono);font-size:11.5px;color:var(--ink);
+    background:var(--paper);padding:.5px 4px;border-radius:3px;
+    border:1px solid rgba(0,0,0,.05);white-space:nowrap}
+
+  .callout{
+    padding:15px 18px;border:1px solid var(--rule);border-left:3px solid var(--accent);
+    border-radius:0 8px 8px 0;background:var(--raise);font-size:13.5px;color:var(--soft);
+    margin:18px 0 0;
+  }
+  .callout.good{border-left-color:var(--go)}
+  .callout.bad{border-left-color:var(--warn)}
+  .callout b{color:var(--ink);font-weight:600}
+
+  /* tables */
+  .table{border:1px solid var(--rule);border-radius:10px;overflow:hidden;background:var(--raise)}
+  .chead,.crow{display:grid;grid-template-columns:88px 226px 1fr 1fr;gap:16px;
+    padding:12px 16px;align-items:start}
+  .chead{background:var(--paper);border-bottom:1px solid var(--rule);
+    font-size:11px;color:var(--faint);letter-spacing:.02em}
+  .chead b{color:var(--soft);font-weight:600}
+  .crow{border-top:1px solid var(--rule);font-size:12.5px}
+  .crow:hover{background:#f7f4ec}
+  .cgl{display:flex;gap:6px}
+  .cgl .glg{display:flex;flex-direction:column;align-items:center;gap:3px}
+  .cgl .glg i{font-style:normal;font-size:8.5px;color:var(--faint);
+    letter-spacing:.03em;line-height:1}
+  .cgl .glg.is-site i{color:var(--accent)}
+  .cgl svg{width:21px;height:21px;stroke:var(--ink);stroke-width:1.6;fill:none;
+    stroke-linecap:round;stroke-linejoin:round;display:block}
+  .cgl .is-site svg{stroke:var(--accent)}
+  .cname{font-family:var(--mono);font-size:11.5px;line-height:1.9}
+  .cname .arrow{color:var(--faint);padding:0 3px}
+  .cname .none{color:var(--stop);font-size:10.5px;font-family:var(--sans)}
+  .cbefore{color:var(--stop)}
+  .cafter{color:var(--go)}
+  .cnote{grid-column:2/-1;color:var(--faint);font-size:11.5px;margin:4px 0 0;
+    padding-top:6px;border-top:1px dotted var(--rule)}
+
+  .arow{display:grid;grid-template-columns:38px 176px 210px 1fr;gap:16px;
+    align-items:start;padding:11px 16px;border-top:1px solid var(--rule);font-size:12.5px}
+  .arow:first-child{border-top:0}
+  .arow:hover{background:#f7f4ec}
+  .agl svg{width:19px;height:19px;stroke:var(--ink);stroke-width:1.6;fill:none;
+    stroke-linecap:round;stroke-linejoin:round;display:block;margin-top:2px}
+  .aname{font-family:var(--mono);font-size:11.5px}
+  .aname .aslug{display:block;font-size:9.5px;color:var(--faint);margin-top:2px}
+  .awhere{color:var(--soft);font-size:12px}
+  .amotion{color:var(--soft)}
+  .is-self .amotion{color:var(--warn)}
+  .why{display:block;color:var(--faint);font-size:11.5px;margin-top:3px}
+
+  .stable{border:1px solid var(--rule);border-radius:10px;overflow:hidden;background:var(--raise)}
+  .skiprow{display:grid;grid-template-columns:228px 200px 1fr;gap:16px;align-items:start;
+    padding:12px 16px;border-top:1px solid var(--rule);font-size:12.5px}
+  .skiprow:first-child{border-top:0}
+  .sname{font-family:var(--mono);font-size:11.5px;color:var(--stop)}
+  .swhere{color:var(--soft);font-size:12px}
+  .swhy{color:var(--soft)}
+
+  .gtable{border:1px solid var(--rule);border-radius:10px;overflow:hidden;background:var(--raise)}
+  .grow{display:grid;grid-template-columns:30px 1fr;gap:16px;align-items:start;
+    padding:13px 16px;border-top:1px solid var(--rule);font-size:12.5px}
+  .grow:first-child{border-top:0}
+  .gnum{color:var(--faint);font-size:13px;font-weight:600;text-align:center}
+  .gbody b{display:block;color:var(--ink);font-weight:600;margin-bottom:3px;font-size:13px}
+  .gtext{color:var(--soft)}
+
+  footer{margin-top:46px;padding-top:18px;border-top:1px solid var(--rule);
+    font-size:12.5px;color:var(--faint);line-height:1.7}
+
+  @media (max-width:900px){
+    .chead{display:none}
+    .crow,.arow{grid-template-columns:58px 1fr;gap:6px 12px}
+    .cgl,.agl{grid-column:1;grid-row:1;justify-content:flex-start}
+    .cgl .glg i{font-size:8px}
+    .cgl svg,.agl svg{width:19px;height:19px}
+    .cname,.aname{grid-column:2;grid-row:1}
+    .cbefore,.cafter,.awhere,.amotion,.cnote{grid-column:1/-1}
+    .cbefore{margin-top:4px}
+    .cafter{margin-top:2px}
+    .skiprow{grid-template-columns:1fr;gap:3px}
+    .grow{grid-template-columns:24px 1fr}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>动效图标 · 修改前 / 修改后</h1>
+    <p class="lede">范围是<b>侧栏导航、知识库导航、标题栏和菜单栏</b>。
+      上半部分是现在已经在播的 11 枚 animate-ui 图标换成 lucide-animated 的逐条对照，
+      下半部分是这次新加的清单——其中知识库导航那六枚站点上没有，是<b>照仓库自己的字形新写的</b>。
+      所有动效数字都<b>逐字抄自站点 registry JSON 和仓库里的 tsx 源文件</b>，
+      不是照动图猜的；字形差异是对两边 svg 属性做逐点比对得出的。</p>
+    <div class="stats">
+      <span class="stat"><b>11</b><span>现有动效（换库）</span></span>
+      <span class="stat"><b>50</b><span>要改的调用点</span></span>
+      <span class="stat"><b>4</b><span>新增 · 站点有</span></span>
+      <span class="stat"><b>6</b><span>新增 · 自写</span></span>
+      <span class="stat"><b>8 / 16</b><span>字形完全一致</span></span>
+    </div>
+  </header>
+
+  <h2><span class="num">01</span>现有 11 枚：animate-ui &rarr; lucide-animated</h2>
+  <p class="sub">这 11 枚已经在播动效，换库是<b>同构替换</b>——接口都对得上，但动效形态会变。
+    左边是仓库现在文件里的参数，右边是站点会写进 <code>components/icons/</code> 的参数。
+    两侧的 svg 标记都取的是仓库 / registry 的<b>真实字形</b>，所以两栏其实能直接对比例。</p>
+
+  <div class="table">
+    <div class="chead">
+      <span></span><span><b>图标 / 组件名</b></span>
+      <span><b>现在（animate-ui）</b></span><span><b>换成（lucide-animated）</b></span>
+    </div>
+    __CUR__
+  </div>
+
+  <div class="callout bad">
+    <b>PanelLeft / PanelRight 不是「替换」，是两处要拆开看。</b>
+    站点上不存在 <code>panel-left</code> / <code>panel-right</code> 这两个组件名，
+    只有 <code>panel-left-close</code>、<code>panel-left-open</code>、<code>panel-right-open</code> 三枚。
+    它们的动作和仓库现在的一样——都是把分栏线挪 2px（<code>9 &rarr; 7</code> 或
+    <code>15 &rarr; 17</code>）——但被拆成了「开」和「关」两个独立图标。
+    <br><br>
+    问题在于 <code>PanelLeft</code> / <code>PanelRight</code> 在你的代码里是<b>四个不同按钮</b>共用的名字：
+    左栏开合（标题栏）、右栏开合（右栏自己的头部）、顶栏展开右栏，另外还出现在侧栏右键菜单里。
+    「面板在左边还是右边」和「当前是开还是关」是两件事，而站点的命名把前一件事丢掉了——
+    <code>PanelRight</code> 连 <code>panel-right-close</code> 都没有。
+    <b>这两枚建议保留 animate-ui 的实现</b>，比硬塞站点组件干净。
+  </div>
+
+  <h2><span class="num">02</span>新增 · 站点直接可用（4 枚）</h2>
+  <p class="sub">这几枚在 lucide-animated 上有现成组件，动作参数抄自 registry。
+    其中 <b>Maximize / Minimize 已经在播</b>（标题栏那个按钮），这里列出来是因为它们的参数就是下面 §01 里要换的那两个。</p>
+  <div class="table">
+    <div class="arow" style="background:var(--paper);color:var(--faint);font-size:11px;letter-spacing:.02em">
+      <span></span><span>组件</span><span>位置</span><span>动效</span>
+    </div>
+    __AVAIL__
+  </div>
+
+  <h2><span class="num">03</span>新增 · 站点没有，照仓库字形自写（6 枚）</h2>
+  <p class="sub">知识库导航栏的六个入口，站点 468 枚里<b>一个都没有</b>——
+    不是「有但不合适」，是同名项根本不存在（最接近的 <code>file-stack</code>、
+    <code>home</code> 字形也不是同一个）。所以这六枚只有两条路：保持静态，或者自己写。
+    <b>下面这六个文件已经写好并通过 <code>tsc --strict</code></b>，
+    可以直接放进 <code>apps/desktop/src/components/animate-ui/icons/</code>。</p>
+  <div class="table">
+    <div class="arow" style="background:var(--paper);color:var(--faint);font-size:11px;letter-spacing:.02em">
+      <span></span><span>图标</span><span>位置</span><span>自写动效</span>
+    </div>
+    __NAV__
+  </div>
+  <div class="callout">
+    __NAV_NOTE__
+  </div>
+
+  <h2><span class="num">04</span>评估后建议保持静态的</h2>
+  <p class="sub">这几枚评估下来建议不动——理由写在下面，免得以后再翻出来重新讨论一遍。
+    其中 <code>House</code> 是唯一的例外情况：站点上确实有近似组件，但字形不同、且被两处共用，
+    真要动得先解决共用问题。</p>
+  <div class="stable">__SKIP__</div>
+
+  <h2><span class="num">05</span>落地时必须一起处理的事</h2>
+  <p class="sub">前四条不加处理就会出问题；<b>第五条只针对 §03 那六枚自写的</b>，
+    是它们和站点现成组件之间最大的差别。</p>
+  <div class="gtable">__GOTCHAS__</div>
+
+  <footer>
+    动效参数抄自 <code>lucide-animated.com/r/&lt;slug&gt;.json</code>（实际抓取的 registry 内容）
+    与仓库 <code>apps/desktop/src/components/animate-ui/icons/*.tsx</code>。
+    字形比对为逐属性 diff，结果 8/16 完全一致（Maximize、Minimize、MessageCirclePlus、Plus、
+    ChevronRight、FolderOpen、LoaderCircle、X），其余 8 枚站点用的是旧版几何。
+    站点清单核对于 <code>lucide-animated.com/icons/llms.txt</code>（468 枚）。
+    §03 的六枚不在该清单内，动效为自行设计，已通过 <code>tsc --strict</code>。
+    <br>同目录另有三份归档：<code>fox-icons.html</code>（全量图标总览）、
+    <code>fox-icon-animation-review.html</code>（animateicons 方案）、
+    <code>lucide-animated-review.html</code>（选型对比）。
+  </footer>
+</div>
+</body>
+</html>
+"""
+
+HTML = (TEMPLATE
+        .replace("__CUR__", cur_rows)
+        .replace("__AVAIL__", avail_rows)
+        .replace("__NAV_NOTE__", NAV_NOTE)
+        .replace("__NAV__", nav_rows)
+        .replace("__SKIP__", skip_rows)
+        .replace("__GOTCHAS__", gotcha_rows))
+
+for tok in ("__CUR__", "__AVAIL__", "__NAV__", "__NAV_NOTE__", "__SKIP__", "__GOTCHAS__"):
+    assert tok not in HTML, "unsubstituted " + tok
+
+open(OUT, "w", encoding="utf-8").write(HTML)
+print("wrote", OUT, len(HTML), "bytes")
+print("cur", len(CURRENT), "avail", len(AVAILABLE),
+      "nav", len(NAV), "skip", len(SKIP), "gotchas", len(GOTCHAS))

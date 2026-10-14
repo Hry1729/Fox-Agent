@@ -221,7 +221,7 @@ export function watcherResilience(): Plugin {
         )
         state.timer = setTimeout(() => {
           state.timer = null
-          if (disposed || watcher.closed) {
+          if (disposed || ('closed' in watcher && watcher.closed === true)) {
             pending.delete(path)
             return
           }

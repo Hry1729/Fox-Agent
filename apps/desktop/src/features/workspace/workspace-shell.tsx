@@ -2,7 +2,7 @@ import { lazy, Suspense, type ReactNode } from 'react'
 import type { KnowledgeBaseRecord } from '@/features/conversations/model/types'
 import type { LocalKnowledgeGateway, LocalKnowledgeView } from '@/features/local-knowledge'
 import type { PluginCardView, PluginGateway } from '@/features/plugins'
-import type { KnowledgeSourceLocator, NavigateWorkspace, WorkspaceView } from './types'
+import type { KnowledgeSourceLocator, LocalKnowledgeDocumentAsk, NavigateWorkspace, WorkspaceView } from './types'
 import { localKnowledgeBackRoute, localKnowledgeViewForWorkspace, workspaceViewForLocalKnowledge } from './management-navigation'
 
 const AgentListPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentListPage })))
@@ -16,6 +16,7 @@ const ModelProvidersPage = lazy(() => import('@/features/settings/settings-pages
 const YuxiSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.YuxiSettingsPage })))
 const ProjectPermissionsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ProjectPermissionsPage })))
 const ConversationSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ConversationSettingsPage })))
+const ShortcutSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ShortcutSettingsPage })))
 const UsageStatisticsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.UsageStatisticsPage })))
 const ExtensionsSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ExtensionsSettingsPage })))
 const AboutSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.AboutSettingsPage })))
@@ -39,6 +40,7 @@ export interface WorkspaceShellProps {
   dark: boolean
   onDark: () => void
   onAskKnowledge: (knowledgeBase: KnowledgeBaseRecord) => void
+  onAskLocalKnowledgeDocument: (payload: LocalKnowledgeDocumentAsk) => void
   localKnowledgeGateway?: LocalKnowledgeGateway
   pluginGateway?: PluginGateway
   localKnowledgeCreateRequest?: number
@@ -61,6 +63,7 @@ export function WorkspaceShell({
   dark,
   onDark,
   onAskKnowledge,
+  onAskLocalKnowledgeDocument,
   localKnowledgeGateway,
   pluginGateway,
   localKnowledgeCreateRequest,
@@ -92,6 +95,7 @@ export function WorkspaceShell({
         documentId={activeDocumentId ?? undefined}
         onNavigate={navigateLocalKnowledge}
         onBack={backFromLocalKnowledge}
+        onAskDocument={onAskLocalKnowledgeDocument}
         createRequest={localKnowledgeCreateRequest}
         onCreateRequestHandled={onLocalKnowledgeCreateRequestHandled}
       />
@@ -118,6 +122,8 @@ export function WorkspaceShell({
     rawWorkspacePage = <ProjectPermissionsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'settings-conversation') {
     rawWorkspacePage = <ConversationSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
+  } else if (activeView === 'settings-shortcuts') {
+    rawWorkspacePage = <ShortcutSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'settings-usage') {
     rawWorkspacePage = <UsageStatisticsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'settings-extensions') {

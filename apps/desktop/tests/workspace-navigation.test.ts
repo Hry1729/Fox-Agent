@@ -44,6 +44,16 @@ describe('workspace navigation', () => {
     expect(localKnowledgeBackRoute('local-files', null)).toEqual({ view: 'local-knowledge-home' })
   })
 
+  test('keeps the original return route across shortcut settings navigation', () => {
+    const documentRoute: WorkspaceReturnRoute = { view: 'local-knowledge-documents', entityId: 'kb-1', documentId: 'doc-1' }
+    expect(SETTINGS_WORKSPACE_VIEWS).toContain('settings-shortcuts')
+    expect(managementSection('settings-shortcuts')).toBe('settings')
+    const entered = captureManagementReturnRoutes(routes(), documentRoute, 'settings-shortcuts')
+    expect(managementExitRoute('settings-shortcuts', entered)).toEqual(documentRoute)
+    const switched = captureManagementReturnRoutes(entered, { view: 'settings-shortcuts', entityId: null, documentId: null }, 'settings-ai')
+    expect(managementExitRoute('settings-ai', switched)).toEqual(documentRoute)
+  })
+
   test('keeps plugins standalone while local knowledge uses management return handling', () => {
     expect(SETTINGS_WORKSPACE_VIEWS).not.toContain('plugins')
     expect(managementSection('plugins')).toBeNull()

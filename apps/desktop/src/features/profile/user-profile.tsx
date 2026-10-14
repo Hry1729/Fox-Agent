@@ -117,7 +117,7 @@ export function UserProfileDialog({ open, onOpenChange, profile, detail, onSave 
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent className="fox-user-profile-dialog sm:max-w-md">
       <DialogHeader><DialogTitle>编辑个人资料</DialogTitle><DialogDescription>选择 Fox 内置头像并设置在这台设备上显示的用户名。</DialogDescription></DialogHeader>
-      <div className="fox-user-profile-preview"><Avatar><AvatarImage src={avatar} alt="" /><AvatarFallback>{profile.initial}</AvatarFallback></Avatar><span><strong>{name.trim() || profile.name}</strong><small>{detail || 'Fox 本地用户'}</small></span></div>
+      <div className="fox-user-profile-preview"><Avatar><AvatarImage src={avatar} alt="" /><AvatarFallback>{profile.initial}</AvatarFallback></Avatar><span><strong>{name.trim() || profile.name}</strong><small>{detail || 'Fox 本机用户'}</small></span></div>
       <label className="fox-user-profile-field"><span>用户名</span><Input value={name} maxLength={32} autoFocus onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submit() }} /><small>{name.trim().length}/32</small></label>
       <div className="fox-user-profile-field"><span>选择头像</span><div className="fox-avatar-picker" role="radiogroup" aria-label="选择头像">{defaultProfileAvatars.map((src) => <button key={src} type="button" role="radio" aria-checked={avatar === src} className={avatar === src ? 'is-active' : ''} onClick={() => setAvatar(src)}><img src={src} alt="" />{avatar === src && <i><Check /></i>}</button>)}</div></div>
       {error && <p className="fox-user-profile-error">{error}</p>}

@@ -54,7 +54,7 @@ describe('R4 durable waiting ownership', () => {
 describe('R4 diagnostic and delivery facts', () => {
   test('retry scheduling alone never claims dispatch or success', () => {
     const retry = event(2, 'run.retrying')
-    expect(runtimeStatusNotice(retry, [retry])).toBe('已安排重试')
+    expect(runtimeStatusNotice(retry, [retry])).toBe('等待重试')
     const failed = event(3, 'context.compaction.failed', { category: 'transport_outcome_unknown', outcomeKnown: false, retryTimeline: 'no_run_retry_event_on_compaction_path' })
     expect(compactionFailurePresentation(failed)?.label).toBe('上下文整理未完成 · 传输结果未知 · 结果未知')
   })
@@ -137,7 +137,7 @@ describe('R4 diagnostic and delivery facts', () => {
     const cases: Array<[string, string]> = [
       ['mcp.timed_out', '连接超时'],
       ['mcp.connection_unavailable', '连接器暂时不可用'],
-      ['mcp.configuration_changed', '连接器配置已变化'],
+      ['mcp.configuration_changed', '连接器设置已变化'],
     ]
     for (const [code, summary] of cases) {
       const diagnostic = toolFailurePresentation('call_mcp_tool', { details: { diagnosticSource: 'host', errorCode: code, underlyingMessage: 'upstream text' } })
@@ -240,7 +240,7 @@ describe('R4 diagnostic and delivery facts', () => {
         operation: 'office_read', diagnosticSource: 'host', stage: 'policy', executionStarted: false,
       },
     })
-    expect(refusal.summary).toBe('本次操作没有得到授权')
+    expect(refusal.summary).toBe('本次操作未获批准')
     expect(refusal.summary).not.toContain('写入')
   })
   test('a denied write never claims execution, however complete its result looks', () => {
@@ -274,7 +274,7 @@ describe('R4 diagnostic and delivery facts', () => {
         operation: 'office_create', diagnosticSource: 'host', stage: 'policy', executionStarted: false,
       },
     })
-    expect(refusal.summary).toBe('本次操作没有得到授权')
+    expect(refusal.summary).toBe('本次操作未获批准')
     expect(refusal.summary).not.toContain('写入')
   })
   test('the built-in Office write class still words a settled failure as a refused write', () => {

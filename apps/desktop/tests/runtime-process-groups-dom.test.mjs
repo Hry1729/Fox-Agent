@@ -55,11 +55,11 @@ test('a run still waiting for an execution slot says so, with its real queue wai
   })
   const view = render(queued)
   // No run.started yet: this Run is holding a place in the shared execution queue.
-  // The queued stage has its own label — RUN_PHASE_LABELS.queued is 准备执行
+  // The queued stage has its own label — RUN_PHASE_LABELS.queued is 等待开始
   // (run-phase.ts) and no source string produces 排队等待执行 — and it must never be
   // reported as "analysing the request".
   const summary = view.container.querySelector('.fox-runtime-process-summary')
-  await waitFor(() => assert.match(summary?.textContent ?? '', /准备执行/))
+  await waitFor(() => assert.match(summary?.textContent ?? '', /等待开始/))
   assert.doesNotMatch(summary.textContent, /正在分析请求/)
   // The queue wait is a timing fact of the same projection, not a second timer glued
   // into the status line (run-phase.ts runPhaseTitle; tests/run-phase.test.ts pins the
@@ -84,7 +84,7 @@ test('a started run reports the model wait and the generation stage separately',
     ],
   })
   const view = render(queuedFirst)
-  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /等待模型响应/))
+  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /等待回复/))
   // The length of the wait is the run's single timer beside the avatar, not part of
   // the status line (run-phase.ts: the elapsed time is *not* glued onto the label
   // because the header already renders the run's one timer). run.started is 36s old,
@@ -172,9 +172,9 @@ test('run notices remain visible when process rows are collapsed', async () => {
   const view = render(timeline([...events, event(6, 'run.retrying')]))
   await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
   // A planned retry is not an executed retry (run-status-facts.ts
-  // runtimeStatusNotice), so the notice reads 已安排重试 — no source string produces
+  // runtimeStatusNotice), so the notice reads 等待重试 — no source string produces
   // 正在重试. The notice must stay mounted and readable while the process rows fold.
-  assert.equal(view.container.querySelector('.fox-process-notice').textContent, '已安排重试')
+  assert.equal(view.container.querySelector('.fox-process-notice').textContent, '等待重试')
 })
 
 test('Kernel messages and multiple assistant messages in one run use the safe legacy display after grouping loads', async () => {

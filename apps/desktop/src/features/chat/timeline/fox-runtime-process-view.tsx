@@ -102,7 +102,7 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
         </ContextMenuTrigger>
         <ContextMenuContent className="fox-runtime-path-menu">
           <ContextMenuItem onSelect={() => onRevealFileInExplorer?.(slots.path)}><FolderOpen />在文件管理器打开</ContextMenuItem>
-          <ContextMenuItem onSelect={() => onRevealFileInExplorer?.(slots.path)}><FolderSearch />打开文件位置</ContextMenuItem>
+          <ContextMenuItem onSelect={() => onRevealFileInExplorer?.(slots.path)}><FolderSearch />打开文件夹</ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
     )
@@ -306,10 +306,10 @@ export function RuntimeProcess({ events, process: preparedProcess, groupHelpers,
       : awaitingUser
         ? '等待你的回答'
       : lifecycleFailed
-        ? '工作过程未完成'
+        ? '处理过程未完成'
         : lifecycleCancelled
-          ? '工作过程已取消'
-          : '工作过程已完成'
+          ? '处理过程已取消'
+          : '处理过程已完成'
   const desiredTitle = baseProcessTitle
   const processTitle = useStableProcessTitle(desiredTitle, running)
   const activityKind = activeTool ? groupHelpers?.processActivityKind(activeTool.name, activeTool.input)

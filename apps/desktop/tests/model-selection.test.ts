@@ -6,7 +6,7 @@ const remote = { id: 'yuxi:default-chatbot', runtimeType: 'yuxi', configurableIt
 const catalog = [{ spec: 'siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash' }]
 
 test('new remote messages and retries never inherit local models or default labels', () => {
-  for (const stale of ['sensenova-6.8-flash-lite', '知识库默认模型', '', undefined]) {
+  for (const stale of ['sensenova-6.8-flash-lite', '资料库默认模型', '', undefined]) {
     expect(conversationModelOverride(remote, stale, catalog)).toBeUndefined()
   }
   expect(conversationModelOverride(remote, catalog[0].spec, catalog)).toBe(catalog[0].spec)

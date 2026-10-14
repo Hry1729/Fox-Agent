@@ -53,7 +53,7 @@ describe('knowledge preview model', () => {
       status: 'completed',
       documentId: 'document-1',
     })).toBe([
-      '知识库：设备资料',
+      '资料库：设备资料',
       '文件名：轨道吊说明书.docx',
       '类型：Word 文档',
       '大小：2.5 MB',

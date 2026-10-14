@@ -161,6 +161,7 @@ describe('starting a fresh draft', () => {
       'clearWorkflowTimer', 'setChatState', 'setActivePrompt', 'setPendingUserMessage',
       'setEmptyConversation', 'setComposerDraft', 'setComposerResetKey', 'setActiveEntityId',
       'setActiveDocumentId', 'setActiveSourceLocator', 'setAssistantMode', 'setActiveView',
+      'cancelDocumentAsk', 'setComposerInitialAttachments',
       `${compiled}; return beginNewDraft`,
     )(
       () => { calls.clearWorkflowTimer = true },
@@ -168,6 +169,7 @@ describe('starting a fresh draft', () => {
       setter('emptyConversation'), setter('composerDraft'), setter('composerResetKey'),
       setter('activeEntityId'), setter('activeDocumentId'), setter('activeSourceLocator'),
       setter('assistantMode'), setter('activeView'),
+      () => { calls.cancelDocumentAsk = true }, setter('composerInitialAttachments'),
     )
     return { beginNewDraft, calls }
   }
@@ -188,6 +190,8 @@ describe('starting a fresh draft', () => {
     expect(calls.activeDocumentId).toBeNull()
     expect(calls.activeSourceLocator).toBeNull()
     expect(calls.activeView).toBe('chat')
+    expect(calls.cancelDocumentAsk).toBe(true)
+    expect(calls.composerInitialAttachments).toBeNull()
     // Nothing cancels the conversation that is still running in the background.
     expect('cancel' in calls).toBe(false)
     // The assistant mode is only touched when the caller asks for a change.
@@ -216,6 +220,30 @@ describe('starting a fresh draft', () => {
 })
 
 describe('composable conversation draft selections', () => {
+  test('prepares fresh knowledge refs synchronously before another selection can run', async () => {
+    const h = harness()
+    const oldConversation = { conversation: { id: 'existing', agentId: 'fox-general', permissionMode: 'ask', projectRoot: 'D:/work/existing' }, messages: [], attachments: [], knowledgeBindings: [], knowledgeReferences: [{ source: 'local', id: 'existing-kb' }], expertBindings: [], lastRun: null }
+    const otherConversation = { ...oldConversation, conversation: { ...oldConversation.conversation, id: 'other' }, knowledgeReferences: [{ source: 'local', id: 'other-kb' }] }
+    h.setConversationLoader(async (id) => id === 'other' ? otherConversation : oldConversation)
+    await h.render().openConversation('existing')
+    const refs = [{ source: 'local' as const, id: 'doc-kb' }]
+    const names = { [knowledgeReferenceKey(refs[0])]: '资料所属库' }
+    let switchPromise: Promise<void> | undefined
+    queueMicrotask(() => { switchPromise = h.render().openConversation('other') })
+    expect(h.render().createConversationDraftWithKnowledge('fox-general', refs, names)).toBe(true)
+    const draft = h.render()
+    expect(draft.selectedConversationId).toBeNull()
+    expect(draft.detail).toBeNull()
+    expect(draft.knowledgeReferences).toEqual(refs)
+    expect(draft.knowledgeReferenceNames).toEqual(names)
+    expect(h.creates()).toBe(0)
+    expect(h.submitted().savedReferences).toBeUndefined()
+    await Promise.resolve()
+    await switchPromise
+    expect(h.render().detail.knowledgeReferences).toEqual([{ source: 'local', id: 'other-kb' }])
+    expect(oldConversation.knowledgeReferences).toEqual([{ source: 'local', id: 'existing-kb' }])
+    expect(h.submitted().savedReferences).toBeUndefined()
+  })
   test('returning to chat does not create a draft, but New conversation does', () => {
     const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
     const selection = workbench.slice(workbench.indexOf('  const switchAssistantMode ='), workbench.indexOf('  const createProjectDraft ='))
@@ -235,7 +263,7 @@ describe('composable conversation draft selections', () => {
     test(`preserves project, expert and mixed knowledge in order ${order}`, async () => {
       const h = harness()
       const references = [{ source: 'local', id: 'kb-local' }, { source: 'remote', id: 'kb-remote', connectionId: 'yuxi-primary' }]
-      const names = Object.fromEntries(references.map((reference, index) => [knowledgeReferenceKey(reference as any), index ? '远程制度库' : '本地经验库']))
+      const names = Object.fromEntries(references.map((reference, index) => [knowledgeReferenceKey(reference as any), index ? '远程制度库' : '本机经验库']))
       for (const step of order) {
         const state = h.render()
         if (step === 'p') state.selectProject('D:/work/project', 'read_only')

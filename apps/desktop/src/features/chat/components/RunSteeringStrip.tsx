@@ -72,7 +72,7 @@ export function RunSteeringStrip({
                 <li key={row.messageId} className={`fox-steering-item is-${state}`}>
                   <span
                     className={`fox-steering-lane is-${lane}`}
-                    title={lane === STEERING_LANE_NEXT_TURN ? '排队，下一轮处理' : '补充到当前任务'}
+                    title={lane === STEERING_LANE_NEXT_TURN ? '下一轮再处理' : '加入当前任务'}
                   >
                     {lane === STEERING_LANE_NEXT_TURN ? '下一轮' : '当前任务'}
                   </span>
@@ -85,7 +85,7 @@ export function RunSteeringStrip({
                       variant="ghost"
                       className="fox-steering-discard"
                       disabled={busy}
-                      title="从队列中移除这条补充要求"
+                      title="移除补充"
                       onClick={() => void discard(row.messageId)}
                     >
                       <Trash2 size={12} />

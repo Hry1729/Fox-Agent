@@ -74,11 +74,11 @@ export function RunReliabilityPanel({ conversationId, active }: { conversationId
       {snapshot?.contextBudget && <ContextBudgetPanel budget={snapshot.contextBudget} />}
       {snapshot?.continuable.map(run => <div key={run.runId} className="flex items-center justify-between gap-2">
         <span>{pauseLabel(run.pauseReason)} · 已完成 {run.completedToolCalls} 次工具调用</span>
-        <Button size="sm" disabled={active || busy} onClick={() => void continueRun(run.runId)}>保留进度继续</Button>
+        <Button size="sm" disabled={active || busy} onClick={() => void continueRun(run.runId)}>继续任务</Button>
       </div>)}
       {snapshot?.jobs.map(job => <div key={job.jobId}>
         <JobProgressCard snapshot={job} onCancel={async id => { await jobAction(job, 'compute_job_cancel', { jobId: id }) }} onViewResult={() => void readPage(job)} />
-        {job.resumable && <Button size="sm" disabled={busy || !active || job.runId !== snapshot.runId} onClick={() => { void jobAction(job, 'compute_job_start', { jobId: job.jobId }).catch(cause => setError(String(cause))) }}>重新检查权限并恢复作业</Button>}
+        {job.resumable && <Button size="sm" disabled={busy || !active || job.runId !== snapshot.runId} onClick={() => { void jobAction(job, 'compute_job_start', { jobId: job.jobId }).catch(cause => setError(String(cause))) }}>恢复任务</Button>}
       </div>)}
       {page && <div><pre className="max-h-72 overflow-auto whitespace-pre-wrap">{page.content}</pre>{page.nextOffset !== null && <Button size="sm" onClick={() => { const job = snapshot?.jobs.find(j => j.jobId === page.jobId); if (job) void readPage(job, page.nextOffset!) }}>下一页</Button>}</div>}
       {error && <p role="alert" className="text-destructive">{error}</p>}

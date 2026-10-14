@@ -1,8 +1,11 @@
 import { FOX_ASSISTANT_AVATAR } from '../components/FoxAssistantAvatar'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { Copy, FolderOpen, MessageSquarePlus, Minus, PanelLeft, Settings, Sparkles, Square, X } from 'lucide-react'
+import { FolderOpen, Minus, Sparkles, X } from 'lucide-react'
+import { AnimatedIconTrigger, Maximize, MessageCirclePlus, Minimize, PanelLeft, Settings } from '@/components/fox-ui/animated-icons'
 import { type ReactNode, memo, useEffect, useState } from 'react'
+import { detectShortcutPlatform, formatShortcut, type ShortcutActionId } from '@/features/settings/shortcut-model'
+import { useShortcutPreferences } from '@/features/settings/use-shortcuts'
 
 function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onZoom }: {
   leftSidebarCollapsed: boolean
@@ -14,6 +17,14 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
   onZoom: (delta: number) => void
 }) {
   const [maximized, setMaximized] = useState(false)
+  const { preferences } = useShortcutPreferences()
+  const platform = detectShortcutPlatform()
+  const shortcutHint = (actionId: ShortcutActionId) => {
+    const binding = preferences[actionId]
+    if (!binding) return null
+    const label = formatShortcut(binding, platform)
+    return <DropdownMenuShortcut aria-label={label.spoken}>{label.text}</DropdownMenuShortcut>
+  }
 
   useEffect(() => {
     let disposed = false
@@ -29,7 +40,7 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
         }
       }
       void syncMaximized()
-      void appWindow.onResized(() => { void syncMaximized() }).then((cleanup) => { unlisten = cleanup })
+      void appWindow.onResized(() => { void syncMaximized() }).then((cleanup) => { if (disposed) cleanup(); else unlisten = cleanup }).catch(() => { /* Browser preview has no native events. */ })
     } catch {
       // Browser preview has no native window state.
     }
@@ -59,14 +70,14 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
         <img src={FOX_ASSISTANT_AVATAR} alt="" />
         <strong>Fox</strong>
         <div className="fox-titlebar-sidebar-controls" aria-label="侧边栏控制">
-          <button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button>
+          <AnimatedIconTrigger><button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button></AnimatedIconTrigger>
         </div>
         <nav aria-label="应用菜单">
           <WindowMenu label="文件">
-            <DropdownMenuItem onSelect={onNewChat}><MessageSquarePlus />新建对话<DropdownMenuShortcut>Ctrl N</DropdownMenuShortcut></DropdownMenuItem>
-            <DropdownMenuItem onSelect={onOpenProject}><FolderOpen />打开项目<DropdownMenuShortcut>Ctrl O</DropdownMenuShortcut></DropdownMenuItem>
+            <AnimatedIconTrigger><DropdownMenuItem onSelect={onNewChat}><MessageCirclePlus />新建对话{shortcutHint('new-conversation')}</DropdownMenuItem></AnimatedIconTrigger>
+            <DropdownMenuItem onSelect={onOpenProject}><FolderOpen />打开项目{shortcutHint('add-project')}</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onSettings}><Settings />设置<DropdownMenuShortcut>Ctrl ,</DropdownMenuShortcut></DropdownMenuItem>
+            <AnimatedIconTrigger><DropdownMenuItem onSelect={onSettings}><Settings />设置{shortcutHint('open-settings')}</DropdownMenuItem></AnimatedIconTrigger>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void windowAction('close')}>退出</DropdownMenuItem>
           </WindowMenu>
@@ -78,7 +89,7 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
             <DropdownMenuItem onSelect={() => document.execCommand('paste')}>粘贴<DropdownMenuShortcut>Ctrl V</DropdownMenuShortcut></DropdownMenuItem>
           </WindowMenu>
           <WindowMenu label="视图">
-            <DropdownMenuItem onSelect={onToggleSidebar}><PanelLeft />切换侧边栏<DropdownMenuShortcut>Ctrl B</DropdownMenuShortcut></DropdownMenuItem>
+            <AnimatedIconTrigger><DropdownMenuItem onSelect={onToggleSidebar}><PanelLeft />{leftSidebarCollapsed ? '显示侧栏' : '隐藏侧栏'}{shortcutHint('toggle-sidebar')}</DropdownMenuItem></AnimatedIconTrigger>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => onZoom(0.1)}>放大<DropdownMenuShortcut>Ctrl +</DropdownMenuShortcut></DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onZoom(-0.1)}>缩小<DropdownMenuShortcut>Ctrl -</DropdownMenuShortcut></DropdownMenuItem>
@@ -90,7 +101,7 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
       </div>
       <div className="fox-window-controls">
         <button type="button" aria-label="最小化" onClick={() => void windowAction('minimize')}><Minus /></button>
-        <button type="button" aria-label={maximized ? '还原窗口' : '最大化'} title={maximized ? '还原窗口' : '最大化'} onClick={() => void windowAction('maximize')}>{maximized ? <Copy /> : <Square />}</button>
+        <AnimatedIconTrigger><button type="button" aria-label={maximized ? '还原窗口' : '最大化'} title={maximized ? '还原窗口' : '最大化'} onClick={() => void windowAction('maximize')}>{maximized ? <Minimize /> : <Maximize />}</button></AnimatedIconTrigger>
         <button type="button" className="is-close" aria-label="关闭" onClick={() => void windowAction('close')}><X /></button>
       </div>
     </header>

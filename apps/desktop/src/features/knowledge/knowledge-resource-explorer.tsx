@@ -74,11 +74,11 @@ export function KnowledgeResourceExplorer({
               type="button"
               className="fox-file-tree-root"
               onClick={() => setRootExpanded((value) => !value)}
-              title={database?.name ?? '知识库'}
+              title={database?.name ?? '资料库'}
             >
               {rootExpanded ? <ChevronDown /> : <ChevronRight />}
               <FolderOpen />
-              <strong>{database?.name ?? '知识库'}</strong>
+              <strong>{database?.name ?? '资料库'}</strong>
             </button>
             {rootExpanded && (
               <DocumentTree

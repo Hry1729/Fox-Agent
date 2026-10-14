@@ -31,7 +31,7 @@ export function AssistantProcess({ running = false }: { running?: boolean }) {
   return (
     <ChainOfThought open={open} onOpenChange={setOpen} className="fox-chain-of-thought">
       <ChainOfThoughtHeader className="fox-chain-of-thought-header">
-        {running ? <RunStatusText text="正在处理" /> : <span>工作过程（7 步）</span>}
+        {running ? <RunStatusText text="正在处理" /> : <span>处理过程（7 步）</span>}
         {!running && <small>· 思考 10 秒</small>}
       </ChainOfThoughtHeader>
       <ChainOfThoughtContent className="fox-chain-of-thought-content">
@@ -83,7 +83,7 @@ export function ApprovalPrompt({ onApprove, onDeny }: { onApprove: () => void; o
       <ConfirmationRequest>
         <div className="fox-confirmation-body">
           <span className="fox-prompt-figure"><img src={FOX_ASSISTANT_AVATAR} alt="" /></span>
-          <div><ConfirmationTitle>允许 Fox 修改本地文件？</ConfirmationTitle><p><code>apps/desktop/src/styles/workbench.css</code></p><small>Fox 将写入此工作区中的一个文件。你可以在 Changes 面板检查修改。</small></div>
+          <div><ConfirmationTitle>允许 Fox 修改本机文件？</ConfirmationTitle><p><code>apps/desktop/src/styles/workbench.css</code></p><small>Fox 将写入此工作区中的一个文件。你可以在 Changes 面板检查修改。</small></div>
         </div>
         <ConfirmationActions className="fox-confirmation-actions">
           <ConfirmationAction variant="ghost" onClick={onDeny}>拒绝</ConfirmationAction>
@@ -100,7 +100,7 @@ export function DeniedPrompt() {
       <ConfirmationRejected>
         <div className="fox-denied-prompt">
           <img className="fox-inline-mascot" src={FOX_ASSISTANT_AVATAR} alt="" />
-          <span><strong>操作已取消</strong><small>Fox 没有修改任何本地文件。</small></span>
+          <span><strong>操作已取消</strong><small>Fox 没有修改任何本机文件。</small></span>
         </div>
       </ConfirmationRejected>
     </Confirmation>
@@ -121,20 +121,20 @@ function errorPresentation(error?: string | null, details?: DesktopErrorDetails 
   }
   if (/Pi Runtime dependencies|Fox Runtime|runtime (?:script|executable)|Node\.js is required/i.test(detail)) {
     return {
-      title: 'Fox 本地运行时不可用',
-      description: '本地专家运行环境未能启动。请确认 Fox 依赖完整，并在重启应用后重试。',
+      title: 'Fox 未能启动，请重启应用后重试',
+      description: '本机专家运行环境未能启动。请确认 Fox 依赖完整，并在重启应用后重试。',
       detail,
     }
   }
   if (/knowledge|知识库|yuxi|ECONNREFUSED.*5010/i.test(detail)) {
     return {
-      title: '无法连接到知识库服务',
-      description: '知识库服务暂时没有响应。请确认服务已启动，或稍后重试。',
+      title: '资料库服务连接失败，请检查设置',
+      description: '资料库服务暂时没有响应。请确认服务已启动，或稍后重试。',
       detail,
     }
   }
   return {
-    title: 'Fox 暂时无法完成请求',
+    title: '处理失败，可重试或查看问题诊断',
     description: '运行过程中遇到了问题。你可以重试，或在设置中查看运行诊断。',
     detail,
   }
@@ -146,9 +146,9 @@ export function ErrorPrompt({ onRetry, error, errorDetails }: { onRetry?: () => 
 }
 
 const clarificationOptions = [
-  { id: 'analyze', title: '仅分析', detail: '先阅读相关文件并给出建议，不写入工作区' },
-  { id: 'edit', title: '直接修改', detail: '按推荐方案修改文件，写入前仍会请求授权' },
-  { id: 'backup', title: '先备份再修改', detail: '保留原文件副本后再执行修改' }
+  { id: 'analyze', title: '只看不改', detail: '先阅读相关文件并给出建议，不写入工作区' },
+  { id: 'edit', title: '修改文件', detail: '按推荐方案修改文件，写入前仍会请求批准' },
+  { id: 'backup', title: '先备份再改', detail: '保留原文件副本后再执行修改' }
 ] as const
 
 export function QuestionPrompt({ onAnswer }: { onAnswer: (answer: string) => void }) {

@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>小狐狸头像 · 蓝盘主题</title>
+<style>
+  :root {
+    --bg: #1a1916;
+    --panel: #22211d;
+    --paper: #ece7dc;
+    --mute: #8d877b;
+    --line: #3a372f;
+    --accent: #7db4ff;
+    --fg: #ece7dc;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--paper); }
+  body {
+    font: 14px/1.5 "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    letter-spacing: 0.01em;
+  }
+  header {
+    padding: 26px 32px 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  header p { margin: 0; color: var(--mute); font-size: 12px; }
+  header p a { color: var(--accent); text-decoration: none; border-bottom: 1px solid #7db4ff44; }
+  header p a:hover { border-bottom-color: var(--accent); }
+  main {
+    display: grid;
+    grid-template-columns: minmax(300px, 460px) 1fr;
+    gap: 28px;
+    padding: 12px 32px 48px;
+    align-items: start;
+  }
+  .stage {
+    position: sticky;
+    top: 20px;
+    background: var(--panel);
+    border: 1px solid #2e2c27;
+    border-radius: 20px;
+    padding: 28px 24px 20px;
+  }
+  .disk {
+    position: relative;
+    width: min(100%, 340px);
+    margin: 0 auto;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* pointer-events:none 必须保留：SVG 内容（白色垫底 rect 达 2880²）会溢出到
+     整个页面，SVG 默认的 visiblePainted 不看 opacity，opacity:0 的垫底照样会
+     吞掉全页点击并冒泡到 .disk 触发 hop()，导致按钮点不动。视线跟随监听在
+     window 上，SVG 无需任何指针交互；.disk 自身仍可命中（HTML 元素按盒模型命中）。 */
+  .disk svg { width: 100%; height: auto; display: block; overflow: visible; pointer-events: none; }
+  .disk .ref {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+  .disk.ref-on .ref { opacity: 0.5; }
+  .readout {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 16px;
+    font-variant-numeric: tabular-nums;
+    color: #b7b1a4;
+    font-size: 12px;
+  }
+  .readout b { color: var(--paper); font-weight: 600; }
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .modes .sub { color: var(--mute); font-size: 11px; align-self: center; margin-right: 2px; }
+  button {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: #2a2823;
+    color: var(--paper);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button[aria-pressed="true"] { background: var(--accent); color: #10151c; border-color: var(--accent); }
+  button:hover { border-color: #6a6458; }
+  h2 {
+    margin: 0 0 10px;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--mute);
+    font-weight: 600;
+  }
+  section + section { margin-top: 22px; }
+  .group + .group { margin-top: 12px; }
+  .group .gl {
+    font-size: 11px;
+    color: var(--mute);
+    margin-bottom: 6px;
+    letter-spacing: 0.08em;
+  }
+  .states { display: flex; flex-wrap: wrap; gap: 6px; }
+  .states button { font-size: 12px; padding: 5px 10px; }
+  .note {
+    color: var(--mute);
+    font-size: 12px;
+    max-width: 62ch;
+  }
+  .note code { color: #d8d0c0; font-size: 11px; }
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; }
+    .stage { position: static; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fox Avatar</h1>
+  <p>蓝盘主题版 · 整页单一淡蓝 <b>#8FC6FE</b>：产品动作缩点 = 淡蓝实心圆（非狐狸小头像）× 周围元素同为淡蓝
+    <br />另两个版本：<a href="index.html">脸部特写版</a> · <a href="index-mini.html">整狐缩影版</a></p>
+</header>
+<main>
+  <aside class="stage">
+    <div class="disk" id="disk" title="点一下跳一下">
+      <svg id="fox" role="img" aria-label="Fox avatar"></svg>
+      <img class="ref" src="assets/fox-eyes-ref.png" alt="" />
+    </div>
+    <div class="readout">
+      <div>状态 <b id="r-state">idle</b></div>
+      <div>特效 <b id="r-fx">—</b></div>
+      <div>挤压 <b id="r-squash">1.000</b></div>
+      <div>旋转 <b id="r-spin">0°</b></div>
+    </div>
+    <div class="modes">
+      <button id="opt-follow" aria-pressed="true">跟随指针</button>
+      <button id="opt-auto" aria-pressed="true">自动小动作</button>
+      <button id="opt-ref" aria-pressed="false">眼位对位</button>
+    </div>
+    <div class="modes" id="anim-toggles">
+      <span class="sub">容器动画</span>
+      <button data-anim="breath" aria-pressed="true">呼吸</button>
+      <button data-anim="float" aria-pressed="true">浮动</button>
+      <button data-anim="roll" aria-pressed="true">摇摆</button>
+      <button data-anim="squash" aria-pressed="true">挤压</button>
+    </div>
+    <div class="modes">
+      <button id="act-hop">跳一下</button>
+      <button id="act-spin">转一圈</button>
+      <button id="act-bounce">弹跳转</button>
+      <button id="act-dizzy">眩晕转</button>
+      <button id="act-wild">狂野转</button>
+      <button id="act-blink">眨眨眼</button>
+      <button id="act-burst">撒花</button>
+    </div>
+  </aside>
+  <div>
+    <section>
+      <h2>状态 · 35 态</h2>
+      <div id="states"></div>
+    </section>
+    <section>
+      <h2>实现说明</h2>
+      <p class="note">
+        本页是 Grok 引擎（状态机 / 弹簧物理 / 25 套眼形 morph / 14 种 overlay 特效 /
+        特技全家桶）在狐狸头像上的全量移植，身形切换除外。        情绪/生命周期等状态沿用
+        overlay 特效（如思考=狐狸+两颗跳动点）。
+        <b>本页「蓝盘主题」与另两版的关键差别：整页只用一枚淡蓝 <code>#8FC6FE</code>。</b>
+        产品动作组（生成/哼歌/加载/语音/书写/发送/接收/上传/警报/拖拽/弹跳/关机）与
+        Agent 形态（环绕/雷达/进度）缩点收满时，头像不再是"小狐狸"或"小脸"，而是
+        <b>一枚淡蓝实心圆</b>（<code>dotMode:"blue"</code>，跳过怼脸取景）；底盘也换成了
+        同色的 <code>assets/fox-base-blue.png</code>，所以从大图缩到小点的全过程没有一次跳色。
+        圆圈周围的跳动点 / 环绕粒子 / 圈 / 字形也全部是同一枚淡蓝。
+        特技（转一圈/弹跳转/眩晕转/狂野转）一律旋转整个头像，眼睛只在脸上随头倾斜。
+        容器动画（呼吸/浮动/摇摆/挤压）可用上方开关单独关闭。
+        眼位来自对 <code>Fox头像.png</code> 的像素测量。「眼位对位」可叠加原版核对。
+      </p>
+      <p class="note">
+        <b>情绪反应组（14 态）另有专属"眼部语言"</b>，几个正交维度自由组合 ——
+        视线行为（扫视 / 斜睨 / 上翻 / 躲闪 / 垂视 / 仰视 / 慢漂 / 斗鸡眼 / 抖视 / 绕圈）、
+        眼内装饰（四角闪 / 五角星 / 泪滴 / 螺旋晕圈）、
+        眼形本体接管（笑眼弧线 <code>arc</code> 在用；爱心形变 <code>shape:"heart"</code> 保留备用）、
+        高光点改写（<code>hlHeart</code> 白点变白心、<code>orbit</code> 白点绕圈）、
+        眼部放大增益 <code>boost</code>、左右同形等大 <code>sym</code>。
+        兴奋=星星眼+高频抖视、惊讶=<b>双眼整体等比睁大</b>瞪视（无装饰、左右等大）、狐疑=半闭+斜睨、
+        生气=锁定凝视、<b>犯困=眼睛在"睁（苏醒 0 号眼形）"与"闭（睡着 13 号眼形）"之间来回点头</b>
+        （慢慢沉下去 → 闭住 → 迅速弹开，像打瞌睡）、<b>开心=上弯笑眼弧线</b>（进这个状态时眼睛
+        先被压扁成一条线、再往上弯成 ^^，不是"眼睛直接消失"）、好奇=左右扫视、
+        困惑=<b>双眼放大 + 高光白点在眼里转圈</b>+斗鸡眼、无聊=眯缝眼+翻白眼、骄傲=仰视、
+        害羞=<b>正常大小的大眼，高光白点换成白色爱心</b>+躲闪、难过=泪滴垂视、
+        贪玩=五角星眼+绕圈看、庆祝=闪光眼+仰视。
+        眼内高光白点默认保留；只有带装饰/弧线/爱心眼形的情绪会把它淡出（装饰自己就是眼睛的内容）。
+        <b>眼形素材的"大小眼"陷阱</b>：3 / 5 / 9 / 12 / 14 / 18 / 21 / 23 这 8 个索引<b>左右两眼
+        天生不一样大</b>（18 号左 111×98、右 62×57；5 / 14 / 23 更极端 —— 一只大竖椭圆配一条横眯缝线），
+        选中它们就会出现"一大一小"。惊讶 / 困惑必须用标准竖椭圆（归一化后 87×111）：
+        18 / 9 / 12 归一化后是横的（111×98 / 111×87），一放大就变成"眼睛变宽"；
+        庆祝原来是 18 + 9，正好是全表最不对称的两个。
+        此外 14 条眼形播放列表已重排 —— 原先多数情绪共用同一组合（这正是"看起来重复"的根源），
+        现在两两之间最多只共用一个眼形索引。生命周期 / Agent 形态 / 产品动作组不受影响。
+      </p>
+    </section>
+  </div>
+</main>
+<!-- 蓝盘主题（本页专属皮肤，必须先于 src 脚本）：
+     整页只用**一个颜色：淡蓝 #8FC6FE**，从底盘到缩点圆到周围小圆全是一个色。
+     ① 产品动作/Agent 形态缩点时，头像不再是"小狐狸/小脸"，而是**一枚淡蓝实心圆**
+        —— dotMode:"blue" 跳过怼脸取景（fo≡0），缩点后半程漫上一枚与底盘逐像素
+        重合的实心圆（tables.DOT_BLUE，色=淡蓝、半径=实测盘半径）。
+     ② base：换一张**淡蓝底盘**的底图。原 assets/fox-base.png 里那枚圆盘是烘焙在图
+        里的 rgb(33,143,253) 亮蓝 —— 不换的话，缩到一半会露出还在变小的亮蓝盘，
+        再被淡蓝圆盖住 = 一次明显跳色。fox-base-blue.png 只把那枚盘子的色换成淡蓝
+        （狐狸本体逐像素不动），原图仍留给另外三页，不受影响。
+     ③ 周围元素（跳动点 / 环绕粒子 / 圈 / 字形 / 撒花）全部同一枚淡蓝：
+        orn 给成两格同色 → OverlayLayer 的"i%2 双色交替"退化成单色，
+        与缩点后的实心圆完全同色，视觉上高度一致。
+     ④ ornFloor：周围小圆的暗端下限。源版跳动点脉冲最暗 0.50、环绕粒子绕到背面最暗
+        0.18 —— 后者在深色底上直接读成"黑色小圆"。这里两处一起抬到 0.62，于是任何
+        时刻都读得出是淡蓝（深度感仍由半径差与脉冲节奏承担）。写 0.18 即完全还原。 -->
+<script>
+  window.FOX_SKIN = {
+    dotMode: "blue",
+    base: "assets/fox-base-blue.png",   // 淡蓝底盘版底图（原 fox-base.png 不动）
+    orn: true,                          // → tables.ORN_BLUE（两格同色淡蓝）
+    ornBurst: true,                     // → tables.ORN_BURST（单色淡蓝）
+    ornFloor: 0.62,   // 周围小圆的暗端下限（源版：跳动点 0.50、环绕粒子 0.18）；写 0.18 还原
+  };
+</script>
+<script src="src/math.js"></script>
+<script src="src/geo.js"></script>
+<script src="src/tables.js"></script>
+<script src="src/eyes.js"></script>
+<script src="src/fx.js"></script>
+<script src="src/motion.js"></script>
+<script src="src/fox.js"></script>
+<script>
+  const readout = {
+    state: document.getElementById("r-state"),
+    fx: document.getElementById("r-fx"),
+    squash: document.getElementById("r-squash"),
+    spin: document.getElementById("r-spin"),
+  };
+  const stateRoot = document.getElementById("states");
+  const disk = document.getElementById("disk");
+
+  const fox = new FoxAvatar(document.getElementById("fox"), {
+    followPointer: true,
+    autoTricks: true,
+    onChange(s) {
+      readout.state.textContent = FOX_TABLES.LABELS[s.state] || s.state;
+      readout.fx.textContent = s.overlay || "—";
+      readout.squash.textContent = s.squash.toFixed(3);
+      const deg = ((s.spin * 180) / Math.PI) % 360;
+      readout.spin.textContent = `${deg.toFixed(0)}°`;
+    },
+  });
+
+  /* 分组状态按钮 */
+  const stateBtns = {};
+  FOX_TABLES.GROUPS.forEach((grp) => {
+    const wrap = document.createElement("div");
+    wrap.className = "group";
+    const label = document.createElement("div");
+    label.className = "gl";
+    label.textContent = grp.label;
+    const row = document.createElement("div");
+    row.className = "states";
+    grp.states.forEach((name) => {
+      const b = document.createElement("button");
+      b.textContent = FOX_TABLES.LABELS[name] || name;
+      b.dataset.state = name;
+      b.setAttribute("aria-pressed", name === "idle" ? "true" : "false");
+      b.addEventListener("click", () => {
+        fox.setState(name);
+        Object.values(stateBtns).forEach((x) =>
+          x.setAttribute("aria-pressed", x.dataset.state === name ? "true" : "false")
+        );
+      });
+      row.appendChild(b);
+      stateBtns[name] = b;
+    });
+    wrap.appendChild(label);
+    wrap.appendChild(row);
+    stateRoot.appendChild(wrap);
+  });
+
+  function bindToggle(id, fn) {
+    const el = document.getElementById(id);
+    el.addEventListener("click", () => {
+      const v = el.getAttribute("aria-pressed") !== "true";
+      el.setAttribute("aria-pressed", v ? "true" : "false");
+      fn(v);
+    });
+  }
+  bindToggle("opt-follow", (v) => fox.setFollowPointer(v));
+  bindToggle("opt-auto", (v) => fox.setAutoTricks(v));
+  bindToggle("opt-ref", (v) => disk.classList.toggle("ref-on", v));
+
+  document.querySelectorAll("#anim-toggles [data-anim]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const v = b.getAttribute("aria-pressed") !== "true";
+      b.setAttribute("aria-pressed", v ? "true" : "false");
+      fox.setAnim(b.dataset.anim, v);
+    });
+  });
+
+  document.getElementById("act-hop").addEventListener("click", () => fox.hop());
+  document.getElementById("act-spin").addEventListener("click", () => fox.spinOnce(1));
+  document.getElementById("act-bounce").addEventListener("click", () => fox.bounceOnce());
+  document.getElementById("act-dizzy").addEventListener("click", () => fox.dizzyOnce());
+  document.getElementById("act-wild").addEventListener("click", () => fox.wildOnce());
+  document.getElementById("act-blink").addEventListener("click", () => fox.blinkOnce());
+  document.getElementById("act-burst").addEventListener("click", () => fox.burstOnce(22, 1.1, 0.3));
+  disk.addEventListener("click", () => fox.hop());
+
+  /* URL hash 直达状态，便于调试/分享：index.html#thinking */
+  if (location.hash) {
+    const s = decodeURIComponent(location.hash.slice(1));
+    if (FOX_TABLES.EYE_PLAYLIST[s]) {
+      fox.setState(s);
+      Object.values(stateBtns).forEach((x) =>
+        x.setAttribute("aria-pressed", x.dataset.state === s ? "true" : "false")
+      );
+    }
+  }
+  if (location.search.includes("debug")) {
+    const dbg = document.createElement("div");
+    dbg.style.cssText =
+      "position:fixed;top:8px;right:8px;z-index:99;background:#000c;color:#0f0;font:12px/1.5 monospace;padding:6px 10px;border-radius:8px;white-space:pre;";
+    document.body.appendChild(dbg);
+    let err = "no error";
+    window.addEventListener("error", (e) => {
+      err = (e.message || "?") + " @ " + (e.filename || "").split("/").pop() + ":" + e.lineno;
+      dbg.style.color = "#f55";
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      err = "rej: " + (e.reason && e.reason.message ? e.reason.message : e.reason);
+      dbg.style.color = "#f55";
+    });
+    setInterval(() => {
+      dbg.textContent = [
+        `state=${fox.state} want=${FOX_FX.MAP[fox.state]}`,
+        `yl=${fox.overlay.x.toFixed(3)} t=${fox.overlay.t}`,
+        `kind=${fox.ovKind} mix=${fox.overlayMix.x.toFixed(2)}`,
+        `frames=${window.__frames ?? "?"}`,
+        `err=${err}`,
+      ].join("\n");
+    }, 200);
+    let fp = 0;
+    const oldRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (fn) =>
+      oldRaf((t) => { fp++; window.__frames = fp; try { return fn(t); } catch (e) { window.__frames = "throw: " + e.message; } });
+  }
+</script>
+</body>
+</html>

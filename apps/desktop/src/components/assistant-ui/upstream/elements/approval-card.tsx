@@ -179,7 +179,7 @@ export function ApprovalCard({
                 {alwaysAllowLabel}
               </button>
             )}
-            {onAllowConversation && <button type="button" disabled={busy} onClick={onAllowConversation} className={cn(ghostButton, "flex h-8 items-center rounded-full px-3.5 text-xs font-medium whitespace-nowrap")}>本次对话内允许</button>}
+            {onAllowConversation && <button type="button" disabled={busy} onClick={onAllowConversation} className={cn(ghostButton, "flex h-8 items-center rounded-full px-3.5 text-xs font-medium whitespace-nowrap")}>本对话内允许</button>}
             {onAllowOnce && (
               <button
                 type="button"

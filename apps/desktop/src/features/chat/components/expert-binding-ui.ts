@@ -181,7 +181,7 @@ export function expertErrorPresentation(
   ) {
     return {
       kind: 'snapshot',
-      title: '专家快照已损坏',
+      title: '专家信息损坏，请新建对话重新选择',
       description: '为避免加载错误能力，请新建对话并重新选择该专家。',
       retryable: false,
     }
@@ -193,7 +193,7 @@ export function expertErrorPresentation(
   ) {
     return {
       kind: 'locked',
-      title: '当前对话的专家已锁定',
+      title: '如需更换专家，请新建对话',
       description: '请新建对话后再更换或移除专家，当前对话内容不会受影响。',
       retryable: false,
     }
@@ -205,7 +205,7 @@ export function expertErrorPresentation(
   ) {
     return {
       kind: 'offline',
-      title: '专家当前离线',
+      title: '专家暂时无法连接，请检查服务',
       description: '请检查专家服务连接，或更换其他专家后重试。',
       retryable: true,
       retryLabel: '重试连接',
@@ -217,7 +217,7 @@ export function expertErrorPresentation(
   ) {
     return {
       kind: 'missing',
-      title: '专家不存在或已被删除',
+      title: '找不到这位专家，请重新选择',
       description: '请返回专家中心，重新选择一个可用专家。',
       retryable: false,
     }
@@ -229,8 +229,8 @@ export function expertErrorPresentation(
   ) {
     return {
       kind: 'invalid',
-      title: '专家配置无效',
-      description: '请在专家中心检查配置，或更换其他专家。',
+      title: '专家设置无效',
+      description: '请在专家页检查设置，或更换其他专家。',
       retryable: false,
     }
   }

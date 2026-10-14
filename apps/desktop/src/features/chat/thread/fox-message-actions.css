@@ -1,0 +1,46 @@
+/* Official elements-message-actions: size-7 controls, size-3.5 icons, gap-1.
+   Scope to the thread so legacy and shared UI retain their own adaptations. */
+.fox-thread-actionbar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.fox-thread-msg [data-slot='message-actions'].fox-thread-message-actions,
+.fox-thread-msg .fox-user-meta .fox-user-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+}
+
+.fox-thread-msg [data-slot='message-actions'].fox-thread-message-actions > button,
+.fox-thread-msg .fox-user-actions > button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--fox-radius-control);
+}
+
+.fox-thread-msg [data-slot='message-actions'].fox-thread-message-actions > button > svg,
+.fox-thread-msg .fox-user-actions > button > svg {
+  grid-area: 1 / 1;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.fox-thread-msg .fox-thread-copy-button.is-copied {
+  color: var(--success);
+}
+
+.fox-thread-msg .fox-thread-action-button:focus-visible {
+  outline: 2px solid var(--fox-accent);
+  outline-offset: 2px;
+}

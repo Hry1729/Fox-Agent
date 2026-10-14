@@ -2,6 +2,20 @@ import { describe, expect, test } from 'bun:test'
 import { createMockLocalKnowledgeGateway } from '../src/features/local-knowledge/mock-gateway'
 
 describe('local knowledge mock gateway', () => {
+  test('allows editing the built-in guide settings and preserves its identity and deletion protection', async () => {
+    const gateway = createMockLocalKnowledgeGateway()
+    const before = await gateway.getKnowledgeBase('fox-user-guide')
+    const documents = await gateway.listDocuments(before.id)
+    const updated = await gateway.updateKnowledgeBase(before.id, {
+      name: '我的 Fox 使用指南', description: '工作时使用的说明', chunkSize: 640, chunkOverlap: 64, searchMode: 'keyword',
+    })
+    expect(updated).toMatchObject({ id: before.id, name: '我的 Fox 使用指南', description: '工作时使用的说明', chunkSize: 640, chunkOverlap: 64 })
+    expect(updated.storagePath).toBe(before.storagePath)
+    expect(await gateway.listDocuments(before.id)).toEqual(documents)
+    await expect(gateway.deleteKnowledgeBase(before.id)).rejects.toThrow('不能删除')
+    expect((await gateway.getKnowledgeBase(before.id)).name).toBe('我的 Fox 使用指南')
+  })
+
   test('lists local bases and documents without invoking Tauri', async () => {
     const gateway = createMockLocalKnowledgeGateway()
     const bases = await gateway.listKnowledgeBases()
@@ -62,7 +76,7 @@ describe('local knowledge mock gateway', () => {
       writable: true,
     })
     await expect(gateway.getKnowledgeBase(created.id)).resolves.toMatchObject({ id: created.id, name: '新资料库' })
-    await expect(gateway.createKnowledgeBase({ name: '   ' })).rejects.toThrow('知识库名称不能为空')
+    await expect(gateway.createKnowledgeBase({ name: '   ' })).rejects.toThrow('资料库名称不能为空')
   })
 
   test('accepts an import and exposes a recoverable job snapshot', async () => {

@@ -146,7 +146,7 @@
 .fox-notification-trigger {
   position: absolute;
   z-index: 12;
-  top: 13px;
+  top: 16px;
   right: 12px;
   width: var(--fox-control-sm);
   height: var(--fox-control-sm);
@@ -1716,14 +1716,6 @@
   padding: 8px 0;
 }
 
-.fox-sidebar:not(.is-collapsed) .fox-sidebar-footer > button {
-  transform: translateX(-8px);
-}
-
-.fox-sidebar:not(.is-collapsed) .fox-sidebar-footer > .fox-icon-button {
-  transform: translateX(4px);
-}
-
 .fox-profile {
   min-width: 0;
   flex: 1;
@@ -1880,6 +1872,12 @@
   font-weight: var(--fox-weight-semibold);
   line-height: 1;
   text-align: center;
+}
+
+/* Lift the sidebar's stacking context only while its local menu is open;
+   the compact right drawer must not intercept history/project menu clicks. */
+.fox-sidebar.is-collapsed:has(.fox-sidebar-collapsed-popover) {
+  z-index: 60 !important;
 }
 
 .fox-sidebar-collapsed-popover {
@@ -2081,8 +2079,8 @@
   position: relative;
   min-width: 0;
   min-height: 0;
-  flex: 1;
-  overflow: visible;
+  flex: 1 1 0%;
+  overflow: clip;
   margin: 3px 0 0;
   border: 0;
   border-radius: var(--fox-radius-large) var(--fox-radius-large) var(--fox-radius-large) 0;
@@ -2127,9 +2125,10 @@
 
 .fox-chat-pane {
   position: relative;
-  min-width: 560px;
+  min-width: 0;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 0%;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   container-name: fox-chat;
@@ -2443,6 +2442,8 @@ button.fox-chat-project-row:disabled {
 
 .fox-summary-model {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 8px;
   padding: 14px;
   border-bottom: 1px solid var(--fox-border);
@@ -2581,6 +2582,7 @@ button.fox-chat-project-row:disabled {
 
 .fox-chat-stage {
   position: relative;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   display: flex;
@@ -2737,6 +2739,7 @@ button.fox-chat-project-row:disabled {
   margin: 0 auto;
   align-items: flex-start;
   justify-content: center;
+  gap: 6px;
   padding: 0 0 220px;
   text-align: left;
   transform: translateY(var(--fox-empty-vertical-offset, 0));
@@ -2807,7 +2810,7 @@ button.fox-chat-project-row:disabled {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   margin-inline: 0;
-  padding: 5px 2px;
+  padding: 2px;
   white-space: nowrap;
 }
 
@@ -4646,7 +4649,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-composer-wrap.is-empty {
-  top: calc(47% + var(--fox-empty-vertical-offset, 0px));
+  /* Match the empty prompt's 50% centre so the gap stays steady as the stage grows. */
+  top: calc(50% - 32px + var(--fox-empty-vertical-offset, 0px));
   bottom: auto;
   width: min(48rem, calc(100% - clamp(2rem, 12vw, 10rem)));
   transform: translate(-50%, -3%);
@@ -6572,10 +6576,10 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-context-panel {
-  min-width: 280px;
-  max-width: 760px;
+  min-width: min(280px, 48%);
+  max-width: min(760px, 48%);
   min-height: 0;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   display: grid;
   grid-template-rows: 40px minmax(0, 1fr);
   overflow: hidden;
@@ -6586,6 +6590,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-context-panel.is-compact {
   width: 100%;
   height: 100%;
+  min-width: 0;
   max-width: none;
   border-left: 0;
 }
@@ -6758,16 +6763,49 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-text);
 }
 
+.fox-compact-context-layer {
+  position: absolute;
+  z-index: 40;
+  inset: 0;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: inherit;
+}
+
+.fox-compact-context-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: color-mix(in oklch, var(--fox-text) 12%, transparent);
+}
+
 .fox-compact-context-sheet {
-  width: min(390px, 88vw) !important;
-  max-width: none !important;
-  padding: 0 !important;
-  border-left: 1px solid var(--fox-border) !important;
-  background: var(--fox-canvas) !important;
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(390px, 88%);
+  max-width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  outline: none;
+  border-left: 1px solid var(--fox-border);
+  background: var(--fox-canvas);
+  box-shadow: var(--fox-shadow-md);
 }
 
 .fox-compact-context-sheet.is-maximized {
-  width: 100vw !important;
+  width: 100%;
+}
+
+/* The normal panel is hidden at compact breakpoints; the local drawer still
+   renders the same real panel, within the content card's left boundary. */
+.fox-compact-context-sheet > .fox-context-panel.is-compact {
+  display: grid;
 }
 
 .fox-context-home {
@@ -12135,3 +12173,29 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-faint);
   line-height: 1.5;
 }
+
+/* Task 5: official Toggle / Files with Fox control tokens. */
+.fox-topbar-toggle {
+  flex: 0 0 28px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--fox-radius-control);
+  color: var(--fox-muted);
+}
+.fox-topbar-toggle:hover { background: var(--fox-hover); color: var(--fox-text); }
+.fox-topbar-toggle [data-slot='toggle-highlight'] { background: var(--fox-accent-soft); border-radius: inherit; }
+.fox-topbar-toggle[data-state='on'] { color: var(--fox-accent); }
+.fox-topbar-toggle:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 2px; }
+.fox-animate-file-tree { padding: 4px; font-size: var(--fox-type-chrome); }
+.fox-animate-file-tree :is([data-slot='folder-header'], [data-slot='files'], [data-slot='file'], [data-slot='folder'], [data-slot='file'] > div, [data-slot='folder'] > div) { min-width: 0; }
+.fox-animate-file-tree [data-slot='folder-header'] { margin: 0; }
+.fox-animate-file-tree :is([data-slot='folder-trigger'], .fox-animate-file-trigger) { border: 0; padding: 0; background: transparent; color: var(--fox-text); cursor: pointer; border-radius: var(--fox-radius-control); }
+.fox-animate-file-tree :is([data-slot='file'], [data-slot='folder']) { padding: 6px 8px; gap: 8px; }
+.fox-animate-file-tree [data-slot='file-label'] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fox-type-chrome); }
+.fox-animate-file-tree :is([data-slot='file-icon'], [data-slot='folder-icon']) { display: inline-flex; flex: 0 0 16px; color: var(--fox-muted); }
+.fox-animate-file-tree svg { width: 16px; height: 16px; }
+.fox-animate-file-tree [data-slot='motion-highlight'] { background: var(--fox-hover); border-radius: var(--fox-radius-control); }
+.fox-animate-file-tree button:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: -2px; }
+.fox-animate-file-trigger[aria-current='true'] { background: var(--fox-accent-soft); color: var(--fox-accent); }

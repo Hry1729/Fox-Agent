@@ -191,7 +191,7 @@ describe('supplementary requests bind to one conversation and one active Run', (
             {
               seq: 1,
               messageId: 'a-only',
-              content: '只属于会话 A 的补充要求',
+              content: '只属于对话 A 的补充要求',
               status: 'received',
               lane: 'current',
               receivedAt: 1,

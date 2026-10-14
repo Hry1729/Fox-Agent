@@ -52,7 +52,7 @@ export function stateLabel(state: JobState): string {
     case 'running':
       return '计算中'
     case 'paused':
-      return '已暂停（可续做）'
+      return '已暂停'
     case 'cancelled':
       return '已取消'
     case 'failed':

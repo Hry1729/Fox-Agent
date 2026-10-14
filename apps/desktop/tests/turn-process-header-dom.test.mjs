@@ -229,17 +229,17 @@ test('the round header joins its own fields: no leading separator, and one whole
 test('a settled turn preserves its process title and joins the whole-round time once', async () => {
   const view = render(timeline())
   await waitFor(() => assert.equal(stages(view).length, 2))
-  const settled = () => view.getByRole('button', { name: /^(展开|收起)过程 · 工作过程$/ })
+  const settled = () => view.getByRole('button', { name: /^(展开|收起)过程 · 处理过程$/ })
   assert.equal(settled().getAttribute('aria-expanded'), 'false')
-  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '工作过程')
-  assert.equal(settled().getAttribute('aria-label'), '展开过程 · 工作过程')
-  assert.equal(header(view).textContent, '工作过程·用时 6秒')
+  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '处理过程')
+  assert.equal(settled().getAttribute('aria-label'), '展开过程 · 处理过程')
+  assert.equal(header(view).textContent, '处理过程·用时 6秒')
   assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 1)
   assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
   // Both fold states read the same: the fields are independent of the disclosure.
   fireEvent.click(settled())
-  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '工作过程')
-  assert.equal(header(view).textContent, '工作过程·用时 6秒')
+  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '处理过程')
+  assert.equal(header(view).textContent, '处理过程·用时 6秒')
   assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 1)
 })
 
@@ -310,13 +310,13 @@ test('a planned tool retry keeps its note joined to the state by exactly one sep
 
 test('a header without process content keeps its own word and joins the timer to it', async () => {
   await React.act(async () => persistProcessDisplayMode('verbose'))
-  const view = render(React.createElement(TurnProcessHeader, { avatar: null, events: [event(1, 'run.started'), event(7, 'run.completed')], active: false, canToggle: false, collapsed: true, status: '工作过程', onToggle() {} }))
+  const view = render(React.createElement(TurnProcessHeader, { avatar: null, events: [event(1, 'run.started'), event(7, 'run.completed')], active: false, canToggle: false, collapsed: true, status: '处理过程', onToggle() {} }))
   await waitFor(() => assert.ok(view.container.querySelector('.fox-process-turn-toggle.is-status')))
   const status = view.container.querySelector('.fox-process-turn-toggle.is-status')
-  assert.equal(status.querySelector('.fox-process-turn-label').textContent, '工作过程')
+  assert.equal(status.querySelector('.fox-process-turn-label').textContent, '处理过程')
   assert.equal(status.contains(view.container.querySelector('[role="timer"]')), true)
   assert.equal(status.getAttribute('role'), 'status')
-  assert.equal(header(view).textContent, '工作过程·用时 6秒')
+  assert.equal(header(view).textContent, '处理过程·用时 6秒')
   assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
 })
 

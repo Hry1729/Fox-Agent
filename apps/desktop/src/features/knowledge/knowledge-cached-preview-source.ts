@@ -81,5 +81,5 @@ export function binaryValue(value: unknown) {
     return bytes
   }
   if (Array.isArray(value)) return Uint8Array.from(value)
-  throw new Error('知识库服务返回了无法识别的二进制数据。')
+  throw new Error('资料库服务返回了无法识别的二进制数据。')
 }

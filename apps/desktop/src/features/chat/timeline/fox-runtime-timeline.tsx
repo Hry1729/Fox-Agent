@@ -60,7 +60,7 @@ function FoxConversationScrollButton({ running }: { running: boolean }) {
 
 export function ConversationBottomDock({ plan, running = false }: { plan?: GoalProgressData['planRevisions'][number]; running?: boolean }) {
   const planStatus = plan?.status === 'proposed'
-    ? '待批准'
+    ? '需要你批准'
     : plan?.status === 'approved'
       ? '已批准'
       : plan?.status === 'rejected'

@@ -37,19 +37,39 @@ export type RunPhase =
   | 'settled'
 
 export const RUN_PHASE_LABELS: Record<RunPhase, string> = {
-  queued: '准备执行',
-  preparing: '正在准备上下文',
-  awaiting_response: '等待模型响应',
-  awaiting_compaction: '等待压缩响应',
-  preparing_compaction: '正在准备压缩',
-  retry_scheduled: '已安排重试',
-  compaction_failed: '压缩未完成',
+  queued: '等待开始',
+  preparing: '正在准备',
+  awaiting_response: '等待回复',
+  awaiting_compaction: '等待精简结果',
+  preparing_compaction: '正在准备精简',
+  retry_scheduled: '等待重试',
+  compaction_failed: '精简失败',
   streaming: '正在生成',
   finalizing: '正在收尾',
   settled: '已完成',
 }
 
 const TERMINAL_EVENT_TYPES = TERMINAL_RUN_EVENT_TYPES
+
+/**
+ * How a Run actually ended. The copy contract splits the shared terminal label
+ * by result, so '已完成' never covers a failed or cancelled Run.
+ */
+export type RunSettlement = 'completed' | 'failed' | 'cancelled' | 'interrupted'
+
+const SETTLED_TITLES: Record<RunSettlement, string> = {
+  completed: '已完成',
+  failed: '处理失败',
+  cancelled: '已取消',
+  interrupted: '已中断',
+}
+
+function settlementOf(terminalEventType: string | undefined, runState: string | null | undefined): RunSettlement {
+  if (terminalEventType === 'run.cancelled' || runState === 'cancelled') return 'cancelled'
+  if (terminalEventType === 'run.interrupted' || runState === 'interrupted') return 'interrupted'
+  if (terminalEventType === 'run.failed' || runState === 'failed' || runState === 'budget_exhausted' || runState === 'approval_expired') return 'failed'
+  return 'completed'
+}
 
 /** Durable proof that the model has produced something the user can read. */
 const CONTENT_EVENT_TYPES = new Set([
@@ -61,6 +81,8 @@ const CONTENT_EVENT_TYPES = new Set([
 
 export interface RunPhaseTiming {
   phase: RunPhase
+  /** Set only when `phase === 'settled'`: which terminal outcome the label shows. */
+  settlement?: RunSettlement | null
   /** When this Run left the shared execution queue (`run.started`). */
   startedAt: number | null
   endedAt: number | null
@@ -125,6 +147,7 @@ export function runPhaseTiming(
     // No execution start yet: this Run is still holding a place in the queue.
     return {
       phase: settled ? 'settled' : 'queued',
+      settlement: settled ? settlementOf(terminal?.eventType, options.runState) : null,
       startedAt: null,
       endedAt,
       queueMs: queuedAt === null ? null : Math.max(0, (endedAt ?? options.now) - queuedAt),
@@ -135,7 +158,7 @@ export function runPhaseTiming(
   const startedAt = started.createdAt
   const queueMs = queuedAt === null ? null : Math.max(0, startedAt - queuedAt)
   const executionMs = Math.max(0, (endedAt ?? options.now) - startedAt)
-  if (settled) return { phase: 'settled', startedAt, endedAt, queueMs, executionMs }
+  if (settled) return { phase: 'settled', settlement: settlementOf(terminal?.eventType, options.runState), startedAt, endedAt, queueMs, executionMs }
 
   const modelWaiting = activeModelWaiting(events, { runState: options.runState })
   if (modelWaiting) return {
@@ -170,5 +193,6 @@ export function runPhaseTiming(
  */
 export function runPhaseTitle(timing: RunPhaseTiming): string {
   if (timing.modelWaiting) return modelWaitingTitle(timing.modelWaiting)
+  if (timing.phase === 'settled' && timing.settlement) return SETTLED_TITLES[timing.settlement]
   return RUN_PHASE_LABELS[timing.phase]
 }

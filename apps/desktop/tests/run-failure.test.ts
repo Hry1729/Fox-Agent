@@ -27,7 +27,7 @@ describe('deriveRunFailures', () => {
         id: 'run-failed',
         status: 'failed',
         errorCode: 'kernel.context_compaction_insufficient',
-        errorMessage: '上下文压缩空间不足',
+        errorMessage: '上下文精简空间不足',
       })],
       events: [],
     })
@@ -36,7 +36,7 @@ describe('deriveRunFailures', () => {
     expect(failures.get('run-failed')).toEqual({
       kind: 'failed',
       code: 'kernel.context_compaction_insufficient',
-      message: '上下文压缩空间不足',
+      message: '上下文精简空间不足',
     })
   })
 
@@ -56,7 +56,7 @@ describe('deriveRunFailures', () => {
         id: 'run-1',
         status: 'failed',
         errorCode: 'kernel.context_compaction_insufficient',
-        errorMessage: '上下文压缩空间不足',
+        errorMessage: '上下文精简空间不足',
       })],
       events: [],
       messages: assistantMessages,

@@ -2,19 +2,36 @@ import { activeModelWaiting, modelWaitingTitle } from '../run-status-facts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Toggle } from '@/components/animate-ui/components/radix/toggle'
+import { AnimatedIconTrigger, PanelRight } from '@/components/fox-ui/animated-icons'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
 import { type ConversationDetail, type ConversationSummary } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { Activity, AlertTriangle, Archive, BookOpen, Bot, ChevronRight, CircleHelp, CircleStop, FileEdit, FileText, Folder, FolderOpen, ListTodo, MoreHorizontal, PanelRight, Pin, PinOff, Settings, ShieldCheck, Terminal } from 'lucide-react'
-import { type ReactNode, useState } from 'react'
-import { type ChatState, IconButton, type RightMode } from '../fox-shared'
+import { Activity, AlertTriangle, Archive, BookOpen, Bot, ChevronRight, CircleHelp, CircleStop, FileEdit, FileText, Folder, FolderOpen, ListTodo, MoreHorizontal, Pin, PinOff, Settings, ShieldCheck, Terminal } from 'lucide-react'
+import { type ReactNode, useId, useRef, useState } from 'react'
+import { type ChatState, type RightMode } from '../fox-shared'
 import { runtimeProcess } from '../timeline/fox-runtime-process-model'
 
 function ConversationSummaryPopover({ detail, modelName, onOpenRightMode }: { detail: ConversationDetail | null; modelName: string; onOpenRightMode: (mode: RightMode) => void }) {
   const [open, setOpen] = useState(false)
+  const summaryId = useId()
+  const anchorRootRef = useRef<HTMLSpanElement>(null)
+  // The chat pane is display:none when the right panel is maximized. Anchor
+  // to its visible surface instead of letting the hidden button report 0,0.
+  // Read geometry on every position update so resize/sidebar changes follow.
+  const summaryAnchor = useRef({
+    getBoundingClientRect: () => {
+      const toggle = anchorRootRef.current
+      const surface = toggle?.closest('.fox-content-surface')
+      const pane = toggle?.closest('.fox-chat-pane')
+      const paneRect = pane?.getBoundingClientRect()
+      const rect = paneRect?.width ? paneRect : surface?.getBoundingClientRect()
+      return rect ? new DOMRect(rect.right - 12, rect.top + 49, 0, 0) : new DOMRect()
+    },
+  })
   const artifacts = detail?.artifacts ?? []
   const tasks = detail?.tasks ?? []
   const activeProcesses = (detail?.toolCalls ?? []).filter((tool) => !['completed', 'failed', 'denied', 'cancelled'].includes(tool.status))
@@ -26,24 +43,33 @@ function ConversationSummaryPopover({ detail, modelName, onOpenRightMode }: { de
   // phase/retry/compaction counters and tool-call counts are internal facts:
   // they stay in the durable records, not in an ordinary chat header.
   const summaryItems: Array<{ icon: ReactNode; label: string; count: number; detail: string; mode: RightMode }> = [
-    { icon: <FileText size={15} />, label: '文件输出', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、'), mode: 'files' },
+    { icon: <FileText size={15} />, label: '生成文件', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、'), mode: 'files' },
     { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、'), mode: 'activity' },
-    { icon: <Terminal size={15} />, label: '后台进程', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、'), mode: 'activity' },
-    { icon: <Bot size={15} />, label: '子专家', count: subAgents.length, detail: subAgents.slice(-2).map((item) => `${item.workerAgentName} · ${item.status}`).join('、'), mode: 'agents' },
-    { icon: <BookOpen size={15} />, label: '来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、'), mode: 'knowledge' },
+    { icon: <Terminal size={15} />, label: '后台程序', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、'), mode: 'activity' },
+    { icon: <Bot size={15} />, label: '协作助手', count: subAgents.length, detail: subAgents.slice(-2).map((item) => `${item.workerAgentName} · ${item.status}`).join('、'), mode: 'agents' },
+    { icon: <BookOpen size={15} />, label: '资料来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、'), mode: 'knowledge' },
   ]
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <Tooltip>
-        <TooltipTrigger asChild><PopoverTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="对话摘要"><Activity size={16} /></Button></PopoverTrigger></TooltipTrigger>
-        <TooltipContent side="bottom"><p>对话摘要</p></TooltipContent>
-      </Tooltip>
-      <PopoverContent align="end" sideOffset={8} className="fox-conversation-summary">
+    // Only the summary toggles close this controlled, non-modal popover.
+    // Keep a toggle inside the portal too: a maximized right panel hides the
+    // chat header, but outside clicks, Escape and item actions must not close it.
+    <Popover open={open} modal={false}>
+      <PopoverAnchor virtualRef={summaryAnchor} />
+      <span ref={anchorRootRef} className="inline-flex">
+        <Tooltip>
+          <TooltipTrigger asChild><Toggle size="icon" className="fox-topbar-toggle fox-icon-button" pressed={open} onPressedChange={setOpen} aria-label="对话摘要" aria-expanded={open} aria-controls={summaryId}><Activity size={16} /></Toggle></TooltipTrigger>
+          <TooltipContent side="bottom"><p>对话摘要</p></TooltipContent>
+        </Tooltip>
+      </span>
+      <PopoverContent id={summaryId} aria-label="对话摘要" align="end" sideOffset={8} updatePositionStrategy="always" className="fox-conversation-summary"
+        onOpenAutoFocus={(event) => event.preventDefault()} onCloseAutoFocus={(event) => event.preventDefault()}
+        onInteractOutside={(event) => event.preventDefault()} onEscapeKeyDown={(event) => event.preventDefault()}>
         <div className="fox-summary-model">
           <div><span>模型</span><strong title={modelName}>{modelName}</strong></div>
+          <Toggle size="icon" className="fox-topbar-toggle fox-icon-button" pressed={open} onPressedChange={setOpen} aria-label="收起对话摘要" aria-expanded={open} aria-controls={summaryId}><Activity size={16} /></Toggle>
         </div>
         <div className="fox-summary-list">
-          {summaryItems.map((item) => <button type="button" key={item.label} className="fox-summary-item" aria-label={`打开${item.label}侧边栏`} onClick={() => { setOpen(false); onOpenRightMode(item.mode) }}>
+          {summaryItems.map((item) => <button type="button" key={item.label} className="fox-summary-item" aria-label={`打开${item.label}侧边栏`} onClick={() => onOpenRightMode(item.mode)}>
             <span className="fox-summary-icon">{item.icon}</span>
             <span><strong>{item.label}</strong><small>{item.detail || '暂无'}</small></span>
             <span className="fox-summary-item-tail"><b>{item.count}</b><ChevronRight /></span>
@@ -54,7 +80,7 @@ function ConversationSummaryPopover({ detail, modelName, onOpenRightMode }: { de
   )
 }
 
-export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
+export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
   const waiting = detail && detail.conversation.id === conversation?.id
     ? activeModelWaiting(detail.runtimeEvents, { runId: detail.lastRun?.id, runState: conversationRunState(detail) }) : null
@@ -91,7 +117,7 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onOpen
             <DropdownMenuContent align="start" className="fox-top-menu">
               <DropdownMenuLabel>当前对话</DropdownMenuLabel>
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onPinConversation(conversation)}>{conversation?.pinned ? <PinOff /> : <Pin />}{conversation?.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
-              <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名对话</DropdownMenuItem>
+              <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onArchiveConversation(conversation)}><Archive />归档对话</DropdownMenuItem>
             </DropdownMenuContent>
@@ -101,11 +127,11 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onOpen
       <div className="fox-chat-top-actions">
         <ConversationSummaryPopover detail={detail} modelName={modelName} onOpenRightMode={onOpenRightMode} />
         {state === 'running' && <Badge className="fox-running-badge" title={waiting ? modelWaitingTitle(waiting) : undefined}><span />{waiting ? modelWaitingTitle(waiting) : '运行中'}</Badge>}
-        {state === 'question' && <Badge className="fox-question-badge"><CircleHelp size={12} />等待回答</Badge>}
-        {state === 'approval' && <Badge className="fox-approval-badge"><ShieldCheck size={12} />等待批准</Badge>}
-        {state === 'error' && <Badge className="fox-error-badge"><AlertTriangle size={12} />运行错误</Badge>}
+        {state === 'question' && <Badge className="fox-question-badge"><CircleHelp size={12} />需要你回答</Badge>}
+        {state === 'approval' && <Badge className="fox-approval-badge"><ShieldCheck size={12} />需要你批准</Badge>}
+        {state === 'error' && <Badge className="fox-error-badge"><AlertTriangle size={12} />处理失败</Badge>}
         {state === 'denied' && <Badge className="fox-denied-badge"><CircleStop size={12} />已取消</Badge>}
-        {rightSidebarCollapsed && <IconButton label="展开右侧边栏" className="fox-right-sidebar-expand" tooltipSide="bottom" onClick={onRightSidebarExpand}><PanelRight size={14} /></IconButton>}
+        <Tooltip><TooltipTrigger asChild><AnimatedIconTrigger><Toggle size="icon" className="fox-topbar-toggle fox-right-sidebar-expand" aria-label={rightSidebarCollapsed ? "展开右侧边栏" : "收起右侧边栏"} aria-expanded={!rightSidebarCollapsed} pressed={!rightSidebarCollapsed} onPressedChange={(pressed) => pressed ? onRightSidebarExpand() : onRightSidebarCollapse()}><PanelRight size={16} /></Toggle></AnimatedIconTrigger></TooltipTrigger><TooltipContent side="bottom">{rightSidebarCollapsed ? "展开右侧边栏" : "收起右侧边栏"}</TooltipContent></Tooltip>
       </div>
     </header>
   )

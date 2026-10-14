@@ -399,7 +399,7 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
 
     async addFileSource(path) {
       const normalizedPath = path.trim()
-      if (!normalizedPath) throw new Error('请选择需要管理的本地文件夹。')
+      if (!normalizedPath) throw new Error('请选择需要管理的本机文件夹。')
       const existing = [...fileSources.values()].find((source) => source.rootPath.toLocaleLowerCase() === normalizedPath.toLocaleLowerCase())
       if (existing) return copy(existing)
       const timestamp = now()
@@ -419,7 +419,7 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
 
     async rescanFileSource(id) {
       const source = fileSources.get(id)
-      if (!source) throw new Error(`本地文件来源不存在：${id}`)
+      if (!source) throw new Error(`本机文件来源不存在：${id}`)
       const next = { ...source, lastScannedAt: now(), updatedAt: now() }
       fileSources.set(id, next)
       return copy(next)
@@ -428,7 +428,7 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
     async updateFileSource(id, displayName) {
       const source = fileSources.get(id)
       const normalizedName = displayName.trim()
-      if (!source) throw new Error(`本地文件来源不存在：${id}`)
+      if (!source) throw new Error(`本机文件来源不存在：${id}`)
       if (!normalizedName) throw new Error('请输入文件夹显示名称。')
       const next = { ...source, displayName: normalizedName, updatedAt: now() }
       fileSources.set(id, next)
@@ -462,28 +462,28 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
 
     async readLocalFileRange(id, start, end) {
       const file = catalogFiles.get(id)
-      if (!file) throw new Error(`本地文件不存在：${id}`)
+      if (!file) throw new Error(`本机文件不存在：${id}`)
       const content = file.extension === 'md'
-        ? '# Fox 本地文件预览\n\n这是开发环境中的 Markdown 预览示例。\n\n- 点击文件行会在 Fox 中打开\n- 右侧按钮可以加入知识库或调用系统打开\n'
+        ? '# Fox 本机文件预览\n\n这是开发环境中的 Markdown 预览示例。\n\n- 点击文件行会在 Fox 中打开\n- 右侧按钮可以加入资料库或调用系统打开\n'
         : file.extension === 'txt'
-          ? 'Fox 本地文件预览示例。'
+          ? 'Fox 本机文件预览示例。'
           : ''
       return mockRange(content, start, end)
     },
 
     async openLocalFile(id) {
-      if (!catalogFiles.has(id)) throw new Error(`本地文件不存在：${id}`)
+      if (!catalogFiles.has(id)) throw new Error(`本机文件不存在：${id}`)
       return true
     },
 
     async revealLocalFile(id) {
-      if (!catalogFiles.has(id)) throw new Error(`本地文件不存在：${id}`)
+      if (!catalogFiles.has(id)) throw new Error(`本机文件不存在：${id}`)
       return true
     },
 
     async getKnowledgeBase(id) {
       const base = bases.get(id)
-      if (!base) throw new Error(`本地知识库不存在：${id}`)
+      if (!base) throw new Error(`本机资料库不存在：${id}`)
       return copy({
         ...base,
         parserVersion: 'fox-parser-1',
@@ -494,7 +494,7 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
 
     async createKnowledgeBase(request: LocalKnowledgeBaseCreateRequest) {
       const name = request.name.trim()
-      if (!name) throw new Error('知识库名称不能为空。')
+      if (!name) throw new Error('资料库名称不能为空。')
       const createdAt = now()
       const id = `mock-local-base-${baseCounter++}`
       const base: LocalKnowledgeBase = {
@@ -522,10 +522,9 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
 
     async updateKnowledgeBase(id, request) {
       const base = bases.get(id)
-      if (!base) throw new Error(`本地知识库不存在：${id}`)
-      if (id === 'fox-user-guide') throw new Error('Fox 使用指南是内置知识库，不能修改。')
+      if (!base) throw new Error(`本机资料库不存在：${id}`)
       const name = request.name.trim()
-      if (!name) throw new Error('知识库名称不能为空。')
+      if (!name) throw new Error('资料库名称不能为空。')
       const updated = {
         ...base,
         name,
@@ -541,8 +540,8 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
     },
 
     async deleteKnowledgeBase(id) {
-      if (id === 'fox-user-guide') throw new Error('Fox 使用指南是内置知识库，不能删除。')
-      if (!bases.delete(id)) throw new Error(`本地知识库不存在：${id}`)
+      if (id === 'fox-user-guide') throw new Error('Fox 使用指南是内置资料库，不能删除。')
+      if (!bases.delete(id)) throw new Error(`本机资料库不存在：${id}`)
       documents.delete(id)
       folders.delete(id)
       for (const [jobId, job] of jobs) {
@@ -552,14 +551,14 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
     },
 
     async listDocuments(id, options = {}) {
-      if (!bases.has(id)) throw new Error(`本地知识库不存在：${id}`)
+      if (!bases.has(id)) throw new Error(`本机资料库不存在：${id}`)
       const query = options.query?.trim().toLocaleLowerCase() ?? ''
       const items = (documents.get(id) ?? []).filter((document) => !query || [document.name, document.relativePath, document.extension].some((value) => value.toLocaleLowerCase().includes(query)))
       return copy({ items, total: items.length } satisfies Page<LocalKnowledgeDocument>)
     },
 
     async listFolders(id) {
-      if (!bases.has(id)) throw new Error(`本地知识库不存在：${id}`)
+      if (!bases.has(id)) throw new Error(`本机资料库不存在：${id}`)
       const collection = documents.get(id) ?? []
       return [...(folders.get(id) ?? new Set<string>())]
         .sort((left, right) => left.localeCompare(right, 'zh-CN'))
@@ -573,7 +572,7 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
     },
 
     async createFolder(knowledgeBaseId, name, parentPath = '') {
-      if (!bases.has(knowledgeBaseId)) throw new Error(`本地知识库不存在：${knowledgeBaseId}`)
+      if (!bases.has(knowledgeBaseId)) throw new Error(`本机资料库不存在：${knowledgeBaseId}`)
       const normalizedName = name.trim()
       if (!normalizedName || /[<>:"/\\|?*]/.test(normalizedName) || normalizedName === '.' || normalizedName === '..') throw new Error('文件夹名称无效')
       const relativePath = [parentPath.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''), normalizedName].filter(Boolean).join('/')
@@ -586,29 +585,29 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
 
     async readDocumentFileRange(knowledgeBaseId, documentId, start, end) {
       const document = (documents.get(knowledgeBaseId) ?? []).find((item) => item.id === documentId)
-      if (!document) throw new Error(`本地知识文档不存在：${documentId}`)
+      if (!document) throw new Error(`本机资料不存在：${documentId}`)
       const content = document.extension === 'md'
-        ? `# ${document.name}\n\n这是 Fox 本地知识库中的文档预览。\n\n- 文档来自本地知识库\n- 可以从左侧文件列表快速切换\n`
+        ? `# ${document.name}\n\n这是 Fox 本机资料库中的文档预览。\n\n- 文档来自本机资料库\n- 可以从左侧文件列表快速切换\n`
         : document.extension === 'txt'
-          ? `${document.name}\n\nFox 本地知识文档预览。`
+          ? `${document.name}\n\nFox 本机资料预览。`
           : ''
       return mockRange(content, start, end)
     },
 
     async openDocumentFile(knowledgeBaseId, documentId) {
-      if (!(documents.get(knowledgeBaseId) ?? []).some((item) => item.id === documentId)) throw new Error(`本地知识文档不存在：${documentId}`)
+      if (!(documents.get(knowledgeBaseId) ?? []).some((item) => item.id === documentId)) throw new Error(`本机资料不存在：${documentId}`)
       return true
     },
 
     async revealDocumentFile(knowledgeBaseId, documentId) {
-      if (!(documents.get(knowledgeBaseId) ?? []).some((item) => item.id === documentId)) throw new Error(`本地知识文档不存在：${documentId}`)
+      if (!(documents.get(knowledgeBaseId) ?? []).some((item) => item.id === documentId)) throw new Error(`本机资料不存在：${documentId}`)
       return true
     },
 
     async startImport(request: LocalKnowledgeImportRequest): Promise<OperationAccepted> {
       const base = bases.get(request.knowledgeBaseId)
-      if (!base) throw new Error(`本地知识库不存在：${request.knowledgeBaseId}`)
-      if (!base.writable) throw new Error('当前本地知识库不可写')
+      if (!base) throw new Error(`本机资料库不存在：${request.knowledgeBaseId}`)
+      if (!base.writable) throw new Error('当前本机资料库不可写')
       if (request.files.length === 0) throw new Error('至少选择一个文件')
 
       const { job, event } = createJob(request.knowledgeBaseId, request.files.length, 'import')
@@ -703,9 +702,9 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
 
     async startStorageMigration(destinationPath) {
       const normalizedPath = destinationPath.trim()
-      if (!normalizedPath) throw new Error('请选择新的本地知识库存储文件夹。')
+      if (!normalizedPath) throw new Error('请选择新的本机资料库存储文件夹。')
       const active = [...storageMigrations.values()].find((migration) => ['queued', 'running', 'paused'].includes(migration.status))
-      if (active) throw new Error('本地知识库存储迁移正在进行中。')
+      if (active) throw new Error('本机资料库存储迁移正在进行中。')
       if (storage.restartRequired) throw new Error('请重启 Fox 后再配置新的存储位置。')
       const nowValue = now()
       const id = `mock-storage-migration-${storageMigrationCounter++}`
@@ -765,14 +764,14 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
     async testEmbeddingModel(modelId) { return { integrityVerified: true, loadReady: true, dimension: modelId === 'multilingual-e5-small' ? 384 : 512, elapsedMs: 42, message: '隔离测试通过', errorCode: null, errorDetails: null } },
     async setDefaultEmbeddingModel() { return true },
     async deleteEmbeddingModel() { return true },
-    async importEmbeddingModelPackage() { throw new Error('浏览器预览不支持导入本地模型包。') },
+    async importEmbeddingModelPackage() { throw new Error('浏览器预览不支持导入本机模型包。') },
     async getVectorBackendHealth() { return { backend: 'mock-vector', available: true, readWriteVerified: true, fallbackActive: false, message: '预览环境向量后端正常。' } },
     async startIndex(knowledgeBaseId) { return { operationId: `mock-index-${knowledgeBaseId}-${Date.now()}`, acceptedAt: now() } },
     async testRetrieval(knowledgeBaseId, query, mode) { return { knowledgeBaseId, query, mode, fusionVersion: mode === 'hybrid' ? 'rrf-v1-k60' : null, timings: { keywordMs: 1, vectorMs: mode === 'keyword' ? 0 : 2, totalMs: mode === 'keyword' ? 1 : 3 }, items: [] } },
     async listRetrievalCases() { return [] },
     async saveRetrievalCase(request) { return { id: request.id ?? `mock-case-${Date.now()}`, knowledgeBaseId: request.knowledgeBaseId, question: request.question, expectedDocumentIds: request.expectedDocumentIds ?? [], expectedKeywords: request.expectedKeywords ?? [], createdAt: Date.now(), updatedAt: Date.now() } },
     async deleteRetrievalCase() { return true },
-    async exportRetrievalCases(knowledgeBaseId) { return { json: { schemaVersion: 1, knowledgeBaseId, cases: [] }, markdown: '# 本地知识库检索测试集\n' } },
+    async exportRetrievalCases(knowledgeBaseId) { return { json: { schemaVersion: 1, knowledgeBaseId, cases: [] }, markdown: '# 本机资料库检索测试集\n' } },
     async listDocumentChunks() { return [] },
     async deleteDocument() { return true },
     async reparseDocument(knowledgeBaseId) { return { operationId: `mock-reparse-${knowledgeBaseId}-${Date.now()}`, acceptedAt: now() } },

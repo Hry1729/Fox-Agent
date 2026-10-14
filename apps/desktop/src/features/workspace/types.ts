@@ -18,6 +18,7 @@ export type WorkspaceView =
   | 'local-knowledge-jobs'
   | 'local-knowledge-models'
   | 'local-knowledge-retrieval'
+  | 'local-knowledge-settings'
   | 'skills'
   | 'mcp'
   | 'maintenance'
@@ -28,6 +29,7 @@ export type WorkspaceView =
   | 'settings-yuxi'
   | 'settings-projects'
   | 'settings-conversation'
+  | 'settings-shortcuts'
   | 'settings-usage'
   | 'settings-extensions'
   | 'settings-about'
@@ -42,6 +44,16 @@ export interface KnowledgeSourceLocator {
   page?: number
   anchor?: string
   excerpt?: string
+}
+
+export interface LocalKnowledgeDocumentAsk {
+  knowledgeBaseId: string
+  knowledgeBaseName: string
+  documentId: string
+  documentName: string
+  relativePath?: string
+  mimeType?: string
+  sizeBytes?: number
 }
 
 export type NavigateWorkspace = (view: WorkspaceView, entityId?: string, context?: WorkspaceNavigationContext) => void

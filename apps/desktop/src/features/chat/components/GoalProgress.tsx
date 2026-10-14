@@ -162,7 +162,7 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
                 <div className="text-sm font-medium">计划 v{pendingPlan.revision} 待批准：{pendingPlan.title}</div>
                 <p className="mt-1 text-xs text-muted-foreground">{pendingPlan.summary}</p>
               </div>
-              <Badge variant="outline">待批准</Badge>
+              <Badge variant="outline">需要你批准</Badge>
             </div>
             {pendingPlan.tasks.length > 0 && (
               <ol className="mb-3 list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
@@ -211,7 +211,7 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
               </div>
             </>}
             {pendingWorkflowGate && resolvedWorkflowGateId === pendingWorkflowGate.id && (
-              <p className="text-sm text-muted-foreground">Gate 决策已保存；下一次会话刷新将载入最新 Workflow 检查点。</p>
+              <p className="text-sm text-muted-foreground">Gate 决策已保存；下一次对话刷新将载入最新 Workflow 检查点。</p>
             )}
             {workflowGateError && <p className="mt-2 text-sm text-destructive">{workflowGateError}</p>}
           </div>
@@ -234,7 +234,7 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
             </div>
             {expertTeam.run.status === 'running' && cancelledTeamId !== expertTeam.run.id && (
               <div className="mt-3 flex justify-end">
-                <Button variant="outline" size="sm" disabled={resolving} onClick={() => void cancelTeam()}>停止团队</Button>
+                <Button variant="outline" size="sm" disabled={resolving} onClick={() => void cancelTeam()}>停止协作</Button>
               </div>
             )}
             {teamError && <p className="mt-2 text-sm text-destructive">{teamError}</p>}
@@ -267,8 +267,8 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
             )}
             {(planRevisions.length > 0 || reviewFindings.length > 0 || acceptances.length > 0) && (
               <div className="fox-goal-a1-status">
-                <div><b>计划修订</b><span>{planRevisions.length ? `v${Math.max(...planRevisions.map((item) => item.revision))} · ${pendingPlan ? '待批准' : planRevisions.some((item) => item.status === 'approved') ? '已批准' : '未批准'}` : '未建立'}</span></div>
-                <div><b>独立审查</b><span>{reviewFindings.length ? `${reviewFindings.filter((item) => item.status === 'open').length} 个待处理` : '未审查'}</span></div>
+                <div><b>修改计划</b><span>{planRevisions.length ? `v${Math.max(...planRevisions.map((item) => item.revision))} · ${pendingPlan ? '需要你批准' : planRevisions.some((item) => item.status === 'approved') ? '已批准' : '未批准'}` : '未建立'}</span></div>
+                <div><b>独立复查</b><span>{reviewFindings.length ? `${reviewFindings.filter((item) => item.status === 'open').length} 个待处理` : '未审查'}</span></div>
                 <div><b>最终验收</b><span>{acceptances[0]?.status === 'accepted' ? '已通过' : acceptances[0]?.status === 'rejected' ? '未通过' : '待验收'}</span></div>
               </div>
             )}

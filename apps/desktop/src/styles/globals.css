@@ -110,6 +110,9 @@
   --fox-success-surface: color-mix(in srgb, var(--fox-success) 8%, var(--fox-card));
   --fox-focus-ring: color-mix(in srgb, var(--ring) 22%, transparent);
   --fox-scrim: color-mix(in srgb, black 30%, transparent);
+  /* Search-term highlight. Brand-tinted instead of the classic yellow so the
+     colour still comes from the active theme. */
+  --fox-mark: color-mix(in oklch, var(--brand) 16%, transparent);
   --fox-user: var(--user-bubble);
   --fox-user-foreground: var(--user-bubble-foreground);
   /* Three elevation steps: sm for raised controls, md for menus and popovers,
@@ -196,6 +199,8 @@
   /* Opaque, so contrast does not depend on the surface underneath: keeps 12px
      secondary text at or above 4.5:1 on background, card, popover and muted. */
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 88%, var(--background));
+  /* 16% brand is invisible on a dark surface; the highlight needs more of it. */
+  --fox-mark: color-mix(in oklch, var(--brand) 28%, transparent);
   --fox-shadow-sm: 0 1px 2px color-mix(in oklch, black 30%, transparent);
   --fox-shadow-md: 0 6px 20px color-mix(in oklch, black 32%, transparent);
   --fox-shadow-lg: 0 18px 55px color-mix(in oklch, black 35%, transparent);
@@ -324,4 +329,5 @@ button:disabled,
 .fox-status-dot.is-ok { background: var(--success); }
 .fox-status-dot.is-error { background: var(--destructive); }
 .fox-status-dot.is-warning { background: var(--warning); }
+.fox-status-dot.is-brand { background: var(--brand); }
 .fox-status-dot.is-empty { background: transparent; border: 1px solid var(--fox-muted); }

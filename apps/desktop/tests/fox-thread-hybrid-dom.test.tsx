@@ -91,7 +91,7 @@ describe('the assistant-ui thread with the hybrid rollback', () => {
     mount([], (suggestion) => started.push(suggestion))
     await flush()
     expect(document.querySelector('.fox-empty-conversation .fox-empty-heading')).not.toBeNull()
-    expect(document.querySelector('.fox-empty-conversation h2')?.textContent).toBe('今天想一起做点什么？')
+    expect(document.querySelector('.fox-empty-conversation h2')?.textContent).toBe('今天想做什么？')
     const suggestions = [...document.querySelectorAll('.fox-starter-suggestions button')]
     expect(suggestions.length).toBeGreaterThanOrEqual(1)
     // Clicking a suggestion goes through the classic `onStart` (fills the

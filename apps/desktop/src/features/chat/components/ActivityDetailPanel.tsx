@@ -33,8 +33,8 @@ function goalStatus(status: string) {
 function runStatus(status: string) {
   if (['running', 'streaming'].includes(status)) return '进行中'
   if (['queued', 'pending'].includes(status)) return '排队中'
-  if (['awaiting_approval', 'waiting_approval'].includes(status)) return '等待批准'
-  if (['awaiting_question', 'waiting_question'].includes(status)) return '等待回答'
+  if (['awaiting_approval', 'waiting_approval'].includes(status)) return '需要你批准'
+  if (['awaiting_question', 'waiting_question'].includes(status)) return '需要你回答'
   if (status === 'completed') return '已完成'
   if (status === 'failed') return '失败'
   if (['cancelled', 'canceled'].includes(status)) return '已取消'
@@ -99,7 +99,7 @@ export function ActivityDetailPanel({ detail, goal, focusedEvidence, onEvidenceC
   return <div className="fox-activity-detail">
     <header><Activity size={17} /><div><strong>运行详情</strong><small>按需查看执行、计划和证据</small></div></header>
     {detail?.lastRun && <section className="fox-activity-overview"><strong>最近一次运行</strong><span>{runStatus(detail.lastRun.status)}</span>{detail.lastRun.errorMessage && <p><AlertTriangle size={13} />{detail.lastRun.errorMessage}</p>}</section>}
-    {focusedEvidence && <section className="fox-activity-evidence-focus"><strong>所选证据</strong><p>{focusedEvidence.summary}</p><small>核验状态：{focusedEvidence.validityStatus}{matchedTool ? ` · ${matchedTool.toolName} · ${toolStatus(matchedTool)}` : focusedEvidence.refKind === 'run_event' ? ' · 运行记录见下方' : ' · 原始记录暂不可直接定位'}</small></section>}
+    {focusedEvidence && <section className="fox-activity-evidence-focus"><strong>相关依据</strong><p>{focusedEvidence.summary}</p><small>核验状态：{focusedEvidence.validityStatus}{matchedTool ? ` · ${matchedTool.toolName} · ${toolStatus(matchedTool)}` : focusedEvidence.refKind === 'run_event' ? ' · 运行记录见下方' : ' · 原始记录暂不可直接定位'}</small></section>}
     {goal && <section className="fox-activity-goal">
       <div className="fox-activity-section-head"><div><strong>{goal.goal.title}</strong><small>{goalStatus(goal.goal.status)} · {goal.completedCount}/{goal.totalCount} 项任务完成</small></div>
         <div className="fox-activity-actions">
@@ -108,16 +108,16 @@ export function ActivityDetailPanel({ detail, goal, focusedEvidence, onEvidenceC
         </div>
       </div>
       {goal.goal.blockedReason && <p className="fox-activity-warning">{goal.goal.blockedReason}</p>}
-      {team?.status === 'running' && <button type="button" className="fox-activity-team-stop" disabled={busy} onClick={() => void cancelTeam()}>停止专家团队</button>}
+      {team?.status === 'running' && <button type="button" className="fox-activity-team-stop" disabled={busy} onClick={() => void cancelTeam()}>停止协作</button>}
       <details><summary>查看计划、任务和证据</summary>
         {goal.planRevisions.map((plan) => <p key={plan.id}><strong>计划 v{plan.revision}</strong> · {plan.status} · {plan.title}</p>)}
         {goal.tasks.map((task) => <div className="fox-activity-task" key={task.id}><strong>{task.title}</strong><small>{task.status}{task.blockedReason ? ` · ${task.blockedReason}` : ''}</small>{goal.evidence.filter((evidence) => evidence.taskId === task.id).map((evidence) => <button type="button" key={evidence.id} onClick={() => onEvidenceClick?.(evidence)}>{evidence.summary}<small>{evidence.validityStatus}</small></button>)}</div>)}
         {goal.acceptances.length > 0 && <p>验收记录：{goal.acceptances.length} 条。任务完成不代表验收通过。</p>}
       </details>
     </section>}
-    <section className="fox-activity-tools"><div className="fox-activity-section-head"><strong>工具与后台活动</strong><small>{detail?.toolCalls.length ?? 0} 条</small></div>
+    <section className="fox-activity-tools"><div className="fox-activity-section-head"><strong>工具记录</strong><small>{detail?.toolCalls.length ?? 0} 条</small></div>
       {tools.length === 0 ? <p className="fox-activity-empty">当前没有工具记录。</p> : tools.map((tool) => <ToolEntry key={tool.id} tool={tool} focused={matchedTool?.id === tool.id} />)}
-      {(detail?.toolCalls.length ?? 0) > tools.length && <small>仅显示最近 100 条；更早的记录可在会话历史中查看。</small>}
+      {(detail?.toolCalls.length ?? 0) > tools.length && <small>仅显示最近 100 条；更早的记录可在对话历史中查看。</small>}
     </section>
     <section className="fox-activity-events"><div className="fox-activity-section-head"><strong>运行记录</strong><small>{detail?.runtimeEvents.length ?? 0} 条</small></div>
       {recentEvents.length === 0 ? <p className="fox-activity-empty">当前没有运行记录。</p> : recentEvents.map((event) => <p key={`${event.runId}:${event.seq}`}><span>{event.eventType}</span><small>{new Date(event.createdAt).toLocaleTimeString()}</small></p>)}

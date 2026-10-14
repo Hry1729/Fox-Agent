@@ -346,7 +346,7 @@ export function mapLocalKnowledgeStorageMigration(dto: LocalKnowledgeStorageMigr
     progress: Math.max(0, Math.min(100, Math.trunc(numberValue(dto.progress)))),
     lastSequence: Math.max(0, Math.trunc(numberValue(dto.lastSequence))),
     error: hasError
-      ? { code: dto.errorCode ?? 'local_knowledge.migration_failed', message: dto.errorMessage ?? '本地知识库存储迁移失败。', retryable: false }
+      ? { code: dto.errorCode ?? 'local_knowledge.migration_failed', message: dto.errorMessage ?? '本机资料库存储迁移失败。', retryable: false }
       : null,
     createdAt: requiredIsoTimestamp(dto.createdAt),
     updatedAt: requiredIsoTimestamp(dto.updatedAt),
@@ -371,7 +371,7 @@ export function mapLocalKnowledgeJob(dto: LocalKnowledgeJobDto): KnowledgeJob {
     totalItems: 0,
     heartbeatAt: toIsoTimestamp(dto.heartbeatAt),
     error: hasError
-      ? { code: dto.errorCode ?? 'local_knowledge.job_failed', message: dto.errorMessage ?? '本地知识库任务失败', retryable: false }
+      ? { code: dto.errorCode ?? 'local_knowledge.job_failed', message: dto.errorMessage ?? '本机资料库任务失败', retryable: false }
       : null,
     createdAt: requiredIsoTimestamp(dto.createdAt),
     updatedAt: requiredIsoTimestamp(dto.updatedAt),
@@ -428,7 +428,7 @@ function mapEmbeddingModel(dto: LocalEmbeddingModelDto): LocalEmbeddingModel {
 }
 
 function operationEvent(operationId: string, jobs: KnowledgeJob[]): OperationEvent {
-  if (jobs.length === 0) unavailable('local_knowledge.operation_not_found', '未找到本地知识库操作。')
+  if (jobs.length === 0) unavailable('local_knowledge.operation_not_found', '未找到本机资料库操作。')
   const completedItems = jobs.filter((job) => job.status === 'completed').length
   const failedJobs = jobs.filter((job) => job.status === 'failed' || job.status === 'interrupted')
   const cancelledItems = jobs.filter((job) => job.status === 'cancelled').length
@@ -489,7 +489,7 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     },
     async addFileSource(path) {
       const normalizedPath = path.trim()
-      if (!normalizedPath) unavailable('local_knowledge.source_path_missing', '请选择需要管理的本地文件夹。')
+      if (!normalizedPath) unavailable('local_knowledge.source_path_missing', '请选择需要管理的本机文件夹。')
       return mapLocalKnowledgeFileSource(await client.addLocalKnowledgeFileSource(normalizedPath))
     },
     async rescanFileSource(id) {
@@ -532,7 +532,7 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     },
     async createKnowledgeBase(request: LocalKnowledgeBaseCreateRequest) {
       const name = request.name.trim()
-      if (!name) unavailable('local_knowledge.name_required', '知识库名称不能为空。')
+      if (!name) unavailable('local_knowledge.name_required', '资料库名称不能为空。')
       const description = request.description?.trim() || null
       return mapLocalKnowledgeBase(await client.createLocalKnowledgeBase({
         name,
@@ -545,7 +545,7 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     },
     async updateKnowledgeBase(id, request) {
       const name = request.name.trim()
-      if (!name) unavailable('local_knowledge.name_required', '知识库名称不能为空。')
+      if (!name) unavailable('local_knowledge.name_required', '资料库名称不能为空。')
       const description = request.description?.trim() || null
       return mapLocalKnowledgeBase(await client.updateLocalKnowledgeBase({
         id,
@@ -590,7 +590,7 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     async startImport(request: LocalKnowledgeImportRequest): Promise<OperationAccepted> {
       const files = request.files.map((file) => {
         if (!file.sourcePath) {
-          unavailable('local_knowledge.import_source_path_missing', `无法读取「${file.name}」的本地路径，请使用系统文件选择器重新选择。`)
+          unavailable('local_knowledge.import_source_path_missing', `无法读取「${file.name}」的本机路径，请使用系统文件选择器重新选择。`)
         }
         return { sourcePath: file.sourcePath, relativePath: file.relativePath }
       })
@@ -652,7 +652,7 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     },
     async startStorageMigration(destinationPath) {
       const normalizedPath = destinationPath.trim()
-      if (!normalizedPath) unavailable('local_knowledge.migration_destination_missing', '请选择新的本地知识库存储文件夹。')
+      if (!normalizedPath) unavailable('local_knowledge.migration_destination_missing', '请选择新的本机资料库存储文件夹。')
       return mapAccepted(await client.startLocalKnowledgeStorageMigration(normalizedPath))
     },
     async getStorageMigration(migrationId) {

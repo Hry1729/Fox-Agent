@@ -16,7 +16,7 @@ describe('run phase from durable events', () => {
     expect(timing.executionMs).toBeNull()
     // The label is the phase alone: the run's single timer sits beside the avatar,
     // so gluing the same interval into this line reported it twice.
-    expect(runPhaseTitle(timing)).toBe('准备执行')
+    expect(runPhaseTitle(timing)).toBe('等待开始')
   })
 
   test('an unknown enqueue time stays unknown instead of being estimated', () => {
@@ -24,7 +24,7 @@ describe('run phase from durable events', () => {
     expect(timing.phase).toBe('queued')
     expect(timing.queueMs).toBeNull()
     expect(timing.executionMs).toBeNull()
-    expect(runPhaseTitle(timing)).toBe('准备执行')
+    expect(runPhaseTitle(timing)).toBe('等待开始')
   })
 
   test('after run.started the phases are distinguished and the waits are split', () => {
@@ -36,7 +36,7 @@ describe('run phase from durable events', () => {
     expect(waiting.executionMs).toBe(36_000)
     // The wait is still reported — as the timing facts above, not as a second timer
     // glued into the status line.
-    expect(runPhaseTitle(waiting)).toBe('等待模型响应')
+    expect(runPhaseTitle(waiting)).toBe('等待回复')
 
     const streaming = runPhaseTiming(
       [started, event(2, 'reasoning.delta', { delta: '先分析' }, 3000)],

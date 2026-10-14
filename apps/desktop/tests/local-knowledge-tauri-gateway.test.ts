@@ -16,8 +16,8 @@ import {
 
 const base: LocalKnowledgeBaseDto = {
   id: 'kb-local',
-  name: '本地资料',
-  description: '测试知识库',
+  name: '本机资料',
+  description: '测试资料库',
   activeIndexGeneration: 'generation-12',
   documentCount: 2,
   activeJobStatus: null,

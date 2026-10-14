@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Cable,
   CircleAlert,
@@ -27,6 +27,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { FoxEmptyState } from '@/components/fox-ui/empty-state'
+import { SkeletonContent } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import '@/styles/plugin-center.css'
 import { defaultPluginGateway } from './tauri-gateway'
@@ -165,23 +167,27 @@ function ScopeDialog({
   plugin,
   scope,
   loading,
+  error,
   onClose,
   onToggle,
 }: {
   plugin: PluginCardView
   scope: PluginAgentScopeDTO[]
   loading: boolean
+  error: string | null
   onClose: () => void
   onToggle: (agent: PluginAgentScopeDTO) => void
 }) {
   return (
     <div className="fox-plugin-scope-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose() }}>
       <section className="fox-plugin-scope-dialog" role="dialog" aria-modal="true" aria-labelledby="fox-plugin-scope-title">
-        <header><span><Settings2 /></span><div><h2 id="fox-plugin-scope-title">配置启用范围</h2><p>{plugin.name} 只对选定的 Agent 生效。</p></div><Button type="button" variant="ghost" size="icon" aria-label="关闭配置范围" onClick={onClose}><X /></Button></header>
+        <header><span><Settings2 /></span><div><h2 id="fox-plugin-scope-title">使用范围</h2><p>{plugin.name} 只对选定的 Agent 生效。</p></div><Button type="button" variant="ghost" size="icon" aria-label="关闭配置范围" onClick={onClose}><X /></Button></header>
         {loading
-          ? <div className="fox-plugin-scope-loading"><LoaderCircle className="animate-spin" />读取 Agent 配置中…</div>
+          ? <SkeletonContent label="读取 Agent 配置中…" lines={3} />
+          : error
+            ? <FoxEmptyState variant="error" title="无法读取启用范围" description={error} />
           : scope.length === 0
-            ? <div className="fox-plugin-scope-loading">暂无可配置的 Agent。</div>
+            ? <FoxEmptyState title="暂无可配置的 Agent" description="创建专家后，可以在这里配置插件的使用范围。" />
             : <div className="fox-plugin-scope-list">{scope.map((agent) => <label key={agent.agentId}><span><input type="checkbox" checked={agent.enabled} onChange={() => onToggle(agent)} /><b>{agent.agentName}</b></span><small>{agent.enabled ? '已启用' : '未启用'}</small></label>)}</div>}
         <footer><Button type="button" variant="outline" size="sm" onClick={onClose}>完成</Button></footer>
       </section>
@@ -189,8 +195,8 @@ function ScopeDialog({
   )
 }
 
-function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="fox-plugin-empty"><PackagePlus /><span>{children}</span></div>
+function EmptyState({ title, search = false }: { title: string; search?: boolean }) {
+  return <FoxEmptyState variant={search ? 'search' : 'empty'} icon={<PackagePlus />} title={title} description={search ? '调整关键词或分类后再试。' : '安装插件后，可以在这里管理启用状态和使用范围。'} />
 }
 
 export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddPlugin, onConfigureAgent, className }: PluginCenterPageProps) {
@@ -210,6 +216,7 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
   const [scopePlugin, setScopePlugin] = useState<PluginCardView | null>(null)
   const [scope, setScope] = useState<PluginAgentScopeDTO[]>([])
   const [scopeLoading, setScopeLoading] = useState(false)
+  const [scopeError, setScopeError] = useState<string | null>(null)
 
   useEffect(() => {
     if (initialKind && kindOrder.includes(initialKind)) {
@@ -273,11 +280,12 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
     setScopePlugin(card)
     setScope([])
     setScopeLoading(true)
+    setScopeError(null)
     try {
       setScope(await gateway.agentScopeList(card.id))
       setError(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '无法读取 Agent 启用范围。')
+      setScopeError(cause instanceof Error ? cause.message : '无法读取 Agent 启用范围。')
     } finally {
       setScopeLoading(false)
     }
@@ -335,15 +343,15 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
             <TabsList className="fox-plugin-kind-tabs">{kindOrder.map((item) => <TabsTrigger key={item} value={item}><KindIcon kind={item} />{pluginKindLabel(item)}</TabsTrigger>)}</TabsList>
           </Tabs>
         </header>
-        {error && <div className="fox-plugin-error"><CircleAlert /><span>{error}</span><Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button></div>}
+        {error && <FoxEmptyState variant="error" icon={<CircleAlert />} title="插件加载失败" description={error} action={<Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button>} />}
         <main className="fox-plugin-installed-content">
           {loading && !installed.length
-            ? <div className="fox-plugin-loading"><LoaderCircle className="animate-spin" />正在加载已安装插件…</div>
+            ? <SkeletonContent label="正在加载已安装插件…" lines={4} avatar />
             : installedCards.length === 0
-              ? <EmptyState>{installedSearch.trim() ? `没有匹配的${pluginKindLabel(kind)}。` : `暂无已安装${pluginKindLabel(kind)}。`}</EmptyState>
+              ? !error && <EmptyState search={Boolean(installedSearch.trim())} title={installedSearch.trim() ? `没有匹配的${pluginKindLabel(kind)}。` : `暂无已安装${pluginKindLabel(kind)}。`} />
               : <div className="fox-plugin-installed-grid">{installedCards.map((card) => <InstalledPluginCard key={card.id} card={card} busy={activationBusy.has(card.id)} onToggle={(enabled) => void handleToggle(card, enabled)} onConfigure={() => void handleConfigure(card)} />)}</div>}
         </main>
-        {scopePlugin && <ScopeDialog plugin={scopePlugin} scope={scope} loading={scopeLoading} onClose={() => setScopePlugin(null)} onToggle={(agent) => void handleScopeToggle(agent)} />}
+        {scopePlugin && <ScopeDialog plugin={scopePlugin} scope={scope} loading={scopeLoading} error={scopeError} onClose={() => setScopePlugin(null)} onToggle={(agent) => void handleScopeToggle(agent)} />}
       </div>
     )
   }
@@ -364,13 +372,13 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
         </Tabs>
       </header>
 
-      {error && <div className="fox-plugin-error"><CircleAlert /><span>{error}</span><Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button></div>}
+      {error && <FoxEmptyState variant="error" icon={<CircleAlert />} title="插件加载失败" description={error} action={<Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button>} />}
 
       <main className="fox-plugin-content">
         {loading && !catalog.length
-          ? <div className="fox-plugin-loading"><LoaderCircle className="animate-spin" />正在加载插件目录…</div>
+          ? <SkeletonContent label="正在加载插件目录…" lines={4} avatar />
           : catalog.length === 0
-            ? <EmptyState>没有找到匹配的{pluginKindLabel(kind)}。</EmptyState>
+            ? !error && <EmptyState search={Boolean(search.trim() || category)} title={`没有找到匹配的${pluginKindLabel(kind)}。`} />
             : <>
               <section className="fox-plugin-section fox-plugin-featured-section">
                 <div className="fox-plugin-section-heading"><h2>精选{pluginKindLabel(kind)}</h2></div>
@@ -383,13 +391,13 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
                   <Button className="fox-plugin-refresh-action" type="button" variant="ghost" onClick={() => void reload()} disabled={loading}><RefreshCw className={loading ? 'animate-spin' : undefined} />刷新</Button>
                 </div>
                 {visibleCards.length === 0
-                  ? <EmptyState>没有找到匹配的{pluginKindLabel(kind)}。</EmptyState>
+                  ? !error && <EmptyState search={Boolean(search.trim() || category)} title={`没有找到匹配的${pluginKindLabel(kind)}。`} />
                   : <div className="fox-plugin-grid">{visibleCards.map((card) => <CatalogPluginCard key={card.id} card={card} onInstallAction={(item) => void handleInstallAction(item)} />)}</div>}
               </section>
             </>}
       </main>
 
-      {scopePlugin && <ScopeDialog plugin={scopePlugin} scope={scope} loading={scopeLoading} onClose={() => setScopePlugin(null)} onToggle={(agent) => void handleScopeToggle(agent)} />}
+      {scopePlugin && <ScopeDialog plugin={scopePlugin} scope={scope} loading={scopeLoading} error={scopeError} onClose={() => setScopePlugin(null)} onToggle={(agent) => void handleScopeToggle(agent)} />}
     </div>
   )
 }

@@ -11,6 +11,8 @@
    viewport grows past the stage and `.fox-chat-stage`'s `overflow: hidden`
    clips it — the message list cannot scroll. */
 .fox-thread-shell {
+  min-width: 0;
+  width: 100%;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -25,6 +27,7 @@
 }
 
 .fox-thread {
+  min-width: 0;
   position: relative;
   display: flex;
   flex: 1;
@@ -35,6 +38,7 @@
 .fox-thread .fox-scroll-button:disabled { display: none; }
 
 .fox-thread-root {
+  min-width: 0;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -43,6 +47,8 @@
 }
 
 .fox-thread-viewport {
+  min-width: 0;
+  overflow-x: hidden;
   flex: 1;
   min-height: 0;
   overflow-y: auto;

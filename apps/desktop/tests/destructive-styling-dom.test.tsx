@@ -102,9 +102,9 @@ describe('public destructive styling', () => {
       { open: true },
       React.createElement(ContextMenuPrimitive.Trigger, null, React.createElement('div', null, '目标')),
       React.createElement(ContextMenuPrimitive.Content, { forceMount: true },
-        React.createElement(ContextMenuItem, { variant: 'destructive' }, '移入回收站')),
+        React.createElement(ContextMenuItem, { variant: 'destructive' }, '删除对话')),
     ))
-    const item = screen.getByRole('menuitem', { name: '移入回收站' })
+    const item = screen.getByRole('menuitem', { name: '删除对话' })
     expect(item.getAttribute('data-variant')).toBe('destructive')
     const tokens = classes(item)
     for (const fill of RESTING_RED_FILLS) expect(tokens).not.toContain(fill)
@@ -118,9 +118,9 @@ describe('public destructive styling', () => {
       { open: true },
       React.createElement(DropdownMenuPrimitive.Trigger, null, '更多'),
       React.createElement(DropdownMenuPrimitive.Content, { forceMount: true },
-        React.createElement(DropdownMenuItem, null, '重命名对话')),
+        React.createElement(DropdownMenuItem, null, '重命名')),
     ))
-    const item = screen.getByRole('menuitem', { name: '重命名对话' })
+    const item = screen.getByRole('menuitem', { name: '重命名' })
     expect(item.getAttribute('data-variant')).toBe('default')
     const tokens = classes(item)
     // Danger is opt-in per item: the default variant carries no unconditional

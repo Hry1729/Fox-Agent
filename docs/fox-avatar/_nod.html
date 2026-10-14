@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>drowsy nod + happy arc strip</title>
+<style>
+  :root { --bg:#1a1916; --paper:#ece7dc; --mute:#8d877b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--paper);
+         font:12px/1.4 "PingFang SC","Microsoft YaHei",monospace; }
+  h2 { margin:14px 0 6px; padding-left:12px; font-size:13px; letter-spacing:.06em;
+       color:var(--paper); font-weight:700; }
+  h2 span { color:var(--mute); font-weight:400; letter-spacing:0; }
+  .grid { display:grid; grid-template-columns:repeat(4, 400px); }
+  .cell { position:relative; width:400px; height:300px; border:1px solid #33302a;
+          overflow:hidden; background:#efece5; }
+  .win { position:absolute; inset:0; overflow:hidden; }
+  .win svg { position:absolute; left:0; top:0; width:400px; height:300px; display:block; }
+  .nm { position:absolute; left:8px; top:6px; z-index:3; color:#1a1916; font-weight:700; font-size:12px; }
+  .sb { position:absolute; left:8px; bottom:6px; z-index:3; color:#6d675d; font-size:10px; }
+</style>
+</head>
+<body>
+<h2>① 犯困 · 点头式眨眼 <span>—— 眼睛在"睁（苏醒 0 号眼形）"与"闭（睡着 13 号眼形）"之间来回切换</span></h2>
+<div class="grid" id="g1"></div>
+<h2>② 开心 · 弧线衔接 <span>—— 先压扁成一条线（犯困那种），再往上弯成 ^^</span></h2>
+<div class="grid" id="g2"></div>
+<script src="src/math.js"></script>
+<script src="src/geo.js"></script>
+<script src="src/tables.js"></script>
+<script src="src/eyes.js"></script>
+<script src="src/fx.js"></script>
+<script src="src/motion.js"></script>
+<script src="src/fox.js"></script>
+<script>
+(function () {
+  const T = FOX_TABLES;
+  const BOX = "60 350 440 330";        // 直接框住双眼（与 _emo.html 同一取景）
+  const g1 = document.getElementById("g1");
+  const g2 = document.getElementById("g2");
+
+  /* 逐帧对照页：无头环境 rAF 会饥饿，而且弹簧/指数平滑都会让"当前值 ≠ 我钉的值"。
+     所以这里做两件事：
+       ① 冻结驱动器 —— _stepNod / _stepEyeFX 换成空函数、morph 弹簧刚度置 0
+          （stepSpring 在 freq=0 时 x 不再变化：v += 0，x += 0）；
+       ② 每 20ms 把整个姿势重新钉一遍（morph / 眨眼 / 视线 / 表情量 / 眼部缩放）。 */
+  function makeCell(host, title, sub, state, setup) {
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    const win = document.createElement("div");
+    win.className = "win";
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    win.appendChild(svg);
+    const nm = document.createElement("div");
+    nm.className = "nm"; nm.textContent = title;
+    const sb = document.createElement("div");
+    sb.className = "sb"; sb.textContent = sub;
+    cell.appendChild(win); cell.appendChild(nm); cell.appendChild(sb);
+    host.appendChild(cell);
+
+    svg.setAttribute("viewBox", BOX);
+    const fox = new FoxAvatar(svg, { followPointer: false, autoTricks: false });
+    svg.setAttribute("viewBox", BOX);
+    fox.setFollowPointer(false);
+    fox.setState(state, true);
+    fox.eyeStiffness = 0;
+    fox._stepNod = function () {};
+    fox._stepEyeFX = function () {};
+
+    const pin = () => {
+      fox.blinkQueue.length = 0;
+      fox.blinkUntil = Infinity; fox.winkUntil = Infinity; fox.winkAt = -1e9;
+      fox.blink.x = 1; fox.blink.t = 1;
+      fox.gazeX.x = 0; fox.gazeX.t = 0; fox.gazeY.x = 0; fox.gazeY.t = 0;
+      fox.pointer.x = 0; fox.pointer.y = 0; fox.pointer.tx = 0; fox.pointer.ty = 0;
+      setup(fox);
+      fox.eyeScale.t = T.BODY[state].eyeBoost * fox.fxBoost;
+      fox.eyeScale.x = fox.eyeScale.t;
+    };
+    pin();
+    setInterval(pin, 20);
+  }
+
+  const zeroFx = (fox) => {
+    fox.symMix = 0; fox.arcMix = 0; fox.heartMix = 0; fox.crossMix = 0;
+    fox.orbitMix = 0; fox.hlHeartMix = 0; fox.fxBoost = 1;
+    fox.glyph.a = null; fox.glyph.b = null; fox.glyph.mix = 1;
+  };
+
+  /* ① 犯困：drop 0 → 1（眼形 0 → 13 同步，眼皮 1 → 0.45） */
+  const DN = T.EYE_NOD;
+  [0, 0.15, 0.30, 0.45, 0.60, 0.75, 0.90, 1.00].forEach((d) => {
+    makeCell(g1, "犯困 " + T.LABELS.drowsy, "drop=" + d.toFixed(2) +
+      "   眼皮=" + (1 - DN.lid * d).toFixed(2), "drowsy", (fox) => {
+      fox.fxTo = T.EYE_FX.drowsy;
+      fox.eyeFrom = DN.openIdx;
+      fox.eyeTo = DN.shutIdx;
+      fox.liveFrom = null;
+      fox.morph.x = d; fox.morph.t = d; fox.morph.v = 0;
+      fox.nodClose = d;
+      fox.nodAsleep = d > DN.flip;
+      zeroFx(fox);
+    });
+  });
+
+  /* ② 开心：arcMix 0 → 1（眼形 2 不动，衔接曲线全部由 arcMix 推出来） */
+  [0, 0.20, 0.35, 0.50, 0.62, 0.75, 0.88, 1.00].forEach((a) => {
+    makeCell(g2, "开心 " + T.LABELS.happy, "arcMix=" + a.toFixed(2), "happy", (fox) => {
+      fox.fxTo = T.EYE_FX.happy;
+      fox.arcType = "smile";
+      fox.arcMix = a;
+      fox.eyeFrom = T.EYE_PLAYLIST.happy[0];
+      fox.eyeTo = T.EYE_PLAYLIST.happy[0];
+      fox.liveFrom = null;
+      fox.morph.x = 1; fox.morph.t = 1; fox.morph.v = 0;
+      fox.nodClose = 0;
+      zeroFx(fox);
+      fox.arcMix = a;               // zeroFx 会清零，这里再写回
+    });
+  });
+})();
+</script>
+</body>
+</html>

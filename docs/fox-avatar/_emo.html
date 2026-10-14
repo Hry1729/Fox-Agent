@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>emotion eye sheet</title>
+<style>
+  :root { --bg:#1a1916; --paper:#ece7dc; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--paper);
+         font:12px/1.4 "PingFang SC","Microsoft YaHei",monospace; }
+  .grid { display:grid; grid-template-columns:repeat(4, 480px); }
+  .cell { position:relative; width:480px; height:360px; border:1px solid #33302a; overflow:hidden; background:#efece5; }
+  .win { position:absolute; inset:0; overflow:hidden; }
+  .win svg { position:absolute; left:0; top:0; width:480px; height:360px; display:block; }
+  .nm { position:absolute; left:8px; top:6px; z-index:3; color:#1a1916; font-weight:700; font-size:13px; }
+  .dbg { position:absolute; left:8px; bottom:6px; z-index:3; color:#6d675d; font-size:10px; }
+</style>
+</head>
+<body>
+<div class="grid" id="g"></div>
+<script src="src/math.js"></script>
+<script src="src/geo.js"></script>
+<script src="src/tables.js"></script>
+<script src="src/eyes.js"></script>
+<script src="src/fx.js"></script>
+<script src="src/motion.js"></script>
+<script src="src/fox.js"></script>
+<script>
+  const NAMES = ["excited","surprised","suspicious","angry","drowsy","happy","curious",
+                 "confused","bored","proud","shy","sad","playful","celebrate"];
+  const CN = FOX_TABLES.LABELS;
+  const g = document.getElementById("g");
+  window.__foxes = [];
+  NAMES.forEach((name, i) => {
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    const win = document.createElement("div");
+    win.className = "win";
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    win.appendChild(svg);
+    const nm = document.createElement("div");
+    nm.className = "nm"; nm.textContent = name + "  " + CN[name];
+    const dbg = document.createElement("div");
+    dbg.className = "dbg"; dbg.id = "d" + i;
+    cell.appendChild(win); cell.appendChild(nm); cell.appendChild(dbg);
+    g.appendChild(cell);
+    /* 取景：viewBox 直接框住眼部（两眼中心 277.5,544.5；视野 375×287.5 用户单位，
+       正好装下双眼 + 鼻子）。viewBox 宽高比与格子一致 → 不会被拉伸。 */
+    svg.setAttribute("viewBox", "60 350 440 330");
+    const fox = new FoxAvatar(svg, { followPointer: false, autoTricks: false });
+    svg.setAttribute("viewBox", "60 350 440 330");
+    fox.setFollowPointer(false);
+    fox.setState(name);
+    /* 无头环境 rAF 会饥饿 + 截图瞬间可能正好落在眨眼/换眼形/表情淡入的中途，
+       所以每 30ms 把"稳态姿势"重新钉一遍 —— 这样截到的一定是终态：
+       眼形 morph 到位、不眨眼、所有表情量给满、眼部缩放到位。 */
+    const pin = () => {
+      fox.morph.x = 1; fox.morph.t = 1; fox.morph.v = 0;
+      fox.blinkQueue.length = 0; fox.blinkUntil = Infinity;
+      fox.blink.x = 1; fox.blink.t = 1;
+      const t = fox.fxTo;
+      fox.heartMix = t && t.shape === "heart" ? 1 : 0;
+      fox.symMix = t && t.sym ? 1 : 0;
+      fox.arcMix = t && t.arc ? 1 : 0;
+      fox.crossMix = t && t.look === "cross" ? 1 : 0;
+      fox.orbitMix = t && t.orbit ? 1 : 0;
+      fox.hlHeartMix = t && t.hlHeart ? 1 : 0;
+      fox.fxBoost = t && t.boost ? t.boost : 1;
+      /* 犯困是"睁 ↔ 闭"来回切换的（nod）：静态对照图必须钉在一个确定的相位，
+         否则每次截图截到的是周期里随机的一帧。0.55 = 半睡半醒那一段。 */
+      fox.nodClose = t && t.nod ? 0.55 : 0;
+      fox.nodAsleep = false;
+      fox.glyph.a = t ? t.glyph || null : null;
+      fox.glyph.b = null; fox.glyph.mix = 1;
+      fox.eyeScale.t = FOX_TABLES.BODY[name].eyeBoost * fox.fxBoost;
+      fox.eyeScale.x = fox.eyeScale.t;
+    };
+    pin();
+    setInterval(pin, 30);
+    window.__foxes.push(fox);
+  });
+</script>
+</body>
+</html>

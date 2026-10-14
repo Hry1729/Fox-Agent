@@ -18,7 +18,7 @@ import {
 import type { ApprovalDecision, ApprovalRecord } from '@/features/conversations/model/types'
 import type { GrantScope } from '@/components/assistant-ui/upstream/elements/permission-grant'
 
-const conversationScopeNote = '“本次对话内允许”只登记本会话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者会话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。'
+const conversationScopeNote = '“本次对话内允许”只登记本对话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者对话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。'
 
 /** Only a path-only read request uses the permission surface; mutations retain their operation review. */
 function isReadScopeRequest(approval: ApprovalRecord, presentation: ReturnType<typeof approvalPresentation>) {
@@ -80,8 +80,8 @@ export function RuntimeApprovalPrompt({
   const briefScope = repairOverride ? repairDetails ? '仅追加本次修复。' : '审批详情不完整，请拒绝后重新发起。'
     : replacement?.baselineVersion === 'missing' ? '新建，不覆盖已有内容。'
       : replacement ? '替换全部内容；授权绑定此版本与内容。'
-        : presentation.officeReuse ? `仅此文件的 ${presentation.officeReuse.selectors.length} 处位置和属性；会话授权可撤销。`
-          : allowedDecisions.includes('allow_conversation') ? '会话授权仅限此工具和此目标，可撤销。' : '仅授权本次操作。'
+        : presentation.officeReuse ? `仅此文件的 ${presentation.officeReuse.selectors.length} 处位置和属性；对话授权可撤销。`
+          : allowedDecisions.includes('allow_conversation') ? '对话授权仅限此工具和此目标，可撤销。' : '仅授权本次操作。'
   const target = replacement?.targetIdentity ?? presentation.officeReuse?.target ?? presentation.target
   const operation = presentation.command && presentation.command !== target ? `${target}\n${presentation.command}` : target
   return (
@@ -90,7 +90,7 @@ export function RuntimeApprovalPrompt({
       onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
       onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
       detailsContent={<>
-        <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>{presentation.content !== undefined ? <>查看拟写入内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}</summary>
+        <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>{presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}</summary>
         <div role="region" aria-label="审批详情">
         {repairOverride && <div className={`fox-approval-context ${repairDetails ? '' : 'is-invalid'}`}>
           {repairDetails
@@ -110,7 +110,7 @@ export function RuntimeApprovalPrompt({
         {presentation.content !== undefined && <pre className="fox-approval-diff fox-approval-write-preview" aria-label="拟写入内容" tabIndex={0}><code>{presentation.content || '（空文件）'}</code></pre>}
         {presentation.wholeFileReplacement && <div className="fox-approval-replacement">
           <details className="fox-approval-disclosure">
-            <summary>查看授权校验信息</summary>
+            <summary>授权详情</summary>
             <div className="fox-approval-context">
               <p><strong>用途：</strong>{presentation.wholeFileReplacement.purpose}（这不是普通写入审批）</p>
               <p><strong>基线版本：</strong><code>{presentation.wholeFileReplacement.baselineVersion}</code></p>

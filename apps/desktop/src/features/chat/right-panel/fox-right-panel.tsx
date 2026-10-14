@@ -4,7 +4,7 @@ import { safeDiagnosticText, toolFailurePresentation } from '../run-status-facts
 import { artifactSummaryLine, artifactVerificationLabel, formatFileSize } from '../runtime-artifacts'
 import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, normalizeBrowserUrl, webActivitySummary } from '../sidebar-model'
 import { Agent as AIAgent, AgentContent as AIAgentContent } from '@/components/ai-elements/agent'
-import { FileTree, FileTreeFile, FileTreeFolder } from '@/components/ai-elements/file-tree'
+import { Files, SubFiles, FolderItem, FolderTrigger, FolderPanel, FileItem } from '@/components/animate-ui/components/base/files'
 import { WebPreview, WebPreviewBody, WebPreviewNavigation, WebPreviewNavigationButton } from '@/components/ai-elements/web-preview'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -47,14 +47,30 @@ function toolDiff(tool: ToolCallRecord, approvals: ApprovalRecord[]) {
   return JSON.stringify(tool.input, null, 2)
 }
 
-function projectFileTree(entries: ProjectFileEntry[], workspaceName: string, selectedFile: string, onSelect: (path: string) => void) {
+export function ProjectFileTree({ entries, workspaceName, selectedFile, onSelect }: { entries: ProjectFileEntry[]; workspaceName: string; selectedFile: string; onSelect: (path: string) => void }) {
   const workspaceRootPath = '__fox_workspace_root__'
+  const [openFolders, setOpenFolders] = useState<string[]>([workspaceRootPath])
   const byParent = new Map<string, ProjectFileEntry[]>()
   entries.forEach((entry) => byParent.set(entry.parent, [...(byParent.get(entry.parent) ?? []), entry]))
+  const selectedKey = normalizedProjectPath(selectedFile).toLocaleLowerCase()
+  // Share expansion state across official SubFiles roots. Opening a file from
+  // another entry point reveals its ancestors without losing manual expansion.
+  useEffect(() => {
+    const ancestors = [workspaceRootPath]
+    const entryByPath = new Map(entries.map(entry => [normalizedProjectPath(entry.path).toLocaleLowerCase(), entry]))
+    let entry = entryByPath.get(selectedKey)
+    const visited = new Set<string>()
+    while (entry?.parent && !visited.has(entry.parent)) {
+      visited.add(entry.parent)
+      ancestors.push(entry.parent)
+      entry = entryByPath.get(normalizedProjectPath(entry.parent).toLocaleLowerCase())
+    }
+    setOpenFolders(current => ancestors.every(path => current.includes(path)) ? current : [...new Set([...current, ...ancestors])])
+  }, [entries, selectedKey])
   const render = (parent: string): ReactNode => (byParent.get(parent) ?? []).map((entry) => entry.isDirectory
-    ? <FileTreeFolder key={entry.path} path={entry.path} name={entry.name}>{render(entry.path)}</FileTreeFolder>
-    : <FileTreeFile key={entry.path} path={entry.path} name={entry.name} />)
-  return <FileTree defaultExpanded={new Set([workspaceRootPath])} selectedPath={selectedFile} onSelect={(path) => { if (path !== workspaceRootPath && !entries.find((item) => item.path === path)?.isDirectory) onSelect(path) }} className="fox-ai-file-tree"><FileTreeFolder path={workspaceRootPath} name={workspaceName}>{render('')}</FileTreeFolder></FileTree>
+    ? <FolderItem key={entry.path} value={entry.path}><FolderTrigger title={entry.path}>{entry.name}</FolderTrigger><FolderPanel><SubFiles open={openFolders} onOpenChange={setOpenFolders}>{render(entry.path)}</SubFiles></FolderPanel></FolderItem>
+    : <FileItem key={entry.path} title={entry.path} aria-label={`打开 ${entry.name}`} aria-current={normalizedProjectPath(entry.path).toLocaleLowerCase() === selectedKey ? 'true' : undefined} onClick={() => onSelect(entry.path)}>{entry.name}</FileItem>)
+  return <Files open={openFolders} onOpenChange={setOpenFolders} className="fox-animate-file-tree" aria-label="项目文件"><FolderItem value={workspaceRootPath}><FolderTrigger title={workspaceName}>{workspaceName}</FolderTrigger><FolderPanel><SubFiles open={openFolders} onOpenChange={setOpenFolders}>{render('')}</SubFiles></FolderPanel></FolderItem></Files>
 }
 
 function normalizedProjectPath(value: string) {
@@ -154,8 +170,8 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
         <div className="fox-file-location" title={displayPath}><span>{displayPath}</span></div>
         <div className="fox-project-file-actions">
           <Tooltip>
-            <TooltipTrigger asChild><button type="button" aria-label="打开项目文件夹" disabled={Boolean(busyAction)} onClick={() => void openProjectFolder()}><FolderOpen size={15} /></button></TooltipTrigger>
-            <TooltipContent>打开项目文件夹</TooltipContent>
+            <TooltipTrigger asChild><button type="button" aria-label="打开文件夹" disabled={Boolean(busyAction)} onClick={() => void openProjectFolder()}><FolderOpen size={15} /></button></TooltipTrigger>
+            <TooltipContent>打开文件夹</TooltipContent>
           </Tooltip>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -163,9 +179,9 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="fox-result-open-menu">
               <DropdownMenuLabel>文件操作</DropdownMenuLabel>
-              <DropdownMenuItem onSelect={() => void runAction('open')}><ExternalLink size={14} />系统默认方式打开</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void runAction('reveal')}><FolderOpen size={14} />打开所在位置</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void runAction('copy_path')}><Copy size={14} />复制文件路径</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void runAction('open')}><ExternalLink size={14} />系统打开</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void runAction('reveal')}><FolderOpen size={14} />打开文件夹</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void runAction('copy_path')}><Copy size={14} />复制路径</DropdownMenuItem>
               <DropdownMenuSeparator />
               {applications.length > 0
                 ? applications.map((application) => <DropdownMenuItem key={application.id} onSelect={() => void runAction('open_with', application.id)}><Terminal size={14} />{application.label}</DropdownMenuItem>)
@@ -178,7 +194,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
         {loading
           ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取文件</div>
           : error
-            ? <div className="fox-result-unavailable"><AlertTriangle size={21} /><strong>无法预览文件</strong><span>{error}</span></div>
+            ? <div className="fox-result-unavailable"><AlertTriangle size={21} /><strong>预览失败</strong><span>{error}</span></div>
             : /\.html?$/i.test(path) && preview?.content ? <Suspense fallback={<pre>正在加载预览…</pre>}><HtmlFilePreview key={path} name={displayPath} content={preview.content} /></Suspense> : <pre>{preview?.content ?? ''}</pre>}
         {preview?.truncated && <small className="fox-result-truncated">预览已截断，仅显示文件开头部分。</small>}
       </div>
@@ -259,7 +275,7 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
   }
 
   if (!artifact) {
-    return <div className="fox-empty-panel"><FileText size={29} /><strong>从对话中选择文件</strong><span>每次回答产生的新建或修改文件会显示在回答底部，点击后在这里打开。</span></div>
+    return <div className="fox-empty-panel"><FileText size={29} /><strong>对话文件</strong><span>每次回答产生的新建或修改文件会显示在回答底部，点击后在这里打开。</span></div>
   }
 
   const applications = inspection?.applications ?? []
@@ -270,9 +286,9 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
         <div className="fox-result-file-actions">
           <Tooltip>
             <TooltipTrigger asChild>
-              <button type="button" aria-label="打开项目文件夹" disabled={loading || Boolean(busyAction) || !detail?.conversation.projectRoot} onClick={() => void openProjectFolder()}><FolderOpen size={15} /></button>
+              <button type="button" aria-label="打开文件夹" disabled={loading || Boolean(busyAction) || !detail?.conversation.projectRoot} onClick={() => void openProjectFolder()}><FolderOpen size={15} /></button>
             </TooltipTrigger>
-            <TooltipContent>打开项目文件夹</TooltipContent>
+            <TooltipContent>打开文件夹</TooltipContent>
           </Tooltip>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -280,9 +296,9 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="fox-result-open-menu">
               <DropdownMenuLabel>文件操作</DropdownMenuLabel>
-              <DropdownMenuItem disabled={!inspection?.capabilities.open} onSelect={() => void runAction('open')}><ExternalLink size={14} />系统默认方式打开</DropdownMenuItem>
-              <DropdownMenuItem disabled={!inspection?.capabilities.reveal} onSelect={() => void runAction('reveal')}><FolderOpen size={14} />打开所在位置</DropdownMenuItem>
-              <DropdownMenuItem disabled={!inspection?.capabilities.copyPath} onSelect={() => void runAction('copy_path')}><Copy size={14} />复制文件路径</DropdownMenuItem>
+              <DropdownMenuItem disabled={!inspection?.capabilities.open} onSelect={() => void runAction('open')}><ExternalLink size={14} />系统打开</DropdownMenuItem>
+              <DropdownMenuItem disabled={!inspection?.capabilities.reveal} onSelect={() => void runAction('reveal')}><FolderOpen size={14} />打开文件夹</DropdownMenuItem>
+              <DropdownMenuItem disabled={!inspection?.capabilities.copyPath} onSelect={() => void runAction('copy_path')}><Copy size={14} />复制路径</DropdownMenuItem>
               <DropdownMenuSeparator />
               {applications.length > 0
                 ? applications.map((application) => <DropdownMenuItem key={application.id} onSelect={() => void runAction('open_with', application.id)}><Terminal size={14} />{application.label}</DropdownMenuItem>)
@@ -363,8 +379,8 @@ function BrowserPanel({ detail }: { detail: ConversationDetail | null }) {
 
   return (
     <WebPreview className="fox-browser-panel">
-      <div className="fox-browser-tabs" role="tablist" aria-label="网页预览与网络记录">
-        <button type="button" role="tab" aria-selected={activeTab === 'page'} className={activeTab === 'page' ? 'is-active' : ''} onClick={() => setActiveTab('page')}><Globe2 size={13} />手动预览</button>
+      <div className="fox-browser-tabs" role="tablist" aria-label="网页记录">
+        <button type="button" role="tab" aria-selected={activeTab === 'page'} className={activeTab === 'page' ? 'is-active' : ''} onClick={() => setActiveTab('page')}><Globe2 size={13} />网页预览</button>
         <button type="button" role="tab" aria-selected={activeTab === 'activity'} className={activeTab === 'activity' ? 'is-active' : ''} onClick={() => setActiveTab('activity')}><Activity size={13} />网络记录{webCalls.length > 0 && <small>{webCalls.length}</small>}</button>
       </div>
       <WebPreviewNavigation className="fox-browser-address">
@@ -387,7 +403,7 @@ function BrowserPanel({ detail }: { detail: ConversationDetail | null }) {
                 ? <button type="button" key={tool.id} onClick={() => navigateTo(summary.navigableUrl!)}>{content}</button>
                 : <div key={tool.id} className="fox-browser-activity-row">{content}</div>
             })}</div></ScrollArea>
-          : <div className="fox-browser-empty"><Globe2 size={30} /><strong>当前会话没有联网记录</strong><span>Agent 调用 web_search、web_read 或 http_request 后，目标、状态和结果会显示在这里。</span></div>}
+          : <div className="fox-browser-empty"><Globe2 size={30} /><strong>这段对话还没有联网记录</strong><span>Agent 调用 web_search、web_read 或 http_request 后，目标、状态和结果会显示在这里。</span></div>}
     </WebPreview>
   )
 }
@@ -442,7 +458,7 @@ function childRunFailureMessage(run: ChildRunRecord) {
   // The concrete execution cap is internal accounting: the user reads that the
   // sub-task did not finish in time and that its result was not used.
   if (childRunFailureTitle(run) === '运行超时') return '子任务未在限定时间内完成，结果未采用'
-  return run.errorMessage ?? (run.status === 'interrupted' ? '运行意外中断，本次结果未采用' : '子 Agent 未返回可采用结果')
+  return run.errorMessage ?? (run.status === 'interrupted' ? '运行意外中断，本次结果未采用' : '协作助手未返回可采用结果')
 }
 
 function childAgentVisualQaEnabled() {
@@ -508,8 +524,8 @@ function ChildAgentPanel({ detail, onOpenChildAgent }: { detail: ConversationDet
     <AIAgent className="fox-agent-panel">
       <AIAgentContent className="fox-agent-content">
         {runs.length === 0
-          ? <div className="fox-agent-empty"><Bot size={27} /><strong>当前会话还没有子 Agent</strong><span>子 Agent 开始运行后，会显示在这个列表中。</span></div>
-          : <nav className="fox-agent-list" aria-label="子 Agent 列表">
+          ? <div className="fox-agent-empty"><Bot size={27} /><strong>这段对话还没有协作助手</strong><span>协作助手开始运行后，会显示在这个列表中。</span></div>
+          : <nav className="fox-agent-list" aria-label="协作助手列表">
               {visibleRuns.map((run, index) => (
                 <button type="button" key={run.childRunId} className="fox-agent-list-item" aria-label={`打开 ${run.workerAgentName} 消息`} onClick={() => onOpenChildAgent(run, index)}>
                   <img className="fox-agent-list-avatar" src={childAgentAvatars[index % childAgentAvatars.length]} alt="" />
@@ -603,13 +619,13 @@ function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildR
   return (
     <section className="fox-agent-conversation is-tab" aria-label={`${run.workerAgentName}只读消息记录`}>
       <header className="fox-agent-conversation-head">
-        <button type="button" className="fox-agent-conversation-back" aria-label="返回子 Agent 列表" onClick={onBack}><ArrowLeft /></button>
+        <button type="button" className="fox-agent-conversation-back" aria-label="返回协作助手列表" onClick={onBack}><ArrowLeft /></button>
         <div><strong title={run.objective}>{run.workerAgentName}</strong></div>
         <span className={`is-${run.status}`}><ChildRunStatusIcon run={run} />{childRunStatusLabel(run.status)}</span>
       </header>
       <div className="fox-agent-conversation-scroll">
         {childDetailLoading && !childDetail
-          ? <div className="fox-agent-inline-state"><LoaderCircle className="animate-spin" />正在读取子 Agent 消息</div>
+          ? <div className="fox-agent-inline-state"><LoaderCircle className="animate-spin" />正在读取协作助手消息</div>
           : childDetailError && !childDetail
             ? <div className="fox-agent-inline-state is-error"><AlertTriangle />{childDetailError}</div>
             : transcript.map((item) => item.kind === 'tool'
@@ -631,8 +647,8 @@ function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildR
                     <img src={childAgentAvatars[avatarIndex % childAgentAvatars.length]} alt="" />
                     <div><small>{run.workerAgentName} · {new Date(item.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</small><MarkdownResponse>{item.content}</MarkdownResponse></div>
                   </article>)}
-        {!childDetailLoading && !childDetailError && transcript.length === 0 && <p className="fox-agent-transcript-empty">这个子 Agent 还没有可见消息。</p>}
-        {childRunIsActive(run) && <div className="fox-agent-live-line"><LoaderCircle className="animate-spin" />子 Agent 正在运行，消息会自动更新</div>}
+        {!childDetailLoading && !childDetailError && transcript.length === 0 && <p className="fox-agent-transcript-empty">这个协作助手还没有可见消息。</p>}
+        {childRunIsActive(run) && <div className="fox-agent-live-line"><LoaderCircle className="animate-spin" />协作助手正在运行，消息会自动更新</div>}
         {(run.status === 'failed' || run.status === 'interrupted') && <div className="fox-agent-run-error" role="alert">
           <AlertTriangle />
           <div><strong>{childRunFailureTitle(run)}</strong><p>{childRunFailureMessage(run)}</p></div>
@@ -670,7 +686,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
   if (mode === 'files') {
     const normalizedSearch = fileSearch.trim().toLowerCase()
     const visibleFiles = projectFiles.filter((item) => !item.isDirectory && (!normalizedSearch || item.path.toLowerCase().includes(normalizedSearch)))
-    if (!conversationId || !detail?.conversation.projectRoot) return <div className="fox-empty-panel"><Folders size={29} /><strong>尚未选择项目</strong><span>为当前会话授权一个项目文件夹后即可浏览。</span></div>
+    if (!conversationId || !detail?.conversation.projectRoot) return <div className="fox-empty-panel"><Folders size={29} /><strong>尚未选择项目</strong><span>为当前对话授权一个项目文件夹后即可浏览。</span></div>
     const selectFile = (path: string) => {
       const matchingArtifact = detail.artifacts.find((artifact) => artifactProjectPath(artifact, detail.conversation.projectRoot!, projectFiles) === path)
       onOpenFile(path, matchingArtifact?.id ?? null)
@@ -686,7 +702,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
           : <div className="fox-file-tree-pane">
               <div className="fox-panel-search"><Search size={14} /><input value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} placeholder="搜索文件" />{fileSearch && <button type="button" aria-label="清除搜索" onClick={() => setFileSearch('')}><X size={12} /></button>}</div>
               <ScrollArea className="fox-file-tree">
-                {fileLoading ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取项目文件</div> : normalizedSearch ? <div className="fox-file-search-results">{visibleFiles.map((item) => <button type="button" key={item.path} onClick={() => selectFile(item.path)}><FileText size={14} /><span><strong>{item.name}</strong><small>{item.parent || detail.conversation.projectRoot}</small></span></button>)}{visibleFiles.length === 0 && <p>没有匹配的文件</p>}</div> : projectFileTree(projectFiles, detail.conversation.projectRoot.split(/[\\/]/).at(-1) || detail.conversation.projectRoot, '', selectFile)}
+                {fileLoading ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取项目文件</div> : normalizedSearch ? <div className="fox-file-search-results">{visibleFiles.map((item) => <button type="button" key={item.path} onClick={() => selectFile(item.path)}><FileText size={14} /><span><strong>{item.name}</strong><small>{item.parent || detail.conversation.projectRoot}</small></span></button>)}{visibleFiles.length === 0 && <p>没有匹配的文件</p>}</div> : <ProjectFileTree entries={projectFiles} workspaceName={detail.conversation.projectRoot.split(/[\\/]/).at(-1) || detail.conversation.projectRoot} selectedFile="" onSelect={selectFile} />}
               </ScrollArea>
               {fileError && <p className="fox-file-tree-error"><AlertTriangle size={14} />{fileError}</p>}
             </div>}
@@ -696,10 +712,10 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
   if (mode === 'knowledge') {
     const sources = runtimeProcess(detail?.runtimeEvents ?? []).sources
     const items = [
-      ...(detail?.knowledgeBindings ?? []).map((item) => ({ id: `binding:${item.knowledgeBaseId}`, title: item.knowledgeBaseName || item.knowledgeBaseId, detail: '已绑定到当前会话', kind: '知识库' })),
+      ...(detail?.knowledgeBindings ?? []).map((item) => ({ id: `binding:${item.knowledgeBaseId}`, title: item.knowledgeBaseName || item.knowledgeBaseId, detail: '已绑定到当前对话', kind: '资料库' })),
       ...sources.map((item) => ({ id: `source:${item.id}`, title: item.title, detail: item.excerpt || '本次回答引用的知识来源', kind: '引用' })),
     ].filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
-    if (!items.length) return <div className="fox-empty-panel"><BookOpen size={29} /><strong>当前会话没有知识来源</strong><span>从输入框的“+”绑定知识库，检索结果也会保留在这里。</span></div>
+    if (!items.length) return <div className="fox-empty-panel"><BookOpen size={29} /><strong>这段对话还没有引用资料</strong><span>从输入框的“+”绑定资料库，检索结果也会保留在这里。</span></div>
     return <ScrollArea className="fox-source-list">{items.map((item, index) => <button type="button" key={item.id}><span>{index + 1}</span><div><strong>{item.title}</strong><small>{item.kind} · {item.detail}</small></div></button>)}</ScrollArea>
   }
   if (mode === 'changes') {
@@ -710,7 +726,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
     const command = activeChange && isCommand ? commandOutput(activeChange) : null
     const activeExecution = activeChange ? toolExecutionStatus(activeChange) : null
     const linkedEvidence = activeChange ? (detail?.evidence ?? []).filter((evidence) => evidence.refKind === 'tool_call' && (evidence.refId === activeChange.id || evidence.refId === activeChange.runtimeToolCallId)) : []
-    if (!changeFiles.length) return <div className="fox-empty-panel"><FileEdit size={29} /><strong>当前会话没有文件更改或命令</strong><span>Fox 的写入、编辑和命令记录会显示在这里。</span></div>
+    if (!changeFiles.length) return <div className="fox-empty-panel"><FileEdit size={29} /><strong>这段对话还没有修改或命令记录</strong><span>Fox 的写入、编辑和命令记录会显示在这里。</span></div>
     return (
       <div className="fox-change-panel">
         <div className="fox-change-list">
@@ -738,12 +754,12 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
 }
 
 const rightItems: Array<[RightMode, string, ReactNode]> = [
-  ['knowledge', '知识库', <BookOpen size={16} />],
+  ['knowledge', '资料库', <BookOpen size={16} />],
   ['files', '文件', <Folders size={16} />],
   ['changes', '更改', <FileEdit size={16} />],
   ['activity', '运行详情', <Activity size={16} />],
   ['browser', '网页与网络', <Globe2 size={16} />],
-  ['agents', '子 Agent', <Bot size={16} />]
+  ['agents', '协作助手', <Bot size={16} />]
 ]
 
 /** The right-hand sidebar: opened pages (including one tab per open file), the
@@ -788,13 +804,13 @@ export function RightPanel({ mode, tabs, detail, activity, width, compact = fals
         </div>
         <div className="fox-context-tab-actions">
           <DropdownMenu>
-            <DropdownMenuTrigger asChild><button type="button" aria-label="打开侧边栏页面" title="打开侧边栏页面"><Plus size={14} /></button></DropdownMenuTrigger>
+            <DropdownMenuTrigger asChild><button type="button" aria-label="打开页面" title="打开页面"><Plus size={14} /></button></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="fox-context-add-menu">
               {rightItems.map(([id, label, icon]) => <DropdownMenuItem key={id} onSelect={() => onMode(id)}>{icon}<span>{label}</span></DropdownMenuItem>)}
             </DropdownMenuContent>
           </DropdownMenu>
           <button type="button" aria-label={maximized ? '还原右侧边栏' : '全屏显示右侧边栏'} title={maximized ? '还原' : '全屏'} onClick={onToggleMaximized}>{maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
-          <button type="button" className="is-sidebar-open" aria-label="关闭右侧边栏" title="关闭右侧边栏" onClick={onCollapse}><PanelRight size={14} /></button>
+          <button type="button" className="is-sidebar-open" aria-label="关闭面板" title="关闭面板" onClick={onCollapse}><PanelRight size={14} /></button>
         </div>
       </div>
       {mode === 'agents' && activeChildAgent && activeChildAgentRun

@@ -79,7 +79,7 @@ export function artifactSummaryLine(artifact: ArtifactRecord) {
   if (isPreviewArtifact(artifact)) return '预览'
   const published = artifact.artifactOrigin === 'project' && Boolean(artifact.delivery?.versionId && artifact.delivery?.sourceToolCallId)
   const base = published ? '已发布到项目'
-    : artifact.artifactOrigin === 'host_private' ? '中间产物 · 未发布' : '项目文件'
+    : artifact.artifactOrigin === 'host_private' ? '中间文件 · 未发布' : '项目文件'
   return warning ? `${base} · ${warning}` : base
 }
 

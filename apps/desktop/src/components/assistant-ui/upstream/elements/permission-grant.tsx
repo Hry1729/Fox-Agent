@@ -7,7 +7,7 @@ import { field, inkButton, mono, paper } from "./surfaces";
 import { useReceiptFocus } from "./receipt-focus";
 
 export type GrantScope = "once" | "conversation" | "session" | "always" | "denied";
-const scopeLabels: Record<GrantScope, string> = { once: "只允许这一次", conversation: "本次对话内允许", session: "本次会话", always: "始终允许", denied: "拒绝" };
+const scopeLabels: Record<GrantScope, string> = { once: "只允许这一次", conversation: "本对话内允许", session: "本次对话", always: "始终允许", denied: "拒绝" };
 
 export function PermissionGrant({
   capability,

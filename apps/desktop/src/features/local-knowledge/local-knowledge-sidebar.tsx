@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ChevronRight, Database, Files, Folder, FolderOpen, House, ListTodo, LoaderCircle, Orbit, Plus } from 'lucide-react'
+import { ChevronRight, Database, Folder, FolderOpen, LoaderCircle, Plus } from 'lucide-react'
+import { Folders, Home, Library, ListTodo, Orbit, Wallet } from '@/components/fox-ui/animated-icons'
+import { SidebarMotionItem } from '@/features/chat/shell/fox-sidebar-motion'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { NavigateWorkspace, WorkspaceView } from '@/features/workspace/types'
@@ -13,6 +15,7 @@ const knowledgeBaseViews: WorkspaceView[] = [
   'local-knowledge-documents',
   'local-knowledge-import',
   'local-knowledge-retrieval',
+  'local-knowledge-settings',
 ]
 
 type KnowledgeTreeNode = KnowledgeTreeFolder | KnowledgeTreeDocument
@@ -153,11 +156,11 @@ export function LocalKnowledgeSidebarNavigation({
   }
   const renderTree = (nodes: KnowledgeTreeNode[]): ReactNode => nodes.map((node) => {
     if (node.kind === 'document') {
-      return <button key={node.key} type="button" className={`fox-local-knowledge-tree-document ${activeDocumentId === node.document.id ? 'is-active' : ''}`} title={node.document.relativePath} onClick={() => navigate('local-knowledge-documents', node.document.knowledgeBaseId, { documentId: node.document.id })}><LocalFileTypeIcon extension={node.document.extension} /><span>{node.name}</span></button>
+      return <SidebarMotionItem key={node.key}><button type="button" className={`fox-local-knowledge-tree-document ${activeDocumentId === node.document.id ? 'is-active' : ''}`} aria-current={activeDocumentId === node.document.id ? 'page' : undefined} title={node.document.relativePath} onClick={() => navigate('local-knowledge-documents', node.document.knowledgeBaseId, { documentId: node.document.id })}><LocalFileTypeIcon extension={node.document.extension} /><span>{node.name}</span></button></SidebarMotionItem>
     }
     const expanded = expandedFolders.has(node.key)
     return <div className="fox-local-knowledge-tree-folder" key={node.key}>
-      <button type="button" className="fox-local-knowledge-tree-folder-row" aria-expanded={expanded} title={node.key} onClick={() => toggleFolder(node.key)}><ChevronRight className="fox-local-knowledge-tree-chevron" /><span className="fox-local-knowledge-tree-folder-icon">{expanded ? <FolderOpen /> : <Folder />}</span><span>{node.name}</span></button>
+      <SidebarMotionItem><button type="button" className="fox-local-knowledge-tree-folder-row" aria-expanded={expanded} title={node.key} onClick={() => toggleFolder(node.key)}><ChevronRight className="fox-local-knowledge-tree-chevron" /><span className="fox-local-knowledge-tree-folder-icon">{expanded ? <FolderOpen /> : <Folder />}</span><span>{node.name}</span></button></SidebarMotionItem>
       {expanded && <div className="fox-local-knowledge-tree-children">{renderTree(node.children)}</div>}
     </div>
   })
@@ -165,25 +168,28 @@ export function LocalKnowledgeSidebarNavigation({
   return (
     <>
       <div className="fox-sidebar-primary fox-local-knowledge-sidebar-primary">
-        <button className={`fox-sidebar-command ${activeView === 'local-knowledge-home' ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge-home')}><House size={18} /><span>最近</span></button>
-        <button className={`fox-sidebar-command ${activeView === 'local-files' ? 'is-active' : ''}`} onClick={() => navigate('local-files')}><Files size={18} /><span>本地文件</span></button>
-        <button className={`fox-sidebar-command ${knowledgeBaseActive ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge')}><Database size={18} /><span>本地知识库</span></button>
-        <button className={`fox-sidebar-command ${activeView === 'local-knowledge-models' ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge-models')}><Orbit size={18} /><span>向量模型</span></button>
-        <button className={`fox-sidebar-command ${globalJobsActive ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge-jobs')}><ListTodo size={18} /><span>任务中心</span></button>
+        {[
+          { view: 'local-knowledge-home' as const, label: '最近', icon: Home, active: activeView === 'local-knowledge-home' },
+          { view: 'local-files' as const, label: '本机文件', icon: Folders, active: activeView === 'local-files' },
+          { view: 'knowledge' as const, label: '远程资料库', icon: Library, active: activeView === 'knowledge' },
+          { view: 'local-knowledge' as const, label: '本机资料库', icon: Wallet, active: knowledgeBaseActive },
+          { view: 'local-knowledge-models' as const, label: '向量模型', icon: Orbit, active: activeView === 'local-knowledge-models' },
+          { view: 'local-knowledge-jobs' as const, label: '处理进度', icon: ListTodo, active: globalJobsActive },
+        ].map(({ view, label, icon: Icon, active }) => <SidebarMotionItem key={view}><button type="button" className={`fox-sidebar-command ${active ? 'is-active' : ''}`} aria-label={label} aria-current={active ? 'page' : undefined} onClick={() => navigate(view)}><Icon size={18} /><span>{label}</span></button></SidebarMotionItem>)}
       </div>
       {!collapsed && !hideLibrary && (
         <ScrollArea className="fox-sidebar-scroll">
           <section className="fox-sidebar-section fox-local-knowledge-sidebar-section">
-            <div className="fox-section-head"><span>我的知识库</span><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="新建知识库" onClick={() => { if (onCreate) onCreate(); else navigate('local-knowledge') }}><Plus size={14} /></Button></div>
+            <div className="fox-section-head"><span>我的资料库</span><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="新建资料库" onClick={() => { if (onCreate) onCreate(); else navigate('local-knowledge') }}><Plus size={14} /></Button></div>
             <div className="fox-local-knowledge-sidebar-list">
               {bases.map((base) => {
                 const active = activeEntityId === base.id && knowledgeBaseViews.includes(activeView)
                 return <div className={`fox-local-knowledge-sidebar-base ${active ? 'is-active' : ''}`} key={base.id}>
-                  <button type="button" className={`fox-sidebar-tree-row fox-local-knowledge-sidebar-row ${active ? 'is-active' : ''}`} title={base.name} onClick={() => navigate('local-knowledge-detail', base.id)}>
+                  <SidebarMotionItem><button type="button" className={`fox-sidebar-tree-row fox-local-knowledge-sidebar-row ${active ? 'is-active' : ''}`} aria-current={active ? 'page' : undefined} title={base.name} onClick={() => navigate('local-knowledge-detail', base.id)}>
                     <Database size={14} />
                     <span>{base.name}</span>
                     <small>{base.documentCount}</small>
-                  </button>
+                  </button></SidebarMotionItem>
                   {active && <div className="fox-local-knowledge-sidebar-documents" aria-label={`${base.name}文件列表`}>
                     {documentsLoading && <p><LoaderCircle className="animate-spin" />正在加载文件...</p>}
                     {!documentsLoading && renderTree(documentTree)}
@@ -192,8 +198,8 @@ export function LocalKnowledgeSidebarNavigation({
                   </div>}
                 </div>
               })}
-              {!error && bases.length === 0 && <p className="fox-project-empty">暂无本地知识库</p>}
-              {error && <p className="fox-project-empty">知识库列表暂不可用</p>}
+              {!error && bases.length === 0 && <p className="fox-project-empty">暂无本机资料库</p>}
+              {error && <p className="fox-project-empty">资料库列表暂不可用</p>}
             </div>
           </section>
         </ScrollArea>

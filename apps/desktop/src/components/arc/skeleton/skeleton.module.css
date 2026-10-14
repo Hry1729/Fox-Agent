@@ -1,0 +1,15 @@
+/* Source: https://uiarc.dev/r/skeleton.json */
+.root { display: flex; width: 100%; min-width: 0; align-items: flex-start; gap: 12px; }
+/* A calm, finite pulse: each block dims a beat after the one above it, then rests after about 20 seconds. */
+.avatar, .line { display: block; flex: 0 0 auto; border-radius: var(--fox-radius-control, 6px); background: color-mix(in oklab, var(--fox-border-strong) 38%, var(--card)); animation: skeleton-pulse 1.8s cubic-bezier(.65,0,.35,1) calc(var(--index, 0) * 90ms) 11 both; }
+.avatar { width: var(--fox-control-md, 32px); height: var(--fox-control-md, 32px); border-radius: 999px; }
+.lines { display: grid; flex: 1; gap: 8px; padding-top: 4px; }
+.line { width: 100%; height: 8px; }
+.line:first-child { width: 48%; height: 12px; }
+.line:last-child { width: 72%; }
+.frame { position: relative; display: flow-root; }
+@keyframes skeleton-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .52; } }
+@media (prefers-reduced-motion: reduce) { .avatar, .line { animation: none; } }
+
+.block { animation: skeleton-pulse 1.8s cubic-bezier(.65,0,.35,1) 11 both; }
+@media (prefers-reduced-motion: reduce) { .block { animation: none; } }

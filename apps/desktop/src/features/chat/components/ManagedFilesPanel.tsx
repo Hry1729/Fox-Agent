@@ -28,7 +28,7 @@ import { RestoreRequestIdentities, restoreActionKey } from './restore-request-id
 const KIND_COPY: Record<string, string> = {
   created: '新建',
   modified: '修改',
-  restored: '恢复',
+  restored: '恢复版本',
   // Content a restore overwrote that the registry did not know about (an edit
   // made outside any recorded task). It is preserved as its own version, so the
   // user can select and bring it back.
@@ -207,7 +207,7 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
         onClick={() => setOpen((value) => !value)}
       >
         <FileClock size={13} />
-        <span>文件版本恢复</span>
+        <span>文件版本</span>
         <span className="fox-managed-count">{groups.length}</span>
         {groups.some((group) => group.drifted) && (
           <AlertTriangle size={12} className="fox-managed-warn-icon" aria-label="有文件被外部修改" />
@@ -223,7 +223,7 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
               className="fox-managed-refresh"
               onClick={() => void load()}
               disabled={loading}
-              title="重新扫描"
+              title="重新检查"
             >
               {loading ? <LoaderCircle size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             </button>
@@ -262,7 +262,7 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
                         {formatTime(version.createdAt)}
                       </span>
                       {version.changeKind === 'restored' && version.restoredFromId && (
-                        <span className="fox-managed-source">来自先前版本</span>
+                        <span className="fox-managed-source">旧版恢复</span>
                       )}
                       <span className="fox-managed-version-actions">
                         {isCurrent ? (
@@ -286,7 +286,7 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
                               ) : (
                                 <RotateCcw size={12} />
                               )}
-                              {hint ? '仍要覆盖恢复' : '恢复'}
+                              {hint ? '覆盖恢复' : '恢复版本'}
                             </Button>
                           </>
                         )}

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>dbg</title>
+<style>body{margin:0;background:#efece5}svg{display:block;width:640px;height:640px}</style>
+</head>
+<body>
+<svg id="s" viewBox="0 0 720 720"></svg>
+<script src="src/math.js"></script>
+<script src="src/geo.js"></script>
+<script src="src/tables.js"></script>
+<script src="src/eyes.js"></script>
+<script src="src/fx.js"></script>
+<script src="src/motion.js"></script>
+<script src="src/fox.js"></script>
+<script>
+(function () {
+  /* hash 形如 "#shy" 或 "#shy+red"（+ 后是调试开关，避免污染状态名） */
+  const hash = location.hash ? location.hash.slice(1) : "shy";
+  const st = hash.split("+")[0] || "shy";
+  const flag = hash.split("+").slice(1).join("+");
+  const svg = document.getElementById("s");
+  const fox = new FoxAvatar(svg, { followPointer: false, autoTricks: false });
+  fox.setFollowPointer(false);
+  fox.setState(st, true);
+  /* 和 _emo.html 一样：无头环境 rAF 会饥饿，手动把表情推到终态 */
+  fox.morph.x = 1; fox.morph.t = 1; fox.morph.v = 0;
+  fox.blink.x = 1; fox.blink.t = 1;
+  for (let k = 0; k < 8; k++) fox._stepEyeFX(0.4);
+  fox.eyeScale.t = FOX_TABLES.BODY[st].eyeBoost * fox.fxBoost;
+  fox.eyeScale.x = fox.eyeScale.t;
+  /* 无头环境 rAF 会饥饿 → 手动推 10 帧，保证真的画过。
+     时间戳必须比"最后一帧 rAF"更晚，否则 dt 为负会把表情量算坏。 */
+  const tb = performance.now() + 500;
+  for (let k = 0; k < 10; k++) fox._tick(tb + k * 16);
+  /* 调试开关：hash 里带 "red" 就把白心染红 —— 一眼能看出它真实的形状与位置 */
+  if (flag.indexOf("red") >= 0 && fox.hlHeartEls) {
+    fox.hlHeartEls.forEach(function (h) { h.setAttribute("fill", "#e0245e"); });
+  }
+  /* 每帧把关键量写进 title，dump-dom 可直接读；同时钉住眨眼/wink
+     —— 无头截图很容易正好落在眨眼中间帧，那会把眼睛压扁一半，
+     量出来是假的"一大一小 / 形状不对"。 */
+  setInterval(function () {
+    fox.blinkQueue.length = 0;
+    fox.blinkUntil = Infinity;
+    fox.winkAt = -1e9;
+    fox.blink.x = 1; fox.blink.t = 1;
+    const eye = fox.eyeEls[0];
+    const bb = eye.getBBox();
+    const hh = fox.hlHeartEls && fox.hlHeartEls[0];
+    /* 白心 vs 眼形：都用 getBoundingClientRect（屏幕坐标，含全部祖先变换）
+       —— 判断白心有没有顶出眼形上/下沿，只能靠实测不能靠算。 */
+    let hinfo = "-";
+    if (hh) {
+      /* 形状自身 bbox（未应用自身 transform）—— 用来核对 HEART_D 的真实尺寸/几何中心 */
+      const sb = hh.getBBox();
+      hinfo = "shapeBB=" + sb.x.toFixed(2) + "," + sb.y.toFixed(2) + "," +
+        sb.width.toFixed(2) + "," + sb.height.toFixed(2);
+      if (hh.style.display !== "none") {
+        const a = hh.getBoundingClientRect();
+        const b = eye.getBoundingClientRect();
+        hinfo += " | h=" + a.height.toFixed(1) +
+          " topMargin=" + (a.top - b.top).toFixed(1) +
+          " botMargin=" + (b.bottom - a.bottom).toFixed(1) +
+          " tf=" + hh.getAttribute("transform");
+      }
+    }
+    const pad = fox.padCircle;
+    document.title =
+      "state=" + st +
+      " heart=" + fox.heartMix.toFixed(2) +
+      " sym=" + fox.symMix.toFixed(2) +
+      " fxBoost=" + fox.fxBoost.toFixed(2) +
+      " eyeScale=" + fox.eyeScale.x.toFixed(3) +
+      " blink=" + fox.blink.x.toFixed(3) +
+      " tf=" + eye.getAttribute("transform") +
+      " bbox=" + bb.x.toFixed(1) + "," + bb.y.toFixed(1) + "," + bb.width.toFixed(1) + "," + bb.height.toFixed(1) +
+      " eyeRect=" + (function () { const r = eye.getBoundingClientRect();
+        return r.left.toFixed(1) + "," + r.top.toFixed(1) + "," + r.width.toFixed(1) + "," + r.height.toFixed(1); })() +
+      " HEART[" + hinfo + "]" +
+      " pad=" + (pad ? pad.style.display + "/" + pad.style.opacity : "-") +
+      " eyeFrom=" + fox.eyeFrom + " eyeTo=" + fox.eyeTo + " morph=" + fox.morph.x.toFixed(2);
+  }, 120);
+})();
+</script>
+</body>
+</html>

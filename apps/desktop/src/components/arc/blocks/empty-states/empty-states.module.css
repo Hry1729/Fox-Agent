@@ -1,0 +1,34 @@
+/* Source: https://uiarc.dev/r/empty-states.json — Fox compact state adaptation. */
+.root { container-type: inline-size; width: 100%; color: var(--foreground); font: inherit; }
+.panel { display: flex; flex-direction: column; align-items: center; gap: 12px; width: 100%; max-width: 440px; margin-inline: auto; padding: 24px 16px; }
+.stage { width: min(100%, 180px); aspect-ratio: 320 / 216; }
+.art { display: block; width: 100%; height: 100%; overflow: visible; }
+/* Strokes stay 1.5px on screen at any size. Colors come from tones and cross over on CSS transitions while the geometry springs. */
+.shape { vector-effect: non-scaling-stroke; fill: none; stroke: none; stroke-width: 1.5px; stroke-linecap: round; stroke-linejoin: round; transition: fill 240ms cubic-bezier(.22,1,.36,1), stroke 240ms cubic-bezier(.22,1,.36,1); }
+.shape[data-tone="outline"] { fill: var(--card); stroke: var(--foreground); }
+.shape[data-tone="tuck"] { fill: var(--card); stroke: var(--fox-border-strong); }
+.shape[data-tone="slot"] { fill: var(--card); stroke: var(--fox-border-strong); }
+.shape[data-tone="query"] { fill: var(--muted-foreground); stroke: transparent; }
+.shape[data-tone="bar"] { fill: var(--fox-border-strong); stroke: transparent; }
+.shape[data-tone="back"] { fill: var(--card); stroke: var(--muted-foreground); }
+.shape[data-tone="shade"] { fill: var(--muted); stroke: var(--foreground); }
+.shape[data-tone="dot"] { fill: var(--foreground); stroke: transparent; }
+.shape[data-tone="ink"] { fill: var(--card); stroke: var(--foreground); }
+.shape[data-tone="muted"] { fill: var(--card); stroke: var(--muted-foreground); }
+.shape[data-tone="subtle"] { fill: var(--card); stroke: var(--fox-border-strong); }
+.shape[data-tone="accent"] { fill: var(--card); stroke: var(--foreground); }
+.shape[data-tone="success"] { fill: var(--card); stroke: var(--success); }
+.shape[data-tone="warning"] { fill: var(--card); stroke: var(--warning); }
+.shape:is([data-kind="stroke"], [data-kind="mark"])[data-tone] { fill: none; }
+
+
+.copy { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; width: 100%; text-align: center; }
+.customIcon { display: inline-grid; place-items: center; color: var(--muted-foreground); }
+.customIcon svg { width: 18px; height: 18px; }
+.root[data-variant="error"] .customIcon { color: var(--destructive); }
+.title { margin: 0; font-size: var(--fox-type-title, 16px); font-weight: 500; line-height: 1.5; text-wrap: balance; }
+.line { max-width: 42ch; color: var(--muted-foreground); font-size: var(--fox-type-meta, 13px); line-height: 1.6; overflow-wrap: anywhere; }
+.action { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; }
+.action :is(button, a):focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+@container (max-width: 300px) { .panel { padding: 16px 12px; gap: 8px; } .stage { width: 128px; } .title { font-size: var(--fox-type-body, 14px); } }
+@media (prefers-reduced-motion: reduce) { .shape { transition: none; } }

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, LogIn, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RefreshCw, RotateCcw, Search, Server, Sparkles, X } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Button } from '@/components/ui/button'
+import { FoxEmptyState } from '@/components/fox-ui/empty-state'
+import { SkeletonContent } from '@/components/ui/skeleton'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -24,7 +26,7 @@ const MAX_LOCAL_OPEN_BYTES = 500 * 1024 * 1024
 
 function asCard(item: KnowledgeBaseRecord, index: number): KnowledgeCardData {
   const progress = item.fileCount > 0 ? Math.round(item.processedCount / item.fileCount * 100) : item.status === 'active' ? 100 : 0
-  return { ...item, types: item.kbType || '知识库', progress, agents: 0, recent: item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : '来自知识库服务', tone: ['blue', 'violet', 'green', 'amber', 'gray'][index % 5] }
+  return { ...item, types: item.kbType || '资料库', progress, agents: 0, recent: item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : '来自资料库服务', tone: ['blue', 'violet', 'green', 'amber', 'gray'][index % 5] }
 }
 
 function contentText(value: unknown): string {
@@ -47,12 +49,12 @@ export function KnowledgeListPage({ sidebarCollapsed, onSidebar, navigate }: { s
   const [contentFilter, setContentFilter] = useState('all')
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const allCards = resource.items.map(asCard)
-  const typeOptions = Array.from(new Set(allCards.map((item) => item.kbType || '知识库')))
+  const typeOptions = Array.from(new Set(allCards.map((item) => item.kbType || '资料库')))
   const cards = allCards
     .filter((item) => !normalizedQuery || [item.name, item.description, item.kbType]
       .some((value) => value?.toLocaleLowerCase().includes(normalizedQuery)))
     .filter((item) => statusFilter === 'all' || (statusFilter === 'ready' ? item.progress >= 100 : statusFilter === 'processing' ? item.progress > 0 && item.progress < 100 : item.progress === 0))
-    .filter((item) => typeFilter === 'all' || (item.kbType || '知识库') === typeFilter)
+    .filter((item) => typeFilter === 'all' || (item.kbType || '资料库') === typeFilter)
     .filter((item) => contentFilter === 'all' || (contentFilter === 'populated' ? item.fileCount > 0 : item.fileCount === 0))
   const connected = yuxi.service?.lastStatus === 'connected'
   const openService = () => {
@@ -64,21 +66,22 @@ export function KnowledgeListPage({ sidebarCollapsed, onSidebar, navigate }: { s
     navigate('login')
   }
   return (
-    <WorkspacePage title="远程知识库" subtitle="浏览你有权限访问的资料" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <WorkspacePage title="远程资料库" subtitle="浏览你有权限访问的资料" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
       <section className="fox-page-content fox-knowledge-list-page">
-        <div className="fox-page-intro fox-list-page-intro"><h1>远程知识库</h1><label className="fox-list-page-search"><Search size={14} /><Input aria-label="搜索知识库" placeholder="搜索知识库..." value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>
+        <div className="fox-page-intro fox-list-page-intro"><h1>远程资料库</h1><label className="fox-list-page-search"><Search size={14} /><Input aria-label="搜索资料库" placeholder="搜索资料库" value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>
         <div className="fox-page-toolbar fox-agent-toolbar fox-knowledge-toolbar">
-          <Select value={statusFilter} onValueChange={setStatusFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="ready">已就绪</SelectItem><SelectItem value="processing">处理中</SelectItem><SelectItem value="pending">待处理</SelectItem></SelectContent></Select>
+          <Select value={statusFilter} onValueChange={setStatusFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="ready">可使用</SelectItem><SelectItem value="processing">处理中</SelectItem><SelectItem value="pending">待处理</SelectItem></SelectContent></Select>
           <Select value={typeFilter} onValueChange={setTypeFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部类型</SelectItem>{typeOptions.map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select>
-          <Select value={contentFilter} onValueChange={setContentFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部内容</SelectItem><SelectItem value="populated">包含文件</SelectItem><SelectItem value="empty">空知识库</SelectItem></SelectContent></Select>
+          <Select value={contentFilter} onValueChange={setContentFilter}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部内容</SelectItem><SelectItem value="populated">包含文件</SelectItem><SelectItem value="empty">空资料库</SelectItem></SelectContent></Select>
           <span className="fox-agent-result-count">{cards.length} 个结果</span>
           <Button variant="outline" size="sm" className="fox-agent-refresh" title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}><RefreshCw /></Button>
         </div>
-        {resource.error && <p className="fox-page-error">{resource.error}</p>}
-        {!yuxi.loading && !yuxi.service && <div className="fox-page-empty-state"><Server /><span><b>尚未配置知识库服务</b><small>先连接知识库服务，再登录账户访问资料。</small></span><Button onClick={openService}>配置服务</Button></div>}
-        {!yuxi.loading && yuxi.service && !yuxiUser.loading && !yuxiUser.user && <div className="fox-page-empty-state"><LogIn /><span><b>{connected ? '知识库服务已连接，账户尚未登录' : '需要登录知识库'}</b><small>{yuxiUser.error ?? '浏览器中的登录态不会与 Fox 自动共享，请在 Fox 中登录一次。'}</small></span><Button onClick={openLogin}>知识库登录</Button></div>}
-        {!resource.loading && yuxiUser.user && resource.items.length === 0 && <p className="fox-page-empty">当前账户暂无可访问的知识库。</p>}
-        {!resource.loading && yuxiUser.user && resource.items.length > 0 && cards.length === 0 && <p className="fox-page-empty">没有匹配“{query.trim()}”的知识库。</p>}
+        {(yuxi.loading || yuxiUser.loading || (yuxiUser.user && resource.loading && resource.items.length === 0)) && <SkeletonContent label="正在读取远程资料库…" lines={4} avatar />}
+        {resource.error && yuxiUser.user && <FoxEmptyState variant="error" title="远程资料库加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void resource.refresh()}>重试</Button>} />}
+        {!yuxi.loading && !yuxi.service && <FoxEmptyState icon={<Server />} title="先连接资料库服务，再登录账户" description="先连接资料库服务，再登录账户访问资料。" action={<Button onClick={openService}>配置服务</Button>} />}
+        {!yuxi.loading && yuxi.service && !yuxiUser.loading && !yuxiUser.user && <FoxEmptyState variant={yuxiUser.error ? 'error' : 'empty'} icon={<LogIn />} title={connected ? '资料库服务已连接，账户尚未登录' : '需要登录资料库'} description={yuxiUser.error ?? '浏览器中的登录态不会与 Fox 自动共享，请在 Fox 中登录一次。'} action={<Button onClick={openLogin}>登录账户</Button>} />}
+        {!resource.loading && !resource.error && yuxiUser.user && resource.items.length === 0 && <FoxEmptyState title="当前账户没有可查看的资料库" description="请确认账户权限，或在资料库服务中添加资料。" />}
+        {!resource.loading && !resource.error && yuxiUser.user && resource.items.length > 0 && cards.length === 0 && <FoxEmptyState variant="search" title="没有符合当前筛选条件的资料库" description={query.trim() ? `没有匹配“${query.trim()}”的资料库。` : '调整状态、类型或内容筛选后再试。'} action={<Button variant="outline" size="sm" onClick={() => { setQuery(''); setStatusFilter('all'); setTypeFilter('all'); setContentFilter('all') }}>清空筛选</Button>} />}
         <div className="fox-entity-grid fox-shadcn-entity-grid fox-knowledge-grid">{cards.map((knowledge) => <KnowledgeCard key={knowledge.id} knowledge={knowledge} onOpen={() => navigate('knowledge-detail', knowledge.id)} />)}</div>
       </section>
     </WorkspacePage>
@@ -170,26 +173,26 @@ export function KnowledgeDetailPage({ sidebarCollapsed, onSidebar, navigate, onA
   return (
     <WorkspacePage
       className="fox-knowledge-detail-page"
-      title={selectedDocument?.name ?? database?.name ?? '知识库'}
+      title={selectedDocument?.name ?? database?.name ?? '资料库'}
       sidebarCollapsed={sidebarCollapsed}
       onSidebar={onSidebar}
       onBack={() => navigate('knowledge')}
       actions={<>
         <div className="fox-knowledge-document-heading">
-          <strong title={selectedDocument?.name ?? database?.name ?? '知识库'}>{selectedDocument?.name ?? database?.name ?? '知识库'}</strong>
-          {selectedDocument && <DropdownMenu><DropdownMenuTrigger asChild><Button className="fox-document-title-more" variant="ghost" size="icon" aria-label="更多文件操作"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="start" className="fox-document-actions-menu"><DropdownMenuItem onSelect={reloadSelectedDocumentPreview}><RotateCcw />重新加载预览</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void copySelectedDocumentInfo()}><Copy />复制文件信息</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+          <strong title={selectedDocument?.name ?? database?.name ?? '资料库'}>{selectedDocument?.name ?? database?.name ?? '资料库'}</strong>
+          {selectedDocument && <DropdownMenu><DropdownMenuTrigger asChild><Button className="fox-document-title-more" variant="ghost" size="icon" aria-label="更多文件操作"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="start" className="fox-document-actions-menu"><DropdownMenuItem onSelect={reloadSelectedDocumentPreview}><RotateCcw />刷新预览</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void copySelectedDocumentInfo()}><Copy />复制文件信息</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
         </div>
-        <Button size="sm" disabled={!database} onClick={() => database && onAskKnowledge(database)}><MessageSquare size={14} />使用知识助手提问</Button>
+        <Button size="sm" disabled={!database} onClick={() => database && onAskKnowledge(database)}><MessageSquare size={14} />就此资料提问</Button>
         {selectedDocument && <div className="fox-document-action-buttons">
           <Button variant="outline" size="sm" disabled={openingLocally} onClick={() => void openSelectedDocumentLocally()}>{openingLocally ? <LoaderCircle className="animate-spin" /> : <MonitorUp />}本机打开</Button>
-          {resource.downloadingId === selectedDocument.id ? <><span className="fox-document-download-progress">{formatDownloadProgress(resource.downloadProgress)}</span><Button variant="outline" size="sm" onClick={() => void resource.cancelDownload()}><X />取消</Button></> : <Button variant="outline" size="sm" onClick={() => void downloadSelectedDocument()}><Download />下载原文件</Button>}
+          {resource.downloadingId === selectedDocument.id ? <><span className="fox-document-download-progress">{formatDownloadProgress(resource.downloadProgress)}</span><Button variant="outline" size="sm" onClick={() => void resource.cancelDownload()}><X />取消</Button></> : <Button variant="outline" size="sm" onClick={() => void downloadSelectedDocument()}><Download />下载原件</Button>}
         </div>}
       </>}
     >
-      {resource.error && <p className="fox-page-error">{resource.error}</p>}
+      {resource.error && <FoxEmptyState variant="error" title="资料加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void (selectedDocument ? resource.openDocument(selectedDocument.id) : resource.refresh())}>重试</Button>} />}
       <div className="fox-library-layout is-document-only">
         <main className="fox-document-view">
-          {selectedDocument ? <article className="fox-document-detail"><div>
+          {resource.loading && !database ? <SkeletonContent label="正在读取资料库…" lines={5} avatar /> : selectedDocument ? <article className="fox-document-detail"><div>
             <div className="fox-document-info-card">
               <div className="fox-document-meta-strip is-inline">
                 <span><small>类型</small><b title={documentKind(selectedDocument)}>{documentKind(selectedDocument)}</b></span>
@@ -199,7 +202,7 @@ export function KnowledgeDetailPage({ sidebarCollapsed, onSidebar, navigate, onA
               </div>
             </div>
             <KnowledgeFileViewer key={`${selectedDocument.id}:${previewRevision}`} knowledgeBaseId={knowledgeId ?? ''} document={selectedDocument} parsedContent={body} parsedContentLoading={resource.documentId === selectedDocument.id && resource.documentLoading} sourceLocator={sourceLocator} />
-          </div></article> : <div className="fox-document-placeholder"><FolderOpen /><b>选择文件查看详情</b><p>{database?.description || '浏览知识库中已处理的文档内容。'}</p></div>}
+          </div></article> : !resource.error && <FoxEmptyState icon={<FolderOpen />} title={database ? '资料库暂无文件' : '没有选择资料库'} description={database?.description || '请从远程资料库列表进入有权限访问的资料库。'} action={<Button variant="outline" size="sm" onClick={() => navigate('knowledge')}>返回资料库</Button>} />}
         </main>
       </div>
     </WorkspacePage>
@@ -229,27 +232,29 @@ export function KnowledgeGraphPage({ sidebarCollapsed, onSidebar, navigate, know
     void resource.loadGraphMetadata()
   }
   return (
-    <WorkspacePage className="fox-knowledge-graph-page" title="知识图谱" subtitle={`${resource.detail?.database.name ?? '知识图谱'} · 探索实体与文档之间的关系`} sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('knowledge-detail', knowledgeId ?? undefined)} actions={<Button variant="outline" size="sm" disabled={resource.graphLoading} onClick={() => load()}><RotateCcw size={14} />{resource.graphLoading ? '加载中' : '刷新图谱'}</Button>}>
+    <WorkspacePage className="fox-knowledge-graph-page" title="关系图" subtitle={`${resource.detail?.database.name ?? '关系图'} · 探索实体与文档之间的关系`} sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('knowledge-detail', knowledgeId ?? undefined)} actions={<Button variant="outline" size="sm" disabled={resource.graphLoading} onClick={() => load()}><RotateCcw size={14} />{resource.graphLoading ? '加载中' : '刷新图谱'}</Button>}>
       <div className="fox-graph-layout">
         <div className="fox-graph-toolbar">
-          <label><Search size={14} /><Input aria-label="搜索节点" placeholder="搜索实体、概念或文档" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') load() }} /></label>
-          <Select value={selectedType} onValueChange={(value) => { setSelectedType(value); setSelectedId(null) }}><SelectTrigger aria-label="实体类型"><SelectValue /></SelectTrigger><SelectContent>{['全部', ...labels].map((label) => <SelectItem key={label} value={label}>{label}</SelectItem>)}</SelectContent></Select>
+          <label><Search size={14} /><Input aria-label="搜索条目" placeholder="搜索实体、概念或文档" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') load() }} /></label>
+          <Select value={selectedType} onValueChange={(value) => { setSelectedType(value); setSelectedId(null) }}><SelectTrigger aria-label="类别"><SelectValue /></SelectTrigger><SelectContent>{['全部', ...labels].map((label) => <SelectItem key={label} value={label}>{label}</SelectItem>)}</SelectContent></Select>
           <Select value={String(depth)} onValueChange={(value) => setDepth(Number(value))}><SelectTrigger aria-label="查询深度"><SelectValue /></SelectTrigger><SelectContent>{[1, 2, 3].map((value) => <SelectItem key={value} value={String(value)}>深度 {value}</SelectItem>)}</SelectContent></Select>
-          <Select value={String(maxNodes)} onValueChange={(value) => setMaxNodes(Number(value))}><SelectTrigger aria-label="节点上限"><SelectValue /></SelectTrigger><SelectContent>{[50, 100, 200].map((value) => <SelectItem key={value} value={String(value)}>最多 {value} 个节点</SelectItem>)}</SelectContent></Select>
+          <Select value={String(maxNodes)} onValueChange={(value) => setMaxNodes(Number(value))}><SelectTrigger aria-label="条目上限"><SelectValue /></SelectTrigger><SelectContent>{[50, 100, 200].map((value) => <SelectItem key={value} value={String(value)}>最多 {value} 个节点</SelectItem>)}</SelectContent></Select>
           <Button size="sm" onClick={() => load()} disabled={resource.graphLoading}><Search />查询</Button>
-          <div className="fox-graph-toolbar-stats"><span><b>{graph.nodes.length}</b> 节点</span><span><b>{graph.edges.length}</b> 关系</span></div>
+          <div className="fox-graph-toolbar-stats"><span><b>{graph.nodes.length}</b> 条目</span><span><b>{graph.edges.length}</b> 关系</span></div>
         </div>
         <div className="fox-graph-workspace">
         <main className="fox-graph-canvas">
-          <div className="fox-graph-canvas-head"><span><Sparkles />关系画布</span><small>{selected ? `已选择 ${selected.label}` : '单击查看详情，双击展开邻居'}</small></div>
-          <div className="fox-graph-tools"><Button size="icon" variant="secondary" title="缩小" onClick={() => void canvasRef.current?.zoomBy(-.12)}><Minus /></Button><span>{Math.round(zoom * 100)}%</span><Button size="icon" variant="secondary" title="放大" onClick={() => void canvasRef.current?.zoomBy(.12)}><Plus /></Button><Button size="icon" variant="secondary" title="适应画布" onClick={() => void canvasRef.current?.fitView()}><Maximize2 /></Button></div>
+          <div className="fox-graph-canvas-head"><span><Sparkles />关系画布</span><small>{selected ? `已选择 ${selected.label}` : '单击查看详情，双击展开关联'}</small></div>
+          <div className="fox-graph-tools"><Button size="icon" variant="secondary" title="缩小" onClick={() => void canvasRef.current?.zoomBy(-.12)}><Minus /></Button><span>{Math.round(zoom * 100)}%</span><Button size="icon" variant="secondary" title="放大" onClick={() => void canvasRef.current?.zoomBy(.12)}><Plus /></Button><Button size="icon" variant="secondary" title="显示全图" onClick={() => void canvasRef.current?.fitView()}><Maximize2 /></Button></div>
           <KnowledgeGraphCanvas ref={canvasRef} nodes={graph.nodes} edges={graph.edges} selectedId={selectedId} onSelect={setSelectedId} onExpand={(node) => { setQuery(node.label); load(node.label) }} onZoomChange={setZoom} />
-          {graph.nodes.length === 0 && <p className="fox-page-empty fox-graph-empty-state">{resource.graphLoading ? '正在加载知识图谱...' : '当前知识库暂无可浏览图谱，或图谱服务尚未完成构建。'}</p>}
+          {graph.nodes.length === 0 && (resource.graphLoading
+            ? <SkeletonContent className="fox-graph-empty-state" label="正在加载关系图…" lines={4} />
+            : <FoxEmptyState className="fox-graph-empty-state" variant={resource.error ? 'error' : query.trim() || selectedType !== '全部' ? 'search' : 'empty'} title={resource.error ? '关系图加载失败' : query.trim() || selectedType !== '全部' ? '没有匹配的关系图条目' : '资料库暂无可浏览图谱'} description={resource.error ?? '调整查询条件，或等待图谱服务完成构建。'} action={<Button variant="outline" size="sm" onClick={() => load()}>重新查询</Button>} />)}
         </main>
         <aside className="fox-graph-inspector">
-          <div><span className="fox-document-icon">{selected?.type === 'Chunk' ? <FileText /> : <Bot />}</span><p><small>{selected ? selected.type : '知识图谱'}</small><b>{selected?.label ?? resource.detail?.database.name}</b></p></div>
-          <p>{selected ? '查看节点属性、关联关系与来源文档。' : resource.detail?.database.description || '从画布选择一个节点，开始探索知识之间的联系。'}</p>
-          {selected ? <><dl>{Object.entries(selected.properties).slice(0, 8).map(([key, value]) => <div key={key}><dt>{key}</dt><dd title={String(value)}>{formatGraphProperty(value)}</dd></div>)}</dl><section className="fox-graph-relations"><header><b>关联关系</b><span>{selectedRelations.length}</span></header>{selectedRelations.slice(0, 6).map((edge) => { const neighborId = edge.source === selected.id ? edge.target : edge.source; const neighbor = graph.nodes.find((node) => node.id === neighborId); return <button key={edge.id} onClick={() => setSelectedId(neighborId)}><Link2 /><span><b>{edge.label || '关联'}</b><small>{neighbor?.label ?? neighborId}</small></span><ChevronRight /></button> })}{selectedRelations.length === 0 && <small>当前子图中暂无关系</small>}</section><div className="fox-graph-inspector-actions"><Button size="sm" variant="outline" onClick={() => { setQuery(selected.label); load(selected.label) }}><Network />展开邻居</Button>{sourceDocumentId && <Button size="sm" onClick={() => navigate('knowledge-detail', knowledgeId ?? undefined, { documentId: sourceDocumentId })}><FileText />查看来源</Button>}</div></> : <><div className="fox-graph-overview"><span><Network /><b>{stats.nodes}</b><small>全部节点</small></span><span><Link2 /><b>{stats.edges}</b><small>全部关系</small></span><span><ListTree /><b>{labels.length}</b><small>实体类型</small></span></div><section className="fox-graph-guide"><b>如何探索</b><p>搜索关键词加载相关子图，单击节点查看详情，双击节点继续展开上下游关系。</p></section></>}
+          <div><span className="fox-document-icon">{selected?.type === 'Chunk' ? <FileText /> : <Bot />}</span><p><small>{selected ? selected.type : '关系图'}</small><b>{selected?.label ?? resource.detail?.database.name}</b></p></div>
+          <p>{selected ? '查看条目属性、关联关系与来源文档。' : resource.detail?.database.description || '从画布选择一个条目，开始探索资料之间的联系。'}</p>
+          {selected ? <><dl>{Object.entries(selected.properties).slice(0, 8).map(([key, value]) => <div key={key}><dt>{key}</dt><dd title={String(value)}>{formatGraphProperty(value)}</dd></div>)}</dl><section className="fox-graph-relations"><header><b>关联关系</b><span>{selectedRelations.length}</span></header>{selectedRelations.slice(0, 6).map((edge) => { const neighborId = edge.source === selected.id ? edge.target : edge.source; const neighbor = graph.nodes.find((node) => node.id === neighborId); return <button key={edge.id} onClick={() => setSelectedId(neighborId)}><Link2 /><span><b>{edge.label || '关联'}</b><small>{neighbor?.label ?? neighborId}</small></span><ChevronRight /></button> })}{selectedRelations.length === 0 && <small>当前子图中暂无关系</small>}</section><div className="fox-graph-inspector-actions"><Button size="sm" variant="outline" onClick={() => { setQuery(selected.label); load(selected.label) }}><Network />展开关联</Button>{sourceDocumentId && <Button size="sm" onClick={() => navigate('knowledge-detail', knowledgeId ?? undefined, { documentId: sourceDocumentId })}><FileText />查看来源</Button>}</div></> : <><div className="fox-graph-overview"><span><Network /><b>{stats.nodes}</b><small>全部节点</small></span><span><Link2 /><b>{stats.edges}</b><small>全部关系</small></span><span><ListTree /><b>{labels.length}</b><small>类别</small></span></div><section className="fox-graph-guide"><b>如何探索</b><p>搜索关键词加载相关子图，单击节点查看详情，双击节点继续展开上下游关系。</p></section></>}
         </aside>
         </div>
       </div>

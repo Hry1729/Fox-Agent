@@ -128,7 +128,7 @@ export function modelWaitingTitle(waiting: ModelWaitingFact): string {
 }
 
 const compactionCategories: Record<string, string> = {
-  provider_unavailable: '模型服务不可用', invalid_result: '压缩结果无效', cancelled: '压缩已取消',
+  provider_unavailable: '模型服务不可用', invalid_result: '精简结果无效', cancelled: '精简已取消',
   transport_outcome_unknown: '传输结果未知', unknown: '原因类别未知',
   length: '响应达到长度上限', invalid_tool_arguments: '工具参数无效', truncated_tool_proposal: '工具提案不完整',
   protocol_invalid: '响应协议无效', stream_interrupted: '模型响应流中断', worker_exception: '模型请求处理异常',
@@ -179,7 +179,7 @@ const writeFailureCopy: Record<string, FailureCopy> = {
 const localFailureCopy: Record<string, FailureCopy> = {
   'tool.read_only_input': { summary: '这个文件是只读材料', hint: '请改为读取它，或把结果另存到别的文件' },
   'tool.permission_denied': { summary: '当前权限不允许这次操作', hint: '如需继续，请调整权限后重试' },
-  'kernel.policy_denied': { summary: '本次操作没有得到授权', hint: '如需继续，请在允许的范围内重试' },
+  'kernel.policy_denied': { summary: '本次操作未获批准', hint: '如需继续，请在允许的范围内重试' },
   'tool.path_denied': { summary: '这个位置不允许访问', hint: '请换一个位置' },
   'tool.file_conflict': { summary: '文件已被修改', hint: '请重新读取后再保存' },
   'tool.invalid_input': { summary: '调用内容不符合要求', hint: '请检查后重试' },
@@ -211,7 +211,7 @@ const localFailureCopy: Record<string, FailureCopy> = {
 const remoteFailureCopy: Record<string, FailureCopy> = {
   'mcp.timed_out': { summary: '连接超时', hint: '请重试' },
   'mcp.connection_unavailable': { summary: '连接器暂时不可用', hint: '请稍后重试' },
-  'mcp.configuration_changed': { summary: '连接器配置已变化', hint: '请重新连接后再试' },
+  'mcp.configuration_changed': { summary: '连接器设置已变化', hint: '请重新连接后再试' },
   'mcp.remote_failure': { summary: '连接器调用未成功', hint: '请重试' },
 }
 
@@ -295,7 +295,7 @@ export function toolFailurePresentation(tool: string, result: unknown): ToolFail
 
 /** A planned retry is not an executed retry; a later dispatch is separate evidence. */
 export function runtimeStatusNotice(item: RunEventRecord, events: readonly RunEventRecord[]): string | null {
-  if (item.eventType === 'run.retrying') return '已安排重试'
+  if (item.eventType === 'run.retrying') return '等待重试'
   if (item.eventType === 'run.retry.completed') return '重试已结束；结果以运行和工具记录为准'
   if (item.eventType === 'run.phase' && item.event.phase === 'request_sent'
     && events.some(previous => previous.runId === item.runId && previous.seq < item.seq && previous.eventType === 'run.retrying')) return '模型请求已发送'

@@ -117,7 +117,7 @@ describe('reply file results', () => {
       ...artifact('deliverable', 'deliverable', 'metrics.csv'),
       delivery: {
         versionId: 'version-2', versionNo: 1, sourceToolCallId: 'call-2', toolName: 'write_file',
-        verificationStatus: 'failed', summary: '交付核验失败：列名与契约不一致（metric,key,value）',
+        verificationStatus: 'failed', summary: '逐项核对失败：列名与契约不一致（metric,key,value）',
         targetPath: 'metrics.csv',
       },
     }

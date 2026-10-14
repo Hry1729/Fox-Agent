@@ -11,7 +11,7 @@ export interface ManagementReturnRoutes {
   knowledge: WorkspaceReturnRoute
 }
 
-export type LocalKnowledgeRouteView = 'home' | 'files' | 'list' | 'detail' | 'documents' | 'import' | 'jobs' | 'models' | 'retrieval'
+export type LocalKnowledgeRouteView = 'home' | 'files' | 'list' | 'detail' | 'documents' | 'import' | 'jobs' | 'models' | 'retrieval' | 'settings'
 
 const localKnowledgeViews: Partial<Record<WorkspaceView, LocalKnowledgeRouteView>> = {
   'local-knowledge-home': 'home',
@@ -23,6 +23,7 @@ const localKnowledgeViews: Partial<Record<WorkspaceView, LocalKnowledgeRouteView
   'local-knowledge-jobs': 'jobs',
   'local-knowledge-models': 'models',
   'local-knowledge-retrieval': 'retrieval',
+  'local-knowledge-settings': 'settings',
 }
 
 const workspaceViewsForLocalKnowledge: Record<LocalKnowledgeRouteView, WorkspaceView> = {
@@ -35,6 +36,7 @@ const workspaceViewsForLocalKnowledge: Record<LocalKnowledgeRouteView, Workspace
   jobs: 'local-knowledge-jobs',
   models: 'local-knowledge-models',
   retrieval: 'local-knowledge-retrieval',
+  settings: 'local-knowledge-settings',
 }
 
 export function localKnowledgeViewForWorkspace(view: WorkspaceView): LocalKnowledgeRouteView | null {
@@ -52,6 +54,11 @@ export function localKnowledgeBackRoute(view: WorkspaceView, knowledgeBaseId?: s
   return { view: 'local-knowledge-detail', entityId: knowledgeBaseId ?? undefined }
 }
 
+export function remoteKnowledgeBackRoute(view: WorkspaceView, knowledgeBaseId?: string | null): { view: WorkspaceView; entityId?: string } {
+  if (view === 'knowledge-graph' && knowledgeBaseId) return { view: 'knowledge-detail', entityId: knowledgeBaseId }
+  return { view: 'knowledge' }
+}
+
 export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'settings',
   'onboarding',
@@ -60,6 +67,7 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'settings-yuxi',
   'settings-projects',
   'settings-conversation',
+  'settings-shortcuts',
   'settings-usage',
   'settings-extensions',
   'settings-about',
@@ -86,6 +94,7 @@ export function managementSection(view: WorkspaceView): 'settings' | 'knowledge'
     || view === 'local-knowledge-jobs'
     || view === 'local-knowledge-models'
     || view === 'local-knowledge-retrieval'
+    || view === 'local-knowledge-settings'
   ) return 'knowledge'
   return null
 }

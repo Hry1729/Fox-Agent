@@ -80,7 +80,7 @@ export function RealProfilingController() {
       </div>
       <div style={status}>
         {recording
-          ? '● 采集中：在 App 内进行会话切换 / 流式回答 / 滚动，然后停止。'
+          ? '● 采集中：在 App 内进行对话切换 / 流式回答 / 滚动，然后停止。'
           : last
             ? `上次：${last.scenarioRunId} commits=${last.renderCommitCount} overFrames=${last.frames.overBudgetFrames} longTasks=${last.longTasks.count} settle=${last.settle.status}`
             : '空闲。开始后操作真实 App，再停止并导出。'}

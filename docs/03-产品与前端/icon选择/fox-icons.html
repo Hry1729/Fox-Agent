@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fox 图标总览</title>
+<style>
+  :root {
+    color-scheme: light;
+    --paper: #f4f1ea;
+    --paper-raise: #faf8f3;
+    --ink: #26241f;
+    --ink-soft: #5c574d;
+    --ink-faint: #a09a8d;
+    --rule: #ded8ca;
+    --dot: #ddd7c8;
+    --accent: #1f5fd0;
+    --accent-soft: #e8edf7;
+    --sans: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    color: var(--ink);
+    background-color: var(--paper);
+    background-image: radial-gradient(var(--dot) 0.8px, transparent 0.8px);
+    background-size: 18px 18px;
+    background-position: -1px -1px;
+    line-height: 1.5;
+  }
+
+  .shell { max-width: 1180px; margin: 0 auto; padding: 0 24px 96px; }
+
+  /* ---------- header ---------- */
+  header { padding: 56px 0 22px; }
+
+  h1 {
+    margin: 0;
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+  }
+
+  .lede {
+    margin: 8px 0 0;
+    font-size: 14.5px;
+    color: var(--ink-soft);
+    max-width: 62ch;
+  }
+
+  .lede b { font-weight: 600; color: var(--ink); }
+
+  /* ---------- controls ---------- */
+  .controls {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 14px 0;
+    margin-bottom: 20px;
+    background: linear-gradient(var(--paper) 72%, transparent);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .search {
+    position: relative;
+    flex: 1 1 260px;
+    min-width: 210px;
+  }
+
+  .search svg {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 15px; height: 15px;
+    stroke: var(--ink-faint);
+    fill: none;
+    stroke-width: 2;
+    pointer-events: none;
+  }
+
+  .search input {
+    width: 100%;
+    font: inherit;
+    font-size: 14px;
+    color: var(--ink);
+    padding: 9px 34px 9px 35px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--paper-raise);
+    outline: none;
+  }
+
+  .search input::placeholder { color: var(--ink-faint); }
+
+  .search input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .clear {
+    position: absolute;
+    right: 7px; top: 50%;
+    transform: translateY(-50%);
+    width: 22px; height: 22px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    cursor: pointer;
+    color: var(--ink-faint);
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  .clear:hover { background: var(--rule); color: var(--ink); }
+  .search.filled .clear { display: flex; }
+
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--paper-raise);
+    overflow: hidden;
+  }
+
+  .seg button {
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 13px;
+    border: 0;
+    background: none;
+    color: var(--ink-soft);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .seg button + button { border-left: 1px solid var(--rule); }
+  .seg button:hover { color: var(--ink); background: #f0ece2; }
+
+  .seg button[aria-pressed="true"] {
+    background: var(--ink);
+    color: var(--paper-raise);
+  }
+
+  /* ---------- section ---------- */
+  section { margin-bottom: 38px; }
+
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding-bottom: 9px;
+    margin-bottom: 1px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .sec-head h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+
+  .sec-head p {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+
+  .sec-head code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- grid ---------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-top: 0;
+    border-radius: 0 0 10px 10px;
+    overflow: hidden;
+  }
+
+  .tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 13px;
+    padding: 26px 10px 17px;
+    background: var(--paper);
+    border: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    text-align: center;
+    transition: background-color 130ms ease;
+  }
+
+  .tile:hover { background: var(--paper-raise); }
+
+  .tile:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    z-index: 2;
+  }
+
+  .tile .glyph {
+    width: 30px; height: 30px;
+    stroke: var(--ink);
+    stroke-width: 1.6;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    display: block;
+    transition: stroke 130ms ease, transform 130ms ease;
+  }
+
+  .tile:hover .glyph { stroke: var(--accent); transform: scale(1.08); }
+
+  .tile .label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.055em;
+    color: var(--ink-soft);
+    word-break: break-all;
+    line-height: 1.35;
+  }
+
+  .tile .sub {
+    display: block;
+    margin-top: 3px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    color: var(--ink-faint);
+    word-break: break-all;
+  }
+
+  .tile .badge {
+    position: absolute;
+    top: 7px; right: 7px;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .tile.has-anim .glyph::after { content: none; }
+
+  /* small ring on lucide tiles that also ship as an animated icon */
+  .tile[data-anim="1"]::after {
+    content: "";
+    position: absolute;
+    inset: 6px;
+    border-radius: 7px;
+    border: 1px dashed var(--rule);
+    pointer-events: none;
+  }
+
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    flex-wrap: wrap;
+    margin: 0 0 22px;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+
+  .legend i {
+    position: relative;
+    width: 20px; height: 15px;
+    border-radius: 4px;
+    border: 1px solid var(--rule);
+    background: var(--paper);
+    display: inline-block;
+    flex: none;
+  }
+
+  .legend i.dashed::after {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    border-radius: 2px;
+    border: 1px dashed var(--rule);
+  }
+
+  .legend i.dot::after {
+    content: "";
+    position: absolute;
+    top: 2px; right: 2px;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+
+  /* ---------- misc ---------- */
+  .empty {
+    padding: 72px 20px;
+    text-align: center;
+    color: var(--ink-soft);
+    font-size: 14.5px;
+  }
+
+  footer {
+    margin-top: 40px;
+    padding-top: 18px;
+    border-top: 1px solid var(--rule);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+  }
+
+  footer code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+  }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 30px;
+    transform: translate(-50%, 16px);
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 15px;
+    border-radius: 9px;
+    background: var(--ink);
+    color: var(--paper-raise);
+    font-family: var(--mono);
+    font-size: 12px;
+    box-shadow: 0 8px 26px rgba(38, 36, 31, 0.22);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 170ms ease, transform 170ms ease;
+    max-width: min(90vw, 560px);
+    z-index: 60;
+  }
+
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast .tick { color: #8fdca4; }
+
+  @media (max-width: 1000px) { .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 820px) {
+    .shell { padding: 0 14px 72px; }
+    header { padding: 34px 0 18px; }
+    h1 { font-size: 23px; }
+    .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .tile { padding: 20px 6px 14px; gap: 10px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <h1>Fox 图标总览</h1>
+    <p class="lede">应用中实际使用的全部图标，共 <b>186</b> 个 —— <b>175</b> 个来自 lucide-react v0.544.0，<b>11</b> 个为仓库内的动画图标。点击任意图标即可复制 import 语句。</p>
+  </header>
+
+  <div class="controls">
+    <div class="search" id="searchWrap">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.34-4.34"></path></svg>
+      <input id="q" type="search" placeholder="搜索图标名，例如 alert、file、chevron…" autocomplete="off" spellcheck="false" aria-label="搜索图标">
+      <button class="clear" id="clear" type="button" aria-label="清空搜索">&#215;</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><i class="dashed"></i> 同时有动画版本</span>
+    <span><i class="dot"></i> 仓库内动画图标</span>
+  </div>
+
+  <main id="mount"></main>
+
+  <footer>
+    <span>扫描自 <code>apps/desktop/src</code> · 376 个源文件 · 236 个 lucide 导入符号</span>
+    <span id="shown"></span>
+  </footer>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const DATA = {"lucide": [{"kind": "lucide", "slug": "activity", "name": "Activity", "aliases": ["Activity"], "inner": "<path d=\"M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2\"></path>", "animated": false}, {"kind": "lucide", "slug": "archive", "name": "Archive", "aliases": ["Archive"], "inner": "<rect width=\"20\" height=\"5\" x=\"2\" y=\"3\" rx=\"1\"></rect><path d=\"M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8\"></path><path d=\"M10 12h4\"></path>", "animated": false}, {"kind": "lucide", "slug": "arrow-down", "name": "ArrowDown", "aliases": ["ArrowDown", "ArrowDownIcon"], "inner": "<path d=\"M12 5v14\"></path><path d=\"m19 12-7 7-7-7\"></path>", "animated": false}, {"kind": "lucide", "slug": "arrow-left", "name": "ArrowLeft", "aliases": ["ArrowLeft", "ArrowLeftIcon"], "inner": "<path d=\"m12 19-7-7 7-7\"></path><path d=\"M19 12H5\"></path>", "animated": false}, {"kind": "lucide", "slug": "arrow-right", "name": "ArrowRight", "aliases": ["ArrowRight", "ArrowRightIcon"], "inner": "<path d=\"M5 12h14\"></path><path d=\"m12 5 7 7-7 7\"></path>", "animated": false}, {"kind": "lucide", "slug": "arrow-up", "name": "ArrowUp", "aliases": ["ArrowUp", "ArrowUpIcon"], "inner": "<path d=\"m5 12 7-7 7 7\"></path><path d=\"M12 19V5\"></path>", "animated": false}, {"kind": "lucide", "slug": "arrow-up-down", "name": "ArrowUpDown", "aliases": ["ArrowUpDown"], "inner": "<path d=\"m21 16-4 4-4-4\"></path><path d=\"M17 20V4\"></path><path d=\"m3 8 4-4 4 4\"></path><path d=\"M7 4v16\"></path>", "animated": false}, {"kind": "lucide", "slug": "arrow-up-right", "name": "ArrowUpRight", "aliases": ["ArrowUpRight"], "inner": "<path d=\"M7 7h10v10\"></path><path d=\"M7 17 17 7\"></path>", "animated": false}, {"kind": "lucide", "slug": "ban", "name": "Ban", "aliases": ["Ban"], "inner": "<path d=\"M4.929 4.929 19.07 19.071\"></path><circle cx=\"12\" cy=\"12\" r=\"10\"></circle>", "animated": false}, {"kind": "lucide", "slug": "bell", "name": "Bell", "aliases": ["Bell"], "inner": "<path d=\"M10.268 21a2 2 0 0 0 3.464 0\"></path><path d=\"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326\"></path>", "animated": true}, {"kind": "lucide", "slug": "bell-ring", "name": "BellRing", "aliases": ["BellRing"], "inner": "<path d=\"M10.268 21a2 2 0 0 0 3.464 0\"></path><path d=\"M22 8c0-2.3-.8-4.3-2-6\"></path><path d=\"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326\"></path><path d=\"M4 2C2.8 3.7 2 5.7 2 8\"></path>", "animated": false}, {"kind": "lucide", "slug": "blocks", "name": "Blocks", "aliases": ["Blocks"], "inner": "<path d=\"M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2\"></path><rect x=\"14\" y=\"2\" width=\"8\" height=\"8\" rx=\"1\"></rect>", "animated": true}, {"kind": "lucide", "slug": "book", "name": "Book", "aliases": ["BookIcon"], "inner": "<path d=\"M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20\"></path>", "animated": false}, {"kind": "lucide", "slug": "book-copy", "name": "BookCopy", "aliases": ["BookCopy"], "inner": "<path d=\"M5 7a2 2 0 0 0-2 2v11\"></path><path d=\"M5.803 18H5a2 2 0 0 0 0 4h9.5a.5.5 0 0 0 .5-.5V21\"></path><path d=\"M9 15V4a2 2 0 0 1 2-2h9.5a.5.5 0 0 1 .5.5v14a.5.5 0 0 1-.5.5H11a2 2 0 0 1 0-4h10\"></path>", "animated": false}, {"kind": "lucide", "slug": "bookmark", "name": "Bookmark", "aliases": ["Bookmark", "BookmarkIcon"], "inner": "<path d=\"m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z\"></path>", "animated": false}, {"kind": "lucide", "slug": "bookmark-check", "name": "BookmarkCheck", "aliases": ["BookmarkCheck"], "inner": "<path d=\"m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z\"></path><path d=\"m9 10 2 2 4-4\"></path>", "animated": false}, {"kind": "lucide", "slug": "book-open", "name": "BookOpen", "aliases": ["BookOpen"], "inner": "<path d=\"M12 7v14\"></path><path d=\"M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z\"></path>", "animated": false}, {"kind": "lucide", "slug": "bot", "name": "Bot", "aliases": ["Bot", "BotIcon"], "inner": "<path d=\"M12 8V4H8\"></path><rect width=\"16\" height=\"12\" x=\"4\" y=\"8\" rx=\"2\"></rect><path d=\"M2 14h2\"></path><path d=\"M20 14h2\"></path><path d=\"M15 13v2\"></path><path d=\"M9 13v2\"></path>", "animated": false}, {"kind": "lucide", "slug": "braces", "name": "Braces", "aliases": ["BracesIcon"], "inner": "<path d=\"M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1\"></path><path d=\"M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1\"></path>", "animated": false}, {"kind": "lucide", "slug": "brain", "name": "Brain", "aliases": ["Brain", "BrainIcon"], "inner": "<path d=\"M12 18V5\"></path><path d=\"M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4\"></path><path d=\"M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5\"></path><path d=\"M17.997 5.125a4 4 0 0 1 2.526 5.77\"></path><path d=\"M18 18a4 4 0 0 0 2-7.464\"></path><path d=\"M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517\"></path><path d=\"M6 18a4 4 0 0 1-2-7.464\"></path><path d=\"M6.003 5.125a4 4 0 0 0-2.526 5.77\"></path>", "animated": false}, {"kind": "lucide", "slug": "cable", "name": "Cable", "aliases": ["Cable"], "inner": "<path d=\"M17 19a1 1 0 0 1-1-1v-2a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2a1 1 0 0 1-1 1z\"></path><path d=\"M17 21v-2\"></path><path d=\"M19 14V6.5a1 1 0 0 0-7 0v11a1 1 0 0 1-7 0V10\"></path><path d=\"M21 21v-2\"></path><path d=\"M3 5V3\"></path><path d=\"M4 10a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2a2 2 0 0 1-2 2z\"></path><path d=\"M7 5V3\"></path>", "animated": false}, {"kind": "lucide", "slug": "calendar-days", "name": "CalendarDays", "aliases": ["CalendarDays"], "inner": "<path d=\"M8 2v4\"></path><path d=\"M16 2v4\"></path><rect width=\"18\" height=\"18\" x=\"3\" y=\"4\" rx=\"2\"></rect><path d=\"M3 10h18\"></path><path d=\"M8 14h.01\"></path><path d=\"M12 14h.01\"></path><path d=\"M16 14h.01\"></path><path d=\"M8 18h.01\"></path><path d=\"M12 18h.01\"></path><path d=\"M16 18h.01\"></path>", "animated": false}, {"kind": "lucide", "slug": "check", "name": "Check", "aliases": ["Check", "CheckIcon"], "inner": "<path d=\"M20 6 9 17l-5-5\"></path>", "animated": false}, {"kind": "lucide", "slug": "chevron-down", "name": "ChevronDown", "aliases": ["ChevronDown", "ChevronDownIcon"], "inner": "<path d=\"m6 9 6 6 6-6\"></path>", "animated": false}, {"kind": "lucide", "slug": "chevron-left", "name": "ChevronLeft", "aliases": ["ChevronLeft", "ChevronLeftIcon"], "inner": "<path d=\"m15 18-6-6 6-6\"></path>", "animated": false}, {"kind": "lucide", "slug": "chevron-right", "name": "ChevronRight", "aliases": ["ChevronRight", "ChevronRightIcon"], "inner": "<path d=\"m9 18 6-6-6-6\"></path>", "animated": false}, {"kind": "lucide", "slug": "chevrons-up-down", "name": "ChevronsUpDown", "aliases": ["ChevronsUpDown", "ChevronsUpDownIcon"], "inner": "<path d=\"m7 15 5 5 5-5\"></path><path d=\"m7 9 5-5 5 5\"></path>", "animated": false}, {"kind": "lucide", "slug": "chevron-up", "name": "ChevronUp", "aliases": ["ChevronUp", "ChevronUpIcon"], "inner": "<path d=\"m18 15-6-6-6 6\"></path>", "animated": false}, {"kind": "lucide", "slug": "circle", "name": "Circle", "aliases": ["Circle", "CircleIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle>", "animated": false}, {"kind": "lucide", "slug": "circle-alert", "name": "CircleAlert", "aliases": ["AlertCircle", "CircleAlert", "CircleAlertIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><line x1=\"12\" x2=\"12\" y1=\"8\" y2=\"12\"></line><line x1=\"12\" x2=\"12.01\" y1=\"16\" y2=\"16\"></line>", "animated": false}, {"kind": "lucide", "slug": "circle-check", "name": "CircleCheck", "aliases": ["CheckCircle2", "CheckCircle2Icon", "CircleCheck", "CircleCheckIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"m9 12 2 2 4-4\"></path>", "animated": false}, {"kind": "lucide", "slug": "circle-check-big", "name": "CircleCheckBig", "aliases": ["CheckCircle", "CheckCircleIcon"], "inner": "<path d=\"M21.801 10A10 10 0 1 1 17 3.335\"></path><path d=\"m9 11 3 3L22 4\"></path>", "animated": false}, {"kind": "lucide", "slug": "circle-dot", "name": "CircleDot", "aliases": ["CircleDot", "CircleDotIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><circle cx=\"12\" cy=\"12\" r=\"1\"></circle>", "animated": false}, {"kind": "lucide", "slug": "circle-pause", "name": "CirclePause", "aliases": ["PauseCircle"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><line x1=\"10\" x2=\"10\" y1=\"15\" y2=\"9\"></line><line x1=\"14\" x2=\"14\" y1=\"15\" y2=\"9\"></line>", "animated": false}, {"kind": "lucide", "slug": "circle-question-mark", "name": "CircleQuestionMark", "aliases": ["CircleHelp"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3\"></path><path d=\"M12 17h.01\"></path>", "animated": false}, {"kind": "lucide", "slug": "circle-small", "name": "CircleSmall", "aliases": ["CircleSmallIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"6\"></circle>", "animated": false}, {"kind": "lucide", "slug": "circle-stop", "name": "CircleStop", "aliases": ["CircleStop"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><rect x=\"9\" y=\"9\" width=\"6\" height=\"6\" rx=\"1\"></rect>", "animated": false}, {"kind": "lucide", "slug": "circle-x", "name": "CircleX", "aliases": ["CircleX", "CircleXIcon", "XCircle", "XCircleIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"m15 9-6 6\"></path><path d=\"m9 9 6 6\"></path>", "animated": false}, {"kind": "lucide", "slug": "clipboard-list", "name": "ClipboardList", "aliases": ["ClipboardList"], "inner": "<rect width=\"8\" height=\"4\" x=\"8\" y=\"2\" rx=\"1\" ry=\"1\"></rect><path d=\"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2\"></path><path d=\"M12 11h4\"></path><path d=\"M12 16h4\"></path><path d=\"M8 11h.01\"></path><path d=\"M8 16h.01\"></path>", "animated": false}, {"kind": "lucide", "slug": "clock", "name": "Clock", "aliases": ["Clock", "ClockIcon"], "inner": "<path d=\"M12 6v6l4 2\"></path><circle cx=\"12\" cy=\"12\" r=\"10\"></circle>", "animated": false}, {"kind": "lucide", "slug": "clock3", "name": "Clock3", "aliases": ["Clock3"], "inner": "<path d=\"M12 6v6h4\"></path><circle cx=\"12\" cy=\"12\" r=\"10\"></circle>", "animated": false}, {"kind": "lucide", "slug": "code", "name": "Code", "aliases": ["Code"], "inner": "<path d=\"m16 18 6-6-6-6\"></path><path d=\"m8 6-6 6 6 6\"></path>", "animated": false}, {"kind": "lucide", "slug": "code-xml", "name": "CodeXml", "aliases": ["Code2"], "inner": "<path d=\"m18 16 4-4-4-4\"></path><path d=\"m6 8-4 4 4 4\"></path><path d=\"m14.5 4-5 16\"></path>", "animated": false}, {"kind": "lucide", "slug": "copy", "name": "Copy", "aliases": ["Copy", "CopyIcon"], "inner": "<rect width=\"14\" height=\"14\" x=\"8\" y=\"8\" rx=\"2\" ry=\"2\"></rect><path d=\"M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2\"></path>", "animated": false}, {"kind": "lucide", "slug": "corner-down-left", "name": "CornerDownLeft", "aliases": ["CornerDownLeft", "CornerDownLeftIcon"], "inner": "<path d=\"M20 4v7a4 4 0 0 1-4 4H4\"></path><path d=\"m9 10-5 5 5 5\"></path>", "animated": false}, {"kind": "lucide", "slug": "cpu", "name": "Cpu", "aliases": ["Cpu"], "inner": "<path d=\"M12 20v2\"></path><path d=\"M12 2v2\"></path><path d=\"M17 20v2\"></path><path d=\"M17 2v2\"></path><path d=\"M2 12h2\"></path><path d=\"M2 17h2\"></path><path d=\"M2 7h2\"></path><path d=\"M20 12h2\"></path><path d=\"M20 17h2\"></path><path d=\"M20 7h2\"></path><path d=\"M7 20v2\"></path><path d=\"M7 2v2\"></path><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"2\"></rect><rect x=\"8\" y=\"8\" width=\"8\" height=\"8\" rx=\"1\"></rect>", "animated": false}, {"kind": "lucide", "slug": "database", "name": "Database", "aliases": ["Database"], "inner": "<ellipse cx=\"12\" cy=\"5\" rx=\"9\" ry=\"3\"></ellipse><path d=\"M3 5V19A9 3 0 0 0 21 19V5\"></path><path d=\"M3 12A9 3 0 0 0 21 12\"></path>", "animated": false}, {"kind": "lucide", "slug": "dot", "name": "Dot", "aliases": ["DotIcon"], "inner": "<circle cx=\"12.1\" cy=\"12.1\" r=\"1\"></circle>", "animated": false}, {"kind": "lucide", "slug": "download", "name": "Download", "aliases": ["Download", "DownloadIcon"], "inner": "<path d=\"M12 15V3\"></path><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"></path><path d=\"m7 10 5 5 5-5\"></path>", "animated": false}, {"kind": "lucide", "slug": "earth", "name": "Earth", "aliases": ["Globe2"], "inner": "<path d=\"M21.54 15H17a2 2 0 0 0-2 2v4.54\"></path><path d=\"M7 3.34V5a3 3 0 0 0 3 3a2 2 0 0 1 2 2c0 1.1.9 2 2 2a2 2 0 0 0 2-2c0-1.1.9-2 2-2h3.17\"></path><path d=\"M11 21.95V18a2 2 0 0 0-2-2a2 2 0 0 1-2-2v-1a2 2 0 0 0-2-2H2.05\"></path><circle cx=\"12\" cy=\"12\" r=\"10\"></circle>", "animated": false}, {"kind": "lucide", "slug": "ellipsis", "name": "Ellipsis", "aliases": ["EllipsisIcon", "MoreHorizontal", "MoreHorizontalIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"1\"></circle><circle cx=\"19\" cy=\"12\" r=\"1\"></circle><circle cx=\"5\" cy=\"12\" r=\"1\"></circle>", "animated": false}, {"kind": "lucide", "slug": "eraser", "name": "Eraser", "aliases": ["Eraser"], "inner": "<path d=\"M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21\"></path><path d=\"m5.082 11.09 8.828 8.828\"></path>", "animated": false}, {"kind": "lucide", "slug": "external-link", "name": "ExternalLink", "aliases": ["ExternalLink", "ExternalLinkIcon"], "inner": "<path d=\"M15 3h6v6\"></path><path d=\"M10 14 21 3\"></path><path d=\"M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6\"></path>", "animated": false}, {"kind": "lucide", "slug": "eye", "name": "Eye", "aliases": ["Eye", "EyeIcon"], "inner": "<path d=\"M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0\"></path><circle cx=\"12\" cy=\"12\" r=\"3\"></circle>", "animated": false}, {"kind": "lucide", "slug": "eye-off", "name": "EyeOff", "aliases": ["EyeOffIcon"], "inner": "<path d=\"M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49\"></path><path d=\"M14.084 14.158a3 3 0 0 1-4.242-4.242\"></path><path d=\"M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143\"></path><path d=\"m2 2 20 20\"></path>", "animated": false}, {"kind": "lucide", "slug": "file", "name": "File", "aliases": ["File", "FileIcon"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-archive", "name": "FileArchive", "aliases": ["FileArchive", "FileArchiveIcon"], "inner": "<path d=\"M10 12v-1\"></path><path d=\"M10 18v-2\"></path><path d=\"M10 7V6\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M15.5 22H18a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v16a2 2 0 0 0 .274 1.01\"></path><circle cx=\"10\" cy=\"20\" r=\"2\"></circle>", "animated": false}, {"kind": "lucide", "slug": "file-clock", "name": "FileClock", "aliases": ["FileClock"], "inner": "<path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M16 22h2a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3\"></path><path d=\"M8 14v2.2l1.6 1\"></path><circle cx=\"8\" cy=\"16\" r=\"6\"></circle>", "animated": false}, {"kind": "lucide", "slug": "file-code", "name": "FileCode", "aliases": ["FileCode", "FileCodeIcon"], "inner": "<path d=\"M10 12.5 8 15l2 2.5\"></path><path d=\"m14 12.5 2 2.5-2 2.5\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-code2", "name": "FileCode2", "aliases": ["FileCode2", "FileCode2Icon"], "inner": "<path d=\"M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"m5 12-3 3 3 3\"></path><path d=\"m9 18 3-3-3-3\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-image", "name": "FileImage", "aliases": ["FileImage", "FileImageIcon"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><circle cx=\"10\" cy=\"12\" r=\"2\"></circle><path d=\"m20 17-1.296-1.296a2.41 2.41 0 0 0-3.408 0L9 22\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-json", "name": "FileJson", "aliases": ["FileJson"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1\"></path><path d=\"M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-pen", "name": "FilePen", "aliases": ["FileEdit"], "inner": "<path d=\"M12.5 22H18a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v9.5\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M13.378 15.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-play", "name": "FilePlay", "aliases": ["FilePlay"], "inner": "<path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z\"></path><path d=\"M15.033 13.44a.647.647 0 0 1 0 1.12l-4.065 2.352a.645.645 0 0 1-.968-.56v-4.704a.645.645 0 0 1 .967-.56z\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-question-mark", "name": "FileQuestionMark", "aliases": ["FileQuestion"], "inner": "<path d=\"M12 17h.01\"></path><path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z\"></path><path d=\"M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3\"></path>", "animated": false}, {"kind": "lucide", "slug": "files", "name": "Files", "aliases": ["Files"], "inner": "<path d=\"M15 2a2 2 0 0 1 1.414.586l4 4A2 2 0 0 1 21 8v7a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z\"></path><path d=\"M15 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M5 7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h8a2 2 0 0 0 1.732-1\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-spreadsheet", "name": "FileSpreadsheet", "aliases": ["FileSpreadsheet", "FileSpreadsheetIcon"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M8 13h2\"></path><path d=\"M14 13h2\"></path><path d=\"M8 17h2\"></path><path d=\"M14 17h2\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-stack", "name": "FileStack", "aliases": ["FileStack"], "inner": "<path d=\"M11 21a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1\"></path><path d=\"M16 16a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1\"></path><path d=\"M21 6a2 2 0 0 0-.586-1.414l-2-2A2 2 0 0 0 17 2h-3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1z\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-text", "name": "FileText", "aliases": ["FileText", "FileTextIcon"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M10 9H8\"></path><path d=\"M16 13H8\"></path><path d=\"M16 17H8\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-type", "name": "FileType", "aliases": ["FileType"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M9 13v-1h6v1\"></path><path d=\"M12 12v6\"></path><path d=\"M11 18h2\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-up", "name": "FileUp", "aliases": ["FileUp"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"></path><path d=\"M12 12v6\"></path><path d=\"m15 15-3-3-3 3\"></path>", "animated": false}, {"kind": "lucide", "slug": "file-warning", "name": "FileWarning", "aliases": ["FileWarning"], "inner": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"></path><path d=\"M12 9v4\"></path><path d=\"M12 17h.01\"></path>", "animated": false}, {"kind": "lucide", "slug": "flask-conical", "name": "FlaskConical", "aliases": ["FlaskConical"], "inner": "<path d=\"M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2\"></path><path d=\"M6.453 15h11.094\"></path><path d=\"M8.5 2h7\"></path>", "animated": false}, {"kind": "lucide", "slug": "folder", "name": "Folder", "aliases": ["Folder", "FolderIcon"], "inner": "<path d=\"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z\"></path>", "animated": false}, {"kind": "lucide", "slug": "folder-input", "name": "FolderInput", "aliases": ["FolderInput"], "inner": "<path d=\"M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1\"></path><path d=\"M2 13h10\"></path><path d=\"m9 16 3-3-3-3\"></path>", "animated": false}, {"kind": "lucide", "slug": "folder-open", "name": "FolderOpen", "aliases": ["FolderOpen", "FolderOpenIcon"], "inner": "<path d=\"m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2\"></path>", "animated": false}, {"kind": "lucide", "slug": "folder-plus", "name": "FolderPlus", "aliases": ["FolderPlus"], "inner": "<path d=\"M12 10v6\"></path><path d=\"M9 13h6\"></path><path d=\"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z\"></path>", "animated": false}, {"kind": "lucide", "slug": "folders", "name": "Folders", "aliases": ["Folders"], "inner": "<path d=\"M20 5a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h2.5a1.5 1.5 0 0 1 1.2.6l.6.8a1.5 1.5 0 0 0 1.2.6z\"></path><path d=\"M3 8.268a2 2 0 0 0-1 1.738V19a2 2 0 0 0 2 2h11a2 2 0 0 0 1.732-1\"></path>", "animated": false}, {"kind": "lucide", "slug": "folder-search", "name": "FolderSearch", "aliases": ["FolderSearch"], "inner": "<path d=\"M10.7 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v4.1\"></path><path d=\"m21 21-1.9-1.9\"></path><circle cx=\"17\" cy=\"17\" r=\"3\"></circle>", "animated": false}, {"kind": "lucide", "slug": "gauge", "name": "Gauge", "aliases": ["Gauge"], "inner": "<path d=\"m12 14 4-4\"></path><path d=\"M3.34 19a10 10 0 1 1 17.32 0\"></path>", "animated": false}, {"kind": "lucide", "slug": "git-commit-horizontal", "name": "GitCommitHorizontal", "aliases": ["GitCommitIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"3\"></circle><line x1=\"3\" x2=\"9\" y1=\"12\" y2=\"12\"></line><line x1=\"15\" x2=\"21\" y1=\"12\" y2=\"12\"></line>", "animated": false}, {"kind": "lucide", "slug": "git-fork", "name": "GitFork", "aliases": ["GitFork"], "inner": "<circle cx=\"12\" cy=\"18\" r=\"3\"></circle><circle cx=\"6\" cy=\"6\" r=\"3\"></circle><circle cx=\"18\" cy=\"6\" r=\"3\"></circle><path d=\"M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9\"></path><path d=\"M12 12v3\"></path>", "animated": false}, {"kind": "lucide", "slug": "globe", "name": "Globe", "aliases": ["GlobeIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20\"></path><path d=\"M2 12h20\"></path>", "animated": false}, {"kind": "lucide", "slug": "hard-drive", "name": "HardDrive", "aliases": ["HardDrive"], "inner": "<line x1=\"22\" x2=\"2\" y1=\"12\" y2=\"12\"></line><path d=\"M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z\"></path><line x1=\"6\" x2=\"6.01\" y1=\"16\" y2=\"16\"></line><line x1=\"10\" x2=\"10.01\" y1=\"16\" y2=\"16\"></line>", "animated": false}, {"kind": "lucide", "slug": "history", "name": "History", "aliases": ["History"], "inner": "<path d=\"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8\"></path><path d=\"M3 3v5h5\"></path><path d=\"M12 7v5l4 2\"></path>", "animated": false}, {"kind": "lucide", "slug": "house", "name": "House", "aliases": ["House"], "inner": "<path d=\"M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8\"></path><path d=\"M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z\"></path>", "animated": false}, {"kind": "lucide", "slug": "image", "name": "Image", "aliases": ["Image", "ImageIcon"], "inner": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\" ry=\"2\"></rect><circle cx=\"9\" cy=\"9\" r=\"2\"></circle><path d=\"m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21\"></path>", "animated": false}, {"kind": "lucide", "slug": "image-plus", "name": "ImagePlus", "aliases": ["ImagePlus"], "inner": "<path d=\"M16 5h6\"></path><path d=\"M19 2v6\"></path><path d=\"M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5\"></path><path d=\"m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21\"></path><circle cx=\"9\" cy=\"9\" r=\"2\"></circle>", "animated": false}, {"kind": "lucide", "slug": "images", "name": "Images", "aliases": ["Images"], "inner": "<path d=\"m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16\"></path><path d=\"M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2\"></path><circle cx=\"13\" cy=\"7\" r=\"1\" fill=\"currentColor\"></circle><rect x=\"8\" y=\"2\" width=\"14\" height=\"14\" rx=\"2\"></rect>", "animated": false}, {"kind": "lucide", "slug": "info", "name": "Info", "aliases": ["Info", "InfoIcon"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"M12 16v-4\"></path><path d=\"M12 8h.01\"></path>", "animated": false}, {"kind": "lucide", "slug": "keyboard", "name": "Keyboard", "aliases": ["Keyboard"], "inner": "<path d=\"M10 8h.01\"></path><path d=\"M12 12h.01\"></path><path d=\"M14 8h.01\"></path><path d=\"M16 12h.01\"></path><path d=\"M18 8h.01\"></path><path d=\"M6 8h.01\"></path><path d=\"M7 16h10\"></path><path d=\"M8 12h.01\"></path><rect width=\"20\" height=\"16\" x=\"2\" y=\"4\" rx=\"2\"></rect>", "animated": false}, {"kind": "lucide", "slug": "key-round", "name": "KeyRound", "aliases": ["KeyRound", "KeyRoundIcon"], "inner": "<path d=\"M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z\"></path><circle cx=\"16.5\" cy=\"7.5\" r=\".5\" fill=\"currentColor\"></circle>", "animated": false}, {"kind": "lucide", "slug": "layers", "name": "Layers", "aliases": ["Layers3"], "inner": "<path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z\"></path><path d=\"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12\"></path><path d=\"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17\"></path>", "animated": false}, {"kind": "lucide", "slug": "library", "name": "Library", "aliases": ["Library"], "inner": "<path d=\"m16 6 4 14\"></path><path d=\"M12 6v14\"></path><path d=\"M8 8v12\"></path><path d=\"M4 4v16\"></path>", "animated": false}, {"kind": "lucide", "slug": "link2", "name": "Link2", "aliases": ["Link2"], "inner": "<path d=\"M9 17H7A5 5 0 0 1 7 7h2\"></path><path d=\"M15 7h2a5 5 0 1 1 0 10h-2\"></path><line x1=\"8\" x2=\"16\" y1=\"12\" y2=\"12\"></line>", "animated": false}, {"kind": "lucide", "slug": "list-filter", "name": "ListFilter", "aliases": ["ListFilter"], "inner": "<path d=\"M2 5h20\"></path><path d=\"M6 12h12\"></path><path d=\"M9 19h6\"></path>", "animated": false}, {"kind": "lucide", "slug": "list-todo", "name": "ListTodo", "aliases": ["ListTodo"], "inner": "<path d=\"M13 5h8\"></path><path d=\"M13 12h8\"></path><path d=\"M13 19h8\"></path><path d=\"m3 17 2 2 4-4\"></path><rect x=\"3\" y=\"4\" width=\"6\" height=\"6\" rx=\"1\"></rect>", "animated": false}, {"kind": "lucide", "slug": "list-tree", "name": "ListTree", "aliases": ["ListTree"], "inner": "<path d=\"M8 5h13\"></path><path d=\"M13 12h8\"></path><path d=\"M13 19h8\"></path><path d=\"M3 10a2 2 0 0 0 2 2h3\"></path><path d=\"M3 5v12a2 2 0 0 0 2 2h3\"></path>", "animated": false}, {"kind": "lucide", "slug": "loader-circle", "name": "LoaderCircle", "aliases": ["Loader2", "Loader2Icon", "LoaderCircle", "LoaderCircleIcon"], "inner": "<path d=\"M21 12a9 9 0 1 1-6.219-8.56\"></path>", "animated": false}, {"kind": "lucide", "slug": "log-in", "name": "LogIn", "aliases": ["LogIn"], "inner": "<path d=\"m10 17 5-5-5-5\"></path><path d=\"M15 12H3\"></path><path d=\"M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4\"></path>", "animated": false}, {"kind": "lucide", "slug": "log-out", "name": "LogOut", "aliases": ["LogOut"], "inner": "<path d=\"m16 17 5-5-5-5\"></path><path d=\"M21 12H9\"></path><path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"></path>", "animated": false}, {"kind": "lucide", "slug": "mars", "name": "Mars", "aliases": ["MarsIcon"], "inner": "<path d=\"M16 3h5v5\"></path><path d=\"m21 3-6.75 6.75\"></path><circle cx=\"10\" cy=\"14\" r=\"6\"></circle>", "animated": false}, {"kind": "lucide", "slug": "mars-stroke", "name": "MarsStroke", "aliases": ["MarsStrokeIcon"], "inner": "<path d=\"m14 6 4 4\"></path><path d=\"M17 3h4v4\"></path><path d=\"m21 3-7.75 7.75\"></path><circle cx=\"9\" cy=\"15\" r=\"6\"></circle>", "animated": false}, {"kind": "lucide", "slug": "maximize", "name": "Maximize", "aliases": ["Maximize"], "inner": "<path d=\"M8 3H5a2 2 0 0 0-2 2v3\"></path><path d=\"M21 8V5a2 2 0 0 0-2-2h-3\"></path><path d=\"M3 16v3a2 2 0 0 0 2 2h3\"></path><path d=\"M16 21h3a2 2 0 0 0 2-2v-3\"></path>", "animated": true}, {"kind": "lucide", "slug": "maximize2", "name": "Maximize2", "aliases": ["Maximize2"], "inner": "<path d=\"M15 3h6v6\"></path><path d=\"m21 3-7 7\"></path><path d=\"m3 21 7-7\"></path><path d=\"M9 21H3v-6\"></path>", "animated": false}, {"kind": "lucide", "slug": "message-circle", "name": "MessageCircle", "aliases": ["MessageCircle", "MessageCircleIcon"], "inner": "<path d=\"M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719\"></path>", "animated": false}, {"kind": "lucide", "slug": "message-circle-more", "name": "MessageCircleMore", "aliases": ["MessageCircleMore"], "inner": "<path d=\"M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719\"></path><path d=\"M8 12h.01\"></path><path d=\"M12 12h.01\"></path><path d=\"M16 12h.01\"></path>", "animated": false}, {"kind": "lucide", "slug": "message-circle-plus", "name": "MessageCirclePlus", "aliases": ["MessageCirclePlus"], "inner": "<path d=\"M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719\"></path><path d=\"M8 12h8\"></path><path d=\"M12 8v8\"></path>", "animated": true}, {"kind": "lucide", "slug": "message-square", "name": "MessageSquare", "aliases": ["MessageSquare"], "inner": "<path d=\"M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z\"></path>", "animated": false}, {"kind": "lucide", "slug": "message-square-text", "name": "MessageSquareText", "aliases": ["MessageSquareText"], "inner": "<path d=\"M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z\"></path><path d=\"M7 11h10\"></path><path d=\"M7 15h6\"></path><path d=\"M7 7h8\"></path>", "animated": false}, {"kind": "lucide", "slug": "mic", "name": "Mic", "aliases": ["MicIcon"], "inner": "<path d=\"M12 19v3\"></path><path d=\"M19 10v2a7 7 0 0 1-14 0v-2\"></path><rect x=\"9\" y=\"2\" width=\"6\" height=\"13\" rx=\"3\"></rect>", "animated": false}, {"kind": "lucide", "slug": "minimize", "name": "Minimize", "aliases": ["Minimize"], "inner": "<path d=\"M8 3v3a2 2 0 0 1-2 2H3\"></path><path d=\"M21 8h-3a2 2 0 0 1-2-2V3\"></path><path d=\"M3 16h3a2 2 0 0 1 2 2v3\"></path><path d=\"M16 21v-3a2 2 0 0 1 2-2h3\"></path>", "animated": true}, {"kind": "lucide", "slug": "minimize2", "name": "Minimize2", "aliases": ["Minimize2"], "inner": "<path d=\"m14 10 7-7\"></path><path d=\"M20 10h-6V4\"></path><path d=\"m3 21 7-7\"></path><path d=\"M4 14h6v6\"></path>", "animated": false}, {"kind": "lucide", "slug": "minus", "name": "Minus", "aliases": ["Minus", "MinusIcon"], "inner": "<path d=\"M5 12h14\"></path>", "animated": false}, {"kind": "lucide", "slug": "monitor", "name": "Monitor", "aliases": ["Monitor"], "inner": "<rect width=\"20\" height=\"14\" x=\"2\" y=\"3\" rx=\"2\"></rect><line x1=\"8\" x2=\"16\" y1=\"21\" y2=\"21\"></line><line x1=\"12\" x2=\"12\" y1=\"17\" y2=\"21\"></line>", "animated": false}, {"kind": "lucide", "slug": "monitor-up", "name": "MonitorUp", "aliases": ["MonitorUp"], "inner": "<path d=\"m9 10 3-3 3 3\"></path><path d=\"M12 13V7\"></path><rect width=\"20\" height=\"14\" x=\"2\" y=\"3\" rx=\"2\"></rect><path d=\"M12 17v4\"></path><path d=\"M8 21h8\"></path>", "animated": false}, {"kind": "lucide", "slug": "moon", "name": "Moon", "aliases": ["Moon"], "inner": "<path d=\"M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401\"></path>", "animated": false}, {"kind": "lucide", "slug": "music", "name": "Music", "aliases": ["MusicIcon"], "inner": "<path d=\"M9 18V5l12-2v13\"></path><circle cx=\"6\" cy=\"18\" r=\"3\"></circle><circle cx=\"18\" cy=\"16\" r=\"3\"></circle>", "animated": false}, {"kind": "lucide", "slug": "music2", "name": "Music2", "aliases": ["Music2Icon"], "inner": "<circle cx=\"8\" cy=\"18\" r=\"4\"></circle><path d=\"M12 18V2l7 4\"></path>", "animated": false}, {"kind": "lucide", "slug": "network", "name": "Network", "aliases": ["Network"], "inner": "<rect x=\"16\" y=\"16\" width=\"6\" height=\"6\" rx=\"1\"></rect><rect x=\"2\" y=\"16\" width=\"6\" height=\"6\" rx=\"1\"></rect><rect x=\"9\" y=\"2\" width=\"6\" height=\"6\" rx=\"1\"></rect><path d=\"M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3\"></path><path d=\"M12 12V8\"></path>", "animated": false}, {"kind": "lucide", "slug": "non-binary", "name": "NonBinary", "aliases": ["NonBinaryIcon"], "inner": "<path d=\"M12 2v10\"></path><path d=\"m8.5 4 7 4\"></path><path d=\"m8.5 8 7-4\"></path><circle cx=\"12\" cy=\"17\" r=\"5\"></circle>", "animated": false}, {"kind": "lucide", "slug": "notebook-pen", "name": "NotebookPen", "aliases": ["NotebookPen"], "inner": "<path d=\"M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4\"></path><path d=\"M2 6h4\"></path><path d=\"M2 10h4\"></path><path d=\"M2 14h4\"></path><path d=\"M2 18h4\"></path><path d=\"M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z\"></path>", "animated": false}, {"kind": "lucide", "slug": "orbit", "name": "Orbit", "aliases": ["Orbit"], "inner": "<path d=\"M20.341 6.484A10 10 0 0 1 10.266 21.85\"></path><path d=\"M3.659 17.516A10 10 0 0 1 13.74 2.152\"></path><circle cx=\"12\" cy=\"12\" r=\"3\"></circle><circle cx=\"19\" cy=\"5\" r=\"2\"></circle><circle cx=\"5\" cy=\"19\" r=\"2\"></circle>", "animated": false}, {"kind": "lucide", "slug": "package", "name": "Package", "aliases": ["PackageIcon"], "inner": "<path d=\"M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z\"></path><path d=\"M12 22V12\"></path><polyline points=\"3.29 7 12 12 20.71 7\"></polyline><path d=\"m7.5 4.27 9 5.15\"></path>", "animated": false}, {"kind": "lucide", "slug": "package-open", "name": "PackageOpen", "aliases": ["PackageOpen"], "inner": "<path d=\"M12 22v-9\"></path><path d=\"M15.17 2.21a1.67 1.67 0 0 1 1.63 0L21 4.57a1.93 1.93 0 0 1 0 3.36L8.82 14.79a1.655 1.655 0 0 1-1.64 0L3 12.43a1.93 1.93 0 0 1 0-3.36z\"></path><path d=\"M20 13v3.87a2.06 2.06 0 0 1-1.11 1.83l-6 3.08a1.93 1.93 0 0 1-1.78 0l-6-3.08A2.06 2.06 0 0 1 4 16.87V13\"></path><path d=\"M21 12.43a1.93 1.93 0 0 0 0-3.36L8.83 2.2a1.64 1.64 0 0 0-1.63 0L3 4.57a1.93 1.93 0 0 0 0 3.36l12.18 6.86a1.636 1.636 0 0 0 1.63 0z\"></path>", "animated": false}, {"kind": "lucide", "slug": "package-plus", "name": "PackagePlus", "aliases": ["PackagePlus"], "inner": "<path d=\"M16 16h6\"></path><path d=\"M19 13v6\"></path><path d=\"M21 10V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l2-1.14\"></path><path d=\"m7.5 4.27 9 5.15\"></path><polyline points=\"3.29 7 12 12 20.71 7\"></polyline><line x1=\"12\" x2=\"12\" y1=\"22\" y2=\"12\"></line>", "animated": false}, {"kind": "lucide", "slug": "package-x", "name": "PackageX", "aliases": ["PackageX"], "inner": "<path d=\"M21 10V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l2-1.14\"></path><path d=\"m7.5 4.27 9 5.15\"></path><polyline points=\"3.29 7 12 12 20.71 7\"></polyline><line x1=\"12\" x2=\"12\" y1=\"22\" y2=\"12\"></line><path d=\"m17 13 5 5m-5 0 5-5\"></path>", "animated": false}, {"kind": "lucide", "slug": "panel-left", "name": "PanelLeft", "aliases": ["PanelLeft"], "inner": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"></rect><path d=\"M9 3v18\"></path>", "animated": true}, {"kind": "lucide", "slug": "panel-right", "name": "PanelRight", "aliases": ["PanelRight"], "inner": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"></rect><path d=\"M15 3v18\"></path>", "animated": true}, {"kind": "lucide", "slug": "paperclip", "name": "Paperclip", "aliases": ["PaperclipIcon"], "inner": "<path d=\"m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551\"></path>", "animated": false}, {"kind": "lucide", "slug": "pause", "name": "Pause", "aliases": ["Pause", "PauseIcon"], "inner": "<rect x=\"14\" y=\"3\" width=\"5\" height=\"18\" rx=\"1\"></rect><rect x=\"5\" y=\"3\" width=\"5\" height=\"18\" rx=\"1\"></rect>", "animated": false}, {"kind": "lucide", "slug": "pencil", "name": "Pencil", "aliases": ["Pencil"], "inner": "<path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\"></path><path d=\"m15 5 4 4\"></path>", "animated": false}, {"kind": "lucide", "slug": "pin", "name": "Pin", "aliases": ["Pin"], "inner": "<path d=\"M12 17v5\"></path><path d=\"M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z\"></path>", "animated": false}, {"kind": "lucide", "slug": "pin-off", "name": "PinOff", "aliases": ["PinOff"], "inner": "<path d=\"M12 17v5\"></path><path d=\"M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89\"></path><path d=\"m2 2 20 20\"></path><path d=\"M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11\"></path>", "animated": false}, {"kind": "lucide", "slug": "play", "name": "Play", "aliases": ["Play", "PlayIcon"], "inner": "<path d=\"M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z\"></path>", "animated": false}, {"kind": "lucide", "slug": "plus", "name": "Plus", "aliases": ["Plus", "PlusIcon"], "inner": "<path d=\"M5 12h14\"></path><path d=\"M12 5v14\"></path>", "animated": false}, {"kind": "lucide", "slug": "presentation", "name": "Presentation", "aliases": ["Presentation", "PresentationIcon"], "inner": "<path d=\"M2 3h20\"></path><path d=\"M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3\"></path><path d=\"m7 21 5-5 5 5\"></path>", "animated": false}, {"kind": "lucide", "slug": "puzzle", "name": "Puzzle", "aliases": ["Puzzle"], "inner": "<path d=\"M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z\"></path>", "animated": false}, {"kind": "lucide", "slug": "quote", "name": "Quote", "aliases": ["Quote"], "inner": "<path d=\"M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z\"></path><path d=\"M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z\"></path>", "animated": false}, {"kind": "lucide", "slug": "refresh-cw", "name": "RefreshCw", "aliases": ["RefreshCw", "RefreshCwIcon"], "inner": "<path d=\"M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8\"></path><path d=\"M21 3v5h-5\"></path><path d=\"M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16\"></path><path d=\"M8 16H3v5\"></path>", "animated": false}, {"kind": "lucide", "slug": "rotate-ccw", "name": "RotateCcw", "aliases": ["RotateCcw"], "inner": "<path d=\"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8\"></path><path d=\"M3 3v5h5\"></path>", "animated": false}, {"kind": "lucide", "slug": "rotate-cw", "name": "RotateCw", "aliases": ["RotateCw"], "inner": "<path d=\"M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8\"></path><path d=\"M21 3v5h-5\"></path>", "animated": false}, {"kind": "lucide", "slug": "search", "name": "Search", "aliases": ["Search", "SearchIcon"], "inner": "<path d=\"m21 21-4.34-4.34\"></path><circle cx=\"11\" cy=\"11\" r=\"8\"></circle>", "animated": true}, {"kind": "lucide", "slug": "send", "name": "Send", "aliases": ["Send"], "inner": "<path d=\"M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z\"></path><path d=\"m21.854 2.147-10.94 10.939\"></path>", "animated": false}, {"kind": "lucide", "slug": "server", "name": "Server", "aliases": ["Server"], "inner": "<rect width=\"20\" height=\"8\" x=\"2\" y=\"2\" rx=\"2\" ry=\"2\"></rect><rect width=\"20\" height=\"8\" x=\"2\" y=\"14\" rx=\"2\" ry=\"2\"></rect><line x1=\"6\" x2=\"6.01\" y1=\"6\" y2=\"6\"></line><line x1=\"6\" x2=\"6.01\" y1=\"18\" y2=\"18\"></line>", "animated": false}, {"kind": "lucide", "slug": "settings", "name": "Settings", "aliases": ["Settings"], "inner": "<path d=\"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915\"></path><circle cx=\"12\" cy=\"12\" r=\"3\"></circle>", "animated": true}, {"kind": "lucide", "slug": "settings2", "name": "Settings2", "aliases": ["Settings2"], "inner": "<path d=\"M14 17H5\"></path><path d=\"M19 7h-9\"></path><circle cx=\"17\" cy=\"17\" r=\"3\"></circle><circle cx=\"7\" cy=\"7\" r=\"3\"></circle>", "animated": false}, {"kind": "lucide", "slug": "shield", "name": "Shield", "aliases": ["Shield"], "inner": "<path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"></path>", "animated": false}, {"kind": "lucide", "slug": "shield-check", "name": "ShieldCheck", "aliases": ["ShieldCheck"], "inner": "<path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"></path><path d=\"m9 12 2 2 4-4\"></path>", "animated": false}, {"kind": "lucide", "slug": "sparkles", "name": "Sparkles", "aliases": ["Sparkles"], "inner": "<path d=\"M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z\"></path><path d=\"M20 2v4\"></path><path d=\"M22 4h-4\"></path><circle cx=\"4\" cy=\"20\" r=\"2\"></circle>", "animated": false}, {"kind": "lucide", "slug": "square", "name": "Square", "aliases": ["SquareIcon"], "inner": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"></rect>", "animated": false}, {"kind": "lucide", "slug": "star", "name": "Star", "aliases": ["Star"], "inner": "<path d=\"M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z\"></path>", "animated": false}, {"kind": "lucide", "slug": "sun", "name": "Sun", "aliases": ["Sun"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"4\"></circle><path d=\"M12 2v2\"></path><path d=\"M12 20v2\"></path><path d=\"m4.93 4.93 1.41 1.41\"></path><path d=\"m17.66 17.66 1.41 1.41\"></path><path d=\"M2 12h2\"></path><path d=\"M20 12h2\"></path><path d=\"m6.34 17.66-1.41 1.41\"></path><path d=\"m19.07 4.93-1.41 1.41\"></path>", "animated": false}, {"kind": "lucide", "slug": "sun-moon", "name": "SunMoon", "aliases": ["SunMoon"], "inner": "<path d=\"M12 2v2\"></path><path d=\"M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715\"></path><path d=\"M16 12a4 4 0 0 0-4-4\"></path><path d=\"m19 5-1.256 1.256\"></path><path d=\"M20 12h2\"></path>", "animated": true}, {"kind": "lucide", "slug": "target", "name": "Target", "aliases": ["Target"], "inner": "<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><circle cx=\"12\" cy=\"12\" r=\"6\"></circle><circle cx=\"12\" cy=\"12\" r=\"2\"></circle>", "animated": false}, {"kind": "lucide", "slug": "terminal", "name": "Terminal", "aliases": ["Terminal", "TerminalIcon"], "inner": "<path d=\"M12 19h8\"></path><path d=\"m4 17 6-6-6-6\"></path>", "animated": false}, {"kind": "lucide", "slug": "text-wrap", "name": "TextWrap", "aliases": ["WrapText"], "inner": "<path d=\"m16 16-3 3 3 3\"></path><path d=\"M3 12h14.5a1 1 0 0 1 0 7H13\"></path><path d=\"M3 19h6\"></path><path d=\"M3 5h18\"></path>", "animated": false}, {"kind": "lucide", "slug": "thumbs-down", "name": "ThumbsDown", "aliases": ["ThumbsDownIcon"], "inner": "<path d=\"M17 14V2\"></path><path d=\"M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z\"></path>", "animated": false}, {"kind": "lucide", "slug": "thumbs-up", "name": "ThumbsUp", "aliases": ["ThumbsUpIcon"], "inner": "<path d=\"M7 10v12\"></path><path d=\"M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z\"></path>", "animated": false}, {"kind": "lucide", "slug": "transgender", "name": "Transgender", "aliases": ["TransgenderIcon"], "inner": "<path d=\"M12 16v6\"></path><path d=\"M14 20h-4\"></path><path d=\"M18 2h4v4\"></path><path d=\"m2 2 7.17 7.17\"></path><path d=\"M2 5.355V2h3.357\"></path><path d=\"m22 2-7.17 7.17\"></path><path d=\"M8 5 5 8\"></path><circle cx=\"12\" cy=\"12\" r=\"4\"></circle>", "animated": false}, {"kind": "lucide", "slug": "trash2", "name": "Trash2", "aliases": ["Trash2", "Trash2Icon"], "inner": "<path d=\"M10 11v6\"></path><path d=\"M14 11v6\"></path><path d=\"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6\"></path><path d=\"M3 6h18\"></path><path d=\"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\"></path>", "animated": false}, {"kind": "lucide", "slug": "triangle-alert", "name": "TriangleAlert", "aliases": ["AlertTriangle", "AlertTriangleIcon", "TriangleAlert"], "inner": "<path d=\"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3\"></path><path d=\"M12 9v4\"></path><path d=\"M12 17h.01\"></path>", "animated": false}, {"kind": "lucide", "slug": "upload", "name": "Upload", "aliases": ["Upload"], "inner": "<path d=\"M12 3v12\"></path><path d=\"m17 8-5-5-5 5\"></path><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"></path>", "animated": false}, {"kind": "lucide", "slug": "user-round", "name": "UserRound", "aliases": ["UserRound"], "inner": "<circle cx=\"12\" cy=\"8\" r=\"5\"></circle><path d=\"M20 21a8 8 0 0 0-16 0\"></path>", "animated": false}, {"kind": "lucide", "slug": "users", "name": "Users", "aliases": ["Users"], "inner": "<path d=\"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2\"></path><path d=\"M16 3.128a4 4 0 0 1 0 7.744\"></path><path d=\"M22 21v-2a4 4 0 0 0-3-3.87\"></path><circle cx=\"9\" cy=\"7\" r=\"4\"></circle>", "animated": true}, {"kind": "lucide", "slug": "venus", "name": "Venus", "aliases": ["VenusIcon"], "inner": "<path d=\"M12 15v7\"></path><path d=\"M9 19h6\"></path><circle cx=\"12\" cy=\"9\" r=\"6\"></circle>", "animated": false}, {"kind": "lucide", "slug": "venus-and-mars", "name": "VenusAndMars", "aliases": ["VenusAndMarsIcon"], "inner": "<path d=\"M10 20h4\"></path><path d=\"M12 16v6\"></path><path d=\"M17 2h4v4\"></path><path d=\"m21 2-5.46 5.46\"></path><circle cx=\"12\" cy=\"11\" r=\"5\"></circle>", "animated": false}, {"kind": "lucide", "slug": "video", "name": "Video", "aliases": ["VideoIcon"], "inner": "<path d=\"m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5\"></path><rect x=\"2\" y=\"6\" width=\"14\" height=\"12\" rx=\"2\"></rect>", "animated": false}, {"kind": "lucide", "slug": "volume2", "name": "Volume2", "aliases": ["Volume2"], "inner": "<path d=\"M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z\"></path><path d=\"M16 9a5 5 0 0 1 0 6\"></path><path d=\"M19.364 18.364a9 9 0 0 0 0-12.728\"></path>", "animated": false}, {"kind": "lucide", "slug": "wand-sparkles", "name": "WandSparkles", "aliases": ["WandSparkles"], "inner": "<path d=\"m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72\"></path><path d=\"m14 7 3 3\"></path><path d=\"M5 6v4\"></path><path d=\"M19 14v4\"></path><path d=\"M10 2v2\"></path><path d=\"M7 8H3\"></path><path d=\"M21 16h-4\"></path><path d=\"M11 3H9\"></path>", "animated": false}, {"kind": "lucide", "slug": "webhook", "name": "Webhook", "aliases": ["Webhook"], "inner": "<path d=\"M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2\"></path><path d=\"m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06\"></path><path d=\"m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8\"></path>", "animated": false}, {"kind": "lucide", "slug": "wifi-off", "name": "WifiOff", "aliases": ["WifiOff"], "inner": "<path d=\"M12 20h.01\"></path><path d=\"M8.5 16.429a5 5 0 0 1 7 0\"></path><path d=\"M5 12.859a10 10 0 0 1 5.17-2.69\"></path><path d=\"M19 12.859a10 10 0 0 0-2.007-1.523\"></path><path d=\"M2 8.82a15 15 0 0 1 4.177-2.643\"></path><path d=\"M22 8.82a15 15 0 0 0-11.288-3.764\"></path><path d=\"m2 2 20 20\"></path>", "animated": false}, {"kind": "lucide", "slug": "wrench", "name": "Wrench", "aliases": ["Wrench", "WrenchIcon"], "inner": "<path d=\"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z\"></path>", "animated": false}, {"kind": "lucide", "slug": "x", "name": "X", "aliases": ["X", "XIcon"], "inner": "<path d=\"M18 6 6 18\"></path><path d=\"m6 6 12 12\"></path>", "animated": false}, {"kind": "lucide", "slug": "zap", "name": "Zap", "aliases": ["Zap"], "inner": "<path d=\"M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z\"></path>", "animated": false}], "animated": [{"kind": "animated", "slug": "bell", "name": "Bell", "aliases": ["Bell"], "inner": "<path d=\"M10.268 21a2 2 0 0 0 3.464 0\"></path><path d=\"M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326\"></path>"}, {"kind": "animated", "slug": "blocks", "name": "Blocks", "aliases": ["Blocks"], "inner": "<path d=\"M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2\"></path><rect x=\"14\" y=\"2\" width=\"8\" height=\"8\" rx=\"1\"></rect>"}, {"kind": "animated", "slug": "maximize", "name": "Maximize", "aliases": ["Maximize"], "inner": "<path d=\"M8 3H5a2 2 0 0 0-2 2v3\"></path><path d=\"M21 8V5a2 2 0 0 0-2-2h-3\"></path><path d=\"M3 16v3a2 2 0 0 0 2 2h3\"></path><path d=\"M16 21h3a2 2 0 0 0 2-2v-3\"></path>"}, {"kind": "animated", "slug": "message-circle-plus", "name": "MessageCirclePlus", "aliases": ["MessageCirclePlus"], "inner": "<path d=\"M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719\"></path><path d=\"M8 12h8\"></path><path d=\"M12 8v8\"></path>"}, {"kind": "animated", "slug": "minimize", "name": "Minimize", "aliases": ["Minimize"], "inner": "<path d=\"M8 3v3a2 2 0 0 1-2 2H3\"></path><path d=\"M21 8h-3a2 2 0 0 1-2-2V3\"></path><path d=\"M3 16h3a2 2 0 0 1 2 2v3\"></path><path d=\"M16 21v-3a2 2 0 0 1 2-2h3\"></path>"}, {"kind": "animated", "slug": "panel-left", "name": "PanelLeft", "aliases": ["PanelLeft"], "inner": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"></rect><path d=\"M9 3v18\"></path>"}, {"kind": "animated", "slug": "panel-right", "name": "PanelRight", "aliases": ["PanelRight"], "inner": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"></rect><path d=\"M15 3v18\"></path>"}, {"kind": "animated", "slug": "search", "name": "Search", "aliases": ["Search"], "inner": "<path d=\"m21 21-4.34-4.34\"></path><circle cx=\"11\" cy=\"11\" r=\"8\"></circle>"}, {"kind": "animated", "slug": "settings", "name": "Settings", "aliases": ["Settings"], "inner": "<path d=\"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915\"></path><circle cx=\"12\" cy=\"12\" r=\"3\"></circle>"}, {"kind": "animated", "slug": "sun-moon", "name": "SunMoon", "aliases": ["SunMoon"], "inner": "<path d=\"M12 2v2\"></path><path d=\"M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715\"></path><path d=\"M16 12a4 4 0 0 0-4-4\"></path><path d=\"m19 5-1.256 1.256\"></path><path d=\"M20 12h2\"></path>"}, {"kind": "animated", "slug": "users", "name": "Users", "aliases": ["Users"], "inner": "<path d=\"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2\"></path><path d=\"M16 3.128a4 4 0 0 1 0 7.744\"></path><path d=\"M22 21v-2a4 4 0 0 0-3-3.87\"></path><circle cx=\"9\" cy=\"7\" r=\"4\"></circle>"}]};
+
+const mount = document.getElementById('mount');
+const q = document.getElementById('q');
+const searchWrap = document.getElementById('searchWrap');
+const clearBtn = document.getElementById('clear');
+const toast = document.getElementById('toast');
+const shown = document.getElementById('shown');
+
+let query = '';
+
+const SVG_OPEN = '<svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">';
+
+function importLine(t) {
+  return 'import { ' + t.aliases[0] + ' } from "' + (t.kind === 'animated'
+    ? '@/components/fox-ui/animated-icons'
+    : 'lucide-react') + '"';
+}
+
+function matches(t) {
+  if (!query) return true;
+  const hay = (t.name + ' ' + t.slug + ' ' + t.aliases.join(' ')).toLowerCase();
+  return query.split(/\s+/).every(function (part) { return hay.indexOf(part) !== -1; });
+}
+
+function tileHtml(t) {
+  const aliases = t.aliases.filter(function (a) { return a !== t.name; });
+  const sub = aliases.length ? t.slug + ' · ' + aliases.join(' ') : t.slug;
+  return '<button class="tile" type="button" data-key="' + t.kind + ':' + t.name + '"'
+    + (t.animated ? ' data-anim="1"' : '')
+    + ' title="' + importLine(t).replace(/"/g, '&quot;') + '">'
+    + (t.kind === 'animated' ? '<span class="badge"></span>' : '')
+    + SVG_OPEN + t.inner + '</svg>'
+    + '<span class="label">' + t.name + '<span class="sub">' + sub + '</span></span>'
+    + '</button>';
+}
+
+function sectionHtml(title, note, list) {
+  const grid = list.length
+    ? list.map(tileHtml).join('')
+    : '<div class="empty" style="grid-column:1/-1">没有匹配的图标。</div>';
+  return '<section>'
+    + '<div class="sec-head"><h2>' + title + '</h2><p>' + note + '</p></div>'
+    + '<div class="grid">' + grid + '</div>'
+    + '</section>';
+}
+
+function render() {
+  const lucide = DATA.lucide.filter(matches);
+  const animated = DATA.animated.filter(matches);
+  const total = lucide.length + animated.length;
+
+  if (!total) {
+    mount.innerHTML = '<div class="empty">没有匹配的图标。换个关键词，或清空搜索。</div>';
+    shown.textContent = '';
+    return;
+  }
+
+  mount.innerHTML =
+    sectionHtml('Lucide', 'lucide-react v0.544.0 · ' + lucide.length + ' 个', lucide) +
+    sectionHtml('动画图标', '仓库内实现 · ' + animated.length + ' 个', animated);
+
+  shown.textContent = '当前显示 ' + total + ' / ' + (DATA.lucide.length + DATA.animated.length) + ' 个图标';
+}
+
+function apply() {
+  query = q.value.trim().toLowerCase();
+  searchWrap.classList.toggle('filled', q.value.length > 0);
+  render();
+}
+
+q.addEventListener('input', apply);
+clearBtn.addEventListener('click', function () { q.value = ''; q.focus(); apply(); });
+
+let toastTimer;
+function flash(line) {
+  toast.innerHTML = '<span class="tick">&#10003;</span><span>' + line.replace(/</g, '&lt;') + '</span>';
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2200);
+}
+
+mount.addEventListener('click', function (e) {
+  const tile = e.target.closest('.tile');
+  if (!tile) return;
+  const [kind, name] = tile.dataset.key.split(':');
+  const pool = kind === 'animated' ? DATA.animated : DATA.lucide;
+  const t = pool.find(function (x) { return x.name === name; });
+  if (!t) return;
+  const line = importLine(t);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(line).then(function () { flash(line); }, function () { flash(line); });
+  } else { flash(line); }
+});
+
+apply();
+</script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+/* Source: https://uiarc.dev/r/shortcut-recorder.json */
+/* ---------------------------------------------- Kbd ---------------------------------------------- */
+
+/* A key cap: a one pixel edge with a slightly heavier bottom, so it reads as a key without a shadow. Held, it drops a pixel and takes the accent. */
+.kbd { display: inline-grid; min-width: 26px; height: 26px; box-sizing: border-box; place-items: center; padding: 0 7px 1px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: var(--fox-radius-small); background: var(--muted); color: var(--foreground); font-family: inherit; font-size: var(--fox-type-caption); font-weight: 500; line-height: 1; letter-spacing: 0; font-variant-numeric: tabular-nums; white-space: nowrap; transition: transform var(--fox-transition-base), border-color var(--fox-transition-fast), background-color var(--fox-transition-fast), color var(--fox-transition-fast), border-bottom-width var(--fox-transition-fast); }
+.kbd[data-size="sm"] { min-width: 22px; height: 22px; padding: 0 5px 1px; border-radius: var(--fox-radius-small); font-size: var(--fox-type-caption); }
+.kbd[data-pressed] { transform: translateY(1px); border-color: color-mix(in oklab, var(--primary) 55%, var(--border)); border-bottom-width: 1px; background: var(--accent); color: var(--primary); transition-duration: 90ms; }
+.kbd[data-tone="warning"] { border-color: color-mix(in oklab, var(--warning) 55%, var(--border)); background: color-mix(in oklab, var(--warning) 12%, var(--muted)); color: var(--foreground); }
+.keys { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+
+/* ---------------------------------------------- Recorder ---------------------------------------------- */
+
+.field { display: grid; min-width: 0; font-family: inherit; letter-spacing: normal; }
+.label { justify-self: start; margin-bottom: var(--fox-space-s); color: var(--foreground); font-size: var(--fox-type-chrome); font-weight: 500; line-height: 1.5; }
+
+.control { position: relative; display: flex; min-width: 0; height: var(--fox-control-md); box-sizing: border-box; align-items: center; border: 1px solid var(--border); border-radius: var(--fox-radius-control); background: var(--card); transition: border-color var(--fox-transition-fast), background-color var(--fox-transition-fast); }
+@media (hover: hover) and (pointer: fine) { .control[data-state="idle"]:hover { border-color: var(--foreground); } }
+.control:has(.recorder:focus-visible) { border-color: var(--foreground); }
+.control[data-state="recording"] { border-color: var(--primary); background: color-mix(in oklab, var(--primary) 4%, var(--card)); }
+.control[data-state="conflict"] { border-color: var(--warning); }
+.field[data-disabled] .control { opacity: .5; background: var(--muted); }
+
+.recorder { display: flex; min-width: 0; height: 100%; flex: 1; align-items: center; padding: 0 6px 0 9px; border: 0; border-radius: var(--fox-radius-control); background: transparent; color: var(--foreground); cursor: pointer; font: inherit; text-align: left; -webkit-tap-highlight-color: transparent; touch-action: manipulation; outline: none; }
+.recorder:disabled { cursor: not-allowed; }
+.row { position: relative; display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px; }
+.chipSlot { display: inline-flex; flex: 0 0 auto; }
+.chipSlot .kbd { flex: 0 0 auto; }
+.placeholder { padding-left: 3px; color: var(--muted-foreground); font-size: var(--fox-type-chrome); white-space: nowrap; }
+.placeholder[data-recording] { color: var(--muted-foreground); }
+/* A recording light: steady in reduced motion, a slow breath otherwise. */
+.dot { width: 7px; height: 7px; flex: none; margin: 0 6px 0 3px; border-radius: 50%; background: var(--primary); animation: breathe 1.4s ease infinite; }
+.dot[data-reduced] { animation: none; }
+@keyframes breathe { 50% { opacity: .35; } }
+
+.actions { display: flex; flex: none; align-items: center; gap: 2px; padding-right: 4px; }
+.action { display: grid; width: 32px; height: 32px; place-items: center; padding: 0; border: 0; border-radius: calc(var(--fox-radius-control) - 5px); background: transparent; color: var(--muted-foreground); cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background-color var(--fox-transition-fast), color var(--fox-transition-fast); }
+@media (hover: hover) and (pointer: fine) { .action:hover { background: var(--muted); color: var(--foreground); } }
+.action:active, .action:focus-visible { background: var(--muted); color: var(--foreground); outline: none; }
+
+.messageSlot { position: relative; overflow: hidden; }
+.message { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px var(--fox-space-m); padding-top: var(--fox-space-s); font-size: var(--fox-type-caption); line-height: 1.5; }
+.message[data-tone="hint"] { color: var(--muted-foreground); }
+.message[data-tone="warning"] { color: var(--muted-foreground); }
+.message[data-tone="warning"] .messageText::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 1px; border-radius: 50%; background: var(--warning); vertical-align: middle; }
+.strong { color: var(--foreground); font-weight: 500; }
+.messageActions { display: inline-flex; gap: var(--fox-space-m); }
+.link { padding: 0; border: 0; background: none; color: var(--foreground); cursor: pointer; font: inherit; font-weight: 500; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; transition: text-decoration-color var(--fox-transition-fast), color var(--fox-transition-fast); }
+.link:focus-visible { text-decoration-color: currentColor; outline: none; }
+.link[data-quiet] { color: var(--muted-foreground); font-weight: 400; text-decoration: none; }
+@media (hover: hover) and (pointer: fine) { .link:hover { text-decoration-color: currentColor; } .link[data-quiet]:hover { color: var(--foreground); } }
+
+/* ---------------------------------------------- Cheatsheet ---------------------------------------------- */
+
+.list { container-type: inline-size; display: grid; min-width: 0; gap: var(--fox-space-m); font-family: inherit; letter-spacing: normal; }
+.searchRow { display: flex; height: var(--fox-control-sm); box-sizing: border-box; align-items: center; gap: var(--fox-space-s); padding: 0 6px 0 12px; border: 1px solid var(--border); border-radius: var(--fox-radius-control); background: var(--card); transition: border-color var(--fox-transition-fast); }
+.searchRow:focus-within { border-color: var(--foreground); }
+.searchIcon { flex: none; color: var(--muted-foreground); }
+.search { min-width: 0; height: 100%; flex: 1; padding: 0; border: 0; background: transparent; color: var(--foreground); font: inherit; font-size: var(--fox-type-chrome); outline: none; -webkit-appearance: none; appearance: none; }
+.search::placeholder { color: var(--muted-foreground); }
+.search::-webkit-search-cancel-button { display: none; }
+.count { flex: none; color: var(--muted-foreground); font-size: var(--fox-type-caption); font-variant-numeric: tabular-nums; }
+.clear { display: grid; width: 24px; height: 24px; flex: none; place-items: center; padding: 0; border: 0; border-radius: var(--fox-radius-pill); background: color-mix(in oklab, var(--foreground) 8%, transparent); color: var(--muted-foreground); cursor: pointer; }
+.clear:focus-visible { background: color-mix(in oklab, var(--foreground) 14%, transparent); color: var(--foreground); outline: none; }
+
+.groups { display: grid; align-items: start; gap: 0 var(--fox-space-2xl); }
+@container (min-width: 520px) { .groups { grid-template-columns: 1fr 1fr; } }
+.group { overflow: hidden; margin-inline: -8px; padding-inline: 8px; }
+.groupLabel { margin: 0; padding: var(--fox-space-m) 0 var(--fox-space-xs); color: var(--muted-foreground); font-size: var(--fox-type-caption); font-weight: 400; }
+.rows { display: grid; margin: 0; padding: 0; list-style: none; }
+.item { overflow: hidden; margin-inline: -8px; }
+/* Rows fade when a held modifier is not in them, and light when their whole combination is down. */
+.itemInner { display: flex; min-height: 36px; align-items: center; justify-content: space-between; gap: var(--fox-space-m); padding: 0 8px; border-radius: 10px; transition: opacity var(--fox-transition-base), background-color var(--fox-transition-fast); }
+.item + .item .itemInner { box-shadow: inset 0 1px 0 var(--border); }
+.item[data-dim] .itemInner { opacity: .38; }
+.item[data-match] .itemInner { background: var(--accent); box-shadow: none; }
+.item[data-match] + .item .itemInner { box-shadow: none; }
+.itemLabel { min-width: 0; overflow: hidden; color: var(--muted-foreground); font-size: var(--fox-type-chrome); text-overflow: ellipsis; white-space: nowrap; transition: color var(--fox-transition-fast); }
+.item[data-match] .itemLabel { color: var(--foreground); }
+.empty { margin: 0; padding: var(--fox-space-l) 0; color: var(--muted-foreground); font-size: var(--fox-type-chrome); }
+
+.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kbd, .control, .itemInner { transition-duration: 0ms; }
+  .kbd[data-pressed] { transform: none; }
+  .dot { animation: none; }
+}
+
+/* Match Fox control density while preserving Arc recording and conflict states. */
+.control { min-height: var(--fox-control-md); height: auto; }
+.recorder { min-height: calc(var(--fox-control-md) - 2px); padding-block: 3px; }
+.kbd { min-width: 22px; height: 22px; padding: 0 5px 1px; }
+.action { width: var(--fox-control-sm); height: var(--fox-control-sm); border-radius: var(--fox-radius-small); }
+.recorder:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.action:focus-visible, .link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }

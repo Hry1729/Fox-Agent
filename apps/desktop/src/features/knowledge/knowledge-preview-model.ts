@@ -26,7 +26,7 @@ export interface KnowledgeDocumentInfo {
 
 export function formatKnowledgeDocumentInfo(info: KnowledgeDocumentInfo) {
   return [
-    `知识库：${info.knowledgeBase}`,
+    `资料库：${info.knowledgeBase}`,
     `文件名：${info.filename}`,
     `类型：${info.kind}`,
     `大小：${info.size}`,

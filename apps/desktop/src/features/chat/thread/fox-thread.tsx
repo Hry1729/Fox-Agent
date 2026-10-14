@@ -50,7 +50,7 @@ function FoxScrollToBottom() {
  * store itself, so the dock needs no extra prop. */
 function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][number] }) {
   const planStatus = plan?.status === 'proposed'
-    ? '待批准'
+    ? '需要你批准'
     : plan?.status === 'approved'
       ? '已批准'
       : plan?.status === 'rejected'

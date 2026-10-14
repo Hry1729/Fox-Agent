@@ -34,7 +34,7 @@ const boundaryLabels: Record<string, string> = {
   'user.question.responded': '已收到回答',
   'run.failed': '运行失败',
   'run.interrupted': '运行中断',
-  'run.cancelled': '运行已取消',
+  'run.cancelled': '已取消',
 }
 
 const processEvents = new Set(['reasoning.delta', 'tool.started', 'tool.updated', 'tool.completed'])
@@ -227,7 +227,7 @@ export function processGroupTitle(events: readonly RunEventRecord[]) {
   const counts = summarizeProcessActivity(events)
   if (!counts.length) return '已完成分析'
   const labels: Record<ProcessActivityKind, string> = {
-    localKnowledge: '检索了本地知识库', remoteKnowledge: '检索了远程知识库', knowledge: '检索了知识库',
+    localKnowledge: '检索了本机资料库', remoteKnowledge: '检索了远程资料库', knowledge: '检索了资料库',
     read: '读取了文件', search: '已搜索代码', write: '修改了文件', command: '执行了命令',
     web: '访问了网页', office: '调用了办公工具', question: '询问了用户', other: '调用了工具',
     readImage: '已读取图片', edit: '修改了文件', code: '运行了代码', subagents: '已协调子代理',
@@ -243,8 +243,8 @@ export function processGroupTitle(events: readonly RunEventRecord[]) {
 export function activeProcessGroupTitle(name?: string, input?: unknown) {
   if (!name) return '正在分析请求'
   const labels: Record<ProcessActivityKind, string> = {
-    localKnowledge: '正在检索本地知识库', remoteKnowledge: '正在检索远程知识库',
-    knowledge: '正在检索知识库', read: '正在读取文件', search: '正在搜索代码',
+    localKnowledge: '正在检索本机资料库', remoteKnowledge: '正在检索远程资料库',
+    knowledge: '正在检索资料库', read: '正在读取文件', search: '正在搜索代码',
     write: '正在修改文件', command: '正在执行命令', web: '正在访问网页',
     office: '正在调用办公工具', question: '等待你的回答', other: '正在调用工具',
     readImage: '正在读取图片', edit: '正在编辑文件', code: '正在运行代码', subagents: '正在协调子代理',

@@ -1,19 +1,30 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
-import { AlertCircle, ArrowLeft, ArrowRight, BookOpen, CheckCircle2, ChevronDown, ChevronRight, Clock3, Cpu, Database, Download, ExternalLink, FileQuestion, FileStack, FileText, FlaskConical, Folder, FolderOpen, FolderPlus, HardDrive, Info, Layers3, ListFilter, LoaderCircle, MoreHorizontal, PackageOpen, Pencil, Plus, RefreshCw, RotateCcw, Search, Star, Trash2, Upload, XCircle } from 'lucide-react'
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
+import { AlertCircle, ArrowLeft, ArrowRight, ArrowUpDown, BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, ChevronsUpDown, Clock3, Copy, Cpu, CornerDownLeft, Database, Download, ExternalLink, Eye, FileQuestion, FileStack, FileText, FlaskConical, Folder, FolderInput, FolderOpen, FolderPlus, Gauge, HardDrive, History, Info, Layers3, ListFilter, ListTodo, LoaderCircle, MessageCircle, MoreHorizontal, PackageOpen, Pause, Pencil, Plus, Quote, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Star, Trash2, Upload, WandSparkles, XCircle } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { ExpandingSearch } from '@/components/arc/expanding-search/expanding-search'
+import { FileDropzone, type FileDropzoneItem } from '@/components/arc/file-dropzone/file-dropzone'
+import { FoxEmptyState } from '@/components/fox-ui/empty-state'
+import { desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 import { MessageResponse } from '@/components/ai-elements/message-response'
 import { Badge } from '@/components/ui/badge'
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from '@/components/ui/breadcrumb'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Progress } from '@/components/ui/progress'
+import { SkeletonContent } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/model/types'
+import type { LocalKnowledgeDocumentAsk } from '@/features/workspace/types'
 import { notify as toast } from '@/features/notifications'
+import { detectShortcutPlatform, formatShortcut, matchesShortcutAction } from '@/features/settings/shortcut-model'
+import { useShortcutPreferences } from '@/features/settings/use-shortcuts'
 import { previewKind } from '@/features/knowledge/knowledge-preview-model'
 import { binaryValue, createKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from '@/features/knowledge/knowledge-preview-source'
 import { createOperationState, reduceOperationEvent, type OperationState } from './operation-reducer'
@@ -21,6 +32,7 @@ import { defaultLocalKnowledgeGateway } from './tauri-gateway'
 import { LocalFileTypeIcon } from './local-file-type-icon'
 import type { KnowledgeChunkPreview, KnowledgeJob, KnowledgeJobStatus, KnowledgeOperationStage, KnowledgeRetrievalCase, KnowledgeRetrievalResult, KnowledgeSearchMode, LocalEmbeddingModel, LocalFileCategory, LocalKnowledgeBase, LocalKnowledgeBaseCreateRequest, LocalKnowledgeBaseDetail, LocalKnowledgeCatalogFile, LocalKnowledgeDocument, LocalKnowledgeFileSource, LocalKnowledgeFolder, LocalKnowledgeGateway, LocalKnowledgeImportFile, LocalKnowledgeStorageMigration, LocalKnowledgeStorageStatus, OperationAccepted, StorageMigrationStage, StorageMigrationStatus, VectorBackendHealth } from './model'
 import { formatBytes, formatJobStage } from './model'
+import { searchSnippetParts } from './search-snippet'
 import '@/styles/local-knowledge.css'
 
 const KnowledgePdfViewer = lazy(() => import('@/features/knowledge/knowledge-pdf-viewer'))
@@ -31,13 +43,14 @@ const MAX_LOCAL_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024
 const LOCAL_FILE_PAGE_SIZE = 12
 const KNOWLEDGE_JOB_PAGE_SIZE = 8
 const RECENT_DOCUMENT_LIMIT = 8
+const HOME_EXAMPLE_QUESTIONS = ['怎么把本机文件加入资料库？', '智能搜索和按字词查找有什么区别？']
 const RECENT_DOCUMENT_STORAGE_KEY = 'fox.local-knowledge.recent-documents'
 const LOCAL_KNOWLEDGE_ACTIVITY_STORAGE_KEY = 'fox.local-knowledge.activity-history'
 const LOCAL_KNOWLEDGE_ACTIVITY_LIMIT = 80
 const LOCAL_KNOWLEDGE_MASCOT = '/mascot/fox/status/fox_give_flowers.png'
 const FOX_GUIDE_KNOWLEDGE_BASE_ID = 'fox-user-guide'
 
-export type LocalKnowledgeView = 'home' | 'files' | 'list' | 'detail' | 'documents' | 'import' | 'jobs' | 'models' | 'retrieval'
+export type LocalKnowledgeView = 'home' | 'files' | 'list' | 'detail' | 'documents' | 'import' | 'jobs' | 'models' | 'retrieval' | 'settings'
 
 interface RecentLocalKnowledgeDocument {
   knowledgeBaseId: string
@@ -114,7 +127,7 @@ function recordImportedDocuments(knowledgeBaseId: string, files: Array<{ name: s
       id: `${now + index}-${Math.random().toString(36).slice(2)}`,
       knowledgeBaseId,
       kind: 'document_imported',
-      title: wasDeleted ? '重新导入文档' : '导入文档',
+      title: wasDeleted ? '重新添加资料' : '添加资料',
       detail,
       occurredAt: new Date(now + index).toISOString(),
     }
@@ -123,23 +136,23 @@ function recordImportedDocuments(knowledgeBaseId: string, files: Array<{ name: s
 }
 
 function knowledgeJobStageActivityTitle(job: KnowledgeJob, stage: KnowledgeOperationStage): string {
-  if (job.type === 'delete') return stage === 'committing' ? '完成文档删除' : '删除文档'
+  if (job.type === 'delete') return stage === 'committing' ? '完成资料移除' : '移除资料'
   const titleByStage: Record<KnowledgeOperationStage, string> = {
-    validating: job.type === 'import' ? '校验导入文件' : '校验文档',
-    copying: '复制导入文件',
-    hashing: '计算文档哈希',
-    parsing: '解析文档',
-    chunking: '文本分块',
-    embedding: '向量化索引',
-    vector_upsert: '写入向量索引',
-    verifying: '校验索引',
+    validating: job.type === 'import' ? '校验添加的文件' : '校验资料',
+    copying: '复制添加的文件',
+    hashing: '计算文件指纹',
+    parsing: '读取资料',
+    chunking: '切分段落',
+    embedding: '整理内容',
+    vector_upsert: '写入搜索数据',
+    verifying: '校验搜索结果',
     committing: job.type === 'rebuild'
-      ? '完成索引重建'
+      ? '完成重新整理'
       : job.type === 'import'
-        ? '完成文档导入'
+        ? '完成资料添加'
         : job.type === 'parse'
-          ? '完成文档解析'
-          : '完成索引更新',
+          ? '完成资料读取'
+          : '完成整理',
   }
   return titleByStage[stage]
 }
@@ -222,6 +235,7 @@ export interface LocalKnowledgeNavigationProps extends LocalKnowledgePageProps {
   onCreateRequestHandled?: () => void
   onBack?: () => void
   onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string, documentId?: string) => void
+  onAskDocument?: (payload: LocalKnowledgeDocumentAsk) => void
 }
 
 type EmbeddedLocalKnowledgeNavigationProps = LocalKnowledgeNavigationProps & { embedded?: boolean }
@@ -251,16 +265,16 @@ function displayLocalPath(value: string): string {
 }
 
 function baseStatusLabel(status: LocalKnowledgeBase['status']): string {
-  return ({ empty: '待导入', indexing: '索引中', ready: '已就绪', error: '有错误', migrating: '迁移中' })[status]
+  return ({ empty: '还没有资料', indexing: '正在整理', ready: '可以使用', error: '有错误', migrating: '迁移中' })[status]
 }
 
 function documentStatusLabel(status: LocalKnowledgeDocument['status']): string {
-  return ({ queued: '排队中', parsing: '解析中', indexed: '已索引', error: '失败', stale: '待重建' })[status]
+  return ({ queued: '排队中', parsing: '读取中', indexed: '已整理', error: '读取失败', stale: '待重新整理' })[status]
 }
 
 function jobStatusLabel(status: KnowledgeJobStatus, outcome: KnowledgeJob['outcome']): string {
-  if (status === 'completed' && outcome === 'partial') return '部分完成'
-  return ({ queued: '排队中', running: '处理中', paused: '已暂停', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' })[status]
+  if (status === 'completed' && outcome === 'partial') return '只完成一部分'
+  return ({ queued: '排队中', running: '进行中', paused: '已暂停', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' })[status]
 }
 
 function storageMigrationStatusLabel(status: StorageMigrationStatus): string {
@@ -270,10 +284,10 @@ function storageMigrationStatusLabel(status: StorageMigrationStatus): string {
 function storageMigrationStageLabel(stage: StorageMigrationStage | null): string {
   return ({
     validating: '校验目标目录',
-    quiescing: '暂停知识库任务',
+    quiescing: '暂停资料库任务',
     flushing: '写入并刷新索引',
     closing_handles: '释放文件句柄',
-    copying: '复制知识库文件',
+    copying: '复制资料库文件',
     verifying: '校验迁移结果',
     switching: '切换存储配置',
     reopening: '重新打开数据库',
@@ -327,7 +341,7 @@ function StorageLocationDialog({ gateway, open, onOpenChange }: { gateway: Local
           return
         }
         if (next.status === 'completed') {
-          toast.success('本地知识库存储迁移已完成', { description: '请重启 Fox，使新的存储位置生效。', sourceType: 'knowledge_storage_migration', sourceId: migrationId })
+          toast.success('本机资料库存储迁移已完成', { description: '请重启 Fox，使新的存储位置生效。', sourceType: 'knowledge_storage_migration', sourceId: migrationId })
           try {
             const refreshed = await gateway.getStorageStatus()
             if (!disposed) setStatus(refreshed)
@@ -389,16 +403,16 @@ function StorageLocationDialog({ gateway, open, onOpenChange }: { gateway: Local
     <Dialog open={open} onOpenChange={(nextOpen) => { if (!migrationBusy && !starting) onOpenChange(nextOpen) }}>
       <DialogContent className="fox-local-kb-storage-dialog" showCloseButton={!migrationBusy && !starting}>
         <DialogHeader>
-          <DialogTitle>本地知识库存储位置</DialogTitle>
-          <DialogDescription>选择新的根目录后，Fox 会自动迁移数据库、文件和本地索引。</DialogDescription>
+          <DialogTitle>保存位置</DialogTitle>
+          <DialogDescription>选择新的根目录后，Fox 会自动迁移数据库、文件和本机索引。</DialogDescription>
         </DialogHeader>
         <div className="fox-local-kb-storage-body">
           {loading && <div className="fox-local-kb-storage-path is-loading"><LoaderCircle className="animate-spin" /><span>正在读取存储位置...</span></div>}
           {!loading && status && <>
             <label className="fox-local-kb-storage-label">当前位置</label>
             <div className="fox-local-kb-storage-path"><FolderOpen aria-hidden="true" /><code title={status.rootPath}>{status.rootPath}</code></div>
-            {pendingPath && <><label className="fox-local-kb-storage-label">迁移目标</label><div className="fox-local-kb-storage-pending"><ArrowLeft aria-hidden="true" /><code title={pendingPath}>{pendingPath}</code></div></>}
-            {migration && <div className="fox-local-kb-storage-progress" role="status" aria-live="polite"><div className="fox-local-kb-storage-progress-head"><span>{storageMigrationStatusLabel(migration.status)}</span><b>{migration.progress}%</b></div><div className="fox-local-kb-progress"><span style={{ width: `${Math.max(0, Math.min(100, migration.progress))}%` }} /></div><small>{storageMigrationStageLabel(migration.stage)}</small></div>}
+            {pendingPath && <><label className="fox-local-kb-storage-label">新位置</label><div className="fox-local-kb-storage-pending"><ArrowLeft aria-hidden="true" /><code title={pendingPath}>{pendingPath}</code></div></>}
+            {migration && <div className="fox-local-kb-storage-progress" role="status" aria-live="polite"><div className="fox-local-kb-storage-progress-head"><span>{storageMigrationStatusLabel(migration.status)}</span><b>{migration.progress}%</b></div><Progress className="fox-local-kb-progress" value={migration.progress} aria-label="存储迁移进度" /><small>{storageMigrationStageLabel(migration.stage)}</small></div>}
             {completed && <p className="fox-local-kb-storage-success"><CheckCircle2 />迁移已完成，重启 Fox 后新存储位置才会生效。</p>}
             {(error || migrationError) && <p className="fox-local-kb-storage-error" role="alert"><AlertCircle />{migrationError ?? error}</p>}
           </>}
@@ -419,7 +433,7 @@ function LocalKnowledgeHeader({ title, description, onBack, actions }: { title: 
   return (
     <header className="fox-local-kb-header">
       <div className="fox-local-kb-header-main">
-        {onBack && <Button aria-label="返回本地知识库" className="fox-local-kb-back" variant="ghost" size="icon" onClick={onBack}><ArrowLeft /></Button>}
+        {onBack && <Button aria-label="返回本机资料库" className="fox-local-kb-back" variant="ghost" size="icon" onClick={onBack}><ArrowLeft /></Button>}
         <div>
           <h1>{title}</h1>
           {description && <p>{description}</p>}
@@ -431,15 +445,15 @@ function LocalKnowledgeHeader({ title, description, onBack, actions }: { title: 
 }
 
 function LocalKnowledgeLoading() {
-  return <div className="fox-local-kb-loading"><LoaderCircle className="animate-spin" /><span>正在读取本地知识库...</span></div>
+  return <SkeletonContent className="fox-local-kb-loading" label="正在读取本机资料库..." lines={4} avatar />
 }
 
 function LocalKnowledgeError({ message, onRetry }: { message: string; onRetry?: () => void }) {
-  return <div className="fox-local-kb-error"><AlertCircle /><span>{message}</span>{onRetry && <Button size="sm" variant="outline" onClick={onRetry}>重试</Button>}</div>
+  return <FoxEmptyState variant="error" icon={<AlertCircle />} title="资料库加载失败" description={message} action={onRetry && <Button size="sm" variant="outline" onClick={onRetry}>重试</Button>} />
 }
 
 function LocalKnowledgeEmpty({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
-  return <div className="fox-local-kb-empty"><Database /><div><strong>{title}</strong><span>{description}</span></div>{action}</div>
+  return <FoxEmptyState variant="empty" icon={<Database />} title={title} description={description} action={action} />
 }
 
 function isSelectableEmbeddingModel(model: LocalEmbeddingModel) {
@@ -459,7 +473,7 @@ function CreateKnowledgeBaseDialog({
   submitting: boolean
   error: string | null
   onOpenChange: (open: boolean) => void
-  onSubmit: (request: LocalKnowledgeBaseCreateRequest) => Promise<void>
+  onSubmit: (request: LocalKnowledgeBaseCreateRequest, files: LocalKnowledgeImportFile[]) => Promise<void>
 }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -468,7 +482,9 @@ function CreateKnowledgeBaseDialog({
   const [chunkSize, setChunkSize] = useState('512')
   const [chunkOverlap, setChunkOverlap] = useState('50')
   const [searchMode, setSearchMode] = useState<KnowledgeSearchMode>('keyword')
-  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [fileSelections, setFileSelections] = useState<KnowledgeImportSelection[]>([])
+  const files = fileSelections.filter((item) => item.status !== 'failed').map((item) => item.importFile)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelsLoadError, setModelsLoadError] = useState(false)
@@ -481,7 +497,8 @@ function CreateKnowledgeBaseDialog({
       setChunkSize('512')
       setChunkOverlap('50')
       setSearchMode('keyword')
-      setAdvancedOpen(false)
+      setMoreOpen(false)
+      setFileSelections([])
       setValidationError(null)
       setModels([])
       setModelsLoadError(false)
@@ -514,23 +531,27 @@ function CreateKnowledgeBaseDialog({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (fileSelections.some((item) => item.status === 'failed')) {
+      setValidationError('请移除或重新选择无法导入的文件。')
+      return
+    }
     const normalizedName = name.trim()
     if (!normalizedName) {
-      setValidationError('请输入知识库名称。')
+      setValidationError('请输入资料库名称。')
       return
     }
     const normalizedChunkSize = Number(chunkSize)
     const normalizedChunkOverlap = Number(chunkOverlap)
     if (!Number.isInteger(normalizedChunkSize) || normalizedChunkSize < 128 || normalizedChunkSize > 4096) {
-      setValidationError('分块大小需为 128–4096 的整数。')
+      setValidationError('段落长度需为 128–4096 的整数。')
       return
     }
     if (!Number.isInteger(normalizedChunkOverlap) || normalizedChunkOverlap < 0 || normalizedChunkOverlap >= normalizedChunkSize) {
-      setValidationError('重叠长度需为非负整数，且必须小于分块大小。')
+      setValidationError('衔接长度需为非负整数，且必须小于段落长度。')
       return
     }
     if (searchMode !== 'keyword' && !models.some((model) => model.id === embeddingModelId && isSelectableEmbeddingModel(model))) {
-      setValidationError('向量或混合检索需要选择一个已安装的向量模型。')
+      setValidationError('智能搜索需要选择一个已安装并测试通过的搜索模型。')
       return
     }
     setValidationError(null)
@@ -541,7 +562,7 @@ function CreateKnowledgeBaseDialog({
       chunkSize: normalizedChunkSize,
       chunkOverlap: normalizedChunkOverlap,
       searchMode,
-    })
+    }, files)
   }
 
   const requestOpenChange = (nextOpen: boolean) => {
@@ -549,40 +570,55 @@ function CreateKnowledgeBaseDialog({
     onOpenChange(nextOpen)
   }
 
+  const selectableModels = models.filter(isSelectableEmbeddingModel)
+  const chooseSearchMode = (smart: boolean) => {
+    if (!smart) {
+      setSearchMode('keyword')
+      return
+    }
+    if (embeddingModelId === 'none') {
+      const preferred = selectableModels.find((model) => model.isDefault) ?? selectableModels[0]
+      if (preferred) setEmbeddingModelId(preferred.id)
+    }
+    setSearchMode('hybrid')
+  }
+
   return (
     <Dialog open={open} onOpenChange={requestOpenChange}>
-      <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!submitting}>
+      <DialogContent className="fox-local-kb-create-dialog fox-kb-create-dialog" showCloseButton={!submitting}>
         <DialogHeader>
-          <DialogTitle>新建本地知识库</DialogTitle>
-          <DialogDescription>创建后可以导入文件并建立本地索引；检测到默认向量模型时会自动选择混合检索。</DialogDescription>
+          <DialogTitle>新建资料库</DialogTitle>
+          <DialogDescription>起个名字，把资料放进来就能用了。</DialogDescription>
         </DialogHeader>
         <form className="fox-local-kb-create-form" onSubmit={submit}>
           <div>
             <label htmlFor="local-knowledge-base-name">名称 <span>*</span></label>
-            <Input id="local-knowledge-base-name" autoFocus placeholder="例如：产品资料库" value={name} onChange={(event) => { setName(event.target.value); setValidationError(null) }} disabled={submitting} />
+            <Input id="local-knowledge-base-name" autoFocus placeholder="例如：产品资料" value={name} onChange={(event) => { setName(event.target.value); setValidationError(null) }} disabled={submitting} />
           </div>
-          <div>
-            <label htmlFor="local-knowledge-base-description">描述 <small>（可选）</small></label>
-            <Textarea id="local-knowledge-base-description" className="fox-local-kb-create-textarea" placeholder="简要说明这个知识库的用途" value={description} onChange={(event) => setDescription(event.target.value)} disabled={submitting} />
-          </div>
-          <div className="fox-local-kb-index-settings">
-            <h3 className="fox-local-kb-index-settings-title">索引与检索</h3>
-            <label>向量模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword') }} disabled={submitting || modelsLoading}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用向量模型</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
-            <label>检索模式<Select value={searchMode} onValueChange={(value) => setSearchMode(value as KnowledgeSearchMode)} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="keyword">关键词检索</SelectItem><SelectItem value="vector" disabled={embeddingModelId === 'none'}>向量检索</SelectItem><SelectItem value="hybrid" disabled={embeddingModelId === 'none'}>混合检索</SelectItem></SelectContent></Select></label>
-            <button type="button" className="fox-local-kb-advanced-toggle" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((open) => !open)}><ChevronRight className={advancedOpen ? 'is-open' : undefined} />高级</button>
-            {advancedOpen && <div className="fox-local-kb-advanced-fields">
-              <label>分块大小<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => setChunkSize(event.target.value)} disabled={submitting} /></label>
-              <label>重叠长度<Input type="number" min={0} step={1} value={chunkOverlap} onChange={(event) => setChunkOverlap(event.target.value)} disabled={submitting} /></label>
-            </div>}
-            {modelsLoading && <p><LoaderCircle className="animate-spin" />正在读取向量模型...</p>}
-            {!modelsLoading && modelsLoadError && <p><AlertCircle />向量模型列表暂不可用。可以先创建关键词知识库，稍后再编辑检索配置。</p>}
-            {!modelsLoading && !modelsLoadError && models.length === 0 && <p><Cpu />还没有可用的向量模型。可先创建关键词知识库，再到“向量模型”页面安装。</p>}
-            {!modelsLoading && models.length > 0 && !models.some(isSelectableEmbeddingModel) && <p><Info />已显示可安装模型；请先在“向量模型”页面完成安装与测试，之后即可选择。</p>}
-          </div>
+          {open && <KnowledgeImportDropzone gateway={gateway} items={fileSelections} onItemsChange={setFileSelections} disabled={submitting} onError={setValidationError} />}
+          {moreOpen && <div className="fox-kb-create-more">
+            <div>
+              <label htmlFor="local-knowledge-base-description">简介 <small>（可选）</small></label>
+              <Textarea id="local-knowledge-base-description" className="fox-local-kb-create-textarea" placeholder="简单说明这个资料库的用途" value={description} onChange={(event) => setDescription(event.target.value)} disabled={submitting} />
+            </div>
+            <label>搜索方式<Select value={searchMode === 'keyword' ? 'keyword' : 'smart'} onValueChange={(value) => chooseSearchMode(value === 'smart')} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="keyword">按字词查找</SelectItem><SelectItem value="smart">智能搜索</SelectItem></SelectContent></Select></label>
+            <p className="fox-kb-create-mode-hint">{searchMode === 'keyword' ? '速度快，适合找确切的名称和编号。' : '能理解意思相近的说法，需要先装好一个搜索模型。'}</p>
+            <div className="fox-local-kb-index-settings">
+              <h3 className="fox-local-kb-index-settings-title">高级</h3>
+              <label>搜索模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword') }} disabled={submitting || modelsLoading}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
+              <label>段落长度<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => setChunkSize(event.target.value)} disabled={submitting} /></label>
+              <label>衔接长度<Input type="number" min={0} step={1} value={chunkOverlap} onChange={(event) => setChunkOverlap(event.target.value)} disabled={submitting} /></label>
+              {modelsLoading && <p><LoaderCircle className="animate-spin" />正在读取搜索模型...</p>}
+              {!modelsLoading && modelsLoadError && <p><AlertCircle />搜索模型列表暂不可用。可以先创建，稍后再编辑搜索方式。</p>}
+              {!modelsLoading && !modelsLoadError && models.length === 0 && <p><Cpu />还没有可用的搜索模型。可先创建，再到“向量模型”页面安装。</p>}
+              {!modelsLoading && models.length > 0 && !selectableModels.length && <p><Info />模型还没有安装并测试通过，可以先创建，之后再到“向量模型”页面完成。</p>}
+            </div>
+          </div>}
           {(validationError || error) && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{validationError ?? error}</p>}
           <DialogFooter className="fox-local-kb-create-actions">
+            <button type="button" className="fox-kb-create-more-toggle" aria-expanded={moreOpen} onClick={() => setMoreOpen((value) => !value)}><ChevronRight className={moreOpen ? 'is-open' : undefined} />更多选项</button>
             <Button type="button" variant="outline" onClick={() => requestOpenChange(false)} disabled={submitting}>取消</Button>
-            <Button type="submit" disabled={submitting}>{submitting && <LoaderCircle className="animate-spin" />}创建知识库</Button>
+            <Button type="submit" disabled={submitting || fileSelections.some((item) => item.status === 'failed')}>{submitting && <LoaderCircle className="animate-spin" />}创建</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -590,22 +626,28 @@ function CreateKnowledgeBaseDialog({
   )
 }
 
-function EditKnowledgeBaseDialog({
+function KnowledgeBaseSettingsForm({
   gateway,
   base,
   open,
   submitting,
   error,
+  readOnly = false,
   onOpenChange,
   onSubmit,
+  onDelete,
+  onDirtyChange,
 }: {
   gateway: LocalKnowledgeGateway
-  base: LocalKnowledgeBaseDetail
+  base: LocalKnowledgeBase
   open: boolean
   submitting: boolean
   error: string | null
+  readOnly?: boolean
   onOpenChange: (open: boolean) => void
   onSubmit: (request: LocalKnowledgeBaseCreateRequest) => Promise<void>
+  onDelete?: () => void
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const [name, setName] = useState(base.name)
   const [description, setDescription] = useState(base.description)
@@ -614,8 +656,10 @@ function EditKnowledgeBaseDialog({
   const [chunkSize, setChunkSize] = useState(String(base.chunkSize))
   const [chunkOverlap, setChunkOverlap] = useState(String(base.chunkOverlap))
   const [searchMode, setSearchMode] = useState<KnowledgeSearchMode>(base.searchMode)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
+  useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
 
   useEffect(() => {
     if (!open) return
@@ -625,30 +669,45 @@ function EditKnowledgeBaseDialog({
     setChunkSize(String(base.chunkSize))
     setChunkOverlap(String(base.chunkOverlap))
     setSearchMode(base.searchMode)
+    setAdvancedOpen(false)
     setValidationError(null)
     setDirty(false)
     void gateway.listEmbeddingModels().then(setModels).catch(() => setModels([]))
   }, [base, gateway, open])
 
+  const smart = searchMode !== 'keyword'
+  const chooseSmart = (nextSmart: boolean) => {
+    setDirty(true)
+    if (!nextSmart) {
+      setSearchMode('keyword')
+      return
+    }
+    if (embeddingModelId === 'none') {
+      const preferred = models.find((model) => model.isDefault && isSelectableEmbeddingModel(model)) ?? models.find(isSelectableEmbeddingModel)
+      if (preferred) setEmbeddingModelId(preferred.id)
+    }
+    setSearchMode(searchMode === 'vector' ? 'vector' : 'hybrid')
+  }
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const normalizedName = name.trim()
     if (!normalizedName) {
-      setValidationError('请输入知识库名称。')
+      setValidationError('请输入资料库名称。')
       return
     }
     const normalizedChunkSize = Number(chunkSize)
     const normalizedChunkOverlap = Number(chunkOverlap)
     if (!Number.isInteger(normalizedChunkSize) || normalizedChunkSize < 128 || normalizedChunkSize > 4096) {
-      setValidationError('分块大小需为 128–4096 的整数。')
+      setValidationError('段落长度需为 128–4096 的整数。')
       return
     }
     if (!Number.isInteger(normalizedChunkOverlap) || normalizedChunkOverlap < 0 || normalizedChunkOverlap >= normalizedChunkSize) {
-      setValidationError('重叠长度需为非负整数，且必须小于分块大小。')
+      setValidationError('衔接长度需为非负整数，且必须小于段落长度。')
       return
     }
-    if (searchMode !== 'keyword' && !models.some((model) => model.id === embeddingModelId && isSelectableEmbeddingModel(model))) {
-      setValidationError('向量或混合检索需要选择一个已安装的向量模型。')
+    if (smart && !models.some((model) => model.id === embeddingModelId && isSelectableEmbeddingModel(model))) {
+      setValidationError('智能搜索需要选择一个已安装并测试通过的搜索模型。')
       return
     }
     setValidationError(null)
@@ -664,42 +723,107 @@ function EditKnowledgeBaseDialog({
 
   const requestOpenChange = (nextOpen: boolean) => {
     if (submitting) return
-    if (!nextOpen && dirty && !window.confirm('放弃尚未保存的知识库修改？')) return
+    if (!nextOpen && dirty && !window.confirm('放弃尚未保存的资料库修改？')) return
     onOpenChange(nextOpen)
   }
 
   return (
-    <Dialog open={open} onOpenChange={requestOpenChange}>
-      <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!submitting}>
-        <DialogHeader>
-          <DialogTitle>编辑本地知识库</DialogTitle>
-          <DialogDescription>修改基本信息和检索配置。模型或分块参数变化后会重建向量索引。</DialogDescription>
-        </DialogHeader>
-        <form className="fox-local-kb-create-form" onSubmit={submit}>
+    <section className="fox-kb-settings-panel">
+        <p className="fox-kb-settings-description">{readOnly ? '这是 Fox 自带的资料库，名称和搜索方式不能改，这里可以看它的存放位置和整理情况。' : '改名称和简介就够了。换搜索方式或段落长度会重新整理一次资料。'}</p>
+        <form className={cn('fox-kb-settings-form', readOnly && 'is-readonly')} onSubmit={submit}>
           <div>
-            <label htmlFor="local-knowledge-base-edit-name">名称 <span>*</span></label>
-            <Input id="local-knowledge-base-edit-name" autoFocus value={name} onChange={(event) => { setName(event.target.value); setValidationError(null); setDirty(true) }} disabled={submitting} />
+            <label htmlFor="local-knowledge-base-edit-name">名称 {!readOnly && <span>*</span>}</label>
+            <Input id="local-knowledge-base-edit-name" autoFocus value={name} onChange={(event) => { setName(event.target.value); setValidationError(null); setDirty(true) }} disabled={submitting || readOnly} />
           </div>
           <div>
-            <label htmlFor="local-knowledge-base-edit-description">描述 <small>（可选）</small></label>
-            <Textarea id="local-knowledge-base-edit-description" className="fox-local-kb-create-textarea" value={description} onChange={(event) => { setDescription(event.target.value); setDirty(true) }} disabled={submitting} />
+            <label htmlFor="local-knowledge-base-edit-description">简介 <small>（可选）</small></label>
+            <Textarea id="local-knowledge-base-edit-description" className="fox-local-kb-create-textarea" value={description} onChange={(event) => { setDescription(event.target.value); setDirty(true) }} disabled={submitting || readOnly} />
           </div>
-          <div className="fox-local-kb-index-settings">
-            <h3 className="fox-local-kb-index-settings-title">索引与检索</h3>
-            <label>向量模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword'); setDirty(true) }} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用向量模型</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
-            <label>检索模式<Select value={searchMode} onValueChange={(value) => { setSearchMode(value as KnowledgeSearchMode); setDirty(true) }} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="keyword">关键词检索</SelectItem><SelectItem value="vector" disabled={embeddingModelId === 'none'}>向量检索</SelectItem><SelectItem value="hybrid" disabled={embeddingModelId === 'none'}>混合检索</SelectItem></SelectContent></Select></label>
-            <label>分块大小<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => { setChunkSize(event.target.value); setDirty(true) }} disabled={submitting} /></label>
-            <label>重叠长度<Input type="number" min={0} step={1} value={chunkOverlap} onChange={(event) => { setChunkOverlap(event.target.value); setDirty(true) }} disabled={submitting} /></label>
+          <div className="fox-kb-settings-field">
+            <span className="fox-kb-settings-label">搜索方式</span>
+            <div className="fox-kb-settings-modes" role="radiogroup" aria-label="搜索方式">
+              <label className={cn('fox-kb-settings-mode', !smart && 'is-on')}>
+                <input type="radio" name="local-knowledge-search-mode" checked={!smart} disabled={submitting || readOnly} onChange={() => chooseSmart(false)} />
+                <span><b>按字词查找</b><small>速度快，适合找确切的名称和编号。</small></span>
+              </label>
+              <label className={cn('fox-kb-settings-mode', smart && 'is-on')}>
+                <input type="radio" name="local-knowledge-search-mode" checked={smart} disabled={submitting || readOnly} onChange={() => chooseSmart(true)} />
+                <span><b>智能搜索<em>推荐</em></b><small>能理解意思相近的说法。保存后会重新整理一次。</small></span>
+              </label>
+            </div>
           </div>
+          <button type="button" className="fox-kb-settings-disclose" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((value) => !value)}><ChevronRight className={advancedOpen ? 'is-open' : undefined} />高级<small>{readOnly ? '存放位置、段落、上次整理' : '段落长度、搜索模型、存放位置'}</small></button>
+          {advancedOpen && <div className="fox-kb-settings-advanced">
+            <label>搜索模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword'); setDirty(true) }} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
+            <div className="fox-local-kb-advanced-fields">
+              <label>段落长度<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => { setChunkSize(event.target.value); setDirty(true) }} disabled={submitting} /></label>
+              <label>衔接长度<Input type="number" min={0} step={1} value={chunkOverlap} onChange={(event) => { setChunkOverlap(event.target.value); setDirty(true) }} disabled={submitting} /></label>
+            </div>
+            <dl className="fox-kb-settings-facts">
+              <div><dt>存放位置</dt><dd title={base.storagePath}>{displayLocalPath(base.storagePath)}</dd></div>
+              <div><dt>资料</dt><dd>{base.documentCount} 份</dd></div>
+              <div><dt>段落</dt><dd>{countLabel(base.chunkCount)}</dd></div>
+              <div><dt>上次整理</dt><dd>{formatDate(base.lastIndexedAt)}</dd></div>
+            </dl>
+          </div>}
           {(validationError || error) && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{validationError ?? error}</p>}
-          <DialogFooter className="fox-local-kb-create-actions">
-            <Button type="button" variant="outline" onClick={() => requestOpenChange(false)} disabled={submitting}>取消</Button>
-            <Button type="submit" disabled={submitting}>{submitting && <LoaderCircle className="animate-spin" />}保存修改</Button>
-          </DialogFooter>
+          <div className="fox-kb-settings-foot">
+            {onDelete && <Button type="button" variant="outline" className="fox-kb-settings-delete" onClick={onDelete} disabled={submitting}><Trash2 />删除资料库</Button>}
+            <Button type="button" variant="outline" onClick={() => requestOpenChange(false)} disabled={submitting}>{readOnly ? '关闭' : '取消'}</Button>
+            {!readOnly && <Button type="submit" disabled={submitting}>{submitting && <LoaderCircle className="animate-spin" />}保存</Button>}
+          </div>
         </form>
-      </DialogContent>
-    </Dialog>
+    </section>
   )
+}
+
+export function LocalKnowledgeSettingsPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, onNavigate, onBack }: LocalKnowledgeNavigationProps) {
+  const [base, setBase] = useState<LocalKnowledgeBaseDetail | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const load = useCallback(async () => {
+    if (!knowledgeBaseId) { setLoading(false); return }
+    setLoading(true)
+    try { setBase(await gateway.getKnowledgeBase(knowledgeBaseId)); setError(null) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setLoading(false) }
+  }, [gateway, knowledgeBaseId])
+  useEffect(() => { void load() }, [load])
+  const returnToList = () => { if (onNavigate) onNavigate('list'); else onBack?.() }
+  const requestReturnToList = () => {
+    if (saving || (dirty && !window.confirm('放弃尚未保存的资料库修改？'))) return
+    returnToList()
+  }
+  const save = async (request: LocalKnowledgeBaseCreateRequest) => {
+    if (!base) return
+    setSaving(true)
+    setError(null)
+    try {
+      const updated = await gateway.updateKnowledgeBase(base.id, request)
+      setBase((current) => current ? { ...current, ...updated } : current)
+      setDirty(false)
+      toast.success('已保存资料库设置。')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setSaving(false) }
+  }
+  const remove = async () => {
+    if (!base || base.id === FOX_GUIDE_KNOWLEDGE_BASE_ID) return
+    setSaving(true)
+    setError(null)
+    try { await gateway.deleteKnowledgeBase(base.id); returnToList() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setSaving(false) }
+  }
+  return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content fox-kb-settings-content">
+    <LocalKnowledgeHeader title="资料库设置" description={base?.name ?? ''} onBack={requestReturnToList} />
+    {loading && <LocalKnowledgeLoading />}
+    {!loading && !base && (error ? <LocalKnowledgeError message={error} onRetry={() => void load()} /> : <LocalKnowledgeEmpty title="没有选择资料库" description="请从本机资料库进入设置。" />)}
+    {!loading && base && <KnowledgeBaseSettingsForm gateway={gateway} base={base} open submitting={saving} error={deleteOpen ? null : error} onDirtyChange={setDirty} onOpenChange={(open) => { if (!open) returnToList() }} onSubmit={save} onDelete={base.id === FOX_GUIDE_KNOWLEDGE_BASE_ID ? undefined : () => { setError(null); setDeleteOpen(true) }} />}
+    {base && base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID && <DeleteKnowledgeBaseDialog base={base} open={deleteOpen} submitting={saving} error={deleteOpen ? error : null} onOpenChange={(open) => { if (!saving) { setDeleteOpen(open); setError(null) } }} onConfirm={remove} />}
+  </div></div>
 }
 
 function DeleteKnowledgeBaseDialog({
@@ -710,7 +834,7 @@ function DeleteKnowledgeBaseDialog({
   onOpenChange,
   onConfirm,
 }: {
-  base: LocalKnowledgeBaseDetail
+  base: LocalKnowledgeBase
   open: boolean
   submitting: boolean
   error: string | null
@@ -721,10 +845,10 @@ function DeleteKnowledgeBaseDialog({
     <Dialog open={open} onOpenChange={(nextOpen) => { if (!submitting) onOpenChange(nextOpen) }}>
       <DialogContent className="fox-local-kb-create-dialog fox-local-kb-delete-dialog" showCloseButton={!submitting}>
         <DialogHeader>
-          <DialogTitle>删除本地知识库</DialogTitle>
-          <DialogDescription>此操作会删除知识库中的全部文档和本地索引，无法撤销。</DialogDescription>
+          <DialogTitle>删除资料库</DialogTitle>
+          <DialogDescription>只删除资料库里的资料副本和搜索结果，电脑上的原文件不受影响。</DialogDescription>
         </DialogHeader>
-        <div className="fox-local-kb-delete-summary"><Trash2 /><div><strong>{base.name}</strong><span>{base.documentCount} 个文档将被永久删除</span></div></div>
+        <div className="fox-local-kb-delete-summary"><Trash2 /><div><strong>{base.name}</strong><span>{base.documentCount} 份资料副本会被删除，无法恢复</span></div></div>
         {error && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{error}</p>}
         <DialogFooter className="fox-local-kb-create-actions">
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>取消</Button>
@@ -742,24 +866,37 @@ function countLabel(value: number | null): string {
 
 
 function searchModeLabel(base: LocalKnowledgeBase): string {
-  if (!base.vectorIndexReady) return base.textIndexReady ? '仅关键词检索' : '关键词检索未就绪'
-  if (base.searchMode === 'vector' && base.vectorIndexReady) return '向量检索'
-  if (base.searchMode === 'hybrid' && base.vectorIndexReady) return '混合检索'
-  return '关键词检索'
+  if (!base.vectorIndexReady) return base.textIndexReady ? '仅按字词查找' : '按字词查找未就绪'
+  if ((base.searchMode === 'vector' || base.searchMode === 'hybrid') && base.vectorIndexReady) return '智能搜索'
+  return '按字词查找'
 }
 
-function KnowledgeBaseCard({ base, onOpen }: { base: LocalKnowledgeBase; onOpen: () => void }) {
+function KnowledgeBaseCard({ base, job, onOpen, onEdit, onDelete }: { base: LocalKnowledgeBase; job: KnowledgeJob | null; onOpen: () => void; onEdit: () => void; onDelete: () => void }) {
+  const progress = job ? Math.max(0, Math.min(100, job.progress)) : 0
+  const managed = base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID
   return (
-    <Card className="fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card fox-shadcn-knowledge-card fox-local-kb-card-view" onClick={onOpen} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen() } }} role="button" tabIndex={0} aria-label={`打开知识库${base.name}`}>
-      <CardHeader className="fox-shadcn-kb-head">
-        <span className="fox-shadcn-kb-icon fox-shadcn-agent-icon is-blue"><Database /></span>
-        <span className="fox-shadcn-kb-heading"><span className="fox-agent-name-row"><strong>{base.name}</strong></span></span>
-      </CardHeader>
-      <CardContent className="fox-shadcn-kb-content">
-        <p className="fox-agent-description" title={base.description}>{base.description || '本地知识库'}</p>
-        <span className="fox-local-kb-card-meta"><span>{base.documentCount} 个文档</span><span className={cn('fox-local-kb-card-state', `is-${base.status}`)}><i className={cn('fox-status-dot', base.status === 'ready' ? 'is-ok' : base.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{baseStatusLabel(base.status)}</span></span>
-      </CardContent>
-    </Card>
+    <article className="fox-kb-cover-card" onClick={onOpen} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen() } }} role="button" tabIndex={0} aria-label={`打开资料库${base.name}`}>
+      <span className="fox-kb-cover" aria-hidden="true">
+        <BookOpen className="fox-kb-cover-watermark" />
+        <span className="fox-kb-cover-glyph"><BookOpen /></span>
+      </span>
+      <span className="fox-kb-cover-menu" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-kb-cover-more" aria-label={`${base.name} 的更多操作`}><MoreHorizontal /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end" sideOffset={5}>
+            <DropdownMenuItem onSelect={onEdit}><Pencil />编辑信息</DropdownMenuItem>
+            {managed && <><DropdownMenuSeparator /><DropdownMenuItem className="fox-local-kb-menu-danger" onSelect={onDelete}><Trash2 />删除资料库</DropdownMenuItem></>}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </span>
+      <span className="fox-kb-cover-body">
+        <strong>{base.name}</strong>
+        <p title={base.description || undefined}>{base.description || '\u00a0'}</p>
+        {job
+          ? <span className="fox-kb-cover-meta is-busy"><i className="fox-status-dot is-brand" aria-hidden="true" />正在整理<Progress asChild className="fox-local-kb-progress" value={progress} aria-label={`${base.name} 整理进度`}><span /></Progress><b>{progress}%</b></span>
+          : <span className="fox-kb-cover-meta">{base.documentCount} 份资料<span aria-hidden="true">·</span><span className={cn('fox-kb-cover-state', `is-${base.status}`)}><i className={cn('fox-status-dot', base.status === 'ready' ? 'is-ok' : base.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{baseStatusLabel(base.status)}</span></span>}
+      </span>
+    </article>
   )
 }
 
@@ -795,7 +932,7 @@ function LocalFilePreviewDialog({ file, gateway, open, onOpenChange }: { file: L
   const kind = file ? previewKind(file.name) : 'unsupported'
   const metadata = useMemo(() => file ? localCatalogMetadata(file) : null, [file])
   const openPreviewSource = useCallback<KnowledgeCachedPreviewOpener>(async ({ maxBytes, signal }) => {
-    if (!file || !metadata) throw new Error('没有选择需要预览的本地文件。')
+    if (!file || !metadata) throw new Error('没有选择需要预览的本机文件。')
     if (file.sizeBytes > maxBytes) throw new Error(`${file.name} 超过内置预览大小限制，请使用系统应用打开。`)
     return createKnowledgeCachedPreviewSource({
       metadata,
@@ -873,13 +1010,13 @@ function LocalFilePreviewDialog({ file, gateway, open, onOpenChange }: { file: L
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="fox-local-files-preview-dialog">
         <DialogHeader>
-          <DialogTitle>{file?.name ?? '本地文件预览'}</DialogTitle>
+          <DialogTitle>{file?.name ?? '本机文件预览'}</DialogTitle>
           <DialogDescription title={file?.absolutePath}>{file?.absolutePath}</DialogDescription>
         </DialogHeader>
         <div className="fox-local-files-preview-body">
           {loading && <div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在准备预览</b></div>}
           {!loading && !error && !unsupported && <Suspense fallback={<div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在加载查看器</b></div>}>{preview}</Suspense>}
-          {!loading && (unsupported || error) && <div className="fox-file-preview-state"><FileQuestion /><b>{error ? '预览加载失败' : '暂不支持内置预览'}</b><p>{error ?? '当前文件格式暂不支持在 Fox 中直接预览。'}</p><Button onClick={() => void openWithSystem()}><ExternalLink />用系统应用打开</Button></div>}
+          {!loading && (unsupported || error) && <div className="fox-file-preview-state"><FileQuestion /><b>{error ? '预览加载失败' : '暂不支持内置预览'}</b><p>{error ?? '当前文件格式暂不支持在 Fox 中直接预览。'}</p><Button onClick={() => void openWithSystem()}><ExternalLink />系统打开</Button></div>}
         </div>
         <DialogFooter className="fox-local-files-preview-actions"><Button variant="outline" onClick={() => void revealInFolder()}><FolderOpen />打开所在文件夹</Button><Button variant="outline" onClick={() => void openWithSystem()}><ExternalLink />系统打开</Button></DialogFooter>
       </DialogContent>
@@ -903,7 +1040,7 @@ function localDocumentMetadata(document: LocalKnowledgeDocument): KnowledgeDocum
   }
 }
 
-function LocalKnowledgeDocumentReader({ knowledgeBaseId, document, gateway, onBack, onDeleted, onJobAccepted, embedded = false }: { knowledgeBaseId: string; document: LocalKnowledgeDocument; gateway: LocalKnowledgeGateway; onBack: () => void; onDeleted: () => Promise<void>; onJobAccepted: () => void; embedded?: boolean }) {
+function LocalKnowledgeDocumentReader({ knowledgeBaseId, knowledgeBaseName, document, gateway, onBack, onDeleted, onJobAccepted, onAskDocument }: { knowledgeBaseId: string; knowledgeBaseName?: string; document: LocalKnowledgeDocument; gateway: LocalKnowledgeGateway; onBack: () => void; onDeleted: () => Promise<void>; onJobAccepted: () => void; onAskDocument?: (payload: LocalKnowledgeDocumentAsk) => void; embedded?: boolean }) {
   const [text, setText] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -980,7 +1117,7 @@ function LocalKnowledgeDocumentReader({ knowledgeBaseId, document, gateway, onBa
     setError(null)
     try {
       await gateway.deleteDocument(knowledgeBaseId, document.id)
-      recordLocalKnowledgeActivity({ knowledgeBaseId, kind: 'document_deleted', title: '删除文档', detail: document.relativePath || document.name })
+      recordLocalKnowledgeActivity({ knowledgeBaseId, kind: 'document_deleted', title: '移除资料', detail: document.relativePath || document.name })
       setDeleteOpen(false)
       await onDeleted()
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
@@ -1003,28 +1140,58 @@ function LocalKnowledgeDocumentReader({ knowledgeBaseId, document, gateway, onBa
                 ? <pre className="fox-local-files-text-preview">{text}</pre>
                  : null
   )
-  const readerActions = <><Button variant="outline" onClick={() => void openChunks()}><Layers3 />分块预览</Button><Button variant="outline" onClick={() => void reparse()} disabled={actionBusy}><RefreshCw />重新解析</Button><Button variant="outline" onClick={() => void revealInFolder()}><FolderOpen />打开所在文件夹</Button><Button variant="outline" onClick={() => void openWithSystem()}><ExternalLink />系统打开</Button><Button variant="ghost" className="fox-local-kb-delete-trigger" onClick={() => setDeleteOpen(true)}><Trash2 />删除</Button></>
+  const copyText = async (value: string, message: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(message)
+    } catch {
+      setError('无法访问剪贴板，请手动复制。')
+    }
+  }
+  const readerMenu = <DropdownMenu>
+    <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
+    <DropdownMenuContent className="fox-kb-reader-menu" align="end" sideOffset={5}>
+      <DropdownMenuItem onSelect={() => void openChunks()}><Layers3 />查看分段</DropdownMenuItem>
+      <DropdownMenuItem disabled={actionBusy} onSelect={() => void reparse()}><RefreshCw />重新读取</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => void copyText(document.relativePath, '已复制文件路径。')}><Copy />复制路径</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem variant="destructive" onSelect={() => setDeleteOpen(true)}><Trash2 />从资料库移除</DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
 
   return (
-    <section className="fox-local-kb-document-reader">
-      {embedded ? <div className="fox-local-kb-embedded-toolbar"><div><Button aria-label="返回文档列表" variant="ghost" size="icon" onClick={onBack}><ArrowLeft /></Button><span><h2 title={document.name}>{document.name}</h2><p>文档预览与索引操作</p></span></div><div>{readerActions}</div></div> : <LocalKnowledgeHeader title={document.name} description="" onBack={onBack} actions={readerActions} />}
-      <div className="fox-local-kb-document-reader-meta"><LocalFileTypeIcon extension={document.extension} /><span title={document.relativePath}>{document.relativePath}</span><small>{formatBytes(document.sizeBytes)} · 更新于 {formatDate(document.updatedAt)}</small></div>
+    <section className="fox-local-kb-document-reader fox-kb-reader">
+      <div className="fox-kb-reader-bar">
+        <Button aria-label="返回资料列表" variant="ghost" size="icon" onClick={onBack}><ArrowLeft /></Button>
+        <nav className="fox-kb-reader-crumb" aria-label="资料位置">
+          {knowledgeBaseName && <span title={knowledgeBaseName}>{knowledgeBaseName}</span>}
+          {document.relativePath.split('/').slice(0, -1).map((part) => <span key={part}><ChevronRight aria-hidden="true" />{part}</span>)}
+          <ChevronRight aria-hidden="true" /><b title={document.name}>{document.name}</b>
+        </nav>
+        <div className="fox-kb-reader-actions">
+          <Button variant="ghost" size="icon" aria-label="问问这份资料" title="问问这份资料" disabled={!onAskDocument} onClick={() => onAskDocument?.({ knowledgeBaseId, knowledgeBaseName: knowledgeBaseName ?? knowledgeBaseId, documentId: document.id, documentName: document.name, relativePath: document.relativePath, mimeType: document.mimeType, sizeBytes: document.sizeBytes })}><MessageCircle /></Button>
+          <Button variant="ghost" size="icon" aria-label="系统打开" title="系统打开" onClick={() => void openWithSystem()}><ExternalLink /></Button>
+          <Button variant="ghost" size="icon" aria-label="在文件夹中显示" title="在文件夹中显示" onClick={() => void revealInFolder()}><FolderOpen /></Button>
+          {readerMenu}
+        </div>
+      </div>
+      <div className="fox-local-kb-document-reader-meta"><LocalFileTypeIcon extension={document.extension} /><span>{formatBytes(document.sizeBytes)} · {formatDate(document.updatedAt)} 更新</span>{document.status !== 'indexed' && <span className="fox-kb-reader-state"><i className={cn('fox-status-dot', document.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{documentStatusLabel(document.status)}</span>}</div>
       <div className="fox-local-kb-document-reader-body">
         {loading && <div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在准备预览</b></div>}
         {!loading && !error && !unsupported && <Suspense fallback={<div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在加载查看器</b></div>}>{preview}</Suspense>}
-        {!loading && (unsupported || error) && <div className="fox-file-preview-state"><FileQuestion /><b>{error ? '预览加载失败' : '暂不支持内置预览'}</b><p>{error ?? '当前文件格式暂不支持在 Fox 中直接预览。'}</p><Button onClick={() => void openWithSystem()}><ExternalLink />用系统应用打开</Button></div>}
+        {!loading && (unsupported || error) && <div className="fox-file-preview-state"><FileQuestion /><b>{error ? '预览加载失败' : '暂不支持内置预览'}</b><p>{error ?? '当前文件格式暂不支持在 Fox 中直接预览。'}</p><Button onClick={() => void openWithSystem()}><ExternalLink />系统打开</Button></div>}
       </div>
       <Dialog open={chunksOpen} onOpenChange={setChunksOpen}>
         <DialogContent className="fox-local-kb-chunks-dialog">
-          <DialogHeader><DialogTitle>分块预览</DialogTitle><DialogDescription>检查解析后的文本边界、锚点和顺序。当前最多显示 100 个分块。</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>查看分段</DialogTitle><DialogDescription>检查读取后的段落边界、锚点和顺序。当前最多显示 100 段。</DialogDescription></DialogHeader>
           {chunksLoading && <LocalKnowledgeLoading />}
-          {!chunksLoading && chunks.length === 0 && <LocalKnowledgeEmpty title="暂无分块" description="请先重新解析文档或重建索引。" />}
-          {!chunksLoading && chunks.length > 0 && <div className="fox-local-kb-chunk-list">{chunks.map((chunk) => <article key={chunk.id}><header><strong>分块 {chunk.chunkIndex + 1}</strong><span>{chunk.anchor ?? '无锚点'}{chunk.startOffset != null && chunk.endOffset != null ? ` · ${chunk.startOffset}–${chunk.endOffset}` : ''}</span></header><p>{chunk.content}</p></article>)}</div>}
+          {!chunksLoading && chunks.length === 0 && <LocalKnowledgeEmpty title="还没有分段" description="请先重新读取这份资料。" />}
+          {!chunksLoading && chunks.length > 0 && <div className="fox-local-kb-chunk-list">{chunks.map((chunk) => <article key={chunk.id}><header><strong>第 {chunk.chunkIndex + 1} 段</strong><span>{chunk.anchor ?? '无锚点'}{chunk.startOffset != null && chunk.endOffset != null ? ` · ${chunk.startOffset}–${chunk.endOffset}` : ''}</span></header><p>{chunk.content}</p></article>)}</div>}
         </DialogContent>
       </Dialog>
       <Dialog open={deleteOpen} onOpenChange={(open) => { if (!actionBusy) setDeleteOpen(open) }}>
         <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!actionBusy}>
-          <DialogHeader><DialogTitle>删除文档</DialogTitle><DialogDescription>将删除文档副本、文本分块和当前向量索引记录。此操作无法撤销。</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>从资料库移除</DialogTitle><DialogDescription>只删除这份资料在资料库里的副本和分段，电脑上的原文件不变。</DialogDescription></DialogHeader>
           <div className="fox-local-kb-delete-summary"><Trash2 /><div><strong>{document.name}</strong><span>{document.relativePath}</span></div></div>
           <DialogFooter><Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={actionBusy}>取消</Button><Button variant="destructive" onClick={() => void remove()} disabled={actionBusy}>{actionBusy ? <LoaderCircle className="animate-spin" /> : <Trash2 />}确认删除</Button></DialogFooter>
         </DialogContent>
@@ -1033,49 +1200,24 @@ function LocalKnowledgeDocumentReader({ knowledgeBaseId, document, gateway, onBa
   )
 }
 
-function LocalFileSourceRow({ source, selected, busy, onSelect, onEdit, onRescan, onRemove }: { source: LocalKnowledgeFileSource; selected: boolean; busy: boolean; onSelect: () => void; onEdit: () => void; onRescan: () => void; onRemove: () => void }) {
-  return <div className={cn('fox-local-files-source-row-wrap', selected && 'is-selected', busy && 'is-busy')}>
-    <button type="button" className="fox-local-files-source-row" aria-pressed={selected} onClick={onSelect} disabled={busy} title={displayLocalPath(source.rootPath)}>
-      <strong>{source.displayName}</strong>
-      <small>{source.fileCount} 个文件</small>
-    </button>
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-local-files-source-menu" aria-label={`管理 ${source.displayName}`} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
-      <DropdownMenuContent align="end" sideOffset={5} className="fox-local-files-source-menu-content">
-        <DropdownMenuItem onSelect={onEdit}><Pencil />编辑</DropdownMenuItem>
-        <DropdownMenuItem onSelect={onRescan}><RefreshCw />刷新</DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={onRemove}><Trash2 />删除</DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  </div>
-}
-
-function AllLocalFileSourcesRow({ selected, fileCount, onSelect }: { selected: boolean; fileCount: number; onSelect: () => void }) {
-  return <button type="button" className={cn('fox-local-files-source-row', 'is-all', selected && 'is-selected')} aria-pressed={selected} onClick={onSelect}>
-    <strong>全部文件</strong>
-    <small>{fileCount} 个文件</small>
-  </button>
-}
-
-function LocalFileRow({ file, selected, onToggle, onPreview, onImport, onOpen, onReveal }: { file: LocalKnowledgeCatalogFile; selected: boolean; onToggle: () => void; onPreview: () => void; onImport: () => void; onOpen: () => void; onReveal: () => void }) {
-  const invoke = (event: ReactMouseEvent, action: () => void) => {
-    event.stopPropagation()
-    action()
-  }
+function LocalFileRow({ file, selected, onToggle, onPreview, onImport, onReveal }: { file: LocalKnowledgeCatalogFile; selected: boolean; onToggle: () => void; onPreview: () => void; onImport: () => void; onReveal: () => void }) {
   return (
-    <div className={cn('fox-local-files-row', selected && 'is-selected')}>
-      <input type="checkbox" checked={selected} onChange={onToggle} aria-label={`选择 ${file.name}`} />
-      <button type="button" className="fox-local-files-file-trigger" onClick={onPreview}>
-        <LocalFileTypeIcon extension={file.extension} />
-        <span className="fox-local-files-file-main"><strong>{file.name}</strong></span>
-      </button>
-      <span className="fox-local-files-file-source"><b>{file.sourceName}</b><small>{file.extension.toUpperCase()}</small></span>
-      <span className="fox-local-files-file-meta"><b>{formatBytes(file.sizeBytes)}</b><small>{formatRelativeDate(file.modifiedAt)}</small></span>
-      <span className="fox-local-files-file-actions">
-        <Button variant="ghost" size="icon" title="加入知识库" aria-label={`将 ${file.name} 加入知识库`} onClick={(event) => invoke(event, onImport)}><Database /></Button>
-        <Button variant="ghost" size="icon" title="在 Fox 中打开" aria-label={`在 Fox 中打开 ${file.name}`} onClick={(event) => invoke(event, onOpen)}><BookOpen /></Button>
-        <Button variant="ghost" size="icon" title="打开所在文件夹" aria-label={`打开 ${file.name} 所在文件夹`} onClick={(event) => invoke(event, onReveal)}><FolderOpen /></Button>
+    <div className={cn('fox-local-files-row', selected && 'is-selected')} role="button" tabIndex={0} aria-pressed={selected} onClick={onToggle} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onToggle() } }}>
+      <input type="checkbox" className="fox-kb-files-check" checked={selected} onChange={onToggle} onClick={(event) => event.stopPropagation()} aria-label={`选择 ${file.name}`} />
+      <LocalFileTypeIcon extension={file.extension} />
+      <span className="fox-local-files-file-main"><strong title={file.name}>{file.name}</strong><small title={`${file.sourceName} · ${file.relativePath}`}>{file.sourceName} · {file.relativePath}</small></span>
+      <span className="fox-local-files-file-type">{file.extension.toUpperCase()}</span>
+      <span className="fox-local-files-file-size">{formatBytes(file.sizeBytes)}</span>
+      <time className="fox-local-files-file-date">{formatRelativeDate(file.modifiedAt)}</time>
+      <span className="fox-local-files-file-acts" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+        <Button variant="ghost" size="icon-sm" aria-label={`预览 ${file.name}`} title="预览" onClick={onPreview}><Eye /></Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button className="fox-local-kb-row-more" variant="ghost" size="icon-sm" aria-label={`${file.name} 更多操作`}><MoreHorizontal /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end" sideOffset={5}>
+            <DropdownMenuItem onSelect={onImport}><Database />加入资料库</DropdownMenuItem>
+            <DropdownMenuItem onSelect={onReveal}><FolderOpen />在文件夹中显示</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </span>
     </div>
   )
@@ -1086,6 +1228,7 @@ export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway
   const [bases, setBases] = useState<LocalKnowledgeBase[]>([])
   const [files, setFiles] = useState<LocalKnowledgeCatalogFile[]>([])
   const [query, setQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
   const [category, setCategory] = useState<LocalFileCategory>('all')
   const [sourceId, setSourceId] = useState('all')
   const [sortBy, setSortBy] = useState<'modified' | 'name' | 'size'>('modified')
@@ -1234,10 +1377,8 @@ export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway
     return (right.modifiedAt ?? '').localeCompare(left.modifiedAt ?? '')
   }), [files, sortBy])
   const visibleFilesSelected = visibleFiles.length > 0 && visibleFiles.every((file) => selected.has(file.id))
-  const totalFileCount = sourceId === 'all'
-    ? sources.reduce((total, source) => total + source.fileCount, 0)
-    : sources.find((source) => source.id === sourceId)?.fileCount ?? files.length
   const allSourceFileCount = sources.reduce((total, source) => total + source.fileCount, 0)
+  const scopeLabel = sourceId === 'all' ? '全部文件夹' : sources.find((source) => source.id === sourceId)?.displayName ?? '全部文件夹'
   const toggleFile = (fileId: string) => {
     setSelected((current) => {
       const next = new Set(current)
@@ -1284,7 +1425,7 @@ export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway
 
   const openImport = () => {
     if (bases.length === 0) {
-      setError('请先创建一个本地知识库，再把文件加入知识库。')
+      setError('请先创建一个本机资料库，再把文件加入资料库。')
       return
     }
     setImportOpen(true)
@@ -1292,7 +1433,7 @@ export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway
 
   const openImportFor = (file: LocalKnowledgeCatalogFile) => {
     if (bases.length === 0) {
-      setError('请先创建一个本地知识库，再把文件加入知识库。')
+      setError('请先创建一个本机资料库，再把文件加入资料库。')
       return
     }
     setSelected(new Set([file.id]))
@@ -1309,44 +1450,63 @@ export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway
 
   return (
     <div className={cn('fox-local-kb-page', className)}>
-      <div className="fox-local-kb-content">
+      <div className="fox-local-kb-content fox-local-kb-files-content">
         <header className="fox-local-files-header">
-          <div className="fox-local-files-heading"><h1>本地文件</h1><span>{totalFileCount} 个文件</span></div>
+          <div className="fox-local-files-heading"><h1>本机文件</h1></div>
           <div className="fox-local-files-header-actions">
-            <label className="fox-local-kb-search"><Search /><Input aria-label="搜索本地文件" placeholder="搜索文件名或路径..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-            <Button onClick={() => void addSource()} disabled={picking}>{picking ? <LoaderCircle className="animate-spin" /> : <FolderPlus />}{picking ? '正在扫描' : '添加文件夹'}</Button>
+            {searchOpen || query !== ''
+              ? <label className="fox-local-kb-search"><Search /><Input autoFocus aria-label="搜索本机文件" placeholder="文件名或路径" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuery(''); setSearchOpen(false) } }} />{query && <button type="button" aria-label="清空搜索" onClick={() => { setQuery(''); setSearchOpen(false) }}><XCircle /></button>}</label>
+              : <Button variant="ghost" size="icon-sm" aria-label="搜索本机文件" onClick={() => setSearchOpen(true)}><Search /></Button>}
+            <Button onClick={() => void addSource()} disabled={picking}>{picking ? <LoaderCircle className="animate-spin" /> : <FolderPlus />}添加文件夹</Button>
           </div>
         </header>
-        {sources.length > 0 && <div className="fox-local-files-sources" aria-label="本地文件夹">
-          <AllLocalFileSourcesRow selected={sourceId === 'all'} fileCount={allSourceFileCount} onSelect={() => setSourceId('all')} />
-          {sources.map((source) => <LocalFileSourceRow key={source.id} source={source} selected={sourceId === source.id} busy={busySourceId === source.id} onSelect={() => setSourceId(source.id)} onEdit={() => openSourceEditor(source)} onRescan={() => void rescanSource(source.id)} onRemove={() => { setRemovingSource(source); setSourceDialogError(null) }} />)}
-        </div>}
         <div className="fox-local-files-toolbar">
+          {sources.length > 0 && <DropdownMenu>
+            <DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="fox-kb-files-scope"><Folder />{scopeLabel}<small>{sources.length}</small><ChevronsUpDown /></Button></DropdownMenuTrigger>
+            <DropdownMenuContent align="start" sideOffset={5} className="fox-kb-files-scope-menu">
+              <DropdownMenuItem onSelect={() => setSourceId('all')}><FolderInput />全部文件夹<DropdownMenuShortcut>{allSourceFileCount}</DropdownMenuShortcut></DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {sources.map((source) => <DropdownMenuItem key={source.id} onSelect={() => setSourceId(source.id)}>{source.displayName}<DropdownMenuShortcut>{source.fileCount}</DropdownMenuShortcut></DropdownMenuItem>)}
+              <DropdownMenuSeparator />
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger><Settings2 />管理文件夹</DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="fox-kb-files-manage-menu">
+                  {sources.map((source) => <div key={source.id} className="fox-kb-files-manage-group">
+                    <DropdownMenuLabel>{source.displayName}</DropdownMenuLabel>
+                    <DropdownMenuItem disabled={busySourceId != null} onSelect={() => openSourceEditor(source)}><Pencil />重命名</DropdownMenuItem>
+                    <DropdownMenuItem disabled={busySourceId != null} onSelect={() => void rescanSource(source.id)}><RefreshCw />重新检查</DropdownMenuItem>
+                    <DropdownMenuItem variant="destructive" disabled={busySourceId != null} onSelect={() => { setRemovingSource(source); setSourceDialogError(null) }}><Trash2 />移除</DropdownMenuItem>
+                  </div>)}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            </DropdownMenuContent>
+          </DropdownMenu>}
           <Tabs value={category} onValueChange={(value) => setCategory(value as LocalFileCategory)} className="fox-local-files-categories">
-            <TabsList aria-label="本地文件类型">{localFileCategories.map((item) => <TabsTrigger key={item.value} value={item.value}>{item.label}</TabsTrigger>)}</TabsList>
+            <TabsList aria-label="本机文件类型">{localFileCategories.map((item) => <TabsTrigger key={item.value} value={item.value}>{item.label}</TabsTrigger>)}</TabsList>
           </Tabs>
           <Select value={sortBy} onValueChange={(value) => setSortBy(value as 'modified' | 'name' | 'size')}>
-            <SelectTrigger className="fox-local-files-sort-select" aria-label="本地文件排序"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="modified">修改时间</SelectItem><SelectItem value="name">文件名</SelectItem><SelectItem value="size">文件大小</SelectItem></SelectContent>
+            <SelectTrigger className="fox-local-files-sort-select" aria-label="本机文件排序"><ArrowUpDown />{sortBy === 'modified' ? '最近修改' : sortBy === 'name' ? '文件名' : '文件大小'}</SelectTrigger>
+            <SelectContent><SelectItem value="modified">最近修改</SelectItem><SelectItem value="name">文件名</SelectItem><SelectItem value="size">文件大小</SelectItem></SelectContent>
           </Select>
         </div>
-        {selected.size > 0 && <div className="fox-local-files-selection"><span>已选择 {selected.size} 个文件 · {formatBytes(selectedFiles.reduce((total, file) => total + file.sizeBytes, 0))}</span><Button variant="ghost" onClick={() => setSelected(new Set())}>取消选择</Button><Button onClick={openImport}><Database />加入知识库</Button></div>}
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
-        {!loading && !error && sources.length === 0 && <LocalKnowledgeEmpty title="还没有本地文件来源" description="添加一个文件夹后，Fox 只会登记其中受支持的文档，不会移动原文件。" action={<Button onClick={() => void addSource()}><FolderPlus />添加文件夹</Button>} />}
-        {!loading && !error && sources.length > 0 && files.length === 0 && <LocalKnowledgeEmpty title="没有匹配的文件" description="当前目录中没有受支持的文件，或没有匹配当前筛选条件。" />}
-        {!loading && !error && files.length > 0 && <div className="fox-local-files-list"><div className="fox-local-files-list-head"><input type="checkbox" checked={visibleFilesSelected} onChange={toggleVisibleFiles} aria-label="选择当前已加载的全部文件" /><span>文件</span><span>来源 / 类型</span><span>大小 / 修改时间</span><span>操作</span></div>{visibleFiles.map((file) => <LocalFileRow key={file.id} file={file} selected={selected.has(file.id)} onToggle={() => toggleFile(file.id)} onPreview={() => setPreviewFile(file)} onImport={() => openImportFor(file)} onOpen={() => setPreviewFile(file)} onReveal={() => void revealLocalFile(file)} />)}<div ref={loadMoreRef} className="fox-local-files-load-more" aria-live="polite">{loadingMore && <><LoaderCircle className="animate-spin" />正在加载更多文件...</>}</div></div>}
+        {!loading && !error && sources.length === 0 && <LocalKnowledgeEmpty title="尚未添加" description="添加一个文件夹后，Fox 只会登记其中受支持的文档，不会移动原文件。" action={<Button onClick={() => void addSource()}><FolderPlus />添加文件夹</Button>} />}
+        {!loading && !error && sources.length > 0 && files.length === 0 && <LocalKnowledgeEmpty title="没有匹配的文件" description="没有可显示的文件" />}
+        {!loading && !error && files.length > 0 && <div className="fox-local-files-list"><div className="fox-local-files-list-head"><input type="checkbox" checked={visibleFilesSelected} onChange={toggleVisibleFiles} aria-label="选择当前已加载的全部文件" /><span /><span className="fox-local-files-col-name">名称</span><span className="fox-local-files-col-type">类型</span><span className="fox-local-files-col-size">大小</span><span className="fox-local-files-col-date">修改时间</span><span className="fox-local-files-col-acts">操作</span></div>{visibleFiles.map((file) => <LocalFileRow key={file.id} file={file} selected={selected.has(file.id)} onToggle={() => toggleFile(file.id)} onPreview={() => setPreviewFile(file)} onImport={() => openImportFor(file)} onReveal={() => void revealLocalFile(file)} />)}<div ref={loadMoreRef} className="fox-local-files-load-more" aria-live="polite">{loadingMore && <><LoaderCircle className="animate-spin" />正在加载更多文件...</>}</div></div>}
+        {/* 原型 .selbar：浮在列表底部中央，所以放在列表之后，靠 sticky bottom 贴底 */}
+        {selected.size > 0 && <div className="fox-local-files-selection" role="status"><span>已选 {selected.size} 个 <small>· {formatBytes(selectedFiles.reduce((total, file) => total + file.sizeBytes, 0))}</small></span><Button onClick={openImport}><Database />加入资料库</Button><Button variant="ghost" size="icon-sm" aria-label="取消选择" onClick={() => setSelected(new Set())}><XCircle /></Button></div>}
       </div>
       <Dialog open={importOpen} onOpenChange={(open) => { if (!importing) setImportOpen(open) }}>
         <DialogContent className="fox-local-files-import-dialog" showCloseButton={!importing}>
-          <DialogHeader><DialogTitle>加入本地知识库</DialogTitle><DialogDescription>选中的 {selectedFiles.length} 个文件会复制到目标知识库，原文件保持不变。</DialogDescription></DialogHeader>
-          <div className="fox-local-files-base-options">{bases.map((base) => <label key={base.id} className={targetBaseId === base.id ? 'is-selected' : undefined}><input type="radio" name="target-local-knowledge-base" value={base.id} checked={targetBaseId === base.id} onChange={() => setTargetBaseId(base.id)} /><Database /><span><strong>{base.name}</strong><small>{base.documentCount} 个文档 · {base.description || '暂无描述'}</small></span></label>)}</div>
+          <DialogHeader><DialogTitle>加入资料库</DialogTitle><DialogDescription>选中的 {selectedFiles.length} 个文件会复制到目标资料库，原文件保持不变。</DialogDescription></DialogHeader>
+          <div className="fox-local-files-base-options">{bases.map((base) => <label key={base.id} className={targetBaseId === base.id ? 'is-selected' : undefined}><input type="radio" name="target-local-knowledge-base" value={base.id} checked={targetBaseId === base.id} onChange={() => setTargetBaseId(base.id)} /><Database /><span><strong>{base.name}</strong><small>{base.documentCount} 份资料 · {base.description || '暂无描述'}</small></span></label>)}</div>
           <DialogFooter><Button variant="outline" onClick={() => setImportOpen(false)} disabled={importing}>取消</Button><Button onClick={() => void startImport()} disabled={importing || !targetBaseId}>{importing ? <LoaderCircle className="animate-spin" /> : <Upload />}{importing ? '正在加入' : '确认加入'}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog open={editingSource != null} onOpenChange={(open) => { if (!open && !busySourceId) setEditingSource(null) }}>
         <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!busySourceId}>
-          <DialogHeader><DialogTitle>编辑文件夹</DialogTitle><DialogDescription>修改文件夹在 Fox 中显示的名称，不会更改磁盘上的文件夹名称。</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>重命名</DialogTitle><DialogDescription>修改文件夹在 Fox 中显示的名称，不会更改磁盘上的文件夹名称。</DialogDescription></DialogHeader>
           <label className="fox-local-kb-field"><span>显示名称</span><Input value={sourceNameDraft} maxLength={80} autoFocus onChange={(event) => setSourceNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void updateSource() } }} /></label>
           {sourceDialogError && <LocalKnowledgeError message={sourceDialogError} />}
           <DialogFooter><Button variant="outline" onClick={() => setEditingSource(null)} disabled={busySourceId != null}>取消</Button><Button onClick={() => void updateSource()} disabled={busySourceId != null || !sourceNameDraft.trim()}>{busySourceId ? <LoaderCircle className="animate-spin" /> : <Pencil />}保存</Button></DialogFooter>
@@ -1354,7 +1514,7 @@ export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway
       </Dialog>
       <Dialog open={removingSource != null} onOpenChange={(open) => { if (!open && !busySourceId) setRemovingSource(null) }}>
         <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!busySourceId}>
-          <DialogHeader><DialogTitle>删除文件夹来源</DialogTitle><DialogDescription>Fox 只会停止管理这个文件夹并移除目录记录，不会删除原文件。</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>移除文件夹</DialogTitle><DialogDescription>Fox 只会停止管理这个文件夹并移除目录记录，不会删除原文件。</DialogDescription></DialogHeader>
           {removingSource && <div className="fox-local-kb-delete-summary"><FolderOpen /><div><strong>{removingSource.displayName}</strong><span>{displayLocalPath(removingSource.rootPath)}</span></div></div>}
           {sourceDialogError && <LocalKnowledgeError message={sourceDialogError} />}
           <DialogFooter><Button variant="outline" onClick={() => setRemovingSource(null)} disabled={busySourceId != null}>取消</Button><Button variant="destructive" onClick={() => void removeSource()} disabled={busySourceId != null}>{busySourceId ? <LoaderCircle className="animate-spin" /> : <Trash2 />}确认删除</Button></DialogFooter>
@@ -1367,14 +1527,19 @@ export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway
 
 export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate }: LocalKnowledgePageProps & { onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string, documentId?: string) => void }) {
   const [bases, setBases] = useState<LocalKnowledgeBase[]>([])
+  const [jobs, setJobs] = useState<KnowledgeJob[]>([])
   const [recent] = useState(readRecentDocuments)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [example, setExample] = useState('')
+  const [showAllRecent, setShowAllRecent] = useState(false)
 
   const load = async () => {
     setLoading(true)
     try {
-      setBases(await gateway.listKnowledgeBases())
+      const [nextBases, nextJobs] = await Promise.all([gateway.listKnowledgeBases(), gateway.listJobs().catch(() => [] as KnowledgeJob[])])
+      setBases(nextBases)
+      setJobs(nextJobs)
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -1386,35 +1551,64 @@ export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway,
   useEffect(() => { void load() }, [gateway])
 
   const availableBaseIds = useMemo(() => new Set(bases.map((base) => base.id)), [bases])
-  const visibleRecent = recent.filter((item) => availableBaseIds.has(item.knowledgeBaseId)).slice(0, RECENT_DOCUMENT_LIMIT)
-  const guide = bases.find((base) => base.name === 'Fox 使用指南')
+  const visibleRecent = useMemo(() => recent
+    .filter((item) => availableBaseIds.has(item.knowledgeBaseId))
+    .slice(0, showAllRecent ? recent.length : RECENT_DOCUMENT_LIMIT), [availableBaseIds, recent, showAllRecent])
+  const guide = bases.find((base) => base.id === FOX_GUIDE_KNOWLEDGE_BASE_ID)
+  // There is no cross-knowledge-base search, so the box queries one library:
+  // the one you last read, otherwise the first one you created.
+  const searchBase = useMemo(() => bases.find((base) => base.id === recent[0]?.knowledgeBaseId)
+    ?? bases.find((base) => base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID) ?? bases[0] ?? null, [bases, recent])
+  const baseNameById = useMemo(() => new Map(bases.map((base) => [base.id, base.name])), [bases])
+  const runningJob = useMemo(() => jobs.filter((job) => job.status === 'queued' || job.status === 'running' || job.status === 'paused')
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null, [jobs])
+  const totalDocuments = bases.reduce((total, base) => total + base.documentCount, 0)
 
   return (
     <div className={cn('fox-local-kb-page fox-local-kb-home-page', className)}>
+      {runningJob && <button type="button" className="fox-kb-home-jobline" onClick={() => onNavigate?.('jobs')}>
+        <LoaderCircle className="animate-spin" aria-hidden="true" />
+        <span>正在整理「{baseNameById.get(runningJob.knowledgeBaseId) ?? runningJob.knowledgeBaseId}」</span>
+        <Progress asChild className="fox-kb-home-jobline-bar" value={runningJob.progress} aria-label="资料整理进度"><span /></Progress>
+        <b>{runningJob.progress}%</b>
+      </button>}
       <div className="fox-local-kb-content fox-local-kb-home-content">
         <section className="fox-local-kb-home-hero">
           <div className="fox-local-kb-home-greeting">
             <img src={LOCAL_KNOWLEDGE_MASCOT} alt="" />
-            <div className="fox-local-kb-home-greeting-copy">
-              <h1>今天想一起读点什么？</h1>
-              <div className="fox-local-kb-home-actions">
-                <Button type="button" variant="outline" onClick={() => onNavigate?.('files')}>整理本地文件</Button>
-              </div>
+            <div>
+              <h1>今天想找点什么？</h1>
+              <p>{bases.length} 个资料库，{totalDocuments} 份资料</p>
             </div>
           </div>
+          {searchBase && <KnowledgeBaseSearch
+            key={example}
+            gateway={gateway}
+            base={searchBase}
+            initialQuery={example}
+            omni
+            hint={null}
+            below={<p className="fox-kb-home-try"><span>试试</span>{HOME_EXAMPLE_QUESTIONS.map((question) => <button type="button" key={question} onClick={() => setExample(question)}><CornerDownLeft />{question}</button>)}</p>}
+            onOpenAdvanced={() => onNavigate?.('retrieval', searchBase.id)}
+            onOpenDocument={(documentId) => onNavigate?.('documents', searchBase.id, documentId)}
+          />}
         </section>
 
         {error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
 
         <section className="fox-local-kb-home-recent">
-          <div className="fox-local-kb-home-section-head"><h2>最近访问</h2></div>
+          <div className="fox-kb-home-shead">
+            <h3>最近查看</h3>
+            {recent.length > RECENT_DOCUMENT_LIMIT && <button type="button" onClick={() => setShowAllRecent((current) => !current)}>{showAllRecent ? '收起' : '全部'}<ChevronRight /></button>}
+          </div>
           {!loading && visibleRecent.length > 0 && <div className="fox-local-kb-recent-list">
-            <div className="fox-local-kb-recent-list-head"><span>文件</span><span>所属知识库</span><span>最近打开</span></div>
-            {visibleRecent.map((item) => <button type="button" key={`${item.knowledgeBaseId}:${item.documentId}`} onClick={() => onNavigate?.('documents', item.knowledgeBaseId, item.documentId)}><span><LocalFileTypeIcon extension={item.extension} /><strong>{item.name}</strong></span><span>{item.knowledgeBaseName}</span><span>{formatRelativeDate(item.openedAt)}</span></button>)}
+            {visibleRecent.map((item) => <button type="button" key={`${item.knowledgeBaseId}:${item.documentId}`} onClick={() => onNavigate?.('documents', item.knowledgeBaseId, item.documentId)}><LocalFileTypeIcon extension={item.extension} /><span className="fox-local-kb-recent-name">{item.name}</span><span className="fox-local-kb-recent-kb">{item.knowledgeBaseName}</span><time className="fox-local-kb-recent-time">{formatRelativeDate(item.openedAt)}</time></button>)}
           </div>}
-          {!loading && visibleRecent.length === 0 && <div className="fox-local-kb-home-recent-empty"><p>阅读过的文档会出现在这里。</p>{guide && <button type="button" className="fox-local-kb-readiness-action" onClick={() => onNavigate?.('documents', guide.id)}>打开 Fox 使用指南</button>}</div>}
-          {loading && <div className="fox-local-kb-recent-loading"><LoaderCircle className="animate-spin" />正在整理最近访问...</div>}
+          {!loading && visibleRecent.length === 0 && <div className="fox-local-kb-home-recent-empty"><p>阅读过的资料会出现在这里。</p></div>}
+          {loading && <div className="fox-local-kb-recent-loading"><LoaderCircle className="animate-spin" />正在读取最近打开的资料...</div>}
         </section>
+
+        {guide && <p className="fox-kb-home-foot"><BookOpen aria-hidden="true" />第一次使用？<button type="button" onClick={() => onNavigate?.('documents', guide.id)}>看看使用指南</button></p>}
       </div>
     </div>
   )
@@ -1422,6 +1616,7 @@ export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway,
 
 export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate, createRequest, onCreateRequestHandled }: LocalKnowledgePageProps & { onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string) => void; createRequest?: number; onCreateRequestHandled?: () => void }) {
   const [items, setItems] = useState<LocalKnowledgeBase[]>([])
+  const [jobs, setJobs] = useState<KnowledgeJob[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -1429,15 +1624,35 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
   const [storageOpen, setStorageOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [deleteBase, setDeleteBase] = useState<LocalKnowledgeBase | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [mutationError, setMutationError] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
-    try { setItems(await gateway.listKnowledgeBases()); setError(null) }
+    try {
+      const [nextItems, nextJobs] = await Promise.all([gateway.listKnowledgeBases(), gateway.listJobs()])
+      setItems(nextItems)
+      setJobs(nextJobs)
+      setError(null)
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setLoading(false) }
   }
 
   useEffect(() => { void load() }, [gateway])
+
+  // A card shows one progress bar instead of a status dot, so only the newest
+  // unfinished job per knowledge base is surfaced.
+  const activeJobByBase = useMemo(() => {
+    const next = new Map<string, KnowledgeJob>()
+    for (const job of jobs) {
+      if (job.status !== 'queued' && job.status !== 'running' && job.status !== 'paused') continue
+      const current = next.get(job.knowledgeBaseId)
+      if (!current || current.updatedAt < job.updatedAt) next.set(job.knowledgeBaseId, job)
+    }
+    return next
+  }, [jobs])
 
   const openCreateDialog = () => {
     setCreateError(null)
@@ -1450,11 +1665,21 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
     onCreateRequestHandled?.()
   }, [createRequest, onCreateRequestHandled])
 
-  const createKnowledgeBase = async (request: LocalKnowledgeBaseCreateRequest) => {
+  const createKnowledgeBase = async (request: LocalKnowledgeBaseCreateRequest, files: LocalKnowledgeImportFile[]) => {
     setCreating(true)
     setCreateError(null)
     try {
       const created = await gateway.createKnowledgeBase(request)
+      if (files.length) {
+        // The library exists even if the first import fails, so this must not
+        // surface as "creation failed".
+        try {
+          recordImportedDocuments(created.id, files)
+          await gateway.startImport({ knowledgeBaseId: created.id, files })
+        } catch {
+          toast.error('资料库已创建，但资料添加失败，可以在资料库页面重试。')
+        }
+      }
       setCreateOpen(false)
       await load()
       onNavigate?.('detail', created.id)
@@ -1465,6 +1690,21 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
     }
   }
 
+  const removeBase = async () => {
+    if (!deleteBase) return
+    setSaving(true)
+    setMutationError(null)
+    try {
+      await gateway.deleteKnowledgeBase(deleteBase.id)
+      setDeleteBase(null)
+      await load()
+    } catch (cause) {
+      setMutationError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase()
     return items.filter((item) => !normalizedQuery || [item.name, item.description, item.storagePath].some((value) => value.toLocaleLowerCase().includes(normalizedQuery)))
@@ -1472,104 +1712,217 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
 
   return (
     <div className={cn('fox-local-kb-page', className)}>
-      <div className="fox-local-kb-content">
-        <LocalKnowledgeHeader title="本地知识库" description="" actions={<>
-          <label className="fox-local-kb-search"><Search /><Input aria-label="搜索本地知识库" placeholder="搜索知识库..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-          <Button size="sm" onClick={openCreateDialog}><Database />新建知识库</Button>
+      <div className="fox-local-kb-content fox-local-kb-list-content">
+        <LocalKnowledgeHeader title="本机资料库" description="把资料放进资料库，Fox 就能在对话里引用它们。" actions={<>
+          {/* 原型只在知识库多到扫不过来时才给搜索框 */}
+          {items.length > 8 && <label className="fox-local-kb-search"><Search /><Input aria-label="搜索本机资料库" placeholder="搜索资料库" value={query} onChange={(event) => setQuery(event.target.value)} /></label>}
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end" sideOffset={5}>
               <DropdownMenuItem onSelect={() => setStorageOpen(true)}><HardDrive />存储位置</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          <Button onClick={openCreateDialog}><Plus />新建资料库</Button>
         </>} />
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
-        {!loading && !error && items.length === 0 && <LocalKnowledgeEmpty title="还没有本地知识库" description="创建一个知识库后，就可以导入文件并建立本地索引。" action={<Button onClick={openCreateDialog}>创建知识库</Button>} />}
-        {!loading && !error && items.length > 0 && filteredItems.length === 0 && <LocalKnowledgeEmpty title="没有匹配的知识库" description="换一个名称、描述或存储位置关键词试试。" />}
-        {!loading && !error && filteredItems.length > 0 && <div className="fox-local-kb-grid fox-shadcn-entity-grid fox-knowledge-grid">{filteredItems.map((base) => <KnowledgeBaseCard key={base.id} base={base} onOpen={() => onNavigate?.('detail', base.id)} />)}</div>}
+        {!loading && !error && items.length === 0 && <LocalKnowledgeEmpty title="新建资料库，集中查阅文件" description="起个名字，把资料放进来，之后就能在对话里引用。" action={<Button onClick={openCreateDialog}><Plus />新建资料库</Button>} />}
+        {!loading && !error && items.length > 0 && filteredItems.length === 0 && <LocalKnowledgeEmpty title="没有匹配的资料库" description="换一个名称、描述或存储位置关键词试试。" />}
+        {!loading && !error && filteredItems.length > 0 && <div className="fox-kb-cover-grid">
+          {filteredItems.map((base) => <KnowledgeBaseCard key={base.id} base={base} job={activeJobByBase.get(base.id) ?? null} onOpen={() => onNavigate?.('detail', base.id)} onEdit={() => onNavigate?.('settings', base.id)} onDelete={() => { setMutationError(null); setDeleteBase(base) }} />)}
+          <button type="button" className="fox-kb-new-card" onClick={openCreateDialog}><Plus />新建资料库</button>
+        </div>}
       </div>
       <StorageLocationDialog gateway={gateway} open={storageOpen} onOpenChange={setStorageOpen} />
       <CreateKnowledgeBaseDialog gateway={gateway} open={createOpen} submitting={creating} error={createError} onOpenChange={(open) => { setCreateOpen(open); if (open) setCreateError(null) }} onSubmit={createKnowledgeBase} />
+      {deleteBase && <DeleteKnowledgeBaseDialog base={deleteBase} open submitting={saving} error={mutationError} onOpenChange={(open) => { if (!open) setDeleteBase(null) }} onConfirm={removeBase} />}
     </div>
   )
 }
 
-function KnowledgeInspector({ base, displayedEmbeddingModel, effectiveEmbeddingModel, configuredBindingUnavailable, canEdit, onEdit, onBuildVector, onManageModels }: {
-  base: LocalKnowledgeBaseDetail
-  displayedEmbeddingModel: { name: string } | null
-  effectiveEmbeddingModel: { name: string } | null
-  configuredBindingUnavailable: boolean
-  canEdit: boolean
-  onEdit: () => void
-  onBuildVector: () => void
-  onManageModels: () => void
+/** Marks the matched words inside a search snippet. Returns the plain text when
+ *  lower-casing would change its length, so indices cannot drift apart. */
+function SearchSnippet({ content, query }: { content: string; query: string }) {
+  const snippet = searchSnippetParts(content, query)
+  return <p className={cn('fox-kb-hit-snippet', !snippet.match && 'has-no-match')} title={content}>
+    <span className="fox-kb-hit-before">{snippet.prefixEllipsis && '…'}{snippet.before}</span>
+    {snippet.match && <mark>{snippet.match}</mark>}
+    <span className="fox-kb-hit-after">{snippet.after}{snippet.suffixEllipsis && '…'}</span>
+  </p>
+}
+
+/** The hub's search box: it replaces the old 检索测试 tab, so hits read as
+ *  paragraphs instead of a scoring table. */
+function KnowledgeBaseSearch({ gateway, base, hint, initialQuery = '', omni = false, controlContainer, below, onActiveChange, onOpenAdvanced, onOpenDocument }: {
+  gateway: LocalKnowledgeGateway
+  base: LocalKnowledgeBase
+  hint: { text: string; label: string; run: () => void } | null
+  initialQuery?: string
+  omni?: boolean
+  controlContainer?: HTMLElement | null
+  below?: ReactNode
+  onActiveChange?: (active: boolean) => void
+  onOpenAdvanced: () => void
+  onOpenDocument: (documentId: string) => void
 }) {
-  const [storageOpen, setStorageOpen] = useState(false)
-  const vectorFixable = !base.vectorIndexReady && base.documentCount > 0 && effectiveEmbeddingModel != null && !configuredBindingUnavailable
+  const { preferences: shortcutPreferences } = useShortcutPreferences()
+  const searchBinding = shortcutPreferences.search
+  const searchShortcut = searchBinding ? formatShortcut(searchBinding, detectShortcutPlatform()).text : null
+  const searchLabel = `在${base.name}里搜索${searchShortcut ? `（${searchShortcut}）` : ''}`
+  const [query, setQuery] = useState(initialQuery)
+  const [term, setTerm] = useState(initialQuery)
+  const [mode, setMode] = useState<KnowledgeSearchMode>(base.searchMode)
+  const [items, setItems] = useState<KnowledgeRetrievalResult['items']>([])
+  const [searched, setSearched] = useState(false)
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const searchRevision = useRef(0)
+  // 智能搜索 needs a vector index; without one the box can only match words.
+  const canSearchSmart = base.vectorIndexReady
+  const activeMode: KnowledgeSearchMode = mode === 'keyword' || canSearchSmart ? mode : 'keyword'
+
+  const inputRef = useRef<HTMLInputElement>(null)
+  // The current library consumes search before the global sidebar listener.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (controlContainer !== undefined || document.querySelector('[role="dialog"]')) return
+      if (!matchesShortcutAction(event, 'search') || !inputRef.current) return
+      event.preventDefault()
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [controlContainer])
+
+  const clearSearch = () => {
+    searchRevision.current += 1
+    setQuery(''); setTerm(''); setItems([]); setSearched(false); setRunning(false); setError(null)
+  }
+
+  useEffect(() => () => { searchRevision.current += 1 }, [])
+
+  const run = (nextTerm: string, nextMode = activeMode) => {
+    if (!nextTerm.trim()) { clearSearch(); return }
+    const revision = ++searchRevision.current
+    setTerm(nextTerm)
+    setMode(nextMode)
+    setRunning(true)
+    setError(null)
+    setSearched(true)
+    void gateway.testRetrieval(base.id, nextTerm, nextMode, 10).then((result) => {
+      if (revision === searchRevision.current) setItems(result.items)
+    }).catch((cause) => {
+      if (revision !== searchRevision.current) return
+      setItems([])
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }).finally(() => { if (revision === searchRevision.current) setRunning(false) })
+  }
+
+  // The home page hands over a suggested question, which should search at once.
+  useEffect(() => { if (initialQuery) run(initialQuery) }, [initialQuery])
+
+  // 原型 05-kb-search：一旦进入搜索结果，下面的资料列表就让位给结果。
+  useEffect(() => {
+    onActiveChange?.(searched)
+    return () => onActiveChange?.(false)
+  }, [searched, onActiveChange])
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const next = query.trim()
+    if (!next) { clearSearch(); return }
+    run(next)
+  }
+
+  const copyCitation = () => {
+    const first = items[0]
+    if (!first) return
+    void navigator.clipboard?.writeText(`${first.documentName} · ${first.relativePath}`)
+  }
+
+  const copyItemCitation = (item: KnowledgeRetrievalResult['items'][number]) => {
+    void navigator.clipboard?.writeText(`${item.documentName} · ${item.relativePath}\n${item.content}`)
+  }
+
+  return <div className={cn('fox-kb-search-block', omni && 'is-omni')}>
+    {controlContainer !== undefined ? controlContainer && createPortal(<ExpandingSearch label={searchLabel} placeholder="搜索资料内容，或直接问一个问题" items={[]} value={query} onValueChange={(next) => { if (!next.trim()) clearSearch(); else setQuery(next) }} onSearch={(next) => run(next)} showResults={false} keyboardShortcut clearLabel="清空搜索" expandedWidth={360} className="fox-kb-expanding-search" />, controlContainer) : <form className="fox-kb-search" role="search" onSubmit={submit}>
+      <Search aria-hidden="true" />
+      <input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} aria-label={`在${base.name}里搜索`} placeholder={omni ? '搜索资料内容，或直接问一个问题' : `在「${base.name}」里搜索，或直接提问`} />
+      {query && <button type="button" aria-label="清空搜索" onClick={clearSearch}><XCircle /></button>}
+      {omni && searchShortcut && <kbd className="fox-kb-search-scope" aria-hidden="true">{searchShortcut}</kbd>}
+    </form>}
+    {below}
+    {hint && <p className="fox-kb-hub-hint"><i className="fox-status-dot is-empty" aria-hidden="true" /><span>{hint.text}</span><button type="button" onClick={hint.run}>{hint.label}</button></p>}
+    {searched && <div className="fox-kb-search-bar">
+        <Select value={activeMode} onValueChange={(value) => run(term, value as KnowledgeSearchMode)}>
+          <SelectTrigger className="fox-kb-search-pick" aria-label="搜索方式"><span>{activeMode === 'keyword' ? '按字词查找' : '智能搜索'}</span></SelectTrigger>
+          <SelectContent><SelectItem value="keyword">按字词查找</SelectItem>{canSearchSmart && <SelectItem value="hybrid">智能搜索</SelectItem>}</SelectContent>
+        </Select>
+      <span>{running ? '正在查找…' : `找到 ${items.length} 段相关内容`}</span>
+      <div className="fox-kb-search-bar-spacer" />
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="搜索结果更多操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
+        <DropdownMenuContent align="end" sideOffset={5}>
+          <DropdownMenuItem onSelect={onOpenAdvanced}><FlaskConical />高级检索对比</DropdownMenuItem>
+          <DropdownMenuItem disabled={!items.length} onSelect={copyCitation}><Quote />复制第一条引用</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>}
+    {error && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{error}</p>}
+    {searched && !running && !error && items.length === 0 && <FoxEmptyState variant="search" icon={<Search />} title="没有找到相关内容" description="换个说法再试试。" action={<Button variant="outline" size="sm" onClick={clearSearch}>清空搜索</Button>} />}
+    {items.map((item, index) => <article className="fox-kb-hit" key={item.chunkId} tabIndex={0} onClick={() => onOpenDocument(item.documentId)} onKeyDown={(event) => { if (event.key === 'Enter') onOpenDocument(item.documentId) }}>
+      <header>
+        <LocalFileTypeIcon extension={item.documentName.split('.').pop() ?? ''} />
+        <b title={item.relativePath}>{item.documentName}</b>
+        <span className="fox-kb-hit-folder">{item.relativePath.split('/').slice(0, -1).join('/') || '全部资料'}</span>
+        {index === 0 && <span className="fox-kb-hit-rel"><i className="fox-status-dot" aria-hidden="true" />最相关</span>}
+        <span className="fox-kb-hit-acts" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+          <Button variant="ghost" size="icon-sm" aria-label="复制这段引用" title="复制这段引用" onClick={() => copyItemCitation(item)}><Quote /></Button>
+          <Button variant="ghost" size="icon-sm" aria-label="打开这份资料" title="打开这份资料" onClick={() => onOpenDocument(item.documentId)}><FileText /></Button>
+        </span>
+      </header>
+      <SearchSnippet content={item.content} query={term} />
+    </article>)}
+  </div>
+}
+
+function KnowledgeActivityClock({ jobs, knowledgeBaseName, onOpenJobs }: {
+  jobs: KnowledgeJob[]
+  knowledgeBaseName: string
+  onOpenJobs: () => void
+}) {
+  const busy = jobs.some((job) => job.status === 'queued' || job.status === 'running' || job.status === 'paused')
   return (
-    <aside className="fox-local-kb-inspector" aria-label="索引与配置信息">
-      <section className="fox-local-kb-inspector-group">
-        <h3>索引</h3>
-        <dl>
-          <div><dt>文档</dt><dd>{base.documentCount}</dd></div>
-          <div><dt>分块</dt><dd>{countLabel(base.chunkCount)}</dd></div>
-          <div><dt>文本索引</dt><dd className="fox-local-kb-inspector-state"><i className={cn('fox-status-dot', base.textIndexReady ? 'is-ok' : 'is-empty')} aria-hidden="true" />{base.textIndexReady ? '就绪' : '待构建'}</dd></div>
-          <div><dt>向量索引</dt><dd className="fox-local-kb-inspector-state">
-            <i className={cn('fox-status-dot', base.vectorIndexReady ? 'is-ok' : configuredBindingUnavailable ? 'is-error' : 'is-empty')} aria-hidden="true" />
-            <span>{base.vectorIndexReady ? `就绪${base.vectorCount != null ? ` · ${countLabel(base.vectorCount)}` : ''}` : configuredBindingUnavailable ? '模型异常' : effectiveEmbeddingModel ? '待构建' : '未配置'}</span>
-            {!base.vectorIndexReady && <button type="button" onClick={vectorFixable ? onBuildVector : onManageModels}>{vectorFixable ? '构建' : '设置'}</button>}
-          </dd></div>
-        </dl>
-      </section>
-      <section className="fox-local-kb-inspector-group">
-        <h3>配置</h3>
-        <dl>
-          <div><dt>向量模型</dt><dd>{displayedEmbeddingModel ? `${displayedEmbeddingModel.name}${configuredBindingUnavailable ? '（不可用）' : base.configuredEmbeddingModelId ? '' : '（默认）'}` : (base.configuredEmbeddingModelId ?? '未配置')}</dd></div>
-          <div><dt>分块大小</dt><dd>{base.chunkSize}</dd></div>
-          <div><dt>重叠长度</dt><dd>{base.chunkOverlap}</dd></div>
-          <div><dt>检索模式</dt><dd>{searchModeLabel(base)}</dd></div>
-        </dl>
-        {canEdit && <div className="fox-local-kb-inspector-foot"><button type="button" onClick={onEdit}>编辑配置…</button></div>}
-      </section>
-      <section className="fox-local-kb-inspector-group">
-        <button type="button" className="fox-local-kb-inspector-toggle" aria-expanded={storageOpen} onClick={() => setStorageOpen((open) => !open)}>
-          <ChevronRight className={storageOpen ? 'is-open' : undefined} aria-hidden="true" />存储与运行
-        </button>
-        {storageOpen && <dl>
-          <div><dt>解析器版本</dt><dd>{base.parserVersion ?? '暂无统计'}</dd></div>
-          <div><dt>可用空间</dt><dd>{base.storage.freeBytes == null ? '暂无统计' : formatBytes(base.storage.freeBytes)}</dd></div>
-          <div><dt>本地权限</dt><dd>{base.writable ? '可编辑' : '只读'}</dd></div>
-          <div><dt>存储路径</dt><dd className="fox-local-kb-inspector-path" title={base.storagePath}>{base.storagePath}</dd></div>
-        </dl>}
-      </section>
-    </aside>
+    <Popover>
+      <PopoverTrigger asChild><Button variant="ghost" size="icon" aria-label="最近动态" className={cn('fox-kb-activity-trigger', busy && 'is-busy')}><Clock3 /></Button></PopoverTrigger>
+      <PopoverContent align="end" sideOffset={6} className="fox-kb-activity-pop">
+        <p className="fox-kb-activity-title">最近动态</p>
+        {jobs.length === 0 && <p className="fox-kb-activity-empty">还没有整理记录。</p>}
+        {jobs.slice(0, 4).map((job) => <button type="button" className="fox-kb-activity-row" key={job.id} onClick={onOpenJobs}>
+          {job.status === 'failed' || job.status === 'interrupted' ? <AlertCircle /> : job.status === 'cancelled' ? <XCircle /> : job.status === 'running' || job.status === 'queued' ? <LoaderCircle className="animate-spin" /> : <CheckCircle2 />}
+          <span><b>{knowledgeJobTitle(job, knowledgeBaseName)}</b><small>{formatRelativeDate(job.updatedAt)}</small></span>
+        </button>)}
+        <button type="button" className="fox-kb-activity-all" onClick={onOpenJobs}><ListTodo />查看全部处理进度</button>
+      </PopoverContent>
+    </Popover>
   )
 }
 
-export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, onBack, onNavigate, onOperationAccepted }: LocalKnowledgeNavigationProps & { onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, onBack, onNavigate, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const [base, setBase] = useState<LocalKnowledgeBaseDetail | null>(null)
   const [configuredEmbeddingModel, setConfiguredEmbeddingModel] = useState<LocalEmbeddingModel | null>(null)
   const [defaultEmbeddingModel, setDefaultEmbeddingModel] = useState<LocalEmbeddingModel | null>(null)
-  const [documents, setDocuments] = useState<LocalKnowledgeDocument[]>([])
   const [jobs, setJobs] = useState<KnowledgeJob[]>([])
   const [activeSubview, setActiveSubview] = useState<KnowledgeDetailSubview | null>(null)
   const [activeDocumentId, setActiveDocumentId] = useState<string | undefined>()
-  const [inspectorOpen, setInspectorOpen] = useState(true)
+  const [searchShowing, setSearchShowing] = useState(false)
+  const [searchContainer, setSearchContainer] = useState<HTMLDivElement | null>(null)
   const [importRequest, setImportRequest] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [editOpen, setEditOpen] = useState(false)
-  const [deleteOpen, setDeleteOpen] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [deleting, setDeleting] = useState(false)
   const [mutationError, setMutationError] = useState<string | null>(null)
   const hadActiveJobsRef = useRef(false)
-
-  const selectDetailTab = (view: KnowledgeDetailSubview) => {
-    setActiveDocumentId(undefined)
-    setActiveSubview(view === 'documents' ? null : view)
-  }
 
   const leaveSubviewOrDetail = () => {
     if (activeSubview) {
@@ -1602,16 +1955,14 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
     if (!knowledgeBaseId) return
     setLoading(true)
     try {
-      const [nextBase, documentPage, nextJobs, embeddingModels] = await Promise.all([
+      const [nextBase, nextJobs, embeddingModels] = await Promise.all([
         gateway.getKnowledgeBase(knowledgeBaseId),
-        gateway.listDocuments(knowledgeBaseId).catch(() => null),
         gateway.listJobs(knowledgeBaseId).catch(() => null),
         gateway.listEmbeddingModels().catch(() => [] as LocalEmbeddingModel[]),
       ])
       setBase(nextBase)
       setConfiguredEmbeddingModel(nextBase.configuredEmbeddingModelId ? embeddingModels.find((model) => model.id === nextBase.configuredEmbeddingModelId) ?? null : null)
       setDefaultEmbeddingModel(embeddingModels.find((model) => model.isDefault && model.status === 'ready' && model.integrityStatus === 'verified' && model.loadReady) ?? null)
-      setDocuments(documentPage?.items ?? [])
       const resolvedJobs = nextJobs ?? nextBase.recentJobs
       hadActiveJobsRef.current = resolvedJobs.some((job) => job.status === 'queued' || job.status === 'running' || job.status === 'paused')
       setJobs(resolvedJobs)
@@ -1643,14 +1994,8 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
         const shouldRefreshBase = hasActiveJobs || hadActiveJobsRef.current
         hadActiveJobsRef.current = hasActiveJobs
         if (shouldRefreshBase) {
-          const [nextBase, documentPage] = await Promise.all([
-            gateway.getKnowledgeBase(knowledgeBaseId),
-            gateway.listDocuments(knowledgeBaseId).catch(() => null),
-          ])
-          if (!disposed) {
-            setBase(nextBase)
-            if (documentPage) setDocuments(documentPage.items)
-          }
+          const nextBase = await gateway.getKnowledgeBase(knowledgeBaseId)
+          if (!disposed) setBase(nextBase)
         }
       } catch {
         // The detail page remains usable with the last successful activity snapshot.
@@ -1688,78 +2033,35 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
   const effectiveEmbeddingModel = base?.embeddingModel
     ?? configuredEmbeddingModelReady
     ?? (!base?.configuredEmbeddingModelId ? defaultEmbeddingModel : null)
-  const displayedEmbeddingModel = base?.embeddingModel
-    ?? configuredEmbeddingModel
-    ?? (!base?.configuredEmbeddingModelId ? defaultEmbeddingModel : null)
 
   const runningJob = jobs.find((job) => job.status === 'queued' || job.status === 'running' || job.status === 'paused') ?? null
   const runningJobTotal = runningJob
     ? runningJob.totalItems > 0 ? runningJob.totalItems : Math.max(runningJob.completedItems + runningJob.failedItems, 1)
     : 0
 
-  const readiness = base ? (() => {
-    if (base.documentCount === 0) return { tone: 'muted' as const, text: '还没有文档', hint: '导入文档后会自动建立索引' }
-    if (configuredBindingUnavailable) return { tone: 'warning' as const, text: '已绑定的向量模型不可用', action: { label: '修复模型', run: () => onNavigate?.('models', base.id) } }
-    if (base.status === 'error') return { tone: 'error' as const, text: '索引有错误', action: { label: '查看任务', run: () => selectDetailTab('jobs') } }
-    if (!base.textIndexReady) return { tone: 'muted' as const, text: '文本索引未构建' }
+  // The hub says one thing at a time: what this library can do right now.
+  const statusLine = base ? (() => {
+    if (base.documentCount === 0) return { dot: 'is-empty', text: '还没有资料' }
+    if (base.status === 'error') return { dot: 'is-error', text: '整理有错误' }
+    if (base.status === 'indexing' || base.status === 'migrating') return { dot: 'is-brand', text: '正在整理' }
+    if (!base.textIndexReady && !base.vectorIndexReady) return { dot: 'is-empty', text: '还没有整理好' }
+    return { dot: 'is-ok', text: '可以在对话中使用' }
+  })() : null
+
+  const searchHint = base && base.documentCount > 0 && !runningJob ? (() => {
+    if (configuredBindingUnavailable) return { text: '绑定的搜索模型不可用，智能搜索暂时用不了。', label: '修复模型', run: () => onNavigate?.('models', base.id) }
     if (!base.vectorIndexReady) return {
-      tone: 'ok' as const,
-      text: '可关键词检索 · 向量检索未启用',
-      action: effectiveEmbeddingModel ? { label: '构建向量索引', run: () => void rebuildIndex() } : { label: '安装模型', run: () => onNavigate?.('models', base.id) },
+      text: '智能搜索未开启，换个说法可能搜不到。',
+      label: effectiveEmbeddingModel ? '开启' : '安装模型',
+      run: effectiveEmbeddingModel ? () => void rebuildIndex() : () => onNavigate?.('models', base.id),
     }
-    return { tone: 'ok' as const, text: `${searchModeLabel(base)}可用` }
+    return null
   })() : null
 
   const requestImport = () => {
     setActiveDocumentId(undefined)
     setActiveSubview(null)
     setImportRequest((count) => count + 1)
-  }
-  const primaryAction = base
-    ? base.documentCount === 0
-      ? { label: '导入文档', run: requestImport }
-      : !base.textIndexReady || base.status === 'error'
-        ? { label: '构建索引', run: () => void rebuildIndex() }
-        : { label: '导入', run: requestImport }
-    : null
-
-  const cancelRunningJob = async (job: KnowledgeJob) => {
-    try {
-      const updated = await gateway.cancelJob(job.id)
-      setJobs((current) => current.map((item) => item.id === updated.id ? updated : item))
-    } catch (cause) {
-      setMutationError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }
-
-  const updateKnowledgeBase = async (request: LocalKnowledgeBaseCreateRequest) => {
-    if (!knowledgeBaseId) return
-    setSaving(true)
-    setMutationError(null)
-    try {
-      await gateway.updateKnowledgeBase(knowledgeBaseId, request)
-      setEditOpen(false)
-      await load()
-    } catch (cause) {
-      setMutationError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const deleteKnowledgeBase = async () => {
-    if (!knowledgeBaseId) return
-    setDeleting(true)
-    setMutationError(null)
-    try {
-      await gateway.deleteKnowledgeBase(knowledgeBaseId)
-      setDeleteOpen(false)
-      onNavigate?.('list')
-    } catch (cause) {
-      setMutationError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setDeleting(false)
-    }
   }
 
   const rebuildIndex = async () => {
@@ -1774,92 +2076,166 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
     }
   }
 
-  if (!knowledgeBaseId) return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content"><LocalKnowledgeEmpty title="没有选择知识库" description="请从本地知识库列表进入一个知识库。" action={<Button onClick={onBack}>返回列表</Button>} /></div></div>
+  if (!knowledgeBaseId) return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content"><LocalKnowledgeEmpty title="没有选择资料库" description="请从本机资料库列表进入一个资料库。" action={<Button onClick={onBack}>返回列表</Button>} /></div></div>
+
+  // 原型 06-reader：阅读态由 52px 面包屑栏接管页头，知识库标题不再重复出现。
+  const readingDocument = activeSubview === null && activeDocumentId !== undefined
 
   return (
     <div className={cn('fox-local-kb-page fox-local-kb-detail-page', className)}>
-      <div className="fox-local-kb-content fox-local-kb-detail-content">
+      <div className="fox-local-kb-content fox-local-kb-detail-content" data-searching={searchShowing || undefined}>
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
         {!loading && base && <>
-          <header className="fox-local-kb-detail-header">
-            <div className="fox-local-kb-detail-heading">
-              <Button aria-label={activeSubview || activeDocumentId ? '返回文档列表' : '返回本地知识库'} className="fox-local-kb-back" variant="ghost" size="icon" onClick={leaveSubviewOrDetail}><ArrowLeft /></Button>
-              <div className="fox-local-kb-detail-title">
-                <h1 title={base.name}>{base.name}</h1>
-                {readiness && <p className={cn('fox-local-kb-readiness-line', `is-${readiness.tone}`)}>
-                  <i aria-hidden="true" />
-                  <span>{readiness.text}</span>
-                  {readiness.hint && <span>{readiness.hint}</span>}
-                  {'action' in readiness && readiness.action && <button type="button" className="fox-local-kb-readiness-action" onClick={readiness.action.run}>{readiness.action.label}</button>}
-                </p>}
-              </div>
-              <div className="fox-local-kb-detail-actions">
-                <Button variant="ghost" size="icon" aria-label={inspectorOpen ? '隐藏索引与配置面板' : '显示索引与配置面板'} aria-pressed={inspectorOpen} title="索引与配置" onClick={() => setInspectorOpen((open) => !open)}><Info /></Button>
-                {base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID && <DropdownMenu>
-                  <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="知识库操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" sideOffset={5}>
-                    <DropdownMenuItem onSelect={() => { setMutationError(null); setEditOpen(true) }}><Pencil />编辑</DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onSelect={() => { setMutationError(null); setDeleteOpen(true) }}><Trash2 />删除</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>}
-                {primaryAction && <Button onClick={primaryAction.run}>{primaryAction.label}</Button>}
-              </div>
+          {!readingDocument && <header className="fox-kb-hub-head">
+            {activeSubview && <Button aria-label="返回资料列表" className="fox-local-kb-back" variant="ghost" size="icon" onClick={leaveSubviewOrDetail}><ArrowLeft /></Button>}
+            <div className="fox-kb-hub-title">
+              <h1 title={base.name}>{base.name}</h1>
+              <p className="fox-kb-hub-status">
+                {runningJob ? <>
+                  <i className="fox-status-dot is-brand" aria-hidden="true" />
+                  <span>正在整理</span>
+                  <Progress asChild className="fox-local-kb-progress" value={runningJob.progress} aria-label="资料整理进度"><span /></Progress>
+                  <b>{runningJob.completedItems} / {runningJobTotal}</b>
+                </> : statusLine && <>
+                  <i className={cn('fox-status-dot', statusLine.dot)} aria-hidden="true" />
+                  <span>{statusLine.text}</span>
+                  {base.documentCount > 0 && <><span aria-hidden="true">·</span><span>{base.documentCount} 份资料</span></>}
+                </>}
+              </p>
             </div>
-            <Tabs value={activeSubview ?? 'documents'} onValueChange={(value) => selectDetailTab(value as KnowledgeDetailSubview)} className="fox-local-kb-detail-switcher">
-              <TabsList aria-label="知识库视图">
-                <TabsTrigger value="documents">文档</TabsTrigger>
-                <TabsTrigger value="retrieval">检索测试</TabsTrigger>
-                <TabsTrigger value="jobs">任务</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </header>
+            <div className="fox-kb-hub-actions">
+              {activeSubview === null && <div className="fox-kb-search-control-slot" ref={setSearchContainer} />}
+              <KnowledgeActivityClock jobs={jobs} knowledgeBaseName={base.name} onOpenJobs={() => { setActiveDocumentId(undefined); setActiveSubview('jobs') }} />
+              <Button variant="ghost" size="icon" aria-label="资料库设置" onClick={() => onNavigate?.('settings', base.id)}><Settings2 /></Button>
+              <Button onClick={requestImport}><Plus />添加资料</Button>
+            </div>
+          </header>}
           {mutationError && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{mutationError}</p>}
-          <div className="fox-local-kb-detail-body" key={activeSubview ?? 'documents'}>
-            <div className="fox-local-kb-detail-main">
-              {activeSubview === null && <LocalKnowledgeDocumentsPage embedded gateway={gateway} knowledgeBaseId={base.id} documentId={activeDocumentId} importRequest={importRequest} onImportRequestHandled={() => setImportRequest(0)} onBack={leaveSubviewOrDetail} onNavigate={navigateWithinSubview} onOperationAccepted={onOperationAccepted} />}
-              {activeSubview === 'retrieval' && <LocalKnowledgeRetrievalPage embedded gateway={gateway} knowledgeBaseId={base.id} onBack={() => setActiveSubview(null)} onNavigate={navigateWithinSubview} />}
-              {activeSubview === 'jobs' && <LocalKnowledgeJobsPage embedded gateway={gateway} knowledgeBaseId={base.id} onBack={() => setActiveSubview(null)} onNavigate={navigateWithinSubview} />}
-            </div>
-            {activeSubview === null && inspectorOpen && <KnowledgeInspector
-              base={base}
-              displayedEmbeddingModel={displayedEmbeddingModel}
-              effectiveEmbeddingModel={effectiveEmbeddingModel}
-              configuredBindingUnavailable={configuredBindingUnavailable}
-              canEdit={base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID}
-              onEdit={() => { setMutationError(null); setEditOpen(true) }}
-              onBuildVector={() => void rebuildIndex()}
-              onManageModels={() => onNavigate?.('models', base.id)}
-            />}
-          </div>
-          {runningJob && <div className="fox-local-kb-job-bar" role="status" aria-live="polite">
-            <strong>{formatJobStage(runningJob.stage)}</strong>
-            <span className="fox-local-kb-job-bar-count">{runningJob.completedItems} / {runningJobTotal}</span>
-            <div className="fox-local-kb-progress" aria-label={`任务进度 ${runningJob.progress}%`}><span style={{ width: `${Math.max(0, Math.min(100, runningJob.progress))}%` }} /></div>
-            <b>{runningJob.progress}%</b>
-            <Button variant="ghost" size="sm" onClick={() => void cancelRunningJob(runningJob)}>取消</Button>
-          </div>}
+          {activeSubview === 'retrieval' && <LocalKnowledgeRetrievalPage embedded gateway={gateway} knowledgeBaseId={base.id} onBack={() => setActiveSubview(null)} onNavigate={navigateWithinSubview} />}
+          {activeSubview === 'jobs' && <LocalKnowledgeJobsPage embedded gateway={gateway} knowledgeBaseId={base.id} onBack={() => setActiveSubview(null)} onNavigate={navigateWithinSubview} />}
+          {activeSubview === null && <>
+            {!activeDocumentId && <KnowledgeBaseSearch key={base.id} gateway={gateway} base={base} hint={searchHint} omni controlContainer={searchContainer} onActiveChange={setSearchShowing} onOpenAdvanced={() => setActiveSubview('retrieval')} onOpenDocument={(documentId) => setActiveDocumentId(documentId)} />}
+            <LocalKnowledgeDocumentsPage embedded gateway={gateway} knowledgeBaseId={base.id} documentId={activeDocumentId} importRequest={importRequest} onImportRequestHandled={() => setImportRequest(0)} onBack={leaveSubviewOrDetail} onNavigate={navigateWithinSubview} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
+          </>}
         </>}
       </div>
-      {base && base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID && <><EditKnowledgeBaseDialog gateway={gateway} base={base} open={editOpen} submitting={saving} error={editOpen ? mutationError : null} onOpenChange={(open) => { setEditOpen(open); if (open) setMutationError(null) }} onSubmit={updateKnowledgeBase} /><DeleteKnowledgeBaseDialog base={base} open={deleteOpen} submitting={deleting} error={deleteOpen ? mutationError : null} onOpenChange={(open) => { setDeleteOpen(open); if (open) setMutationError(null) }} onConfirm={deleteKnowledgeBase} /></>}
     </div>
   )
 }
 
-export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, onBack, onNavigate, embedded = false, initialImportOpen = false, importRequest = 0, onImportRequestHandled, onOperationAccepted }: EmbeddedLocalKnowledgeNavigationProps & { initialImportOpen?: boolean; importRequest?: number; onImportRequestHandled?: () => void; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+// Mirrors local_knowledge_picker.rs. Final file/path checks still run in Host.
+const LOCAL_IMPORT_ACCEPT = '.pdf,.docx,.pptx,.xlsx,.md,.txt'
+const LOCAL_IMPORT_MAX_BYTES = 256 * 1024 * 1024
+const LOCAL_IMPORT_MAX_FILES = 5000
+
+type KnowledgeImportSelection = FileDropzoneItem & { importFile: LocalKnowledgeImportFile }
+
+function KnowledgeImportDropzone({ gateway, items, disabled, onItemsChange, onError }: {
+  gateway: LocalKnowledgeGateway
+  items: KnowledgeImportSelection[]
+  disabled: boolean
+  onItemsChange: (items: KnowledgeImportSelection[]) => void
+  onError: (message: string | null) => void
+}) {
+  const [picking, setPicking] = useState(false)
+  const [nativeDragging, setNativeDragging] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const latest = useRef({ items, disabled, picking, onItemsChange, onError })
+  latest.current = { items, disabled, picking, onItemsChange, onError }
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+
+  const addSelection = (incoming: Array<{ file: LocalKnowledgeImportFile; sizeKnown?: boolean }>) => {
+    const current = latest.current
+    if (current.disabled || current.picking) return
+    const seen = new Set(current.items.map((item) => item.id))
+    const added: KnowledgeImportSelection[] = []
+    for (const { file, sizeKnown = true } of incoming) {
+      const id = file.sourcePath ?? `${file.relativePath ?? file.name}:${file.sizeBytes}`
+      if (seen.has(id)) continue
+      seen.add(id)
+      if (current.items.length + added.length >= LOCAL_IMPORT_MAX_FILES) {
+        current.onError(`单次最多导入 ${LOCAL_IMPORT_MAX_FILES} 个文件。`)
+        break
+      }
+      const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0]
+      const error = !extension || !LOCAL_IMPORT_ACCEPT.split(',').includes(extension)
+        ? '不支持此格式；文件夹请使用「选择文件夹」。'
+        : file.sizeBytes > LOCAL_IMPORT_MAX_BYTES ? '文件超过 256 MB 限制。'
+          : !file.sourcePath && gateway.pickImportFiles ? '无法读取本机路径，请使用系统文件选择器重新选择。' : undefined
+      added.push({ id, name: file.relativePath ?? file.name, size: file.sizeBytes, sizeKnown, status: error ? 'failed' : undefined, error, retryable: false, importFile: file })
+    }
+    current.onItemsChange([...current.items, ...added])
+  }
+  const addBrowserFiles = (files: File[]) => {
+    onError(null)
+    addSelection(files.map((file) => ({ file: { name: file.name, sourcePath: (file as File & { path?: string }).path, relativePath: file.webkitRelativePath || file.name, mimeType: file.type, sizeBytes: file.size } })))
+  }
+  const pick = async (kind: 'files' | 'folder') => {
+    const select = kind === 'files' ? gateway.pickImportFiles : gateway.pickImportFolder
+    if (!select || latest.current.disabled || latest.current.picking) return
+    latest.current.picking = true
+    setPicking(true)
+    onError(null)
+    try {
+      const selected = await select.call(gateway)
+      if (!alive.current) return
+      latest.current.picking = false
+      addSelection(selected.map((file) => ({ file })))
+      if (kind === 'folder' && !selected.length) onError('所选文件夹中没有支持导入的文件。')
+    } catch (cause) {
+      if (alive.current) onError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      if (alive.current) { latest.current.picking = false; setPicking(false) }
+    }
+  }
+  const addSelectionRef = useRef(addSelection)
+  addSelectionRef.current = addSelection
+  useEffect(() => {
+    if (!desktopRuntimeAvailable) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void import('@tauri-apps/api/webview').then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
+      if (disposed) return
+      if (latest.current.disabled || latest.current.picking) { setNativeDragging(false); return }
+      const payload = event.payload
+      if (payload.type === 'leave') { setNativeDragging(false); return }
+      const bounds = rootRef.current?.getBoundingClientRect()
+      const scale = window.devicePixelRatio || 1
+      const x = payload.position.x / scale, y = payload.position.y / scale
+      const inside = Boolean(bounds && x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom)
+      setNativeDragging(payload.type !== 'drop' && inside)
+      if (payload.type !== 'drop' || !inside) return
+      latest.current.onError(null)
+      addSelectionRef.current(payload.paths.map((path) => ({ sizeKnown: false, file: { sourcePath: path, name: path.split(/[\\/]/).pop() ?? path, relativePath: path.split(/[\\/]/).pop() ?? path, mimeType: '', sizeBytes: 0 } })))
+    })).then((stop) => { if (disposed) stop(); else unlisten = stop }).catch((cause) => {
+      if (!disposed) latest.current.onError(`拖放暂不可用，请选择文件：${cause instanceof Error ? cause.message : String(cause)}`)
+    })
+    return () => { disposed = true; unlisten?.() }
+  }, [])
+
+  return <div ref={rootRef} className="fox-kb-file-dropzone">
+    <FileDropzone items={items} onItemsChange={(next) => onItemsChange(next as KnowledgeImportSelection[])} onAddFiles={addBrowserFiles} onPickFiles={gateway.pickImportFiles ? () => void pick('files') : undefined} disabled={disabled || picking} externalDragging={nativeDragging} accept={LOCAL_IMPORT_ACCEPT} multiple maxSize={LOCAL_IMPORT_MAX_BYTES} maxFiles={LOCAL_IMPORT_MAX_FILES} compactAt={3} label={picking ? '正在选择文件…' : '拖入文件，或点击选择'} description="支持 PDF、DOCX、PPTX、XLSX、Markdown、TXT" note="每个文件不超过 256 MB；单次最多 5000 个文件。" dropLabel="松开以添加文件" />
+    {gateway.pickImportFolder && <Button className="fox-kb-dropzone-folder" type="button" variant="outline" size="sm" disabled={disabled || picking} onClick={() => void pick('folder')}><FolderOpen />选择文件夹并保留目录结构</Button>}
+    {items.length > 0 && <div className="fox-kb-dropzone-summary"><span>{items.filter((item) => item.status !== 'failed').length} 个待导入文件{items.some((item) => item.status === 'failed') && ` · ${items.filter((item) => item.status === 'failed').length} 个需移除或重新选择`}</span><Button type="button" variant="ghost" size="sm" disabled={disabled || picking} onClick={() => { onItemsChange([]); onError(null) }}>清空</Button></div>}
+  </div>
+}
+
+export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, onBack, onNavigate, embedded = false, initialImportOpen = false, importRequest = 0, onImportRequestHandled, onOperationAccepted, onAskDocument }: EmbeddedLocalKnowledgeNavigationProps & { initialImportOpen?: boolean; importRequest?: number; onImportRequestHandled?: () => void; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const [base, setBase] = useState<LocalKnowledgeBase | null>(null)
   const [documents, setDocuments] = useState<LocalKnowledgeDocument[]>([])
   const [folders, setFolders] = useState<LocalKnowledgeFolder[]>([])
   const [currentFolder, setCurrentFolder] = useState('')
+  const [sortBy, setSortBy] = useState<'name' | 'time'>('name')
   const [createOpen, setCreateOpen] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [creating, setCreating] = useState(false)
   const [folderError, setFolderError] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
-  const [importFiles, setImportFiles] = useState<LocalKnowledgeImportFile[]>([])
+  const [importSelections, setImportSelections] = useState<KnowledgeImportSelection[]>([])
+  const importFiles = importSelections.filter((item) => item.status !== 'failed').map((item) => item.importFile)
   const [targetFolder, setTargetFolder] = useState('')
-  const [picking, setPicking] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1880,7 +2256,7 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
   useEffect(() => {
     if (!initialImportOpen || !knowledgeBaseId) return
     setTargetFolder('')
-    setImportFiles([])
+    setImportSelections([])
     setImportError(null)
     setImportOpen(true)
   }, [initialImportOpen, knowledgeBaseId])
@@ -1900,9 +2276,26 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
     const index = normalized.lastIndexOf('/')
     return index < 0 ? '' : normalized.slice(0, index)
   }
-  const childFolders = folders.filter((folder) => parentPath(folder.relativePath) === currentFolder)
-  const childDocuments = documents.filter((document) => parentPath(document.relativePath) === currentFolder)
-  const breadcrumbs = currentFolder ? currentFolder.split('/').filter(Boolean) : []
+  const sortRows = <T extends { name: string; updatedAt?: string | null }>(items: T[]) => [...items].sort((left, right) => sortBy === 'name'
+    ? left.name.localeCompare(right.name, 'zh-CN')
+    : (right.updatedAt ?? '').localeCompare(left.updatedAt ?? ''))
+  const childFolders = sortRows(folders.filter((folder) => parentPath(folder.relativePath) === currentFolder))
+  const childDocuments = sortRows(documents.filter((document) => parentPath(document.relativePath) === currentFolder))
+
+  const revealDocument = async (document: LocalKnowledgeDocument) => {
+    if (!knowledgeBaseId) return
+    try { await gateway.revealDocumentFile(knowledgeBaseId, document.id) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+  }
+
+  const removeDocument = async (document: LocalKnowledgeDocument) => {
+    if (!knowledgeBaseId) return
+    try {
+      await gateway.deleteDocument(knowledgeBaseId, document.id)
+      recordLocalKnowledgeActivity({ knowledgeBaseId, kind: 'document_deleted', title: '移除资料', detail: document.relativePath || document.name })
+      await load()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+  }
 
   const createFolder = async () => {
     if (!knowledgeBaseId || !folderName.trim()) return
@@ -1923,7 +2316,7 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
 
   const openImportDialog = () => {
     setTargetFolder(currentFolder)
-    setImportFiles([])
+    setImportSelections([])
     setImportError(null)
     setImportOpen(true)
   }
@@ -1932,52 +2325,12 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
   const closeImportDialog = () => {
     if (submitting) return
     setImportOpen(false)
-    setImportFiles([])
+    setImportSelections([])
     setImportError(null)
-  }
-
-  const chooseImportFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const selected = Array.from(event.target.files ?? []).map((file) => ({
-      name: file.name,
-      sourcePath: (file as File & { path?: string }).path,
-      relativePath: file.name,
-      mimeType: file.type,
-      sizeBytes: file.size,
-    }))
-    setImportFiles(selected)
-    setImportError(null)
-    event.target.value = ''
-  }
-
-  const chooseHostImportFiles = async () => {
-    if (!gateway.pickImportFiles) return
-    setPicking(true)
-    try {
-      setImportFiles(await gateway.pickImportFiles())
-      setImportError(null)
-    } catch (cause) {
-      setImportError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setPicking(false)
-    }
-  }
-
-  const chooseHostImportFolder = async () => {
-    if (!gateway.pickImportFolder) return
-    setPicking(true)
-    try {
-      const selected = await gateway.pickImportFolder()
-      setImportFiles(selected)
-      setImportError(selected.length ? null : '所选文件夹中没有支持导入的文件。')
-    } catch (cause) {
-      setImportError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setPicking(false)
-    }
   }
 
   const startImportFromDialog = async () => {
-    if (!knowledgeBaseId || importFiles.length === 0) return
+    if (!knowledgeBaseId || importFiles.length === 0 || submitting || importSelections.some((item) => item.status === 'failed')) return
     setSubmitting(true)
     setImportError(null)
     try {
@@ -1991,7 +2344,7 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
       recordImportedDocuments(knowledgeBaseId, importFiles.map((file) => ({ name: file.name, relativePath: [targetFolder, file.relativePath ?? file.name].filter(Boolean).join('/') })))
       onOperationAccepted?.(accepted)
       setImportOpen(false)
-      setImportFiles([])
+      setImportSelections([])
       onNavigate?.('jobs', knowledgeBaseId)
     } catch (cause) {
       setImportError(cause instanceof Error ? cause.message : String(cause))
@@ -2007,7 +2360,7 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
         <DropdownMenuItem onSelect={() => { setFolderError(null); setCreateOpen(true) }}><FolderPlus />新建文件夹</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-    : <><Button variant="outline" size="sm" onClick={() => { setFolderError(null); setCreateOpen(true) }} disabled={!knowledgeBaseId}><FolderPlus />新建文件夹</Button><Button size="sm" onClick={openImportDialog} disabled={!knowledgeBaseId}><Upload />导入文件或文件夹</Button></>
+    : <><Button variant="outline" size="sm" onClick={() => { setFolderError(null); setCreateOpen(true) }} disabled={!knowledgeBaseId}><FolderPlus />新建文件夹</Button><Button size="sm" onClick={openImportDialog} disabled={!knowledgeBaseId}><Upload />添加资料</Button></>
 
   return (
     <div className={cn('fox-local-kb-page', embedded && 'fox-local-kb-embedded-page', className)}>
@@ -2015,32 +2368,52 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
         {!loading && !error && !selectedDocument && <section className="fox-local-kb-browser">
-          {!embedded && <LocalKnowledgeHeader title={base?.name ?? '本地知识库'} description={currentFolder ? `当前文件夹：${currentFolder}` : '按文件夹整理和浏览知识库文档。'} onBack={onBack} actions={browserActions} />}
-          <div className="fox-local-kb-browser-toolbar">
-            {currentFolder && <nav className="fox-local-kb-breadcrumbs" aria-label="文件夹路径"><button type="button" onClick={() => setCurrentFolder('')}>根目录</button>{breadcrumbs.map((part, index) => { const path = breadcrumbs.slice(0, index + 1).join('/'); return <span key={path}><ArrowRight /><button type="button" className={path === currentFolder ? 'is-current' : ''} onClick={() => setCurrentFolder(path)}>{part}</button></span> })}</nav>}
-            {embedded && <div className="fox-local-kb-browser-actions">{browserActions}</div>}
+          {!embedded && <LocalKnowledgeHeader title={base?.name ?? '本机资料库'} description={currentFolder ? `当前文件夹：${currentFolder}` : '按文件夹整理和浏览这里的资料。'} onBack={onBack} actions={browserActions} />}
+          <div className="fox-kb-doc-crumb">
+            <Breadcrumb aria-label="资料目录"><BreadcrumbList><BreadcrumbItem><DropdownMenu>
+              <DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="fox-kb-doc-scope"><Folder />全部资料<ChevronDown /></Button></DropdownMenuTrigger>
+              <DropdownMenuContent align="start" sideOffset={5} className="fox-kb-doc-scope-pop">
+                <DropdownMenuItem onSelect={() => setCurrentFolder('')}><Layers3 />全部资料</DropdownMenuItem>
+                {folders.map((folder) => <DropdownMenuItem key={folder.relativePath} onSelect={() => setCurrentFolder(folder.relativePath)}><FolderOpen />{folder.relativePath}<small>{folder.documentCount} 份资料</small></DropdownMenuItem>)}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem disabled={!knowledgeBaseId} onSelect={() => { setFolderError(null); setCreateOpen(true) }}><FolderPlus />新建文件夹</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu></BreadcrumbItem>{currentFolder.split('/').filter(Boolean).map((part, index, parts) => <Fragment key={parts.slice(0, index + 1).join('/')}><BreadcrumbSeparator /><BreadcrumbItem>{index === parts.length - 1 ? <BreadcrumbPage>{part}</BreadcrumbPage> : <BreadcrumbLink asChild><button type="button" onClick={() => setCurrentFolder(parts.slice(0, index + 1).join('/'))}>{part}</button></BreadcrumbLink>}</BreadcrumbItem></Fragment>)}</BreadcrumbList></Breadcrumb>
+            <span className="fox-kb-doc-count">{childFolders.length + childDocuments.length} 项</span>
+            <div className="fox-kb-doc-crumb-spacer" />
+            <button type="button" className="fox-kb-doc-sort" onClick={() => setSortBy(sortBy === 'name' ? 'time' : 'name')}><ArrowUpDown />{sortBy === 'name' ? '名称' : '修改时间'}</button>
           </div>
-          {childFolders.length === 0 && childDocuments.length === 0 ? <LocalKnowledgeEmpty title={folders.length || documents.length ? '这个文件夹是空的' : '还没有文档'} description={folders.length || documents.length ? '可以在此创建子文件夹，或导入文件和整个文件夹。' : '点击右上角「导入文档」，或把文件拖到这里。'} /> : <div className="fox-local-kb-browser-list">
-            <div className="fox-local-kb-browser-list-head" role="row"><span>名称</span><span>大小或内容</span><span>修改时间</span></div>
-            {childFolders.map((folder) => <button type="button" className="fox-local-kb-folder-row" key={folder.relativePath} onClick={() => setCurrentFolder(folder.relativePath)}><span className="fox-local-kb-browser-name"><FolderOpen /><span className="fox-local-kb-browser-name-text" title={folder.name}>{folder.name}</span></span><span className="fox-local-kb-browser-size">{folder.documentCount} 个文档</span><span className="fox-local-kb-browser-time" /></button>)}
-            {childDocuments.map((document) => <button type="button" className="fox-local-kb-document-row" key={document.id} onClick={() => onNavigate?.('documents', knowledgeBaseId, document.id)}><span className="fox-local-kb-browser-name"><LocalFileTypeIcon extension={document.extension} /><span className="fox-local-kb-browser-name-text" title={document.name}>{document.name}</span>{document.status !== 'indexed' && <small className="fox-local-kb-browser-status"><i className={cn('fox-status-dot', document.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{documentStatusLabel(document.status)}</small>}</span><span className="fox-local-kb-browser-size">{formatBytes(document.sizeBytes)} · {document.chunkCount} 个分块</span><span className="fox-local-kb-browser-time">{formatRelativeDate(document.updatedAt)}</span></button>)}
+          {childFolders.length === 0 && childDocuments.length === 0 ? <LocalKnowledgeEmpty title={folders.length || documents.length ? '这个文件夹是空的' : '还没有资料'} description={folders.length || documents.length ? '可以在这里建子文件夹，或直接添加文件和整个文件夹。' : '点右上角「添加资料」，选择文件或整个文件夹。'} /> : <div className="fox-local-kb-browser-list">
+            {childFolders.map((folder) => <div role="button" tabIndex={0} className="fox-local-kb-folder-row" key={folder.relativePath} onClick={() => setCurrentFolder(folder.relativePath)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setCurrentFolder(folder.relativePath) } }}><FolderOpen className="fox-local-kb-browser-icon" /><span className="fox-local-kb-browser-name"><span className="fox-local-kb-browser-name-text" title={folder.name}>{folder.name}</span></span><span className="fox-local-kb-browser-size">{folder.documentCount} 份资料</span><span className="fox-local-kb-browser-time" /><span className="fox-local-kb-row-menu" /></div>)}
+            {childDocuments.map((document) => <div role="button" tabIndex={0} className="fox-local-kb-document-row" key={document.id} onClick={() => onNavigate?.('documents', knowledgeBaseId, document.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onNavigate?.('documents', knowledgeBaseId, document.id) } }}><LocalFileTypeIcon extension={document.extension} /><span className="fox-local-kb-browser-name"><span className="fox-local-kb-browser-name-text" title={document.name}>{document.name}</span>{document.status !== 'indexed' && <small className="fox-local-kb-browser-status"><i className={cn('fox-status-dot', document.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{documentStatusLabel(document.status)}</small>}</span><span className="fox-local-kb-browser-size">{formatBytes(document.sizeBytes)} · {document.chunkCount} 段</span><span className="fox-local-kb-browser-time">{formatRelativeDate(document.updatedAt)}</span><span className="fox-local-kb-row-menu" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-local-kb-row-more" aria-label={`${document.name} 的更多操作`}><MoreHorizontal /></Button></DropdownMenuTrigger>
+                <DropdownMenuContent align="end" sideOffset={5}>
+                  <DropdownMenuItem onSelect={() => onNavigate?.('documents', knowledgeBaseId, document.id)}><FileText />预览</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => void revealDocument(document)}><FolderOpen />在文件夹中显示</DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onSelect={() => void removeDocument(document)}><Trash2 />从资料库移除</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </span></div>)}
           </div>}
+          {childFolders.length + childDocuments.length > 0 && <button type="button" className="fox-kb-dropline" onClick={openImportDialog} disabled={!knowledgeBaseId}><Upload />点这里添加文件或整个文件夹，也能稍后从「本机文件」挑</button>}
         </section>}
-        {!loading && !error && selectedDocument && knowledgeBaseId && <LocalKnowledgeDocumentReader embedded={embedded} knowledgeBaseId={knowledgeBaseId} document={selectedDocument} gateway={gateway} onBack={() => onNavigate?.('documents', knowledgeBaseId)} onDeleted={load} onJobAccepted={() => onNavigate?.('jobs', knowledgeBaseId)} />}
+        {!loading && !error && selectedDocument && knowledgeBaseId && <LocalKnowledgeDocumentReader knowledgeBaseName={base?.name} knowledgeBaseId={knowledgeBaseId} document={selectedDocument} gateway={gateway} onBack={() => onNavigate?.('documents', knowledgeBaseId)} onDeleted={load} onJobAccepted={() => onNavigate?.('jobs', knowledgeBaseId)} onAskDocument={onAskDocument} />}
       </div>
       <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) { setFolderName(''); setFolderError(null) } }}>
-        <DialogContent className="fox-local-kb-folder-dialog"><DialogHeader><DialogTitle>新建文件夹</DialogTitle><DialogDescription>{currentFolder ? `在「${currentFolder}」中创建子文件夹。` : '在知识库根目录创建文件夹。'}</DialogDescription></DialogHeader><label className="fox-local-kb-folder-field"><span>文件夹名称</span><Input autoFocus value={folderName} onChange={(event) => setFolderName(event.target.value)} placeholder="例如：产品资料" onKeyDown={(event) => { if (event.key === 'Enter') void createFolder() }} /></label>{folderError && <p className="fox-local-kb-form-error" role="alert"><AlertCircle />{folderError}</p>}<DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>取消</Button><Button onClick={() => void createFolder()} disabled={creating || !folderName.trim()}>{creating ? <LoaderCircle className="animate-spin" /> : <FolderPlus />}{creating ? '正在创建' : '创建文件夹'}</Button></DialogFooter></DialogContent>
+        <DialogContent className="fox-local-kb-folder-dialog"><DialogHeader><DialogTitle>新建文件夹</DialogTitle><DialogDescription>{currentFolder ? `在「${currentFolder}」中创建子文件夹。` : '在资料库根目录创建文件夹。'}</DialogDescription></DialogHeader><label className="fox-local-kb-folder-field"><span>文件夹名称</span><Input autoFocus value={folderName} onChange={(event) => setFolderName(event.target.value)} placeholder="例如：产品资料" onKeyDown={(event) => { if (event.key === 'Enter') void createFolder() }} /></label>{folderError && <p className="fox-local-kb-form-error" role="alert"><AlertCircle />{folderError}</p>}<DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>取消</Button><Button onClick={() => void createFolder()} disabled={creating || !folderName.trim()}>{creating ? <LoaderCircle className="animate-spin" /> : <FolderPlus />}{creating ? '正在创建' : '创建文件夹'}</Button></DialogFooter></DialogContent>
       </Dialog>
       <Dialog open={importOpen} onOpenChange={(open) => { if (open) setImportOpen(true); else closeImportDialog() }}>
         <DialogContent className="fox-local-kb-import-dialog" showCloseButton={!submitting}>
-          <DialogHeader><DialogTitle>导入文档</DialogTitle><DialogDescription>{base ? `导入到「${base.name}」，文件只会写入本地知识库。` : '选择要加入本地知识库的文件。'}</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>添加资料</DialogTitle><DialogDescription>{base ? `添加到「${base.name}」，Fox 只复制一份到资料库，电脑上的原文件不变。` : '选择要加入本机资料库的文件。'}</DialogDescription></DialogHeader>
           <div className="fox-local-kb-import-dialog-body">
-            <div className="fox-local-kb-import-dropzone"><Upload /><strong>选择要导入的文件或文件夹</strong><small>支持 PDF、DOCX、PPTX、XLSX、Markdown、TXT；导入文件夹时会保留原有目录结构。</small><div className="fox-local-kb-import-pickers">{gateway.pickImportFiles ? <Button type="button" variant="outline" onClick={() => void chooseHostImportFiles()} disabled={picking}>{picking ? <LoaderCircle className="animate-spin" /> : <FileText />}选择文件</Button> : <label className="fox-local-kb-file-picker"><span>选择文件</span><input type="file" multiple onChange={chooseImportFiles} /></label>}{gateway.pickImportFolder && <Button type="button" variant="outline" onClick={() => void chooseHostImportFolder()} disabled={picking}>{picking ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}选择文件夹</Button>}</div></div>
-            <label className="fox-local-kb-import-target"><span>导入到</span><Select value={targetFolder || '__root__'} onValueChange={(value) => setTargetFolder(value === '__root__' ? '' : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__root__">根目录</SelectItem>{folders.map((folder) => <SelectItem key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</SelectItem>)}</SelectContent></Select></label>
-            {importFiles.length > 0 && <div className="fox-local-kb-selected-files"><div className="fox-local-kb-section-head"><div><h2>待导入文件</h2><p>{importFiles.length} 个文件 · {formatBytes(importFiles.reduce((total, file) => total + file.sizeBytes, 0))}</p></div><Button variant="ghost" size="sm" onClick={() => setImportFiles([])}>清空</Button></div><div className="fox-local-kb-selected-file-list">{importFiles.map((file) => <div className="fox-local-kb-selected-file" key={`${file.name}-${file.sourcePath ?? file.sizeBytes}`}><FileText /><span title={file.relativePath ?? file.name}>{file.relativePath ?? file.name}</span><small>{formatBytes(file.sizeBytes)}</small></div>)}</div></div>}
+            {importOpen && <KnowledgeImportDropzone gateway={gateway} items={importSelections} onItemsChange={setImportSelections} disabled={submitting} onError={setImportError} />}
+            <label className="fox-local-kb-import-target"><span>导入到</span><Select value={targetFolder || '__root__'} onValueChange={(value) => setTargetFolder(value === '__root__' ? '' : value)} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__root__">根目录</SelectItem>{folders.map((folder) => <SelectItem key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</SelectItem>)}</SelectContent></Select></label>
+
             {importError && <p className="fox-local-kb-form-error" role="alert"><AlertCircle />{importError}</p>}
           </div>
-          <DialogFooter><Button variant="outline" onClick={closeImportDialog} disabled={submitting}>取消</Button><Button onClick={() => void startImportFromDialog()} disabled={!knowledgeBaseId || importFiles.length === 0 || submitting}>{submitting ? <LoaderCircle className="animate-spin" /> : <Upload />}{submitting ? '正在导入' : '开始导入'}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={closeImportDialog} disabled={submitting}>取消</Button><Button onClick={() => void startImportFromDialog()} disabled={!knowledgeBaseId || importFiles.length === 0 || submitting || importSelections.some((item) => item.status === 'failed')}>{submitting ? <LoaderCircle className="animate-spin" /> : <Upload />}{submitting ? '正在导入' : '开始导入'}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
@@ -2121,7 +2494,7 @@ export function LocalKnowledgeImportPage({ gateway = defaultLocalKnowledgeGatewa
   return (
     <div className={cn('fox-local-kb-page', className)}>
       <div className="fox-local-kb-content fox-local-kb-import-page">
-        <LocalKnowledgeHeader title="导入本地文档" description={base ? `导入到「${base.name}」，文件只会写入本地知识库。` : '选择要加入本地知识库的文件。'} onBack={onBack} />
+        <LocalKnowledgeHeader title="导入文件" description={base ? `导入到「${base.name}」，文件只会写入本机资料库。` : '选择要加入本机资料库的文件。'} onBack={onBack} />
         <Card className="fox-local-kb-import-card"><div className="fox-local-kb-import-dropzone"><Upload /><strong>选择要导入的文件或文件夹</strong><small>支持 PDF、DOCX、PPTX、XLSX、Markdown、TXT；导入文件夹时会保留原有目录结构。</small><div className="fox-local-kb-import-pickers">{gateway.pickImportFiles ? <Button type="button" variant="outline" onClick={() => void chooseHostFiles()} disabled={picking}>{picking ? <LoaderCircle className="animate-spin" /> : <FileText />}选择文件</Button> : <label className="fox-local-kb-file-picker"><span>选择文件</span><input type="file" multiple onChange={chooseFiles} /></label>}{gateway.pickImportFolder && <Button type="button" variant="outline" onClick={() => void chooseHostFolder()} disabled={picking}>{picking ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}选择文件夹</Button>}</div></div><label className="fox-local-kb-import-target"><span>导入到</span><Select value={targetFolder || '__root__'} onValueChange={(value) => setTargetFolder(value === '__root__' ? '' : value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__root__">根目录</SelectItem>{folders.map((folder) => <SelectItem key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</SelectItem>)}</SelectContent></Select></label>{files.length > 0 && <div className="fox-local-kb-selected-files"><div className="fox-local-kb-section-head"><div><h2>待导入文件</h2><p>{files.length} 个文件 · {formatBytes(files.reduce((total, file) => total + file.sizeBytes, 0))}</p></div><Button variant="ghost" size="sm" onClick={() => setFiles([])}>清空</Button></div>{files.map((file) => <div className="fox-local-kb-selected-file" key={`${file.name}-${file.sourcePath ?? file.sizeBytes}`}><FileText /><span title={file.relativePath ?? file.name}>{file.relativePath ?? file.name}</span><small>{formatBytes(file.sizeBytes)}</small></div>)}</div>}{error && <p className="fox-local-kb-form-error"><AlertCircle />{error}</p>}<div className="fox-local-kb-form-actions"><Button variant="outline" onClick={onBack}>取消</Button><Button onClick={() => void startImport()} disabled={!knowledgeBaseId || files.length === 0 || submitting}>{submitting ? <LoaderCircle className="animate-spin" /> : <Upload />}开始导入</Button></div></Card>
       </div>
     </div>
@@ -2155,32 +2528,32 @@ const KNOWLEDGE_JOB_STAGE_STEPS: Record<KnowledgeJob['type'], KnowledgeJobStageS
   import: [
     { label: '校验', stages: ['validating'] },
     { label: '复制', stages: ['copying', 'hashing'] },
-    { label: '解析', stages: ['parsing'] },
-    { label: '提交', stages: ['committing'] },
+    { label: '读取', stages: ['parsing'] },
+    { label: '保存', stages: ['committing'] },
   ],
   parse: [
     { label: '校验', stages: ['validating'] },
-    { label: '解析', stages: ['parsing'] },
-    { label: '分块', stages: ['chunking'] },
-    { label: '提交', stages: ['committing'] },
+    { label: '读取', stages: ['parsing'] },
+    { label: '切段', stages: ['chunking'] },
+    { label: '保存', stages: ['committing'] },
   ],
   index: [
     { label: '校验', stages: ['validating'] },
-    { label: '向量化', stages: ['embedding'] },
-    { label: '写入索引', stages: ['vector_upsert'] },
-    { label: '索引校验', stages: ['verifying'] },
-    { label: '提交', stages: ['committing'] },
+    { label: '整理', stages: ['embedding'] },
+    { label: '写入搜索结果', stages: ['vector_upsert'] },
+    { label: '检查结果', stages: ['verifying'] },
+    { label: '保存', stages: ['committing'] },
   ],
   rebuild: [
     { label: '校验', stages: ['validating'] },
-    { label: '向量化', stages: ['embedding'] },
-    { label: '写入索引', stages: ['vector_upsert'] },
-    { label: '索引校验', stages: ['verifying'] },
-    { label: '提交', stages: ['committing'] },
+    { label: '整理', stages: ['embedding'] },
+    { label: '写入搜索结果', stages: ['vector_upsert'] },
+    { label: '检查结果', stages: ['verifying'] },
+    { label: '保存', stages: ['committing'] },
   ],
   delete: [
     { label: '校验', stages: ['validating'] },
-    { label: '提交删除', stages: ['committing'] },
+    { label: '确认移除', stages: ['committing'] },
   ],
 }
 
@@ -2191,15 +2564,25 @@ function knowledgeJobBucket(job: KnowledgeJob): Exclude<KnowledgeJobFilter, 'all
 }
 
 function knowledgeJobTypeLabel(type: KnowledgeJob['type']): string {
-  return ({ import: '文档导入', parse: '文档解析', index: '索引构建', delete: '文档删除', rebuild: '索引重建' })[type]
+  return ({ import: '添加资料', parse: '读取资料', index: '整理', delete: '移除资料', rebuild: '重新整理' })[type]
 }
 
 function knowledgeJobTitle(job: KnowledgeJob, knowledgeBaseName: string): string {
   const count = job.totalItems > 0 ? job.totalItems : Math.max(job.completedItems + job.failedItems, 1)
-  if (job.type === 'import') return `导入 ${count} 个文档到 ${knowledgeBaseName}`
-  if (job.type === 'parse') return `解析 ${count} 个文档`
-  if (job.type === 'delete') return `删除 ${count} 个文档`
-  return `${knowledgeJobTypeLabel(job.type)} ${count} 项`
+  if (job.type === 'import') return `添加 ${count} 份资料到 ${knowledgeBaseName}`
+  if (job.type === 'parse') return `读取 ${count} 份资料`
+  if (job.type === 'delete') return `移除 ${count} 份资料`
+  return `${knowledgeJobTypeLabel(job.type)} ${count} 份资料`
+}
+
+/** History lines put the knowledge base in its own column, so the title only
+ *  has to say what finished. */
+function knowledgeJobHistoryTitle(job: KnowledgeJob): string {
+  const count = job.totalItems > 0 ? job.totalItems : Math.max(job.completedItems + job.failedItems, 1)
+  if (job.type === 'import') return `添加了 ${count} 份资料`
+  if (job.type === 'parse') return `读取了 ${count} 份资料`
+  if (job.type === 'delete') return `移除了 ${count} 份资料`
+  return job.type === 'rebuild' ? '重新整理完成' : '整理完成'
 }
 
 function knowledgeJobStageIndex(type: KnowledgeJob['type'], stage: KnowledgeOperationStage | null): number {
@@ -2245,7 +2628,7 @@ export function LocalKnowledgeJobsPage({ gateway = defaultLocalKnowledgeGateway,
   const [baseFilter, setBaseFilter] = useState(knowledgeBaseId ?? 'all')
   const [dateFilter, setDateFilter] = useState<KnowledgeJobDateFilter>('all')
   const [expandedJobIds, setExpandedJobIds] = useState<Set<string>>(() => new Set())
-  const [collapsedJobDays, setCollapsedJobDays] = useState<Set<string>>(() => new Set())
+
   const [visibleJobCount, setVisibleJobCount] = useState(KNOWLEDGE_JOB_PAGE_SIZE)
   const loadMoreJobsRef = useRef<HTMLDivElement | null>(null)
 
@@ -2258,12 +2641,9 @@ export function LocalKnowledgeJobsPage({ gateway = defaultLocalKnowledgeGateway,
       ])
       setJobs(nextJobs)
       setKnowledgeBases(nextKnowledgeBases)
-      setExpandedJobIds((current) => {
-        const retained = new Set(Array.from(current).filter((jobId) => nextJobs.some((job) => job.id === jobId)))
-        if (retained.size > 0) return retained
-        const firstPriorityJob = nextJobs.find((job) => knowledgeJobBucket(job) === 'active' || knowledgeJobBucket(job) === 'attention')
-        return new Set(firstPriorityJob ? [firstPriorityJob.id] : [])
-      })
+      // 原型 08-jobs：进行中的任务默认也只是一行 + 3px 进度条，
+      // 阶段清单要点开才展开，所以这里只保留用户已展开的项。
+      setExpandedJobIds((current) => new Set(Array.from(current).filter((jobId) => nextJobs.some((job) => job.id === jobId))))
       setError(null)
     }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
@@ -2308,16 +2688,18 @@ export function LocalKnowledgeJobsPage({ gateway = defaultLocalKnowledgeGateway,
   const filteredJobs = useMemo(() => scopedJobs.filter((job) => statusFilter === 'all' || knowledgeJobBucket(job) === statusFilter), [scopedJobs, statusFilter])
   const displayedJobs = useMemo(() => filteredJobs.slice(0, visibleJobCount), [filteredJobs, visibleJobCount])
   const hasMoreJobs = visibleJobCount < filteredJobs.length
+  const pinnedJobs = useMemo(() => displayedJobs.filter((job) => knowledgeJobBucket(job) !== 'completed'), [displayedJobs])
+  const historyJobs = useMemo(() => displayedJobs.filter((job) => knowledgeJobBucket(job) === 'completed'), [displayedJobs])
   const groupedJobs = useMemo(() => {
     const groups = new Map<string, { label: string; date: string; jobs: KnowledgeJob[] }>()
-    for (const job of displayedJobs) {
+    for (const job of historyJobs) {
       const dateGroup = knowledgeJobDateGroup(job.updatedAt)
       const group = groups.get(dateGroup.date) ?? { ...dateGroup, jobs: [] }
       group.jobs.push(job)
       groups.set(dateGroup.date, group)
     }
     return Array.from(groups.values())
-  }, [displayedJobs])
+  }, [historyJobs])
   useEffect(() => {
     setVisibleJobCount(KNOWLEDGE_JOB_PAGE_SIZE)
   }, [baseFilter, dateFilter, statusFilter, typeFilter])
@@ -2344,15 +2726,16 @@ export function LocalKnowledgeJobsPage({ gateway = defaultLocalKnowledgeGateway,
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
   }
   const activeFilterCount = (knowledgeBaseId ? 0 : baseFilter !== 'all' ? 1 : 0) + (typeFilter !== 'all' ? 1 : 0) + (dateFilter !== 'all' ? 1 : 0)
+  const bucketCount = (bucket: Exclude<KnowledgeJobFilter, 'all'>) => scopedJobs.filter((job) => knowledgeJobBucket(job) === bucket).length
   const jobFilters = <div className="fox-local-kb-job-toolbar">
     <Tabs value={statusFilter} onValueChange={(value) => setStatusFilter(value as KnowledgeJobFilter)} className="fox-local-kb-job-filter-tabs">
-      <TabsList aria-label="筛选任务状态"><TabsTrigger value="all">全部</TabsTrigger><TabsTrigger value="active">进行中</TabsTrigger><TabsTrigger value="attention">需处理</TabsTrigger><TabsTrigger value="completed">已完成</TabsTrigger></TabsList>
+      <TabsList aria-label="筛选任务状态"><TabsTrigger value="all">全部</TabsTrigger><TabsTrigger value="active">进行中<small>{bucketCount('active')}</small></TabsTrigger><TabsTrigger value="attention">需处理<small>{bucketCount('attention')}</small></TabsTrigger><TabsTrigger value="completed">已完成<small>{bucketCount('completed')}</small></TabsTrigger></TabsList>
     </Tabs>
     <Popover>
-      <PopoverTrigger asChild><Button variant="outline" size="sm" aria-label="筛选任务"><ListFilter />筛选{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ''}</Button></PopoverTrigger>
+      <PopoverTrigger asChild><Button variant={activeFilterCount > 0 ? 'outline' : 'ghost'} size="icon" aria-label={activeFilterCount > 0 ? `筛选任务，已应用 ${activeFilterCount} 个条件` : '筛选任务'}><ListFilter /></Button></PopoverTrigger>
       <PopoverContent align="end" sideOffset={6} className="fox-local-kb-job-filter-pop">
-        {!knowledgeBaseId && <label className="fox-local-kb-job-filter-field"><span>知识库</span><Select value={baseFilter} onValueChange={setBaseFilter}><SelectTrigger aria-label="筛选知识库"><SelectValue placeholder="全部知识库" /></SelectTrigger><SelectContent><SelectItem value="all">全部知识库</SelectItem>{knowledgeBases.map((base) => <SelectItem key={base.id} value={base.id}>{base.name}</SelectItem>)}</SelectContent></Select></label>}
-        <label className="fox-local-kb-job-filter-field"><span>类型</span><Select value={typeFilter} onValueChange={(value) => setTypeFilter(value as KnowledgeJobTypeFilter)}><SelectTrigger aria-label="筛选任务类型"><SelectValue placeholder="全部任务类型" /></SelectTrigger><SelectContent><SelectItem value="all">全部任务类型</SelectItem><SelectItem value="import">文档导入</SelectItem><SelectItem value="parse">文档解析</SelectItem><SelectItem value="index">索引构建</SelectItem><SelectItem value="delete">文档删除</SelectItem><SelectItem value="rebuild">索引重建</SelectItem></SelectContent></Select></label>
+        {!knowledgeBaseId && <label className="fox-local-kb-job-filter-field"><span>资料库</span><Select value={baseFilter} onValueChange={setBaseFilter}><SelectTrigger aria-label="筛选资料库"><SelectValue placeholder="全部资料库" /></SelectTrigger><SelectContent><SelectItem value="all">全部资料库</SelectItem>{knowledgeBases.map((base) => <SelectItem key={base.id} value={base.id}>{base.name}</SelectItem>)}</SelectContent></Select></label>}
+        <label className="fox-local-kb-job-filter-field"><span>类型</span><Select value={typeFilter} onValueChange={(value) => setTypeFilter(value as KnowledgeJobTypeFilter)}><SelectTrigger aria-label="筛选任务类型"><SelectValue placeholder="全部类型" /></SelectTrigger><SelectContent><SelectItem value="all">全部类型</SelectItem>{(['import', 'parse', 'index', 'delete', 'rebuild'] as const).map((type) => <SelectItem key={type} value={type}>{knowledgeJobTypeLabel(type)}</SelectItem>)}</SelectContent></Select></label>
         <label className="fox-local-kb-job-filter-field"><span>时间</span><Select value={dateFilter} onValueChange={(value) => setDateFilter(value as KnowledgeJobDateFilter)}><SelectTrigger aria-label="筛选任务时间"><SelectValue placeholder="全部时间" /></SelectTrigger><SelectContent><SelectItem value="all">全部时间</SelectItem><SelectItem value="today">今天</SelectItem><SelectItem value="week">近 7 天</SelectItem></SelectContent></Select></label>
       </PopoverContent>
     </Popover>
@@ -2360,37 +2743,24 @@ export function LocalKnowledgeJobsPage({ gateway = defaultLocalKnowledgeGateway,
   return (
     <div className={cn('fox-local-kb-page', embedded && 'fox-local-kb-embedded-page', className)}>
       <div className={cn('fox-local-kb-content fox-local-kb-jobs-content', embedded && 'fox-local-kb-embedded-content')}>
-        {!embedded && <LocalKnowledgeHeader title={knowledgeBaseId ? '任务状态' : '任务中心'} description="" onBack={knowledgeBaseId ? onBack : undefined} />}
+        {!embedded && <LocalKnowledgeHeader title={knowledgeBaseId ? '任务状态' : '处理进度'} description="" onBack={knowledgeBaseId ? onBack : undefined} actions={jobFilters} />}
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
-        {!loading && !error && visibleJobs.length === 0 && <section className="fox-local-kb-job-board"><LocalKnowledgeEmpty title="没有任务记录" description="导入文档或重建索引后，任务进度会显示在这里。" action={knowledgeBaseId ? <Button onClick={() => onNavigate?.('documents', knowledgeBaseId)}>前往文档</Button> : <Button onClick={() => onNavigate?.('list')}>查看知识库</Button>} /></section>}
+        {!loading && !error && visibleJobs.length === 0 && <section className="fox-local-kb-job-board"><LocalKnowledgeEmpty title="没有任务记录" description="添加资料或重新整理后，进度会显示在这里。" action={knowledgeBaseId ? <Button onClick={() => onNavigate?.('documents', knowledgeBaseId)}>前往文档</Button> : <Button onClick={() => onNavigate?.('list')}>查看资料库</Button>} /></section>}
         {!loading && !error && visibleJobs.length > 0 && <section className="fox-local-kb-job-board">
-          {jobFilters}
+          {embedded && jobFilters}
+          {pinnedJobs.length > 0 && <div className="fox-kb-job-pinned">
+            {pinnedJobs.map((job) => <JobTimelineItem key={job.id} job={job} knowledgeBaseName={baseNameById.get(job.knowledgeBaseId) ?? job.knowledgeBaseId} expanded={expandedJobIds.has(job.id)} onToggle={() => setExpandedJobIds((current) => { const next = new Set(current); if (next.has(job.id)) next.delete(job.id); else next.add(job.id); return next })} onCancel={() => void cancel(job)} onRetry={() => void retry(job)} />)}
+          </div>}
           <div className="fox-local-kb-job-timeline" aria-live="polite">
-            {groupedJobs.length === 0
-              ? <LocalKnowledgeEmpty title="没有符合条件的任务" description="调整状态、知识库、任务类型或时间范围后再试。" />
+            {displayedJobs.length === 0
+              ? <LocalKnowledgeEmpty title="没找到任务，试着调整筛选条件" description="调整状态、资料库、任务类型或时间范围后再试。" />
               : <>{groupedJobs.map((group) => {
-                const collapsed = collapsedJobDays.has(group.date)
-                return <section className={cn('fox-local-kb-job-day', collapsed && 'is-collapsed')} key={group.date}>
+                return <section className="fox-local-kb-job-day" key={group.date}>
                   <header>
                     <strong>{group.label}</strong>
-                    <i />
-                    <button
-                      type="button"
-                      className="fox-local-kb-job-day-toggle"
-                      aria-expanded={!collapsed}
-                      aria-label={`${collapsed ? '展开' : '折叠'}${group.label}的任务`}
-                      onClick={() => setCollapsedJobDays((current) => {
-                        const next = new Set(current)
-                        if (next.has(group.date)) next.delete(group.date)
-                        else next.add(group.date)
-                        return next
-                      })}
-                    >
-                      <ChevronDown />
-                    </button>
                   </header>
-                  {!collapsed && <div className="fox-local-kb-job-day-list">{group.jobs.map((job) => <JobTimelineItem key={job.id} job={job} knowledgeBaseName={baseNameById.get(job.knowledgeBaseId) ?? job.knowledgeBaseId} expanded={expandedJobIds.has(job.id)} onToggle={() => setExpandedJobIds((current) => { const next = new Set(current); if (next.has(job.id)) next.delete(job.id); else next.add(job.id); return next })} onCancel={() => void cancel(job)} onRetry={() => void retry(job)} />)}</div>}
+                  <div className="fox-local-kb-job-day-list">{group.jobs.map((job) => <JobTimelineItem key={job.id} job={job} knowledgeBaseName={baseNameById.get(job.knowledgeBaseId) ?? job.knowledgeBaseId} expanded={expandedJobIds.has(job.id)} onToggle={() => setExpandedJobIds((current) => { const next = new Set(current); if (next.has(job.id)) next.delete(job.id); else next.add(job.id); return next })} onCancel={() => void cancel(job)} onRetry={() => void retry(job)} />)}</div>
                 </section>
               })}{hasMoreJobs && <div ref={loadMoreJobsRef} className="fox-local-kb-jobs-load-more" role="status">继续向下滚动，加载更多任务</div>}</> }
           </div>
@@ -2411,15 +2781,23 @@ function JobTimelineItem({ job, knowledgeBaseName, expanded, onToggle, onCancel,
   const completedItems = job.completedItems > 0
     ? job.completedItems
     : job.status === 'completed' && !partial ? totalItems : 0
+  // Finished jobs are history: one line each, status carried by the dot alone.
+  if (bucket === 'completed') return <div className="fox-local-kb-job-line">
+    <i className={cn('fox-status-dot', partial ? 'is-warning' : 'is-ok')} aria-hidden="true" />
+    <span className="fox-local-kb-job-line-name">{knowledgeJobHistoryTitle(job)}</span>
+    <span className="fox-local-kb-job-line-kb">{knowledgeBaseName}</span>
+    <time className="fox-local-kb-job-line-time">{new Date(job.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
+  </div>
   return <article className={cn('fox-local-kb-job-row', `is-${bucket}`, expanded && 'is-expanded')}>
     <button type="button" className="fox-local-kb-job-row-head" aria-expanded={expanded} onClick={onToggle}>
+      {bucket === 'active' ? <LoaderCircle className="fox-local-kb-job-row-icon animate-spin" aria-hidden="true" /> : <AlertCircle className="fox-local-kb-job-row-icon is-warning" aria-hidden="true" />}
       <span className="fox-local-kb-job-row-main"><strong>{knowledgeJobTitle(job, knowledgeBaseName)}</strong><small>{knowledgeJobTypeLabel(job.type)} · {knowledgeBaseName} · {formatRelativeDate(job.updatedAt)}</small></span>
-      <span className={cn('fox-local-kb-job-row-status', `is-${bucket}`)}><i className="fox-status-dot" aria-hidden="true" />{jobStatusLabel(job.status, job.outcome)}</span>
+      <span className={cn('fox-local-kb-job-row-status', `is-${bucket}`)}>{bucket === 'active' ? <>{job.progress}%</> : <><i className="fox-status-dot" aria-hidden="true" />{jobStatusLabel(job.status, job.outcome)}</>}</span>
       <ChevronDown className="fox-local-kb-job-row-chevron" aria-hidden="true" />
     </button>
-    {bucket === 'active' && !expanded && <div className="fox-local-kb-job-row-progress" aria-label={`任务进度 ${job.progress}%`}><span style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} /></div>}
+    {bucket === 'active' && !expanded && <Progress className="fox-local-kb-job-row-progress" value={job.progress} aria-label={`任务进度 ${job.progress}%`} />}
     {expanded && <div className="fox-local-kb-job-row-body">
-      {bucket === 'active' && <div className="fox-local-kb-job-row-stage"><span>当前阶段：{formatJobStage(job.stage)}</span><div className="fox-local-kb-progress"><b style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} /></div><b>{job.progress}%</b></div>}
+      {bucket === 'active' && <div className="fox-local-kb-job-row-stage"><span>当前阶段：{formatJobStage(job.stage)}</span><Progress className="fox-local-kb-progress" value={job.progress} aria-label="任务阶段进度" /><b>{job.progress}%</b></div>}
       <ol className="fox-local-kb-job-stages">{stageSteps.map((step, index) => {
         const state = job.status === 'completed' && !partial
           ? 'complete'
@@ -2444,10 +2822,27 @@ function modelStatusLabel(model: LocalEmbeddingModel): string {
   return '未安装'
 }
 
+// The catalog has no marketing copy, so the one-liner comes from the language
+// tag the manifest already carries.
+function modelFitLine(model: LocalEmbeddingModel): string {
+  const langs = model.languages
+  const zh = langs.some((lang) => lang.includes('中'))
+  const en = langs.some((lang) => /英|english/i.test(lang))
+  if (zh && en) return '中英文混合的资料更准确'
+  if (zh) return '最适合中文资料'
+  if (langs.length > 0) return `适合${langs.join('、')}资料`
+  return '适合多种语言的资料'
+}
+
+function embeddingModelKey(model: LocalEmbeddingModel): string {
+  return `${model.id}@${model.version}`
+}
+
 export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGateway, className }: LocalKnowledgeNavigationProps) {
   const [models, setModels] = useState<LocalEmbeddingModel[]>([])
   const [health, setHealth] = useState<VectorBackendHealth | null>(null)
   const [filesModel, setFilesModel] = useState<LocalEmbeddingModel | null>(null)
+  const [healthOpen, setHealthOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -2506,12 +2901,12 @@ export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGatewa
         status: result.loadReady ? 'completed' : 'failed',
       }
       if (result.loadReady) {
-        toast.success(`${model.name} 隔离测试通过`, {
+        toast.success(`${model.name} 测试通过`, {
           ...context,
           description: `${result.message}\n维度：${result.dimension}\n耗时：${result.elapsedMs} ms`,
         })
       } else {
-        toast.error(`${model.name} 隔离测试失败`, {
+        toast.error(`${model.name} 测试失败`, {
           ...context,
           description: [
             result.message,
@@ -2522,7 +2917,7 @@ export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGatewa
       }
       await load()
     } catch (cause) {
-      toast.error(`${model.name} 隔离测试未能完成`, {
+      toast.error(`${model.name} 测试没能完成`, {
         description: cause instanceof Error ? cause.message : String(cause),
         mergeKey: `embedding-model-test:${model.id}:${Date.now()}`,
         sourceType: 'embedding_model_test',
@@ -2552,44 +2947,84 @@ export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGatewa
     }
   }
 
+  const currentModel = useMemo(() => models.filter(isSelectableEmbeddingModel)
+    .sort((left, right) => Number(right.isDefault) - Number(left.isDefault))[0] ?? null, [models])
+  const otherModels = useMemo(() => models.filter((model) => embeddingModelKey(model) !== (currentModel ? embeddingModelKey(currentModel) : '')), [currentModel, models])
+  const suggestedModel = useMemo(() => otherModels.find((model) => model.recommended && model.status === 'not_installed')
+    ?? otherModels.find((model) => model.status === 'not_installed') ?? null, [otherModels])
+  const engineOk = health != null && health.readWriteVerified && !health.fallbackActive
+
+  const modelMenu = (model: LocalEmbeddingModel, busy: boolean) => <DropdownMenu>
+    <DropdownMenuTrigger asChild><Button className="fox-local-model-more" variant="ghost" size="icon-sm" aria-label={`管理 ${model.name}`} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
+    <DropdownMenuContent className="fox-local-model-menu" align="end" sideOffset={5}>
+      <DropdownMenuItem onSelect={() => void testModel(model)}><WandSparkles />试一试</DropdownMenuItem>
+      <DropdownMenuItem disabled={model.isDefault || !model.loadReady} onSelect={() => void run(model.id, () => gateway.setDefaultEmbeddingModel(model.id), '已设为默认搜索模型；没有单独绑定模型的资料库会自动用它。')}><Star />设为默认</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => setFilesModel(model)}><FileStack />查看文件</DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem variant="destructive" onSelect={() => void run(model.id, () => gateway.deleteEmbeddingModel(model.id), '模型已删除。')}><Trash2 />删除</DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
+
   return (
     <div className={cn('fox-local-kb-page', className)}>
       <div className="fox-local-kb-content fox-local-models-page">
-        <LocalKnowledgeHeader title="向量模型" description="安装模型 → 测试 → 设为默认；然后在知识库「向量索引」点击构建。" actions={<Button variant="outline" onClick={() => void importPackage()} disabled={busyId != null}><PackageOpen />导入模型包</Button>} />
+        <LocalKnowledgeHeader title="向量模型" description="让 Fox 读懂文字的意思，搜索时不必记得原文怎么写。装好一个就够用。" actions={<DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="模型页更多操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent className="fox-local-model-menu" align="end" sideOffset={5}>
+            <DropdownMenuItem disabled={busyId != null} onSelect={() => void importPackage()}><PackageOpen />导入模型包</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setHealthOpen(true)}><Gauge />运行状态<em className="fox-local-model-menu-state">{health == null ? '未知' : engineOk ? '正常' : '兼容模式'}</em></DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>} />
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
-        {!loading && models.length > 0 && <div className="fox-local-model-list">
-          {models.map((model) => {
-            const installing = model.status === 'installing' && model.download
-            const busy = busyId === model.id
-            const statusTone = model.status === 'ready' && model.loadReady ? 'is-ok' : model.status === 'error' ? 'is-error' : 'is-empty'
-            return <div key={`${model.id}-${model.version}`} className="fox-local-model-row">
-              <div className="fox-local-model-row-main">
-                <strong>{model.name}{model.isDefault ? ' · 默认' : ''}</strong>
-                <small>{model.languages.join(' / ') || '语言未声明'} · {model.dimension} 维 · {formatBytes(model.sizeBytes)}{model.recommended ? ' · 推荐' : ''}</small>
-                {installing && <div className="fox-local-model-download" role="status" aria-live="polite"><div className="fox-local-kb-progress"><span style={{ width: `${model.download?.progress ?? 0}%` }} /></div><small>{model.download?.currentFile ? `正在下载 ${model.download.currentFile}` : '准备下载'} · {formatBytes(model.download?.downloadedBytes ?? 0)} / {formatBytes(model.download?.totalBytes ?? model.sizeBytes)}</small></div>}
+        {!loading && models.length > 0 && currentModel && <section className="fox-kb-model-hero">
+          <span className="fox-kb-model-hero-icon" aria-hidden="true"><Brain /></span>
+          <div className="fox-kb-model-hero-text">
+            <span className="fox-kb-model-hero-status"><i className="fox-status-dot is-ok" aria-hidden="true" />使用中</span>
+            <strong>{currentModel.name}</strong>
+            <small>{modelFitLine(currentModel)} · {formatBytes(currentModel.sizeBytes)} · {currentModel.isDefault ? '所有资料库默认使用' : '当前资料库正在使用'}</small>
+          </div>
+          <div className="fox-kb-model-hero-actions">
+            <Button variant="outline" size="sm" onClick={() => void testModel(currentModel)} disabled={busyId === currentModel.id}><WandSparkles />试一试</Button>
+            {modelMenu(currentModel, busyId === currentModel.id)}
+          </div>
+        </section>}
+        {!loading && models.length > 0 && !currentModel && <section className="fox-kb-model-hero is-empty">
+          <span className="fox-kb-model-hero-icon" aria-hidden="true"><Cpu /></span>
+          <div className="fox-kb-model-hero-text">
+            <span className="fox-kb-model-hero-status"><i className="fox-status-dot is-empty" aria-hidden="true" />还没有装好</span>
+            <strong>现在只能按字词查找</strong>
+            <small>装好一个模型后，Fox 就能明白换个说法的查询，不必记得原文怎么写。</small>
+          </div>
+          {suggestedModel && <div className="fox-kb-model-hero-actions">
+            <Button variant="outline" size="sm" onClick={() => void run(suggestedModel.id, () => gateway.startEmbeddingModelInstall(suggestedModel.id), '模型下载任务已创建。')} disabled={busyId != null}><Download />{suggestedModel.recommended ? '下载推荐模型' : '下载'}</Button>
+          </div>}
+        </section>}
+        {!loading && otherModels.length > 0 && <><div className="fox-kb-model-section-bar">{currentModel && <h3 className="fox-kb-model-section">其他可选</h3>}<small className="fox-kb-model-engine">本机引擎{health == null ? '状态未知' : engineOk ? '运行正常' : '使用兼容模式'}</small></div>
+          <div className="fox-local-model-list">
+            {otherModels.map((model) => {
+              const installing = model.status === 'installing' && model.download
+              const busy = busyId === model.id
+              const statusTone = model.status === 'ready' && model.loadReady ? 'is-ok' : model.status === 'error' ? 'is-error' : 'is-empty'
+              return <div key={embeddingModelKey(model)} className="fox-local-model-row">
+                <span className="fox-kb-model-row-icon" aria-hidden="true"><Brain /></span>
+                <div className="fox-local-model-row-main">
+                  <strong>{model.name}</strong>
+                  <small>{modelFitLine(model)} · {formatBytes(model.sizeBytes)}</small>
+                  {installing && <div className="fox-local-model-download" role="status" aria-live="polite"><Progress className="fox-local-kb-progress" value={model.download?.progress ?? 0} aria-label={`${model.name} 下载进度`} /><small>{model.download?.currentFile ? `正在下载 ${model.download.currentFile}` : '准备下载'} · {formatBytes(model.download?.downloadedBytes ?? 0)} / {formatBytes(model.download?.totalBytes ?? model.sizeBytes)}</small></div>}
+                </div>
+                {!installing && <span className="fox-local-model-row-status"><i className={cn('fox-status-dot', statusTone)} aria-hidden="true" />{modelStatusLabel(model)}</span>}
+                {model.status === 'not_installed' && <Button variant="outline" size="sm" onClick={() => void run(model.id, () => gateway.startEmbeddingModelInstall(model.id), '模型下载任务已创建。')} disabled={busy}><Download />下载</Button>}
+                {installing && model.download && <Button variant="ghost" size="icon-sm" className="fox-kb-model-pause" aria-label="暂停下载" onClick={() => void run(model.id, () => gateway.cancelEmbeddingModelDownload(model.download!.id), '下载已暂停，可随时继续。')} disabled={busy}><Pause /></Button>}
+                {(model.status === 'error' || model.download?.status === 'cancelled' || model.download?.status === 'failed') && model.download && !installing && <Button variant="outline" size="sm" onClick={() => void run(model.id, () => gateway.retryEmbeddingModelDownload(model.download!.id), '已从断点继续下载。')} disabled={busy}><RotateCcw />继续</Button>}
+                {isSelectableEmbeddingModel(model) && <Button variant="outline" size="sm" onClick={() => void run(model.id, () => gateway.setDefaultEmbeddingModel(model.id), '已设为默认搜索模型；没有单独绑定模型的资料库会自动用它。')} disabled={busy}><Star />设为默认</Button>}
+                {model.status === 'ready' && modelMenu(model, busy)}
               </div>
-              <span className="fox-local-model-row-status"><i className={cn('fox-status-dot', statusTone)} aria-hidden="true" />{modelStatusLabel(model)}</span>
-              {model.status === 'not_installed' && <Button variant="outline" size="sm" onClick={() => void run(model.id, () => gateway.startEmbeddingModelInstall(model.id), '模型下载任务已创建。')} disabled={busy}>安装</Button>}
-              {installing && model.download && <Button variant="outline" size="sm" onClick={() => void run(model.id, () => gateway.cancelEmbeddingModelDownload(model.download!.id), '下载已取消，可随时继续。')} disabled={busy}>取消</Button>}
-              {(model.status === 'error' || model.download?.status === 'cancelled' || model.download?.status === 'failed') && model.download && !installing && <Button variant="outline" size="sm" onClick={() => void run(model.id, () => gateway.retryEmbeddingModelDownload(model.download!.id), '已从断点继续下载。')} disabled={busy}><RotateCcw />继续</Button>}
-              {model.status === 'ready' && <DropdownMenu>
-                <DropdownMenuTrigger asChild><Button className="fox-local-model-more" variant="ghost" size="icon-sm" aria-label={`管理 ${model.name}`} disabled={busy}><MoreHorizontal /></Button></DropdownMenuTrigger>
-                <DropdownMenuContent className="fox-local-model-menu" align="end" sideOffset={5}>
-                  <DropdownMenuItem onSelect={() => void testModel(model)}><FlaskConical />隔离测试</DropdownMenuItem>
-                  <DropdownMenuItem disabled={model.isDefault || !model.loadReady} onSelect={() => void run(model.id, () => gateway.setDefaultEmbeddingModel(model.id), '已设为默认向量模型；未绑定模型的知识库将在构建向量索引时自动采用它。')}><Star />设为默认</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => setFilesModel(model)}><FileStack />文件</DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onSelect={() => void run(model.id, () => gateway.deleteEmbeddingModel(model.id), '模型已删除。')}><Trash2 />删除</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>}
-            </div>
-          })}
-        </div>}
-        {!loading && !error && health && <p className={cn('fox-local-model-backend', health.readWriteVerified ? 'is-ok' : 'is-warning')}>
-          <i className={cn('fox-status-dot', health.readWriteVerified ? 'is-ok' : 'is-warning')} aria-hidden="true" />
-          后端：{health.backend} · {health.fallbackActive ? '兼容模式' : '正常'}
-          <span title={health.message}>{health.message}</span>
+            })}
+          </div></>}
+        {!loading && !error && health && otherModels.length === 0 && <p className={cn('fox-local-model-backend', engineOk ? 'is-ok' : 'is-warning')}>
+          <i className={cn('fox-status-dot', engineOk ? 'is-ok' : 'is-warning')} aria-hidden="true" />
+          {engineOk ? '本机引擎运行正常' : '本机引擎处于兼容模式，智能搜索可能受影响'}
         </p>}
         <Dialog open={filesModel != null} onOpenChange={(open) => { if (!open) setFilesModel(null) }}>
           <DialogContent className="fox-local-model-files-dialog">
@@ -2601,6 +3036,20 @@ export function LocalKnowledgeModelsPage({ gateway = defaultLocalKnowledgeGatewa
               {filesModel?.files.length === 0 && <p>手动模型包已通过 manifest 校验。</p>}
               {filesModel?.files.map((file) => <div className="fox-local-model-file-row" key={file.name}><span><FileText /><strong title={file.name}>{file.name}</strong></span><small>{formatBytes(file.sizeBytes)}</small><code title={file.sha256}>{file.sha256.slice(0, 12)}…</code></div>)}
             </div>
+          </DialogContent>
+        </Dialog>
+        <Dialog open={healthOpen} onOpenChange={setHealthOpen}>
+          <DialogContent className="fox-kb-model-health">
+            <DialogHeader>
+              <DialogTitle>运行状态</DialogTitle>
+              <DialogDescription>{engineOk ? '本机引擎运行正常。' : '引擎处于兼容模式，智能搜索的结果可能不如预期。'}</DialogDescription>
+            </DialogHeader>
+            <dl className="fox-kb-model-health-facts">
+              <div><dt>引擎</dt><dd>{health?.backend ?? '未就绪'}</dd></div>
+              <div><dt>读写检查</dt><dd>{health?.readWriteVerified ? '已通过' : '未通过'}</dd></div>
+              <div><dt>模式</dt><dd>{health?.fallbackActive ? '兼容模式' : '正常'}</dd></div>
+            </dl>
+            {health?.message && <p className="fox-kb-model-health-message">{health.message}</p>}
           </DialogContent>
         </Dialog>
       </div>
@@ -2654,7 +3103,7 @@ export function LocalKnowledgeRetrievalPage({ gateway = defaultLocalKnowledgeGat
     catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
       setError(message)
-      toast.error('知识库检索失败', {
+      toast.error('资料库检索失败', {
         description: message,
         mergeKey: `knowledge-retrieval:${knowledgeBaseId}:${mode}`,
         sourceType: 'knowledge_retrieval',
@@ -2714,7 +3163,7 @@ export function LocalKnowledgeRetrievalPage({ gateway = defaultLocalKnowledgeGat
       const index = chunks.findIndex((chunk) => chunk.id === item.chunkId)
       const start = Math.max(0, index - 1)
       const surrounding = index < 0 ? [] : chunks.slice(start, index + 2)
-      const text = surrounding.length ? surrounding.map((chunk, position) => `${position === index - start ? '当前分块' : '相邻分块'}\n${chunk.content}`).join('\n\n') : item.content
+      const text = surrounding.length ? surrounding.map((chunk, position) => `${position === index - start ? '当前段落' : '相邻段落'}\n${chunk.content}`).join('\n\n') : item.content
       setContexts((current) => ({ ...current, [item.chunkId]: { loading: false, text } }))
     } catch (cause) {
       setContexts((current) => ({ ...current, [item.chunkId]: { loading: false, error: cause instanceof Error ? cause.message : String(cause) } }))
@@ -2760,18 +3209,18 @@ export function LocalKnowledgeRetrievalPage({ gateway = defaultLocalKnowledgeGat
   }
 
   const retrievalMenu = <DropdownMenu>
-    <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="检索测试操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
+    <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="高级检索操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
     <DropdownMenuContent align="end" sideOffset={5}>
       <DropdownMenuItem disabled={!query.trim() || !result} onSelect={() => void saveCase()}>保存当前问题</DropdownMenuItem>
-      <DropdownMenuItem disabled={cases.length === 0} onSelect={() => void exportCases()}>导出测试集</DropdownMenuItem>
+      <DropdownMenuItem disabled={cases.length === 0} onSelect={() => void exportCases()}>导出问题</DropdownMenuItem>
     </DropdownMenuContent>
   </DropdownMenu>
 
-  if (!knowledgeBaseId) return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content"><LocalKnowledgeEmpty title="没有选择知识库" description="请先进入一个本地知识库。" action={<Button onClick={onBack}>返回</Button>} /></div></div>
+  if (!knowledgeBaseId) return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content"><LocalKnowledgeEmpty title="没有选择资料库" description="请先进入一个本机资料库。" action={<Button onClick={onBack}>返回</Button>} /></div></div>
 
   return <div className={cn('fox-local-kb-page', embedded && 'fox-local-kb-embedded-page', className)}><div className={cn('fox-local-kb-content fox-local-retrieval-page', embedded && 'fox-local-kb-embedded-content')}>
     {!embedded && <LocalKnowledgeHeader
-      title="检索测试"
+      title="高级检索"
       description=""
       onBack={onBack}
     />}
@@ -2779,49 +3228,50 @@ export function LocalKnowledgeRetrievalPage({ gateway = defaultLocalKnowledgeGat
     {!loading && error && <LocalKnowledgeError message={error} />}
     {!loading && base && <>
       <div className="fox-local-retrieval-bar">
-        <label className="fox-local-retrieval-search"><Search aria-hidden="true" /><Input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search() }} placeholder="输入要验证的问题，回车检索" aria-label="检索测试问题" /></label>
+        <label className="fox-local-retrieval-search"><Search aria-hidden="true" /><Input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search() }} placeholder="输入问题，回车检索" aria-label="检索问题" /></label>
         <Tabs value={mode} onValueChange={(value) => setMode(value as KnowledgeSearchMode)} className="fox-local-retrieval-mode-tabs">
-          <TabsList aria-label="检索方式">
-            <TabsTrigger value="keyword">关键词</TabsTrigger>
-            <TabsTrigger value="vector" disabled={!base.vectorIndexReady} title={base.vectorIndexReady ? undefined : '向量索引未构建'}>向量</TabsTrigger>
-            <TabsTrigger value="hybrid" disabled={!base.vectorIndexReady} title={base.vectorIndexReady ? undefined : '向量索引未构建'}>混合</TabsTrigger>
+          <TabsList aria-label="搜索方式">
+            <TabsTrigger value="keyword">按字词</TabsTrigger>
+            <TabsTrigger value="vector" disabled={!base.vectorIndexReady} title={base.vectorIndexReady ? undefined : '还没有整理好'}>按意思</TabsTrigger>
+            <TabsTrigger value="hybrid" disabled={!base.vectorIndexReady} title={base.vectorIndexReady ? undefined : '还没有整理好'}>混合</TabsTrigger>
           </TabsList>
         </Tabs>
         {retrievalMenu}
       </div>
-      {mode !== 'keyword' && !base.vectorIndexReady && <p className="fox-local-retrieval-hint" role="status"><i className="fox-status-dot is-empty" aria-hidden="true" />向量检索未启用{base.documentCount > 0 && <> · <button type="button" className="fox-local-kb-readiness-action" onClick={() => void buildVectorIndex()}>构建索引</button></>}</p>}
+      {mode !== 'keyword' && !base.vectorIndexReady && <p className="fox-local-retrieval-hint" role="status"><i className="fox-status-dot is-empty" aria-hidden="true" />智能搜索还没有开启{base.documentCount > 0 && <> · <button type="button" className="fox-local-kb-readiness-action" onClick={() => void buildVectorIndex()}>现在整理</button></>}</p>}
       {result && <section className="fox-local-retrieval-results" aria-live="polite">
-        <div className="fox-local-kb-section-head"><div><h2>检索结果</h2><p>{result.mode === 'hybrid' ? `${result.fusionVersion} · ` : ''}关键词 {result.timings.keywordMs} ms · 向量 {result.timings.vectorMs} ms · 总计 {result.timings.totalMs} ms</p></div></div>
-        {result.items.length === 0 ? <LocalKnowledgeEmpty title="没有命中内容" description="尝试调整问题、检索方式或重建索引。" /> : <ol className="fox-local-retrieval-result-list">{result.items.map((item, index) => <li key={item.chunkId} className="fox-local-retrieval-result">
-          <div className="fox-local-retrieval-result-head"><b>{index + 1}</b><div><strong>{item.documentName}</strong><small>{item.relativePath}{item.anchor ? ` · ${item.anchor}` : ''}</small></div><span className="fox-local-retrieval-score" title={`关键词 ${item.keywordScore?.toFixed(3) ?? '—'} · 向量 ${item.vectorScore?.toFixed(3) ?? '—'}`}>{item.score.toFixed(3)}</span></div>
+        <div className="fox-local-kb-section-head"><div><h2>搜索结果</h2><p>{result.mode === 'hybrid' ? `${result.fusionVersion} · ` : ''}按字词 {result.timings.keywordMs} ms · 按意思 {result.timings.vectorMs} ms · 总计 {result.timings.totalMs} ms</p></div></div>
+        {result.items.length === 0 ? <LocalKnowledgeEmpty title="没有找到相关内容" description="换个说法再试，或者先重新整理一次资料。" /> : <ol className="fox-local-retrieval-result-list">{result.items.map((item, index) => <li key={item.chunkId} className="fox-local-retrieval-result">
+          <div className="fox-local-retrieval-result-head"><b>{index + 1}</b><div><strong>{item.documentName}</strong><small>{item.relativePath}{item.anchor ? ` · ${item.anchor}` : ''}</small></div><span className="fox-local-retrieval-score" title={`按字词 ${item.keywordScore?.toFixed(3) ?? '—'} · 按意思 ${item.vectorScore?.toFixed(3) ?? '—'}`}>{item.score.toFixed(3)}</span></div>
           <p>{item.content}</p>
-          {contexts[item.chunkId] && <div className={`fox-local-retrieval-context ${contexts[item.chunkId].error ? 'is-error' : ''}`}>{contexts[item.chunkId].loading ? <><LoaderCircle className="animate-spin" />正在读取相邻分块</> : <pre>{contexts[item.chunkId].error ?? contexts[item.chunkId].text}</pre>}</div>}
-          <footer className="fox-local-retrieval-result-actions"><Button variant="ghost" size="sm" onClick={() => void toggleContext(item)}>{contexts[item.chunkId] ? '收起上下文' : '展开上下文'}</Button><Button variant="ghost" size="sm" onClick={() => void copyCitation(item)}>复制引用</Button><Button variant="ghost" size="sm" onClick={() => onNavigate?.('documents', knowledgeBaseId, item.documentId)}>定位文档</Button><Button variant="ghost" size="sm" onClick={() => void openOriginal(item)}>打开原文件</Button></footer>
+          {contexts[item.chunkId] && <div className={`fox-local-retrieval-context ${contexts[item.chunkId].error ? 'is-error' : ''}`}>{contexts[item.chunkId].loading ? <><LoaderCircle className="animate-spin" />正在读取相邻段落</> : <pre>{contexts[item.chunkId].error ?? contexts[item.chunkId].text}</pre>}</div>}
+          <footer className="fox-local-retrieval-result-actions"><Button variant="ghost" size="sm" onClick={() => void toggleContext(item)}>{contexts[item.chunkId] ? '收起上下文' : '展开上下文'}</Button><Button variant="ghost" size="sm" onClick={() => void copyCitation(item)}>复制引用</Button><Button variant="ghost" size="sm" onClick={() => onNavigate?.('documents', knowledgeBaseId, item.documentId)}>找到原文</Button><Button variant="ghost" size="sm" onClick={() => void openOriginal(item)}>打开原文件</Button></footer>
         </li>)}</ol>}
       </section>}
       {comparison && <section className="fox-local-retrieval-comparison">
-        <div className="fox-local-kb-section-head"><div><h2>检索模式对比</h2><p>同一问题、相同 Top 10；未标注答案时显示与混合检索 Top 3 的重合度。</p></div></div>
+        <div className="fox-local-kb-section-head"><div><h2>三种搜索方式对比</h2><p>同一个问题、各取前 10 段；没有标注答案时，显示与混合方式前 3 名的重合度。</p></div></div>
         <div className="fox-local-retrieval-comparison-list">{comparison.map((item) => <div key={item.mode} className="fox-local-retrieval-comparison-row"><strong>{item.mode === 'keyword' ? '关键词' : item.mode === 'vector' ? '向量' : '混合'}</strong><span>{item.result.timings.totalMs} ms</span><span>{item.result.items.length} 个命中</span><span>{item.expectedCount ? `命中 ${item.hitCount}/${item.expectedCount}` : '未标注答案'}</span><span>{item.hybridTop3Overlap == null ? '混合基准' : `Top 3 重合 ${item.hybridTop3Overlap}/${item.hybridTop3Count}`}</span><small>{item.result.items[0]?.documentName ?? '无结果'}</small></div>)}</div>
       </section>}
       <section className="fox-local-retrieval-cases">
-        <div className="fox-local-kb-section-head"><div><h2>回归问题</h2><p>最多保留 20 条，可重复对比检索策略。</p></div></div>
+        <div className="fox-local-kb-section-head"><div><h2>测试问题</h2><p>最多保留 20 条，可重复对比检索策略。</p></div></div>
         {cases.length === 0 ? <p className="fox-local-retrieval-empty">还没有保存测试问题。</p> : <div className="fox-local-retrieval-case-list">{cases.map((item) => <div key={item.id} className="fox-local-retrieval-case"><button type="button" onClick={() => { setQuery(item.question); void search(item.question) }}>{item.question}</button><span className="fox-local-retrieval-case-actions"><Button variant="ghost" size="sm" disabled={!base.vectorIndexReady || comparisonRunning} onClick={() => void compareCase(item)}>{comparisonRunning ? <LoaderCircle className="animate-spin" /> : <FlaskConical />}三模式对比</Button><Button variant="ghost" size="sm" onClick={() => void gateway.deleteRetrievalCase(item.id).then(() => setCases((current) => current.filter((entry) => entry.id !== item.id)))}><Trash2 />删除</Button></span></div>)}</div>}
       </section>
     </>}
   </div></div>
 }
 
-export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, gateway = defaultLocalKnowledgeGateway, onNavigate, onBack, createRequest, onCreateRequestHandled, onOperationAccepted }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; createRequest?: number; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, gateway = defaultLocalKnowledgeGateway, onNavigate, onBack, createRequest, onCreateRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; createRequest?: number; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const navigate = onNavigate
   switch (view) {
     case 'home': return <LocalKnowledgeHomePage gateway={gateway} onNavigate={navigate} />
     case 'files': return <LocalKnowledgeFilesPage gateway={gateway} onNavigate={navigate} onOperationAccepted={onOperationAccepted} />
-    case 'detail': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} />
-    case 'documents': return <LocalKnowledgeDocumentsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} documentId={documentId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} />
+    case 'detail': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
+    case 'documents': return <LocalKnowledgeDocumentsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} documentId={documentId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
     case 'import': return <LocalKnowledgeDocumentsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} initialImportOpen onOperationAccepted={onOperationAccepted} />
     case 'jobs': return <LocalKnowledgeJobsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
     case 'models': return <LocalKnowledgeModelsPage gateway={gateway} onBack={onBack} />
     case 'retrieval': return <LocalKnowledgeRetrievalPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
+    case 'settings': return <LocalKnowledgeSettingsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
     default: return <LocalKnowledgeListPage gateway={gateway} onNavigate={navigate} createRequest={createRequest} onCreateRequestHandled={onCreateRequestHandled} />
   }
 }

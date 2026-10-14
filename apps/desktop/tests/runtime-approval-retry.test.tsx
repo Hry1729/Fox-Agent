@@ -34,7 +34,7 @@ test('a path-only permission uses the declared decision intersection and submits
     expect(host.querySelectorAll('[data-slot="permission-grant"]').length).toBe(1)
     expect(host.querySelector('[data-slot="approval-card"]')).toBeNull()
     const buttons=[...host.querySelectorAll<HTMLButtonElement>('button')]
-    expect(buttons.map(button=>button.textContent)).toEqual(['拒绝','本次对话内允许'])
+    expect(buttons.map(button=>button.textContent)).toEqual(['拒绝','本对话内允许'])
     await act(async()=>buttons[1].click())
     expect(calls).toEqual([['kernel-approval:read:v9','allow_conversation']])
     expect(buttons.every(button=>button.disabled)).toBe(true)
@@ -54,10 +54,10 @@ test('ordinary writes keep content and all declared choices in one ApprovalCard'
     expect(host.textContent?.split('D:/project/报告.md').length).toBe(2)
     expect(host.querySelectorAll('.aui-ink-button').length).toBe(1)
     expect(host.querySelector('.aui-ink-button')?.textContent).toBe('只允许这一次')
-    expect([...host.querySelectorAll('button')].map(button=>button.textContent)).toEqual(['拒绝','本次对话内允许','只允许这一次'])
+    expect([...host.querySelectorAll('button')].map(button=>button.textContent)).toEqual(['拒绝','本对话内允许','只允许这一次'])
     expect(host.querySelector('.aui-approval-operation')?.textContent).toBe('D:/project/报告.md')
     expect(host.querySelector('[data-slot="approval-card"] > div:first-child')?.textContent).not.toContain('D:/project/报告.md')
-    const button=[...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='本次对话内允许')!
+    const button=[...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='本对话内允许')!
     await act(async()=>button.click())
     expect(calls).toEqual([['kernel-approval:write:v8','allow_conversation']])
   } finally {await act(async()=>root.unmount())}

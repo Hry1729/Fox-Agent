@@ -8,6 +8,8 @@ import { type ExecutionReceiptPresentation, executionReceiptPresentation } from 
 import { type GoalProgressData } from '../hooks/use-goal-progress'
 import { useRunSteering } from '../hooks/use-run-steering'
 import { localKnowledgePickerState } from '../knowledge-picker-state'
+import { MAX_COMPOSER_ATTACHMENT_BYTES } from '../local-knowledge-document-draft'
+import { ComposerInitialAttachmentBridge, type ComposerInitialAttachments } from './composer-initial-attachments'
 import { conversationModelOverride, yuxiModelOverrideAllowed } from '../model-selection'
 import { ComposerMenu, Models } from '@/components/assistant-ui/elements/composer'
 import { useMentionFiles } from './use-mention-files'
@@ -127,7 +129,7 @@ export function readStoredSeenChanges() {
   }
 }
 
-function Composer({ resetKey, draft, setDraft, chatState, centered = false, newConversation, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
+function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, draft, setDraft, chatState, centered = false, newConversation, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const resolveRuntimeApproval = onResolveApproval
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
@@ -482,7 +484,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, newC
       className="fox-steering-submit"
       data-testid="fox-steering-submit"
       disabled={steering.busy || !draft.trim()}
-      title="补充到当前任务：在下一个安全分发边界交给模型，不停止当前任务，不新增工具授权"
+      title="加入当前任务：在下一个安全分发边界交给模型，不停止当前任务，不新增工具授权"
     >
       {steering.busy ? <LoaderCircle className="animate-spin" size={13} /> : <CornerDownLeft size={13} />}
       {steeringView.primaryLabel}
@@ -577,21 +579,21 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, newC
                 {matchingCommands.map(command => <CommandPrimitiveItem asChild key={command.id} value={command.id} onSelect={() => applySlashCommand(command)}><ComposerCommandItem command={{ name: command.id, description: command.title, icon: command.Icon }} active={commandHighlight === command.id} onMouseDown={event => event.preventDefault()} className="w-full rounded-[var(--fox-radius-control)]" /></CommandPrimitiveItem>)}
               </CommandGroup>
             </> : <>
-              <CommandEmpty>{runtimeContext.knowledgeLoading ? '正在读取知识库…' : runtimeContext.knowledgeError || '当前没有可使用的知识库'}</CommandEmpty>
-              <CommandGroup heading="远程知识库">
+              <CommandEmpty>{runtimeContext.knowledgeLoading ? '正在读取资料库…' : runtimeContext.knowledgeError || '当前没有可使用的资料库'}</CommandEmpty>
+              <CommandGroup heading="远程资料库">
                 {(runtimeContext.remoteKnowledgeBases ?? []).map((item) => {
                   const reference: KnowledgeReference = { source: 'remote', providerKey: 'yuxi-primary', connectionId: 'yuxi-primary', id: item.id }
                   const selected = selectedKnowledgeReferenceKeys.has(knowledgeReferenceKey(reference))
-                  return <CommandItem key={`remote:${item.id}`} value={`远程知识库 ${item.name} ${item.description}`} onSelect={() => { if (!runtimeContext.knowledgeLoading) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.fileCount} 个文件`}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
+                  return <CommandItem key={`remote:${item.id}`} value={`远程资料库 ${item.name} ${item.description}`} onSelect={() => { if (!runtimeContext.knowledgeLoading) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.fileCount} 个文件`}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
                 })}
               </CommandGroup>
               <div className="fox-slash-knowledge-separator" aria-hidden="true" />
-              <CommandGroup heading="本地知识库">
+              <CommandGroup heading="本机资料库">
                 {(runtimeContext.localKnowledgeBases ?? []).map((item) => {
                   const reference: KnowledgeReference = { source: 'local', providerKey: 'local', id: item.id }
                   const selected = selectedKnowledgeReferenceKeys.has(knowledgeReferenceKey(reference))
                   const availability = localKnowledgePickerState(item)
-                  return <CommandItem key={`local:${item.id}`} disabled={!selected && !availability.available} value={`本地知识库 ${item.name} ${item.description ?? ''}`} onSelect={() => { if (!runtimeContext.knowledgeLoading && (selected || availability.available)) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.documentCount} 个文档`} · {availability.status}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
+                  return <CommandItem key={`local:${item.id}`} disabled={!selected && !availability.available} value={`本机资料库 ${item.name} ${item.description ?? ''}`} onSelect={() => { if (!runtimeContext.knowledgeLoading && (selected || availability.available)) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.documentCount} 个文档`} · {availability.status}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
                 })}
               </CommandGroup>
             </>}
@@ -609,12 +611,12 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, newC
           accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv'}
           multiple
           maxFiles={8}
-          maxFileSize={5 * 1024 * 1024}
+          maxFileSize={MAX_COMPOSER_ATTACHMENT_BYTES}
           onError={({ code, message }) => {
             if (code === 'max_file_size') toast.error('单个附件不能超过 5 MB')
             else if (code === 'max_files') toast.error('一次最多添加 8 个附件')
             else if (code === 'attachment_read_failed') toast.error('附件读取失败，草稿与附件已保留：请删除该附件后重新选择再发送')
-            else if (code === 'attachment_send_failed') toast.error('附件发送失败，草稿与附件已保留，请重试', { description: message })
+            else if (code === 'attachment_send_failed') toast.error('发送失败，草稿和附件已保留，请重试', { description: message })
             else toast.error('支持 PDF、TXT、MD、DOCX、XLSX、PPTX、CSV、TSV；旧版 DOC、XLS、PPT 请先转换格式')
           }}
           onSubmitStart={({ text, files }) => {
@@ -716,6 +718,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, newC
           className={`fox-prompt-input ${focused ? 'is-focused' : ''}`}
         >
         <ComposerAttachmentCommandBridge openRef={attachmentDialogRef} />
+        <ComposerInitialAttachmentBridge request={initialAttachments} onConsumed={onInitialAttachmentsConsumed} />
         <ComposerAttachmentPreview projectRoot={runtimeControlled ? projectRoot : undefined} knowledgeChips={runtimeControlled ? knowledgeChips : []} onProject={onProject} onKnowledge={openKnowledge} />
         <PromptInputBody>
           <PromptInputTextarea value={draft} disabled={questionSubmitting} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…'} />
@@ -729,7 +732,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, newC
                 {supportsImageInput && <PromptInputActionAddAttachments label="添加图片" />}
                 <PromptInputActionMenuItem disabled={!runtimeControlled} onSelect={() => onProject?.()}><FolderOpen />{projectRoot ? '更换项目' : '选择项目'}</PromptInputActionMenuItem>
                 <PromptInputActionMenuItem disabled={!runtimeControlled || expertReadOnly} onSelect={onChangeExpert}><Sparkles />添加专家</PromptInputActionMenuItem>
-                <PromptInputActionMenuItem onSelect={openKnowledge}><Library />{knowledgeChips.length ? `知识库（已选 ${knowledgeChips.length}）` : '选择知识库'}</PromptInputActionMenuItem>
+                <PromptInputActionMenuItem onSelect={openKnowledge}><Library />{knowledgeChips.length ? `资料库（已选 ${knowledgeChips.length}）` : '选择资料库'}</PromptInputActionMenuItem>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             <PromptInputActionMenu>
@@ -746,7 +749,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, newC
           <div className="fox-composer-submit">
             <Models value={activeAgent?.id} disabled={!activeAgent} onValueChange={value => value !== activeAgent?.id && onAgentChange?.(value)} options={[
               ...(activeAgent && !selectableAgents.some(item => item.id === activeAgent.id) ? [{ id: activeAgent.id, name: activeAgent.name, meta: '当前助手', disabled: true }] : []),
-              ...selectableAgents.map(item => ({ id: item.id, name: item.name, meta: item.defaultModel === 'configured-model' ? modelService?.modelId || '按助手配置' : item.defaultModel, disabled: !item.available })),
+              ...selectableAgents.map(item => ({ id: item.id, name: item.name, meta: item.defaultModel === 'configured-model' ? modelService?.modelId || '按助手设置' : item.defaultModel, disabled: !item.available })),
             ]} />
             {steeringMode ? steeringControls : sendControls}
           </div>

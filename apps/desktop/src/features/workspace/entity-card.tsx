@@ -20,20 +20,20 @@ export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAc
   const summon = () => {
     if (disabled) return
     if (!agent.available) {
-      toast.error('该专家暂不可用', { description: agent.runtimeType === 'yuxi' ? '请确认知识库服务已连接后再试' : '请稍后重试' })
+      toast.error('该专家暂不可用', { description: agent.runtimeType === 'yuxi' ? '请确认资料库服务已连接后再试' : '请稍后重试' })
       return
     }
     onUse()
   }
   return (
-    <Card className={`fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card ${agent.available ? '' : 'is-unavailable'}`} onClick={summon} onKeyDown={(event) => activateCard(event, summon)} role="button" tabIndex={0} aria-label={`召唤${agent.name}`} aria-disabled={disabled || !agent.available}>
+    <Card className={`fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card ${agent.available ? '' : 'is-unavailable'}`} onClick={summon} onKeyDown={(event) => activateCard(event, summon)} role="button" tabIndex={0} aria-label={`与${agent.name}开始对话`} aria-disabled={disabled || !agent.available}>
       <CardHeader className="fox-shadcn-kb-head">
         <span className="fox-shadcn-kb-icon fox-shadcn-agent-icon"><img src={agent.image} alt="" /></span>
         <span className="fox-shadcn-kb-heading">
           <span className="fox-agent-name-row"><strong>{agent.name}</strong></span>
         </span>
       </CardHeader>
-      {showAction && <Button className="fox-agent-summon" size="sm" disabled={disabled || !agent.available} onClick={(event) => { event.stopPropagation(); summon() }}>召唤</Button>}
+      {showAction && <Button className="fox-agent-summon" size="sm" disabled={disabled || !agent.available} onClick={(event) => { event.stopPropagation(); summon() }}>开始对话</Button>}
       {onViewDetail && <Tooltip>
         <TooltipTrigger asChild>
           <Button className="fox-agent-manage" variant="ghost" size="icon" aria-label={`查看${agent.name}详情`} onClick={(event) => { event.stopPropagation(); onViewDetail() }}><Info /></Button>
@@ -44,7 +44,7 @@ export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAc
         <p className="fox-agent-description" title={agent.description}>{agent.description}</p>
         <span className="fox-library-card-tags">
           {agent.tools > 0 && <small>工具 {agent.tools}</small>}
-          {agent.knowledge > 0 && <small>知识库 {agent.knowledge}</small>}
+          {agent.knowledge > 0 && <small>资料库 {agent.knowledge}</small>}
           {agent.mcps > 0 && <small>连接器 {agent.mcps}</small>}
           {agent.skills > 0 && <small>技能 {agent.skills}</small>}
           {agent.tools + agent.knowledge + agent.mcps + agent.skills === 0 && <small>通用专家</small>}
@@ -57,7 +57,7 @@ export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAc
 export function KnowledgeCard({ knowledge, onOpen }: { knowledge: KnowledgeCardData; onOpen: () => void }) {
   const ready = knowledge.progress >= 100
   return (
-    <Card className="fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card fox-shadcn-knowledge-card" onClick={onOpen} onKeyDown={(event) => activateCard(event, onOpen)} role="button" tabIndex={0} aria-label={`打开知识库${knowledge.name}`}>
+    <Card className="fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card fox-shadcn-knowledge-card" onClick={onOpen} onKeyDown={(event) => activateCard(event, onOpen)} role="button" tabIndex={0} aria-label={`打开资料库${knowledge.name}`}>
       <CardHeader className="fox-shadcn-kb-head">
         <span className={`fox-shadcn-kb-icon fox-shadcn-agent-icon is-${knowledge.tone}`}><Database /></span>
         <span className="fox-shadcn-kb-heading">
@@ -66,7 +66,7 @@ export function KnowledgeCard({ knowledge, onOpen }: { knowledge: KnowledgeCardD
       </CardHeader>
       <CardContent className="fox-shadcn-kb-content">
         <p className="fox-agent-description" title={knowledge.description}>{knowledge.description}</p>
-        <span className="fox-library-card-tags"><small>知识库</small><small>{knowledge.fileCount} 文件</small><small>{ready ? '已就绪' : `${knowledge.progress}%`}</small>{knowledge.agents > 0 && <small>{knowledge.agents} 专家</small>}</span>
+        <span className="fox-library-card-tags"><small>资料库</small><small>{knowledge.fileCount} 文件</small><small>{ready ? '可使用' : `${knowledge.progress}%`}</small>{knowledge.agents > 0 && <small>{knowledge.agents} 专家</small>}</span>
       </CardContent>
     </Card>
   )

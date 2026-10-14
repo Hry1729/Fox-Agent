@@ -69,11 +69,11 @@ export function childRunIsActive(run: Pick<ChildRunRecord, 'status'>) {
 
 export function childRunStatusLabel(status: ChildRunRecord['status']) {
   switch (status) {
-    case 'queued': return '已接收'
+    case 'queued': return '已收到'
     case 'running': return '运行中'
     case 'cancelling': return '取消中'
     case 'completed': return '已完成'
-    case 'failed': return '异常结束'
+    case 'failed': return '处理失败'
     case 'cancelled': return '已取消'
     case 'interrupted': return '已中断'
   }
@@ -89,13 +89,13 @@ export interface ChildRunStatusPresentation {
 
 export function childRunStatusPresentation(status: ChildRunRecord['status']): ChildRunStatusPresentation {
   switch (status) {
-    case 'queued': return { label: '已接收', detail: '任务已接收，正在等待可用的子 Agent', tone: 'info' }
-    case 'running': return { label: '运行中', detail: '子 Agent 正在执行任务，状态会自动更新', tone: 'info' }
-    case 'cancelling': return { label: '取消中', detail: '已发送取消信号，正在等待子 Agent 停止', tone: 'neutral' }
-    case 'completed': return { label: '已完成', detail: '子 Agent 已返回运行结果', tone: 'success' }
-    case 'failed': return { label: '异常结束', detail: '运行失败，子 Agent 已停止', tone: 'danger' }
-    case 'cancelled': return { label: '已取消', detail: '任务已取消，子 Agent 已停止', tone: 'neutral' }
-    case 'interrupted': return { label: '已中断', detail: '运行被中断，子 Agent 已停止', tone: 'danger' }
+    case 'queued': return { label: '已收到', detail: '任务已接收，正在等待可用的协作助手', tone: 'info' }
+    case 'running': return { label: '运行中', detail: '协作助手正在执行任务，状态会自动更新', tone: 'info' }
+    case 'cancelling': return { label: '取消中', detail: '已发送取消信号，正在等待协作助手停止', tone: 'neutral' }
+    case 'completed': return { label: '已完成', detail: '协作助手已返回运行结果', tone: 'success' }
+    case 'failed': return { label: '处理失败', detail: '运行失败，协作助手已停止', tone: 'danger' }
+    case 'cancelled': return { label: '已取消', detail: '任务已取消，协作助手已停止', tone: 'neutral' }
+    case 'interrupted': return { label: '已中断', detail: '运行被中断，协作助手已停止', tone: 'danger' }
   }
 }
 

@@ -10,7 +10,7 @@ import { TurnProcessHeader } from '../turn-process-header'
 import { StreamingText } from '../components/StreamingText'
 import { RunActivity } from '@/components/assistant-ui/elements/run-activity'
 import { StoppedRun } from '@/components/assistant-ui/elements/error-state'
-import { MessageActions as AssistantMessageActions } from '@/components/assistant-ui/elements/message-actions'
+import { MessageActions as AssistantMessageActions, copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
 import { FeedbackDialog as FeedbackDialogSurface } from '@/components/assistant-ui/elements/feedback-dialog'
 import { ErrorPrompt } from '../demo/fox-demo-prompts'
 import { Message, MessageContent } from '@/components/ai-elements/message'
@@ -18,7 +18,7 @@ import { desktopClient, desktopErrorDetails } from '@/features/conversations/api
 import { type ArtifactRecord, type ConversationMessage, type KnowledgeBindingRecord, type RunEventRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
 import { memo, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { TimelineRuntimeContext, copyTextWithFeedback, requestConversationFork } from '../fox-shared'
+import { TimelineRuntimeContext, requestConversationFork } from '../fox-shared'
 import { type RuntimeSource, runtimeProcess } from './fox-runtime-process-model'
 import { RuntimeProcess, useLiveNow } from './fox-runtime-process-view'
 import { RuntimeSources } from './fox-runtime-sources'
@@ -100,7 +100,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   const turnProcessStatus = failureReason || message.status === 'failed' ? '过程未完成'
     : cancelled || message.status === 'cancelled' ? '过程已取消'
       : message.status === 'interrupted' ? '过程已中断'
-        : modelWaiting ? modelWaitingTitle(modelWaiting) : runInProgress || running ? '正在处理' : '工作过程'
+        : modelWaiting ? modelWaitingTitle(modelWaiting) : runInProgress || running ? '正在处理' : '处理过程'
   const replyTime = new Date(message.updatedAt || message.createdAt).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -173,10 +173,10 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
         </MessageContent>
         {!hideFooter && !running && !runInProgress && <div className="fox-message-footer">
           <AssistantMessageActions reaction={feedback} running={running || runInProgress} busy={feedbackSaving}
-            onCopy={() => parsed.answer ? void copyTextWithFeedback(parsed.answer, '已复制回复') : toast('暂无可复制内容')}
+            onCopy={() => { if (parsed.answer) return copyMessageResponse(parsed.answer); toast('暂无可复制内容'); return false }}
             onFork={() => onFork ? onFork(message.id) : requestConversationFork(message.id)}
             onPositive={() => void submitPositiveFeedback()} onNegative={() => setFeedbackOpen(true)} onRegenerate={onRetry} />
-          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && !failureReason && !cancelled && <span>已中断 · 内容已保存</span>}{cancelled && <span className="fox-message-cancelled-meta">运行已取消</span>}{failureReason && <span className="fox-message-failure-meta">{failureReason.kind === 'interrupted' ? '运行中断' : '运行失败'}</span>}</div>
+          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && !failureReason && !cancelled && <span>已中断</span>}{cancelled && <span className="fox-message-cancelled-meta">已取消</span>}{failureReason && <span className="fox-message-failure-meta">{failureReason.kind === 'interrupted' ? '运行中断' : '运行失败'}</span>}</div>
         </div>}
       </Message>
       <FeedbackDialogSurface open={feedbackOpen} onOpenChange={setFeedbackOpen} category={feedbackCategory} onCategoryChange={setFeedbackCategory} note={feedbackComment} onNoteChange={setFeedbackComment} saving={feedbackSaving} onSubmit={() => void submitNegativeFeedback()} />

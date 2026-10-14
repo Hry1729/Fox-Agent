@@ -3,6 +3,7 @@ import { Ban, Eye, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Progress } from '@/components/ui/progress'
 import {
   canViewResult,
   isCancellable,
@@ -59,12 +60,11 @@ export function JobProgressCard({ snapshot, className, onCancel, onViewResult }:
       </div>
 
       <div className="space-y-1">
-        <div className="h-2 w-full rounded bg-muted" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={ratio === null ? undefined : Math.round(ratio * 100)}>
-          <div
-            className={cn('h-2 rounded bg-primary transition-[width]', ratio === null && 'animate-pulse w-1/3')}
-            style={ratio === null ? undefined : { width: `${Math.round(ratio * 100)}%` }}
-          />
-        </div>
+        <Progress
+          className={cn('h-2 rounded', ratio === null && '[&_[data-slot=progress-indicator]]:animate-pulse [&_[data-slot=progress-indicator]]:w-1/3!')}
+          value={ratio === null ? null : Math.round(ratio * 100)}
+          aria-label={`${kindLabel(snapshot.kind)}进度`}
+        />
         <div className="text-xs text-muted-foreground">{progressText(snapshot)}</div>
       </div>
 

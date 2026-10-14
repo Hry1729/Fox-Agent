@@ -24,7 +24,7 @@ export function asAgentCard(agent: AgentRecord): AgentCardData {
     knowledge: knowledgeCount,
     mcps: agent.runtimeType === 'pi' && Array.isArray(manifest.mcpServers) ? manifest.mcpServers.length : agent.resources.mcps.length,
     skills: agent.runtimeType === 'pi' && Array.isArray(manifest.skills) ? manifest.skills.length : agent.resources.skills.length,
-    recent: agent.runtimeType === 'pi' ? '本机' : '知识库',
+    recent: agent.runtimeType === 'pi' ? '本机' : '资料库',
     active: agent.isDefault,
   }
 }

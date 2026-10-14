@@ -1,0 +1,194 @@
+/* Arc tokens are scoped to these instances, including the body portal. Fox's
+   semantic theme tokens remain the source of colour in every colour theme. */
+:where(.fox-arc-mode-tabs, .fox-sidebar-user-trigger, .fox-sidebar-user-panel) {
+  --surface: var(--background);
+  --surface-muted: var(--muted);
+  --surface-raised: var(--popover);
+  --text-secondary: var(--foreground);
+  --text-muted: var(--muted-foreground);
+  --accent-strong: var(--foreground);
+  --danger: var(--destructive);
+  --border-strong: var(--input);
+  --radius-control: var(--fox-radius-control);
+  --radius-panel: var(--fox-radius-overlay);
+  --radius-pill: 999px;
+  --shadow-resting: var(--fox-shadow-sm);
+  --shadow-floating: var(--fox-shadow-lg);
+  --font-body: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --tracking-body: 0;
+  --text-xs: var(--fox-type-caption);
+  --text-sm: var(--fox-type-chrome);
+  --text-base: var(--fox-type-control);
+  --leading-body: 1.5;
+  --control-height-sm: 26px;
+  --space-1: 3px;
+  --space-2: 8px;
+  --space-3: 10px;
+  --space-4: 16px;
+  --duration-fast: 160ms;
+  --duration-standard: 240ms;
+  --duration-spring: 420ms;
+  --ease-standard: cubic-bezier(.22, 1, .36, 1);
+  --ease-spring: cubic-bezier(.16, 1, .3, 1);
+}
+
+.fox-sidebar[data-slot='motion-highlight-container'] {
+  isolation: isolate;
+}
+.fox-sidebar-moving-highlight {
+  pointer-events: none;
+  border-radius: var(--fox-radius-card);
+  background: color-mix(in oklch, var(--sidebar-accent) 82%, var(--background));
+  box-shadow: var(--fox-shadow-sm), inset 0 0 0 1px color-mix(in oklch, var(--sidebar-border) 65%, transparent);
+}
+/* AnimateIcon provides context without changing the flex geometry of rows. */
+.fox-sidebar-icon-trigger {
+  display: contents;
+}
+.fox-sidebar [data-highlight='true'] {
+  position: relative;
+  z-index: 1;
+}
+.fox-shell .fox-sidebar .fox-sidebar-command[data-highlight='true']:hover,
+.fox-sidebar .fox-sidebar-tree-row[data-highlight='true']:hover,
+.fox-shell .fox-sidebar .fox-project-row[data-highlight='true']:hover,
+.fox-sidebar .fox-local-knowledge-sidebar-row[data-highlight='true']:hover,
+.fox-sidebar .fox-local-knowledge-tree-document[data-highlight='true']:hover,
+.fox-sidebar .fox-local-knowledge-tree-folder-row[data-highlight='true']:hover {
+  background: transparent;
+}
+.fox-sidebar .fox-local-knowledge-sidebar-row:focus-visible,
+.fox-sidebar .fox-local-knowledge-tree-document:focus-visible,
+.fox-sidebar .fox-local-knowledge-tree-folder-row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.fox-sidebar .fox-sidebar-command:focus-visible,
+.fox-sidebar .fox-sidebar-tree-main:focus-visible,
+.fox-sidebar .fox-project-row-main:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.fox-arc-mode-tabs [role='tab'] svg {
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
+  flex: none;
+  stroke-width: 1.8;
+}
+/* `[role=tab]` is in Chromium's default focus-ring group, and arc's
+   `.trigger:focus-visible` draws `2px solid var(--ring)` at `offset: -2px` —
+   which lands just inside the selected pill, so the switch shows two concentric
+   rounded rectangles: the pill's own edge plus an outline that is 1px short of
+   it. That offset is the whole defect; recolouring it does not help (with
+   `--brand` it becomes a near-black box, since light-theme `--brand` is
+   `oklch(0.205 0 0)`).
+   This control is a two-option segmented switch whose state is already carried
+   by the pill, and arc has the same call in `expanding-search` (`.trigger:
+   focus-visible { outline: none }`). So drop the outline and signal focus the
+   way this trigger already signals hover: the label goes to full contrast. */
+.fox-arc-mode-tabs [role='tab']:focus-visible {
+  outline: none;
+  color: var(--foreground);
+}
+.fox-sidebar-collapsed-utilities {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  margin: 3px 0 1px;
+}
+.fox-sidebar-user-trigger {
+  min-width: 0;
+  max-width: 100%;
+  border-radius: var(--fox-radius-card);
+}
+.fox-sidebar-user-trigger:focus-visible,
+.fox-sidebar-user-panel button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.fox-sidebar-user-panel {
+  z-index: 65;
+}
+.fox-sidebar-user-panel svg {
+  width: 16px;
+  height: 16px;
+}
+.fox-sidebar.is-collapsed .fox-sidebar-footer {
+  align-items: center;
+  padding-bottom: 10px;
+}
+.fox-sidebar.is-collapsed .fox-sidebar-user-trigger {
+  width: 34px;
+  height: 34px;
+  justify-content: center;
+  padding: 3px;
+}
+.fox-sidebar-user-menu {
+  min-width: 0;
+  max-width: 100%;
+}
+.fox-sidebar:not(.is-collapsed) .fox-sidebar-user-menu {
+  flex: 1 1 0;
+}
+.fox-sidebar-user-menu > :is(div, span) {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+}
+.fox-sidebar:not(.is-collapsed) .fox-sidebar-user-trigger {
+  width: 100%;
+}
+.fox-sidebar-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.fox-sidebar-footer-actions > * {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.fox-sidebar-footer-actions .fox-icon-button {
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: grid;
+  place-items: center;
+}
+.fox-sidebar-footer-actions .fox-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+.fox-sidebar-search-idle {
+  padding: 4px 0 10px;
+}
+.fox-sidebar-search-dialog .fox-global-search-results > [data-slot='fox-empty-state'],
+.fox-sidebar-search-idle > [data-slot='fox-empty-state'] {
+  min-height: 150px;
+}
+.fox-sidebar-search-state-action {
+  min-height: 28px;
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-control);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+}
+.fox-sidebar-search-state-action:hover {
+  background: var(--accent);
+}
+.fox-sidebar-search-state-action:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fox-sidebar-moving-highlight,
+  .fox-sidebar-collapsed-utilities button {
+    transition: none;
+  }
+}

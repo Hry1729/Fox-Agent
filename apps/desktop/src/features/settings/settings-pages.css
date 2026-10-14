@@ -152,8 +152,9 @@
   gap: 8px;
 }
 
-.fox-text-scale-control > input[type='range'] {
+.fox-text-scale-control > .fox-settings-text-slider {
   width: 160px;
+  flex: 0 0 160px;
   margin: 0;
 }
 
@@ -644,3 +645,48 @@
 .fox-settings-layout .fox-provider-row-status { flex: none; display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: var(--fox-type-caption); font-variant-numeric: tabular-nums; }
 .fox-settings-layout .fox-provider-row-add { flex: none; width: 16px; height: 16px; color: var(--muted-foreground); }
 .fox-settings-layout .fox-provider-row:hover .fox-provider-row-name strong { color: var(--foreground); }
+
+/* Arc controls keep the established Fox settings column, type scale and tokens. */
+.fox-settings-layout .fox-settings-shortcut-recorder {
+  width: 276px;
+  max-width: 100%;
+  flex: 0 0 276px;
+}
+.fox-settings-layout .fox-shortcut-settings .fox-setting-row {
+  align-items: start;
+}
+.fox-settings-layout .fox-shortcut-settings .fox-setting-row > span {
+  padding-top: 4px;
+}
+.fox-shortcut-help {
+  margin: 12px 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.6;
+}
+.fox-onboarding-stepper {
+  margin: 4px 0 2px;
+}
+
+@media (max-width: 640px) {
+  .fox-settings-layout .fox-shortcut-settings .fox-setting-row {
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
+  }
+  .fox-settings-layout .fox-settings-shortcut-recorder {
+    width: 100%;
+    flex-basis: auto;
+  }
+  .fox-settings-layout .fox-shortcut-settings .fox-settings-section-head {
+    flex-wrap: wrap;
+  }
+  .fox-text-scale-control {
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+  .fox-text-scale-control > .fox-settings-text-slider {
+    width: 120px;
+    flex-basis: 120px;
+  }
+}

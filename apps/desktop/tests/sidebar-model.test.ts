@@ -63,12 +63,12 @@ describe('right sidebar model', () => {
   })
 
   test('presents only persisted Child Run states in the realtime status bar', () => {
-    expect(childRunStatusLabel('queued')).toBe('已接收')
+    expect(childRunStatusLabel('queued')).toBe('已收到')
     expect(childRunStatusLabel('running')).toBe('运行中')
-    expect(childRunStatusLabel('failed')).toBe('异常结束')
+    expect(childRunStatusLabel('failed')).toBe('处理失败')
     expect(childRunStatusPresentation('running')).toEqual({
       label: '运行中',
-      detail: '子 Agent 正在执行任务，状态会自动更新',
+      detail: '协作助手正在执行任务，状态会自动更新',
       tone: 'info',
     })
     expect(childRunStatusPresentation('failed').tone).toBe('danger')

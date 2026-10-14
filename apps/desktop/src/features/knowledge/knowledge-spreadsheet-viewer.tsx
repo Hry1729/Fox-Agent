@@ -3,6 +3,7 @@ import { LoaderCircle } from 'lucide-react'
 import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/model/types'
 import { assertSafeZipArchive, hasZipSignature } from './knowledge-archive-safety'
 import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
+import './knowledge-reader-viewers.css'
 
 const MAX_SPREADSHEET_BYTES = 64 * 1024 * 1024
 const WORKBOOK_ZIP_LIMITS = {
@@ -88,7 +89,7 @@ export default function KnowledgeSpreadsheetViewer({
   }, [documentId, filename, knowledgeBaseId, metadata, onFailure, openPreviewSource])
 
   return (
-    <div className="fox-spreadsheet-preview-shell">
+    <div className="fox-spreadsheet-preview-shell" data-knowledge-viewer="spreadsheet">
       <div
         ref={containerRef}
         className="fox-spreadsheet-preview"

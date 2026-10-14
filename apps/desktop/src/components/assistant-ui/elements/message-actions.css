@@ -1,0 +1,27 @@
+/* @assistant-ui/elements-message-actions: size-7 / size-3.5 / gap-1.
+   Keep copy/check in ONE grid cell; Fox's general button rule uses flex. */
+.fox-message-footer [data-slot='message-actions'] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--fox-space-xs, 4px);
+  margin: 0;
+}
+.fox-message-footer [data-slot='message-actions'] > button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--fox-radius-control);
+}
+.fox-message-footer [data-slot='message-actions'] > button > svg {
+  grid-area: 1 / 1;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.fox-message-footer [data-slot='message-actions'] > button.text-emerald-500 {
+  color: var(--success);
+}

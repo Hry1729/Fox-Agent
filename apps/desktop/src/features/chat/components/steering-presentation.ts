@@ -73,23 +73,23 @@ export interface SteeringStripView {
 
 export const STEERING_STATUS_COPY: Record<string, { label: string; title: string }> = {
   received: {
-    label: '已接收',
+    label: '已收到',
     title: '已持久保存，将在当前任务下一个安全分发边界交给模型（尚未交给模型）',
   },
   queued: {
-    label: '等待生效',
+    label: '下一轮处理',
     title: '已持久保存并留在队列中等待下一轮；当前任务不会处理它',
   },
   delivered: {
-    label: '已交给模型',
+    label: '已发出',
     title: '已进入某个模型请求的输入，等待该轮响应提交结果',
   },
   applied: {
-    label: '已应用',
+    label: '已回复',
     title: '模型响应已提交，该要求属于已响应请求的一部分',
   },
   cancelled: {
-    label: '未应用',
+    label: '未发出',
     title: '任务在该要求被交给模型前结束，它没有进入任何模型请求',
   },
 }
@@ -138,7 +138,7 @@ export function steeringStripView(input: SteeringStripInput): SteeringStripView 
     visible: input.rows.length > 0,
     editable,
     historyOnly,
-    label: historyOnly ? '补充要求记录（已结束）' : '运行中补充要求',
+    label: historyOnly ? '补充要求记录（已结束）' : '补充要求',
     hint: historyOnly
       ? `该任务已结束（${input.runState ?? '终态'}），以下记录保留用于核对；${
           queued.length > 0
@@ -146,7 +146,7 @@ export function steeringStripView(input: SteeringStripInput): SteeringStripView 
             : '补充要求只能提交给正在运行的任务。'
         }`
       : hasLiveQueue
-        ? '当前任务只会处理「补充到当前任务」的内容；排队的补充要求保留到下一轮，不改变当前任务，也不新增工具授权。'
+        ? '当前任务只会处理「加入当前任务」的内容；排队的补充要求保留到下一轮，不改变当前任务，也不新增工具授权。'
         : '要求会持久保存，只在下一个安全分发边界交给模型；不会改变已冻结的任务，也不会新增工具授权。',
     outstanding: queuedBytes(currentRows.filter((row) => row.status === 'received' || row.status === 'delivered')),
     pending: currentRows.filter((row) => row.status === 'received' || row.status === 'delivered').length,
@@ -192,8 +192,8 @@ export function steeringComposerView(input: SteeringComposerInput): SteeringComp
   return {
     canSubmitToCurrentTask: accepts,
     canQueueForNextTurn: accepts,
-    primaryLabel: '补充到当前任务',
-    secondaryLabel: '排队，下一轮处理',
+    primaryLabel: '加入当前任务',
+    secondaryLabel: '下一轮再处理',
     queued,
     retainedForNextTask,
     retainedNotice: retainedForNextTask

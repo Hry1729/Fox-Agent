@@ -96,7 +96,7 @@ function FilesHarness({ initialTabs = [], onCloseFile }) {
 test('the ＋ menu still offers 文件 and selecting it opens the files page', async () => {
   const modes = []
   const view = render(React.createElement(RightPanel, panelProps({ onMode: (mode) => modes.push(mode) })))
-  const trigger = view.getByRole('button', { name: '打开侧边栏页面' })
+  const trigger = view.getByRole('button', { name: '打开页面' })
   assert.ok(trigger)
   fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false })
   const item = await waitFor(() => screen.getByRole('menuitem', { name: '文件' }), { timeout: 3000 })
@@ -128,7 +128,7 @@ test('opening a file adds its own tab, and closing the last one leaves no stale 
   await waitFor(() => assert.equal(view.container.querySelector('.fox-context-tab.is-file-tab'), null))
   // Nothing is left pinning the files page, so the panel falls back instead of
   // showing an empty file view, and the ＋ menu is still there to reopen it.
-  assert.ok(view.getByRole('button', { name: '打开侧边栏页面' }))
+  assert.ok(view.getByRole('button', { name: '打开页面' }))
   assert.equal(view.container.querySelector('.fox-file-panel'), null)
   assert.ok(view.container.querySelector('.fox-context-home'))
 })

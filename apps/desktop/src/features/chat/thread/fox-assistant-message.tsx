@@ -1,7 +1,7 @@
 import { ActionBarPrimitive, MessagePrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import type { DataMessagePartComponent } from '@assistant-ui/react'
 import { FoxAssistantAvatar } from '../components/FoxAssistantAvatar'
-import { TimelineRuntimeContext, copyTextWithFeedback, requestConversationFork } from '../fox-shared'
+import { TimelineRuntimeContext, requestConversationFork } from '../fox-shared'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 import { notify as toast } from '@/features/notifications'
 import { useContext, useState } from 'react'
@@ -11,7 +11,8 @@ import { FoxProcessPart } from './parts/fox-process'
 import { FoxTextPart } from './parts/fox-text'
 import { FoxRunActivityBody } from './fox-run-activity-body'
 import type { FoxThreadMessage } from './convert-detail'
-import { MessageActions as AssistantMessageActions } from '@/components/assistant-ui/elements/message-actions'
+import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
+import { FoxMessageActions } from './fox-message-actions'
 import { FeedbackDialog as FeedbackDialogSurface } from '@/components/assistant-ui/elements/feedback-dialog'
 import { StoppedRun } from '@/components/assistant-ui/elements/error-state'
 import { ErrorPrompt } from '../demo/fox-demo-prompts'
@@ -93,15 +94,15 @@ export function FoxAssistantMessage() {
         {foxMessage?.source && foxMessage.failure && <ErrorPrompt error={foxMessage.failure.message} onRetry={isLast ? () => aui.message.reload() : undefined} />}
         {!foxMessage?.source && cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
         {!messageRunning && <div className="fox-message-footer">
-          <ActionBarPrimitive.Root autohide="never" className="fox-message-actions">
-            <AssistantMessageActions reaction={reaction} busy={feedbackSaving}
-              onCopy={() => void copyTextWithFeedback(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'), '已复制回复')}
+          <ActionBarPrimitive.Root autohide="never" className="fox-thread-actionbar">
+            <FoxMessageActions reaction={reaction} busy={feedbackSaving}
+              onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))}
               onFork={() => requestConversationFork(aui.message.getState().id)} onPositive={() => void submitPositive()} onNegative={() => setFeedbackOpen(true)} onRegenerate={isLast ? () => aui.message.reload() : undefined} />
           </ActionBarPrimitive.Root>
           <div className="fox-message-meta">
             <span>{assistantName || 'Fox 默认助手'}</span>
             <span>{replyTime}</span>
-            {cancelled && <span className="fox-message-cancelled-meta">运行已取消</span>}
+            {cancelled && <span className="fox-message-cancelled-meta">已取消</span>}
             {failed && <span className="fox-message-failure-meta">运行失败</span>}
           </div>
         </div>}

@@ -77,7 +77,7 @@ export function FeedbackDialog({
             <span className="bg-foreground/[0.05] text-muted-foreground flex size-7 shrink-0 items-center justify-center rounded-lg">
               <ThumbsDownIcon className="size-3.5" />
             </span>
-            <span className="text-[13.5px] font-medium">这条回答哪里需要改进？</span>
+            <span className="text-[13.5px] font-medium">回答反馈</span>
             <span className={cn(mono, "text-muted-foreground ms-auto")}>
               可选
             </span>

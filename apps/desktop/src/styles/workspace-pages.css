@@ -3221,6 +3221,15 @@
 .fox-onboarding-screen.is-finishing .fox-onboarding-main{transform:translateX(-72px);opacity:0;pointer-events:none}
 .fox-onboarding-screen.is-finishing .fox-onboarding-enter{opacity:1;visibility:visible;pointer-events:auto;transform:translate(-50%,0)}
 
+/* The compact wizard keeps its step card, including completion and back actions.
+   Its visual panel is hidden, so the desktop closing animation must not hide main. */
+@media(max-width:980px){
+  .fox-onboarding-screen .fox-onboarding-shell,
+  .fox-onboarding-screen.is-finishing .fox-onboarding-shell{grid-template-columns:minmax(0,1fr)}
+  .fox-onboarding-screen .fox-onboarding-main>*{min-width:0}
+  .fox-onboarding-screen.is-finishing .fox-onboarding-main{transform:none;opacity:1;pointer-events:auto}
+}
+
 @keyframes foxGrainientFallback{0%{background-position:0% 12%}50%{background-position:72% 88%}100%{background-position:100% 20%}}
 @media(prefers-reduced-motion:reduce){.fox-onboarding-shell,.fox-onboarding-main,.fox-onboarding-visual-media,.fox-onboarding-enter{transition-duration:1ms!important;transition-delay:0s!important}}
 
@@ -5884,8 +5893,7 @@
   gap: var(--fox-space-xl);
 }
 
-.fox-knowledge-list-page .fox-knowledge-grid,
-.fox-local-kb-grid.fox-knowledge-grid {
+.fox-knowledge-list-page .fox-knowledge-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--fox-space-xl);
 }
@@ -6047,16 +6055,14 @@
 
 @media (max-width: 960px) {
   .fox-agent-list-page .fox-shadcn-entity-grid,
-  .fox-knowledge-list-page .fox-knowledge-grid,
-  .fox-local-kb-grid.fox-knowledge-grid {
+  .fox-knowledge-list-page .fox-knowledge-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 640px) {
   .fox-agent-list-page .fox-shadcn-entity-grid,
-  .fox-knowledge-list-page .fox-knowledge-grid,
-  .fox-local-kb-grid.fox-knowledge-grid {
+  .fox-knowledge-list-page .fox-knowledge-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -51,7 +51,7 @@ describe('plugin center selectors', () => {
 
   test('exposes install, retry, update, uninstall, and busy states', () => {
     expect(pluginInstallAction(card()).action).toBe('install')
-    expect(pluginInstallAction(card({ installStatus: 'install_failed' })).label).toBe('重试安装')
+    expect(pluginInstallAction(card({ installStatus: 'install_failed' })).label).toBe('重试')
     expect(pluginInstallAction(card({ installStatus: 'update_available' })).action).toBe('update')
     expect(pluginInstallAction(card({ installStatus: 'installed' })).action).toBe('uninstall')
     expect(pluginInstallAction(card({ installStatus: 'installing' }))).toMatchObject({ action: 'none', disabled: true })
@@ -59,9 +59,9 @@ describe('plugin center selectors', () => {
   })
 
   test('keeps activation semantics explicit for global, per-agent, and Host-managed tools', () => {
-    expect(activationSummary({ mode: 'global', enabled: true })).toBe('全局已启用')
+    expect(activationSummary({ mode: 'global', enabled: true })).toBe('已全局启用')
     expect(activationSummary({ mode: 'per_agent', enabledAgentCount: 2 })).toBe('2 个 Agent 已启用')
-    expect(activationSummary({ mode: 'not_applicable' })).toBe('由 Host 管理')
+    expect(activationSummary({ mode: 'not_applicable' })).toBe('由应用管理')
     expect(pluginKindLabel('mcp')).toBe('连接器')
     expect(pluginKindLabel('skill')).toBe('技能')
     expect(pluginKindLabel('tool')).toBe('内置工具')

@@ -4,6 +4,7 @@ import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/m
 import type { DocumentViewPosition } from './document-activity-model'
 import { assertSafeZipArchive } from './knowledge-archive-safety'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
+import './knowledge-reader-viewers.css'
 import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
 
 const MAX_PPTX_BYTES = 64 * 1024 * 1024
@@ -155,7 +156,7 @@ export default function KnowledgePptxViewer({
   }
 
   return (
-    <div className="fox-pptx-preview-shell">
+    <div className="fox-pptx-preview-shell" data-knowledge-viewer="presentation">
       <div className="fox-preview-surface fox-pptx-preview-surface">
         <PreviewToolbar>
           <span className="fox-preview-toolbar-label">{slideCount ? `第 ${slideIndex + 1} / ${slideCount} 页` : '正在读取幻灯片'}</span>

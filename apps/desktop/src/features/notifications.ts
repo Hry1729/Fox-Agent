@@ -94,7 +94,7 @@ export async function publishAppNotification(
 
   if (!desktopRuntimeAvailable) {
     const detail: InAppNotificationEventDetail = {
-      notification: { id: `browser-notification-${Date.now()}`, kind, title, body },
+      notification: { id: options.mergeKey ?? options.sourceId ?? `browser-notification-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, title, body },
     }
     window.dispatchEvent(new CustomEvent<InAppNotificationEventDetail>(FOX_IN_APP_NOTIFICATION_EVENT, { detail }))
     return
@@ -124,7 +124,7 @@ export async function publishAppNotification(
       notification: {
         id: `notification-persist-failed-${Date.now()}`,
         kind: 'failed',
-        title: '通知中心写入失败',
+        title: '通知写入失败',
         body: notificationText(cause, body),
       },
     }

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { Progress } from '@/components/ui/progress'
 import type { ContextBudgetDto } from './context-budget-presentation'
 import {
   calibrationNote,
@@ -38,10 +39,8 @@ export function ContextBudgetPanel({ budget }: { budget: ContextBudgetDto }) {
         {expanded ? '收起' : '占用明细'}
       </Button>
     </div>
-    <div className="fox-context-budget-bar" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}
-      aria-label={`上下文压力 ${percent}%`}>
-      <div className={percent >= 90 ? 'fox-context-budget-bar-fill is-high' : 'fox-context-budget-bar-fill'} style={{ width: `${percent}%` }} />
-    </div>
+    <Progress className={percent >= 90 ? 'fox-context-budget-bar [&_[data-slot=progress-indicator]]:bg-destructive' : 'fox-context-budget-bar'} value={percent}
+      aria-label={`上下文压力 ${percent}%`} />
     <p className="fox-context-budget-reason">{triggerReasonLabel(budget)}</p>
     {expanded && <div id={panelId} className="fox-context-budget-body">
       <dl className="fox-context-budget-rows">
@@ -64,7 +63,7 @@ export function ContextBudgetPanel({ budget }: { budget: ContextBudgetDto }) {
         {usageNote ? <span>（{usageNote}）</span> : null}
       </p>}
       {calibration && <p className="fox-context-budget-note">{calibration}</p>}
-      <p className="fox-context-budget-note">估算值用于提前预警；真实上限以模型供应商为准。压缩不会改写原始历史，也不重放工具。</p>
+      <p className="fox-context-budget-note">估算值用于提前预警；真实上限以模型服务为准。精简不会改写原始历史，也不重放工具。</p>
     </div>}
   </section>
 }

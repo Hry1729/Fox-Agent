@@ -7,6 +7,7 @@ import type { DocumentViewPosition } from './document-activity-model'
 import { MAX_PDF_ZOOM, MIN_PDF_ZOOM, PDF_ZOOM_STEP, movePdfPage, normalizePdfViewport, zoomPdf } from './knowledge-preview-model'
 import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
+import './knowledge-reader-viewers.css'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 
@@ -287,7 +288,7 @@ export default function KnowledgePdfViewer({
   }, [rendering])
 
   return (
-    <div className="fox-preview-surface fox-pdf-viewer">
+    <div className="fox-preview-surface fox-pdf-viewer" data-knowledge-viewer="pdf">
       <PreviewToolbar>
         <span className="fox-pdf-page-navigation" aria-label="页面导航">
           <PreviewIconButton label="上一页" disabled={viewport.page <= 1} onClick={() => movePage(-1)}><ChevronLeft /></PreviewIconButton>

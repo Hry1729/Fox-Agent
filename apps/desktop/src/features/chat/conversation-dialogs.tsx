@@ -113,21 +113,21 @@ export function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoa
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="fox-knowledge-binding-dialog">
         <DialogHeader>
-          <DialogTitle>选择会话知识库</DialogTitle>
-          <DialogDescription>仅所选知识库可用于当前会话。</DialogDescription>
+          <DialogTitle>选择资料库</DialogTitle>
+          <DialogDescription>仅所选资料库可用于当前对话。</DialogDescription>
         </DialogHeader>
         <Tabs value={source} onValueChange={(value) => setSource(value as 'local' | 'remote')} className="fox-knowledge-picker-tabs">
-          <TabsList aria-label="知识库来源" className="fox-knowledge-picker-sources">
-            <TabsTrigger value="local">本地 · {localItems.length}</TabsTrigger>
+          <TabsList aria-label="资料库来源" className="fox-knowledge-picker-sources">
+            <TabsTrigger value="local">本机 · {localItems.length}</TabsTrigger>
             <TabsTrigger value="remote">远程 · {remoteLoading ? '读取中' : remoteError ? '未连接' : remoteItems.length}{remoteError && <AlertTriangle aria-hidden="true" className="fox-knowledge-connection-warning" />}</TabsTrigger>
           </TabsList>
           <label className="fox-knowledge-picker-search">
             <Search aria-hidden="true" />
-            <Input aria-label="搜索知识库" placeholder="搜索知识库" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <Input aria-label="搜索资料库" placeholder="搜索资料库" value={query} onChange={(event) => setQuery(event.target.value)} />
           </label>
           <TabsContent value={source} className="fox-knowledge-picker-panel">
-            {source === 'remote' && remoteError && <div role="status" className="fox-knowledge-picker-notice"><AlertTriangle aria-hidden="true" /><div><strong>远程连接暂不可用</strong><p>{remoteError}</p><p>本地知识库仍可使用。</p></div><Button variant="ghost" disabled={remoteLoading} onClick={onRetry}>重试</Button></div>}
-            <div className="fox-knowledge-picker-list" aria-label={source === 'local' ? '本地知识库' : '远程知识库'} aria-busy={loading}>
+            {source === 'remote' && remoteError && <div role="status" className="fox-knowledge-picker-notice"><AlertTriangle aria-hidden="true" /><div><strong>远程连接暂不可用</strong><p>{remoteError}</p><p>本机资料库仍可使用。</p></div><Button variant="ghost" disabled={remoteLoading} onClick={onRetry}>重试</Button></div>}
+            <div className="fox-knowledge-picker-list" aria-label={source === 'local' ? '本机资料库' : '远程资料库'} aria-busy={loading}>
               {visibleItems.map((item) => {
                 const key = knowledgeReferenceKey(item.reference)
                 const checked = selected.includes(key)
@@ -137,9 +137,9 @@ export function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoa
                   {item.unavailable && <span className="fox-knowledge-picker-status">{item.status}</span>}
                 </label>
               })}
-              {!visibleItems.length && <p className="fox-knowledge-picker-empty" role="status">{loading ? '正在读取知识库…' : search ? '没有匹配的知识库，请换个关键词。' : source === 'local' ? '暂无本地知识库，请先在知识库页面导入。' : remoteError ? '连接恢复后可查看远程知识库。' : '暂无可访问的远程知识库。'}</p>}
+              {!visibleItems.length && <p className="fox-knowledge-picker-empty" role="status">{loading ? '正在读取资料库…' : search ? '没有匹配的资料库，请换个关键词。' : source === 'local' ? '暂无本机资料库，请先在资料库页面导入。' : remoteError ? '连接恢复后可查看远程资料库。' : '暂无可访问的远程资料库。'}</p>}
             </div>
-            {source === 'local' && <div className="fox-knowledge-picker-hint"><Popover><PopoverTrigger asChild><Button type="button" variant="ghost" size="sm" aria-label="为什么知识库暂不可选"><CircleHelp aria-hidden="true" />选择条件</Button></PopoverTrigger><PopoverContent className="max-w-80 text-sm" align="start"><strong>导入文档后，等待解析完成即可选择</strong><p>关键词检索可用的知识库也能加入聊天，无须安装向量模型。若显示待解析、暂停或失败，请到知识库页面查看任务进度和错误原因。</p></PopoverContent></Popover><span>有可检索内容即可加入聊天。</span><Button type="button" variant="ghost" size="sm" disabled={loading} onClick={onRetry}>刷新</Button></div>}
+            {source === 'local' && <div className="fox-knowledge-picker-hint"><Popover><PopoverTrigger asChild><Button type="button" variant="ghost" size="sm" aria-label="为什么资料库暂不可选"><CircleHelp aria-hidden="true" />选择条件</Button></PopoverTrigger><PopoverContent className="max-w-80 text-sm" align="start"><strong>导入文件后，等待整理完成即可选择</strong><p>按字词查找可用的资料库也能加入聊天，无须安装向量模型。若显示未整理、暂停或失败，请到资料库页面查看任务进度和错误原因。</p></PopoverContent></Popover><span>有可检索内容即可加入聊天。</span><Button type="button" variant="ghost" size="sm" disabled={loading} onClick={onRetry}>刷新</Button></div>}
           </TabsContent>
         </Tabs>
         {error && <p role="alert" className="fox-knowledge-picker-error">{error}</p>}
@@ -155,7 +155,7 @@ export function ConversationManagementDialogs({ conversation, mode, busy, error,
   return <>
     <Dialog open={mode === 'rename'} onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent className="fox-conversation-dialog">
-        <DialogHeader><DialogTitle>重命名对话</DialogTitle><DialogDescription>新的标题只改变显示名称，不会改变当前会话绑定的 Agent 或 Runtime。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>重命名</DialogTitle><DialogDescription>新的标题只改变显示名称，不会改变当前对话绑定的 Agent 或 Runtime。</DialogDescription></DialogHeader>
         <Input autoFocus value={title} maxLength={120} onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && title.trim() && !busy) onRename(title.trim()) }} />
         <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button disabled={busy || !title.trim()} onClick={() => onRename(title.trim())}>{busy && <LoaderCircle className="animate-spin" />}保存</Button></DialogFooter>
       </DialogContent>
@@ -175,7 +175,7 @@ export function ProjectDeleteDialog({ project, busy, onClose, onDelete }: { proj
     <DialogContent className="fox-conversation-dialog">
       <DialogHeader>
         <DialogTitle>删除项目？</DialogTitle>
-        <DialogDescription>“{project?.name}”及其 {project?.items.length ?? 0} 个对话、消息、工具记录和 Fox 内部产物将被删除。这里只会移除 Fox 中的项目记录，不会删除本机文件夹“{project?.root}”。此操作无法撤销。</DialogDescription>
+        <DialogDescription>“{project?.name}”及其 {project?.items.length ?? 0} 个对话、消息、工具记录和 Fox 内部生成的文件将被删除。这里只会移除 Fox 中的项目记录，不会删除本机文件夹“{project?.root}”。此操作无法撤销。</DialogDescription>
       </DialogHeader>
       <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button variant="destructive" disabled={busy} onClick={onDelete}>{busy && <LoaderCircle className="animate-spin" />}删除项目</Button></DialogFooter>
     </DialogContent>

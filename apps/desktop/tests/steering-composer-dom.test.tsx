@@ -70,8 +70,8 @@ function SteeringComposer({
       ? React.createElement(
           React.Fragment,
           null,
-          React.createElement('button', { type: 'submit', 'data-testid': 'steer', disabled: !draft.trim() }, '补充到当前任务'),
-          React.createElement('button', { type: 'button', 'data-testid': 'queue', onClick: () => onQueue(draft) }, '排队，下一轮处理'),
+          React.createElement('button', { type: 'submit', 'data-testid': 'steer', disabled: !draft.trim() }, '加入当前任务'),
+          React.createElement('button', { type: 'button', 'data-testid': 'queue', onClick: () => onQueue(draft) }, '下一轮再处理'),
           React.createElement('button', { type: 'button', 'data-testid': 'stop', onClick: onStop }, '停止'),
         )
       : React.createElement('button', { type: 'submit', 'data-testid': 'send' }, '发送'),

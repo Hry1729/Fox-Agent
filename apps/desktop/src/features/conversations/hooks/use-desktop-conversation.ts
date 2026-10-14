@@ -86,6 +86,7 @@ interface DesktopConversationState {
   setGoalRunning: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>
   createConversation: (projectRoot?: string, permissionMode?: ProjectRecord['permissionMode']) => Promise<boolean>
   createConversationForAgent: (agentId: string, projectRoot?: string, permissionMode?: ProjectRecord['permissionMode']) => Promise<boolean>
+  createConversationDraftWithKnowledge: (agentId: string, references: KnowledgeReference[], names: Record<string, string>) => boolean
   createConversationForExpert: (expertId: string, projectRoot?: string, permissionMode?: ProjectRecord['permissionMode']) => Promise<ExpertOperationResult>
   removeExpert: () => Promise<ExpertOperationResult>
   setDraftPermission: (permissionMode: ProjectRecord['permissionMode']) => void
@@ -454,6 +455,23 @@ export function useDesktopConversation(): DesktopConversationState {
       knowledgeBases: [],
     }
     applyDraft(nextDraft)
+    return true
+  }, [applyDraft, clearSelection])
+
+  const createConversationDraftWithKnowledge = useCallback((agentId: string, references: KnowledgeReference[], names: Record<string, string>) => {
+    if (!agentId.trim()) return false
+    setError(null)
+    setErrorDetails(null)
+    clearSelection()
+    applyDraft({
+      agentId,
+      expertId: null,
+      projectRoot: null,
+      permissionMode: null,
+      knowledgeBases: [],
+      knowledgeReferences: references,
+      knowledgeNames: names,
+    })
     return true
   }, [applyDraft, clearSelection])
 
@@ -1438,6 +1456,7 @@ export function useDesktopConversation(): DesktopConversationState {
     setGoalRunning,
     createConversation,
     createConversationForAgent,
+    createConversationDraftWithKnowledge,
     createConversationForExpert,
     removeExpert,
     setDraftPermission,
@@ -1455,7 +1474,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

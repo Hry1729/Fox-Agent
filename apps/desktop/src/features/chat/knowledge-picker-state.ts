@@ -8,8 +8,8 @@ export function localKnowledgePickerState(item: Pick<LocalKnowledgeBaseDto,
     return {
       available,
       status: jobStatus === 'running' || jobStatus === 'queued'
-        ? '更新中 · 现有内容可用'
-        : item.vectorIndexReady ? '可用 · 向量检索' : '可用 · 关键词检索',
+        ? '正在整理 · 现有内容可用'
+        : item.vectorIndexReady ? '可用 · 智能搜索' : '可用 · 按字词查找',
       reason: '',
     }
   }
@@ -17,17 +17,17 @@ export function localKnowledgePickerState(item: Pick<LocalKnowledgeBaseDto,
     available,
     status: knowledgePickerStatus(item.activeJobStatus, false, item.documentCount),
     reason: item.documentCount > 0
-      ? '文档已导入，尚无可检索内容。请在知识库页面查看解析进度或失败原因。'
-      : '请先在知识库页面导入文档并等待解析完成。',
+      ? '资料已添加，还搜不到内容。请在资料库页面查看整理进度或失败原因。'
+      : '请先在资料库页面添加资料，并等待整理完成。',
   }
 }
 
 export function knowledgePickerStatus(activeJobStatus: string | null | undefined, indexed: boolean, documentCount = 0) {
   const labels: Record<string, string> = {
-    queued: '排队中', running: '处理中', paused: '已暂停', failed: '处理失败',
-    error: '处理失败', cancelled: '已取消', interrupted: '已中断',
+    queued: '排队中', running: '正在整理', paused: '已暂停', failed: '整理失败',
+    error: '整理失败', cancelled: '已取消', interrupted: '已中断',
   }
-  return labels[activeJobStatus?.toLowerCase() ?? ''] ?? (indexed ? '已索引' : documentCount > 0 ? '待解析' : '待导入')
+  return labels[activeJobStatus?.toLowerCase() ?? ''] ?? (indexed ? '已整理' : documentCount > 0 ? '待整理' : '还没有资料')
 }
 
 export function filterKnowledgePickerItems<T extends { source: string; name: string; description: string; unavailable?: boolean }>(items: T[], source: string, query: string): T[] {

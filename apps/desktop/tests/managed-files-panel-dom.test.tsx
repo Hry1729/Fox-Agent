@@ -16,7 +16,7 @@
 // A click-through of the packaged Tauri desktop app is still a separate manual
 // acceptance item; nothing here claims to be that.
 
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 // Several DOM suites share one process, so the first one to run owns registration.
@@ -84,10 +84,17 @@ let versions: unknown[] = [
 // The real modules are loaded first so the mocks below can SPREAD them: a
 // `mock.module` factory replaces the module for the whole process, and a partial
 // factory would break every other test file that imports the same module.
-const actualDesktopClient = await import(
-  '../src/features/conversations/api/desktop-client'
-)
-const actualNotifications = await import('../src/features/notifications')
+const actualDesktopClient = {
+  ...await import('../src/features/conversations/api/desktop-client'),
+}
+const actualNotifications = { ...await import('../src/features/notifications') }
+
+// Bun module mocks persist across test files. Restore this suite's boundary so
+// subsequent client-contract tests reach the real IPC adapter.
+afterAll(() => {
+  mock.module('../src/features/conversations/api/desktop-client', () => actualDesktopClient)
+  mock.module('../src/features/notifications', () => actualNotifications)
+})
 
 mock.module('../src/features/conversations/api/desktop-client', () => ({
   ...actualDesktopClient,
@@ -155,12 +162,12 @@ afterEach(() => {
 async function mountPanel() {
   ;(globalThis as any).window.confirm = () => true
   render(React.createElement(ManagedFilesPanel, { conversationId: 'conv-1' }))
-  const header = await screen.findByRole('button', { name: /文件版本恢复/ })
+  const header = await screen.findByRole('button', { name: /文件版本/ })
   fireEvent.click(header)
   return header
 }
 
-const restoreButton = () => screen.getByRole('button', { name: '恢复' })
+const restoreButton = () => screen.getByRole('button', { name: '恢复版本' })
 
 describe('ManagedFilesPanel render contract', () => {
   // Server rendering never runs `useEffect`, so the version list is still empty
@@ -353,7 +360,7 @@ describe('RuntimeApprovalPrompt (real DOM clicks)', () => {
     expect(document.querySelector('.fox-approval-replacement')).toBeNull()
     // The grant is stored against the conversation (and is revoked when the
     // policy generation moves), so the label must not claim a narrower lifetime.
-    expect(screen.getByRole('button', { name: '本次对话内允许' })).toBeDefined()
+    expect(screen.getByRole('button', { name: '本对话内允许' })).toBeDefined()
     // The user is told the real scope, that it is revocable, and that revoking or
     // changing the mode ends it — instead of an unqualified "allow this run".
     expect(document.querySelector('.fox-approval-scope-note')?.textContent).toContain('可随时撤销')
@@ -389,7 +396,7 @@ describe('RuntimeApprovalPrompt (real DOM clicks)', () => {
     expect(scope).not.toContain('仅授权本次操作')
     // Nothing existing is destroyed, so the conversation-scoped decision the Host
     // declared stays available.
-    expect(screen.getByRole('button', { name: '本次对话内允许' })).toBeDefined()
+    expect(screen.getByRole('button', { name: '本对话内允许' })).toBeDefined()
     expect(screen.getByRole('button', { name: '只允许这一次' })).toBeDefined()
     expect(screen.getByRole('button', { name: '拒绝' })).toBeDefined()
   })

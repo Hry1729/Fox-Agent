@@ -402,7 +402,7 @@ export interface LocalKnowledgeGateway {
 }
 
 export function knowledgeReferenceLabel(reference: KnowledgeReference): string {
-  return reference.source === 'local' ? `本地知识库 ${reference.id}` : `远程知识库 ${reference.id}`
+  return reference.source === 'local' ? `本机资料库 ${reference.id}` : `远程资料库 ${reference.id}`
 }
 
 export function formatBytes(bytes: number): string {
@@ -416,13 +416,13 @@ export function formatJobStage(stage: KnowledgeOperationStage | null): string {
   const labels: Record<KnowledgeOperationStage, string> = {
     validating: '校验文件',
     copying: '复制文件',
-    hashing: '计算哈希',
-    parsing: '解析内容',
-    chunking: '切分文本',
-    embedding: '生成向量',
-    vector_upsert: '写入向量索引',
-    verifying: '校验索引',
-    committing: '提交代次',
+    hashing: '计算文件指纹',
+    parsing: '读取内容',
+    chunking: '切分段落',
+    embedding: '整理内容',
+    vector_upsert: '写入搜索数据',
+    verifying: '校验搜索结果',
+    committing: '保存结果',
   }
   return stage ? labels[stage] : '等待开始'
 }

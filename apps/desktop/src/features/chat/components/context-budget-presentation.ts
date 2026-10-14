@@ -78,23 +78,23 @@ export function usageOccupancyNote(dto: ContextBudgetDto): string | null {
 export function triggerReasonLabel(dto: ContextBudgetDto): string {
   switch (dto.triggerReason) {
     case 'threshold':
-      return '接近上下文上限，触发压缩'
+      return '接近上下文上限，触发精简'
     case 'single_item_too_large':
       return '单条内容超过窗口，需分页或引用'
     case 'no_reduction':
-      return '上次压缩没有收益，有界停止'
+      return '上次精简没有收益，有界停止'
     case 'no_candidates':
-      return '没有可压缩的候选内容，有界停止'
+      return '没有可精简的候选内容，有界停止'
     case 'summary_failed':
       return '摘要服务失败'
     case 'passes_exhausted':
-      return '压缩轮次用尽，有界停止'
+      return '精简轮次用尽，有界停止'
     case 'insufficient':
       return '保留必要内容后仍超出上下文容量'
     case 'manual':
-      return '手动触发'
+      return '立即执行'
     default:
-      return '未触发压缩'
+      return '未触发精简'
   }
 }
 

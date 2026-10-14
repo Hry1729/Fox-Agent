@@ -3,15 +3,15 @@ import { filterKnowledgePickerItems, knowledgePickerStatus, localKnowledgePicker
 
 describe('knowledge picker', () => {
   test('keyword-ready libraries are selectable without a vector generation', () => {
-    expect(localKnowledgePickerState({ documentCount: 1, activeJobStatus: null, textIndexReady: true, vectorIndexReady: false })).toEqual({ available: true, status: '可用 · 关键词检索', reason: '' })
+    expect(localKnowledgePickerState({ documentCount: 1, activeJobStatus: null, textIndexReady: true, vectorIndexReady: false })).toEqual({ available: true, status: '可用 · 按字词查找', reason: '' })
     expect(localKnowledgePickerState({ documentCount: 2, activeJobStatus: 'running', textIndexReady: true }).available).toBe(true)
   })
   test('imported files are distinguished from a ready index and an empty library', () => {
     const pending = localKnowledgePickerState({ documentCount: 1, activeJobStatus: 'completed', textIndexReady: false })
     expect(pending.available).toBe(false)
-    expect(pending.status).toBe('待解析')
-    expect(pending.reason).toContain('文档已导入')
-    expect(localKnowledgePickerState({ documentCount: 0, activeJobStatus: null }).status).toBe('待导入')
+    expect(pending.status).toBe('待整理')
+    expect(pending.reason).toContain('资料已添加')
+    expect(localKnowledgePickerState({ documentCount: 0, activeJobStatus: null }).status).toBe('还没有资料')
   })
   const items = [
     { source: 'local', name: 'Fox 使用指南', description: '常用操作教程', unavailable: true },
@@ -28,10 +28,10 @@ describe('knowledge picker', () => {
     expect(filterKnowledgePickerItems(items, 'remote', '教程')).toEqual([])
   })
   test('status reflects usable index, not simply a completed job', () => {
-    expect(knowledgePickerStatus('completed', true)).toBe('已索引')
-    expect(knowledgePickerStatus('completed', false)).toBe('待导入')
-    expect(knowledgePickerStatus(null, false)).toBe('待导入')
-    expect(knowledgePickerStatus('RUNNING', true)).toBe('处理中')
-    expect(knowledgePickerStatus('failed', false)).toBe('处理失败')
+    expect(knowledgePickerStatus('completed', true)).toBe('已整理')
+    expect(knowledgePickerStatus('completed', false)).toBe('还没有资料')
+    expect(knowledgePickerStatus(null, false)).toBe('还没有资料')
+    expect(knowledgePickerStatus('RUNNING', true)).toBe('正在整理')
+    expect(knowledgePickerStatus('failed', false)).toBe('整理失败')
   })
 })

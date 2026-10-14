@@ -1,0 +1,34 @@
+.fox-local-kb-document-reader-body > [data-knowledge-viewer] {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fox-local-kb-document-reader-body .fox-preview-surface,
+.fox-local-kb-document-reader-body .fox-preview-toolbar {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fox-local-kb-document-reader-body .fox-pdf-canvas-viewport {
+  align-items: safe center;
+}
+
+.fox-local-kb-document-reader-body .fox-pdf-canvas-host {
+  flex-shrink: 0;
+}
+
+.fox-local-kb-document-reader-body .fox-docx-preview,
+.fox-local-kb-document-reader-body .fox-pptx-preview,
+.fox-local-kb-document-reader-body .fox-spreadsheet-preview {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  overscroll-behavior: contain;
+}
+
+.fox-local-kb-document-reader-body .fox-docx-preview .docx-wrapper {
+  width: max-content;
+  min-width: 100%;
+}

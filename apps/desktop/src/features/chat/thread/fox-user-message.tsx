@@ -3,8 +3,10 @@ import type { TextMessagePartProps, Attachment as AuiAttachment } from '@assista
 import { UserMessageBubble } from '../components/UserMessageBubble'
 import { requestConversationFork } from '../fox-shared'
 import { FoxEditComposer } from './fox-edit-composer'
-import { Copy, FileEdit, GitFork } from 'lucide-react'
+import { FileEdit, GitFork } from 'lucide-react'
 import { File as MessageFile } from '@/components/assistant-ui/elements/file'
+import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
+import { FoxCopyMessageButton } from './fox-message-actions'
 
 /** Raw user text — never markdown-rendered, same as the legacy bubble. */
 function FoxUserText(part: TextMessagePartProps) {
@@ -44,9 +46,7 @@ export function FoxUserMessage() {
         <FoxEditComposer />
         {!isEditing && <div className="fox-user-meta">
             <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
-              <ActionBarPrimitive.Copy asChild>
-                <button type="button" className="fox-thread-action-button" aria-label="复制消息"><Copy size={13} /></button>
-              </ActionBarPrimitive.Copy>
+              <FoxCopyMessageButton onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))} />
               <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
                 <GitFork size={13} />
               </button>

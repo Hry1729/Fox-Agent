@@ -16,12 +16,12 @@ export function FoxSources({ sources }: { sources: RuntimeSource[] }) {
   const fox = useFoxThread()
   const [selectedSource, setSelectedSource] = useState<RuntimeSource | null>(null)
   const selectedKnowledgeName = selectedSource
-    ? fox.knowledgeBindings.find((binding) => binding.knowledgeBaseId === selectedSource.knowledgeBaseId)?.knowledgeBaseName || selectedSource.knowledgeBaseId || '知识库'
-    : '知识库'
+    ? fox.knowledgeBindings.find((binding) => binding.knowledgeBaseId === selectedSource.knowledgeBaseId)?.knowledgeBaseName || selectedSource.knowledgeBaseId || '资料库'
+    : '资料库'
   if (!sources.length) return null
   return (
-    <div className="fox-thread-sources" aria-label="知识库来源">
-      <span className="fox-thread-sources-label"><BookOpen size={12} />来源</span>
+    <div className="fox-thread-sources" aria-label="资料库来源">
+      <span className="fox-thread-sources-label"><BookOpen size={12} />资料来源</span>
       {sources.map((source, index) => (
         <button type="button" key={source.id} className="fox-thread-source-chip" onClick={() => setSelectedSource(source)} title={source.excerpt || source.title}>
           <span className="fox-thread-source-index">{index + 1}</span>{source.title}
@@ -30,7 +30,7 @@ export function FoxSources({ sources }: { sources: RuntimeSource[] }) {
       <Dialog open={Boolean(selectedSource)} onOpenChange={(open) => { if (!open) setSelectedSource(null) }}>
         <DialogContent className="fox-source-dialog">
           <DialogHeader>
-            <div className="fox-source-dialog-heading"><span><BookOpen size={18} /></span><div><DialogTitle>{selectedSource?.title ?? '知识库引用'}</DialogTitle><DialogDescription>模型回答所引用的知识片段</DialogDescription></div></div>
+            <div className="fox-source-dialog-heading"><span><BookOpen size={18} /></span><div><DialogTitle>{selectedSource?.title ?? '资料库引用'}</DialogTitle><DialogDescription>模型回答所引用的知识片段</DialogDescription></div></div>
           </DialogHeader>
           <div className="fox-source-dialog-meta">
             <span><Library size={14} />{selectedKnowledgeName}</span>

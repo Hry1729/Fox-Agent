@@ -53,12 +53,12 @@ describe('context budget presentation', () => {
   })
 
   test('explains trigger reasons including bounded stops', () => {
-    expect(triggerReasonLabel(dto({ triggerReason: 'threshold' }))).toContain('压缩')
+    expect(triggerReasonLabel(dto({ triggerReason: 'threshold' }))).toContain('精简')
     expect(triggerReasonLabel(dto({ triggerReason: 'single_item_too_large' }))).toContain('单条')
     expect(triggerReasonLabel(dto({ triggerReason: 'no_reduction' }))).toContain('有界停止')
     expect(triggerReasonLabel(dto({ triggerReason: 'no_candidates' }))).toContain('有界停止')
     expect(triggerReasonLabel(dto({ triggerReason: 'summary_failed' }))).toContain('失败')
-    expect(triggerReasonLabel(dto({ triggerReason: 'none' }))).toBe('未触发压缩')
+    expect(triggerReasonLabel(dto({ triggerReason: 'none' }))).toBe('未触发精简')
   })
 
   test('formats counts and clamps the pressure meter', () => {
