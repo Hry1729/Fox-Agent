@@ -33,13 +33,15 @@ export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAc
           <span className="fox-agent-name-row"><strong>{agent.name}</strong></span>
         </span>
       </CardHeader>
-      {showAction && <Button className="fox-agent-summon" size="sm" disabled={disabled || !agent.available} onClick={(event) => { event.stopPropagation(); summon() }}>开始对话</Button>}
+      <span className="fox-agent-card-actions">
       {onViewDetail && <Tooltip>
         <TooltipTrigger asChild>
           <Button className="fox-agent-manage" variant="ghost" size="icon" aria-label={`查看${agent.name}详情`} onClick={(event) => { event.stopPropagation(); onViewDetail() }}><Info /></Button>
         </TooltipTrigger>
         <TooltipContent side="top">详情</TooltipContent>
       </Tooltip>}
+      {showAction && <Button className="fox-agent-summon" size="sm" disabled={disabled || !agent.available} onClick={(event) => { event.stopPropagation(); summon() }}>开始对话</Button>}
+      </span>
       <CardContent className="fox-shadcn-kb-content">
         <p className="fox-agent-description" title={agent.description}>{agent.description}</p>
         <span className="fox-library-card-tags">

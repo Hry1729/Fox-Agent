@@ -4469,14 +4469,24 @@
   padding: 5px 9px 5px 13px !important;
 }
 
-.fox-agent-summon {
+.fox-agent-card-actions {
   position: absolute;
   top: 10px;
   right: 11px;
   z-index: 2;
-  width: 48px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fox-agent-summon {
+  position: static;
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: 80px;
   height: 28px;
-  padding: 0;
+  padding-inline: 12px !important;
+  white-space: nowrap;
   border-radius: calc(var(--radius) - 2px);
   opacity: 0;
   pointer-events: none;
@@ -4486,10 +4496,8 @@
 }
 
 .fox-agent-manage {
-  position: absolute;
-  top: 10px;
-  right: 64px;
-  z-index: 2;
+  position: static;
+  flex: 0 0 auto;
   width: 28px;
   height: 28px;
   opacity: 0;
@@ -5969,8 +5977,10 @@
 }
 
 .fox-library-card:has(.fox-agent-summon) .fox-agent-name-row {
-  padding-right: 80px;
+  padding-right: 84px;
 }
+
+.fox-library-card:has(.fox-agent-summon):has(.fox-agent-manage) .fox-agent-name-row { padding-right: 118px; }
 
 .fox-library-card .fox-shadcn-kb-content,
 .fox-library-card.fox-shadcn-agent-card .fox-shadcn-kb-content,

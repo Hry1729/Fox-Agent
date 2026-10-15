@@ -2,13 +2,17 @@
   position: absolute;
   z-index: 17;
   top: 0;
-  right: 12px;
-  width: 128px;
-  height: 190px;
+  right: clamp(28px, 18%, 180px);
+  --fox-expert-card-fill: #ffffff;
+  --fox-expert-card-ink: #292c33;
+  --fox-expert-card-muted: #7b8491;
+  width: 98px;
+  height: 146px;
   padding: 0;
   border: 0;
   background: transparent;
   cursor: pointer;
+  filter: drop-shadow(0 2px 3px rgb(0 0 0 / .14)) drop-shadow(0 6px 9px rgb(0 0 0 / .10));
   perspective: 700px;
   border-radius: var(--fox-radius-control);
   touch-action: manipulation;
@@ -21,7 +25,7 @@
 .fox-expert-lanyard-scene,
 .fox-expert-lanyard-fallback { position: absolute; inset: 0; display: block; pointer-events: none; }
 .fox-expert-lanyard-scene canvas { width: 100%; height: 100%; display: block; }
-.fox-expert-lanyard-fallback { perspective: 700px; overflow: hidden; }
+.fox-expert-lanyard-fallback { width: 128px; height: 190px; perspective: 700px; overflow: hidden; transform: scale(.765625); transform-origin: top left; }
 .fox-expert-lanyard-body {
   position: absolute;
   left: 8px;
@@ -39,20 +43,30 @@
   border: 1px solid #d7d9dc;
   border-radius: 6px;
   backface-visibility: hidden;
-  background: linear-gradient(125deg,#fff 30%,#eef0f2 100%);
+  background: #fafbfc;
   box-shadow: 1px 2px 3px #0002;
 }
 .fox-expert-lanyard-face.is-back { transform: rotateY(180deg); }
 .fox-expert-lanyard-face img {
   position: absolute;
-  width: 96px;
-  height: 118px;
-  left: 7px;
-  bottom: 7px;
+  width: 86px;
+  height: 86px;
+  left: 12px;
+  top: 21px;
+  border-radius: 4px;
   object-fit: contain;
   pointer-events: none;
   user-select: none;
 }
+.fox-expert-lanyard-face strong { position: absolute; left: 7px; right: 7px; bottom: 10px; color: #30343a; font-size: 15px !important; font-weight: 600; line-height: 1.25; text-align: center; overflow-wrap: anywhere; }
+.fox-expert-lanyard-face.is-back { background: var(--shell); }
+.fox-expert-card-emboss { display: block; width: 100%; height: 100%; border-radius: inherit; }
+.fox-expert-lanyard-face.is-front { background: var(--fox-expert-card-fill); }
+.fox-expert-lanyard-face.is-front img { width: 90px; height: 90px; left: 50%; transform: translateX(-50%); top: 18px; border-radius: 6px; object-fit: cover; }
+.fox-expert-lanyard-face strong { left: 7px; right: 7px; top: 118px; bottom: auto; color: var(--fox-expert-card-ink); font-size: 13.125px !important; font-weight: 600; line-height: 1.15; text-align: center; display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.fox-expert-lanyard-face small { position: absolute; left: 7px; right: 7px; top: 136px; color: var(--fox-expert-card-muted); font-size: 7px !important; font-weight: 500; line-height: 1.2; letter-spacing: .875px; text-align: center; white-space: nowrap; }
+[data-color-theme='paper'] .fox-expert-lanyard { --fox-expert-card-fill: #f8f6ef; --fox-expert-card-ink: #473b26; --fox-expert-card-muted: #6b5d42; }
+[data-color-theme='mist'] .fox-expert-lanyard { --fox-expert-card-fill: #f3f6fa; --fox-expert-card-ink: #263b50; --fox-expert-card-muted: #4a6278; }
 .fox-expert-lanyard-slot {
   position: absolute;
   width: 24px;
@@ -84,15 +98,6 @@
   border: 2px solid #bbbfc7;
   border-radius: 4px 4px 50% 50%;
   background: linear-gradient(90deg,#8f969f,#edf0f3,#a6adb5);
-}
-/* Anchored inside the chat stage below its topbar; the desktop panel is a
-   sibling, so opening/resizing it moves the badge with the message pane. */
-.fox-chat-stage.has-expert-lanyard .fox-thread-viewport { padding-right: 152px; }
-@container fox-chat (max-width: 700px) {
-  .fox-chat-stage.has-expert-lanyard .fox-thread-viewport {
-    padding-right: var(--fox-space-xl);
-    padding-top: 202px;
-  }
 }
 /* Compact panels occupy the same content card as a drawer. Keep the badge
    beneath that drawer and remove its hidden button from keyboard navigation. */

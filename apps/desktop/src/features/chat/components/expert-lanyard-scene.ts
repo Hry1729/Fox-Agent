@@ -23,10 +23,11 @@
 // Source: https://github.com/DavidHDev/react-bits/blob/3329f3bde763a37a2a89b24598e9f50fa0d4de3d/src/ts-default/Components/Lanyard/Lanyard.tsx
 // Retained: rounded extruded card, slot/bevel and UVs, ring/clamp geometry,
 // woven strap normal map, PMREM studio panels and glossy/silver/black defaults.
-// Fox differences: 112×150 portrait; two fixed straps; expert avatar on front,
-// plain white back shown initially; lazy loading; click/keyboard flips only.
+// Fox differences: compact portrait; two fixed straps; named expert on front,
+// patterned Fox back; lazy loading; click/keyboard flips only.
 // No dragging, physics, breeze, intro, automatic rotation or idle render loop.
 import * as THREE from 'three'
+import { createExpertCardBackPainter, paintExpertCardBack } from './expert-card-emboss'
 
 const WIDTH = 1.68, HEIGHT = 2.25, THICKNESS = 0.018, BEVEL = 0.007
 const RING_RADIUS = 0.095, RING_TUBE = 0.0135, EYELET_RADIUS = 0.036, CLAMP_BODY = 0.15
@@ -107,7 +108,7 @@ const buildWeaveTexture = () => {
 }
 
 export interface ExpertLanyardScene { flip: (front: boolean) => void; dispose: () => void }
-export function createExpertLanyardScene(container: HTMLElement, frontImage: string, onUnavailable: () => void): ExpertLanyardScene {
+export function createExpertLanyardScene(container: HTMLElement, card: { frontImage: string; name: string }, onUnavailable: () => void): ExpertLanyardScene {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power' })
   const canvas = renderer.domElement
   const scene = new THREE.Scene()
@@ -116,13 +117,16 @@ export function createExpertLanyardScene(container: HTMLElement, frontImage: str
   const image = new Image()
   let alive = true, raf = 0, target = 0, angle = 0
   let observer: ResizeObserver | undefined
+  let themeObserver: MutationObserver | undefined
+  let backPainter: ReturnType<typeof createExpertCardBackPainter> | undefined
   let motion: MediaQueryList | undefined
   let onMotionChange: (() => void) | undefined
   const onContextLost = (event: Event) => { event.preventDefault(); dispose(); onUnavailable() }
   const dispose = () => {
     if (!alive) return
     alive = false
-    cancelAnimationFrame(raf); observer?.disconnect()
+    cancelAnimationFrame(raf); observer?.disconnect(); themeObserver?.disconnect()
+    backPainter?.dispose()
     if (onMotionChange) motion?.removeEventListener('change', onMotionChange)
     image.onload = null; image.onerror = null; image.removeAttribute('src')
     canvas.removeEventListener('webglcontextlost', onContextLost)
@@ -145,16 +149,22 @@ export function createExpertLanyardScene(container: HTMLElement, frontImage: str
     keyLight.position.set(-2.5, 4, 6); fillLight.position.set(3, -1, 4)
     scene.add(keyLight, fillLight)
     const faceCanvas = document.createElement('canvas')
-    faceCanvas.width = 512; faceCanvas.height = 686
+    faceCanvas.width = 1024; faceCanvas.height = 1372
     const ctx = faceCanvas.getContext('2d')
     if (!ctx) throw new Error('Canvas unavailable')
+    ctx.scale(2, 2)
     ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 512, 686)
     const texture = own(new THREE.CanvasTexture(faceCanvas))
     texture.colorSpace = THREE.SRGBColorSpace
     texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy())
-    const glossy = { roughness: 0.42, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.06 }
-    const frontMaterial = own(new THREE.MeshPhysicalMaterial({ ...glossy, map: texture }))
-    const backMaterial = own(new THREE.MeshPhysicalMaterial({ ...glossy, color: '#ffffff' }))
+    const frontMaterial = own(new THREE.MeshBasicMaterial({ map: texture, toneMapped: false }))
+    const backCanvas = document.createElement('canvas')
+    backCanvas.width = 1024; backCanvas.height = 1372
+    paintExpertCardBack(backCanvas, container)
+    const backTexture = own(new THREE.CanvasTexture(backCanvas))
+    backTexture.colorSpace = THREE.SRGBColorSpace
+    backTexture.anisotropy = texture.anisotropy
+    const backMaterial = own(new THREE.MeshBasicMaterial({ map: backTexture, toneMapped: false }))
     const edgeMaterial = own(new THREE.MeshPhysicalMaterial({ color: '#ebebeb', roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.08 }))
     const metal = own(new THREE.MeshStandardMaterial({ color: '#d9dce2', roughness: 0.16, metalness: 1 }))
     const weave = own(buildWeaveTexture())
@@ -192,21 +202,56 @@ export function createExpertLanyardScene(container: HTMLElement, frontImage: str
       catch { dispose(); onUnavailable() }
     }
     image.crossOrigin = 'anonymous'; image.decoding = 'async'
-    image.onload = () => {
+    const paintFront = () => {
       if (!alive || !image.naturalWidth || !image.naturalHeight) return
-      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 512, 686)
-      // Contain the actual expert avatar below the card's slot.
-      const scale = Math.min(448 / image.naturalWidth, 554 / image.naturalHeight)
+      const styles = getComputedStyle(container)
+      ctx.fillStyle = styles.getPropertyValue('--fox-expert-card-fill').trim() || '#f5f5f4'
+      ctx.fillRect(0, 0, 512, 686)
+      const portraitSize = 686 * .6
+      const portraitLeft = (512 - portraitSize) / 2
+      const scale = Math.max(portraitSize / image.naturalWidth, portraitSize / image.naturalHeight)
       const w = image.naturalWidth * scale, h = image.naturalHeight * scale
-      ctx.drawImage(image, (512 - w) / 2, 100 + (554 - h) / 2, w, h)
+      ctx.save(); ctx.beginPath(); ctx.roundRect(portraitLeft, 84, portraitSize, portraitSize, 28); ctx.clip()
+      ctx.fillStyle = 'rgba(255,255,255,.36)'; ctx.fillRect(portraitLeft, 84, portraitSize, portraitSize)
+      ctx.drawImage(image, (512 - w) / 2, 84 + (portraitSize - h) / 2, w, h); ctx.restore()
+      ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'
+      const textLines = (text: string, limit: number) => {
+        const lines: string[] = []; let line = ''
+        for (const char of text.replace(/\s+/g, ' ').trim()) {
+          if (line && ctx.measureText(line + char).width > 448) { lines.push(line); line = '' }
+          line += char
+        }
+        if (line) lines.push(line)
+        if (lines.length > limit) {
+          let last = lines[limit - 1]
+          while (last && ctx.measureText(last + '…').width > 448) last = last.slice(0, -1)
+          lines.splice(limit - 1, lines.length, last + '…')
+        }
+        return lines
+      }
+      ctx.fillStyle = styles.getPropertyValue('--fox-expert-card-ink').trim() || '#292c33'
+      ctx.font = '600 60px "HarmonyOS Sans SC", sans-serif'
+      textLines(card.name, 1).forEach(text => ctx.fillText(text, 256, 590))
+      ctx.fillStyle = styles.getPropertyValue('--fox-expert-card-muted').trim() || '#555b66'
+      ctx.font = '500 32px "HarmonyOS Sans SC", sans-serif'
+      ctx.letterSpacing = '4px'
+      ctx.fillText('Fox Agent', 256, 648)
+      ctx.letterSpacing = '0px'
       texture.needsUpdate = true; render()
     }
+    image.onload = paintFront
     // A remote avatar without CORS can still be displayed by the DOM fallback.
     image.onerror = () => { if (alive) { dispose(); onUnavailable() } }
-    image.src = frontImage
+    image.src = card.frontImage
+    backPainter = createExpertCardBackPainter(backCanvas, container, () => {
+      if (alive) { backTexture.needsUpdate = true; render() }
+    })
+    void document.fonts.ready.then(paintFront)
+    themeObserver = new MutationObserver(paintFront)
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-color-theme'] })
     const resize = () => {
       if (!alive) return
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+      renderer.setPixelRatio(Math.min(Math.max(window.devicePixelRatio || 1, 2), 3))
       renderer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight), false)
       render()
     }
@@ -226,6 +271,7 @@ export function createExpertLanyardScene(container: HTMLElement, frontImage: str
         cancelAnimationFrame(raf); raf = 0
         if (!alive) return
         target = frontSide ? 0 : Math.PI
+        backPainter?.setActive(!frontSide)
         if (motion?.matches) { angle = target; group.rotation.y = angle; render(); return }
         const from = angle, start = performance.now()
         const tick = (now: number) => {

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="graphite">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fox · 资料库统一方案</title>
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css">
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css">
+<link rel="stylesheet" href="../../../apps/desktop/src/styles/themes.css">
+<link rel="stylesheet" href="preview.css">
+<script src="../知识库重设计/icons.js"></script>
+</head>
+<body>
+<header class="document-head"><div><h1>资料放在原处，入口归到一起。</h1><p>Fox 资料库统一方案 · 交互预览 · 2026.10.15</p></div><div class="controls"><label>主题 <select id="theme"><option value="graphite">石墨</option><option value="paper">暖纸</option><option value="mist">雾蓝</option></select></label><button id="mode">切换深色</button><a href="#proposal">查看合并方案</a></div></header>
+<p class="demo-note">下面是可操作的设计演示，所有资料和连接均为示例。不会读取、修改或上传电脑上的文件。</p>
+<section class="window" aria-label="Fox 资料库交互预览">
+<header class="titlebar"><img src="../../../apps/desktop/public/avatars/fox-assistant.png" alt=""><b>Fox</b><span>文件　 编辑　 视图　 帮助</span><small>方案预览</small></header>
+<div class="app"><aside class="sidebar"><div class="mode-tabs"><span>助手</span><strong>知识</strong></div><button class="nav-item" data-action="home" id="home-nav"></button><p class="side-label">我的资料库</p><nav id="library-nav" aria-label="资料库"></nav><button class="nav-item" data-action="add">＋ 添加资料库</button><div class="side-bottom"><img src="../../../apps/desktop/public/avatars/defaults/fox_big_smile.png" alt="小狐"><span>资料随手可用</span></div></aside><main id="workspace"></main></div>
+</section>
+<section id="proposal" class="proposal">
+<h2>三个入口，合成一个「资料库」</h2><p class="lead">用户只需要选择资料在哪里。文件浏览和用于问答的整理进度，在同一处查看。</p>
+<div class="comparison"><div><h3>现在</h3><p>本机文件：添加文件夹、浏览文件，再选目标库导入。</p><p>本机资料库：管理导入的副本、分段和索引。</p><p>远程资料库：连接服务，使用远程的文档和检索。</p></div><div><h3>建议</h3><p>资料库：统一列表、搜索入口和详情框架。</p><p>添加文件夹即创建资料库。先浏览文件，再选择是否整理供问答使用。</p><p>来源仍分为本地文件夹、托管资料、远程连接，显示在库的属性中。</p></div></div>
+<h2>本机文件页，融入资料库详情</h2>
+<div class="table-wrap"><table><thead><tr><th>区域</th><th>承担的任务</th><th>合并方式</th></tr></thead><tbody><tr><td>目录与文件</td><td>浏览、筛选、排序、多选</td><td>沿用本机文件能力；文件未整理也能浏览。无目录的远程服务显示平铺列表。</td></tr><tr><td>文件预览</td><td>阅读、查看属性、问这份资料</td><td>复用知识库查看器；预览失败与整理失败分别提示，不互相阻塞。</td></tr><tr><td>整理记录</td><td>查看处理进度、失败重试</td><td>放在详情页标签中；显示扫描、解析、索引各阶段。未完成时标明问答可用范围。</td></tr><tr><td>设置抽屉</td><td>来源、同步、模型、排除规则</td><td>按来源和能力显示操作；远程只读不展示本地重建索引。</td></tr></tbody></table></div>
+<h2>文件和索引保持分离</h2><p>新增统一的资料库视图模型，先聚合现有数据，不把三类存储强行迁成一套。名称可以相同，身份不能靠名称判断。</p>
+<div class="table-wrap"><table><thead><tr><th>来源</th><th>文件在哪里</th><th>问答如何工作</th><th>移除含义</th></tr></thead><tbody><tr><td>本地文件夹</td><td>保留原路径；路径按系统规则规范化</td><td>浏览直接读目录，解析和索引保存在 Fox；可暂停自动整理</td><td>移除关联及索引，不删除原文件</td></tr><tr><td>已有 / 托管资料库</td><td>保留现有副本及 document ID</td><td>继续使用现有分段、模型和索引</td><td>需单独确认删除托管副本；不在本原型模拟</td></tr><tr><td>远程资料库</td><td>远程服务管理</td><td>按服务能力调用检索；不默认下载全库、不默认生成本地索引</td><td>只断开本地连接，不删除远程资料</td></tr></tbody></table></div>
+<h2>关键规则</h2><ul class="rules"><li><b>一次添加，一个资料库。</b>选择文件夹后允许改名，展示预计处理范围和模型位置；关闭“用于问答”时只浏览。使用云端模型前明确资料发送范围。</li><li><b>避免重复与嵌套。</b>重复路径打开已有库；父子目录重叠时提示范围冲突，选择复用已有库或排除重叠目录，不静默重复导入。</li><li><b>变更可追踪。</b>按来源标识、相对路径、文件指纹识别增量变更；处理任务幂等。原文件被移动或删除时保留历史引用标识，并提示来源失效。</li><li><b>搜索分两层。</b>默认按文件名筛选，可用全文检索时再提供“搜内容”。跨库搜索标明实际覆盖的库，远程失败时不声称搜索完整。</li><li><b>失败不挡阅读。</b>单文件失败单独重试；失效文件夹可重新定位；远程过期可重新连接。缓存内容标注时间，失效连接暂停问答。</li><li><b>能力决定按钮。</b>浏览、预览、检索、上传、删除、同步均由来源能力与当前权限决定。界面统一不代表能力相同。</li></ul>
+<h2>分阶段接入，保留退路</h2><ol class="steps"><li><b>统一导航和只读聚合。</b>给现有本地库、文件夹来源、远程库建立带来源类型的稳定标识；旧路由重定向到统一详情，保留库 ID、文档 ID、会话引用。</li><li><b>接入文件夹资料库。</b>先建立来源与索引库的关联。已有文件夹不自动重复建库；一对多历史导入关系单独列出，用户确认后关联，不能按同名自动合并。</li><li><b>接入增量同步与问答。</b>区分文件目录记录和索引文档；覆盖新增、改名、删除、离线、解析失败、重试。远程继续走原服务适配器。</li><li><b>验收后收起旧入口。</b>通过开关小范围启用，保留旧路由和数据读取方式；迁移前留映射快照，未通过时撤回入口切换，不删除旧数据。</li></ol>
+<h3>接入前的验收范围</h3><p>空库、千级文件分页、中文长路径、文件夹失联、重复添加、父子目录重叠、历史一对多导入、云模型告知、远程无目录 / 无预览 / 只读 / 过期权限，以及旧对话引用跳转。键盘操作、窄窗口和三主题明暗模式分别检查。</p>
+<p class="scope">当前交付只包含 HTML 方案和示例交互，未修改 App 的资料库路由、数据或后端。目录监听、统一搜索和迁移服务属于后续实现范围。</p>
+</section>
+<dialog id="panel" aria-labelledby="panel-title"></dialog><div id="toast" role="status" aria-live="polite"></div>
+<script src="preview.js"></script>
+</body></html>
