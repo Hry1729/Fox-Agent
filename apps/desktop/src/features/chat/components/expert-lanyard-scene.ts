@@ -207,7 +207,7 @@ export function createExpertLanyardScene(container: HTMLElement, card: { frontIm
       const styles = getComputedStyle(container)
       ctx.fillStyle = styles.getPropertyValue('--fox-expert-card-fill').trim() || '#f5f5f4'
       ctx.fillRect(0, 0, 512, 686)
-      const portraitSize = 686 * .6
+      const portraitSize = 686 * .5
       const portraitLeft = (512 - portraitSize) / 2
       const scale = Math.max(portraitSize / image.naturalWidth, portraitSize / image.naturalHeight)
       const w = image.naturalWidth * scale, h = image.naturalHeight * scale
