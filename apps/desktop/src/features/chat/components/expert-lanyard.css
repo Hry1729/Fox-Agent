@@ -63,8 +63,8 @@
 .fox-expert-card-emboss { display: block; width: 100%; height: 100%; border-radius: inherit; }
 .fox-expert-lanyard-face.is-front { background: var(--fox-expert-card-fill); }
 .fox-expert-lanyard-face.is-front img { width: 75px; height: 75px; left: 50%; transform: translateX(-50%); top: 18px; border-radius: 6px; object-fit: cover; }
-.fox-expert-lanyard-face strong { left: 7px; right: 7px; top: 118px; bottom: auto; color: var(--fox-expert-card-ink); font-size: 13.125px !important; font-weight: 600; line-height: 1.15; text-align: center; display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
-.fox-expert-lanyard-face small { position: absolute; left: 7px; right: 7px; top: 136px; color: var(--fox-expert-card-muted); font-size: 7px !important; font-weight: 500; line-height: 1.2; letter-spacing: .875px; text-align: center; white-space: nowrap; }
+.fox-expert-lanyard-face strong { left: 7px; right: 7px; top: 106px; bottom: auto; color: var(--fox-expert-card-ink); font-size: 13.125px !important; font-weight: 600; line-height: 1.15; text-align: center; display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.fox-expert-lanyard-face small { position: absolute; left: 7px; right: 7px; top: 124px; color: var(--fox-expert-card-muted); font-size: 7px !important; font-weight: 500; line-height: 1.2; letter-spacing: .875px; text-align: center; white-space: nowrap; }
 [data-color-theme='paper'] .fox-expert-lanyard { --fox-expert-card-fill: #f8f6ef; --fox-expert-card-ink: #473b26; --fox-expert-card-muted: #6b5d42; }
 [data-color-theme='mist'] .fox-expert-lanyard { --fox-expert-card-fill: #f3f6fa; --fox-expert-card-ink: #263b50; --fox-expert-card-muted: #4a6278; }
 .fox-expert-lanyard-slot {

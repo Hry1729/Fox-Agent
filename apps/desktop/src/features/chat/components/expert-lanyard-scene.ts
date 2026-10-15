@@ -231,11 +231,11 @@ export function createExpertLanyardScene(container: HTMLElement, card: { frontIm
       }
       ctx.fillStyle = styles.getPropertyValue('--fox-expert-card-ink').trim() || '#292c33'
       ctx.font = '600 60px "HarmonyOS Sans SC", sans-serif'
-      textLines(card.name, 1).forEach(text => ctx.fillText(text, 256, 590))
+      textLines(card.name, 1).forEach(text => ctx.fillText(text, 256, 535))
       ctx.fillStyle = styles.getPropertyValue('--fox-expert-card-muted').trim() || '#555b66'
       ctx.font = '500 32px "HarmonyOS Sans SC", sans-serif'
       ctx.letterSpacing = '4px'
-      ctx.fillText('Fox Agent', 256, 648)
+      ctx.fillText('Fox Agent', 256, 593)
       ctx.letterSpacing = '0px'
       texture.needsUpdate = true; render()
     }
