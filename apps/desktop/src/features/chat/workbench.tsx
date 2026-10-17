@@ -176,7 +176,9 @@ export function Workbench() {
   const [sidebarManuallyCollapsed, setSidebarCollapsed] = useState(() => readStoredBoolean(layoutStorage.sidebarCollapsed, false))
   const [narrowSidebar, setNarrowSidebar] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 700px)').matches)
   const sidebarCollapsed = sidebarManuallyCollapsed || narrowSidebar
-  const [sidebarWidth, setSidebarWidth] = useState(() => readStoredNumber(layoutStorage.sidebarWidth, 288, 220, 456))
+  // With the rail gone the sidebar's own content sets the width; the shell only
+  // keeps the last expanded width so one number drives both sides of the motion.
+  const [expandedSidebarWidth, setExpandedSidebarWidth] = useState(() => readStoredNumber(layoutStorage.sidebarWidth, 288, 220, 456))
   useEffect(() => {
     const query = window.matchMedia('(max-width: 700px)')
     const sync = () => setNarrowSidebar(query.matches)
@@ -322,7 +324,7 @@ export function Workbench() {
   // libraries inject at runtime; re-publish them as adopted (CSSOM) sheets.
   useEffect(() => adoptBlockedStyles(), [])
   useEffect(() => { window.localStorage.setItem(layoutStorage.sidebarCollapsed, sidebarManuallyCollapsed ? '1' : '0') }, [sidebarManuallyCollapsed])
-  useEffect(() => { window.localStorage.setItem(layoutStorage.sidebarWidth, String(Math.round(sidebarWidth))) }, [sidebarWidth])
+  useEffect(() => { window.localStorage.setItem(layoutStorage.sidebarWidth, String(Math.round(expandedSidebarWidth))) }, [expandedSidebarWidth])
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightWidth, String(Math.round(rightWidth))) }, [rightWidth])
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightMode, rightMode ?? 'closed') }, [rightMode])
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightTabs, JSON.stringify(openRightTabs)) }, [openRightTabs])
@@ -375,13 +377,16 @@ export function Workbench() {
   }, [desktopUserMessage, pendingUserMessage])
 
   const shellStyle = useMemo(() => {
-    const currentSidebarWidth = sidebarCollapsed ? 64 : sidebarWidth
+    // While collapsed the rail is suppressed (the narrow-rail CSS cannot reach a
+    // 0-width sidebar), so the centred column needs no offset. Both numbers move
+    // on the same clock as the sidebar's width transition.
+    const railWidth = sidebarCollapsed ? 0 : `min(${expandedSidebarWidth}px, 34vw)`
     return {
-      '--fox-sidebar-width': `${currentSidebarWidth}px`,
-      '--fox-sidebar-center-offset': `${currentSidebarWidth / 2}px`,
+      '--fox-sidebar-width': `${expandedSidebarWidth}px`,
+      '--fox-sidebar-center-offset': `calc(${railWidth} / 2)`,
       '--fox-composer-occlusion': `${composerHeight}px`,
     } as React.CSSProperties
-  }, [compactLayout, composerHeight, sidebarCollapsed, sidebarWidth])
+  }, [composerHeight, expandedSidebarWidth, sidebarCollapsed])
 
   const openRightSidebarHome = () => {
     setRightSidebarCollapsed(false)
@@ -1286,7 +1291,7 @@ export function Workbench() {
       <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
       <div className="fox-workbench">
         <MemoizedSidebar collapsed={sidebarCollapsed} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
-        {!sidebarCollapsed && <SidebarResizeDivider width={sidebarWidth} onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
+        {!sidebarCollapsed && <SidebarResizeDivider width={expandedSidebarWidth} onResize={(delta) => setExpandedSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className={`fox-content-card ${showConversationRightSidebar && !rightSidebarCollapsed && (!compactLayout || compactRightOpen) ? 'has-open-right-panel' : ''}`}>
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout ? 'is-right-maximized' : ''}`}>
         <section className="fox-chat-pane">

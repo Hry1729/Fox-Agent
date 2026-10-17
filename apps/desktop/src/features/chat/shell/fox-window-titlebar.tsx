@@ -1,9 +1,9 @@
 import { FOX_ASSISTANT_AVATAR } from '../components/FoxAssistantAvatar'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { FolderOpen, Minus, Sparkles, X } from 'lucide-react'
-import { AnimatedIconTrigger, Maximize, MessageCirclePlus, Minimize, PanelLeft, Settings } from '@/components/fox-ui/animated-icons'
-import { type ReactNode, memo, useEffect, useState } from 'react'
+import { ClipboardPaste, Copy, FolderOpen, Minus, Redo2, Sparkles, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
+import { AlignLeft, AnimatedIconTrigger, Maximize, MessageCirclePlus, Minimize, PanelLeft, Settings } from '@/components/fox-ui/animated-icons'
+import { memo, useEffect, useState, type ReactNode } from 'react'
 import { detectShortcutPlatform, formatShortcut, type ShortcutActionId } from '@/features/settings/shortcut-model'
 import { useShortcutPreferences } from '@/features/settings/use-shortcuts'
 
@@ -69,35 +69,10 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
       <div className="fox-window-product" data-tauri-drag-region>
         <img src={FOX_ASSISTANT_AVATAR} alt="" />
         <strong>Fox</strong>
-        <div className="fox-titlebar-sidebar-controls" aria-label="侧边栏控制">
+        <div className="fox-titlebar-sidebar-controls" aria-label="标题栏控制">
+          <AnimatedIconTrigger><AppMenu onNewChat={onNewChat} onOpenProject={onOpenProject} onSettings={onSettings} onAbout={onAbout} leftSidebarCollapsed={leftSidebarCollapsed} onToggleSidebar={onToggleSidebar} onZoom={onZoom} onClose={() => void windowAction('close')} shortcutHint={shortcutHint} /></AnimatedIconTrigger>
           <AnimatedIconTrigger><button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button></AnimatedIconTrigger>
         </div>
-        <nav aria-label="应用菜单">
-          <WindowMenu label="文件">
-            <AnimatedIconTrigger><DropdownMenuItem onSelect={onNewChat}><MessageCirclePlus />新建对话{shortcutHint('new-conversation')}</DropdownMenuItem></AnimatedIconTrigger>
-            <DropdownMenuItem onSelect={onOpenProject}><FolderOpen />打开项目{shortcutHint('add-project')}</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <AnimatedIconTrigger><DropdownMenuItem onSelect={onSettings}><Settings />设置{shortcutHint('open-settings')}</DropdownMenuItem></AnimatedIconTrigger>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => void windowAction('close')}>退出</DropdownMenuItem>
-          </WindowMenu>
-          <WindowMenu label="编辑">
-            <DropdownMenuItem onSelect={() => document.execCommand('undo')}>撤销<DropdownMenuShortcut>Ctrl Z</DropdownMenuShortcut></DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => document.execCommand('redo')}>重做<DropdownMenuShortcut>Ctrl Y</DropdownMenuShortcut></DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => document.execCommand('copy')}>复制<DropdownMenuShortcut>Ctrl C</DropdownMenuShortcut></DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => document.execCommand('paste')}>粘贴<DropdownMenuShortcut>Ctrl V</DropdownMenuShortcut></DropdownMenuItem>
-          </WindowMenu>
-          <WindowMenu label="视图">
-            <AnimatedIconTrigger><DropdownMenuItem onSelect={onToggleSidebar}><PanelLeft />{leftSidebarCollapsed ? '显示侧栏' : '隐藏侧栏'}{shortcutHint('toggle-sidebar')}</DropdownMenuItem></AnimatedIconTrigger>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => onZoom(0.1)}>放大<DropdownMenuShortcut>Ctrl +</DropdownMenuShortcut></DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onZoom(-0.1)}>缩小<DropdownMenuShortcut>Ctrl -</DropdownMenuShortcut></DropdownMenuItem>
-          </WindowMenu>
-          <WindowMenu label="帮助">
-            <DropdownMenuItem onSelect={onAbout}><Sparkles />关于 Fox</DropdownMenuItem>
-          </WindowMenu>
-        </nav>
       </div>
       <div className="fox-window-controls">
         <button type="button" aria-label="最小化" onClick={() => void windowAction('minimize')}><Minus /></button>
@@ -110,11 +85,48 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
 
 export const MemoizedWindowTitlebar = memo(WindowTitlebar)
 
-function WindowMenu({ label, children }: { label: string; children: ReactNode }) {
+function WindowMenuLabel({ children }: { children: string }) {
+  return <DropdownMenuLabel className="fox-window-menu-label">{children}</DropdownMenuLabel>
+}
+
+/** One icon menu for everything the native-style bar used to spell out as
+ *  文件 / 编辑 / 视图 / 帮助, so the title bar stays two controls wide. */
+function AppMenu({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onZoom, onClose, shortcutHint }: {
+  leftSidebarCollapsed: boolean
+  onNewChat: () => void
+  onOpenProject: () => void
+  onSettings: () => void
+  onAbout: () => void
+  onToggleSidebar: () => void
+  onZoom: (delta: number) => void
+  onClose: () => void
+  shortcutHint: (actionId: ShortcutActionId) => ReactNode
+}) {
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild><button type="button">{label}</button></DropdownMenuTrigger>
-      <DropdownMenuContent align="start" sideOffset={3} className="fox-window-menu-content">{children}</DropdownMenuContent>
+      <DropdownMenuTrigger asChild><button type="button" className="fox-titlebar-menu-trigger" aria-label="应用菜单" title="应用菜单"><AlignLeft /></button></DropdownMenuTrigger>
+      <DropdownMenuContent align="start" sideOffset={5} className="fox-window-menu-content fox-app-menu">
+        <WindowMenuLabel>文件</WindowMenuLabel>
+        <DropdownMenuItem onSelect={onNewChat}><MessageCirclePlus />新建对话{shortcutHint('new-conversation')}</DropdownMenuItem>
+        <DropdownMenuItem onSelect={onOpenProject}><FolderOpen />打开项目{shortcutHint('add-project')}</DropdownMenuItem>
+        <DropdownMenuItem onSelect={onSettings}><Settings />设置{shortcutHint('open-settings')}</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <WindowMenuLabel>编辑</WindowMenuLabel>
+        <DropdownMenuItem onSelect={() => document.execCommand('undo')}><Undo2 />撤销<DropdownMenuShortcut>Ctrl Z</DropdownMenuShortcut></DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => document.execCommand('redo')}><Redo2 />重做<DropdownMenuShortcut>Ctrl Y</DropdownMenuShortcut></DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => document.execCommand('copy')}><Copy />复制<DropdownMenuShortcut>Ctrl C</DropdownMenuShortcut></DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => document.execCommand('paste')}><ClipboardPaste />粘贴<DropdownMenuShortcut>Ctrl V</DropdownMenuShortcut></DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <WindowMenuLabel>视图</WindowMenuLabel>
+        <DropdownMenuItem onSelect={onToggleSidebar}><PanelLeft />{leftSidebarCollapsed ? '显示侧栏' : '隐藏侧栏'}{shortcutHint('toggle-sidebar')}</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onZoom(0.1)}><ZoomIn />放大<DropdownMenuShortcut>Ctrl +</DropdownMenuShortcut></DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onZoom(-0.1)}><ZoomOut />缩小<DropdownMenuShortcut>Ctrl -</DropdownMenuShortcut></DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <WindowMenuLabel>帮助</WindowMenuLabel>
+        <DropdownMenuItem onSelect={onAbout}><Sparkles />关于 Fox</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onClose}>退出</DropdownMenuItem>
+      </DropdownMenuContent>
     </DropdownMenu>
   )
 }

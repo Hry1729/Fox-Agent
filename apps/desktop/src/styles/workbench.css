@@ -67,7 +67,9 @@
   gap: 1px;
   height: var(--fox-inline-action-height);
   align-self: center;
-  margin-left: 1px;
+  /* The title bar keeps a single icon menu, so it starts right after the product
+     name instead of leaving the old text-menu gutter empty. */
+  margin-left: -4px;
 }
 
 .fox-titlebar-sidebar-controls button {
@@ -811,11 +813,16 @@
   -webkit-backdrop-filter: blur(8px);
 }
 
+/* One animated value drives the collapse: the sidebar shares the shell's
+   --fox-sidebar-width, so expanding writes the remembered width once and the
+   width, the rail's padding and the app's centred column all move together.
+   The min() keeps a remembered width that no longer fits a narrow window from
+   squeezing the conversation card. */
 .fox-sidebar {
   min-height: 0;
   position: relative;
-  width: var(--fox-sidebar-width);
-  flex: 0 0 var(--fox-sidebar-width);
+  width: min(var(--fox-sidebar-width), 34vw);
+  flex: 0 0 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -826,10 +833,14 @@
   box-shadow: none;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  transition: width 180ms ease, flex-basis 180ms ease, padding 180ms ease;
+  transition:
+    width 200ms cubic-bezier(.22, 1, .36, 1),
+    padding 200ms cubic-bezier(.22, 1, .36, 1);
+  will-change: width;
 }
 
 .fox-sidebar.is-collapsed {
+  width: 64px;
   padding-inline: 10px;
   overflow: visible;
 }
@@ -850,12 +861,40 @@
   display: none;
 }
 
+/* The title-safe strip is what visually joins the rail to the title bar, so its
+   height animates with the width instead of snapping. */
+.fox-sidebar-title-safe {
+  transition: height 200ms cubic-bezier(.22, 1, .36, 1), flex-basis 200ms cubic-bezier(.22, 1, .36, 1);
+}
+
 .fox-sidebar.is-collapsed .fox-sidebar-title-safe {
   height: 45px;
   flex-basis: 45px;
   align-items: center;
   justify-content: center;
-  transform: translateY(9px);
+}
+
+/* Collapsed-only controls rise up level with the title bar. Instead of
+   translating the expanded content (which would park invisible rows beside the
+   title bar), the controls live in a container that is hidden until collapsed. */
+.fox-sidebar-collapsed-rail {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+}
+
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail {
+  display: flex;
+  margin-top: -9px;
+}
+
+/* Separates the strip that stays up top (文件 / 对话) from the rest of the rail. */
+.fox-sidebar-rail-divider {
+  width: 20px;
+  height: 1px;
+  flex: 0 0 1px;
+  margin: 6px auto 7px;
+  background: color-mix(in srgb, var(--fox-border) 82%, transparent);
 }
 
 .fox-sidebar.is-collapsed .fox-sidebar-title-safe .fox-icon-button,
@@ -885,7 +924,7 @@
 .fox-sidebar-mode-switch:focus-visible,
 .fox-sidebar-collapsed-sections button:hover,
 .fox-sidebar-collapsed-sections button:focus-visible {
-  background: var(--fox-panel);
+  background: var(--fox-hover);
   color: var(--fox-text);
   outline: none;
 }
@@ -1073,6 +1112,24 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* While a managed view is collapsed the row keeps its label in the DOM for an
+   instant expand; the rail's overflow then clips it to the icon instead of the
+   row reflowing mid-animation. */
+.fox-sidebar.is-collapsed .fox-sidebar-primary.is-expanded-row {
+  position: absolute;
+  top: 0;
+  left: 10px;
+  right: 10px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.fox-sidebar.is-collapsed .fox-sidebar-primary.is-expanded-row .fox-sidebar-command svg {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
 }
 
 .fox-shell .fox-sidebar-command,
@@ -1867,6 +1924,16 @@
 .fox-sidebar-collapsed-sections > .fox-sidebar-collapsed-entry > button > svg {
   width: var(--fox-icon-size);
   height: var(--fox-icon-size);
+  stroke-width: 1.8;
+}
+
+/* A long list used to run past the tile. The tile sits just above the footer, so
+   the menu's bottom edge is fixed near the window's bottom; the inner list now
+   scrolls inside it, and the nested conversation menu is sized to the room above
+   the row it opens from. */
+.fox-sidebar.is-collapsed .fox-sidebar-conversations-popover {
+  max-height: min(320px, calc(100dvh - 120px));
+  overflow: auto;
 }
 
 .fox-sidebar-collapsed-count {
@@ -12229,15 +12296,39 @@ img[src='/avatars/fox-assistant.png'] {
   stroke-width: 1.8;
 }
 
+/* The collapsed strip stays row-height so the rail's first control lands at the
+   same y whether the width has finished animating or not. */
 .fox-sidebar.is-collapsed .fox-sidebar-title-safe {
   height: var(--fox-sidebar-row-height);
   flex: 0 0 var(--fox-sidebar-row-height);
   margin: 16px 0 5px;
   transform: none;
 }
-.fox-sidebar.is-collapsed .fox-sidebar-collapsed-utilities {
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail {
   gap: 5px;
   margin: 0 0 5px;
+}
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-search-trigger,
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-collapsed-home {
+  width: var(--fox-sidebar-row-height);
+  height: var(--fox-sidebar-row-height);
+  flex: 0 0 var(--fox-sidebar-row-height);
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+/* The way back to the full sidebar comes first, level with the title bar. */
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-collapsed-home {
+  color: var(--fox-text);
+}
+.fox-sidebar-collapsed-back {
+  width: var(--fox-sidebar-row-height);
+  min-height: var(--fox-sidebar-row-height);
+  align-self: center;
+  justify-content: center;
+  margin: 5px 0;
+  padding: 0;
 }
 .fox-sidebar.is-collapsed .fox-sidebar-primary {
   gap: 5px;

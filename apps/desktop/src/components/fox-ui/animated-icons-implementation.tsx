@@ -8,6 +8,7 @@ export { MessageCirclePlus, MessageCirclePlus as MessageCirclePlusIcon } from '@
 export { Users, Users as UsersIcon } from '@/components/animate-ui/icons/users'
 export { Blocks, Blocks as BlocksIcon } from '@/components/animate-ui/icons/blocks'
 export { PanelLeft, PanelLeft as PanelLeftIcon } from '@/components/animate-ui/icons/panel-left'
+export { PanelLeftOpen, PanelLeftOpen as PanelLeftOpenIcon } from '@/components/animate-ui/icons/panel-left-open'
 export { PanelRight, PanelRight as PanelRightIcon } from '@/components/animate-ui/icons/panel-right'
 export { Settings, Settings as SettingsIcon } from '@/components/animate-ui/icons/settings'
 export { SunMoon, SunMoon as SunMoonIcon } from '@/components/animate-ui/icons/sun-moon'
@@ -26,6 +27,7 @@ export { ListTodo, ListTodo as ListTodoIcon } from '@/components/animate-ui/icon
 export { BookCopy, BookCopy as BookCopyIcon } from '@/components/animate-ui/icons/book-copy'
 export { Home, Home as HomeIcon } from '@/components/animate-ui/icons/home'
 export { Sparkles, Sparkles as SparklesIcon } from '@/components/animate-ui/icons/sparkles'
+export { AlignLeft, AlignLeft as AlignLeftIcon } from '@/components/animate-ui/icons/align-left'
 export type { IconProps, AnimateIconProps } from '@/components/animate-ui/icons/icon'
 
 export type AnimatedIconTriggerProps = Omit<AnimateIconProps, 'asChild' | 'children' | 'loop' | 'animate' | 'animateOnView'> & {

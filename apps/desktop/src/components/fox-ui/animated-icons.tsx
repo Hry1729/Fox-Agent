@@ -1,5 +1,5 @@
 import { cloneElement, type ComponentProps, type ComponentType, type ReactElement } from 'react'
-import { MessageCirclePlus as StaticMessageCirclePlus, Users as StaticUsers, Blocks as StaticBlocks, PanelLeft as StaticPanelLeft, PanelRight as StaticPanelRight, Settings as StaticSettings, SunMoon as StaticSunMoon, Maximize as StaticMaximize, Minimize as StaticMinimize, Search as StaticSearch, Bell as StaticBell, Wallet as StaticWallet, Folders as StaticFolders, Library as StaticLibrary, Orbit as StaticOrbit, ListTodo as StaticListTodo, BookCopy as StaticBookCopy, House as StaticHouse, Sparkles as StaticSparkles } from 'lucide-react'
+import { MessageCirclePlus as StaticMessageCirclePlus, Users as StaticUsers, Blocks as StaticBlocks, PanelLeft as StaticPanelLeft, PanelLeftOpen as StaticPanelLeftOpen, PanelRight as StaticPanelRight, Settings as StaticSettings, SunMoon as StaticSunMoon, Maximize as StaticMaximize, Minimize as StaticMinimize, Search as StaticSearch, Bell as StaticBell, Wallet as StaticWallet, Folders as StaticFolders, Library as StaticLibrary, Orbit as StaticOrbit, ListTodo as StaticListTodo, BookCopy as StaticBookCopy, House as StaticHouse, Sparkles as StaticSparkles, AlignLeft as StaticAlignLeft } from 'lucide-react'
 import type { AnimateIconProps, IconProps } from '@/components/animate-ui/icons/icon'
 import { deferredModule } from './use-deferred-module'
 
@@ -7,7 +7,7 @@ const implementation = deferredModule(() => import('./animated-icons-implementat
 export type { IconProps, AnimateIconProps } from '@/components/animate-ui/icons/icon'
 export type AnimatedIconTriggerProps = Omit<AnimateIconProps, 'asChild' | 'children' | 'loop' | 'animate' | 'animateOnView'> & { children: ReactElement }
 
-function icon(name: 'MessageCirclePlus' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles', Fallback: typeof StaticBell) {
+function icon(name: 'MessageCirclePlus' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelLeftOpen' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles' | 'AlignLeft', Fallback: typeof StaticBell) {
   return function DeferredIcon(props: IconProps<string>) {
     const loaded = implementation.useModule()
     if (loaded) { const Icon = loaded[name] as ComponentType<IconProps<string>>; return <Icon {...props} /> }
@@ -24,6 +24,8 @@ export const Blocks = icon('Blocks', StaticBlocks)
 export { Blocks as BlocksIcon }
 export const PanelLeft = icon('PanelLeft', StaticPanelLeft)
 export { PanelLeft as PanelLeftIcon }
+export const PanelLeftOpen = icon('PanelLeftOpen', StaticPanelLeftOpen)
+export { PanelLeftOpen as PanelLeftOpenIcon }
 export const PanelRight = icon('PanelRight', StaticPanelRight)
 export { PanelRight as PanelRightIcon }
 export const Settings = icon('Settings', StaticSettings)
@@ -54,6 +56,8 @@ export const Home = icon('Home', StaticHouse)
 export { Home as HomeIcon }
 export const Sparkles = icon('Sparkles', StaticSparkles)
 export { Sparkles as SparklesIcon }
+export const AlignLeft = icon('AlignLeft', StaticAlignLeft)
+export { AlignLeft as AlignLeftIcon }
 
 export function AnimatedIconTrigger({ children, ...props }: AnimatedIconTriggerProps) {
   const loaded = implementation.useModule()

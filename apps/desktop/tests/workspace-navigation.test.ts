@@ -41,7 +41,7 @@ describe('workspace navigation', () => {
     expect(localKnowledgeBackRoute('local-knowledge-documents', 'kb-1')).toEqual({ view: 'local-knowledge-detail', entityId: 'kb-1' })
     expect(localKnowledgeBackRoute('local-knowledge-home', null)).toEqual({ view: 'chat' })
     expect(localKnowledgeBackRoute('local-knowledge', null)).toEqual({ view: 'local-knowledge-home' })
-    expect(localKnowledgeBackRoute('local-files', null)).toEqual({ view: 'local-knowledge-home' })
+    expect(localKnowledgeBackRoute('local-files', null)).toEqual({ view: 'local-knowledge' })
   })
 
   test('keeps the original return route across shortcut settings navigation', () => {
