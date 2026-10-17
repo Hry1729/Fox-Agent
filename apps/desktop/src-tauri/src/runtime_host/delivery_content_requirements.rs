@@ -976,7 +976,10 @@ fn evaluate(contract:&Contract,root:&Path,bytes:&[u8],path:&str,database:&Databa
                 let mut expected=Vec::new();for (index,name) in selected.iter().enumerate() {
                     let body=contents.get(name).ok_or("冻结选择引用缺失")?;
                     expected.extend_from_slice(file_name(name).as_bytes());expected.push(b'\n');expected.extend_from_slice(body);
-                    if index+1<selected.len(){if !body.ends_with(b"\n"){expected.push(b'\n');}expected.push(b'\n');}
+                    // Entries are joined by exactly one blank line. A 0-byte body
+                    // contributes no line of its own, so it must not gain a
+                    // terminator LF before the separator (D1).
+                    if index+1<selected.len(){if !body.is_empty()&&!body.ends_with(b"\n"){expected.push(b'\n');}expected.push(b'\n');}
                 }
                 Ok(if bytes==expected {RequirementVerdict::Met}else{RequirementVerdict::Unmet(format!("真实合并字节不符合冻结的文件名升序/完整内容/单空行格式；要求顺序：{}",selected.iter().map(|p|file_name(p)).collect::<Vec<_>>().join("、")))})
             }
@@ -1104,6 +1107,107 @@ mod tests {
         assert_eq!(source_sheet_from_task("以 Detailed Ledger 为事实明细，按 Segment Group 列统计。").unwrap(),Some("Detailed Ledger".into()));
         let requirement=source_statistics_demand("读取 FIRST.XLSX 和 SECOND.XLSX，按 Segment Group 列统计，生成 report.md。").unwrap();
         assert!(matches!(requirement.kind,RequirementKind::SourceStatsUnbound{..}));
+    }
+
+    // D1: the v1 `Contract::Concat` writer is the path that actually runs when
+    // v2 is off (the default), so the empty-body separator must be fixed here
+    // too. The expectations below are literal bytes written from the frozen
+    // wording ("entries joined by exactly one blank line"), not produced by the
+    // writer under test.
+    #[test]
+    fn d1_v1_concat_separates_entries_with_exactly_one_blank_line() {
+        let root = std::env::temp_dir().join("fox-d1-v1-concat");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Three 0-byte sources: the B4 shape. `frozen_bytes` re-verifies each
+        // digest, so the references must describe the real files.
+        let names = ["01_周一.txt", "02_周二.txt", "03_周三.txt"];
+        let sources = names
+            .iter()
+            .map(|name| {
+                std::fs::write(root.join(name), b"").unwrap();
+                Source {
+                    path: (*name).into(),
+                    sha256: digest(b""),
+                    bytes: 0,
+                    first_line: 1,
+                    last_line: 1,
+                }
+            })
+            .collect::<Vec<_>>();
+        let selected = names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        let contract = Contract::Concat {
+            sources,
+            selected,
+            selection_order: "byteSizeAscThenNameAsc".into(),
+            tie_order: "nameAsc".into(),
+            merge_order: "nameAsc".into(),
+            read_only: true,
+        };
+        let database = Database::open(root.join("d1.db")).expect("database");
+
+        // The rule's 44 bytes must be Met.
+        let correct = "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes();
+        assert_eq!(
+            evaluate(&contract, &root, correct, "joined.txt", &database, "run", &json!({})),
+            RequirementVerdict::Met,
+            "D1: the corrected 44-byte merge must satisfy the v1 contract"
+        );
+        assert_eq!(correct.len(), 44);
+
+        // The old 46-byte construction (two blank lines) must now be Unmet.
+        let double_blank = "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes();
+        assert!(
+            matches!(
+                evaluate(&contract, &root, double_blank, "joined.txt", &database, "run", &json!({})),
+                RequirementVerdict::Unmet(_)
+            ),
+            "D1: two blank lines must not satisfy the one-blank-line rule"
+        );
+
+        // A non-empty body without a terminator still needs two LFs, and an
+        // LF-terminated one needs one — the fix must not collapse either.
+        let mixed = ["01_周一.txt", "02_周二.txt"];
+        std::fs::write(root.join("01_周一.txt"), b"alpha").unwrap();
+        std::fs::write(root.join("02_周二.txt"), b"beta\n").unwrap();
+        let mixed_sources = mixed
+            .iter()
+            .map(|name| {
+                let body = std::fs::read(root.join(name)).unwrap();
+                Source {
+                    path: (*name).into(),
+                    sha256: digest(&body),
+                    bytes: body.len() as u64,
+                    first_line: 1,
+                    last_line: 1,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mixed_contract = Contract::Concat {
+            sources: mixed_sources,
+            selected: mixed.iter().map(|n| (*n).to_string()).collect(),
+            selection_order: "byteSizeAscThenNameAsc".into(),
+            tie_order: "nameAsc".into(),
+            merge_order: "nameAsc".into(),
+            read_only: true,
+        };
+        // alpha (no LF) -> terminator LF + blank LF; beta\n -> blank LF only.
+        assert_eq!(
+            evaluate(
+                &mixed_contract,
+                &root,
+                b"01_\xe5\x91\xa8\xe4\xb8\x80.txt\nalpha\n\n02_\xe5\x91\xa8\xe4\xba\x8c.txt\nbeta\n",
+                "joined.txt",
+                &database,
+                "run",
+                &json!({})
+            ),
+            RequirementVerdict::Met,
+            "D1: non-empty bodies keep their original two-LF/one-LF separators"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
