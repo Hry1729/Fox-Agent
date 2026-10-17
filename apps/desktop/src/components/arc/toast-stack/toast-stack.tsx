@@ -47,13 +47,13 @@ export interface ToastStackProviderProps {
 
 /**
  * The viewport for a toast stack. Render it once inside a `ToastStackProvider` and call `useToastStack()` anywhere below.
- * Use it for short, non-blocking results of what someone just did: new toasts rise from the bottom edge, older ones tuck behind,
+ * Use it for short, non-blocking results of what someone just did: new toasts enter from the chosen edge, older ones tuck behind,
  * and hovering or focusing the stack fans it out into a list. Toasts pause while the stack is open or the tab is hidden, and swipe right to dismiss.
  */
 export interface ToastStackProps {
   /** Accessible name of the notification region. */
   label?: string;
-  position?: "bottom-right" | "bottom-center" | "bottom-left";
+  position?: "top-right" | "bottom-right" | "bottom-center" | "bottom-left";
   /** Pins the stack inside the nearest positioned ancestor instead of the window, for panels and previews. */
   contained?: boolean;
   /** How many toasts show at once. Older ones wait behind and return as the front ones close. */
@@ -109,15 +109,16 @@ const focusVisible = (element: Element) => { try { return element.matches(":focu
  * Closed, tucked toasts take the front toast's height so their edges line up; open, each takes its own and they stack with a gap.
  * The list is the hover target and is sized to cover the gaps, so moving between open toasts never collapses the stack.
  */
-function layoutStack(toasts: ToastRecord[], heights: Record<string, number>, expanded: boolean, visibleToasts: number) {
+function layoutStack(toasts: ToastRecord[], heights: Record<string, number>, expanded: boolean, visibleToasts: number, fromTop = false) {
+  const direction = fromTop ? 1 : -1;
   const front = toasts.length ? heights[toasts[0]!.id] ?? 0 : 0;
   const tops = toasts.reduce<number[]>((sum, item, index) => [...sum, sum[index]! + (index < visibleToasts ? (heights[item.id] ?? 0) + GAP : 0)], [0]);
   const targets = toasts.map((item, index): Target => {
     const visible = index < visibleToasts;
     const depth = Math.min(index, visibleToasts);
     return expanded
-      ? { y: -tops[index]!, scale: 1, height: heights[item.id] ?? 0, opacity: visible ? 1 : 0, content: 1 }
-      : { y: -PEEK * depth, scale: 1 - STEP * depth, height: index === 0 ? heights[item.id] ?? 0 : front, opacity: visible ? 1 : 0, content: index === 0 ? 1 : 0 };
+      ? { y: direction * tops[index]!, scale: 1, height: heights[item.id] ?? 0, opacity: visible ? 1 : 0, content: 1 }
+      : { y: direction * PEEK * depth, scale: 1 - STEP * depth, height: index === 0 ? heights[item.id] ?? 0 : front, opacity: visible ? 1 : 0, content: index === 0 ? 1 : 0 };
   });
   const listHeight = !toasts.length ? 0 : expanded ? tops[toasts.length]! - GAP : front + PEEK * (Math.min(toasts.length, visibleToasts) - 1);
   return { targets, listHeight };
@@ -190,6 +191,7 @@ function Swap(props: HTMLMotionProps<"span">) {
 type Gesture = { pointerId: number; startX: number; startY: number; origin: number; active: boolean; samples: { t: number; x: number }[] };
 
 interface ToastItemProps {
+  fromTop: boolean;
   toast: ToastRecord;
   target: Target;
   expanded: boolean;
@@ -204,7 +206,7 @@ interface ToastItemProps {
   onHandOff: (leaving: HTMLElement, keyboard: boolean) => void;
 }
 
-function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, store, onMeasure, onDragChange, onTap, onHandOff }: ToastItemProps) {
+function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, store, onMeasure, onDragChange, onTap, onHandOff, fromTop }: ToastItemProps) {
   const { id } = toast;
   const [isPresent, safeToRemove] = usePresence();
   const itemRef = useRef<HTMLLIElement>(null);
@@ -251,14 +253,14 @@ function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, sto
       animate(contentOpacity, target.content, reducedFade);
       return;
     }
-    if (entering) { y.jump(target.y + target.height); scale.jump(target.scale); height.jump(target.height); contentOpacity.jump(target.content); opacity.jump(0); }
+    if (entering) { y.jump(target.y + (fromTop ? -target.height : target.height)); scale.jump(target.scale); height.jump(target.height); contentOpacity.jump(target.content); opacity.jump(0); }
     const spring = morph ? motionTokens.spring.morph : motionTokens.spring.smooth;
     animate(y, target.y, spring);
     animate(scale, target.scale, spring);
     if (!entering) animate(height, target.height, spring);
     animate(opacity, target.opacity, entering ? enterFade : fade);
     animate(contentOpacity, target.content, fade);
-  }, [contentOpacity, expanded, height, isPresent, opacity, reduce, scale, target.content, target.height, target.opacity, target.scale, target.y, y]);
+  }, [contentOpacity, expanded, fromTop, height, isPresent, opacity, reduce, scale, target.content, target.height, target.opacity, target.scale, target.y, y]);
 
   // An update restarts the clock; pausing keeps whatever time is left.
   useEffect(() => { remaining.current = toast.duration; }, [toast.version, toast.duration]);
@@ -281,11 +283,11 @@ function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, sto
     const done = () => safeToRemove?.();
     if (reduce) { animate(opacity, 0, reducedFade).then(done); return; }
     if (!swiped.current) {
-      animate(y, y.get() + 10, motionTokens.spring.smooth);
+      animate(y, y.get() + (fromTop ? -10 : 10), motionTokens.spring.smooth);
       animate(scale, scale.get() * .96, motionTokens.spring.smooth);
     }
     animate(opacity, 0, { duration: swiped.current ? .22 : motionTokens.duration.exit, ease: standard }).then(done);
-  }, [isPresent, onHandOff, opacity, reduce, safeToRemove, scale, y]);
+  }, [fromTop, isPresent, onHandOff, opacity, reduce, safeToRemove, scale, y]);
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     pointerType.current = event.pointerType;
@@ -447,7 +449,8 @@ export function ToastStack({ label = "通知", position = "bottom-right", contai
     return () => document.removeEventListener("pointerdown", onDown);
   }, [tapped]);
 
-  const { targets, listHeight } = layoutStack(toasts, heights, expanded, visibleToasts);
+  const fromTop = position === 'top-right';
+  const { targets, listHeight } = layoutStack(toasts, heights, expanded, visibleToasts, fromTop);
 
   function onFocus(event: FocusEvent<HTMLElement>) {
     const from = event.relatedTarget;
@@ -463,7 +466,7 @@ export function ToastStack({ label = "通知", position = "bottom-right", contai
   return <section ref={regionRef} className={[styles.viewport, styles[position], contained && styles.contained, className].filter(Boolean).join(" ")} aria-label={hotkey ? `${label} (Alt+T)` : label} aria-live="polite" aria-relevant="additions text" aria-atomic="false" onFocus={onFocus} onBlur={onBlur}>
     <ol ref={listRef} className={styles.list} style={{ height: listHeight }} data-expanded={expanded} onPointerEnter={event => { if (event.pointerType === "mouse") setHovered(true); }} onPointerMove={event => { if (event.pointerType === "mouse" && !hovered) setHovered(true); }} onPointerLeave={event => { if (event.pointerType === "mouse") setHovered(false); }}>
       <AnimatePresence onExitComplete={prune}>
-        {toasts.map((item, index) => <ToastItem key={item.id} toast={item} target={targets[index]!} expanded={expanded} front={index === 0} hidden={index >= visibleToasts} paused={paused} reduce={reduce} store={store} onMeasure={measure} onDragChange={setDragging} onTap={toggleTap} onHandOff={handOff} />)}
+        {toasts.map((item, index) => <ToastItem key={item.id} toast={item} target={targets[index]!} fromTop={fromTop} expanded={expanded} front={index === 0} hidden={index >= visibleToasts} paused={paused} reduce={reduce} store={store} onMeasure={measure} onDragChange={setDragging} onTap={toggleTap} onHandOff={handOff} />)}
       </AnimatePresence>
     </ol>
   </section>;

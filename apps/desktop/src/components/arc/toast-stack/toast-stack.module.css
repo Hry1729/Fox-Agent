@@ -13,7 +13,10 @@
 .list { position: relative; margin: 0; padding: 0; list-style: none; pointer-events: auto; }
 /* Tucked toasts scale from their top edge, so exactly the peek shows above the toast in front. */
 .item { position: absolute; right: 0; bottom: 0; left: 0; transform-origin: 50% 0; }
-.card { position: absolute; inset: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--fox-radius-overlay, 12px); background: var(--popover); color: var(--foreground); box-shadow: var(--fox-shadow-sm); container-type: inline-size; touch-action: pan-y; -webkit-tap-highlight-color: transparent; transition: background-color 240ms cubic-bezier(.22,1,.36,1), border-color 240ms cubic-bezier(.22,1,.36,1); }
+.viewport.top-right { top: 52px; right: 16px; bottom: auto; }
+.top-right .item { top: 0; bottom: auto; transform-origin: 50% 100%; }
+.contained.top-right { top: 12px; right: 12px; }
+.card { position: absolute; inset: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--fox-radius-card); background: var(--popover); color: var(--foreground); box-shadow: var(--fox-shadow-sm); container-type: inline-size; touch-action: pan-y; -webkit-tap-highlight-color: transparent; transition: background-color 240ms cubic-bezier(.22,1,.36,1), border-color 240ms cubic-bezier(.22,1,.36,1); }
 .item[data-front="true"] .card, .item[data-expanded="true"] .card { box-shadow: var(--fox-shadow-md); }
 /* Tucked toasts sit a step back in tone as well as scale. */
 .item[data-front="false"][data-expanded="false"] .card { background: var(--muted); }
@@ -36,7 +39,7 @@
 .description { display: block; margin-top: 2px; color: var(--muted-foreground); }
 
 /* Clips only while its width folds, so the focus ring stays whole at rest. */
-.actionSlot { display: flex; flex: none; justify-content: flex-end; margin-top: -4px; }
+.actionSlot { display: flex; flex: none; justify-content: flex-end; align-self: center; margin-top: 0; }
 .actionSlot[data-moving="true"] { overflow: hidden; }
 .action, .close { flex: none; border: 1px solid transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: scale 260ms cubic-bezier(.16,1,.3,1), background-color 160ms cubic-bezier(.22,1,.36,1), border-color 160ms cubic-bezier(.22,1,.36,1), color 160ms cubic-bezier(.22,1,.36,1); }
 .action { height: 28px; padding: 0 8px; border-color: var(--border); border-radius: 999px; background: var(--card); color: var(--foreground); font-size: var(--fox-type-meta, 13px); font-weight: 500; white-space: nowrap; }

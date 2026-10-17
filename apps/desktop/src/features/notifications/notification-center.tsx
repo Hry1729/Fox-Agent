@@ -1,3 +1,4 @@
+import '@/components/fox-ui/sidebar-list-pane.css'
 import { useLayoutEffect, useRef } from 'react'
 import { Bell } from 'lucide-react'
 import { deferredModule } from '@/components/fox-ui/use-deferred-module'
@@ -72,6 +73,6 @@ export function NotificationCenter(props: NotificationCenterProps) {
   if (loaded) return <loaded.NotificationCenter {...props} bridge={bridge.current} />
   return <>
     {props.showTrigger && <button type="button" className={`fox-notification-trigger ${props.open ? 'is-active' : ''}`} aria-label="通知" aria-pressed={props.open} title="通知" onPointerEnter={implementation.preload} onFocus={implementation.preload} onClick={() => { implementation.preload(); props.onOpenChange(!props.open) }}><Bell /></button>}
-    {props.open && <section className="fox-notification-sidebar fox-sidebar-section" aria-label="通知"><header className="fox-section-head"><span>通知</span></header><div className="fox-notification-list" role="status" aria-label="正在同步任务状态" /></section>}
+    {props.open && <section className="fox-notification-sidebar fox-sidebar-list-pane" aria-label="通知"><header className="fox-section-head"><span>通知</span></header><div className="fox-notification-list" role="status" aria-label="正在同步任务状态" /></section>}
   </>
 }

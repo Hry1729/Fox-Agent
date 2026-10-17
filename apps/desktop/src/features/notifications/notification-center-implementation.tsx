@@ -1,20 +1,22 @@
+import '@/components/fox-ui/sidebar-list-pane.css'
 import type { NotificationBridge } from './notification-center'
+import { createPortal } from 'react-dom'
+import './notification-center.css'
 import { ToastStack, ToastStackProvider, useToastStack, type ToastType } from '@/components/arc/toast-stack/toast-stack'
 import { AnimatedIconTrigger, Bell as AnimatedBell } from '@/components/fox-ui/animated-icons'
 import { FoxEmptyState } from '@/components/fox-ui/empty-state'
 import { SkeletonContent } from '@/components/ui/skeleton'
 import { Progress } from '@/components/ui/progress'
 import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 import { type AppNotificationRecord, type NotificationPreferencesRecord } from '@/features/conversations/model/types'
 import { FOX_IN_APP_NOTIFICATION_EVENT, FOX_NOTIFICATIONS_CHANGED_EVENT, FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT, type InAppNotificationEventDetail, normalizeNotificationSoundId, notificationIsVisibleInContext, playNotificationSound, notify as toast } from '@/features/notifications'
 import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
-import { AlertTriangle, Bell, Check, CircleDot, Eraser, ExternalLink, FolderOpen, MoreHorizontal, Pin, PinOff, RotateCcw } from 'lucide-react'
+import { AlertTriangle, Bell, CheckCheck, CircleDot, Eraser, ExternalLink, FolderOpen, MoreHorizontal, RotateCcw, Bot, Database, ListTodo, MessageSquare, Settings } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-const NOTIFICATION_PIN_STORAGE_KEY = 'fox.notification.manually-pinned-ids'
 type ToastNotification = Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'> & Partial<AppNotificationRecord>
 const toastType: Record<AppNotificationRecord['kind'], ToastType> = { completed: 'success', failed: 'error', progress: 'loading', approval: 'warning', question: 'info' }
 
@@ -36,18 +38,17 @@ function notificationDay(item: AppNotificationRecord): { key: string; label: str
   return { key, label: date.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }) }
 }
 
-function loadManuallyPinnedNotificationIds(): Set<string> {
-  if (typeof window === 'undefined') return new Set()
-  try {
-    const value = JSON.parse(window.localStorage.getItem(NOTIFICATION_PIN_STORAGE_KEY) ?? '[]')
-    return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [])
-  } catch {
-    return new Set()
-  }
+function isAutomaticPriorityNotification(item: AppNotificationRecord): boolean {
+  return item.kind === 'failed' || item.kind === 'approval' || item.kind === 'question'
 }
 
-function isAutomaticPriorityNotification(item: AppNotificationRecord): boolean {
-  return item.severity === 'high' || item.kind === 'approval' || item.kind === 'question' || item.kind === 'progress'
+function notificationDestination(item: AppNotificationRecord) {
+  const view = item.workspaceView ?? ''
+  if (view.includes('knowledge') || view === 'local-files' || item.sourceType === 'knowledge') return { Icon: Database, label: '资料库', action: '打开资料库' }
+  if (view === 'agents' || view === 'agent-detail') return { Icon: Bot, label: '专家', action: '查看专家' }
+  if (view === 'chat' || item.sourceType === 'run') return { Icon: MessageSquare, label: '对话', action: '打开对话' }
+  if (view.startsWith('settings') || view === 'model-service') return { Icon: Settings, label: '设置', action: '去设置' }
+  return { Icon: ListTodo, label: '任务', action: '查看任务' }
 }
 
 function NotificationCenterContent({
@@ -77,7 +78,6 @@ function NotificationCenterContent({
   const { toast: showToast, dismiss: dismissToast } = useToastStack()
   const queuedFingerprints = useRef(new Map<string, string>())
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [manuallyPinnedIds, setManuallyPinnedIds] = useState<Set<string>>(loadManuallyPinnedNotificationIds)
   const observedNotifications = useRef<Map<string, string> | null>(null)
   const loadGeneration = useRef(0)
   const openCenter = useRef(onOpenChange)
@@ -208,8 +208,8 @@ function NotificationCenterContent({
 
   const unreadCount = items.filter((item) => item.readAt == null).length
   const hasReadNotifications = items.some((item) => item.readAt != null)
-  const priorityItems = useMemo(() => items.filter((item) => manuallyPinnedIds.has(item.id) || isAutomaticPriorityNotification(item)), [items, manuallyPinnedIds])
-  const datedItems = useMemo(() => items.filter((item) => !manuallyPinnedIds.has(item.id) && !isAutomaticPriorityNotification(item)), [items, manuallyPinnedIds])
+  const priorityItems = useMemo(() => items.filter(isAutomaticPriorityNotification), [items])
+  const datedItems = useMemo(() => items.filter((item) => !isAutomaticPriorityNotification(item)), [items])
   const notificationGroups = useMemo(() => datedItems.reduce<Array<{ key: string; label: string; items: AppNotificationRecord[] }>>((groups, item) => {
     const day = notificationDay(item)
     const current = groups.at(-1)
@@ -217,15 +217,6 @@ function NotificationCenterContent({
     else groups.push({ ...day, items: [item] })
     return groups
   }, []), [datedItems])
-  const toggleManualPin = useCallback((id: string) => {
-    setManuallyPinnedIds((current) => {
-      const next = new Set(current)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      window.localStorage.setItem(NOTIFICATION_PIN_STORAGE_KEY, JSON.stringify([...next]))
-      return next
-    })
-  }, [])
   const inspectItem = async (item: AppNotificationRecord) => {
     setExpandedId((current) => current === item.id ? null : item.id)
     try {
@@ -279,21 +270,31 @@ function NotificationCenterContent({
   }
   const renderNotificationItem = (item: AppNotificationRecord) => {
     const expanded = expandedId === item.id
-    const manuallyPinned = manuallyPinnedIds.has(item.id)
-    const automaticPriority = isAutomaticPriorityNotification(item)
+    const { Icon, label, action } = notificationDestination(item)
+    // Run records store the conversation title, rather than an event title.
+    const title = item.sourceType === 'run'
+      ? item.kind === 'failed' ? '任务运行失败'
+        : item.status === 'cancelled' ? '任务已取消'
+          : item.kind === 'completed' ? '任务已完成'
+            : item.kind === 'approval' ? '等待确认'
+              : item.kind === 'question' ? '等待回答'
+                : item.status === 'queued' ? '任务正在排队' : '任务正在执行'
+      : item.title
+    const source = item.sourceType === 'run' ? item.title : label
+    const status = item.kind === 'failed' ? '失败' : item.readAt == null ? '未读' : '已读'
     const downloadedFile = item.action.type === 'downloaded_file' && typeof item.action.path === 'string'
     const canOpenDirectly = downloadedFile && item.action.canOpenDirectly === true
     return <article key={item.id} className={`fox-notification-entry ${expanded ? 'is-expanded' : ''}`}>
-      <div className={`fox-notification-item fox-sidebar-tree-row is-${item.kind} ${item.readAt == null ? 'is-unread' : ''} ${expanded ? 'is-active' : ''} ${manuallyPinned ? 'is-manually-pinned' : ''}`}>
+      <div className={`fox-notification-item fox-sidebar-tree-row is-${item.kind} ${item.readAt == null ? 'is-unread' : ''} ${expanded ? 'is-active' : ''}`}>
         <button type="button" className="fox-notification-item-main" onClick={() => void inspectItem(item)} aria-expanded={expanded}>
-          <span className="fox-notification-dot" />
-          <span className="fox-notification-copy"><span className="fox-notification-line"><strong>{item.title}</strong><time>{new Date(item.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></span><small>{item.body}</small>{item.progress != null && item.kind === 'progress' && <Progress value={item.progress} aria-label={`${item.title}进度`} className="mt-1 h-1" />}</span>
+          <span className="fox-notification-source-icon" role="img" aria-label={`${label}通知，${status}`}><Icon aria-hidden="true" />{item.kind === 'failed' ? <i className="fox-notification-badge is-failed" /> : item.readAt == null ? <i className="fox-notification-badge is-unread" /> : null}</span>
+          <span className="fox-notification-copy"><span className="fox-notification-line"><strong>{title}</strong><time>{new Date(item.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></span><small>{source}</small>{item.progress != null && item.kind === 'progress' && <Progress value={item.progress} aria-label={`${item.title}进度`} className="mt-1 h-1" />}</span>
         </button>
-        {!automaticPriority && <button type="button" className="fox-notification-pin" aria-label={manuallyPinned ? `取消置顶 ${item.title}` : `置顶 ${item.title}`} aria-pressed={manuallyPinned} title={manuallyPinned ? '取消置顶' : '置顶'} onClick={() => toggleManualPin(item.id)}>{manuallyPinned ? <PinOff /> : <Pin />}</button>}
+
       </div>
       {expanded && <div className="fox-notification-details">
-        <pre>{item.body}</pre>
-        <footer><span>{item.sourceType} · {item.status}</span><div>{canOpenDirectly && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, false)}><ExternalLink />打开文件</Button>}{downloadedFile && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, true)}><FolderOpen />打开所在文件夹</Button>}{item.workspaceView && <Button variant="outline" size="sm" onClick={() => void openItem(item)}><ExternalLink />打开相关页面</Button>}</div></footer>
+        <p>{item.body}</p>
+        <footer><div>{canOpenDirectly && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, false)}><ExternalLink />打开文件</Button>}{downloadedFile && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, true)}><FolderOpen />打开所在文件夹</Button>}{item.workspaceView && <Button variant="outline" size="sm" onClick={() => void openItem(item)}><ExternalLink />{action}</Button>}</div></footer>
       </div>}
     </article>
   }
@@ -301,31 +302,32 @@ function NotificationCenterContent({
     {showTrigger && <AnimatedIconTrigger><button type="button" className={`fox-notification-trigger ${open ? 'is-active' : ''}`} aria-label={unreadCount ? `${unreadCount} 条未读通知` : '通知'} aria-pressed={open} title="通知" onClick={() => onOpenChange(!open)}>
         <AnimatedBell />{preferences?.badge !== false && unreadCount > 0 && <span aria-hidden="true" />}
       </button></AnimatedIconTrigger>}
-    {open && <section className="fox-notification-sidebar fox-sidebar-section" aria-label="通知">
+    {open && <section className="fox-notification-sidebar fox-sidebar-list-pane" aria-label="通知">
       <header className="fox-section-head">
         <span>通知</span>
         <span>
-          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="fox-notification-clear-read" aria-label="清除已读通知" disabled={!hasReadNotifications} onClick={() => void clearRead()}><Eraser /></Button></TooltipTrigger><TooltipContent side="right"><p>清除已读</p></TooltipContent></Tooltip>
+          <Button variant="ghost" size="icon" className="fox-icon-button fox-notification-mark-read" aria-label="全部已读" title="全部已读" disabled={!unreadCount} onClick={() => void markAllRead()}><CheckCheck size={14} /></Button>
           <DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-notification-more" aria-label="管理通知"><MoreHorizontal /></Button></DropdownMenuTrigger>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button fox-notification-more" aria-label="管理通知"><MoreHorizontal /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end" side="right" sideOffset={6} className="fox-notification-menu">
             <DropdownMenuItem onSelect={() => setUnreadOnly((value) => !value)}>{unreadOnly ? <Bell /> : <CircleDot />}{unreadOnly ? '全部通知' : '只看未读'}</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void load()}><RotateCcw />刷新通知</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={!unreadCount} onSelect={() => void markAllRead()}><Check />全部已读</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => { onNavigate('settings'); onOpenChange(false) }}><Settings />通知设置</DropdownMenuItem>
+            <DropdownMenuItem disabled={!hasReadNotifications} onSelect={() => void clearRead()}><Eraser />清除已读</DropdownMenuItem>
           </DropdownMenuContent>
           </DropdownMenu>
         </span>
       </header>
-      <div className="fox-notification-list" aria-live="polite">
+      <ScrollArea className="fox-sidebar-scroll"><div className="fox-notification-list" aria-live="polite">
         {error && items.length > 0 && <div className="fox-notification-error" role="alert"><AlertTriangle />{error}</div>}
         {loading && !items.length && <div className="p-3"><SkeletonContent label="正在同步任务状态" avatar lines={3} /></div>}
         {!loading && !items.length && !error && <FoxEmptyState title={unreadOnly ? '没有未读通知' : '暂无通知'} description={unreadOnly ? '已读记录仍保存在通知中心。' : '任务更新、审批和操作结果会显示在这里。'} action={unreadOnly ? <Button variant="outline" size="sm" onClick={() => setUnreadOnly(false)}>查看全部通知</Button> : undefined} />}
         {!loading && !items.length && error && <FoxEmptyState variant="error" title="通知同步失败" description={error} action={<Button variant="outline" size="sm" onClick={() => void load()}>重试</Button>} />}
-        {items.length > 0 && <section className="fox-notification-day is-priority" aria-labelledby="notification-priority-title">
-          <div className="fox-notification-day-title" id="notification-priority-title">置顶</div>
+        {priorityItems.length > 0 && <section className="fox-notification-day is-priority" aria-labelledby="notification-priority-title">
+          <div className="fox-notification-day-title" id="notification-priority-title">需要处理</div>
           <div className="fox-notification-day-items">
-            {priorityItems.length ? priorityItems.map(renderNotificationItem) : <p className="fox-notification-priority-empty">暂无置顶通知</p>}
+            {priorityItems.map(renderNotificationItem)}
           </div>
         </section>}
         {notificationGroups.map((group) => <section className="fox-notification-day" key={group.key} aria-labelledby={`notification-day-${group.key}`}>
@@ -334,9 +336,9 @@ function NotificationCenterContent({
             {group.items.map(renderNotificationItem)}
           </div>
         </section>)}
-      </div>
+      </div></ScrollArea>
     </section>}
-    <ToastStack label="通知更新" visibleToasts={3} />
+    {createPortal(<ToastStack label="通知更新" position="top-right" visibleToasts={3} />, document.body)}
   </>
 }
 

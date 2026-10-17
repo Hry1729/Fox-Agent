@@ -216,14 +216,22 @@ export function playNotificationSound(soundId: NotificationSoundId = DEFAULT_NOT
   }
 }
 
+const notificationPreviews: Array<Pick<AppNotificationRecord, 'kind' | 'title' | 'body'>> = [
+  { kind: 'completed', title: '测试通知 · 操作完成', body: '资料已保存，可以继续下一步。' },
+  { kind: 'failed', title: '测试通知 · 操作失败', body: '连接暂时不可用，请稍后重试。这是一条测试消息。' },
+  { kind: 'progress', title: '测试通知 · 正在处理', body: '正在整理资料，请稍候。这是一条测试消息。' },
+  { kind: 'approval', title: '测试通知 · 等待确认', body: '下一步操作需要确认。这是一条测试消息。' },
+  { kind: 'question', title: '测试通知 · 等待回答', body: '请选择希望采用的处理方式。这是一条测试消息。' },
+]
+let notificationPreviewIndex = 0
+
 export function dispatchNotificationPreview(soundId: NotificationSoundId) {
   if (typeof window === 'undefined') return
+  const index = notificationPreviewIndex++
   const detail: InAppNotificationEventDetail = {
     notification: {
-      id: `notification-test-${Date.now()}`,
-      kind: 'completed',
-      title: 'Fox 测试通知',
-      body: '通知卡片、倒计时进度条和提示音均工作正常。',
+      ...notificationPreviews[index % notificationPreviews.length],
+      id: `notification-test-${Date.now()}-${index}`,
     },
     soundId,
     forceSound: true,
