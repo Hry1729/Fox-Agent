@@ -16,6 +16,11 @@ pub use cancellation::{CancellationRegistry, CancellationToken};
 mod compaction_tests;
 #[cfg(test)]
 mod waiting_jobs_tests;
+// Package 2-D U1: the Run-lifecycle half of the delivery-review park. The Host,
+// database and acceptance-rule halves live in `fox-desktop`'s
+// `delivery_u1_tests`.
+#[cfg(test)]
+mod delivery_review_tests;
 #[cfg(test)]
 pub mod corpus;
 pub mod ports;
@@ -35,7 +40,7 @@ pub use recovery::{
 pub use controller::{
     approval_effect_key, batch_delivery_effect_key, batch_delivery_idempotency_key,
     dispatch_effect_key, dispatch_idempotency_key, persist_events, Effect, KernelPersistCommand,
-    ModelRetryAdmission,
+    ModelRetryAdmission, DeliveryAcceptanceFact,
     PersistApprovalResolution, PersistBatch, PersistEvent, PersistOutboxEffect, PersistTool,
     RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController, WaitingJobFact, INITIAL_MODEL_EFFECT_KEY,
     INITIAL_MODEL_IDEMPOTENCY_KEY, STEERING_COMPETITION, JOB_NOTICE_COMPETITION,
