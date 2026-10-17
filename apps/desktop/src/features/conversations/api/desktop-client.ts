@@ -790,6 +790,16 @@ export const desktopClient = {
     command<boolean>('child_run_cancel_by_user', { parentConversationId, childRunId }),
   resolveApproval: (approvalId: string, decision: import('../model/types').ApprovalDecision) =>
     command<boolean>('approval_resolve', { approvalId, decision }),
+  // Package 2-D U1: accepting an unverified delivery. Separate from
+  // `resolveApproval` on purpose — that one grants tool authority, this one
+  // records that a user took responsibility for content that is not verified.
+  // No `actor` field: the Host derives the subject from the trusted window.
+  // The response carries the fresh row state, including any terminal the
+  // acceptance just committed, so a stale local copy can never outlive it.
+  resolveDeliveryAcceptance: (runId: string, itemKey: string, decision: import('../model/types').DeliveryAcceptanceDecision) =>
+    command<import('../model/types').DeliveryAcceptanceOutcome>('delivery_acceptance_resolve', { runId, itemKey, decision }),
+  deliveryAcceptanceState: (runId: string, itemKey: string) =>
+    command<import('../model/types').DeliveryAcceptanceState>('delivery_acceptance_state', { runId, itemKey }),
   resolveWorkModeConfirmation: (conversationId: string, goalId: string, expectedVersion: number, approved: boolean) =>
     command<GoalRecord>('work_mode_confirmation_resolve', { conversationId, goalId, expectedVersion, approved }),
   resolvePlanRevision: (conversationId: string, planRevisionId: string, decision: 'approved' | 'rejected') =>

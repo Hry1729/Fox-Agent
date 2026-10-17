@@ -567,6 +567,56 @@ export interface DeliveryChecklistRecord {
   checkedAt: number | null
 }
 
+/**
+ * The wire shape of a blocked reason.
+ *
+ * Mirrors `AcceptanceBlocked` in `runtime_host/delivery_u1.rs`. The Rust enum is
+ * external-tagged, so serializing it directly yields `"Absent"` or
+ * `{"row_not_pending":{…}}` — neither of which has a `kind`/`detail` pair, which
+ * is exactly why this explicit DTO exists. `kind` is a closed vocabulary; an
+ * unknown value falls back to `detail`.
+ */
+export interface DeliveryAcceptanceBlocked {
+  kind: string
+  detail: string
+}
+
+export interface DeliveryAcceptanceState {
+  runId: string
+  itemKey: string
+  verificationClass: string
+  blocked: DeliveryAcceptanceBlocked | null
+  accepted: {
+    acceptedBy: string
+    acceptedAt: number
+    candidatePath: string
+    candidateSha256: string
+    specHash: string
+  } | null
+  rejected: boolean
+  /**
+   * Whether the Run has reached a terminal state.
+   *
+   * Decides which actions exist at all: a parked Run may be accepted or rejected,
+   * and a Run that already ended may only have its earlier acceptance revoked.
+   * The Host enforces the same rule; this only lets the UI reflect it, so a
+   * finished Run's row keeps a reachable revoke entry instead of vanishing with
+   * the panel that only renders while parked.
+   */
+  runTerminal: boolean
+}
+
+/** What the user asked the Host to do. Parsed by the Host, never defaulted. */
+export type DeliveryAcceptanceDecision = 'accept' | 'reject' | 'revoke'
+
+/** What a resolve actually did, including the terminal it may have committed. */
+export interface DeliveryAcceptanceOutcome {
+  runId: string
+  itemKey: string
+  decision: DeliveryAcceptanceDecision
+  state: DeliveryAcceptanceState
+}
+
 export interface ConversationHistoryPage {
   messages: ConversationMessage[]
   runtimeEvents: RunEventRecord[]

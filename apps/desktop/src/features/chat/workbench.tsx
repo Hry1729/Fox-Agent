@@ -4,6 +4,7 @@ import { steeringComposerView, steeringSubmitMode } from './components/steering-
 import { useRunSteering } from './hooks/use-run-steering'
 import { ManagedFilesPanel } from './components/ManagedFilesPanel'
 import { RuntimeApprovalPrompt } from './components/RuntimeApprovalPrompt'
+import { DeliveryAcceptanceCard } from './components/DeliveryAcceptanceCard'
 import type { ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { runtimeProcessActivity } from './runtime-process-activity'
 import { runPhaseTiming, runPhaseTitle } from './run-phase'
@@ -85,6 +86,7 @@ import {
   Search,
   Server,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Square,
@@ -3312,6 +3314,67 @@ type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,
 }
 
 const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ knowledgeBindings: [] })
+
+/**
+ * Package 2-D U1: the surface that asks the user to decide about deliverables
+ * whose content the Host could not verify.
+ *
+ * Rendered while the Run is parked on `awaiting_delivery_review`, **and** while a
+ * Run that has already ended still has an acceptance the user may want to
+ * withdraw. The second half is R-1: gating purely on `parked` made the whole
+ * panel — including the card's "撤销接受" button — disappear the moment the Run
+ * completed, so the user could find neither their acceptance nor a way to undo
+ * it.
+ *
+ * It reads the checklist that `load_conversation` already returns (no extra read)
+ * and asks the Host for each outstanding item's acceptance state on demand — the
+ * freshness check behind that state re-reads the candidate file, so it must not
+ * run inside the bulk conversation load.
+ *
+ * It never renders an item as passed. The verification class and the acceptance
+ * are two separate lines, because they are two separate facts.
+ */
+function DeliveryReviewPanel() {
+  const { deliveryRunId, deliveryRunState, deliveryChecklist } = useContext(TimelineRuntimeContext)
+  const parked = deliveryRunState === 'awaiting_delivery_review'
+  const outstanding = useMemo(
+    () => (deliveryChecklist ?? []).filter((item) => item.runId === deliveryRunId && item.status !== 'passed'),
+    [deliveryChecklist, deliveryRunId],
+  )
+  // A finished Run keeps the panel only while one of its rows still carries an
+  // acceptance to withdraw. Probing the Host for that would re-read every
+  // candidate file on each conversation load, which is exactly what the on-demand
+  // `loadState` exists to avoid — so the panel renders whenever the Run is parked
+  // or has ended with outstanding rows, and the **card** decides per row which
+  // buttons exist. A Run with no outstanding rows at all renders nothing.
+  if (!deliveryRunId || outstanding.length === 0) return null
+  if (!parked && deliveryRunState !== 'completed' && deliveryRunState !== 'failed') return null
+  const ended = !parked
+  return (
+    <div className="fox-delivery-review">
+      <header>
+        {ended ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}
+        <div>
+          <strong>{ended ? '交付内容尚未核验——任务已结束' : '交付内容尚未核验'}</strong>
+          <small>
+            {ended
+              ? '该任务的核验结论保留原样。你此前的接受仍在，可以逐项撤销；任务不会因此重启或重跑。'
+              : '产物已保留。你可以逐项接受未核验风险，或补充材料后重新核验；不会自动重跑模型修复。'}
+          </small>
+        </div>
+      </header>
+      {outstanding.map((item) => (
+        <DeliveryAcceptanceCard
+          key={`${item.runId}:${item.itemKey}`}
+          runId={item.runId}
+          itemKey={item.itemKey}
+          description={item.description || item.targetPath || item.itemKey}
+          loadState={(runId, itemKey) => desktopClient.deliveryAcceptanceState(runId, itemKey)}
+          resolve={(runId, itemKey, decision) => desktopClient.resolveDeliveryAcceptance(runId, itemKey, decision)}        />
+      ))}
+    </div>
+  )
+}
 const TimelineRuntimeContext = createContext<TimelineRuntimeContextValue>({ knowledgeBindings: [] })
 
 function isFileChangeTool(toolName: string) {
@@ -6145,7 +6208,7 @@ export function Workbench() {
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRuns={desktopConversation.enabled ? desktopConversation.detail?.runs : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRuns={desktopConversation.enabled ? desktopConversation.detail?.runs : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} /></Profiler><DeliveryReviewPanel /><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>

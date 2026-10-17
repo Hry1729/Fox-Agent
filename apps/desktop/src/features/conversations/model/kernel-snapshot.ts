@@ -2,6 +2,9 @@ import type { ConversationDetail, KernelRunSnapshot } from './types'
 
 const states = new Set([
   'created', 'running', 'waiting_approval', 'retry_scheduled', 'compacting', 'cancelling',
+  // Package 2-D U1: the Run is parked waiting for the user's per-item delivery
+  // decision. It is non-terminal, so `terminalWritten` must be false for it.
+  'awaiting_delivery_review',
   'completed', 'cancelled', 'failed', 'budget_exhausted', 'approval_expired',
 ])
 const terminalStates = new Set(['completed', 'cancelled', 'failed', 'budget_exhausted', 'approval_expired'])
@@ -15,7 +18,6 @@ export function snapshotForRun(detail: ConversationDetail): KernelRunSnapshot | 
     || terminalStates.has(snapshot.state) !== snapshot.terminalWritten) return null
   return snapshot
 }
-
 export function conversationRunState(detail: ConversationDetail | null): string | null {
   if (!detail) return null
   return snapshotForRun(detail)?.state ?? detail.lastRun?.status ?? null
@@ -23,7 +25,7 @@ export function conversationRunState(detail: ConversationDetail | null): string 
 
 export function conversationRunIsActive(detail: ConversationDetail | null): boolean {
   const state = conversationRunState(detail)
-  return state !== null && ['queued', 'created', 'running', 'waiting_approval', 'retry_scheduled', 'compacting', 'cancelling'].includes(state)
+  return state !== null && ['queued', 'created', 'running', 'waiting_approval', 'retry_scheduled', 'compacting', 'cancelling', 'awaiting_delivery_review'].includes(state)
 }
 
 export function conversationRunFingerprint(detail: ConversationDetail | null): string {
