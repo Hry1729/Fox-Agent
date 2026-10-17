@@ -268,7 +268,7 @@ test('a narrow row keeps the action name out of the clipped region', async () =>
   assert.ok(pathSlot.compareDocumentPosition(tail) & Node.DOCUMENT_POSITION_FOLLOWING)
 })
 
-test('the whole-run elapsed time stays a single header timer beside the Fox avatar', async () => {
+test('the whole-run elapsed time stays in the summary header without an avatar', async () => {
   const view = render(timeline('', {
     events: [
       event(1, 'run.started'),
@@ -281,12 +281,9 @@ test('the whole-run elapsed time stays a single header timer beside the Fox avat
   const header = view.container.querySelector('.fox-process-turn-header')
   const timers = view.container.querySelectorAll('[role="timer"]')
   assert.equal(timers.length, 1)
-  // The timer lives in the turn header, after the avatar — never inside a step row.
   assert.ok(header.contains(timers[0]))
   assert.equal(timers[0].closest('.fox-runtime-step-row'), null)
   const avatar = header.querySelector('.fox-assistant-avatar')
-  assert.ok(avatar)
-  const following = globalThis.Node?.DOCUMENT_POSITION_FOLLOWING ?? 4
-  assert.ok(avatar.compareDocumentPosition(timers[0]) & following)
+  assert.equal(avatar, null)
   assert.equal(timers[0].parentElement.closest('.fox-runtime-step-row'), null)
 })

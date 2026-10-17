@@ -11,6 +11,7 @@ import { useFoxRuntime, type FoxRuntimeCallbacks } from './use-fox-runtime'
 type DesktopConversationState = ReturnType<typeof useDesktopConversation>
 
 export interface AssistantUiChatProps {
+  statusBar?: import('react').ReactNode
   conversation: DesktopConversationState
   callbacks: FoxRuntimeCallbacks
   pendingMessage?: ConversationMessage | null
@@ -36,7 +37,7 @@ export interface AssistantUiChatProps {
  * `useDesktopConversation`) stays here, so legacy-composer sends still stream
  * into the assistant-ui message list.
  */
-export default function AssistantUiChat({ conversation, callbacks, pendingMessage, isSendDisabled, suggestions, onStart, planRevision, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer }: AssistantUiChatProps) {
+export default function AssistantUiChat({ statusBar, conversation, callbacks, pendingMessage, isSendDisabled, suggestions, onStart, planRevision, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer }: AssistantUiChatProps) {
   const runtime = useFoxRuntime(conversation, callbacks, { pendingMessage, isSendDisabled })
   // The workbench provides knowledge bindings and the open-source action through
   // this context for the whole chat stage; reuse them instead of new props.
@@ -90,7 +91,7 @@ export default function AssistantUiChat({ conversation, callbacks, pendingMessag
   }), [events, eventsByRun, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <FoxThread fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />
+      <FoxThread statusBar={statusBar} fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />
     </AssistantRuntimeProvider>
   )
 }

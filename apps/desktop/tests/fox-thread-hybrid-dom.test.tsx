@@ -18,6 +18,8 @@ const React = await import('react')
 const { act, cleanup, render, waitFor } = await import('@testing-library/react')
 const { AssistantRuntimeProvider, useExternalStoreRuntime } = await import('@assistant-ui/react')
 const FoxThread = await import('../src/features/chat/thread/fox-thread')
+const { default: AssistantUiChat } = await import('../src/features/chat/thread/fox-assistant-ui-chat')
+const { applyKernelModelPreview } = await import('../src/features/conversations/model/kernel-model-preview')
 
 afterEach(() => {
   cleanup()
@@ -86,6 +88,23 @@ function mount(messages: ThreadMessageLike[], onStart?: (suggestion: string) => 
 }
 
 describe('the assistant-ui thread with the hybrid rollback', () => {
+  test('current Kernel wire previews paint successive text while the run is still running', async () => {
+    let detail: any = {
+      conversation: { id: 'stream-conversation' }, lastRun: { id: 'stream-run', status: 'running', startedAt: Date.now() },
+      kernelSnapshot: { schemaVersion: 1, runId: 'stream-run', turnId: 'stream-turn', state: 'running', lastEventSeq: '3', terminalWritten: false },
+      messages: [], runtimeEvents: [], toolCalls: [], approvals: [], attachments: [], artifacts: [], knowledgeBindings: [], goals: [], tasks: [], evidence: [],
+    }
+    const ui = () => React.createElement(AssistantUiChat, { conversation: { enabled: true, detail, streamingText: detail.messages.at(-1)?.content ?? '' } as any, callbacks: { onSubmit: () => undefined } })
+    const view = render(ui())
+    for (const [index, text] of ['正在逐步输出第一段', '正在逐步输出第一段\n\n现在到达第二段', '正在逐步输出第一段\n\n现在到达第二段\n\n最后到达第三段'].entries()) {
+      detail = applyKernelModelPreview(detail, { schemaVersion: 1, runId: 'stream-run', conversationId: 'stream-conversation', turnId: 'stream-turn', checkpointSeq: 2, revision: index + 1, text, progressBytes: 100 * (index + 1) })
+      view.rerender(ui())
+      await waitFor(() => expect(view.container.querySelector('.fox-thread-msg.is-assistant')?.textContent).toContain(text.split('\n\n').at(-1)!))
+      expect(view.container.querySelector('[data-streaming="true"]')).not.toBeNull()
+      expect(detail.lastRun.status).toBe('running')
+      if (index === 0) expect(view.container.textContent).not.toContain('现在到达第二段')
+    }
+  })
   test('empty conversations show the CLASSIC empty state (mascot + suggestions)', async () => {
     const started: string[] = []
     mount([], (suggestion) => started.push(suggestion))
@@ -118,18 +137,16 @@ describe('the assistant-ui thread with the hybrid rollback', () => {
     })
   })
 
-  test('an assistant message with a process part keeps the avatar ON the process head line', async () => {
+  test('an assistant message with a process part does not duplicate the composer avatar', async () => {
     mount([USER_MESSAGE, ASSISTANT_MESSAGE])
     await waitFor(() => {
       expect(document.querySelector('.fox-thread-msg.is-assistant')).not.toBeNull()
     })
-    // The avatar shares the process header row (legacy TurnProcessHeader
-    // relation), and the old standalone head row is gone for these messages.
-    expect(document.querySelector('.fox-runtime-process-head .fox-assistant-avatar')).not.toBeNull()
+    expect(document.querySelector('.fox-runtime-process-head .fox-assistant-avatar')).toBeNull()
     expect(document.querySelector('.fox-thread-msg.is-assistant .fox-thread-assistant-head')).toBeNull()
   })
 
-  test('a text-only assistant message still shows the standalone avatar row', async () => {
+  test('a text-only assistant message does not add a standalone avatar row', async () => {
     const textOnly = {
       role: 'assistant',
       id: 'a2',
@@ -142,6 +159,6 @@ describe('the assistant-ui thread with the hybrid rollback', () => {
     await waitFor(() => {
       expect([...document.querySelectorAll('.fox-thread-msg.is-assistant')].some((node) => node.textContent?.includes('纯文本回复')))
     })
-    expect(document.querySelector('.fox-thread-msg.is-assistant .fox-thread-assistant-head .fox-assistant-avatar')).not.toBeNull()
+    expect(document.querySelector('.fox-thread-msg.is-assistant .fox-thread-assistant-head')).toBeNull()
   })
 })

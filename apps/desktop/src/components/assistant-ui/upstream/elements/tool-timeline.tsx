@@ -64,8 +64,10 @@ export function ToolTimeline({
       className={cn("w-full max-w-sm", className)}
     >
       <div className="fox-runtime-process-head">{leading}<CollapsibleTrigger className="fox-element-timeline-trigger fox-chain-of-thought-header group/trigger text-muted-foreground hover:text-foreground/90 flex items-center gap-1.5 rounded-md py-1 text-[13.5px] transition-colors outline-none">
-        <ChevronRightIcon className="size-3.5 shrink-0 opacity-60 transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-open/trigger:rotate-90 group-data-panel-open/trigger:rotate-90 motion-reduce:transition-none" />
-        {groupIcon}
+        <span className="fox-tool-disclosure-icon" data-has-icon={Boolean(groupIcon)} aria-hidden="true">
+          {groupIcon}
+          <ChevronRightIcon className="fox-tool-disclosure-chevron" />
+        </span>
         <SwapLabel
           active={streaming ? 0 : 1}
           className={cn("fox-element-timeline-summary fox-runtime-process-summary text-start tabular-nums", streaming && "is-running")}

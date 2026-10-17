@@ -68,20 +68,20 @@ test('the assistant bucket key stays stable when steering inserts another user a
   assert.equal(after[2].content, '补充要求')
 })
 
-test('one turn header holds the avatar, fold control, and durable duration; final reply and footer stay out of the fold', async () => {
+test('one turn header holds the step summary, fold control, and durable duration; final reply and footer stay out of the fold', async () => {
   const view = render(timeline())
-  await waitFor(() => assert.equal(stages(view).length, 2))
+  await waitFor(() => assert.equal(stages(view).length, 2), { timeout: 5000 })
   const header = view.container.querySelector('.fox-process-turn-header')
-  assert.equal(header.querySelectorAll('.fox-assistant-avatar').length, 1)
-  assert.equal(view.container.querySelectorAll('.fox-assistant-content .fox-assistant-avatar').length, 1)
-  assert.equal(header.querySelector('[role="timer"]').textContent, '用时 6秒')
+  assert.equal(header.querySelectorAll('.fox-assistant-avatar').length, 0)
+  assert.equal(view.container.querySelectorAll('.fox-assistant-content .fox-assistant-avatar').length, 0)
+  assert.equal(header.querySelector('[role="timer"]'), null)
   assert.equal(stages(view).filter(stage => stage.hidden).length, 2)
   assert.equal(view.container.querySelectorAll('.fox-answer-segment:not([hidden])').length, 1)
   assert.match(view.container.querySelector('.fox-answer-segment:not([hidden])').textContent, /第二段/)
   assert.ok(view.getByRole('button', { name: '重新生成回复' }))
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   assert.equal(stages(view).filter(stage => stage.hidden).length, 0)
-  assert.equal(view.container.querySelectorAll('.fox-assistant-content .fox-assistant-avatar').length, 1)
+  assert.equal(view.container.querySelectorAll('.fox-assistant-content .fox-assistant-avatar').length, 0)
   assert.equal(view.container.querySelectorAll('.fox-answer-segment:not([hidden])').length, 2)
 })
 
@@ -104,7 +104,7 @@ test('running turn can be folded and reopened; explicit open choice survives com
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   assert.equal(view.getByRole('button', { name: /收起过程/ }).getAttribute('aria-expanded'), 'true')
   const timer = view.container.querySelector('[role="timer"]')
-  assert.match(timer.textContent, /^已用时 /)
+  assert.equal(timer, null)
   const answerNode = view.container.querySelector('.fox-answer-segment.is-final')
   fireEvent.click(view.getByRole('button', { name: /收起过程/ }))
   assert.equal(stages(view).filter(stage => stage.hidden).length, 2)
@@ -113,7 +113,7 @@ test('running turn can be folded and reopened; explicit open choice survives com
   view.rerender(timeline())
   assert.equal(stages(view).filter(stage => stage.hidden).length, 0)
   assert.equal(view.getByRole('button', { name: /收起过程/ }).getAttribute('aria-expanded'), 'true')
-  assert.equal(view.container.querySelector('[role="timer"]').textContent, '用时 6秒')
+  assert.equal(view.container.querySelector('[role="timer"]'), null)
 })
 
 test('explicit running collapse survives completion and interleaved user input remains visible', async () => {
@@ -186,73 +186,68 @@ test('manual turn and group state survive completion and display mode changes', 
   assert.equal(view.container.querySelectorAll('.fox-runtime-process-disclosure[aria-hidden="false"]').length, 1)
 })
 
-/** The header's visible line is the toggle's own label, plus the separator the header
- *  renders only when there is status text, plus the one whole-round timer. The label is
- *  read from `.fox-process-turn-label` because the separator and the timer live inside
- *  the trigger as well — everything right of the avatar folds the round. */
+
 const header = (view) => view.container.querySelector('.fox-process-turn-header')
 const toggle = (view, state = '收起') => view.getByRole('button', { name: new RegExp(`${state}过程`) })
 const toggleText = (view, state = '收起') => toggle(view, state).querySelector('.fox-process-turn-label')?.textContent ?? ''
 
-test('the round header joins its own fields: no leading separator, and one whole-round timer', async () => {
+test('the round header joins its own fields: no leading separator or duplicate timer', async () => {
   const view = render(live())
   await waitFor(() => assert.equal(stages(view).length, 2))
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
-  // Running and expanded: [avatar] [chevron] 正在处理 · 已用时 N秒
-  assert.equal(toggleText(view), '正在处理')
-  assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在处理')
+  assert.equal(toggleText(view), '已读取 1 个文件')
+  assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 已读取 1 个文件')
   assert.equal(toggle(view).getAttribute('title'), '收起过程')
   assert.equal(toggle(view).getAttribute('aria-expanded'), 'true')
   // A native button keeps Enter/Space working; nothing about the line changed that.
   assert.equal(toggle(view).tagName, 'BUTTON')
   assert.equal(toggle(view).getAttribute('type'), 'button')
-  assert.match(header(view).textContent, /^正在处理·已用时 \d+秒$/)
-  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
-  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 1)
+  assert.match(header(view).textContent, /^已读取 1 个文件$/)
+  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
 
   // Collapsed: the same fields, folded — the status text is never rewritten.
   fireEvent.click(toggle(view))
   assert.equal(toggle(view, '展开').getAttribute('aria-expanded'), 'false')
-  assert.equal(toggleText(view, '展开'), '正在处理')
-  assert.equal(toggle(view, '展开').getAttribute('aria-label'), '展开过程 · 正在处理')
-  assert.match(header(view).textContent, /^正在处理·已用时 \d+秒$/)
+  assert.equal(toggleText(view, '展开'), '已读取 1 个文件')
+  assert.equal(toggle(view, '展开').getAttribute('aria-label'), '展开过程 · 已读取 1 个文件')
+  assert.match(header(view).textContent, /^已读取 1 个文件$/)
   fireEvent.click(toggle(view, '展开'))
   assert.equal(toggle(view).getAttribute('aria-expanded'), 'true')
-  assert.equal(toggleText(view), '正在处理')
+  assert.equal(toggleText(view), '已读取 1 个文件')
 
-  // 计时器与分隔点都在触发区里：点头像右侧任意一处都能开合，这是本轮改动的目的。
-  assert.equal(toggle(view).contains(view.container.querySelector('[role="timer"]')), true)
-  fireEvent.click(view.container.querySelector('[role="timer"]'))
+  assert.equal(toggle(view).getAttribute('aria-describedby'), null)
+  fireEvent.click(toggle(view).querySelector('.fox-process-turn-label'))
   assert.equal(toggle(view, '展开').getAttribute('aria-expanded'), 'false')
 })
 
-test('a settled turn preserves its process title and joins the whole-round time once', async () => {
+test('a settled turn preserves its process title and omits the duplicate time', async () => {
   const view = render(timeline())
   await waitFor(() => assert.equal(stages(view).length, 2))
-  const settled = () => view.getByRole('button', { name: /^(展开|收起)过程 · 处理过程$/ })
+  const settled = () => view.getByRole('button', { name: /^(展开|收起)过程 · 已读取 1 个文件$/ })
   assert.equal(settled().getAttribute('aria-expanded'), 'false')
-  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '处理过程')
-  assert.equal(settled().getAttribute('aria-label'), '展开过程 · 处理过程')
-  assert.equal(header(view).textContent, '处理过程·用时 6秒')
-  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 1)
-  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
+  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '已读取 1 个文件')
+  assert.equal(settled().getAttribute('aria-label'), '展开过程 · 已读取 1 个文件')
+  assert.equal(header(view).textContent, '已读取 1 个文件')
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
+  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
   // Both fold states read the same: the fields are independent of the disclosure.
   fireEvent.click(settled())
-  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '处理过程')
-  assert.equal(header(view).textContent, '处理过程·用时 6秒')
-  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 1)
+  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '已读取 1 个文件')
+  assert.equal(header(view).textContent, '已读取 1 个文件')
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
 })
 
 test('failed, cancelled and interrupted turns keep their own status as the first field', async () => {
   const cases = [
     { name: 'failed', events: [...events.slice(0, -1), event(7, 'run.failed', { code: 'provider_error', message: '失败' })],
-      status: '过程未完成', headerText: '过程未完成·用时 6秒' },
+      status: '过程未完成', headerText: '已读取 1 个文件 · 过程未完成' },
     { name: 'cancelled', events: [...events.slice(0, -1), event(7, 'run.cancelled')],
-      status: '过程已取消', headerText: '过程已取消·用时 6秒' },
+      status: '过程已取消', headerText: '已读取 1 个文件 · 过程已取消' },
     // Interrupted before the run recorded an end: there is no whole-round time to
     // separate the status from, so the header must not leave a dangling separator.
     { name: 'interrupted', events: events.slice(0, -1), messages: [user, { ...assistant, status: 'interrupted' }],
-      status: '过程已中断', headerText: '过程已中断' },
+      status: '过程已中断', headerText: '已读取 1 个文件 · 过程已中断' },
   ]
   for (const item of cases) {
     const view = render(item.messages ? timeline(item.events, { messages: item.messages }) : timeline(item.events))
@@ -260,8 +255,8 @@ test('failed, cancelled and interrupted turns keep their own status as the first
     fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
     const toggleLabel = toggleText(view)
     // Exactly one state word, never prefixed by a separator of its own.
-    assert.equal(toggleLabel, item.status, item.name)
-    assert.equal(toggle(view).getAttribute('aria-label'), `收起过程 · ${item.status}`)
+    assert.equal(toggleLabel, `已读取 1 个文件 · ${item.status}`, item.name)
+    assert.equal(toggle(view).getAttribute('aria-label'), `收起过程 · 已读取 1 个文件 · ${item.status}`)
     assert.equal(header(view).textContent, item.headerText, item.name)
     if (item.name === 'interrupted') {
       assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
@@ -270,7 +265,7 @@ test('failed, cancelled and interrupted turns keep their own status as the first
       assert.equal((header(view).textContent.match(/·/g) ?? []).length, 1)
     }
     fireEvent.click(toggle(view))
-    assert.equal(toggleText(view, '展开'), item.status)
+    assert.equal(toggleText(view, '展开'), `已读取 1 个文件 · ${item.status}`)
     assert.equal(header(view).textContent, item.headerText, item.name)
     cleanup()
   }
@@ -287,7 +282,7 @@ test('a turn waiting on the model says so without a leading separator', async ()
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   await waitFor(() => assert.equal(toggleText(view), '正在等待回复'))
   assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在等待回复')
-  assert.match(header(view).textContent, /^正在等待回复·已用时 \d+秒$/)
+  assert.match(header(view).textContent, /^正在等待回复$/)
   assert.doesNotMatch(header(view).textContent, /^·/)
 })
 
@@ -300,23 +295,21 @@ test('a planned tool retry keeps its note joined to the state by exactly one sep
   const view = render(live(retrying))
   await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
-  await waitFor(() => assert.equal(toggleText(view), '正在处理 · 工具调用待调整'))
-  assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 正在处理 · 工具调用待调整')
-  assert.match(header(view).textContent, /^正在处理 · 工具调用待调整·已用时 \d+秒$/)
-  // The separator belongs to the join: the state line has exactly one, and the
-  // header adds exactly one more before the timer.
-  assert.equal((header(view).textContent.match(/·/g) ?? []).length, 2)
+  await waitFor(() => assert.equal(toggleText(view), '1 次调用失败'))
+  assert.equal(toggle(view).getAttribute('aria-label'), '收起过程 · 1 次调用失败')
+  assert.match(header(view).textContent, /^1 次调用失败$/)
+  assert.equal((header(view).textContent.match(/·/g) ?? []).length, 0)
 })
 
-test('a header without process content keeps its own word and joins the timer to it', async () => {
+test('a header without process content keeps its own word and omits elapsed time', async () => {
   await React.act(async () => persistProcessDisplayMode('verbose'))
   const view = render(React.createElement(TurnProcessHeader, { avatar: null, events: [event(1, 'run.started'), event(7, 'run.completed')], active: false, canToggle: false, collapsed: true, status: '处理过程', onToggle() {} }))
   await waitFor(() => assert.ok(view.container.querySelector('.fox-process-turn-toggle.is-status')))
   const status = view.container.querySelector('.fox-process-turn-toggle.is-status')
   assert.equal(status.querySelector('.fox-process-turn-label').textContent, '处理过程')
-  assert.equal(status.contains(view.container.querySelector('[role="timer"]')), true)
+  assert.equal(status.querySelector('[role="timer"]'), null)
   assert.equal(status.getAttribute('role'), 'status')
-  assert.equal(header(view).textContent, '处理过程·用时 6秒')
-  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 1)
+  assert.equal(header(view).textContent, '处理过程')
+  assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
 })
 

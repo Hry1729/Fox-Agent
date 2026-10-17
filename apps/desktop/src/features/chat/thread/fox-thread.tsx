@@ -10,6 +10,7 @@ import { FoxUserMessage } from './fox-user-message'
 import './fox-thread.css'
 
 export interface FoxThreadProps {
+  statusBar?: import('react').ReactNode
   fox: FoxThreadContextValue
   /** Opening suggestions for the empty state (expert-defined or default). */
   suggestions?: string[]
@@ -39,7 +40,7 @@ function FoxScrollToBottom() {
   // The primitive disables its button at bottom; scoped CSS hides that state.
   // Running determines only the dots/arrow, not whether scrolling is available.
   return (
-    <ThreadPrimitive.ScrollToBottom className="fox-scroll-button" aria-label="定位到最新消息">
+    <ThreadPrimitive.ScrollToBottom behavior={isRunning ? 'instant' : 'auto'} className="fox-scroll-button" aria-label="定位到最新消息">
       {isRunning ? <FoxThinkingDots /> : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>}
     </ThreadPrimitive.ScrollToBottom>
   )
@@ -74,7 +75,7 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  * at the mount site, so switching conversations rebuilds the runtime state
  * instead of mixing message streams.
  */
-export default function FoxThread({ fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
+export default function FoxThread({ statusBar, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
   return (
     <FoxThreadContext.Provider value={fox}>
       <div className="fox-thread">
@@ -90,6 +91,7 @@ export default function FoxThread({ fox, suggestions, onStart, planRevision, tur
             <ThreadPrimitive.If empty={false}>
               <div className="fox-thread-date"><span>今天</span></div>
               <ThreadPrimitive.Messages components={{ UserMessage: FoxUserMessage, AssistantMessage: FoxAssistantMessage }} />
+              {statusBar}
             </ThreadPrimitive.If>
           </ThreadPrimitive.Viewport>
           <FoxBottomDock plan={planRevision} />

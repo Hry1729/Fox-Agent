@@ -226,7 +226,8 @@ test('a failed tool stays visible in its stage and in the collapsed turn summary
   assert.match(view.container.querySelector('.fox-run-step-summary').textContent, /本次操作未能完成/)
   // A tool result describes one attempt, not the task (tool-attempt-status.ts), so a
   // completed run keeps no run-failure status — the failure stays in its stage.
-  assert.doesNotMatch(view.getByRole('button', { name: /收起过程/ }).textContent, /失败/)
+  assert.match(view.getByRole('button', { name: /收起过程/ }).textContent, /1 次调用失败/)
+  assert.doesNotMatch(view.getByRole('button', { name: /收起过程/ }).textContent, /过程未完成|运行失败/)
 })
 
 test('a reply closes its preceding process group even when a tool has no result yet', async () => {

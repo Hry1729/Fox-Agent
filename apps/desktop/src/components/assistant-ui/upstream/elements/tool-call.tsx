@@ -55,8 +55,10 @@ export function ToolCall({
       className={cn("w-full max-w-sm", className)}
     >
       <CollapsibleTrigger aria-label={ariaLabel} className="fox-element-tool-trigger group/trigger text-muted-foreground hover:text-foreground/90 flex w-full items-center gap-2 rounded-md py-1 text-[13.5px] transition-colors outline-none">
-        <ChevronRightIcon className="size-3.5 shrink-0 opacity-60 transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-open/trigger:rotate-90 group-data-panel-open/trigger:rotate-90 motion-reduce:transition-none" />
-        {icon}
+        <span className="fox-tool-disclosure-icon" data-has-icon={Boolean(icon)} aria-hidden="true">
+          {icon}
+          <ChevronRightIcon className="fox-tool-disclosure-chevron" />
+        </span>
         <SwapLabel
           active={running ? 0 : 1}
           className="shrink-0 text-start whitespace-nowrap"

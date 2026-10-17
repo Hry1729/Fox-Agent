@@ -38,7 +38,15 @@ function StreamingLeaf({ children, node: _node, ref: _ref, ...props }: Component
   const duration = (props.style as Record<string, string> | undefined)?.['--sd-duration'];
   return <ElementStreamingText inline cursor={false} segments={[{ text: children }]} count={1} streaming={context?.isAnimating ?? false} fresh={duration !== '0ms'} {...props} />;
 }
-const streamingComponents = { span: StreamingLeaf };
+function MarkdownLink({ children, href, className }: ComponentProps<'a'> & { node?: unknown }) {
+  const [open, setOpen] = useState(false);
+  const style = cn('wrap-anywhere appearance-none text-left font-medium text-primary underline', className);
+  if (href?.startsWith('#fox-artifact=')) return <a href={href} className={style} data-streamdown="link">{children}</a>;
+  if (!href || href === 'streamdown:incomplete-link') return <span className={style}>{children}</span>;
+  return <><button type="button" className={style} data-streamdown="link" onClick={() => setOpen(true)}>{children}</button>
+    <ExternalLinkDialog isOpen={open} onClose={() => setOpen(false)} onConfirm={() => undefined} url={href} /></>;
+}
+const streamingComponents = { span: StreamingLeaf, a: MarkdownLink };
 
 const labelUnspecifiedCodeFences = (markdown: string) => {
   const lines = markdown.split("\n");

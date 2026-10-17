@@ -80,6 +80,21 @@ function processPart(fox: FoxThreadMessage) {
 }
 
 describe('deriveFoxThreadMessages', () => {
+  test('late artifacts and metadata changes invalidate completed and synthetic message caches', () => {
+    for (const completed of [true, false]) {
+      const cache = createFoxThreadCache()
+      const base = detail({ messages: completed ? [message({ id: 'a', role: 'assistant', runId: 'r1', content: '报告' })] : [], lastRun: run({ id: 'r1', status: completed ? 'completed' : 'running' }) })
+      const before = deriveFoxThreadMessages({ detail: base, streamingText: completed ? '' : '报告' }, cache)
+      const file = { id: 'file', conversationId: 'c1', runId: 'r1', displayName: '报告.pdf', artifactType: 'created_file', artifactClass: 'process', artifactOrigin: 'host_private', storagePath: 'report.pdf', mediaType: 'application/pdf', byteSize: 10, sha256: null, status: 'ready', createdAt: 1, updatedAt: 1 }
+      const loaded = { ...base, artifacts: [file] }
+      const after = deriveFoxThreadMessages({ detail: loaded, streamingText: completed ? '' : '报告' }, cache)
+      expect(after[0]).not.toBe(before[0])
+      expect(after[0].content.find(part => part.type === 'data-fox-artifacts')).toEqual({ type: 'data-fox-artifacts', data: [file] })
+      expect(deriveFoxThreadMessages({ detail: loaded, streamingText: completed ? '' : '报告' }, cache)[0]).toBe(after[0])
+      const changed = deriveFoxThreadMessages({ detail: { ...loaded, artifacts: [{ ...file, status: 'unavailable' }] }, streamingText: completed ? '' : '报告' }, cache)
+      expect(changed[0]).not.toBe(after[0])
+    }
+  })
   test('同一Run的Kernel round合为一条展示，保留原始round供过程顺序投影', () => {
     const rounds = [message({ id: 'kernel-message:r1:1', role: 'assistant', runId: 'r1', content: '先读取文件' }), message({ id: 'kernel-message:r1:2', role: 'assistant', runId: 'r1', content: '最终答案', ordinal: 2 })]
     const rows = deriveFoxThreadMessages({ detail: detail({ messages: rounds, lastRun: run({ id: 'r1', status: 'completed' }) }) })

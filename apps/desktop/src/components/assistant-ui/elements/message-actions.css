@@ -25,3 +25,8 @@
 .fox-message-footer [data-slot='message-actions'] > button.text-emerald-500 {
   color: var(--success);
 }
+
+.fox-message-footer [data-slot='message-actions'] > button { color: var(--fox-faint); }
+.fox-message-footer [data-slot='message-actions'] > button:hover,
+.fox-message-footer [data-slot='message-actions'] > button[aria-pressed="true"] { color: var(--fox-muted); }
+.fox-message-footer [data-slot='message-actions'] > button.text-emerald-500 { color: var(--success); }

@@ -1,9 +1,9 @@
 import { type RunFailure } from '../../conversations/model/run-failure'
-import { FoxAssistantAvatar } from '../components/FoxAssistantAvatar'
 import { useProcessDisplayMode } from '../process-display-mode'
 import { runPhaseTiming, runPhaseTitle } from '../run-phase'
 import { activeModelWaiting, compactionFailurePresentation, modelWaitingTitle } from '../run-status-facts'
 import { RuntimeArtifacts } from '../runtime-artifacts'
+import { resolveFinalArtifactReference } from '../final-artifact-references'
 import { runtimeProcessActivity } from '../runtime-process-activity'
 import { toolAttemptState } from '../tool-attempt-status'
 import { TurnProcessHeader } from '../turn-process-header'
@@ -97,6 +97,8 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   // including when it is still streaming. Earlier replies remain in the fold.
   const visibleResponseIndex = orderedGroups?.reduce((last, group, index) =>
     group.kind === 'response' && index > lastProcessIndex ? index : last, -1) ?? -1
+  const finalGroup = orderedGroups[visibleResponseIndex]
+  const finalResponse = !running && !runInProgress && finalGroup?.kind === 'response' ? finalGroup.text : ''
   const turnProcessStatus = failureReason || message.status === 'failed' ? '过程未完成'
     : cancelled || message.status === 'cancelled' ? '过程已取消'
       : message.status === 'interrupted' ? '过程已中断'
@@ -134,12 +136,21 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   }
 
   return (
-    <div className="fox-turn-anchor">
+    <div className="fox-turn-anchor" onClickCapture={event => {
+      const target = event.target instanceof Element ? event.target.closest('a') : null
+      const href = target?.getAttribute('href') ?? ''
+      if (!href.startsWith('#fox-artifact=')) return
+      event.preventDefault()
+      event.stopPropagation()
+      const artifact = resolveFinalArtifactReference(href, artifacts)
+      if (artifact) onOpenArtifact?.(artifact)
+      else toast.error('文件记录尚未找到')
+    }}>
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
             <RunActivity status={runAttemptState === 'completed' ? 'complete' : runAttemptState === 'failed' ? 'error' : runAttemptState} statusLabel={turnProcessStatus} open={!turnProcessCollapsed} onOpenChange={next => setTurnProcessChoice(next ? 'open' : 'closed')} className="fox-process-turn-content"
               header={
-            <TurnProcessHeader avatar={<FoxAssistantAvatar />} events={processEvents} active={running || runInProgress}
+            <TurnProcessHeader events={processEvents} active={running || runInProgress}
               canToggle={canToggleTurn} collapsed={turnProcessCollapsed} status={turnProcessStatus}
               toolStatus={pendingToolAttempt ? '工具调用待调整' : undefined} onToggle={() => {
                 if (!turnProcessCollapsed) setCollapseVersion(value => value + 1)
@@ -166,7 +177,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
           {compactionFailures.map(({ item, presentation }) => presentation && <div key={`compaction-failure-${item.seq}`} className="fox-process-notice" role="status">
             {presentation.label}
           </div>)}
-          {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
+          {!running && <RuntimeArtifacts artifacts={artifacts} finalResponse={finalResponse} onOpenArtifact={onOpenArtifact} />}
           {failureReason && !hideFooter && <ErrorPrompt error={failureReason.message} onRetry={onRetry} />}
           {cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />

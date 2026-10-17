@@ -25,7 +25,9 @@ import { createRoot } from 'react-dom/client';
 import './src/styles/globals.css';
 import './src/styles/workbench.css';
 import './src/styles/workspace-pages.css';
-import { RuntimeTimeline } from './src/features/chat/workbench';
+import './src/features/chat/runtime-process-groups.css';
+import './src/features/chat/runtime-process-row.css';
+import { RuntimeTimeline } from './src/features/chat/timeline/fox-runtime-timeline';
 import { answerDeltaFingerprint } from './src/features/conversations/model/runtime-delta-fingerprint';
 
 const kind = new URLSearchParams(location.search).get('case') || 'live';
@@ -52,6 +54,8 @@ tools('first', false, false);
 answer('第一段');
 tools('second', kind === 'live', kind === 'failed');
 answer('第二段');
+// A reply settles its preceding group. Only the new trailing group is live.
+if (kind === 'live') tools('third', true, false);
 const running = kind === 'live' || kind === 'kernel';
 const messages: any[] = [
   { id: 'user', conversationId: 'conversation', runId: 'run', role: 'user', kind: 'text', content: '验证过程组织', status: 'completed', ordinal: 1, createdAt: 1, updatedAt: 1 },
@@ -143,7 +147,11 @@ async function connect(cdpPort, vitePort) {
   return { socket, send, evaluate }
 }
 
-const click = (client, selector, index = 0) => client.evaluate(`(() => { const node = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; if (!node) return false; node.click(); return true })()`)
+const click = (client, selector, index = 0) => client.evaluate(`(() => { const node = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; if (!node || !node.getClientRects().length || node.closest('[hidden], [inert]')) return false; node.click(); return true })()`)
+async function openTurn(client) {
+  check(await click(client, '.fox-process-turn-toggle'), 'missing visible turn toggle')
+  return waitFor(async () => { const sample = await metrics(client); return sample.hidden.every(value => !value) ? sample : null })
+}
 const metrics = client => client.evaluate(`(() => {
   const stages = [...document.querySelectorAll('.fox-process-stage')];
   const headers = stages.map(stage => stage.querySelector('.fox-chain-of-thought-header'));
@@ -152,7 +160,8 @@ const metrics = client => client.evaluate(`(() => {
     generation: window.__processCheck?.generation, kind: window.__processCheck?.kind,
     stageCount: stages.length, answerCount: document.querySelectorAll('.fox-answer-segment').length,
     answers: [...document.querySelectorAll('.fox-answer-segment')].map(node => node.textContent.trim()),
-    titles: stages.map(stage => stage.querySelector('.fox-runtime-process-summary')?.textContent?.trim()),
+    titles: stages.map(stage => stage.querySelector('.fox-runtime-process-summary > [aria-hidden="false"]')?.textContent?.trim()),
+    running: stages.map(stage => stage.querySelector('.fox-runtime-process-summary')?.classList.contains('is-running')),
     open: headers.map(header => header?.getAttribute('aria-expanded')),
     hidden: stages.map(stage => stage.hidden),
     scrolls: scrolls.map(node => node ? { top: node.scrollTop, height: node.scrollHeight, client: node.clientHeight, overflow: getComputedStyle(node).overflowY } : null),
@@ -163,7 +172,7 @@ const metrics = client => client.evaluate(`(() => {
 async function ready(client, kind, priorGeneration) {
   return waitFor(async () => {
     const sample = await metrics(client)
-    return sample?.kind === kind && sample.generation !== priorGeneration && sample.stageCount === 2 && sample.answerCount === 2 ? sample : null
+    return sample?.kind === kind && sample.generation !== priorGeneration && sample.stageCount === (kind === 'live' ? 3 : 2) && sample.answerCount === 2 ? sample : null
   })
 }
 
@@ -210,10 +219,13 @@ async function run() {
     console.log('Chrome CDP connected')
     let live = await ready(client, 'live', null)
     check(live.answers[0].includes('第一段') && live.answers[1].includes('第二段'), 'answer segments lost or reordered')
-    check(live.titles[1].includes('正在读取文件'), 'tool remains in flight after answer but stage is not running')
-    check(await click(client, '.fox-process-stage .fox-chain-of-thought-header', 1), 'missing live stage header')
-    live = await waitFor(async () => { const sample = await metrics(client); return sample.open[1] === 'true' && sample.scrolls[1] ? sample : null })
-    check(scrollAtEnd(live.scrolls[1]), `live stage did not open at end: ${JSON.stringify(live.scrolls[1])}`)
+    check(live.hidden.every(Boolean), 'process should start folded')
+    check(live.titles[1] === '读取了文件' && !live.running[1], 'reply did not settle its preceding process group')
+    check(live.titles[2].includes('正在读取文件') && live.running[2], 'trailing tool group is not running')
+    await openTurn(client)
+    check(await click(client, '.fox-process-stage .fox-chain-of-thought-header', 2), 'missing live stage header')
+    live = await waitFor(async () => { const sample = await metrics(client); return sample.open[2] === 'true' && sample.scrolls[2]?.client > 0 ? sample : null })
+    check(scrollAtEnd(live.scrolls[2]), `live stage did not open at end: ${JSON.stringify(live.scrolls[2])}`)
     check(await click(client, '.fox-process-stage .fox-chain-of-thought-header', 0), 'missing completed stage header')
     let first = await waitFor(async () => { const sample = await metrics(client); return sample.open[0] === 'true' && sample.scrolls[0] ? sample : null })
     check(first.scrolls[0].height > first.scrolls[0].client && first.scrolls[0].top === 0, `completed stage did not open at top: ${JSON.stringify(first.scrolls[0])}`)
@@ -227,7 +239,7 @@ async function run() {
     check(collapsed.hidden.every(Boolean) && collapsed.answerCount === 2, 'collapsing process hid answer or left process rows visible')
     await click(client, '.fox-process-turn-toggle')
     const restored = await metrics(client)
-    check(restored.open[1] === 'true' && restored.answerCount === 2, 'reopening process lost expanded stage or answer')
+    check(restored.open.every(value => value === 'false') && restored.hidden.every(value => !value) && restored.answerCount === 2, 'reopening process did not reset stage disclosures or lost an answer')
     results.live = { initial: live, completedStage: first, collapsed, restored }
     const liveShot = await client.send('Page.captureScreenshot', { format: 'png' })
     if (liveShot?.data) writeFileSync(join(outputRoot, 'live.png'), Buffer.from(liveShot.data, 'base64'))
@@ -236,6 +248,8 @@ async function run() {
     await client.send('Page.navigate', { url: `http://127.0.0.1:${vitePort}/${route}?case=completed` })
     const completed = await ready(client, 'completed', generation)
     generation = completed.generation
+    check(completed.running.every(value => !value), 'completed run retained a live stage')
+    await openTurn(client)
     await click(client, '.fox-process-stage .fox-chain-of-thought-header', 1)
     const completedOpen = await waitFor(async () => { const sample = await metrics(client); return sample.open[1] === 'true' && sample.scrolls[1] ? sample : null })
     check(completedOpen.scrolls[1].height > completedOpen.scrolls[1].client && completedOpen.scrolls[1].top === 0, 'finished stage did not open from beginning')
@@ -245,11 +259,18 @@ async function run() {
 
     await client.send('Page.navigate', { url: `http://127.0.0.1:${vitePort}/${route}?case=failed` })
     const failed = await ready(client, 'failed', generation)
-    check(failed.titles[1].includes('失败'), `failed tool hidden from stage title: ${failed.titles[1]}`)
+    await openTurn(client)
+    check(await click(client, '.fox-process-stage .fox-chain-of-thought-header', 1), 'missing failed tool stage')
+    const failedRow = await waitFor(() => client.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('.fox-process-stage .fox-element-tool-trigger [aria-hidden="false"]')];
+      const row = rows.find(node => node.querySelector('.fox-run-step-action')?.textContent.includes('工具调用未成功'));
+      return row ? { action: row.querySelector('.fox-run-step-action').textContent, summary: row.closest('button').querySelector('.fox-run-step-summary')?.textContent } : null;
+    })()`))
+    check(failedRow.summary?.includes('本次操作未能完成'), 'failed tool lost its explanation')
     await click(client, '.fox-process-turn-toggle')
     const failedCollapsed = await metrics(client)
-    check(failedCollapsed.toggle.includes('失败') && failedCollapsed.answerCount === 2 && failedCollapsed.hidden.every(Boolean), 'failed tool hidden from whole-turn summary or answer lost')
-    results.failed = failedCollapsed
+    check(!failedCollapsed.toggle.includes('失败') && failedCollapsed.answerCount === 2 && failedCollapsed.hidden.every(Boolean), 'a tool attempt incorrectly failed the whole turn or folding lost answers')
+    results.failed = { ...failedCollapsed, failedRow }
     const failedShot = await client.send('Page.captureScreenshot', { format: 'png' })
     if (failedShot?.data) writeFileSync(join(outputRoot, 'failed.png'), Buffer.from(failedShot.data, 'base64'))
     generation = failed.generation
@@ -258,6 +279,7 @@ async function run() {
       const sample = await ready(client, kind, generation)
       generation = sample.generation
       check(sample.open.every(value => value === 'false'), 'Kernel stages must default to collapsed')
+      await openTurn(client)
       const diagrams = await waitFor(() => client.evaluate(`(() => {
         const svgs = [...document.querySelectorAll('.fox-answer-segment svg')];
         const labels = svgs.map(svg => svg.textContent || '');
@@ -272,7 +294,8 @@ async function run() {
       check(collapsed.hidden.every(Boolean) && collapsed.answerCount === 2, 'Kernel collapse removed response diagrams')
       await click(client, '.fox-process-turn-toggle')
       const reopened = await metrics(client)
-      check(reopened.open[1] === 'true', 'Kernel stage lost disclosure state')
+      check(reopened.open.every(value => value === 'false'), 'Kernel stages did not reset after folding the turn')
+      check(await click(client, '.fox-process-stage .fox-chain-of-thought-header', 1), 'missing reopened Kernel stage')
       if (kind === 'kernel') {
         await client.evaluate('window.replaceKernel()')
         await waitFor(() => client.evaluate(`(() => {
@@ -286,8 +309,11 @@ async function run() {
     }
     writeFileSync(join(outputRoot, 'runtime-process-browser-check.json'), JSON.stringify({ results, vitePort, cdpPort }, null, 2))
     console.log(`runtime-process browser check OK: ${outputRoot}`)
-    console.log('real RuntimeTimeline + Fox CSS: live end, completed top, collapse state, response-after-active-tool, partial failure')
+    console.log('real RuntimeTimeline + Fox CSS: trailing live end, settled top, fold reset, reply settles prior group, tool failure, Kernel diagrams')
   } catch (error) {
+    if (client) {
+      try { writeFileSync(join(outputRoot, 'failure-dom.json'), JSON.stringify({ metrics: await metrics(client), html: await client.evaluate('document.body.innerHTML') }, null, 2)) } catch { /* preserve the original failure */ }
+    }
     writeFileSync(join(outputRoot, 'runtime-process-browser-error.txt'), `${error.stack || error}\n\nVite output:\n${viteLog.join('')}\nChrome output:\n${chromeLog.join('')}`)
     throw error
   } finally {

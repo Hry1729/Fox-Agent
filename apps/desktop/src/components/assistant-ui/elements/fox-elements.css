@@ -31,7 +31,13 @@
 .fox-element-tool-call .fox-runtime-tool-detail > div { margin: 0; border: 0; border-radius: 0; background: transparent; }
 .fox-element-tool-call [data-streamdown='code-block'] { border: 0; box-shadow: none; }
 .fox-element-tool-call > button { display: flex; width: 100%; min-width: 0; padding: 2px 0; text-align: left; }
-.fox-element-tool-call > button > .fox-runtime-step-icon-glyph { width: 14px; height: 14px; flex: 0 0 14px; }
+.fox-tool-disclosure-icon { display: grid; width: 15px; height: 15px; flex: 0 0 15px; }
+.fox-tool-disclosure-icon > svg { grid-area: 1 / 1; width: 15px; height: 15px; transition: opacity 140ms ease, transform 140ms ease; }
+.fox-tool-disclosure-icon[data-has-icon='true'] > .fox-tool-disclosure-chevron { opacity: 0; }
+:is(.fox-element-tool-trigger, .fox-element-timeline-trigger):is(:hover, :focus-visible, [aria-expanded='true']) .fox-tool-disclosure-icon > svg:not(.fox-tool-disclosure-chevron) { opacity: 0; }
+:is(.fox-element-tool-trigger, .fox-element-timeline-trigger):is(:hover, :focus-visible, [aria-expanded='true']) .fox-tool-disclosure-icon > .fox-tool-disclosure-chevron { opacity: 1; }
+:is(.fox-element-tool-trigger, .fox-element-timeline-trigger)[aria-expanded='true'] .fox-tool-disclosure-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .fox-tool-disclosure-icon > svg { transition: none; } }
 .fox-element-tool-call > button > span:nth-last-child(2) { flex: 0 1 auto; min-width: 0; }
 .fox-element-tool-call > button > span:nth-last-child(2) { display: inline-flex; gap: 0; align-items: baseline; }
 .fox-element-tool-call .fox-runtime-step-path { color: var(--fox-text); }

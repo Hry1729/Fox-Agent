@@ -8,6 +8,7 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 const React = await import('react')
 const { cleanup, fireEvent, render, screen, within } = await import('@testing-library/react')
 const { RuntimeArtifacts } = await import('../src/features/chat/runtime-artifacts')
+const { finalArtifactIds } = await import('../src/features/chat/final-artifact-references')
 
 afterEach(cleanup)
 
@@ -21,7 +22,28 @@ function artifact(id: string, artifactClass: string, displayName: string): Artif
 }
 
 describe('reply file results', () => {
-  test('larger batches keep category disclosures and opening a file keeps its Host identity', () => {
+  test('model-selected private PDF stays visible among intermediate files without changing Host facts', () => {
+    const pdf = { ...artifact('compute-artifact:pdf', 'process', 'AGV报告.pdf'), artifactOrigin: 'host_private' }
+    const artifacts = [pdf, ...[1, 2, 3, 4].map(i => artifact(`chart-${i}`, 'process', `chart-${i}.svg`))]
+    let opened: ArtifactRecord | undefined
+    render(React.createElement(RuntimeArtifacts, { artifacts, finalResponse: '[AGV报告.pdf](#fox-artifact=compute-artifact%3Apdf)', onOpenArtifact: item => { opened = item } }))
+    const card = screen.getByRole('button', { name: /AGV报告.pdf/ })
+    expect(card.getAttribute('title')).toBe('生成文件 · 未发布')
+    expect(screen.queryByRole('button', { name: /chart-1.svg/ })).toBeNull()
+    fireEvent.click(card)
+    expect(opened).toBe(pdf)
+    expect(opened?.artifactClass).toBe('process')
+  })
+
+  test('legacy delivery section resolves unique exact names, not missing files, drafts or ambiguous names', () => {
+    const records = [artifact('pdf', 'process', '报告.pdf'), artifact('csv', 'process', '数据.csv'), artifact('draft', 'process', '草稿.pdf')]
+    const text = '## 交付物\n- **报告.pdf**\n- `数据.csv`\n- `不存在.csv`\n- 未生成 **草稿.pdf**\n## 核心结论\n**草稿.pdf**'
+    expect([...finalArtifactIds(text, records)]).toEqual(['pdf', 'csv'])
+    expect([...finalArtifactIds(text, [...records, artifact('duplicate', 'process', '报告.pdf')])]).toEqual(['csv'])
+    expect([...finalArtifactIds('报告.pdf\n[失效](#fox-artifact=missing)\n[错误](#fox-artifact=%ZZ)', records)]).toEqual([])
+    expect([...finalArtifactIds('```md\n[示例](#fox-artifact=pdf)\n```', records)]).toEqual([])
+  })
+  test('larger batches show final files and keep process disclosures and opening a file keeps its Host identity', () => {
     const opened: string[] = []
     render(React.createElement(RuntimeArtifacts, {
       artifacts: [
@@ -33,17 +55,9 @@ describe('reply file results', () => {
       onOpenArtifact: (item: ArtifactRecord) => opened.push(item.id),
     }))
 
-    const result = screen.getByRole('button', { name: /本次文件结果/ })
     const process = screen.getByRole('button', { name: /过程文件/ })
-    expect(result.parentElement).toBe(process.parentElement)
-    expect(result.getAttribute('aria-expanded')).toBe('false')
     expect(process.getAttribute('aria-expanded')).toBe('false')
-    expect(screen.queryByRole('region', { name: '本次文件结果' })).toBeNull()
-
-    fireEvent.click(result)
-    expect(result.getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByRole('region', { name: '本次文件结果' }).id).toBe(result.getAttribute('aria-controls'))
-    expect(screen.getByRole('button', { name: /报告.docx/ })).toBeTruthy()
+    expect(screen.getByRole('region', { name: '本次文件结果' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /计算.csv/ })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /报告.docx/ }))
     expect(opened).toEqual(['deliverable'])
@@ -51,9 +65,8 @@ describe('reply file results', () => {
     fireEvent.click(process)
     const panel = screen.getByRole('region', { name: '过程文件' })
     expect(panel.id).toBe(process.getAttribute('aria-controls'))
-    expect(result.getAttribute('aria-expanded')).toBe('false')
     expect(process.getAttribute('aria-expanded')).toBe('true')
-    expect(screen.queryByRole('button', { name: /报告.docx/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /报告.docx/ })).toBeTruthy()
     expect(within(panel).getByRole('button', { name: /预览.html/ })).toBeTruthy()
     expect(within(panel).getByRole('button', { name: /计算.csv/ })).toBeTruthy()
 

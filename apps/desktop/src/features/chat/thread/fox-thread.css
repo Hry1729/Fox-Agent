@@ -17,7 +17,7 @@
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  padding-bottom: var(--fox-composer-occlusion, 180px);
+  padding-bottom: max(0px, calc(var(--fox-composer-occlusion, 180px) - 6px));
 }
 
 /* Empty conversations centre the classic composer on the stage itself
@@ -47,15 +47,24 @@
 }
 
 .fox-thread-viewport {
+  scroll-behavior: auto;
   min-width: 0;
   overflow-x: hidden;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--fox-space-xl) var(--fox-space-3xl);
+  padding: var(--fox-space-xl) 0;
+  scrollbar-gutter: stable both-edges;
+  padding-bottom: 44px;
   display: flex;
   flex-direction: column;
   gap: var(--fox-space-l);
+}
+
+.fox-chat-stage.is-empty .fox-thread-viewport {
+  padding: 0;
+  scrollbar-gutter: auto;
+  mask-image: none;
 }
 
 /* Flex children must keep their natural height: the default `flex-shrink: 1`
@@ -66,10 +75,10 @@
   flex-shrink: 0;
 }
 
-/* One content column: every message sits inside the same 720px cap. */
+/* Messages and composer share the chat column width. */
 .fox-thread-msg {
-  width: 100%;
-  max-width: 720px;
+  width: var(--fox-chat-column-width);
+  max-width: none;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -425,4 +434,14 @@
   display: inline-flex;
   align-items: center;
   gap: var(--fox-space-m);
+}
+
+.fox-chat-stage.is-empty .fox-empty-conversation {
+  width: min(48rem, calc(100% - clamp(2rem, 12vw, 10rem)));
+  position: absolute;
+  left: 50%;
+  bottom: calc(50% + 46px - var(--fox-empty-vertical-offset, 0px));
+  height: auto;
+  padding: 0;
+  transform: translateX(-50%);
 }

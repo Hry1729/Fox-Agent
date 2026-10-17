@@ -30,8 +30,8 @@
 .fox-process-turn-toggle > .fox-process-turn-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fox-process-turn-toggle > svg { flex: 0 0 13px; }
 .fox-process-turn-label [data-slot='thinking-indicator-dot'] { width: 6px; height: 6px; flex: 0 0 6px; margin-inline: 3.5px; transition: opacity 120ms ease; }
-.fox-process-turn-toggle > .fox-process-turn-disclosure-icon { position: absolute; left: 0; top: 50%; transform: translateY(-50%); opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
-.fox-process-turn-header:is(:hover, :focus-within) button.fox-process-turn-toggle .fox-process-turn-disclosure-icon { opacity: 1; }
+.fox-process-turn-toggle > .fox-process-turn-disclosure-icon { position: static; display: block; width: 13px; height: 13px; align-self: center; margin: 0; transform: none; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.fox-process-turn-toggle:is(:hover, :focus-visible) > .fox-process-turn-disclosure-icon { opacity: 1; }
 .fox-process-turn-header:is(:hover, :focus-within) button.fox-process-turn-toggle [data-slot='thinking-indicator-dot'] { opacity: 0; visibility: hidden; }
 .fox-process-turn-elapsed { flex: 0 0 auto; color: var(--fox-muted); font-size: 12px; white-space: nowrap; }
 /* The dot between the status text and the whole-round timer is rendered only when
@@ -111,6 +111,7 @@
   transition: opacity 100ms ease;
 }
 .fox-runtime-process .fox-chain-of-thought-header:is(:hover, :focus-visible, [aria-expanded='true']) > .chain-of-thought-toggle { opacity: 1; }
+.fox-runtime-process .fox-chain-of-thought-header:is(:hover, :focus-visible, [aria-expanded='true']) .fox-runtime-group-icon { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
   .fox-process-turn-disclosure-icon, .fox-process-turn-label [data-slot='thinking-indicator-dot'] { transition: none; }
   .fox-runtime-group-icon,

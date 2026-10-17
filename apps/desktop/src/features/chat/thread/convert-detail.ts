@@ -205,7 +205,8 @@ function toFoxThreadMessage(args: {
   // event stream advanced, or its run's terminal state arrived. Static history
   // messages never change keys, so the converter keeps reusing their objects.
   const version = runVersion(events, message.runId)
-  const key = `${message.id}:${message.updatedAt}:${message.status}:${version}:${isActiveRun ? 1 : 0}:${failure ? failure.code : ''}:${cancelled ? 1 : 0}:${message.content}`
+  const artifactVersion = JSON.stringify(message.runId ? artifactsByRun.get(message.runId) ?? [] : [])
+  const key = `${message.id}:${message.updatedAt}:${message.status}:${version}:${isActiveRun ? 1 : 0}:${failure ? failure.code : ''}:${cancelled ? 1 : 0}:${message.content}:${artifactVersion}`
   const cached = cache.get(message.id)
   if (cached && cached.key === key) return cached.message
   const attachments = (attachmentsByMessage.get(message.id) ?? []).map(attachmentToFoxAttachment)
@@ -294,7 +295,7 @@ function syntheticAssistantMessage(
   const version = runVersion(detail.runtimeEvents, activeRunId)
   const failure = runTerminalStates.failures.get(activeRunId) ?? null
   const cancelled = runTerminalStates.cancelled.has(activeRunId)
-  const key = `assistant-${activeRunId}:streaming:${streamingText}:${version}`
+  const key = `assistant-${activeRunId}:streaming:${streamingText}:${version}:${JSON.stringify(artifactsByRun.get(activeRunId) ?? [])}`
   const cached = cache.get(`assistant-${activeRunId}`)
   if (cached && cached.key === key) return cached.message
   const parts: FoxThreadPart[] = []

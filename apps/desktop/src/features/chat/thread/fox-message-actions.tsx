@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CheckIcon, CopyIcon } from 'lucide-react'
+import { CheckIcon, CopyIcon, GitFork } from 'lucide-react'
 import { MessageActions } from '@/components/assistant-ui/upstream/elements/message-actions'
 import { ghostButton, iconSwap, iconSwapIn, iconSwapOut } from '@/components/assistant-ui/upstream/elements/surfaces'
 import { cn } from '@/lib/utils'
@@ -50,7 +50,7 @@ export function FoxMessageActions({ reaction, busy, onCopy, onFork, onPositive, 
     reaction={reaction === 'positive' ? 'up' : reaction === 'negative' ? 'down' : null}
     regenerating={false} busy={busy} allowClearReaction={false} aria-busy={copying}
     onCopy={() => void copy()} onReactionChange={(value) => value === 'up' ? onPositive() : value === 'down' ? onNegative() : undefined}
-    onRegenerate={onRegenerate} onMore={onFork} moreLabel="从此消息创建分支" />
+    onRegenerate={onRegenerate} onMore={onFork} moreIcon={<GitFork aria-hidden="true" className="size-3.5" />} moreLabel="从此消息创建分支" />
 }
 
 export function FoxCopyMessageButton({ onCopy }: { onCopy: CopyAction }) {

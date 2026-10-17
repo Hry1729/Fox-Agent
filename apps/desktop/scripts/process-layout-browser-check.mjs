@@ -15,7 +15,9 @@ import { createRoot } from 'react-dom/client';
 import './src/styles/globals.css';
 import './src/styles/workbench.css';
 import './src/styles/workspace-pages.css';
-import { RuntimeTimeline } from './src/features/chat/workbench';
+import './src/features/chat/runtime-process-groups.css';
+import './src/features/chat/runtime-process-row.css';
+import { RuntimeTimeline } from './src/features/chat/timeline/fox-runtime-timeline';
 import { answerDeltaFingerprint } from './src/features/conversations/model/runtime-delta-fingerprint';
 import { persistProcessDisplayMode } from './src/features/chat/process-display-mode';
 import { RunStatusText } from './src/features/chat/components/FoxAssistantAvatar';
@@ -36,6 +38,10 @@ const artifacts=query.has('artifacts') ? [
   {id:'deliverable',conversationId:'c',runId:'run',displayName:'报告.docx',artifactType:'created_file',artifactClass:'deliverable',artifactOrigin:'project',storagePath:'C:/project/报告.docx',mediaType:null,byteSize:1024,sha256:null,status:'ready',createdAt:start,updatedAt:start},
   {id:'process',conversationId:'c',runId:'run',displayName:'计算.csv',artifactType:'created_file',artifactClass:'process',artifactOrigin:'project',storagePath:'C:/project/计算.csv',mediaType:null,byteSize:1024,sha256:null,status:'ready',createdAt:start,updatedAt:start},
 ] : [];
+if (artifacts.length && !query.has('small')) artifacts.push(
+  {...artifacts[0],id:'deliverable-2',displayName:'附录.docx'},
+  {...artifacts[1],id:'process-2',displayName:'中间数据.csv'},
+);
 document.body.style.margin='0';
 const approval={id:'kernel-approval:run:write:v7',toolName:'write_file',requestedAction:'write_file',request:{input:{path:'D:/项目/长目录/fox/20260929-5ce8fd7980d7/report.md',content:('# 报告正文\\n正文内容保持原样。\\n').repeat(150)},wholeFileReplacement:{purpose:'整文件替换',targetIdentity:'D:/项目/长目录/fox/20260929-5ce8fd7980d7/report.md',baselineVersion:'missing',candidateDigest:'sha256:'+ 'a'.repeat(64),requestDigest:'sha256:'+'b'.repeat(64),availableDecisions:['allow_once','deny']}}};
 createRoot(document.getElementById('root')!).render(<div className="fox-conversation-content" style={{padding:16,maxWidth:900,margin:'0 auto'}}>{query.has('approval')?<div className="fox-prompt-shell is-decision is-approval"><div className="fox-decision-card"><div className="fox-decision-approval-list"><RuntimeApprovalPrompt approval={approval as any} onResolve={async(id,decision)=>{(window as any).__approvalResult={id,decision};return true}}/></div></div></div>:<><RuntimeTimeline messages={messages as any} attachments={[]} artifacts={artifacts as any} events={events} runtimeRunning={live} activeRunId={live?'run':undefined} state={live?'streaming':'idle'} streamingText="" onRetry={()=>{}} onRerun={async()=>false}/>{query.has('shimmer')&&<div id="status-probe"><RunStatusText text="正在分析请求" active /></div>}</>}</div>);
@@ -74,10 +80,10 @@ try {
   let serving=false
   for(let i=0;i<80;i++){try{serving=(await fetch(`http://127.0.0.1:${port}/process-layout-check.html`)).ok;if(serving)break}catch{}await sleep(250)}
   if(!serving)throw Error('fixture dev server unavailable')
-  for(const scenario of [{name:'wide',width:1100,live:false,dark:false},{name:'narrow-dark',width:360,live:false,dark:true},{name:'running',width:850,live:true,dark:false},{name:'artifacts',width:850,live:false,dark:false,artifacts:true},{name:'fallback-live',width:850,live:true,fallback:true},{name:'fallback-failed',width:850,live:false,fallback:true,failed:true},{name:'detailed-live',width:850,live:true,detailed:true}]) {
+  for(const scenario of [{name:'wide',width:1100,live:false,dark:false},{name:'narrow-dark',width:360,live:false,dark:true},{name:'running',width:850,live:true,dark:false},{name:'artifacts',width:850,live:false,dark:false,artifacts:true},{name:'artifacts-direct',width:850,live:false,artifacts:true,small:true},{name:'fallback-live',width:850,live:true,fallback:true},{name:'fallback-failed',width:850,live:false,fallback:true,failed:true},{name:'detailed-live',width:850,live:true,detailed:true}]) {
     await client.send('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:900,deviceScaleFactor:1,mobile:false})
     const previous=await client.evaluate('window.__processCase?.generation')
-    await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/process-layout-check.html?live=${scenario.live?1:0}&${scenario.dark?'dark=1':''}&${scenario.artifacts?'artifacts=1':''}&${scenario.fallback?'fallback=1':''}&${scenario.failed?'failed=1':''}&${scenario.detailed?'detailed=1':''}`})
+    await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/process-layout-check.html?live=${scenario.live?1:0}&${scenario.dark?'dark=1':''}&${scenario.artifacts?'artifacts=1':''}&${scenario.small?'small=1':''}&${scenario.fallback?'fallback=1':''}&${scenario.failed?'failed=1':''}&${scenario.detailed?'detailed=1':''}`})
     let ready=false
     for(let i=0;i<300;i++) {ready=await client.evaluate(`window.__processCase?.generation!==${JSON.stringify(previous??null)} && !!document.querySelector('.fox-process-stage') && !!document.querySelector('.fox-process-turn-toggle')`);if(ready)break;await sleep(200)}
     if(!ready)throw Error(scenario.name+': fixture did not mount '+JSON.stringify(client.errors)+' pending='+JSON.stringify([...client.requests.values()])+' '+await client.evaluate('JSON.stringify({url:location.href,html:document.documentElement.outerHTML.slice(-1500),case:window.__processCase})'))
@@ -90,15 +96,20 @@ try {
     if(!markdownReady)throw Error(scenario.name+': answer markdown did not hydrate')
     await client.evaluate(`(()=>{const b=document.querySelector('button.fox-process-turn-toggle');if(b?.getAttribute('aria-expanded')==='false')b.click()})()`)
     await sleep(100)
-    const result=await client.evaluate(`(()=>{const rect=e=>e.getBoundingClientRect();const turn=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');const avatar=turn.querySelector('.fox-assistant-avatar');const toggle=turn.querySelector('.fox-process-turn-toggle');const stages=[...turn.querySelectorAll('.fox-process-stage')];const a=rect(avatar),b=rect(toggle),s=stages.map(rect);const footer=turn.querySelector('.fox-message-footer');const inside=(e,x,y)=>{const hit=document.elementFromPoint(x,y);return !!e&&!!hit&&(hit===e||e.contains(hit))};const row=rect(toggle.closest('.fox-process-turn-header'));const head=[...turn.querySelectorAll('.fox-process-stage .fox-chain-of-thought-header')].find(e=>rect(e).width>0);const hr=head?rect(head):null,headRow=head?rect(head.parentElement):null;const tailX=headRow?headRow.right-6:0,tailY=hr?hr.top+hr.height/2:0;const hh=head?document.elementFromPoint(tailX,tailY):null;const v={sameHeaderRow:Math.abs((a.top+a.height/2)-(b.top+b.height/2))<6,buttonRight:b.left>=a.right-1,allStagesBelow:s.every(r=>r.top>=Math.max(a.bottom,b.bottom)-1),stageAlignment:s.every(r=>Math.abs(r.left-s[0].left)<1),avatarCount:turn.querySelectorAll('.fox-assistant-avatar').length,footerVisible:!!footer&&rect(footer).height>0,finalVisible:[...turn.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),overflow:document.documentElement.scrollWidth>innerWidth+1,rowTailHit:inside(toggle,row.right-6,row.top+row.height/2),toggleTailGap:Math.round(row.right-b.right),timerHit:inside(toggle,...(r=>[r.left+r.width/2,r.top+r.height/2])(rect(toggle.querySelector('[role=timer]')??toggle))),avatarInert:!inside(toggle,a.left+a.width/2,a.top+a.height/2),headTailHit:head?inside(head,tailX,tailY):null,headTailGap:hr?Math.round(headRow.right-hr.right):null,headHit:hh?hh.tagName+'.'+(typeof hh.className==='string'?hh.className.slice(0,70):''):'none'};return v})()`)
-    for(const key of ['sameHeaderRow','buttonRight','allStagesBelow','stageAlignment','footerVisible','finalVisible','rowTailHit','timerHit','avatarInert'])if(!result[key])throw Error(scenario.name+': '+key+' '+JSON.stringify(result))
+    const result=await client.evaluate(`(()=>{const rect=e=>e.getBoundingClientRect();const turn=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');const avatar=turn.querySelector('.fox-assistant-avatar');const toggle=turn.querySelector('.fox-process-turn-toggle');const stages=[...turn.querySelectorAll('.fox-process-stage')];const b=rect(toggle),s=stages.map(rect);const footer=turn.querySelector('.fox-message-footer');const inside=(e,x,y)=>{const hit=document.elementFromPoint(x,y);return !!e&&!!hit&&(hit===e||e.contains(hit))};const row=rect(toggle.closest('.fox-process-turn-header'));const head=[...turn.querySelectorAll('.fox-process-stage .fox-chain-of-thought-header')].find(e=>rect(e).width>0);const hr=head?rect(head):null,headRow=head?rect(head.parentElement):null;const tailX=headRow?headRow.right-6:0,tailY=hr?hr.top+hr.height/2:0;const hh=head?document.elementFromPoint(tailX,tailY):null;const v={allStagesBelow:s.every(r=>r.top>=b.bottom-1),stageAlignment:s.every(r=>Math.abs(r.left-s[0].left)<1),avatarCount:turn.querySelectorAll('.fox-assistant-avatar').length,footerVisible:!!footer&&rect(footer).height>0,finalVisible:[...turn.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),overflow:document.documentElement.scrollWidth>innerWidth+1,rowTailHit:inside(toggle,row.right-6,row.top+row.height/2),toggleTailGap:Math.round(row.right-b.right),timerHit:inside(toggle,...(r=>[r.left+r.width/2,r.top+r.height/2])(rect(toggle.querySelector('[role=timer]')??toggle))),headTailHit:head?inside(head,tailX,tailY):null,headTailGap:hr?Math.round(headRow.right-hr.right):null,headHit:hh?hh.tagName+'.'+(typeof hh.className==='string'?hh.className.slice(0,70):''):'none'};return v})()`)
+    for(const key of ['allStagesBelow','stageAlignment','finalVisible','rowTailHit','timerHit'])if(!result[key])throw Error(scenario.name+': '+key+' '+JSON.stringify(result))
+    if(result.footerVisible !== !scenario.live)throw Error(scenario.name+': footer lifecycle '+JSON.stringify(result))
     if(result.toggleTailGap>2||result.headTailGap>2)throw Error(scenario.name+': the fold trigger does not span its row '+JSON.stringify(result))
     // 详细模式下阶段头没有折叠控件（零尺寸），那时这项不适用，只在有 trigger 时断言。
     if(result.headTailHit===false)throw Error(scenario.name+': head tail is not the fold trigger '+JSON.stringify(result))
-    if(result.avatarCount!==1||result.overflow)throw Error(scenario.name+': duplicate avatar or overflow '+JSON.stringify(result))
+    if(result.avatarCount!==0||result.overflow)throw Error(scenario.name+': duplicate avatar or overflow '+JSON.stringify(result))
     if(await client.evaluate('!!document.querySelector(".fox-live-reasoning")'))throw Error(scenario.name+': old reasoning card returned')
     if(scenario.detailed) {
-      await client.evaluate(`(()=>{const b=document.querySelector('.fox-process-stage .fox-chain-of-thought-header');if(b.getAttribute('aria-expanded')!=='true')b.click();b.click()})()`)
+      await client.evaluate(`(()=>{const b=document.querySelector('.fox-process-stage .fox-chain-of-thought-header');if(b.getAttribute('aria-expanded')!=='true')b.click()})()`)
+      let expanded=false
+      for(let i=0;i<50;i++){expanded=await client.evaluate(`document.querySelector('.fox-process-stage .fox-chain-of-thought-header').getAttribute('aria-expanded')==='true'`);if(expanded)break;await sleep(50)}
+      if(!expanded)throw Error('detailed mode prevents manual expansion')
+      await client.evaluate(`document.querySelector('.fox-process-stage .fox-chain-of-thought-header').click()`)
       await sleep(200)
       if(await client.evaluate(`document.querySelector('.fox-process-stage .fox-chain-of-thought-header').getAttribute('aria-expanded')!=='false'`))throw Error('detailed mode prevents manual collapse')
     }
@@ -120,7 +131,11 @@ try {
       result.spacing={closedBase,rowClosedBase,cycles}
       await setGroup(false)
     }
-    if(scenario.artifacts) {
+    if(scenario.artifacts && scenario.small) {
+      const direct=await client.evaluate(`(()=>{const section=document.querySelector('.fox-message-file-results.is-direct');const regions=[...section.querySelectorAll('[role="region"]')];return {tabs:section.querySelectorAll('.fox-message-artifact-group-trigger').length,groups:regions.map(e=>({label:e.getAttribute('aria-label'),text:e.textContent,visible:e.getBoundingClientRect().height>0}))}})()`)
+      if(direct.tabs!==0||direct.groups.length!==2||!direct.groups.every(e=>e.visible)||!direct.groups[0].text.includes('报告.docx')||!direct.groups[1].text.includes('计算.csv'))throw Error('small artifact batch not directly visible '+JSON.stringify(direct))
+      result.directArtifacts=direct
+    } else if(scenario.artifacts) {
       const clickFileTab=async label=>{
         const point=await client.evaluate(`(()=>{const b=[...document.querySelectorAll('.fox-message-file-results-row button')].find(e=>e.textContent.includes(${JSON.stringify(label)}));if(!b)throw Error('missing file tab');const r=b.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`)
         await client.send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1})
@@ -137,8 +152,8 @@ try {
     }
     const shot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,scenario.name+'.png'),Buffer.from(shot.data,'base64'))
     await client.evaluate(`document.querySelector('button.fox-process-turn-toggle')?.click()`);await sleep(80)
-    result.fold=await client.evaluate(`(()=>{const t=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');return {hidden:[...t.querySelectorAll('.fox-process-stage')].every(e=>e.hidden),final:[...t.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),footer:t.querySelector('.fox-message-footer').getBoundingClientRect().height>0}})()`)
-    if(!result.fold.hidden||!result.fold.final||!result.fold.footer)throw Error(scenario.name+': collapse '+JSON.stringify(result.fold))
+    result.fold=await client.evaluate(`(()=>{const t=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');const footer=t.querySelector('.fox-message-footer');return {hidden:[...t.querySelectorAll('.fox-process-stage')].every(e=>e.hidden),final:[...t.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),footer:!!footer&&footer.getBoundingClientRect().height>0}})()`)
+    if(!result.fold.hidden||!result.fold.final||result.fold.footer!==!scenario.live)throw Error(scenario.name+': collapse '+JSON.stringify(result.fold))
     results.push({scenario:scenario.name,...result})
   }
   for(const width of [900,360]) {
@@ -148,15 +163,16 @@ try {
     let ready=false
     for(let i=0;i<150;i++){ready=await client.evaluate(`window.__processCase?.generation!==${JSON.stringify(previous)} && !!document.querySelector('.fox-approval-disclosure')`);if(ready)break;await sleep(150)}
     if(!ready)throw Error('approval did not mount')
-    const measure=()=>client.evaluate(`(()=>{const root=document.querySelector('.fox-runtime-confirmation'),r=root.getBoundingClientRect(),buttons=[...root.querySelectorAll('button')];return {height:r.height,overflow:document.documentElement.scrollWidth>innerWidth,allClosed:[...root.querySelectorAll('details')].every(e=>!e.open),title:root.querySelector('[data-slot=alert-description]').textContent,actions:buttons.map(b=>b.textContent),buttonsVisible:buttons.every(b=>{const a=b.getBoundingClientRect();const hit=document.elementFromPoint(a.left+a.width/2,a.top+a.height/2);return (hit===b||b.contains(hit))&&a.bottom<=innerHeight}),scrollable:root.querySelector('.fox-approval-details-scroll').scrollHeight>root.querySelector('.fox-approval-details-scroll').clientHeight}})()`)
+    const measure=()=>client.evaluate(`(()=>{const root=document.querySelector('.fox-runtime-confirmation'),r=root.getBoundingClientRect(),buttons=[...root.querySelectorAll('button')];return {height:r.height,overflow:document.documentElement.scrollWidth>innerWidth,allClosed:[...root.querySelectorAll('details')].every(e=>!e.open),title:document.getElementById(root.getAttribute('aria-labelledby')).textContent,actions:buttons.map(b=>b.textContent),buttonsVisible:buttons.every(b=>{const a=b.getBoundingClientRect();const hit=document.elementFromPoint(a.left+a.width/2,a.top+a.height/2);return (hit===b||b.contains(hit))&&a.bottom<=innerHeight}),previewHeight:root.querySelector('.fox-approval-write-preview').clientHeight,scrollable:root.querySelector('.fox-approval-write-preview').scrollHeight>root.querySelector('.fox-approval-write-preview').clientHeight}})()`)
     const initial=await measure()
-    if(initial.overflow||!initial.allClosed||!initial.buttonsVisible||initial.actions.length!==2||!initial.title.includes('写入新文件'))throw Error('approval initial '+JSON.stringify(initial))
+    if(initial.overflow||!initial.allClosed||!initial.buttonsVisible||initial.actions.length!==2||!initial.title.includes('新建文件'))throw Error('approval initial '+JSON.stringify(initial))
     const initialShot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,`approval-${width}-collapsed.png`),Buffer.from(initialShot.data,'base64'))
     const click=async selector=>{const p=await client.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.scrollIntoView({block:'nearest'});const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);await client.send('Input.dispatchMouseEvent',{type:'mousePressed',...p,button:'left',clickCount:1});await client.send('Input.dispatchMouseEvent',{type:'mouseReleased',...p,button:'left',clickCount:1});await sleep(80)}
-    await click('.fox-approval-details-scroll > details summary')
+    await click('.fox-approval-details-scroll > summary')
     await click('.fox-approval-replacement summary')
+    await client.evaluate(`document.querySelector('.fox-confirmation-actions').scrollIntoView({block:'nearest'})`)
     const expanded=await measure()
-    if(expanded.overflow||!expanded.buttonsVisible||expanded.height>440||!expanded.scrollable)throw Error('approval expansion '+JSON.stringify(expanded))
+    if(expanded.overflow||!expanded.buttonsVisible||expanded.previewHeight>240||expanded.previewHeight<=0||!expanded.scrollable)throw Error('approval expansion '+JSON.stringify(expanded))
     const shot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,`approval-${width}.png`),Buffer.from(shot.data,'base64'))
     await click('.fox-confirmation-actions button:last-child')
     const decision=await client.evaluate('window.__approvalResult')
@@ -180,7 +196,7 @@ try {
     let shown=false
     for(let i=0;i<60;i++){shown=await client.evaluate(`!!document.querySelector('.fox-conversation-bottom-dock .fox-scroll-button')`);if(shown)break;await sleep(100)}
     if(!shown)throw Error('scroll button never appeared '+JSON.stringify({theme,live,scroller}))
-    const v=await client.evaluate(`(()=>{const b=document.querySelector('.fox-conversation-bottom-dock .fox-scroll-button'),r=b.getBoundingClientRect(),s=getComputedStyle(b),dots=[...b.querySelectorAll('.fox-thinking-dots > i')],p=b.offsetParent?b.offsetParent.getBoundingClientRect():{left:0,width:document.documentElement.clientWidth};return {size:[Math.round(r.width),Math.round(r.height)],radius:s.borderRadius,dots:dots.length,color:dots[0]?getComputedStyle(dots[0]).color:null,arrow:!!b.querySelector('svg'),offset:Math.round(r.left+r.width/2-(p.left+p.width/2)),label:b.getAttribute('aria-label')}})()`)
+    const v=await client.evaluate(`(()=>{const b=document.querySelector('.fox-conversation-bottom-dock .fox-scroll-button'),r=b.getBoundingClientRect(),s=getComputedStyle(b),dots=[...b.querySelectorAll('[data-slot=typing-indicator] > span')],p=b.offsetParent?b.offsetParent.getBoundingClientRect():{left:0,width:document.documentElement.clientWidth};return {size:[Math.round(r.width),Math.round(r.height)],radius:s.borderRadius,dots:dots.length,color:dots[0]?getComputedStyle(dots[0]).backgroundColor:null,arrow:!!b.querySelector('svg'),offset:Math.round(r.left+r.width/2-(p.left+p.width/2)),label:b.getAttribute('aria-label')}})()`)
     dotColors[theme]=v.color
     // offset 只记录、不断言：按钮居中由 .fox-conversation-bottom-dock 的既有 CSS 决定，
     // 而这里的参考系是检查页自己的 16px 内边距壳，不是应用里的聊天列。
@@ -197,6 +213,7 @@ try {
   let shimmerReady=false
   for(let i=0;i<300;i++){shimmerReady=await client.evaluate(`window.__processCase?.generation!==${JSON.stringify(generation)} && !!document.querySelector('#status-probe') && !!document.querySelector('.fox-chain-of-thought-header')`);if(shimmerReady)break;await sleep(200)}
   if(!shimmerReady)throw Error('shimmer fixture did not mount')
+  await client.evaluate(`document.querySelector('button.fox-process-turn-toggle')?.click()`)
   for(let i=0;i<100;i++){
     if(await client.evaluate(`!!document.querySelector('.fox-run-status-step')`))break
     await client.evaluate(`(()=>{const b=document.querySelector('.fox-process-stage .fox-chain-of-thought-header');if(b?.getAttribute('aria-expanded')!=='true')b?.click()})()`)
@@ -211,6 +228,6 @@ try {
   results.push({scenario:'shimmer-narrow',...shimmer})
   const shimmerShot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,'shimmer-narrow.png'),Buffer.from(shimmerShot.data,'base64'))
   writeFileSync(join(output,'result.json'),JSON.stringify({results},null,2));rmSync(join(output,'failure.json'),{force:true});console.log(JSON.stringify({results},null,2))
-} catch(error) {writeFileSync(join(output,'failure.json'),JSON.stringify({error:String(error),chromeExit:chrome?.exitCode,chromeDiagnostics,results},null,2));console.error(error,'chrome exit',chrome?.exitCode,'stderr',chromeDiagnostics);process.exitCode=1}
+} catch(error) {if(client){try{writeFileSync(join(output,'failure-dom.html'),await client.evaluate('document.body.innerHTML'))}catch{}}writeFileSync(join(output,'failure.json'),JSON.stringify({error:String(error),chromeExit:chrome?.exitCode,chromeDiagnostics,results},null,2));console.error(error,'chrome exit',chrome?.exitCode,'stderr',chromeDiagnostics);process.exitCode=1}
 finally {client?.close();chrome?.kill();vite?.kill();for(const file of [htmlPath,entryPath])rmSync(file,{force:true});if(browserProfile?.startsWith(output)){if(chrome?.exitCode===null)await new Promise(resolve=>{chrome.once('exit',resolve);setTimeout(resolve,3000)});try{rmSync(browserProfile,{recursive:true,force:true,maxRetries:10,retryDelay:250})}catch{console.warn('browser profile cleanup pending:',browserProfile)}}}
 

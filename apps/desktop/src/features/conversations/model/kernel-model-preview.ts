@@ -14,7 +14,8 @@ export function applyKernelModelPreview(detail: ConversationDetail | null, value
     || !Number.isSafeInteger(notice.checkpointSeq) || notice.checkpointSeq <= 0 || !Number.isSafeInteger(notice.revision) || notice.revision <= 0
     || typeof notice.text !== 'string' || new TextEncoder().encode(notice.text).length > 262_144
     || (notice.reasoning !== undefined && (typeof notice.reasoning !== 'string' || new TextEncoder().encode(notice.reasoning).length > 262_144))
-    || Object.keys(notice).some(key => !['schemaVersion', 'runId', 'conversationId', 'turnId', 'checkpointSeq', 'revision', 'text', 'reasoning'].includes(key))) return detail
+    || (notice.progressBytes != null && (!Number.isSafeInteger(notice.progressBytes) || notice.progressBytes < 0 || notice.progressBytes > 67_108_864))
+    || Object.keys(notice).some(key => !['schemaVersion', 'runId', 'conversationId', 'turnId', 'checkpointSeq', 'revision', 'text', 'reasoning', 'progressBytes'].includes(key))) return detail
   const snapshot = snapshotForRun(detail)
   if (!snapshot || detail.conversation.id !== notice.conversationId || snapshot.runId !== notice.runId || snapshot.turnId !== notice.turnId
     || snapshot.state !== 'running' || BigInt(snapshot.lastEventSeq) !== BigInt(notice.checkpointSeq) + 1n) return detail

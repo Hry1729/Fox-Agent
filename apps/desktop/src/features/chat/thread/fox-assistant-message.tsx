@@ -1,6 +1,5 @@
 import { ActionBarPrimitive, MessagePrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import type { DataMessagePartComponent } from '@assistant-ui/react'
-import { FoxAssistantAvatar } from '../components/FoxAssistantAvatar'
 import { TimelineRuntimeContext, requestConversationFork } from '../fox-shared'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 import { notify as toast } from '@/features/notifications'
@@ -66,11 +65,6 @@ export function FoxAssistantMessage() {
   const isLast = useAuiState(state => state.message.isLast)
   const foxMessage = useAuiState(state => state.message.metadata?.custom?.fox as FoxThreadMessage | undefined)
   const messageRunning = status?.type === 'running' || Boolean(foxMessage?.isActiveRun)
-  // Messages that carry a process part render the avatar on the process head
-  // line (FoxProcessPart's `leading`), matching the legacy TurnProcessHeader
-  // where the avatar shares the status row. Only text-only messages — history
-  // rows without run events — fall back to a standalone avatar row.
-  const hasProcessPart = useAuiState((state) => state.message.content.some((part) => part.type === 'data' && part.name === 'fox-process'))
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [reaction, setReaction] = useState<'positive' | 'negative' | null>(null)
   const [feedbackSaving, setFeedbackSaving] = useState(false)
@@ -89,7 +83,6 @@ export function FoxAssistantMessage() {
   return (
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
       <MessagePrimitive.Root className="fox-thread-msg is-assistant">
-        {!hasProcessPart && !foxMessage?.source && <div className="fox-thread-assistant-head"><FoxAssistantAvatar /></div>}
         {foxMessage?.source ? <FoxRunActivityBody message={foxMessage} /> : <MessagePrimitive.Parts components={FOX_PART_COMPONENTS} />}
         {foxMessage?.source && foxMessage.failure && <ErrorPrompt error={foxMessage.failure.message} onRetry={isLast ? () => aui.message.reload() : undefined} />}
         {!foxMessage?.source && cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}

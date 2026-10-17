@@ -129,7 +129,9 @@ export function readDefaultProjectPermission(): ProjectRecord['permissionMode'] 
 
 export function readStoredNumber(key: string, fallback: number, min: number, max: number) {
   if (typeof window === 'undefined') return fallback
-  const value = Number(window.localStorage.getItem(key))
+  const stored = window.localStorage.getItem(key)
+  if (stored == null || !stored.trim()) return fallback
+  const value = Number(stored)
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
 }
 

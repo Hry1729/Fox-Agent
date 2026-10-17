@@ -11,6 +11,25 @@ function detail(): ConversationDetail {
 }
 const preview = { schemaVersion: 1, runId: 'run', conversationId: 'conversation', turnId: 'turn', checkpointSeq: 2, revision: 1, text: '正在回答 中文 😀' }
 
+test('current worker previews with progress bytes update text before the run completes', () => {
+  let current = detail()
+  const snapshot = current.kernelSnapshot
+  for (const [index, text] of ['第一段', '第一段\n\n第二段', '第一段\n\n第二段\n\n第三段'].entries()) {
+    current = applyKernelModelPreview(current, { ...preview, text, revision: index + 1, progressBytes: new TextEncoder().encode(text).length }, 10 + index)!
+    expect(current.messages[0]?.content).toBe(text)
+    expect(current.messages[0]?.status).toBe('streaming')
+    expect(current.kernelSnapshot).toBe(snapshot)
+    expect(current.lastRun?.status).toBe('running')
+  }
+  for (const progressBytes of [undefined, null, 0, 67_108_864]) {
+    expect(applyKernelModelPreview(detail(), { ...preview, progressBytes })?.messages).toHaveLength(1)
+  }
+  for (const progressBytes of [-1, 1.5, 67_108_865, '12', NaN, Infinity]) {
+    const original = detail()
+    expect(applyKernelModelPreview(original, { ...preview, progressBytes })).toBe(original)
+  }
+})
+
 test('streaming previews replace text without advancing facts or accepting duplicates', () => {
   const original = detail()
   const first = applyKernelModelPreview(original, preview, 10)!

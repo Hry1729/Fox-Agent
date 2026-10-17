@@ -1,5 +1,5 @@
+import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
-import { FOX_ASSISTANT_AVATAR } from './components/FoxAssistantAvatar'
 import { expertErrorMessage, expertInteractionLocked, latestExpertToolAvailability } from './components/expert-binding-ui'
 import { useGoalProgress } from './hooks/use-goal-progress'
 import { conversationModelOverride } from './model-selection'
@@ -100,6 +100,15 @@ function ResizeDivider({ onResize }: { onResize: (delta: number) => void }) {
   )
 }
 
+function SidebarResizeDivider({ width, onResize }: { width: number; onResize: (delta: number) => void }) {
+  const start = useRef<number | null>(null)
+  return <div className="fox-sidebar-resize-divider" role="separator" tabIndex={0} aria-label="调整左侧导航栏宽度" aria-orientation="vertical" aria-valuemin={220} aria-valuemax={456} aria-valuenow={Math.round(width)}
+    onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); start.current = event.clientX; event.currentTarget.setPointerCapture(event.pointerId) }}
+    onPointerMove={(event) => { if (start.current === null) return; const delta = event.clientX - start.current; start.current = event.clientX; onResize(delta) }}
+    onPointerUp={() => { start.current = null }} onPointerCancel={() => { start.current = null }} onLostPointerCapture={() => { start.current = null }}
+    onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onResize((event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 24 : 8)) } else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); onResize((event.key === 'Home' ? 220 : 456) - width) } }} />
+}
+
 // Keep the compact drawer inside the content card: its backdrop and maximized
 // width share the chat's bounds, while history navigation stays reachable.
 function CompactRightPanel({ children, maximized, onClose }: { children: ReactNode; maximized: boolean; onClose: () => void }) {
@@ -115,11 +124,6 @@ function CompactRightPanel({ children, maximized, onClose }: { children: ReactNo
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
     }}>{children}</div>
   </div>
-}
-
-function SidebarResizeDivider({ onResize }: { onResize: (delta: number) => void }) {
-  const start = useRef<{ x: number } | null>(null)
-  return <div className="fox-sidebar-resize-divider" role="separator" aria-label="调整侧边栏宽度" aria-orientation="vertical" onPointerDown={(event) => { start.current = { x: event.clientX }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { if (!start.current) return; const delta = event.clientX - start.current.x; start.current = { x: event.clientX }; onResize(delta) }} onPointerUp={() => { start.current = null }}><span /></div>
 }
 
 export function Workbench() {
@@ -169,11 +173,17 @@ export function Workbench() {
   useEffect(() => {
     void desktopConversation.refreshRuntimeStatus()
   }, [desktopConversation.refreshRuntimeStatus, modelService.service?.supportsImageInput])
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStoredBoolean(layoutStorage.sidebarCollapsed, false))
-  const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const storedWidth = readStoredNumber(layoutStorage.sidebarWidth, 236, 220, 456)
-    return [304, 292, 280, 268, 256].includes(storedWidth) ? 236 : storedWidth
-  })
+  const [sidebarManuallyCollapsed, setSidebarCollapsed] = useState(() => readStoredBoolean(layoutStorage.sidebarCollapsed, false))
+  const [narrowSidebar, setNarrowSidebar] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 700px)').matches)
+  const sidebarCollapsed = sidebarManuallyCollapsed || narrowSidebar
+  const [sidebarWidth, setSidebarWidth] = useState(() => readStoredNumber(layoutStorage.sidebarWidth, 288, 220, 456))
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 700px)')
+    const sync = () => setNarrowSidebar(query.matches)
+    sync()
+    query.addEventListener('change', sync)
+    return () => query.removeEventListener('change', sync)
+  }, [])
   const [rightMode, setRightMode] = useState<RightMode | null>(readStoredRightMode)
   const [openRightTabs, setOpenRightTabs] = useState<RightMode[]>(readStoredRightTabs)
   const [openFileTabs, setOpenFileTabs] = useState<OpenFileTab[]>([])
@@ -311,7 +321,7 @@ export function Workbench() {
   // The host CSP carries a style nonce, which drops the stylesheets our effect
   // libraries inject at runtime; re-publish them as adopted (CSSOM) sheets.
   useEffect(() => adoptBlockedStyles(), [])
-  useEffect(() => { window.localStorage.setItem(layoutStorage.sidebarCollapsed, sidebarCollapsed ? '1' : '0') }, [sidebarCollapsed])
+  useEffect(() => { window.localStorage.setItem(layoutStorage.sidebarCollapsed, sidebarManuallyCollapsed ? '1' : '0') }, [sidebarManuallyCollapsed])
   useEffect(() => { window.localStorage.setItem(layoutStorage.sidebarWidth, String(Math.round(sidebarWidth))) }, [sidebarWidth])
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightWidth, String(Math.round(rightWidth))) }, [rightWidth])
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightMode, rightMode ?? 'closed') }, [rightMode])
@@ -365,7 +375,7 @@ export function Workbench() {
   }, [desktopUserMessage, pendingUserMessage])
 
   const shellStyle = useMemo(() => {
-    const currentSidebarWidth = sidebarCollapsed || compactLayout ? 64 : sidebarWidth
+    const currentSidebarWidth = sidebarCollapsed ? 64 : sidebarWidth
     return {
       '--fox-sidebar-width': `${currentSidebarWidth}px`,
       '--fox-sidebar-center-offset': `${currentSidebarWidth / 2}px`,
@@ -838,7 +848,7 @@ export function Workbench() {
     setProjectDeleteDialog(null)
     toast.success('项目已从 Fox 删除，本机文件夹未受影响')
   }
-  const selectExpert = useStableCallback(async (expertId: string): Promise<boolean> => {
+  const selectExpert = useStableCallback(async (expertId: string, newConversation = false): Promise<boolean> => {
     if (expertReadOnly) return false
     if (expertId === desktopConversation.selectedExpertId) return true
     const targetAgent = agentResource.agents.find((agent) => agent.id === expertId)
@@ -859,7 +869,9 @@ export function Workbench() {
       toast.error('专家资料库配置无效', { description: cause instanceof Error ? cause.message : String(cause) })
       return false
     }
-    const result = await desktopConversation.createConversationForExpert(targetAgent.id)
+    const result = newConversation
+      ? await desktopConversation.createConversationForExpert(targetAgent.id)
+      : await desktopConversation.changeExpert(targetAgent.id)
     if (!result.success) {
       toast.error(expertErrorMessage(result.error, '无法与这位专家开始对话'))
       return false
@@ -889,7 +901,7 @@ export function Workbench() {
       if (!targetAgent) return
       const targetKind = normalizeAgentClassification(targetAgent).agentKind
       if (targetKind === 'worker') return
-      if (targetKind === 'expert') void selectExpert(entityId)
+      if (targetKind === 'expert') void selectExpert(entityId, true)
       if (targetKind === 'assistant' && entityId !== desktopConversation.detail?.conversation.agentId) {
         void desktopConversation.createConversationForAgent(entityId).then((created) => {
           if (!created) toast.error(desktopConversation.error ?? '无法切换这个助手')
@@ -966,7 +978,7 @@ export function Workbench() {
   const workspacePage = activeView === 'chat' || activeView === 'onboarding' ? null : (
     <WorkspaceShell
       activeView={activeView}
-      sidebarCollapsed={sidebarCollapsed || compactLayout}
+      sidebarCollapsed={sidebarCollapsed}
       onSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
       navigate={navigate}
       activeEntityId={activeEntityId}
@@ -1244,7 +1256,7 @@ export function Workbench() {
   const handleToggleTheme = useStableCallback(() => setDark(!dark))
   const handleOpenSettings = useStableCallback(() => navigate('settings'))
   const handleOpenAbout = useStableCallback(() => navigate('settings-about'))
-  const handleToggleSidebar = useStableCallback(() => setSidebarCollapsed((value) => !value))
+  const handleToggleSidebar = useStableCallback(() => { if (!narrowSidebar) setSidebarCollapsed((value) => !value) })
   const handleZoom = useStableCallback((delta: number) => {
     const current = Number(document.documentElement.dataset.foxZoom ?? '1')
     const next = Math.min(1.4, Math.max(.8, Math.round((current + delta) * 10) / 10))
@@ -1264,18 +1276,18 @@ export function Workbench() {
     <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
   )
   const assistantUiThreadPanel = (
-    <Suspense fallback={<div className="fox-app-loading"><img src={FOX_ASSISTANT_AVATAR} alt="" /><p>Fox 正在准备新界面</p></div>}><div className="fox-thread-shell"><AssistantUiChat key={desktopConversation.detail?.conversation.id ?? 'draft'} conversation={desktopConversation} pendingMessage={pendingUserMessage} isSendDisabled={expertReadOnly} suggestions={activeAgent?.openingSuggestions} onStart={handleTimelineStart} planRevision={assistantUiPlanRevision} onOpenArtifact={handleTimelineOpenArtifact} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} callbacks={{ onSubmit: (prompt, files) => handleComposerSubmitPrompt(prompt, undefined, files), onOptimistic: handleComposerPromptCommit, onEdit: (messageId, prompt) => handleTimelineRerun(messageId, prompt), onReload: () => retryLatestRun() }} /></div></Suspense>
+    <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载对话" />}><div className="fox-thread-shell"><AssistantUiChat statusBar={<FoxRunStatusBar key={desktopConversation.selectedConversationId ?? 'draft'} detail={desktopConversation.enabled ? desktopConversation.detail : null} conversationId={desktopConversation.selectedConversationId} />} key={desktopConversation.detail?.conversation.id ?? 'draft'} conversation={desktopConversation} pendingMessage={pendingUserMessage} isSendDisabled={expertReadOnly} suggestions={activeAgent?.openingSuggestions} onStart={handleTimelineStart} planRevision={assistantUiPlanRevision} onOpenArtifact={handleTimelineOpenArtifact} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} callbacks={{ onSubmit: (prompt, files) => handleComposerSubmitPrompt(prompt, undefined, files), onOptimistic: handleComposerPromptCommit, onEdit: (messageId, prompt) => handleTimelineRerun(messageId, prompt), onReload: () => retryLatestRun() }} /></div></Suspense>
   )
 
-  if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading"><img src={FOX_ASSISTANT_AVATAR} alt="" /><p>Fox 正在准备引导页</p></div>}><OnboardingPage dark={dark} navigate={navigate} onExit={finishOnboarding} /></Suspense>
+  if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载引导页" />}><OnboardingPage dark={dark} navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (
     <main className="fox-shell" style={shellStyle} onPointerDownCapture={acknowledgeVisibleCompletion} onWheelCapture={acknowledgeVisibleCompletion} onKeyDownCapture={acknowledgeVisibleCompletion}>
-      <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
+      <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
       <div className="fox-workbench">
-        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
-        {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
-        <div className="fox-content-card">
+        <MemoizedSidebar collapsed={sidebarCollapsed} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
+        {!sidebarCollapsed && <SidebarResizeDivider width={sidebarWidth} onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
+        <div className={`fox-content-card ${showConversationRightSidebar && !rightSidebarCollapsed && (!compactLayout || compactRightOpen) ? 'has-open-right-panel' : ''}`}>
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout ? 'is-right-maximized' : ''}`}>
         <section className="fox-chat-pane">
           {expertPickerOpen && <Suspense fallback={null}><ExpertPickerDialog open={expertPickerOpen} onOpenChange={setExpertPickerOpen} agents={agentResource.agents} selectedExpertId={desktopConversation.selectedExpertId} readOnly={expertReadOnly} onSelect={selectExpert} /></Suspense>}
@@ -1290,7 +1302,7 @@ export function Workbench() {
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
 <div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''} ${activeView === 'chat' && activeExpert ? 'has-expert-lanyard' : ''}`}>
-  {activeView === 'chat' && activeExpert && <Suspense fallback={null}><ExpertLanyard key={activeExpert.id} expertId={activeExpert.id} name={activeExpert.name} frontImage={asAgentCard(activeExpert).image} /></Suspense>}
+  {activeView === 'chat' && activeExpert && <Suspense fallback={null}><ExpertLanyard expertId={activeExpert.id} name={activeExpert.name} description={activeExpert.description || activeExpert.category} frontImage={asAgentCard(activeExpert).image} autoCollapseKey={timelineEmpty ? 0 : pendingUserMessage?.createdAt ?? desktopUserMessage?.createdAt ?? 1} /></Suspense>}
   {assistantUiThreadPanel}{composerPanel}
 </div></>}
           </ComposerRuntimeContext.Provider>

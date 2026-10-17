@@ -44,3 +44,8 @@
   outline: 2px solid var(--fox-accent);
   outline-offset: 2px;
 }
+
+.fox-thread-msg [data-slot='message-actions'].fox-thread-message-actions > button { color: var(--fox-faint); }
+.fox-thread-msg [data-slot='message-actions'].fox-thread-message-actions > button:hover,
+.fox-thread-msg [data-slot='message-actions'].fox-thread-message-actions > button[aria-pressed="true"] { color: var(--fox-muted); }
+.fox-thread-msg [data-slot='message-actions'].fox-thread-message-actions > button.text-emerald-500 { color: var(--success); }
