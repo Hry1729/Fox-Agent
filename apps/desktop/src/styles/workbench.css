@@ -1,12 +1,8 @@
 .fox-shell {
   --fox-shell-chrome: color-mix(in oklch, var(--background) 34%, transparent);
-  /* One vertical rhythm for the sidebar's project and conversation rows: a
-     32px row built from a 28px inner control plus a 2px gap, so a project row,
-     a project's child conversation and a standalone conversation all read at the
-     same density. Knowledge-base navigation and notification rows keep their own
-     metrics; a semantic group distance stays available for group headers. */
-  --fox-sidebar-row-gap: var(--fox-space-micro);
-  --fox-sidebar-group-gap: var(--fox-space-s);
+  /* Compact conversation spacing; project headings retain their own height. */
+  --fox-sidebar-row-gap: 1px;
+  --fox-sidebar-group-gap: 3px;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -146,7 +142,7 @@
 .fox-notification-trigger {
   position: absolute;
   z-index: 12;
-  top: 16px;
+  top: 15px;
   right: 12px;
   width: var(--fox-control-sm);
   height: var(--fox-control-sm);
@@ -173,6 +169,7 @@
 }
 
 .fox-notification-trigger > svg {
+  translate: 0 0.5px;
   width: 14px;
   height: 14px;
   stroke-width: 1.8;
@@ -180,8 +177,8 @@
 
 .fox-notification-trigger > span {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 7px;
+  right: 6px;
   width: 5px;
   height: 5px;
   border-radius: var(--fox-radius-pill);
@@ -815,6 +812,7 @@
 }
 
 .fox-sidebar {
+  min-height: 0;
   position: relative;
   width: var(--fox-sidebar-width);
   flex: 0 0 var(--fox-sidebar-width);
@@ -962,8 +960,8 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-top: -3px;
-  margin-bottom: 10px;
+  margin-top: -4px;
+  margin-bottom: 13px;
   padding-right: 24px;
 }
 
@@ -1043,6 +1041,14 @@
   color: var(--fox-text);
 }
 
+.fox-notification-trigger.is-active[aria-pressed='true'],
+.fox-notification-trigger.is-active[aria-pressed='true']:hover,
+.fox-sidebar-search-trigger.is-active[aria-pressed='true'],
+.fox-sidebar-search-trigger.is-active[aria-pressed='true']:hover {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
 .fox-sidebar-search-trigger:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 1px;
@@ -1066,7 +1072,7 @@
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: var(--fox-space-xs);
+  gap: 2px;
 }
 
 .fox-shell .fox-sidebar-command,
@@ -1092,11 +1098,12 @@
 /* The project title row stacks a 28px inner control; with the shared row gap as
    padding it is exactly one 32px row, level with a conversation row. */
 .fox-shell .fox-project-row {
+  min-height: 30px;
   padding: var(--fox-sidebar-row-gap) 10px;
 }
 
 .fox-shell .fox-sidebar-command {
-  min-height: var(--fox-sidebar-row-height);
+  min-height: 28px;
   border-radius: var(--fox-radius-card);
   padding: 0 var(--fox-space-l);
 }
@@ -1336,7 +1343,8 @@
 }
 
 .fox-project-row:hover .fox-project-row-actions,
-.fox-project-row:focus-within .fox-project-row-actions {
+.fox-project-row:has(:focus-visible) .fox-project-row-actions,
+.fox-project-row:has([data-state='open']) .fox-project-row-actions {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
@@ -1365,25 +1373,23 @@
   gap: var(--fox-sidebar-row-gap);
 }
 
-/* Project children and standalone conversations share one row metric: a 32px
-   row whose inner control is the same 28px height the project row uses.
-   The selectors carry two classes on purpose: `.fox-sidebar-tree-row` is
-   declared later in this file with the same single-class specificity, so a bare
-   `.fox-project-conversation-row` rule lost its `min-height` back to 34px and
-   project children ended up a different height from standalone rows. Both
-   selectors stay scoped to the two conversation lists: knowledge-base
-   navigation and notification rows share `.fox-sidebar-tree-row` and keep their
-   own metrics. */
+/* Scope the 28px conversation rows so knowledge and notification rows keep their metrics. */
 .fox-project-children .fox-sidebar-tree-row,
 .fox-conversation-list .fox-sidebar-tree-row {
-  min-height: var(--fox-sidebar-row-height);
+  min-height: 28px;
   padding-block: var(--fox-sidebar-row-gap);
 }
 
 .fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
 .fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main {
-  min-height: var(--fox-inline-action-height);
-  height: var(--fox-inline-action-height);
+  min-height: 26px;
+  height: 26px;
+}
+
+.fox-project-children .fox-sidebar-row-actions button,
+.fox-conversation-list .fox-sidebar-row-actions button {
+  min-height: 24px;
+  height: 24px;
 }
 
 /* A fixed trailing slot keeps status changes from moving the conversation title. */
@@ -1708,6 +1714,7 @@
 }
 
 .fox-sidebar-footer {
+  flex: 0 0 auto;
   min-height: 0;
   display: flex;
   align-items: center;
@@ -2081,25 +2088,15 @@
   min-height: 0;
   flex: 1 1 0%;
   overflow: clip;
-  margin: 3px 0 0;
+  margin: 2px 5px 5px 0;
   border: 0;
-  border-radius: var(--fox-radius-large) var(--fox-radius-large) var(--fox-radius-large) 0;
+  border-radius: calc(var(--fox-radius-window) + 4px) calc(var(--fox-radius-window) + 4px) var(--fox-radius-window) calc(var(--fox-radius-window) + 4px);
   background: transparent;
-  box-shadow: none;
+  box-shadow: 0 1px 9px rgb(0 0 0 / 0.10);
   filter: none;
 }
 
-.fox-content-card::before {
-  content: '';
-  position: absolute;
-  z-index: 2;
-  inset: 0;
-  border-top: 1px solid var(--fox-border);
-  border-left: 1px solid var(--fox-border);
-  border-radius: inherit;
-  border-bottom-left-radius: 0;
-  pointer-events: none;
-}
+.fox-content-card::before { content: none; }
 
 .fox-content-card::after {
   content: none;
@@ -2594,6 +2591,20 @@ button.fox-chat-project-row:disabled {
   --fox-empty-vertical-offset: clamp(18px, 3vh, 30px);
 }
 
+.fox-chat-stage { --fox-chat-column-width: min(56rem, calc(100cqw - clamp(2rem, 8vw, 8rem))); }
+.fox-composer-wrap:not(.is-empty) { width: var(--fox-chat-column-width); }
+.fox-content-card.has-open-right-panel :is(.fox-turn-rail, .fox-conversation-rail) { display: none; }
+@container fox-chat (max-width: 900px) {
+  .fox-chat-stage { --fox-chat-column-width: min(48rem, calc(100cqw - 32px)); }
+}
+@container fox-chat (max-width: 760px) {
+  .fox-chat-stage { --fox-chat-column-width: calc(100cqw - 24px); }
+  .fox-chat-stage .fox-conversation-rail { display: none; }
+}
+@media (max-width: 520px) {
+  .fox-chat-stage { --fox-chat-column-width: calc(100cqw - 16px); }
+}
+
 /* With project/knowledge/attachment chips the composer card is 26px taller. The card
    and the mascot/heading/capsules block both consume this offset, so lifting both by
    half the growth keeps the whole group optically centred on the page. */
@@ -2810,7 +2821,7 @@ button.fox-chat-project-row:disabled {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   margin-inline: 0;
-  padding: 2px;
+  padding: 0;
   white-space: nowrap;
 }
 
@@ -3082,7 +3093,7 @@ button.fox-chat-project-row:disabled {
   width: 100%;
   color: var(--fox-text);
   font-size: var(--fox-type-body);
-  line-height: 1.65;
+  line-height: 1.5;
   overflow-wrap: anywhere;
   text-align: left;
 }
@@ -4648,6 +4659,17 @@ img[src='/avatars/fox-assistant.png'] {
   transform: translateX(-50%);
 }
 
+.fox-composer-wrap:not(.is-empty)::before {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 42px;
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--fox-canvas) 90%, transparent));
+}
+
 .fox-composer-wrap.is-empty {
   /* Match the empty prompt's 50% centre so the gap stays steady as the stage grows. */
   top: calc(50% - 32px + var(--fox-empty-vertical-offset, 0px));
@@ -5075,6 +5097,8 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-canvas);
 }
 
+.fox-app-loading { background: var(--fox-loading-background); color: var(--muted-foreground); }
+
 .fox-route-loading span {
   width: 22px;
   height: 22px;
@@ -5470,7 +5494,7 @@ img[src='/avatars/fox-assistant.png'] {
   background: color-mix(in oklch, var(--fox-card) 94%, transparent);
   padding: 10px;
   /* One definition for the card's elevation, reused by every activation state. */
-  --fox-composer-elevation: 0 12px 34px color-mix(in oklch, var(--fox-text) 9%, transparent), 0 3px 10px color-mix(in oklch, var(--fox-text) 4%, transparent), inset 0 1px 0 color-mix(in oklch, var(--fox-card) 80%, transparent);
+  --fox-composer-elevation: 0 10px 24px color-mix(in oklch, var(--fox-shadow-color) 6%, transparent), 0 2px 6px color-mix(in oklch, var(--fox-shadow-color) 2%, transparent);
   box-shadow: var(--fox-composer-elevation);
   backdrop-filter: blur(24px) saturate(1.12);
   transition: border-color 150ms ease, box-shadow 150ms ease;
@@ -5489,10 +5513,9 @@ img[src='/avatars/fox-assistant.png'] {
   background: linear-gradient(180deg, color-mix(in oklch, var(--fox-card) 38%, transparent), transparent 32%);
 }
 
-/* Activation is the card's own 1px border turning the pale blue. The grey elevation
-   stays exactly as it rests, so nothing grows, jumps or gains a second outline. */
+/* Focus changes the existing border without adding a second outline. */
 .fox-prompt-input.is-focused > [data-slot='input-group'] {
-  border-color: var(--fox-blue-soft);
+  border-color: var(--brand);
   box-shadow: var(--fox-composer-elevation);
 }
 
@@ -6520,8 +6543,6 @@ img[src='/avatars/fox-assistant.png'] {
   height: 30px !important;
   flex: 0 0 30px;
   border-radius: 50% !important;
-  /* Blue in both themes: light blue by day, deep blue by night. The card/text
-     pair it used before inverted with the theme (black by day, white by night). */
   background: var(--fox-send-surface) !important;
   color: var(--fox-send-ink) !important;
   box-shadow: none !important;
@@ -7083,7 +7104,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .dark .fox-content-card {
-  box-shadow: none;
+  box-shadow: 0 1px 10.8px rgb(0 0 0 / 0.30);
   filter: none;
 }
 
@@ -10699,22 +10720,6 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 @media (max-width: 1180px) {
-  .fox-shell { --fox-sidebar-width: 64px !important; --fox-sidebar-center-offset: 32px !important; }
-  .fox-sidebar { padding-inline: 10px; }
-  .fox-sidebar-resize-divider { display: none; }
-  .fox-window-safe,
-  .fox-mode-tabs,
-  .fox-sidebar-scroll,
-  .fox-profile-copy,
-  .fox-sidebar-command span,
-  .fox-sidebar-command kbd { display: none; }
-  .fox-sidebar-title-safe,
-  .fox-sidebar-command,
-  .fox-sidebar-footer { justify-content: center; }
-  .fox-sidebar-command { padding: 0; }
-  .fox-sidebar-footer { flex: 0 0 auto; flex-direction: column; min-height: 0; gap: 5px; }
-  .fox-sidebar-spacer { min-height: 8px; flex: 1 1 auto; }
-  .fox-profile { flex: 0 0 auto; overflow: hidden; border-radius: 50%; padding: 0; }
   .fox-context-panel { display: none; }
   .fox-resize-divider { display: none; }
   .fox-chat-top-actions { margin-right: 0; }
@@ -12199,3 +12204,47 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-animate-file-tree [data-slot='motion-highlight'] { background: var(--fox-hover); border-radius: var(--fox-radius-control); }
 .fox-animate-file-tree button:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: -2px; }
 .fox-animate-file-trigger[aria-current='true'] { background: var(--fox-accent-soft); color: var(--fox-accent); }
+
+.fox-kb-settings-dialog { width: min(640px, calc(100vw - 32px)); max-width: 640px; max-height: calc(100dvh - 48px); overflow-y: auto; }
+.fox-kb-settings-dialog .fox-kb-settings-panel { width: 100%; min-width: 0; margin-top: 0; }
+
+.fox-kb-settings-dialog { gap: 16px; }
+.fox-kb-settings-dialog .fox-kb-settings-panel .fox-kb-settings-form > div:not(.fox-kb-settings-foot):not(.fox-kb-settings-advanced) { padding-block: 14px; }
+.fox-kb-settings-dialog .fox-kb-settings-panel .fox-kb-settings-form > div:first-child { padding-top: 0; }
+.fox-kb-settings-dialog .fox-kb-settings-panel .fox-kb-settings-form > .fox-kb-settings-foot { margin-top: 16px; padding-top: 16px; }
+
+.fox-sidebar.is-collapsed :is(.fox-sidebar-mode-switch, .fox-sidebar-collapsed-utilities .fox-sidebar-search-trigger) {
+  width: var(--fox-sidebar-row-height);
+  height: var(--fox-sidebar-row-height);
+  min-width: var(--fox-sidebar-row-height);
+  min-height: var(--fox-sidebar-row-height);
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.fox-sidebar.is-collapsed :is(.fox-sidebar-mode-switch, .fox-sidebar-collapsed-utilities .fox-sidebar-search-trigger) svg {
+  width: var(--fox-sidebar-icon-size);
+  height: var(--fox-sidebar-icon-size);
+  flex: 0 0 var(--fox-sidebar-icon-size);
+  stroke-width: 1.8;
+}
+
+.fox-sidebar.is-collapsed .fox-sidebar-title-safe {
+  height: var(--fox-sidebar-row-height);
+  flex: 0 0 var(--fox-sidebar-row-height);
+  margin: 16px 0 5px;
+  transform: none;
+}
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-utilities {
+  gap: 5px;
+  margin: 0 0 5px;
+}
+.fox-sidebar.is-collapsed .fox-sidebar-primary {
+  gap: 5px;
+  padding-top: 0;
+  margin-top: 0;
+  transform: none;
+}
+
+.fox-sidebar-resize-divider { touch-action:none; flex:0 0 8px; margin-inline:-4px; transform:none; }
+.fox-sidebar-resize-divider:focus-visible { outline:2px solid var(--ring); outline-offset:-2px; }

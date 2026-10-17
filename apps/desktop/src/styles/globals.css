@@ -12,7 +12,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: "HarmonyOS Sans SC", "Segoe UI", system-ui, sans-serif;
+  --font-sans: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --font-heading: var(--font-sans);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -117,9 +117,9 @@
   --fox-user-foreground: var(--user-bubble-foreground);
   /* Three elevation steps: sm for raised controls, md for menus and popovers,
      lg for dialogs. No inset highlights. */
-  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--foreground) 6%, transparent);
-  --fox-shadow-md: 0 4px 16px color-mix(in oklch, var(--foreground) 9%, transparent);
-  --fox-shadow-lg: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
+  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--fox-shadow-color) 6%, transparent);
+  --fox-shadow-md: 0 4px 16px color-mix(in oklch, var(--fox-shadow-color) 9%, transparent);
+  --fox-shadow-lg: 0 16px 45px color-mix(in oklch, var(--fox-shadow-color) 12%, transparent);
   --fox-shadow: var(--fox-shadow-lg);
   --fox-control-sm: 28px;
   --fox-control-md: 32px;
@@ -152,18 +152,19 @@
   --fox-space-6xl: 48px;
   --fox-space-8xl: 64px;
   /* --fox-radius-small/control/card/large/overlay are set per theme in themes.css. */
+  --fox-radius-window: 8px;
   --fox-radius-pill: 999px;
   --fox-text-scale: 1;
-  /* Type scale: 12 / 13 / 14 / 16 / 24, nothing smaller than 12. Chat reads at
-     14; sidebars, menus and controls sit one step down at 13. */
-  --fox-type-workbench: calc(14px * var(--fox-text-scale));
+  /* Type scale: 12 / 13 / 14 / 15 / 16 / 24. Chat reads at
+     15; sidebars, menus and controls sit one step down at 13. */
+  --fox-type-workbench: calc(15px * var(--fox-text-scale));
   --fox-type-chrome: calc(13px * var(--fox-text-scale));
   --fox-type-caption: calc(12px * var(--fox-text-scale));
   --fox-type-card-stat: calc(12px * var(--fox-text-scale));
-  --fox-type-meta: calc(13px * var(--fox-text-scale));
+  --fox-type-meta: calc(12px * var(--fox-text-scale));
   --fox-type-control: var(--fox-type-chrome);
   --fox-type-body: calc(14px * var(--fox-text-scale));
-  --fox-type-ui: calc(14px * var(--fox-text-scale));
+  --fox-type-ui: calc(13px * var(--fox-text-scale));
   --fox-type-title: calc(16px * var(--fox-text-scale));
   --fox-type-card-title: calc(16px * var(--fox-text-scale));
   --fox-type-section: calc(16px * var(--fox-text-scale));
@@ -201,13 +202,15 @@
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 88%, var(--background));
   /* 16% brand is invisible on a dark surface; the highlight needs more of it. */
   --fox-mark: color-mix(in oklch, var(--brand) 28%, transparent);
-  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, black 30%, transparent);
-  --fox-shadow-md: 0 6px 20px color-mix(in oklch, black 32%, transparent);
-  --fox-shadow-lg: 0 18px 55px color-mix(in oklch, black 35%, transparent);
+  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--fox-shadow-color) 30%, transparent);
+  --fox-shadow-md: 0 6px 20px color-mix(in oklch, var(--fox-shadow-color) 32%, transparent);
+  --fox-shadow-lg: 0 18px 55px color-mix(in oklch, var(--fox-shadow-color) 35%, transparent);
 }
 
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+/* The bootstrap page sets a system font on body. Restore the product font once styles load. */
+html body { font-family: var(--font-sans); font-weight: 400; -webkit-font-smoothing: antialiased; }
 
 /* Radix ScrollArea sets `overflow: scroll` inline on its viewport and draws its own
    thumb (mounted only while hovering). The native bar therefore has to be hidden

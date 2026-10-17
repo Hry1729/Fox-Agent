@@ -14,7 +14,7 @@
 .shell { position: absolute; top: 0; right: 0; height: 100%; overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--control-height-md) / 2 - (var(--control-height-md) / 2 - var(--radius-control)) * var(--es-open, 0)); background: var(--surface); color: var(--text-secondary); pointer-events: auto; transition: border-color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-standard) var(--ease-standard), transform var(--duration-spring) var(--ease-spring); }
 .root[data-anchor="start"] .shell { right: auto; left: 0; }
 .shell[data-expanded] { border-color: var(--border-strong); color: var(--foreground); }
-.shell:has(> .trigger:focus-visible), .shell:has(> .input:focus) { border-color: var(--foreground); box-shadow: 0 0 0 3px var(--focus-ring); color: var(--foreground); }
+.shell:has(> .trigger:focus-visible), .shell:has(> .input:focus) { border-color: var(--ring); box-shadow: 0 0 0 3px var(--focus-ring); color: var(--foreground); }
 @media (hover: hover) and (pointer: fine) {
   .shell:not([data-expanded]):hover { background: var(--surface-muted); color: var(--foreground); }
   .shell[data-expanded]:not(:has(> .input:focus)):hover { border-color: var(--foreground); }

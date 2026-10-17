@@ -130,7 +130,7 @@ function HighlightItem<T extends React.ElementType>({ ref, as, children, id, val
     if (shouldUpdateBounds) return () => cancelAnimationFrame(rafId);
   }, [mode, isActive, activeValue, setBounds, clearBounds, activeClassName, setActiveClassName, forceUpdateBounds, contextForceUpdateBounds]);
   if (!React.isValidElement(children)) return children;
-  const dataAttributes = { 'data-active': isActive ? 'true' : 'false', 'data-disabled': isDisabled, 'data-value': childValue, 'data-highlight': true };
+  const dataAttributes = { 'data-active': isActive ? 'true' : 'false', 'data-disabled': isDisabled ? true : undefined, 'data-value': childValue, 'data-highlight': true };
   const commonHandlers = hover ? {
     onMouseEnter: (e: React.MouseEvent<HTMLDivElement>) => { setActiveValue(childValue); element.props.onMouseEnter?.(e); },
     onMouseLeave: (e: React.MouseEvent<HTMLDivElement>) => { setActiveValue(null); element.props.onMouseLeave?.(e); },

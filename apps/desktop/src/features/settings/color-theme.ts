@@ -2,7 +2,7 @@ export const COLOR_THEME_STORAGE_KEY = 'fox.preferences.colorTheme'
 
 export const COLOR_THEMES = [
   { id: 'graphite', label: '石墨', description: '中性灰阶，墨色主按钮，紧凑利落' },
-  { id: 'paper', label: '暖纸', description: '米白暖灰，Fox 蓝主色，圆润柔和' },
+  { id: 'paper', label: '暖纸', description: '米白暖灰，暖金主色，圆润柔和' },
   { id: 'mist', label: '雾蓝', description: '冷调蓝灰，延续 Fox 经典配色' },
 ] as const
 

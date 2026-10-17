@@ -18,9 +18,9 @@ type SubFilesProps = FilesProps;
 function SubFiles(props: SubFilesProps) { return <FilesPrimitive {...props} />; }
 type FolderItemProps = FolderItemPrimitiveProps;
 function FolderItem(props: FolderItemProps) { return <FolderItemPrimitive {...props} />; }
-type FolderTriggerProps = FileLabelPrimitiveProps & { gitStatus?: GitStatus };
-function FolderTrigger({ children, className, gitStatus, ...props }: FolderTriggerProps) {
-  return <FolderHeaderPrimitive><FolderTriggerPrimitive className="w-full text-start"><FolderHighlightPrimitive>
+type FolderTriggerProps = FileLabelPrimitiveProps & { gitStatus?: GitStatus; triggerProps?: React.ComponentProps<typeof FolderTriggerPrimitive> };
+function FolderTrigger({ children, className, gitStatus, triggerProps, ...props }: FolderTriggerProps) {
+  return <FolderHeaderPrimitive><FolderTriggerPrimitive {...triggerProps} className={cn("w-full text-start", triggerProps?.className)}><FolderHighlightPrimitive>
     <FolderPrimitive className="flex items-center justify-between gap-2 p-2 pointer-events-none"><div className={cn('flex items-center gap-2', gitStatus === 'untracked' && 'text-green-400', gitStatus === 'modified' && 'text-amber-400', gitStatus === 'deleted' && 'text-red-400')}>
       <FolderIconPrimitive closeIcon={<FolderIcon className="size-4.5" />} openIcon={<FolderOpenIcon className="size-4.5" />} />
       <FileLabelPrimitive className={cn('text-sm', className)} {...props}>{children}</FileLabelPrimitive>

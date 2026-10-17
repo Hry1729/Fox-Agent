@@ -15,7 +15,7 @@
         "title": "Fox",
         "width": 1200,
         "height": 800,
-        "minWidth": 760,
+        "minWidth": 600,
         "minHeight": 560,
         "decorations": false,
         "resizable": true,

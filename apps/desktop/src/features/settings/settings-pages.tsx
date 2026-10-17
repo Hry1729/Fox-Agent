@@ -274,6 +274,38 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
   const yuxi = useYuxiService()
   const [step, setStep] = useState(0)
   const [stepDirection, setStepDirection] = useState(1)
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => setReducedMotion(media.matches)
+    update()
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
+  const [grainColors, setGrainColors] = useState<string[] | null>(null)
+  useEffect(() => {
+    const root = document.documentElement
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 1
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) return
+    const update = () => {
+      const style = getComputedStyle(root)
+      const colors = ['--brand', '--muted', '--background'].map((token) => {
+        context.clearRect(0, 0, 1, 1)
+        context.fillStyle = token === '--brand'
+          ? `color-mix(in oklch, ${style.getPropertyValue('--brand').trim()} ${style.getPropertyValue('--fox-onboarding-tint').trim() || '28%'}, ${style.getPropertyValue('--background').trim()})`
+          : style.getPropertyValue(token).trim()
+        context.fillRect(0, 0, 1, 1)
+        return '#' + [...context.getImageData(0, 0, 1, 1).data].slice(0, 3).map((value) => value.toString(16).padStart(2, '0')).join('')
+      })
+      setGrainColors(colors)
+    }
+    update()
+    const observer = new MutationObserver(update)
+    observer.observe(root, { attributes: true, attributeFilter: ['class', 'data-color-theme', 'style'] })
+    return () => observer.disconnect()
+  }, [dark])
   const steps = [
     { title: '连接模型服务', description: '配置 Fox 原生 Agent 使用的模型、API 协议与上下文能力。', ready: Boolean(model.service), action: () => navigate('settings-models'), actionLabel: model.service ? '检查模型配置' : '配置模型服务' },
     { title: '连接资料库服务', description: '连接本机或局域网服务，启用远程专家、资料库和知识图谱。', ready: Boolean(yuxi.service), action: () => navigate('settings-yuxi'), actionLabel: yuxi.service ? '检查资料库连接' : '配置资料库服务' },
@@ -298,12 +330,12 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
   // full-width card, and the "进入 Fox" call to action appears underneath.
   const finishing = step === steps.length - 1
   return <div className={`fox-onboarding-screen${finishing ? ' is-finishing' : ''}`} data-tauri-drag-region>
-    <Grainient
+    {grainColors && <Grainient
       className="fox-onboarding-background"
-      color1={dark ? '#173a63' : '#9fc9ee'}
-      color2={dark ? '#0a1a2c' : '#e8f4ff'}
-      color3={dark ? '#03060b' : '#ffffff'}
-      timeSpeed={0.6}
+      color1={grainColors[0]}
+      color2={grainColors[1]}
+      color3={grainColors[2]}
+      timeSpeed={reducedMotion ? 0 : 0.6}
       colorBalance={-0.18}
       warpStrength={1}
       warpFrequency={5}
@@ -319,7 +351,7 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
       saturation={1.05}
       zoom={0.9}
       dpr={1}
-    />
+    />}
     <Button variant="outline" size="sm" className="fox-onboarding-skip" onClick={() => onExit('skipped')}>暂时跳过</Button>
     <div className="fox-onboarding-shell">
       <section className="fox-onboarding-main">
@@ -333,10 +365,15 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
                   key={step}
                   className="fox-onboarding-step-content"
                   custom={stepDirection}
-                  initial={{ x: stepDirection >= 0 ? '-100%' : '100%', opacity: 0 }}
-                  animate={{ x: '0%', opacity: 1 }}
-                  exit={{ x: stepDirection >= 0 ? '50%' : '-50%', opacity: 0 }}
-                  transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                  variants={{
+                    enter: (direction: number) => ({ x: reducedMotion ? 0 : direction >= 0 ? '100%' : '-100%', opacity: 0 }),
+                    active: { x: '0%', opacity: 1 },
+                    leave: (direction: number) => ({ x: reducedMotion ? 0 : direction >= 0 ? '-100%' : '100%', opacity: 0 }),
+                  }}
+                  initial="enter"
+                  animate="active"
+                  exit="leave"
+                  transition={{ duration: reducedMotion ? 0 : 0.4, ease: [0.22, 1, 0.36, 1] }}
                 >
                   <header><h1>{current.title}</h1><p>{current.description}</p></header>
                   <div className={`fox-onboarding-status ${current.ready ? 'is-ready' : ''}`}><span>{current.ready ? <Check /> : <LoaderCircle />}</span><div><b>{current.ready ? '当前状态正常' : '尚未完成'}</b><small>{statusCopy}</small></div><Badge variant={current.ready ? 'secondary' : 'outline'}>{current.ready ? '可使用' : '待配置'}</Badge></div>
@@ -350,7 +387,7 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
         </main>
       </section>
       <aside className="fox-onboarding-visual">
-        <div className="fox-onboarding-visual-media"><img src="/mascot/fox/status/fox_sayhi.png" alt="Fox 卡通形象" /><div><strong>Fox Desktop</strong><span>轻量、高效的桌面专家工作台</span></div><BorderBeam className="fox-onboarding-enter" colorVariant="colorful" size="md" strength={0.7} theme="light"><Button className="fox-onboarding-enter-button" size="sm" variant="outline" onClick={() => onExit(model.service ? 'completed' : 'skipped')}>开始使用<ChevronRight /></Button></BorderBeam></div>
+        <div className="fox-onboarding-visual-media"><img src="/mascot/fox/status/fox_sayhi.png" alt="Fox 卡通形象" /><div><strong>Fox Desktop</strong><span>轻量、高效的桌面专家工作台</span></div><BorderBeam className="fox-onboarding-enter" colorVariant="colorful" size="md" strength={0.7} theme={dark ? 'dark' : 'light'}><Button className="fox-onboarding-enter-button" size="sm" variant="outline" onClick={() => onExit(model.service ? 'completed' : 'skipped')}>开始使用<ChevronRight /></Button></BorderBeam></div>
       </aside>
     </div>
   </div>

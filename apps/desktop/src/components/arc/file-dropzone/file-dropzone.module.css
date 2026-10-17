@@ -40,7 +40,7 @@
   --r: 0deg; --x: 0px; --y: 0px;
   position: absolute; inset: 0; display: grid; place-items: end center; padding: 0 0 5px;
   border: 1px solid var(--border); border-radius: 7px; background: var(--surface-raised); color: var(--text-muted);
-  box-shadow: 0 1px 2px oklch(0% 0 0 / .05), 0 3px 8px oklch(0% 0 0 / .04);
+  box-shadow: var(--fox-shadow-sm);
   transform: translate(var(--x), var(--y)) rotate(var(--r));
   transform-origin: 50% 100%;
   transition: transform var(--duration-spring) var(--ease-spring), color var(--duration-standard) var(--ease-standard), border-color var(--duration-standard) var(--ease-standard);
@@ -79,7 +79,7 @@
 .row { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: 12px; min-height: 58px; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius-control); padding: 8px 8px 8px 9px; background: var(--surface); transition: border-color var(--duration-standard) var(--ease-standard); }
 .row.isFailed { border-color: color-mix(in oklab, var(--danger) 26%, var(--border)); }
 .fileIcon { display: grid; width: 40px; height: 40px; place-items: center; color: var(--text-secondary); }
-.thumb { display: block; width: 40px; height: 40px; overflow: hidden; border-radius: 10px; background: var(--surface-muted); box-shadow: inset 0 0 0 1px oklch(0% 0 0 / .06); }
+.thumb { display: block; width: 40px; height: 40px; overflow: hidden; border-radius: 10px; background: var(--surface-muted); box-shadow: inset 0 0 0 1px var(--border); }
 .thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .copy { display: grid; min-width: 0; }
 .name { overflow: hidden; font-size: var(--text-sm); font-weight: 500; line-height: var(--leading-body); text-overflow: ellipsis; white-space: nowrap; }

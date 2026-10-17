@@ -44,7 +44,7 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --ring: var(--brand);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.708 0 0);
   --chart-3: oklch(0.556 0 0);
@@ -86,7 +86,7 @@
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 9%);
   --input: oklch(1 0 0 / 14%);
-  --ring: oklch(0.556 0 0);
+  --ring: var(--brand);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.708 0 0);
   --chart-3: oklch(0.556 0 0);
@@ -110,7 +110,7 @@
   --shell: oklch(0.12 0 0);
 }
 
-/* B. Paper: warm stone neutrals, generous radius, Fox blue as the primary. */
+/* B. Paper: warm stone surfaces with a gold accent. */
 [data-color-theme="paper"] {
   --radius: 0.875rem;
   --fox-radius-small: 7px;
@@ -124,7 +124,7 @@
   --card-foreground: oklch(0.24 0.012 60);
   --popover: oklch(0.995 0.003 85);
   --popover-foreground: oklch(0.24 0.012 60);
-  --primary: oklch(0.53 0.13 254);
+  --primary: oklch(0.52 0.105 78);
   --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.95 0.012 85);
   --secondary-foreground: oklch(0.24 0.012 60);
@@ -135,23 +135,23 @@
   --destructive: oklch(0.56 0.2 28);
   --border: oklch(0.895 0.014 85);
   --input: oklch(0.875 0.016 85);
-  --ring: oklch(0.7 0.1 254);
-  --chart-1: oklch(0.78 0.09 254);
-  --chart-2: oklch(0.64 0.12 254);
+  --ring: oklch(0.52 0.105 78);
+  --chart-1: oklch(0.78 0.09 82);
+  --chart-2: oklch(0.64 0.12 78);
   --chart-3: oklch(0.7 0.12 65);
   --chart-4: oklch(0.6 0.1 155);
   --chart-5: oklch(0.55 0.1 20);
   --sidebar: oklch(0.952 0.013 85);
   --sidebar-foreground: oklch(0.24 0.012 60);
-  --sidebar-primary: oklch(0.53 0.13 254);
+  --sidebar-primary: oklch(0.52 0.105 78);
   --sidebar-primary-foreground: oklch(1 0 0);
   --sidebar-accent: oklch(0.915 0.017 85);
   --sidebar-accent-foreground: oklch(0.24 0.012 60);
   --sidebar-border: oklch(0.895 0.014 85);
-  --sidebar-ring: oklch(0.7 0.1 254);
-  --brand: oklch(0.53 0.13 254);
+  --sidebar-ring: oklch(0.52 0.105 78);
+  --brand: oklch(0.52 0.105 78);
   --brand-foreground: oklch(0.985 0 0);
-  --brand-soft: oklch(0.94 0.02 250);
+  --brand-soft: oklch(0.945 0.035 85);
   --success: oklch(0.55 0.11 155);
   --warning: oklch(0.55 0.12 65);
   --user-bubble: oklch(0.925 0.018 85);
@@ -165,8 +165,8 @@
   --card-foreground: oklch(0.955 0.008 85);
   --popover: oklch(0.28 0.009 70);
   --popover-foreground: oklch(0.955 0.008 85);
-  --primary: oklch(0.64 0.13 254);
-  --primary-foreground: oklch(1 0 0);
+  --primary: oklch(0.78 0.12 82);
+  --primary-foreground: oklch(0.22 0.02 75);
   --secondary: oklch(0.31 0.01 70);
   --secondary-foreground: oklch(0.955 0.008 85);
   --muted: oklch(0.31 0.01 70);
@@ -176,18 +176,18 @@
   --destructive: oklch(0.7 0.18 25);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.7 0.11 254);
+  --ring: oklch(0.78 0.12 82);
   --sidebar: oklch(0.205 0.008 70);
   --sidebar-foreground: oklch(0.955 0.008 85);
-  --sidebar-primary: oklch(0.64 0.13 254);
-  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-primary: oklch(0.78 0.12 82);
+  --sidebar-primary-foreground: oklch(0.22 0.02 75);
   --sidebar-accent: oklch(0.3 0.01 70);
   --sidebar-accent-foreground: oklch(0.955 0.008 85);
   --sidebar-border: oklch(1 0 0 / 8%);
-  --sidebar-ring: oklch(0.7 0.11 254);
-  --brand: oklch(0.72 0.12 254);
-  --brand-foreground: oklch(0.17 0 0);
-  --brand-soft: oklch(0.32 0.04 254);
+  --sidebar-ring: oklch(0.78 0.12 82);
+  --brand: oklch(0.78 0.12 82);
+  --brand-foreground: oklch(0.22 0.02 75);
+  --brand-soft: oklch(0.34 0.045 78);
   --success: oklch(0.74 0.12 155);
   --warning: oklch(0.8 0.12 75);
   --user-bubble: oklch(0.33 0.012 70);
@@ -220,7 +220,7 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.915 0.012 245);
   --input: oklch(0.9 0.014 245);
-  --ring: oklch(0.72 0.1 255);
+  --ring: var(--brand);
   --chart-1: oklch(0.809 0.105 251.813);
   --chart-2: oklch(0.623 0.214 259.815);
   --chart-3: oklch(0.546 0.245 262.881);
@@ -250,8 +250,8 @@
   --card-foreground: oklch(0.97 0.006 245);
   --popover: oklch(0.24 0.022 250);
   --popover-foreground: oklch(0.97 0.006 245);
-  --primary: oklch(0.62 0.13 255);
-  --primary-foreground: oklch(1 0 0);
+  --primary: oklch(0.72 0.12 255);
+  --primary-foreground: oklch(0.17 0 0);
   --secondary: oklch(0.27 0.024 250);
   --secondary-foreground: oklch(0.97 0.006 245);
   --muted: oklch(0.27 0.024 250);
@@ -261,11 +261,11 @@
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 9%);
   --input: oklch(1 0 0 / 14%);
-  --ring: oklch(0.7 0.11 255);
+  --ring: var(--brand);
   --sidebar: oklch(0.165 0.02 250);
   --sidebar-foreground: oklch(0.97 0.006 245);
-  --sidebar-primary: oklch(0.62 0.13 255);
-  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-primary: oklch(0.72 0.12 255);
+  --sidebar-primary-foreground: oklch(0.17 0 0);
   --sidebar-accent: oklch(0.28 0.04 250);
   --sidebar-accent-foreground: oklch(0.97 0.006 245);
   --sidebar-border: oklch(1 0 0 / 7%);
@@ -279,3 +279,21 @@
   --user-bubble-foreground: oklch(0.95 0.02 250);
   --shell: oklch(0.15 0.02 250);
 }
+
+/* The avatar disk and motion ornaments share the selected theme's palette. */
+:root, [data-color-theme='graphite'] { --fox-avatar-color: #45474e; }
+[data-color-theme='graphite'].dark, :root.dark:not([data-color-theme]) { --fox-avatar-color: #898d98; }
+[data-color-theme='paper'] { --fox-avatar-color: #eddaa6; }
+[data-color-theme='mist'] { --fox-avatar-color: #8fc6fe; }
+:root { --fox-avatar-ornament: color-mix(in srgb, var(--fox-avatar-color) 55%, var(--background)); }
+
+/* Elevation uses dark palette ink in both modes, avoiding pale shadows at night. */
+:root, [data-color-theme="graphite"] { --fox-shadow-color: oklch(0.2 0 0); }
+[data-color-theme="paper"] { --fox-shadow-color: oklch(0.3 0.055 78); }
+[data-color-theme="mist"] { --fox-shadow-color: oklch(0.26 0.045 255); }
+:root.dark, [data-color-theme="graphite"].dark { --fox-shadow-color: oklch(0.04 0 0); }
+[data-color-theme="paper"].dark { --fox-shadow-color: oklch(0.1 0.025 78); }
+[data-color-theme="mist"].dark { --fox-shadow-color: oklch(0.08 0.025 255); }
+
+:root { --fox-onboarding-tint: 28%; --fox-loading-background: linear-gradient(145deg,var(--background),var(--muted)); }
+[data-color-theme='paper'] { --fox-onboarding-tint: 8%; }

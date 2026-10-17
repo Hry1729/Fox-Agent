@@ -18,11 +18,12 @@ const animations = {
     group: {
       initial: {
         rotate: 0,
+        transition: { duration: 0.15, ease: 'easeOut' },
       },
       animate: {
-        rotate: [0, 90, 180],
+        rotate: 30,
         transition: {
-          duration: 1.25,
+          duration: 0.5,
           ease: 'easeInOut',
         },
       },
