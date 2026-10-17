@@ -19,6 +19,21 @@ name = "kernel-desktop-acceptance"
 path = "src/bin/kernel-desktop-acceptance.rs"
 required-features = ["kernel-acceptance"]
 
+# Package-2-D closeout: builds the injected U1 parked starting point in the
+# isolated acceptance database, using only production APIs. Never in a normal
+# production build.
+[[bin]]
+name = "closeout-u1-fixture"
+path = "src/bin/closeout-u1-fixture.rs"
+required-features = ["kernel-acceptance"]
+
+# Package-2-D closeout: read-only diagnostic dump of the persisted context-budget
+# report, so the real trigger of a compaction stop is established from data.
+[[bin]]
+name = "closeout-db-dump"
+path = "src/bin/closeout-db-dump.rs"
+required-features = ["kernel-acceptance"]
+
 [[bin]]
 name = "local-embedding-smoke"
 path = "src/local_embedding.rs"

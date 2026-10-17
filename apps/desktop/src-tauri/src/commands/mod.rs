@@ -3029,6 +3029,154 @@ pub fn approval_resolve(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Package 2-D U1: accepting an unverified delivery
+// ---------------------------------------------------------------------------
+
+/// What the user asked the Host to do about one checklist item's unverified
+/// delivery.
+///
+/// There is deliberately **no** `actor` field. The subject is derived from the
+/// trusted window that issued the command, never from the request body: a body
+/// field would let any caller name whoever it liked as the person who accepted
+/// an unverified artifact. `require_trusted_local_window` returns `Result<(),
+/// String>` with no session identity, so the identifier we can honestly record
+/// is the window label — a **local trusted-session** identifier, not a user
+/// identity. This product has no user-identity mechanism and this command does
+/// not invent one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveDeliveryAcceptanceRequest {
+    pub run_id: String,
+    pub item_key: String,
+    /// `accept` | `reject` | `revoke`. Parsed by the shared policy, never
+    /// matched as a free string.
+    pub decision: String,
+}
+
+/// The trusted-session identifier recorded as the accepting subject.
+///
+/// Derived from the window label the command layer already proved is the bundled
+/// main document. Empty when that label is somehow absent, which the command
+/// treats as a refusal rather than recording an anonymous acceptance.
+pub(crate) fn trusted_window_actor(window: &tauri::WebviewWindow) -> Option<String> {
+    let label = window.label();
+    (!label.trim().is_empty()).then(|| format!("window:{label}"))
+}
+
+#[tauri::command]
+pub fn delivery_acceptance_resolve(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: ResolveDeliveryAcceptanceRequest,
+) -> ApiResponse<DeliveryAcceptanceOutcome> {
+    use crate::runtime_host::delivery::delivery_u1 as u1;
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_origin", error, false);
+    }
+    let Some(actor) = trusted_window_actor(&window) else {
+        return ApiResponse::failure(
+            "delivery.acceptance_no_subject",
+            "无法确定接受操作的受信主体",
+            false,
+        );
+    };
+    let Some(decision) = u1::parse_acceptance_decision(&request.decision) else {
+        return ApiResponse::failure(
+            "delivery.acceptance_bad_decision",
+            "接受操作只支持 accept / reject / revoke",
+            false,
+        );
+    };
+    match u1::resolve_delivery_acceptance(
+        &state.database,
+        &request.run_id,
+        &request.item_key,
+        decision,
+        &actor,
+        crate::database::now_ms(),
+    ) {
+        Ok(_) => {
+            // Re-read the row's state so the caller sees what actually happened,
+            // including the terminal the acceptance may have just committed.
+            let state = u1::delivery_acceptance_state(
+                &state.database,
+                &request.run_id,
+                &request.item_key,
+            )
+            .unwrap_or_else(|_| u1::AcceptanceState {
+                run_id: request.run_id.clone(),
+                item_key: request.item_key.clone(),
+                verification_class: "unknown".to_owned(),
+                blocked: None,
+                accepted: None,
+                rejected: false,
+                run_terminal: false,
+            });
+            ApiResponse::success(DeliveryAcceptanceOutcome {
+                run_id: request.run_id,
+                item_key: request.item_key,
+                decision,
+                state,
+            })
+        }
+        Err(error) => match error {
+            u1::AcceptanceResolveError::Refused(reason) => {
+                ApiResponse::failure(reason.as_str(), reason.detail(), false)
+            }
+            u1::AcceptanceResolveError::Storage(detail) => {
+                ApiResponse::failure("delivery.acceptance_storage", detail, true)
+            }
+            u1::AcceptanceResolveError::RunTerminal { state } => ApiResponse::failure(
+                "delivery.acceptance_run_terminal",
+                format!("任务已结束（{state}），只能撤销此前的接受"),
+                false,
+            ),
+        },
+    }
+}
+
+/// What a resolve actually did, as the UI needs it.
+///
+/// Carries the fresh row state rather than a bare `bool`, so a caller cannot
+/// mistake "the write was a no-op" for "the item is now accepted", and so the
+/// terminal the acceptance may have committed is visible without a second round
+/// trip.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryAcceptanceOutcome {
+    pub run_id: String,
+    pub item_key: String,
+    pub decision: crate::runtime_host::delivery::delivery_u1::DeliveryAcceptanceDecision,
+    pub state: crate::runtime_host::delivery::delivery_u1::AcceptanceState,
+}
+
+#[tauri::command]
+pub fn delivery_acceptance_state(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: DeliveryAcceptanceItemRequest,
+) -> ApiResponse<crate::runtime_host::delivery::delivery_u1::AcceptanceState> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_origin", error, false);
+    }
+    match crate::runtime_host::delivery::delivery_u1::delivery_acceptance_state(
+        &state.database,
+        &request.run_id,
+        &request.item_key,
+    ) {
+        Ok(state) => ApiResponse::success(state),
+        Err(error) => ApiResponse::failure("delivery.acceptance_read_failed", error, true),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryAcceptanceItemRequest {
+    pub run_id: String,
+    pub item_key: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunSteeringEnqueueRequest {
