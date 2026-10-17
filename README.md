@@ -120,3 +120,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --offline
 - [完整文档导航](docs/README.md)：按角色和工作内容查找全部文档。
 
 项目仍有明确边界，包括 Agent 产物打开链路、部分页面占位、导航历史、跨平台验收、CSP 和进程级隔离等，详见[已知限制](docs/07-路线图/已知限制.md)。
+
+## 界面组件来源
+
+资料库文件夹动效使用 [Rare UI](https://rareui.com) 的 Folder 组件（Copyright 2026 Swami Malode），并适配 Fox 主题。许可见 [Rare UI 许可](apps/desktop/src/components/ui/rare-ui-LICENSE.txt)。
