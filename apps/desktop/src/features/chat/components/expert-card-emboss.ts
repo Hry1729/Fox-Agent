@@ -1,119 +1,107 @@
-// Coordinates are shared by the Three texture and the non-WebGL card face.
-const shapes = [
-  'M279 158 C297 149 316 137 334 129 C333 150 326 169 304 178 C296 177 285 169 279 158 Z',
-  'M290 182 C312 172 337 174 352 187 C336 204 310 208 290 193 Z',
-  'M44 132 C31 106 24 60 28 24 C29 12 34 9 43 14 C67 27 91 48 112 76 C143 63 189 63 220 76 C241 48 265 27 289 14 C298 9 303 12 304 24 C308 60 301 106 288 132 C295 146 305 157 315 165 Q305 172 296 172 Q304 179 314 182 C300 192 287 194 276 195 C249 213 212 218 166 216 C120 218 83 213 56 195 C45 194 32 192 18 182 Q28 179 36 172 Q27 172 17 165 C27 157 37 146 44 132 Z',
-  'M51 108 C44 88 41 60 44 40 C62 49 79 65 92 82 C76 87 62 96 51 108 Z',
-  'M240 82 C253 65 270 49 288 40 C291 60 288 88 281 108 C270 96 256 87 240 82 Z',
-]
+import foxMaskUrl from './expert-card-fox-mask.png'
 
-const layers = new WeakMap<HTMLCanvasElement, { key: string; base: HTMLCanvasElement; mask: Path2D }>()
+const layers = new WeakMap<HTMLCanvasElement, { key: string; base: HTMLCanvasElement }>()
+let foxMask: HTMLImageElement | undefined
+const imageListeners = new Set<() => void>()
+function loadFoxMask() {
+  if (!foxMask) {
+    foxMask = new Image()
+    foxMask.onload = () => imageListeners.forEach(refresh => refresh())
+    foxMask.src = foxMaskUrl
+  }
+  return foxMask
+}
 
-export function paintExpertCardBack(canvas: HTMLCanvasElement, host: HTMLElement, phase = .5) {
+// The reference uses a 260 x 360 frosted back; both renderers share this texture.
+export function paintExpertCardBack(canvas: HTMLCanvasElement, host: HTMLElement) {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
-  const styles = getComputedStyle(host)
-  const background = styles.getPropertyValue('--shell').trim() || '#f4f4f4'
-  const ink = styles.getPropertyValue('--muted-foreground').trim() || '#68707b'
-  const key = `${background}|${ink}|${canvas.width}|${canvas.height}|${document.fonts.status}`
+  const primary = getComputedStyle(host).getPropertyValue('--primary').trim() || '#6b7280'
+  const image = loadFoxMask()
+  const key = `${primary}|${canvas.width}|${canvas.height}|${image.complete && image.naturalWidth > 0}`
   let layer = layers.get(canvas)
   if (!layer || layer.key !== key) {
     const base = document.createElement('canvas')
     base.width = canvas.width; base.height = canvas.height
-    const mask = drawSilverCard(base, background, ink)
-    layer = { key, base, mask }; layers.set(canvas, layer)
+    drawFrostedCard(base, primary, image)
+    layer = { key, base }; layers.set(canvas, layer)
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
   ctx.drawImage(layer.base, 0, 0)
-  ctx.save()
-  ctx.scale(canvas.width / 512, canvas.height / 686)
-  ctx.translate(73, 219)
-  ctx.clip(layer.mask)
-  const x = -180 + phase * 720
-  const sweep = ctx.createLinearGradient(x, 0, x + 150, 90)
-  sweep.addColorStop(0, 'rgba(255,255,255,0)')
-  sweep.addColorStop(.4, 'rgba(255,255,255,.12)')
-  sweep.addColorStop(.55, 'rgba(255,255,255,.7)')
-  sweep.addColorStop(1, 'rgba(255,255,255,0)')
-  ctx.fillStyle = sweep; ctx.fillRect(0, 0, 370, 250)
-  ctx.restore()
+
 }
 
-function drawSilverCard(canvas: HTMLCanvasElement, background: string, ink: string) {
+function drawFrostedCard(canvas: HTMLCanvasElement, primary: string, image: HTMLImageElement) {
   const ctx = canvas.getContext('2d')!
-  ctx.fillStyle = background; ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.scale(canvas.width / 512, canvas.height / 686)
-  const mask = new Path2D()
-  ctx.save()
-  ctx.translate(73, 219)
-  const emboss = (path: Path2D, inset = false) => {
-    if (!inset) mask.addPath(path)
-    ctx.save()
-    ctx.filter = 'blur(1px)'
-    ctx.translate(1.8, 1.8)
-    ctx.fillStyle = inset ? '#ffffff' : '#b7bdc7'; ctx.fill(path)
-    ctx.translate(-3.6, -3.6)
-    ctx.fillStyle = inset ? '#b7bdc7' : '#ffffff'; ctx.fill(path)
-    ctx.translate(1.8, 1.8)
-    ctx.filter = 'none'
-    const face = ctx.createLinearGradient(0, 30, 180, 240)
-    face.addColorStop(0, '#ffffff'); face.addColorStop(.46, '#f4f6f8')
-    face.addColorStop(.64, '#dce1e7'); face.addColorStop(.8, '#f8fafc'); face.addColorStop(1, '#e7ebf0')
-    ctx.fillStyle = inset ? '#dbe0e6' : face; ctx.fill(path)
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.scale(canvas.width / 260, canvas.height / 360)
+  const tint = document.createElement('canvas')
+  tint.width = 260; tint.height = 360
+  const color = tint.getContext('2d')!
+  color.fillStyle = primary; color.fillRect(0, 0, 260, 360)
+  const mask = document.createElement('canvas')
+  mask.width = 260; mask.height = 360
+  const maskContext = mask.getContext('2d')!
+  const pixels = maskContext.createImageData(260, 360)
+  // Offset soft pools preserve white space between them without circular edges.
+  for (let y = 0; y < 360; y++) {
+    for (let x = 0; x < 260; x++) {
+      const upperLeft = Math.exp(-1.4 * (((x - 42) / 145) ** 2 + ((y - 140) / 145) ** 2))
+      const lowerRight = Math.exp(-1.4 * (((x - 224) / 178) ** 2 + ((y - 306) / 182) ** 2))
+      pixels.data[(y * 260 + x) * 4 + 3] = Math.round(255 * (.02 + .24 * upperLeft + .18 * lowerRight))
+    }
+  }
+  maskContext.putImageData(pixels, 0, 0)
+  color.globalCompositeOperation = 'destination-in'
+  color.drawImage(mask, 0, 0)
+  ctx.drawImage(tint, 0, 0)
+  const panel = new Path2D()
+  panel.roundRect(22, 44, 216, 294, 12)
+  ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fill(panel)
+  ctx.strokeStyle = 'rgba(255,255,255,.28)'; ctx.lineWidth = 1; ctx.stroke(panel)
+  // Seeded grain keeps the frosted texture stable across repaints.
+  ctx.save(); ctx.clip(panel)
+  let seed = 17
+  for (let i = 0; i < 6500; i++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+    const x = seed % 260
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+    const y = seed % 360
+    ctx.fillStyle = i % 2 ? 'rgba(255,255,255,.12)' : 'rgba(0,0,0,.025)'
+    ctx.fillRect(x, y, .5, .5)
+  }
+  ctx.restore()
+  if (image.complete && image.naturalWidth) {
+    const mark = document.createElement('canvas')
+    mark.width = 440; mark.height = 336
+    const ink = mark.getContext('2d')!
+    const scale = Math.min(mark.width / image.naturalWidth, mark.height / image.naturalHeight)
+    const w = image.naturalWidth * scale, h = image.naturalHeight * scale
+    ink.drawImage(image, (mark.width - w) / 2, (mark.height - h) / 2, w, h)
+    ink.globalCompositeOperation = 'source-in'
+    ink.fillStyle = '#ffffff'; ink.fillRect(0, 0, mark.width, mark.height)
+    ctx.save(); ctx.globalAlpha = .95
+    ctx.shadowColor = primary; ctx.shadowBlur = 10; ctx.shadowOffsetY = 4
+    ctx.drawImage(mark, 75, 145.2, 110, 84)
     ctx.restore()
   }
-  shapes.forEach(shape => emboss(new Path2D(shape)))
-  const oval = (x: number, y: number, rx: number, ry: number, inset = false) => {
-    const path = new Path2D()
-    path.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2)
-    emboss(path, inset)
-  }
-  oval(113, 164, 10, 12, true); oval(220, 164, 10, 12, true)
-  oval(166, 193, 18, 11)
-  oval(73, 202, 29, 30); oval(259, 202, 29, 30)
-  ctx.restore()
-  ctx.fillStyle = ink
-  ctx.font = '500 40px "HarmonyOS Sans SC", sans-serif'
-  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'
-  ctx.letterSpacing = '1px'
-  ctx.fillText('Fox Agent', 256, 506)
-  ctx.letterSpacing = '0px'
-  return mask
 }
 
 export function createExpertCardBackPainter(canvas: HTMLCanvasElement, host: HTMLElement, onPaint: () => void = () => {}) {
-  const motion = matchMedia('(prefers-reduced-motion: reduce)')
-  let alive = true, active = false, visible = true, frame = 0, last = 0
+  let alive = true
   const refresh = () => { if (alive) { paintExpertCardBack(canvas, host); onPaint() } }
-  const canRun = () => alive && active && visible && !motion.matches && document.visibilityState !== 'hidden'
-  const tick = (now: number) => {
-    frame = 0
-    if (!canRun()) return
-    if (now - last >= 1000 / 24 && getComputedStyle(host).visibility !== 'hidden') {
-      last = now
-      paintExpertCardBack(canvas, host, (now % 6500) / 6500); onPaint()
-    }
-    if (canRun()) frame = requestAnimationFrame(tick)
-  }
-  const sync = () => {
-    cancelAnimationFrame(frame); frame = 0
-    refresh()
-    if (canRun()) frame = requestAnimationFrame(tick)
-  }
   const theme = new MutationObserver(refresh)
   theme.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-color-theme'] })
-  const viewport = new IntersectionObserver(entries => { visible = entries[0]?.isIntersecting ?? false; sync() })
-  viewport.observe(host)
-  motion.addEventListener('change', sync)
-  document.addEventListener('visibilitychange', sync)
-  void document.fonts.ready.then(refresh)
+  imageListeners.add(refresh)
   refresh()
   return {
-    setActive(value: boolean) { active = value; sync() },
+    setActive(value: boolean) { if (value) refresh() },
     refresh,
     dispose() {
-      alive = false; cancelAnimationFrame(frame); theme.disconnect(); viewport.disconnect()
-      motion.removeEventListener('change', sync); document.removeEventListener('visibilitychange', sync)
+      alive = false
+      theme.disconnect()
+      imageListeners.delete(refresh)
       layers.delete(canvas)
     },
   }

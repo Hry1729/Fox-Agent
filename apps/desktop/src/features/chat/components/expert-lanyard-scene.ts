@@ -23,9 +23,9 @@
 // Source: https://github.com/DavidHDev/react-bits/blob/3329f3bde763a37a2a89b24598e9f50fa0d4de3d/src/ts-default/Components/Lanyard/Lanyard.tsx
 // Retained: rounded extruded card, slot/bevel and UVs, ring/clamp geometry,
 // woven strap normal map, PMREM studio panels and glossy/silver/black defaults.
-// Fox differences: compact portrait; two fixed straps; named expert on front,
-// patterned Fox back; lazy loading; click/keyboard flips only.
-// No dragging, physics, breeze, intro, automatic rotation or idle render loop.
+// Fox differences: compact portrait, one fixed strap, named expert on front,
+// patterned Fox back and lazy loading. The React shell handles pull-to-toggle.
+// No physics, breeze, automatic rotation or idle render loop.
 import * as THREE from 'three'
 import { createExpertCardBackPainter, paintExpertCardBack } from './expert-card-emboss'
 
@@ -142,7 +142,7 @@ export function createExpertLanyardScene(container: HTMLElement, card: { frontIm
     canvas.setAttribute('aria-hidden', 'true')
     container.appendChild(canvas)
     scene.environment = own(buildEnvironment(renderer)).texture
-    // 128×190 host; 112×150 card. The two straps are clipped at the top edge.
+    // 128×190 host; 112×150 card. The strap is clipped at the top edge.
     const camera = new THREE.OrthographicCamera(-0.96, 0.96, 1.5, -1.35, 0.1, 100)
     camera.position.set(0, 0, 12); camera.lookAt(0, 0, 0)
     const keyLight = new THREE.DirectionalLight(0xffffff, 1.6), fillLight = new THREE.DirectionalLight(0xffffff, 0.35)
@@ -187,10 +187,9 @@ export function createExpertLanyardScene(container: HTMLElement, card: { frontIm
     eyelet.position.y = hangY
     clamp.position.y = hangY + EYELET_RADIUS + CLAMP_BODY / 2 - 0.004
     scene.add(clamp, eyelet)
-    // Two fixed, woven ribbons join the original silver clasp. No simulation.
-    for (const side of [-1, 1]) {
-      const top = new THREE.Vector2(side * 0.3, 1.56)
-      const bottom = new THREE.Vector2(side * 0.055, hangY + EYELET_RADIUS + CLAMP_BODY - 0.025)
+    {
+      const top = new THREE.Vector2(0, 1.56)
+      const bottom = new THREE.Vector2(0, hangY + EYELET_RADIUS + CLAMP_BODY - 0.025)
       const band = new THREE.Mesh(own(new THREE.PlaneGeometry(0.12, top.distanceTo(bottom))), bandMaterial)
       band.position.set((top.x + bottom.x) / 2, (top.y + bottom.y) / 2, -0.025)
       band.rotation.z = -Math.atan2(top.x - bottom.x, top.y - bottom.y)

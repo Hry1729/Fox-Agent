@@ -102,6 +102,9 @@ describe('conversation expert state', () => {
     archived.conversation.archived = true
 
     expect(canRemoveConversationExpert(withMessage)).toBe(false)
+    expect(conversationExpertBindingLockError(withMessage, true)).toBeNull()
+    expect(conversationExpertBindingLockError(withRun, true)?.code).toBe('conversation.expert_binding_locked')
+    expect(conversationExpertBindingLockError(archived, true)?.code).toBe('conversation.expert_binding_locked')
     expect(conversationExpertBindingLockError(withMessage)?.code).toBe('conversation.expert_binding_locked')
     expect(canRemoveConversationExpert(withRun)).toBe(false)
     expect(canRemoveConversationExpert(archived)).toBe(false)

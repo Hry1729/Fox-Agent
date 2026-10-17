@@ -32,7 +32,7 @@ export function ExpertPickerDialog({ open, onOpenChange, agents, selectedExpertI
   }
   return <Dialog open={open} onOpenChange={(next) => { if (!busy) onOpenChange(next) }}>
     <DialogContent className="fox-expert-picker-dialog">
-      <DialogHeader><DialogTitle>添加专家</DialogTitle><DialogDescription>{readOnly ? '任务结束后可更换专家。' : '选择专家参与当前对话。'}</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>{selectedExpertId ? '更换专家' : '添加专家'}</DialogTitle><DialogDescription>{readOnly ? '任务结束后可更换专家。' : '选择专家参与当前对话，聊天记录会保留。'}</DialogDescription></DialogHeader>
       <label className="fox-expert-picker-search"><Search size={16} /><Input aria-label="搜索专家" placeholder="搜索专家" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="fox-expert-picker-grid" aria-busy={busy}>

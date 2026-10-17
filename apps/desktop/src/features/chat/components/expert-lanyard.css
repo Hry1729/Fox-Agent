@@ -1,3 +1,5 @@
+.fox-expert-lanyard-transition { position: absolute; inset: 0; z-index: 17; pointer-events: none; }
+.fox-expert-lanyard-transition > .fox-expert-lanyard { pointer-events: auto; }
 .fox-expert-lanyard {
   position: absolute;
   z-index: 17;
@@ -11,11 +13,12 @@
   padding: 0;
   border: 0;
   background: transparent;
-  cursor: pointer;
+  cursor: grab;
   filter: drop-shadow(0 2px 3px rgb(0 0 0 / .14)) drop-shadow(0 6px 9px rgb(0 0 0 / .10));
   perspective: 700px;
   border-radius: var(--fox-radius-control);
-  touch-action: manipulation;
+  touch-action: none;
+  user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
 .fox-expert-lanyard:focus-visible {
@@ -82,12 +85,13 @@
   width: 8px;
   height: 36px;
   top: -5px;
-  left: 56px;
+  left: 60px;
   transform-origin: center bottom;
-  transform: rotate(-29deg);
+  transform: none;
   background: repeating-linear-gradient(0deg,#111 0px,#111 2px,#242424 2px,#242424 3px);
 }
-.fox-expert-lanyard-strap.is-right { left: 64px; transform: rotate(29deg); }
+.fox-expert-lanyard-extension { position: absolute; left: calc(50% - 3px); top: -76px; width: 6px; height: 80px; background: repeating-linear-gradient(0deg,#111 0px,#111 2px,#242424 2px,#242424 3px); pointer-events: none; }
+.fox-expert-lanyard[data-dragging='true'] { cursor: grabbing; }
 .fox-expert-lanyard-clasp {
   position: absolute;
   z-index: 1;

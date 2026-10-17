@@ -89,6 +89,7 @@ interface DesktopConversationState {
   createConversationDraftWithKnowledge: (agentId: string, references: KnowledgeReference[], names: Record<string, string>) => boolean
   createConversationForExpert: (expertId: string, projectRoot?: string, permissionMode?: ProjectRecord['permissionMode']) => Promise<ExpertOperationResult>
   removeExpert: () => Promise<ExpertOperationResult>
+  changeExpert: (expertId: string) => Promise<ExpertOperationResult>
   setDraftPermission: (permissionMode: ProjectRecord['permissionMode']) => void
   openConversation: (conversationId: string) => Promise<void>
   loadEarlierMessages: () => Promise<void>
@@ -114,7 +115,7 @@ export function activeConversationExpertBinding(detail: ConversationDetail | nul
   return detail?.expertBindings?.find((binding) => binding.state === 'active') ?? null
 }
 
-export function conversationExpertBindingLockError(detail: ConversationDetail | null): DesktopErrorDetails | null {
+export function conversationExpertBindingLockError(detail: ConversationDetail | null, allowExistingMessages = false): DesktopErrorDetails | null {
   if (!detail) return null
   if (detail.conversation.archived) {
     return {
@@ -130,7 +131,7 @@ export function conversationExpertBindingLockError(detail: ConversationDetail | 
       retryable: false,
     }
   }
-  if (detail.messages.some((message) => message.role === 'user' || message.role === 'assistant')) {
+  if (!allowExistingMessages && detail.messages.some((message) => message.role === 'user' || message.role === 'assistant')) {
     return {
       code: 'conversation.expert_binding_locked',
       message: 'conversation expert cannot change after user or assistant messages have been created',
@@ -623,6 +624,44 @@ export function useDesktopConversation(): DesktopConversationState {
       return null
     }
   }, [openConversation, refreshLifecycleLists])
+
+  const changeExpert = useCallback(async (expertId: string): Promise<ExpertOperationResult> => {
+    const id = expertId.trim()
+    const current = detail
+    const conversationId = activeConversationIdRef.current
+    const lockError = !id
+      ? { code: 'expert.invalid', message: 'expert id is required', retryable: false }
+      : conversationId && current?.conversation.id !== conversationId
+        ? { code: 'conversation.expert_binding_locked', message: '请等待当前对话加载完成后再更换专家', retryable: true }
+        : conversationExpertBindingLockError(current, true)
+    if (lockError) {
+      setError(lockError.message)
+      setErrorDetails(lockError)
+      return { success: false, error: lockError }
+    }
+    if (!conversationId) {
+      applyDraft({ ...draftRef.current, expertId: id })
+      setError(null)
+      setErrorDetails(null)
+      return { success: true, error: null }
+    }
+    const version = selectionVersionRef.current
+    try {
+      await desktopClient.bindConversationExpert(conversationId, id)
+      await refreshSelectedConversation(conversationId)
+      if (selectionVersionRef.current !== version) return { success: false, error: null }
+      setError(null)
+      setErrorDetails(null)
+      return { success: true, error: null }
+    } catch (cause) {
+      const error = desktopErrorDetails(cause)
+      if (selectionVersionRef.current === version) {
+        setError(error.message)
+        setErrorDetails(error)
+      }
+      return { success: false, error }
+    }
+  }, [applyDraft, detail, refreshSelectedConversation])
 
   const removeExpert = useCallback(async () => {
     const current = detail
@@ -1459,6 +1498,7 @@ export function useDesktopConversation(): DesktopConversationState {
     createConversationDraftWithKnowledge,
     createConversationForExpert,
     removeExpert,
+    changeExpert,
     setDraftPermission,
     openConversation,
     loadEarlierMessages,
@@ -1474,7 +1514,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {
