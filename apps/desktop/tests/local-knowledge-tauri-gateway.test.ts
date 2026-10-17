@@ -276,6 +276,7 @@ describe('local knowledge Tauri gateway', () => {
       id: 'source-1',
       rootPath: 'D:\\资料',
       displayName: '资料',
+      description: '',
       fileCount: 1,
       totalSize: 2048,
       lastScannedAt: '2025-08-21T18:14:10.000Z',
@@ -363,4 +364,128 @@ describe('local knowledge Tauri gateway', () => {
       restartRequired: false,
     })
   })
+})
+
+test('coalesces concurrent reads and invalidates snapshots while jobs are active', async () => {
+  const client = createClient()
+  let bases = 0, storageReads = 0, details = 0, jobs = 0
+  client.listLocalKnowledgeBases = async () => { bases++; return [base] }
+  client.getLocalKnowledgeStorageStatus = async () => { storageReads++; return storage }
+  client.getLocalKnowledgeBase = async () => { details++; return base }
+  client.listLocalKnowledgeJobs = async () => { jobs++; return [job] }
+  const gateway = createTauriLocalKnowledgeGateway(client)
+  await Promise.all([gateway.listKnowledgeBases(), gateway.listKnowledgeBases(), gateway.getKnowledgeBase(base.id), gateway.getKnowledgeBase(base.id), gateway.listJobs(base.id)])
+  expect({ bases, storageReads, details, jobs }).toEqual({ bases: 1, storageReads: 1, details: 1, jobs: 1 })
+  await gateway.listKnowledgeBases()
+  expect(bases).toBe(2)
+  expect(storageReads).toBe(2)
+})
+
+test('failed shared reads can be retried', async () => {
+  const client = createClient()
+  let attempts = 0
+  client.listLocalKnowledgeBases = async () => { if (++attempts === 1) throw new Error('temporarily unavailable'); return [base] }
+  const gateway = createTauriLocalKnowledgeGateway(client)
+  const first = await Promise.allSettled([gateway.listKnowledgeBases(), gateway.listKnowledgeBases()])
+  expect(first.every((result) => result.status === 'rejected')).toBe(true)
+  expect(attempts).toBe(1)
+  expect(await gateway.listKnowledgeBases()).toHaveLength(1)
+  expect(attempts).toBe(2)
+})
+
+test('reuses unchanged library reads and invalidates after mutations', async () => {
+  const client = createClient()
+  let reads = 0
+  client.listLocalKnowledgeBases = async () => { reads++; return [base] }
+  client.listLocalKnowledgeJobs = async () => []
+  const gateway = createTauriLocalKnowledgeGateway(client)
+  await gateway.listKnowledgeBases()
+  await gateway.listKnowledgeBases()
+  expect(reads).toBe(1)
+  await gateway.createKnowledgeBase({ name: '新建资料', description: '用于测试' })
+  await gateway.listKnowledgeBases()
+  expect(reads).toBe(2)
+})
+
+test('a read started before a mutation cannot refill the snapshot cache', async () => {
+  const client = createClient()
+  let reads = 0
+  let release!: (value: LocalKnowledgeBaseDto[]) => void
+  client.listLocalKnowledgeBases = async () => {
+    reads++
+    if (reads === 1) return new Promise((resolve) => { release = resolve })
+    return [{ ...base, name: 'new name' }]
+  }
+  const gateway = createTauriLocalKnowledgeGateway(client)
+  const oldRead = gateway.listKnowledgeBases()
+  await gateway.createKnowledgeBase({ name: '新建资料', description: '用于测试' })
+  release([base])
+  await oldRead
+  expect((await gateway.listKnowledgeBases())[0].name).toBe('new name')
+  expect(reads).toBe(2)
+})
+
+test('terminal job changes invalidate cached library metadata', async () => {
+  const client = createClient()
+  let reads = 0, version = 1
+  client.listLocalKnowledgeBases = async () => { reads++; return [base] }
+  client.listLocalKnowledgeJobs = async () => [{ ...job, status: 'completed', lastSequence: version }]
+  const gateway = createTauriLocalKnowledgeGateway(client)
+  await gateway.listJobs()
+  await gateway.listKnowledgeBases()
+  version++
+  await gateway.listJobs()
+  await gateway.listKnowledgeBases()
+  expect(reads).toBe(2)
+})
+
+test('library cache expires after thirty seconds', async () => {
+  const client = createClient()
+  let reads = 0
+  client.listLocalKnowledgeBases = async () => { reads++; return [base] }
+  const realNow = Date.now
+  let now = realNow()
+  Date.now = () => now
+  try {
+    const gateway = createTauriLocalKnowledgeGateway(client)
+    await gateway.listKnowledgeBases()
+    now += 29_000
+    await gateway.listKnowledgeBases()
+    expect(reads).toBe(1)
+    now += 1_001
+    await gateway.listKnowledgeBases()
+    expect(reads).toBe(2)
+  } finally { Date.now = realNow }
+})
+
+test('catalog pages are reused and a folder rescan invalidates them', async () => {
+  const client = createClient()
+  let reads = 0
+  client.listLocalKnowledgeLocalFiles = async () => { reads++; return [catalogFile] }
+  client.rescanLocalKnowledgeFileSource = async () => fileSource
+  const gateway = createTauriLocalKnowledgeGateway(client)
+  const page = { sourceId: 'source-1', limit: 2000, offset: 0 }
+  await gateway.listLocalFiles(page)
+  await gateway.listLocalFiles(page)
+  expect(reads).toBe(1)
+  await gateway.rescanFileSource('source-1')
+  await gateway.listLocalFiles(page)
+  expect(reads).toBe(2)
+})
+
+test('concurrent folder refreshes share one scan and later visits scan again', async () => {
+  const client = createClient()
+  let scans = 0
+  let release!: () => void
+  client.rescanLocalKnowledgeFileSource = async () => { scans++; await new Promise<void>((resolve) => { release = resolve }); return fileSource }
+  const gateway = createTauriLocalKnowledgeGateway(client)
+  const first = gateway.rescanFileSource('source-1')
+  const second = gateway.rescanFileSource('source-1')
+  expect(scans).toBe(1)
+  release()
+  await Promise.all([first, second])
+  const third = gateway.rescanFileSource('source-1')
+  expect(scans).toBe(2)
+  release()
+  await third
 })

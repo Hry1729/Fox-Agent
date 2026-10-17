@@ -286,6 +286,7 @@ export function mapLocalKnowledgeFileSource(dto: LocalKnowledgeFileSourceDto): L
     id: dto.id,
     rootPath: dto.rootPath,
     displayName: dto.displayName,
+    description: dto.description ?? '',
     fileCount: Math.max(0, numberValue(dto.fileCount)),
     totalSize: Math.max(0, numberValue(dto.totalSize)),
     lastScannedAt: toIsoTimestamp(dto.lastScannedAt),
@@ -472,16 +473,61 @@ function operationEvent(operationId: string, jobs: KnowledgeJob[]): OperationEve
 }
 
 export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopClient = desktopClient): LocalKnowledgeGateway {
+  const pending = new Map<string, Promise<unknown>>()
+  const cached = new Map<string, { value: unknown; expires: number }>()
+  const sourceScans = new Map<string, Promise<LocalKnowledgeFileSource>>()
+  let revision = 0
+  const invalidate = () => { revision += 1; cached.clear(); pending.clear() }
+  const sourceClient = client
+  // Mutations invalidate before and after the write so concurrent old reads cannot refill the cache.
+  client = new Proxy(sourceClient, {
+    get(target, property) {
+      const method = Reflect.get(target, property)
+      if (typeof method !== 'function') return method
+      if (!/^(add|rescan|update|remove|create|delete|start|cancel|retry|set|import|reparse)/.test(String(property))) return method.bind(target)
+      return async (...args: unknown[]) => {
+        invalidate()
+        try { return await method.apply(target, args) } finally { invalidate() }
+      }
+    },
+  })
+  const read = <T,>(key: string, action: () => Promise<T>, ttl = 30_000): Promise<T> => {
+    const saved = cached.get(key)
+    if (saved && saved.expires > Date.now()) return Promise.resolve(saved.value as T)
+    const existing = pending.get(key)
+    if (existing) return existing as Promise<T>
+    const startedRevision = revision
+    const request = action()
+    pending.set(key, request)
+    const clear = () => { if (pending.get(key) === request) pending.delete(key) }
+    void request.then((value) => {
+      if (ttl > 0 && startedRevision === revision) {
+        if (cached.size >= 128) cached.delete(cached.keys().next().value!)
+        cached.set(key, { value, expires: Date.now() + ttl })
+      }
+      clear()
+    }, clear)
+    return request
+  }
+  const storageStatus = () => read('storage', () => client.getLocalKnowledgeStorageStatus())
+  const jobVersions = new Map<string, string>()
+  const jobsFor = (id?: string) => read(`jobs:${id ?? '*'}`, async () => {
+    const jobs = await client.listLocalKnowledgeJobs(id)
+    const key = id ?? '*'
+    const version = JSON.stringify(jobs)
+    if ((jobVersions.has(key) && jobVersions.get(key) !== version) || jobs.some((job) => ['queued', 'running', 'paused'].includes(job.status))) invalidate()
+    jobVersions.set(key, version)
+    return jobs
+  }, 0)
   return {
     async listKnowledgeBases() {
-      const [bases, storage] = await Promise.all([
-        client.listLocalKnowledgeBases(),
-        client.getLocalKnowledgeStorageStatus(),
-      ])
-      return bases.map((base) => mapLocalKnowledgeBase(base, storage))
+      return read('bases', async () => {
+        const [bases, storage] = await Promise.all([client.listLocalKnowledgeBases(), storageStatus()])
+        return bases.map((base) => mapLocalKnowledgeBase(base, storage))
+      })
     },
     async listFileSources() {
-      return (await client.listLocalKnowledgeFileSources()).map(mapLocalKnowledgeFileSource)
+      return read('fileSources', async () => (await client.listLocalKnowledgeFileSources()).map(mapLocalKnowledgeFileSource))
     },
     async pickFileSourceFolder() {
       const path = await client.pickLocalKnowledgeSourceFolder()
@@ -493,25 +539,31 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
       return mapLocalKnowledgeFileSource(await client.addLocalKnowledgeFileSource(normalizedPath))
     },
     async rescanFileSource(id) {
-      return mapLocalKnowledgeFileSource(await client.rescanLocalKnowledgeFileSource(id))
+      const existing = sourceScans.get(id)
+      if (existing) return existing
+      const request = client.rescanLocalKnowledgeFileSource(id).then(mapLocalKnowledgeFileSource)
+      sourceScans.set(id, request)
+      const clear = () => { if (sourceScans.get(id) === request) sourceScans.delete(id) }
+      void request.then(clear, clear)
+      return request
     },
-    async updateFileSource(id, displayName) {
+    async updateFileSource(id, displayName, description) {
       const normalizedName = displayName.trim()
       if (!normalizedName) unavailable('local_knowledge.source_name_required', '请输入文件夹显示名称。')
-      return mapLocalKnowledgeFileSource(await client.updateLocalKnowledgeFileSource(id, normalizedName))
+      return mapLocalKnowledgeFileSource(await client.updateLocalKnowledgeFileSource(id, normalizedName, description?.trim()))
     },
     async removeFileSource(id) {
       return client.removeLocalKnowledgeFileSource(id)
     },
     async listLocalFiles(options = {}) {
-      const files = await client.listLocalKnowledgeLocalFiles({
+      const request = {
         sourceId: options.sourceId,
         query: options.query,
         category: options.category === 'all' ? undefined : options.category,
         limit: options.limit,
         offset: options.offset,
-      })
-      return files.map(mapLocalKnowledgeCatalogFile)
+      }
+      return read(`localFiles:${JSON.stringify(request)}`, async () => (await client.listLocalKnowledgeLocalFiles(request)).map(mapLocalKnowledgeCatalogFile))
     },
     async readLocalFileRange(id, start, end) {
       return client.readLocalKnowledgeLocalFileRange(id, start, end)
@@ -523,12 +575,12 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
       return client.openLocalKnowledgeLocalFile(id, true)
     },
     async getKnowledgeBase(id) {
-      const [base, storage, jobs] = await Promise.all([
-        client.getLocalKnowledgeBase(id),
-        client.getLocalKnowledgeStorageStatus(),
-        client.listLocalKnowledgeJobs(id),
-      ])
-      return mapLocalKnowledgeDetail(base, storage, jobs.map(mapLocalKnowledgeJob))
+      return read(`base:${id}`, async () => {
+        const [base, storage, jobs] = await Promise.all([
+          client.getLocalKnowledgeBase(id), storageStatus(), jobsFor(id),
+        ])
+        return mapLocalKnowledgeDetail(base, storage, jobs.map(mapLocalKnowledgeJob))
+      })
     },
     async createKnowledgeBase(request: LocalKnowledgeBaseCreateRequest) {
       const name = request.name.trim()
@@ -561,11 +613,11 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
       return client.deleteLocalKnowledgeBase(id)
     },
     async listDocuments(id, options) {
-      const items = await client.listLocalKnowledgeDocuments(id, options?.query)
+      const items = await read(`documents:${id}:${options?.query ?? ''}`, () => client.listLocalKnowledgeDocuments(id, options?.query))
       return { items: items.map(mapLocalKnowledgeDocument), total: items.length } satisfies Page<LocalKnowledgeDocument>
     },
     async listFolders(id) {
-      return (await client.listLocalKnowledgeFolders(id)).map(mapFolder)
+      return (await read(`folders:${id}`, () => client.listLocalKnowledgeFolders(id))).map(mapFolder)
     },
     async createFolder(knowledgeBaseId, name, parentPath) {
       const normalizedName = name.trim()
@@ -602,11 +654,11 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
       }))
     },
     async listJobs(knowledgeBaseId) {
-      const jobs = await client.listLocalKnowledgeJobs(knowledgeBaseId)
+      const jobs = await jobsFor(knowledgeBaseId)
       return jobs.map(mapLocalKnowledgeJob)
     },
     async getOperation(operationId): Promise<OperationSnapshot> {
-      const jobs = (await client.listLocalKnowledgeJobs())
+      const jobs = (await jobsFor())
         .map(mapLocalKnowledgeJob)
         .filter((job) => job.operationId === operationId || job.id === operationId)
       const event = operationEvent(operationId, jobs)
@@ -645,7 +697,7 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
       return { operationId: job.parentOperationId ?? job.id, acceptedAt: requiredIsoTimestamp(job.updatedAt) }
     },
     async getStorageStatus() {
-      return mapLocalKnowledgeStorageStatus(await client.getLocalKnowledgeStorageStatus())
+      return mapLocalKnowledgeStorageStatus(await storageStatus())
     },
     async pickStorageDirectory() {
       return mapPickedStorageDirectory(await client.pickLocalKnowledgeStorageDirectory())

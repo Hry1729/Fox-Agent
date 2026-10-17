@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, LogIn, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RefreshCw, RotateCcw, Search, Server, Sparkles, X } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { ExpandingSearch } from '@/components/arc/expanding-search/expanding-search'
+import { useLibraryBrowser, navigateLibraryFolder, setLibraryView, publishLibraryFolders } from '@/features/local-knowledge/library-browser-state'
 import { Button } from '@/components/ui/button'
 import { FoxEmptyState } from '@/components/fox-ui/empty-state'
 import { SkeletonContent } from '@/components/ui/skeleton'
@@ -21,6 +24,9 @@ import { knowledgeDocumentIcon } from './knowledge-resource-explorer'
 import { openKnowledgeCachedPreviewSource } from './knowledge-preview-source'
 import { KnowledgeGraphCanvas, type KnowledgeGraphCanvasHandle } from './knowledge-graph-canvas'
 import { YUXI_LOGIN_RETURN_KEY, YUXI_SERVICE_RETURN_KEY } from './knowledge-navigation'
+import { LibraryFileManager, LibraryViewSwitch } from '@/features/local-knowledge/library-file-manager'
+import { remoteLibraryFiles, type LibraryFile } from '@/features/local-knowledge/library-file-model'
+import { ArrowLeft } from 'lucide-react'
 
 const MAX_LOCAL_OPEN_BYTES = 500 * 1024 * 1024
 
@@ -91,12 +97,16 @@ export function KnowledgeListPage({ sidebarCollapsed, onSidebar, navigate }: { s
 export function KnowledgeDetailPage({ sidebarCollapsed, onSidebar, navigate, onAskKnowledge, knowledgeId, initialDocumentId, sourceLocator }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; onAskKnowledge: (knowledgeBase: KnowledgeBaseRecord) => void; knowledgeId?: string | null; initialDocumentId?: string | null; sourceLocator?: KnowledgeSourceLocator | null }) {
   const resource = useKnowledgeDetail(knowledgeId ?? null)
   const documents = resource.detail?.documents ?? []
-  const selectedDocument = documents.find((item) => item.id === initialDocumentId) ?? documents.find((item) => !item.isFolder)
-  useEffect(() => {
-    if (!initialDocumentId && selectedDocument) {
-      navigate('knowledge-detail', knowledgeId ?? undefined, { documentId: selectedDocument.id })
-    }
-  }, [initialDocumentId, knowledgeId, navigate, selectedDocument?.id])
+  const selectedDocument = documents.find((item) => !item.isFolder && item.id === initialDocumentId)
+  const managedFiles = useMemo(() => remoteLibraryFiles(documents), [documents])
+  const browserKey = `remote:${knowledgeId ?? ''}`
+  const browser = useLibraryBrowser(browserKey)
+  const [fileQuery, setFileQuery] = useState('')
+  useEffect(() => { if (resource.detail) publishLibraryFolders(browserKey, managedFiles) }, [browserKey, managedFiles, resource.detail])
+  const [downloadingBatch, setDownloadingBatch] = useState(false)
+  const [batchDownloadMessage, setBatchDownloadMessage] = useState<string | null>(null)
+  const batchCancelled = useRef(false)
+  const previewReturnFocus = useRef<HTMLElement | null>(null)
   useEffect(() => {
     if (selectedDocument) void resource.openDocument(selectedDocument.id)
   }, [resource.openDocument, selectedDocument?.id])
@@ -170,43 +180,41 @@ export function KnowledgeDetailPage({ sidebarCollapsed, onSidebar, navigate, onA
       })
     }
   }
-  return (
-    <WorkspacePage
-      className="fox-knowledge-detail-page"
-      title={selectedDocument?.name ?? database?.name ?? '资料库'}
-      sidebarCollapsed={sidebarCollapsed}
-      onSidebar={onSidebar}
-      onBack={() => navigate('knowledge')}
-      actions={<>
-        <div className="fox-knowledge-document-heading">
-          <strong title={selectedDocument?.name ?? database?.name ?? '资料库'}>{selectedDocument?.name ?? database?.name ?? '资料库'}</strong>
-          {selectedDocument && <DropdownMenu><DropdownMenuTrigger asChild><Button className="fox-document-title-more" variant="ghost" size="icon" aria-label="更多文件操作"><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="start" className="fox-document-actions-menu"><DropdownMenuItem onSelect={reloadSelectedDocumentPreview}><RotateCcw />刷新预览</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void copySelectedDocumentInfo()}><Copy />复制文件信息</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
-        </div>
-        <Button size="sm" disabled={!database} onClick={() => database && onAskKnowledge(database)}><MessageSquare size={14} />就此资料提问</Button>
-        {selectedDocument && <div className="fox-document-action-buttons">
-          <Button variant="outline" size="sm" disabled={openingLocally} onClick={() => void openSelectedDocumentLocally()}>{openingLocally ? <LoaderCircle className="animate-spin" /> : <MonitorUp />}本机打开</Button>
-          {resource.downloadingId === selectedDocument.id ? <><span className="fox-document-download-progress">{formatDownloadProgress(resource.downloadProgress)}</span><Button variant="outline" size="sm" onClick={() => void resource.cancelDownload()}><X />取消</Button></> : <Button variant="outline" size="sm" onClick={() => void downloadSelectedDocument()}><Download />下载原件</Button>}
-        </div>}
-      </>}
-    >
+  const downloadFiles = async (files: LibraryFile[]) => {
+    if (downloadingBatch) return
+    setDownloadingBatch(true)
+    setBatchDownloadMessage(null)
+    batchCancelled.current = false
+    const unfinished: string[] = []
+    try {
+      for (const file of files) {
+        if (batchCancelled.current) { unfinished.push(file.name); continue }
+        try {
+          const result = await resource.downloadDocument(file.id, file.name)
+          if (result) toast.success(`已下载 ${result.filename}`, { description: result.path, sourceType: 'knowledge_download', sourceId: file.id, localFile: { path: result.path, canOpenDirectly: result.canOpenDirectly } })
+          else unfinished.push(file.name)
+        } catch { unfinished.push(file.name) }
+      }
+      if (unfinished.length) setBatchDownloadMessage(`${batchCancelled.current ? '已停止下载。' : ''}以下文件未完成下载：${unfinished.join('、')}。可以重新选择这些文件后重试。`)
+    } finally { setDownloadingBatch(false) }
+  }
+  return <WorkspacePage className="fox-knowledge-detail-page" title={database?.name ?? '远程资料库'} sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('local-knowledge')}>
+    <header className="fox-library-remote-heading fox-library-detail-topbar">
+      <Button variant="ghost" size="icon" aria-label="返回资料库" onClick={() => navigate('local-knowledge')}><ArrowLeft /></Button>
+      <nav className="fox-library-breadcrumb" aria-label="资料库路径"><button type="button" aria-current={!browser.path ? 'page' : undefined} onClick={() => navigateLibraryFolder(browserKey, '')}>{database?.name ?? '远程资料库'}</button>{browser.path.split('/').filter(Boolean).map((name, index, parts) => <Fragment key={parts.slice(0, index + 1).join('/')}><span aria-hidden="true">/</span><button type="button" aria-current={index === parts.length - 1 ? 'page' : undefined} onClick={() => navigateLibraryFolder(browserKey, parts.slice(0, index + 1).join('/'))}>{name}</button></Fragment>)}</nav>
+      <div className="fox-kb-search-control-slot"><ExpandingSearch className="fox-kb-expanding-search" anchor="end" label="搜索远程资料库文件" placeholder="搜索文件名" items={[]} value={fileQuery} onValueChange={setFileQuery} onSearch={setFileQuery} showResults={false} expandedWidth={280} /></div>
+      <LibraryViewSwitch view={browser.view} onChange={(view) => setLibraryView(browserKey, view)} />
+      <Button variant="ghost" size="icon" aria-label="刷新远程资料库" disabled={resource.loading} onClick={() => void resource.refresh()}><RefreshCw /></Button><Button variant="outline" size="sm" disabled={!database} onClick={() => navigate('knowledge-graph', knowledgeId ?? undefined)}><Network />关系图</Button><Button size="sm" disabled={!database} onClick={() => database && onAskKnowledge(database)}><MessageSquare />就此资料提问</Button>
+    </header>
+    <div className="fox-library-remote-content">{resource.loading && !database && <SkeletonContent label="正在读取远程资料库" lines={6} />}{resource.error && <FoxEmptyState variant="error" title="远程资料加载失败" description={resource.error} action={<Button variant="outline" onClick={() => void resource.refresh()}>重试</Button>} />}{batchDownloadMessage && <p role="alert" className="fox-library-download-message">{batchDownloadMessage}</p>}{downloadingBatch && <div className="fox-library-download-message" role="status">正在下载所选文件 <Button variant="outline" size="sm" onClick={() => { batchCancelled.current = true; void resource.cancelDownload() }}>停止下载</Button></div>}{database && <LibraryFileManager contentOnly view={browser.view} path={browser.path} onPathChange={(path) => navigateLibraryFolder(browserKey, path)} searchQuery={fileQuery} onSearchQueryChange={setFileQuery} files={managedFiles} busy={downloadingBatch} onOpen={(file) => navigate('knowledge-detail', knowledgeId ?? undefined, { documentId: file.id })} onDownload={(files) => void downloadFiles(files)} />}</div>
+    <Dialog open={Boolean(initialDocumentId)} onOpenChange={(open) => { if (!open) navigate('knowledge-detail', knowledgeId ?? undefined) }}><DialogContent className="fox-library-preview-dialog fox-library-remote-preview" aria-describedby={undefined} onOpenAutoFocus={() => { previewReturnFocus.current = globalThis.document.activeElement as HTMLElement }} onCloseAutoFocus={(event) => { event.preventDefault(); if (previewReturnFocus.current?.isConnected) previewReturnFocus.current.focus() }}>
+      <DialogHeader><DialogTitle>{selectedDocument?.name ?? '文件预览'}</DialogTitle></DialogHeader>
+      {selectedDocument && <div className="fox-library-preview-tools"><Button size="sm" disabled={!database} onClick={() => database && onAskKnowledge(database)}><MessageSquare />就此资料提问</Button><Button variant="ghost" size="icon" title="刷新预览" aria-label="刷新预览" onClick={reloadSelectedDocumentPreview}><RotateCcw /></Button><Button variant="ghost" size="icon" aria-label="复制文件信息" onClick={() => void copySelectedDocumentInfo()}><Copy /></Button><Button variant="outline" size="sm" disabled={openingLocally} onClick={() => void openSelectedDocumentLocally()}><MonitorUp />本机打开</Button>{resource.downloadingId === selectedDocument.id ? <><span>{formatDownloadProgress(resource.downloadProgress)}</span><Button variant="outline" size="sm" onClick={() => void resource.cancelDownload()}><X />取消</Button></> : <Button variant="outline" size="sm" onClick={() => void downloadSelectedDocument()}><Download />下载原件</Button>}</div>}
       {resource.error && <FoxEmptyState variant="error" title="资料加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void (selectedDocument ? resource.openDocument(selectedDocument.id) : resource.refresh())}>重试</Button>} />}
-      <div className="fox-library-layout is-document-only">
-        <main className="fox-document-view">
-          {resource.loading && !database ? <SkeletonContent label="正在读取资料库…" lines={5} avatar /> : selectedDocument ? <article className="fox-document-detail"><div>
-            <div className="fox-document-info-card">
-              <div className="fox-document-meta-strip is-inline">
-                <span><small>类型</small><b title={documentKind(selectedDocument)}>{documentKind(selectedDocument)}</b></span>
-                <span><small>大小</small><b>{formatSize(selectedDocument.size)}</b></span>
-                <span><small>更新时间</small><b>{formatDate(selectedDocument.updatedAt)}</b></span>
-                <span><small>处理状态</small><b title={selectedDocument.status ?? '未知'}>{selectedDocument.status ?? '未知'}</b></span>
-              </div>
-            </div>
-            <KnowledgeFileViewer key={`${selectedDocument.id}:${previewRevision}`} knowledgeBaseId={knowledgeId ?? ''} document={selectedDocument} parsedContent={body} parsedContentLoading={resource.documentId === selectedDocument.id && resource.documentLoading} sourceLocator={sourceLocator} />
-          </div></article> : !resource.error && <FoxEmptyState icon={<FolderOpen />} title={database ? '资料库暂无文件' : '没有选择资料库'} description={database?.description || '请从远程资料库列表进入有权限访问的资料库。'} action={<Button variant="outline" size="sm" onClick={() => navigate('knowledge')}>返回资料库</Button>} />}
-        </main>
-      </div>
-    </WorkspacePage>
-  )
+      {selectedDocument && <div className="fox-library-preview-metadata"><span>{documentKind(selectedDocument)}</span><span>{formatSize(selectedDocument.size)}</span><span>{formatDate(selectedDocument.updatedAt)}</span><span>{selectedDocument.status ?? '未知'}</span></div>}
+      <div className="fox-library-modal-body">{selectedDocument ? <KnowledgeFileViewer key={`${selectedDocument.id}:${previewRevision}`} knowledgeBaseId={knowledgeId ?? ''} document={selectedDocument} parsedContent={body} parsedContentLoading={resource.documentId === selectedDocument.id && resource.documentLoading} sourceLocator={sourceLocator} /> : resource.loading ? <SkeletonContent label="正在读取文件" lines={5} /> : <FoxEmptyState title="未找到文件" description="文件可能已被移除，请刷新资料库。" />}</div>
+    </DialogContent></Dialog>
+  </WorkspacePage>
 }
 
 export function KnowledgeGraphPage({ sidebarCollapsed, onSidebar, navigate, knowledgeId }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; knowledgeId?: string | null }) {

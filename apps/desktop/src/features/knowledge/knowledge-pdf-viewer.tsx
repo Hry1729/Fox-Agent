@@ -68,6 +68,8 @@ export default function KnowledgePdfViewer({
     let source: Awaited<ReturnType<typeof openKnowledgeCachedPreviewSource>> | null = null
     const abortController = new AbortController()
     const load = async () => {
+      setLoading(true)
+      canvasHostRef.current?.replaceChildren()
       try {
         const pdfjs = await import('pdfjs-dist')
         pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl

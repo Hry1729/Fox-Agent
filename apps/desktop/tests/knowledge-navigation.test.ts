@@ -4,6 +4,7 @@ import { resolveYuxiLoginReturn, resolveYuxiServiceReturn } from '../src/feature
 describe('knowledge navigation', () => {
   test('returns login flows to their origin', () => {
     expect(resolveYuxiLoginReturn('knowledge')).toBe('knowledge')
+    expect(resolveYuxiLoginReturn('local-knowledge')).toBe('local-knowledge')
     expect(resolveYuxiLoginReturn('agents')).toBe('agents')
     expect(resolveYuxiLoginReturn('settings-yuxi')).toBe('settings-yuxi')
     expect(resolveYuxiLoginReturn(null)).toBe('settings-yuxi')
@@ -11,6 +12,7 @@ describe('knowledge navigation', () => {
 
   test('returns service configuration to its origin', () => {
     expect(resolveYuxiServiceReturn('knowledge')).toBe('knowledge')
+    expect(resolveYuxiServiceReturn('local-knowledge')).toBe('local-knowledge')
     expect(resolveYuxiServiceReturn('login')).toBe('login')
     expect(resolveYuxiServiceReturn('settings-yuxi')).toBe('settings-yuxi')
     expect(resolveYuxiServiceReturn(null)).toBe('settings-yuxi')

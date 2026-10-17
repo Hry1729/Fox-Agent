@@ -7,7 +7,6 @@ import { localKnowledgeBackRoute, localKnowledgeViewForWorkspace, workspaceViewF
 
 const AgentListPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentListPage })))
 const AgentDetailPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentDetailPage })))
-const KnowledgeListPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeListPage })))
 const KnowledgeDetailPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeDetailPage })))
 const KnowledgeGraphPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeGraphPage })))
 const SettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.SettingsPage })))
@@ -94,6 +93,7 @@ export function WorkspaceShell({
         knowledgeBaseId={activeEntityId ?? undefined}
         documentId={activeDocumentId ?? undefined}
         onNavigate={navigateLocalKnowledge}
+        onNavigateWorkspace={navigate}
         onBack={backFromLocalKnowledge}
         onAskDocument={onAskLocalKnowledgeDocument}
         createRequest={localKnowledgeCreateRequest}
@@ -105,7 +105,7 @@ export function WorkspaceShell({
   } else if (activeView === 'agent-detail') {
     rawWorkspacePage = <AgentDetailPage {...pageProps} agentId={activeEntityId} section={activeDocumentId ?? 'home'} />
   } else if (activeView === 'knowledge') {
-    rawWorkspacePage = <KnowledgeListPage {...pageProps} />
+    rawWorkspacePage = <LocalKnowledgeWorkspace view="list" gateway={localKnowledgeGateway} onNavigate={navigateLocalKnowledge} onNavigateWorkspace={navigate} createRequest={localKnowledgeCreateRequest} onCreateRequestHandled={onLocalKnowledgeCreateRequestHandled} />
   } else if (activeView === 'knowledge-detail') {
     rawWorkspacePage = <KnowledgeDetailPage {...pageProps} onAskKnowledge={onAskKnowledge} knowledgeId={activeEntityId} initialDocumentId={activeDocumentId} sourceLocator={activeSourceLocator} />
   } else if (activeView === 'knowledge-graph') {

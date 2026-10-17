@@ -37,6 +37,27 @@ export default function KnowledgeSpreadsheetViewer({
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const scroll = (event: WheelEvent) => {
+      if (event.ctrlKey) return
+      const vertical = container.querySelector<HTMLElement>('.x-spreadsheet-scrollbar.vertical')
+      const horizontal = container.querySelector<HTMLElement>('.x-spreadsheet-scrollbar.horizontal')
+      if (!vertical || !horizontal) return
+      const scale = event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? container.clientHeight : 1
+      const dx = (event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX) * scale
+      const dy = (event.shiftKey ? 0 : event.deltaY) * scale
+      event.preventDefault()
+      event.stopPropagation()
+      horizontal.scrollLeft += dx
+      vertical.scrollTop += dy
+    }
+    // The library listens to legacy mousewheel and moves only one row per event.
+    container.addEventListener('wheel', scroll, { capture: true, passive: false })
+    return () => container.removeEventListener('wheel', scroll, true)
+  }, [])
+
+  useEffect(() => {
     let disposed = false
     let preview: ExcelPreviewInstance | null = null
     const abortController = new AbortController()

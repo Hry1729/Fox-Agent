@@ -30,9 +30,17 @@ import { binaryValue, createKnowledgeCachedPreviewSource, type KnowledgeCachedPr
 import { createOperationState, reduceOperationEvent, type OperationState } from './operation-reducer'
 import { defaultLocalKnowledgeGateway } from './tauri-gateway'
 import { LocalFileTypeIcon } from './local-file-type-icon'
-import type { KnowledgeChunkPreview, KnowledgeJob, KnowledgeJobStatus, KnowledgeOperationStage, KnowledgeRetrievalCase, KnowledgeRetrievalResult, KnowledgeSearchMode, LocalEmbeddingModel, LocalFileCategory, LocalKnowledgeBase, LocalKnowledgeBaseCreateRequest, LocalKnowledgeBaseDetail, LocalKnowledgeCatalogFile, LocalKnowledgeDocument, LocalKnowledgeFileSource, LocalKnowledgeFolder, LocalKnowledgeGateway, LocalKnowledgeImportFile, LocalKnowledgeStorageMigration, LocalKnowledgeStorageStatus, OperationAccepted, StorageMigrationStage, StorageMigrationStatus, VectorBackendHealth } from './model'
+import type { KnowledgeChunkPreview, KnowledgeJob, KnowledgeJobStatus, KnowledgeOperationStage, KnowledgeRetrievalCase, KnowledgeRetrievalResult, KnowledgeSearchMode, LocalEmbeddingModel, LocalKnowledgeBase, LocalKnowledgeBaseCreateRequest, LocalKnowledgeBaseDetail, LocalKnowledgeCatalogFile, LocalKnowledgeDocument, LocalKnowledgeFolder, LocalKnowledgeGateway, LocalKnowledgeImportFile, LocalKnowledgeStorageMigration, LocalKnowledgeStorageStatus, OperationAccepted, StorageMigrationStage, StorageMigrationStatus, VectorBackendHealth } from './model'
 import { formatBytes, formatJobStage } from './model'
 import { searchSnippetParts } from './search-snippet'
+import { useLibraryBrowser, navigateLibraryFolder, setLibraryView, publishLibraryFolders } from './library-browser-state'
+import { LibraryFileManager, LibraryViewSwitch } from './library-file-manager'
+import { duplicateLibraryImportPaths, type LibraryFile } from './library-file-model'
+import FolderComponent from '@/components/ui/folder-component'
+import { LibraryRemoteSection } from './library-remote-section'
+import { LocalFolderSection, LocalFolderDetailPage, LOCAL_FOLDERS_CHANGED } from './local-folder-pages'
+import { Laptop } from 'lucide-react'
+import type { NavigateWorkspace } from '@/features/workspace/types'
 import '@/styles/local-knowledge.css'
 
 const KnowledgePdfViewer = lazy(() => import('@/features/knowledge/knowledge-pdf-viewer'))
@@ -40,7 +48,6 @@ const KnowledgeDocxViewer = lazy(() => import('@/features/knowledge/knowledge-do
 const KnowledgePptxViewer = lazy(() => import('@/features/knowledge/knowledge-pptx-viewer'))
 const KnowledgeSpreadsheetViewer = lazy(() => import('@/features/knowledge/knowledge-spreadsheet-viewer'))
 const MAX_LOCAL_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024
-const LOCAL_FILE_PAGE_SIZE = 12
 const KNOWLEDGE_JOB_PAGE_SIZE = 8
 const RECENT_DOCUMENT_LIMIT = 8
 const HOME_EXAMPLE_QUESTIONS = ['怎么把本机文件加入资料库？', '智能搜索和按字词查找有什么区别？']
@@ -226,6 +233,7 @@ function rememberRecentDocument(base: LocalKnowledgeBase, document: LocalKnowled
 export interface LocalKnowledgePageProps {
   gateway?: LocalKnowledgeGateway
   className?: string
+  onNavigateWorkspace?: NavigateWorkspace
 }
 
 export interface LocalKnowledgeNavigationProps extends LocalKnowledgePageProps {
@@ -467,8 +475,10 @@ function CreateKnowledgeBaseDialog({
   error,
   onOpenChange,
   onSubmit,
+  onFolderCreated,
 }: {
   gateway: LocalKnowledgeGateway
+  onFolderCreated: (id: string) => void
   open: boolean
   submitting: boolean
   error: string | null
@@ -488,6 +498,9 @@ function CreateKnowledgeBaseDialog({
   const [validationError, setValidationError] = useState<string | null>(null)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelsLoadError, setModelsLoadError] = useState(false)
+  const [step, setStep] = useState<1 | 2>(1)
+  const [folderBusy, setFolderBusy] = useState(false)
+  const busy = submitting || folderBusy
 
   useEffect(() => {
     if (!open) {
@@ -502,6 +515,7 @@ function CreateKnowledgeBaseDialog({
       setValidationError(null)
       setModels([])
       setModelsLoadError(false)
+      setStep(1)
     }
   }, [open])
 
@@ -529,8 +543,32 @@ function CreateKnowledgeBaseDialog({
     return () => { disposed = true }
   }, [gateway, open])
 
+  const addFolder = async () => {
+    setFolderBusy(true)
+    setValidationError(null)
+    try {
+      const path = await gateway.pickFileSourceFolder()
+      if (!path) return
+      const source = await gateway.addFileSource(path)
+      window.dispatchEvent(new Event(LOCAL_FOLDERS_CHANGED))
+      onOpenChange(false)
+      onFolderCreated(source.id)
+    } catch (cause) {
+      setValidationError(cause instanceof Error ? cause.message : String(cause))
+    } finally { setFolderBusy(false) }
+  }
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (files.length > LOCAL_IMPORT_MAX_FILES) { setValidationError(`单次最多导入 ${LOCAL_IMPORT_MAX_FILES} 个文件。请减少所选文件。`); return }
+    const duplicates = duplicateLibraryImportPaths(files)
+    if (duplicates.length) { setValidationError(`有同名文件会导入到同一位置：${duplicates.join('、')}。请返回挑选文件，移除重复项后再导入。`); return }
+    if (step === 1) {
+      if (!files.length || fileSelections.some((item) => item.status === 'failed')) { setValidationError('请先挑选可以导入的文件。'); return }
+      setValidationError(null)
+      setStep(2)
+      return
+    }
     if (fileSelections.some((item) => item.status === 'failed')) {
       setValidationError('请移除或重新选择无法导入的文件。')
       return
@@ -566,7 +604,7 @@ function CreateKnowledgeBaseDialog({
   }
 
   const requestOpenChange = (nextOpen: boolean) => {
-    if (submitting) return
+    if (busy) return
     onOpenChange(nextOpen)
   }
 
@@ -585,29 +623,28 @@ function CreateKnowledgeBaseDialog({
 
   return (
     <Dialog open={open} onOpenChange={requestOpenChange}>
-      <DialogContent className="fox-local-kb-create-dialog fox-kb-create-dialog" showCloseButton={!submitting}>
+      <DialogContent className="fox-local-kb-create-dialog fox-kb-create-dialog" showCloseButton={!busy}>
         <DialogHeader>
-          <DialogTitle>新建资料库</DialogTitle>
-          <DialogDescription>起个名字，把资料放进来就能用了。</DialogDescription>
+          <div className="fox-library-create-steps" aria-label={`第 ${step} 步，共 3 步`}>{['挑选文件', '命名', '导入'].map((label, index) => <span key={label} className={step === index + 1 ? 'is-current' : step > index + 1 ? 'is-done' : ''} aria-current={step === index + 1 ? 'step' : undefined}><i>{index + 1}</i>{label}</span>)}</div>
+          <DialogTitle>{step === 1 ? '新建资料库' : '给资料库起个名字'}</DialogTitle>
+          <DialogDescription>{step === 1 ? '从电脑的不同位置挑选文件，可以多次添加。' : `${files.length} 个文件 · ${formatBytes(files.reduce((total, file) => total + file.sizeBytes, 0))}，导入后可以随时再添加。`}</DialogDescription>
         </DialogHeader>
         <form className="fox-local-kb-create-form" onSubmit={submit}>
-          <div>
+          {step === 2 && <div>
             <label htmlFor="local-knowledge-base-name">名称 <span>*</span></label>
-            <Input id="local-knowledge-base-name" autoFocus placeholder="例如：产品资料" value={name} onChange={(event) => { setName(event.target.value); setValidationError(null) }} disabled={submitting} />
-          </div>
-          {open && <KnowledgeImportDropzone gateway={gateway} items={fileSelections} onItemsChange={setFileSelections} disabled={submitting} onError={setValidationError} />}
-          {moreOpen && <div className="fox-kb-create-more">
-            <div>
-              <label htmlFor="local-knowledge-base-description">简介 <small>（可选）</small></label>
-              <Textarea id="local-knowledge-base-description" className="fox-local-kb-create-textarea" placeholder="简单说明这个资料库的用途" value={description} onChange={(event) => setDescription(event.target.value)} disabled={submitting} />
-            </div>
-            <label>搜索方式<Select value={searchMode === 'keyword' ? 'keyword' : 'smart'} onValueChange={(value) => chooseSearchMode(value === 'smart')} disabled={submitting}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="keyword">按字词查找</SelectItem><SelectItem value="smart">智能搜索</SelectItem></SelectContent></Select></label>
+            <Input id="local-knowledge-base-name" autoFocus placeholder="例如：产品资料" value={name} onChange={(event) => { setName(event.target.value); setValidationError(null) }} disabled={busy} />
+          </div>}
+          {step === 1 && open && <><KnowledgeImportDropzone gateway={gateway} items={fileSelections} onItemsChange={setFileSelections} disabled={busy} onError={setValidationError} allowFolder={false} /><Button type="button" variant="outline" disabled={busy} onClick={() => void addFolder()}>{folderBusy ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}将本机文件夹作为资料库</Button></>}
+          {step === 1 && files.length > 0 && <div className="fox-library-picked-origins"><b>{files.length} 个文件 · 来自 {new Set(files.map((file) => file.sourcePath?.replace(/[\\/][^\\/]+$/, '') ?? '当前选择')).size} 个位置</b>{files.slice(0, 20).map((file, index) => <small key={`${file.sourcePath}:${index}`} title={file.sourcePath}>{file.sourcePath || file.relativePath || file.name}</small>)}</div>}
+          {step === 2 && <div><label htmlFor="local-knowledge-base-description">简介 <small>（选填）</small></label><Textarea id="local-knowledge-base-description" placeholder="一句话说明这里放的是什么" value={description} onChange={(event) => setDescription(event.target.value)} disabled={busy} /></div>}
+          {step === 2 && moreOpen && <div className="fox-kb-create-more">
+            <label>搜索方式<Select value={searchMode === 'keyword' ? 'keyword' : 'smart'} onValueChange={(value) => chooseSearchMode(value === 'smart')} disabled={busy}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="keyword">按字词查找</SelectItem><SelectItem value="smart">智能搜索</SelectItem></SelectContent></Select></label>
             <p className="fox-kb-create-mode-hint">{searchMode === 'keyword' ? '速度快，适合找确切的名称和编号。' : '能理解意思相近的说法，需要先装好一个搜索模型。'}</p>
             <div className="fox-local-kb-index-settings">
               <h3 className="fox-local-kb-index-settings-title">高级</h3>
-              <label>搜索模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword') }} disabled={submitting || modelsLoading}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
-              <label>段落长度<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => setChunkSize(event.target.value)} disabled={submitting} /></label>
-              <label>衔接长度<Input type="number" min={0} step={1} value={chunkOverlap} onChange={(event) => setChunkOverlap(event.target.value)} disabled={submitting} /></label>
+              <label>搜索模型<Select value={embeddingModelId} onValueChange={(value) => { if (value !== 'none' && !models.some((model) => model.id === value && isSelectableEmbeddingModel(model))) return; setEmbeddingModelId(value); if (value === 'none') setSearchMode('keyword') }} disabled={busy || modelsLoading}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">暂不使用</SelectItem>{models.map((model) => <SelectItem key={model.id} value={model.id} disabled={!isSelectableEmbeddingModel(model)}>{model.name} · {model.dimension} 维{isSelectableEmbeddingModel(model) ? '' : ` · ${modelStatusLabel(model)}`}</SelectItem>)}</SelectContent></Select></label>
+              <label>段落长度<Input type="number" min={128} max={4096} step={1} value={chunkSize} onChange={(event) => setChunkSize(event.target.value)} disabled={busy} /></label>
+              <label>衔接长度<Input type="number" min={0} step={1} value={chunkOverlap} onChange={(event) => setChunkOverlap(event.target.value)} disabled={busy} /></label>
               {modelsLoading && <p><LoaderCircle className="animate-spin" />正在读取搜索模型...</p>}
               {!modelsLoading && modelsLoadError && <p><AlertCircle />搜索模型列表暂不可用。可以先创建，稍后再编辑搜索方式。</p>}
               {!modelsLoading && !modelsLoadError && models.length === 0 && <p><Cpu />还没有可用的搜索模型。可先创建，再到“向量模型”页面安装。</p>}
@@ -616,12 +653,13 @@ function CreateKnowledgeBaseDialog({
           </div>}
           {(validationError || error) && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{validationError ?? error}</p>}
           <DialogFooter className="fox-local-kb-create-actions">
-            <button type="button" className="fox-kb-create-more-toggle" aria-expanded={moreOpen} onClick={() => setMoreOpen((value) => !value)}><ChevronRight className={moreOpen ? 'is-open' : undefined} />更多选项</button>
-            <Button type="button" variant="outline" onClick={() => requestOpenChange(false)} disabled={submitting}>取消</Button>
-            <Button type="submit" disabled={submitting || fileSelections.some((item) => item.status === 'failed')}>{submitting && <LoaderCircle className="animate-spin" />}创建</Button>
+            {step === 2 && <><Button type="button" variant="ghost" disabled={busy} onClick={() => setStep(1)}><ArrowLeft />上一步</Button><button type="button" className="fox-kb-create-more-toggle" aria-expanded={moreOpen} onClick={() => setMoreOpen((value) => !value)}><ChevronRight className={moreOpen ? 'is-open' : undefined} />更多选项</button></>}
+            <Button type="button" variant="outline" onClick={() => requestOpenChange(false)} disabled={busy}>取消</Button>
+            <Button type="submit" disabled={busy || !files.length || fileSelections.some((item) => item.status === 'failed')}>{submitting && <LoaderCircle className="animate-spin" />}{step === 1 ? '下一步' : '导入'}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
+
     </Dialog>
   )
 }
@@ -729,7 +767,7 @@ function KnowledgeBaseSettingsForm({
 
   return (
     <section className="fox-kb-settings-panel">
-        <p className="fox-kb-settings-description">{readOnly ? '这是 Fox 自带的资料库，名称和搜索方式不能改，这里可以看它的存放位置和整理情况。' : '改名称和简介就够了。换搜索方式或段落长度会重新整理一次资料。'}</p>
+        {readOnly && <p className="fox-kb-settings-description">这是 Fox 自带的资料库，名称和搜索方式不能改，这里可以看它的存放位置和整理情况。</p>}
         <form className={cn('fox-kb-settings-form', readOnly && 'is-readonly')} onSubmit={submit}>
           <div>
             <label htmlFor="local-knowledge-base-edit-name">名称 {!readOnly && <span>*</span>}</label>
@@ -777,7 +815,7 @@ function KnowledgeBaseSettingsForm({
   )
 }
 
-export function LocalKnowledgeSettingsPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, onNavigate, onBack }: LocalKnowledgeNavigationProps) {
+function LocalKnowledgeSettingsDialog({ gateway = defaultLocalKnowledgeGateway, knowledgeBaseId, onNavigate, onBack, onSaved }: LocalKnowledgeNavigationProps & { onSaved?: (base: LocalKnowledgeBase) => void }) {
   const [base, setBase] = useState<LocalKnowledgeBaseDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -792,7 +830,7 @@ export function LocalKnowledgeSettingsPage({ gateway = defaultLocalKnowledgeGate
     finally { setLoading(false) }
   }, [gateway, knowledgeBaseId])
   useEffect(() => { void load() }, [load])
-  const returnToList = () => { if (onNavigate) onNavigate('list'); else onBack?.() }
+  const returnToList = () => { onBack?.() }
   const requestReturnToList = () => {
     if (saving || (dirty && !window.confirm('放弃尚未保存的资料库修改？'))) return
     returnToList()
@@ -806,6 +844,8 @@ export function LocalKnowledgeSettingsPage({ gateway = defaultLocalKnowledgeGate
       setBase((current) => current ? { ...current, ...updated } : current)
       setDirty(false)
       toast.success('已保存资料库设置。')
+      onSaved?.(updated)
+      onBack?.()
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setSaving(false) }
   }
@@ -813,17 +853,17 @@ export function LocalKnowledgeSettingsPage({ gateway = defaultLocalKnowledgeGate
     if (!base || base.id === FOX_GUIDE_KNOWLEDGE_BASE_ID) return
     setSaving(true)
     setError(null)
-    try { await gateway.deleteKnowledgeBase(base.id); returnToList() }
+    try { await gateway.deleteKnowledgeBase(base.id); returnToList(); onNavigate?.('list') }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setSaving(false) }
   }
-  return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content fox-kb-settings-content">
-    <LocalKnowledgeHeader title="资料库设置" description={base?.name ?? ''} onBack={requestReturnToList} />
+  const content = <>
     {loading && <LocalKnowledgeLoading />}
     {!loading && !base && (error ? <LocalKnowledgeError message={error} onRetry={() => void load()} /> : <LocalKnowledgeEmpty title="没有选择资料库" description="请从本机资料库进入设置。" />)}
     {!loading && base && <KnowledgeBaseSettingsForm gateway={gateway} base={base} open submitting={saving} error={deleteOpen ? null : error} onDirtyChange={setDirty} onOpenChange={(open) => { if (!open) returnToList() }} onSubmit={save} onDelete={base.id === FOX_GUIDE_KNOWLEDGE_BASE_ID ? undefined : () => { setError(null); setDeleteOpen(true) }} />}
     {base && base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID && <DeleteKnowledgeBaseDialog base={base} open={deleteOpen} submitting={saving} error={deleteOpen ? error : null} onOpenChange={(open) => { if (!saving) { setDeleteOpen(open); setError(null) } }} onConfirm={remove} />}
-  </div></div>
+  </>
+  return <Dialog open onOpenChange={(open) => { if (!open) requestReturnToList() }}><DialogContent className="fox-kb-settings-dialog" showCloseButton={!saving}><DialogHeader><DialogTitle>资料库设置</DialogTitle><DialogDescription>{base?.name || '管理资料库名称和搜索方式。'}</DialogDescription></DialogHeader>{content}</DialogContent></Dialog>
 }
 
 function DeleteKnowledgeBaseDialog({
@@ -875,11 +915,19 @@ function KnowledgeBaseCard({ base, job, onOpen, onEdit, onDelete }: { base: Loca
   const progress = job ? Math.max(0, Math.min(100, job.progress)) : 0
   const managed = base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID
   return (
-    <article className="fox-kb-cover-card" onClick={onOpen} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen() } }} role="button" tabIndex={0} aria-label={`打开资料库${base.name}`}>
+    <article className="fox-kb-cover-card">
+      <button type="button" className="fox-kb-card-open" onClick={onOpen} aria-label={`打开资料库${base.name}`}>
       <span className="fox-kb-cover" aria-hidden="true">
-        <BookOpen className="fox-kb-cover-watermark" />
-        <span className="fox-kb-cover-glyph"><BookOpen /></span>
+        <FolderComponent color="theme" size="xs" />
       </span>
+      <span className="fox-kb-cover-body">
+        <strong>{base.name}<span className="fox-library-source-label"><Laptop />本机</span></strong>
+        <p title={base.description || undefined}>{base.description?.trim() || '无简介'}</p>
+        {job
+          ? <span className="fox-kb-cover-meta is-busy"><i className="fox-status-dot is-brand" aria-hidden="true" />正在整理<Progress asChild className="fox-local-kb-progress" value={progress} aria-label={`${base.name} 整理进度`}><span /></Progress><b>{progress}%</b></span>
+          : <span className="fox-kb-cover-meta">{base.documentCount} 份资料{base.status === 'error' && <span className="fox-kb-cover-state is-error">{baseStatusLabel(base.status)}</span>}</span>}
+      </span>
+      </button>
       <span className="fox-kb-cover-menu" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-kb-cover-more" aria-label={`${base.name} 的更多操作`}><MoreHorizontal /></Button></DropdownMenuTrigger>
@@ -889,25 +937,9 @@ function KnowledgeBaseCard({ base, job, onOpen, onEdit, onDelete }: { base: Loca
           </DropdownMenuContent>
         </DropdownMenu>
       </span>
-      <span className="fox-kb-cover-body">
-        <strong>{base.name}</strong>
-        <p title={base.description || undefined}>{base.description || '\u00a0'}</p>
-        {job
-          ? <span className="fox-kb-cover-meta is-busy"><i className="fox-status-dot is-brand" aria-hidden="true" />正在整理<Progress asChild className="fox-local-kb-progress" value={progress} aria-label={`${base.name} 整理进度`}><span /></Progress><b>{progress}%</b></span>
-          : <span className="fox-kb-cover-meta">{base.documentCount} 份资料<span aria-hidden="true">·</span><span className={cn('fox-kb-cover-state', `is-${base.status}`)}><i className={cn('fox-status-dot', base.status === 'ready' ? 'is-ok' : base.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{baseStatusLabel(base.status)}</span></span>}
-      </span>
     </article>
   )
 }
-
-const localFileCategories: Array<{ value: LocalFileCategory; label: string }> = [
-  { value: 'all', label: '全部' },
-  { value: 'text', label: '文本' },
-  { value: 'document', label: '文档' },
-  { value: 'pdf', label: 'PDF' },
-  { value: 'presentation', label: '演示文稿' },
-  { value: 'spreadsheet', label: '表格' },
-]
 
 function localCatalogMetadata(file: LocalKnowledgeCatalogFile): KnowledgeDocumentSourceMetadata {
   return {
@@ -971,7 +1003,11 @@ function LocalFilePreviewDialog({ file, gateway, open, onOpenChange }: { file: L
     return () => { disposed = true }
   }, [file, gateway, kind, open])
 
-  const handleFailure = useCallback((message: string) => setError(message), [])
+  const handleFailure = useCallback((message: string) => setError(
+    /os error [23]\b|系统找不到指定的(文件|路径)|No such file or directory/i.test(message)
+      ? '原文件已移动或删除。请返回文件夹，点击刷新更新文件列表。'
+      : message,
+  ), [])
   const openWithSystem = async () => {
     if (!file) return
     try {
@@ -1200,331 +1236,6 @@ function LocalKnowledgeDocumentReader({ knowledgeBaseId, knowledgeBaseName, docu
   )
 }
 
-function LocalFileRow({ file, selected, onToggle, onPreview, onImport, onReveal }: { file: LocalKnowledgeCatalogFile; selected: boolean; onToggle: () => void; onPreview: () => void; onImport: () => void; onReveal: () => void }) {
-  return (
-    <div className={cn('fox-local-files-row', selected && 'is-selected')} role="button" tabIndex={0} aria-pressed={selected} onClick={onToggle} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onToggle() } }}>
-      <input type="checkbox" className="fox-kb-files-check" checked={selected} onChange={onToggle} onClick={(event) => event.stopPropagation()} aria-label={`选择 ${file.name}`} />
-      <LocalFileTypeIcon extension={file.extension} />
-      <span className="fox-local-files-file-main"><strong title={file.name}>{file.name}</strong><small title={`${file.sourceName} · ${file.relativePath}`}>{file.sourceName} · {file.relativePath}</small></span>
-      <span className="fox-local-files-file-type">{file.extension.toUpperCase()}</span>
-      <span className="fox-local-files-file-size">{formatBytes(file.sizeBytes)}</span>
-      <time className="fox-local-files-file-date">{formatRelativeDate(file.modifiedAt)}</time>
-      <span className="fox-local-files-file-acts" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-        <Button variant="ghost" size="icon-sm" aria-label={`预览 ${file.name}`} title="预览" onClick={onPreview}><Eye /></Button>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild><Button className="fox-local-kb-row-more" variant="ghost" size="icon-sm" aria-label={`${file.name} 更多操作`}><MoreHorizontal /></Button></DropdownMenuTrigger>
-          <DropdownMenuContent align="end" sideOffset={5}>
-            <DropdownMenuItem onSelect={onImport}><Database />加入资料库</DropdownMenuItem>
-            <DropdownMenuItem onSelect={onReveal}><FolderOpen />在文件夹中显示</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </span>
-    </div>
-  )
-}
-
-export function LocalKnowledgeFilesPage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate, onOperationAccepted }: LocalKnowledgeNavigationProps & { onOperationAccepted?: (accepted: OperationAccepted) => void }) {
-  const [sources, setSources] = useState<LocalKnowledgeFileSource[]>([])
-  const [bases, setBases] = useState<LocalKnowledgeBase[]>([])
-  const [files, setFiles] = useState<LocalKnowledgeCatalogFile[]>([])
-  const [query, setQuery] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [category, setCategory] = useState<LocalFileCategory>('all')
-  const [sourceId, setSourceId] = useState('all')
-  const [sortBy, setSortBy] = useState<'modified' | 'name' | 'size'>('modified')
-  const [editingSource, setEditingSource] = useState<LocalKnowledgeFileSource | null>(null)
-  const [sourceNameDraft, setSourceNameDraft] = useState('')
-  const [removingSource, setRemovingSource] = useState<LocalKnowledgeFileSource | null>(null)
-  const [sourceDialogError, setSourceDialogError] = useState<string | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [targetBaseId, setTargetBaseId] = useState('')
-  const [importOpen, setImportOpen] = useState(false)
-  const [previewFile, setPreviewFile] = useState<LocalKnowledgeCatalogFile | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [hasMore, setHasMore] = useState(false)
-  const [picking, setPicking] = useState(false)
-  const [importing, setImporting] = useState(false)
-  const [busySourceId, setBusySourceId] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const loadMoreRef = useRef<HTMLDivElement | null>(null)
-  const requestRevisionRef = useRef(0)
-
-  const load = useCallback(async () => {
-    const revision = ++requestRevisionRef.current
-    setLoading(true)
-    try {
-      const [nextSources, nextBases, nextFiles] = await Promise.all([
-        gateway.listFileSources(),
-        gateway.listKnowledgeBases(),
-        gateway.listLocalFiles({ sourceId: sourceId === 'all' ? undefined : sourceId, query: query.trim() || undefined, category, limit: LOCAL_FILE_PAGE_SIZE, offset: 0 }),
-      ])
-      if (revision !== requestRevisionRef.current) return
-      setSources(nextSources)
-      setSourceId((current) => current === 'all' || nextSources.some((source) => source.id === current) ? current : 'all')
-      setBases(nextBases)
-      setFiles(nextFiles)
-      setHasMore(nextFiles.length === LOCAL_FILE_PAGE_SIZE)
-      setSelected((current) => new Set([...current].filter((id) => nextFiles.some((file) => file.id === id))))
-      setTargetBaseId((current) => current && nextBases.some((base) => base.id === current) ? current : nextBases[0]?.id ?? '')
-      setError(null)
-    } catch (cause) {
-      if (revision === requestRevisionRef.current) setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      if (revision === requestRevisionRef.current) setLoading(false)
-    }
-  }, [category, gateway, query, sourceId])
-
-  useEffect(() => { void load() }, [load])
-
-  const loadMore = useCallback(async () => {
-    if (loading || loadingMore || !hasMore) return
-    const revision = requestRevisionRef.current
-    const offset = files.length
-    setLoadingMore(true)
-    try {
-      const nextFiles = await gateway.listLocalFiles({ sourceId: sourceId === 'all' ? undefined : sourceId, query: query.trim() || undefined, category, limit: LOCAL_FILE_PAGE_SIZE, offset })
-      if (revision !== requestRevisionRef.current) return
-      setFiles((current) => [...current, ...nextFiles.filter((file) => !current.some((item) => item.id === file.id))])
-      setHasMore(nextFiles.length === LOCAL_FILE_PAGE_SIZE)
-    } catch (cause) {
-      if (revision === requestRevisionRef.current) setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      if (revision === requestRevisionRef.current) setLoadingMore(false)
-    }
-  }, [category, files.length, gateway, hasMore, loading, loadingMore, query, sourceId])
-
-  useEffect(() => {
-    const sentinel = loadMoreRef.current
-    if (!sentinel || !hasMore) return
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) void loadMore()
-    }, { rootMargin: '120px 0px' })
-    observer.observe(sentinel)
-    return () => observer.disconnect()
-  }, [hasMore, loadMore])
-
-  const addSource = async () => {
-    setPicking(true)
-    setError(null)
-    try {
-      const path = await gateway.pickFileSourceFolder()
-      if (!path) return
-      await gateway.addFileSource(path)
-      await load()
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setPicking(false)
-    }
-  }
-
-  const rescanSource = async (sourceId: string) => {
-    setBusySourceId(sourceId)
-    setError(null)
-    try {
-      await gateway.rescanFileSource(sourceId)
-      await load()
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setBusySourceId(null)
-    }
-  }
-
-  const openSourceEditor = (source: LocalKnowledgeFileSource) => {
-    setEditingSource(source)
-    setSourceNameDraft(source.displayName)
-    setSourceDialogError(null)
-  }
-
-  const updateSource = async () => {
-    if (!editingSource || !sourceNameDraft.trim()) return
-    setBusySourceId(editingSource.id)
-    setSourceDialogError(null)
-    try {
-      await gateway.updateFileSource(editingSource.id, sourceNameDraft)
-      setEditingSource(null)
-      await load()
-    } catch (cause) {
-      setSourceDialogError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setBusySourceId(null)
-    }
-  }
-
-  const removeSource = async () => {
-    if (!removingSource) return
-    const source = removingSource
-    setBusySourceId(source.id)
-    setSourceDialogError(null)
-    try {
-      await gateway.removeFileSource(source.id)
-      setRemovingSource(null)
-      if (sourceId === source.id) setSourceId('all')
-      else await load()
-    } catch (cause) {
-      setSourceDialogError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setBusySourceId(null)
-    }
-  }
-
-  const selectedFiles = files.filter((file) => selected.has(file.id))
-  const visibleFiles = useMemo(() => [...files].sort((left, right) => {
-    if (sortBy === 'name') return left.name.localeCompare(right.name, 'zh-CN')
-    if (sortBy === 'size') return right.sizeBytes - left.sizeBytes
-    return (right.modifiedAt ?? '').localeCompare(left.modifiedAt ?? '')
-  }), [files, sortBy])
-  const visibleFilesSelected = visibleFiles.length > 0 && visibleFiles.every((file) => selected.has(file.id))
-  const allSourceFileCount = sources.reduce((total, source) => total + source.fileCount, 0)
-  const scopeLabel = sourceId === 'all' ? '全部文件夹' : sources.find((source) => source.id === sourceId)?.displayName ?? '全部文件夹'
-  const toggleFile = (fileId: string) => {
-    setSelected((current) => {
-      const next = new Set(current)
-      if (next.has(fileId)) next.delete(fileId)
-      else next.add(fileId)
-      return next
-    })
-  }
-  const toggleVisibleFiles = () => {
-    setSelected((current) => {
-      const next = new Set(current)
-      if (visibleFilesSelected) visibleFiles.forEach((file) => next.delete(file.id))
-      else visibleFiles.forEach((file) => next.add(file.id))
-      return next
-    })
-  }
-
-  const startImport = async () => {
-    if (!targetBaseId || selectedFiles.length === 0) return
-    setImporting(true)
-    setError(null)
-    try {
-      const accepted = await gateway.startImport({
-        knowledgeBaseId: targetBaseId,
-        files: selectedFiles.map((file) => ({
-          name: file.name,
-          sourcePath: file.absolutePath,
-          relativePath: file.relativePath,
-          mimeType: file.mimeType,
-          sizeBytes: file.sizeBytes,
-        })),
-      })
-      recordImportedDocuments(targetBaseId, selectedFiles.map((file) => ({ name: file.name, relativePath: file.relativePath })))
-      onOperationAccepted?.(accepted)
-      setImportOpen(false)
-      setSelected(new Set())
-      onNavigate?.('jobs', targetBaseId)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setImporting(false)
-    }
-  }
-
-  const openImport = () => {
-    if (bases.length === 0) {
-      setError('请先创建一个本机资料库，再把文件加入资料库。')
-      return
-    }
-    setImportOpen(true)
-  }
-
-  const openImportFor = (file: LocalKnowledgeCatalogFile) => {
-    if (bases.length === 0) {
-      setError('请先创建一个本机资料库，再把文件加入资料库。')
-      return
-    }
-    setSelected(new Set([file.id]))
-    setImportOpen(true)
-  }
-
-  const revealLocalFile = async (file: LocalKnowledgeCatalogFile) => {
-    try {
-      await gateway.revealLocalFile(file.id)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }
-
-  return (
-    <div className={cn('fox-local-kb-page', className)}>
-      <div className="fox-local-kb-content fox-local-kb-files-content">
-        <header className="fox-local-files-header">
-          <div className="fox-local-files-heading"><h1>本机文件</h1></div>
-          <div className="fox-local-files-header-actions">
-            {searchOpen || query !== ''
-              ? <label className="fox-local-kb-search"><Search /><Input autoFocus aria-label="搜索本机文件" placeholder="文件名或路径" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setQuery(''); setSearchOpen(false) } }} />{query && <button type="button" aria-label="清空搜索" onClick={() => { setQuery(''); setSearchOpen(false) }}><XCircle /></button>}</label>
-              : <Button variant="ghost" size="icon-sm" aria-label="搜索本机文件" onClick={() => setSearchOpen(true)}><Search /></Button>}
-            <Button onClick={() => void addSource()} disabled={picking}>{picking ? <LoaderCircle className="animate-spin" /> : <FolderPlus />}添加文件夹</Button>
-          </div>
-        </header>
-        <div className="fox-local-files-toolbar">
-          {sources.length > 0 && <DropdownMenu>
-            <DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="fox-kb-files-scope"><Folder />{scopeLabel}<small>{sources.length}</small><ChevronsUpDown /></Button></DropdownMenuTrigger>
-            <DropdownMenuContent align="start" sideOffset={5} className="fox-kb-files-scope-menu">
-              <DropdownMenuItem onSelect={() => setSourceId('all')}><FolderInput />全部文件夹<DropdownMenuShortcut>{allSourceFileCount}</DropdownMenuShortcut></DropdownMenuItem>
-              <DropdownMenuSeparator />
-              {sources.map((source) => <DropdownMenuItem key={source.id} onSelect={() => setSourceId(source.id)}>{source.displayName}<DropdownMenuShortcut>{source.fileCount}</DropdownMenuShortcut></DropdownMenuItem>)}
-              <DropdownMenuSeparator />
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger><Settings2 />管理文件夹</DropdownMenuSubTrigger>
-                <DropdownMenuSubContent className="fox-kb-files-manage-menu">
-                  {sources.map((source) => <div key={source.id} className="fox-kb-files-manage-group">
-                    <DropdownMenuLabel>{source.displayName}</DropdownMenuLabel>
-                    <DropdownMenuItem disabled={busySourceId != null} onSelect={() => openSourceEditor(source)}><Pencil />重命名</DropdownMenuItem>
-                    <DropdownMenuItem disabled={busySourceId != null} onSelect={() => void rescanSource(source.id)}><RefreshCw />重新检查</DropdownMenuItem>
-                    <DropdownMenuItem variant="destructive" disabled={busySourceId != null} onSelect={() => { setRemovingSource(source); setSourceDialogError(null) }}><Trash2 />移除</DropdownMenuItem>
-                  </div>)}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            </DropdownMenuContent>
-          </DropdownMenu>}
-          <Tabs value={category} onValueChange={(value) => setCategory(value as LocalFileCategory)} className="fox-local-files-categories">
-            <TabsList aria-label="本机文件类型">{localFileCategories.map((item) => <TabsTrigger key={item.value} value={item.value}>{item.label}</TabsTrigger>)}</TabsList>
-          </Tabs>
-          <Select value={sortBy} onValueChange={(value) => setSortBy(value as 'modified' | 'name' | 'size')}>
-            <SelectTrigger className="fox-local-files-sort-select" aria-label="本机文件排序"><ArrowUpDown />{sortBy === 'modified' ? '最近修改' : sortBy === 'name' ? '文件名' : '文件大小'}</SelectTrigger>
-            <SelectContent><SelectItem value="modified">最近修改</SelectItem><SelectItem value="name">文件名</SelectItem><SelectItem value="size">文件大小</SelectItem></SelectContent>
-          </Select>
-        </div>
-        {loading && <LocalKnowledgeLoading />}
-        {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
-        {!loading && !error && sources.length === 0 && <LocalKnowledgeEmpty title="尚未添加" description="添加一个文件夹后，Fox 只会登记其中受支持的文档，不会移动原文件。" action={<Button onClick={() => void addSource()}><FolderPlus />添加文件夹</Button>} />}
-        {!loading && !error && sources.length > 0 && files.length === 0 && <LocalKnowledgeEmpty title="没有匹配的文件" description="没有可显示的文件" />}
-        {!loading && !error && files.length > 0 && <div className="fox-local-files-list"><div className="fox-local-files-list-head"><input type="checkbox" checked={visibleFilesSelected} onChange={toggleVisibleFiles} aria-label="选择当前已加载的全部文件" /><span /><span className="fox-local-files-col-name">名称</span><span className="fox-local-files-col-type">类型</span><span className="fox-local-files-col-size">大小</span><span className="fox-local-files-col-date">修改时间</span><span className="fox-local-files-col-acts">操作</span></div>{visibleFiles.map((file) => <LocalFileRow key={file.id} file={file} selected={selected.has(file.id)} onToggle={() => toggleFile(file.id)} onPreview={() => setPreviewFile(file)} onImport={() => openImportFor(file)} onReveal={() => void revealLocalFile(file)} />)}<div ref={loadMoreRef} className="fox-local-files-load-more" aria-live="polite">{loadingMore && <><LoaderCircle className="animate-spin" />正在加载更多文件...</>}</div></div>}
-        {/* 原型 .selbar：浮在列表底部中央，所以放在列表之后，靠 sticky bottom 贴底 */}
-        {selected.size > 0 && <div className="fox-local-files-selection" role="status"><span>已选 {selected.size} 个 <small>· {formatBytes(selectedFiles.reduce((total, file) => total + file.sizeBytes, 0))}</small></span><Button onClick={openImport}><Database />加入资料库</Button><Button variant="ghost" size="icon-sm" aria-label="取消选择" onClick={() => setSelected(new Set())}><XCircle /></Button></div>}
-      </div>
-      <Dialog open={importOpen} onOpenChange={(open) => { if (!importing) setImportOpen(open) }}>
-        <DialogContent className="fox-local-files-import-dialog" showCloseButton={!importing}>
-          <DialogHeader><DialogTitle>加入资料库</DialogTitle><DialogDescription>选中的 {selectedFiles.length} 个文件会复制到目标资料库，原文件保持不变。</DialogDescription></DialogHeader>
-          <div className="fox-local-files-base-options">{bases.map((base) => <label key={base.id} className={targetBaseId === base.id ? 'is-selected' : undefined}><input type="radio" name="target-local-knowledge-base" value={base.id} checked={targetBaseId === base.id} onChange={() => setTargetBaseId(base.id)} /><Database /><span><strong>{base.name}</strong><small>{base.documentCount} 份资料 · {base.description || '暂无描述'}</small></span></label>)}</div>
-          <DialogFooter><Button variant="outline" onClick={() => setImportOpen(false)} disabled={importing}>取消</Button><Button onClick={() => void startImport()} disabled={importing || !targetBaseId}>{importing ? <LoaderCircle className="animate-spin" /> : <Upload />}{importing ? '正在加入' : '确认加入'}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={editingSource != null} onOpenChange={(open) => { if (!open && !busySourceId) setEditingSource(null) }}>
-        <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!busySourceId}>
-          <DialogHeader><DialogTitle>重命名</DialogTitle><DialogDescription>修改文件夹在 Fox 中显示的名称，不会更改磁盘上的文件夹名称。</DialogDescription></DialogHeader>
-          <label className="fox-local-kb-field"><span>显示名称</span><Input value={sourceNameDraft} maxLength={80} autoFocus onChange={(event) => setSourceNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void updateSource() } }} /></label>
-          {sourceDialogError && <LocalKnowledgeError message={sourceDialogError} />}
-          <DialogFooter><Button variant="outline" onClick={() => setEditingSource(null)} disabled={busySourceId != null}>取消</Button><Button onClick={() => void updateSource()} disabled={busySourceId != null || !sourceNameDraft.trim()}>{busySourceId ? <LoaderCircle className="animate-spin" /> : <Pencil />}保存</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={removingSource != null} onOpenChange={(open) => { if (!open && !busySourceId) setRemovingSource(null) }}>
-        <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!busySourceId}>
-          <DialogHeader><DialogTitle>移除文件夹</DialogTitle><DialogDescription>Fox 只会停止管理这个文件夹并移除目录记录，不会删除原文件。</DialogDescription></DialogHeader>
-          {removingSource && <div className="fox-local-kb-delete-summary"><FolderOpen /><div><strong>{removingSource.displayName}</strong><span>{displayLocalPath(removingSource.rootPath)}</span></div></div>}
-          {sourceDialogError && <LocalKnowledgeError message={sourceDialogError} />}
-          <DialogFooter><Button variant="outline" onClick={() => setRemovingSource(null)} disabled={busySourceId != null}>取消</Button><Button variant="destructive" onClick={() => void removeSource()} disabled={busySourceId != null}>{busySourceId ? <LoaderCircle className="animate-spin" /> : <Trash2 />}确认删除</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <LocalFilePreviewDialog file={previewFile} gateway={gateway} open={previewFile != null} onOpenChange={(open) => { if (!open) setPreviewFile(null) }} />
-    </div>
-  )
-}
-
 export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate }: LocalKnowledgePageProps & { onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string, documentId?: string) => void }) {
   const [bases, setBases] = useState<LocalKnowledgeBase[]>([])
   const [jobs, setJobs] = useState<KnowledgeJob[]>([])
@@ -1533,27 +1244,31 @@ export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway,
   const [error, setError] = useState<string | null>(null)
   const [example, setExample] = useState('')
   const [showAllRecent, setShowAllRecent] = useState(false)
+  const loadRevision = useRef(0)
 
   const load = async () => {
+    const revision = ++loadRevision.current
     setLoading(true)
+    const basesRequest = gateway.listKnowledgeBases()
+    void gateway.listJobs().then((items) => { if (revision === loadRevision.current) setJobs(items) }).catch(() => {})
     try {
-      const [nextBases, nextJobs] = await Promise.all([gateway.listKnowledgeBases(), gateway.listJobs().catch(() => [] as KnowledgeJob[])])
+      const nextBases = await basesRequest
+      if (revision !== loadRevision.current) return
       setBases(nextBases)
-      setJobs(nextJobs)
       setError(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      if (revision === loadRevision.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setLoading(false)
+      if (revision === loadRevision.current) setLoading(false)
     }
   }
 
-  useEffect(() => { void load() }, [gateway])
+  useEffect(() => { void load(); return () => { loadRevision.current += 1 } }, [gateway])
 
   const availableBaseIds = useMemo(() => new Set(bases.map((base) => base.id)), [bases])
   const visibleRecent = useMemo(() => recent
-    .filter((item) => availableBaseIds.has(item.knowledgeBaseId))
-    .slice(0, showAllRecent ? recent.length : RECENT_DOCUMENT_LIMIT), [availableBaseIds, recent, showAllRecent])
+    .filter((item) => loading || error || availableBaseIds.has(item.knowledgeBaseId))
+    .slice(0, showAllRecent ? recent.length : RECENT_DOCUMENT_LIMIT), [availableBaseIds, recent, showAllRecent, loading, error])
   const guide = bases.find((base) => base.id === FOX_GUIDE_KNOWLEDGE_BASE_ID)
   // There is no cross-knowledge-base search, so the box queries one library:
   // the one you last read, otherwise the first one you created.
@@ -1601,23 +1316,27 @@ export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway,
             <h3>最近查看</h3>
             {recent.length > RECENT_DOCUMENT_LIMIT && <button type="button" onClick={() => setShowAllRecent((current) => !current)}>{showAllRecent ? '收起' : '全部'}<ChevronRight /></button>}
           </div>
-          {!loading && visibleRecent.length > 0 && <div className="fox-local-kb-recent-list">
+          {visibleRecent.length > 0 && <div className="fox-local-kb-recent-list">
             {visibleRecent.map((item) => <button type="button" key={`${item.knowledgeBaseId}:${item.documentId}`} onClick={() => onNavigate?.('documents', item.knowledgeBaseId, item.documentId)}><LocalFileTypeIcon extension={item.extension} /><span className="fox-local-kb-recent-name">{item.name}</span><span className="fox-local-kb-recent-kb">{item.knowledgeBaseName}</span><time className="fox-local-kb-recent-time">{formatRelativeDate(item.openedAt)}</time></button>)}
           </div>}
           {!loading && visibleRecent.length === 0 && <div className="fox-local-kb-home-recent-empty"><p>阅读过的资料会出现在这里。</p></div>}
-          {loading && <div className="fox-local-kb-recent-loading"><LoaderCircle className="animate-spin" />正在读取最近打开的资料...</div>}
+          {loading && recent.length === 0 && <div className="fox-local-kb-recent-loading"><LoaderCircle className="animate-spin" />正在读取最近打开的资料...</div>}
         </section>
 
-        {guide && <p className="fox-kb-home-foot"><BookOpen aria-hidden="true" />第一次使用？<button type="button" onClick={() => onNavigate?.('documents', guide.id)}>看看使用指南</button></p>}
+        {guide && <p className="fox-kb-home-foot"><BookOpen aria-hidden="true" />第一次使用？<button type="button" onClick={() => onNavigate?.('detail', guide.id)}>看看使用指南</button></p>}
       </div>
     </div>
   )
 }
 
-export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate, createRequest, onCreateRequestHandled }: LocalKnowledgePageProps & { onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string) => void; createRequest?: number; onCreateRequestHandled?: () => void }) {
+export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate, onNavigateWorkspace, createRequest, onCreateRequestHandled, initialEditId }: LocalKnowledgePageProps & { initialEditId?: string; onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string) => void; createRequest?: number; onCreateRequestHandled?: () => void }) {
+  const [editId, setEditId] = useState<string | null>(initialEditId ?? null)
+  useEffect(() => { if (initialEditId) setEditId(initialEditId) }, [initialEditId])
+  const closeEditor = () => { setEditId(null); if (initialEditId) onNavigate?.('list') }
   const [items, setItems] = useState<LocalKnowledgeBase[]>([])
   const [jobs, setJobs] = useState<KnowledgeJob[]>([])
   const [query, setQuery] = useState('')
+  const [searchExpanded, setSearchExpanded] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -1627,20 +1346,38 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
   const [deleteBase, setDeleteBase] = useState<LocalKnowledgeBase | null>(null)
   const [saving, setSaving] = useState(false)
   const [mutationError, setMutationError] = useState<string | null>(null)
+  const [fileMatches, setFileMatches] = useState<LocalKnowledgeCatalogFile[]>([])
+  const [fileSearchError, setFileSearchError] = useState(false)
+  const [matchedPreviewFile, setMatchedPreviewFile] = useState<LocalKnowledgeCatalogFile | null>(null)
+  const loadRevision = useRef(0)
 
   const load = async () => {
+    const revision = ++loadRevision.current
     setLoading(true)
+    const basesRequest = gateway.listKnowledgeBases()
+    void gateway.listJobs().then((items) => { if (revision === loadRevision.current) setJobs(items) }).catch(() => {})
     try {
-      const [nextItems, nextJobs] = await Promise.all([gateway.listKnowledgeBases(), gateway.listJobs()])
+      const nextItems = await basesRequest
+      if (revision !== loadRevision.current) return
       setItems(nextItems)
-      setJobs(nextJobs)
       setError(null)
     }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
-    finally { setLoading(false) }
+    catch (cause) { if (revision === loadRevision.current) setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { if (revision === loadRevision.current) setLoading(false) }
   }
 
-  useEffect(() => { void load() }, [gateway])
+  useEffect(() => { void load(); return () => { loadRevision.current += 1 } }, [gateway])
+  useEffect(() => {
+    let disposed = false
+    if (!query.trim()) { setFileMatches([]); setFileSearchError(false); return }
+    const timer = window.setTimeout(() => { void gateway.listLocalFiles({ query: query.trim(), limit: 8 }).then((files) => { if (!disposed) { setFileMatches(files); setFileSearchError(false) } }).catch(() => { if (!disposed) setFileSearchError(true) }) }, 200)
+    return () => { disposed = true; window.clearTimeout(timer) }
+  }, [gateway, query])
+  useEffect(() => {
+    if (![...activeJobByBase.values()].length) return
+    const timer = window.setInterval(() => { void gateway.listJobs().then(setJobs).catch(() => {}); void gateway.listKnowledgeBases().then(setItems).catch(() => {}) }, 1800)
+    return () => window.clearInterval(timer)
+  }, [gateway, jobs.some((job) => ['queued', 'running', 'paused'].includes(job.status))])
 
   // A card shows one progress bar instead of a status dot, so only the newest
   // unfinished job per knowledge base is surfaced.
@@ -1682,7 +1419,7 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
       }
       setCreateOpen(false)
       await load()
-      onNavigate?.('detail', created.id)
+      toast.success(`已创建「${created.name}」`, { description: '资料在后台导入，可以继续浏览。' })
     } catch (cause) {
       setCreateError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -1711,30 +1448,25 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
   }, [items, query])
 
   return (
-    <div className={cn('fox-local-kb-page', className)}>
+    <div className={cn('fox-local-kb-page fox-library-unified', className)}>
       <div className="fox-local-kb-content fox-local-kb-list-content">
-        <LocalKnowledgeHeader title="本机资料库" description="把资料放进资料库，Fox 就能在对话里引用它们。" actions={<>
-          {/* 原型只在知识库多到扫不过来时才给搜索框 */}
-          {items.length > 8 && <label className="fox-local-kb-search"><Search /><Input aria-label="搜索本机资料库" placeholder="搜索资料库" value={query} onChange={(event) => setQuery(event.target.value)} /></label>}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
-            <DropdownMenuContent align="end" sideOffset={5}>
-              <DropdownMenuItem onSelect={() => setStorageOpen(true)}><HardDrive />存储位置</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+        <LocalKnowledgeHeader title="资料库" description="集中浏览本机资料和 Yuxi 远程资料。" actions={<>
+          <div className={cn("fox-library-list-search", searchExpanded && "is-expanded")}><ExpandingSearch onExpandedChange={setSearchExpanded} anchor="end" label="搜索所有资料库和本机文件" placeholder="搜索资料库和本机文件" items={[]} value={query} onValueChange={setQuery} showResults={false} keyboardShortcut clearLabel="清空搜索" expandedWidth={320} className="fox-kb-expanding-search" /></div>
+          <Button variant="ghost" size="icon" aria-label="存储位置" title="存储位置" onClick={() => setStorageOpen(true)}><HardDrive /></Button>
           <Button onClick={openCreateDialog}><Plus />新建资料库</Button>
         </>} />
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
-        {!loading && !error && items.length === 0 && <LocalKnowledgeEmpty title="新建资料库，集中查阅文件" description="起个名字，把资料放进来，之后就能在对话里引用。" action={<Button onClick={openCreateDialog}><Plus />新建资料库</Button>} />}
-        {!loading && !error && items.length > 0 && filteredItems.length === 0 && <LocalKnowledgeEmpty title="没有匹配的资料库" description="换一个名称、描述或存储位置关键词试试。" />}
-        {!loading && !error && filteredItems.length > 0 && <div className="fox-kb-cover-grid">
-          {filteredItems.map((base) => <KnowledgeBaseCard key={base.id} base={base} job={activeJobByBase.get(base.id) ?? null} onOpen={() => onNavigate?.('detail', base.id)} onEdit={() => onNavigate?.('settings', base.id)} onDelete={() => { setMutationError(null); setDeleteBase(base) }} />)}
-          <button type="button" className="fox-kb-new-card" onClick={openCreateDialog}><Plus />新建资料库</button>
-        </div>}
+        <LocalFolderSection gateway={gateway} query={query} libraryCount={items.length} matchedLibraryCount={filteredItems.length} librariesLoading={loading || Boolean(error)} onOpen={(id) => onNavigate?.('files', id)}>
+          {!loading && !error && filteredItems.map((base) => <KnowledgeBaseCard key={base.id} base={base} job={activeJobByBase.get(base.id) ?? null} onOpen={() => onNavigate?.('detail', base.id)} onEdit={() => setEditId(base.id)} onDelete={() => { setMutationError(null); setDeleteBase(base) }} />)}
+        </LocalFolderSection>
+        {query.trim() && <div className="fox-library-search-results"><h3>匹配的本机文件</h3>{fileSearchError ? <p>本机文件搜索暂不可用。</p> : fileMatches.length ? fileMatches.map((file) => <button type="button" key={file.id} onClick={() => setMatchedPreviewFile(file)}><LocalFileTypeIcon extension={file.extension} /><span><b>{file.name}</b><small>{file.absolutePath}</small></span><ChevronRight /></button>) : <p>没有匹配的已收录文件。</p>}</div>}
+        <LibraryRemoteSection query={query} navigate={onNavigateWorkspace} />
       </div>
+      <LocalFilePreviewDialog gateway={gateway} file={matchedPreviewFile} open={Boolean(matchedPreviewFile)} onOpenChange={(open) => { if (!open) setMatchedPreviewFile(null) }} />
+      {editId && <LocalKnowledgeSettingsDialog key={editId} gateway={gateway} knowledgeBaseId={editId} onBack={closeEditor} onSaved={(updated) => setItems((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item))} onNavigate={() => { closeEditor(); void load() }} />}
       <StorageLocationDialog gateway={gateway} open={storageOpen} onOpenChange={setStorageOpen} />
-      <CreateKnowledgeBaseDialog gateway={gateway} open={createOpen} submitting={creating} error={createError} onOpenChange={(open) => { setCreateOpen(open); if (open) setCreateError(null) }} onSubmit={createKnowledgeBase} />
+      <CreateKnowledgeBaseDialog onFolderCreated={(id) => onNavigate?.('files', id)} gateway={gateway} open={createOpen} submitting={creating} error={createError} onOpenChange={(open) => { setCreateOpen(open); if (open) setCreateError(null) }} onSubmit={createKnowledgeBase} />
       {deleteBase && <DeleteKnowledgeBaseDialog base={deleteBase} open submitting={saving} error={mutationError} onOpenChange={(open) => { if (!open) setDeleteBase(null) }} onConfirm={removeBase} />}
     </div>
   )
@@ -1846,7 +1578,7 @@ function KnowledgeBaseSearch({ gateway, base, hint, initialQuery = '', omni = fa
   }
 
   return <div className={cn('fox-kb-search-block', omni && 'is-omni')}>
-    {controlContainer !== undefined ? controlContainer && createPortal(<ExpandingSearch label={searchLabel} placeholder="搜索资料内容，或直接问一个问题" items={[]} value={query} onValueChange={(next) => { if (!next.trim()) clearSearch(); else setQuery(next) }} onSearch={(next) => run(next)} showResults={false} keyboardShortcut clearLabel="清空搜索" expandedWidth={360} className="fox-kb-expanding-search" />, controlContainer) : <form className="fox-kb-search" role="search" onSubmit={submit}>
+    {controlContainer !== undefined ? controlContainer && createPortal(<ExpandingSearch anchor="end" label={searchLabel} placeholder="搜索资料内容，或直接问一个问题" items={[]} value={query} onValueChange={(next) => { if (!next.trim()) clearSearch(); else setQuery(next) }} onSearch={(next) => run(next)} showResults={false} keyboardShortcut clearLabel="清空搜索" expandedWidth={360} className="fox-kb-expanding-search" />, controlContainer) : <form className="fox-kb-search" role="search" onSubmit={submit}>
       <Search aria-hidden="true" />
       <input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} aria-label={`在${base.name}里搜索`} placeholder={omni ? '搜索资料内容，或直接问一个问题' : `在「${base.name}」里搜索，或直接提问`} />
       {query && <button type="button" aria-label="清空搜索" onClick={clearSearch}><XCircle /></button>}
@@ -1909,20 +1641,27 @@ function KnowledgeActivityClock({ jobs, knowledgeBaseName, onOpenJobs }: {
   )
 }
 
-export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, onBack, onNavigate, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, onBack, onNavigate, onOperationAccepted, onAskDocument, initialImportOpen = false }: LocalKnowledgeNavigationProps & { initialImportOpen?: boolean; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const browser = useLibraryBrowser(knowledgeBaseId)
+  const [addRequest, setAddRequest] = useState<'file' | 'folder' | null>(null)
+  const clearAddRequest = useCallback(() => setAddRequest(null), [])
+  useEffect(() => { if (initialImportOpen) setAddRequest('file') }, [initialImportOpen, knowledgeBaseId])
+  useEffect(() => { setActiveSubview(null); setActiveDocumentId(undefined) }, [browser.navigation])
   const [base, setBase] = useState<LocalKnowledgeBaseDetail | null>(null)
   const [configuredEmbeddingModel, setConfiguredEmbeddingModel] = useState<LocalEmbeddingModel | null>(null)
+  const [modelsLoading, setModelsLoading] = useState(true)
   const [defaultEmbeddingModel, setDefaultEmbeddingModel] = useState<LocalEmbeddingModel | null>(null)
   const [jobs, setJobs] = useState<KnowledgeJob[]>([])
   const [activeSubview, setActiveSubview] = useState<KnowledgeDetailSubview | null>(null)
-  const [activeDocumentId, setActiveDocumentId] = useState<string | undefined>()
+  const [activeDocumentId, setActiveDocumentId] = useState<string | undefined>(documentId)
   const [searchShowing, setSearchShowing] = useState(false)
   const [searchContainer, setSearchContainer] = useState<HTMLDivElement | null>(null)
-  const [importRequest, setImportRequest] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
   const hadActiveJobsRef = useRef(false)
+  const loadRevision = useRef(0)
 
   const leaveSubviewOrDetail = () => {
     if (activeSubview) {
@@ -1953,31 +1692,38 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
 
   const load = async () => {
     if (!knowledgeBaseId) return
+    const revision = ++loadRevision.current
     setLoading(true)
+    setModelsLoading(true)
+    setConfiguredEmbeddingModel(null)
+    setDefaultEmbeddingModel(null)
+    const baseRequest = gateway.getKnowledgeBase(knowledgeBaseId)
+    const models = gateway.listEmbeddingModels().catch(() => [] as LocalEmbeddingModel[])
     try {
-      const [nextBase, nextJobs, embeddingModels] = await Promise.all([
-        gateway.getKnowledgeBase(knowledgeBaseId),
-        gateway.listJobs(knowledgeBaseId).catch(() => null),
-        gateway.listEmbeddingModels().catch(() => [] as LocalEmbeddingModel[]),
-      ])
+      const nextBase = await baseRequest
+      if (revision !== loadRevision.current) return
       setBase(nextBase)
-      setConfiguredEmbeddingModel(nextBase.configuredEmbeddingModelId ? embeddingModels.find((model) => model.id === nextBase.configuredEmbeddingModelId) ?? null : null)
-      setDefaultEmbeddingModel(embeddingModels.find((model) => model.isDefault && model.status === 'ready' && model.integrityStatus === 'verified' && model.loadReady) ?? null)
-      const resolvedJobs = nextJobs ?? nextBase.recentJobs
+      void models.then((embeddingModels) => {
+        if (revision !== loadRevision.current) return
+        setModelsLoading(false)
+        setConfiguredEmbeddingModel(nextBase.configuredEmbeddingModelId ? embeddingModels.find((model) => model.id === nextBase.configuredEmbeddingModelId) ?? null : null)
+        setDefaultEmbeddingModel(embeddingModels.find((model) => model.isDefault && model.status === 'ready' && model.integrityStatus === 'verified' && model.loadReady) ?? null)
+      })
+      const resolvedJobs = nextBase.recentJobs
       hadActiveJobsRef.current = resolvedJobs.some((job) => job.status === 'queued' || job.status === 'running' || job.status === 'paused')
       setJobs(resolvedJobs)
       setError(null)
     }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
-    finally { setLoading(false) }
+    catch (cause) { if (revision === loadRevision.current) setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { if (revision === loadRevision.current) setLoading(false) }
   }
 
-  useEffect(() => { void load() }, [gateway, knowledgeBaseId])
+  useEffect(() => { void load(); return () => { loadRevision.current += 1 } }, [gateway, knowledgeBaseId])
 
   useEffect(() => {
     setActiveSubview(null)
-    setActiveDocumentId(undefined)
-  }, [knowledgeBaseId])
+    setActiveDocumentId(documentId)
+  }, [knowledgeBaseId, documentId])
 
   useEffect(() => {
     if (!knowledgeBaseId) return
@@ -2035,20 +1781,7 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
     ?? (!base?.configuredEmbeddingModelId ? defaultEmbeddingModel : null)
 
   const runningJob = jobs.find((job) => job.status === 'queued' || job.status === 'running' || job.status === 'paused') ?? null
-  const runningJobTotal = runningJob
-    ? runningJob.totalItems > 0 ? runningJob.totalItems : Math.max(runningJob.completedItems + runningJob.failedItems, 1)
-    : 0
-
-  // The hub says one thing at a time: what this library can do right now.
-  const statusLine = base ? (() => {
-    if (base.documentCount === 0) return { dot: 'is-empty', text: '还没有资料' }
-    if (base.status === 'error') return { dot: 'is-error', text: '整理有错误' }
-    if (base.status === 'indexing' || base.status === 'migrating') return { dot: 'is-brand', text: '正在整理' }
-    if (!base.textIndexReady && !base.vectorIndexReady) return { dot: 'is-empty', text: '还没有整理好' }
-    return { dot: 'is-ok', text: '可以在对话中使用' }
-  })() : null
-
-  const searchHint = base && base.documentCount > 0 && !runningJob ? (() => {
+  const searchHint = base && !modelsLoading && base.documentCount > 0 && !runningJob ? (() => {
     if (configuredBindingUnavailable) return { text: '绑定的搜索模型不可用，智能搜索暂时用不了。', label: '修复模型', run: () => onNavigate?.('models', base.id) }
     if (!base.vectorIndexReady) return {
       text: '智能搜索未开启，换个说法可能搜不到。',
@@ -2057,12 +1790,6 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
     }
     return null
   })() : null
-
-  const requestImport = () => {
-    setActiveDocumentId(undefined)
-    setActiveSubview(null)
-    setImportRequest((count) => count + 1)
-  }
 
   const rebuildIndex = async () => {
     if (!knowledgeBaseId) return
@@ -2078,8 +1805,6 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
 
   if (!knowledgeBaseId) return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content"><LocalKnowledgeEmpty title="没有选择资料库" description="请从本机资料库列表进入一个资料库。" action={<Button onClick={onBack}>返回列表</Button>} /></div></div>
 
-  // 原型 06-reader：阅读态由 52px 面包屑栏接管页头，知识库标题不再重复出现。
-  const readingDocument = activeSubview === null && activeDocumentId !== undefined
 
   return (
     <div className={cn('fox-local-kb-page fox-local-kb-detail-page', className)}>
@@ -2087,36 +1812,34 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
         {!loading && base && <>
-          {!readingDocument && <header className="fox-kb-hub-head">
-            {activeSubview && <Button aria-label="返回资料列表" className="fox-local-kb-back" variant="ghost" size="icon" onClick={leaveSubviewOrDetail}><ArrowLeft /></Button>}
-            <div className="fox-kb-hub-title">
-              <h1 title={base.name}>{base.name}</h1>
-              <p className="fox-kb-hub-status">
-                {runningJob ? <>
-                  <i className="fox-status-dot is-brand" aria-hidden="true" />
-                  <span>正在整理</span>
-                  <Progress asChild className="fox-local-kb-progress" value={runningJob.progress} aria-label="资料整理进度"><span /></Progress>
-                  <b>{runningJob.completedItems} / {runningJobTotal}</b>
-                </> : statusLine && <>
-                  <i className={cn('fox-status-dot', statusLine.dot)} aria-hidden="true" />
-                  <span>{statusLine.text}</span>
-                  {base.documentCount > 0 && <><span aria-hidden="true">·</span><span>{base.documentCount} 份资料</span></>}
-                </>}
-              </p>
-            </div>
+          <header className="fox-kb-hub-head fox-library-detail-topbar">
+            <Button aria-label={activeSubview ? '返回资料列表' : '返回资料库'} className="fox-local-kb-back" variant="ghost" size="icon" onClick={leaveSubviewOrDetail}><ArrowLeft /></Button>
+            <nav className="fox-library-breadcrumb" aria-label="资料库路径">
+              <button type="button" onClick={() => navigateLibraryFolder(base.id, '')} aria-current={!browser.path && !activeSubview ? 'page' : undefined} title={base.name}>{base.name}</button>
+              {browser.path.split('/').filter(Boolean).map((name, index, parts) => <Fragment key={parts.slice(0, index + 1).join('/')}><span aria-hidden="true">/</span><button type="button" aria-current={index === parts.length - 1 && !activeSubview ? 'page' : undefined} onClick={() => navigateLibraryFolder(base.id, parts.slice(0, index + 1).join('/'))} title={name}>{name}</button></Fragment>)}
+              {activeSubview && <><span aria-hidden="true">/</span><span aria-current="page">{activeSubview === 'jobs' ? '任务记录' : '检索测试'}</span></>}
+            </nav>
             <div className="fox-kb-hub-actions">
               {activeSubview === null && <div className="fox-kb-search-control-slot" ref={setSearchContainer} />}
               <KnowledgeActivityClock jobs={jobs} knowledgeBaseName={base.name} onOpenJobs={() => { setActiveDocumentId(undefined); setActiveSubview('jobs') }} />
-              <Button variant="ghost" size="icon" aria-label="资料库设置" onClick={() => onNavigate?.('settings', base.id)}><Settings2 /></Button>
-              <Button onClick={requestImport}><Plus />添加资料</Button>
+              <Button variant="ghost" size="icon" aria-label="资料库设置" onClick={() => setSettingsOpen(true)}><Settings2 /></Button>
+              {activeSubview === null && <LibraryViewSwitch view={browser.view} onChange={(view) => setLibraryView(base.id, view)} />}
+              {base.writable && <DropdownMenu>
+                <DropdownMenuTrigger asChild><Button size="icon" aria-label="添加文件或文件夹" title="添加文件或文件夹"><Plus /></Button></DropdownMenuTrigger>
+                <DropdownMenuContent align="end" sideOffset={6} className="fox-library-add-menu">
+                  <DropdownMenuItem onSelect={() => { setActiveSubview(null); setActiveDocumentId(undefined); setAddRequest('file') }}><Upload />添加文件</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => { setActiveSubview(null); setActiveDocumentId(undefined); setAddRequest('folder') }}><FolderPlus />添加文件夹</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>}
             </div>
-          </header>}
+          </header>
+          {settingsOpen && <LocalKnowledgeSettingsDialog gateway={gateway} knowledgeBaseId={base.id} onBack={() => setSettingsOpen(false)} onNavigate={onNavigate} onSaved={(updated) => setBase((current) => current ? { ...current, ...updated } : current)} />}
           {mutationError && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{mutationError}</p>}
           {activeSubview === 'retrieval' && <LocalKnowledgeRetrievalPage embedded gateway={gateway} knowledgeBaseId={base.id} onBack={() => setActiveSubview(null)} onNavigate={navigateWithinSubview} />}
           {activeSubview === 'jobs' && <LocalKnowledgeJobsPage embedded gateway={gateway} knowledgeBaseId={base.id} onBack={() => setActiveSubview(null)} onNavigate={navigateWithinSubview} />}
           {activeSubview === null && <>
-            {!activeDocumentId && <KnowledgeBaseSearch key={base.id} gateway={gateway} base={base} hint={searchHint} omni controlContainer={searchContainer} onActiveChange={setSearchShowing} onOpenAdvanced={() => setActiveSubview('retrieval')} onOpenDocument={(documentId) => setActiveDocumentId(documentId)} />}
-            <LocalKnowledgeDocumentsPage embedded gateway={gateway} knowledgeBaseId={base.id} documentId={activeDocumentId} importRequest={importRequest} onImportRequestHandled={() => setImportRequest(0)} onBack={leaveSubviewOrDetail} onNavigate={navigateWithinSubview} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
+            <KnowledgeBaseSearch key={`${base.id}:${browser.navigation}`} gateway={gateway} base={base} hint={searchShowing ? searchHint : null} omni controlContainer={searchContainer} onActiveChange={setSearchShowing} onOpenAdvanced={() => setActiveSubview('retrieval')} onOpenDocument={(documentId) => setActiveDocumentId(documentId)} />
+            <LocalKnowledgeDocumentsPanel base={base} addRequest={addRequest} onAddRequestHandled={clearAddRequest} gateway={gateway} knowledgeBaseId={base.id} documentId={activeDocumentId} onNavigate={navigateWithinSubview} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
           </>}
         </>}
       </div>
@@ -2131,12 +1854,13 @@ const LOCAL_IMPORT_MAX_FILES = 5000
 
 type KnowledgeImportSelection = FileDropzoneItem & { importFile: LocalKnowledgeImportFile }
 
-function KnowledgeImportDropzone({ gateway, items, disabled, onItemsChange, onError }: {
+function KnowledgeImportDropzone({ gateway, items, disabled, onItemsChange, onError, allowFolder = true }: {
   gateway: LocalKnowledgeGateway
   items: KnowledgeImportSelection[]
   disabled: boolean
   onItemsChange: (items: KnowledgeImportSelection[]) => void
   onError: (message: string | null) => void
+  allowFolder?: boolean
 }) {
   const [picking, setPicking] = useState(false)
   const [nativeDragging, setNativeDragging] = useState(false)
@@ -2217,17 +1941,17 @@ function KnowledgeImportDropzone({ gateway, items, disabled, onItemsChange, onEr
 
   return <div ref={rootRef} className="fox-kb-file-dropzone">
     <FileDropzone items={items} onItemsChange={(next) => onItemsChange(next as KnowledgeImportSelection[])} onAddFiles={addBrowserFiles} onPickFiles={gateway.pickImportFiles ? () => void pick('files') : undefined} disabled={disabled || picking} externalDragging={nativeDragging} accept={LOCAL_IMPORT_ACCEPT} multiple maxSize={LOCAL_IMPORT_MAX_BYTES} maxFiles={LOCAL_IMPORT_MAX_FILES} compactAt={3} label={picking ? '正在选择文件…' : '拖入文件，或点击选择'} description="支持 PDF、DOCX、PPTX、XLSX、Markdown、TXT" note="每个文件不超过 256 MB；单次最多 5000 个文件。" dropLabel="松开以添加文件" />
-    {gateway.pickImportFolder && <Button className="fox-kb-dropzone-folder" type="button" variant="outline" size="sm" disabled={disabled || picking} onClick={() => void pick('folder')}><FolderOpen />选择文件夹并保留目录结构</Button>}
+    {allowFolder && gateway.pickImportFolder && <Button className="fox-kb-dropzone-folder" type="button" variant="outline" size="sm" disabled={disabled || picking} onClick={() => void pick('folder')}><FolderOpen />选择文件夹并保留目录结构</Button>}
     {items.length > 0 && <div className="fox-kb-dropzone-summary"><span>{items.filter((item) => item.status !== 'failed').length} 个待导入文件{items.some((item) => item.status === 'failed') && ` · ${items.filter((item) => item.status === 'failed').length} 个需移除或重新选择`}</span><Button type="button" variant="ghost" size="sm" disabled={disabled || picking} onClick={() => { onItemsChange([]); onError(null) }}>清空</Button></div>}
   </div>
 }
 
-export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, onBack, onNavigate, embedded = false, initialImportOpen = false, importRequest = 0, onImportRequestHandled, onOperationAccepted, onAskDocument }: EmbeddedLocalKnowledgeNavigationProps & { initialImportOpen?: boolean; importRequest?: number; onImportRequestHandled?: () => void; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
-  const [base, setBase] = useState<LocalKnowledgeBase | null>(null)
+function LocalKnowledgeDocumentsPanel({ base, gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, onNavigate, addRequest, onAddRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { base: LocalKnowledgeBaseDetail; addRequest: 'file' | 'folder' | null; onAddRequestHandled: () => void; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const [documents, setDocuments] = useState<LocalKnowledgeDocument[]>([])
   const [folders, setFolders] = useState<LocalKnowledgeFolder[]>([])
-  const [currentFolder, setCurrentFolder] = useState('')
-  const [sortBy, setSortBy] = useState<'name' | 'time'>('name')
+  const browser = useLibraryBrowser(knowledgeBaseId)
+  const currentFolder = browser.path
+  const setCurrentFolder = (path: string) => { if (knowledgeBaseId) navigateLibraryFolder(knowledgeBaseId, path) }
   const [createOpen, setCreateOpen] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [creating, setCreating] = useState(false)
@@ -2240,47 +1964,52 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
   const [importError, setImportError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const openImportDialogRef = useRef<(() => void) | null>(null)
+  const [removeFiles, setRemoveFiles] = useState<LibraryFile[]>([])
+  const [removing, setRemoving] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const previewReturnFocus = useRef<HTMLElement | null>(null)
 
   const load = async () => {
     if (!knowledgeBaseId) return
     setLoading(true)
     try {
-      const [baseDetail, page, folderItems] = await Promise.all([gateway.getKnowledgeBase(knowledgeBaseId), gateway.listDocuments(knowledgeBaseId), gateway.listFolders(knowledgeBaseId)])
-      setBase(baseDetail); setDocuments(page.items); setFolders(folderItems); setError(null)
+      const [page, folderItems] = await Promise.all([gateway.listDocuments(knowledgeBaseId), gateway.listFolders(knowledgeBaseId)])
+      setDocuments(page.items); setFolders(folderItems); setError(null)
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setLoading(false) }
   }
 
   useEffect(() => { void load() }, [gateway, knowledgeBaseId])
   useEffect(() => {
-    if (!initialImportOpen || !knowledgeBaseId) return
-    setTargetFolder('')
-    setImportSelections([])
-    setImportError(null)
-    setImportOpen(true)
-  }, [initialImportOpen, knowledgeBaseId])
+    if (!knowledgeBaseId || !documents.some((document) => document.status === 'queued' || document.status === 'parsing')) return
+    let disposed = false
+    const timer = window.setInterval(() => { void gateway.listDocuments(knowledgeBaseId).then((page) => { if (!disposed) setDocuments(page.items) }).catch(() => {}) }, 1800)
+    return () => { disposed = true; window.clearInterval(timer) }
+  }, [gateway, knowledgeBaseId, documents.some((document) => document.status === 'queued' || document.status === 'parsing')])
   useEffect(() => {
-    if (!importRequest || !knowledgeBaseId) return
-    onImportRequestHandled?.()
-    openImportDialogRef.current?.()
-  }, [importRequest, knowledgeBaseId, onImportRequestHandled])
+    if (!addRequest || !knowledgeBaseId) return
+    if (addRequest === 'folder') {
+      setFolderError(null)
+      setCreateOpen(true)
+    } else {
+      setTargetFolder(currentFolder)
+      setImportSelections([])
+      setImportError(null)
+      setImportOpen(true)
+    }
+    onAddRequestHandled()
+  }, [addRequest, knowledgeBaseId, currentFolder, onAddRequestHandled])
   const selectedDocument = documentId ? documents.find((document) => document.id === documentId) ?? null : null
 
   useEffect(() => {
     if (base && selectedDocument) rememberRecentDocument(base, selectedDocument)
   }, [base, selectedDocument])
 
-  const parentPath = (value: string) => {
-    const normalized = value.replace(/\\/g, '/')
-    const index = normalized.lastIndexOf('/')
-    return index < 0 ? '' : normalized.slice(0, index)
-  }
-  const sortRows = <T extends { name: string; updatedAt?: string | null }>(items: T[]) => [...items].sort((left, right) => sortBy === 'name'
-    ? left.name.localeCompare(right.name, 'zh-CN')
-    : (right.updatedAt ?? '').localeCompare(left.updatedAt ?? ''))
-  const childFolders = sortRows(folders.filter((folder) => parentPath(folder.relativePath) === currentFolder))
-  const childDocuments = sortRows(documents.filter((document) => parentPath(document.relativePath) === currentFolder))
+  const managedFiles = useMemo<LibraryFile[]>(() => [
+    ...folders.map((folder) => ({ id: `folder:${folder.relativePath}`, name: folder.name, path: folder.relativePath, folder: true, size: 0 })),
+    ...documents.map((document) => ({ id: document.id, name: document.name, path: document.relativePath, size: document.sizeBytes, modifiedAt: document.updatedAt, status: document.status })),
+  ], [folders, documents])
+  useEffect(() => { if (knowledgeBaseId && base?.id === knowledgeBaseId && !loading && !error) publishLibraryFolders(knowledgeBaseId, managedFiles) }, [knowledgeBaseId, base?.id, loading, error, managedFiles])
 
   const revealDocument = async (document: LocalKnowledgeDocument) => {
     if (!knowledgeBaseId) return
@@ -2288,13 +2017,41 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
   }
 
-  const removeDocument = async (document: LocalKnowledgeDocument) => {
-    if (!knowledgeBaseId) return
+  const removeDocuments = async () => {
+    if (!knowledgeBaseId || removing) return
+    setRemoving(true)
+    setActionError(null)
+    const failures: string[] = []
     try {
-      await gateway.deleteDocument(knowledgeBaseId, document.id)
-      recordLocalKnowledgeActivity({ knowledgeBaseId, kind: 'document_deleted', title: '移除资料', detail: document.relativePath || document.name })
+      for (const file of removeFiles) {
+        try {
+          const removed = await gateway.deleteDocument(knowledgeBaseId, file.id)
+          if (!removed) throw new Error('服务未确认移除')
+          recordLocalKnowledgeActivity({ knowledgeBaseId, kind: 'document_deleted', title: '移除资料', detail: file.path || file.name })
+        } catch (cause) { failures.push(`${file.name}：${cause instanceof Error ? cause.message : String(cause)}`) }
+      }
+      setRemoveFiles([])
       await load()
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+      if (failures.length) setActionError(`部分文件未移除：${failures.join('；')}`)
+      else toast.success('已从资料库移除，电脑上的原文件已保留。')
+    } finally { setRemoving(false) }
+  }
+
+  const reprocessDocuments = async (files: LibraryFile[]) => {
+    if (!knowledgeBaseId || submitting) return
+    setSubmitting(true)
+    setActionError(null)
+    const failures: string[] = []
+    let acceptedCount = 0
+    try {
+      for (const file of files) {
+        try { const accepted = await gateway.reparseDocument(knowledgeBaseId, file.id); onOperationAccepted?.(accepted); acceptedCount += 1 }
+        catch (cause) { failures.push(`${file.name}：${cause instanceof Error ? cause.message : String(cause)}`) }
+      }
+      if (acceptedCount) toast.success(`${acceptedCount} 个文件已加入后台处理队列。`)
+      if (failures.length) setActionError(`部分文件未开始处理：${failures.join('；')}`)
+      await load()
+    } finally { setSubmitting(false) }
   }
 
   const createFolder = async () => {
@@ -2314,13 +2071,12 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
     }
   }
 
-  const openImportDialog = () => {
-    setTargetFolder(currentFolder)
+  const openImportDialog = (path = currentFolder) => {
+    setTargetFolder(path)
     setImportSelections([])
     setImportError(null)
     setImportOpen(true)
   }
-  openImportDialogRef.current = openImportDialog
 
   const closeImportDialog = () => {
     if (submitting) return
@@ -2331,6 +2087,8 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
 
   const startImportFromDialog = async () => {
     if (!knowledgeBaseId || importFiles.length === 0 || submitting || importSelections.some((item) => item.status === 'failed')) return
+    const duplicates = duplicateLibraryImportPaths(importFiles)
+    if (duplicates.length) { setImportError(`有同名文件会导入到同一位置：${duplicates.join('、')}。请移除重复项后再导入。`); return }
     setSubmitting(true)
     setImportError(null)
     try {
@@ -2345,7 +2103,8 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
       onOperationAccepted?.(accepted)
       setImportOpen(false)
       setImportSelections([])
-      onNavigate?.('jobs', knowledgeBaseId)
+      toast.success('文件已加入后台导入队列。')
+      await load()
     } catch (cause) {
       setImportError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -2353,54 +2112,44 @@ export function LocalKnowledgeDocumentsPage({ gateway = defaultLocalKnowledgeGat
     }
   }
 
-  const browserActions = embedded
-    ? <DropdownMenu>
-      <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="文件夹操作" disabled={!knowledgeBaseId}><Plus /></Button></DropdownMenuTrigger>
-      <DropdownMenuContent align="end" sideOffset={5}>
-        <DropdownMenuItem onSelect={() => { setFolderError(null); setCreateOpen(true) }}><FolderPlus />新建文件夹</DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-    : <><Button variant="outline" size="sm" onClick={() => { setFolderError(null); setCreateOpen(true) }} disabled={!knowledgeBaseId}><FolderPlus />新建文件夹</Button><Button size="sm" onClick={openImportDialog} disabled={!knowledgeBaseId}><Upload />添加资料</Button></>
+
 
   return (
-    <div className={cn('fox-local-kb-page', embedded && 'fox-local-kb-embedded-page', className)}>
-      <div className={cn('fox-local-kb-content fox-local-kb-reader-page', embedded && 'fox-local-kb-embedded-content')}>
+    <div className={cn('fox-local-kb-page', 'fox-local-kb-embedded-page', className)}>
+      <div className={cn('fox-local-kb-content fox-local-kb-reader-page', 'fox-local-kb-embedded-content')}>
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
-        {!loading && !error && !selectedDocument && <section className="fox-local-kb-browser">
-          {!embedded && <LocalKnowledgeHeader title={base?.name ?? '本机资料库'} description={currentFolder ? `当前文件夹：${currentFolder}` : '按文件夹整理和浏览这里的资料。'} onBack={onBack} actions={browserActions} />}
-          <div className="fox-kb-doc-crumb">
-            <Breadcrumb aria-label="资料目录"><BreadcrumbList><BreadcrumbItem><DropdownMenu>
-              <DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="fox-kb-doc-scope"><Folder />全部资料<ChevronDown /></Button></DropdownMenuTrigger>
-              <DropdownMenuContent align="start" sideOffset={5} className="fox-kb-doc-scope-pop">
-                <DropdownMenuItem onSelect={() => setCurrentFolder('')}><Layers3 />全部资料</DropdownMenuItem>
-                {folders.map((folder) => <DropdownMenuItem key={folder.relativePath} onSelect={() => setCurrentFolder(folder.relativePath)}><FolderOpen />{folder.relativePath}<small>{folder.documentCount} 份资料</small></DropdownMenuItem>)}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem disabled={!knowledgeBaseId} onSelect={() => { setFolderError(null); setCreateOpen(true) }}><FolderPlus />新建文件夹</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu></BreadcrumbItem>{currentFolder.split('/').filter(Boolean).map((part, index, parts) => <Fragment key={parts.slice(0, index + 1).join('/')}><BreadcrumbSeparator /><BreadcrumbItem>{index === parts.length - 1 ? <BreadcrumbPage>{part}</BreadcrumbPage> : <BreadcrumbLink asChild><button type="button" onClick={() => setCurrentFolder(parts.slice(0, index + 1).join('/'))}>{part}</button></BreadcrumbLink>}</BreadcrumbItem></Fragment>)}</BreadcrumbList></Breadcrumb>
-            <span className="fox-kb-doc-count">{childFolders.length + childDocuments.length} 项</span>
-            <div className="fox-kb-doc-crumb-spacer" />
-            <button type="button" className="fox-kb-doc-sort" onClick={() => setSortBy(sortBy === 'name' ? 'time' : 'name')}><ArrowUpDown />{sortBy === 'name' ? '名称' : '修改时间'}</button>
-          </div>
-          {childFolders.length === 0 && childDocuments.length === 0 ? <LocalKnowledgeEmpty title={folders.length || documents.length ? '这个文件夹是空的' : '还没有资料'} description={folders.length || documents.length ? '可以在这里建子文件夹，或直接添加文件和整个文件夹。' : '点右上角「添加资料」，选择文件或整个文件夹。'} /> : <div className="fox-local-kb-browser-list">
-            {childFolders.map((folder) => <div role="button" tabIndex={0} className="fox-local-kb-folder-row" key={folder.relativePath} onClick={() => setCurrentFolder(folder.relativePath)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setCurrentFolder(folder.relativePath) } }}><FolderOpen className="fox-local-kb-browser-icon" /><span className="fox-local-kb-browser-name"><span className="fox-local-kb-browser-name-text" title={folder.name}>{folder.name}</span></span><span className="fox-local-kb-browser-size">{folder.documentCount} 份资料</span><span className="fox-local-kb-browser-time" /><span className="fox-local-kb-row-menu" /></div>)}
-            {childDocuments.map((document) => <div role="button" tabIndex={0} className="fox-local-kb-document-row" key={document.id} onClick={() => onNavigate?.('documents', knowledgeBaseId, document.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onNavigate?.('documents', knowledgeBaseId, document.id) } }}><LocalFileTypeIcon extension={document.extension} /><span className="fox-local-kb-browser-name"><span className="fox-local-kb-browser-name-text" title={document.name}>{document.name}</span>{document.status !== 'indexed' && <small className="fox-local-kb-browser-status"><i className={cn('fox-status-dot', document.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{documentStatusLabel(document.status)}</small>}</span><span className="fox-local-kb-browser-size">{formatBytes(document.sizeBytes)} · {document.chunkCount} 段</span><span className="fox-local-kb-browser-time">{formatRelativeDate(document.updatedAt)}</span><span className="fox-local-kb-row-menu" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-local-kb-row-more" aria-label={`${document.name} 的更多操作`}><MoreHorizontal /></Button></DropdownMenuTrigger>
-                <DropdownMenuContent align="end" sideOffset={5}>
-                  <DropdownMenuItem onSelect={() => onNavigate?.('documents', knowledgeBaseId, document.id)}><FileText />预览</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => void revealDocument(document)}><FolderOpen />在文件夹中显示</DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onSelect={() => void removeDocument(document)}><Trash2 />从资料库移除</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </span></div>)}
-          </div>}
-          {childFolders.length + childDocuments.length > 0 && <button type="button" className="fox-kb-dropline" onClick={openImportDialog} disabled={!knowledgeBaseId}><Upload />点这里添加文件或整个文件夹，也能稍后从「本机文件」挑</button>}
+        {!loading && !error && <section className="fox-local-kb-browser">
+          {actionError && <p className="fox-local-kb-form-error" role="alert"><AlertCircle />{actionError}</p>}
+          <LibraryFileManager contentOnly view={browser.view} files={managedFiles} path={currentFolder} onPathChange={setCurrentFolder} busy={removing || submitting} onOpen={(file) => onNavigate?.('documents', knowledgeBaseId, file.id)}
+            onRemove={base?.writable ? setRemoveFiles : undefined}
+            onReveal={(file) => { const document = documents.find((item) => item.id === file.id); if (document) void revealDocument(document) }}
+            onReprocess={base?.writable ? (files) => void reprocessDocuments(files) : undefined}
+            onAdd={base?.writable ? openImportDialog : undefined}
+            onCreateFolder={base?.writable ? (path) => { setCurrentFolder(path); setFolderError(null); setCreateOpen(true) } : undefined}
+            onDropFiles={base?.writable ? (files, path) => {
+              setTargetFolder(path); setImportError(null); setImportOpen(true)
+              setImportSelections(files.map((file) => {
+                const sourcePath = (file as File & { path?: string }).path
+                const invalid = !LOCAL_IMPORT_ACCEPT.split(',').includes(`.${file.name.split('.').pop()?.toLowerCase()}`) ? '不支持此格式' : file.size > LOCAL_IMPORT_MAX_BYTES ? '文件超过 256 MB' : !sourcePath && gateway.pickImportFiles ? '无法读取本机路径，请用系统文件选择器重新选择。' : undefined
+                return { id: sourcePath ?? file.name, name: file.name, size: file.size, status: invalid ? 'failed' : undefined, error: invalid, importFile: { name: file.name, sourcePath, mimeType: file.type, sizeBytes: file.size } }
+              }))
+            } : undefined}
+            onDropPaths={base?.writable ? (paths, path) => {
+              setTargetFolder(path); setImportError(null); setImportOpen(true)
+              setImportSelections(paths.slice(0, LOCAL_IMPORT_MAX_FILES).map((sourcePath) => {
+                const name = sourcePath.split(/[\\/]/).pop() ?? sourcePath
+                const invalid = !LOCAL_IMPORT_ACCEPT.split(',').includes(`.${name.split('.').pop()?.toLowerCase()}`) ? '不支持此格式，请选择文件。' : undefined
+                return { id: sourcePath, name, size: 0, sizeKnown: false, status: invalid ? 'failed' : undefined, error: invalid, importFile: { name, sourcePath, mimeType: '', sizeBytes: 0 } }
+              }))
+            } : undefined} />
         </section>}
-        {!loading && !error && selectedDocument && knowledgeBaseId && <LocalKnowledgeDocumentReader knowledgeBaseName={base?.name} knowledgeBaseId={knowledgeBaseId} document={selectedDocument} gateway={gateway} onBack={() => onNavigate?.('documents', knowledgeBaseId)} onDeleted={load} onJobAccepted={() => onNavigate?.('jobs', knowledgeBaseId)} onAskDocument={onAskDocument} />}
+        <Dialog open={Boolean(selectedDocument)} onOpenChange={(open) => { if (!open) onNavigate?.('documents', knowledgeBaseId) }}><DialogContent className="fox-library-preview-dialog" aria-describedby={undefined} onOpenAutoFocus={() => { previewReturnFocus.current = globalThis.document.activeElement as HTMLElement }} onCloseAutoFocus={(event) => { event.preventDefault(); if (previewReturnFocus.current?.isConnected) previewReturnFocus.current.focus() }}>
+          <DialogTitle className="sr-only">预览 {selectedDocument?.name}</DialogTitle>
+          {!loading && !error && selectedDocument && knowledgeBaseId && <LocalKnowledgeDocumentReader key={selectedDocument.id} knowledgeBaseName={base?.name} knowledgeBaseId={knowledgeBaseId} document={selectedDocument} gateway={gateway} onBack={() => onNavigate?.('documents', knowledgeBaseId)} onDeleted={async () => { await load(); onNavigate?.('documents', knowledgeBaseId) }} onJobAccepted={() => onNavigate?.('jobs', knowledgeBaseId)} onAskDocument={onAskDocument} />}
+        </DialogContent></Dialog>
       </div>
+      <Dialog open={removeFiles.length > 0} onOpenChange={(open) => { if (!open && !removing) setRemoveFiles([]) }}><DialogContent showCloseButton={!removing}><DialogHeader><DialogTitle>从资料库移除 {removeFiles.length} 个文件？</DialogTitle><DialogDescription>移除资料副本和对应搜索数据，电脑上的原文件会保留。已有引用中的资料内容将不再可用。</DialogDescription></DialogHeader><ul className="fox-library-remove-list">{removeFiles.map((file) => <li key={file.id}>{file.name}</li>)}</ul><DialogFooter><Button variant="outline" disabled={removing} onClick={() => setRemoveFiles([])}>取消</Button><Button disabled={removing} onClick={() => void removeDocuments()}>{removing && <LoaderCircle className="animate-spin" />}确认移除</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) { setFolderName(''); setFolderError(null) } }}>
         <DialogContent className="fox-local-kb-folder-dialog"><DialogHeader><DialogTitle>新建文件夹</DialogTitle><DialogDescription>{currentFolder ? `在「${currentFolder}」中创建子文件夹。` : '在资料库根目录创建文件夹。'}</DialogDescription></DialogHeader><label className="fox-local-kb-folder-field"><span>文件夹名称</span><Input autoFocus value={folderName} onChange={(event) => setFolderName(event.target.value)} placeholder="例如：产品资料" onKeyDown={(event) => { if (event.key === 'Enter') void createFolder() }} /></label>{folderError && <p className="fox-local-kb-form-error" role="alert"><AlertCircle />{folderError}</p>}<DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>取消</Button><Button onClick={() => void createFolder()} disabled={creating || !folderName.trim()}>{creating ? <LoaderCircle className="animate-spin" /> : <FolderPlus />}{creating ? '正在创建' : '创建文件夹'}</Button></DialogFooter></DialogContent>
       </Dialog>
@@ -3260,18 +3009,18 @@ export function LocalKnowledgeRetrievalPage({ gateway = defaultLocalKnowledgeGat
   </div></div>
 }
 
-export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, gateway = defaultLocalKnowledgeGateway, onNavigate, onBack, createRequest, onCreateRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; createRequest?: number; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, gateway = defaultLocalKnowledgeGateway, onNavigate, onNavigateWorkspace, onBack, createRequest, onCreateRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; createRequest?: number; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const navigate = onNavigate
   switch (view) {
     case 'home': return <LocalKnowledgeHomePage gateway={gateway} onNavigate={navigate} />
-    case 'files': return <LocalKnowledgeFilesPage gateway={gateway} onNavigate={navigate} onOperationAccepted={onOperationAccepted} />
+    case 'files': return knowledgeBaseId ? <LocalFolderDetailPage key={knowledgeBaseId} gateway={gateway} sourceId={knowledgeBaseId} onBack={() => navigate?.('list')} renderPreview={(file, close) => <LocalFilePreviewDialog gateway={gateway} file={file} open={Boolean(file)} onOpenChange={(open) => { if (!open) close() }} />} /> : <LocalKnowledgeListPage gateway={gateway} onNavigate={navigate} onNavigateWorkspace={onNavigateWorkspace} />
     case 'detail': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
-    case 'documents': return <LocalKnowledgeDocumentsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} documentId={documentId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
-    case 'import': return <LocalKnowledgeDocumentsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} initialImportOpen onOperationAccepted={onOperationAccepted} />
+    case 'documents': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} documentId={documentId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
+    case 'import': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} initialImportOpen onOperationAccepted={onOperationAccepted} />
     case 'jobs': return <LocalKnowledgeJobsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
     case 'models': return <LocalKnowledgeModelsPage gateway={gateway} onBack={onBack} />
     case 'retrieval': return <LocalKnowledgeRetrievalPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
-    case 'settings': return <LocalKnowledgeSettingsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
-    default: return <LocalKnowledgeListPage gateway={gateway} onNavigate={navigate} createRequest={createRequest} onCreateRequestHandled={onCreateRequestHandled} />
+    case 'settings': return <LocalKnowledgeListPage gateway={gateway} initialEditId={knowledgeBaseId} onNavigate={navigate} onNavigateWorkspace={onNavigateWorkspace} />
+    default: return <LocalKnowledgeListPage gateway={gateway} onNavigate={navigate} onNavigateWorkspace={onNavigateWorkspace} createRequest={createRequest} onCreateRequestHandled={onCreateRequestHandled} />
   }
 }

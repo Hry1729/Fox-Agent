@@ -207,6 +207,7 @@ export interface LocalKnowledgeFileSourceDto {
   id: string
   rootPath: string
   displayName: string
+  description?: string
   fileCount: number
   totalSize: number
   lastScannedAt: number | null
@@ -821,8 +822,8 @@ export const desktopClient = {
     command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_add', { path }),
   rescanLocalKnowledgeFileSource: (id: string) =>
     command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_rescan', { id }),
-  updateLocalKnowledgeFileSource: (id: string, displayName: string) =>
-    command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_update', { id, displayName }),
+  updateLocalKnowledgeFileSource: (id: string, displayName: string, description?: string) =>
+    command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_update', { id, displayName, description }),
   removeLocalKnowledgeFileSource: (id: string) =>
     command<boolean>('local_knowledge_file_source_remove', { id }),
   listLocalKnowledgeLocalFiles: (options: { sourceId?: string; query?: string; category?: string; limit?: number; offset?: number } = {}) =>

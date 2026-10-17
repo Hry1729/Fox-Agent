@@ -2125,7 +2125,7 @@ impl Database {
             return Err(ConversationExpertBindingError::ConversationNotFound);
         }
         if let Some(reason) =
-            conversation_expert_binding_lock_reason(&transaction, conversation_id)?
+            conversation_expert_binding_lock_reason(&transaction, conversation_id, true)?
         {
             return Err(reason);
         }
@@ -2206,7 +2206,7 @@ impl Database {
             return Err(ConversationExpertBindingError::ConversationNotFound);
         }
         if let Some(reason) =
-            conversation_expert_binding_lock_reason(&transaction, conversation_id)?
+            conversation_expert_binding_lock_reason(&transaction, conversation_id, false)?
         {
             return Err(reason);
         }
@@ -7261,6 +7261,7 @@ pub(crate) fn package_snapshot_hash(package_snapshot: &Value) -> String {
 fn conversation_expert_binding_lock_reason(
     connection: &Connection,
     conversation_id: &str,
+    allow_existing_messages: bool,
 ) -> rusqlite::Result<Option<ConversationExpertBindingError>> {
     let archived = connection.query_row(
         "SELECT archived != 0 OR trashed_at IS NOT NULL FROM conversations WHERE id = ?1",
@@ -7278,7 +7279,7 @@ fn conversation_expert_binding_lock_reason(
         [conversation_id],
         |row| row.get::<_, bool>(0),
     )?;
-    if has_messages {
+    if has_messages && !allow_existing_messages {
         return Ok(Some(ConversationExpertBindingError::LockedByMessages));
     }
     let has_active_run = connection.query_row(
@@ -10036,6 +10037,18 @@ mod tests {
                     Ok(())
                 })
                 .expect("insert dialog message");
+            let replacement = database
+                .bind_conversation_expert(&dialog.id, "fox-reviewer", "manual")
+                .expect("idle conversation can replace its expert after messages");
+            assert_eq!(replacement.expert_id, "fox-reviewer");
+            let history = database.list_conversation_expert_bindings(&dialog.id).unwrap();
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[0].state, "replaced");
+            assert_eq!(history[1].state, "active");
+            let preserved = database.with_connection(|connection| {
+                connection.query_row("SELECT content FROM messages WHERE conversation_id = ?1", [&dialog.id], |row| row.get::<_, String>(0))
+            }).unwrap();
+            assert_eq!(preserved, "hello");
             assert_eq!(
                 database.remove_conversation_expert(&dialog.id).unwrap_err(),
                 ConversationExpertBindingError::LockedByMessages

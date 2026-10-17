@@ -32,3 +32,22 @@
   width: max-content;
   min-width: 100%;
 }
+
+.fox-spreadsheet-preview .x-spreadsheet-scrollbar {
+  scrollbar-width: auto;
+  scrollbar-color: #9ca3af #f4f5f8;
+}
+.fox-spreadsheet-preview .x-spreadsheet-scrollbar.vertical { width: 15px; }
+.fox-spreadsheet-preview .x-spreadsheet-scrollbar.horizontal { height: 15px; }
+.fox-local-files-preview-body .fox-spreadsheet-preview-shell,
+.fox-local-kb-document-reader-body .fox-spreadsheet-preview-shell {
+  height: clamp(240px, calc(100dvh - 240px), 680px);
+  min-height: 0;
+}
+.fox-local-files-preview-body .fox-spreadsheet-preview,
+.fox-local-kb-document-reader-body .fox-spreadsheet-preview {
+  height: 100%;
+  min-height: 0;
+}
+.fox-local-files-preview-body .fox-spreadsheet-preview .x-spreadsheet,
+.fox-local-kb-document-reader-body .fox-spreadsheet-preview .x-spreadsheet { min-height: 0; }

@@ -425,12 +425,12 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       return copy(next)
     },
 
-    async updateFileSource(id, displayName) {
+    async updateFileSource(id, displayName, description) {
       const source = fileSources.get(id)
       const normalizedName = displayName.trim()
       if (!source) throw new Error(`本机文件来源不存在：${id}`)
       if (!normalizedName) throw new Error('请输入文件夹显示名称。')
-      const next = { ...source, displayName: normalizedName, updatedAt: now() }
+      const next = { ...source, displayName: normalizedName, description: description?.trim() ?? source.description ?? '', updatedAt: now() }
       fileSources.set(id, next)
       return copy(next)
     },

@@ -49,7 +49,8 @@ export function workspaceViewForLocalKnowledge(view: LocalKnowledgeRouteView): W
 
 export function localKnowledgeBackRoute(view: WorkspaceView, knowledgeBaseId?: string | null): { view: WorkspaceView; entityId?: string } {
   if (view === 'local-knowledge-home') return { view: 'chat' }
-  if (view === 'local-files' || view === 'local-knowledge' || view === 'local-knowledge-models') return { view: 'local-knowledge-home' }
+  if (view === 'local-files') return { view: 'local-knowledge' }
+  if (view === 'local-knowledge' || view === 'local-knowledge-models') return { view: 'local-knowledge-home' }
   if (view === 'local-knowledge-detail') return { view: 'local-knowledge' }
   return { view: 'local-knowledge-detail', entityId: knowledgeBaseId ?? undefined }
 }

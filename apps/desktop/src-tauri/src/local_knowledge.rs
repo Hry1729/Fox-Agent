@@ -222,6 +222,8 @@ pub struct LocalKnowledgeStore {
     pub(crate) root: Arc<PathBuf>,
     pub(crate) zvec_resource_dir: Arc<Option<PathBuf>>,
     database_path: Arc<PathBuf>,
+    #[cfg(feature = "zvec")]
+    pub(crate) generation_checks: Arc<Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<(PathBuf, u64, Option<std::time::SystemTime>)>)>>>,
     storage_migration_active: Arc<Mutex<Option<String>>>,
     pending_root_path: Arc<Mutex<Option<PathBuf>>>,
 }
@@ -360,6 +362,7 @@ pub struct LocalKnowledgeFileSource {
     pub id: String,
     pub root_path: String,
     pub display_name: String,
+    pub description: String,
     pub file_count: i64,
     pub total_size: i64,
     pub last_scanned_at: Option<i64>,
@@ -400,6 +403,8 @@ pub struct LocalKnowledgeFileSourceIdRequest {
 pub struct LocalKnowledgeFileSourceUpdateRequest {
     pub id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -535,6 +540,8 @@ impl LocalKnowledgeStore {
             root: Arc::new(root),
             zvec_resource_dir: Arc::new(zvec_resource_dir.map(Path::to_path_buf)),
             database_path: Arc::new(database_path),
+            #[cfg(feature = "zvec")]
+            generation_checks: Arc::default(),
             storage_migration_active: Arc::new(Mutex::new(None)),
             pending_root_path: Arc::new(Mutex::new(None)),
         })
@@ -559,6 +566,8 @@ impl LocalKnowledgeStore {
             root: Arc::new(root),
             zvec_resource_dir: Arc::new(zvec_resource_dir.map(Path::to_path_buf)),
             database_path: Arc::new(database_path),
+            #[cfg(feature = "zvec")]
+            generation_checks: Arc::default(),
             storage_migration_active: Arc::new(Mutex::new(None)),
             pending_root_path: Arc::new(Mutex::new(None)),
         };
@@ -1337,7 +1346,7 @@ impl LocalKnowledgeStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT id, root_path, display_name, file_count, total_size,
-                    last_scanned_at, created_at, updated_at
+                    last_scanned_at, created_at, updated_at, description
              FROM local_file_sources
              ORDER BY display_name COLLATE NOCASE, root_path COLLATE NOCASE",
         )?;
@@ -1403,18 +1412,25 @@ impl LocalKnowledgeStore {
         let now = crate::database::now_ms();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        transaction.execute(
-            "DELETE FROM local_file_catalog WHERE source_id = ?1",
-            [source_id],
-        )?;
+        transaction.execute_batch("CREATE TEMP TABLE catalog_scan_paths (path TEXT PRIMARY KEY COLLATE NOCASE);")?;
         {
+            let mut paths = transaction.prepare("INSERT INTO catalog_scan_paths(path) VALUES (?1)")?;
             let mut statement = transaction.prepare(
                 "INSERT INTO local_file_catalog(
                      id, source_id, absolute_path, relative_path, display_name,
                      extension, mime_type, file_size, modified_at, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                 ) VALUES (COALESCE((SELECT id FROM local_file_catalog WHERE source_id = ?2 AND absolute_path = ?3), ?1), ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                 ON CONFLICT(id) DO UPDATE SET
+                   relative_path = excluded.relative_path, display_name = excluded.display_name,
+                   extension = excluded.extension, mime_type = excluded.mime_type,
+                   file_size = excluded.file_size, modified_at = excluded.modified_at,
+                   updated_at = excluded.updated_at
+                 WHERE relative_path != excluded.relative_path OR display_name != excluded.display_name
+                   OR extension != excluded.extension OR mime_type != excluded.mime_type
+                   OR file_size != excluded.file_size OR modified_at IS NOT excluded.modified_at",
             )?;
             for file in &files {
+                paths.execute([&file.absolute_path])?;
                 statement.execute(params![
                     Uuid::new_v4().to_string(),
                     source_id,
@@ -1429,6 +1445,12 @@ impl LocalKnowledgeStore {
                 ])?;
             }
         }
+        transaction.execute(
+            "DELETE FROM local_file_catalog WHERE source_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM catalog_scan_paths WHERE path = absolute_path)",
+            [source_id],
+        )?;
+        transaction.execute_batch("DROP TABLE catalog_scan_paths;")?;
         transaction.execute(
             "UPDATE local_file_sources
              SET file_count = ?2, total_size = ?3, last_scanned_at = ?4, updated_at = ?4
@@ -1470,8 +1492,9 @@ impl LocalKnowledgeStore {
         }
         let updated_at = crate::database::now_ms();
         let changed = self.connection()?.execute(
-            "UPDATE local_file_sources SET display_name = ?1, updated_at = ?2 WHERE id = ?3",
-            params![display_name, updated_at, source_id],
+            "UPDATE local_file_sources SET display_name = ?1, updated_at = ?2,
+             description = COALESCE(?4, description) WHERE id = ?3",
+            params![display_name, updated_at, source_id, request.description.as_deref().map(str::trim)],
         )?;
         if changed == 0 {
             return Err(LocalKnowledgeError::not_found("local file source"));
@@ -1681,7 +1704,7 @@ impl LocalKnowledgeStore {
         self.connection()?
             .query_row(
                 "SELECT id, root_path, display_name, file_count, total_size,
-                        last_scanned_at, created_at, updated_at
+                        last_scanned_at, created_at, updated_at, description
                  FROM local_file_sources WHERE id = ?1",
                 [source_id],
                 map_file_source,
@@ -3118,6 +3141,12 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError>
     ))?;
     ensure_schema_column(
         connection,
+        "local_file_sources",
+        "description",
+        "ALTER TABLE local_file_sources ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_schema_column(
+        connection,
         "local_kb_storage_migrations",
         "restart_required",
         "ALTER TABLE local_kb_storage_migrations ADD COLUMN restart_required INTEGER NOT NULL DEFAULT 0",
@@ -3232,23 +3261,21 @@ fn scan_catalog_files(
     while let Some(directory) = directories.pop() {
         let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
-            Err(error) if directory != root => {
-                eprintln!(
-                    "[local-knowledge] skip unreadable catalog directory {}: {error}",
-                    directory.display()
-                );
+            Err(error) if directory != root && error.kind() == std::io::ErrorKind::NotFound => {
                 continue;
             }
             Err(error) => return Err(LocalKnowledgeError::from(error)),
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry?;
             let path = entry.path();
             if path.starts_with(&excluded_root) {
                 continue;
             }
             let file_type = match entry.file_type() {
                 Ok(file_type) => file_type,
-                Err(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(LocalKnowledgeError::from(error)),
             };
             if file_type.is_symlink() {
                 continue;
@@ -3266,7 +3293,8 @@ fn scan_catalog_files(
             }
             let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(LocalKnowledgeError::from(error)),
             };
             if metadata.len() > MAX_PICKED_FILE_SIZE {
                 continue;
@@ -3427,6 +3455,7 @@ fn map_file_source(row: &Row<'_>) -> rusqlite::Result<LocalKnowledgeFileSource> 
         last_scanned_at: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        description: row.get(8)?,
     })
 }
 
@@ -4201,6 +4230,13 @@ mod tests {
             .unwrap();
         assert_eq!(source.file_count, 2);
         assert_eq!(store.list_file_sources().unwrap().len(), 1);
+        assert_eq!(source.description, "");
+        let edited = store.update_file_source(LocalKnowledgeFileSourceUpdateRequest {
+            id: source.id.clone(), display_name: "项目资料".into(), description: Some("  测试简介  ".into()),
+        }).unwrap();
+        assert_eq!(edited.display_name, "项目资料");
+        assert_eq!(edited.description, "测试简介");
+        assert_eq!(edited.root_path, source.root_path);
 
         let all_files = store
             .list_catalog_files(LocalKnowledgeCatalogFilesRequest {
@@ -4263,6 +4299,30 @@ mod tests {
         assert_eq!(pdf_files.len(), 1);
         assert_eq!(pdf_files[0].extension, "pdf");
 
+        std::fs::remove_file(&report_path).unwrap();
+        std::fs::write(source_root.join("new.md"), b"new").unwrap();
+        std::fs::write(&notes_path, b"changed").unwrap();
+        let rescanned = store.scan_file_source(&source.id).unwrap();
+        assert_eq!(rescanned.file_count, 2);
+        assert_eq!(rescanned.display_name, "项目资料");
+        assert_eq!(rescanned.description, "测试简介");
+        let renamed = store.update_file_source(LocalKnowledgeFileSourceUpdateRequest {
+            id: source.id.clone(), display_name: "保留简介".into(), description: None,
+        }).unwrap();
+        assert_eq!(renamed.description, "测试简介");
+        store.update_file_source(LocalKnowledgeFileSourceUpdateRequest {
+            id: source.id.clone(), display_name: "保留简介".into(), description: Some("".into()),
+        }).unwrap();
+        assert_eq!(store.get_file_source(&source.id).unwrap().description, "");
+        let updated = store.list_catalog_files(LocalKnowledgeCatalogFilesRequest {
+            source_id: Some(source.id.clone()), query: None, category: None, limit: None, offset: None,
+        }).unwrap();
+        assert!(updated.iter().all(|file| file.display_name != "report.pdf"));
+        assert!(updated.iter().any(|file| file.display_name == "new.md"));
+        let same_notes = updated.iter().find(|file| file.display_name == "notes.md").unwrap();
+        assert_eq!(same_notes.id, notes.id);
+        assert_eq!(same_notes.file_size, 7);
+
         assert!(store.remove_file_source(&source.id).unwrap());
         assert!(store.list_file_sources().unwrap().is_empty());
         assert!(store
@@ -4276,7 +4336,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(notes_path.exists());
-        assert!(report_path.exists());
+        assert!(!report_path.exists());
 
         drop(store);
         let _ = std::fs::remove_dir_all(root);
@@ -4493,5 +4553,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(destination);
         let _ = std::fs::remove_file(database_path);
+    }
+}
+
+#[cfg(all(test, feature = "zvec"))]
+mod library_latency_probe {
+    use super::*;
+    #[test]
+    #[ignore = "requires an explicit snapshot of an actual library"]
+    fn measure_actual_library_reads() {
+        let root = std::env::var("FOX_LIBRARY_BENCH_ROOT").expect("snapshot root");
+        let resources = std::env::var("FOX_LIBRARY_BENCH_DLL").expect("Zvec DLL directory");
+        let store = LocalKnowledgeStore::open_retrieval_worker(&root, Some(Path::new(&resources))).unwrap();
+        for iteration in 0..5 {
+            let started = std::time::Instant::now();
+            let bases = store.list_bases().unwrap();
+            println!("LIBRARY_BENCH list iteration={} elapsed_ms={:.3} bases={}", iteration, started.elapsed().as_secs_f64()*1000.0, bases.len());
+            for base in bases {
+                let started = std::time::Instant::now();
+                let detail = store.get_base(&base.id).unwrap();
+                println!("LIBRARY_BENCH detail iteration={} id={} elapsed_ms={:.3} vectors={:?} ready={}", iteration, base.id, started.elapsed().as_secs_f64()*1000.0, detail.vector_count, detail.vector_index_ready);
+            }
+        }
+        let base = store.list_bases().unwrap().remove(0);
+        let generation = base.active_index_generation.as_deref().unwrap();
+        let count = base.vector_count.unwrap() as usize;
+        let dimension = base.embedding_model.as_ref().unwrap().dimension as usize;
+        let started = std::time::Instant::now();
+        store.zvec_vector_store().unwrap().open_generation(&base.id, generation, dimension, count).unwrap();
+        println!("LIBRARY_BENCH raw_index_open_check_close elapsed_ms={:.3}", started.elapsed().as_secs_f64()*1000.0);
+        assert!(store.validate_zvec_generation_readable(&base.id, generation, dimension, count + 1).is_err(), "changed count must not reuse a successful check");
+        let expired = std::time::Instant::now() - std::time::Duration::from_secs(31);
+        for entry in store.generation_checks.lock().unwrap().values_mut() { entry.0 = expired; }
+        assert!(store.get_base(&base.id).unwrap().vector_index_ready);
+        assert!(store.generation_checks.lock().unwrap().values().any(|entry| entry.0 > expired));
+        println!("LIBRARY_BENCH invalidation=count-change,expiry passed");
     }
 }

@@ -1603,13 +1603,27 @@ impl LocalKnowledgeStore {
         dimension: usize,
         expected_count: usize,
     ) -> Result<(), LocalKnowledgeError> {
+        // This cache is only for page capability status; retrieval still opens and validates its index.
+        let directory = self.root.join("indexes").join(knowledge_base_id).join(generation_id);
+        let key = format!("{}:{knowledge_base_id}:{generation_id}:{dimension}:{expected_count}:{:?}", self.root.display(), self.zvec_resource_dir);
+        let fingerprint = generation_status_fingerprint(&directory)?;
+        if self.generation_checks.lock().map_err(|_| LocalKnowledgeError::storage("generation status cache poisoned"))?
+            .get(&key).is_some_and(|(checked, previous)| checked.elapsed().as_secs() < 30 && previous == &fingerprint) {
+            return Ok(());
+        }
         self.zvec_vector_store()
             .and_then(|store| {
                 store
                     .open_generation(knowledge_base_id, generation_id, dimension, expected_count)
                     .map_err(|error| LocalKnowledgeError::storage(error.to_string()))
-            })
-            .map(|_| ())
+            })?;
+        // Opening Zvec may update its manifest. Record the settled state, and never cache failures.
+        let fingerprint = generation_status_fingerprint(&directory)?;
+        let mut cache = self.generation_checks.lock().map_err(|_| LocalKnowledgeError::storage("generation status cache poisoned"))?;
+        cache.retain(|_, (checked, _)| checked.elapsed().as_secs() < 30);
+        if cache.len() >= 256 { cache.clear(); }
+        cache.insert(key, (std::time::Instant::now(), fingerprint));
+        Ok(())
     }
 }
 
@@ -3244,5 +3258,39 @@ mod tests {
         assert!(!health.fallback_active, "{}", health.message);
         drop(store);
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(feature = "zvec")]
+fn generation_status_fingerprint(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>, LocalKnowledgeError> {
+    let mut entries = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if entry.file_type()?.is_dir() { directories.push(entry.path()); }
+            else { entries.push((entry.path(), metadata.len(), metadata.modified().ok())); }
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries)
+}
+
+#[cfg(all(test, feature = "zvec"))]
+mod generation_status_tests {
+    use super::*;
+    #[test]
+    fn fingerprint_detects_file_changes_and_missing_generations() {
+        let root = std::env::temp_dir().join(format!("fox-generation-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("segment")).unwrap();
+        std::fs::write(root.join("segment/index"), b"first").unwrap();
+        let first = generation_status_fingerprint(&root).unwrap();
+        std::fs::write(root.join("segment/index"), b"changed size").unwrap();
+        assert_ne!(first, generation_status_fingerprint(&root).unwrap());
+        std::fs::remove_file(root.join("segment/index")).unwrap();
+        assert_ne!(first, generation_status_fingerprint(&root).unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(generation_status_fingerprint(&root).is_err());
     }
 }

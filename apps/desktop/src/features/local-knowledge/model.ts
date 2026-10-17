@@ -123,6 +123,7 @@ export interface LocalKnowledgeFileSource {
   id: string
   rootPath: string
   displayName: string
+  description?: string
   fileCount: number
   totalSize: number
   lastScannedAt: string | null
@@ -353,7 +354,7 @@ export interface LocalKnowledgeGateway {
   pickFileSourceFolder(): Promise<string | null>
   addFileSource(path: string): Promise<LocalKnowledgeFileSource>
   rescanFileSource(id: string): Promise<LocalKnowledgeFileSource>
-  updateFileSource(id: string, displayName: string): Promise<LocalKnowledgeFileSource>
+  updateFileSource(id: string, displayName: string, description?: string): Promise<LocalKnowledgeFileSource>
   removeFileSource(id: string): Promise<boolean>
   listLocalFiles(options?: { sourceId?: string; query?: string; category?: LocalFileCategory; limit?: number; offset?: number }): Promise<LocalKnowledgeCatalogFile[]>
   readLocalFileRange(id: string, start: number, end: number): Promise<unknown>
