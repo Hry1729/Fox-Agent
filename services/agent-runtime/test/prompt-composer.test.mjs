@@ -8,6 +8,13 @@ import {
   stablePromptHash,
 } from '../src/prompt-composer.mjs'
 
+test('final file references select tool records without granting publication or verification', () => {
+  const { prompt } = composeFoxPrompt({ systemPrompt: 'Fox', context: { permissionMode: 'read_only' } })
+  assert.match(prompt, /\[filename\]\(#fox-artifact=ARTIFACT_ID\)/)
+  assert.match(prompt, /exact artifact id returned by a successful tool result in this run/)
+  assert.match(prompt, /do not publish files, grant write permission, satisfy delivery gates, or imply verification/)
+})
+
 test('uses the Host frozen delivery targets verbatim for prompt placement', () => {
   const deliveryTargets = { schemaVersion: 1, recognition: 'recognized', defaultDirectory: 'fox/session-results', targets: [
     { itemKey: 'file:root-report.md', path: 'root-report.md', directory: null },
