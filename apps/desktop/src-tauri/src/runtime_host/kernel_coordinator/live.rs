@@ -51,9 +51,24 @@ enum Stage {
 /// distinct: a plain completion, the generic bounded stop-review, the bounded
 /// business-delivery repair, and answering additional user input that was
 /// accepted while this round was in flight.
-enum StopFollowup {
+/// Where the live session goes after one round's stop.
+///
+/// `pub(super)` because the live-lane tests drive the same mapping through
+/// [`KernelCoordinator::typed_live_followup`] and then commit its result; a test
+/// that re-declared the enum could assert a route production never takes.
+pub(super) enum StopFollowup {
     /// Accept the stop as the Run's final answer.
     Final,
+    /// A typed verdict whose own class is a **definite non-pass**. Like `Final`
+    /// it arms no directive and completes nothing, but the Run must not be
+    /// reported as completed: the delivery did not pass, so the outcome is the
+    /// class's own canonical failure. Kept as its own variant instead of a flag
+    /// on `Final` so the two terminal outcomes cannot be confused at the one
+    /// place that writes them.
+    Failed {
+        code: &'static str,
+        message: String,
+    },
     /// A settled response while original compute Jobs remain unfinished.
     Park { history_json: String, response_json: String,
         jobs: Vec<kernel::WaitingJobFact> },
@@ -73,6 +88,23 @@ enum StopFollowup {
     /// `steering` continuation lane and round, so a normal completion can never
     /// silently discard a request the user was told was received.
     Steering(fox_engine_protocol::KernelInitialModelInput),
+    /// Package 2-D U1: the delivery gate reached a `RequiresU1` verdict. The Run
+    /// is parked on `awaiting_delivery_review` until the user accepts each
+    /// unverified item or supplies more evidence.
+    ///
+    /// Before this variant the live lane had no way to express that: it returned
+    /// `Err`, which failed the round and therefore the Run. A `RequiresU1`
+    /// verdict is neither a pass nor a failure, so neither `Final` nor `Failed`
+    /// is the right answer — and `Repair` would arm a model repair round the
+    /// product explicitly does not want for an unverified delivery.
+    ///
+    /// `outstanding_items` are the verdict's own non-passed rows, carried with the
+    /// follow-up so the park writes exactly what this decision observed rather
+    /// than re-reading the checklist a second time.
+    AwaitDeliveryReview {
+        reason: String,
+        outstanding_items: Vec<String>,
+    },
 }
 
 /// The Host execute callback must be shareable across the bounded read-only
@@ -499,6 +531,85 @@ impl KernelCoordinator<'_> {
         }
     }
 
+    /// Turn one already computed **typed** stop into the live lane's follow-up.
+    ///
+    /// The one definition of the class -> live-route mapping, shared by the real
+    /// round service and the tests that drive it: a `RepairNeeded` delivery must
+    /// arm its repair round (not be finished), and a definite non-pass must
+    /// terminate with its own class's canonical reason (not be reported as a
+    /// completed Run). Taking `Final` for every non-U1 class is precisely the
+    /// defect the repair round fixes, so the mapping is not duplicated where a
+    /// second copy could disagree.
+    fn typed_live_followup(
+        &self,
+        typed: Box<super::super::delivery::TypedDeliveryStop>,
+        pre_history: &[Value],
+        output: &Value,
+    ) -> Result<(super::super::delivery::DeliveryStop, StopFollowup), String> {
+        // A requires-U1 verdict used to be impossible here: the only constructor
+        // (`delivery::typed_stop_from_verdict`) refuses to build a typed stop for
+        // one, because no `StopFollowup` could express "not passed, not failed, not
+        // repaired and not waiting". Package 2-D U1 adds that expression, so the
+        // lane parks instead of erroring — and the error is kept as a fail-closed
+        // guard for any path that reaches this function without one.
+        if typed.verdict.requires_u1() {
+            let reason = match &typed.verdict.disposition() {
+                crate::runtime_host::delivery::DeliveryDisposition::RequiresU1 { reason } => {
+                    reason.clone()
+                }
+                _ => "交付内容尚未核验，等待用户逐项处理".to_owned(),
+            };
+            let outstanding_items = typed
+                .rows
+                .iter()
+                .filter(|row| !row.passed)
+                .map(|row| row.item_key.clone())
+                .collect::<Vec<_>>();
+            return Ok((
+                super::super::delivery::DeliveryStop::Typed(typed),
+                StopFollowup::AwaitDeliveryReview {
+                    reason,
+                    outstanding_items,
+                },
+            ));
+        }
+        let stop = super::super::delivery::DeliveryStop::Typed(typed);
+        let followup = match stop.route() {
+            // The class chooses the failure centrally; the terminal write carries
+            // that reason and no second one.
+            super::super::delivery::DeliveryRoute::Fail { code, message } => {
+                StopFollowup::Failed { code, message }
+            }
+            super::super::delivery::DeliveryRoute::Repair => {
+                let Some(prompt) = stop.repair_prompt().map(str::to_owned) else {
+                    return Err(
+                        "a repairable typed verdict reached the live lane without its repair \
+                         instruction"
+                            .into(),
+                    );
+                };
+                let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
+                input.messages = pre_history.to_vec();
+                input.messages.push(output.clone());
+                input.messages.push(json!({"role":"user","content":[{"type":"text","text":prompt.clone()}],"timestamp":0}));
+                input.validate()?;
+                StopFollowup::Repair { prompt, input }
+            }
+            super::super::delivery::DeliveryRoute::Complete => StopFollowup::Final,
+            super::super::delivery::DeliveryRoute::RequiresU1 { reason } => {
+                // Unreachable: the guard above already returned. Kept as a
+                // fail-closed arm so a future refactor cannot silently fall
+                // through to `Final` and complete a Run whose delivery was never
+                // verified.
+                StopFollowup::AwaitDeliveryReview {
+                    reason,
+                    outstanding_items: Vec::new(),
+                }
+            }
+        };
+        Ok((stop, followup))
+    }
+
     /// Commit the durable record for one engine round output and produce the
     /// directive that keeps the live session going.
     #[allow(clippy::too_many_arguments)]
@@ -704,6 +815,15 @@ impl KernelCoordinator<'_> {
                     });
                     StopFollowup::Repair { prompt, input }
                 }
+                super::super::delivery::DeliveryStop::Typed(typed) => {
+                    // The class -> follow-up mapping lives in one production
+                    // function so the branch driven here is the branch a test
+                    // drives, rather than a copy of it.
+                    let (stop, followup) =
+                        self.typed_live_followup(typed, &pre_history, &output)?;
+                    delivery_outcome = Some(stop);
+                    followup
+                }
                 other => {
                     // Kept only until the steering re-check below decides this
                     // round's actual end state: a delivery ledger row is written
@@ -809,7 +929,8 @@ impl KernelCoordinator<'_> {
         // Queued rows are bound to the directive this decision arms (a batch
         // directive after a tool proposal, a continuation directive after a
         // non-tool follow-up). A Final response arms nothing: the terminal
-        // write-set cancels open rows instead.
+        // write-set cancels open rows instead. A `Failed` response is terminal
+        // for the same reason — it arms no directive either.
         let response_event_seq = self
             .controller
             .lock()
@@ -873,6 +994,18 @@ impl KernelCoordinator<'_> {
                 outcome,
                 crate::database::now_ms(),
             )?;
+            // A typed stop stages only its terminal rows. The non-terminal
+            // siblings (`Unconfirmed`) have no terminal of their own to commit,
+            // so their facts are retained here, under this same decision, on the
+            // pending rows the stage deliberately did not touch. Without it, a
+            // mixed verdict loses the unknown facts at exactly the moment the
+            // aggregate refuses on them.
+            super::super::delivery::retain_pending_typed_stop(
+                &self.database,
+                &self.binding.run_id,
+                outcome,
+                crate::database::now_ms(),
+            )?;
         }
         #[cfg(test)]
         test_barrier::fire(&format!("{}:delivery:staged", self.binding.run_id));
@@ -919,6 +1052,26 @@ impl KernelCoordinator<'_> {
                         pending_rows.clear();
                         steering_decision=None;
                         let jobs=self.unfinished_compute_wait_facts()?;
+                        // The refused round is re-planned. Outstanding child
+                        // Jobs and pending notices outrank the original
+                        // terminal, but the terminal itself is remembered: a
+                        // delivery that did not pass must not be quietly
+                        // completed just because a job notice raced the
+                        // commit. `Failed` arms no directive, so it can be
+                        // carried across this reschedule unchanged.
+                        //
+                        // `AwaitDeliveryReview` is carried too: it is a
+                        // non-terminal decision, and falling through to `Final`
+                        // here would complete a Run whose delivery was never
+                        // verified — exactly the defect the parked state exists
+                        // to prevent.
+                        let terminal = match stop_followup {
+                            StopFollowup::Failed { code, message } => {
+                                StopFollowup::Failed { code, message }
+                            }
+                            StopFollowup::AwaitDeliveryReview { .. } => stop_followup,
+                            _ => StopFollowup::Final,
+                        };
                         stop_followup=if !jobs.is_empty() {
                             StopFollowup::Park {
                                 history_json:serde_json::to_string(&pre_history)
@@ -928,7 +1081,7 @@ impl KernelCoordinator<'_> {
                         } else if let Some((input,notices))=
                             self.job_notice_followup_input(&pre_history,&output)? {
                             StopFollowup::JobNotice {input,notices}
-                        } else {StopFollowup::Final};
+                        } else {terminal};
                     }
                     delivery_outcome=None;
                     // The round is being handed to a job-notice/park/final
@@ -1109,7 +1262,11 @@ impl KernelCoordinator<'_> {
         // therefore measures the exact bytes of the next request — including the
         // steering notices appended to it — before the dispatch is armed.
         let armed_followup = match &stop_followup {
-            StopFollowup::Final | StopFollowup::Park { .. } | StopFollowup::JobNotice { .. } => None,
+            StopFollowup::Final
+            | StopFollowup::Failed { .. }
+            | StopFollowup::Park { .. }
+            | StopFollowup::JobNotice { .. }
+            | StopFollowup::AwaitDeliveryReview { .. } => None,
             StopFollowup::Review(input) => Some((CONTINUATION_PROMPT.to_owned(), input)),
             StopFollowup::Repair { prompt, input } => Some((prompt.clone(), input)),
             StopFollowup::Steering(input) => Some((STEERING_PROMPT.to_owned(), input)),
@@ -1607,6 +1764,93 @@ impl<'a> KernelCoordinator<'a> {
             .expect("Kernel coordinator lock")
             .last_event_seq()
     }
+
+    /// Drive the **production** live-lane class mapping for an already computed
+    /// typed stop, and return which terminal follow-up it chose.
+    ///
+    /// Exposed so the live-lane tests can assert the mapping and then commit the
+    /// very follow-up it produced through the real `commit_tail` — not a
+    /// reimplementation of either. The two halves are returned together because
+    /// the defect being guarded is precisely a disagreement between them: the
+    /// route said `Repair`/`Fail` while the committed outcome said `Completed`.
+    pub(super) fn typed_live_followup_for_test(
+        &self,
+        stop: super::super::delivery::DeliveryStop,
+        pre_history: &[Value],
+        output: &Value,
+    ) -> Result<TypedLiveFollowup, String> {
+        let (stop, followup) = self.typed_live_followup_for_route(stop, pre_history, output)?;
+        let terminal = match &followup {
+            StopFollowup::Final => Some("completed".to_owned()),
+            StopFollowup::Failed { code, .. } => Some(format!("failed:{code}")),
+            StopFollowup::Repair { prompt, .. } => Some(format!("repair:{prompt}")),
+            StopFollowup::Park { .. } | StopFollowup::JobNotice { .. } | StopFollowup::Review(_)
+            | StopFollowup::Steering(_) | StopFollowup::AwaitDeliveryReview { .. } => None,
+        };
+        Ok(TypedLiveFollowup {
+            stop,
+            followup,
+            terminal,
+        })
+    }
+
+    /// The route-only half, so a test can commit the follow-up itself.
+    pub(super) fn typed_live_followup_for_route(
+        &self,
+        stop: super::super::delivery::DeliveryStop,
+        pre_history: &[Value],
+        output: &Value,
+    ) -> Result<
+        (
+            super::super::delivery::DeliveryStop,
+            StopFollowup,
+        ),
+        String,
+    > {
+        let super::super::delivery::DeliveryStop::Typed(typed) = stop else {
+            return Err("a live typed follow-up needs a typed stop".into());
+        };
+        self.typed_live_followup(typed, pre_history, output)
+    }
+
+    /// Commit an already computed live follow-up through the real `commit_tail`
+    /// and the real decision write-set.
+    ///
+    /// The terminal outcome is decided by the same function the live loop calls,
+    /// so a test cannot pass by asserting a mapping that no code path uses: the
+    /// refusal and the committed Kernel state come from one implementation.
+    pub(super) fn commit_typed_followup_for_test(
+        &self,
+        followup: &StopFollowup,
+        policy: &dyn kernel::PolicyDecisionPort,
+    ) -> Result<(), String> {
+        let data_root_id = self.database.kernel_data_root_id();
+        self.apply_decision(
+            None,
+            |controller, now| {
+                commit_tail(
+                    controller,
+                    now,
+                    &data_root_id,
+                    policy,
+                    &None,
+                    followup,
+                )
+            },
+            None,
+            None,
+        )
+    }
+}
+
+/// What the live lane decided for one typed stop, as a test can observe it.
+#[cfg(test)]
+pub(super) struct TypedLiveFollowup {
+    pub stop: super::super::delivery::DeliveryStop,
+    pub followup: StopFollowup,
+    /// `completed`, `failed:<code>`, `repair:<prompt>`, or `None` for a
+    /// non-terminal follow-up.
+    pub terminal: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1647,6 +1891,15 @@ fn commit_tail(
     }
     match stop_followup {
         StopFollowup::Final => Ok(controller.terminate(kernel::RunOutcome::Completed)),
+        // The typed verdict's own class is a definite non-pass. Terminating
+        // `Completed` here is exactly the defect: the delivery ledger says the
+        // delivery did not pass, and the Run outcome has to agree with it.
+        StopFollowup::Failed { code, message } => Ok(controller.terminate(
+            kernel::RunOutcome::Failed {
+                code: (*code).into(),
+                message: message.clone(),
+            },
+        )),
         StopFollowup::Park { history_json, response_json, jobs } => {
             let response_seq = controller.last_event_seq();
             controller.park_waiting_jobs(now.monotonic_ms, now.wall_ms,
@@ -1673,6 +1926,16 @@ fn commit_tail(
             &serde_json::to_string(input)
                 .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
         ),
+        // Package 2-D U1: park on the delivery, exactly as the completion lane
+        // does. The outstanding items travel with the follow-up, so the park
+        // writes exactly what this decision observed.
+        StopFollowup::AwaitDeliveryReview { reason, outstanding_items } => controller
+            .park_awaiting_delivery_review(
+                now.monotonic_ms,
+                now.wall_ms,
+                reason,
+                outstanding_items,
+            ),
     }
 }
 

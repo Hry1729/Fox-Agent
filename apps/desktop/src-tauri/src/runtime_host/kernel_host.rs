@@ -1437,7 +1437,15 @@ pub(super) fn drive_with_actions_transport(
                     .map(|_| ()),
                 _ => unreachable!(),
             }
-        } else if snapshot.state == "waiting_approval" || snapshot.state == "retry_scheduled" {
+        } else if snapshot.state == "waiting_approval"
+            || snapshot.state == "retry_scheduled"
+            // Package 2-D U1: a Run parked on an unverified delivery has no
+            // dispatchable work by design — the user must accept (per item) or
+            // supply more evidence. Yielding here is the whole point: without
+            // this arm the Run falls through to `kernel.no_progress` and is
+            // reported as a failure, which is exactly the pre-2-D behaviour.
+            || snapshot.state == "awaiting_delivery_review"
+        {
             // Sample the spin only when the timeline switch is on: no counter
             // table, no formatted string, and no lock is touched otherwise.
             #[cfg(test)]
@@ -1894,11 +1902,19 @@ impl super::RuntimeHost {
 
     pub(super) fn record_kernel_start_failure(&self, run_id: &str) -> Result<(), String> {
         let _ownership = acquire(&self.sessions_dir, run_id)?;
-        if self.database.kernel_host_run_state(run_id)?.as_deref() == Some("waiting_jobs")
+        let settled_park = matches!(
+            self.database.kernel_host_run_state(run_id)?.as_deref(),
+            Some("waiting_jobs") | Some("awaiting_delivery_review")
+        );
+        if settled_park
             && !self.database.pending_kernel_host_commands(run_id)?
                 .iter().any(|command| command.kind == "cancel") {
-            // The first model response is already settled. A failure to reopen
-            // the Host cannot turn a parked Run into a false execution failure.
+            // Both parked states have already settled their model round and are
+            // deliberately non-terminal: `waiting_jobs` released its Host
+            // session, and `awaiting_delivery_review` parked because its
+            // delivery was never verified. A failure to reopen the Host cannot
+            // turn either into a false execution failure, which would destroy
+            // the park a later U1 decision is the only thing allowed to resolve.
             return Ok(());
         }
         if self.database.kernel_fail_before_aggregate(run_id)? {

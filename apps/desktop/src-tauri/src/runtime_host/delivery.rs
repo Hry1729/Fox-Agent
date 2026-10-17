@@ -29,7 +29,7 @@ use crate::database::{
 use calamine::{open_workbook_auto_from_rs, Data as CellData, Reader};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,86 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "delivery_content_requirements.rs"]
 mod content_requirements;
+
+// Package 2-D U1: the rule that decides whether a user's acceptance of an
+// unverified delivery still stands. Registered beside the module that owns the
+// verification result it reads, so the two share one vocabulary rather than a
+// second copy of it.
+#[path = "delivery_u1.rs"]
+pub(crate) mod delivery_u1;
+
+// Package 2-A tests (Host strict spec decoding + typed delivery reads).
+// Test-only registration; the production modules above are unchanged.
+#[cfg(test)]
+#[path = "p2a_host_decode_tests.rs"]
+mod p2a_host_decode_tests;
+
+// Package 2-B1 internal classification and pure aggregation core.
+// Package 2-E gives it production callers: `route_typed_run` folds the mixed
+// rows through it, and `legacy_verdict_decision` translates a v1 verdict into
+// its fact vocabulary. It is not a second gate — the `:957` version gate is
+// untouched — and its own tests are `cfg(test)` inside the file.
+#[path = "p2b_decision.rs"]
+mod p2b_decision;
+
+// Package 2-B2 typed consumer of a 2-B1 decision: class -> consumer disposition,
+// plus the version-isolated durable verdict encoding. The Host/Kernel edges and
+// the durable writes live at their own call sites in this module.
+#[path = "p2b_consumer.rs"]
+mod p2b_consumer;
+
+// Package 2-C1 the durable **contract identity** of one checklist row, read from
+// its own frozen `requirements_json`, plus the one pass-qualification rule that
+// reads that identity together with the row's finding.
+//
+// This is not a second six-class policy: the classification of *facts* stays in
+// `p2b_decision`, the verdict envelope stays in `p2b_consumer`, and this module
+// only answers which contract a row's own frozen requirement column selects.
+#[path = "p2b_contract_identity.rs"]
+mod p2b_contract_identity;
+
+// Re-exported so a consumer branch outside this module can name the classification
+// class without reaching into `p2b_decision`'s private module surface.
+pub(crate) use p2b_decision::DeliveryClass;
+
+// The typed consumer vocabulary the Host edges name directly.
+//
+// Package 2-B2 put the class -> disposition mapping here and the Host edges live
+// in `kernel_coordinator`, so the disposition type, the verdict it is derived
+// from and the decoded durable record must be nameable from there. These three
+// are the **only** widening: no module becomes public, no behaviour changes, and
+// `decode_verdict` stays reachable exactly as before.
+pub(crate) use p2b_consumer::{DeliveryDisposition, DeliveryVerdict};
+
+// The **one** rule that decides whether durable finding bytes may be shown as a
+// pass. Exported because the real read/display consumer lives in
+// `database::repositories::delivery_checks` (the projection behind
+// `load_conversation`), and that path must consult the same decision this module's
+// encoder produced rather than re-deriving it. It is a pure function over the
+// durable column text: it reads no database, writes nothing, and knows nothing
+// about statuses.
+pub(crate) use p2b_consumer::display_pass_of_finding;
+
+// Package 2-C1: the **one** downgrade guard every pass consumer shares, now
+// identity-aware. Exported for the same reason as the rule above: the checklist
+// projection (`database::repositories::delivery_checks`), the artifact view
+// (`database::repositories::artifact_delivery_view`), the finalize write defence
+// and the terminal model-failure progress summary all answer the same pass
+// question about the same durable row, so they must take one decision and not
+// four. It only ever withholds a pass; it never re-derives a status, so the write
+// side's own `failed` verdicts survive, and it can never promote a pass either.
+pub(crate) use p2b_contract_identity::{PassQualification, passed_qualification_of_row};
+
+// Test-only re-exports, so the real-Host consumer tests registered beside the
+// coordinator can build a verdict and decode a stored one.
+#[cfg(test)]
+pub(crate) use p2b_consumer::{
+    decode_verdict as decode_stored_verdict, ItemDecision, StoredVerdict,
+};
+#[cfg(test)]
+pub(crate) use p2b_decision::{
+    decide as decide_facts, DecisionFact, DecisionResult, FactClass, FactOrigin,
+};
 
 pub(crate) fn ensure_frozen_content_writable(database:&Database,run:&str,task:Option<&str>,root:&str,target:&Path)->Result<(),String> {
     content_requirements::ensure_concat_writable(database,run,task,root,target)
@@ -1176,6 +1256,14 @@ fn project_relative_path(named: &str, project_root: Option<&str>) -> Option<Stri
     (!text.is_empty()).then_some(text)
 }
 
+/// The same relative-path decision [`project_relative_path`] makes, exposed for
+/// the U1 acceptance rule, which has to resolve the accepted candidate against
+/// the **current** authorization root. It is the same function, not a second
+/// spelling of the rule, so the two cannot drift apart.
+pub(crate) fn project_relative_path_for_u1(named: &str, project_root: Option<&str>) -> Option<String> {
+    project_relative_path(named, project_root)
+}
+
 /// A directory token is named as input when an input verb introduces it, or
 /// when the task reads *from* it ("in/docs/ 目录中的文档").
 fn mention_names_input_directory(text: &str, token: &str) -> bool {
@@ -1630,7 +1718,7 @@ pub(crate) struct ItemVerdict {
 }
 
 /// What the stop handler should do after the model's reply ended.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum DeliveryStop {
     /// Not a file-producing task (no checklist rows): normal stop handling.
     NoChecklist,
@@ -1644,6 +1732,74 @@ pub(crate) enum DeliveryStop {
         prompt: String,
         findings_json: String,
     },
+    /// A typed v2 verdict was computed by the package-2-B2 consumer, which the
+    /// Host must act on **without re-evaluating** the gate.
+    ///
+    /// This is a separate variant rather than a reinterpretation of `Passed` /
+    /// `Exhausted` precisely so that the three existing variants keep their exact
+    /// meaning (their `items: Vec<ItemVerdict>` shape carries only the legacy
+    /// `passed` boolean, which cannot express a class). The pre-computed typed
+    /// verdict, its class and the items the terminal write may carry all travel
+    /// with it, so the terminal path never re-runs `evaluate_stop` and never
+    /// loses the classification.
+    ///
+    /// Package 2-E constructs it: [`route_typed_run`] folds a Run whose frozen rows
+    /// are not all legal v1 records, and it is the only production constructor. A
+    /// Run whose rows are all v1 never reaches it — `evaluate_stop` keeps returning
+    /// the three legacy variants for those, byte for byte.
+    Typed(Box<TypedDeliveryStop>),
+}
+
+/// A typed v2 verdict carried by [`DeliveryStop::Typed`].
+#[derive(Debug, Clone)]
+pub(crate) struct TypedDeliveryStop {
+    /// The folded verdict, including every retained fact.
+    pub verdict: p2b_consumer::DeliveryVerdict,
+    /// One row per checklist item, already encoded in the durable v2 form.
+    pub rows: Vec<TypedDeliveryRow>,
+    /// Items the terminal stage may write. Deliberately **excludes** every
+    /// non-terminal (e.g. `Unconfirmed`) item, which must never borrow the
+    /// terminal stage's `passed = 0` and be finalized as `failed`.
+    pub terminal_items: Vec<StagedDeliveryItem>,
+    /// Items retained on the non-terminal path, `(item_key, finding)`.
+    pub pending_items: Vec<(String, String)>,
+    /// The repair instruction, present **only** when the aggregate class is
+    /// `RepairNeeded`.
+    ///
+    /// A typed stop carries no legacy `ItemVerdict`, so the repair prompt cannot
+    /// be rebuilt from `items()`: a `RepairNeeded` stop that arrived without its
+    /// prompt would arm a repair round that tells the model nothing. Built once,
+    /// here, from the same verdict that produced the rows.
+    pub repair_prompt: Option<String>,
+    /// The repair-round audit payload, present exactly when `repair_prompt` is.
+    /// `stage_delivery_outcome` derives the durable `delivery_repair_rounds`
+    /// gain from this string, so a typed repair round is auditable the same way
+    /// the legacy one is.
+    pub repair_findings_json: Option<String>,
+}
+
+/// One item's encoded v2 verdict row.
+#[derive(Debug, Clone)]
+pub(crate) struct TypedDeliveryRow {
+    pub item_key: String,
+    /// Whether this row may be written as passed. Only an explicitly `Confirmed`
+    /// item is.
+    pub passed: bool,
+    /// The full durable finding, including the v2 verdict envelope.
+    pub finding_json: String,
+    /// The class token, kept so a reader can report the category without
+    /// decoding the whole envelope.
+    pub class: &'static str,
+    /// Whether this item's class is a **final** outcome, as opposed to one that
+    /// still has a live repair round in front of it.
+    pub terminal: bool,
+    /// Whether the terminal stage may carry this row.
+    ///
+    /// This is a different question from `terminal`: a `RepairNeeded` item is
+    /// staged and finalized exactly as the legacy repair round does, yet it is
+    /// not final. Only `Unconfirmed` is excluded — it has no decision of its own
+    /// to commit, so staging it would let `passed = 0` be finalized as `failed`.
+    pub stage: bool,
 }
 
 impl DeliveryStop {
@@ -1653,15 +1809,431 @@ impl DeliveryStop {
             DeliveryStop::Passed { items }
             | DeliveryStop::Exhausted { items }
             | DeliveryStop::Repair { items, .. } => items,
+            // A typed verdict carries no legacy `ItemVerdict`: its rows are the
+            // encoded form, which is the only shape that can express a class.
+            // Reporting the legacy view here would silently lose it.
+            DeliveryStop::Typed(_) => &[],
         }
     }
 
     /// The repair-round audit payload, when this stop armed one.
+    ///
+    /// Both lanes that can arm a repair round answer here: the legacy
+    /// `Repair` gate, and a typed verdict whose aggregate class is
+    /// `RepairNeeded`. A typed `Unconfirmed`/terminal stop answers `None`, which
+    /// is what keeps `delivery_repair_rounds` from gaining a round for a
+    /// delivery that was never asked to repair anything.
     pub(crate) fn repair_findings(&self) -> Option<&str> {
         match self {
             DeliveryStop::Repair { findings_json, .. } => Some(findings_json),
+            DeliveryStop::Typed(typed) => typed.repair_findings_json.as_deref(),
             _ => None,
         }
+    }
+
+    /// The repair instruction, when this stop armed a repair round.
+    pub(crate) fn repair_prompt(&self) -> Option<&str> {
+        match self {
+            DeliveryStop::Repair { prompt, .. } => Some(prompt),
+            DeliveryStop::Typed(typed) => typed.repair_prompt.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The typed v2 verdict, when this stop carries one.
+    pub(crate) fn typed(&self) -> Option<&TypedDeliveryStop> {
+        match self {
+            DeliveryStop::Typed(typed) => Some(typed),
+            _ => None,
+        }
+    }
+
+    /// Re-check that this stop can be written at all.
+    ///
+    /// Every write entry — stage, retention, terminal — calls this before its
+    /// first statement, so one shared check decides whether an ambiguous verdict
+    /// may reach the ledger. A typed stop is built by
+    /// [`typed_stop_from_verdict`], which already refuses an ambiguous verdict; a
+    /// stop built any other way (a test helper, or a future producer) is checked
+    /// here rather than being trusted. The legacy variants carry no verdict and
+    /// always pass.
+    pub(crate) fn validate(&self) -> Result<(), TypedRowAmbiguity> {
+        let Some(typed) = self.typed() else {
+            return Ok(());
+        };
+        check_row_ambiguity(&typed.verdict)
+    }
+
+    /// What a consumer must do about this stop.
+    ///
+    /// **The one definition of the class -> route mapping.** Both terminal lanes
+    /// take their route from here, so a class cannot be completed by one lane and
+    /// failed by the other. In particular the mapping is derived from the verdict
+    /// class, never from "is this stop typed": that conflation is what let a
+    /// `RepairNeeded` delivery be terminated as `Completed` and a `Refused` one be
+    /// terminated with a caller-supplied reason.
+    ///
+    /// The legacy variants have no class of their own and keep the routing they
+    /// have always had.
+    pub(crate) fn route(&self) -> DeliveryRoute {
+        match self {
+            DeliveryStop::Typed(typed) => typed.route(),
+            // The legacy no-checklist case has nothing to stage; the caller still
+            // routes it to completion, and the mark decision is made there.
+            DeliveryStop::NoChecklist | DeliveryStop::Passed { .. } => DeliveryRoute::Complete,
+            // An exhausted legacy gate has no repair round left to arm, so the
+            // Run ends as it always did.
+            DeliveryStop::Exhausted { .. } => DeliveryRoute::Complete,
+            DeliveryStop::Repair { .. } => DeliveryRoute::Repair,
+        }
+    }
+}
+
+impl TypedDeliveryStop {
+    /// What the verdict's **own class** requires. See [`DeliveryStop::route`].
+    pub(crate) fn route(&self) -> DeliveryRoute {
+        match self.verdict.disposition() {
+            p2b_consumer::DeliveryDisposition::Accept => DeliveryRoute::Complete,
+            p2b_consumer::DeliveryDisposition::Repair => DeliveryRoute::Repair,
+            p2b_consumer::DeliveryDisposition::Terminal { code, message, .. } => {
+                DeliveryRoute::Fail { code, message }
+            }
+            p2b_consumer::DeliveryDisposition::RequiresU1 { reason } => {
+                DeliveryRoute::RequiresU1 { reason }
+            }
+        }
+    }
+}
+
+/// What happens to the Run after a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeliveryRoute {
+    /// Finalize the staged verdicts and report the Run as completed.
+    Complete,
+    /// Arm one bounded repair round; the Run stays non-final.
+    Repair,
+    /// The class's own definite non-pass, with its own canonical reason.
+    Fail {
+        code: &'static str,
+        message: String,
+    },
+    /// Neither complete nor fail: no terminal write at all.
+    RequiresU1 { reason: String },
+}
+
+/// Consume an already-computed v2 decision as a typed [`DeliveryStop`].
+///
+/// This is the package-2-B2 Host edge: it maps the consumer's disposition onto
+/// the stop vocabulary **without calling `evaluate_stop` again**, so the
+/// classification, the retained facts and the decision mark cannot drift from the
+/// verdict they belong to.
+///
+/// The disposition decides which vocabulary the verdict lands in:
+/// * `Accept`, `Repair` and `Terminal` become a typed stop, for the ordinary
+///   completion / repair / failed-terminal paths;
+/// * `RequiresU1` has no stop **through this entry point** and is returned as
+///   `Err`. It is not a weaker stop: every variant this function can return either
+///   completes the Run or fails it, so a caller that must not guess needs the
+///   verdict back. The caller either routes it to
+///   [`retain_pending_typed_outcome`], which keeps the pending state and the facts
+///   without any terminal write, or — in production, where the deferred Run must
+///   still be carried as a stop so its rows reach the retention path — builds the
+///   deferred stop with [`typed_stop_from_rows`] on the returned verdict. That is
+///   what [`route_typed_run`] does; a bare `Err` is not a stop.
+pub(crate) fn typed_stop_from_verdict(
+    ledger: &[DeliveryChecklistItem],
+    verdict: p2b_consumer::DeliveryVerdict,
+) -> Result<DeliveryStop, TypedStopRefusal> {
+    use p2b_consumer::DeliveryDisposition;
+    // The ambiguity check runs **first**, before the disposition is even read.
+    // A verdict that names one `item_key` twice is malformed input, and the
+    // contract for malformed input does not depend on what the fold made of it:
+    // reporting such a verdict as a valid `RequiresU1` handoff (or as any other
+    // disposition) would disguise an internal input ambiguity as a decision, which
+    // is exactly what the input contract forbids. Validating first also makes "no
+    // partial write" true for every entry at once, since no caller can reach a
+    // stage, a retention or a terminal with a verdict whose rows were never built.
+    check_row_ambiguity(&verdict).map_err(TypedStopRefusal::Ambiguous)?;
+    match verdict.disposition() {
+        DeliveryDisposition::Accept
+        | DeliveryDisposition::Repair
+        | DeliveryDisposition::Terminal { .. } => {}
+        // Hand the verdict back so the caller can retain it verbatim instead of
+        // reconstructing it (and possibly losing a fact on the way).
+        DeliveryDisposition::RequiresU1 { .. } => {
+            return Err(TypedStopRefusal::RequiresU1(verdict))
+        }
+    }
+    let rows = encode_typed_rows(ledger, &verdict).map_err(TypedStopRefusal::Ambiguous)?;
+    Ok(DeliveryStop::Typed(Box::new(typed_stop_from_rows(
+        rows, verdict,
+    ))))
+}
+
+/// Assemble a typed stop from rows already encoded in the durable form.
+///
+/// Split out of [`typed_stop_from_verdict`] so a caller that has to encode its
+/// rows differently — the mixed-version router, whose v1 rows must keep their own
+/// finding — still shares the one partition, the one repair payload and the one
+/// route. Nothing here decides *what* is written: `stage` and the aggregate class
+/// arrive on the rows and the verdict.
+fn typed_stop_from_rows(
+    rows: Vec<TypedDeliveryRow>,
+    verdict: p2b_consumer::DeliveryVerdict,
+) -> TypedDeliveryStop {
+    let terminal_items = rows
+        .iter()
+        .filter(|row| row.stage)
+        .map(|row| StagedDeliveryItem {
+            item_key: row.item_key.clone(),
+            passed: row.passed,
+            finding_json: row.finding_json.clone(),
+        })
+        .collect();
+    let pending_items = rows
+        .iter()
+        .filter(|row| !row.stage)
+        .map(|row| (row.item_key.clone(), row.finding_json.clone()))
+        .collect();
+    // A repair round is armed by the aggregate class, and only by it: an
+    // `Accept` stop completes, a `Terminal` stop fails. Building the prompt here
+    // (rather than in the caller) keeps the instruction and the round's durable
+    // audit payload derived from one and the same verdict.
+    let (repair_prompt, repair_findings_json) = match verdict.disposition() {
+        p2b_consumer::DeliveryDisposition::Repair => (
+            Some(typed_repair_prompt(&verdict)),
+            Some(typed_repair_findings(&verdict).to_string()),
+        ),
+        _ => (None, None),
+    };
+    TypedDeliveryStop {
+        verdict,
+        rows,
+        terminal_items,
+        pending_items,
+        repair_prompt,
+        repair_findings_json,
+    }
+}
+
+/// Test-only: build the deferred stop for a verdict the typed constructor refuses.
+///
+/// [`typed_stop_from_verdict`] returns `Err` for a `RequiresU1` verdict, because the
+/// variants **it** can return all complete or fail the Run. The seam exists so a
+/// test can drive the shared completion tail on a deferred delivery without going
+/// through the producer. It delegates to [`typed_stop_from_rows`], the same builder
+/// [`route_typed_run`] uses in production, so a test cannot assert a shape the
+/// router would never produce.
+#[cfg(test)]
+pub(crate) fn typed_stop_bypassing_the_refusal_for_test(
+    ledger: &[DeliveryChecklistItem],
+    verdict: p2b_consumer::DeliveryVerdict,
+) -> DeliveryStop {
+    let rows = encode_typed_rows(ledger, &verdict).expect("test fixture verdict is unambiguous");
+    DeliveryStop::Typed(Box::new(typed_stop_from_rows(rows, verdict)))
+}
+
+/// The audit payload recorded for a typed repair round.
+///
+/// Deliberately a list of the **items that still have to be repaired**, with the
+/// reasons that kept them out of `Confirmed`, so the durable round can be read
+/// back and explained without decoding every row's envelope. It is not a
+/// re-serialization of the legacy finding keys: those do not exist on a typed
+/// verdict, and inventing them would make the audit claim provenance it lacks.
+fn typed_repair_findings(verdict: &p2b_consumer::DeliveryVerdict) -> Value {
+    let items: Vec<Value> = verdict
+        .items
+        .iter()
+        .filter(|item| !item.is_passed())
+        .map(|item| {
+            let reasons: Vec<&str> = {
+                let mut unique: Vec<&str> = Vec::new();
+                for reason in item.facts.iter().filter_map(|fact| fact.reason_code.as_deref()) {
+                    if !unique.contains(&reason) {
+                        unique.push(reason);
+                    }
+                }
+                unique
+            };
+            json!({
+                "itemKey": item.item_key,
+                "class": p2b_consumer::delivery_class_str(item.class),
+                "reasonCodes": reasons,
+            })
+        })
+        .collect();
+    json!({
+        "source": "deliveryVerdict",
+        "aggregateClass": p2b_consumer::delivery_class_str(verdict.class),
+        "items": items,
+    })
+}
+
+/// Encode every item of a verdict in the durable v2 form.
+///
+/// Each row keeps the item's own pre-existing finding keys and adds the verdict
+/// envelope, so no legacy key is lost by carrying the new one.
+///
+/// The ledger is keyed by `item_key` (`delivery_outcome_stage` has
+/// `PRIMARY KEY(run_id,item_key)`), so at most **one** row per key can ever be
+/// written. A verdict that names one key twice is therefore refused outright by
+/// [`encode_typed_rows`] rather than resolved here: see [`TypedRowAmbiguity`].
+fn encode_typed_rows(
+    ledger: &[DeliveryChecklistItem],
+    verdict: &p2b_consumer::DeliveryVerdict,
+) -> Result<Vec<TypedDeliveryRow>, TypedRowAmbiguity> {
+    // Refuse the ambiguous input before encoding anything. Doing this first (and
+    // in one place) is what makes "no partial write" true by construction: no
+    // caller can reach a stage, a retention or a terminal with a verdict whose
+    // rows were never built.
+    check_row_ambiguity(verdict)?;
+    let existing: std::collections::BTreeMap<&str, &str> = ledger
+        .iter()
+        .filter_map(|item| {
+            item.finding
+                .as_deref()
+                .map(|finding| (item.item_key.as_str(), finding))
+        })
+        .collect();
+    let mut rows: Vec<TypedDeliveryRow> = Vec::with_capacity(verdict.items.len());
+    for item in &verdict.items {
+        let existing: Value = existing
+            .get(item.item_key.as_str())
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_else(|| json!({}));
+        rows.push(typed_row(item, verdict.item_finding(item, &existing)));
+    }
+    Ok(rows)
+}
+
+/// One verdict item as a durable row, on the finding bytes the caller supplies.
+///
+/// `existing` is a parameter rather than read from the ledger here because the two
+/// callers legitimately differ: the single-version lane bases a row on the durable
+/// column, while the router bases a v2 row on the finding the gate just computed,
+/// which is what the legacy lane stages. Both must agree on the class/pass/stage
+/// rules, and that agreement is this function.
+fn typed_row(item: &p2b_consumer::ItemDecision, existing: Value) -> TypedDeliveryRow {
+    TypedDeliveryRow {
+        item_key: item.item_key.clone(),
+        passed: item.is_passed(),
+        class: p2b_consumer::delivery_class_str(item.class),
+        terminal: item.is_final_class(),
+        stage: item.may_enter_terminal_stage(),
+        finding_json: existing.to_string(),
+    }
+}
+
+/// A verdict whose rows cannot be encoded because two items share an `item_key`.
+///
+/// The whole error, not a summary: every ambiguous key with both (or all) of the
+/// competing items and their complete fact lists, so the caller receives the input
+/// it must re-plan **without** having to re-read anything. Nothing was written when
+/// this is returned — the check runs before the first stage, retention or terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypedRowAmbiguity {
+    pub(crate) ambiguous: Vec<p2b_consumer::AmbiguousItemKey>,
+}
+
+/// The one place a verdict's item keys are checked for ambiguity.
+///
+/// Called by [`encode_typed_rows`] (which the stop builder and the retention
+/// encoder both use) and by [`DeliveryStop::validate`], so every write entry
+/// shares the same rule rather than each re-implementing the scan.
+fn check_row_ambiguity(verdict: &p2b_consumer::DeliveryVerdict) -> Result<(), TypedRowAmbiguity> {
+    let ambiguous = p2b_consumer::AmbiguousItemKey::all_in(verdict);
+    if ambiguous.is_empty() {
+        Ok(())
+    } else {
+        Err(TypedRowAmbiguity { ambiguous })
+    }
+}
+
+impl TypedRowAmbiguity {
+    /// A bounded message naming every conflicting key.
+    pub(crate) fn message(&self) -> String {
+        self.ambiguous
+            .iter()
+            .map(p2b_consumer::AmbiguousItemKey::message)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+impl std::fmt::Display for TypedRowAmbiguity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message())
+    }
+}
+
+/// Why a verdict produced no typed stop.
+///
+/// Two genuinely different reasons used to share one `Err(DeliveryVerdict)`,
+/// which left the caller unable to tell "this verdict has no stop to route, keep
+/// its facts" from "this verdict is malformed and must not be written at all".
+/// They are separated here so neither can be handled as the other: a `RequiresU1`
+/// verdict is a **valid** decision whose facts belong on the retention path, while
+/// an ambiguous one is an input error that must write nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TypedStopRefusal {
+    /// The disposition has no stop by design: a valid `Accept`-shaped class that
+    /// still cannot be routed, namely `RequiresU1`. Handed back verbatim so the
+    /// caller retains it without reconstructing (and possibly losing) a fact.
+    RequiresU1(DeliveryVerdict),
+    /// The verdict could not be encoded: two items claim one `item_key`. Nothing
+    /// was written.
+    Ambiguous(TypedRowAmbiguity),
+}
+
+impl TypedStopRefusal {
+    /// The retained verdict when this refusal is the non-routable disposition.
+    pub(crate) fn requires_u1_verdict(&self) -> Option<&DeliveryVerdict> {
+        match self {
+            TypedStopRefusal::RequiresU1(verdict) => Some(verdict),
+            TypedStopRefusal::Ambiguous(_) => None,
+        }
+    }
+
+    /// The ambiguity when this refusal is a malformed input.
+    pub(crate) fn ambiguity(&self) -> Option<&TypedRowAmbiguity> {
+        match self {
+            TypedStopRefusal::Ambiguous(ambiguity) => Some(ambiguity),
+            TypedStopRefusal::RequiresU1(_) => None,
+        }
+    }
+
+    /// Whether this refusal is the valid, retainable `RequiresU1` case.
+    pub(crate) fn is_requires_u1(&self) -> bool {
+        matches!(self, TypedStopRefusal::RequiresU1(_))
+    }
+
+    /// A bounded human-facing summary.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            TypedStopRefusal::RequiresU1(verdict) => format!(
+                "the delivery verdict is `{}` and has no stop to route; its facts are retained \
+                 without a terminal write",
+                p2b_consumer::delivery_class_str(verdict.class)
+            ),
+            TypedStopRefusal::Ambiguous(ambiguity) => ambiguity.message(),
+        }
+    }
+
+    /// The retained verdict, panicking when this refusal is an ambiguity.
+    ///
+    /// Test-facing. A caller that expects the `RequiresU1` handoff states that
+    /// expectation once, so each assertion reads the verdict directly instead of
+    /// unwrapping a result at every line.
+    #[cfg(test)]
+    pub(crate) fn expect_requires_u1(&self) -> &DeliveryVerdict {
+        self.requires_u1_verdict()
+            .expect("this refusal must be the retainable RequiresU1 handoff")
+    }
+}
+
+impl std::fmt::Display for TypedStopRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message())
     }
 }
 
@@ -1742,8 +2314,26 @@ pub(crate) fn evaluate_stop(
             }
         }
     }
-    if verdicts.iter().all(|verdict| verdict.passed) {
+    // Package 2-E version router. A row's generation comes from its own frozen
+    // requirement column and never from the producer's switch, so a Run frozen as
+    // v2 stays v2 across a restart, a continuation and a switch-off. Any row that
+    // is not a legal legacy row makes the whole Run typed: a damaged or
+    // unreadable contract must not pass on the permissive lane.
+    let identities = database.delivery_checklist_requirements(run_id)?;
+    let typed_scope = identities.iter().any(|(_, raw)| {
+        !matches!(
+            p2b_contract_identity::classify_requirements(raw.as_deref()),
+            p2b_contract_identity::ContractIdentity::LegacyV1
+        )
+    });
+    if !typed_scope && verdicts.iter().all(|verdict| verdict.passed) {
         return Ok(DeliveryStop::Passed { items: verdicts });
+    }
+    // A typed Run is decided by its rows and never by a sibling's shortcut: an
+    // unrecognized file intent must not complete a Run whose v2 contract was
+    // never verified.
+    if typed_scope {
+        return route_typed_run(database, run_id, &checklist, &verdicts, &identities);
     }
     if checklist.iter().any(|item|item.item_key==RECOGNITION_ITEM) {
         // Recognition needs user clarification, not an empty-path repair loop.
@@ -1772,6 +2362,200 @@ pub(crate) fn evaluate_stop(
     })
 }
 
+/// Decide a Run whose frozen rows are not all legal legacy v1 records.
+///
+/// **One** `decide` folds every row: a v2 row is re-classified by the typed chain,
+/// and a v1 row's already-computed legacy verdict is translated into facts. A
+/// per-version split — a typed verdict holding only the v2 rows plus a second
+/// priority order in the stop layer — would re-introduce exactly the
+/// decision-priority drift 2-D removed, and would let a v1 sibling mask a v2
+/// `Unconfirmed`.
+///
+/// A v1 row keeps its own finding bytes and receives **no** verdict envelope. An
+/// envelope is a v2 record: stamping one on a row whose frozen contract is v1
+/// would re-identify a row the producer's switch never touched, and `delivery_u1`
+/// would then read it as a v2 row whose class is not `Unconfirmed`.
+///
+/// A row whose contract column cannot be read is neither version. It is decided
+/// `Invalid` so damage can never fall through to the permissive lane, and it is
+/// deliberately not reported as a definite content failure.
+fn route_typed_run(
+    database: &Database,
+    run_id: &str,
+    checklist: &[DeliveryChecklistItem],
+    verdicts: &[ItemVerdict],
+    identities: &[(String, Option<String>)],
+) -> Result<DeliveryStop, String> {
+    // The same durable counter the legacy lane reads, so a v1 failure and a v2
+    // failure draw on one repair budget rather than two.
+    let budget = database.delivery_repair_round_count(run_id)? < DELIVERY_REPAIR_LIMIT;
+    let mut items: Vec<p2b_consumer::ItemDecision> = Vec::with_capacity(checklist.len());
+    // Whether a row owes a v2 record. Kept beside the decisions, from the same
+    // positional read, so it cannot drift out of step with `items` — an envelope
+    // attached to a row that does not owe one re-identifies that row as v2.
+    let mut typed: Vec<bool> = Vec::with_capacity(checklist.len());
+    for (index, item) in checklist.iter().enumerate() {
+        let verdict = verdicts
+            .get(index)
+            .ok_or_else(|| format!("交付核验缺少交付项「{}」的判定", item.item_key))?;
+        let finding: Value =
+            serde_json::from_str(&verdict.finding_json).unwrap_or_else(|_| json!({}));
+        // Both reads come from `delivery_checklist_items` ordered by `item_key`, so
+        // a row that does not line up is a damaged read rather than a version
+        // question, and it must not be answered as if it were legal v1.
+        let identity = match identities.get(index) {
+            Some((key, raw)) if *key == item.item_key => {
+                p2b_contract_identity::classify_requirements(raw.as_deref())
+            }
+            _ => p2b_contract_identity::ContractIdentity::Indeterminate(
+                "交付行身份与冻结需求列不对应".into(),
+            ),
+        };
+        match identity {
+            p2b_contract_identity::ContractIdentity::HostV2 => {
+                let requirements = database.delivery_item_requirements(run_id, &item.item_key)?;
+                let mut results = Vec::new();
+                for requirement in &requirements {
+                    let StoredRequirementKind::ContentContract { spec } = &requirement.kind else {
+                        continue;
+                    };
+                    if !matches!(
+                        content_requirements::decode_spec(spec),
+                        content_requirements::DecodedSpec::V2(_)
+                    ) {
+                        continue;
+                    }
+                    results.push(content_requirements::classify_v2_requirement(
+                        database,
+                        run_id,
+                        &item.item_key,
+                        spec,
+                        verdict.bound_path.as_deref(),
+                        &finding,
+                        budget,
+                    ));
+                }
+                // `HostV2` already means one spec decoded, so this is unreachable
+                // while the identity holds. An empty fact set would fold to
+                // `Unconfirmed` and park a row that owes a record it does not
+                // have, which is the wrong reading of a damaged row.
+                if results.is_empty() {
+                    results.push(p2b_decision::decide(
+                        &[p2b_decision::DecisionFact::invalid_with_code(
+                            super::delivery_checks_v2::reason_code::CONTRACT_UNREADABLE,
+                            "v2 内容契约行没有可解码的 v2 记录",
+                        )],
+                        budget,
+                    ));
+                }
+                items.push(p2b_consumer::ItemDecision::from_results(
+                    &item.item_key,
+                    &results,
+                    budget,
+                ));
+                typed.push(true);
+            }
+            p2b_contract_identity::ContractIdentity::LegacyV1 => {
+                items.push(p2b_consumer::ItemDecision::from_results(
+                    &item.item_key,
+                    &[legacy_verdict_decision(verdict, &finding, budget)],
+                    budget,
+                ));
+                typed.push(false);
+            }
+            p2b_contract_identity::ContractIdentity::Indeterminate(reason) => {
+                items.push(p2b_consumer::ItemDecision::from_results(
+                    &item.item_key,
+                    &[p2b_decision::decide(
+                        &[p2b_decision::DecisionFact::invalid_with_code(
+                            super::delivery_checks_v2::reason_code::CONTRACT_UNREADABLE,
+                            reason,
+                        )],
+                        budget,
+                    )],
+                    budget,
+                ));
+                typed.push(true);
+            }
+        }
+    }
+    let verdict = p2b_consumer::DeliveryVerdict::from_items(items, budget);
+    check_row_ambiguity(&verdict).map_err(|ambiguity| ambiguity.message())?;
+    let mut rows: Vec<TypedDeliveryRow> = Vec::with_capacity(verdict.items.len());
+    for (index, decision) in verdict.items.iter().enumerate() {
+        // A v1 row keeps the exact bytes the legacy gate produced, so no v2
+        // envelope is written over a row the producer's switch never touched: an
+        // envelope is a v2 record, and `delivery_u1` would read it as one whose
+        // class is not `Unconfirmed`. A v2 row is based on the *gate's* finding
+        // rather than the durable column, so the legacy sub-check entries the gate
+        // computed are what the envelope is added to.
+        let bytes = if typed[index] {
+            let existing: Value = serde_json::from_str(&verdicts[index].finding_json)
+                .unwrap_or_else(|_| json!({}));
+            p2b_consumer::stamp_envelope(&verdict, decision, &existing)
+        } else {
+            serde_json::from_str(&verdicts[index].finding_json).unwrap_or_else(|_| json!({}))
+        };
+        rows.push(typed_row(decision, bytes));
+    }
+    // The `RequiresU1` aggregate is a valid decision with no terminal to route, so
+    // its rows are materialised into the deferred stop rather than reported as an
+    // error: every consumer keeps the same facts and the same identity.
+    Ok(DeliveryStop::Typed(Box::new(typed_stop_from_rows(
+        rows, verdict,
+    ))))
+}
+
+/// Translate an already-computed legacy verdict into the one fact vocabulary.
+///
+/// Only the vocabulary is translated, never the decision: the v1 lane already
+/// evaluated this row's v1 contracts against the real artifact, so re-reading the
+/// finding here would be a second v1 policy in a second place. The row's own
+/// `passed` bit is therefore carried verbatim, and its legacy `reasonCode` is
+/// preserved rather than replaced by a generic class.
+fn legacy_verdict_decision(
+    verdict: &ItemVerdict,
+    finding: &Value,
+    budget: bool,
+) -> p2b_decision::DecisionResult {
+    let origin = legacy_verdict_origin(verdict, finding);
+    let facts = if verdict.passed {
+        vec![p2b_decision::DecisionFact::passed(origin)]
+    } else {
+        vec![p2b_decision::DecisionFact::failed(
+            origin,
+            finding["reasonCode"]
+                .as_str()
+                .unwrap_or(p2b_consumer::DELIVERY_DEFINITE_FAILURE),
+            finding["reason"]
+                .as_str()
+                .unwrap_or("交付项未通过既有 v1 核验"),
+            true,
+            None,
+        )]
+    };
+    p2b_decision::decide(&facts, budget)
+}
+
+/// The identity a legacy row's translated fact is attributed to.
+///
+/// A candidate position is only claimed when both halves are real. An empty
+/// `candidate("", "")` would assert an artifact identity the row never proved, so
+/// a row without both stays explicitly unbound and the fact's own row carries the
+/// attribution.
+fn legacy_verdict_origin(verdict: &ItemVerdict, finding: &Value) -> p2b_decision::FactOrigin {
+    let path = verdict.bound_path.as_deref().and_then(Path::to_str);
+    let hash = finding["checkedHash"]
+        .as_str()
+        .map(|hash| hash.trim_start_matches("sha256:"));
+    match (path, hash) {
+        (Some(path), Some(hash)) if !hash.is_empty() => {
+            p2b_decision::FactOrigin::candidate(path, hash)
+        }
+        _ => p2b_decision::FactOrigin::CheckUnbound,
+    }
+}
+
 /// Stage one round's item results (and, for repairs, the bounded repair audit
 /// row) **before** the Kernel decision that consumes them commits.
 ///
@@ -1789,6 +2573,10 @@ pub(crate) fn stage_outcome(
     stop: &DeliveryStop,
     now: i64,
 ) -> Result<(), String> {
+    // One shared check ahead of the first write: an ambiguous verdict must not
+    // reach the ledger through any entry, and it must be refused *before* the
+    // stage inserts its first row rather than after a partial insert.
+    stop.validate().map_err(|ambiguity| ambiguity.message())?;
     let items = staged_items(stop);
     database.stage_delivery_outcome(run_id, decision_mark, &items, stop.repair_findings(), now)
 }
@@ -1887,6 +2675,9 @@ pub(crate) fn stage_failure_outcome(
     stop: &DeliveryStop,
     now: i64,
 ) -> Result<(), String> {
+    // Same shared check as `stage_outcome`: the failing lane writes to the same
+    // ledger and must refuse an ambiguous verdict just as the completing one does.
+    stop.validate().map_err(|ambiguity| ambiguity.message())?;
     let items = staged_items(stop);
     database.stage_delivery_outcome(run_id, decision_mark, &items, None, now)
 }
@@ -1932,6 +2723,12 @@ pub(crate) fn finalize_staged_outcomes(database: &Database) -> Result<usize, Str
 }
 
 fn staged_items(stop: &DeliveryStop) -> Vec<StagedDeliveryItem> {
+    // A typed stop stages only its **terminal** items. Its non-terminal rows must
+    // not enter the terminal stage at all: `passed = 0` there is finalized as
+    // `failed`, which would turn "not verified yet" into a content failure.
+    if let DeliveryStop::Typed(typed) = stop {
+        return typed.terminal_items.clone();
+    }
     stop.items()
         .iter()
         .map(|item| StagedDeliveryItem {
@@ -1940,6 +2737,127 @@ fn staged_items(stop: &DeliveryStop) -> Vec<StagedDeliveryItem> {
             finding_json: item.finding_json.clone(),
         })
         .collect()
+}
+
+/// Retain a typed verdict that produced **no stop at all**.
+///
+/// A `RequiresU1` aggregate — `Unconfirmed` alone, or a pass beside an unverified
+/// item, since the aggregate folds every item's facts — is neither a pass nor a
+/// failure and has no terminal decision. Nothing is staged for it, so **every**
+/// item's facts must be retained on the pending path, not only the items whose
+/// own class is `Unconfirmed`: a `Confirmed` sibling's facts are just as durable
+/// and just as needed by a later U1, and filtering to the non-staged rows alone
+/// would silently drop them. The aggregate's refusal to decide is not a licence
+/// to lose the items it could decide.
+///
+/// The ledger's `pending` status is the existing non-terminal state, and the row
+/// keeps its full finding (including the v2 verdict envelope) so a later U1 has
+/// the facts, not a summary of them. Nothing here writes a status or a terminal:
+/// this is the explicit "blocked before the terminal stage" path the card
+/// requires, and it needs no migration.
+///
+/// The write stays scoped to `status='pending'` (see
+/// [`Database::retain_pending_delivery_findings`]), so a row that a real decision
+/// already terminated is never reopened.
+///
+/// An ambiguous verdict retains nothing and reports why: the caller is told the
+/// input was refused, rather than being handed a `usize` that implies a partial
+/// save completed.
+pub(crate) fn retain_pending_typed_outcome(
+    database: &Database,
+    run_id: &str,
+    ledger: &[DeliveryChecklistItem],
+    verdict: &p2b_consumer::DeliveryVerdict,
+    now: i64,
+) -> Result<usize, TypedRetentionError> {
+    let rows = encode_typed_rows(ledger, verdict).map_err(TypedRetentionError::Ambiguous)?;
+    let items: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| (row.item_key, row.finding_json))
+        .collect();
+    database
+        .retain_pending_delivery_findings(run_id, &items, now)
+        .map_err(TypedRetentionError::Storage)
+}
+
+/// Why a typed retention wrote nothing.
+///
+/// The two cases must not be conflated: an ambiguous verdict is a **refused
+/// input** (nothing was attempted), while a storage error is a failed write of an
+/// input that was valid. Reporting both as one opaque `String` would let a caller
+/// treat a refused verdict as a transient write problem worth retrying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TypedRetentionError {
+    /// The verdict names one `item_key` twice. Nothing was written.
+    Ambiguous(TypedRowAmbiguity),
+    /// The verdict encoded cleanly but the ledger write failed.
+    Storage(String),
+}
+
+impl TypedRetentionError {
+    /// The ambiguity, when the verdict itself was the problem.
+    pub(crate) fn ambiguity(&self) -> Option<&TypedRowAmbiguity> {
+        match self {
+            TypedRetentionError::Ambiguous(ambiguity) => Some(ambiguity),
+            TypedRetentionError::Storage(_) => None,
+        }
+    }
+
+    /// Whether this failure is a refused input rather than a failed write.
+    pub(crate) fn is_refused_input(&self) -> bool {
+        matches!(self, TypedRetentionError::Ambiguous(_))
+    }
+}
+
+impl std::fmt::Display for TypedRetentionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypedRetentionError::Ambiguous(ambiguity) => formatter.write_str(&ambiguity.message()),
+            TypedRetentionError::Storage(detail) => formatter.write_str(detail),
+        }
+    }
+}
+
+/// Retain the facts that an **already computed** typed stop cannot stage.
+///
+/// [`retain_pending_typed_outcome`] re-encodes the verdict against a checklist
+/// ledger. A typed stop was produced from a ledger the caller may not hold any
+/// more — and re-reading one would be a second evaluation of a decision that has
+/// already been made — so the rows it already encoded are reused verbatim. Same
+/// encoder, same rows: this is a de-duplication of the read, not a second
+/// mapping.
+pub(crate) fn retain_pending_items(
+    database: &Database,
+    run_id: &str,
+    items: &[(String, String)],
+    now: i64,
+) -> Result<usize, String> {
+    database.retain_pending_delivery_findings(run_id, items, now)
+}
+
+/// Retain the non-terminal siblings of an **already computed** typed stop.
+///
+/// One definition for both lanes that can carry a typed stop (the completion
+/// caller and the live loop), so a mixed verdict keeps its unknown facts
+/// whichever lane observed it. A stop with no pending items — a `Confirmed`
+/// aggregate, or a `RepairNeeded` one whose rows are all staged — is a no-op
+/// rather than an error: the empty case is the ordinary one, not a defect.
+///
+/// The retention entry shares [`DeliveryStop::validate`] with the two stage
+/// entries, so a stop that cannot be written cannot be retained either. A stop
+/// built outside [`typed_stop_from_verdict`] therefore cannot smuggle an
+/// ambiguous verdict past the encoder by taking this path.
+pub(crate) fn retain_pending_typed_stop(
+    database: &Database,
+    run_id: &str,
+    stop: &DeliveryStop,
+    now: i64,
+) -> Result<usize, String> {
+    stop.validate().map_err(|ambiguity| ambiguity.message())?;
+    let Some(typed) = stop.typed() else {
+        return Ok(0);
+    };
+    retain_pending_items(database, run_id, &typed.pending_items, now)
 }
 
 fn now_ms() -> i64 {
@@ -6086,10 +7004,16 @@ pub(crate) fn zip_with_extra_part(bytes: &[u8], name: &str, body: &str) -> Vec<u
     stored_zip(&entries)
 }
 
+/// The frozen model-visible repair contract: prologue, trailer and the byte
+/// ceiling `request_continuation` implies. Held once because **both** the legacy
+/// gate and a typed v2 repair round send the same contract; a second copy is
+/// where the wording could silently drift between the two lanes.
+const REPAIR_PROMPT_PROLOGUE: &str = "Fox 交付核验：你承诺的文件成果尚未全部通过 Host 的确定性核验。请只修复下列具体未完成项（在已授权工具范围内），不要重复已经完成的操作，也不要用一句“已完成”代替真实产物；任务给出的输入材料保持原样，修复只写入任务要求的产物路径。\n";
+const REPAIR_PROMPT_TRAILER: &str = "修复并确认文件真实落盘后，再给出最终答复。";
+const REPAIR_PROMPT_CEILING: usize = 15_500;
+
 fn repair_prompt(findings: &[Value]) -> String {
-    let mut body = String::from(
-        "Fox 交付核验：你承诺的文件成果尚未全部通过 Host 的确定性核验。请只修复下列具体未完成项（在已授权工具范围内），不要重复已经完成的操作，也不要用一句“已完成”代替真实产物；任务给出的输入材料保持原样，修复只写入任务要求的产物路径。\n",
-    );
+    let mut body = String::from(REPAIR_PROMPT_PROLOGUE);
     for finding in findings {
         let name = finding["displayName"].as_str().unwrap_or("交付项");
         let reason = finding["reason"].as_str().unwrap_or("核验未通过");
@@ -6115,9 +7039,47 @@ fn repair_prompt(findings: &[Value]) -> String {
             }
         }
     }
-    body.push_str("修复并确认文件真实落盘后，再给出最终答复。");
+    body.push_str(REPAIR_PROMPT_TRAILER);
     // request_continuation caps the prompt at 16 KiB; trim at a byte boundary.
-    while body.len() > 15_500 {
+    while body.len() > REPAIR_PROMPT_CEILING {
+        body.pop();
+    }
+    body
+}
+
+/// The repair prompt for a **typed** v2 repair round.
+///
+/// Same frozen prologue and trailer as [`repair_prompt`], so the model sees one
+/// contract whichever lane armed the round. Only the item body differs, and it
+/// has to: a typed verdict keeps its reasons in the retained facts
+/// (`reasonCode` / `detail`), not in the legacy finding keys the builder above
+/// reads, so reusing that builder would emit a checklist with no reasons in it.
+fn typed_repair_prompt(verdict: &p2b_consumer::DeliveryVerdict) -> String {
+    let mut body = String::from(REPAIR_PROMPT_PROLOGUE);
+    for item in verdict.items.iter().filter(|item| !item.is_passed()) {
+        let mut reasons: Vec<&str> = Vec::new();
+        for fact in &item.facts {
+            let Some(reason) = fact.reason_code.as_deref() else {
+                continue;
+            };
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+        let quoted = if reasons.is_empty() {
+            "核验未通过".to_owned()
+        } else {
+            reasons.join(", ")
+        };
+        body.push_str(&format!("- {}：{quoted}\n", item.item_key));
+        for fact in &item.facts {
+            if let Some(detail) = fact.detail.as_deref() {
+                body.push_str(&format!("    · {detail}\n"));
+            }
+        }
+    }
+    body.push_str(REPAIR_PROMPT_TRAILER);
+    while body.len() > REPAIR_PROMPT_CEILING {
         body.pop();
     }
     body
@@ -6140,6 +7102,23 @@ mod r3_tests;
 #[cfg(test)]
 #[path = "delivery_path_identity_tests.rs"]
 mod path_identity_tests;
+
+/// Package 2-C1 §1: the five version layers and the leaf/Host interop between the
+/// frozen rule payload and the Host-side strict contract decoder. Adjacent to the
+/// frozen 2-A cases rather than inside them, so no existing assertion is bent to
+/// accommodate the Host reading.
+#[cfg(test)]
+#[path = "p2c1_version_layer_tests.rs"]
+mod p2c1_version_layer_tests;
+
+/// Package 2-E: the production version router and the producer gate it reads.
+///
+/// Separate from the frozen 2-A/2-C cases so no existing assertion is bent to
+/// accommodate the wiring, and separate from the 2-B2 consumer facilities because
+/// these reach the router through `evaluate_stop` rather than through the consumer.
+#[cfg(test)]
+#[path = "p2e_router_tests.rs"]
+mod p2e_router_tests;
 
 #[cfg(test)]
 mod tests {
@@ -9085,3 +10064,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
