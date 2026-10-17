@@ -49,6 +49,7 @@ use serde_json::Value;
 
 use super::delivery::RequirementVerdict;
 
+pub(crate) mod budget;
 pub(crate) mod fact_pdf;
 pub(crate) mod lineage_roles;
 pub(crate) mod text_csv;
@@ -1163,30 +1164,57 @@ impl ParsedTable {
 /// A parse failure with a stable code and a position. `unterminated_quote` and
 /// `width_mismatch` are different findings: a parser bug must never be reported
 /// as wrong data.
+/// Why a parse failed, independent of the human-readable [`TableError::code`].
+///
+/// The category is chosen **at the construction site**, where the parser
+/// knows whether it hit a resource ceiling, a capability it does not
+/// implement, or a definite violation of a declared/syntactic rule. It is
+/// never inferred from the code string or the detail message.
+///
+/// * [`ParseFailureKind::Resource`] — a declared ceiling (bytes/scan/millis/
+///   records/fields/cells/line/text) stopped the parse. Always carries a real
+///   [`LimitKind`]; maps to an *unverified* budget observation.
+/// * [`ParseFailureKind::Unsupported`]] — the checker can read the bytes but
+///   cannot interpret them under the frozen contract (today: bytes that are
+///   not valid UTF-8, or a lone CR the dialect cannot explain). There is no
+///   frozen encoding declaration, so this is evidence insufficiency, not a
+///   violation; it maps to *unverified*.
+/// * [`ParseFailureKind::Violation`] — a definite, checkable violation under
+///   a supported contract: declared BOM required/forbidden, declared LF/CRLF
+///   line endings, or the quoted-field syntax. Maps to *failed*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParseFailureKind {
+    Resource,
+    Unsupported,
+    Violation,
+}
+
+/// A parse failure with a stable code, a position and an explicit,
+/// construction-site [`ParseFailureKind`].
+///
+/// Fields are crate-private and **not** directly writable: every production
+/// error goes through [`TableError::resource`] / [`TableError::unsupported`]
+/// / [`TableError::violation`] so that the `kind`/`limit` invariant cannot
+/// drift (a Resource always carries its limit; Unsupported/Violation never
+/// do). Child modules of this crate can technically reach a private field,
+/// so the invariant is additionally pinned by the
+/// `table_error_kind_limit_invariant` unit test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TableError {
-    pub code: String,
-    pub locator: RecordLocator,
-    pub detail: String,
+    code: String,
+    locator: RecordLocator,
+    detail: String,
     /// Set only for an over-limit stop, so the caller can render the same
     /// explicit over-limit report a direct observation uses. A budget stop is
     /// never a content error (plan §7 P0-2).
-    pub limit: Option<LimitKind>,
+    limit: Option<LimitKind>,
+    kind: ParseFailureKind,
 }
 
 impl TableError {
-    pub(crate) fn new(code: &str, locator: RecordLocator, detail: impl Into<String>) -> Self {
-        Self {
-            code: code.to_owned(),
-            locator,
-            detail: detail.into(),
-            limit: None,
-        }
-    }
-
-    /// A parse that stopped at a declared ceiling. Names the ceiling so the
-    /// caller does not have to guess which one from the message.
-    pub(crate) fn budget(
+    /// A parse that stopped at a declared ceiling. The only constructor that
+    /// sets `kind = Resource`; it always carries the real [`LimitKind`].
+    pub(crate) fn resource(
         limit: LimitKind,
         ceiling: u64,
         observed: u64,
@@ -1200,7 +1228,68 @@ impl TableError {
                 limit.as_str()
             ),
             limit: Some(limit),
+            kind: ParseFailureKind::Resource,
         }
+    }
+
+    /// The checker could not interpret the bytes under the frozen contract
+    /// (no declared encoding policy is violated; the capability is simply
+    /// insufficient). Carries no limit and maps to unverified.
+    pub(crate) fn unsupported(
+        code: &str,
+        locator: RecordLocator,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.to_owned(),
+            locator,
+            detail: detail.into(),
+            limit: None,
+            kind: ParseFailureKind::Unsupported,
+        }
+    }
+
+    /// A definite violation of a declared/syntactic rule under a supported
+    /// contract. Carries no limit and maps to a blocking failed observation.
+    pub(crate) fn violation(
+        code: &str,
+        locator: RecordLocator,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.to_owned(),
+            locator,
+            detail: detail.into(),
+            limit: None,
+            kind: ParseFailureKind::Violation,
+        }
+    }
+
+    /// Back-compat constructor used by the budget path; identical to
+    /// [`Self::resource`].
+    pub(crate) fn budget(
+        limit: LimitKind,
+        ceiling: u64,
+        observed: u64,
+        locator: RecordLocator,
+    ) -> Self {
+        Self::resource(limit, ceiling, observed, locator)
+    }
+
+    pub(crate) fn code(&self) -> &str {
+        &self.code
+    }
+    pub(crate) fn locator(&self) -> &RecordLocator {
+        &self.locator
+    }
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
+    pub(crate) fn limit(&self) -> Option<LimitKind> {
+        self.limit
+    }
+    pub(crate) fn kind(&self) -> ParseFailureKind {
+        self.kind
     }
 }
 
