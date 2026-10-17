@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="graphite">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fox · 交互优化对照（已落地 vs 仍待做）</title>
+<style>
+:root, [data-color-theme="graphite"] {
+  --r-ctl: 6px; --r-card: 8px; --r-lg: 12px;
+  --bg: oklch(1 0 0); --fg: oklch(0.145 0 0); --card: oklch(1 0 0);
+  --muted: oklch(0.97 0 0); --muted-fg: oklch(0.556 0 0); --accent: oklch(0.955 0 0);
+  --primary: oklch(0.205 0 0); --primary-fg: oklch(0.985 0 0);
+  --border: oklch(0.922 0 0); --destructive: oklch(0.577 0.245 27.325);
+  --success: oklch(0.56 0.12 160); --warning: oklch(0.55 0.13 70);
+  --shell: oklch(0.965 0 0); --sidebar: oklch(0.975 0 0); --bubble: oklch(0.955 0 0);
+  --page: oklch(0.965 0 0); --faint: oklch(0.65 0 0);
+  --shadow: 0 8px 24px oklch(0 0 0 / 8%);
+}
+:root.dark, [data-color-theme="graphite"].dark {
+  --bg: oklch(0.145 0 0); --fg: oklch(0.985 0 0); --card: oklch(0.18 0 0);
+  --muted: oklch(0.24 0 0); --muted-fg: oklch(0.708 0 0); --accent: oklch(0.255 0 0);
+  --primary: oklch(0.922 0 0); --primary-fg: oklch(0.205 0 0);
+  --border: oklch(1 0 0 / 9%); --shell: oklch(0.12 0 0); --sidebar: oklch(0.175 0 0);
+  --bubble: oklch(0.25 0 0); --page: oklch(0.11 0 0); --faint: oklch(0.58 0 0);
+  --destructive: oklch(0.704 0.191 22.216); --success: oklch(0.74 0.13 160); --warning: oklch(0.8 0.13 75);
+}
+[data-color-theme="paper"] {
+  --r-ctl: 10px; --r-card: 14px; --r-lg: 18px;
+  --bg: oklch(0.982 0.008 85); --fg: oklch(0.24 0.012 60); --card: oklch(0.995 0.003 85);
+  --muted: oklch(0.95 0.012 85); --muted-fg: oklch(0.52 0.018 60); --accent: oklch(0.935 0.014 85);
+  --primary: oklch(0.53 0.13 254); --primary-fg: oklch(1 0 0); --border: oklch(0.895 0.014 85);
+  --shell: oklch(0.96 0.01 85); --sidebar: oklch(0.97 0.01 85); --bubble: oklch(0.94 0.014 85);
+  --page: oklch(0.955 0.012 85);
+}
+[data-color-theme="paper"].dark {
+  --bg: oklch(0.18 0.01 60); --fg: oklch(0.95 0.01 85); --card: oklch(0.22 0.012 60);
+  --muted: oklch(0.28 0.012 60); --muted-fg: oklch(0.72 0.02 70); --accent: oklch(0.3 0.014 60);
+  --primary: oklch(0.72 0.12 254); --primary-fg: oklch(0.15 0.02 254); --border: oklch(1 0 0 / 10%);
+  --shell: oklch(0.14 0.01 60); --sidebar: oklch(0.16 0.01 60); --bubble: oklch(0.28 0.014 60); --page: oklch(0.12 0.01 60);
+}
+[data-color-theme="mist"] {
+  --bg: oklch(0.985 0.008 240); --fg: oklch(0.22 0.02 250); --card: oklch(0.995 0.004 240);
+  --muted: oklch(0.95 0.012 240); --muted-fg: oklch(0.5 0.02 250); --accent: oklch(0.94 0.016 240);
+  --primary: oklch(0.45 0.1 250); --primary-fg: oklch(0.99 0.01 240); --border: oklch(0.9 0.016 240);
+  --shell: oklch(0.96 0.012 240); --sidebar: oklch(0.97 0.01 240); --bubble: oklch(0.94 0.014 240); --page: oklch(0.955 0.014 240);
+}
+[data-color-theme="mist"].dark {
+  --bg: oklch(0.16 0.015 250); --fg: oklch(0.95 0.01 240); --card: oklch(0.2 0.016 250);
+  --muted: oklch(0.26 0.016 250); --muted-fg: oklch(0.72 0.02 240); --accent: oklch(0.28 0.018 250);
+  --primary: oklch(0.75 0.08 250); --primary-fg: oklch(0.18 0.02 250); --border: oklch(1 0 0 / 10%);
+  --shell: oklch(0.13 0.012 250); --sidebar: oklch(0.15 0.014 250); --bubble: oklch(0.26 0.018 250); --page: oklch(0.11 0.012 250);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--fg); font: 13px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+button { font: inherit; color: inherit; cursor: pointer; border: 0; background: none; }
+h1, h2, h3, p, ul { margin: 0; }
+ul { padding-left: 1.1em; }
+code { font-size: 11.5px; padding: 1px 5px; border-radius: 4px; background: var(--muted); }
+
+.top { max-width: 1280px; margin: 0 auto; padding: 28px 24px 12px; display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; align-items: flex-end; }
+.eyebrow { font-size: 11px; color: var(--muted-fg); letter-spacing: .04em; }
+.top h1 { font-size: 24px; font-weight: 600; letter-spacing: -.02em; margin: 6px 0 8px; }
+.lead { max-width: 64ch; color: var(--muted-fg); line-height: 1.65; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.seg { display: inline-flex; padding: 3px; border-radius: var(--r-card); background: var(--muted); }
+.seg button { height: 28px; padding: 0 10px; border-radius: calc(var(--r-card) - 2px); color: var(--muted-fg); font-size: 12px; font-weight: 500; }
+.seg button.on { background: var(--bg); color: var(--fg); outline: 1px solid var(--border); }
+
+.banner {
+  max-width: 1280px; margin: 8px auto 0; padding: 14px 16px; border-radius: var(--r-card);
+  border: 1px solid color-mix(in oklch, var(--warning) 35%, var(--border));
+  background: color-mix(in oklch, var(--warning) 8%, var(--card));
+  font-size: 12.5px; line-height: 1.65; color: var(--muted-fg);
+}
+.banner b { color: var(--fg); }
+.banner ul { margin-top: 6px; }
+
+.summary {
+  max-width: 1280px; margin: 14px auto 0; padding: 0 24px;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+}
+.summary article {
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--card);
+}
+.summary h3 { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.summary li { font-size: 12.5px; line-height: 1.5; margin-top: 4px; }
+.summary .done { color: var(--success); }
+.summary .todo { color: var(--warning); }
+
+.toc {
+  position: sticky; top: 0; z-index: 20; max-width: 1280px; margin: 14px auto 0; padding: 10px 24px;
+  display: flex; flex-wrap: wrap; gap: 6px; background: color-mix(in oklch, var(--page) 90%, transparent);
+  backdrop-filter: blur(8px); border-block: 1px solid var(--border);
+}
+.toc a {
+  height: 30px; padding: 0 10px; border-radius: var(--r-ctl); display: inline-flex; align-items: center; gap: 6px;
+  text-decoration: none; color: var(--muted-fg); font-size: 12px; font-weight: 500; border: 1px solid transparent;
+}
+.toc a:hover { background: var(--muted); color: var(--fg); }
+.toc a.active { background: var(--bg); border-color: var(--border); color: var(--fg); }
+.toc .pill { font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 999px; }
+.toc .pill.done { background: color-mix(in oklch, var(--success) 20%, var(--muted)); color: var(--fg); }
+.toc .pill.open { background: color-mix(in oklch, var(--warning) 20%, var(--muted)); color: var(--fg); }
+
+.scenes { max-width: 1280px; margin: 0 auto; padding: 8px 24px 56px; }
+.scene { padding: 28px 0 32px; border-bottom: 1px solid var(--border); scroll-margin-top: 56px; }
+.scene:last-child { border-bottom: 0; }
+.scene .id { font-size: 11px; color: var(--muted-fg); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.badge {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 700;
+}
+.badge.done { background: color-mix(in oklch, var(--success) 18%, var(--muted)); }
+.badge.open { background: color-mix(in oklch, var(--warning) 18%, var(--muted)); }
+.badge.skip { background: var(--muted); color: var(--muted-fg); }
+.scene h2 { font-size: 20px; font-weight: 600; margin: 8px 0; letter-spacing: -.02em; }
+.scene .why { color: var(--muted-fg); max-width: 72ch; line-height: 1.65; }
+.codepath {
+  margin-top: 8px; font-size: 11.5px; color: var(--muted-fg);
+  padding: 8px 10px; border-radius: var(--r-ctl); background: var(--muted); line-height: 1.55;
+}
+.codepath b { color: var(--fg); font-weight: 600; }
+
+.meta { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0 16px; }
+.meta article { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--card); }
+.meta h3 { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-fg); margin-bottom: 8px; }
+.meta li { font-size: 12.5px; line-height: 1.5; margin-top: 4px; }
+
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+body.stack .compare { grid-template-columns: 1fr; }
+.pane-label { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 12px; }
+.pane-label b { display: inline-flex; gap: 8px; align-items: center; }
+.tag { height: 20px; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; }
+.tag.before { background: color-mix(in oklch, var(--warning) 14%, var(--muted)); }
+.tag.after { background: color-mix(in oklch, var(--success) 14%, var(--muted)); }
+.pane-label span { color: var(--muted-fg); }
+
+.win {
+  height: 460px; border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden;
+  background: var(--shell); box-shadow: var(--shadow); display: grid; grid-template-columns: 176px 1fr; position: relative;
+}
+.titlebar { position: absolute; inset: 0 0 auto; height: 26px; display: flex; justify-content: space-between; padding: 0 8px; align-items: center; font-size: 11px; color: var(--muted-fg); z-index: 2; pointer-events: none; }
+.side { padding: 34px 10px 10px; background: var(--sidebar); border-right: 1px solid var(--border); font-size: 12px; }
+.side .mode { display: flex; padding: 3px; margin-bottom: 10px; border-radius: 8px; background: var(--muted); }
+.side .mode span { flex: 1; height: 24px; display: grid; place-items: center; border-radius: 6px; color: var(--muted-fg); font-weight: 500; }
+.side .mode .on { background: var(--bg); color: var(--fg); outline: 1px solid var(--border); }
+.conv { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border-radius: 6px; color: var(--muted-fg); margin-bottom: 2px; }
+.conv.on { background: var(--accent); color: var(--fg); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warning); flex: none; }
+.dot.run { background: var(--fg); }
+.main {
+  margin-top: 26px; background: var(--bg); border-top: 1px solid var(--border); border-left: 1px solid var(--border);
+  border-top-left-radius: 12px; display: grid; grid-template-rows: 44px 1fr auto; min-width: 0;
+}
+.chead { display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; }
+.chead .acts { display: flex; gap: 4px; }
+.iconbtn { width: 26px; height: 26px; border-radius: var(--r-ctl); display: grid; place-items: center; color: var(--muted-fg); border: 1px solid transparent; font-weight: 400; }
+.iconbtn.on { background: var(--accent); border-color: var(--border); color: var(--fg); }
+.history { padding: 14px 16px; overflow: auto; min-height: 0; }
+.msg { margin-bottom: 12px; font-size: 13px; line-height: 1.6; }
+.msg.user { margin-left: auto; max-width: 84%; width: fit-content; padding: 8px 12px; background: var(--bubble); border-radius: 14px; }
+.who { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; margin-bottom: 5px; }
+.av { width: 16px; height: 16px; border-radius: 50%; background: var(--muted); }
+.body { padding-left: 22px; }
+.msg.user .body { padding-left: 0; }
+
+.statusbar {
+  display: flex; align-items: center; gap: 7px; margin: 0 0 8px 22px; padding: 5px 9px; width: fit-content;
+  border-radius: 999px; background: var(--muted); font-size: 12px; color: var(--muted-fg);
+}
+.fox { width: 20px; height: 20px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, oklch(0.75 0.12 250), oklch(0.45 0.14 250)); flex: none; }
+.statusbar b { color: var(--fg); font-weight: 500; }
+.statusbar time { font-variant-numeric: tabular-nums; color: var(--faint); }
+
+.process { margin: 0 0 10px 22px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--card); font-size: 12px; color: var(--muted-fg); }
+.process .line { display: flex; align-items: center; gap: 6px; padding: 7px 9px; }
+.process .steps { padding: 0 9px 8px; border-top: 1px solid var(--border); font-size: 11.5px; }
+.process .steps div { padding: 5px 0; border-bottom: 1px solid var(--border); }
+.process .steps div:last-child { border-bottom: 0; }
+
+.approval { margin: 0 0 10px 22px; padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--r-card); background: var(--card); font-size: 12px; }
+.approval .head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.badge-wait { margin-left: auto; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: color-mix(in oklch, var(--warning) 18%, var(--muted)); }
+.impact { margin-top: 7px; padding: 7px 9px; border-radius: 6px; background: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 9px; }
+.btn { height: 26px; padding: 0 9px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--card); font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; }
+.btn.primary { background: var(--primary); color: var(--primary-fg); border-color: transparent; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--muted-fg); }
+
+.composer-zone { padding: 0 14px 10px; }
+.composer { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--card); overflow: hidden; }
+.composer.messy .chip, .composer.messy .btn { border: 1px solid var(--border); }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 9px 9px 0; }
+.chip { height: 24px; padding: 0 7px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted-fg); background: var(--muted); max-width: 140px; }
+.chip b { color: var(--fg); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer.clean .chip { border: 0; }
+.composer textarea { width: 100%; border: 0; resize: none; outline: 0; background: transparent; color: var(--fg); padding: 9px 11px 3px; min-height: 40px; font: inherit; }
+.tools { display: flex; justify-content: space-between; gap: 6px; padding: 5px 7px 7px; }
+.tools .left, .tools .right { display: flex; gap: 4px; align-items: center; }
+.composer.clean .tools .btn.ghost { border: 0; }
+
+.reading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 8px 0; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 11px; color: var(--muted-fg); }
+.scroll-btn { height: 26px; padding: 0 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); font-size: 11px; font-weight: 500; box-shadow: var(--shadow); }
+
+.split { display: grid; grid-template-columns: 1fr 5px 160px; height: 100%; }
+.grip { background: var(--border); }
+.preview { position: relative; padding: 10px; font-size: 11px; color: var(--muted-fg); background: var(--card); border-left: 1px solid var(--border); }
+.shield { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in oklch, var(--bg) 55%, transparent); outline: 2px dashed color-mix(in oklch, var(--primary) 40%, transparent); outline-offset: -4px; font-size: 10px; font-weight: 700; color: var(--primary); pointer-events: auto; }
+
+.section-title {
+  max-width: 1280px; margin: 28px auto 0; padding: 0 24px;
+  font-size: 13px; font-weight: 600; color: var(--muted-fg); letter-spacing: .04em; text-transform: uppercase;
+}
+.footnote { max-width: 1280px; margin: 0 auto; padding: 8px 24px 48px; font-size: 12px; color: var(--muted-fg); line-height: 1.65; }
+.footnote a { color: var(--fg); }
+
+@media (max-width: 960px) {
+  .compare, .summary, .meta { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div>
+    <div class="eyebrow">open-claude-ui 借鉴审阅 · 对照真实代码状态</div>
+    <h1>交互优化：已落地 / 仍待做</h1>
+    <p class="lead">上一版把你们已经做好的能力画成「未来目标」，是错的。本页改成：绿色 = 分支里已有实现；黄色 = 仍要复现证据或明确不做。Before 只表示历史痛点，After 在已落地项里 = <b>当前 Fox</b>。</p>
+  </div>
+  <div class="controls">
+    <div class="seg" id="theme-seg"></div>
+    <div class="seg" id="mode-seg"></div>
+    <div class="seg" id="layout-seg">
+      <button type="button" class="on" data-layout="side">左右</button>
+      <button type="button" data-layout="stack">上下</button>
+    </div>
+  </div>
+</header>
+
+<section class="banner">
+  <b>更正说明</b>：Composer 单框底栏、行内附件、过程可折叠、蓝狐运行状态条、审批走 Host 回执、顶栏 Toggle 等，你们分支里已经有了。open-claude-ui 这边值得继续盯的，主要是「滚动抢位置 / 分栏拖过 iframe」这类<b>先复现再改</b>的项，以及明确不采用的强制展开、样例审批定时器、未验证七档渐隐。
+</section>
+
+<section class="summary">
+  <article>
+    <h3 class="done">已落地（勿再当需求重做）</h3>
+    <ul>
+      <li>Composer 外框 + 底栏工具 + 行内附件 / 溢出 …</li>
+      <li><code>FoxRunStatusBar</code> + BlueFox；过程 <code>TurnProcessHeader</code> 可收起</li>
+      <li><code>RuntimeApprovalPrompt</code>：摘要/影响在前，详情披露，等 Host</li>
+      <li>顶栏摘要 / 右栏 Animate UI Toggle；复制等剪贴板成功</li>
+    </ul>
+  </article>
+  <article>
+    <h3 class="todo">仍待证据 / 暂缓</h3>
+    <ul>
+      <li>流式滚动是否抢视口 → 先查是哪一层在滚</li>
+      <li>预览分栏拖过 iframe 是否卡死 → 有复现再加能接事件的护盾</li>
+      <li>窄栏 @container 收纳：若真机仍挤，再做增量</li>
+      <li>七档渐隐、样例滚动 hook、强制展开、审批假成功 → 不做</li>
+    </ul>
+  </article>
+</section>
+
+<nav class="toc" id="toc"></nav>
+<div class="section-title" id="sec-done">一、已落地（Before = 旧痛点，After = 当前实现）</div>
+<main class="scenes" id="scenes-done"></main>
+<div class="section-title" id="sec-open">二、仍待做（有证据再动）</div>
+<main class="scenes" id="scenes-open"></main>
+<footer class="footnote">
+  代码对照以工作树 <code>ui/improvements-20261009</code> 为准。旧聊天对照：<a href="./Fox-交互优化-前后对照.html">Fox-交互优化-前后对照.html</a>。
+</footer>
+
+<script>
+const THEMES = [["graphite","石墨"],["paper","暖纸"],["mist","雾蓝"]];
+
+const shell = (side, main) => `<div class="win">
+  <div class="titlebar"><span>Fox</span><span>— □ ×</span></div>
+  <aside class="side">
+    <div class="mode"><span class="on">助手</span><span>知识</span></div>
+    ${side}
+  </aside>${main}
+</div>`;
+
+const sideRun = `
+  <div class="conv on"><span class="dot run"></span>重构导入</div>
+  <div class="conv"><span class="dot"></span>写文件审批</div>
+  <div class="conv">昨日纪要</div>`;
+
+const done = [
+  {
+    id: "composer",
+    title: "输入区：一层边框，配置在底栏",
+    why: "你们已经按 PAGE-REDESIGN / assistant-ui 迁移做完：外框一层、附件行内胶囊、工具在底。不是待做项。",
+    code: "fox-composer.tsx · Attachments variant=inline · PromptInputFooter 工具行",
+    before: shell(sideRun, `<div class="main"><div class="chead">旧：框套框</div>
+      <div class="history"><div class="msg user"><div class="body">继续改。</div></div></div>
+      <div class="composer-zone"><div class="composer messy">
+        <div class="chips"><span class="chip"><b>申报材料</b>×</span><span class="chip"><b>import.ts</b>×</span></div>
+        <textarea readonly></textarea>
+        <div class="tools"><div class="left"><span class="btn">文件</span><span class="btn">知识</span><span class="btn">专家</span></div><div class="right"><span class="btn primary">发送</span></div></div>
+      </div></div></div>`),
+    after: shell(sideRun, `<div class="main"><div class="chead">当前 Fox</div>
+      <div class="history"><div class="msg user"><div class="body">继续改。</div></div></div>
+      <div class="composer-zone"><div class="composer clean">
+        <div class="chips"><span class="chip"><b>申报材料</b>×</span><span class="chip"><b>import.ts</b>×</span><span class="chip">…</span></div>
+        <textarea readonly></textarea>
+        <div class="tools"><div class="left"><span class="btn ghost">+</span><span class="btn ghost">知识</span><span class="btn ghost">专家</span></div><div class="right"><span class="btn primary">发送</span></div></div>
+      </div></div></div>`),
+  },
+  {
+    id: "process",
+    title: "过程可折叠 + 蓝狐状态条",
+    why: "生成中允许收起过程；短状态用 FoxRunStatusBar（BlueFox）。这正是「不强制展开」的产品选择，已经挂在 workbench → AssistantUiChat。",
+    code: "FoxRunStatusBar.tsx · BlueFoxAvatar · turn-process-header.tsx（展开/收起过程）· workbench statusBar=",
+    before: shell(sideRun, `<div class="main"><div class="chead">旧：过程铺满</div>
+      <div class="history">
+        <div class="msg"><div class="who"><span class="av"></span>Fox</div>
+          <div class="process"><div class="line">过程强制展开占屏…</div>
+            <div class="steps"><div>读文件</div><div>编辑</div><div>测试</div><div>审批夹在中间</div></div>
+          </div>
+          <div class="body"><p style="color:var(--muted-fg);font-size:12px">正文被顶走，也没有独立状态条。</p></div>
+        </div>
+      </div>
+      <div class="composer-zone"><div class="composer"><textarea readonly></textarea></div></div></div>`),
+    after: shell(sideRun, `<div class="main"><div class="chead">当前 Fox</div>
+      <div class="history">
+        <div class="msg"><div class="who"><span class="av"></span>Fox</div>
+          <div class="statusbar"><span class="fox"></span><b>正在编辑文件</b><span>·</span><time>0:42</time></div>
+          <div class="process"><div class="line">过程 · 4 步 · 可收起 ›</div></div>
+          <div class="approval">
+            <div class="head">写入 import.ts <span class="badge-wait">待批准</span></div>
+            <div class="impact">影响写在卡上；不依赖展开过程才能看见。</div>
+            <div class="foot"><span class="btn ghost">拒绝</span><span class="btn primary">允许</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="composer-zone"><div class="composer clean"><textarea readonly></textarea><div class="tools"><div></div><div class="right"><span class="btn">停止</span></div></div></div></div></div>`),
+  },
+  {
+    id: "approval",
+    title: "审批：摘要在前，状态跟 Host",
+    why: "open-claude-ui 样例用定时器假成功——Fox 没有也绝不能学。你们已是 ApprovalCard + resolveApproval，busy 等到回执。",
+    code: "RuntimeApprovalPrompt.tsx · approval-decision-policy · Host onResolve",
+    before: shell(`<div class="conv on"><span class="dot"></span>审批</div>`, `<div class="main"><div class="chead">错误样例（勿学）</div>
+      <div class="history"><div class="approval">
+        <div class="head">工具调用</div>
+        <pre style="margin-top:8px;max-height:120px;overflow:auto;background:var(--muted);padding:8px;border-radius:6px;font-size:11px">大段 diff 先砸脸…</pre>
+        <div class="foot"><span class="btn primary">允许 → setTimeout 变成功</span></div>
+      </div></div>
+      <div class="composer-zone"><div class="composer"><textarea readonly></textarea></div></div></div>`),
+    after: shell(`<div class="conv on"><span class="dot"></span>审批</div>`, `<div class="main"><div class="chead">当前 Fox</div>
+      <div class="history"><div class="approval">
+        <div class="head">写入 import.ts <span class="badge-wait">待 Host</span></div>
+        <div class="impact">拟写入 N 行 · 对话授权仅限此工具与目标 · 可撤销</div>
+        <p style="margin-top:8px;font-size:11px;color:var(--muted-fg)">「查看内容 / 详情」披露 · 点允许后 busy，等回执</p>
+        <div class="foot"><span class="btn ghost">拒绝</span><span class="btn primary">允许一次</span></div>
+      </div></div>
+      <div class="composer-zone"><div class="composer clean"><textarea readonly></textarea></div></div></div>`),
+  },
+  {
+    id: "chrome",
+    title: "顶栏摘要 / 右栏：真实 pressed Toggle",
+    why: "2026-10-13 组件验收已记：摘要与右栏接 Animate UI Toggle，选中态跟真实开关一致；摘要 Popover 非模态受控。",
+    code: "fox-chat-topbar.tsx · Animate UI Toggle · UI-CHANGES-20261013.md",
+    before: shell(sideRun, `<div class="main"><div class="chead">旧：选中态不一致<div class="acts"><span class="iconbtn">◎</span><span class="iconbtn">▣</span></div></div>
+      <div class="history"><div class="msg"><div class="who"><span class="av"></span>Fox</div><div class="body"><p style="color:var(--muted-fg);font-size:12px">开关看起来亮了，实际没打开，或点开摘要后行为怪。</p></div></div></div>
+      <div class="composer-zone"><div class="composer"><textarea readonly></textarea></div></div></div>`),
+    after: shell(sideRun, `<div class="main"><div class="chead">当前 Fox<div class="acts"><span class="iconbtn on">◎</span><span class="iconbtn on">▣</span></div></div>
+      <div class="history"><div class="msg"><div class="who"><span class="av"></span>Fox</div><div class="body"><p style="color:var(--muted-fg);font-size:12px">pressed ↔ 真实打开；摘要用同一图标可关。</p></div></div></div>
+      <div class="composer-zone"><div class="composer clean"><textarea readonly></textarea></div></div></div>`),
+  },
+];
+
+const open = [
+  {
+    id: "scroll",
+    title: "长历史滚动抢位置",
+    why: "产品目标可以是「上翻后暂停贴底 + 回到最新」。但实现前必须证明是 ThreadPrimitive.Viewport autoScroll 还是过程区 StickToBottom 在滚。禁止再挂一套样例 150ms hook。",
+    code: "待查：fox-thread.tsx Viewport autoScroll · timeline StickToBottom",
+    before: shell(`<div class="conv on">长回答</div>`, `<div class="main"><div class="chead">待复现</div>
+      <div class="history"><div class="msg"><div class="who"><span class="av"></span>Fox</div><div class="body">
+        <p>你在看前面段落…</p>
+        <div class="reading"><span>阅读位置</span><span style="color:var(--warning)">流式把视口拽回底部？</span></div>
+      </div></div></div>
+      <div class="composer-zone"><div class="composer"><textarea readonly></textarea></div></div></div>`),
+    after: shell(`<div class="conv on">长回答</div>`, `<div class="main"><div class="chead">目标（未宣称已修）</div>
+      <div class="history"><div class="msg"><div class="who"><span class="av"></span>Fox</div><div class="body">
+        <p>第一节…</p>
+        <div class="reading"><span>贴底已暂停</span><span class="scroll-btn">↓ 回到最新</span></div>
+        <p style="font-size:11px;color:var(--muted-fg)">先复现责任层，再改那一层。</p>
+      </div></div></div>
+      <div class="composer-zone"><div class="composer clean"><textarea readonly></textarea></div></div></div>`),
+  },
+  {
+    id: "split",
+    title: "预览分栏拖过 iframe",
+    why: "样例分栏不可靠（死区只在注释；none 遮罩无效）。仅当真机复现卡死后，在 Fox 现有分割条上加 pointer capture + pointer-events:auto 护盾。",
+    code: "待复现 → 右栏 / 阅读预览 Resizable 路径",
+    before: shell(`<div class="conv on">核对文件</div>`, `<div class="main" style="display:block;margin-top:26px;height:calc(100% - 26px);padding:0">
+      <div class="split" style="height:100%">
+        <div style="padding:12px"><p style="font-size:12px;color:var(--muted-fg)">拖入 iframe 后丢失捕获？（待证）</p></div>
+        <div class="grip"></div>
+        <div class="preview"><b style="color:var(--fg)">iframe</b><p style="margin-top:8px">勿照搬样例 none 遮罩</p></div>
+      </div></div>`),
+    after: shell(`<div class="conv on">核对文件</div>`, `<div class="main" style="display:block;margin-top:26px;height:calc(100% - 26px);padding:0">
+      <div class="split" style="height:100%">
+        <div style="padding:12px"><p style="font-size:12px;color:var(--muted-fg)">仅有复现时才做</p></div>
+        <div class="grip"></div>
+        <div class="preview"><b style="color:var(--fg)">iframe</b><div class="shield">护盾 auto · 示意</div></div>
+      </div></div>`),
+  },
+];
+
+function setTheme(theme, mode) {
+  const root = document.documentElement;
+  if (theme) { root.dataset.colorTheme = theme; localStorage.setItem("fox-aui-v2-theme", theme); }
+  if (mode) { root.classList.toggle("dark", mode === "dark"); localStorage.setItem("fox-aui-v2-mode", mode); }
+  const t = root.dataset.colorTheme || "graphite";
+  const m = root.classList.contains("dark") ? "dark" : "light";
+  document.getElementById("theme-seg").innerHTML = THEMES.map(([k,l]) =>
+    `<button type="button" class="${t===k?"on":""}" data-theme="${k}">${l}</button>`).join("");
+  document.getElementById("mode-seg").innerHTML =
+    `<button type="button" class="${m==="light"?"on":""}" data-mode="light">浅色</button>` +
+    `<button type="button" class="${m==="dark"?"on":""}" data-mode="dark">深色</button>`;
+}
+
+function block(s, kind) {
+  const badge = kind === "done"
+    ? `<span class="badge done">已落地</span>`
+    : `<span class="badge open">待复现</span>`;
+  return `<section class="scene" id="${s.id}">
+    <div class="id">${badge}<span>${kind === "done" ? "历史痛点 → 当前实现" : "先证据，再改码"}</span></div>
+    <h2>${s.title}</h2>
+    <p class="why">${s.why}</p>
+    <div class="codepath"><b>代码 / 状态：</b> ${s.code}</div>
+    <div class="compare">
+      <div><div class="pane-label"><b><span class="tag before">Before</span>${kind === "done" ? "旧痛点" : "问题假设"}</b></div>${s.before}</div>
+      <div><div class="pane-label"><b><span class="tag after">After</span>${kind === "done" ? "当前 Fox" : "目标（未宣称完成）"}</b></div>${s.after}</div>
+    </div>
+  </section>`;
+}
+
+function render() {
+  document.getElementById("toc").innerHTML =
+    done.map(s => `<a href="#${s.id}"><span class="pill done">已</span>${s.title.split("：")[0]}</a>`).join("") +
+    open.map(s => `<a href="#${s.id}"><span class="pill open">待</span>${s.title.split("：")[0]}</a>`).join("");
+  document.getElementById("scenes-done").innerHTML = done.map(s => block(s, "done")).join("");
+  document.getElementById("scenes-open").innerHTML = open.map(s => block(s, "open")).join("");
+}
+
+document.getElementById("theme-seg").addEventListener("click", e => {
+  const t = e.target.closest("[data-theme]"); if (t) setTheme(t.dataset.theme, null);
+});
+document.getElementById("mode-seg").addEventListener("click", e => {
+  const t = e.target.closest("[data-mode]"); if (t) setTheme(null, t.dataset.mode);
+});
+document.getElementById("layout-seg").addEventListener("click", e => {
+  const t = e.target.closest("[data-layout]"); if (!t) return;
+  document.body.classList.toggle("stack", t.dataset.layout === "stack");
+  document.querySelectorAll("#layout-seg button").forEach(b => b.classList.toggle("on", b === t));
+});
+
+const io = new IntersectionObserver(entries => {
+  entries.forEach(en => {
+    if (!en.isIntersecting) return;
+    document.querySelectorAll("#toc a").forEach(a => a.classList.toggle("active", a.getAttribute("href") === `#${en.target.id}`));
+  });
+}, { rootMargin: "-20% 0px -55% 0px", threshold: 0.05 });
+
+setTheme(localStorage.getItem("fox-aui-v2-theme") || "graphite", localStorage.getItem("fox-aui-v2-mode") || "light");
+render();
+[...done, ...open].forEach(s => { const el = document.getElementById(s.id); if (el) io.observe(el); });
+</script>
+</body>
+</html>
