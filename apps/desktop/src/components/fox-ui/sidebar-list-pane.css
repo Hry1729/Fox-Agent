@@ -1,0 +1,19 @@
+
+.fox-sidebar .fox-sidebar-list-pane { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; min-height: 0; margin: 2px 0 0; padding: 5px 0 0; overflow: hidden; }
+.fox-sidebar-list-pane .fox-section-head { flex: 0 0 39px; min-height: 39px; align-items: center; padding: 0 var(--fox-space-m); }
+.fox-sidebar-list-pane .fox-section-head > span:last-child { align-items: center; }
+.fox-sidebar-list-pane .fox-section-head .fox-icon-button { width: var(--fox-control-sm) !important; height: var(--fox-control-sm) !important; min-height: var(--fox-control-sm) !important; flex: 0 0 var(--fox-control-sm) !important; padding: 0; }
+.fox-sidebar-list-pane .fox-section-head .fox-icon-button svg { width: 14px; height: 14px; }
+.fox-sidebar-list-pane > .fox-sidebar-scroll { flex: 1 1 0; min-height: 0; margin: 0; }
+.fox-sidebar-list-pane .fox-sidebar-scroll [data-slot='scroll-area-viewport'] > div { display: block !important; padding-inline: 0; }
+.fox-sidebar-list-pane .fox-sidebar-scroll .fox-sidebar-section:first-child { padding-top: 0; }
+.fox-notification-sidebar.fox-sidebar-list-pane .fox-notification-list { display: flex; flex-direction: column; flex: none; min-height: 0; max-height: none; overflow: visible; padding: 0 0 var(--fox-space-m); scrollbar-gutter: auto; }
+
+.fox-sidebar-group-scroll .fox-sidebar-section { padding-top: 0; }
+.fox-sidebar-group-scroll .fox-sidebar-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 39px;
+  background: var(--sidebar) !important;
+}

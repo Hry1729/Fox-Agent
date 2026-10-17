@@ -1,3 +1,4 @@
+import '@/components/fox-ui/sidebar-list-pane.css'
 import { type ConversationRunIndicator } from '../conversation-run-indicator'
 import { ConversationStatusIcon } from '../conversation-status-icon'
 import { type SidebarProjectGroup, sidebarProjectGroups } from '../sidebar-project-groups'
@@ -276,7 +277,7 @@ export function Sidebar({
   const selectedMode: AssistantMode = LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView) || knowledgeViews.includes(activeView) ? 'knowledge' : 'assistant'
   const sidebarMode = SETTINGS_WORKSPACE_VIEWS.includes(activeView)
     ? 'settings'
-    : LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView) || activeView === 'knowledge'
+    : LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView) || knowledgeViews.includes(activeView)
       ? 'local-knowledge'
     : activeView === 'agent-detail'
       ? 'agent'
@@ -386,9 +387,10 @@ export function Sidebar({
       </div>}
 
       {sidebarMode === 'chat' ? <>{!notificationsOpen && !collapsed && (
-        <ScrollArea className="fox-sidebar-scroll">
+        <div className="fox-sidebar-list-pane">
+        <ScrollArea className="fox-sidebar-scroll fox-sidebar-group-scroll">
           {lifecycleView === 'active' && <section ref={projectSectionRef} className="fox-sidebar-section">
-            <div className="fox-section-head"><span>项目</span><span><IconButton label="添加项目" onClick={onAddProject}><Plus size={14} /></IconButton><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多项目操作"><MoreHorizontal size={14} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-project-menu"><DropdownMenuItem onSelect={onAddProject}><Plus />添加项目</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(true)}><ChevronDown />全部展开</DropdownMenuItem><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(false)}><ChevronRight />全部收起</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目权限</DropdownMenuItem></DropdownMenuContent></DropdownMenu></span></div>
+            <div className="fox-section-head fox-sidebar-group-head"><span>项目</span><span><IconButton label="添加项目" onClick={onAddProject}><Plus size={14} /></IconButton><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多项目操作"><MoreHorizontal size={14} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-project-menu"><DropdownMenuItem onSelect={onAddProject}><Plus />添加项目</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(true)}><ChevronDown />全部展开</DropdownMenuItem><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(false)}><ChevronRight />全部收起</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目权限</DropdownMenuItem></DropdownMenuContent></DropdownMenu></span></div>
             {projectGroups.length ? projectGroups.map((project) => {
               const open = projectOpen[project.key] ?? true
               return <div className="fox-project-group" key={project.key}>
@@ -461,7 +463,7 @@ export function Sidebar({
           </section>}
 
           <section ref={conversationSectionRef} className="fox-sidebar-section fox-conversation-section">
-            <div className="fox-section-head">
+            <div className="fox-section-head fox-sidebar-group-head">
               <span>{lifecycleView === 'archived' ? '已归档' : lifecycleView === 'trash' ? '回收站' : '对话'}</span>
               <span>
                 {lifecycleView === 'active' && <IconButton label="新建对话" onClick={onNewChat}><Plus size={14} /></IconButton>}
@@ -528,6 +530,7 @@ export function Sidebar({
             </div>
           </section>
         </ScrollArea>
+        </div>
       )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} hideLibrary={notificationsOpen} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : !notificationsOpen ? <>
         <div className={`fox-sidebar-primary fox-context-sidebar-nav ${sidebarMode === 'settings' ? 'is-settings' : ''}`}>
           {sidebarMode === 'agent'
