@@ -30,6 +30,7 @@ mod artifact_delivery_view;
 mod app_management;
 mod bundled_capabilities;
 mod computed_artifacts;
+mod delivery_acceptance;
 mod child_runs;
 mod digital_colleagues;
 mod expert_teams;
@@ -55,6 +56,10 @@ pub(crate) use kernel_jobs::{JobSnapshot, JobStartOutcome, JobStartRequest, JobS
 mod run_control;
 mod skill_activations;
 mod delivery_checks;
+pub(crate) use delivery_acceptance::{
+    delivery_review_downgrade_blocker, AcceptanceBinding, AcceptanceRow, AcceptanceWrite,
+    DowngradeBlocker, CURRENT_U1_AWARE_SCHEMA_VERSION,
+};
 mod run_steering;
 mod managed_files;
 pub(crate) use delivery_checks::{
@@ -82,6 +87,20 @@ mod memory;
 mod observability;
 mod work_events;
 mod work_graph;
+
+// H4 focused repair (card `G-P2B2-H4-focused-repair.md`): the two real delivery
+// display consumers must answer the pass question with one shared rule. Registered
+// here because the fixture builds a real `Database` and drives its real entries
+// (`load_conversation`, `artifact_for_conversation`) rather than the internal
+// helper those entries call.
+#[cfg(test)]
+mod h4_consumer_focused_tests;
+
+// Package 2-C1 §4a: the real-database matrix for the independent identity rule and
+// the two display consumers that share it. Registered here for the same reason as
+// the H4 suite above — it drives the real entries over a real database.
+#[cfg(test)]
+mod p2c1_identity_matrix_tests;
 
 pub use app_management::{
     AppNotificationRecord, AppNotificationUpsert, GlobalSearchRecord, MessageFeedbackRecord,

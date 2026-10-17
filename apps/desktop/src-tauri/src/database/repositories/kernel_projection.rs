@@ -21,10 +21,17 @@ pub(super) fn project(
     // vocabulary has no "paused", so the honest projection is 'interrupted': the
     // work stopped and is offered again, it is not a failed verdict and must not
     // silently render as still running.
+    //
+    // Package 2-D U1: `awaiting_delivery_review` projects the same way. The Run
+    // is neither running nor failed — it is parked on artifacts whose content is
+    // not verified, waiting for a per-item user decision. Rendering it
+    // 'running' would claim work is in flight that is not; rendering it 'failed'
+    // would claim a verdict no checker produced.
     tx.execute("UPDATE runs SET
         status=(SELECT CASE r.state WHEN 'created' THEN 'queued' WHEN 'completed' THEN 'completed'
             WHEN 'cancelled' THEN 'cancelled' WHEN 'failed' THEN 'failed' WHEN 'budget_exhausted' THEN 'failed'
             WHEN 'approval_expired' THEN 'interrupted'
+            WHEN 'awaiting_delivery_review' THEN 'interrupted'
             ELSE 'running' END
             FROM kernel_runs r WHERE r.run_id=?1),
         started_at=COALESCE(started_at,?2),

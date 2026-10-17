@@ -3,7 +3,11 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 92;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 93;
+pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
+pub(crate) use repositories::{
+    delivery_review_downgrade_blocker, DowngradeBlocker, CURRENT_U1_AWARE_SCHEMA_VERSION,
+};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::kernel_reconciliation::*;
 pub(crate) use repositories::ModelNoticeInput;

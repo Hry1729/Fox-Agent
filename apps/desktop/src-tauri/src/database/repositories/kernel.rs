@@ -601,6 +601,9 @@ fn valid_run_state(state: &str) -> bool {
             | "waiting_approval"
             | "waiting_jobs"
             | "retry_scheduled"
+            // Package 2-D U1: a delivery the user must still accept. Non-terminal;
+            // the artifacts are retained but their content is not verified.
+            | "awaiting_delivery_review"
             | "compacting"
             | "cancelling"
             | "completed"
@@ -626,6 +629,37 @@ fn run_transition_allowed(from: &str, to: &str) -> bool {
                 | ("running", "completed")
                 | ("running", "failed")
                 | ("running", "budget_exhausted")
+                // Package 2-D U1: the ONLY entry edge. A `RequiresU1` verdict is
+                // produced by the stop gate, which runs while the Run is
+                // `running`, so this is the only state it can be reached from.
+                // `waiting_approval` / `waiting_jobs` / `retry_scheduled` /
+                // `compacting` are deliberately NOT sources: each carries an
+                // unfinished side effect (an undecided approval plus its
+                // deadline, durable child Jobs, a scheduled whole-turn retry, an
+                // in-progress compaction). Parking from one of those would
+                // abandon it — and from `waiting_approval` would additionally
+                // violate the `WaitingApproval ⟺ approval_deadline_wall_ms`
+                // invariant the durable commit enforces below.
+                | ("running", "awaiting_delivery_review")
+                // Exits. `completed` is the user having accepted every item that
+                // needed accepting; `failed` is an explicit user rejection
+                // (`delivery.rejected_by_user`); `cancelling` is cancellation.
+                //
+                // `("awaiting_delivery_review", "running")` is deliberately
+                // RETAINED BUT UNREACHABLE, and the comment that used to sit here
+                // ("补证续写，经新 Run") was wrong. Supplying more evidence starts
+                // a NEW Run through the normal continuation entry; the parent Run
+                // stays parked on `awaiting_delivery_review` for ever and never
+                // returns to `running`. Nothing in this crate triggers the
+                // transition — it exists so that a future, separately authorized
+                // mechanism has a legal edge to use, not as a description of
+                // today's behaviour. Deleting it was considered and rejected:
+                // removing a legal edge is a policy change, whereas keeping it
+                // with an honest comment is not.
+                | ("awaiting_delivery_review", "running")
+                | ("awaiting_delivery_review", "completed")
+                | ("awaiting_delivery_review", "failed")
+                | ("awaiting_delivery_review", "cancelling")
                 | ("waiting_approval", "running")
                 | ("waiting_approval", "cancelling")
                 | ("waiting_approval", "failed")
@@ -2223,12 +2257,62 @@ impl Database {
                         [run_id],
                         |row| row.get(0),
                     )?;
-                    let delivery_outstanding: i64 = transaction.query_row(
-                        "SELECT COUNT(*) FROM delivery_checklist_items
-                          WHERE run_id=?1 AND status<>'passed'",
-                        [run_id],
-                        |row| row.get(0),
-                    )?;
+                    // Package 2-C1: `delivery_outstanding` must answer the **same**
+                    // question the two display consumers answer for the same row.
+                    // Counting `status<>'passed'` in SQL asked a shallower one and
+                    // could therefore report a corrupted row as delivered while both
+                    // display surfaces withheld its pass — three consumers, one row,
+                    // two conclusions. The row's durable columns are read here and
+                    // the single shared qualification rule is applied on the Rust
+                    // side, so no JSON shape is classified in SQL and no consumer
+                    // keeps a private copy of the rule.
+                    //
+                    // The whole run's rows are read in one statement rather than one
+                    // query per artifact, because this runs inside the terminal
+                    // model-failure transaction.
+                    // The rows a real decision terminated as passed. Filled by
+                    // the loop below, so the acceptance count can ask "is this
+                    // accepted item still outstanding?" without re-reading them.
+                    let delivery_passed_keys: std::collections::BTreeSet<String>;
+                    let delivery_passed: i64 = {
+                        let mut statement = transaction.prepare(
+                            "SELECT status, finding_json, requirements_json, item_key
+                             FROM delivery_checklist_items WHERE run_id=?1",
+                        )?;
+                        let rows = statement
+                            .query_map([run_id], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, Option<String>>(1)?,
+                                    row.get::<_, Option<String>>(2)?,
+                                    row.get::<_, String>(3)?,
+                                ))
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        let mut passed_keys = std::collections::BTreeSet::new();
+                        let mut passed = 0i64;
+                        for (status, finding, requirements, item_key) in rows {                            // A pass counts only when the row's own original
+                            // status says passed **and** the shared rule does not
+                            // withdraw it. This never promotes anything: a
+                            // `pending` or `failed` row stays outstanding, and a
+                            // legitimate definite non-pass is not washed away.
+                            if status == "passed"
+                                && !crate::runtime_host::delivery::passed_qualification_of_row(
+                                    &status,
+                                    finding.as_deref(),
+                                    requirements.as_deref(),
+                                    &item_key,
+                                )
+                                .withdraws_pass()
+                            {
+                                passed_keys.insert(item_key);
+                                passed += 1;
+                            }
+                        }
+                        delivery_passed_keys = passed_keys;
+                        passed
+                    };
+                    let delivery_outstanding = delivery_total - delivery_passed;
                     let attempt: i64 = transaction.query_row(
                         "SELECT attempt FROM kernel_runs WHERE run_id=?1",
                         [run_id],
@@ -2250,7 +2334,28 @@ impl Database {
                     //     the state is unknown and the remaining work continues.
                     let all_promised_delivered = delivery_total > 0 && delivery_outstanding == 0;
                     let deliverables_satisfied = all_promised_delivered;
-                    let summary = serde_json::json!({
+                    // Package 2-D U1: of the items that are still outstanding, how
+                    // many has a user taken responsibility for? This is a count of
+                    // **recorded** acceptances (the projection row, read in the
+                    // same statement batch), not a freshness verdict: whether an
+                    // acceptance still covers the current bytes is decided by
+                    // `effective_delivery_acceptance`, which re-reads the file and
+                    // therefore does not belong in this bulk summary. A caller must
+                    // not read this number as "these files are verified".
+                    //
+                    // An accepted item is still outstanding: accepting an
+                    // unverified delivery does not verify it. The count exists so a
+                    // reader can tell "the user still has to decide" from "the user
+                    // decided and the content is still unverified".
+                    let delivery_accepted = super::delivery_acceptance::delivery_acceptance_projection(
+                        &transaction,
+                        run_id,
+                    )?
+                    .into_iter()
+                    .filter(|(item_key, accepted, _)| {
+                        *accepted && !delivery_passed_keys.contains(item_key)
+                    })
+                    .count() as i64;                    let summary = serde_json::json!({
                         "runId": run_id,
                         "pauseReason": "model_failure",
                         "failureCategory": failure.category,
@@ -2258,6 +2363,7 @@ impl Database {
                         "pendingToolCalls": pending_tool_calls,
                         "deliveryItems": delivery_total,
                         "deliveryOutstanding": delivery_outstanding,
+                        "deliveryAccepted": delivery_accepted,
                         "deliverablesSatisfied": deliverables_satisfied,
                         "deliverablesSatisfiedReason": if all_promised_delivered {
                             "all_promised_deliverables_passed"
@@ -3635,6 +3741,62 @@ impl Database {
                         ],
                     )?;
                 }
+            }
+            // 7c. Package 2-D U1: a Run parked on `awaiting_delivery_review` is
+            //     NOT terminal, but it is the same kind of pause — the user must
+            //     act before the Run can continue. `kernel_continuable_run`
+            //     refuses a run with no `kernel_run_progress` row, so without
+            //     this write the continuation entry point could not offer it and
+            //     the Host drive loop would have nothing to wait on.
+            //
+            //     The outstanding item list is read from the park event this very
+            //     decision committed, never from a caller-supplied payload: the
+            //     event is the durable fact, and re-deriving the list here from
+            //     the checklist would be a second evaluation of the decision.
+            if cmd.run_state == crate::kernel::RunState::AwaitingDeliveryReview {
+                let park = cmd.events.iter().rev().find(|event| {
+                    event.event_type == "run.awaiting_delivery_review"
+                });
+                let Some(park) = park else {
+                    return Err(kernel_err(format!(
+                        "awaiting_delivery_review has no park event for {run_id}"
+                    )));
+                };
+                let parked: serde_json::Value = serde_json::from_str(&park.payload_json)
+                    .map_err(|_| kernel_err("invalid delivery review park event"))?;
+                let outstanding = parked["outstandingItems"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let attempt: i64 = transaction.query_row(
+                    "SELECT attempt FROM kernel_runs WHERE run_id=?1",
+                    params![run_id],
+                    |row| row.get(0),
+                )?;
+                let summary = serde_json::json!({
+                    "runId": run_id,
+                    "pauseReason": "delivery_review",
+                    "runningElapsedMs": cmd.running_elapsed_ms,
+                    "lastEventSeq": final_last_seq,
+                    "resumable": true,
+                    "deliveryReview": {
+                        "reason": parked["reason"].as_str().unwrap_or_default(),
+                        "outstandingItems": outstanding,
+                    },
+                })
+                .to_string();
+                transaction.execute(
+                    "INSERT INTO kernel_run_progress
+                     (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
+                      terminal_written, running_elapsed_ms, continuable, summary_json, created_at)
+                     VALUES (?1, ?2, 'delivery_review', 0, 0, 0, ?3, 1, ?4, ?5)
+                     ON CONFLICT(run_id, attempt, pause_reason) DO UPDATE SET
+                         terminal_written=0,
+                         running_elapsed_ms=excluded.running_elapsed_ms,
+                         continuable=1,
+                         summary_json=excluded.summary_json",
+                    params![run_id, attempt, cmd.running_elapsed_ms, summary, wall_now_ms],
+                )?;
             }
             // 8. Mid-run steering transitions ride the same decision write-set
             //    so message status can never disagree with the dispatch/response
