@@ -2996,7 +2996,13 @@ fn drive_real_run_with_approvals(
                 // payload key; using the same source keeps the evaluation's
                 // registration rows as traceable as the app's.
                 effect.tool_call_id.as_deref(),
-                || policy.execute(db, tool, &payload["input"], token),
+                || {
+                    let call = effect
+                        .tool_call_id
+                        .as_deref()
+                        .ok_or("missing present_files call identity")?;
+                    policy.execute(db, tool, &payload["input"], call, token)
+                },
             )
         };
         match result {
@@ -3691,7 +3697,7 @@ fn managed_office_gate_checks(
                     tool_call_id: &str| {
         executions.set(executions.get() + 1);
         execute_with_managed_versions(*context, tool, input, Some(tool_call_id), || {
-            policy.execute(db, tool, input, &token)
+            policy.execute(db, tool, input, tool_call_id, &token)
         })
     };
 
@@ -3985,7 +3991,7 @@ impl ReadOnlyGateRun {
             tool,
             input,
             Some(tool_call_id),
-            || policy.execute(&self.db, tool, input, &token),
+            || policy.execute(&self.db, tool, input, tool_call_id, &token),
         )
     }
 }

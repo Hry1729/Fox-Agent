@@ -132,7 +132,8 @@ fn kernel_reads_project_root_and_office_attachments_through_frozen_gateway() {
                         .is_err());
                     policy.execute_context_resource(&db, &root, &root, &root, tool, &payload["input"], token)?
                 } else {
-                    policy.execute(&db, tool, &payload["input"], token)?
+                    let call = effect.tool_call_id.as_deref().unwrap_or("display-call");
+                    policy.execute(&db, tool, &payload["input"], call, token)?
                 };
                 assert!(result.to_string().contains(expected));
                 Ok((true, result))

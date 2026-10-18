@@ -135,7 +135,8 @@ fn recovery_worker_flow(reapprove: bool) {
             |_, effect, token| {
                 count.fetch_add(1, Ordering::SeqCst);
                 let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
-                Ok((true, policy.execute(&db, "write_file", &payload["input"], token)?))
+                Ok((true, policy.execute(&db, "write_file", &payload["input"],
+                    effect.tool_call_id.as_deref().unwrap_or("reconciliation-call"), token)?))
             }).unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert_eq!(std::fs::read_to_string(root.join("new-after-confirmation.txt")).unwrap(), "new approved proposal");

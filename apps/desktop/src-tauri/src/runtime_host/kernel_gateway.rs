@@ -1708,7 +1708,9 @@ mod revision_tests {
             artifacts_dir: None,
         };
 
-        let token = crate::kernel::CancellationToken::default();
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run(&run_id).unwrap();
+        let token = registry.tool_token(&run_id, call_id).unwrap();
         let result = policy
             .execute(
                 &db,

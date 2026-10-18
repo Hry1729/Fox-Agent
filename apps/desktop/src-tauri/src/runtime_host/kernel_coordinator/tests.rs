@@ -1212,7 +1212,8 @@ fn owning_host_recovery_consumes_queued_approvals_then_real_reads_and_model() {
         |_,effect,token| {
             count.fetch_add(1, Ordering::SeqCst);
             let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
-            Ok((true,policy.execute(&db, "read", &payload["input"], token)?))
+            Ok((true,policy.execute(&db, "read", &payload["input"],
+                effect.tool_call_id.as_deref().unwrap_or("read-call"), token)?))
         }).unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "completed");
@@ -2815,8 +2816,9 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
         } else {
             assert_eq!(coordinator.snapshot().unwrap().state,"waiting_approval");
             coordinator.resolve_approval("guarded-read",kernel::ApprovalDecision::AllowOnce).unwrap();
-            coordinator.dispatch_tool("guarded-read","hook-resource",|_,_,token| {
-                Ok((true,policy.execute(&db,"read",&json!({"path":"proof.txt"}),token)?))
+            coordinator.dispatch_tool("guarded-read","hook-resource",|_,effect,token| {
+                Ok((true,policy.execute(&db,"read",&json!({"path":"proof.txt"}),
+                    effect.tool_call_id.as_deref().unwrap_or("guarded-read"),token)?))
             }).unwrap();
         }
         coordinator.fail("test.finished","Finish audit fixture").unwrap();
