@@ -444,6 +444,14 @@ mod tests {
                          VALUES ('conv-1','agent-1','t','active',1,1)",
                         [],
                     )?;
+                    // An artifact row references the Run that declared it, so the
+                    // fixture seats that Run too rather than relying on a nullable
+                    // reference the real writer never leaves empty.
+                    connection.execute(
+                        "INSERT INTO runs(id,conversation_id,status,model,created_at)
+                         VALUES ('run-1','conv-1','running','m',1)",
+                        [],
+                    )?;
                     Ok(())
                 })
                 .expect("seed conversation");
