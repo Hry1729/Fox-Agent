@@ -829,11 +829,11 @@ fn r2_real_continuation_copies_directory_recognition_and_semantics() {
     )
     .unwrap();
     let stop = evaluate_stop(&f.db, f.root.to_str(), &next.run.id).unwrap();
-    // With no checklist at all, the gate short-circuits to a pass: nothing in the
-    // successor can be waiting on content verification.
+    // With no checklist at all, the gate reports the ordinary `NoChecklist` path:
+    // nothing in the successor is waiting on content verification.
     assert!(
-        matches!(stop, DeliveryStop::Passed { .. }),
-        "an ordinary successor completes without a delivery gate: {stop:?}"
+        matches!(stop, DeliveryStop::NoChecklist),
+        "an ordinary successor goes through normal stop handling: {stop:?}"
     );
     assert!(
         f.db
