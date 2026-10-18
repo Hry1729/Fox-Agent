@@ -724,4 +724,139 @@ mod tests {
             serde_json::from_str(r#"{"conversationId":"c","sourceRunId":"r"}"#).unwrap();
         assert_eq!(request.tier, BudgetTier::Standard);
     }
+
+    /// A successor Run must not inherit the source's content-verification
+    /// checklist.
+    ///
+    /// Continuing a Run that was frozen under the previous design used to copy
+    /// its checklist into the new Run and mark every row pending. That put an
+    /// ordinary continuation back on content verification, repair rounds and
+    /// review waiting. The source Run keeps its own rows, waiting state and
+    /// audit — this only declines to seed the successor.
+    #[test]
+    fn a_continuation_does_not_copy_the_source_checklist() {
+        use crate::database::models::ArtifactRecord;
+
+        let root = std::env::temp_dir().join(format!("fox-cont-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::database::Database::open(root.join("facts.db")).unwrap();
+        let conversation = db
+            .create_conversation(db.default_agent_id(), Some("cont"), Some(root.to_str().unwrap()), Some("allow"))
+            .unwrap();
+        let source = db.create_run(&conversation.id, "source", None).unwrap();
+        let source_id = source.run.id.clone();
+        let permission = fox_engine_protocol::FrozenPermission {
+            mode: fox_engine_protocol::PermissionMode::Allow,
+            project_root: Some(root.to_string_lossy().into_owned()),
+            grants: vec![],
+            approval_epoch: None,
+        };
+        let binding = fox_engine_protocol::RunControlBinding {
+            schema_version: 1,
+            run_id: source_id.clone(),
+            conversation_id: conversation.id.clone(),
+            engine_id: "pi".into(),
+            execution_profile_id: "legacy".into(),
+            authority: fox_engine_protocol::ExecutionAuthority::Authoritative,
+            read_only_executor: fox_engine_protocol::ResourceExecutor::Rust,
+            permission_snapshot_id: crate::database::Database::run_control_permission_hash(&permission).unwrap(),
+            permission,
+            budgets: TimeBudgets::default(),
+        };
+        db.freeze_run_control(&binding).unwrap();
+        db.with_connection(|c| {
+            c.execute(
+                "INSERT INTO kernel_runs(run_id, engine_id, kernel_mode, capability_manifest_version,
+                     permission_snapshot_id, execution_profile_id, prompt_config_hash, frozen_config_json,
+                     state, last_event_seq, created_at, updated_at, terminal_at, attempt)
+                 VALUES (?1,'pi','authoritative',2,?2,'legacy','h','{}','paused',0,1,1,NULL,1)",
+                params![source_id, binding.permission_snapshot_id],
+            )?;
+            // The source was frozen under the old design: it owns a real checklist
+            // row that is still pending review.
+            c.execute(
+                "INSERT INTO delivery_checklist_items
+                     (run_id,item_key,target_path,artifact_id,display_name,checks_json,
+                      requirements_json,status,finding_json,checked_at,updated_at)
+                 VALUES (?1,'target:report.md','report.md',NULL,'report.md','[]','{}',
+                         'unverified',NULL,NULL,1)",
+                params![source_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let request = ContinuationRequest {
+            conversation_id: conversation.id.clone(),
+            source_run_id: source_id.clone(),
+            tier: BudgetTier::Standard,
+            custom_execution_ms: None,
+        };
+        let prepared = PreparedContinuation {
+            budgets: TimeBudgets::default(),
+            prompt_config_hash: "prompt-hash".into(),
+            capability_manifest_hash: "manifest-hash".into(),
+            frozen_config_json: serde_json::to_string(&crate::kernel::RunFrozenConfig {
+                engine_id: "pi".into(),
+                kernel_mode: "authoritative".into(),
+                capability_manifest_version: 2,
+                capability_manifest_hash: "manifest-hash".into(),
+                permission_snapshot_id: binding.permission_snapshot_id.clone(),
+                execution_profile_id: "legacy".into(),
+                prompt_config_hash: "prompt-hash".into(),
+                model_request_timeout_ms: binding.budgets.model_request_ms,
+                model_first_response_ms: binding.budgets.model_first_response_ms,
+                model_idle_ms: binding.budgets.model_idle_ms,
+                tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
+                run_execution_budget_ms: binding.budgets.run_execution_ms,
+                run_execution_limited: binding.budgets.run_execution_limited,
+                approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
+                provider_max_retries: 0,
+                turn_max_retries: 0,
+                experimental_compute_job_notice: false,
+            })
+            .unwrap(),
+            artifacts: None,
+            skill_activations: vec![],
+        };
+
+        let started = db
+            .kernel_insert_continuation_attempt(&request, "continue it", &prepared)
+            .expect("the continuation is created");
+        let successor = started.run.id.clone();
+        assert_ne!(successor, source_id);
+
+        let (source_rows, source_status, successor_rows) = db
+            .with_connection(|c| {
+                let mut count = |run: &str| -> rusqlite::Result<i64> {
+                    c.query_row(
+                        "SELECT COUNT(*) FROM delivery_checklist_items WHERE run_id=?1",
+                        [run],
+                        |row| row.get(0),
+                    )
+                };
+                let successor_rows = count(&successor)?;
+                let source_rows = count(&source_id)?;
+                let status: String = c.query_row(
+                    "SELECT status FROM delivery_checklist_items WHERE run_id=?1",
+                    [&source_id],
+                    |row| row.get(0),
+                )?;
+                Ok((source_rows, status, successor_rows))
+            })
+            .unwrap();
+
+        assert_eq!(successor_rows, 0, "the successor starts without a checklist");
+        assert_eq!(source_rows, 1, "the source keeps its own row");
+        assert_eq!(source_status, "unverified", "the source's finding is untouched");
+        // The source's audited waiting state is not rewritten either.
+        let source_state: String = db
+            .with_connection(|c| {
+                c.query_row("SELECT state FROM kernel_runs WHERE run_id=?1", [&source_id], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(source_state, "paused");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
