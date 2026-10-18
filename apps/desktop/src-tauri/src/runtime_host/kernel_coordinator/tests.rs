@@ -4525,3 +4525,119 @@ fn permission_change_ask_to_ask_reissues_only_a_current_ticket() {
         "resolving approval does not execute or claim the tool"
     );
 }
+
+/// A declaration must be attributed to the dispatch that carried it.
+///
+/// This drives the production entry point — a real coordinator dispatch, the
+/// real `GatewayPolicy::execute`, a real SQLite file — because the defect this
+/// pins was in the wiring: the gateway passed the tool *name* where the call
+/// identity belonged, so every declared row claimed "present_files" had made
+/// the call. A test that called `present_files::execute` itself could not see
+/// that, since it supplies the identity of its own choosing.
+#[test]
+fn a_declaration_records_the_dispatch_identity_that_carried_it() {
+    let config = worker_configuration();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let scope = crate::database::KernelHostScope {
+        schema_version: 1,
+        tool_names: ["present_files".into()].into_iter().collect(),
+        mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(),
+        office_tools: Default::default(),
+        lifecycle_hooks: Vec::new(),
+    };
+    db.freeze_kernel_host_scope(&run_id, &scope).unwrap();
+
+    // A real file inside the Run's authorized root.
+    std::fs::write(root.join("out.csv"), "a,b\n1,2\n").unwrap();
+    let policy = super::super::kernel_gateway::GatewayPolicy {
+        binding: db.run_control_binding(&run_id).unwrap().unwrap(),
+        scope: db.kernel_host_scope(&run_id).unwrap(),
+        database: Some(db.clone()),
+        sessions_dir: None,
+        artifacts_dir: None,
+    };
+
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator
+        .dispatch_initial("initial", &Ask, |binding, frame, _| {
+            Ok(fox_engine_protocol::KernelInitialModelResponse {
+                schema_version: 1,
+                run_id: binding.run_id.clone(),
+                turn_id: frame.input.turn_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
+                    {"type":"toolCall","id":"declare-1","name":"present_files",
+                     "arguments":{"files":[{"path":"out.csv","description":"最终表格"}]}}]}),
+            })
+        })
+        .unwrap();
+    coordinator.resolve_approval("declare-1", kernel::ApprovalDecision::AllowOnce).unwrap();
+    coordinator
+        .dispatch_tool("declare-1", "declare-owner", |_, effect, token| {
+            let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+            Ok((
+                true,
+                policy.execute(
+                    &db,
+                    "present_files",
+                    &payload["input"],
+                    effect.tool_call_id.as_deref().unwrap_or_default(),
+                    token,
+                )?,
+            ))
+        })
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    // The durable dispatch row and the declaration must name the same call.
+    let dispatch_tool: String = connection
+        .query_row(
+            "SELECT tool FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id='declare-1'",
+            [&run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_tool, "present_files");
+    let declared: (String, String, Option<String>, i64) = connection
+        .query_row(
+            "SELECT turn_call_id, display_name, declared_description, byte_size
+               FROM artifacts WHERE run_id=?1 AND declared_at IS NOT NULL",
+            [&run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(declared.0, "declare-1", "the row names the dispatch, not the tool");
+    assert_ne!(declared.0, "present_files");
+    assert_eq!(declared.1, "out.csv");
+    assert_eq!(declared.2.as_deref(), Some("最终表格"));
+    assert_eq!(declared.3, 8, "a real file keeps its real size");
+
+    // The same Run and path again updates that one row rather than adding one.
+    coordinator
+        .dispatch_tool("declare-1", "declare-owner", |_, effect, token| {
+            let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+            Ok((
+                true,
+                policy.execute(
+                    &db,
+                    "present_files",
+                    &payload["input"],
+                    effect.tool_call_id.as_deref().unwrap_or_default(),
+                    token,
+                )?,
+            ))
+        })
+        .unwrap();
+    let rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE run_id=?1 AND declared_at IS NOT NULL",
+            [&run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "one Run and one path keep one declaration");
+}
