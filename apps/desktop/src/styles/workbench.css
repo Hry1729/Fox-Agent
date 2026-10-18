@@ -12155,6 +12155,17 @@ img[src='/avatars/fox-assistant.png'] {
   font-size: 12px;
   line-height: 1.5;
 }
+/* The unresolved-requirement row is a question, not a deliverable card: it has no
+   accept button because there is nothing to accept yet. */
+.fox-delivery-review__question {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--fox-border);
+  border-radius: 10px;
+  background: var(--fox-bg);
+  font-size: 13px;
+  line-height: 1.6;
+}
 .fox-delivery-acceptance {
   display: flex;
   flex-direction: column;

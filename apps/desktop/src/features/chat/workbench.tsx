@@ -3337,8 +3337,17 @@ const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ know
 function DeliveryReviewPanel() {
   const { deliveryRunId, deliveryRunState, deliveryChecklist } = useContext(TimelineRuntimeContext)
   const parked = deliveryRunState === 'awaiting_delivery_review'
+  // `recognition:*` rows are not deliverables: they record that the task text did
+  // not name one. The Host refuses their acceptance and their binding, so rendering
+  // a card for them would only produce a button that can never work. They stay in
+  // the Run's outstanding list — that is the durable record that the Run is not
+  // done — and are shown as the open question instead of as an acceptable item.
+  const recognition = useMemo(
+    () => (deliveryChecklist ?? []).filter((item) => item.runId === deliveryRunId && item.itemKey.startsWith('recognition:')),
+    [deliveryChecklist, deliveryRunId],
+  )
   const outstanding = useMemo(
-    () => (deliveryChecklist ?? []).filter((item) => item.runId === deliveryRunId && item.status !== 'passed'),
+    () => (deliveryChecklist ?? []).filter((item) => item.runId === deliveryRunId && item.status !== 'passed' && !item.itemKey.startsWith('recognition:')),
     [deliveryChecklist, deliveryRunId],
   )
   // A finished Run keeps the panel only while one of its rows still carries an
@@ -3347,7 +3356,7 @@ function DeliveryReviewPanel() {
   // `loadState` exists to avoid — so the panel renders whenever the Run is parked
   // or has ended with outstanding rows, and the **card** decides per row which
   // buttons exist. A Run with no outstanding rows at all renders nothing.
-  if (!deliveryRunId || outstanding.length === 0) return null
+  if (!deliveryRunId || (outstanding.length === 0 && recognition.length === 0)) return null
   if (!parked && deliveryRunState !== 'completed' && deliveryRunState !== 'failed') return null
   const ended = !parked
   return (
@@ -3355,14 +3364,28 @@ function DeliveryReviewPanel() {
       <header>
         {ended ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}
         <div>
-          <strong>{ended ? '交付内容尚未核验——任务已结束' : '交付内容尚未核验'}</strong>
+          <strong>
+            {recognition.length > 0
+              ? '交付要求未识别——需要你补充'
+              : ended ? '交付内容尚未核验——任务已结束' : '交付内容尚未核验'}
+          </strong>
           <small>
-            {ended
-              ? '该任务的核验结论保留原样。你此前的接受仍在，可以逐项撤销；任务不会因此重启或重跑。'
-              : '产物已保留。你可以逐项接受未核验风险，或补充材料后重新核验；不会自动重跑模型修复。'}
+            {recognition.length > 0
+              ? '任务提到了要做文件，但没说清具体交付什么，Host 没有可核验的对象。补充文件名、类型或目录后重发，会按新任务重新识别并重新核验；本次不会自动重跑模型，也不会被记成未通过。'
+              : ended
+                ? '该任务的核验结论保留原样。你此前的接受仍在，可以逐项撤销；任务不会因此重启或重跑。'
+                : '产物已保留。你可以逐项接受未核验风险，或补充材料后重新核验；不会自动重跑模型修复。'}
           </small>
         </div>
       </header>
+      {recognition.map((item) => {
+        const reason = typeof item.finding?.reason === 'string' ? item.finding.reason : null
+        return (
+          <p className="fox-delivery-review__question" key={`${item.runId}:${item.itemKey}`}>
+            {reason || '请明确要交付的文件名、类型或目录；当前没有可靠目标可自动修复'}
+          </p>
+        )
+      })}
       {outstanding.map((item) => (
         <DeliveryAcceptanceCard
           key={`${item.runId}:${item.itemKey}`}
