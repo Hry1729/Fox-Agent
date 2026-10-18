@@ -1145,6 +1145,7 @@ impl GatewayPolicy {
         database: &Database,
         tool: &str,
         input: &Value,
+        tool_call_id: &str,
         token: &CancellationToken,
     ) -> Result<Value, String> {
         token.check()?;
@@ -1164,7 +1165,7 @@ impl GatewayPolicy {
                 database,
                 &self.binding.conversation_id,
                 &self.binding.run_id,
-                tool,
+                tool_call_id,
                 &self.binding.permission.project_root,
                 input,
             );
@@ -1632,6 +1633,148 @@ mod revision_tests {
             "reading the input must stay allowed"
         );
         policy.database = None;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The declaration must be attributed to the dispatch that carried it.
+    ///
+    /// This drives the real `GatewayPolicy::execute` entry point rather than
+    /// `present_files::execute` directly, because the bug this pins was in the
+    /// wiring: the gateway used to pass the tool *name* where the call identity
+    /// belonged, so every row claimed `present_files` had declared it.
+    #[test]
+    fn present_files_records_the_real_call_identity_not_the_tool_name() {
+        use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, ResourceExecutor, TimeBudgets};
+        let root = std::env::temp_dir().join(format!("fox-present-gw-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("out.csv"), b"a,b\n1,2\n").unwrap();
+
+        let db_path = std::env::temp_dir().join(format!("fox-present-gw-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(db_path.clone()).unwrap();
+        let conversation = db.create_conversation("fox-general", Some("gw"), None, None).unwrap();
+        let run = db.create_run(&conversation.id, "gw run", None).unwrap();
+        let run_id = run.run.id.clone();
+        let binding = db.freeze_kernel_run_control(&run_id, "durable", TimeBudgets::default()).unwrap();
+        let call_id = "call-present-42";
+        db.with_connection(|c| {
+            c.execute(
+                "INSERT INTO kernel_runs(run_id, engine_id, kernel_mode, capability_manifest_version,
+                     permission_snapshot_id, execution_profile_id, prompt_config_hash, frozen_config_json,
+                     state, last_event_seq, created_at, updated_at, terminal_at)
+                 VALUES (?1,'kernel','authoritative',1,?2,'durable','h','{}','running',0,1,1,NULL)",
+                rusqlite::params![run_id, binding.permission_snapshot_id],
+            )?;
+            // The dispatch row is the identity the declaration must reuse.
+            c.execute(
+                "INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool, source_order,
+                     canonical_input_json, state, result_json, created_at, settled_at)
+                 VALUES (?1,?2,'b1','present_files',0,'{\"files\":[{\"path\":\"out.csv\"}]}','pending',NULL,1,NULL)",
+                rusqlite::params![run_id, call_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let permission = FrozenPermission {
+            mode: PermissionMode::Ask,
+            project_root: Some(root.to_string_lossy().into_owned()),
+            grants: vec![],
+            approval_epoch: None,
+        };
+        let policy = GatewayPolicy {
+            binding: RunControlBinding {
+                schema_version: 1,
+                run_id: run_id.clone(),
+                conversation_id: conversation.id.clone(),
+                engine_id: "pi".into(),
+                execution_profile_id: "durable".into(),
+                authority: ExecutionAuthority::Authoritative,
+                read_only_executor: ResourceExecutor::Rust,
+                permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+                permission,
+                budgets: TimeBudgets::default(),
+            },
+            scope: KernelHostScope {
+                schema_version: 1,
+                tool_names: ["present_files".into()].into_iter().collect(),
+                mcp_server_hashes: Default::default(),
+                knowledge_reference_hashes: Default::default(),
+                knowledge_connection_hashes: Default::default(),
+                office_tools: Default::default(),
+                lifecycle_hooks: vec![],
+            },
+            database: Some(db.clone()),
+            sessions_dir: None,
+            artifacts_dir: None,
+        };
+
+        let token = crate::kernel::CancellationToken::default();
+        let result = policy
+            .execute(
+                &db,
+                "present_files",
+                &json!({"files": [{"path": "out.csv"}]}),
+                call_id,
+                &token,
+            )
+            .expect("the gateway records the declaration");
+
+        assert_eq!(result["recorded"], json!(true));
+        let declared = db
+            .with_connection(|c| {
+                let mut s = c.prepare(
+                    "SELECT turn_call_id, display_name FROM artifacts
+                      WHERE run_id=?1 AND declared_at IS NOT NULL",
+                )?;
+                let rows = s
+                    .query_map(rusqlite::params![run_id], |row| {
+                        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(declared.len(), 1, "one file, one declaration");
+        assert_eq!(declared[0].0.as_deref(), Some(call_id), "the row names the real dispatch");
+        assert_ne!(
+            declared[0].0.as_deref(),
+            Some("present_files"),
+            "the tool name must never stand in for the call identity"
+        );
+        // Cross-check the identity against the durable dispatch row itself.
+        let dispatch = db
+            .with_connection(|c| {
+                c.query_row(
+                    "SELECT tool FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+                    rusqlite::params![run_id, declared[0].0.clone().unwrap_or_default()],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(dispatch, "present_files", "the identity resolves to the dispatch");
+
+        // The same Run naming the same path again updates one row.
+        policy
+            .execute(
+                &db,
+                "present_files",
+                &json!({"files": [{"path": "out.csv"}]}),
+                call_id,
+                &token,
+            )
+            .unwrap();
+        let after = db
+            .with_connection(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE run_id=?1 AND declared_at IS NOT NULL",
+                    rusqlite::params![run_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(after, 1, "a repeat declaration keeps a single row per Run and path");
+
+        let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(root);
     }
 }

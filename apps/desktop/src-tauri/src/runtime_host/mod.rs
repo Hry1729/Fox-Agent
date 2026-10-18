@@ -2475,9 +2475,10 @@ impl RuntimeHost {
         // only decides what a Run started now gets.
         //
         // A Run that already has checklist rows is one that was frozen earlier
-        // (a restart, or a resume of a parked task). It keeps reading its own
-        // frozen contract, so the switch cannot retroactively change a decision
-        // that was already recorded.
+        // and is being restarted: its rows describe its own contract, so it keeps
+        // reading that contract. A continuation of a frozen Run no longer arrives
+        // here with copied rows — the continuation writer declines to seed them —
+        // so a fresh successor takes the simplified branch like any new task.
         let already_frozen = !self
             .database
             .delivery_checklist(&started.run.id)?

@@ -544,17 +544,13 @@ impl Database {
                     super::skill_activations::record_in_connection(&transaction, &started.run.id, Some(&request.conversation_id), record)?;
                 }
             }
-            // Carry delivery requirements forward atomically. Recheck every
-            // artifact; a previous pass is not proof the file is still intact.
-            // `recognition:*` rows stay behind: they record that the *source*
-            // attempt's text did not name a complete target set, which says
-            // nothing about this attempt's text. Copying one would park the new
-            // Run on a requirement no answer can discharge.
-            transaction.execute("INSERT INTO delivery_checklist_items
-                (run_id,item_key,target_path,artifact_id,display_name,checks_json,requirements_json,status,finding_json,checked_at,updated_at)
-                SELECT ?1,item_key,target_path,NULL,display_name,checks_json,requirements_json,'pending',NULL,NULL,?3
-                FROM delivery_checklist_items WHERE run_id=?2 AND item_key NOT LIKE 'recognition:%'",
-                params![started.run.id,request.source_run_id,now])?;
+            // Delivery requirements are deliberately NOT carried forward. A new
+            // successor Run is an ordinary Run under the simplified hand-over: it
+            // declares its files, and waiting on a copied checklist would put it
+            // back on content verification, repair rounds and review waiting that
+            // the source Run's contract no longer governs. The source Run keeps its
+            // own rows, waiting state and audit untouched — this only declines to
+            // seed the new Run.
             // Auditable re-verification fact: the source attempt records which
             // permission the continuation was verified against and that it is a
             // narrowing of its own.

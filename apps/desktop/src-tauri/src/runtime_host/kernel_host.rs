@@ -2437,7 +2437,16 @@ impl super::RuntimeHost {
                 tool,
                 &input,
                 effect.tool_call_id.as_deref(),
-                || policy.execute(&self.database, tool, &input, token),
+                || {
+                    // The declaration is attributed to the dispatch that carried
+                    // it, so a missing call identity is a Host error rather than
+                    // a row that records the tool name in its place.
+                    let call_id = effect
+                        .tool_call_id
+                        .as_deref()
+                        .ok_or("missing present_files call identity")?;
+                    policy.execute(&self.database, tool, &input, call_id, token)
+                },
             );
             outcome
         }
