@@ -826,23 +826,31 @@ mod tests {
         let successor = started.run.id.clone();
         assert_ne!(successor, source_id);
 
-        let (source_rows, source_status, successor_rows) = db
+        let successor_rows = db
+            .query_count_raw(
+                "SELECT COUNT(*) FROM delivery_checklist_items WHERE run_id=?1",
+                &[&successor],
+            )
+            .unwrap();
+        let source_rows = db
+            .query_count_raw(
+                "SELECT COUNT(*) FROM delivery_checklist_items WHERE run_id=?1",
+                &[&source_id],
+            )
+            .unwrap();
+        let (source_status, source_state) = db
             .with_connection(|c| {
-                let mut count = |run: &str| -> rusqlite::Result<i64> {
-                    c.query_row(
-                        "SELECT COUNT(*) FROM delivery_checklist_items WHERE run_id=?1",
-                        [run],
-                        |row| row.get(0),
-                    )
-                };
-                let successor_rows = count(&successor)?;
-                let source_rows = count(&source_id)?;
                 let status: String = c.query_row(
                     "SELECT status FROM delivery_checklist_items WHERE run_id=?1",
                     [&source_id],
                     |row| row.get(0),
                 )?;
-                Ok((source_rows, status, successor_rows))
+                let state: String = c.query_row(
+                    "SELECT state FROM kernel_runs WHERE run_id=?1",
+                    [&source_id],
+                    |row| row.get(0),
+                )?;
+                Ok((status, state))
             })
             .unwrap();
 
@@ -850,11 +858,6 @@ mod tests {
         assert_eq!(source_rows, 1, "the source keeps its own row");
         assert_eq!(source_status, "failed", "the source's finding is untouched");
         // The source's audited waiting state is not rewritten either.
-        let source_state: String = db
-            .with_connection(|c| {
-                c.query_row("SELECT state FROM kernel_runs WHERE run_id=?1", [&source_id], |row| row.get(0))
-            })
-            .unwrap();
         assert_eq!(source_state, "paused");
 
         let _ = std::fs::remove_dir_all(&root);
