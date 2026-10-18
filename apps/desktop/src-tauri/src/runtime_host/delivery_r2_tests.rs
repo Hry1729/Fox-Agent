@@ -787,34 +787,27 @@ fn r2_real_continuation_copies_directory_recognition_and_semantics() {
     let next =
         f.db.kernel_insert_continuation_attempt(&request, &prompt, &prepared)
             .unwrap();
-    assert_eq!(
-        f.db.delivery_item_requirements(&next.run.id, &slot.item_key)
-            .unwrap(),
-        source_requirements
-    );
-    // The concrete obligations travel; the *unresolved* marker does not. It says
-    // the parent's text named no complete target set, which is a statement about
-    // that text only, and the child has its own text to be judged on. Inheriting it
-    // would park the resumed Run on a requirement no answer could discharge.
-    let after = frozen_delivery_reference(&f.db, &next.run.id, &f.context()).unwrap();
-    assert_eq!(
-        before["targets"], after["targets"],
-        "the inherited concrete obligations are the same ones"
-    );
-    assert_eq!(before["recognition"], "unresolved");
-    assert_eq!(
-        after["recognition"], "recognized",
-        "a resumed Run re-decides recognition from its own text: {after}"
+    // A successor is an ordinary Run under the simplified hand-over. It inherits
+    // no content obligations at all — neither the concrete slots nor the source's
+    // unresolved recognition marker — because the checklist is what puts a Run
+    // back on content verification, and that contract no longer governs a new
+    // Run. The source's rows stay exactly as they were.
+    assert!(
+        f.db.delivery_checklist(&next.run.id).unwrap().is_empty(),
+        "the successor starts with no checklist: {:?}",
+        f.db.delivery_checklist(&next.run.id)
     );
     assert!(
-        !f.db
-            .delivery_checklist(&next.run.id)
-            .unwrap()
-            .iter()
-            .any(|item| item.item_key == RECOGNITION_ITEM),
-        "the source's unresolved marker must not be copied into the resumed Run"
+        f.db.delivery_item_requirements(&next.run.id, &slot.item_key)
+            .is_err(),
+        "the successor has no inherited requirement"
     );
-    // The source Run keeps its own row: nothing in the audit trail is rewritten.
+    assert_eq!(
+        f.db.delivery_item_requirements(&f.run, &slot.item_key)
+            .unwrap(),
+        source_requirements,
+        "source rows stay intact"
+    );
     assert!(f
         .db
         .delivery_checklist(&f.run)
@@ -825,15 +818,6 @@ fn r2_real_continuation_copies_directory_recognition_and_semantics() {
         .db
         .bind_delivery_item(&next.run.id, &slot.item_key, "tmp/foreign.docx", None)
         .is_err());
-    assert!(f
-        .db
-        .delivery_checklist(&next.run.id)
-        .unwrap()
-        .iter()
-        .find(|i| i.item_key == slot.item_key)
-        .unwrap()
-        .target_path
-        .is_none());
     fs::create_dir_all(f.root.join("out")).unwrap();
     fs::write(
         f.root.join("out/external.docx"),
@@ -845,19 +829,18 @@ fn r2_real_continuation_copies_directory_recognition_and_semantics() {
     )
     .unwrap();
     let stop = evaluate_stop(&f.db, f.root.to_str(), &next.run.id).unwrap();
-    // The child's slot is still unbound, so it cannot pass; but the *source's*
-    // unresolved requirement is gone from this Run, so the stop is decided by the
-    // child's own rows rather than by an inherited marker.
+    // With no checklist at all, the gate short-circuits to a pass: nothing in the
+    // successor can be waiting on content verification.
+    assert!(
+        matches!(stop, DeliveryStop::Passed { .. }),
+        "an ordinary successor completes without a delivery gate: {stop:?}"
+    );
     assert!(
         f.db
             .delivery_checklist(&next.run.id)
             .unwrap()
             .iter()
             .all(|item| item.item_key != RECOGNITION_ITEM)
-    );
-    assert!(
-        !matches!(stop, DeliveryStop::Passed { .. }),
-        "an unbound slot cannot complete the Run: {stop:?}"
     );
     assert_eq!(
         f.db.delivery_item_requirements(&f.run, &slot.item_key)
@@ -1503,29 +1486,29 @@ fn other_obligations_are_still_inherited() {
         .delivery_item_requirements(&f.run, "file:summary.txt")
         .unwrap();
     let child = successor_of(&f);
+    // A successor is an ordinary Run under the simplified hand-over: it gets no
+    // checklist, so nothing can put it back on content verification. The source
+    // keeps its own obligations untouched.
     let child_items = f.db.delivery_checklist(&child).unwrap();
-    assert_eq!(
-        child_items
-            .iter()
-            .map(|item| item.item_key.clone())
-            .collect::<Vec<_>>(),
-        vec!["file:summary.txt".to_string()]
+    assert!(
+        child_items.is_empty(),
+        "the successor must not inherit a checklist: {child_items:?}"
     );
-    assert_eq!(
+    assert!(
         f.db.delivery_item_requirements(&child, "file:summary.txt")
+            .is_err(),
+        "the successor has no inherited requirement to read"
+    );
+    let parent_items = f.db.delivery_checklist(&f.run).unwrap();
+    assert!(
+        parent_items.iter().any(|item| item.item_key == "file:summary.txt"),
+        "the source keeps its own obligation"
+    );
+    assert_eq!(
+        f.db.delivery_item_requirements(&f.run, "file:summary.txt")
             .unwrap(),
-        requirement
-    );
-    assert_eq!(
-        child_items[0].target_path.as_deref(),
-        Some("summary.txt"),
-        "the concrete target travels with the obligation"
-    );
-    assert_eq!(child_items[0].status, "pending");
-    assert!(child_items[0].finding.is_none());
-    assert_eq!(
-        frozen_delivery_reference(&f.db, &child, &f.context()).unwrap()["recognition"],
-        "recognized"
+        requirement,
+        "the source's requirement is unchanged"
     );
 }
 

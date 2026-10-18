@@ -384,6 +384,20 @@ fn r3_real_continuation_preserves_content_contract_bytes_and_reference() {
         capability_manifest_hash:value["capability_manifest_hash"].as_str().unwrap().into(),frozen_config_json:frozen,
         artifacts:Some((model,f.db.kernel_initial_input(&f.run).unwrap(),f.policy.scope.clone())),skill_activations:vec![]};
     let next=f.db.kernel_insert_continuation_attempt(&request,&prompt,&prepared).unwrap();
-    assert_eq!(requirements,f.db.delivery_item_requirements(&next.run.id,&item.item_key).unwrap());
-    assert_eq!(before,frozen_delivery_reference(&f.db,&next.run.id,&f.context()).unwrap());
+    // The successor inherits nothing: no content contract, no obligations. Its
+    // reference is the placement advice an ordinary new task gets, not the
+    // source's frozen contract.
+    assert!(f.db.delivery_checklist(&next.run.id).unwrap().is_empty(),
+        "the successor must not inherit the source contract");
+    assert!(f.db.delivery_item_requirements(&next.run.id,&item.item_key).is_err());
+    // The source is untouched, contract bytes included.
+    assert_eq!(requirements,f.db.delivery_item_requirements(&f.run,&item.item_key).unwrap());
+    assert_eq!(before,frozen_delivery_reference(&f.db,&f.run,&f.context()).unwrap());
+    let after=frozen_delivery_reference(&f.db,&next.run.id,&f.context()).unwrap();
+    assert_ne!(before,after,"the successor does not read the source's frozen contract");
+    // Settling a Run with no checklist passes without a review wait.
+    assert!(matches!(
+        evaluate_stop(&f.db,f.root.to_str(),&next.run.id).unwrap(),
+        DeliveryStop::Passed{..}
+    ));
 }
