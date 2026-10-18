@@ -1080,3 +1080,56 @@ fn p2b_consumer_a_repair_round_stages_its_rows_though_they_are_not_final() {
     assert!(repairable_row.stage, "but it is still staged and finalized");
     assert!(!repairable_row.passed);
 }
+
+// ---------------------------------------------------------------------------
+// D2: the relabelled text diagnosis survives the durable encoding
+// ---------------------------------------------------------------------------
+//
+// `expected` is a free-form string on the wire, so the text-concat check may
+// describe *what* is expected instead of pasting the expected bytes. That is
+// only useful if the description survives the receipt/finding round trip
+// unchanged and is not reparsed into something else.
+
+#[test]
+fn d2_a_described_expected_survives_the_durable_encoding() {
+    let described = "来源标题行顺序（只有标题名，不是文件内容）：01_a.txt → 02_b.txt → 03_c.txt";
+    let fact = DecisionFact::failed(
+        FactOrigin::candidate("out/joined.txt", &"c".repeat(64)),
+        "delivery.check.text.separator_mismatch",
+        "各段正文与冻结来源逐字节一致，但段间空行不符合冻结合并格式",
+        true,
+        Some(RecordLocator::default().at_byte(0)),
+    )
+    .with_check_identity(Some("content:concat"), "text.concat", 2)
+    .with_structured(Some(described), Some("段间空行数量不符"), None);
+    let item = ItemDecision {
+        item_key: "file:joined.txt".to_owned(),
+        class: DeliveryClass::DefiniteFailure,
+        facts: vec![fact],
+        repair_budget_remaining: true,
+    };
+    let verdict = DeliveryVerdict::from_items(vec![item.clone()], false);
+    let finding = verdict.item_finding(&item, &serde_json::json!({}));
+
+    // The encoded fact carries the description verbatim, not a re-joined list.
+    assert_eq!(
+        finding["deliveryVerdict"]["facts"][0]["expected"], described,
+        "the encoded expected field must be the description itself"
+    );
+
+    match decode_verdict(&finding) {
+        StoredVerdict::V2(stored) => {
+            let decoded = &stored.facts[0];
+            assert_eq!(decoded.expected.as_deref(), Some(described));
+            assert_eq!(
+                decoded.reason_code.as_deref(),
+                Some("delivery.check.text.separator_mismatch")
+            );
+            // A description is still a blocking, repairable failure: relabelling
+            // does not soften the consequence.
+            assert!(decoded.blocking);
+            assert!(decoded.needs_repair);
+        }
+        other => panic!("expected a v2 stored verdict, got {other:?}"),
+    }
+}

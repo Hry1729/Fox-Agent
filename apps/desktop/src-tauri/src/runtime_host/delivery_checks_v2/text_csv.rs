@@ -38,6 +38,7 @@
 use super::budget::{validate_utf8_metered, Budget, BudgetStop, Clock, Outcome, SystemClock};
 #[cfg(test)]
 use super::budget::Phase;
+use super::merge_rule::MergeRule;
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -81,26 +82,31 @@ fn trim_all_trailing_lf_metered<'b>(
 
 /// The authoritative expected byte construction.
 ///
-/// This reproduces, byte for byte, what the v1 `Contract::Concat` writer
-/// produced (`delivery_content_requirements.rs`), so:
+/// This reproduces, byte for byte, what the `Contract::Concat` writer produces
+/// for the given separator rule (`delivery_content_requirements.rs`), so a v1
+/// record and a v2 record of the same contract and the same rule agree on the
+/// merged bytes.
 ///
-/// * a v1 record keeps **exactly** its old semantics, and
-/// * a v2 record differs from v1 only where its declared policy says it may.
+/// The rule is a **parameter**, never a default: which separator a frozen record
+/// is verified with is carried by that record (`mergeRule`), and a reader that
+/// substituted today's rule for a record that does not declare one would verify
+/// history against semantics it was never frozen with.
 ///
 /// Each entry is `name` + LF + the body copied verbatim, and adjacent entries
 /// are separated by **exactly one blank line**. The separator therefore adds
-/// one LF when the body already ended its own line (it ends with LF, or it is
-/// empty and contributed no line at all), and two when a non-empty body left
-/// its line unterminated — the first LF closes that line, the second is the
-/// blank line. Treating a 0-byte body as "unterminated" would put *two* blank
-/// lines between entries (D1).
-fn expected_concat(segments: &[TextSegment<'_>], out: &mut Vec<u8>) {
+/// one LF when the body already ended its own line (it ends with LF, or — under
+/// the corrected rule — it is empty and contributed no line at all), and two
+/// when a non-empty body left its line unterminated — the first LF closes that
+/// line, the second is the blank line. Under the historical rule a 0-byte body
+/// counts as unterminated, so adjacent empty entries are separated by two blank
+/// lines (D1); that is preserved deliberately, not reproduced by accident.
+fn expected_concat(segments: &[TextSegment<'_>], rule: MergeRule, out: &mut Vec<u8>) {
     for (index, segment) in segments.iter().enumerate() {
         out.extend_from_slice(segment.file_name().as_bytes());
         out.push(b'\n');
         out.extend_from_slice(segment.bytes);
         if index + 1 < segments.len() {
-            if needs_terminator(segment.bytes) {
+            if rule.needs_terminator(segment.bytes) {
                 out.push(b'\n');
             }
             out.push(b'\n');
@@ -108,27 +114,18 @@ fn expected_concat(segments: &[TextSegment<'_>], out: &mut Vec<u8>) {
     }
 }
 
-/// True when a body must gain one LF before the separator blank line, because
-/// it holds a line of its own that did not end with LF.
-///
-/// A 0-byte body contributes no line, so it never needs one: the entry is just
-/// the header line, already terminated, and the separator supplies the blank
-/// line on its own.
-fn needs_terminator(body: &[u8]) -> bool {
-    !body.is_empty() && !body.ends_with(b"\n")
-}
-
 /// Length of [`expected_concat`]'s output, computed from frozen metadata with
 /// `checked_add` and **before** any allocation. Mirrors the writer byte for
-/// byte: `Σ(h_i + 1 + b_i) + Σ_{i<n-1}(2 − e_i)` where `e_i` is 1 iff segment
-/// `i` needs no extra terminator LF — that is, iff its body is empty or already
-/// ends with LF. A 0-byte body is therefore charged **one** separator byte, not
-/// two, exactly as the writer emits it (D1). The last segment adds no separator,
-/// so a one-segment rule reads no body tail byte.
+/// byte: `Σ(h_i + 1 + b_i) + Σ_{i<n-1} sep_i` where `sep_i` is
+/// [`MergeRule::separator_len`] — 1 when the body needs no terminator LF (it is
+/// empty under the corrected rule, or already ends with LF) and 2 otherwise.
+/// The last segment adds no separator, so a one-segment rule reads no body tail
+/// byte.
 ///
 /// Overflow or an over-`max_text_bytes` result is a `TextBytes` stop.
 fn expected_concat_len(
     segments: &[TextSegment<'_>],
+    rule: MergeRule,
     budget: &mut Budget<'_>,
 ) -> Result<usize, BudgetStop> {
     #[cfg(test)]
@@ -147,11 +144,17 @@ fn expected_concat_len(
             .checked_add(part)
             .ok_or_else(|| budget.text_length_overflow())?;
         if index + 1 < n {
-            // An empty body has no tail byte to read and needs no terminator;
-            // only a non-empty body obliges the scan.
-            let terminated = segment.bytes.is_empty()
-                || matches!(budget.last_byte(segment.bytes)?, Some(b'\n'));
-            let separator = if terminated { 1 } else { 2 };
+            // An empty body has no tail byte to read. Whether it still earns a
+            // terminator is exactly what the frozen rule decides, so the rule is
+            // consulted instead of a fixed assumption.
+            let needs_terminator = match rule {
+                // The historical rule terminates every body that lacks a
+                // trailing LF — including a 0-byte one, which is why adjacent
+                // empty entries get two blank lines there.
+                MergeRule::SeparatorV1 if segment.bytes.is_empty() => true,
+                _ => !matches!(budget.last_byte(segment.bytes)?, Some(b'\n') | None),
+            };
+            let separator = if needs_terminator { 2 } else { 1 };
             total = total
                 .checked_add(separator)
                 .ok_or_else(|| budget.text_length_overflow())?;
@@ -171,13 +174,17 @@ fn expected_concat_len(
 /// Build the expected merge under the `TextBytes` and `Millis` budgets. The
 /// copy is chunked (≤8 KiB per extend) and time-checked per chunk; construction
 /// bytes are not charged to `ScanBytes` (their size is already capped here).
+///
+/// `rule` is threaded through to both the length estimate and the copy, so the
+/// bytes produced and the length they were budgeted at can never disagree.
 fn build_expected_metered(
     segments: &[TextSegment<'_>],
+    rule: MergeRule,
     budget: &mut Budget<'_>,
 ) -> Result<Vec<u8>, BudgetStop> {
     #[cfg(test)]
     budget.phase(Phase::Construction);
-    let length = expected_concat_len(segments, budget)?;
+    let length = expected_concat_len(segments, rule, budget)?;
     budget.check_time()?;
     // One bounded, non-preemptible allocation. OOM is not promised catchable;
     // the honest boundary is the declared `max_text_bytes` ceiling.
@@ -189,7 +196,7 @@ fn build_expected_metered(
         out.push(b'\n');
         extend_chunked(&mut out, segment.bytes, CHUNK, budget)?;
         if index + 1 < segments.len() {
-            if needs_terminator(segment.bytes) {
+            if rule.needs_terminator(segment.bytes) {
                 out.push(b'\n');
             }
             out.push(b'\n');
@@ -359,6 +366,8 @@ fn diagnose_concat_metered(
     segments: &[TextSegment<'_>],
     expected: &[u8],
     actual: &[u8],
+    merge_rule: MergeRule,
+    eof: EofPolicy,
     budget: &mut Budget<'_>,
 ) -> Result<CheckObservation, BudgetStop> {
     #[cfg(test)]
@@ -394,95 +403,149 @@ fn diagnose_concat_metered(
     }
 
     // 2. The frozen source set is not present at all, or not in frozen order.
-    match header_positions_metered(actual, segments, budget)? {
-        None => {
-            // Every frozen header may still be present out of order: a bounded
-            // reordering search gated by the existing 1 MiB input-length scope.
-            if actual.len() <= DIAGNOSIS_SCAN_BYTES
-                && headers_all_present_metered(actual, segments, budget)?
-            {
-                let frozen = segments
-                    .iter()
-                    .map(|segment| segment.file_name())
-                    .collect::<Vec<_>>();
-                // ORDER is proven: code and expected are fixed before any
-                // display-only window read.
+    //
+    //    Strict recognition requires `name\n` for every header, including the
+    //    last one. A merge that lost its inter-segment blank lines has nothing
+    //    after the last header at all, so it fails recognition even though every
+    //    source is present in order — and blaming the sources there sends the
+    //    model off to rewrite bodies. The finding is therefore built exactly as
+    //    before and only *relabelled* afterwards (see `pending_source`), which
+    //    keeps every budget threshold and the proven-code-on-stop rule intact.
+    let mut pending_source: Option<CheckObservation> =
+        match header_positions_metered(actual, segments, budget)? {
+            None => {
+                // Every frozen header may still be present out of order: a bounded
+                // reordering search gated by the existing 1 MiB input-length scope.
+                if actual.len() <= DIAGNOSIS_SCAN_BYTES
+                    && headers_all_present_metered(actual, segments, budget)?
+                {
+                    // ORDER is proven: code and expected are fixed before any
+                    // display-only window read.
+                    let mut observation = failed(
+                        rule_id,
+                        check,
+                        reason_code::TEXT_ORDER_MISMATCH,
+                        binding,
+                        format!(
+                            "候选包含全部来源标题行，但顺序与冻结合并顺序不一致；冻结顺序：{}",
+                            header_names_bounded(segments, " → ")
+                        ),
+                    );
+                    observation.expected = Some(header_order_diagnosis(segments));
+                    observation.actual = display(actual, 0, budget);
+                    return Ok(observation);
+                }
+                let frozen_names = header_names_bounded(segments, "、");
+                // A CRLF-terminated header is the usual reason a frozen `name\n`
+                // is not found. The byte comparison remains the authority.
+                let mut crlf_header: Option<(String, usize)> = None;
+                for segment in segments {
+                    let mut needle = segment.file_name().as_bytes().to_vec();
+                    needle.extend_from_slice(b"\r\n");
+                    if let Some(offset) = find_needle_metered(actual, 0, &needle, budget)? {
+                        crlf_header = Some((segment.file_name().to_owned(), offset));
+                        break;
+                    }
+                }
+                // SOURCE is proven (with an already-held CRLF-header locator):
+                // fix code/detail/expected/locator before the display window.
+                let detail = match &crlf_header {
+                    Some((name, _)) => format!(
+                        "候选没有按冻结顺序包含标题行「{name}」+LF；该标题在候选里以 CRLF 结尾，而冻结合并格式要求标题行用 LF。冻结顺序：{frozen_names}"
+                    ),
+                    None => format!("候选没有按冻结顺序包含全部来源标题行；冻结顺序：{frozen_names}"),
+                };
                 let mut observation = failed(
                     rule_id,
                     check,
-                    reason_code::TEXT_ORDER_MISMATCH,
+                    reason_code::TEXT_SOURCE_MISSING,
                     binding,
-                    format!(
-                        "候选包含全部来源标题行，但顺序与冻结合并顺序不一致；冻结顺序：{}",
-                        frozen.join("、")
-                    ),
+                    detail,
                 );
-                observation.expected = Some(frozen.join("\n"));
+                // The frozen headers are what is missing, so `expected` names
+                // them. It must never be the frozen bytes themselves: for an
+                // all-empty source set `names.join("\n")` *is* the expected
+                // artifact, and handing that string to the model reads as "write
+                // this", which is how a candidate ends up missing the separators
+                // it was asked for.
+                observation.expected = Some(header_order_diagnosis(segments));
+                observation.locator = crlf_header
+                    .map(|(_, offset)| RecordLocator::default().at_byte(offset as u64));
                 observation.actual = display(actual, 0, budget);
-                return Ok(observation);
+                Some(observation)
             }
-            let frozen_names = segments
-                .iter()
-                .map(|segment| segment.file_name())
-                .collect::<Vec<_>>();
-            // A CRLF-terminated header is the usual reason a frozen `name\n` is
-            // not found. The byte comparison remains the authority.
-            let mut crlf_header: Option<(String, usize)> = None;
-            for segment in segments {
-                let mut needle = segment.file_name().as_bytes().to_vec();
-                needle.extend_from_slice(b"\r\n");
-                if let Some(offset) = find_needle_metered(actual, 0, &needle, budget)? {
-                    crlf_header = Some((segment.file_name().to_owned(), offset));
-                    break;
-                }
+            Some(_positions) => {
+                // Headers appear in frozen order; content before the first one is a
+                // content difference, decided below.
+                None
             }
-            // SOURCE is proven (with an already-held CRLF-header locator):
-            // fix code/detail/expected/locator before the display window.
-            let detail = match &crlf_header {
-                Some((name, _)) => format!(
-                    "候选没有按冻结顺序包含标题行「{name}」+LF；该标题在候选里以 CRLF 结尾，而冻结合并格式要求标题行用 LF。冻结顺序：{}",
-                    frozen_names.join("、")
-                ),
-                None => format!(
-                    "候选没有按冻结顺序包含全部来源标题行；冻结顺序：{}",
-                    frozen_names.join("、")
-                ),
-            };
-            let mut observation = failed(
-                rule_id,
-                check,
-                reason_code::TEXT_SOURCE_MISSING,
-                binding,
-                detail,
-            );
-            observation.expected = Some(frozen_names.join("\n"));
-            observation.locator =
-                crlf_header.map(|(_, offset)| RecordLocator::default().at_byte(offset as u64));
-            observation.actual = display(actual, 0, budget);
-            return Ok(observation);
-        }
-        Some(_positions) => {
-            // Headers appear in frozen order; content before the first one is a
-            // content difference, decided below.
-        }
-    }
+        };
 
-    // 3. Bodies are byte-identical and only the inter-segment blank line
+    // 3. Bodies are byte-identical and only the inter-segment blank line / EOF
     //    structure differs.
-    if only_separators_differ_metered(actual, segments, budget)? {
+    //
+    //    This also re-attributes a SOURCE finding that strict recognition
+    //    produced only because a merge lost its blank lines: if every payload is
+    //    verbatim at its header position and nothing but newlines differs, the
+    //    sources are not missing. A stop inside the recognizer keeps whichever
+    //    finding is already proven and never invents one, so no budget threshold
+    //    moves.
+    let separators_only = match only_separators_differ_metered(actual, segments, budget) {
+        Ok(found) => found,
+        Err(_) if pending_source.is_some() => false,
+        Err(stop) => return Err(stop),
+    };
+    if separators_only {
+        // The code is already proven; the trailing-LF counts only enrich the
+        // wording, so a stop here degrades to the count-free sentence instead
+        // of discarding the finding (the same rule the display windows follow).
+        let lf_counts = match (
+            trailing_lf_count_metered(expected, budget).ok(),
+            trailing_lf_count_metered(actual, budget).ok(),
+        ) {
+            (Some(expected_lf), Some(actual_lf)) => Some((expected_lf, actual_lf)),
+            _ => None,
+        };
+        // The rule is stated from the two frozen axes, never from the bytes the
+        // constructor happened to emit: `AllowSingleTrailingLf` permits zero or
+        // one trailing LF, so demanding exactly one would be a requirement the
+        // checker itself does not enforce, and the separator before it is decided
+        // by the record's `mergeRule`, not by a policy field or a default.
+        let rule = separator_rule_diagnosis(merge_rule, eof);
+        let detail = match lf_counts {
+            Some((expected_lf, actual_lf)) => format!(
+                "各段正文与冻结来源逐字节一致，只有换行结构不同。冻结规则：{rule}。候选的字节事实：末尾 {actual_lf} 个终止 LF；冻结构造的末尾为 {expected_lf} 个（{}）",
+                expected_tail_diagnosis(segments, merge_rule, expected_lf)
+            ),
+            None => format!(
+                "各段正文与冻结来源逐字节一致，只有换行结构不同。冻结规则：{rule}"
+            ),
+        };
         let mut observation = failed(
             rule_id,
             check,
             reason_code::TEXT_SEPARATOR_MISMATCH,
             binding,
-            "各段正文与冻结来源逐字节一致，但段间空行（恰好一个空行）不符合冻结合并格式".to_owned(),
+            detail,
         );
-        observation.expected = Some("段间恰好一个空行".to_owned());
-        observation.actual = Some("段间空行数量不符".to_owned());
+        observation.expected = Some(rule);
+        observation.actual = match lf_counts {
+            Some((expected_lf, actual_lf)) => Some(format!(
+                "段间空行数量与冻结的分隔规则不符；末尾 {} 个终止 LF，冻结构造为 {expected_lf} 个",
+                actual_lf
+            )),
+            None => Some("段间空行数量与冻结的分隔规则不符".to_owned()),
+        };
         return Ok(observation);
     }
 
-    // 4. A real body difference. The first-difference locator is the proven
+    // 4. The proven SOURCE finding, now that separators are ruled out.
+    if let Some(source) = pending_source {
+        return Ok(source);
+    }
+
+
+    // 5. A real body difference. The first-difference locator is the proven
     //    fact (set before any display read). The three display windows are
     //    then read **independently and strictly in order**, each through the
     //    existing metered window helper:
@@ -534,6 +597,154 @@ fn diagnose_concat_metered(
 /// its first differing byte, but no reordered-header search is attempted.
 const DIAGNOSIS_SCAN_BYTES: usize = 1 << 20;
 
+/// How many bytes of header names a diagnosis lists before it stops. The field
+/// is shown to the model in the repair prompt, so a 64-source contract must not
+/// print 64 paths there.
+const DIAGNOSIS_HEADER_LIST_BYTES: usize = 240;
+
+/// Bounded list of the frozen header names. Frozen names are contract metadata
+/// (the same rule `find_needle_metered` states for its needle), so they are not
+/// charged to the scan budget — but the rendering is capped.
+fn header_names_bounded(segments: &[TextSegment<'_>], separator: &str) -> String {
+    let total = segments.len();
+    let mut listed = String::new();
+    let mut shown = 0usize;
+    for segment in segments {
+        let name = segment.file_name();
+        let gap = if shown == 0 { "" } else { separator };
+        if listed.len() + gap.len() + name.len() > DIAGNOSIS_HEADER_LIST_BYTES {
+            break;
+        }
+        listed.push_str(gap);
+        listed.push_str(name);
+        shown += 1;
+    }
+    if shown == total {
+        listed
+    } else {
+        format!("{listed}{separator}…（共 {total} 个标题，已截断）")
+    }
+}
+
+/// The frozen header order, labelled as order rather than as file content.
+///
+/// `names.join("\n")` is byte-identical to a merge whose bodies are all empty,
+/// so that string read as "the expected artifact" — precisely the bytes a wrong
+/// candidate already holds. This states what the list is, and stays bounded.
+fn header_order_diagnosis(segments: &[TextSegment<'_>]) -> String {
+    format!(
+        "来源标题行顺序（只有标题名，不是文件内容）：{}",
+        header_names_bounded(segments, " → ")
+    )
+}
+
+/// What the frozen contract actually *requires* of the inter-entry separator
+/// and of the file end.
+///
+/// This describes the rules the reader really applied, so a diagnosis can never
+/// state a requirement the checker would not itself enforce. Three distinct
+/// byte facts are kept apart, because a repair has to tell them apart:
+///
+/// 1. **A body's own trailing newline** — copied verbatim, never trimmed and
+///    never normalised.
+/// 2. **The separator appended between entries** — one blank line. How many LF
+///    bytes that costs is decided by the record's frozen `MergeRule`, and the two
+///    rules differ **only** for a 0-byte body.
+/// 3. **The end of the file** — governed by [`EofPolicy`], which is a separate
+///    axis from the separator rule and is stated as a requirement only where the
+///    policy really makes one.
+///
+/// Both inputs are the decoded frozen values. Nothing here re-derives a rule and
+/// nothing supplies a default: a reader that substituted today's separator for a
+/// record that does not declare one would describe history with semantics it was
+/// never frozen with, which is the defect this wording exists to avoid.
+///
+/// [`EofPolicy::AllowSingleTrailingLf`] *permits* zero-or-one trailing LF. It
+/// does not demand exactly one, so this wording must not claim it does: the
+/// checker passes a candidate with no trailing LF (see the `EofCase` table), and
+/// a diagnosis that demands one would send the model to make a change the
+/// contract does not require.
+fn separator_rule_diagnosis(rule: MergeRule, eof: EofPolicy) -> String {
+    // `mergeRule` decides the inter-entry separator; `EofPolicy` decides the
+    // file end. They are stated separately because they are separate axes, and
+    // because conflating them is exactly what made the old wording claim an EOF
+    // requirement the checker never enforced.
+    let separator = match rule {
+        MergeRule::SeparatorV1 => {
+            "段间恰好一个空行：正文已自带终止 LF 时补 1 个 LF，否则补 2 个（先补正文终止 LF，再补空行）；按历史规则，0 字节正文算作未终止，因此相邻空段的段间是 2 个 LF（正文自带的换行原样保留）"
+        }
+        MergeRule::SeparatorV2 => {
+            "段间恰好一个空行：正文已自带终止 LF 时补 1 个 LF，否则补 2 个（先补正文终止 LF，再补空行）；0 字节正文不贡献任何行、因此不获得终止 LF，相邻空段的段间是 1 个 LF（正文自带的换行原样保留）"
+        }
+    };
+    match eof {
+        EofPolicy::RequireTrailingLf => format!("{separator}；文件末尾要求恰好一个终止 LF"),
+        EofPolicy::AllowSingleTrailingLf => {
+            format!("{separator}；文件末尾允许 0 个或 1 个终止 LF，两者等价")
+        }
+        EofPolicy::SourceVerbatim => {
+            format!("{separator}；文件末尾按最后一个来源正文自带的样子保留，不增不减")
+        }
+        EofPolicy::ByteExact => {
+            format!("{separator}；文件末尾逐字节，包含终止 LF 的有无与个数")
+        }
+    }
+}
+
+/// How the frozen assembly ends, stated as the fact it is rather than as a
+/// requirement.
+///
+/// `expected` is produced by [`expected_concat`], which copies each body verbatim
+/// and appends **nothing** after the final entry. So the trailing-LF count of the
+/// expected bytes is a consequence of two things: the last body's own trailing
+/// bytes, and the header line's own terminating LF when that body is empty. It is
+/// never "the contract demands one LF here" — that belongs to
+/// [`separator_rule_diagnosis`], which reads the declared separator rule and the
+/// declared EOF policy instead.
+///
+/// `rule` is passed because an **empty last body** is the one shape whose
+/// construction the two separator rules agree on, yet it is also the shape where
+/// a reader is most tempted to describe the missing terminator as a requirement.
+/// Under the historical rule the 0-byte body *is* treated as unterminated when it
+/// is followed by another entry, but the tail of the file is still never given an
+/// extra LF by the constructor. Naming the rule keeps the sentence honest without
+/// changing a single byte of the comparison.
+fn expected_tail_diagnosis(
+    segments: &[TextSegment<'_>],
+    rule: MergeRule,
+    expected_lf: usize,
+) -> String {
+    let Some(last) = segments.last() else {
+        return format!("没有来源，期望末尾为 {expected_lf} 个终止 LF");
+    };
+    let body_lf = last
+        .bytes
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\n')
+        .count();
+    if body_lf > 0 {
+        format!(
+            "末条正文自带 {body_lf} 个终止 LF，按原样保留、不做裁剪；期望末尾随之为 {expected_lf} 个"
+        )
+    } else if last.bytes.is_empty() {
+        // The two rules differ only in what an empty body earns *between*
+        // entries, never at the file end, so the attribution names which rule was
+        // applied instead of implying the terminator came from the contract.
+        let rule_note = match rule {
+            MergeRule::SeparatorV1 => "（历史规则：该空正文若后面还有来源，会被补一个终止 LF 再补空行）",
+            MergeRule::SeparatorV2 => "（修正规则：该空正文不贡献任何行，因此不补终止 LF）",
+        };
+        format!(
+            "末条正文为空，构造只写它的标题行；期望末尾的 {expected_lf} 个 LF 是那一行标题自身的换行，不是额外的末尾要求{rule_note}"
+        )
+    } else {
+        format!(
+            "末条正文不以 LF 结尾，构造不在文件末尾追加任何字节；期望末尾因此为 {expected_lf} 个终止 LF"
+        )
+    }
+}
+
 /// True when the candidate contains the byte sequence `name\n` for a segment.
 fn header_present_metered(
     actual: &[u8],
@@ -560,6 +771,52 @@ fn headers_all_present_metered(
     Ok(true)
 }
 
+/// Locate every frozen header, also tolerating a **final** header that the file
+/// ends on directly, with no LF after it.
+///
+/// Diagnostic only. [`only_separators_differ_metered`] uses it to choose between
+/// two already-failing findings, and that function never grants a pass, so this
+/// cannot widen the pass condition. The strict
+/// [`header_positions_metered`] remains the recognition every other caller uses,
+/// because "the last header has no LF" is exactly the shape a merge that is
+/// merely missing its separators has — while a contract that is genuinely
+/// missing a source never reaches this shape.
+///
+/// Returns the header offsets paired with the bytes each header occupies
+/// (`name\n` = len + 1, a bare final `name` = len).
+fn header_positions_allow_unterminated_last_metered(
+    actual: &[u8],
+    segments: &[TextSegment<'_>],
+    budget: &mut Budget<'_>,
+) -> Result<Option<Vec<(usize, usize)>>, BudgetStop> {
+    let mut positions = Vec::with_capacity(segments.len());
+    let mut cursor = 0usize;
+    for (index, segment) in segments.iter().enumerate() {
+        let name = segment.file_name().as_bytes();
+        let mut needle = name.to_vec();
+        needle.push(b'\n');
+        if let Some(relative) = find_needle_metered(actual, cursor, &needle, budget)? {
+            positions.push((relative, name.len() + 1));
+            cursor = relative + name.len() + 1;
+            continue;
+        }
+        let is_last = index + 1 == segments.len();
+        let bare = if is_last {
+            find_needle_metered(actual, cursor, name, budget)?
+        } else {
+            None
+        };
+        // Only the file's own end may stand in for the missing LF; a bare name
+        // in the middle is not a header position.
+        let Some(relative) = bare.filter(|start| start + name.len() == actual.len()) else {
+            return Ok(None);
+        };
+        positions.push((relative, name.len()));
+        cursor = actual.len();
+    }
+    Ok(Some(positions))
+}
+
 /// True when every frozen payload appears verbatim at its header position, in
 /// order, and the only bytes that differ anywhere are newlines.
 ///
@@ -576,11 +833,25 @@ fn only_separators_differ_metered(
     if segments.is_empty() {
         return Ok(false);
     }
-    let Some(positions) = header_positions_metered(actual, segments, budget)? else {
+    let Some(positions) = header_positions_allow_unterminated_last_metered(actual, segments, budget)?
+    else {
         return Ok(false);
     };
-    for (index, (segment, position)) in segments.iter().zip(positions.iter()).enumerate() {
-        let start = position + segment.file_name().len() + 1;
+    // Nothing may precede the first header except newlines. Without this the
+    // recognizer would accept extra content before the first header and report
+    // it as "only the separators differ", which is a false statement about the
+    // bytes and sends the repair to the wrong place. The frozen construction
+    // starts with the first header name, so any non-newline prefix is real
+    // additional content, not a separator shape.
+    for prefix_index in 0..positions[0].0 {
+        if budget.byte_at(actual, prefix_index)? != b'\n' {
+            return Ok(false);
+        }
+    }
+    for index in 0..segments.len() {
+        let segment = &segments[index];
+        let (position, header_len) = positions[index];
+        let start = position + header_len;
         let Some(payload) = actual.get(start..start + segment.bytes.len()) else {
             return Ok(false);
         };
@@ -590,7 +861,10 @@ fn only_separators_differ_metered(
         // Between this payload and the next header (or EOF) only newline bytes
         // may appear.
         let tail_start = start + segment.bytes.len();
-        let tail_end = positions.get(index + 1).copied().unwrap_or(actual.len());
+        let tail_end = positions
+            .get(index + 1)
+            .map(|(next, _)| *next)
+            .unwrap_or(actual.len());
         for tail_index in tail_start..tail_end {
             if budget.byte_at(actual, tail_index)? != b'\n' {
                 return Ok(false);
@@ -704,7 +978,11 @@ pub(crate) fn check_text_concat_budgeted(
         );
     }
     // S2/S3: construction length (TextBytes, pre-allocation) and chunked copy.
-    let expected = match build_expected_metered(request.segments, &mut budget) {
+    // The separator rule comes from the frozen record, not from this build: a
+    // record that does not declare one is verified with the historical rule it
+    // was actually written with.
+    let expected = match build_expected_metered(request.segments, request.envelope.merge_rule, &mut budget)
+    {
         Ok(expected) => expected,
         Err(stop) => return stopped(stop),
     };
@@ -722,6 +1000,8 @@ pub(crate) fn check_text_concat_budgeted(
                 request.segments,
                 &expected,
                 request.actual,
+                request.envelope.merge_rule,
+                policy.eof,
                 budget,
             ) {
                 Ok(observation) => observation,
@@ -2123,11 +2403,20 @@ mod tests {
         TextSegment { path, bytes }
     }
 
+    /// A v2 envelope frozen **today**, so it carries the corrected separator.
+    ///
+    /// The envelope helper is the test-side stand-in for the freeze writer: a
+    /// new contract is frozen with the current rule, and a test that used the
+    /// historical one by default would be asserting yesterday's semantics.
     fn v2_text(eof: EofPolicy) -> RuleEnvelope {
         v2_with(ComparisonMode::TextSegments, eof)
     }
 
     fn v2_with(comparison: ComparisonMode, eof: EofPolicy) -> RuleEnvelope {
+        v2_with_rule(comparison, eof, MergeRule::current())
+    }
+
+    fn v2_with_rule(comparison: ComparisonMode, eof: EofPolicy, rule: MergeRule) -> RuleEnvelope {
         RuleEnvelope::v2(
             "content:concat",
             RulePolicy {
@@ -2136,11 +2425,24 @@ mod tests {
                 table: TableDialect::default(),
             },
         )
+        .with_merge_rule(rule)
+    }
+
+    /// A **historical** v2 envelope: the shape a record frozen before the marker
+    /// existed decodes to, i.e. no marker and therefore the legacy separator.
+    fn v2_legacy(eof: EofPolicy) -> RuleEnvelope {
+        v2_with_rule(ComparisonMode::TextSegments, eof, MergeRule::SeparatorV1)
     }
 
     fn concat_of(segments: &[TextSegment<'_>]) -> Vec<u8> {
+        concat_of_with(segments, MergeRule::current())
+    }
+
+    /// The same construction under an explicitly chosen separator rule, so a
+    /// test can pin both the historical and the corrected semantics.
+    fn concat_of_with(segments: &[TextSegment<'_>], rule: MergeRule) -> Vec<u8> {
         let mut expected = Vec::new();
-        expected_concat(segments, &mut expected);
+        expected_concat(segments, rule, &mut expected);
         expected
     }
 
@@ -2772,7 +3074,7 @@ mod tests {
 
         let actual = b"a.txt\nalpha\r\n"; // byte-identical to `expected_concat`
         let mut expected = Vec::new();
-        expected_concat(&segments, &mut expected);
+        expected_concat(&segments, MergeRule::current(), &mut expected);
         assert_eq!(actual.as_slice(), expected.as_slice(), "the counterexample must be byte-identical");
 
         let observation = check(&envelope, &segments, actual);
@@ -4912,5 +5214,929 @@ mod tests {
                 "D1 shape {index}: construction must satisfy its own contract"
             );
         }
+    }
+
+    // ---- D1 boundary cases: the body is copied verbatim ----------------------
+    //
+    // The merge rule has two independent halves and the tests below keep them
+    // apart:
+    //
+    //   * the **body** is copied byte for byte — no trimming, no newline
+    //     normalising, no collapsing of blank lines the source itself carries;
+    //   * the **separator** is appended at the entry boundary, with one LF when
+    //     the body already ended its own line and two when a non-empty body
+    //     left it unterminated.
+    //
+    // So the number of blank lines a reader *sees* between two entries is
+    // `trailing blank lines of body i` + 1. That is not a claim that every merge
+    // collapses to one blank line regardless of its bodies; a body ending in
+    // two LFs still shows the blank line it contributed. These expectations are
+    // literal bytes written from the wording, not produced by the code under
+    // test.
+
+    /// A body with interior newlines is preserved whole, and only the boundary
+    /// separator is appended after it.
+    #[test]
+    fn d1_body_interior_newlines_are_preserved_verbatim() {
+        let segments = [
+            segment("in/a.txt", b"alpha\nbeta"),
+            segment("in/b.txt", b"one\ntwo\n"),
+        ];
+        assert_eq!(
+            concat_of(&segments),
+            b"a.txt\nalpha\nbeta\n\nb.txt\none\ntwo\n".to_vec(),
+            "interior LF must survive unchanged; only the boundary LF is appended"
+        );
+
+        // The same construction must be a pass, so the preserved interior is
+        // not being normalised anywhere downstream either.
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let expected = concat_of(&segments);
+        assert_eq!(check(&envelope, &segments, &expected).state, CheckState::Passed);
+    }
+
+    /// A body that already carries trailing blank lines keeps them; the
+    /// separator adds exactly one more LF. Nothing is collapsed to one blank
+    /// line, and nothing is trimmed.
+    #[test]
+    fn d1_body_with_multiple_trailing_lf_keeps_them_and_adds_one() {
+        let segments = [
+            segment("in/a.txt", b"alpha\n\n"),
+            segment("in/b.txt", b"beta"),
+        ];
+        let expected = concat_of(&segments);
+        assert_eq!(
+            expected,
+            b"a.txt\nalpha\n\n\nb.txt\nbeta".to_vec(),
+            "two trailing LFs in the body stay; the boundary adds one LF, so the \
+             reader sees body(1 blank line) + separator(1) = 2 blank lines"
+        );
+        // Explicitly: the body was neither trimmed nor collapsed. `a.txt\n` is
+        // 6 bytes, so the body run starts at 6 and is `alpha\n\n` untouched.
+        assert_eq!(&expected[6..13], b"alpha\n\n");
+        // Then the boundary: one separator LF, then the next header.
+        assert_eq!(&expected[13..14], b"\n");
+        assert_eq!(&expected[14..20], b"b.txt\n");
+
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        assert_eq!(check(&envelope, &segments, &expected).state, CheckState::Passed);
+    }
+
+    /// The construction copies the exact source bytes, so a body with CRLF,
+    /// trailing spaces or a missing final LF reaches the artifact untouched.
+    #[test]
+    fn d1_original_body_bytes_are_reproduced_exactly() {
+        let bodies: [&[u8]; 4] = [b"alpha\r\n", b"beta  ", b"gamma", b"delta\n\n\n"];
+        let segments: Vec<TextSegment<'_>> = bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let name = match index {
+                    0 => "in/a.txt",
+                    1 => "in/b.txt",
+                    2 => "in/c.txt",
+                    _ => "in/d.txt",
+                };
+                segment(name, body)
+            })
+            .collect();
+        let expected = concat_of(&segments);
+
+        // Every original body must appear as a contiguous, unmodified run.
+        for body in bodies {
+            assert!(
+                expected.windows(body.len()).any(|window| window == body),
+                "body {body:?} must appear verbatim in the construction"
+            );
+        }
+        // No CR was dropped and none was invented.
+        assert_eq!(
+            expected.iter().filter(|byte| **byte == b'\r').count(),
+            1,
+            "the single source CR must survive and no other may be added"
+        );
+
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        assert_eq!(check(&envelope, &segments, &expected).state, CheckState::Passed);
+    }
+
+    /// The metered length twin must equal the number of bytes the writer emits,
+    /// for every shape above. A divergence here is what makes a correct
+    /// candidate look mismatched, so it is asserted directly rather than
+    /// inferred from a pass.
+    #[test]
+    fn d1_length_twin_equals_written_bytes_for_boundary_shapes() {
+        let shapes: [&[TextSegment<'static>]; 6] = [
+            // single empty body
+            &[TextSegment { path: "in/a.txt", bytes: b"" }],
+            // empty followed by empty
+            &[
+                TextSegment { path: "in/a.txt", bytes: b"" },
+                TextSegment { path: "in/b.txt", bytes: b"" },
+            ],
+            // interior newlines
+            &[
+                TextSegment { path: "in/a.txt", bytes: b"alpha\nbeta" },
+                TextSegment { path: "in/b.txt", bytes: b"one\ntwo" },
+            ],
+            // several trailing LFs
+            &[
+                TextSegment { path: "in/a.txt", bytes: b"alpha\n\n" },
+                TextSegment { path: "in/b.txt", bytes: b"beta" },
+            ],
+            // CRLF and trailing spaces preserved
+            &[
+                TextSegment { path: "in/a.txt", bytes: b"alpha\r\n" },
+                TextSegment { path: "in/b.txt", bytes: b"beta  " },
+            ],
+            // empty inside a non-empty run
+            &[
+                TextSegment { path: "in/a.txt", bytes: b"alpha" },
+                TextSegment { path: "in/b.txt", bytes: b"" },
+                TextSegment { path: "in/c.txt", bytes: b"gamma\n" },
+            ],
+        ];
+        let clock = SystemClock;
+        for (index, segments) in shapes.iter().enumerate() {
+            let written = concat_of(segments);
+            let mut budget = Budget::new(&CheckLimits::P0, &clock);
+            let estimated = expected_concat_len(segments, MergeRule::current(), &mut budget)
+                .unwrap_or_else(|stop| panic!("shape {index}: length twin stopped: {stop:?}"));
+            assert_eq!(
+                estimated,
+                written.len(),
+                "shape {index}: expected_concat_len must equal the writer's byte count"
+            );
+        }
+    }
+
+    // ---- compat: the separator comes from the frozen record --------------
+    //
+    // These pin the mechanism rather than one artifact: the same three-source
+    // B4 shape is verified under both rules, and the rule a record carries is
+    // what decides which 44/46-byte answer is a pass.
+
+    /// The same segments under both rules differ **only** by the empty-body
+    /// terminator, which is the whole behavioural delta of the marker.
+    #[test]
+    fn d1_compat_the_two_rules_differ_only_on_the_empty_bodies() {
+        let b4 = [
+            segment("in/01_周一.txt", b""),
+            segment("in/02_周二.txt", b""),
+            segment("in/03_周三.txt", b""),
+        ];
+        let old = concat_of_with(&b4, MergeRule::SeparatorV1);
+        let new = concat_of_with(&b4, MergeRule::SeparatorV2);
+        assert_eq!(old.len(), 46, "the historical construction is 46 bytes");
+        assert_eq!(new.len(), 44, "the corrected construction is 44 bytes");
+        assert_eq!(old, "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes());
+        assert_eq!(new, "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes());
+
+        // A shape with no 0-byte body must be byte-identical under both rules,
+        // which is what keeps the marker from reaching any other artifact.
+        let non_empty = [
+            segment("in/a.txt", b"alpha"),
+            segment("in/b.txt", b"beta\n"),
+        ];
+        assert_eq!(
+            concat_of_with(&non_empty, MergeRule::SeparatorV1),
+            concat_of_with(&non_empty, MergeRule::SeparatorV2),
+            "no empty body means no difference"
+        );
+    }
+
+    /// An envelope with no marker is verified with the historical rule, so the
+    /// 46-byte construction still passes and the 44-byte one does not.
+    #[test]
+    fn d1_compat_an_unmarked_envelope_keeps_the_historical_separator() {
+        let segments = [
+            segment("in/01_周一.txt", b""),
+            segment("in/02_周二.txt", b""),
+            segment("in/03_周三.txt", b""),
+        ];
+        // The value a record frozen before the marker existed decodes to.
+        let legacy = RuleEnvelope::v1();
+        assert_eq!(legacy.merge_rule, MergeRule::SeparatorV1);
+        assert!(legacy.merge_rule.is_legacy());
+
+        let old_46 = "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes();
+        assert_eq!(
+            check(&legacy, &segments, old_46).state,
+            CheckState::Passed,
+            "an old record must still accept its own artifact"
+        );
+
+        let corrected_44 = "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes();
+        assert_ne!(
+            check(&legacy, &segments, corrected_44).state,
+            CheckState::Passed,
+            "an old record must not silently accept the corrected artifact"
+        );
+    }
+
+    /// A marked envelope gets the marked rule on the same segments, so the rule
+    /// travels with the record and not with the segments.
+    #[test]
+    fn d1_compat_a_marked_envelope_uses_its_declared_rule() {
+        let segments = [
+            segment("in/01_周一.txt", b""),
+            segment("in/02_周二.txt", b""),
+            segment("in/03_周三.txt", b""),
+        ];
+        let corrected_44 = "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes();
+        let old_46 = "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes();
+
+        let marked = v2_with_rule(
+            ComparisonMode::TextSegments,
+            EofPolicy::AllowSingleTrailingLf,
+            MergeRule::SeparatorV2,
+        );
+        assert_eq!(
+            check(&marked, &segments, corrected_44).state,
+            CheckState::Passed,
+            "a record marked separator-v2 verifies with the corrected rule"
+        );
+        assert_ne!(
+            check(&marked, &segments, old_46).state,
+            CheckState::Passed,
+            "the old double-blank artifact must not pass a corrected record"
+        );
+
+        // The explicit historical marker wins even though this build writes the
+        // corrected rule: the record, not the build, decides.
+        let explicit_old = v2_with_rule(
+            ComparisonMode::TextSegments,
+            EofPolicy::AllowSingleTrailingLf,
+            MergeRule::SeparatorV1,
+        );
+        assert_eq!(
+            check(&explicit_old, &segments, old_46).state,
+            CheckState::Passed,
+            "an explicit separator-v1 marker must be honoured"
+        );
+    }
+
+    /// The marker survives the real durable shape: serializing the envelope and
+    /// reading it back yields the rule that was frozen.
+    #[test]
+    fn d1_compat_the_marker_survives_serialize_and_restore() {
+        for rule in [MergeRule::SeparatorV1, MergeRule::SeparatorV2] {
+            let envelope = v2_with_rule(
+                ComparisonMode::TextSegments,
+                EofPolicy::AllowSingleTrailingLf,
+                rule,
+            );
+            let spec = envelope.to_spec_keys();
+            // The legacy rule is skipped when serializing, so a record written by
+            // an older build and one written today look the same.
+            let written = spec
+                .get(merge_rule::KEY)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
+            assert_eq!(
+                written,
+                (!rule.is_legacy()).then(|| rule.as_str().to_owned()),
+                "{} serialization",
+                rule.as_str()
+            );
+            // Either way, what comes back is the rule that went in.
+            let restored = RuleEnvelope::from_spec(&spec).expect("a written envelope must read back");
+            assert_eq!(restored.merge_rule, rule, "{} must round-trip", rule.as_str());
+        }
+    }
+
+    /// An unknown marker is an error, not the legacy rule — the reader must never
+    /// invent a separator for a record it does not understand.
+    #[test]
+    fn d1_compat_an_unknown_marker_is_not_read_as_the_legacy_rule() {
+        use serde_json::json;
+        for bad in [
+            json!("separator-v3"),
+            json!("separator-V1"),
+            json!(1),
+            json!(true),
+            json!(null),
+            json!(["separator-v1"]),
+        ] {
+            let spec = json!({
+                "envelopeVersion": 2,
+                "checkerVersion": 2,
+                "ruleId": "content:concat",
+                "mergeRule": bad,
+                "policy": {"comparison": "textSegments"},
+            });
+            assert!(
+                RuleEnvelope::from_spec(&spec).is_err(),
+                "{bad} must be refused rather than read as legacy"
+            );
+        }
+        // And a genuinely absent marker is still legal.
+        let spec = json!({
+            "envelopeVersion": 2,
+            "checkerVersion": 2,
+            "ruleId": "content:concat",
+            "policy": {"comparison": "textSegments"},
+        });
+        assert_eq!(
+            RuleEnvelope::from_spec(&spec).expect("an absent marker is legal").merge_rule,
+            MergeRule::SeparatorV1
+        );
+    }
+
+    /// Construction and the length estimate must always agree, under **both**
+    /// rules: if they disagreed, a record would be budgeted for one byte count
+    /// and compared against another.
+    #[test]
+    fn d1_compat_length_and_construction_agree_under_both_rules() {
+        let clock = SystemClock;
+        let shapes: [&[TextSegment<'_>]; 5] = [
+            &[segment("in/a.txt", b"")],
+            &[segment("in/a.txt", b""), segment("in/b.txt", b"")],
+            &[
+                segment("in/a.txt", b""),
+                segment("in/b.txt", b""),
+                segment("in/c.txt", b""),
+            ],
+            &[segment("in/a.txt", b"alpha"), segment("in/b.txt", b"")],
+            &[segment("in/a.txt", b""), segment("in/b.txt", b"beta\n")],
+        ];
+        for rule in [MergeRule::SeparatorV1, MergeRule::SeparatorV2] {
+            for (index, segments) in shapes.iter().enumerate() {
+                let written = concat_of_with(segments, rule);
+                let mut budget = Budget::new(&CheckLimits::P0, &clock);
+                let estimated = expected_concat_len(segments, rule, &mut budget)
+                    .unwrap_or_else(|stop| panic!("{rule:?} shape {index}: {stop:?}"));
+                assert_eq!(
+                    estimated,
+                    written.len(),
+                    "{rule:?} shape {index}: the estimate must equal what is written"
+                );
+            }
+        }
+        // The 0-byte shapes are exactly where the two rules disagree, so they
+        // must disagree here too — otherwise this test would pass vacuously.
+        let empties = [segment("in/a.txt", b""), segment("in/b.txt", b"")];
+        assert_ne!(
+            concat_of_with(&empties, MergeRule::SeparatorV1),
+            concat_of_with(&empties, MergeRule::SeparatorV2),
+            "the fixture must be able to tell the rules apart"
+        );
+    }
+
+
+    // ---- D2: diagnostic truthfulness -------------------------------------
+    //
+    // The frozen header list and the frozen merge are byte-identical whenever
+    // every payload is empty, so a diagnostic that prints `names.join("\n")` as
+    // "expected" hands the model a candidate masquerading as the answer. These
+    // tests pin that `expected` is described as an order, never as content.
+
+    fn d2_segments() -> [TextSegment<'static>; 3] {
+        [
+            segment("in/01_a.txt", b""),
+            segment("in/02_b.txt", b""),
+            segment("in/03_c.txt", b""),
+        ]
+    }
+
+    /// The literal defect shape: three empty sources, merged without the
+    /// inter-segment blank lines and without the trailing LF.
+    fn d2_joined_without_separators() -> &'static [u8] {
+        b"01_a.txt\n02_b.txt\n03_c.txt"
+    }
+
+    fn d2_joined_correct() -> &'static [u8] {
+        b"01_a.txt\n\n02_b.txt\n\n03_c.txt\n"
+    }
+
+    /// `expected` must never be the frozen bytes of an all-empty source set.
+    fn assert_expected_is_not_the_frozen_merge(expected: &str, segments: &[TextSegment<'_>]) {
+        let frozen = concat_of(segments);
+        assert_ne!(
+            expected.as_bytes(),
+            frozen.as_slice(),
+            "diagnostic `expected` is byte-identical to the frozen merge; it is indistinguishable from the correct answer"
+        );
+        let joined_names = segments
+            .iter()
+            .map(|segment| segment.file_name())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(
+            expected, joined_names,
+            "diagnostic `expected` is the bare newline-joined header list, which for empty sources IS the wrong candidate"
+        );
+    }
+
+    #[test]
+    fn d2_separator_defect_is_not_reported_as_a_missing_source() {
+        let segments = d2_segments();
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let observation = check(&envelope, &segments, d2_joined_without_separators());
+
+        assert_eq!(
+            observation.state,
+            CheckState::Failed,
+            "the artifact must still fail; only its attribution changed"
+        );
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "every header is present in frozen order; blaming the sources for a \
+             separator defect sends the model to rewrite a body"
+        );
+        let expected = observation.expected.as_deref().unwrap_or_default();
+        assert_expected_is_not_the_frozen_merge(expected, &segments);
+        assert!(
+            expected.contains("段间"),
+            "a separator finding must say what is wrong with the separators, got {expected:?}"
+        );
+    }
+
+    /// The separator finding names the trailing LF as the byte fact it is, and
+    /// states the EOF rule from the declared policy rather than demanding one.
+    ///
+    /// `AllowSingleTrailingLf` passes a candidate with no trailing LF (the
+    /// `EofCase` table pins that), so a diagnosis claiming "末尾 LF 1 个" as the
+    /// requirement would ask the model for a change the checker never enforces.
+    #[test]
+    fn d2_separator_diagnosis_names_the_trailing_lf_when_both_differ() {
+        let segments = d2_segments();
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let observation = check(&envelope, &segments, d2_joined_without_separators());
+        let expected = observation.expected.as_deref().unwrap_or_default();
+        let actual = observation.actual.as_deref().unwrap_or_default();
+        let detail = observation.detail.as_deref().unwrap_or_default();
+
+        assert!(
+            actual.contains("末尾 0 个终止 LF"),
+            "actual must state the candidate's trailing-LF byte fact, got {actual:?}"
+        );
+        assert!(
+            detail.contains("末尾 0 个终止 LF"),
+            "the repair-facing detail must state the byte fact, got {detail:?}"
+        );
+        assert!(
+            detail.contains("允许 0 个或 1 个"),
+            "the detail must state the permitted range from the declared policy, got {detail:?}"
+        );
+        assert!(
+            !expected.contains("末尾 LF 1 个") && !detail.contains("要求恰好一个终止 LF"),
+            "an allowing policy must not be presented as requiring exactly one LF, got {expected:?} / {detail:?}"
+        );
+    }
+
+    /// The correct artifact keeps passing, so the fix did not create a new
+    /// pass condition anywhere.
+    #[test]
+    fn d2_correct_artifact_still_passes() {
+        let segments = d2_segments();
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let observation = check(&envelope, &segments, d2_joined_correct());
+        assert_eq!(
+            observation.state,
+            CheckState::Passed,
+            "the correct merge must still pass, got {:?} / {:?}",
+            observation.state,
+            observation.reason_code
+        );
+    }
+
+    /// A genuinely missing source must stay a source finding.
+    #[test]
+    fn d2_genuinely_missing_header_is_still_a_source_finding() {
+        let segments = [
+            segment("in/a.txt", b""),
+            segment("in/b.txt", b""),
+            segment("in/never.txt", b""),
+        ];
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let observation = check(&envelope, &segments, b"a.txt\n\nb.txt\n");
+        assert_eq!(observation.state, CheckState::Failed);
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_SOURCE_MISSING),
+            "a header that is absent from the artifact must remain SOURCE_MISSING"
+        );
+        let expected = observation.expected.as_deref().unwrap_or_default();
+        assert_expected_is_not_the_frozen_merge(expected, &segments);
+    }
+
+    /// A wrong header order must stay an order finding, not become a separator
+    /// finding just because the bodies happen to match.
+    #[test]
+    fn d2_wrong_header_order_is_still_an_order_finding() {
+        let segments = [
+            segment("in/a.txt", b""),
+            segment("in/b.txt", b""),
+        ];
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        // Both headers present, reversed, with correct separator density.
+        let observation = check(&envelope, &segments, b"b.txt\n\na.txt\n");
+        assert_eq!(observation.state, CheckState::Failed);
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_ORDER_MISMATCH),
+            "reordering is an order finding; the separator recognizer must not claim it"
+        );
+        let expected = observation.expected.as_deref().unwrap_or_default();
+        assert_expected_is_not_the_frozen_merge(expected, &segments);
+    }
+
+    /// A changed body must not be reported as "only the separators differ",
+    /// even when the separators also differ.
+    #[test]
+    fn d2_changed_body_is_not_reported_as_a_separator_difference() {
+        let segments = [
+            segment("in/a.txt", b"alpha"),
+            segment("in/b.txt", b"beta"),
+        ];
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let observation = check(&envelope, &segments, b"a.txt\nalpha\nb.txt\nBETA");
+        assert_eq!(observation.state, CheckState::Failed);
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_CONTENT_MISMATCH),
+            "a body byte change is a content finding even when separators are also wrong"
+        );
+    }
+
+    /// Duplicate headers and header-styled body text must not be mistaken for
+    /// a clean header sequence, which is what would let the separator branch
+    /// claim a file whose sources are genuinely wrong.
+    #[test]
+    fn d2_duplicate_header_or_header_like_body_is_not_a_separator_difference() {
+        let segments = [
+            segment("in/a.txt", b""),
+            segment("in/b.txt", b""),
+        ];
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+
+        // A duplicated first header, then the separator defect.
+        let duplicated = check(&envelope, &segments, b"a.txt\na.txt\nb.txt");
+        assert_eq!(duplicated.state, CheckState::Failed);
+        assert_ne!(
+            duplicated.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "a duplicated header is not a separator defect"
+        );
+
+        // Header-styled text inside a body: the payload no longer matches.
+        let header_like = check(&envelope, &segments, b"a.txt\nb.txt\nb.txt");
+        assert_eq!(header_like.state, CheckState::Failed);
+        assert_ne!(
+            header_like.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "a body that only looks like a header is not a separator defect"
+        );
+    }
+
+    /// The diagnosis must stay bounded: a contract with many sources cannot
+    /// print every path into the repair prompt.
+    #[test]
+    fn d2_header_list_is_bounded_by_length() {
+        let path = "in/".to_owned();
+        let owned = (0..64)
+            .map(|index| format!("{path}{index:03}_a_rather_long_source_name.txt"))
+            .collect::<Vec<_>>();
+        let segments = owned
+            .iter()
+            .map(|name| TextSegment {
+                path: name.as_str(),
+                bytes: b"",
+            })
+            .collect::<Vec<_>>();
+        let rendered = header_names_bounded(&segments, "、");
+        assert!(
+            rendered.len() < DIAGNOSIS_HEADER_LIST_BYTES + 64,
+            "the header list must be capped, got {} bytes",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains("已截断"),
+            "a truncated list must say so, got {rendered:?}"
+        );
+    }
+
+    /// The relabelling must be metered like every other diagnosis read: a
+    /// starving budget keeps whichever finding is already proven and never
+    /// fabricates a separator verdict or an unmetered full-file walk.
+    ///
+    /// The thresholds are the check's own accounting, recorded so that a future
+    /// change making this recognizer unmetered surfaces here as a failure.
+    #[test]
+    fn d2_separator_recognition_stops_on_a_scan_budget() {
+        let segments = d2_segments();
+        let actual = d2_joined_without_separators();
+
+        // Enough budget for the whole diagnosis: the relabelling lands.
+        let rendered = k2_run_scan(&segments, actual, 300, EofPolicy::AllowSingleTrailingLf);
+        assert_eq!(
+            rendered.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "with budget the separator finding is produced"
+        );
+        assert!(rendered.expected.is_some() && rendered.actual.is_some());
+
+        // The recognizer cannot finish, but the SOURCE finding is already
+        // proven: the proven code survives, uncorrupted by a partial read.
+        let starved = k2_run_scan(&segments, actual, 230, EofPolicy::AllowSingleTrailingLf);
+        assert_eq!(
+            starved.reason_code.as_deref(),
+            Some(reason_code::TEXT_SOURCE_MISSING),
+            "a stop inside the recognizer must keep the proven finding, got {:?}",
+            starved.reason_code
+        );
+
+        // Nothing proven yet: the stop must not invent a classification.
+        let nothing = k2_run_scan(&segments, actual, 150, EofPolicy::AllowSingleTrailingLf);
+        assert_eq!(
+            nothing.reason_code.as_deref(),
+            Some(reason_code::TEXT_CONTENT_MISMATCH),
+            "a stop before any fact is proven yields the generic finding, got {:?}",
+            nothing.reason_code
+        );
+        assert!(
+            nothing.expected.is_none() && nothing.actual.is_none(),
+            "a stopped diagnosis must not render fields"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // H1: the separator diagnosis must not invent an EOF requirement
+    // -----------------------------------------------------------------------
+
+    /// Under `AllowSingleTrailingLf` the contract accepts zero trailing LF: the
+    /// very artifact the old wording called deficient passes. The diagnosis must
+    /// therefore state a permitted range, not a demand for exactly one.
+    #[test]
+    fn h1_allow_policy_permits_zero_trailing_lf_and_says_so() {
+        let segments = d2_segments();
+        let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
+
+        // The artifact with correct separators and NO trailing LF passes, which
+        // is what makes "末尾 LF 1 个" a false requirement.
+        let without_lf = check(&allow, &segments, b"01_a.txt\n\n02_b.txt\n\n03_c.txt");
+        assert_eq!(
+            without_lf.state,
+            CheckState::Passed,
+            "zero trailing LF is permitted here, got {:?} / {:?}",
+            without_lf.state,
+            without_lf.reason_code
+        );
+
+        // A real separator defect must be described with the permitted range.
+        let defect = check(&allow, &segments, d2_joined_without_separators());
+        assert_eq!(defect.state, CheckState::Failed);
+        assert_eq!(
+            defect.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH)
+        );
+        let expected = defect.expected.as_deref().unwrap_or_default();
+        let detail = defect.detail.as_deref().unwrap_or_default();
+        assert!(
+            expected.contains("允许 0 个或 1 个"),
+            "an allowing policy must be stated as a range, got {expected:?}"
+        );
+        assert!(
+            !expected.contains("要求恰好一个"),
+            "an allowing policy must not be stated as a requirement, got {expected:?}"
+        );
+        assert!(
+            detail.contains("允许 0 个或 1 个"),
+            "the repair-facing detail must carry the same range, got {detail:?}"
+        );
+    }
+
+    /// Under `RequireTrailingLf` the contract genuinely demands exactly one, and
+    /// that shape is decided by the earlier hard R7 branch — not by the separator
+    /// diagnosis. The two policies must not share one wording.
+    #[test]
+    fn h1_require_policy_is_reported_by_the_hard_eof_branch() {
+        let segments = d2_segments();
+        let require = v2_text(EofPolicy::RequireTrailingLf);
+        let observation = check(&require, &segments, d2_joined_without_separators());
+        assert_eq!(observation.state, CheckState::Failed);
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_EOF_MISMATCH),
+            "RequireTrailingLf is enforced by the hard EOF finding, got {:?}",
+            observation.reason_code
+        );
+        let expected = observation.expected.as_deref().unwrap_or_default();
+        assert_eq!(
+            expected, "末尾 LF 1 个",
+            "this policy really does require exactly one, so stating it is correct"
+        );
+    }
+
+    /// A body that carries several trailing LFs keeps them: the diagnosis must
+    /// report the count as a preserved byte fact, and must not ask for a trim.
+    #[test]
+    fn h1_body_with_several_trailing_lf_is_not_trimmed() {
+        let segments = [
+            segment("in/a.txt", b"alpha\n\n\n"),
+            segment("in/b.txt", b"beta\n"),
+        ];
+        let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
+        // Correct merge for these sources, byte for byte: `alpha\n\n\n` keeps its
+        // own three LFs and the separator adds exactly one more.
+        let correct: &[u8] = b"a.txt\nalpha\n\n\n\nb.txt\nbeta\n";
+        let passed = check(&allow, &segments, correct);
+        assert_eq!(
+            passed.state,
+            CheckState::Passed,
+            "a body's own trailing newlines are preserved verbatim, got {:?} / {:?}",
+            passed.state,
+            passed.reason_code
+        );
+        assert_eq!(
+            concat_of(&segments).as_slice(),
+            correct,
+            "the constructor must stay verbatim: no trim, no collapse"
+        );
+
+        // The same sources with the separator defect still name the body's own
+        // multiple LFs rather than pretending one is required.
+        let defect = check(&allow, &segments, b"a.txt\nalpha\n\n\nb.txt\nbeta\n");
+        assert_eq!(defect.state, CheckState::Failed);
+        let detail = defect.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("末条正文自带 1 个终止 LF"),
+            "the detail must attribute the tail to the body, got {detail:?}"
+        );
+    }
+
+    /// The empty-last-body shape: the expected tail LF comes from the header
+    /// line, and the diagnosis must say so instead of implying an EOF demand.
+    #[test]
+    fn h1_empty_last_body_tail_is_attributed_to_the_header_line() {
+        let segments = d2_segments();
+        let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let defect = check(&allow, &segments, d2_joined_without_separators());
+        let detail = defect.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("末条正文为空") && detail.contains("不是额外的末尾要求"),
+            "the empty-body tail must be attributed to the header line, got {detail:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M1: content before the first header is not a separator difference
+    // -----------------------------------------------------------------------
+
+    /// The reported counterexample: junk before the first header used to be
+    /// claimed as "only the separators differ", which also asserted the bodies
+    /// were byte-identical when they were not.
+    #[test]
+    fn m1_content_before_the_first_header_is_not_a_separator_finding() {
+        let segments = [
+            segment("in/a.txt", b""),
+            segment("in/b.txt", b""),
+        ];
+        let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
+
+        let prefixed = check(&allow, &segments, b"xxa.txt\nb.txt");
+        assert_eq!(prefixed.state, CheckState::Failed);
+        assert_ne!(
+            prefixed.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "extra content before the first header is not a separator difference, got {:?}",
+            prefixed.reason_code
+        );
+        let detail = prefixed.detail.as_deref().unwrap_or_default();
+        assert!(
+            !detail.contains("各段正文与冻结来源逐字节一致"),
+            "the bodies are NOT byte-identical here, so that claim is false: {detail:?}"
+        );
+
+        // The single-source shape, same defect.
+        let one = [segment("in/b.txt", b"")];
+        let single = check(&allow, &one, b"xxb.txt");
+        assert_eq!(single.state, CheckState::Failed);
+        assert_ne!(
+            single.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "a bare prefix before the only header is not a separator difference"
+        );
+    }
+
+    /// Newlines before the first header ARE a separator shape, so the guard must
+    /// not reject them: only non-newline bytes are real extra content.
+    #[test]
+    fn m1_leading_blank_lines_are_still_a_separator_finding() {
+        let segments = [
+            segment("in/a.txt", b""),
+            segment("in/b.txt", b""),
+        ];
+        let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
+        let observation = check(&allow, &segments, b"\na.txt\nb.txt");
+        assert_eq!(observation.state, CheckState::Failed);
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "leading newlines are newline structure, not extra content, got {:?}",
+            observation.reason_code
+        );
+    }
+
+    /// The M1 guard must not widen matching in the other direction: a duplicate
+    /// header, a header-like body and a missing header stay as they were.
+    #[test]
+    fn m1_guard_does_not_widen_recognition() {
+        let segments = [
+            segment("in/a.txt", b"alpha"),
+            segment("in/b.txt", b"beta"),
+        ];
+        let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
+
+        // Duplicate header occurrence: separator density is wrong AND the body
+        // area is disturbed; it must not become a pass.
+        let duplicate = check(&allow, &segments, b"a.txt\n\na.txt\n\nalpha\n\nb.txt\nbeta\n");
+        assert_eq!(duplicate.state, CheckState::Failed);
+
+        // A body that merely looks like a header must not be accepted.
+        let header_like = check(&allow, &segments, b"a.txt\n\nb.txt\n\nb.txt\nbeta\n");
+        assert_eq!(header_like.state, CheckState::Failed);
+        assert_ne!(
+            header_like.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "a body ending in a header-like line is a body difference, got {:?}",
+            header_like.reason_code
+        );
+
+        // A genuinely missing header stays a source finding.
+        let missing = check(&allow, &segments, b"a.txt\n\nalpha\n");
+        assert_eq!(
+            missing.reason_code.as_deref(),
+            Some(reason_code::TEXT_SOURCE_MISSING),
+            "a missing header must stay SOURCE_MISSING, got {:?}",
+            missing.reason_code
+        );
+    }
+
+    /// The two fixtures that matter for the pass condition: the correct artifact
+    /// keeps passing and the B4-shaped 41-byte candidate keeps failing.
+    #[test]
+    fn h1_m1_pass_condition_is_unchanged() {
+        let segments = d2_segments();
+        let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
+
+        let correct = check(&allow, &segments, d2_joined_correct());
+        assert_eq!(
+            correct.state,
+            CheckState::Passed,
+            "the correct merge must still pass, got {:?} / {:?}",
+            correct.state,
+            correct.reason_code
+        );
+
+        let wrong = check(&allow, &segments, d2_joined_without_separators());
+        assert_eq!(
+            wrong.state,
+            CheckState::Failed,
+            "the separator-less candidate must still fail"
+        );
+        assert_eq!(
+            wrong.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH)
+        );
+    }
+
+    /// The M1 guard is metered: it reads the prefix through the budget like every
+    /// other comparison. With enough budget the finding degrades to the generic
+    /// content difference; with too little it follows the existing budget
+    /// contract rather than becoming a pass or a fabricated separator claim.
+    #[test]
+    fn m1_prefix_guard_respects_the_scan_budget() {
+        let segments = [
+            segment("in/a.txt", b""),
+            segment("in/b.txt", b""),
+        ];
+        // Both headers are present, so no SOURCE finding is provable here: the
+        // correct fallback for a rejected prefix is the generic content finding.
+        let actual: &[u8] = b"xxa.txt\n\nb.txt\n";
+        let enough = k2_run_scan(&segments, actual, 400, EofPolicy::AllowSingleTrailingLf);
+        assert_eq!(enough.state, CheckState::Failed);
+        assert_ne!(
+            enough.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "extra content before the first header is not a separator difference"
+        );
+
+        // A budget that cannot complete the diagnosis must not pass and must not
+        // claim the separator code: the existing contract applies.
+        let starved = k2_run_scan(&segments, actual, 4, EofPolicy::AllowSingleTrailingLf);
+        assert_ne!(
+            starved.state,
+            CheckState::Passed,
+            "a starved scan must never pass"
+        );
+        assert_ne!(
+            starved.reason_code.as_deref(),
+            Some(reason_code::TEXT_SEPARATOR_MISMATCH),
+            "an incomplete recognition must not fabricate the separator finding, got {:?}",
+            starved.reason_code
+        );
     }
 }
