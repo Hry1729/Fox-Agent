@@ -50,6 +50,52 @@ function responseFor(messages) {
     return { text: '审批步骤已返回；请以工具结果和验收文件核对是否执行。' }
   }
   if (user.includes('[KERNEL_CANCEL]')) return { text: '这是等待取消的临时流式内容。'.repeat(80), slow: true }
+  // Package-2-E: the drift fixture. It writes the correct merge, then streams a
+  // long final response. That stretch of wall clock is the window the driver uses
+  // to change a frozen source underneath the Run, which is the only way to make
+  // the checker's real identity drift fire without touching its logic.
+  if (user.includes('[P2E_DRIFT]')) {
+    if (!results.length) {
+      return { tool: 'write_file', input: { path: 'joined.txt', content: 'alpha.txt\naa\n\nzeta.txt\nz' } }
+    }
+    return { text: '合并已完成。等待来源复核。'.repeat(60), slow: true }
+  }
+  // Package-2-E: the U1 fixture. The write is real and the receipt is real — the
+  // content is simply empty, which is the one shape the checker classifies as
+  // "readable but carrying no verifiable evidence". An empty `content` is a
+  // legitimate request (clearing a file), so this stays a genuine managed write
+  // rather than a skipped one, and its receipt hash is the empty digest.
+  if (user.includes('[P2E_EMPTY]')) {
+    if (!results.length) {
+      return { tool: 'write_file', input: { path: 'joined.txt', content: '' } }
+    }
+    if (results.length === 1 && /summary\.json/.test(user)) {
+      return { tool: 'write_file', input: {
+        path: 'summary.json',
+        content: JSON.stringify({ files: ['alpha.txt', 'zeta.txt'] }, null, 2) + '\n',
+      } }
+    }
+    return { text: '已写出 joined.txt。' }
+  }
+  // Package-2-E: the merge fixture. The task text carries the marker so the same
+  // provider stays replayable, and both writes are real `write_file` tool calls
+  // performed by the desktop's own managed-write path.
+  const mergeMatch = user.match(/\[P2E_MERGE_(OK|BAD)\]/)
+  if (mergeMatch) {
+    const joined = mergeMatch[1] === 'OK'
+      ? 'alpha.txt\naa\n\nzeta.txt\nz'
+      : 'zeta.txt\nz\n\nalpha.txt\naa'
+    if (!results.length) {
+      return { tool: 'write_file', input: { path: 'joined.txt', content: joined } }
+    }
+    if (results.length === 1) {
+      return { tool: 'write_file', input: {
+        path: 'summary.json',
+        content: JSON.stringify({ files: ['alpha.txt', 'zeta.txt'] }, null, 2) + '\n',
+      } }
+    }
+    return { text: '已按冻结的合并顺序写出 joined.txt，并写出 summary.json 记录文件名清单。' }
+  }
   return { text: 'Kernel 桌面验收：这段内容逐步显示，只有最终响应提交后才成为正式消息。流式回复完成。' }
 }
 

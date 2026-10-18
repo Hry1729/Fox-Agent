@@ -83,6 +83,22 @@ pub enum RunState {
     /// A whole-turn retry has been scheduled (error recovery). Distinct from
     /// `Compacting`, which is context management.
     RetryScheduled,
+    /// The delivery gate reached a `RequiresU1` verdict: the artifacts exist and
+    /// are retained, but their content is **not verified**. The Run parks here
+    /// until a user accepts (per item) or supplies more evidence.
+    ///
+    /// This is a state about the **delivery**, not about a tool call, which is
+    /// why it is deliberately not `WaitingApproval`: that state's resolution path
+    /// (`kernel_approve_and_enqueue_dispatch`) requires a `tool_call_id`, clears
+    /// an approval deadline and enqueues a `DispatchTool` — i.e. it grants tool
+    /// authorization. Accepting an unverified delivery must never do that.
+    ///
+    /// Entered from `Running` only, and never carries an
+    /// `approval_deadline_wall_ms` (the durable commit enforces the
+    /// `WaitingApproval ⟺ deadline` invariant). Parked is expressed to the
+    /// continuation entry by a `kernel_run_progress` row with
+    /// `pause_reason = 'delivery_review'`, not by this variant alone.
+    AwaitingDeliveryReview,
     Compacting,
     /// Cancellation requested; in-flight model stream / hooks / host requests /
     /// tools are being torn down before the single `Cancelled` terminal is written.
@@ -107,6 +123,7 @@ impl RunState {
             RunState::WaitingApproval => "waiting_approval",
             RunState::WaitingJobs => "waiting_jobs",
             RunState::RetryScheduled => "retry_scheduled",
+            RunState::AwaitingDeliveryReview => "awaiting_delivery_review",
             RunState::Compacting => "compacting",
             RunState::Cancelling => "cancelling",
             RunState::Completed => "completed",
@@ -131,10 +148,20 @@ impl RunState {
     /// Terminal states that keep the completed work and offer a Host-driven
     /// continuation instead of forcing the user to start over. Expiry and budget
     /// exhaustion are pauses of the work, not verdicts about it.
+    ///
+    /// **Note on the production meaning of "continuable"**: neither this method
+    /// nor [`RunOutcome::is_continuable`] has a production caller today — the
+    /// durable, production-read criterion is `kernel_run_progress.continuable`.
+    /// [`RunState::AwaitingDeliveryReview`] is set `true` here for consistency
+    /// with that criterion (its progress row is written with `continuable = 1`),
+    /// and so a future caller does not have to guess. Setting it does **not** by
+    /// itself make a parked Run continuable in the UI.
     pub fn is_continuable(self) -> bool {
         matches!(
             self,
-            RunState::ApprovalExpired | RunState::BudgetExhausted
+            RunState::ApprovalExpired
+                | RunState::BudgetExhausted
+                | RunState::AwaitingDeliveryReview
         )
     }
 
@@ -145,6 +172,7 @@ impl RunState {
             "waiting_approval" => RunState::WaitingApproval,
             "waiting_jobs" => RunState::WaitingJobs,
             "retry_scheduled" => RunState::RetryScheduled,
+            "awaiting_delivery_review" => RunState::AwaitingDeliveryReview,
             "compacting" => RunState::Compacting,
             "cancelling" => RunState::Cancelling,
             "completed" => RunState::Completed,

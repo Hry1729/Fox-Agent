@@ -56,7 +56,87 @@ fn safe_finding(value: &Value) -> Option<Value> {
         else if semantic=="unverified" {result.insert("verificationStatus".into(),json!("unverified"));}
     }
     if requirements_truncated {result.insert("requirementsTruncated".into(),json!(true));}
+    // Package 2-B2: a typed v2 verdict is whitelisted as a **bounded projection**,
+    // never passed through whole. Passing it through would let an unbounded fact
+    // list exceed the finding capacity silently, and dropping it would leave the
+    // reader unable to tell a v2 record from a legacy one.
+    if let Some(projected)=project_verdict(source.get("deliveryVerdict")) {
+        let bounded=matches!(projected,Some(_));
+        if let Some(projected)=projected {
+            result.insert("deliveryVerdict".into(),projected);
+        }
+        // Capacity is checked before accepting: an over-budget projection is
+        // recorded as explicitly missing instead of being silently truncated.
+        if !bounded || serde_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
+            result.remove("deliveryVerdict");
+            result.insert("deliveryVerdictOmitted".into(),json!(true));
+        }
+    }
     Some(Value::Object(result))
+}
+
+/// Project a persisted v2 verdict envelope into a bounded, readable form.
+///
+/// `None` means "no envelope present" and `Some(None)` means "present but its
+/// shape is not one this reader can decode" — the distinction matters, because
+/// the caller records the second case as an explicit omission rather than
+/// pretending the record never had a verdict.
+fn project_verdict(value: Option<&Value>) -> Option<Option<Value>> {
+    let value=value?;
+    let envelope=value.as_object()?;
+    let mut result=serde_json::Map::new();
+    for field in ["verdictSchemaVersion","verdictEnvelopeVersion","itemCount"] {
+        if let Some(number)=envelope.get(field).and_then(Value::as_u64) {
+            result.insert(field.into(),json!(number));
+        }
+    }
+    for field in ["itemKey","class","aggregateClass"] {
+        if let Some(text)=envelope.get(field).and_then(Value::as_str) {
+            result.insert(field.into(),json!(bounded_display_text(text,512)));
+        }
+    }
+    for field in ["terminal","repairBudgetRemaining"] {
+        if let Some(flag)=envelope.get(field).and_then(Value::as_bool) {
+            result.insert(field.into(),json!(flag));
+        }
+    }
+    let facts=envelope.get("facts").and_then(Value::as_array);
+    if let Some(facts)=facts {
+        let total=facts.len();
+        // A bounded number of facts, each bounded field by field. `factCount` is
+        // always recorded so a truncated list is never mistaken for a complete one.
+        let kept: Vec<Value>=facts.iter().take(32).filter_map(|fact| {
+            let source=fact.as_object()?;let mut entry=serde_json::Map::new();
+            for field in ["class","origin","ruleId","check","reasonCode","limitKind","equivalence","path","sha256","expected","actual"] {
+                if let Some(text)=source.get(field).and_then(Value::as_str) {
+                    entry.insert(field.into(),json!(bounded_display_text(text,512)));
+                }
+            }
+            for field in ["checkerVersion","limit"] {
+                if let Some(number)=source.get(field).and_then(Value::as_u64) {
+                    entry.insert(field.into(),json!(number));
+                }
+            }
+            for field in ["blocking","needsRepair"] {
+                if let Some(flag)=source.get(field).and_then(Value::as_bool) {
+                    entry.insert(field.into(),json!(flag));
+                }
+            }
+            if let Some(detail)=source.get("detail").and_then(Value::as_str) {
+                entry.insert("detail".into(),json!(bounded_display_text(detail,512)));
+            }
+            if let Some(locator)=source.get("locator") {
+                if let Ok(text)=serde_json::to_string(locator) {
+                    entry.insert("locator".into(),json!(bounded_display_text(&text,512)));
+                }
+            }
+            (!entry.is_empty()).then_some(Value::Object(entry))
+        }).collect();
+        result.insert("factCount".into(),json!(total));
+        result.insert("facts".into(),Value::Array(kept));
+        if facts.len()>32 {result.insert("factsTruncated".into(),json!(true));}
+    }
+    Some(Some(Value::Object(result)))
 }
 
 /// A single latest Run, owned by this conversation. All callers use the same
@@ -66,7 +146,7 @@ pub(super) fn query_current_checklist_view(connection:&rusqlite::Connection,conv
     let Some(run)=run else {return Ok((Vec::new(),false));};
     let mut statement=connection.prepare("SELECT i.item_key,i.target_path,
         (SELECT a.id FROM artifacts a WHERE a.id=i.artifact_id AND a.conversation_id=?1),
-        i.display_name,i.status,i.finding_json,i.checked_at
+        i.display_name,i.status,i.finding_json,i.checked_at,i.requirements_json
         FROM delivery_checklist_items i JOIN runs r ON r.id=i.run_id
         WHERE r.conversation_id=?1 AND i.run_id=?2 ORDER BY i.item_key LIMIT 257")?;
     let mut rows=statement.query_map(params![conversation,run],|row| {
@@ -83,10 +163,55 @@ pub(super) fn query_current_checklist_view(connection:&rusqlite::Connection,conv
             "xlsx"|"xls"|"xlsm"=>"spreadsheet","docx"|"doc"=>"word","pptx"|"ppt"=>"slides","pdf"=>"pdf",
             "csv"|"tsv"=>"csv","json"=>"json","txt"|"md"|"html"=>"text","png"|"svg"|"jpg"=>"image",_=>"unknown"}};
         let status:String=row.get(4)?;
+        // The row's own frozen contract column, read in the **same** statement as
+        // its finding so the identity and the verdict always describe one row and
+        // no second per-artifact query is issued.
+        let requirements:Option<String>=row.get(7)?;
+        // Packages 2-B2 / 2-C1: a v2 record's own facts decide whether it may be
+        // shown as a pass. The durable columns are read **before** projection,
+        // because the projection truncates the fact list and could not support a
+        // complete verdict. `KeepStoredStatus` means the row carries no pass
+        // obligation this rule can judge: a historical record keeps the status it
+        // was written with, so introducing v2 cannot mass-downgrade legacy rows.
+        //
+        // This is a **downgrade guard**, not a re-derivation. Only a row that
+        // claims `passed` while its own durable record does not support a pass is
+        // withheld. Re-deriving every status here would overwrite the write side's
+        // own verdicts: a legitimate definite non-pass is stored as `failed` and
+        // must keep reading as `failed`, and `RepairNeeded` (also stored `failed`)
+        // means this round's check did not pass while the Run stays repairable.
+        //
+        // 2-C1 adds the second, independent reason a pass may not stand: the row's
+        // own contract says it owes a v2 record and that record is gone. Reading
+        // only the finding column could not tell that row apart from a legal
+        // legacy one, so a stripped v2 row used to keep displaying `passed`.
+        // The decision itself lives in one shared rule
+        // (`delivery::passed_qualification_of_row`) so this view, the artifact
+        // view, the finalize defence and the progress summary cannot drift apart
+        // about what may count as a pass.
+        let qualification = crate::runtime_host::delivery::passed_qualification_of_row(
+            &status,
+            raw.as_deref(),
+            requirements.as_deref(),
+            &item_key,
+        );
+        let status=match status.as_str() {
+            // The one downgrade: the row says passed and its own durable record
+            // says no. It becomes the existing non-terminal `pending` rather than
+            // `failed`: an unusable or contradictory record is *unconfirmed*, and
+            // claiming it failed would report a verdict no checker produced.
+            "passed" if qualification.withdraws_pass() => "pending".to_owned(),
+            // Everything else keeps the status it was written with: a legitimate
+            // `failed` (Refused/Invalid/DefiniteFailure/RepairNeeded) stays
+            // `failed`, a legitimate `passed` stays `passed`, and `pending` is
+            // never upgraded to a pass by the reader.
+            "pending"|"passed"|"failed" => status,
+            _ => "pending".into(),
+        };
         Ok(super::super::DeliveryChecklistView{run_id:run.into(),item_key:bounded_display_text(&item_key,2048),
             description:bounded_display_text(&row.get::<_,String>(3)?,512),artifact_kind:kind.into(),
             target_path:target_path.map(|s|bounded_display_text(&s,2048)),artifact_id:row.get(2)?,read_version,
-            status:if matches!(status.as_str(),"pending"|"passed"|"failed") {status}else{"pending".into()},finding,checked_at:row.get(6)?})
+            status,finding,checked_at:row.get(6)?})
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     let truncated=rows.len()>256;rows.truncate(256);Ok((rows,truncated))
 }
@@ -356,6 +481,19 @@ impl Database {
             serde_json::from_str(&body).map_err(|_|rusqlite::Error::InvalidParameterName("invalid frozen delivery requirements".into()))
         })
     }
+    /// Read every row's own frozen requirement column beside its item key.
+    ///
+    /// The version router decides per row, so it needs the raw column and the
+    /// key it belongs to in one statement: pairing them through two queries
+    /// would let a row be judged against another row's contract.
+    pub(crate) fn delivery_checklist_requirements(&self,run_id:&str)->Result<Vec<(String,Option<String>)>,String> {
+        self.with_connection(|conn| {
+            let mut stmt=conn.prepare("SELECT item_key, requirements_json FROM delivery_checklist_items WHERE run_id=?1 ORDER BY item_key")?;
+            let rows=stmt.query_map(params![run_id],|row|Ok((row.get(0)?,row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+    }
     /// An unnamed artifact is bound to the immediate frozen output directory,
     /// never another directory with a similarly named or same-type file.
     pub(crate) fn delivery_target_matches_directory(target:&str,directory:&str)->bool {
@@ -472,6 +610,14 @@ impl Database {
     /// Run; this Run must verify the current file version), the old status, the old
     /// finding and `checked_at`. `INSERT OR IGNORE` on (run_id, item_key) is what
     /// keeps re-seeding or a recovery from duplicating a row.
+    ///
+    /// Also deliberately not copied: `recognition:*` rows. Their meaning is "**this
+    /// text** did not name a complete target set", and a resumed Run has its own
+    /// text, so inheriting the row would assert the new task is unresolved before
+    /// anyone parsed it — and, because it can never be bound or accepted, it would
+    /// keep the resumed Run permanently unreleasable. The new Run re-decides this
+    /// for itself in `freeze_task_delivery`. The source Run keeps its own row
+    /// untouched, so nothing in the audit trail is rewritten.
     pub(crate) fn inherit_delivery_checklist(
         &self,
         run_id: &str,
@@ -501,7 +647,8 @@ impl Database {
                 let mut statement = conn.prepare(
                     "SELECT item_key, target_path, display_name, checks_json,
                             requirements_json, COALESCE(target_path, display_name)
-                       FROM delivery_checklist_items WHERE run_id = ?1",
+                       FROM delivery_checklist_items
+                      WHERE run_id = ?1 AND item_key NOT LIKE 'recognition:%'",
                 )?;
                 let rows = statement.query_map(params![source_run_id], |row| {
                     Ok((
@@ -763,24 +910,61 @@ impl Database {
                 transaction.rollback()?;
                 return Ok(0);
             }
-            let staged: Vec<(String, i64, String)> = {
+            // The staged verdict and the item's **own** frozen contract are read
+            // together in one statement, so the identity always describes the row
+            // being written and no per-item contract query is issued.
+            let staged: Vec<(String, i64, String, Option<String>)> = {
                 let mut stmt = transaction.prepare(
-                    "SELECT item_key, passed, finding_json FROM delivery_outcome_stage
-                     WHERE run_id=?1 AND decision_mark=?2 ORDER BY item_key",
+                    "SELECT s.item_key, s.passed, s.finding_json, i.requirements_json
+                     FROM delivery_outcome_stage s
+                     LEFT JOIN delivery_checklist_items i
+                       ON i.run_id = s.run_id AND i.item_key = s.item_key
+                     WHERE s.run_id=?1 AND s.decision_mark=?2 ORDER BY s.item_key",
                 )?;
                 let rows = stmt
                     .query_map(params![run_id, decision_mark], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 rows
             };
-            for (item_key, passed, finding) in &staged {
+            for (item_key, passed, finding, requirements) in &staged {
                 #[cfg(test)]
                 if finalize_fault::should_abort() {
                     return Err(rusqlite::Error::InvalidQuery);
                 }
-                let status = if *passed != 0 { "passed" } else { "failed" };
+                // Packages 2-B2 / 2-C1: the staged `passed` flag and the staged
+                // finding are written together, so the flag is checked against the
+                // finding it is about to be stored beside **and** against the
+                // item's own contract identity. A v2 record may only be written as
+                // `passed` when its own facts support that; a row that owes a v2
+                // record but carries none is written as unconfirmed rather than
+                // being discovered later by a reader. Legacy rows carry no envelope
+                // and keep the flag they were staged with.
+                //
+                // The three outcomes stay distinct: a contradicted pass is written
+                // `failed` (a definite non-pass, exactly as before), a lost or
+                // unreadable record is written `pending` (unconfirmable, so a later
+                // round may still resolve it), and everything else keeps `passed`.
+                let status = if *passed != 0 {
+                    let qualification = crate::runtime_host::delivery::passed_qualification_of_row(
+                        "passed",
+                        Some(finding.as_str()),
+                        requirements.as_deref(),
+                        item_key,
+                    );
+                    match qualification {
+                        crate::runtime_host::delivery::PassQualification::ContradictedByFacts => {
+                            "failed"
+                        }
+                        crate::runtime_host::delivery::PassQualification::RecordUnusable(_) => {
+                            "pending"
+                        }
+                        _ => "passed",
+                    }
+                } else {
+                    "failed"
+                };
                 // Only a row that has not already received this exact verdict is
                 // written, so `checked_at` keeps the instant the verdict was
                 // really decided and a replayed finalizer writes nothing.
@@ -817,6 +1001,42 @@ impl Database {
             )?;
             transaction.commit()?;
             Ok(staged.len())
+        })
+    }
+
+    /// Retain a typed v2 verdict's **non-terminal** items on the pending path.
+    ///
+    /// A `Unconfirmed` delivery is neither a pass nor a failure. Writing it
+    /// through the terminal stage would be wrong in a specific, silent way: the
+    /// stage's `passed = 0` is finalized as `failed`, so "the content was never
+    /// verified" would become "the content failed". This writes the finding only
+    /// and leaves the status `pending`, which is the ledger's existing
+    /// non-terminal state — no new status string and no migration.
+    ///
+    /// The status is asserted in the `WHERE` clause so a row that already carries
+    /// a terminal verdict is never reopened by a retention write.
+    pub(crate) fn retain_pending_delivery_findings(
+        &self,
+        run_id: &str,
+        items: &[(String, String)],
+        now: i64,
+    ) -> Result<usize, String> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        self.with_connection(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let mut written = 0usize;
+            for (item_key, finding) in items {
+                written += transaction.execute(
+                    "UPDATE delivery_checklist_items
+                     SET finding_json=?1, updated_at=?2
+                     WHERE run_id=?3 AND item_key=?4 AND status='pending'",
+                    params![finding, now, run_id, item_key],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(written)
         })
     }
 

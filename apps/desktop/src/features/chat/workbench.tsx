@@ -9,6 +9,8 @@ import { canonicalProjectRoot, matchingProject, selectProjectRoot, validPickedPr
 import { EMPTY_RUNTIME_ARTIFACTS } from './runtime-timeline-performance'
 import { type SidebarProjectGroup } from './sidebar-project-groups'
 import { useVisibleCompletionAcknowledgement } from './use-conversation-completion-notices'
+import { RuntimeArtifacts } from './runtime-artifacts'
+import { DeliveryAcceptanceCard } from './components/DeliveryAcceptanceCard'
 import { adoptBlockedStyles } from '@/components/effects/adopted-styles'
 import { Button } from '@/components/ui/button'
 import { asAgentCard } from '@/features/agents/agent-card-data'
@@ -33,8 +35,8 @@ import { type ManagementReturnRoutes, captureManagementReturnRoutes, managementE
 import { type KnowledgeSourceLocator, type LocalKnowledgeDocumentAsk, type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
-import { File } from 'lucide-react'
-import { type KeyboardEvent, type ReactNode, Profiler, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { File, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { type KeyboardEvent, type ReactNode, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { MemoizedComposer, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
 import { ComposerEntryContext } from './composer/composer-entry-context'
 import { ConversationManagementDialogs, KnowledgeBindingDialog, ProjectDeleteDialog } from './conversation-dialogs'
@@ -127,6 +129,91 @@ function CompactRightPanel({ children, maximized, onClose }: { children: ReactNo
     }}>{children}</div>
   </div>
 }
+
+/**
+ * Package 2-D U1: the surface that asks the user to decide about deliverables
+ * whose content the Host could not verify.
+ *
+ * Rendered while the Run is parked on `awaiting_delivery_review`, **and** while a
+ * Run that has already ended still has an acceptance the user may want to
+ * withdraw. The second half is R-1: gating purely on `parked` made the whole
+ * panel — including the card's "撤销接受" button — disappear the moment the Run
+ * completed, so the user could find neither their acceptance nor a way to undo
+ * it.
+ *
+ * It reads the checklist that `load_conversation` already returns (no extra read)
+ * and asks the Host for each outstanding item's acceptance state on demand — the
+ * freshness check behind that state re-reads the candidate file, so it must not
+ * run inside the bulk conversation load.
+ *
+ * It never renders an item as passed. The verification class and the acceptance
+ * are two separate lines, because they are two separate facts.
+ */
+function DeliveryReviewPanel() {
+  const { deliveryRunId, deliveryRunState, deliveryChecklist } = useContext(TimelineRuntimeContext)
+  const parked = deliveryRunState === 'awaiting_delivery_review'
+  // `recognition:*` rows are not deliverables: they record that the task text did
+  // not name one. The Host refuses their acceptance and their binding, so rendering
+  // a card for them would only produce a button that can never work. They stay in
+  // the Run's outstanding list — that is the durable record that the Run is not
+  // done — and are shown as the open question instead of as an acceptable item.
+  const recognition = useMemo(
+    () => (deliveryChecklist ?? []).filter((item) => item.runId === deliveryRunId && item.itemKey.startsWith('recognition:')),
+    [deliveryChecklist, deliveryRunId],
+  )
+  const outstanding = useMemo(
+    () => (deliveryChecklist ?? []).filter((item) => item.runId === deliveryRunId && item.status !== 'passed' && !item.itemKey.startsWith('recognition:')),
+    [deliveryChecklist, deliveryRunId],
+  )
+  // A finished Run keeps the panel only while one of its rows still carries an
+  // acceptance to withdraw. Probing the Host for that would re-read every
+  // candidate file on each conversation load, which is exactly what the on-demand
+  // `loadState` exists to avoid — so the panel renders whenever the Run is parked
+  // or has ended with outstanding rows, and the **card** decides per row which
+  // buttons exist. A Run with no outstanding rows at all renders nothing.
+  if (!deliveryRunId || (outstanding.length === 0 && recognition.length === 0)) return null
+  if (!parked && deliveryRunState !== 'completed' && deliveryRunState !== 'failed') return null
+  const ended = !parked
+  return (
+    <div className="fox-delivery-review">
+      <header>
+        {ended ? <ShieldCheck size={15} /> : <ShieldAlert size={15} />}
+        <div>
+          <strong>
+            {recognition.length > 0
+              ? '交付要求未识别——需要你补充'
+              : ended ? '交付内容尚未核验——任务已结束' : '交付内容尚未核验'}
+          </strong>
+          <small>
+            {recognition.length > 0
+              ? '任务提到了要做文件，但没说清具体交付什么，Host 没有可核验的对象。补充文件名、类型或目录后重发，会按新任务重新识别并重新核验；本次不会自动重跑模型，也不会被记成未通过。'
+              : ended
+                ? '该任务的核验结论保留原样。你此前的接受仍在，可以逐项撤销；任务不会因此重启或重跑。'
+                : '产物已保留。你可以逐项接受未核验风险，或补充材料后重新核验；不会自动重跑模型修复。'}
+          </small>
+        </div>
+      </header>
+      {recognition.map((item) => {
+        const reason = typeof item.finding?.reason === 'string' ? item.finding.reason : null
+        return (
+          <p className="fox-delivery-review__question" key={`${item.runId}:${item.itemKey}`}>
+            {reason || '请明确要交付的文件名、类型或目录；当前没有可靠目标可自动修复'}
+          </p>
+        )
+      })}
+      {outstanding.map((item) => (
+        <DeliveryAcceptanceCard
+          key={`${item.runId}:${item.itemKey}`}
+          runId={item.runId}
+          itemKey={item.itemKey}
+          description={item.description || item.targetPath || item.itemKey}
+          loadState={(runId, itemKey) => desktopClient.deliveryAcceptanceState(runId, itemKey)}
+          resolve={(runId, itemKey, decision) => desktopClient.resolveDeliveryAcceptance(runId, itemKey, decision)}        />
+      ))}
+    </div>
+  )
+}
+
 
 export function Workbench() {
   const desktopConversation = useDesktopConversation()
@@ -256,6 +343,14 @@ export function Workbench() {
     : undefined
   const desktopRunning = desktopConversation.enabled && runIsActive(desktopConversation.detail)
   const desktopRunStatus = conversationRunState(desktopConversation.detail)
+  // A Run parked on `awaiting_delivery_review` is still active for the Host (it
+  // is continuable and not terminal), but it is not *working*: nothing is
+  // dispatched and the review lane is asking the user to answer. Treating it as
+  // busy turned the composer's submit control into Stop, so the clarification
+  // the panel asks for could never be sent. `desktopBusy` is the narrower fact
+  // the composer and the steering lane need: work is actually in flight.
+  const desktopParkedForReview = desktopRunStatus === 'awaiting_delivery_review'
+  const desktopBusy = desktopRunning && !desktopParkedForReview
   const selectableAgents = chatSelectableAgents(agentResource.agents)
   const activeAgent = resolveActiveChatAgent(agentResource.agents, desktopConversation.selectedAgentId)
   const activeExpert = agentResource.agents.find((item) => item.id === desktopConversation.selectedExpertId) ?? null
@@ -375,9 +470,11 @@ export function Workbench() {
     if (!desktopConversation.enabled) return
     if (pendingRuntimeApproval) setChatState('approval')
     else if (desktopConversation.error) setChatState('error')
-    else if (desktopRunning) setChatState('running')
+    // A parked Run is not `running`: the composer must stay able to send the
+    // clarification the review lane asks for.
+    else if (desktopBusy) setChatState('running')
     else if (desktopAssistantMessage || desktopUserMessage) setChatState('complete')
-  }, [desktopAssistantMessage, desktopConversation.enabled, desktopConversation.error, desktopRunning, desktopUserMessage, pendingRuntimeApproval])
+  }, [desktopAssistantMessage, desktopBusy, desktopConversation.enabled, desktopConversation.error, desktopUserMessage, pendingRuntimeApproval])
   useEffect(() => {
     if (!pendingUserMessage || !desktopUserMessage) return
     if (desktopUserMessage.content !== pendingUserMessage.content) return
@@ -1310,7 +1407,7 @@ export function Workbench() {
   const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings])
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
-    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
+    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
     </ComposerEntryContext.Provider>
   )
   const assistantUiThreadPanel = (
@@ -1378,7 +1475,9 @@ export function Workbench() {
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
 <div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''} ${activeView === 'chat' && activeExpert ? 'has-expert-lanyard' : ''}`}>
   {activeView === 'chat' && activeExpert && <Suspense fallback={null}><ExpertLanyard expertId={activeExpert.id} name={activeExpert.name} description={activeExpert.description || activeExpert.category} frontImage={asAgentCard(activeExpert).image} autoCollapseKey={timelineEmpty ? 0 : pendingUserMessage?.createdAt ?? desktopUserMessage?.createdAt ?? 1} /></Suspense>}
-  {assistantUiThreadPanel}{composerPanel}
+  {assistantUiThreadPanel}
+  <DeliveryReviewPanel />
+  {composerPanel}
 </div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>

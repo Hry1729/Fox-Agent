@@ -8,6 +8,7 @@ pub(crate) mod managed_files;
 mod tool_result_read;
 mod skill_load;
 pub(crate) mod delivery;
+pub(crate) mod delivery_checks_v2;
 pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
 mod kernel_run_lock;

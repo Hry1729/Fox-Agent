@@ -154,7 +154,11 @@ enum DecisionLease<'a> {
 enum CompletionDelivery {
     /// No checklist, or every promised artifact passed: the Run may complete. The
     /// mark is stamped on the completing decision when verdicts were staged.
-    Complete { mark: Option<String> },
+    ///
+    /// Named `Completed` rather than `Complete` so the variant, the admission
+    /// [`CompletionDelivery::Failed`] routes to, and the `RunOutcome` each writes
+    /// share one name and cannot be crossed by a matching mistake.
+    Completed { mark: Option<String> },
     /// A promised artifact failed: this round arms the bounded repair round
     /// instead of finishing, exactly as the live loop does.
     Repair {
@@ -162,16 +166,186 @@ enum CompletionDelivery {
         prompt: String,
         input: fox_engine_protocol::KernelInitialModelInput,
     },
+    /// The delivery can be neither accepted nor rejected: a legal verdict class
+    /// (`RequiresU1`) says the record is not yet verified. This variant is the
+    /// first-class expression of "this round ends with **no** terminal write at
+    /// all", so the completion lane never has to borrow `Complete { mark: None }`
+    /// to mean "do not complete".
+    ///
+    /// Borrowing `Complete { mark: None }` was not equivalent: both real callers
+    /// of this lane fall through to `terminate(RunOutcome::Completed)` for any
+    /// value that is not `Repair`, so a `RequiresU1` delivery was reported as a
+    /// **completed** Run while its own row stayed `pending`. Neither terminal nor
+    /// repair is correct here — the facts belong on the non-terminal retention
+    /// path, and the Run simply does not finish on this round.
+    ///
+    /// `mark` is always `None`: nothing is staged for this class, so there is no
+    /// decision mark to carry and `finish_completion_delivery` stays a no-op.
+    ///
+    /// Package 2-D U1: before the park existed, "the Run simply does not finish"
+    /// was implemented as an empty effect list, which left the Run `running` with
+    /// nothing to dispatch — and the Host drive loop then failed it with
+    /// `kernel.no_progress`. `reason` and `outstanding_items` are what the park
+    /// writes durably, so the Run has a state to wait in and the continuation
+    /// entry point has a progress row to offer.
+    Deferred {
+        reason: String,
+        outstanding_items: Vec<String>,
+    },
+    /// The delivery's own class is a definite non-pass. This round writes the
+    /// **failed** terminal the class centrally chose.
+    ///
+    /// The stop is moved into the round's decision rather than kept beside it: a
+    /// typed verdict is not `Clone`, and the round must not recompute the stop to
+    /// name it — the class would then be re-derived from state that may have moved
+    /// on since the round was decided.
+    ///
+    /// `mark` is a fresh failure mark, not `None`: this variant reaches its
+    /// terminal through the same two-phase write every other completion uses
+    /// (`completion_effects` stages the failure under the mark, the decision
+    /// commits it, `finish_completion_delivery` finalizes and proves it landed),
+    /// so a crash between the two leaves the rows pending rather than unknown.
+    Failed {
+        stop: Box<super::delivery::DeliveryStop>,
+        mark: String,
+    },
 }
 
 impl CompletionDelivery {
     /// The mark this completion's decision must carry, when verdicts were staged.
     fn mark(&self) -> Option<&str> {
         match self {
-            CompletionDelivery::Complete { mark } => mark.as_deref(),
+            CompletionDelivery::Completed { mark } => mark.as_deref(),
             CompletionDelivery::Repair { mark, .. } => Some(mark.as_str()),
+            // Deliberately no mark: a deferred delivery stages nothing, so there
+            // is no stage for a decision to authorize.
+            CompletionDelivery::Deferred { .. } => None,
+            CompletionDelivery::Failed { mark, .. } => Some(mark.as_str()),
         }
     }
+
+    /// Whether this completion writes a terminal state for the Run.
+    ///
+    /// Named so the two callers cannot silently disagree about the third variant:
+    /// a new variant must state its terminal intent here rather than fall into an
+    /// `else` that happens to terminate.
+    fn terminates_the_run(&self) -> bool {
+        match self {
+            CompletionDelivery::Completed { .. } | CompletionDelivery::Failed { .. } => true,
+            CompletionDelivery::Repair { .. } | CompletionDelivery::Deferred { .. } => false,
+        }
+    }
+
+}
+
+/// The reason a `RequiresU1` delivery parks the Run, taken from the verdict's
+/// own route so a caller cannot supply a second spelling of it.
+fn requires_u1_reason(stop: &super::delivery::DeliveryStop) -> String {
+    match stop.route() {
+        super::delivery::DeliveryRoute::RequiresU1 { reason } => reason,
+        // Unreachable: this helper is only called from that arm. Falling back to
+        // a fixed string rather than panicking keeps a future refactor from
+        // turning a policy question into a crash.
+        _ => "交付内容尚未核验，等待用户逐项处理".to_owned(),
+    }
+}
+
+/// The items whose content is not verified, in the verdict's own order.
+///
+/// Read from the stop the decision already produced, never re-derived from the
+/// checklist: a second evaluation here could disagree with the verdict the Run is
+/// actually parked on.
+fn requires_u1_items(stop: &super::delivery::DeliveryStop) -> Vec<String> {
+    stop.typed()
+        .map(|typed| {
+            typed
+                .rows
+                .iter()
+                .filter(|row| !row.passed)
+                .map(|row| row.item_key.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// The effects a completion appends to the round's write-set, **in one place**.
+///
+/// Both real callers (`dispatch_initial_request` and `dispatch_batch`) end their
+/// round with exactly this decision, and the H1 repair is only true if they cannot
+/// drift: while the tail was written out twice, a `Deferred` delivery could be kept
+/// out of the terminal branch in one copy and fall into it in the other,
+/// completing a Run whose delivery was never verified. Extracting it makes "a
+/// deferred delivery writes no terminal" a property of the shared code rather than
+/// of two edits staying in sync.
+///
+/// Returns the effects to append; the caller still owns the surrounding precedence
+/// (steering, parked jobs and notices are decided before this).
+fn completion_effects(
+    controller: &mut RunController,
+    completion: Option<&CompletionDelivery>,
+    now: kernel::ClockReading,
+) -> Result<Vec<Effect>, KernelError> {
+        match completion {
+            // A promised artifact failed: this round owes the bounded repair
+            // round, not a completion.
+            Some(CompletionDelivery::Repair { prompt, input, .. }) => {
+                controller.request_delivery_repair(
+                    prompt,
+                    &serde_json::to_string(input)
+                        .map_err(|error| KernelError::FailClosed(error.to_string()))?,
+                )
+            }
+            // Neither accepted nor rejected: the delivery's own class says it is
+            // not verified yet. The Run is parked on a durable, non-terminal
+            // state — not completed, not failed, and with an empty effect list it
+            // would have been left `running` with nothing to dispatch, which the
+            // Host loop turns into `kernel.no_progress`. Its facts were already
+            // retained on the non-terminal path by
+            // `completion_delivery_for_stop`.
+            Some(CompletionDelivery::Deferred { reason, outstanding_items }) => {
+                debug_assert!(
+                    !completion.is_some_and(CompletionDelivery::terminates_the_run),
+                    "a deferred delivery must never terminate the Run"
+                );
+                controller.park_awaiting_delivery_review(
+                    now.monotonic_ms,
+                    now.wall_ms,
+                    reason,
+                    outstanding_items,
+                )
+            }
+            // A definite non-pass: this round writes the **failed** terminal,
+            // taking the code and message from the class's own canonical
+            // disposition rather than from any caller. Kept in this one shared
+            // function for the same reason `Deferred` is — a copy of this match is
+            // where the class would lose its terminal rule.
+            Some(CompletionDelivery::Failed { stop, .. }) => {
+                debug_assert!(
+                    completion.is_some_and(CompletionDelivery::terminates_the_run),
+                    "a failed delivery must terminate the Run"
+                );
+                let super::delivery::DeliveryRoute::Fail { code, message } = stop.route() else {
+                    return Err(KernelError::FailClosed(
+                        "a failed delivery decision carries a stop whose class routes as a non-failure"
+                            .into(),
+                    ));
+                };
+                Ok(controller.terminate(kernel::RunOutcome::Failed {
+                    code: code.into(),
+                    message,
+                }))
+            }
+            // `Completed`, or no delivery decision at all. Both mean this round
+            // finishes the Run; the arms above are what keep a deferred delivery
+            // and a definite non-pass out of here.
+            _ => {
+                debug_assert!(
+                    completion.is_none_or(CompletionDelivery::terminates_the_run),
+                    "every completion variant must state its terminal intent"
+                );
+                Ok(controller.terminate(kernel::RunOutcome::Completed))
+            }
+        }
 }
 
 /// The flat wait a retry must never beat for the classes that are **not** a
@@ -1216,52 +1390,170 @@ impl<'a> KernelCoordinator<'a> {
         history: &[Value],
         output: &Value,
     ) -> Result<CompletionDelivery, String> {
-        let stop = super::delivery::evaluate_stop(
+        let stop = self.evaluate_completion_stop()?;
+        self.completion_delivery_for_stop(history, output, &stop)
+    }
+
+    /// The delivery stop a round that would finish the Run is decided from.
+    ///
+    /// Both completion entry points read the stop through this one call, so they
+    /// cannot disagree about what "the delivery" is, and the failed terminal —
+    /// which needs the stop's own rows, not just its class — is handed the verdict
+    /// the round was actually decided on rather than a second evaluation.
+    ///
+    /// [2-C2/G2] The typed lane's `Fail` route maps to `CompletionDelivery::Failed`
+    /// and the stop is retained for [`Self::terminate_with_typed_verdict`], so a
+    /// class the v2 chain concluded `DefiniteFailure` (a real `Concat` content
+    /// mismatch is one) can reach its terminal through this lane at all.
+    fn evaluate_completion_stop(&self) -> Result<super::delivery::DeliveryStop, String> {
+        super::delivery::evaluate_stop(
             &self.database,
             self.binding.permission.project_root.as_deref(),
             &self.binding.run_id,
-        )?;
-        match &stop {
-            super::delivery::DeliveryStop::NoChecklist => {
-                Ok(CompletionDelivery::Complete { mark: None })
-            }
-            super::delivery::DeliveryStop::Passed { .. }
-            | super::delivery::DeliveryStop::Exhausted { .. } => {
+        )
+    }
+
+    /// The completion decision for an **already computed** stop.
+    ///
+    /// Split out of [`Self::stage_completion_delivery`] so the typed v2 verdicts
+    /// take this one definition rather than a second copy of the arm structure.
+    /// The card requires an already-computed verdict to be carried verbatim into
+    /// the terminal lane, and a copy of this match is exactly where a class could
+    /// silently lose its staging rule.
+    fn completion_delivery_for_stop(
+        &self,
+        history: &[Value],
+        output: &Value,
+        stop: &super::delivery::DeliveryStop,
+    ) -> Result<CompletionDelivery, String> {
+        use super::delivery::DeliveryRoute;
+        // The legacy no-checklist case has nothing to stage, so it must not
+        // invent a mark: a mark that authorized no rows would leave a decision in
+        // the ledger describing verdicts that do not exist.
+        if matches!(stop, super::delivery::DeliveryStop::NoChecklist) {
+            return Ok(CompletionDelivery::Completed { mark: None });
+        }
+        match stop.route() {
+            DeliveryRoute::Complete => {
                 let mark = format!("delivery:completion:{}", uuid::Uuid::new_v4());
                 super::delivery::stage_outcome(
                     &self.database,
                     &self.binding.run_id,
                     &mark,
-                    &stop,
+                    stop,
                     crate::database::now_ms(),
                 )?;
-                Ok(CompletionDelivery::Complete { mark: Some(mark) })
+                Ok(CompletionDelivery::Completed { mark: Some(mark) })
             }
-            super::delivery::DeliveryStop::Repair { prompt, .. } => {
-                let mark = format!("delivery:completion:{}", uuid::Uuid::new_v4());
-                super::delivery::stage_outcome(
+            DeliveryRoute::Repair => {
+                let Some(prompt) = stop.repair_prompt() else {
+                    return Err(
+                        "a repairable delivery stop reached the completion lane without its repair \
+                         instruction"
+                            .into(),
+                    );
+                };
+                self.arm_completion_repair(history, output, stop, prompt)
+            }
+            // A definite non-pass does **not** take the completing terminal, but it
+            // does take this lane's two-phase write: the failure is staged under a
+            // fresh mark here, the round's decision commits that mark, and
+            // `finish_completion_delivery` finalizes and proves it landed — the same
+            // contract `Complete` and `Repair` keep. Writing the failed outcome
+            // directly from this function would give the round a terminal its own
+            // decision never authorized, and completing would report success for a
+            // delivery whose class says it did not pass.
+            DeliveryRoute::Fail { .. } => {
+                // The non-terminal siblings' facts are durable state, not a
+                // by-product of the terminal: the failure stage only carries
+                // `terminal_items`, so without this a mixed verdict would lose the
+                // very facts that justify calling it mixed. Done before the
+                // terminal, so a crash between the two leaves them pending.
+                super::delivery::retain_pending_typed_stop(
                     &self.database,
                     &self.binding.run_id,
-                    &mark,
-                    &stop,
+                    stop,
                     crate::database::now_ms(),
                 )?;
-                let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
-                input.messages = history.to_vec();
-                input.messages.push(output.clone());
-                input.messages.push(serde_json::json!({
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                    "timestamp": 0
-                }));
-                input.validate()?;
-                Ok(CompletionDelivery::Repair {
+                let mark = self.stage_given_failure_delivery(stop)?.ok_or_else(|| {
+                    "a definite non-pass delivery stop produced no failure stage to authorize"
+                        .to_string()
+                })?;
+                Ok(CompletionDelivery::Failed {
+                    stop: Box::new(stop.clone()),
                     mark,
-                    prompt: prompt.clone(),
-                    input,
+                })
+            }
+            // Neither complete nor fail, and no terminal write at all. The facts
+            // of the unverified items are durable state, not a by-product of a
+            // terminal write, so they are retained here — under this same
+            // decision, on the rows the stage deliberately did not touch — and
+            // then this lane states "deferred" as a first-class value instead of
+            // borrowing a completing variant to mean "do not complete".
+            DeliveryRoute::RequiresU1 { .. } => {
+                super::delivery::retain_pending_typed_stop(
+                    &self.database,
+                    &self.binding.run_id,
+                    stop,
+                    crate::database::now_ms(),
+                )?;
+                Ok(CompletionDelivery::Deferred {
+                    reason: requires_u1_reason(stop),
+                    outstanding_items: requires_u1_items(stop),
                 })
             }
         }
+    }
+
+    /// Stage a repair round and build the follow-up input that owns it.
+    ///
+    /// The one definition both repair lanes take — the legacy `Repair` stop and a
+    /// typed `RepairNeeded` verdict — so the two can never disagree about the
+    /// mark prefix, the staged rows, or the shape of the follow-up input.
+    fn arm_completion_repair(
+        &self,
+        history: &[Value],
+        output: &Value,
+        stop: &super::delivery::DeliveryStop,
+        prompt: &str,
+    ) -> Result<CompletionDelivery, String> {
+        let mark = format!("delivery:completion:{}", uuid::Uuid::new_v4());
+        super::delivery::stage_outcome(
+            &self.database,
+            &self.binding.run_id,
+            &mark,
+            stop,
+            crate::database::now_ms(),
+        )?;
+        // The round's terminal stage carries the rows this decision will finalize.
+        // A typed verdict's non-terminal siblings are deliberately not in it —
+        // `passed = 0` there is finalized as `failed` — so they are retained on
+        // the pending path here, before the round commits, exactly as the live
+        // lane does. Without this the unknown sibling's facts would live only in
+        // the in-memory verdict: a crash mid-round would leave the ledger without
+        // them, and the next reader could not tell it had ever been checked.
+        // A stop with no pending items is a no-op (`Ok(0)`), so the legacy repair
+        // lane takes this line unchanged.
+        super::delivery::retain_pending_typed_stop(
+            &self.database,
+            &self.binding.run_id,
+            stop,
+            crate::database::now_ms(),
+        )?;
+        let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
+        input.messages = history.to_vec();
+        input.messages.push(output.clone());
+        input.messages.push(serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": prompt}],
+            "timestamp": 0
+        }));
+        input.validate()?;
+        Ok(CompletionDelivery::Repair {
+            mark,
+            prompt: prompt.to_owned(),
+            input,
+        })
     }
 
     /// Make the staged verdicts of a decision that just committed final.
@@ -1704,6 +1996,109 @@ impl<'a> KernelCoordinator<'a> {
             self.binding.permission.project_root.as_deref(),
             &self.binding.run_id,
         )?;
+        self.stage_given_failure_delivery(&stop)
+    }
+
+    /// Terminate the Run as failed through an **already computed** typed verdict.
+    ///
+    /// This is the package-2-B2 terminal edge. It exists so a consumer that has
+    /// already classified the delivery does not have to re-enter [`Self::fail`],
+    /// whose `stage_failure_delivery` would run `evaluate_stop` a second time.
+    /// Re-evaluating is not merely wasteful: the second evaluation is a *different*
+    /// decision, so the class, the retained facts and the decision mark written to
+    /// the ledger could all disagree with the verdict the caller actually acted on.
+    ///
+    /// Everything else matches [`Self::fail`] exactly, because it is the same
+    /// legal ordering: stage under a fresh mark, terminate through the decision
+    /// that commits that mark, then finalize and prove the mark landed. A
+    /// `RequiresU1` verdict never reaches this function — it has no terminal.
+    ///
+    /// Admission is by **class**, and the failed outcome is written from the
+    /// verdict's own canonical disposition:
+    /// * `RequiresU1` — refused: it must not acquire a terminal at all;
+    /// * `Accept` — refused: the delivery passed, so failing the Run would
+    ///   contradict the verdict that authorized the write;
+    /// * `Repair` — refused: a repairable delivery still has a repair round in
+    ///   front of it, and failing it would consume the budget the round needs;
+    /// * `Terminal{class, code, message}` — admitted, and its code/message are the
+    ///   ones the class centrally chooses.
+    ///
+    /// There is deliberately **no** `code`/`message` parameter. The class is the
+    /// only input, so a caller cannot decide what reason the ledger records: a
+    /// signature that accepted one would let a `Refused` delivery be written as
+    /// `delivery.invalid`, or an `Accept`ed one as a failure, without any code in
+    /// this module being wrong.
+    pub(crate) fn terminate_with_typed_verdict(
+        &self,
+        stop: &super::delivery::DeliveryStop,
+    ) -> Result<(), String> {
+        use super::delivery::DeliveryRoute;
+        let Some(typed) = stop.typed() else {
+            return Err("typed delivery verdict was not supplied".into());
+        };
+        let (canonical_code, canonical_message) = match stop.route() {
+            // A verdict that asks for U1 must never acquire a failed terminal.
+            // This is the last defence before the terminal write; the caller is
+            // expected to route it to the non-terminal retention path instead.
+            DeliveryRoute::RequiresU1 { .. } => {
+                return Err("a requires-U1 delivery verdict must not terminate the Run".into());
+            }
+            DeliveryRoute::Complete | DeliveryRoute::Repair => {
+                return Err(format!(
+                    "a {} typed verdict must not be admitted here — the Run would be failed \
+                     while its own class says otherwise",
+                    typed.verdict.class.as_str()
+                ));
+            }
+            DeliveryRoute::Fail { code, message } => (code, message),
+        };
+        // The non-terminal siblings' facts are durable state, not a by-product of
+        // the terminal write: this stage only carries `terminal_items`, so without
+        // this the mixed verdict would lose the very facts that justify calling it
+        // mixed. The rows the stop already encoded are reused verbatim, and the
+        // write is scoped to rows that are still `pending`, so a terminated row is
+        // never reopened. Done before the terminal, so a crash between the two
+        // leaves them pending rather than unknown.
+        super::delivery::retain_pending_typed_stop(
+            &self.database,
+            &self.binding.run_id,
+            stop,
+            crate::database::now_ms(),
+        )?;
+        let mark = self.stage_given_failure_delivery(stop)?;
+        self.apply_decision(
+            None,
+            |controller, _| {
+                Ok(controller.terminate(kernel::RunOutcome::Failed {
+                    code: canonical_code.into(),
+                    message: canonical_message.clone(),
+                }))
+            },
+            None,
+            mark.as_deref(),
+        )?;
+        if let Some(mark) = mark.as_deref() {
+            super::delivery::finalize_outcome(
+                &self.database,
+                &self.binding.run_id,
+                mark,
+                crate::database::now_ms(),
+            )?;
+            if !self.database.decision_mark_committed(&self.binding.run_id, mark)? {
+                return Err("delivery failure stage lost its committed decision mark".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Stage an **already computed** stop for a failing Run, returning its mark.
+    ///
+    /// Split out of `stage_failure_delivery` so the typed entry point shares the
+    /// one staging definition instead of a copy of it.
+    fn stage_given_failure_delivery(
+        &self,
+        stop: &super::delivery::DeliveryStop,
+    ) -> Result<Option<String>, String> {
         if matches!(stop, super::delivery::DeliveryStop::NoChecklist) {
             return Ok(None);
         }
@@ -1712,7 +2107,7 @@ impl<'a> KernelCoordinator<'a> {
             &self.database,
             &self.binding.run_id,
             &mark,
-            &stop,
+            stop,
             crate::database::now_ms(),
         )?;
         Ok(Some(mark))
@@ -1721,6 +2116,88 @@ impl<'a> KernelCoordinator<'a> {
     pub(crate) fn snapshot(&self) -> Result<kernel::KernelSnapshot, String> {
         self.database
             .kernel_build_full_snapshot(&self.binding.run_id)
+    }
+
+    /// Test seam: the completion decision an **already computed** stop produces.
+    ///
+    /// Exposed so a test can drive the real staging/finalize branch of the
+    /// completion lane with a verdict it built itself, instead of re-deriving the
+    /// verdict through the filesystem gate and hoping it lands on the class under
+    /// test.
+    ///
+    /// There is no model round here, so nothing would commit the mark the decision
+    /// rides. The seam therefore states "the decision that owns this mark
+    /// committed" through the existing test-only stand-in
+    /// (`record_decision_mark_for_test`), which is what makes the production
+    /// finalize gate itself — not a relaxed copy of it — the thing under test.
+    #[cfg(test)]
+    pub(crate) fn completion_decision_for_test(
+        &self,
+        stop: &super::delivery::DeliveryStop,
+    ) -> Result<Option<String>, String> {
+        let history: Vec<Value> = Vec::new();
+        let output = serde_json::json!({});
+        let delivery = self.completion_delivery_for_stop(&history, &output, stop)?;
+        let mark = delivery.mark().map(str::to_owned);
+        if let Some(mark) = mark.as_deref() {
+            self.database.record_decision_mark_for_test(
+                &self.binding.run_id,
+                mark,
+                crate::database::now_ms(),
+            )?;
+        }
+        // Finalize through the same path the committing decision uses, so the
+        // assertion sees post-finalize state rather than a stage that was never
+        // owned by a decision.
+        self.finish_completion_delivery(Some(&delivery))?;
+        Ok(mark)
+    }
+
+    /// Test seam: run the **shared real completion tail** for a stop and report
+    /// whether it wrote a terminal.
+    ///
+    /// `completion_decision_for_test` covers the staging decision but stops short
+    /// of the round's terminal branch. This seam drives the same
+    /// `completion_effects` both real callers now call, through the real
+    /// `apply` commit, so a test can assert the durable consequence of the branch
+    /// that used to complete a `RequiresU1` Run. It deliberately does **not**
+    /// choose a branch of its own: the effect list under test is the production
+    /// function's return value.
+    ///
+    /// `complete_bypassing_the_steering_lane_for_test` is the stand-in for "the
+    /// caller's terminal write"; it exists either way, and what this seam proves
+    /// is whether the shared tail *asks* for it.
+    #[cfg(test)]
+    pub(crate) fn completion_tail_for_test(
+        &self,
+        stop: &super::delivery::DeliveryStop,
+    ) -> Result<Option<String>, String> {
+        let history: Vec<Value> = Vec::new();
+        let output = serde_json::json!({});
+        let completion = self.completion_delivery_for_stop(&history, &output, stop)?;
+        let mark = completion.mark().map(str::to_owned);
+        if let Some(mark) = mark.as_deref() {
+            self.database.record_decision_mark_for_test(
+                &self.binding.run_id,
+                mark,
+                crate::database::now_ms(),
+            )?;
+        }
+        // The real shared tail, committed through the real decision transaction.
+        self.apply(None, |controller, now| {
+            completion_effects(controller, Some(&completion), now)
+        })?;
+        self.finish_completion_delivery(Some(&completion))?;
+        Ok(mark)
+    }
+
+    /// Test seam: the recovery instruction's delivery facts for an already
+    /// computed stop.
+    #[cfg(test)]
+    pub(crate) fn length_recovery_for_test(        &self,
+        stop: &super::delivery::DeliveryStop,
+    ) -> Result<LengthRecoveryDelivery, String> {
+        self.length_recovery_delivery_for_stop(stop)
     }
 
     // -----------------------------------------------------------------------
@@ -1739,15 +2216,43 @@ impl<'a> KernelCoordinator<'a> {
             self.binding.permission.project_root.as_deref(),
             &self.binding.run_id,
         )?;
+        self.length_recovery_delivery_for_stop(&stop)
+    }
+
+    /// The recovery instruction's delivery facts for an **already computed** stop.
+    ///
+    /// Split out for the same reason as the completion edge: both consumers must
+    /// classify a typed verdict from the verdict itself, and a second copy of this
+    /// match is where `Unconfirmed` would drift back into "failed deliverable".
+    fn length_recovery_delivery_for_stop(
+        &self,
+        stop: &super::delivery::DeliveryStop,
+    ) -> Result<LengthRecoveryDelivery, String> {
         let items = self.database.delivery_checklist(&self.binding.run_id)?;
         let passed = items.iter().filter(|item| item.status == "passed").count();
         let failed = items.iter().filter(|item| item.status == "failed").count();
         let pending = items.iter().filter(|item| item.status == "pending").count();
-        let kind = match &stop {
+        let kind = match stop {
             super::delivery::DeliveryStop::NoChecklist => LengthRecoveryDeliveryKind::NoChecklist,
             super::delivery::DeliveryStop::Passed { .. } => {
                 LengthRecoveryDeliveryKind::VerifiedDeliverables
             }
+            // A typed v2 verdict already knows its class, so it is classified from
+            // the verdict rather than re-derived from raw status counts. A
+            // non-terminal (`Unconfirmed`) item is unverified by definition and
+            // must not be reported as a failed deliverable.
+            super::delivery::DeliveryStop::Typed(typed) => match typed.verdict.class {
+                super::delivery::DeliveryClass::Confirmed => {
+                    LengthRecoveryDeliveryKind::VerifiedDeliverables
+                }
+                super::delivery::DeliveryClass::Unconfirmed => {
+                    LengthRecoveryDeliveryKind::UnverifiedArtifacts
+                }
+                // Refused, Invalid, RepairNeeded and DefiniteFailure are all real
+                // content problems: the artifacts are outstanding, not merely
+                // unverified.
+                _ => LengthRecoveryDeliveryKind::IncompleteDeliverables,
+            },
             // A promise that failed its checks is a different fact from a promise
             // whose content simply was never verified, and the model is told which
             // one it is.
@@ -2644,16 +3149,11 @@ impl<'a> KernelCoordinator<'a> {
                         &serde_json::to_string(notices)
                             .map_err(|error| KernelError::FailClosed(error.to_string()))?,
                     )?);
-                } else if let Some(CompletionDelivery::Repair { prompt, input, .. }) = &completion {
-                    // A promised artifact failed: this round owes the bounded
-                    // repair round, not a completion.
-                    effects.extend(controller.request_delivery_repair(
-                        prompt,
-                        &serde_json::to_string(input)
-                            .map_err(|error| KernelError::FailClosed(error.to_string()))?,
-                    )?);
                 } else {
-                    effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+                    // The one shared completion tail: repair, defer or complete.
+                    // Factored out so the two real callers cannot disagree about
+                    // the deferred variant — see `completion_effects`.
+                    effects.extend(completion_effects(controller, completion.as_ref(), now)?);
                 }
                 Ok(effects)
                 },
@@ -2991,16 +3491,10 @@ impl<'a> KernelCoordinator<'a> {
                             &serde_json::to_string(notices)
                                 .map_err(|error| KernelError::FailClosed(error.to_string()))?,
                         )?);
-                    } else if let Some(CompletionDelivery::Repair { prompt, input, .. }) = &completion {
-                        // A promised artifact failed: this round owes the bounded
-                        // repair round, not a completion.
-                        effects.extend(controller.request_delivery_repair(
-                            prompt,
-                            &serde_json::to_string(input)
-                                .map_err(|error| KernelError::FailClosed(error.to_string()))?,
-                        )?);
                     } else {
-                        effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+                        // The one shared completion tail, identical to
+                        // `dispatch_initial_request`'s: see `completion_effects`.
+                        effects.extend(completion_effects(controller, completion.as_ref(), now)?);
                     }
                     Ok(effects)
                 },

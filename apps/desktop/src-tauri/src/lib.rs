@@ -41,6 +41,14 @@ mod yuxi;
 #[cfg(windows)]
 mod window_resize;
 
+// Package-2-D closeout: the injected U1 parked starting point for the isolated
+// acceptance run. Feature-gated so no normal production build carries it, and
+// exposed as a function rather than a module so the lib's own privacy is kept.
+#[cfg(feature = "kernel-acceptance")]
+mod closeout_fixture;
+#[cfg(feature = "kernel-acceptance")]
+pub use closeout_fixture::{build_u1_parked_fixture, dump_context_budget_reports};
+
 use app_state::AppState;
 use database::Database;
 use local_knowledge::LocalKnowledgeStore;
@@ -367,6 +375,12 @@ pub fn run() {
             commands::run_cancel,
             commands::child_run_cancel_by_user,
             commands::approval_resolve,
+            // Package 2-D U1: accepting an unverified delivery. A separate command
+            // from `approval_resolve` on purpose — that one grants tool authority,
+            // this one records that a user took responsibility for content that is
+            // not verified, and the two must never share a resolution path.
+            commands::delivery_acceptance_resolve,
+            commands::delivery_acceptance_state,
             commands::run_steering_enqueue,
             commands::run_steering_list,
             commands::run_steering_discard,

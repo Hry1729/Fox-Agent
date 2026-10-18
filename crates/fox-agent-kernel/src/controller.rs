@@ -264,6 +264,28 @@ pub struct WaitingJobFact {
     pub deadline_wall_ms: i64,
 }
 
+/// One item the user accepted while its content was **not verified**
+/// (package 2-D U1).
+///
+/// This is an execution fact, not a verification fact: it records who took
+/// responsibility for which bytes under which frozen contract. It is deliberately
+/// a separate event from `RunOutcome`'s own terminal event, so the outcome
+/// vocabulary stays frozen and a reader can tell "the Run completed because the
+/// user accepted unverified content" from "the Run completed because everything
+/// passed".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeliveryAcceptanceFact {
+    pub item_key: String,
+    /// Local trusted-session identifier. Not a user identity.
+    pub actor: String,
+    pub accepted_at: i64,
+    pub candidate_sha256: String,
+    pub spec_hash: String,
+    /// Always `unconfirmed`: accepting never upgrades the verification class.
+    pub acceptance_class: &'static str,
+}
+
 /// Per-run aggregate. Constructed via [`RunController::start`] for a new run or
 /// [`RunController::rehydrate`] after a restart.
 #[derive(Clone)]
@@ -954,11 +976,131 @@ impl RunController {
         })), Effect::PublishSnapshot])
     }
 
+    /// Record, in the same write-set as a terminal decision, that the user
+    /// accepted items whose content was not verified (package 2-D U1).
+    ///
+    /// Deliberately **not** folded into [`Self::terminate`]: `RunOutcome`'s
+    /// vocabulary is frozen, and its `Completed` event carries no payload. A
+    /// separate event keeps the two questions apart — "did the Run end" and
+    /// "why did it end" — and lets a reader distinguish a user-accepted
+    /// completion from a verified one without re-deriving anything.
+    ///
+    /// Fail-closed: the Run must be live — or be the one this very decision has
+    /// just completed, which is the only legal terminal caller (see
+    /// [`commit_delivery_acceptance_terminal`](crate::runtime_host::delivery::delivery_u1::commit_delivery_acceptance_terminal),
+    /// which calls `terminate` first). Anything else — a failed Run, a
+    /// cancellation in flight — cannot carry a user acceptance.
+    ///
+    /// The facts must be bounded, and every fact must be an `unconfirmed`
+    /// acceptance: an empty set is refused rather than silently writing "the
+    /// user accepted nothing".
+    pub fn note_delivery_acceptance(
+        &mut self,
+        facts: &[DeliveryAcceptanceFact],
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running && self.state != RunState::Completed {
+            return Err(KernelError::Terminal {
+                current: self.state.as_str(),
+            });
+        }
+        if facts.is_empty() || facts.len() > 256 {
+            return Err(KernelError::FailClosed(
+                "delivery acceptance note has no facts or too many".into(),
+            ));
+        }
+        for fact in facts {
+            if fact.item_key.trim().is_empty()
+                || fact.item_key.len() > 4096
+                || fact.actor.trim().is_empty()
+                || fact.actor.len() > 256
+                || fact.candidate_sha256.len() != 64
+                || fact.acceptance_class != "unconfirmed"
+            {
+                return Err(KernelError::FailClosed(
+                    "delivery acceptance fact is not a bounded unconfirmed acceptance".into(),
+                ));
+            }
+        }
+        Ok(vec![self.append_event(
+            "run.delivery_accepted",
+            serde_json::json!({
+                "userAccepted": true,
+                "acceptanceClass": "unconfirmed",
+                "acceptances": facts,
+            }),
+        )])
+    }
+
+    /// Park the Run on a delivery the user must still accept (package 2-D U1).    ///
+    /// A `RequiresU1` verdict is neither a pass nor a failure: the artifacts are
+    /// retained, but their content is not verified, and the model repair budget
+    /// must not be armed for it (the user decides between supplying evidence and
+    /// accepting the risk). Before this method the Host had no way to express
+    /// that: the completion lane returned an empty effect list (leaving the Run
+    /// `running` with nothing to dispatch, which the Host loop then failed with
+    /// `kernel.no_progress`) and the live lane returned `Err`.
+    ///
+    /// **Deliberately not `WaitingApproval`.** That state's resolution path
+    /// clears an approval deadline and enqueues a `DispatchTool`, so reusing it
+    /// would turn "the user accepted an unverified artifact" into "the user
+    /// authorized a tool call". This method therefore produces only an
+    /// `AppendEvent` and a `PublishSnapshot`: no `RequestApproval`, no
+    /// `DispatchTool`, no deadline.
+    ///
+    /// Fail-closed preconditions, in the same style as
+    /// [`Self::park_waiting_jobs`]. In particular the Run must be `Running`
+    /// with no unresolved tool call, no un-emitted batch barrier, no in-flight
+    /// model request and no scheduled retry — a park taken while any of those
+    /// is outstanding would abandon their unfinished work.
+    pub fn park_awaiting_delivery_review(
+        &mut self,
+        monotonic_ms: i64,
+        wall_ms: i64,
+        reason: &str,
+        outstanding_items: &[String],
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running
+            || self.config.kernel_mode != "authoritative"
+            || self.model_request_in_flight
+            || self.retry.model_dispatch_pending
+            || self.retry.scheduled_at_wall_ms.is_some()
+            || self.retry.due_wall_ms.is_some()
+            || self.approval_deadline_wall_ms.is_some()
+            || self.wait_deadline_wall_ms.is_some()
+            || self.tools.values().any(|tool| !tool.state.is_terminal())
+            || self.batches.iter().any(|batch| !batch.barrier_emitted)
+            || wall_ms <= 0
+            || reason.trim().is_empty()
+            || reason.len() > 4096
+            || outstanding_items.len() > 256
+            || outstanding_items
+                .iter()
+                .any(|item| item.trim().is_empty() || item.len() > 4096)
+        {
+            return Err(KernelError::FailClosed(
+                "delivery review park has no settled scope".into(),
+            ));
+        }
+        self.suspend_running_clock(monotonic_ms);
+        self.settle_model_request();
+        self.state = RunState::AwaitingDeliveryReview;
+        Ok(vec![
+            self.append_event(
+                "run.awaiting_delivery_review",
+                serde_json::json!({
+                    "reason": reason,
+                    "parkedAtWallMs": wall_ms,
+                    "outstandingItems": outstanding_items,
+                }),
+            ),
+            Effect::PublishSnapshot,
+        ])
+    }
+
     /// Charge a waiting interval once in the wall-clock domain. The caller
     /// commits with a CAS on the durable park event and prior accounted cursor.
     /// Repeated observations at the same wall instant are no-ops.
-    pub fn account_waiting_jobs(
-        &mut self,
+    pub fn account_waiting_jobs(        &mut self,
         park_seq: u64,
         wall_ms: i64,
     ) -> Result<Vec<Effect>, KernelError> {

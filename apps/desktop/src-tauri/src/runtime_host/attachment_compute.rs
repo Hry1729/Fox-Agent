@@ -226,6 +226,231 @@ pub(crate) fn authorized_delivery_root(database:&Database,run:&str)->Result<Path
     Ok(root)
 }
 
+// ===========================================================================
+// Typed delivery reads (package 2-A, internal). The String-returning
+// functions above stay byte-for-byte identical and keep every existing
+// caller; these typed twins classify the failure at its real production
+// site so a future consumer never matches on error text. No production
+// caller exists yet.
+// ===========================================================================
+
+/// Why an authorized delivery read/root lookup could not produce evidence.
+#[derive(Debug)]
+pub(crate) enum DeliveryReadFailure {
+    /// The bytes cannot be authenticated as an in-project deliverable:
+    /// path escape, or a non-regular object. Not a claim of malicious
+    /// tampering.
+    TrustRefusal { reason: &'static str, detail: String },
+    /// A **project-level authorization fact**: the project access that
+    /// existed at freeze time has been removed, or the authorization root no
+    /// longer matches the frozen one. Only these belong here — see `Io` for
+    /// OS-level denials.
+    AuthorizationRefused { detail: String },
+    /// The Run binding or frozen project root is genuinely absent.
+    EvidenceUnavailable { detail: String },
+    /// A declared read-size ceiling was hit. `limit` is measured in **bytes**
+    /// (the only unit this reader enforces today).
+    Resource { limit: u64 },
+    /// Unknown IO/database error — including an OS access denial, which
+    /// proves only that the OS refused this read, not that any project
+    /// authorization was withdrawn or that the object is suspicious. The
+    /// original message is retained and nothing is upgraded to a security
+    /// conclusion. `Io` is not permission to proceed: a later acceptance
+    /// path must still satisfy the current authorization and artifact
+    /// binding.
+    Io(String),
+}
+
+/// Classify an OS open/read error.
+///
+/// An OS access denial stays `Io`: it tells us the OS would not serve this
+/// read, not that project authorization was revoked (a directory, a file
+/// ACL, or a sharing violation all look the same here). `AuthorizationRefused`
+/// is reserved for the explicit project-authorization facts decided in
+/// [`authorized_delivery_root_typed`].
+fn classify_io(error: std::io::Error) -> DeliveryReadFailure {
+    DeliveryReadFailure::Io(error.to_string())
+}
+
+/// Classify the error of a String-returning helper. Its message is retained
+/// verbatim; no security conclusion is drawn from text.
+fn classify_str(detail: String) -> DeliveryReadFailure {
+    DeliveryReadFailure::Io(detail)
+}
+
+/// Test-only seam for the classifier: an OS error that a test cannot trigger
+/// on demand (an in-flight identity change, say) is still verified to keep
+/// its `Io` class instead of being upgraded to a security conclusion.
+#[cfg(test)]
+pub(crate) fn classify_io_for_test(error: std::io::Error) -> DeliveryReadFailure {
+    classify_io(error)
+}
+
+/// Typed twin of [`open_input_handle`]: identical open flags, but the OS
+/// error is classified at this call site (the real production point) instead
+/// of being flattened to a string and re-parsed downstream.
+fn open_input_handle_typed(source: &Path) -> Result<fs::File, DeliveryReadFailure> {
+    let mut open = fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+        open.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .share_mode(FILE_SHARE_READ.0);
+    }
+    open.open(source).map_err(classify_io)
+}
+
+/// Typed twin of [`read_authorized_delivery_bytes`], preserving the exact
+/// read order, identity checks, length ceiling and authorization guards.
+/// `non_regular` and `too_large` are decided independently.
+pub(crate) fn read_authorized_delivery_bytes_typed(
+    root: &Path,
+    relative: &str,
+    limit: u64,
+) -> Result<Vec<u8>, DeliveryReadFailure> {
+    let root = super::capability_tools::canonical_directory(root, "project folder")
+        .map_err(classify_str)?;
+    let source = super::capability_tools::resolve_project_path(&root, relative, true)
+        .map_err(classify_str)?;
+    crate::data_compute::validate_input_path(&source).map_err(classify_str)?;
+    let mut reader = open_input_handle_typed(&source)?;
+    let before = reader.metadata().map_err(classify_io)?;
+    // Independent decisions at the same metadata point: object type and
+    // size must not mask each other.
+    if !before.is_file() {
+        return Err(DeliveryReadFailure::TrustRefusal {
+            reason: "non_regular",
+            detail: "Delivery source is not a regular file".to_owned(),
+        });
+    }
+    if before.len() > limit {
+        return Err(DeliveryReadFailure::Resource { limit });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if before.file_attributes() & 0x400 != 0 {
+            return Err(DeliveryReadFailure::TrustRefusal {
+                reason: "reparse_point",
+                detail: "Delivery source is a reparse point".to_owned(),
+            });
+        }
+        let opened = opened_final_path(&reader).map_err(DeliveryReadFailure::Io)?;
+        if !opened.starts_with(&root) {
+            return Err(DeliveryReadFailure::TrustRefusal {
+                reason: "path_denied",
+                detail: "Opened delivery source escaped its project".to_owned(),
+            });
+        }
+        let canonical = fs::canonicalize(&source).map_err(|error| DeliveryReadFailure::Io(error.to_string()))?;
+        if opened != canonical {
+            return Err(DeliveryReadFailure::TrustRefusal {
+                reason: "path_denied",
+                detail: "Opened delivery source identity mismatch".to_owned(),
+            });
+        }
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut reader)
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(classify_io)?;
+    if bytes.len() as u64 > limit {
+        return Err(DeliveryReadFailure::Resource { limit });
+    }
+    let after = reader.metadata().map_err(classify_io)?;
+    if after.len() != before.len()
+        || after.modified().ok() != before.modified().ok()
+        || bytes.len() as u64 != before.len()
+    {
+        return Err(DeliveryReadFailure::Io(
+            "Delivery source changed during read".to_owned(),
+        ));
+    }
+    crate::data_compute::validate_input_path(&source).map_err(DeliveryReadFailure::Io)?;
+    if !fs::canonicalize(&source)
+        .map_err(|error| DeliveryReadFailure::Io(error.to_string()))?
+        .starts_with(&root)
+    {
+        return Err(DeliveryReadFailure::TrustRefusal {
+            reason: "path_denied",
+            detail: "Delivery source escaped during read".to_owned(),
+        });
+    }
+    #[cfg(windows)]
+    if opened_final_path(&reader).map_err(|error| DeliveryReadFailure::Io(error.to_string()))?
+        != fs::canonicalize(&source).map_err(|error| DeliveryReadFailure::Io(error.to_string()))?
+    {
+        return Err(DeliveryReadFailure::TrustRefusal {
+            reason: "path_denied",
+            detail: "Delivery source identity changed during read".to_owned(),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let live = fs::metadata(&source).map_err(classify_io)?;
+        if live.dev() != after.dev() || live.ino() != after.ino() {
+            return Err(DeliveryReadFailure::Io(
+                "Delivery source identity changed during read".to_owned(),
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+/// Typed twin of [`authorized_delivery_root`].
+///
+/// `Database::run_control_binding()` already re-validates a stored binding
+/// through its own `encode()`, returning `Err(String)` for a structurally
+/// unusable record; that error becomes `Io` below. There is deliberately no
+/// second `binding.validate()` branch here: it would be unreachable, and a
+/// structurally invalid frozen record is unusable *evidence*, not a withdrawn
+/// authorization.
+pub(crate) fn authorized_delivery_root_typed(
+    database: &Database,
+    run: &str,
+) -> Result<PathBuf, DeliveryReadFailure> {
+    let binding = database
+        .run_control_binding(run)
+        .map_err(DeliveryReadFailure::Io)?
+        .ok_or(DeliveryReadFailure::EvidenceUnavailable {
+            detail: "Delivery source needs a frozen Run binding".to_owned(),
+        })?;
+    let root =
+        super::capability_tools::canonical_directory(
+            Path::new(
+                binding
+                    .permission
+                    .project_root
+                    .as_deref()
+                    .ok_or(DeliveryReadFailure::EvidenceUnavailable {
+                        detail: "No frozen project root".to_owned(),
+                    })?,
+            ),
+            "project folder",
+        )
+        .map_err(DeliveryReadFailure::Io)?;
+    let live = database
+        .conversation_project_access(&binding.conversation_id)
+        .map_err(DeliveryReadFailure::Io)?
+        // The project access row is gone: an authorization that existed at
+        // freeze time has explicitly been removed.
+        .ok_or(DeliveryReadFailure::AuthorizationRefused {
+            detail: "Project access was removed".to_owned(),
+        })?;
+    let live_root = super::capability_tools::canonical_directory(Path::new(&live.0), "project folder")
+        .map_err(DeliveryReadFailure::Io)?;
+    if live_root != root {
+        return Err(DeliveryReadFailure::AuthorizationRefused {
+            detail: "Project authorization changed".to_owned(),
+        });
+    }
+    Ok(root)
+}
+
 #[cfg(windows)]
 pub(crate) fn opened_final_path(file: &fs::File) -> Result<PathBuf, String> {
     use std::os::windows::{io::AsRawHandle, ffi::OsStringExt};

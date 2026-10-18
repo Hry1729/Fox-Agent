@@ -12345,3 +12345,174 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-expert-chip[data-default-expert] .fox-expert-icon { border: 0; background: transparent; }
+/* ---------------------------------------------------------------------------
+   Package 2-D U1: accepting an unverified delivery.
+
+   A separate surface from `.fox-decision-approval-list` on purpose. An approval
+   grants authority to run something; accepting here grants nothing. Sharing the
+   styling would let "I accepted the file" read as "I authorized the write".
+   --------------------------------------------------------------------------- */
+.fox-delivery-review {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--fox-border);
+  border-radius: 12px;
+  background: var(--fox-surface);
+}
+.fox-delivery-review > header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.fox-delivery-review > header > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--fox-muted);
+}
+.fox-delivery-review > header strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.fox-delivery-review > header small {
+  display: block;
+  margin-top: 2px;
+  color: var(--fox-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* The unresolved-requirement row is a question, not a deliverable card: it has no
+   accept button because there is nothing to accept yet. */
+.fox-delivery-review__question {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--fox-border);
+  border-radius: 10px;
+  background: var(--fox-bg);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.fox-delivery-acceptance {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--fox-border);
+  border-radius: 10px;
+  background: var(--fox-bg);
+}
+.fox-delivery-acceptance.is-loading,
+.fox-delivery-acceptance.is-error {
+  color: var(--fox-muted);
+  font-size: 12px;
+}
+.fox-delivery-acceptance.is-error {
+  color: var(--destructive);
+}
+.fox-delivery-acceptance > header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.fox-delivery-acceptance > header > span {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 6px;
+}
+.fox-delivery-acceptance > header > span.is-unverified {
+  color: var(--fox-muted);
+  background: var(--fox-surface);
+}
+.fox-delivery-acceptance > header > span.is-accepted {
+  color: var(--fox-accent);
+  background: var(--fox-surface);
+}
+.fox-delivery-acceptance > header strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.fox-delivery-acceptance > header small {
+  display: block;
+  margin-top: 2px;
+  color: var(--fox-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.fox-delivery-acceptance-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+.fox-delivery-acceptance-facts dt {
+  color: var(--fox-muted);
+}
+.fox-delivery-acceptance-facts dd {
+  margin: 0;
+}
+.fox-delivery-acceptance-facts dd[data-class='unconfirmed'] {
+  color: var(--fox-muted);
+}
+.fox-delivery-acceptance-facts dd[data-class='confirmed'] {
+  color: var(--fox-accent);
+}
+.fox-delivery-acceptance-blocked,
+.fox-delivery-acceptance-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.fox-delivery-acceptance-blocked {
+  color: var(--fox-muted);
+}
+.fox-delivery-acceptance-error {
+  color: var(--destructive);
+}
+.fox-delivery-acceptance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.fox-delivery-acceptance-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-surface);
+  color: var(--fox-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.fox-delivery-acceptance-actions button:hover:not(:disabled) {
+  border-color: var(--fox-accent);
+}
+.fox-delivery-acceptance-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* R-1: the Run ended without an acceptance on this row. A muted line, not a
+   hidden one — an absent button reads as "nothing to do here", which is not the
+   same as "the opportunity has passed". */
+.fox-delivery-acceptance-closed {
+  color: var(--fox-faint);
+  font-size: 12px;
+}
+.fox-delivery-acceptance-note {
+  margin: 0;
+  color: var(--fox-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}

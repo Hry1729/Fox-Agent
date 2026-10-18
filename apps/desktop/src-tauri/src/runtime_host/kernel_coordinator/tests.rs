@@ -102,6 +102,29 @@ mod job_notice_capacity_tests;
 mod run_lease_component_tests;
 #[path = "run_admission_tests.rs"]
 mod run_admission_tests;
+#[path = "p2b_consumer_host_tests.rs"]
+mod p2b_consumer_host_tests;
+#[path = "p2b_consumer_g_review_tests.rs"]
+mod p2b_consumer_g_review_tests;
+#[path = "p2b_consumer_live_lane_tests.rs"]
+mod p2b_consumer_live_lane_tests;
+#[path = "p2b_consumer_mixed_matrix_tests.rs"]
+mod p2b_consumer_mixed_matrix_tests;
+#[path = "p2b_consumer_lifecycle_tests.rs"]
+mod p2b_consumer_lifecycle_tests;
+#[path = "p2b_consumer_projection_tests.rs"]
+mod p2b_consumer_projection_tests;
+#[path = "p2b_consumer_h_repair_tests.rs"]
+mod p2b_consumer_h_repair_tests;
+// Package 2-C1 §2/§4a: the progress summary and continuation prompt must count a
+// pass by the same shared rule the two display consumers use, on the same row.
+#[path = "p2c1_summary_tests.rs"]
+mod p2c1_summary_tests;
+// Package 2-D repair, D-1/D-2/D-4/D-5: the user-visible loop (accept/reject ends
+// the Run), the bounded interleavings, the version identity and the downgrade
+// pre-check, on the real completion/live lanes and the real decision commit.
+#[path = "delivery_review_lane_tests.rs"]
+mod delivery_review_lane_tests;
 
 /// Record the durable settled result of one authoritative Kernel tool call.
 ///

@@ -46,15 +46,23 @@ fn user_named_this_output(
     Ok(false)
 }
 
+/// The durable delivery verdict bound to this artifact's current version, if any.
+///
+/// Returns `(status, same_version, reason, withdraw_pass)`. `withdraw_pass` is the
+/// shared display guard's answer for this row, computed from the **raw** durable
+/// `finding_json` — never from a projected/truncated form, and never from this
+/// view's own notion of what "passed" means. Carrying it out of this function is
+/// what lets the caller answer the pass question the same way the checklist
+/// projection does.
 fn bound_check(
     connection: &Connection,
     run: &str,
     artifact: &ArtifactRecord,
     version_id: &str,
     root: &Path,
-) -> rusqlite::Result<Option<(String, bool, Option<String>)>> {
+) -> rusqlite::Result<Option<(String, bool, Option<String>, bool)>> {
     let mut query = connection.prepare(
-        "SELECT target_path,artifact_id,status,finding_json
+        "SELECT target_path,artifact_id,status,finding_json,requirements_json,item_key
          FROM delivery_checklist_items WHERE run_id=?1 ORDER BY item_key",
     )?;
     let rows = query.query_map([run], |row| {
@@ -63,10 +71,12 @@ fn bound_check(
             row.get::<_, Option<String>>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
         ))
     })?;
     for row in rows {
-        let (target, artifact_id, status, finding) = row?;
+        let (target, artifact_id, status, finding, requirements, item_key) = row?;
         let parsed = finding
             .as_deref()
             .and_then(|value| serde_json::from_str::<Value>(value).ok());
@@ -100,7 +110,20 @@ fn bound_check(
             .and_then(|value| value.get("reason"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        return Ok(Some((status, same_version, reason)));
+        // The same identity-aware guard the checklist projection consults. Judged
+        // on the raw columns so a truncated projection cannot make a contradicted
+        // pass look legitimate, and so a legitimate pass is never withheld on
+        // presentation grounds. The row's own contract and its ledger key are read
+        // in the same statement as its finding, so neither the identity nor the
+        // row binding can describe another row.
+        let withdraw_pass = crate::runtime_host::delivery::passed_qualification_of_row(
+            &status,
+            finding.as_deref(),
+            requirements.as_deref(),
+            &item_key,
+        )
+        .withdraws_pass();
+        return Ok(Some((status, same_version, reason, withdraw_pass)));
     }
     Ok(None)
 }
@@ -206,23 +229,37 @@ pub(super) fn enrich(
         return Ok(());
     }
     match bound_check(connection, run, artifact, &version_id, root)? {
-        Some((status, true, reason)) if status == "passed" => {
+        // A `passed` row whose own durable facts do not support a pass is not shown
+        // as passed — the same rule the checklist projection applies, so the two
+        // views cannot report opposite conclusions for one row. It falls back to
+        // the existing "not yet verified" state rather than `failed`: the record is
+        // unconfirmable, and this view must not invent the verdict a checker
+        // withheld. The identity/version/hash checks above keep their priority, so
+        // a real staleness is still reported as `stale` and a legitimate `failed`
+        // below is still reported as `failed`.
+        //
+        // `withdraw_pass` is only ever true for a row written `passed`, so this arm
+        // cannot capture a legitimate `failed`.
+        Some((_, true, _, true)) => {
+            view.summary = "交付验收记录与自身事实矛盾，未确认通过。".into();
+        }
+        Some((written, true, _, _)) if written == "passed" => {
             view.verification_status = "passed".into();
             view.summary = "加载时文件与已通过验收的版本一致。".into();
         }
-        Some((status, true, reason)) if status == "verified" => {
+        Some((written, true, reason, _)) if written == "verified" => {
             view.verification_status = "limited".into();
             view.summary = reason.unwrap_or_else(|| "文件检查完成，业务验收范围有限。".into());
         }
-        Some((status, true, reason)) if status == "failed" => {
+        Some((written, true, reason, _)) if written == "failed" => {
             view.verification_status = "failed".into();
             view.summary = reason.unwrap_or_else(|| "交付验收失败。".into());
         }
-        Some((status, false, _)) if status != "pending" => {
+        Some((written, false, _, _)) if written != "pending" => {
             view.verification_status = "stale".into();
             view.summary = "验收记录对应另一文件版本。".into();
         }
-        Some((_, _, _)) => {
+        Some((_, _, _, _)) => {
             view.summary = "交付验收尚未完成。".into();
         }
         None => {
@@ -255,7 +292,8 @@ mod tests {
              CREATE TABLE managed_file_versions(id TEXT,version_no INTEGER,tool_call_id TEXT,
                  after_hash TEXT,conversation_id TEXT,run_id TEXT,storage_path TEXT);
              CREATE TABLE delivery_checklist_items(run_id TEXT,item_key TEXT,target_path TEXT,
-                 artifact_id TEXT,status TEXT,finding_json TEXT);",
+                 artifact_id TEXT,status TEXT,finding_json TEXT,
+                 requirements_json TEXT NOT NULL DEFAULT '[]');",
             )
             .unwrap();
         connection
@@ -276,7 +314,9 @@ mod tests {
                 params![hash, path.to_string_lossy().as_ref()],
             )
             .unwrap();
-        connection.execute("INSERT INTO delivery_checklist_items VALUES ('run','file:summary.json','summary.json',NULL,'passed',?1)",
+        connection.execute("INSERT INTO delivery_checklist_items
+            (run_id,item_key,target_path,artifact_id,status,finding_json)
+            VALUES ('run','file:summary.json','summary.json',NULL,'passed',?1)",
             [serde_json::json!({"boundPath":path,"managedVersionId":"v1","reason":null}).to_string()]).unwrap();
         let mut artifact = ArtifactRecord {
             id: "artifact".into(),

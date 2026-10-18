@@ -7263,6 +7263,9 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
         return finish_transaction(transaction);
     }
     apply_migration(&transaction, 92, MIGRATION_92, now)?;
+    // Package 2-D U1: additive only. No table is rebuilt and no existing row is
+    // read, so a v1 database is a no-op for this migration.
+    apply_migration(&transaction, 93, MIGRATION_93, now)?;
     finish_transaction(transaction)
 }
 
@@ -15208,6 +15211,76 @@ CREATE INDEX IF NOT EXISTS idx_projects_pinned_created
     ON projects(pinned DESC, created_at ASC, name ASC, id ASC);
 "#;
 
+/// Package 2-D U1: the durable record of a user accepting (or rejecting, or
+/// revoking) an **unverified** delivery.
+///
+/// Two tables, deliberately separate:
+///
+/// * `delivery_acceptances` holds the **current** acceptance for one
+///   `(run_id, item_key)`. Its primary key makes a repeated identical request
+///   idempotent, and `revoked_at` distinguishes "never accepted" from
+///   "accepted and withdrawn". It is a **projection of the current state**, not
+///   history: re-accepting after a revocation overwrites the row.
+/// * `delivery_acceptance_audit` is append-only. Every accept / reject / revoke /
+///   invalidation is one row, carrying the trusted subject and a JSON snapshot of
+///   the object **as it was at that moment**. Nothing is ever updated or deleted
+///   here, so the first acceptance is not lost when a later one replaces the
+///   projection row.
+///
+/// Boundaries that this schema encodes on purpose:
+///
+/// * `acceptance_class` may only be `'unconfirmed'`. There is no value that
+///   would let a row claim a *verified* pass: accepting an unverified delivery
+///   must never be able to write, or read back as, a verification result.
+/// * `accepted_by` is a **local trusted-session identifier** produced by the
+///   command layer from `require_trusted_local_window`. It is NOT a user
+///   identity: this product has no user-identity mechanism, and inventing one
+///   here would let a request body name an actor.
+/// * `object_snapshot` in the audit table is a **JSON snapshot**, not a foreign
+///   key. It is never resolved as an id, so a missing or renamed row cannot make
+///   an audit entry point at nothing.
+/// * `run_id` cascades from `runs`, matching `delivery_checklist_items`, so a
+///   deleted Run cannot leave an orphan acceptance behind.
+///
+/// Additive only: no existing table is rebuilt, no CHECK constraint is widened,
+/// and no row of any existing table is read or written.
+const MIGRATION_93: &str = r#"
+CREATE TABLE IF NOT EXISTS delivery_acceptances (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    item_key TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    accepted_by TEXT NOT NULL CHECK(length(trim(accepted_by)) BETWEEN 1 AND 256),
+    accepted_at INTEGER NOT NULL,
+    candidate_path TEXT NOT NULL,
+    candidate_sha256 TEXT NOT NULL CHECK(length(candidate_sha256) = 64),
+    managed_version_id TEXT,
+    spec_hash TEXT NOT NULL,
+    rule_id TEXT,
+    checker_version INTEGER NOT NULL CHECK(checker_version >= 1),
+    acceptance_class TEXT NOT NULL DEFAULT 'unconfirmed'
+        CHECK(acceptance_class IN ('unconfirmed')),
+    rejected_at INTEGER,
+    revoked_at INTEGER,
+    revoke_reason TEXT,
+    PRIMARY KEY(run_id, item_key)
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_acceptances_conversation
+    ON delivery_acceptances(conversation_id, revoked_at);
+
+CREATE TABLE IF NOT EXISTS delivery_acceptance_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('accepted','rejected','revoked','invalidated')),
+    actor TEXT NOT NULL CHECK(length(trim(actor)) BETWEEN 1 AND 256),
+    at INTEGER NOT NULL,
+    reason TEXT,
+    object_snapshot TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_acceptance_audit_item
+    ON delivery_acceptance_audit(run_id, item_key, at);
+"#;
+
 const MIGRATION_89: &str = r#"
 CREATE TABLE IF NOT EXISTS kernel_decision_marks (
     run_id TEXT NOT NULL REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
@@ -15280,9 +15353,176 @@ END;
 "#;
 
 
+/// Package 2-D U1: migration 93 is additive and idempotent, and a v1 database is
+/// a no-op for it.
 #[cfg(test)]
-mod project_pinning_migration_tests {
+mod delivery_acceptance_migration_tests {
     use super::*;
+
+    #[test]
+    fn upgrades_v92_and_is_idempotent_without_touching_existing_rows() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_with_target(&mut connection, 100, MigrationTarget::V91).expect("create v91 database");
+        // A pre-existing conversation and Run, to prove the migration neither
+        // rebuilds nor rewrites anything an existing database depends on.
+        connection
+            .execute(
+                "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                 VALUES ('a1','Old agent','','local','','',1,1)",
+                [],
+            )
+            .expect("old agent");
+        connection
+            .execute(
+                "INSERT INTO conversations(id,agent_id,title,permission_mode,status,created_at,updated_at)
+                 VALUES ('c1','a1','Old','read_only','active',1,1)",
+                [],
+            )
+            .expect("old conversation");
+        connection
+            .execute(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('r1','c1','completed','m',1)",
+                [],
+            )
+            .expect("old run");
+
+        run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=93",
+                [],
+                |row| row.get(0),
+            )
+            .expect("single version record");
+        assert_eq!(count, 1);
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert_eq!(DATABASE_SCHEMA_VERSION, 93);
+
+        // The old rows are untouched.
+        let title: String = connection
+            .query_row("SELECT title FROM conversations WHERE id='c1'", [], |row| row.get(0))
+            .expect("conversation survives");
+        assert_eq!(title, "Old");
+
+        // Both tables exist and are empty, so "no acceptance" is a legitimate
+        // read rather than a missing-table error.
+        for table in ["delivery_acceptances", "delivery_acceptance_audit"] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .expect("table exists");
+            assert_eq!(rows, 0, "{table}");
+        }
+
+        // Idempotent: a second run neither duplicates the version row nor errors.
+        run_with_target(&mut connection, 300, MigrationTarget::Latest).expect("repeat upgrade");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=93",
+                [],
+                |row| row.get(0),
+            )
+            .expect("still a single version record");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn the_schema_refuses_anything_but_an_unconfirmed_acceptance() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_with_target(&mut connection, 100, MigrationTarget::Latest).expect("create latest");
+        connection
+            .execute(
+                "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                 VALUES ('a1','Old agent','','local','','',1,1)",
+                [],
+            )
+            .expect("agent");
+        connection
+            .execute(
+                "INSERT INTO conversations(id,agent_id,title,permission_mode,status,created_at,updated_at)
+                 VALUES ('c1','a1','Old','read_only','active',1,1)",
+                [],
+            )
+            .expect("conversation");
+        connection
+            .execute(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('r1','c1','completed','m',1)",
+                [],
+            )
+            .expect("run");
+
+        // Each insert uses a distinct `item_key`, because the primary key is
+        // `(run_id, item_key)`: the CHECK-constraint assertions below must fail
+        // on the class, not on a duplicate key that would mask the real reason.
+        let insert = |class: &str, item: &str| {
+            connection.execute(
+                "INSERT INTO delivery_acceptances
+                 (run_id,item_key,conversation_id,accepted_by,accepted_at,candidate_path,
+                  candidate_sha256,spec_hash,checker_version,acceptance_class)
+                 VALUES ('r1',?1,'c1','window:main',1,'out.txt',?2,'h',2,?3)",
+                rusqlite::params![item, digest_of_test(), class],
+            )
+        };
+        assert!(insert("unconfirmed", "i1").is_ok(), "the only legal class");
+        // The CHECK constraint is the schema-level guarantee that an acceptance
+        // can never be recorded as anything else.
+        assert!(insert("confirmed", "i2").is_err());
+        assert!(insert("passed", "i3").is_err());
+        assert!(insert("", "i4").is_err());
+
+        // A blank actor is refused too: an acceptance must name a trusted subject.
+        assert!(connection
+            .execute(
+                "INSERT INTO delivery_acceptances
+                 (run_id,item_key,conversation_id,accepted_by,accepted_at,candidate_path,
+                  candidate_sha256,spec_hash,checker_version,acceptance_class)
+                 VALUES ('r1','i5','c1','   ',1,'out.txt',?1,'h',2,'unconfirmed')",
+                rusqlite::params![digest_of_test()],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn the_audit_table_is_append_only_by_shape() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_with_target(&mut connection, 100, MigrationTarget::Latest).expect("create latest");
+        for (action, at) in [("accepted", 1), ("revoked", 2), ("accepted", 3)] {
+            connection
+                .execute(
+                    "INSERT INTO delivery_acceptance_audit(run_id,item_key,action,actor,at,reason)
+                     VALUES ('r1','i1',?1,'window:main',?2,'because')",
+                    rusqlite::params![action, at],
+                )
+                .expect("audit row");
+        }
+        // An unknown action is refused: the audit vocabulary is closed.
+        assert!(connection
+            .execute(
+                "INSERT INTO delivery_acceptance_audit(run_id,item_key,action,actor,at)
+                 VALUES ('r1','i1','accepted_quietly','window:main',4)",
+                [],
+            )
+            .is_err());
+        let rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM delivery_acceptance_audit WHERE run_id='r1' AND item_key='i1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(rows, 3, "all three decisions are retained, none overwritten");
+    }
+
+    fn digest_of_test() -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(b"candidate"))
+    }
+}
+
+#[cfg(test)]
+mod project_pinning_migration_tests {    use super::*;
 
     #[test]
     fn upgrades_v91_projects_without_losing_metadata_and_is_idempotent() {
@@ -15302,3 +15542,5 @@ mod project_pinning_migration_tests {
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
     }
 }
+
+

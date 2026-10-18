@@ -609,9 +609,36 @@ fn r2_default_slots_input_protection_and_unknown_without_empty_repair() {
     let unknown = Fixture::new("请生成报告。");
     unknown.freeze("请生成报告。");
     let state = unknown.stop();
-    assert!(matches!(state, DeliveryStop::Exhausted { .. }));
-    let finding: Value = serde_json::from_str(&state.items()[0].finding_json).unwrap();
+    // An unresolved requirement is a question, not a content failure: it routes to
+    // the parking lane, never to a repair round and never to a failed terminal.
+    assert!(matches!(state, DeliveryStop::Typed(_)));
+    assert!(matches!(state.route(), DeliveryRoute::RequiresU1 { .. }));
+    // The parked reason must be the row's own answerable question, not a
+    // placeholder: that is the only thing the user can act on.
+    let DeliveryRoute::RequiresU1 { reason } = state.route() else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("请明确要交付的文件名"),
+        "the deferred reason must carry the recognition question: {reason}"
+    );
+    assert!(!reason.contains("无具体检查原因码"), "{reason}");
+    assert!(state.repair_findings().is_none());
+    assert!(state.items().is_empty());
+    let typed = state.typed().unwrap();
+    assert_eq!(p2b_consumer::delivery_class_str(typed.verdict.class), "unconfirmed");
+    assert!(typed.repair_prompt.is_none());
+    let row = typed
+        .rows
+        .iter()
+        .find(|row| row.item_key == RECOGNITION_ITEM)
+        .unwrap();
+    assert!(!row.passed);
+    assert!(!row.stage, "an unverified requirement may not enter the stage");
+    let finding: Value = serde_json::from_str(&row.finding_json).unwrap();
     assert_eq!(finding["verificationStatus"], "unverified");
+    assert_eq!(finding["reasonCode"], "delivery.requirements_unresolved");
+    assert!(finding["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
     assert!(unknown.db.delivery_checklist(&unknown.run).unwrap()[0]
         .target_path
         .is_none());
@@ -765,10 +792,35 @@ fn r2_real_continuation_copies_directory_recognition_and_semantics() {
             .unwrap(),
         source_requirements
     );
+    // The concrete obligations travel; the *unresolved* marker does not. It says
+    // the parent's text named no complete target set, which is a statement about
+    // that text only, and the child has its own text to be judged on. Inheriting it
+    // would park the resumed Run on a requirement no answer could discharge.
+    let after = frozen_delivery_reference(&f.db, &next.run.id, &f.context()).unwrap();
     assert_eq!(
-        before,
-        frozen_delivery_reference(&f.db, &next.run.id, &f.context()).unwrap()
+        before["targets"], after["targets"],
+        "the inherited concrete obligations are the same ones"
     );
+    assert_eq!(before["recognition"], "unresolved");
+    assert_eq!(
+        after["recognition"], "recognized",
+        "a resumed Run re-decides recognition from its own text: {after}"
+    );
+    assert!(
+        !f.db
+            .delivery_checklist(&next.run.id)
+            .unwrap()
+            .iter()
+            .any(|item| item.item_key == RECOGNITION_ITEM),
+        "the source's unresolved marker must not be copied into the resumed Run"
+    );
+    // The source Run keeps its own row: nothing in the audit trail is rewritten.
+    assert!(f
+        .db
+        .delivery_checklist(&f.run)
+        .unwrap()
+        .iter()
+        .any(|item| item.item_key == RECOGNITION_ITEM));
     assert!(f
         .db
         .bind_delivery_item(&next.run.id, &slot.item_key, "tmp/foreign.docx", None)
@@ -793,13 +845,723 @@ fn r2_real_continuation_copies_directory_recognition_and_semantics() {
     )
     .unwrap();
     let stop = evaluate_stop(&f.db, f.root.to_str(), &next.run.id).unwrap();
-    assert!(matches!(stop, DeliveryStop::Exhausted { .. }));
-    assert!(stop.items().iter().all(|item| !item.passed));
-    assert!(stop.repair_findings().is_none());
+    // The child's slot is still unbound, so it cannot pass; but the *source's*
+    // unresolved requirement is gone from this Run, so the stop is decided by the
+    // child's own rows rather than by an inherited marker.
+    assert!(
+        f.db
+            .delivery_checklist(&next.run.id)
+            .unwrap()
+            .iter()
+            .all(|item| item.item_key != RECOGNITION_ITEM)
+    );
+    assert!(
+        !matches!(stop, DeliveryStop::Passed { .. }),
+        "an unbound slot cannot complete the Run: {stop:?}"
+    );
     assert_eq!(
         f.db.delivery_item_requirements(&f.run, &slot.item_key)
             .unwrap(),
         source_requirements,
         "source rows stay intact"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Recognition:delivery_unresolved — the constrained transition matrix
+//
+// Every case below drives the production entries (`freeze_task_delivery`,
+// `evaluate_stop`, `KernelCoordinator::completion_tail_for_test`,
+// `kernel_insert_continuation_attempt`) rather than a test-only copy of the
+// rule, so what is asserted is the transition the Host really performs.
+// ---------------------------------------------------------------------------
+
+fn state_of(db: &Database, run: &str) -> String {
+    db.kernel_build_full_snapshot(run).unwrap().state
+}
+
+/// The stored `kernel_runs.state`, for a Run that has not started yet.
+///
+/// A fresh successor has no retry state until its first decision, so the full
+/// snapshot cannot be built for it; its stored state is still the durable fact.
+fn stored_kernel_state(db: &Database, run: &str) -> String {
+    db.with_connection(|connection| {
+        connection
+            .query_row("SELECT state FROM kernel_runs WHERE run_id=?1", [run], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(Into::into)
+    })
+    .unwrap()
+}
+
+fn event_types(db: &Database, run: &str) -> Vec<String> {
+    db.with_connection(|connection| {
+        let mut statement =
+            connection.prepare("SELECT event_type FROM kernel_events WHERE run_id=?1 ORDER BY seq")?;
+        let rows = statement
+            .query_map([run], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+    .unwrap()
+}
+
+fn legacy_status(db: &Database, run: &str) -> String {
+    db.with_connection(|connection| {
+        connection
+            .query_row("SELECT status FROM runs WHERE id=?1", [run], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(Into::into)
+    })
+    .unwrap()
+}
+
+fn decision_marks(db: &Database, run: &str) -> Vec<String> {
+    db.with_connection(|connection| {
+        let mut statement =
+            connection.prepare("SELECT mark FROM kernel_decision_marks WHERE run_id=?1")?;
+        let rows = statement
+            .query_map([run], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+    .unwrap()
+}
+
+/// Every durable column of the checklist, so "nothing was rewritten" is checked
+/// against the stored bytes rather than against a re-derived view.
+fn stored_rows(db: &Database, run: &str) -> Vec<(String, String, String, String, String)> {
+    db.with_connection(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT item_key, status, COALESCE(target_path,''), COALESCE(finding_json,''),
+                    COALESCE(requirements_json,'')
+               FROM delivery_checklist_items WHERE run_id=?1 ORDER BY item_key",
+        )?;
+        let rows = statement
+            .query_map([run], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+    .unwrap()
+}
+
+fn typed_row<'a>(stop: &'a DeliveryStop, item_key: &str) -> &'a TypedDeliveryRow {
+    stop.typed()
+        .expect("the stop is typed")
+        .rows
+        .iter()
+        .find(|row| row.item_key == item_key)
+        .unwrap_or_else(|| panic!("the typed stop carries {item_key}"))
+}
+
+fn row_finding(row: &TypedDeliveryRow) -> Value {
+    serde_json::from_str(&row.finding_json).unwrap()
+}
+
+fn item_of<'a>(db: &'a Database, run: &str, item_key: &str) -> DeliveryChecklistItem {
+    let items = db.delivery_checklist(run).unwrap();
+    items
+        .into_iter()
+        .find(|item| item.item_key == item_key)
+        .unwrap_or_else(|| panic!("{run} carries {item_key}"))
+}
+
+/// The frozen artifacts a continuation needs, read from the source Run.
+fn prepared_of(f: &Fixture) -> crate::database::PreparedContinuation {
+    let frozen: String = f
+        .db
+        .with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT frozen_config_json FROM kernel_runs WHERE run_id=?1",
+                    [&f.run],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+        })
+        .unwrap();
+    let frozen_value: Value = serde_json::from_str(&frozen).unwrap();
+    let model = f.db.kernel_model_config(&f.run).unwrap();
+    crate::database::PreparedContinuation {
+        budgets: f.db.run_time_budgets(&f.run).unwrap(),
+        prompt_config_hash: model.hash().unwrap(),
+        capability_manifest_hash: frozen_value["capability_manifest_hash"]
+            .as_str()
+            .unwrap()
+            .into(),
+        frozen_config_json: frozen,
+        artifacts: Some((
+            model,
+            f.db.kernel_initial_input(&f.run).unwrap(),
+            f.policy.scope.clone(),
+        )),
+        skill_activations: vec![],
+    }
+}
+
+fn continuation_request(f: &Fixture) -> crate::database::ContinuationRequest {
+    crate::database::ContinuationRequest {
+        conversation_id: f.policy.binding.conversation_id.clone(),
+        source_run_id: f.run.clone(),
+        tier: crate::database::BudgetTier::Standard,
+        custom_execution_ms: None,
+    }
+}
+
+/// Insert the real successor attempt for a source that already has banked
+/// progress — a source that ended (`failed`) or one that is parked.
+///
+/// Mirrors what `mod.rs` prepares for a continuation (frozen config, model,
+/// initial input, host scope) and then inserts it through the one repository
+/// entry, so the inheritance rules under test are the production ones.
+fn insert_successor(f: &Fixture) -> String {
+    let request = continuation_request(f);
+    let prompt = f
+        .db
+        .kernel_continuation_prompt(&request.conversation_id, &f.run)
+        .unwrap();
+    f.db.kernel_insert_continuation_attempt(&request, &prompt, &prepared_of(f))
+        .unwrap()
+        .run
+        .id
+}
+
+/// Fail the source in a bounded way, then insert the real successor attempt.
+fn successor_of(f: &Fixture) -> String {
+    let coordinator = KernelCoordinator::reopen(&f.db, &f.clock, &f.run, &f.cancellation).unwrap();
+    coordinator
+        .fail(crate::kernel_compaction::INSUFFICIENT, "synthetic bounded stop")
+        .unwrap();
+    insert_successor(f)
+}
+
+/// ① The unresolved requirement parks the Run through the real shared tail: no
+/// repair round, no terminal, no decision mark that could finalize anything.
+#[test]
+fn recognition_unresolved_parks_instead_of_repairing() {
+    let task = "请生成报告。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let stop = f.stop();
+    let DeliveryRoute::RequiresU1 { reason } = stop.route() else {
+        panic!("an unresolved requirement routes to the parking lane")
+    };
+    assert!(reason.contains("请明确要交付的文件名"), "{reason}");
+    assert!(stop.repair_prompt().is_none());
+    assert!(f.db.staged_delivery_rounds().unwrap().is_empty());
+    let coordinator = KernelCoordinator::reopen(&f.db, &f.clock, &f.run, &f.cancellation).unwrap();
+    assert_eq!(state_of(&f.db, &f.run), "running");
+    let mark = coordinator.completion_tail_for_test(&stop).unwrap();
+    assert!(
+        mark.is_none(),
+        "a deferred delivery carries no decision mark: {mark:?}"
+    );
+    assert_eq!(state_of(&f.db, &f.run), "awaiting_delivery_review");
+    assert_eq!(legacy_status(&f.db, &f.run), "interrupted");
+    let events = event_types(&f.db, &f.run);
+    assert!(
+        events.iter().any(|event| event == "run.awaiting_delivery_review"),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event == "run.completed" || event == "run.failed"),
+        "{events:?}"
+    );
+    assert!(decision_marks(&f.db, &f.run).is_empty());
+    assert!(f.db.staged_delivery_rounds().unwrap().is_empty());
+    assert_eq!(f.db.delivery_repair_round_count(&f.run).unwrap(), 0);
+    // The queue the parked Run exposes still names the unresolved row, so the
+    // decision channel sees the obligation rather than an empty review.
+    let outstanding = f.db.kernel_build_full_snapshot(&f.run).unwrap();
+    assert_eq!(outstanding.state, "awaiting_delivery_review");
+}
+
+/// ② A genuine refusal, unreadable contract or content failure keeps its own
+/// class: the unresolved row is the weakest fact and never wins the fold.
+#[test]
+fn genuine_refused_invalid_and_definite_failure_are_not_downgraded() {
+    let recognition = DecisionFact::unconfirmed(
+        FactOrigin::CheckUnbound,
+        Some(RECOGNITION_UNRESOLVED_CODE),
+        "请明确要交付的文件名、类型或目录；当前没有可靠目标可自动修复",
+        None,
+    );
+    let candidate = FactOrigin::candidate("out/notes.md", &"a".repeat(64));
+    let refused = DecisionFact::refused(FactOrigin::Spec, "delivery.trust_refused", "拒绝");
+    let invalid = DecisionFact::invalid_with_code("delivery.check.contract_unreadable", "契约不可读");
+    let failed = DecisionFact::failed(
+        candidate,
+        "delivery.content_mismatch",
+        "内容不符",
+        true,
+        None,
+    );
+    for (facts, budget, expected) in [
+        (vec![recognition.clone(), refused], true, "refused"),
+        (vec![recognition.clone(), invalid], true, "invalid"),
+        (vec![recognition.clone(), failed.clone()], true, "repairNeeded"),
+        (vec![recognition.clone(), failed], false, "definiteFailure"),
+        (vec![recognition.clone()], true, "unconfirmed"),
+        (vec![recognition], false, "unconfirmed"),
+    ] {
+        let decided = p2b_decision::decide(&facts, budget);
+        assert_eq!(
+            p2b_consumer::delivery_class_str(decided.class),
+            expected,
+            "budget={budget}"
+        );
+    }
+    // Integration: a real missing file beside the unresolved requirement, with the
+    // repair budget spent, is a definite failure — not a downgrade to "unconfirmed"
+    // and not a silent pass.
+    let task = "生成 out/notes.md，并整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    for _ in 0..2 {
+        f.db.record_delivery_repair_round(&f.run, "{}", crate::database::now_ms())
+            .unwrap();
+    }
+    assert_eq!(f.db.delivery_repair_round_count(&f.run).unwrap(), 2);
+    let stop = f.stop();
+    let DeliveryRoute::Fail { code, message } = stop.route() else {
+        panic!("a spent budget on a real failure is a failed terminal: {:?}", stop.route())
+    };
+    assert_eq!(code, "delivery.definite_failure");
+    assert!(!message.is_empty(), "{message}");
+    // The unresolved row is still carried, unresolved, in the same verdict.
+    let recognition = typed_row(&stop, RECOGNITION_ITEM);
+    assert_eq!(recognition.class, "unconfirmed");
+    assert!(!recognition.stage);
+}
+
+/// ③ Ordinary rows keep their own verdicts while the unresolved row stays
+/// unverified: an unbound slot repairs, the recognition row never does.
+#[test]
+fn ordinary_slot_and_file_rows_keep_their_own_verdicts() {
+    let task = "在 out/ 生成一份 Word，报告需包含：过程、结论 两个章节；请生成报告。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let slot_key = f
+        .db
+        .delivery_checklist(&f.run)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.item_key.starts_with("slot:"))
+        .expect("the Word slot is a row")
+        .item_key;
+    let stop = f.stop();
+    assert_eq!(
+        p2b_consumer::delivery_class_str(stop.typed().unwrap().verdict.class),
+        "repairNeeded"
+    );
+    let slot = typed_row(&stop, &slot_key);
+    assert_eq!(slot.class, "repairNeeded");
+    assert!(!slot.passed);
+    assert!(slot.stage, "a repairNeeded row is the terminal-stage row here");
+    assert!(row_finding(slot).get("deliveryVerdict").is_none());
+    let recognition = typed_row(&stop, RECOGNITION_ITEM);
+    assert_eq!(recognition.class, "unconfirmed");
+    assert!(!recognition.passed);
+    assert!(!recognition.stage, "an unresolved requirement is never staged");
+    assert_eq!(
+        row_finding(recognition)["reasonCode"],
+        RECOGNITION_UNRESOLVED_CODE
+    );
+    // Aggregate routing and the per-row verdicts agree: the slot repairs.
+    assert!(matches!(stop.route(), DeliveryRoute::Repair));
+    let typed = stop.typed().unwrap();
+    assert!(typed
+        .terminal_items
+        .iter()
+        .any(|item| item.item_key == slot_key));
+    assert!(!typed
+        .terminal_items
+        .iter()
+        .any(|item| item.item_key == RECOGNITION_ITEM));
+    assert!(typed
+        .pending_items
+        .iter()
+        .any(|(key, _)| key == RECOGNITION_ITEM));
+}
+
+/// ④ A verified sibling cannot complete the Run while the requirement set is
+/// unresolved, and the parking branch arms no repair.
+#[test]
+fn recognition_blocks_completed_without_arming_repair() {
+    let task = "生成 out/notes.md，并整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    f.call(
+        "notes",
+        "write_file",
+        json!({"path":"out/notes.md","content":"# notes\n\nsynthetic\n"}),
+    )
+    .unwrap();
+    let stop = f.stop();
+    let file_row = typed_row(&stop, "file:out%2fnotes.md");
+    assert!(file_row.passed, "the verified sibling really passed: {file_row:?}");
+    let recognition = typed_row(&stop, RECOGNITION_ITEM);
+    assert!(!recognition.passed);
+    assert!(matches!(stop.route(), DeliveryRoute::RequiresU1 { .. }));
+    assert!(stop.repair_prompt().is_none());
+    assert!(stop.repair_findings().is_none());
+    let coordinator = KernelCoordinator::reopen(&f.db, &f.clock, &f.run, &f.cancellation).unwrap();
+    // The staging decision carries no mark, so nothing can finalize a terminal.
+    assert!(coordinator.completion_decision_for_test(&stop).unwrap().is_none());
+    assert!(coordinator.completion_tail_for_test(&stop).unwrap().is_none());
+    assert_eq!(state_of(&f.db, &f.run), "awaiting_delivery_review");
+    let events = event_types(&f.db, &f.run);
+    assert!(
+        !events.iter().any(|event| event == "run.completed"),
+        "a passing sibling must not complete an unresolved delivery: {events:?}"
+    );
+    // The obligation-bearing row is durable: the parked Run still answers "what is
+    // unresolved" from the ledger, not from memory.
+    let retained = item_of(&f.db, &f.run, RECOGNITION_ITEM);
+    let finding: Value = serde_json::from_str(retained.finding.as_deref().unwrap()).unwrap();
+    assert_eq!(finding["reasonCode"], RECOGNITION_UNRESOLVED_CODE);
+    assert_eq!(finding["verificationStatus"], "unverified");
+    // Neither row reached a terminal status, and no decision mark was written, so
+    // the passing sibling cannot have completed anything either.
+    for row in stored_rows(&f.db, &f.run) {
+        assert_eq!(row.1, "pending", "{} must stay pending", row.0);
+    }
+    assert!(decision_marks(&f.db, &f.run).is_empty());
+}
+
+/// ⑤ A spent repair budget cannot turn the unresolved requirement into a
+/// content failure: the Run stays parked on the same question.
+#[test]
+fn recognition_stays_parked_when_repair_budget_is_exhausted() {
+    let task = "整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    for _ in 0..2 {
+        f.db.record_delivery_repair_round(&f.run, "{}", crate::database::now_ms())
+            .unwrap();
+    }
+    let stop = f.stop();
+    assert_eq!(p2b_consumer::delivery_class_str(stop.typed().unwrap().verdict.class), "unconfirmed");
+    let DeliveryRoute::RequiresU1 { reason } = stop.route() else {
+        panic!("an unresolved requirement stays parked whatever the budget: {:?}", stop.route())
+    };
+    assert!(reason.contains("请明确要交付的文件名"), "{reason}");
+    let recognition = typed_row(&stop, RECOGNITION_ITEM);
+    assert_eq!(recognition.class, "unconfirmed");
+    assert!(!recognition.stage);
+    assert!(!f.stop().typed().unwrap().verdict.repair_budget_remaining);
+    let coordinator = KernelCoordinator::reopen(&f.db, &f.clock, &f.run, &f.cancellation).unwrap();
+    assert!(coordinator.completion_tail_for_test(&stop).unwrap().is_none());
+    assert_eq!(state_of(&f.db, &f.run), "awaiting_delivery_review");
+    assert_eq!(f.db.delivery_repair_round_count(&f.run).unwrap(), 2);
+}
+
+/// ⑥ Both rows of one mixed-version Run reach the router, and only the typed row
+/// is stamped: the recognition row is decided in the legacy lane, with its own
+/// question and no v2 envelope.
+#[test]
+fn typed_and_legacy_paths_both_route_the_recognition_row() {
+    use content_requirements::delivery_v2::{V2Enablement, with_test_enablement};
+    let task = "在初始目录的 .txt 文件中，按字节数从小到大选出 2 个最小文件，大小相同按文件名升序选取。再按文件名升序合并为 joined.txt。每段先写完整文件名，下一行保留全部内容；两段之间恰好一个空行。不要修改原文件。另外生成 summary.json，写明合并的文件名清单。另外生成一份摘要报告。";
+    let f = Fixture::new(task);
+    fs::write(f.root.join("alpha.txt"), "aa").unwrap();
+    fs::write(f.root.join("zeta.txt"), "z").unwrap();
+    fs::write(f.root.join("middle.txt"), "mmm").unwrap();
+    with_test_enablement(V2Enablement::On, || f.freeze(task));
+    fs::write(f.root.join("joined.txt"), "alpha.txt\naa\n\nzeta.txt\nz").unwrap();
+    fs::write(
+        f.root.join("summary.json"),
+        r#"{"files":["alpha.txt","zeta.txt"]}"#,
+    )
+    .unwrap();
+    let identities = f.db.delivery_checklist_requirements(&f.run).unwrap();
+    let typed_keys: Vec<String> = identities
+        .iter()
+        .filter(|(_, raw)| {
+            matches!(
+                p2b_contract_identity::classify_requirements(raw.as_deref()),
+                p2b_contract_identity::ContractIdentity::HostV2
+            )
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    assert_eq!(typed_keys, vec!["file:joined.txt".to_string()]);
+    let stop = f.stop();
+    assert!(matches!(stop, DeliveryStop::Typed(_)));
+    // The v2 row is stamped with its envelope; the recognition row is not.
+    let joined = row_finding(typed_row(&stop, "file:joined.txt"));
+    assert!(
+        joined.get("deliveryVerdict").is_some(),
+        "the typed row owes a v2 record: {joined}"
+    );
+    let sibling = row_finding(typed_row(&stop, "file:summary.json"));
+    assert!(sibling.get("deliveryVerdict").is_none());
+    let recognition = typed_row(&stop, RECOGNITION_ITEM);
+    assert_eq!(recognition.class, "unconfirmed");
+    assert!(!recognition.stage);
+    let recognition_finding = row_finding(recognition);
+    assert!(
+        recognition_finding.get("deliveryVerdict").is_none(),
+        "a recognition row is a legacy row and must not be re-identified as v2"
+    );
+    assert_eq!(
+        recognition_finding["reasonCode"],
+        RECOGNITION_UNRESOLVED_CODE
+    );
+    assert!(recognition_finding["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("请明确要交付的文件名")));
+}
+
+/// ⑦ Beside a real file failure the Run still repairs, and the recognition fact
+/// stays visible in the repair findings as an unresolved (non-repairable) item.
+#[test]
+fn recognition_beside_a_real_file_failure_still_repairs() {
+    let task = "生成 out/notes.md，并整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let stop = f.stop();
+    assert!(matches!(stop.route(), DeliveryRoute::Repair));
+    let prompt = stop.repair_prompt().expect("repair is armed for the missing file");
+    assert!(prompt.contains("out/notes.md"), "{prompt}");
+    let findings: Value =
+        serde_json::from_str(stop.repair_findings().expect("repair findings are recorded"))
+            .unwrap();
+    assert_eq!(findings["source"], "deliveryVerdict");
+    let items = findings["items"].as_array().unwrap();
+    let file_item = items
+        .iter()
+        .find(|item| item["itemKey"] == "file:out%2fnotes.md")
+        .expect("the failing file is in the findings");
+    assert_eq!(file_item["class"], "repairNeeded");
+    let recognition_item = items
+        .iter()
+        .find(|item| item["itemKey"] == RECOGNITION_ITEM)
+        .expect("the unresolved requirement is retained in the same findings");
+    assert_eq!(recognition_item["class"], "unconfirmed");
+    assert!(recognition_item["reasonCodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|code| code == RECOGNITION_UNRESOLVED_CODE));
+    // Arming repair is not the same as having spent a round, and nothing is
+    // staged before a decision owns it.
+    assert_eq!(f.db.delivery_repair_round_count(&f.run).unwrap(), 0);
+    assert!(f.db.staged_delivery_rounds().unwrap().is_empty());
+}
+
+/// ⑧ The successor Run does not inherit the stale marker: it starts with no
+/// recognition row and re-decides the question from its own text.
+#[test]
+fn successor_run_skips_the_stale_recognition_row_and_re_recognizes() {
+    let task = "整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let parent_rows = stored_rows(&f.db, &f.run);
+    assert_eq!(parent_rows.len(), 1);
+    assert_eq!(parent_rows[0].0, RECOGNITION_ITEM);
+    let child = successor_of(&f);
+    assert!(f.db.delivery_checklist(&child).unwrap().is_empty(),
+        "the source's unresolved marker is a statement about the source text only");
+    assert_eq!(f.db.continued_from_run_id(&child).unwrap().as_deref(), Some(f.run.as_str()));
+    assert_eq!(
+        frozen_delivery_reference(&f.db, &child, &f.context()).unwrap()["recognition"],
+        "no_file_deliverables",
+        "an empty successor checklist is not an unresolved one"
+    );
+    // The parent keeps its row and its bytes.
+    assert_eq!(stored_rows(&f.db, &f.run), parent_rows);
+}
+
+/// ⑨ A valid clarification freezes the new obligations on the successor and
+/// leaves the parent's frozen contract untouched.
+#[test]
+fn valid_clarification_freezes_new_obligations_without_touching_the_old_contract() {
+    let task = "整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let parent_rows = stored_rows(&f.db, &f.run);
+    let child = successor_of(&f);
+    // A clarification that names one concrete artifact. Nothing generic ("一份文档")
+    // is left unresolved here, so this is the resolved case by construction.
+    freeze_task_delivery(
+        &f.db,
+        &child,
+        "把结果整理成 out/report.docx。",
+        &f.context(),
+        f.root.to_str(),
+    )
+    .unwrap();
+    let reference = frozen_delivery_reference(&f.db, &child, &f.context()).unwrap();
+    assert_eq!(reference["recognition"], "recognized");
+    assert_eq!(reference["targets"][0]["path"], "out/report.docx");
+    let rows = f.db.delivery_checklist(&child).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].target_path.as_deref(), Some("out/report.docx"));
+    assert_eq!(rows[0].item_key, "file:out%2freport.docx");
+    assert_eq!(rows[0].status, "pending");
+    assert!(rows[0].finding.is_none());
+    // The parent's frozen contract — rows, bytes and the reference it hands the
+    // model — is exactly what it was; a clarification does not rewrite history.
+    assert_eq!(stored_rows(&f.db, &f.run), parent_rows);
+    let parent_reference = frozen_delivery_reference(&f.db, &f.run, &f.context()).unwrap();
+    assert_eq!(parent_reference["recognition"], "unresolved");
+    assert!(parent_reference["targets"].as_array().unwrap().is_empty());
+    assert_eq!(
+        f.db.delivery_item_requirements(&f.run, RECOGNITION_ITEM)
+            .unwrap()
+            .iter()
+            .filter(|requirement| matches!(
+                requirement.kind,
+                StoredRequirementKind::RecognitionUnresolved { .. }
+            ))
+            .count(),
+        1,
+        "the source still states, once, that its own requirement set was unresolved"
+    );
+}
+
+/// ⑩ An unusable or repeated clarification lands on the same unresolved state
+/// instead of a fabricated obligation, and the source cannot be continued twice.
+#[test]
+fn invalid_or_repeated_clarification_yields_unresolved_again() {
+    let task = "整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let child = successor_of(&f);
+    // An unsafe directory is refused outright and freezes nothing.
+    assert!(freeze_task_delivery(
+        &f.db,
+        &child,
+        "在 ../outside/ 生成一份 PDF。",
+        &f.context(),
+        f.root.to_str(),
+    )
+    .is_err());
+    assert!(f.db.delivery_checklist(&child).unwrap().is_empty());
+    // The same unresolved phrasing resolves to the same unresolved state — it is
+    // a question again, not a guessed obligation and not a forged pass.
+    freeze_task_delivery(&f.db, &child, "把结果整理成文件。", &f.context(), f.root.to_str()).unwrap();
+    let rows = f.db.delivery_checklist(&child).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].item_key, RECOGNITION_ITEM);
+    assert!(rows[0].target_path.is_none());
+    assert_eq!(
+        frozen_delivery_reference(&f.db, &child, &f.context()).unwrap()["recognition"],
+        "unresolved"
+    );
+    assert!(matches!(
+        evaluate_stop(&f.db, f.root.to_str(), &child).unwrap().route(),
+        DeliveryRoute::RequiresU1 { .. }
+    ));
+    // One source has exactly one successor.
+    let request = continuation_request(&f);
+    let prompt = f
+        .db
+        .kernel_continuation_prompt(&request.conversation_id, &f.run)
+        .unwrap();
+    let repeated = f
+        .db
+        .kernel_insert_continuation_attempt(&request, &prompt, &prepared_of(&f))
+        .unwrap_err();
+    assert!(
+        repeated.to_string().contains("已经续做过"),
+        "{repeated}"
+    );
+}
+
+/// ⑪ Everything that *is* an obligation travels; only the unresolved marker is
+/// left behind.
+#[test]
+fn other_obligations_are_still_inherited() {
+    let task = "生成 summary.txt，并整理成文件。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let parent_keys: Vec<String> = f
+        .db
+        .delivery_checklist(&f.run)
+        .unwrap()
+        .into_iter()
+        .map(|item| item.item_key)
+        .collect();
+    assert!(parent_keys.contains(&"file:summary.txt".to_string()));
+    assert!(parent_keys.contains(&RECOGNITION_ITEM.to_string()));
+    let requirement = f
+        .db
+        .delivery_item_requirements(&f.run, "file:summary.txt")
+        .unwrap();
+    let child = successor_of(&f);
+    let child_items = f.db.delivery_checklist(&child).unwrap();
+    assert_eq!(
+        child_items
+            .iter()
+            .map(|item| item.item_key.clone())
+            .collect::<Vec<_>>(),
+        vec!["file:summary.txt".to_string()]
+    );
+    assert_eq!(
+        f.db.delivery_item_requirements(&child, "file:summary.txt")
+            .unwrap(),
+        requirement
+    );
+    assert_eq!(
+        child_items[0].target_path.as_deref(),
+        Some("summary.txt"),
+        "the concrete target travels with the obligation"
+    );
+    assert_eq!(child_items[0].status, "pending");
+    assert!(child_items[0].finding.is_none());
+    assert_eq!(
+        frozen_delivery_reference(&f.db, &child, &f.context()).unwrap()["recognition"],
+        "recognized"
+    );
+}
+
+/// ⑫ The parked state, its event and the successor link survive a persisted
+/// read, so nothing about the stop depends on in-memory state.
+#[test]
+fn parked_state_and_successor_link_survive_a_persisted_read() {
+    let task = "请生成报告。";
+    let f = Fixture::new(task);
+    f.freeze(task);
+    let stop = f.stop();
+    let coordinator = KernelCoordinator::reopen(&f.db, &f.clock, &f.run, &f.cancellation).unwrap();
+    coordinator.completion_tail_for_test(&stop).unwrap();
+    let parent_rows = stored_rows(&f.db, &f.run);
+    // The real recovery path: a parked source is continued, not failed. The park
+    // decision already banked the progress rows the continuation reads.
+    let child = insert_successor(&f);
+    let root = f.root.clone();
+    let parent = f.run.clone();
+    drop(f);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    // The parent is still parked after a fresh process-level read, with the same
+    // event and the same rows.
+    assert_eq!(state_of(&db, &parent), "awaiting_delivery_review");
+    assert_eq!(legacy_status(&db, &parent), "interrupted");
+    assert_eq!(stored_rows(&db, &parent), parent_rows);
+    assert!(event_types(&db, &parent)
+        .iter()
+        .any(|event| event == "run.awaiting_delivery_review"));
+    // The successor link is one-way and durable: the child points at the parent,
+    // the parent points at nothing, so a chain cannot cycle.
+    assert_eq!(
+        db.continued_from_run_id(&child).unwrap().as_deref(),
+        Some(parent.as_str())
+    );
+    assert!(db.continued_from_run_id(&parent).unwrap().is_none());
+    assert_eq!(stored_kernel_state(&db, &child), "created");
+    assert!(db.delivery_checklist(&child).unwrap().is_empty());
 }
