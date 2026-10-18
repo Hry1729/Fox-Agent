@@ -32,9 +32,11 @@ import { useYuxiUser } from '@/features/settings/use-yuxi-user'
 import { type ManagementReturnRoutes, captureManagementReturnRoutes, managementExitRoute } from '@/features/workspace/management-navigation'
 import { type KnowledgeSourceLocator, type LocalKnowledgeDocumentAsk, type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
+import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
 import { File } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, Profiler, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MemoizedComposer, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
+import { ComposerEntryContext } from './composer/composer-entry-context'
 import { ConversationManagementDialogs, KnowledgeBindingDialog, ProjectDeleteDialog } from './conversation-dialogs'
 import { type AssistantMode, CONVERSATION_FORK_EVENT, type ChatState, type ChildAgentSelection, ComposerRuntimeContext, type ComposerRuntimeContextValue, EMPTY_CONVERSATION_ATTACHMENTS, EMPTY_CONVERSATION_MESSAGES, EMPTY_RUNTIME_APPROVALS, type OpenFileTab, type RightMode, TimelineRuntimeContext, type TimelineRuntimeContextValue, layoutStorage, readDefaultProjectPermission, readStoredBoolean, readStoredNumber, readStoredRightMode, readStoredRightTabs, recordRegionRender, useStableCallback } from './fox-shared'
 import { RightPanel, artifactProjectPath, childAgentVisualQaPanelWidth, createOpenFileTab } from './right-panel/fox-right-panel'
@@ -178,7 +180,14 @@ export function Workbench() {
   const sidebarCollapsed = sidebarManuallyCollapsed || narrowSidebar
   // With the rail gone the sidebar's own content sets the width; the shell only
   // keeps the last expanded width so one number drives both sides of the motion.
-  const [expandedSidebarWidth, setExpandedSidebarWidth] = useState(() => readStoredNumber(layoutStorage.sidebarWidth, 288, 220, 456))
+  const [expandedSidebarWidth, setExpandedSidebarWidth] = useState(() => {
+    // Apply the new default once, then retain subsequent manual adjustments.
+    if (window.localStorage.getItem('fox.layout.sidebarWidthVersion') !== '276-v1') {
+      window.localStorage.setItem(layoutStorage.sidebarWidth, '276')
+      window.localStorage.setItem('fox.layout.sidebarWidthVersion', '276-v1')
+    }
+    return readStoredNumber(layoutStorage.sidebarWidth, 276, 220, 456)
+  })
   useEffect(() => {
     const query = window.matchMedia('(max-width: 700px)')
     const sync = () => setNarrowSidebar(query.matches)
@@ -856,6 +865,12 @@ export function Workbench() {
   const selectExpert = useStableCallback(async (expertId: string, newConversation = false): Promise<boolean> => {
     if (expertReadOnly) return false
     if (expertId === desktopConversation.selectedExpertId) return true
+    if (!newConversation && expertId === activeAgent?.id) {
+      if (!desktopConversation.selectedExpertId) return true
+      const result = await desktopConversation.removeExpert()
+      if (!result.success) toast.error(expertErrorMessage(result.error, '无法切回默认专家'))
+      return result.success
+    }
     const targetAgent = agentResource.agents.find((agent) => agent.id === expertId)
     if (!targetAgent) return false
     let configuredKnowledgeReferences: KnowledgeReference[] = []
@@ -1122,6 +1137,21 @@ export function Workbench() {
   const handleComposerProject = useStableCallback(() => {
     void addProject()
   })
+  const handleEntryProjectSelect = useStableCallback((project: ProjectRecord) => {
+    if (desktopConversation.selectedConversationId) return
+    desktopConversation.selectProject(canonicalProjectRoot(project.rootPath), project.permissionMode)
+  })
+  const handleEntryProjectAdd = useStableCallback(async () => {
+    if (desktopConversation.selectedConversationId) return
+    const selected = await pickProjectFolder()
+    if (!selected) return
+    const selection = selectProjectRoot(selected, projects, readDefaultProjectPermission())
+    desktopConversation.selectProject(selection.path, selection.permissionMode)
+  })
+  const handleViewDefaultExpert = useStableCallback(() => {
+    if (activeAgent) setExpertDetailId(activeAgent.id)
+  })
+  const handleOpenComposerModelSettings = useStableCallback(() => navigate('settings-models'))
   const handleInitialAttachmentsConsumed = useStableCallback((requestId: number) => {
     setComposerInitialAttachments((request) => request?.requestId === requestId ? null : request)
   })
@@ -1277,25 +1307,65 @@ export function Workbench() {
   // legacy composer talks to `useDesktopConversation()` directly, and the
   // assistant-ui thread subscribes to the same store, so sends from this one
   // instance stream into whichever message list is mounted.
+  const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings])
   const composerPanel = (
+    <ComposerEntryContext.Provider value={composerEntry}>
     <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
+    </ComposerEntryContext.Provider>
   )
   const assistantUiThreadPanel = (
     <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载对话" />}><div className="fox-thread-shell"><AssistantUiChat statusBar={<FoxRunStatusBar key={desktopConversation.selectedConversationId ?? 'draft'} detail={desktopConversation.enabled ? desktopConversation.detail : null} conversationId={desktopConversation.selectedConversationId} />} key={desktopConversation.detail?.conversation.id ?? 'draft'} conversation={desktopConversation} pendingMessage={pendingUserMessage} isSendDisabled={expertReadOnly} suggestions={activeAgent?.openingSuggestions} onStart={handleTimelineStart} planRevision={assistantUiPlanRevision} onOpenArtifact={handleTimelineOpenArtifact} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} callbacks={{ onSubmit: (prompt, files) => handleComposerSubmitPrompt(prompt, undefined, files), onOptimistic: handleComposerPromptCommit, onEdit: (messageId, prompt) => handleTimelineRerun(messageId, prompt), onReload: () => retryLatestRun() }} /></div></Suspense>
   )
 
+  const navigationRoute = {
+    view: activeView, entityId: activeEntityId, documentId: activeDocumentId,
+    sourceLocator: activeSourceLocator, assistantMode,
+    conversationId: activeView === 'chat' ? desktopConversation.selectedConversationId : null,
+    draft: desktopConversation.captureDraft(), composerDraft, emptyConversation,
+    managementReturnRoutes: managementReturnRoutes.current,
+  }
+  const navigationKey = JSON.stringify(activeView === 'chat'
+    ? ['chat', navigationRoute.conversationId, navigationRoute.conversationId ? null : desktopConversation.draftProjectRoot]
+    : [activeView, activeEntityId, activeDocumentId, activeSourceLocator])
+  const navigationHistory = useNavigationHistory(activeView === 'onboarding' ? null : { key: navigationKey, route: navigationRoute }, async (route) => {
+    cancelDocumentAsk()
+    if (route.view === 'chat' && desktopConversation.enabled) {
+      if (route.conversationId) {
+        await desktopConversation.openConversation(route.conversationId)
+      } else {
+        desktopConversation.restoreDraft(route.draft)
+      }
+    }
+    managementReturnRoutes.current = route.managementReturnRoutes
+    setActiveView(route.view)
+    setActiveEntityId(route.entityId)
+    setActiveDocumentId(route.documentId)
+    setActiveSourceLocator(route.sourceLocator)
+    setAssistantMode(route.assistantMode)
+    if (route.view === 'chat') {
+      setComposerDraft(route.composerDraft)
+      setEmptyConversation(route.emptyConversation)
+      setPendingUserMessage(null)
+    }
+    setExpertDetailId(null)
+    setCompactRightOpen(false)
+    setRightSidebarCollapsed(true)
+    setRightPanelMaximized(false)
+    setRightMode(null)
+  }, (error) => toast.error('无法打开历史页面', { description: desktopErrorDetails(error).message }))
+
   if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载引导页" />}><OnboardingPage dark={dark} navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (
     <main className="fox-shell" style={shellStyle} onPointerDownCapture={acknowledgeVisibleCompletion} onWheelCapture={acknowledgeVisibleCompletion} onKeyDownCapture={acknowledgeVisibleCompletion}>
-      <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
+      <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} canGoBack={navigationHistory.canGoBack} canGoForward={navigationHistory.canGoForward} onGoBack={navigationHistory.back} onGoForward={navigationHistory.forward} />
       <div className="fox-workbench">
         <MemoizedSidebar collapsed={sidebarCollapsed} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && <SidebarResizeDivider width={expandedSidebarWidth} onResize={(delta) => setExpandedSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className={`fox-content-card ${showConversationRightSidebar && !rightSidebarCollapsed && (!compactLayout || compactRightOpen) ? 'has-open-right-panel' : ''}`}>
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout ? 'is-right-maximized' : ''}`}>
         <section className="fox-chat-pane">
-          {expertPickerOpen && <Suspense fallback={null}><ExpertPickerDialog open={expertPickerOpen} onOpenChange={setExpertPickerOpen} agents={agentResource.agents} selectedExpertId={desktopConversation.selectedExpertId} readOnly={expertReadOnly} onSelect={selectExpert} /></Suspense>}
+          {expertPickerOpen && <Suspense fallback={null}><ExpertPickerDialog open={expertPickerOpen} onOpenChange={setExpertPickerOpen} agents={agentResource.agents} defaultExpert={activeAgent} selectedExpertId={desktopConversation.selectedExpertId ?? activeAgent?.id} readOnly={expertReadOnly} onSelect={selectExpert} /></Suspense>}
           {expertDetailId && <Suspense fallback={null}><AgentDetailDialog
             agent={(() => { const record = agentResource.agents.find((item) => item.id === expertDetailId); return record ? asAgentCard(record) : null })()}
             open

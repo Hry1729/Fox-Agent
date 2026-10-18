@@ -1,0 +1,14 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Fox 输入框验证</title></head><body><div id="root"></div><script>
+window.isTauri = true;
+window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+window.composerMock = { calls: [], failSave: false, service: { name: '测试服务', baseUrl: 'https://example.invalid/v1', modelId: 'sensenova6.8', apiType: 'openai-completions', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false, enabled: true, credentialConfigured: true }, providers: [{ id: 'provider-test', name: '测试服务', baseUrl: 'https://example.invalid/v1', apiType: 'openai-completions', enabled: true, models: [{ id: 'model-a', modelId: 'sensenova6.8', displayName: 'sensenova6.8', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false }, { id: 'model-b', modelId: 'model-test-b', displayName: 'model-test-b', contextWindow: 64000, maxOutputTokens: 4096, supportsImageInput: false }] }] };
+window.__TAURI_INTERNALS__ = { transformCallback: () => 1, unregisterCallback: () => {}, invoke: async (name, args) => {
+ const mock = window.composerMock;
+ mock.calls.push({ name, args });
+ if (name === 'model_service_get') return { ok: true, data: mock.service };
+ if (name === 'model_providers_list') return { ok: true, data: mock.providers };
+ if (name === 'model_service_save') { if (mock.failSave) return { ok: false, error: { code: 'test.failure', message: '模拟保存失败' } }; mock.service = { ...mock.service, ...args.request }; return { ok: true, data: mock.service }; }
+ if (name.startsWith('plugin:event')) return 1;
+ return { ok: true, data: [] };
+} };
+</script><script type="module" src="./composer-entry.tsx"></script></body></html>

@@ -3194,6 +3194,9 @@
 .fox-onboarding-enter-button{height:32px;padding-inline:16px!important;font-size:12px}
 .fox-onboarding-enter{transition:opacity 500ms ease 800ms,transform 500ms cubic-bezier(.22,1,.36,1) 800ms,visibility 0s linear 800ms!important}
 .fox-onboarding-enter svg{width:13px}
+.fox-onboarding-next,.fox-onboarding-enter-button{display:inline-flex;align-items:center;justify-content:center;gap:2px;line-height:1;padding-block:0}
+.fox-onboarding-screen .fox-onboarding-button-label{display:block;line-height:1;color:inherit!important;transform:translate(2px,1px)}
+.fox-onboarding-next>svg,.fox-onboarding-enter-button>svg{display:block;flex-shrink:0;align-self:center}
 .fox-onboarding-screen.is-finishing .fox-onboarding-skip{opacity:0;visibility:hidden;pointer-events:none;transition:opacity 240ms ease,visibility 0s linear 240ms}
 .fox-onboarding-screen.is-finishing .fox-onboarding-shell{grid-template-columns:minmax(0,0fr) minmax(0,1fr)}
 .fox-onboarding-screen.is-finishing .fox-onboarding-main{transform:translateX(-72px);opacity:0;pointer-events:none}

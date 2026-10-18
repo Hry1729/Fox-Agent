@@ -2,9 +2,12 @@ import type { ReactElement } from 'react'
 import { useReducedMotion } from 'motion/react'
 import { AnimateIcon, type AnimateIconProps } from '@/components/animate-ui/icons/icon'
 
+export { ArrowLeft, ArrowRight } from '@/components/animate-ui/icons/navigation-arrow'
+
 // Official Animate UI registry sources. Keep icons inside the trigger so the
 // whole action (including its label) responds to hover / press, once per gesture.
 export { MessageCirclePlus, MessageCirclePlus as MessageCirclePlusIcon } from '@/components/animate-ui/icons/message-circle-plus'
+export { MessageCircleMore } from '@/components/animate-ui/icons/message-circle-more'
 export { Users, Users as UsersIcon } from '@/components/animate-ui/icons/users'
 export { Blocks, Blocks as BlocksIcon } from '@/components/animate-ui/icons/blocks'
 export { PanelLeft, PanelLeft as PanelLeftIcon } from '@/components/animate-ui/icons/panel-left'

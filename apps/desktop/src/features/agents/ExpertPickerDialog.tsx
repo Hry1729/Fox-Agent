@@ -7,11 +7,12 @@ import { AgentCard } from '@/features/workspace/entity-card'
 import { expertCatalogAgents } from './agent-classification'
 import { asAgentCard } from './agent-card-data'
 
-export function ExpertPickerDialog({ open, onOpenChange, agents, selectedExpertId, readOnly, onSelect }: {
+export function ExpertPickerDialog({ open, onOpenChange, agents, selectedExpertId, readOnly, onSelect, defaultExpert }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   agents: AgentRecord[]
   selectedExpertId?: string | null
+  defaultExpert?: AgentRecord | null
   readOnly: boolean
   onSelect: (expertId: string) => Promise<boolean>
 }) {
@@ -20,7 +21,8 @@ export function ExpertPickerDialog({ open, onOpenChange, agents, selectedExpertI
   const [error, setError] = useState<string | null>(null)
   const busyRef = useRef(false)
   useEffect(() => { if (open) { setQuery(''); setError(null) } }, [open])
-  const choices = expertCatalogAgents(agents).filter((agent) => `${agent.name} ${agent.description}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  const catalog = expertCatalogAgents(agents)
+  const choices = [...(defaultExpert && !catalog.some(agent => agent.id === defaultExpert.id) ? [defaultExpert] : []), ...catalog].filter((agent) => `${agent.name} ${agent.description}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const select = async (expertId: string) => {
     if (busyRef.current || readOnly) return
     busyRef.current = true

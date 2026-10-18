@@ -518,8 +518,7 @@ export function ComposerModelTrigger({
       )}
       {...props}
     >
-      {model}
-      <ChevronDownIcon className="size-3 opacity-60" />
+        <span className="min-w-0 truncate">{model}</span>
     </button>
   );
 }

@@ -1,6 +1,8 @@
+import { sidebarDateGroups } from '../sidebar-date-groups'
 import '@/components/fox-ui/sidebar-list-pane.css'
 import { type ConversationRunIndicator } from '../conversation-run-indicator'
-import { ConversationStatusIcon } from '../conversation-status-icon'
+import { ConversationRunStatus } from '../conversation-run-status'
+import { SidebarCollapsedMenus } from './fox-sidebar-collapsed-menus'
 import { type SidebarProjectGroup, sidebarProjectGroups } from '../sidebar-project-groups'
 import { Button } from '@/components/ui/button'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu'
@@ -9,7 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SidebarModeTabs, SidebarModeTab, UserMenu } from './fox-sidebar-controls'
 import { FoxEmptyState } from '@/components/fox-ui/empty-state'
-import { AnimatedIconTrigger, Bell, Blocks, BookCopy, Library, MessageCirclePlus, PanelLeftOpen, Search, Settings, Sparkles, SunMoon, Users } from '@/components/fox-ui/animated-icons'
+import { AnimatedIconTrigger, Bell, Blocks, BookCopy, MessageCirclePlus, Search, Settings, Sparkles, SunMoon, Users } from '@/components/fox-ui/animated-icons'
 import { SidebarMotion, SidebarMotionItem } from './fox-sidebar-motion'
 import './fox-sidebar.css'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -21,40 +23,15 @@ import { remoteKnowledgeBackRoute, SETTINGS_WORKSPACE_VIEWS } from '@/features/w
 import { detectShortcutPlatform, formatShortcut, matchesShortcutAction, shortcutTokens, type ShortcutActionId } from '@/features/settings/shortcut-model'
 import { useShortcutPreferences } from '@/features/settings/use-shortcuts'
 import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
-import { Activity, AlertTriangle, Archive, ArrowLeft, BookOpen, Bot, Brain, Cable, ChevronDown, ChevronRight, CircleHelp, ClipboardList, Database, FileEdit, Folder, FolderOpen, Folders, Globe2, House, Keyboard, LoaderCircle, MessageCircleMore, MoreHorizontal, Pin, PinOff, Plus, RotateCcw, Server, ShieldCheck, Trash2, UserRound, WandSparkles, Wrench, X } from 'lucide-react'
-import { Suspense, lazy, memo, useCallback, useEffect, useRef, useState } from 'react'
+import { Activity, AlertTriangle, Archive, ArrowLeft, BookOpen, Bot, Brain, Cable, ChevronDown, ChevronRight, CircleHelp, ClipboardList, Database, FileEdit, Folder, FolderOpen, Globe2, House, Keyboard, LoaderCircle, MessageCircleMore, MoreHorizontal, Pin, PinOff, Plus, RotateCcw, Server, ShieldCheck, Trash2, UserRound, WandSparkles, Wrench, X } from 'lucide-react'
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type AssistantMode, IconButton, globalSearchKindLabel } from '../fox-shared'
 import { NotificationCenter } from './fox-notification-center'
 import { LOCAL_KNOWLEDGE_WORKSPACE_VIEWS } from '../workbench'
 
+const EMPTY_PROJECTS: readonly ProjectRecord[] = []
+
 const KnowledgeResourceExplorer = lazy(() => import('@/features/knowledge/knowledge-resource-explorer').then((module) => ({ default: module.KnowledgeResourceExplorer })))
-
-const CONVERSATION_RUN_LABELS: Record<ConversationRunIndicator, string> = {
-  running: '运行中',
-  queued: '运行中',
-  approval: '等待审批或回复',
-  reply: '等待审批或回复',
-  completed: '任务结束',
-}
-
-/**
- * The activity slot of one sidebar row. It is always laid out so a conversation
- * starting or finishing a run never shifts the rows around it, and it reports the
- * state as a `status` only when there is something to announce.
- */
-function ConversationRunStatus({ indicator, className = 'fox-sidebar-conversation-status' }: { indicator?: ConversationRunIndicator; className?: string }) {
-  const label = indicator ? CONVERSATION_RUN_LABELS[indicator] : undefined
-  const state = !indicator ? 'idle' : indicator === 'approval' || indicator === 'reply' ? 'waiting' : indicator === 'completed' ? 'complete' : 'running'
-  return <span
-    className={`${className}${indicator ? ` is-${indicator}` : ''}`}
-    role={label ? 'status' : undefined}
-    aria-label={label}
-    title={label}
-    data-run-indicator={indicator ?? undefined}
-  >
-    <ConversationStatusIcon state={state} size={9.8} />
-  </span>
-}
 
 export function Sidebar({
   collapsed,
@@ -75,7 +52,6 @@ export function Sidebar({
   onDeleteProject,
   onNavigate,
   onExitManagement,
-  onExpand,
   onTheme,
   onSettings,
   runtimeConversations,
@@ -85,7 +61,7 @@ export function Sidebar({
   activeConversationId,
   newChatActive,
   runIndicators,
-  projects = [],
+  projects = EMPTY_PROJECTS,
   yuxiService,
   yuxiUser,
   activeView,
@@ -139,7 +115,6 @@ export function Sidebar({
     return binding ? formatShortcut(binding, shortcutPlatform).text : null
   }
   const newConversationShortcut = shortcutLabel('new-conversation')
-  const toggleSidebarShortcut = shortcutLabel('toggle-sidebar')
   const searchShortcut = shortcutLabel('search')
   const searchTitle = searchShortcut ? `搜索（${searchShortcut}）` : '搜索'
   const settingsBinding = shortcutPreferences['open-settings']
@@ -151,9 +126,6 @@ export function Sidebar({
   const [searchAttempt, setSearchAttempt] = useState(0)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [lifecycleView, setLifecycleView] = useState<'active' | 'archived' | 'trash'>('active')
-  const [pendingSidebarSection, setPendingSidebarSection] = useState<'projects' | 'conversations' | null>(null)
-  const [collapsedSection, setCollapsedSection] = useState<'projects' | 'conversations' | null>(null)
-  const [collapsedProjectKey, setCollapsedProjectKey] = useState<string | null>(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -162,8 +134,6 @@ export function Sidebar({
   // keyboard users keep their place (Radix's default resolves to <body> here
   // because the dialog is opened imperatively, without a DialogTrigger).
   const searchReturnFocusRef = useRef<HTMLElement | null>(null)
-  const projectSectionRef = useRef<HTMLElement | null>(null)
-  const conversationSectionRef = useRef<HTMLElement | null>(null)
   const normalizedSearch = search.trim().toLocaleLowerCase()
   const changeSearchOpen = useCallback((open: boolean) => {
     setSearchOpen(open)
@@ -217,20 +187,20 @@ export function Sidebar({
     : lifecycleView === 'trash'
       ? trashedConversations
       : runtimeConversations
-  const conversationItems = lifecycleConversations?.map((item) => ({
-    ...item,
-    time: item.lastMessageAt ? new Date(item.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
-    active: item.id === activeConversationId
-  })) ?? []
-  const projectConversationItems = lifecycleView === 'active'
-    ? conversationItems.filter((item) => Boolean(item.projectRoot))
-    : []
-  const regularConversationItems = lifecycleView === 'active'
-    ? conversationItems.filter((item) => !item.projectRoot)
-    : conversationItems
-  const visibleProjectConversations = projectConversationItems
-  const projectGroups = sidebarProjectGroups(visibleProjectConversations, projects)
-  const visibleConversations = regularConversationItems
+  const conversationItems = useMemo(() => {
+    const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
+    return lifecycleConversations?.map((item) => ({
+      ...item,
+      time: item.lastMessageAt ? timeFormat.format(new Date(item.lastMessageAt)) : '',
+      active: item.id === activeConversationId
+    })) ?? []
+  }, [lifecycleConversations, activeConversationId])
+  const projectGroups = useMemo(() => sidebarProjectGroups(
+    lifecycleView === 'active' ? conversationItems.filter(item => Boolean(item.projectRoot)) : [], projects
+  ), [conversationItems, lifecycleView, projects])
+  const visibleConversations = useMemo(() => lifecycleView === 'active'
+    ? conversationItems.filter(item => !item.projectRoot)
+    : conversationItems, [conversationItems, lifecycleView])
   const toggleSearch = () => changeSearchOpen(!searchOpen)
   const changeNotificationsOpen = (open: boolean) => {
     setNotificationsOpen(open)
@@ -250,27 +220,9 @@ export function Sidebar({
     }
     onNavigate(item.workspaceView as WorkspaceView, item.entityId ?? undefined, item.documentId ? { documentId: item.documentId } : undefined)
   }
-  const setAllProjectsOpen = (open: boolean) => {
+  const setAllProjectsOpen = useCallback((open: boolean) => {
     setProjectOpen(Object.fromEntries(projectGroups.map((project) => [project.key, open])))
-  }
-  // Pointer enter/leave can arrive in the same task; React's batched mouse events
-  // would then lose the enter. Dismissals get their own layout, enters open in it.
-  const openCollapsedSection = (section: 'projects' | 'conversations') => window.requestAnimationFrame(() => setCollapsedSection(section))
-  const closeCollapsedSection = () => window.requestAnimationFrame(() => { setCollapsedSection(null); setCollapsedProjectKey(null) })
-  const revealSidebarSection = (section: 'projects' | 'conversations') => {
-    setLifecycleView('active')
-    setPendingSidebarSection(section)
-    onExpand()
-  }
-  useEffect(() => {
-    if (collapsed || !pendingSidebarSection) return
-    const frame = window.requestAnimationFrame(() => {
-      const target = pendingSidebarSection === 'projects' ? projectSectionRef.current : conversationSectionRef.current
-      target?.scrollIntoView({ block: 'start' })
-      setPendingSidebarSection(null)
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [collapsed, pendingSidebarSection])
+  }, [projectGroups])
   const { profile, save: saveProfile } = useUserProfile({ name: yuxiUser?.username ?? 'Hury', avatar: yuxiUser?.avatar })
   const profileName = profile.name
   const profileDetail = yuxiUser
@@ -357,76 +309,9 @@ export function Sidebar({
     { view: 'knowledge-graph' as const, label: '关系图', icon: Globe2 },
   ]
 
-  return (
-    <SidebarMotion className={`fox-sidebar ${collapsed ? 'is-collapsed' : ''} ${!['chat', 'local-knowledge'].includes(sidebarMode) ? 'is-management' : ''} ${notificationsOpen ? 'is-notifications' : ''}`}>
-      {/* Chat and 资料库 have nothing left in this strip once collapsed, and
-          keeping a row-height block there would push the rail's first icon down
-          away from the title bar. */}
-      {!(collapsed && showSidebarUtilities) && <div className="fox-sidebar-title-safe">
-        {!['chat', 'local-knowledge'].includes(sidebarMode) ? <button type="button" className="fox-management-back" aria-label="返回" title="返回" onClick={goBack}><ArrowLeft size={16} /><span>返回</span></button> : (collapsed ? null : <span className="fox-window-safe" />)}
-      </div>}
-
-      {collapsed && showSidebarUtilities && <div className="fox-sidebar-collapsed-rail">
-        <Tooltip>
-          <TooltipTrigger asChild><AnimatedIconTrigger><button type="button" className="fox-sidebar-mode-switch" aria-label={selectedMode === 'assistant' ? '切换到知识' : '切换到助手'} onClick={() => onModeChange(selectedMode === 'assistant' ? 'knowledge' : 'assistant')}>{selectedMode === 'assistant' ? <BookCopy /> : <Sparkles />}</button></AnimatedIconTrigger></TooltipTrigger>
-          <TooltipContent side="right"><p>{selectedMode === 'assistant' ? '切换到知识' : '切换到助手'}</p></TooltipContent>
-        </Tooltip>
-        <span className="fox-sidebar-rail-divider" aria-hidden="true" />
-        {/* 文件 / 对话 stay next to the menus; search, notifications, settings and
-            projects fall under the divider. */}
-        <Tooltip>
-          <TooltipTrigger asChild><AnimatedIconTrigger><button type="button" className="fox-sidebar-collapsed-home" aria-label="展开侧栏" onClick={onExpand}><PanelLeftOpen /></button></AnimatedIconTrigger></TooltipTrigger>
-          <TooltipContent side="right"><p>展开侧栏{toggleSidebarShortcut ? `（${toggleSidebarShortcut}）` : ''}</p></TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild><AnimatedIconTrigger><button type="button" className={`fox-sidebar-mode-switch ${sidebarMode === 'chat' && !newChatActive && activeConversationId ? 'is-active' : ''}`} aria-label="对话" aria-pressed={sidebarMode === 'chat' && !newChatActive} onClick={() => { if (sidebarMode === 'chat') onNewChat(); else onModeChange('assistant') }}><MessageCirclePlus /></button></AnimatedIconTrigger></TooltipTrigger>
-          <TooltipContent side="right"><p>对话</p></TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild><AnimatedIconTrigger><button type="button" className={`fox-sidebar-mode-switch ${LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView) ? 'is-active' : ''}`} aria-label="文件" aria-pressed={LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView)} onClick={() => onNavigate('local-knowledge')}><Library /></button></AnimatedIconTrigger></TooltipTrigger>
-          <TooltipContent side="right"><p>文件</p></TooltipContent>
-        </Tooltip>
-        <span className="fox-sidebar-rail-divider" aria-hidden="true" />
-        <AnimatedIconTrigger><button type="button" className="fox-sidebar-search-trigger" onClick={toggleSearch} aria-label="搜索" title={searchTitle}><Search size={16} /></button></AnimatedIconTrigger>
-        <AnimatedIconTrigger><button type="button" className={`fox-sidebar-search-trigger ${notificationsOpen ? 'is-active' : ''}`} onClick={() => changeNotificationsOpen(!notificationsOpen)} aria-label="通知" title="通知" aria-pressed={notificationsOpen}><Bell size={16} /></button></AnimatedIconTrigger>
-      </div>}
-
-      {/* In management views the compact strip keeps only the way back: a
-          full-height button would be taller than the strip it replaces. */}
-      {collapsed && sidebarMode !== 'chat' && sidebarMode !== 'local-knowledge' && <div className="fox-sidebar-collapsed-rail is-management">
-        <button type="button" className="fox-management-back fox-sidebar-collapsed-back" aria-label="返回" title="返回" onClick={goBack}><ArrowLeft size={16} /></button>
-      </div>}
-
-      {showSidebarUtilities && !collapsed && (
-        <div className="fox-sidebar-mode-row">
-          <SidebarModeTabs value={selectedMode} onValueChange={(value) => onModeChange(value as AssistantMode)}>
-              <AnimatedIconTrigger><SidebarModeTab value="assistant"><Sparkles />助手</SidebarModeTab></AnimatedIconTrigger>
-              {/* The trigger has to be wrapped, not the icon: AnimatedIconTrigger
-                  injects its hover/focus handlers onto whatever it wraps, so an
-                  icon-level wrapper leaves the label and padding as dead zones
-                  and the animation only fires over the 14px glyph. */}
-              <AnimatedIconTrigger><SidebarModeTab value="knowledge"><BookCopy />资料</SidebarModeTab></AnimatedIconTrigger>
-            </SidebarModeTabs>
-          <div className="fox-sidebar-mode-actions"><AnimatedIconTrigger><button type="button" className={`fox-sidebar-search-trigger ${searchOpen ? 'is-active' : ''}`} onClick={toggleSearch} aria-label="搜索" title={searchTitle}><Search /></button></AnimatedIconTrigger></div>
-        </div>
-      )}
-
-      {/* The rail versions of these rows live in .fox-sidebar-collapsed-rail, so
-          the expanded list is simply absent while collapsed. */}
-      {/* `is-expanded-row` keeps the label and shortcut in the DOM while collapsed;
-          the rail clips overflow, so the row slides out instead of the layout
-          reflowing for the whole width animation. The rail copies in
-          .fox-sidebar-collapsed-rail take over once it has collapsed. */}
-      {sidebarMode === 'chat' && <div className={`fox-sidebar-primary ${collapsed ? 'is-expanded-row' : ''}`} aria-hidden={collapsed || undefined}>
-        <SidebarMotionItem><button className={`fox-sidebar-command is-emphasis ${newChatActive ? 'is-active' : ''}`} type="button" aria-label="新建对话" aria-current={newChatActive ? 'page' : undefined} tabIndex={collapsed ? -1 : undefined} onClick={onNewChat}><MessageCirclePlus size={18} /><span>新建对话</span>{newConversationShortcut && <kbd>{newConversationShortcut}</kbd>}</button></SidebarMotionItem>
-        <SidebarMotionItem><button className={`fox-sidebar-command starts-destination-group ${agentViews.includes(activeView) ? 'is-active' : ''}`} type="button" aria-label="专家" aria-current={agentViews.includes(activeView) ? 'page' : undefined} tabIndex={collapsed ? -1 : undefined} onClick={() => onNavigate('agents')}><Users size={18} /><span>专家</span></button></SidebarMotionItem>
-        <SidebarMotionItem><button className={`fox-sidebar-command ${activeView === 'plugins' ? 'is-active' : ''}`} type="button" aria-label="插件" aria-current={activeView === 'plugins' ? 'page' : undefined} tabIndex={collapsed ? -1 : undefined} onClick={() => onNavigate('plugins')}><Blocks size={18} /><span>插件</span></button></SidebarMotionItem>
-      </div>}
-
-      {sidebarMode === 'chat' ? <>{!notificationsOpen && !collapsed && (
-        <div className="fox-sidebar-list-pane">
+  const conversationList = useMemo(() => (
         <ScrollArea className="fox-sidebar-scroll fox-sidebar-group-scroll">
-          {lifecycleView === 'active' && <section ref={projectSectionRef} className="fox-sidebar-section">
+          {lifecycleView === 'active' && <section className="fox-sidebar-section">
             <div className="fox-section-head fox-sidebar-group-head"><span>项目</span><span><IconButton label="添加项目" onClick={onAddProject}><Plus size={14} /></IconButton><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多项目操作"><MoreHorizontal size={14} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-project-menu"><DropdownMenuItem onSelect={onAddProject}><Plus />添加项目</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(true)}><ChevronDown />全部展开</DropdownMenuItem><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(false)}><ChevronRight />全部收起</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目权限</DropdownMenuItem></DropdownMenuContent></DropdownMenu></span></div>
             {projectGroups.length ? projectGroups.map((project) => {
               const open = projectOpen[project.key] ?? true
@@ -469,8 +354,7 @@ export function Sidebar({
                   <ContextMenu key={item.id}>
                     <ContextMenuTrigger asChild>
                       <SidebarMotionItem><div className={`fox-sidebar-tree-row fox-project-conversation-row ${item.active ? 'is-active' : ''}`}>
-                        <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><span>{item.title}</span></button>
-                        <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
+                        <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
                         <span className="fox-sidebar-row-time">{item.time}</span>
                         <span className="fox-sidebar-row-actions">
                           <DropdownMenu>
@@ -499,7 +383,7 @@ export function Sidebar({
             }) : <p className="fox-project-empty">暂无项目对话</p>}
           </section>}
 
-          <section ref={conversationSectionRef} className="fox-sidebar-section fox-conversation-section">
+          <section className="fox-sidebar-section fox-conversation-section">
             <div className="fox-section-head fox-sidebar-group-head">
               <span>{lifecycleView === 'archived' ? '已归档' : lifecycleView === 'trash' ? '回收站' : '对话'}</span>
               <span>
@@ -515,12 +399,11 @@ export function Sidebar({
               </span>
             </div>
             <div className="fox-conversation-list">
-              {visibleConversations.map((item) => (
+              {sidebarDateGroups(visibleConversations).map((group) => <section className="fox-sidebar-date-group" key={group.key}><h3 className="fox-sidebar-date-heading"><MessageCircleMore size={14} /><span>{group.label}</span></h3>{group.items.map((item) => (
                 <ContextMenu key={item.id}>
                   <ContextMenuTrigger asChild>
                     <SidebarMotionItem><div className={`fox-sidebar-tree-row ${item.active ? 'is-active' : ''}`}>
-                      <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><MessageCircleMore size={14} /><span>{item.title}</span></button>
-                      <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
+                      <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
                       <span className="fox-sidebar-row-time">{item.time}</span>
                       <span className="fox-sidebar-row-actions">
                         <DropdownMenu>
@@ -562,11 +445,66 @@ export function Sidebar({
                   </>}
                   </ContextMenuContent>
                 </ContextMenu>
-              ))}
+              ))}</section>)}
               {!visibleConversations.length && <p className="fox-project-empty">{lifecycleView === 'archived' ? '没有已归档的对话' : lifecycleView === 'trash' ? '回收站是空的' : '还没有对话，开始聊聊吧'}</p>}
             </div>
           </section>
         </ScrollArea>
+  ), [lifecycleView, projectGroups, projectOpen, visibleConversations, runIndicators,
+    onAddProject, onNewChat, onNewProjectChat, onNavigate, onPinProject, onDeleteProject,
+    onOpenConversation, onPinConversation, onRenameConversation, onArchiveConversation,
+    onTrashConversation, onUnarchiveConversation, onRestoreConversation, onPurgeConversation,
+    setAllProjectsOpen])
+
+  return (
+    <SidebarMotion className={`fox-sidebar ${collapsed ? 'is-collapsed' : ''} ${!['chat', 'local-knowledge'].includes(sidebarMode) ? 'is-management' : ''} ${notificationsOpen ? 'is-notifications' : ''}`}>
+      {/* Chat and 资料库 have nothing left in this strip once collapsed, and
+          keeping a row-height block there would push the rail's first icon down
+          away from the title bar. */}
+      {!(collapsed && showSidebarUtilities) && <div className="fox-sidebar-title-safe">
+        {!['chat', 'local-knowledge'].includes(sidebarMode) ? <button type="button" className="fox-management-back" aria-label="返回" title="返回" onClick={goBack}><ArrowLeft size={16} /><span>返回</span></button> : (collapsed ? null : <span className="fox-window-safe" />)}
+      </div>}
+
+      {collapsed && showSidebarUtilities && <div className="fox-sidebar-collapsed-rail">
+        <Tooltip>
+          <AnimatedIconTrigger><TooltipTrigger asChild><button type="button" className="fox-sidebar-mode-switch" aria-label={selectedMode === 'assistant' ? '切换到资料' : '切换到助手'} onClick={() => onModeChange(selectedMode === 'assistant' ? 'knowledge' : 'assistant')}>{selectedMode === 'assistant' ? <BookCopy /> : <Sparkles />}</button></TooltipTrigger></AnimatedIconTrigger>
+          <TooltipContent side="right"><p>{selectedMode === 'assistant' ? '切换到资料' : '切换到助手'}</p></TooltipContent>
+        </Tooltip>
+        <AnimatedIconTrigger><button type="button" className="fox-sidebar-search-trigger" onClick={toggleSearch} aria-label="搜索" title={searchTitle}><Search size={16} /></button></AnimatedIconTrigger>
+        <AnimatedIconTrigger><button type="button" className={`fox-sidebar-search-trigger ${notificationsOpen ? 'is-active' : ''}`} onClick={() => changeNotificationsOpen(!notificationsOpen)} aria-label="通知" title="通知" aria-pressed={notificationsOpen}><Bell size={16} /></button></AnimatedIconTrigger>
+      </div>}
+
+      {/* In management views the compact strip keeps only the way back: a
+          full-height button would be taller than the strip it replaces. */}
+      {collapsed && sidebarMode !== 'chat' && sidebarMode !== 'local-knowledge' && <div className="fox-sidebar-collapsed-rail is-management">
+        <button type="button" className="fox-management-back fox-sidebar-collapsed-back" aria-label="返回" title="返回" onClick={goBack}><ArrowLeft size={16} /></button>
+      </div>}
+
+      {showSidebarUtilities && !collapsed && (
+        <div className="fox-sidebar-mode-row">
+          <SidebarModeTabs value={selectedMode} onValueChange={(value) => onModeChange(value as AssistantMode)}>
+              <AnimatedIconTrigger><SidebarModeTab value="assistant"><Sparkles />助手</SidebarModeTab></AnimatedIconTrigger>
+              {/* The trigger has to be wrapped, not the icon: AnimatedIconTrigger
+                  injects its hover/focus handlers onto whatever it wraps, so an
+                  icon-level wrapper leaves the label and padding as dead zones
+                  and the animation only fires over the 14px glyph. */}
+              <AnimatedIconTrigger><SidebarModeTab value="knowledge"><BookCopy />资料</SidebarModeTab></AnimatedIconTrigger>
+            </SidebarModeTabs>
+          <div className="fox-sidebar-mode-actions"><AnimatedIconTrigger><button type="button" className={`fox-sidebar-search-trigger ${searchOpen ? 'is-active' : ''}`} onClick={toggleSearch} aria-label="搜索" title={searchTitle}><Search /></button></AnimatedIconTrigger></div>
+        </div>
+      )}
+
+      {sidebarMode === 'chat' && <div className="fox-sidebar-primary">
+        <SidebarMotionItem><button className={`fox-sidebar-command is-emphasis ${newChatActive ? 'is-active' : ''}`} type="button" aria-label="新建对话" aria-current={newChatActive ? 'page' : undefined} onClick={onNewChat}><MessageCirclePlus size={18} /><span>新建对话</span>{newConversationShortcut && <kbd>{newConversationShortcut}</kbd>}</button></SidebarMotionItem>
+        <SidebarMotionItem><button className={`fox-sidebar-command starts-destination-group ${agentViews.includes(activeView) ? 'is-active' : ''}`} type="button" aria-label="专家" aria-current={agentViews.includes(activeView) ? 'page' : undefined} onClick={() => onNavigate('agents')}><Users size={18} /><span>专家</span></button></SidebarMotionItem>
+        <SidebarMotionItem><button className={`fox-sidebar-command ${activeView === 'plugins' ? 'is-active' : ''}`} type="button" aria-label="插件" aria-current={activeView === 'plugins' ? 'page' : undefined} onClick={() => onNavigate('plugins')}><Blocks size={18} /><span>插件</span></button></SidebarMotionItem>
+      </div>}
+
+      {!notificationsOpen && collapsed && sidebarMode === 'chat' && <SidebarCollapsedMenus projects={projectGroups} conversations={visibleConversations} indicators={runIndicators} onOpen={onOpenConversation} />}
+
+      {sidebarMode === 'chat' ? <>{!notificationsOpen && (
+        <div className="fox-sidebar-list-pane" hidden={collapsed}>
+        {conversationList}
         </div>
       )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} hideLibrary={notificationsOpen} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : !notificationsOpen ? <>
         <div className={`fox-sidebar-primary fox-context-sidebar-nav ${sidebarMode === 'settings' ? 'is-settings' : ''}`}>
@@ -596,87 +534,6 @@ export function Sidebar({
       />
 
       <div className="fox-sidebar-spacer" />
-      {!notificationsOpen && collapsed && sidebarMode === 'chat' && <div className="fox-sidebar-collapsed-sections" aria-label="项目与对话">
-        <div
-          className="fox-sidebar-collapsed-entry"
-          onMouseEnter={() => openCollapsedSection('projects')}
-          onMouseLeave={closeCollapsedSection}
-        >
-          <button
-            type="button"
-            className={collapsedSection === 'projects' ? 'is-active' : undefined}
-            aria-label={`展开项目列表，共 ${projectGroups.length} 个项目`}
-            title={`项目 · ${projectGroups.length}`}
-            onFocus={() => openCollapsedSection('projects')}
-            onClick={() => revealSidebarSection('projects')}
-          >
-            <Folders />
-            <span className="fox-sidebar-collapsed-count">{projectGroups.length}</span>
-          </button>
-          {collapsedSection === 'projects' && <div className="fox-sidebar-collapsed-popover fox-sidebar-project-popover" role="menu" aria-label="项目列表">
-            <header>项目</header>
-            {projectGroups.length ? projectGroups.map((project) => <div
-              className="fox-sidebar-hover-project"
-              key={project.key}
-              onMouseEnter={() => setCollapsedProjectKey(project.key)}
-              onFocus={() => setCollapsedProjectKey(project.key)}
-            >
-              <button
-                type="button"
-                role="menuitem"
-                title={project.root}
-                onClick={() => { const firstConversation = project.items[0]; if (firstConversation) onOpenConversation(firstConversation.id) }}
-              >
-                <FolderOpen />
-                <span>{project.name}</span>
-                <small>{project.items.length}</small>
-                <ChevronRight className="fox-sidebar-hover-project-chevron" />
-              </button>
-              {collapsedProjectKey === project.key && <div className="fox-sidebar-collapsed-popover fox-sidebar-conversations-popover" role="menu" aria-label={`${project.name} 对话`}>
-                <header>{project.name}</header>
-                {project.items.map((item) => {
-                  const indicator = runIndicators?.get(item.id)
-                  return <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={indicator ? `${item.title} · ${CONVERSATION_RUN_LABELS[indicator]}` : item.title}>
-                  <MessageCircleMore />
-                  <span>{item.title}</span>
-                  <ConversationRunStatus indicator={indicator} className="fox-sidebar-collapsed-run" />
-                  {item.time && <time>{item.time}</time>}
-                </button>
-                })}
-              </div>}
-            </div>) : <p className="fox-sidebar-collapsed-empty">添加项目，集中管理对话和文件</p>}
-          </div>}
-        </div>
-        <div
-          className="fox-sidebar-collapsed-entry"
-          onMouseEnter={() => openCollapsedSection('conversations')}
-          onMouseLeave={closeCollapsedSection}
-        >
-          <button
-            type="button"
-            className={collapsedSection === 'conversations' ? 'is-active' : undefined}
-            aria-label={`展开对话列表，共 ${visibleConversations.length} 个对话`}
-            title={`对话 · ${visibleConversations.length}`}
-            onFocus={() => openCollapsedSection('conversations')}
-            onClick={() => revealSidebarSection('conversations')}
-          >
-            <MessageCircleMore />
-            <span className="fox-sidebar-collapsed-count">{visibleConversations.length}</span>
-          </button>
-          {collapsedSection === 'conversations' && <div className="fox-sidebar-collapsed-popover fox-sidebar-conversations-list-popover" role="menu" aria-label="对话列表">
-            <header>对话</header>
-            {visibleConversations.length ? visibleConversations.map((item) => {
-              const indicator = runIndicators?.get(item.id)
-              return <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={indicator ? `${item.title} · ${CONVERSATION_RUN_LABELS[indicator]}` : item.title}>
-              <MessageCircleMore />
-              <span>{item.title}</span>
-              <ConversationRunStatus indicator={indicator} className="fox-sidebar-collapsed-run" />
-              {item.time && <time>{item.time}</time>}
-            </button>
-            }) : <p className="fox-sidebar-collapsed-empty">还没有对话，开始聊聊吧</p>}
-          </div>}
-        </div>
-      </div>}
       <div className="fox-sidebar-footer">
         <div className="fox-sidebar-user-menu"><UserMenu
           user={{ name: profileName, email: profileDetail, avatarSrc: profile.avatar, plan: yuxiService?.status === 'connected' && yuxiUser ? '已连接资料库' : undefined }}

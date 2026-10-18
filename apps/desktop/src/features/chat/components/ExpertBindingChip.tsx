@@ -1,4 +1,4 @@
-import { CheckCircle2, ChevronDown, Eye, PackageX, RefreshCw, Sparkles, Trash2, WifiOff } from 'lucide-react'
+import { CheckCircle2, Eye, PackageX, RefreshCw, Sparkles, Trash2, WifiOff } from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -7,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import type { AgentRecord, ConversationExpertBinding } from '@/features/conversations/model/types'
+import { FOX_ASSISTANT_AVATAR } from './FoxAssistantAvatar'
 import type { ExpertToolAvailability } from './expert-binding-ui'
 
 export type ExpertBindingView = ConversationExpertBinding
@@ -18,29 +19,27 @@ function ExpertIcon({ icon, name }: { icon?: string | null; name: string }) {
   </span>
 }
 
-// The menu is deliberately just the three actions (details / change / remove): the
-// capability summary row that used to sit on top of it is gone. `toolAvailability`
-// stays in the prop type because callers still pass it, but nothing renders it now.
-export function ExpertBindingChip({ expert, readOnly, onView, onChange, onRemove }: {
+// Removal stays optional for callers that allow an unbound expert state.
+export function ExpertBindingChip({ expert, readOnly, onView, onChange, onRemove, defaultLabel = false }: {
   expert: AgentRecord
   readOnly: boolean
   toolAvailability?: ExpertToolAvailability
   onView: () => void
   onChange: () => void
-  onRemove: () => void | Promise<void>
+  onRemove?: () => void | Promise<void>
+  defaultLabel?: boolean
 }) {
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger className="fox-expert-chip" title={`当前专家：${expert.name}`}>
-        <ExpertIcon icon={expert.icon} name={expert.name} />
-        <span>{expert.name}</span>
-        <ChevronDown size={12} />
+      <DropdownMenuTrigger className="fox-expert-chip" data-default-expert={defaultLabel || undefined} title={`当前专家：${expert.name}`}>
+        <ExpertIcon icon={expert.icon || (defaultLabel ? FOX_ASSISTANT_AVATAR : undefined)} name={expert.name} />
+        <span>{defaultLabel ? '默认专家' : expert.name}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" sideOffset={7} className="fox-expert-menu">
         <DropdownMenuItem onSelect={onView}><Eye />查看详情</DropdownMenuItem>
         <DropdownMenuItem disabled={readOnly} onSelect={onChange}><RefreshCw />更换专家</DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem className="fox-expert-remove" disabled={readOnly} onSelect={() => void onRemove()}><Trash2 />移除专家</DropdownMenuItem>
+        {onRemove && <><DropdownMenuSeparator />
+        <DropdownMenuItem className="fox-expert-remove" disabled={readOnly} onSelect={() => void onRemove()}><Trash2 />移除专家</DropdownMenuItem></>}
       </DropdownMenuContent>
     </DropdownMenu>
   )

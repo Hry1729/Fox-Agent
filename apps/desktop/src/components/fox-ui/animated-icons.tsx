@@ -2,12 +2,14 @@ import { cloneElement, type ComponentProps, type ComponentType, type ReactElemen
 import { MessageCirclePlus as StaticMessageCirclePlus, Users as StaticUsers, Blocks as StaticBlocks, PanelLeft as StaticPanelLeft, PanelLeftOpen as StaticPanelLeftOpen, PanelRight as StaticPanelRight, Settings as StaticSettings, SunMoon as StaticSunMoon, Maximize as StaticMaximize, Minimize as StaticMinimize, Search as StaticSearch, Bell as StaticBell, Wallet as StaticWallet, Folders as StaticFolders, Library as StaticLibrary, Orbit as StaticOrbit, ListTodo as StaticListTodo, BookCopy as StaticBookCopy, House as StaticHouse, Sparkles as StaticSparkles, AlignLeft as StaticAlignLeft } from 'lucide-react'
 import type { AnimateIconProps, IconProps } from '@/components/animate-ui/icons/icon'
 import { deferredModule } from './use-deferred-module'
+import { MessageCircleMore as StaticMessageCircleMore } from 'lucide-react'
+import { ArrowLeft as StaticArrowLeft, ArrowRight as StaticArrowRight } from 'lucide-react'
 
 const implementation = deferredModule(() => import('./animated-icons-implementation'))
 export type { IconProps, AnimateIconProps } from '@/components/animate-ui/icons/icon'
 export type AnimatedIconTriggerProps = Omit<AnimateIconProps, 'asChild' | 'children' | 'loop' | 'animate' | 'animateOnView'> & { children: ReactElement }
 
-function icon(name: 'MessageCirclePlus' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelLeftOpen' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles' | 'AlignLeft', Fallback: typeof StaticBell) {
+function icon(name: 'ArrowLeft' | 'ArrowRight' | 'MessageCirclePlus' | 'MessageCircleMore' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelLeftOpen' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles' | 'AlignLeft', Fallback: typeof StaticBell) {
   return function DeferredIcon(props: IconProps<string>) {
     const loaded = implementation.useModule()
     if (loaded) { const Icon = loaded[name] as ComponentType<IconProps<string>>; return <Icon {...props} /> }
@@ -17,6 +19,9 @@ function icon(name: 'MessageCirclePlus' | 'Users' | 'Blocks' | 'PanelLeft' | 'Pa
   }
 }
 export const MessageCirclePlus = icon('MessageCirclePlus', StaticMessageCirclePlus)
+export const ArrowLeft = icon('ArrowLeft', StaticArrowLeft)
+export const ArrowRight = icon('ArrowRight', StaticArrowRight)
+export const MessageCircleMore = icon('MessageCircleMore', StaticMessageCircleMore)
 export { MessageCirclePlus as MessageCirclePlusIcon }
 export const Users = icon('Users', StaticUsers)
 export { Users as UsersIcon }

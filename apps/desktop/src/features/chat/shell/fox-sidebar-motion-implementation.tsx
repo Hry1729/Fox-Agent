@@ -12,16 +12,23 @@ export function SidebarHighlight({ container, active }: { container: RefObject<H
     previousActive.current = active
     if (!active || !container.current) { setVisible(false); return }
     setVisible(true)
-    let frame: number
+    let frame = 0
     const measure = () => {
       if (!active.isConnected || !container.current) { previousActive.current = null; setVisible(false); return }
       const parent = container.current.getBoundingClientRect(), rect = active.getBoundingClientRect()
       const next = { top: rect.top - parent.top, left: rect.left - parent.left, width: rect.width, height: rect.height }
       setBounds(previous => previous && Object.keys(next).every(key => previous[key as keyof typeof next] === next[key as keyof typeof next]) ? previous : next)
-      frame = requestAnimationFrame(measure)
     }
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure) }
+    const observer = new ResizeObserver(schedule)
+    observer.observe(active)
+    observer.observe(container.current)
+    const parent = container.current
+    parent.addEventListener('scroll', schedule, true)
+    const mutations = new MutationObserver(schedule)
+    mutations.observe(parent, { childList: true, subtree: true })
     measure()
-    return () => cancelAnimationFrame(frame)
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); mutations.disconnect(); parent.removeEventListener('scroll', schedule, true) }
   }, [active, container])
   if (!bounds) return null
   // Preserve the exit rectangle; fresh entries fade at the target without travelling.

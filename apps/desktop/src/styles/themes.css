@@ -28,6 +28,7 @@
   --fox-radius-large: 12px;
   --fox-radius-overlay: 12px;
   --background: oklch(1 0 0);
+  --chat-background: oklch(0.988 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
@@ -70,6 +71,7 @@
 :root.dark,
 [data-color-theme="graphite"].dark {
   --background: oklch(0.145 0 0);
+  --chat-background: var(--background);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.18 0 0);
   --card-foreground: oklch(0.985 0 0);
@@ -119,6 +121,7 @@
   --fox-radius-large: 20px;
   --fox-radius-overlay: 20px;
   --background: oklch(0.982 0.008 85);
+  --chat-background: oklch(0.991 0.004 85);
   --foreground: oklch(0.24 0.012 60);
   --card: oklch(0.995 0.003 85);
   --card-foreground: oklch(0.24 0.012 60);
@@ -160,6 +163,7 @@
 }
 [data-color-theme="paper"].dark {
   --background: oklch(0.235 0.008 70);
+  --chat-background: var(--background);
   --foreground: oklch(0.955 0.008 85);
   --card: oklch(0.27 0.009 70);
   --card-foreground: oklch(0.955 0.008 85);
@@ -204,6 +208,7 @@
   --fox-radius-large: 14px;
   --fox-radius-overlay: 16px;
   --background: oklch(1 0 0);
+  --chat-background: oklch(0.993 0.003 250);
   --foreground: oklch(0.2 0.015 245);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.2 0.015 245);
@@ -245,6 +250,7 @@
 }
 [data-color-theme="mist"].dark {
   --background: oklch(0.19 0.02 250);
+  --chat-background: var(--background);
   --foreground: oklch(0.97 0.006 245);
   --card: oklch(0.23 0.022 250);
   --card-foreground: oklch(0.97 0.006 245);

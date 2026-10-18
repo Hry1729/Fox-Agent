@@ -45,6 +45,22 @@
 .fox-sidebar-icon-trigger {
   display: contents;
 }
+.fox-sidebar .fox-sidebar-list-pane[hidden] { display: none; }
+
+.fox-sidebar-flyout {
+  z-index: 150;
+  width: min(280px, calc(100vw - 16px));
+  max-height: min(420px, var(--radix-dropdown-menu-content-available-height, calc(100dvh - 56px)));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.fox-sidebar-flyout [role='menuitem'] { min-width: 0; min-height: 34px; gap: 8px; }
+.fox-sidebar-flyout-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fox-sidebar-flyout time, .fox-sidebar-flyout small { flex: none; color: var(--muted-foreground); font-size: 11px; }
+.fox-sidebar-flyout [data-slot='dropdown-menu-label'] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fox-sidebar-flyout .is-active { background: var(--accent); }
 .fox-sidebar [data-highlight='true'] {
   position: relative;
   z-index: 1;

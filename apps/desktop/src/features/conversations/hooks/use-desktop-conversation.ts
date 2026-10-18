@@ -44,7 +44,19 @@ interface ConversationDeleteResult {
   error: string | null
 }
 
+export interface ConversationDraftSnapshot {
+  agentId: string | null
+  expertId: string | null
+  projectRoot: string | null
+  permissionMode: ProjectRecord['permissionMode'] | null
+  knowledgeBases: KnowledgeBaseRecord[]
+  knowledgeReferences?: KnowledgeReference[]
+  knowledgeNames?: Record<string, string>
+}
+
 interface DesktopConversationState {
+  captureDraft: () => ConversationDraftSnapshot
+  restoreDraft: (draft: ConversationDraftSnapshot) => void
   enabled: boolean
   ready: boolean
   conversations: ConversationSummary[]
@@ -195,15 +207,7 @@ export function useDesktopConversation(): DesktopConversationState {
   const [draftKnowledgeBases, setDraftKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
   const [draftKnowledgeReferences, setDraftKnowledgeReferences] = useState<KnowledgeReference[] | undefined>(undefined)
   const [draftKnowledgeNames, setDraftKnowledgeNames] = useState<Record<string, string>>({})
-  const draftRef = useRef<{
-    agentId: string | null
-    expertId: string | null
-    projectRoot: string | null
-    permissionMode: ProjectRecord['permissionMode'] | null
-    knowledgeBases: KnowledgeBaseRecord[]
-    knowledgeReferences?: KnowledgeReference[]
-    knowledgeNames?: Record<string, string>
-  }>({ agentId: null, expertId: null, projectRoot: null, permissionMode: null, knowledgeBases: [] })
+  const draftRef = useRef<ConversationDraftSnapshot>({ agentId: null, expertId: null, projectRoot: null, permissionMode: null, knowledgeBases: [] })
   const [error, setError] = useState<string | null>(null)
   const [errorDetails, setErrorDetails] = useState<DesktopErrorDetails | null>(null)
   const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false)
@@ -256,6 +260,13 @@ export function useDesktopConversation(): DesktopConversationState {
     knowledgeReferences: detail.knowledgeReferences ?? detail.knowledgeBindings.map(knowledgeReferenceFromLegacyBinding),
     knowledgeNames: Object.fromEntries(detail.knowledgeBindings.map((binding) => [knowledgeReferenceKey(knowledgeReferenceFromLegacyBinding(binding)), binding.knowledgeBaseName ?? binding.knowledgeBaseId])),
   } : draftRef.current, [detail])
+
+  const restoreDraft = useCallback((draft: ConversationDraftSnapshot) => {
+    clearSelection()
+    applyDraft(draft)
+    setError(null)
+    setErrorDetails(null)
+  }, [applyDraft, clearSelection])
 
   const selectProject = useCallback((projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => {
     const draft = currentDraft()
@@ -1448,6 +1459,8 @@ export function useDesktopConversation(): DesktopConversationState {
   const { runIndicators, acknowledgeCompletion } = useConversationCompletionNotices(conversations, runOverlay, runOverlaySnapshotAt)
 
   return useMemo(() => ({
+    captureDraft: currentDraft,
+    restoreDraft,
     enabled: desktopRuntimeAvailable,
     ready,
     conversations,
@@ -1514,7 +1527,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

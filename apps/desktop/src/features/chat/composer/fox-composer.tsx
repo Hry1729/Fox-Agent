@@ -1,4 +1,7 @@
 import { ExpertBindingChip } from '../components/ExpertBindingChip'
+import { ComposerProjectBar } from './composer-project-bar'
+import { ComposerEntryContext } from './composer-entry-context'
+import { ComposerModelPicker } from './composer-model-picker'
 import { GoalProgress } from '../components/GoalProgress'
 import { ManagedFilesPanel } from '../components/ManagedFilesPanel'
 import { RunSteeringStrip } from '../components/RunSteeringStrip'
@@ -25,39 +28,34 @@ import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from '@
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { chatSelectableAgents } from '@/features/agents/agent-classification'
 import { type RunSteeringLane, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
 import { type RuntimeQuestion, type RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
 import { type AgentRecord, type ApprovalDecision, type ApprovalRecord, type KnowledgeBindingRecord, type KnowledgeReference, type ModelServiceRecord, type ProjectRecord, type TaskEvidenceRecord, type ToolCallRecord, type YuxiModelRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { ArrowUp, Check, ChevronDown, CircleHelp, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, X } from 'lucide-react'
-import { type ChangeEvent, type ComponentProps, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction, Suspense, lazy, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowUp, Eye, Play, Check, ChevronDown, CircleHelp, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, X } from 'lucide-react'
+import { type ChangeEvent, type ComponentProps, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction, Suspense, lazy, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { type SlashCommand, slashCommandRuntimeText, slashCommands } from './fox-slash-commands'
 import { ApprovalPrompt, QuestionPrompt } from '../demo/fox-demo-prompts'
 import { type ChatState, ComposerRuntimeContext, isConfirmationQuestion, layoutStorage } from '../fox-shared'
 import { compactValue } from '../timeline/fox-runtime-process-model'
 
-// Keep the send button's decorative metal ring out of the entry bundle; it
-// degrades to the plain button until its chunk lands.
-const MetalSendButton = lazy(() => import('@/components/effects/metal-send-button'))
 const RuntimeApprovalPrompt = lazy(() => import('../components/RuntimeApprovalPrompt').then(module => ({ default: module.RuntimeApprovalPrompt })))
 
 function ComposerBorderBeam({ enabled, ...props }: ComponentProps<typeof BorderBeam> & { enabled: boolean }) {
   return enabled ? <BorderBeam {...props} /> : <>{props.children}</>
 }
 
-function ComposerAttachmentPreview({ projectRoot, knowledgeChips = [], onProject, onKnowledge }: { projectRoot?: string | null; knowledgeChips?: Array<{ key: string; name: string }>; onProject?: () => void; onKnowledge?: () => void }) {
+function ComposerAttachmentPreview({ knowledgeChips = [], onKnowledge }: { knowledgeChips?: Array<{ key: string; name: string }>; onKnowledge?: () => void }) {
   const attachments = usePromptInputAttachments()
   const items: ReactNode[] = []
-  if (projectRoot) items.push(<button type="button" key="project" className="is-authorized" onClick={onProject} title={projectRoot}><FolderOpen size={13} /><span>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1)}</span><Check size={12} /></button>)
   knowledgeChips.forEach((chip) => {
     const label = chip.name
     items.push(<button type="button" key={chip.key} className="is-authorized is-knowledge" onClick={onKnowledge} title={label}><Library size={13} /><span>{label}</span><Check size={12} /></button>)
   })
   attachments.files.forEach((file) => items.push(<Attachment key={file.id} data={file} onRemove={() => attachments.remove(file.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove label="移除附件" /></Attachment>))
   if (!items.length) return null
-  const labels = [...(projectRoot ? [projectRoot] : []), ...knowledgeChips.map((chip) => chip.name), ...attachments.files.map((file) => file.filename || '附件')]
+  const labels = [...knowledgeChips.map((chip) => chip.name), ...attachments.files.map((file) => file.filename || '附件')]
   return (
     <Attachments variant="inline" className="fox-composer-attachments fox-composer-context fox-composer-selection-row">
       {items.slice(0, 3)}
@@ -131,6 +129,8 @@ export function readStoredSeenChanges() {
 
 function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, draft, setDraft, chatState, centered = false, newConversation, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
+  const entry = useContext(ComposerEntryContext)
+  const displayExpert = activeExpert ?? entry.defaultExpert
   const resolveRuntimeApproval = onResolveApproval
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
   const submitQuestion = onSubmitQuestion ?? runtimeContext.onSubmitQuestion
@@ -148,7 +148,6 @@ function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, 
       ?? enabledKnowledgeBindings.find((binding) => knowledgeReferenceKey(knowledgeReferenceFromLegacyBinding(binding)) === knowledgeReferenceKey(reference))?.knowledgeBaseName
       ?? reference.id,
   }))
-  const selectableAgents = chatSelectableAgents(agents)
   const openKnowledge = onKnowledge ?? runtimeContext.onKnowledge
   const [status, setStatus] = useState<'ready' | 'streaming'>('ready')
   const [focused, setFocused] = useState(false)
@@ -235,15 +234,18 @@ function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, 
     const composer = composerRef.current
     const prompt = promptRef.current
     const stage = composer?.closest<HTMLElement>('.fox-chat-stage')
-    if (!composer || !prompt || !stage || !onHeightChange) return
+    if (!composer || !prompt || !stage) return
 
     let animationFrame = 0
     const updateHeight = () => {
       window.cancelAnimationFrame(animationFrame)
       animationFrame = window.requestAnimationFrame(() => {
+        stage.style.setProperty('--fox-empty-composer-height', `${composer.getBoundingClientRect().height}px`)
+        const heading = stage.querySelector('.fox-empty-heading')
+        if (heading) stage.style.setProperty('--fox-empty-heading-height', `${heading.getBoundingClientRect().height}px`)
         const stageBottom = stage.getBoundingClientRect().bottom
         const composerTop = composer.getBoundingClientRect().top
-        onHeightChange(Math.ceil(Math.max(0, stageBottom - composerTop + 6)))
+        onHeightChange?.(Math.ceil(Math.max(0, stageBottom - composerTop + 6)))
       })
     }
 
@@ -252,6 +254,8 @@ function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, 
     observer.observe(stage)
     observer.observe(composer)
     observer.observe(prompt)
+    const heading = stage.querySelector('.fox-empty-heading')
+    if (heading) observer.observe(heading)
     window.addEventListener('resize', updateHeight)
 
     return () => {
@@ -260,6 +264,34 @@ function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, 
       window.removeEventListener('resize', updateHeight)
     }
   }, [onHeightChange])
+
+  useLayoutEffect(() => {
+    const composer = composerRef.current
+    const textarea = composer?.querySelector('textarea')
+    if (!composer || !textarea || newConversation) return
+    let frame = 0
+    const measure = () => {
+      composer.classList.remove('is-expanded')
+      textarea.style.height = '0px'
+      const multiline = textarea.scrollHeight > 34
+      const hasAttachments = Boolean(composer.querySelector('.fox-composer-attachments > *'))
+      composer.classList.toggle('is-expanded', multiline || hasAttachments)
+      textarea.style.height = '0px'
+      const height = Math.min(140, Math.max(32, textarea.scrollHeight))
+      textarea.style.height = `${height}px`
+      textarea.style.overflowY = textarea.scrollHeight > 140 ? 'auto' : 'hidden'
+    }
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure) }
+    measure()
+    let width = composer.clientWidth
+    const resize = new ResizeObserver(() => {
+      if (width !== composer.clientWidth) { width = composer.clientWidth; schedule() }
+    })
+    resize.observe(composer)
+    const mutations = new MutationObserver(schedule)
+    mutations.observe(composer, { childList: true, subtree: true })
+    return () => { cancelAnimationFrame(frame); resize.disconnect(); mutations.disconnect() }
+  }, [draft, newConversation])
 
   const onDraftChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const value = event.currentTarget.value
@@ -461,8 +493,6 @@ function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, 
     })
   }
 
-  // Rendered both as the metal ring's child and as the fallback the Suspense
-  // boundary shows until the (lazily loaded) metal engine arrives.
   const sendButton = <PromptInputSubmit
     status={status}
     disabled={runtimeInitializing && status === 'ready'}
@@ -516,12 +546,13 @@ function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, 
     </Button>
   </div>
 
-  const sendControls = centered
-    ? <Suspense fallback={sendButton}><MetalSendButton className="fox-send-metal" theme={dark ? 'dark' : 'light'}>{sendButton}</MetalSendButton></Suspense>
-    : sendButton
+  const sendControls = sendButton
+
+  const expertControl = displayExpert && onChangeExpert && <ExpertBindingChip expert={displayExpert} defaultLabel={!activeExpert} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={activeExpert ? onViewExpert ?? (() => {}) : entry.onViewDefaultExpert ?? (() => {})} onChange={onChangeExpert} />
+  const modelControl = isYuxiAgent ? <Models value={model} disabled={!supportsDynamicModelSwitch || chatState === 'running'} onValueChange={setModel} options={modelOptions.map(item => ({ id: item.spec, name: item.displayName || item.modelId, meta: item.providerDisplayName }))} fallbackLabel={defaultModel} /> : <ComposerModelPicker service={modelService} disabled={!runtimeControlled || chatState === 'running' || runtimeInitializing} onOpenSettings={entry.onOpenModelSettings} />
 
   return (
-    <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''}`}>
+    <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''} ${newConversation ? 'is-new-conversation' : 'is-history'}`}>
 
       <div ref={promptRef} className={`fox-prompt-shell ${decisionPending ? 'is-decision' : ''} ${approvalDecisionPending ? 'is-approval' : ''}`} onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
         {decisionPending ? <div className="fox-decision-card">
@@ -720,43 +751,39 @@ function Composer({ initialAttachments, onInitialAttachmentsConsumed, resetKey, 
         >
         <ComposerAttachmentCommandBridge openRef={attachmentDialogRef} />
         <ComposerInitialAttachmentBridge request={initialAttachments} onConsumed={onInitialAttachmentsConsumed} />
-        <ComposerAttachmentPreview projectRoot={runtimeControlled ? projectRoot : undefined} knowledgeChips={runtimeControlled ? knowledgeChips : []} onProject={onProject} onKnowledge={openKnowledge} />
+        <ComposerAttachmentPreview knowledgeChips={runtimeControlled ? knowledgeChips : []} onKnowledge={openKnowledge} />
         <PromptInputBody>
           <PromptInputTextarea value={draft} disabled={questionSubmitting} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…'} />
         </PromptInputBody>
         <PromptInputFooter className="fox-prompt-toolbar">
           <PromptInputTools className="fox-composer-tools">
-            <PromptInputActionMenu>
+            <PromptInputActionMenu modal={false}>
               <PromptInputActionMenuTrigger tooltip="添加内容" aria-label="添加内容"><Plus size={18} /></PromptInputActionMenuTrigger>
-              <PromptInputActionMenuContent className="fox-add-menu">
-                <PromptInputActionAddAttachments label="添加文件" />
-                {supportsImageInput && <PromptInputActionAddAttachments label="添加图片" />}
-                <PromptInputActionMenuItem disabled={!runtimeControlled} onSelect={() => onProject?.()}><FolderOpen />{projectRoot ? '更换项目' : '选择项目'}</PromptInputActionMenuItem>
-                <PromptInputActionMenuItem disabled={!runtimeControlled || expertReadOnly} onSelect={onChangeExpert}><Sparkles />添加专家</PromptInputActionMenuItem>
-                <PromptInputActionMenuItem onSelect={openKnowledge}><Library />{knowledgeChips.length ? `资料库（已选 ${knowledgeChips.length}）` : '选择资料库'}</PromptInputActionMenuItem>
+              <PromptInputActionMenuContent className={`fox-add-menu ${!newConversation ? 'fox-history-add-menu' : ''}`}>
+                <PromptInputActionAddAttachments label="添加附件" />
+                <PromptInputActionMenuItem onSelect={openKnowledge}><Library />添加资料库</PromptInputActionMenuItem>
+                {!newConversation && <div className="fox-history-menu-settings">{expertControl}{modelControl}</div>}
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             <PromptInputActionMenu>
-              <PromptInputActionMenuTrigger className="fox-execution-control" disabled={!runtimeControlled} tooltip="执行方式"><Terminal size={14} /><span>{{ ask: '执行前询问', allow: '自动执行', read_only: '只读模式' }[projectPermissionMode ?? 'ask']}</span><ChevronDown size={13} /></PromptInputActionMenuTrigger>
+              <PromptInputActionMenuTrigger className="fox-execution-control" disabled={!runtimeControlled} tooltip="执行方式">{projectPermissionMode === 'allow' ? <Play size={14} /> : projectPermissionMode === 'read_only' ? <Eye size={14} /> : <CircleHelp size={14} />}<span>{{ ask: '询问', allow: '自动', read_only: '只读' }[projectPermissionMode ?? 'ask']}</span></PromptInputActionMenuTrigger>
               <PromptInputActionMenuContent className="fox-add-menu fox-execution-menu">
                 {([['ask', '执行前询问'], ['allow', '自动执行'], ['read_only', '只读模式']] as const).map(([value, label]) => (
-                  <PromptInputActionMenuItem key={value} onSelect={() => void onPermissionModeChange?.(value)}><Terminal /><span>{label}</span>{(projectPermissionMode ?? 'ask') === value && <Check className="fox-menu-check" />}</PromptInputActionMenuItem>
+                  <PromptInputActionMenuItem key={value} onSelect={() => void onPermissionModeChange?.(value)}>{value === 'allow' ? <Play /> : value === 'read_only' ? <Eye /> : <CircleHelp />}<span>{label}</span>{(projectPermissionMode ?? 'ask') === value && <Check className="fox-menu-check" />}</PromptInputActionMenuItem>
                 ))}
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             {selectedSlashCommand && <button type="button" className="fox-command-mode-chip" title={`退出${selectedSlashCommand.modeLabel}模式`} onClick={() => setSelectedSlashCommand(null)}><span className="fox-command-mode-icon">{selectedSlashCommand.icon}</span><span>{selectedSlashCommand.modeLabel}</span><span className="fox-command-mode-close"><X size={10} /></span></button>}
-            {activeExpert && onViewExpert && onChangeExpert && onRemoveExpert && <ExpertBindingChip expert={activeExpert} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={onViewExpert} onChange={onChangeExpert} onRemove={onRemoveExpert} />}
+            {newConversation && expertControl}
           </PromptInputTools>
           <div className="fox-composer-submit">
-            <Models value={activeAgent?.id} disabled={!activeAgent} onValueChange={value => value !== activeAgent?.id && onAgentChange?.(value)} options={[
-              ...(activeAgent && !selectableAgents.some(item => item.id === activeAgent.id) ? [{ id: activeAgent.id, name: activeAgent.name, meta: '当前助手', disabled: true }] : []),
-              ...selectableAgents.map(item => ({ id: item.id, name: item.name, meta: item.defaultModel === 'configured-model' ? modelService?.modelId || '按助手设置' : item.defaultModel, disabled: !item.available })),
-            ]} />
+            {newConversation && modelControl}
             {steeringMode ? steeringControls : sendControls}
           </div>
         </PromptInputFooter>
         </PromptInput>
         </ComposerBorderBeam>}
+        {!decisionPending && newConversation && runtimeControlled && entry.onSelectProject && entry.onAddProject && <ComposerProjectBar projectRoot={projectRoot} projects={entry.projects} onSelect={entry.onSelectProject} onAdd={entry.onAddProject} />}
       </div>
     </div>
   )

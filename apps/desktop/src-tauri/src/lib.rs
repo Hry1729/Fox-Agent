@@ -38,6 +38,8 @@ mod vector_store;
 mod work_diagnostics;
 mod work_mode_gate;
 mod yuxi;
+#[cfg(windows)]
+mod window_resize;
 
 use app_state::AppState;
 use database::Database;
@@ -216,6 +218,10 @@ pub fn run() {
                     tauri::WebviewWindowBuilder::from_config(app,config)?
                         .data_directory(isolated_webview_dir.join(&config.label)).build()?;
                 }
+            }
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                window_resize::install(&window)?;
             }
             Ok(())
         })

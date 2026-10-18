@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Fox",
-        "width": 1200,
-        "height": 800,
+        "width": 1120,
+        "height": 768,
         "minWidth": 600,
         "minHeight": 560,
         "decorations": false,

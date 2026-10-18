@@ -1,57 +1,54 @@
 import { NewConversationMascot } from '../components/NewConversationMascot'
 import { ConversationEmptyState } from '@/components/ai-elements/conversation'
-import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
 import { type ArtifactRecord, type ConversationMessage } from '@/features/conversations/model/types'
-import { FileText, Globe2, ImagePlus, MessageCircleMore, Sparkles } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { splitAssistantContent } from './fox-assistant-content'
 
-/**
- * The classic new-conversation empty state: mascot heading plus the expert's
- * opening suggestions (or the default four). Clicking a suggestion fills the
- * composer draft via `onStart`. Shared by the legacy timeline and the
- * assistant-ui thread's empty state so both engines show the same screen.
- */
-export function ConversationEmptyPrompt({ suggestions, onStart }: { suggestions?: string[]; onStart: (suggestion: string) => void }) {
-  const starterSuggestions = suggestions?.map((item) => item.trim()).filter(Boolean).slice(0, 6)
-  const visibleSuggestions = starterSuggestions?.length ? starterSuggestions : [
-    '整理这个项目中的文档',
-    '从资料库查找相关资料',
-    '读取一个文件并帮我分析',
-    '帮我规划并完成一个任务',
-  ]
-  return (
-    <ConversationEmptyState className="fox-empty-conversation">
-      <div className="fox-empty-heading">
-        <NewConversationMascot />
-        <div className="fox-empty-heading-copy"><h2>今天想做什么？</h2><p>Fox 可以和你对话、处理本机文件，也可以从资料库中检索资料。</p></div>
-      </div>
-      <Suggestions className="fox-starter-suggestions">
-        {visibleSuggestions.map((suggestion) => <Suggestion key={suggestion} suggestion={suggestion} onClick={onStart} />)}
-      </Suggestions>
-    </ConversationEmptyState>
-  )
+export function ConversationEmptyPrompt(_props: { suggestions?: string[]; onStart: (suggestion: string) => void }) {
+  return <ConversationEmptyState className="fox-empty-conversation">
+    <div className="fox-empty-heading"><NewConversationMascot /><div className="fox-empty-heading-copy"><h2>今天想做什么？</h2><p>Fox 可以和你对话、处理本机文件，也可以从资料库中检索资料。</p></div></div>
+  </ConversationEmptyState>
+}
+
+function turnTarget(scope: Element, messageId: string): HTMLElement | null {
+  const anchor = scope.querySelector<HTMLElement>(`[data-turn-message-id="${CSS.escape(messageId)}"]`)
+  if (!anchor) return null
+  // display: contents anchors have no scrollable box; use their rendered message.
+  return getComputedStyle(anchor).display === 'contents' ? anchor.firstElementChild as HTMLElement | null : anchor
+}
+
+function turnViewport(target: HTMLElement): HTMLElement | null {
+  for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+    if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY) && parent.scrollHeight > parent.clientHeight) return parent
+  }
+  return null
 }
 
 export function ConversationTurnRail({ messages, artifacts }: { messages: ConversationMessage[]; artifacts: ArtifactRecord[] }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
   const railRef = useRef<HTMLElement | null>(null)
-  const turns = useMemo(() => messages.reduce<Array<{ user: ConversationMessage; assistant?: ConversationMessage; artifacts: ArtifactRecord[]; url?: string }>>((items, message) => {
+  const turns = useMemo(() => messages.reduce<Array<{ user: ConversationMessage; assistants: ConversationMessage[]; assistant?: ConversationMessage; preview?: string; artifacts: ArtifactRecord[]; url?: string }>>((items, message) => {
     if (message.role === 'user') {
-      items.push({ user: message, artifacts: [] })
+      items.push({ user: message, assistants: [], artifacts: [] })
       return items
     }
     if (message.role === 'assistant' && items.length) {
       const current = items.at(-1)!
-      if (!current.assistant) current.assistant = message
+      current.assistants.push(message)
     }
     return items
   }, []).map((turn) => {
-    const content = `${turn.user.content}\n${turn.assistant?.content ?? ''}`
+    const assistant = turn.assistants.at(-1)
+    const answer = [...turn.assistants].reverse().map(message => splitAssistantContent(message.content).answer.trim()).find(Boolean)
+    const runIds = new Set(turn.assistants.map(message => message.runId).filter(Boolean))
+    const files = artifacts.filter(artifact => runIds.has(artifact.runId))
+    const preview = answer || (files.length ? `已生成 ${files.length} 个文件` : assistant?.status === 'streaming' || assistant?.status === 'running' ? 'Fox 正在回复…' : '暂无文字回复')
+    const content = `${turn.user.content}\n${answer ?? ''}`
     return {
       ...turn,
-      artifacts: artifacts.filter((artifact) => Boolean(turn.assistant?.runId) && artifact.runId === turn.assistant?.runId).slice(0, 2),
+      assistant, preview,
+      artifacts: files,
       url: content.match(/https?:\/\/[^\s)]+/)?.[0],
     }
   }), [artifacts, messages])
@@ -62,24 +59,29 @@ export function ConversationTurnRail({ messages, artifacts }: { messages: Conver
       return
     }
     setActiveId((current) => current && turns.some((turn) => turn.user.id === current) ? current : turns.at(-1)!.user.id)
-    const root = railRef.current?.closest('.fox-conversation') ?? null
+    const scope = railRef.current?.closest('.fox-thread, .fox-conversation')
+    if (!scope) return
     const anchors = turns.flatMap((turn) => {
-      const anchor = document.getElementById(`fox-turn-${turn.user.id}`)
-      return anchor ? [anchor] : []
+      const target = turnTarget(scope, turn.user.id)
+      return target ? [{ target, id: turn.user.id }] : []
     })
-    if (!root || !anchors.length) return
+    if (!anchors.length) return
+    const root = turnViewport(anchors[0].target)
+    const ids = new Map(anchors.map(anchor => [anchor.target, anchor.id]))
     const visible = new Map<string, number>()
     const observer = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {
-        const id = (entry.target as HTMLElement).dataset.turnMessageId
+        const id = ids.get(entry.target as HTMLElement)
         if (!id) return
         if (entry.isIntersecting) visible.set(id, entry.intersectionRatio)
         else visible.delete(id)
       })
-      const current = [...visible.entries()].sort((left, right) => right[1] - left[1])[0]?.[0]
+      const top = (root?.getBoundingClientRect().top ?? 0) + 12
+      const positions = new Map(anchors.map(({ id, target }) => [id, Math.abs(target.getBoundingClientRect().top - top)]))
+      const current = [...visible.keys()].sort((left, right) => (positions.get(left) ?? Infinity) - (positions.get(right) ?? Infinity))[0]
       if (current) setActiveId(current)
     }, { root, threshold: [0.05, 0.25, 0.5, 0.8] })
-    anchors.forEach((anchor) => observer.observe(anchor))
+    anchors.forEach(({ target }) => observer.observe(target))
     return () => observer.disconnect()
   }, [turns])
 
@@ -87,19 +89,27 @@ export function ConversationTurnRail({ messages, artifacts }: { messages: Conver
   const hovered = turns.find((turn) => turn.user.id === hoveredId)
   const scrollToTurn = (messageId: string) => {
     setActiveId(messageId)
-    document.getElementById(`fox-turn-${messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    const scope = railRef.current?.closest('.fox-thread, .fox-conversation')
+    const target = scope ? turnTarget(scope, messageId) : null
+    if (!target) return
+    const viewport = turnViewport(target)
+    setHoveredId(null)
+    const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'
+    if (viewport) {
+      viewport.scrollTo({ top: viewport.scrollTop + target.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 12, behavior })
+    } else target.scrollIntoView({ behavior, block: 'start' })
   }
 
   return <nav ref={railRef} className="fox-conversation-rail" aria-label="当前对话历史导航" onMouseLeave={() => setHoveredId(null)}>
     <div className="fox-conversation-marks">{turns.map((turn, index) => <button type="button" key={turn.user.id} className={turn.user.id === activeId ? 'is-active' : ''} aria-label={`第 ${index + 1} 轮：${turn.user.content.slice(0, 40)}`} onMouseEnter={() => setHoveredId(turn.user.id)} onFocus={() => setHoveredId(turn.user.id)} onBlur={() => setHoveredId(null)} onClick={() => scrollToTurn(turn.user.id)}><span /></button>)}</div>
     <div className={`fox-conversation-preview ${hovered ? 'is-visible' : ''}`}>
-      <header><span><MessageCircleMore /></span><div><strong>{hovered?.user.content.slice(0, 58) || '对话回合'}</strong><small>{hovered ? `第 ${turns.indexOf(hovered) + 1} 轮 · ${new Date(hovered.user.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}</small></div></header>
-      <div className="fox-conversation-preview-answer"><small>Fox 回答</small><p>{splitAssistantContent(hovered?.assistant?.content ?? '').answer.slice(0, 180) || '正在等待 Fox 回答…'}</p></div>
-      <div className="fox-conversation-resources">
-        {hovered?.artifacts.map((artifact) => <span key={artifact.id}>{artifact.mediaType === 'text/html' || /html|web/i.test(artifact.artifactType) ? <Globe2 /> : artifact.mediaType?.startsWith('image/') ? <ImagePlus /> : <FileText />}<b>{artifact.displayName}</b></span>)}
-        {hovered?.url && <span><Globe2 /><b>{hovered.url.replace(/^https?:\/\//, '').split('/')[0]}</b></span>}
-        {hovered && hovered.artifacts.length === 0 && !hovered.url && <span className="is-fallback"><Sparkles /><b>Fox，你的智能助手</b></span>}
-      </div>
+      <strong>{hovered?.user.content || '对话回合'}</strong>
+      <p>{hovered?.preview?.slice(0, 360) || ''}</p>
+      {hovered && (hovered.artifacts.length > 0 || hovered.url) && <div className="fox-conversation-preview-files">
+        {hovered.artifacts.slice(0, 2).map(artifact => <span key={artifact.id}>{artifact.displayName}</span>)}
+        {hovered.artifacts.length > 2 && <span>+{hovered.artifacts.length - 2}</span>}
+        {!hovered.artifacts.length && hovered.url && <span>{hovered.url.replace(/^https?:\/\//, '').split('/')[0]}</span>}
+      </div>}
     </div>
   </nav>
 }

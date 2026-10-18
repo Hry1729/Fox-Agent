@@ -55,7 +55,7 @@
   overflow-y: auto;
   padding: var(--fox-space-xl) 0;
   scrollbar-gutter: stable both-edges;
-  padding-bottom: 44px;
+  padding-bottom: 20px;
   display: flex;
   flex-direction: column;
   gap: var(--fox-space-l);
@@ -440,8 +440,9 @@
   width: min(48rem, calc(100% - clamp(2rem, 12vw, 10rem)));
   position: absolute;
   left: 50%;
-  bottom: calc(50% + 46px - var(--fox-empty-vertical-offset, 0px));
+  top: calc(50% + (var(--fox-empty-heading-height, 88px) - 12px - var(--fox-empty-composer-height, 160px)) / 2);
+  bottom: auto;
   height: auto;
   padding: 0;
-  transform: translateX(-50%);
+  transform: translate(-50%, -100%);
 }

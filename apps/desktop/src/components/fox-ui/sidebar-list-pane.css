@@ -17,3 +17,7 @@
   height: 39px;
   background: var(--sidebar) !important;
 }
+
+.fox-sidebar .fox-sidebar-list-pane { margin-right: -8px; }
+.fox-sidebar-list-pane .fox-sidebar-scroll [data-slot='scroll-area-viewport'] > div { padding-right: 12px; }
+.fox-sidebar-list-pane > .fox-section-head { margin-right: 8px; }

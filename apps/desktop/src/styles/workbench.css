@@ -130,6 +130,22 @@
   min-width: 225px;
 }
 
+.fox-window-menu-content.fox-app-menu {
+  min-width: 0;
+  width: max-content;
+}
+
+.fox-app-menu [data-slot='dropdown-menu-sub-trigger'] {
+  white-space: nowrap;
+  gap: 12px;
+}
+
+.fox-titlebar-sidebar-controls button:disabled {
+  opacity: 0.32;
+  cursor: default;
+  background: transparent;
+}
+
 .fox-window-controls {
   height: 100%;
 }
@@ -840,8 +856,8 @@
 }
 
 .fox-sidebar.is-collapsed {
-  width: 64px;
-  padding-inline: 10px;
+  width: 52px;
+  padding-inline: 6px;
   overflow: visible;
 }
 
@@ -1112,24 +1128,6 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-
-/* While a managed view is collapsed the row keeps its label in the DOM for an
-   instant expand; the rail's overflow then clips it to the icon instead of the
-   row reflowing mid-animation. */
-.fox-sidebar.is-collapsed .fox-sidebar-primary.is-expanded-row {
-  position: absolute;
-  top: 0;
-  left: 10px;
-  right: 10px;
-  visibility: hidden;
-  pointer-events: none;
-}
-
-.fox-sidebar.is-collapsed .fox-sidebar-primary.is-expanded-row .fox-sidebar-command svg {
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
 }
 
 .fox-shell .fox-sidebar-command,
@@ -1449,7 +1447,7 @@
   height: 24px;
 }
 
-/* A fixed trailing slot keeps status changes from moving the conversation title. */
+/* Reserve the leading status slot so activity does not shift titles. */
 .fox-sidebar-conversation-status {
   width: 16px;
   min-width: 16px;
@@ -1481,27 +1479,7 @@
   background: transparent;
 }
 
-/* Metal ring around the send button: a rigid flex item so the composer toolbar
-   keeps its layout, and the halo is free to paint outside the 30px circle. */
-.fox-send-metal {
-  flex: 0 0 auto;
-  display: inline-flex;
-  overflow: visible;
-}
 
-/* The library normalizes the wrapped button's own chrome away (`background:
-   transparent !important`) so its metal surface becomes the button surface, and it
-   sets the matching ink on the root (#1d1d1d light / #f8f8f8 dark). Inherit that
-   instead of our card/text pair, which painted a white arrow on the white light-mode
-   disc. This sits in `components` on purpose: for `!important` declarations the layer
-   order is reversed, so the Button's own `!text-primary-foreground` utility (in
-   `utilities`) would otherwise win. The rule above still styles the plain button
-   until the effect's chunk has loaded. */
-@layer components {
-  .fox-send-metal .fox-send-button {
-    color: inherit !important;
-  }
-}
 
 .fox-sidebar-tree-row {
   position: relative;
@@ -1542,14 +1520,14 @@
   text-align: left;
 }
 
-/* Project child titles retain their indentation without a leading status slot. */
+/* Project child rows keep a small inset before their status slot. */
 .fox-project-conversation-row > .fox-sidebar-tree-main {
-  padding-left: 34px;
+  padding-left: 12px;
 }
 .fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
 .fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main { padding-right: 2px; }
 
-.fox-shell .fox-sidebar-tree-main span {
+.fox-shell .fox-sidebar-tree-main > span:last-child {
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -1845,6 +1823,7 @@
 
 .fox-sidebar.is-collapsed .fox-sidebar-footer {
   justify-content: center;
+  border-top: 0;
   flex-direction: column;
   min-height: 0;
   flex: 0 0 auto;
@@ -1875,7 +1854,7 @@
   align-items: center;
   gap: var(--fox-space-xs);
   flex: 0 0 auto;
-  margin-top: auto;
+  margin-top: var(--fox-space-s);
   padding: var(--fox-space-s) 0;
   border-top: 1px solid color-mix(in srgb, var(--fox-border) 76%, transparent);
 }
@@ -1934,18 +1913,6 @@
 .fox-sidebar.is-collapsed .fox-sidebar-conversations-popover {
   max-height: min(320px, calc(100dvh - 120px));
   overflow: auto;
-}
-
-.fox-sidebar-collapsed-count {
-  position: absolute;
-  top: -3px;
-  right: -4px;
-  min-width: 14px;
-  color: var(--fox-muted);
-  font-size: var(--fox-type-caption);
-  font-weight: var(--fox-weight-semibold);
-  line-height: 1;
-  text-align: center;
 }
 
 /* Lift the sidebar's stacking context only while its local menu is open;
@@ -2453,7 +2420,7 @@ button.fox-chat-project-row:disabled {
    surface and one row metric: 8px panel, 4px inset, 32px rows with 8px side
    padding, 16px icons and an 8px icon gap. The base components are rem-based
    and the root font size is 14px, so the values are pinned in px here. */
-:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) {
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu, .fox-composer-picker-menu) {
   padding: var(--fox-space-xs);
   border: 1px solid var(--fox-border);
   border-radius: var(--fox-radius-card);
@@ -2464,7 +2431,7 @@ button.fox-chat-project-row:disabled {
   -webkit-backdrop-filter: none;
 }
 
-:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) :is([data-slot='dropdown-menu-item'], [data-slot='dropdown-menu-sub-trigger'], [data-slot='dropdown-menu-checkbox-item'], [data-slot='dropdown-menu-radio-item'], [data-slot='context-menu-item']) {
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu, .fox-composer-picker-menu) :is([data-slot='dropdown-menu-item'], [data-slot='dropdown-menu-sub-trigger'], [data-slot='dropdown-menu-checkbox-item'], [data-slot='dropdown-menu-radio-item'], [data-slot='context-menu-item'], [data-slot='command-item'], .fox-composer-project-add, .fox-composer-model-manage) {
   min-height: var(--fox-control-md);
   gap: var(--fox-space-m);
   padding-block: 0;
@@ -2474,21 +2441,21 @@ button.fox-chat-project-row:disabled {
   line-height: 1.45;
 }
 
-:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) :is([data-slot='dropdown-menu-item'], [data-slot='dropdown-menu-sub-trigger'], [data-slot='context-menu-item']) > svg {
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu, .fox-composer-picker-menu) :is([data-slot='dropdown-menu-item'], [data-slot='dropdown-menu-sub-trigger'], [data-slot='context-menu-item'], [data-slot='command-item'], .fox-composer-project-add, .fox-composer-model-manage) > svg {
   width: var(--fox-icon-size);
   height: var(--fox-icon-size);
   margin: 0;
   flex: none;
 }
 
-:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) [data-slot='dropdown-menu-label']:not(.fox-profile-menu-head) {
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu, .fox-composer-picker-menu) [data-slot='dropdown-menu-label']:not(.fox-profile-menu-head) {
   padding: 6px var(--fox-space-m);
   color: var(--muted-foreground);
   font-size: var(--fox-type-caption) !important;
   font-weight: var(--fox-weight-medium);
 }
 
-:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu) :is([data-slot='dropdown-menu-separator'], [data-slot='context-menu-separator']) {
+:is(.fox-window-menu-content, .fox-top-menu, .fox-add-menu, .fox-editor-menu, .fox-profile-menu, .fox-project-menu, .fox-conversation-menu, .fox-composer-picker-menu) :is([data-slot='dropdown-menu-separator'], [data-slot='context-menu-separator']) {
   margin: var(--fox-space-xs) calc(-1 * var(--fox-space-xs));
   background: var(--fox-border);
 }
@@ -2658,11 +2625,11 @@ button.fox-chat-project-row:disabled {
   --fox-empty-vertical-offset: clamp(18px, 3vh, 30px);
 }
 
-.fox-chat-stage { --fox-chat-column-width: min(56rem, calc(100cqw - clamp(2rem, 8vw, 8rem))); }
+.fox-chat-stage { --fox-chat-column-width: min(58rem, calc(100cqw - clamp(96px, 8vw, 112px))); }
 .fox-composer-wrap:not(.is-empty) { width: var(--fox-chat-column-width); }
 .fox-content-card.has-open-right-panel :is(.fox-turn-rail, .fox-conversation-rail) { display: none; }
 @container fox-chat (max-width: 900px) {
-  .fox-chat-stage { --fox-chat-column-width: min(48rem, calc(100cqw - 32px)); }
+  .fox-chat-stage { --fox-chat-column-width: min(52rem, calc(100cqw - 96px)); }
 }
 @container fox-chat (max-width: 760px) {
   .fox-chat-stage { --fox-chat-column-width: calc(100cqw - 24px); }
@@ -4375,16 +4342,7 @@ img[src='/avatars/fox-assistant.png'] {
   pointer-events: auto;
 }
 
-.fox-sidebar-tree-row:hover .fox-sidebar-conversation-status,
-.fox-sidebar-tree-row:focus-within .fox-sidebar-conversation-status,
-.fox-sidebar-tree-row:has(.fox-sidebar-row-actions [data-state='open']) .fox-sidebar-conversation-status {
-  width: 0;
-  min-width: 0;
-  flex-basis: 0;
-  margin-right: 0;
-  overflow: hidden;
-  visibility: hidden;
-}
+
 
 .fox-collapsible-code-actions button {
   min-width: 28px;
@@ -4739,10 +4697,10 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-composer-wrap.is-empty {
   /* Match the empty prompt's 50% centre so the gap stays steady as the stage grows. */
-  top: calc(50% - 32px + var(--fox-empty-vertical-offset, 0px));
+  top: calc(50% + (var(--fox-empty-heading-height, 88px) + 12px - var(--fox-empty-composer-height, 160px)) / 2);
   bottom: auto;
   width: min(48rem, calc(100% - clamp(2rem, 12vw, 10rem)));
-  transform: translate(-50%, -3%);
+  transform: translateX(-50%);
 }
 
 .fox-composer-wrap.is-empty .fox-prompt-input > [data-slot='input-group'] {
@@ -5559,7 +5517,7 @@ img[src='/avatars/fox-assistant.png'] {
   border: 1px solid var(--fox-border);
   border-radius: 18px;
   background: color-mix(in oklch, var(--fox-card) 94%, transparent);
-  padding: 10px;
+  padding: 10px 8px 6px;
   /* One definition for the card's elevation, reused by every activation state. */
   --fox-composer-elevation: 0 10px 24px color-mix(in oklch, var(--fox-shadow-color) 6%, transparent), 0 2px 6px color-mix(in oklch, var(--fox-shadow-color) 2%, transparent);
   box-shadow: var(--fox-composer-elevation);
@@ -5750,6 +5708,71 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-prompt-textarea::placeholder {
   color: var(--fox-faint);
 }
+
+.fox-composer-wrap.is-history .fox-prompt-textarea {
+  flex: 0 0 40px;
+  min-height: 40px !important;
+  height: 40px;
+  max-height: 40px;
+}
+
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] {
+  min-height: 88px;
+}
+
+.fox-composer-wrap.is-new-conversation .fox-prompt-border-beam {
+  position: relative;
+  z-index: 1;
+}
+
+.fox-composer-project-bar {
+  margin: -18px 16px 0;
+  padding: 20px 8px 3px 3px;
+  border: 1px solid var(--fox-border);
+  border-radius: 0 0 16px 16px;
+  background: var(--fox-canvas);
+}
+
+.fox-composer-project-trigger,
+.fox-composer-project-add,
+.fox-composer-model-manage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  color: var(--fox-text);
+  font-size: 13px;
+  text-align: left;
+}
+
+.fox-composer-project-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-composer-project-bar .fox-composer-project-trigger {
+  margin-inline-start: 0;
+  max-width: 100%;
+  border-radius: 999px;
+}
+
+.fox-composer-project-trigger:hover,
+.fox-composer-project-add:hover,
+.fox-composer-model-manage:hover { background: var(--fox-hover); }
+.fox-composer-project-trigger:focus-visible,
+.fox-composer-project-add:focus-visible,
+.fox-composer-model-manage:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.fox-composer-project-menu { width: min(320px, calc(100vw - 32px)); }
+.fox-composer-project-add { width: 100%; margin-top: 4px; }
+.fox-composer-project-option { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.fox-composer-project-option small { color: var(--fox-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fox-composer-model-note { padding: 0 8px 8px; color: var(--fox-muted); font-size: 12px; line-height: 1.5; }
+.fox-composer-model-manage { width: 100%; }
+.fox-composer-submit .aui-composer-model-trigger { min-width: 0; }
 
 .fox-composer-context > button {
   display: inline-flex;
@@ -6179,7 +6202,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-composer-submit {
   flex: 1 1 0;
-  /* The send button is 30px and its metal ring paints a few px outside that; the
+  /* The send button is 30px and its beam paints a few px outside that; the
      container must never shrink below it (a cramped toolbar used to clip the button
      away) and must not clip the ring. The composer card itself already clips. */
   min-width: 34px;
@@ -6209,9 +6232,9 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-execution-control {
-  width: 124px;
-  min-width: 124px;
-  flex: 0 0 124px;
+  width: auto;
+  min-width: 0;
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -11069,11 +11092,11 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-conversation-rail {
   position: absolute;
   z-index: 45;
-  left: 9px;
+  left: calc((100% - var(--fox-chat-column-width)) / 4);
   top: 50%;
   display: flex;
   align-items: center;
-  transform: translateY(-50%);
+  transform: translate(-50%, -50%);
 }
 
 .fox-conversation-marks {
@@ -11131,130 +11154,26 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-conversation-preview {
   position: absolute;
-  left: 28px;
+  left: calc(100% + 8px);
   top: 50%;
-  width: min(350px, calc(100vw - 160px));
+  width: min(360px, calc(100vw - 160px));
   display: grid;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid var(--fox-border);
-  border-radius: 10px;
-  background: color-mix(in oklch, var(--fox-card) 96%, transparent);
-  padding: 12px;
+  border-radius: 16px;
+  background: var(--fox-card);
+  padding: 14px 16px;
   box-shadow: var(--fox-shadow-md);
   opacity: 0;
   pointer-events: none;
   transform: translate(-5px, -50%);
   transition: opacity 120ms ease, transform 120ms ease;
-  backdrop-filter: blur(18px);
 }
-
-.fox-conversation-preview.is-visible {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate(0, -50%);
-}
-
-.fox-conversation-preview header {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-}
-
-.fox-conversation-preview header > span {
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
-  display: grid;
-  place-items: center;
-  border-radius: 7px;
-  background: var(--fox-accent-soft);
-  color: var(--fox-accent);
-}
-
-.fox-conversation-preview header svg {
-  width: 15px;
-}
-
-.fox-conversation-preview header div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.fox-conversation-preview strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
-.fox-conversation-preview small {
-  color: var(--fox-faint);
-  font-size: 12px;
-}
-
-.fox-conversation-preview p {
-  display: -webkit-box;
-  margin: 0;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  color: var(--fox-muted);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.fox-conversation-preview-answer {
-  display: grid;
-  gap: 4px;
-  padding-top: 9px;
-  border-top: 1px solid var(--fox-border);
-}
-
-.fox-conversation-preview-answer > small {
-  color: var(--fox-faint);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.fox-conversation-resources {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  overflow: hidden;
-  padding-top: 9px;
-  border-top: 1px solid var(--fox-border);
-}
-
-.fox-conversation-resources span {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
-  color: var(--fox-muted);
-}
-
-.fox-conversation-resources svg {
-  width: 13px;
-  color: var(--fox-accent);
-}
-
-.fox-conversation-resources b {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.fox-conversation-resources .is-fallback {
-  color: var(--fox-faint);
-}
+.fox-conversation-preview.is-visible { opacity: 1; transform: translate(0, -50%); }
+.fox-conversation-preview strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--fox-text); }
+.fox-conversation-preview p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; margin: 0; color: var(--fox-muted); font-size: 13px; line-height: 1.65; white-space: pre-line; overflow-wrap: anywhere; }
+.fox-conversation-preview-files { display: flex; gap: 12px; min-width: 0; color: var(--fox-faint); font-size: 12px; }
+.fox-conversation-preview-files > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Shared product typography: keep dense controls readable without flattening hierarchy. */
 .fox-shell {
@@ -12308,6 +12227,10 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 5px;
   margin: 0 0 5px;
 }
+.fox-sidebar.is-collapsed .fox-sidebar-mode-switch {
+  margin-top: 4px;
+  margin-bottom: -4px;
+}
 .fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-search-trigger,
 .fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-collapsed-home {
   width: var(--fox-sidebar-row-height);
@@ -12339,3 +12262,86 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-sidebar-resize-divider { touch-action:none; flex:0 0 8px; margin-inline:-4px; transform:none; }
 .fox-sidebar-resize-divider:focus-visible { outline:2px solid var(--ring); outline-offset:-2px; }
+
+/* Match the attachment menu while retaining searchable project selection. */
+.fox-composer-picker-menu { gap: 0; --tw-ring-shadow: 0 0 #0000; }
+.fox-composer-picker-menu [cmdk-root] { background: transparent; }
+.fox-composer-picker-menu [cmdk-group] { padding: 0; }
+.fox-composer-picker-menu [cmdk-item] { padding-block: 6px; }
+.fox-composer-picker-menu [cmdk-item][data-selected='true'] { background: var(--fox-hover); color: var(--fox-text); }
+.fox-composer-picker-menu [cmdk-group-heading],
+.fox-composer-picker-menu .aui-model-menu-heading { margin: 0; padding: 6px 8px; font-size: var(--fox-type-caption); color: var(--fox-muted); }
+.fox-composer-picker-menu [cmdk-input-wrapper] { margin: 0 0 4px; }
+.fox-composer-picker-menu .fox-composer-model-note { margin: 0; padding: 2px 8px 8px; }
+.fox-composer-picker-menu .fox-composer-model-manage { border-top: 1px solid var(--fox-border); margin-top: 4px; }
+.fox-composer-project-option > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fox-composer-project-option small { font-size: var(--fox-type-caption); }
+
+.fox-composer-tools [aria-label='添加内容'] svg { width: 18px; height: 18px; }
+.fox-execution-control, .fox-expert-chip, .aui-composer-model-trigger { letter-spacing: 0; }
+.fox-execution-control { gap: 4px; padding-inline: 7px; }
+.fox-composer-submit .aui-composer-model-trigger { padding-inline: 7px; font-size: 12px; }
+
+.fox-execution-control, .fox-expert-chip, .aui-composer-model-trigger { align-items: center; line-height: 1; }
+.fox-execution-control > span, .fox-expert-chip > span:not(.fox-expert-icon), .aui-composer-model-trigger > span { display: block; line-height: 18px; }
+.fox-execution-control > svg, .fox-expert-icon, .aui-composer-model-trigger > svg { display: block; flex-shrink: 0; }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-height: 46px; padding: 6px 8px; border-radius: 28px; }
+.fox-composer-wrap.is-history .fox-prompt-toolbar,
+.fox-composer-wrap.is-history .fox-composer-tools { display: contents; }
+.fox-composer-wrap.is-history .fox-prompt-textarea { grid-column: 2; grid-row: 2; height: 32px; min-height: 32px !important; max-height: 160px; padding: 5px 0; line-height: 22px; align-self: center; }
+.fox-composer-wrap.is-history [aria-label='添加内容'] { grid-column: 1; grid-row: 2; background: var(--fox-hover); border: 1px solid var(--fox-border); border-radius: 50%; }
+.fox-composer-wrap.is-history .fox-execution-control { grid-column: 3; grid-row: 2; }
+.fox-composer-wrap.is-history .fox-composer-submit { grid-column: 4; grid-row: 2; }
+.fox-composer-wrap.is-history .fox-composer-attachments { grid-column: 1 / -1; grid-row: 1; }
+.fox-composer-wrap.is-history .fox-command-mode-chip { grid-column: 2; grid-row: 3; justify-self: start; }
+.fox-history-menu-settings { display: grid; gap: 2px; border-top: 1px solid var(--fox-border); margin-top: 4px; padding-top: 4px; }
+.fox-history-menu-settings > button { width: 100%; max-width: none; justify-content: flex-start; min-height: 32px; border-radius: var(--fox-radius-control); padding-inline: 8px; }
+
+.fox-composer-wrap [aria-label='添加内容'] { width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.fox-composer-wrap [aria-label='添加内容'] svg,
+.fox-composer-wrap .lucide-arrow-up { width: 18px !important; height: 18px !important; }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { row-gap: 0; border-radius: 999px; }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group']:has(.fox-composer-attachments > [data-slot]) { border-radius: 28px; row-gap: 8px; }
+
+/* Optical alignment for the Chinese font's higher glyph centre. */
+.fox-execution-control > span, .fox-expert-chip > span:not(.fox-expert-icon) { transform: translateY(1px); }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { border: 1px solid var(--fox-border); box-shadow: 0 2px 6px color-mix(in srgb, var(--fox-shadow-color) 6%, transparent); border-radius: 999px !important; }
+.fox-composer-wrap.is-history .fox-prompt-textarea { min-height: 0 !important; max-height: 140px; line-height: 22px; padding-block: 4px !important; field-sizing: fixed; }
+.fox-composer-wrap.is-history.is-expanded .fox-prompt-input > [data-slot='input-group'] { display: flex; flex-direction: column; gap: 8px; border-radius: 18px !important; }
+.fox-composer-wrap.is-history.is-expanded .fox-prompt-textarea { flex: none; width: 100%; }
+.fox-composer-wrap.is-history.is-expanded .fox-prompt-toolbar { display: flex; }
+.fox-composer-wrap.is-history.is-expanded .fox-composer-tools { display: flex; }
+.fox-composer-wrap.is-history.is-expanded .fox-composer-attachments { width: 100%; }
+.fox-composer-wrap.is-history .fox-prompt-textarea { scrollbar-width: thin; }
+.fox-user-message:not(.is-editing) { width: fit-content; max-width: 80%; }
+.fox-thread-msg.is-user .fox-user-bubble { width: fit-content; max-width: 80%; }
+
+.fox-composer-wrap.is-new-conversation [aria-label='添加内容'] { flex: 0 0 32px; width: 32px; height: 32px; margin-inline-end: -3px; border-radius: 50% !important; background: transparent; border: 0; box-shadow: none; }
+.fox-composer-wrap.is-new-conversation [aria-label='添加内容']:hover,
+.fox-composer-wrap.is-new-conversation [aria-label='添加内容'][data-state='open'] { background: var(--fox-hover); color: var(--fox-text); }
+.fox-composer-wrap.is-new-conversation [aria-label='添加内容'] svg { width: 16px !important; height: 16px !important; }
+.fox-sidebar-date-heading { display: flex; align-items: center; gap: 8px; margin: 12px 8px 5px; color: var(--fox-muted); font-size: 12px; font-weight: 400; line-height: 20px; }
+.fox-sidebar-date-heading > svg { flex: none; }
+.fox-sidebar-tree-main > .fox-sidebar-conversation-status { flex: 0 0 14px; width: 14px; margin: 0; }
+.fox-sidebar-tree-main > .fox-sidebar-conversation-status:not([data-run-indicator]) { visibility: hidden; }
+
+.fox-sidebar-tree-main > .fox-sidebar-conversation-status { min-width: 14px; overflow: visible; }
+.fox-sidebar-date-group { display: flex; flex-direction: column; gap: var(--fox-sidebar-row-gap); }
+.fox-sidebar-flyout .fox-sidebar-collapsed-run { margin-left: 0; }
+.fox-sidebar-flyout .fox-sidebar-collapsed-run:not([data-run-indicator]) { visibility: hidden; }
+
+@layer components {
+  .fox-composer-wrap .fox-send-button {
+    background: var(--primary) !important;
+    color: #fff !important;
+  }
+}
+
+
+
+.fox-chat-stage {
+  --fox-canvas: var(--chat-background, var(--background));
+  background: var(--fox-canvas);
+}
+
+.fox-expert-chip[data-default-expert] .fox-expert-icon { border: 0; background: transparent; }

@@ -235,19 +235,20 @@ button { color: inherit; }
 button:not(:disabled),
 a[href],
 [role="button"]:not([aria-disabled="true"]),
-[role="menuitem"]:not([data-disabled]),
-[role="option"]:not([data-disabled]),
+[role="menuitem"]:not([data-disabled="true"]):not([data-disabled=""]),
+[role="option"]:not([data-disabled="true"]):not([data-disabled=""]),
 [role="tab"]:not([aria-disabled="true"]),
 [role="switch"]:not([aria-disabled="true"]),
 [role="checkbox"]:not([aria-disabled="true"]),
-[data-slot="select-trigger"]:not([data-disabled]),
-[data-slot="select-item"]:not([data-disabled]) {
+[data-slot="select-trigger"]:not([data-disabled="true"]):not([data-disabled=""]),
+[data-slot="select-item"]:not([data-disabled="true"]):not([data-disabled=""]) {
   cursor: pointer;
 }
 
 button:disabled,
 [aria-disabled="true"],
-[data-disabled] {
+[data-disabled="true"],
+[data-disabled=""] {
   cursor: not-allowed;
 }
 
