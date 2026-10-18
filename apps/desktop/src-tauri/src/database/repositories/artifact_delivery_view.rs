@@ -177,6 +177,44 @@ pub(super) fn enrich(
     } else {
         "host_rule"
     };
+    // A file the model handed over through `present_files` is a delivery, not a
+    // claim awaiting a verdict. Its detail line describes the file and the
+    // hand-over; it must not borrow the verification vocabulary of Runs whose
+    // contracts were frozen under the previous design. That machinery never ran
+    // for these rows — there is no checklist to be pending against — so saying
+    // "not yet verified" would invent an outstanding obligation.
+    //
+    // Rows written before the declaration columns existed have `declared_at`
+    // NULL and keep the verification projection below unchanged.
+    if artifact.declared_at.is_some() {
+        let mut view = ArtifactDeliveryView {
+            version_id: None,
+            version_no: None,
+            source_tool_call_id: artifact.turn_call_id.clone(),
+            purpose_source: purpose_source.into(),
+            verification_status: "declared".into(),
+            summary: "已作为交付文件登记；文件当前可访问。".into(),
+        };
+        match std::fs::metadata(path) {
+            Ok(value) if value.is_file() => {
+                let note = artifact
+                    .declared_description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                view.summary = match note {
+                    Some(note) => format!("已交付：{note}"),
+                    None => "已作为交付文件登记；文件当前可访问。".into(),
+                };
+            }
+            _ => {
+                view.verification_status = "unavailable".into();
+                view.summary = "文件不存在或当前无法访问。".into();
+            }
+        }
+        artifact.delivery = Some(view);
+        return Ok(());
+    }
     let version: Option<(String, i64, Option<String>, Option<String>)> = connection
         .query_row(
             "SELECT id,version_no,tool_call_id,after_hash FROM managed_file_versions
@@ -274,6 +312,86 @@ pub(super) fn enrich(
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn a_declared_file_reads_as_a_delivery_not_a_pending_check() {
+        let root = std::env::temp_dir().join(format!("fox-declared-view-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("final.txt");
+        std::fs::write(&path, b"line one\nline two\n").unwrap();
+        let (_hash, size) = crate::runtime_host::managed_files::hash_file(&path).unwrap();
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE conversations(id TEXT,project_id TEXT,project_root TEXT);
+             CREATE TABLE projects(id TEXT,root_path TEXT);
+             CREATE TABLE messages(run_id TEXT,role TEXT,ordinal INTEGER,content TEXT);
+             CREATE TABLE kernel_runs(run_id TEXT,continued_from_run_id TEXT);
+             CREATE TABLE managed_file_versions(id TEXT,version_no INTEGER,tool_call_id TEXT,
+                 after_hash TEXT,conversation_id TEXT,run_id TEXT,storage_path TEXT);
+             CREATE TABLE delivery_checklist_items(run_id TEXT,item_key TEXT,target_path TEXT,
+                 artifact_id TEXT,status TEXT,finding_json TEXT,
+                 requirements_json TEXT NOT NULL DEFAULT '[]');",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations VALUES ('conv',NULL,?1)",
+                [root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages VALUES ('run','user',1,'创建 final.txt 并交付')",
+                [],
+            )
+            .unwrap();
+        let mut artifact = ArtifactRecord {
+            id: "artifact".into(),
+            conversation_id: "conv".into(),
+            run_id: Some("run".into()),
+            display_name: "final.txt".into(),
+            artifact_type: "created_file".into(),
+            artifact_class: "deliverable".into(),
+            artifact_origin: "project".into(),
+            storage_path: path.to_string_lossy().into_owned(),
+            media_type: None,
+            byte_size: size,
+            sha256: None,
+            status: "ready".into(),
+            created_at: 1,
+            updated_at: 1,
+            turn_call_id: Some("call_real".into()),
+            declared_at: Some(2),
+            declared_description: Some("两行文本".into()),
+            delivery: None,
+        };
+        // No managed version and no checklist row: exactly the state a
+        // present_files declaration leaves behind. The old projection called this
+        // "尚未关联可核对的文件版本与交付验收", which reads as an outstanding check.
+        enrich(&connection, &mut artifact).unwrap();
+        let view = artifact.delivery.as_ref().unwrap();
+        assert_eq!(view.verification_status, "declared");
+        assert_eq!(view.summary, "已交付：两行文本");
+        assert_eq!(view.source_tool_call_id.as_deref(), Some("call_real"));
+
+        // The declaration keeps describing the file even with no note.
+        artifact.declared_description = None;
+        enrich(&connection, &mut artifact).unwrap();
+        assert_eq!(
+            artifact.delivery.as_ref().unwrap().summary,
+            "已作为交付文件登记；文件当前可访问。"
+        );
+
+        // A declared file that later disappears still reports that plainly.
+        std::fs::remove_file(&path).unwrap();
+        enrich(&connection, &mut artifact).unwrap();
+        let view = artifact.delivery.as_ref().unwrap();
+        assert_eq!(view.verification_status, "unavailable");
+        assert_eq!(view.summary, "文件不存在或当前无法访问。");
+
+        std::fs::remove_dir(&root).unwrap();
+    }
 
     #[test]
     fn verdict_applies_only_to_the_recorded_current_file_version() {

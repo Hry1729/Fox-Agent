@@ -677,7 +677,12 @@ export interface ArtifactRecord {
     versionNo: number | null
     sourceToolCallId: string | null
     purposeSource: 'user_request' | 'host_rule' | 'unknown'
-    verificationStatus: 'passed' | 'limited' | 'failed' | 'stale' | 'unavailable' | 'unverified'
+    /**
+     * `declared` marks a file handed over through `present_files`: there is no
+     * checklist behind it, so it carries no verification verdict. The remaining
+     * values belong to Runs frozen under the previous contract.
+     */
+    verificationStatus: 'declared' | 'passed' | 'limited' | 'failed' | 'stale' | 'unavailable' | 'unverified'
     summary: string
   } | null
 }

@@ -48,6 +48,10 @@ export function formatFileSize(bytes: number) {
  * is, not what a check concluded. It stays exported because the detail view, which
  * the user opens deliberately for diagnostics, still reports it for the Runs whose
  * contracts were frozen under the previous design.
+ *
+ * A `declared` row is a file the model handed over through `present_files`. It has
+ * no checklist and therefore no verdict to wait for, so it reads as a delivery
+ * rather than as a check that has not happened yet.
  */
 export function artifactVerificationLabel(status: string) {
   switch (status) {
@@ -56,6 +60,7 @@ export function artifactVerificationLabel(status: string) {
     case 'stale': return '版本已变化'
     case 'unavailable': return '文件不可用'
     case 'pending': return '待核对'
+    case 'declared': return '交付文件'
     default: return '未核验'
   }
 }
