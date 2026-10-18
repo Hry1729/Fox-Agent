@@ -397,6 +397,7 @@ fn r3_real_continuation_preserves_content_contract_bytes_and_reference() {
     assert_ne!(before,after,"the successor does not read the source's frozen contract");
     // With no checklist the gate reports `NoChecklist` — the same ordinary stop
     // handling a new task gets — rather than verifying, repairing or parking.
+    let stop=evaluate_stop(&f.db,f.root.to_str(),&next.run.id).unwrap();
     assert!(matches!(stop,DeliveryStop::NoChecklist),
         "an ordinary successor goes through normal stop handling: {stop:?}");
 }
