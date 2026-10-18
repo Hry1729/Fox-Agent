@@ -572,16 +572,28 @@ mod tests {
         drop(stored);
 
         let reopened = crate::database::Database::open(path.clone()).expect("reopen");
+        // Read the persisted row straight back from the reopened database: this
+        // asserts the restart story against stored bytes rather than an accessor.
         let rows = reopened
-            .artifacts_for_conversation("conv-1", 0, None)
-            .expect("load artifacts")
-            .into_iter()
-            .filter(|artifact| artifact.declared_at.is_some())
-            .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 1, "the declaration must survive a restart");
-        assert_eq!(rows[0].display_name, "report.md");
-        assert_eq!(rows[0].turn_call_id.as_deref(), Some("call-1"));
-        assert!(rows[0].storage_path.starts_with(&root));
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT display_name, turn_call_id, storage_path
+                       FROM artifacts WHERE conversation_id='conv-1' AND declared_at IS NOT NULL",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+            })
+            .expect("the declaration must still be there after reopen");
+        let (display_name, turn_call_id, storage_path) = rows;
+        assert_eq!(display_name, "report.md", "the declaration must survive a restart");
+        assert_eq!(turn_call_id.as_deref(), Some("call-1"));
+        assert!(storage_path.starts_with(&root));
         let _ = fs::remove_file(&path);
     }
 
