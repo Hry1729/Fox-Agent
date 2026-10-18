@@ -236,6 +236,10 @@ const MAX_SEEDED_ITEMS: usize = 12;
 const MAX_VERIFY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SCAN_DEPTH: usize = 5;
 const RECOGNITION_ITEM: &str = "recognition:delivery_unresolved";
+/// The reason code `verify_item` stamps on the recognition row, and the one the
+/// router recognises it by. One literal, so the producer of the finding and the
+/// translation of it cannot drift apart.
+const RECOGNITION_UNRESOLVED_CODE: &str = "delivery.requirements_unresolved";
 
 fn mention_is_example(text: &str, at: usize) -> bool {
     let before = sentence_tail(&text[..at]);
@@ -2320,12 +2324,22 @@ pub(crate) fn evaluate_stop(
     // is not a legal legacy row makes the whole Run typed: a damaged or
     // unreadable contract must not pass on the permissive lane.
     let identities = database.delivery_checklist_requirements(run_id)?;
-    let typed_scope = identities.iter().any(|(_, raw)| {
-        !matches!(
-            p2b_contract_identity::classify_requirements(raw.as_deref()),
-            p2b_contract_identity::ContractIdentity::LegacyV1
-        )
-    });
+    // An unresolved recognition row is decided by the router too, even though its
+    // own contract is legal v1. The legacy lane cannot route it honestly: it has no
+    // artifact to check, so the only readings available to a boolean gate were
+    // "exhausted" (which completes the Run with the requirement unmet) or a repair
+    // round over a target the task never named. The router carries it as
+    // `Unconfirmed`, which neither repairs nor completes and asks the user instead.
+    let recognition_row = checklist
+        .iter()
+        .any(|item| item.item_key == RECOGNITION_ITEM);
+    let typed_scope = recognition_row
+        || identities.iter().any(|(_, raw)| {
+            !matches!(
+                p2b_contract_identity::classify_requirements(raw.as_deref()),
+                p2b_contract_identity::ContractIdentity::LegacyV1
+            )
+        });
     if !typed_scope && verdicts.iter().all(|verdict| verdict.passed) {
         return Ok(DeliveryStop::Passed { items: verdicts });
     }
@@ -2334,10 +2348,6 @@ pub(crate) fn evaluate_stop(
     // never verified.
     if typed_scope {
         return route_typed_run(database, run_id, &checklist, &verdicts, &identities);
-    }
-    if checklist.iter().any(|item|item.item_key==RECOGNITION_ITEM) {
-        // Recognition needs user clarification, not an empty-path repair loop.
-        return Ok(DeliveryStop::Exhausted {items:verdicts});
     }
     // The repair budget ledger is written by the live loop right after the
     // continuation decision commits; kernel event lane counters stay
@@ -2456,9 +2466,14 @@ fn route_typed_run(
                 typed.push(true);
             }
             p2b_contract_identity::ContractIdentity::LegacyV1 => {
+                let decision = if item.item_key == RECOGNITION_ITEM {
+                    recognition_decision(verdict, &finding, budget)
+                } else {
+                    legacy_verdict_decision(verdict, &finding, budget)
+                };
                 items.push(p2b_consumer::ItemDecision::from_results(
                     &item.item_key,
-                    &[legacy_verdict_decision(verdict, &finding, budget)],
+                    &[decision],
                     budget,
                 ));
                 typed.push(false);
@@ -2535,6 +2550,45 @@ fn legacy_verdict_decision(
         )]
     };
     p2b_decision::decide(&facts, budget)
+}
+
+/// Translate the `recognition:delivery_unresolved` row into the one fact
+/// vocabulary, as `Unconfirmed` rather than `Failed`.
+///
+/// The row does not say "the artifact is wrong". It says the task never named an
+/// artifact to check, which `verify_item` reports as `verificationStatus:
+/// "unverified"` with [`RECOGNITION_UNRESOLVED_CODE`]. Reading that as `Failed`
+/// made the delivery lanes answer an unclear requirement with a file rewrite and,
+/// once the repair budget ran out, with a `DefiniteFailure` that wrote "the
+/// content did not pass" into the Run's history. `Unconfirmed` is the class the
+/// fold already reserves for "nothing was observed": it arms no repair round
+/// (rule 3 needs `blocking && needs_repair`), it never becomes a
+/// `DefiniteFailure` (rule 4 needs `Failed`), and it routes to `RequiresU1`, so
+/// the Run parks with the question in front of the user instead of looping.
+///
+/// Only the class changes. The row still owes its own record, so nothing here
+/// stages it, marks it passed, or claims the requirement was discharged.
+fn recognition_decision(
+    verdict: &ItemVerdict,
+    finding: &Value,
+    budget: bool,
+) -> p2b_decision::DecisionResult {
+    // A recognition row is never bound, so a `passed` bit on it would be a claim
+    // nothing verified. It is treated as unresolved even if a damaged row says
+    // otherwise: the alternative is to report a name-only answer as a verified
+    // delivery.
+    let detail = finding["reason"]
+        .as_str()
+        .unwrap_or("请明确要交付的文件名、类型或目录；当前没有可靠目标可自动修复");
+    p2b_decision::decide(
+        &[p2b_decision::DecisionFact::unconfirmed(
+            legacy_verdict_origin(verdict, finding),
+            Some(RECOGNITION_UNRESOLVED_CODE),
+            detail,
+            None,
+        )],
+        budget,
+    )
 }
 
 /// The identity a legacy row's translated fact is attributed to.
@@ -2990,7 +3044,7 @@ fn verify_item(
         StoredRequirementKind::RecognitionUnresolved{reason}=>Some(reason),_=>None}) {
         return Ok(ItemVerdict {item_key:item.item_key.clone(),passed:false,bound_path:None,
             finding_json:json!({"itemKey":item.item_key,"displayName":item.display_name,
-                "reasonCode":"delivery.requirements_unresolved","verificationStatus":"unverified",
+                "reasonCode":RECOGNITION_UNRESOLVED_CODE,"verificationStatus":"unverified",
                 "reason":reason,"checks":{"recognition":"unverified"},"stats":Value::Null}).to_string()});
     }
     let target_directory=item_requirements.iter().find_map(|r|match &r.kind {

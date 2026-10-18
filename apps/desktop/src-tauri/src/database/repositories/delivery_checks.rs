@@ -610,6 +610,14 @@ impl Database {
     /// Run; this Run must verify the current file version), the old status, the old
     /// finding and `checked_at`. `INSERT OR IGNORE` on (run_id, item_key) is what
     /// keeps re-seeding or a recovery from duplicating a row.
+    ///
+    /// Also deliberately not copied: `recognition:*` rows. Their meaning is "**this
+    /// text** did not name a complete target set", and a resumed Run has its own
+    /// text, so inheriting the row would assert the new task is unresolved before
+    /// anyone parsed it — and, because it can never be bound or accepted, it would
+    /// keep the resumed Run permanently unreleasable. The new Run re-decides this
+    /// for itself in `freeze_task_delivery`. The source Run keeps its own row
+    /// untouched, so nothing in the audit trail is rewritten.
     pub(crate) fn inherit_delivery_checklist(
         &self,
         run_id: &str,
@@ -639,7 +647,8 @@ impl Database {
                 let mut statement = conn.prepare(
                     "SELECT item_key, target_path, display_name, checks_json,
                             requirements_json, COALESCE(target_path, display_name)
-                       FROM delivery_checklist_items WHERE run_id = ?1",
+                       FROM delivery_checklist_items
+                      WHERE run_id = ?1 AND item_key NOT LIKE 'recognition:%'",
                 )?;
                 let rows = statement.query_map(params![source_run_id], |row| {
                     Ok((

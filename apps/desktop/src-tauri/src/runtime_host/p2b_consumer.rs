@@ -333,12 +333,36 @@ impl DeliveryVerdict {
             }
         }
         let quoted = if unique.is_empty() {
-            "无具体检查原因码".to_owned()
+            // Nothing above carries a reason code, which is exactly the shape of
+            // an unresolved requirement: it is a question, not a finding. Its own
+            // detail is the answerable sentence the user needs, so quoting "no
+            // specific reason" here would hide the only thing that can be acted
+            // on. Every other empty set — a truly reasonless verdict — still
+            // falls through to the placeholder rather than having a sentence
+            // invented for it.
+            self.unresolved_requirement_detail()
+                .unwrap_or_else(|| "无具体检查原因码".to_owned())
         } else {
             unique.join(", ")
         };
         let bounded: String = format!("{prefix}：{quoted}").chars().take(400).collect();
         bounded
+    }
+
+    /// The detail of an unconfirmed fact that says the delivery requirement
+    /// itself was never identified.
+    ///
+    /// Only the recognition row can put one there, and only a *requirement* can
+    /// be answered by the user: a `Unconfirmed` fact about a candidate artifact is
+    /// a Host-side verification gap and must keep the generic placeholder.
+    fn unresolved_requirement_detail(&self) -> Option<String> {
+        self.facts()
+            .find(|fact| {
+                fact.class == FactClass::Unconfirmed
+                    && fact.reason_code.as_deref() == Some(super::RECOGNITION_UNRESOLVED_CODE)
+            })
+            .and_then(|fact| fact.detail.clone())
+            .filter(|detail| !detail.trim().is_empty())
     }
 
     /// True when this verdict asks for U1 and therefore must not terminate, must
