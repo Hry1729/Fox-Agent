@@ -4536,7 +4536,15 @@ fn permission_change_ask_to_ask_reissues_only_a_current_ticket() {
 /// that, since it supplies the identity of its own choosing.
 #[test]
 fn a_declaration_records_the_dispatch_identity_that_carried_it() {
-    let config = worker_configuration();
+    // The frozen scope must match this Run's own tool catalog, so the config
+    // offers exactly the tool under test.
+    let mut config = worker_configuration();
+    config.proposal_tools = vec![json!({
+        "name": "present_files",
+        "description": "Declare finished files",
+        "parameters": {"type": "object", "properties": {
+            "files": {"type": "array", "items": {"type": "object"}}}, "required": ["files"]}
+    })];
     let clock = TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
     let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
