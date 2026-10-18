@@ -6139,4 +6139,184 @@ mod tests {
             starved.reason_code
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Unified contract rules: the diagnosis reads the same decoded `MergeRule`
+    // the construction used.
+    // -----------------------------------------------------------------------
+
+    /// The two rules differ **only** for a 0-byte body, so a fixture that cannot
+    /// tell them apart proves nothing. This is the guard the rest relies on.
+    #[test]
+    fn closeout_the_unified_fixture_tells_the_two_rules_apart() {
+        let empties = [segment("in/a.txt", b""), segment("in/b.txt", b"")];
+        // Header names are `a.txt` / `b.txt` (the directory is not part of the
+        // header), so each entry is 6 B and the only difference is the one extra
+        // terminator LF the historical rule gives the first empty body.
+        let legacy = concat_of_with(&empties, MergeRule::SeparatorV1);
+        let corrected = concat_of_with(&empties, MergeRule::SeparatorV2);
+        assert_eq!(legacy, b"a.txt\n\n\nb.txt\n");
+        assert_eq!(corrected, b"a.txt\n\nb.txt\n");
+        assert_eq!(legacy.len(), corrected.len() + 1);
+        // A non-empty body is where the rules must agree, or the marker would be
+        // changing semantics it never declared.
+        let bodies = [segment("in/a.txt", b"alpha"), segment("in/b.txt", b"beta")];
+        assert_eq!(
+            concat_of_with(&bodies, MergeRule::SeparatorV1),
+            concat_of_with(&bodies, MergeRule::SeparatorV2),
+            "the rules differ only on an empty body"
+        );
+    }
+
+    /// The reported D1 defect shape carried by a **historical** record must still
+    /// pass under the historical rule: the marker preserves the old semantics
+    /// rather than reinterpreting history.
+    #[test]
+    fn closeout_a_legacy_record_still_accepts_its_own_legacy_artifact() {
+        let segments = d2_segments();
+        let legacy = v2_legacy(EofPolicy::AllowSingleTrailingLf);
+        // Two LF between adjacent empty entries: what the old writer produced and
+        // what the old record was verified against. Built from the frozen rule
+        // rather than pasted, so the fixture cannot drift from the construction.
+        let old = concat_of_with(&segments, MergeRule::SeparatorV1);
+        let corrected = concat_of_with(&segments, MergeRule::SeparatorV2);
+        assert_ne!(old, corrected, "the fixture must distinguish the rules");
+        let observation = check(&legacy, &segments, &old);
+        assert_eq!(
+            observation.state,
+            CheckState::Passed,
+            "an unmarked/legacy record must keep its original semantics: {observation:?}"
+        );
+        // And the same record must not accept the corrected bytes, or the marker
+        // would be decorative.
+        assert_eq!(check(&legacy, &segments, &corrected).state, CheckState::Failed);
+    }
+
+    /// The same historical artifact is a failure under the corrected rule, and the
+    /// diagnosis must say *which* rule it applied — that is the whole point of
+    /// reading the rule from the record instead of from a default.
+    #[test]
+    fn closeout_the_corrected_record_rejects_the_old_artifact_and_names_its_rule() {
+        let segments = d2_segments();
+        let current = v2_with_rule(
+            ComparisonMode::TextSegments,
+            EofPolicy::AllowSingleTrailingLf,
+            MergeRule::SeparatorV2,
+        );
+        let old = concat_of_with(&segments, MergeRule::SeparatorV1);
+        let observation = check(&current, &segments, &old);
+        assert_eq!(observation.state, CheckState::Failed);
+        let expected = observation.expected.as_deref().unwrap_or_default();
+        assert!(
+            expected.contains("0 字节正文不贡献任何行"),
+            "the corrected rule must be stated as the corrected rule, got {expected:?}"
+        );
+        assert!(
+            !expected.contains("按历史规则"),
+            "the corrected record must not be described with the historical rule: {expected:?}"
+        );
+    }
+
+    /// The mirror: under the historical record the same wording flips, so the
+    /// text is genuinely driven by the frozen value and not hard-coded.
+    #[test]
+    fn closeout_the_legacy_record_describes_the_historical_separator() {
+        let rule = separator_rule_diagnosis(
+            MergeRule::SeparatorV1,
+            EofPolicy::AllowSingleTrailingLf,
+        );
+        assert!(rule.contains("相邻空段的段间是 2 个 LF"), "{rule}");
+        assert!(!rule.contains("相邻空段的段间是 1 个 LF"), "{rule}");
+        let corrected = separator_rule_diagnosis(
+            MergeRule::SeparatorV2,
+            EofPolicy::AllowSingleTrailingLf,
+        );
+        assert!(corrected.contains("相邻空段的段间是 1 个 LF"), "{corrected}");
+        assert_ne!(rule, corrected, "the two rules must not read identically");
+    }
+
+    /// `EofPolicy` and `MergeRule` are separate axes: every EOF policy must be
+    /// stated on top of the separator, and the separator must not change with it.
+    #[test]
+    fn closeout_the_eof_axis_does_not_rewrite_the_separator_axis() {
+        for eof in [
+            EofPolicy::AllowSingleTrailingLf,
+            EofPolicy::RequireTrailingLf,
+            EofPolicy::SourceVerbatim,
+            EofPolicy::ByteExact,
+        ] {
+            let v1 = separator_rule_diagnosis(MergeRule::SeparatorV1, eof);
+            let v2 = separator_rule_diagnosis(MergeRule::SeparatorV2, eof);
+            assert!(v1.contains("按历史规则"), "{eof:?}: {v1}");
+            assert!(v2.contains("0 字节正文不贡献任何行"), "{eof:?}: {v2}");
+        }
+        // The EOF requirement is stated only where the policy really makes one.
+        assert!(!separator_rule_diagnosis(
+            MergeRule::SeparatorV2,
+            EofPolicy::AllowSingleTrailingLf
+        )
+        .contains("要求恰好一个终止 LF"));
+        assert!(separator_rule_diagnosis(
+            MergeRule::SeparatorV2,
+            EofPolicy::RequireTrailingLf
+        )
+        .contains("要求恰好一个终止 LF"));
+    }
+
+    /// The empty-last-body attribution must not claim the same rule for both
+    /// records, and must never turn the header line's own LF into an EOF demand.
+    #[test]
+    fn closeout_the_empty_tail_attribution_tracks_the_frozen_rule() {
+        let segments = d2_segments();
+        let v1 = expected_tail_diagnosis(&segments, MergeRule::SeparatorV1, 1);
+        let v2 = expected_tail_diagnosis(&segments, MergeRule::SeparatorV2, 1);
+        assert!(v1.contains("历史规则"), "{v1}");
+        assert!(v2.contains("修正规则"), "{v2}");
+        for text in [&v1, &v2] {
+            assert!(
+                text.contains("不是额外的末尾要求"),
+                "an empty last body must never be described as an EOF requirement: {text}"
+            );
+        }
+    }
+
+    /// A non-empty last body is unaffected by the rule, and an empty source set
+    /// still reports a count without inventing a rule.
+    #[test]
+    fn closeout_the_tail_attribution_for_non_empty_and_empty_source_sets() {
+        let non_empty = [segment("in/a.txt", b"alpha")];
+        assert_eq!(
+            expected_tail_diagnosis(&non_empty, MergeRule::SeparatorV1, 0),
+            expected_tail_diagnosis(&non_empty, MergeRule::SeparatorV2, 0),
+            "a non-empty tail has no rule-dependent wording"
+        );
+        let none: [TextSegment<'static>; 0] = [];
+        let text = expected_tail_diagnosis(&none, MergeRule::SeparatorV2, 0);
+        assert!(text.contains("没有来源"), "{text}");
+    }
+
+    /// The end-to-end invariant: the same candidate is judged differently by the
+    /// two records **through the public check entry point**, and each verdict
+    /// matches the bytes its own rule constructs. This is what makes the marker
+    /// load-bearing rather than descriptive.
+    #[test]
+    fn closeout_the_verdict_follows_the_frozen_rule_end_to_end() {
+        let segments = d2_segments();
+        let v1 = v2_legacy(EofPolicy::AllowSingleTrailingLf);
+        let v2 = v2_with_rule(
+            ComparisonMode::TextSegments,
+            EofPolicy::AllowSingleTrailingLf,
+            MergeRule::SeparatorV2,
+        );
+        let legacy_bytes = concat_of_with(&segments, MergeRule::SeparatorV1);
+        let current_bytes = concat_of_with(&segments, MergeRule::SeparatorV2);
+        assert_ne!(legacy_bytes, current_bytes);
+
+        assert_eq!(check(&v1, &segments, &legacy_bytes).state, CheckState::Passed);
+        assert_eq!(check(&v2, &segments, &current_bytes).state, CheckState::Passed);
+        // Cross-feeding them must fail in both directions: neither rule silently
+        // accepts the other's bytes.
+        assert_eq!(check(&v1, &segments, &current_bytes).state, CheckState::Failed);
+        assert_eq!(check(&v2, &segments, &legacy_bytes).state, CheckState::Failed);
+    }
 }
