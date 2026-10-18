@@ -73,7 +73,9 @@ export function summarizeRunSteps(events: readonly RunEventRecord[], active: boo
   const facts = runFacts(events, runId)
   const successful = facts.tools.filter(tool => tool.completed && !tool.failed && !tool.awaitingUser)
   const fields: string[] = []
-  for (const [kind, verb, unit] of [['read', '读取', '文件'], ['directory', '查看', '目录'], ['write', '修改', '文件']] as const) {
+  // Edited-file totals stay out of the header: the number of files a turn touched
+  // is change detail, and this summary is a process header, not a change report.
+  for (const [kind, verb, unit] of [['read', '读取', '文件'], ['directory', '查看', '目录']] as const) {
     const tools = successful.filter(tool => tool.kind === kind)
     const targets = new Set(tools.map(targetIdentity).filter(Boolean))
     if (targets.size) fields.push(`已${verb} ${targets.size} 个${unit}`)
