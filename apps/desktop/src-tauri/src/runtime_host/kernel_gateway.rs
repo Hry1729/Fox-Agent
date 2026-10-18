@@ -1652,9 +1652,30 @@ mod revision_tests {
         let db_path = std::env::temp_dir().join(format!("fox-present-gw-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(db_path.clone()).unwrap();
         let conversation = db.create_conversation("fox-general", Some("gw"), None, None).unwrap();
+        // The frozen permission is captured from the conversation's project at
+        // freeze time, so the project is seated before the Run is frozen.
+        let root_text = root.to_string_lossy().into_owned();
+        db.with_connection(|c| {
+            c.execute(
+                "INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at)
+                 VALUES ('proj-gw','gw',?1,'allow','active',1,1)",
+                rusqlite::params![root_text],
+            )?;
+            c.execute(
+                "UPDATE conversations SET project_id='proj-gw', project_root=?2 WHERE id=?1",
+                rusqlite::params![conversation.id, root_text],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         let run = db.create_run(&conversation.id, "gw run", None).unwrap();
         let run_id = run.run.id.clone();
         let binding = db.freeze_kernel_run_control(&run_id, "durable", TimeBudgets::default()).unwrap();
+        assert_eq!(
+            binding.permission.project_root.as_deref(),
+            Some(root.to_string_lossy().as_ref()),
+            "the frozen permission must point at the fixture project"
+        );
         let call_id = "call-present-42";
         db.with_connection(|c| {
             c.execute(
@@ -1675,34 +1696,12 @@ mod revision_tests {
         })
         .unwrap();
 
-        let permission = FrozenPermission {
-            mode: PermissionMode::Ask,
-            project_root: Some(root.to_string_lossy().into_owned()),
-            grants: vec![],
-            approval_epoch: None,
-        };
+        // The policy mirrors the durable facts: the same binding and the same
+        // persisted host scope. `execute` refuses a policy that disagrees.
+        let scope = db.kernel_host_scope(&run_id).unwrap();
         let policy = GatewayPolicy {
-            binding: RunControlBinding {
-                schema_version: 1,
-                run_id: run_id.clone(),
-                conversation_id: conversation.id.clone(),
-                engine_id: "pi".into(),
-                execution_profile_id: "durable".into(),
-                authority: ExecutionAuthority::Authoritative,
-                read_only_executor: ResourceExecutor::Rust,
-                permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
-                permission,
-                budgets: TimeBudgets::default(),
-            },
-            scope: KernelHostScope {
-                schema_version: 1,
-                tool_names: ["present_files".into()].into_iter().collect(),
-                mcp_server_hashes: Default::default(),
-                knowledge_reference_hashes: Default::default(),
-                knowledge_connection_hashes: Default::default(),
-                office_tools: Default::default(),
-                lifecycle_hooks: vec![],
-            },
+            binding,
+            scope,
             database: Some(db.clone()),
             sessions_dir: None,
             artifacts_dir: None,
