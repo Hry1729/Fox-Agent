@@ -779,7 +779,7 @@ mod tests {
                      (run_id,item_key,target_path,artifact_id,display_name,checks_json,
                       requirements_json,status,finding_json,checked_at,updated_at)
                  VALUES (?1,'target:report.md','report.md',NULL,'report.md','[]','{}',
-                         'unverified',NULL,NULL,1)",
+                         'failed',NULL,NULL,1)",
                 params![source_id],
             )?;
             Ok(())
@@ -848,7 +848,7 @@ mod tests {
 
         assert_eq!(successor_rows, 0, "the successor starts without a checklist");
         assert_eq!(source_rows, 1, "the source keeps its own row");
-        assert_eq!(source_status, "unverified", "the source's finding is untouched");
+        assert_eq!(source_status, "failed", "the source's finding is untouched");
         // The source's audited waiting state is not rewritten either.
         let source_state: String = db
             .with_connection(|c| {
