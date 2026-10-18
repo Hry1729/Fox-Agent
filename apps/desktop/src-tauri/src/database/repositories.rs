@@ -934,6 +934,88 @@ impl Database {
         })
     }
 
+    /// Record a `present_files` declaration against the file it names.    ///
+    /// The declaration is an upsert keyed on the Run and the resolved path, so a
+    /// retried tool call updates the row it already wrote instead of adding a
+    /// second card. The row keeps `artifact_class = 'deliverable'` and gains the
+    /// declaring call's identity plus the commit time.
+    ///
+    /// A declaration is the *only* thing that sets `declared_at`. Every other
+    /// writer leaves it NULL, which is how the UI distinguishes "the model handed
+    /// this to you" from "the Host saw this file written".
+    ///
+    /// Returns the display names in declaration order, so the caller can report
+    /// exactly what was recorded.
+    pub(crate) fn record_present_files_declaration(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        turn_call_id: &str,
+        files: &[(String, String, Option<String>)],
+        now: i64,
+    ) -> Result<Vec<String>, String> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            let mut names = Vec::with_capacity(files.len());
+            for (path, display_name, description) in files {
+                let byte_size = std::fs::metadata(path)
+                    .map(|metadata| metadata.len() as i64)
+                    .unwrap_or(0);
+                let media_type = mime_for_display_name(display_name);
+                // One file is one row per Run. A retry of the same call carries
+                // the same identity, so this updates its own earlier row rather
+                // than adding a second card for the same file.
+                let updated = transaction.execute(
+                    "UPDATE artifacts
+                        SET display_name=?3, media_type=COALESCE(?4,media_type),
+                            byte_size=?5, artifact_class='deliverable',
+                            turn_call_id=?6, declared_at=?7,
+                            declared_description=?8, updated_at=?7
+                      WHERE run_id=?1 AND storage_path=?2",
+                    params![
+                        run_id,
+                        path,
+                        display_name,
+                        media_type,
+                        byte_size,
+                        turn_call_id,
+                        now,
+                        description
+                    ],
+                )?;
+                if updated == 0 {
+                    transaction.execute(
+                        "INSERT INTO artifacts(
+                            id, conversation_id, run_id, display_name, artifact_type,
+                            artifact_class, artifact_origin, storage_path, media_type,
+                            byte_size, sha256, status, created_at, updated_at,
+                            turn_call_id, declared_at, declared_description)
+                         VALUES (?1,?2,?3,?4,'created_file','deliverable','project',
+                                 ?5,?6,?7,NULL,'ready',?8,?8,?9,?8,?10)",
+                        params![
+                            format!("presented:{run_id}:{}", uuid::Uuid::new_v4()),
+                            conversation_id,
+                            run_id,
+                            display_name,
+                            path,
+                            media_type,
+                            byte_size,
+                            now,
+                            turn_call_id,
+                            description
+                        ],
+                    )?;
+                }
+                names.push(display_name.clone());
+            }
+            transaction.commit()?;
+            Ok(names)
+        })
+    }
+
     /// Raw connection access for repository code. Crate-visible so tests in
     /// sibling modules can seed durable facts without inventing a production
     /// entry point; it grants no authority the caller did not already have.
@@ -1002,7 +1084,7 @@ impl Database {
                     "skills": [],
                     "knowledge": [],
                     "mcpServers": [],
-                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result", "read_tool_result", "skill_load", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
+                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result", "read_tool_result", "skill_load", "present_files", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
                 });
                 let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
                     ("assistant", "primary", "chat_selector")
@@ -3407,7 +3489,8 @@ impl Database {
                 .query_row(
                     "SELECT id, conversation_id, run_id, display_name, artifact_type,
                             artifact_class, artifact_origin, storage_path,
-                            media_type, byte_size, sha256, status, created_at, updated_at
+                            media_type, byte_size, sha256, status, created_at, updated_at,
+                            turn_call_id, declared_at, declared_description
                      FROM artifacts
                      WHERE id = ?1 AND conversation_id = ?2",
                     params![artifact_id, conversation_id],
@@ -3427,6 +3510,9 @@ impl Database {
                             status: row.get(11)?,
                             created_at: row.get(12)?,
                             updated_at: row.get(13)?,
+                            turn_call_id: row.get(14)?,
+                            declared_at: row.get(15)?,
+                            declared_description: row.get(16)?,
                             delivery: None,
                         })
                     },
@@ -7804,7 +7890,8 @@ fn query_artifacts_window(
     let mut statement = connection.prepare(
         "SELECT id, conversation_id, run_id, display_name, artifact_type,
                 artifact_class, artifact_origin, storage_path,
-                media_type, byte_size, sha256, status, created_at, updated_at
+                media_type, byte_size, sha256, status, created_at, updated_at,
+                turn_call_id, declared_at, declared_description
          FROM artifacts WHERE conversation_id = ?1
            AND (run_id IS NULL OR EXISTS(
              SELECT 1 FROM messages m WHERE m.run_id = artifacts.run_id AND m.role = 'user'
@@ -7831,6 +7918,9 @@ fn query_artifacts_window(
                     status: row.get(11)?,
                     created_at: row.get(12)?,
                     updated_at: row.get(13)?,
+                    turn_call_id: row.get(14)?,
+                    declared_at: row.get(15)?,
+                    declared_description: row.get(16)?,
                     delivery: None,
                 })
             },
@@ -7843,11 +7933,45 @@ fn query_artifacts_window(
     Ok(records)
 }
 
+/// The media type the card and the open handler use for a declared file.
+///
+/// This is a display hint derived from the file name, not a claim about what the
+/// file contains and not a check on it. An unrecognised extension simply has no
+/// hint, and the UI falls back to a generic file icon.
+fn mime_for_display_name(display_name: &str) -> Option<String> {
+    let extension = std::path::Path::new(display_name)
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase();
+    let media_type = match extension.as_str() {
+        "md" | "markdown" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" => "text/javascript",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "xml" => "application/xml",
+        "yml" | "yaml" => "application/yaml",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => return None,
+    };
+    Some(media_type.to_owned())
+}
+
 fn query_knowledge_bindings(
     connection: &Connection,
     conversation_id: &str,
-) -> rusqlite::Result<Vec<KnowledgeBindingRecord>> {
-    let Some(bindings) = query_knowledge_reference_bindings_v2(connection, conversation_id)? else {
+) -> rusqlite::Result<Vec<KnowledgeBindingRecord>> {    let Some(bindings) = query_knowledge_reference_bindings_v2(connection, conversation_id)? else {
         return query_legacy_knowledge_bindings(connection, conversation_id);
     };
     Ok(bindings

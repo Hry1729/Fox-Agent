@@ -2199,6 +2199,70 @@ fn resolve_write_target(root: &Path, value: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// Why a path could not be accepted as a deliverable.
+///
+/// Separate from the generic `String` errors the write path uses because the
+/// presentation tool reports these to the model as distinct tool error codes,
+/// and because "not found" and "not yours" mean different things to a caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PresentTargetError {
+    /// The path escapes the authorized root, or the root itself is unusable.
+    NotAuthorized(String),
+    /// There is nothing at the path.
+    NotFound(String),
+    /// Something is there, but it is not a regular file.
+    NotAFile(String),
+}
+
+/// Canonicalize the Run's authorized project folder.
+///
+/// The same function the write path uses, so a delivery cannot resolve its root
+/// by a slightly different rule than a write did.
+pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf, String> {
+    canonical_directory(root, "project folder")
+}
+
+/// Resolve a path the model wants to declare as a deliverable.
+///
+/// The checks are the ones that already govern every other file tool: the text
+/// must be a usable path, the canonical target must stay inside the authorized
+/// root, and the target must exist. What it deliberately does NOT do is look at
+/// the file's contents, size, extension or formatting.
+pub(crate) fn resolve_present_target(
+    root: &Path,
+    value: &str,
+) -> Result<PathBuf, PresentTargetError> {
+    validate_path_text(value).map_err(PresentTargetError::NotAuthorized)?;
+    let requested = Path::new(value);
+    let joined = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        root.join(requested)
+    };
+    let target = joined.canonicalize().map_err(|_| {
+        PresentTargetError::NotFound(format!(
+            "Cannot present {value}: no accessible file at that path. Check the path, \
+             create the file if it is genuinely missing, and retry."
+        ))
+    })?;
+    if let Err(error) = ensure_inside(root, &target) {
+        return Err(PresentTargetError::NotAuthorized(format!(
+            "Cannot present {value}: {error}"
+        )));
+    }
+    let metadata = std::fs::metadata(&target).map_err(|_| {
+        PresentTargetError::NotFound(format!(
+            "Cannot present {value}: the file cannot be read."
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(PresentTargetError::NotAFile(format!(
+            "Cannot present {value}: it is not a regular file."
+        )));
+    }
+    Ok(target)
+}
+
 fn revalidate_target(
     root: &Path,
     target: &Path,

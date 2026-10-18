@@ -7266,6 +7266,9 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // Package 2-D U1: additive only. No table is rebuilt and no existing row is
     // read, so a v1 database is a no-op for this migration.
     apply_migration(&transaction, 93, MIGRATION_93, now)?;
+    // Explicit file delivery: two additive columns on `artifacts`. No existing
+    // row is touched, so every prior artifact keeps `declared_at` NULL.
+    apply_migration(&transaction, 94, MIGRATION_94, now)?;
     finish_transaction(transaction)
 }
 
@@ -15281,6 +15284,35 @@ CREATE INDEX IF NOT EXISTS idx_delivery_acceptance_audit_item
     ON delivery_acceptance_audit(run_id, item_key, at);
 "#;
 
+/// Explicit delivery declarations made by the model through the `present_files`
+/// tool, recorded on the artifact row that already holds the file.
+///
+/// The declaration is what makes a file a *final deliverable*; nothing infers it
+/// from prose, a heading, or a file extension. `run_id` already existed, so only
+/// the two columns the tool binds are added:
+///
+/// * `turn_call_id` is the Host tool-call identity of the call that declared the
+///   file. It is the idempotency key: a retried call reuses it, so a retry updates
+///   the existing declaration instead of inserting a second one.
+/// * `declared_at` is when the declaration was committed. `NULL` means the row was
+///   never declared through the tool (a process file, an Office export, a legacy
+///   row), which is exactly how the UI keeps "declared" separate from "produced".
+/// * `declared_description` is the optional one-line note the model supplied with
+///   the declaration. It belongs to the declaration, not to the file: the same
+///   file declared in a later Run may carry a different note.
+///
+/// Additive only: no table is rebuilt, no existing column is altered, and no
+/// existing row is read or written. Every pre-existing artifact keeps
+/// `declared_at` NULL and therefore keeps its current presentation.
+const MIGRATION_94: &str = r#"
+ALTER TABLE artifacts ADD COLUMN turn_call_id TEXT;
+ALTER TABLE artifacts ADD COLUMN declared_at INTEGER;
+ALTER TABLE artifacts ADD COLUMN declared_description TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_run_declared
+    ON artifacts(run_id, declared_at);
+"#;
+
 const MIGRATION_89: &str = r#"
 CREATE TABLE IF NOT EXISTS kernel_decision_marks (
     run_id TEXT NOT NULL REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
@@ -15399,7 +15431,7 @@ mod delivery_acceptance_migration_tests {
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
             .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
-        assert_eq!(DATABASE_SCHEMA_VERSION, 93);
+        assert_eq!(DATABASE_SCHEMA_VERSION, 94);
 
         // The old rows are untouched.
         let title: String = connection

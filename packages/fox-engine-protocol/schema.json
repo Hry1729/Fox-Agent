@@ -1025,6 +1025,76 @@
     },
     "KernelModelFailure": {
       "$defs": {
+        "KernelModelFailureDiagnostic": {
+          "additionalProperties": false,
+          "description": "Sanitized sub-category and round facts for a settled model failure.\n\nOne category (`incomplete_response`) covers several distinct causes, so the\nsub-category names which branch fired. Contents stay enumerated and bounded:\ncounters, provider stop vocabulary and internal dispatch identity only — never a\ncredential, model input, prompt text or tool argument.",
+          "properties": {
+            "completionRequired": {
+              "description": "Whether the frozen prompt required the Fox final-answer marker at all.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "dispatchId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "effectKey": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "markerSeen": {
+              "description": "Whether the round's own text carried the marker.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "reason": {
+              "description": "Internal branch, for example `empty_final_answer`, `output_length_limit`,\n`transport_no_output`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stopReason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "textChars": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "thinkingChars": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "toolCallCount": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "KernelModelTelemetry": {
           "additionalProperties": false,
           "description": "Byte/time counters for one failed model round. All values are worker-side\nobservations for diagnosis; Host timeout anchors remain authoritative.",
@@ -1081,6 +1151,17 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "diagnostic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KernelModelFailureDiagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which internal branch produced the category, plus the round facts the worker\nactually observed. Optional by design: a field the worker could not observe is\n**absent**, never `false` or `0`, so a reader can tell \"not seen\" from \"seen as\nzero\". Nothing here is retry evidence — Host admission still decides that from\ndurable tool state."
         },
         "httpStatus": {
           "format": "uint16",
@@ -2083,6 +2164,12 @@
       "category": "skill",
       "execution": "host",
       "name": "skill_load"
+    },
+    {
+      "approval": "none",
+      "category": "project-read",
+      "execution": "host",
+      "name": "present_files"
     },
     {
       "approval": "policy",

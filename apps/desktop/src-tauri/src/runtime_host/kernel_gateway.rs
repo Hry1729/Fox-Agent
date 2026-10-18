@@ -43,6 +43,10 @@ pub(super) const SUPPORTED_TOOLS: &[&str] = &[
     // Returns the full text of an enabled skill omitted from the initial prompt.
     // Instructions only; it never adds a tool to the frozen scope.
     "skill_load",
+    // Declares existing files as the user's final deliverables. A Host-side
+    // record with no file access of its own: it resolves and checks the paths it
+    // is given, then persists the declaration the UI reads.
+    "present_files",
 ];
 
 pub(super) fn supported_tools() -> Vec<&'static str> {
@@ -442,6 +446,13 @@ impl GatewayPolicy {
                 .map_err(|error| error.to_string())?;
         }
         if super::work_tools::is_work_tool(tool) {
+            return Ok(());
+        }
+        // A declaration touches no resource: it names files the Run already
+        // produced, and `execute` re-checks every path before recording it. It is
+        // therefore catalogued by `SUPPORTED_TOOLS` alone, with no capability
+        // preparation and no reader/writer admission.
+        if tool == "present_files" {
             return Ok(());
         }
         if super::capability_tools::is_capability_tool(tool) {
@@ -1144,6 +1155,20 @@ impl GatewayPolicy {
         }
         self.validate(tool, input)?;
         database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
+        // Declaring a final file is a Host-side record, not a file operation and
+        // not a durable work item. It resolves and checks the paths it was given,
+        // then writes the declaration, so it returns before the reader/writer
+        // split below — nothing here reads or writes the file itself.
+        if tool == "present_files" {
+            return super::present_files::execute(
+                database,
+                &self.binding.conversation_id,
+                &self.binding.run_id,
+                tool,
+                &self.binding.permission.project_root,
+                input,
+            );
+        }
         if super::capability_tools::is_capability_tool(tool) {
             let action = super::capability_tools::prepare(
                 tool,

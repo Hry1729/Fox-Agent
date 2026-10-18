@@ -261,6 +261,14 @@ pub const TOOL_CONTRACTS: &[(&str, &str, &str, &str)] = &[
     // Host text; it never adds a tool to the Run's frozen scope. (Entries are
     // name-addressed on the wire; order only anchors runtime registration.)
     ("skill_load", "skill", "host", "none"),
+    // Declares existing files as this turn's deliverables. It creates, converts
+    // and grades nothing, so it needs no approval and no write class of its own.
+    // `project-read` is the honest category: the only thing it does to a path is
+    // resolve and stat it, and it must still be withdrawn when there is no
+    // authorized project, because without a root there is nothing to check a path
+    // against. Classifying it `project-write` would make a read-only Run unable to
+    // hand over a file it had already produced, which is not a write at all.
+    ("present_files", "project-read", "host", "none"),
     ("write_file", "project-write", "host", "policy"),
     ("edit_file", "project-write", "host", "policy"),
     ("run_command", "process", "host", "always"),

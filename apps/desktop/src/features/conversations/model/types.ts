@@ -662,6 +662,16 @@ export interface ArtifactRecord {
   status: string
   createdAt: number
   updatedAt: number
+  /**
+   * Tool-call identity of the `present_files` call that declared this file as a
+   * final deliverable. `null` for a file the Host merely observed being written.
+   * The delivery card reads this, never the model's prose.
+   */
+  turnCallId?: string | null
+  /** When the declaration was committed; `null` when the file was never declared. */
+  declaredAt?: number | null
+  /** The optional one-line note the model supplied with the declaration. */
+  declaredDescription?: string | null
   delivery?: {
     versionId: string | null
     versionNo: number | null

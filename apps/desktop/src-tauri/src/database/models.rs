@@ -1472,6 +1472,16 @@ pub struct ArtifactRecord {
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Tool-call identity of the `present_files` call that declared this file as
+    /// a final deliverable, or `None` when the row was produced some other way.
+    /// The UI shows a delivery card only for a declared row, so a file the model
+    /// merely wrote is never presented as something it handed over.
+    pub turn_call_id: Option<String>,
+    /// When the declaration was committed. `None` on every row that was never
+    /// declared, including all rows written before this column existed.
+    pub declared_at: Option<i64>,
+    /// The optional one-line note the model supplied with the declaration.
+    pub declared_description: Option<String>,
     /// Read projection over the Host's version ledger and delivery checklist.
     /// Historical rows without a matching version remain unverified.
     pub delivery: Option<ArtifactDeliveryView>,

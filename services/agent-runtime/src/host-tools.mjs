@@ -241,6 +241,19 @@ export function createHostTools(requestHost) {
         executeHostTool(toolCallId, 'skill_load', params, requestHost, signal),
     },
     {
+      name: 'present_files',
+      label: 'Present final files',
+      description: 'Declare the files you are actually handing to the user as this turn\'s deliverables. Call this once, after the files exist, naming only files you really produced or updated for this request; the user sees exactly these as file cards under your reply. Pass paths relative to the authorized project (or absolute inside it). Each file must already exist and be a regular file — this tool does not create, convert or repair anything, so write the file first with write_file or Office tooling. It does not check, grade or verify file content: an empty or short file is still a legal delivery if that is what you meant to deliver. Prefer the one or two files the user actually wants; at most 8 per call. A path that does not exist, is a directory, or falls outside the project is rejected with a tool error, and then no card is shown for this call. Do not describe files you did not create, and do not call this when the reply has no deliverable.',
+      parameters: Type.Object({
+        files: Type.Array(Type.Object({
+          path: Type.String({ description: 'Path of an existing file, relative to the authorized project folder or absolute inside it.' }),
+          description: Type.Optional(Type.String({ maxLength: 200, description: 'Optional one-line note shown under the file name, e.g. what the file contains. Plain text, no markdown.' })),
+        }, { additionalProperties: false }), { minItems: 1, maxItems: 8 }),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'present_files', params, requestHost, signal),
+    },
+    {
       name: 'write_file',
       label: 'Write file',
       description: 'Create or replace a file inside the authorized project. Supply exactly one of content (UTF-8 text) or artifactId (a verified file id returned by attachment_compute in this conversation, including PDF/SVG/CSV). Never pass a private absolute source path or retype binary bytes. Artifact publication uses the same permissions, version preconditions and read-only input protection. Call this tool for a real file write; describing a write in text does nothing. For existing files, first read the file and pass its readVersion as expectedVersion. On tool.file_conflict, re-read and reconcile your changes. Fox may require user approval before the host writes it.',

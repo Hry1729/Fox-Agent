@@ -612,6 +612,7 @@ fn builtin_tool_category(tool: &str) -> &'static str {
             "Agent 编排"
         }
         "memory_search" | "memory_propose" | "skill_load" => "记忆与上下文",
+        "present_files" => "文件与办公",
         "list_knowledge_bases"
         | "search_knowledge"
         | "read_knowledge_document"
@@ -655,6 +656,7 @@ fn builtin_tool_description(tool: &str) -> &'static str {
         "child_run_collect" => "收集直属 Child Run 的状态、有限结果、用量与错误。",
         "child_run_cancel" => "取消当前父 Run 拥有的一个活动 Child Run。",
         "skill_load" => "按技能目录中的 ID 加载当前任务已启用技能的完整说明；仅返回只读文本，不会为 Run 新增任何工具授权。",
+        "present_files" => "把已生成的文件声明为本次交给用户的最终文件，界面据此显示文件卡片；只声明已存在的普通文件，不检查文件内容。",
         "memory_search" => "按当前 Agent 与项目作用域检索已确认且启用的受治理记忆。",
         "memory_propose" => "基于当前 Run 的明确证据提交候选记忆，等待用户治理。",
         "list_knowledge_bases" => "列出当前可访问的本地与远程知识库。",

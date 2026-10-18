@@ -177,7 +177,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
           {compactionFailures.map(({ item, presentation }) => presentation && <div key={`compaction-failure-${item.seq}`} className="fox-process-notice" role="status">
             {presentation.label}
           </div>)}
-          {!running && <RuntimeArtifacts artifacts={artifacts} finalResponse={finalResponse} onOpenArtifact={onOpenArtifact} />}
+          {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
           {failureReason && !hideFooter && <ErrorPrompt error={failureReason.message} onRetry={onRetry} />}
           {cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />

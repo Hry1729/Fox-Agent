@@ -11609,6 +11609,24 @@ img[src='/avatars/fox-assistant.png'] {
   color: inherit;
   text-align: left;
   cursor: pointer;
+  /* The card is a file row plus an optional note. Stack them so the note sits
+     under the name instead of squeezing the row it belongs to. */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The model's own one-line note about the file it is handing over. */
+.fox-message-artifact-description {
+  display: block;
+  min-width: 0;
+  padding: 0 10px 8px;
+  color: var(--fox-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fox-message-artifact-trigger:focus-visible {

@@ -333,6 +333,9 @@ mod tests {
             status: "ready".into(),
             created_at: 1,
             updated_at: 1,
+            turn_call_id: None,
+            declared_at: None,
+            declared_description: None,
             delivery: None,
         };
         enrich(&connection, &mut artifact).unwrap();

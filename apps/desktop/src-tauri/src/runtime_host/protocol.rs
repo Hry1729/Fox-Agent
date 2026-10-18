@@ -43,6 +43,7 @@ fn host_tool_is_supported(tool: &str) -> bool {
             | "team_member_start"
             | "team_collect"
             | "team_cancel"
+            | "present_files"
     ) || super::capability_tools::is_capability_tool(tool)
         || super::work_tools::is_work_tool(tool)
 }

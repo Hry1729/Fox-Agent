@@ -34,6 +34,10 @@ pub(crate) mod shadow_reconcile;
 #[cfg(test)]
 mod shadow_reconcile_tests;
 mod work_tools;
+/// Explicit final-file declaration. Distinct from `work_tools` (durable task
+/// state) and from `delivery` (content verification), because handing a file to
+/// the user is neither of those.
+pub(crate) mod present_files;
 
 #[cfg(test)]
 pub(crate) use work_tools::WORK_TOOLS;
@@ -2458,31 +2462,34 @@ impl RuntimeHost {
         let mut project_context = project_context_for(
             &self.database,&self.sessions_dir,&started.run.conversation_id,&control_binding.permission,
         );
-        // Ordinary user-facing tasks that explicitly promise files get a
-        // lightweight, artifact-bound delivery checklist. Questions, analysis
-        // and delegated child Runs seed nothing; the ledger is evaluated by
-        // the authoritative live loop (legacy per-round transport does not
-        // verify it, so it must not leave pending rows there).
-        if authority == fox_engine_protocol::ExecutionAuthority::Authoritative
-            && run_role == "user_facing_lead"
-        {
-            delivery::freeze_task_delivery(&self.database,&started.run.id,text,&project_context,
-                control_binding.permission.project_root.as_deref())?;
-            // A user-authored resume of an interrupted task keeps that task's
-            // promised deliverables, even when this round declares nothing of its
-            // own. See `delivery::inherit_interrupted_deliverables` for the bound.
-            delivery::inherit_interrupted_deliverables(
-                &self.database,
-                &started.run.id,
-                &control_binding.conversation_id,
-                control_binding.permission.project_root.as_deref(),
-                text,
-            )?;
-            project_context["deliveryTargets"]=delivery::frozen_delivery_reference(&self.database,&started.run.id,&project_context)?;
+        // Simplified file delivery: a new task does NOT seed a delivery
+        // checklist. The checklist is what `evaluate_stop` reads, and an empty
+        // one routes straight to `Complete`, so not seeding it is what keeps a
+        // new task out of content verification, repair rounds and
+        // `awaiting_delivery_review`. Hiding a panel would not do that: the
+        // blocking state would still exist.
+        //
+        // `freeze_task_delivery` and the whole verification ledger remain in the
+        // tree for the Runs that were already frozen under the previous design.
+        // Those Runs keep their rows and their existing behaviour; this branch
+        // only decides what a Run started now gets.
+        //
+        // A Run that already has checklist rows is one that was frozen earlier
+        // (a restart, or a resume of a parked task). It keeps reading its own
+        // frozen contract, so the switch cannot retroactively change a decision
+        // that was already recorded.
+        let already_frozen = !self
+            .database
+            .delivery_checklist(&started.run.id)?
+            .is_empty();
+        if already_frozen {
+            project_context["deliveryTargets"] =
+                delivery::frozen_delivery_reference(&self.database, &started.run.id, &project_context)?;
         } else {
-            // Legacy receives the same placement rule, without claiming the
-            // authoritative Kernel's durable business verification.
-            project_context["deliveryTargets"]=delivery::task_delivery_reference(text,&project_context);
+            // Placement reference only: where a user-facing file should go. It
+            // is advice for the model and claims nothing about verification.
+            project_context["deliveryTargets"] =
+                delivery::task_delivery_reference(text, &project_context);
         }
         // Host-decided placement for user-facing files. The folder is decided
         // once per (conversation, project) and persisted, so a continuation,
