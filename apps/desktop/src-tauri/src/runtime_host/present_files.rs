@@ -609,7 +609,10 @@ mod tests {
         let (display_name, turn_call_id, storage_path) = rows;
         assert_eq!(display_name, "report.md", "the declaration must survive a restart");
         assert_eq!(turn_call_id.as_deref(), Some("call-1"));
-        assert!(storage_path.starts_with(&root));
+        // The stored path carries the Windows extended-length prefix, so the
+        // assertion trims it rather than comparing against the plain fixture root.
+        let stored = storage_path.trim_start_matches(r"\\?\");
+        assert!(stored.starts_with(&root), "stored {stored} under {root}");
         let _ = fs::remove_file(&path);
     }
 
