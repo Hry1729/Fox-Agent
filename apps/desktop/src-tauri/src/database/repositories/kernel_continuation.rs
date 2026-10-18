@@ -745,6 +745,14 @@ mod tests {
             .unwrap();
         let source = db.create_run(&conversation.id, "source", None).unwrap();
         let source_id = source.run.id.clone();
+        // A successor cannot start while the conversation still has an active
+        // Run, so the source is settled first — it stays paused at the Kernel
+        // level, which is the audited state this test checks is not rewritten.
+        db.with_connection(|c| {
+            c.execute("UPDATE runs SET status='completed', finished_at=1 WHERE id=?1", [&source_id])?;
+            Ok(())
+        })
+        .unwrap();
         let permission = fox_engine_protocol::FrozenPermission {
             mode: fox_engine_protocol::PermissionMode::Allow,
             project_root: Some(root.to_string_lossy().into_owned()),
