@@ -431,9 +431,17 @@ mod tests {
             let database = crate::database::Database::open(path.clone()).expect("open database");
             database
                 .with_connection(|connection| {
+                    // A conversation carries a NOT NULL agent reference, so the
+                    // fixture seats one agent before the conversation it anchors.
                     connection.execute(
-                        "INSERT INTO conversations(id,title,created_at,updated_at)
-                         VALUES ('conv-1','t',1,1)",
+                        "INSERT INTO agents(id,name,description,runtime_type,system_prompt,
+                                            default_model,created_at,updated_at)
+                         VALUES ('agent-1','a','d','native','p','m',1,1)",
+                        [],
+                    )?;
+                    connection.execute(
+                        "INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                         VALUES ('conv-1','agent-1','t','active',1,1)",
                         [],
                     )?;
                     Ok(())
