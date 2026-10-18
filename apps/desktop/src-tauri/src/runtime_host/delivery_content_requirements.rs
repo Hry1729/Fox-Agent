@@ -5,6 +5,8 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub(super) use crate::runtime_host::delivery_checks_v2::merge_rule::{self, MergeRule};
+
 const SOURCE_LIMIT: u64 = 8 * 1024 * 1024;
 const TOTAL_LIMIT: usize = 32 * 1024 * 1024;
 const MAX_SOURCES: usize = 256;
@@ -43,9 +45,15 @@ pub(super) struct Metric { column:String, operation:String }
 
 pub(super) fn model_reference(spec:&Value)->Value {
     let Ok(contract)=serde_json::from_value::<Contract>(spec["rule"].clone()) else {return json!({"schemaVersion":1,"type":"unbound","reason":"内容契约不支持"});};
+    // The separator rule travels with the reference so a user-facing view can
+    // tell a record frozen under the historical rule from one frozen under the
+    // corrected rule. An unreadable marker keeps the legacy reading: this is a
+    // display projection, and rendering is not where a contract is validated.
+    let rule=merge_rule::from_spec(spec).unwrap_or_default();
     match contract {
         Contract::Concat{sources,selected,selection_order,tie_order,merge_order,read_only}=>json!({"schemaVersion":1,"type":"concat",
             "selectionOrder":selection_order,"tieOrder":tie_order,"mergeOrder":merge_order,"selected":selected,
+            "mergeRule":rule.as_str(),
             "sourceManifestHash":digest(&serde_json::to_vec(&sources).unwrap_or_default()),"readOnly":read_only,"format":"完整文件名 LF 原文，相邻段恰好一个空行，最后不添空行"}),
         Contract::DataSource{source,sheet,headers,date_required,metrics}=>json!({"schemaVersion":1,"rule":{
             "type":"dataSource","source":source,"sheet":sheet,"headers":headers,"date_required":date_required,"metrics":metrics},
@@ -100,8 +108,11 @@ pub(super) fn model_reference(spec:&Value)->Value {
 /// The decoded form of a persisted content-contract `spec`.
 #[derive(Debug)]
 pub(super) enum DecodedSpec {
-    /// schemaVersion 1 carrying the existing, deny-unknown `Contract`.
-    V1(Contract),
+    /// schemaVersion 1 carrying the existing, deny-unknown `Contract`, plus the
+    /// separator rule the record declares. The rule is kept **beside** the
+    /// contract, not inside it: the frozen `rule` payload is a shape v1 and v2
+    /// share and must not change, and the marker is a property of the record.
+    V1(Contract, MergeRule),
     /// schemaVersion 2 with envelopeVersion/checkerVersion == 2, a strictly
     /// validated policy, **and** an executable rule decoded as the same
     /// `Contract` family v1 uses.
@@ -110,6 +121,32 @@ pub(super) enum DecodedSpec {
     /// fails strict validation. Carries a stable reason; never falls back to
     /// v1 on missing/invalid data.
     Invalid(String),
+}
+
+impl DecodedSpec {
+    /// The separator rule a decoded record declares, on either chain.
+    ///
+    /// `None` for a record that did not decode: there is no rule to report, and
+    /// returning a default here would be exactly the silent fallback the marker
+    /// exists to prevent. Callers must handle the failure before asking.
+    ///
+    /// The production v1 path reads the rule directly in `apply` rather than
+    /// through this accessor, because it must fail loudly; this projection exists
+    /// so the marker's behaviour is observable on both chains in tests.
+    #[cfg(test)]
+    pub(super) fn merge_rule(&self) -> Option<MergeRule> {
+        match self {
+            Self::V1(_, rule) => Some(*rule),
+            // A v2 record without a marker predates it and was written with the
+            // historical rule; a marker is already validated as one of the two
+            // literals by `decode_spec`.
+            Self::V2(rule) => Some(match rule.envelope.merge_rule.as_deref() {
+                Some(merge_rule::SEPARATOR_V2) => MergeRule::SeparatorV2,
+                _ => MergeRule::SeparatorV1,
+            }),
+            Self::Invalid(_) => None,
+        }
+    }
 }
 
 /// A fully validated v2 envelope: the strict Host DTO plus the executable
@@ -149,6 +186,12 @@ pub(super) struct V2EnvelopeSpec {
     /// Back-compat key produced by `model_reference` for data sources.
     #[serde(default)]
     pub(super) compute_source_sheet: Option<Value>,
+    /// The `Concat` separator rule. Declared here because this DTO denies
+    /// unknown fields: a marker the strict decoder did not know would make every
+    /// new v2 contract unreadable. `None` means the field was absent, which for a
+    /// v2 record is the historical rule.
+    #[serde(default, rename = "mergeRule")]
+    pub(super) merge_rule: Option<String>,
 }
 
 /// Strict mirror of the leaf `RulePolicy` (unknown fields rejected).
@@ -333,10 +376,20 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
 
     match schema_version {
         1 => {
-            // Historical v1: decode only the rule payload; extra top-level
+            // Historical v1: decode only the rule payload; other extra top-level
             // keys are ignored exactly as the current production reader does.
+            //
+            // The separator marker is the one key that is *not* ignored when it
+            // is unusable. Ignoring it would mean silently verifying the record
+            // with a rule its author did not declare, which is the failure mode
+            // the marker exists to prevent. An absent marker is still the
+            // historical rule, so every existing record keeps decoding.
+            let rule = match merge_rule::from_spec(spec) {
+                Ok(rule) => rule,
+                Err(reason) => return DecodedSpec::Invalid(reason),
+            };
             match serde_json::from_value::<Contract>(spec["rule"].clone()) {
-                Ok(contract) => DecodedSpec::V1(contract),
+                Ok(contract) => DecodedSpec::V1(contract, rule),
                 Err(error) => {
                     DecodedSpec::Invalid(format!("内容契约字段不完整或不支持：{error}"))
                 }
@@ -372,6 +425,18 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
                     ))
                 }
             };
+            // The separator marker is validated with the same strictness as the
+            // rest of the envelope, through the field the strict decoder already
+            // populated: a mistyped value failed above, and anything but a known
+            // literal is refused here rather than handed to a verifier that
+            // would then have to choose a rule for itself.
+            if let Some(literal) = envelope.merge_rule.as_deref() {
+                if literal != merge_rule::SEPARATOR_V1 && literal != merge_rule::SEPARATOR_V2 {
+                    return DecodedSpec::Invalid(format!(
+                        "内容契约分隔规则不受支持：{literal}"
+                    ));
+                }
+            }
             DecodedSpec::V2(V2Rule { envelope, contract })
         }
         _ => DecodedSpec::Invalid("内容契约 schemaVersion 不受支持".to_owned()),
@@ -949,7 +1014,7 @@ fn qualifier_negated(line:&str,at:usize)->bool {
     ["并非","不是","尚未","没有","未","不得声称","不能声称","不得宣称","不能宣称","假设","目标是"]
         .iter().any(|marker|prefix.trim_end().ends_with(marker))
 }
-fn evaluate(contract:&Contract,root:&Path,bytes:&[u8],path:&str,database:&Database,run:&str,finding:&Value)->RequirementVerdict {
+fn evaluate(contract:&Contract,rule:MergeRule,root:&Path,bytes:&[u8],path:&str,database:&Database,run:&str,finding:&Value)->RequirementVerdict {
     let result=(||->Result<RequirementVerdict,String>{
         match contract {
             Contract::Unbound{reason}=>Ok(RequirementVerdict::Unverified(reason.clone())),
@@ -976,10 +1041,12 @@ fn evaluate(contract:&Contract,root:&Path,bytes:&[u8],path:&str,database:&Databa
                 let mut expected=Vec::new();for (index,name) in selected.iter().enumerate() {
                     let body=contents.get(name).ok_or("冻结选择引用缺失")?;
                     expected.extend_from_slice(file_name(name).as_bytes());expected.push(b'\n');expected.extend_from_slice(body);
-                    // Entries are joined by exactly one blank line. A 0-byte body
-                    // contributes no line of its own, so it must not gain a
-                    // terminator LF before the separator (D1).
-                    if index+1<selected.len(){if !body.is_empty()&&!body.ends_with(b"\n"){expected.push(b'\n');}expected.push(b'\n');}
+                    // Entries are joined by exactly one blank line. Whether a
+                    // 0-byte body needs a terminator LF before that blank line is
+                    // a property of the **frozen** rule, never of this build: a
+                    // record frozen before the marker existed keeps the old
+                    // two-LF separator it was actually judged with (D1).
+                    if index+1<selected.len(){if rule.needs_terminator(body){expected.push(b'\n');}expected.push(b'\n');}
                 }
                 Ok(if bytes==expected {RequirementVerdict::Met}else{RequirementVerdict::Unmet(format!("真实合并字节不符合冻结的文件名升序/完整内容/单空行格式；要求顺序：{}",selected.iter().map(|p|file_name(p)).collect::<Vec<_>>().join("、")))})
             }
@@ -1006,7 +1073,13 @@ pub(super) fn apply(database:&Database,run:&str,checklist:&[DeliveryChecklistIte
                 // version keeps the unsupported-version reason.
                 let schema=spec["schemaVersion"].as_u64().unwrap_or(0);
                 if schema!=1{return Err(if schema==2{"内容契约 v2 由托管分类链核验，本链路不解码".into()}else{"内容契约版本不支持".into()});}
-                let contract:Contract=serde_json::from_value(spec["rule"].clone()).map_err(|_|"内容契约字段不完整或不支持")?;
+                // The separator rule is read from the frozen record, never
+                // defaulted to what this build writes today. An absent marker is
+                // a record frozen before it existed and means the historical
+                // rule; a marker we do not understand is refused here so it
+                // reaches the existing unverified path instead of being verified
+                // against semantics its author never declared.
+                let rule=merge_rule::from_spec(spec)?;                let contract:Contract=serde_json::from_value(spec["rule"].clone()).map_err(|_|"内容契约字段不完整或不支持")?;
                 let root=root.as_ref().map_err(|e|e.clone())?;
                 let path=verdict.bound_path.as_ref().ok_or("内容核验没有绑定真实产物")?;
                 let relative=project_relative_path(path.to_str().ok_or("产物路径编码不支持")?,root.to_str()).ok_or("产物不在当前授权项目内")?;
@@ -1014,7 +1087,7 @@ pub(super) fn apply(database:&Database,run:&str,checklist:&[DeliveryChecklistIte
                 if finding["checkedHash"].as_str().is_none_or(|hash|hash.trim_start_matches("sha256:")!=digest(&bytes)) {
                     return Err("产物已偏离本次真实回执/版本核验哈希".into());
                 }
-                let result=evaluate(&contract,root,&bytes,&relative,database,run,&finding);
+                let result=evaluate(&contract,rule,root,&bytes,&relative,database,run,&finding);
                 if super::super::attachment_compute::authorized_delivery_root(database,run).as_ref().ok()!=Some(root) {
                     return Err("内容核验期间项目授权改变，未核验".into());
                 }
@@ -1110,10 +1183,14 @@ mod tests {
     }
 
     // D1: the v1 `Contract::Concat` writer is the path that actually runs when
-    // v2 is off (the default), so the empty-body separator must be fixed here
-    // too. The expectations below are literal bytes written from the frozen
-    // wording ("entries joined by exactly one blank line"), not produced by the
-    // writer under test.
+    // v2 is off (the default), so the empty-body separator lives here too. The
+    // expectations below are literal bytes written from the frozen wording
+    // ("entries joined by exactly one blank line"), not produced by the writer
+    // under test.
+    //
+    // The separator is a property of the frozen record, so the same contract is
+    // exercised twice: once with the corrected rule a new freeze writes, and
+    // once with the historical rule an unmarked record still means.
     #[test]
     fn d1_v1_concat_separates_entries_with_exactly_one_blank_line() {
         let root = std::env::temp_dir().join("fox-d1-v1-concat");
@@ -1147,23 +1224,39 @@ mod tests {
         };
         let database = Database::open(root.join("d1.db")).expect("database");
 
-        // The rule's 44 bytes must be Met.
+        // Under the corrected rule (what a new freeze writes) the rule's 44
+        // bytes are Met, and the old 46-byte shape is Unmet.
         let correct = "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes();
         assert_eq!(
-            evaluate(&contract, &root, correct, "joined.txt", &database, "run", &json!({})),
+            evaluate(&contract, MergeRule::SeparatorV2, &root, correct, "joined.txt", &database, "run", &json!({})),
             RequirementVerdict::Met,
-            "D1: the corrected 44-byte merge must satisfy the v1 contract"
+            "D1: the corrected 44-byte merge must satisfy a new contract"
         );
         assert_eq!(correct.len(), 44);
 
-        // The old 46-byte construction (two blank lines) must now be Unmet.
         let double_blank = "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes();
         assert!(
             matches!(
-                evaluate(&contract, &root, double_blank, "joined.txt", &database, "run", &json!({})),
+                evaluate(&contract, MergeRule::SeparatorV2, &root, double_blank, "joined.txt", &database, "run", &json!({})),
                 RequirementVerdict::Unmet(_)
             ),
-            "D1: two blank lines must not satisfy the one-blank-line rule"
+            "D1: under the corrected rule two blank lines must not satisfy anything"
+        );
+
+        // Under the historical rule the same contract still wants 46 bytes. This
+        // is the compatibility guarantee: upgrading must not flip an old record's
+        // verdict, so the corrected 44-byte artifact must **not** pass here.
+        assert_eq!(
+            evaluate(&contract, MergeRule::SeparatorV1, &root, double_blank, "joined.txt", &database, "run", &json!({})),
+            RequirementVerdict::Met,
+            "D1: an unmarked record keeps the two-blank-line separator it was judged with"
+        );
+        assert!(
+            matches!(
+                evaluate(&contract, MergeRule::SeparatorV1, &root, correct, "joined.txt", &database, "run", &json!({})),
+                RequirementVerdict::Unmet(_)
+            ),
+            "D1: the 44-byte artifact must NOT become a pass merely because the build was upgraded"
         );
 
         // A non-empty body without a terminator still needs two LFs, and an
@@ -1193,21 +1286,208 @@ mod tests {
             read_only: true,
         };
         // alpha (no LF) -> terminator LF + blank LF; beta\n -> blank LF only.
+        // Non-empty bodies are byte-identical under both rules, which is the
+        // proof that the marker changes nothing outside the 0-byte case.
+        let mixed_bytes =
+            b"01_\xe5\x91\xa8\xe4\xb8\x80.txt\nalpha\n\n02_\xe5\x91\xa8\xe4\xba\x8c.txt\nbeta\n";
+        for rule in [MergeRule::SeparatorV2, MergeRule::SeparatorV1] {
+            assert_eq!(
+                evaluate(&mixed_contract, rule, &root, mixed_bytes, "joined.txt", &database, "run", &json!({})),
+                RequirementVerdict::Met,
+                "D1: non-empty bodies keep their bytes under {}",
+                rule.as_str()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Three 0-byte sources named as the B4 case froze them, plus a ready
+    /// database: the shared fixture for the separator tests.
+    fn three_empty_concat(root: &Path) -> (Contract, Vec<&'static str>) {
+        let names = ["01_周一.txt", "02_周二.txt", "03_周三.txt"];
+        let sources = names
+            .iter()
+            .map(|name| {
+                std::fs::write(root.join(name), b"").unwrap();
+                Source {
+                    path: (*name).into(),
+                    sha256: digest(b""),
+                    bytes: 0,
+                    first_line: 1,
+                    last_line: 1,
+                }
+            })
+            .collect::<Vec<_>>();
+        let contract = Contract::Concat {
+            sources,
+            selected: names.iter().map(|n| (*n).to_string()).collect(),
+            selection_order: "byteSizeAscThenNameAsc".into(),
+            tie_order: "nameAsc".into(),
+            merge_order: "nameAsc".into(),
+            read_only: true,
+        };
+        (contract, names.to_vec())
+    }
+
+    // ---- compat: the marker is read from the frozen record ----------------
+    //
+    // The separator rule is a fact in the record, not a property of the build
+    // that opens it. These two tests pin the reader: an unmarked record keeps the
+    // historical rule however this build is configured, and a marked one gets the
+    // rule it declares even when that is the *old* one.
+
+    /// An unmarked v1 `Concat` record is read with the historical separator, so
+    /// the 46-byte artifact it was frozen against still passes and the corrected
+    /// 44-byte one does not.
+    #[test]
+    fn d1_compat_an_unmarked_v1_record_keeps_the_historical_separator() {
+        let root = std::env::temp_dir().join("fox-d1-compat-unmarked");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let (contract, _names) = three_empty_concat(&root);
+        let database = Database::open(root.join("d1.db")).expect("database");
+
+        // The shape an old row actually holds: no `mergeRule` key at all.
+        let spec = json!({
+            "schemaVersion": 1,
+            "rule": serde_json::to_value(&contract).unwrap(),
+        });
+        assert!(
+            spec.get("mergeRule").is_none(),
+            "the fixture must be a genuinely unmarked record"
+        );
         assert_eq!(
-            evaluate(
-                &mixed_contract,
-                &root,
-                b"01_\xe5\x91\xa8\xe4\xb8\x80.txt\nalpha\n\n02_\xe5\x91\xa8\xe4\xba\x8c.txt\nbeta\n",
-                "joined.txt",
-                &database,
-                "run",
-                &json!({})
-            ),
+            decode_spec(&spec).merge_rule().expect("an unmarked v1 record always decodes with the historical rule"),
+            MergeRule::SeparatorV1,
+            "an absent marker means the rule the record was written with"
+        );
+
+        let old_46 = "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes();
+        assert_eq!(old_46.len(), 46);
+        assert_eq!(
+            evaluate(&contract, decode_spec(&spec).merge_rule().expect("an unmarked v1 record always decodes with the historical rule"), &root, old_46, "joined.txt", &database, "run", &json!({})),
             RequirementVerdict::Met,
-            "D1: non-empty bodies keep their original two-LF/one-LF separators"
+            "an old record must still be satisfied by the artifact it was judged against"
+        );
+
+        let corrected_44 = "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes();
+        assert_eq!(corrected_44.len(), 44);
+        assert!(
+            matches!(
+                evaluate(&contract, decode_spec(&spec).merge_rule().expect("an unmarked v1 record always decodes with the historical rule"), &root, corrected_44, "joined.txt", &database, "run", &json!({})),
+                RequirementVerdict::Unmet(_)
+            ),
+            "the corrected artifact must not silently start passing an old record"
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A record that explicitly declares the historical rule keeps it even though
+    /// this build freezes the corrected one — the marker is authoritative in both
+    /// directions, so it cannot be used as a one-way upgrade flag.
+    #[test]
+    fn d1_compat_an_explicit_historical_marker_wins_over_the_current_default() {
+        // A decodable rule, so `decode_spec` reaches the marker rather than
+        // failing on the payload: this test is about the marker, not the rule.
+        let rule = serde_json::to_value(Contract::Unbound {
+            reason: "fixture".into(),
+        })
+        .unwrap();
+        let spec = json!({"schemaVersion": 1, "mergeRule": "separator-v1", "rule": rule});
+        assert_eq!(
+            decode_spec(&spec).merge_rule(),
+            Some(MergeRule::SeparatorV1),
+            "an explicit historical marker must be honoured"
+        );
+        assert_eq!(MergeRule::default(), MergeRule::SeparatorV1);
+        assert_ne!(
+            MergeRule::current(),
+            MergeRule::SeparatorV1,
+            "current must differ, or this test proves nothing"
+        );
+
+        // And an explicit corrected marker on the same v1 chain is honoured, so
+        // the choice is genuinely independent of `schemaVersion`.
+        let new_spec = json!({"schemaVersion": 1, "mergeRule": "separator-v2", "rule": rule});
+        assert_eq!(
+            decode_spec(&new_spec).merge_rule(),
+            Some(MergeRule::SeparatorV2),
+            "a declared separator-v2 must reach the reader on the v1 chain"
+        );
+    }
+
+    /// The frozen step writes the marker on every new record, in both envelope
+    /// shapes, so a contract cannot be frozen without saying which rule it means.
+    #[test]
+    fn d1_compat_a_new_freeze_records_the_marker_in_both_envelopes() {
+        use delivery_v2::{spec_for_contract, V2Enablement};
+        let concat = Contract::Concat {
+            sources: Vec::new(),
+            selected: Vec::new(),
+            selection_order: "byteSizeAscThenNameAsc".into(),
+            tie_order: "nameAsc".into(),
+            merge_order: "nameAsc".into(),
+            read_only: true,
+        };
+        let rule = serde_json::to_value(&concat).unwrap();
+        for (label, enablement, expected_schema) in [
+            ("v1", V2Enablement::Off, 1),
+            ("v2", V2Enablement::On, 2),
+        ] {
+            let spec = spec_for_contract(&concat, rule.clone(), "content:concat", &enablement);
+            assert_eq!(spec["schemaVersion"], json!(expected_schema), "{label}");
+            assert_eq!(
+                spec[merge_rule::KEY],
+                json!(MergeRule::current().as_str()),
+                "{label}: a new freeze must declare its separator"
+            );
+            assert_eq!(
+                decode_spec(&spec).merge_rule().expect("an unmarked v1 record always decodes with the historical rule"),
+                MergeRule::current(),
+                "{label}: what the writer froze is what the reader sees"
+            );
+        }
+    }
+
+    /// An unusable marker is refused on **both** chains rather than defaulted.
+    #[test]
+    fn d1_compat_an_unusable_marker_is_refused_on_both_chains() {
+        for schema in [1u64, 2] {
+            for bad in [json!("separator-v3"), json!(2), json!(null), json!("SEPARATOR-V2")] {
+                let spec = json!({
+                    "schemaVersion": schema,
+                    "envelopeVersion": 2,
+                    "checkerVersion": 2,
+                    "ruleId": "content:concat",
+                    "mergeRule": bad,
+                    "rule": {"type": "concat"},
+                });
+                let decoded = decode_spec(&spec);
+                assert!(
+                    matches!(decoded, DecodedSpec::Invalid(_)),
+                    "schemaVersion {schema} accepted {bad} as {decoded:?}"
+                );
+            }
+        }
+    }
+
+    /// The whole point of putting the marker in the spec: it is inside the frozen
+    /// identity, so changing it after acceptance is visible.
+    #[test]
+    fn d1_compat_the_marker_participates_in_the_frozen_identity() {
+        let base = json!({"schemaVersion": 1, "mergeRule": "separator-v1", "rule": {"type": "concat"}});
+        let mut tampered = base.clone();
+        tampered["mergeRule"] = json!("separator-v2");
+
+        // The identity is the digest of the whole spec, so a flipped marker is a
+        // different contract — not a silent reinterpretation of the same one.
+        assert_ne!(
+            digest(&serde_json::to_vec(&base).unwrap()),
+            digest(&serde_json::to_vec(&tampered).unwrap()),
+            "flipping the marker must change the frozen identity"
+        );
     }
 }
 

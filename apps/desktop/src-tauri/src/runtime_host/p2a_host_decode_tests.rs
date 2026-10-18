@@ -97,7 +97,7 @@ fn p2a_decode_v1_ignores_extra_top_level_keys_but_rejects_inside_rule() {
     spec["ruleId"] = json!("content:concat");
     let decoded = decode_spec(&spec);
     assert!(
-        matches!(decoded, DecodedSpec::V1(_)),
+        matches!(decoded, DecodedSpec::V1(..)),
         "extra top-level keys must stay ignored, got {decoded:?}"
     );
     // The legacy reader still reads only `rule`.
@@ -647,7 +647,7 @@ fn p2a_legacy_schema1_with_extra_top_level_keys_still_reads_as_v1() {
     spec["envelopeVersion"] = json!(2);
     let decoded = decode_spec(&spec);
     assert!(
-        matches!(decoded, DecodedSpec::V1(_)),
+        matches!(decoded, DecodedSpec::V1(..)),
         "a schema1 record with a stray policy must stay v1, got {decoded:?}"
     );
     assert_eq!(model_reference(&spec)["type"], json!("concat"));

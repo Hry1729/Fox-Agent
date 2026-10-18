@@ -527,7 +527,7 @@ fn p2b_invalid_spec_is_invalid_with_its_concrete_reason() {
 #[test]
 fn p2b_v1_spec_is_not_classified_as_v2() {
     let spec = json!({"schemaVersion": 1, "rule": v1_concat_rule(vec![])});
-    assert!(matches!(decode_spec(&spec), DecodedSpec::V1(_)));
+    assert!(matches!(decode_spec(&spec), DecodedSpec::V1(..)));
     let input = FactInput {
         spec: &spec,
         read_facts: vec![],

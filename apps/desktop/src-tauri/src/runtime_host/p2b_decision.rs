@@ -817,7 +817,7 @@ pub(crate) fn classify_v2_facts(input: &FactInput<'_>) -> Vec<DecisionFact> {
         DecodedSpec::V2(_) => true,
         // A v1 record is not this function's to classify: the v1 path owns it
         // and must stay byte-identical.
-        DecodedSpec::V1(_) => false,
+        DecodedSpec::V1(..) => false,
     };
 
     // 2. Candidate read facts, classified by the typed producer.
