@@ -351,7 +351,7 @@ fn the_generation_decision_is_a_pure_function_of_the_switch_state() {
         );
         assert!(matches!(
             content_requirements::decode_spec(&spec),
-            content_requirements::DecodedSpec::V1(_)
+            content_requirements::DecodedSpec::V1(..)
         ));
     }
 

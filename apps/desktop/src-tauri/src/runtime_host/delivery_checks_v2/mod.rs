@@ -52,8 +52,11 @@ use super::delivery::RequirementVerdict;
 pub(crate) mod budget;
 pub(crate) mod fact_pdf;
 pub(crate) mod lineage_roles;
+pub(crate) mod merge_rule;
 pub(crate) mod text_csv;
 pub(crate) mod typed_metrics;
+
+use merge_rule::MergeRule;
 
 // ---------------------------------------------------------------------------
 // Versions
@@ -521,6 +524,12 @@ pub(crate) struct RulePolicy {
 ///
 /// No migration and no schema change are needed: v1 readers ignore the extra
 /// keys, and v2 readers read v1 records as v1.
+///
+/// `merge_rule` is the separator semantics of a `Concat` rule, and is a
+/// different axis from `envelope_version` / `schemaVersion` (see
+/// [`merge_rule`]). It is skipped when it is the historical rule so that a
+/// record written by an older build and one written today with that same rule
+/// serialize identically — the marker only ever adds information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RuleEnvelope {
@@ -533,6 +542,13 @@ pub(crate) struct RuleEnvelope {
     pub rule_id: Option<String>,
     #[serde(default)]
     pub policy: RulePolicy,
+    /// The `Concat` separator this record was frozen with.
+    #[serde(
+        default,
+        rename = "mergeRule",
+        skip_serializing_if = "is_legacy_merge_rule"
+    )]
+    pub merge_rule: MergeRule,
 }
 
 fn envelope_v1() -> u32 {
@@ -542,6 +558,12 @@ fn checker_v1() -> u32 {
     CHECKER_VERSION_V1
 }
 
+/// `skip_serializing_if` takes a reference, and keeping the predicate beside the
+/// field is what stops the serialized shape from drifting away from `is_legacy`.
+fn is_legacy_merge_rule(rule: &MergeRule) -> bool {
+    rule.is_legacy()
+}
+
 impl Default for RuleEnvelope {
     fn default() -> Self {
         Self {
@@ -549,6 +571,7 @@ impl Default for RuleEnvelope {
             checker_version: CHECKER_VERSION_V1,
             rule_id: None,
             policy: RulePolicy::default(),
+            merge_rule: merge_rule::MergeRule::default(),
         }
     }
 }
@@ -560,13 +583,25 @@ impl RuleEnvelope {
     }
 
     /// A v2 envelope with an explicit policy, frozen by the Host for a new Run.
+    ///
+    /// A new envelope describes a contract frozen **now**, so it carries the
+    /// separator this build writes. A reader never makes that choice on its own:
+    /// this is the writer declaring the rule, and an envelope for an existing
+    /// record is produced by [`Self::from_spec`], which reads what is there.
     pub(crate) fn v2(rule_id: impl Into<String>, policy: RulePolicy) -> Self {
         Self {
             envelope_version: ENVELOPE_VERSION_V2,
             checker_version: CHECKER_VERSION_V2,
             rule_id: Some(rule_id.into()),
             policy,
+            merge_rule: merge_rule::MergeRule::current(),
         }
+    }
+
+    /// The same envelope frozen with an explicit separator rule.
+    pub(crate) fn with_merge_rule(mut self, rule: merge_rule::MergeRule) -> Self {
+        self.merge_rule = rule;
+        self
     }
 
     /// True when this contract predates the envelope and must be read with v1
@@ -586,6 +621,9 @@ impl RuleEnvelope {
     ///   rule as `unverified` (the behaviour `delivery_content_requirements.rs`
     ///   already has for an unsupported `schemaVersion`). It never defaults to a
     ///   looser policy.
+    /// * A `mergeRule` this build does not understand is an `Err` for the same
+    ///   reason: reading it as the legacy rule would verify a record against
+    ///   semantics its author did not declare.
     pub(crate) fn from_spec(spec: &Value) -> Result<Self, String> {
         let object = spec
             .as_object()
@@ -624,11 +662,13 @@ impl RuleEnvelope {
             Some(value) => serde_json::from_value(value.clone())
                 .map_err(|_| "内容契约政策字段不可读".to_owned())?,
         };
+        let merge_rule = merge_rule::from_spec(spec)?;
         Ok(Self {
             envelope_version,
             checker_version,
             rule_id,
             policy,
+            merge_rule,
         })
     }
 

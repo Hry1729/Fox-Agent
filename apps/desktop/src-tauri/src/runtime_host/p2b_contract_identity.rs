@@ -111,7 +111,7 @@ pub(crate) fn classify_requirements(raw: Option<&str>) -> ContractIdentity {
         };
         match decode_spec(spec) {
             DecodedSpec::V2(_) => return ContractIdentity::HostV2,
-            DecodedSpec::V1(_) => {}
+            DecodedSpec::V1(..) => {}
             DecodedSpec::Invalid(reason) => {
                 indeterminate.get_or_insert(reason);
             }

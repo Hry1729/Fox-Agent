@@ -35,6 +35,8 @@
 
 use super::*;
 
+use crate::runtime_host::delivery_checks_v2::merge_rule;
+
 /// The process-scoped enablement switch for v2 content contracts.
 pub(super) const ENABLE_VARIABLE: &str = "FOX_DELIVERY_V2";
 
@@ -205,6 +207,7 @@ pub(crate) fn spec_for(rule: Value, rule_id: &str) -> Value {
         "schemaVersion": CONTRACT_SCHEMA_VERSION,
         "envelopeVersion": ENVELOPE_VERSION,
         "checkerVersion": CHECKER_VERSION,
+        "mergeRule": merge_rule::MergeRule::current().as_str(),
         "ruleId": rule_id,
         "policy": policy,
         "rule": rule,
@@ -222,6 +225,14 @@ pub(crate) fn spec_for(rule: Value, rule_id: &str) -> Value {
 ///
 /// Both envelope shapes are built here so the two generations cannot come to hold
 /// different rule payloads.
+///
+/// Both shapes also carry the **separator rule** this build freezes, and it is
+/// written on every new record: `schemaVersion` is chosen by the switch, the
+/// separator is chosen by the build. They are independent on purpose — an enabled
+/// gate does not change the separator, and a new contract frozen with the gate off
+/// still gets the corrected separator. This function is the single place a new
+/// contract acquires either value, so a record cannot be frozen with one
+/// separator and later verified as another.
 pub(crate) fn spec_for_contract(
     contract: &Contract,
     rule: Value,
@@ -231,7 +242,11 @@ pub(crate) fn spec_for_contract(
     if enablement.permits_v2() && allows_v2(contract) {
         spec_for(rule, rule_id)
     } else {
-        json!({"schemaVersion": 1, "rule": rule})
+        json!({
+            "schemaVersion": 1,
+            "mergeRule": merge_rule::MergeRule::current().as_str(),
+            "rule": rule,
+        })
     }
 }
 
@@ -339,7 +354,7 @@ mod tests {
         let v2 = spec_for(rule.clone(), "content:concat");
         let v1 = json!({"schemaVersion": 1, "rule": rule});
         assert_eq!(v1["rule"], v2["rule"]);
-        assert!(matches!(decode_spec(&v1), DecodedSpec::V1(_)));
+        assert!(matches!(decode_spec(&v1), DecodedSpec::V1(..)));
         assert!(matches!(decode_spec(&v2), DecodedSpec::V2(_)));
     }
 

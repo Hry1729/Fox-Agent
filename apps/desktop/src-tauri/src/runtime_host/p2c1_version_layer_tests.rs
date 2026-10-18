@@ -93,7 +93,7 @@ fn c1_the_host_selector_and_the_leaf_envelope_marker_read_different_fields() {
     // The Host gate reads `schemaVersion` and selects the frozen v1 contract; the
     // v2-only keys beside it are ignored rather than rejected.
     match decode_spec(&v1_beside_v2_markers) {
-        DecodedSpec::V1(contract) => {
+        DecodedSpec::V1(contract, _rule) => {
             assert_eq!(serde_json::to_value(&contract).unwrap(), unbound_rule())
         }
         other => panic!("schemaVersion 1 stays v1 beside extra keys, got {other:?}"),
@@ -131,7 +131,7 @@ fn c1_the_host_decoder_accepts_what_the_leaf_envelope_writer_produces() {
         &RuleEnvelope::v1(),
     );
     match decode_spec(&v1_spec) {
-        DecodedSpec::V1(contract) => {
+        DecodedSpec::V1(contract, _rule) => {
             assert_eq!(serde_json::to_value(&contract).unwrap(), unbound_rule())
         }
         other => panic!("a v1 leaf envelope must stay on the v1 branch, got {other:?}"),
