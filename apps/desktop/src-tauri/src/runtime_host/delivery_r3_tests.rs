@@ -395,9 +395,8 @@ fn r3_real_continuation_preserves_content_contract_bytes_and_reference() {
     assert_eq!(before,frozen_delivery_reference(&f.db,&f.run,&f.context()).unwrap());
     let after=frozen_delivery_reference(&f.db,&next.run.id,&f.context()).unwrap();
     assert_ne!(before,after,"the successor does not read the source's frozen contract");
-    // With no checklist the gate has nothing to verify, so it cannot require a
-    // review wait on this Run's behalf.
-    let stop=evaluate_stop(&f.db,f.root.to_str(),&next.run.id).unwrap();
-    assert!(!matches!(stop,DeliveryStop::RequiresU1{..}),
-        "an ordinary successor must not be parked for content review: {stop:?}");
+    // With no checklist the gate reports `NoChecklist` — the same ordinary stop
+    // handling a new task gets — rather than verifying, repairing or parking.
+    assert!(matches!(stop,DeliveryStop::NoChecklist),
+        "an ordinary successor goes through normal stop handling: {stop:?}");
 }
