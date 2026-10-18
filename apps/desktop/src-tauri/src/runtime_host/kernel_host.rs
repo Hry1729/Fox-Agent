@@ -643,8 +643,11 @@ pub(crate) fn resource_failure_result_with_input(
         // above is Host-local.
         return with_resource_diagnostic(generic_resource_failure(tool), tool, input, error, false, None);
     }
+    // `present_files` resolves local paths only, so its failure text is authored
+    // by this Host and stays trustworthy: the model must see which check failed
+    // (missing, not a file, outside the project) instead of a withheld body.
     let local=crate::resource_gateway::is_reader(tool) || matches!(tool,
-        "attachment_compute"|"read_attachment"|"read_tool_result"|"structured_data"|"tabular_data"|"run_command"|"write_file"|"edit_file"|"git_read"|"sqlite_read"|"system_info");
+        "attachment_compute"|"read_attachment"|"read_tool_result"|"structured_data"|"tabular_data"|"run_command"|"write_file"|"edit_file"|"git_read"|"sqlite_read"|"system_info"|"present_files");
     with_resource_diagnostic(resource_failure_result(tool, error), tool, input, error, local, None)
 }
 
