@@ -1,3 +1,4 @@
+pub(crate) mod agent_backend_routing;
 mod kernel_continuation;
 mod kernel_reliability;
 mod kernel_reconciliation;
@@ -1528,6 +1529,23 @@ pub async fn conversation_create(
             false,
         ));
     }
+    // Plan v0.3.1 5.4 / 6.6: the outer Agent backend is chosen here, once, and
+    // written in the INSERT (absent = fox). Non-Fox backends are refused while
+    // FOX_EXTERNAL_BACKENDS keeps them off.
+    let agent_backend = match agent_backend_routing::choose_new_conversation_backend(
+        request.agent_backend.as_deref(),
+    ) {
+        Ok(agent_backend) => agent_backend,
+        Err(failure) => return Ok(failure),
+    };
+    let external_backend = agent_backend != fox_agent_backend::port::AgentBackend::Fox;
+    if external_backend && request.expert_id.is_some() {
+        return Ok(ApiResponse::failure(
+            "agent_backend_invalid",
+            "会话专家只能用于 Fox 后端会话",
+            false,
+        ));
+    }
     match state.database.agent_kind(&request.agent_id) {
         Ok(Some(kind)) if kind == "assistant" => {}
         Ok(Some(_)) => {
@@ -1592,11 +1610,19 @@ pub async fn conversation_create(
         }
         Err(error) => return Ok(storage_error(error)),
     };
-    let conversation = match state.database.create_conversation(
+    if external_backend && runtime.0 == "yuxi" {
+        return Ok(ApiResponse::failure(
+            "agent_backend_invalid",
+            "知识库智能体会话只能使用 Fox 后端",
+            false,
+        ));
+    }
+    let conversation = match state.database.create_conversation_with_backend(
         &request.agent_id,
         request.title.as_deref(),
         project_root.as_deref(),
         Some(permission_mode),
+        agent_backend.as_str(),
     ) {
         Ok(conversation) => conversation,
         Err(error) => {
@@ -2350,6 +2376,18 @@ pub fn run_start(
     state: State<'_, AppState>,
     request: StartRunRequest,
 ) -> ApiResponse<StartRunResult> {
+    // Plan 5.4: route by the conversation's frozen backend before any run row
+    // or attachment binding is written. A non-Fox conversation is refused here
+    // (disabled / not yet wired); a mismatched `agentBackend` is misrouted.
+    if let Err(failure) = agent_backend_routing::gate_conversation(
+        &state.database,
+        fox_agent_backend::host_routing::HostEntry::Start,
+        &request.conversation_id,
+        None,
+        request.agent_backend.as_deref(),
+    ) {
+        return failure;
+    }
     let runtime_text = request
         .runtime_text
         .clone()
@@ -2446,6 +2484,24 @@ fn dispatch_started_run(
     runtime_text: String,
     apply_work_gate: bool,
 ) -> ApiResponse<StartRunResult> {
+    // Every start path (run_start, rewind, confirmed dispatch) ends here, so a
+    // non-Fox conversation can never reach the Kernel / legacy / yuxi runtime
+    // even when its caller did not gate. The already-created run is failed
+    // with the routing code so it does not stay queued.
+    if let Err(failure) = agent_backend_routing::gate_conversation::<StartRunResult>(
+        &state.database,
+        fox_agent_backend::host_routing::HostEntry::Start,
+        &started.run.conversation_id,
+        Some(&started.run.id),
+        None,
+    ) {
+        if let Some(error) = failure.error.as_ref() {
+            let _ = state
+                .database
+                .mark_run_failed(&started.run.id, &error.code, &error.message);
+        }
+        return failure;
+    }
     let runtime = match state
         .database
         .conversation_runtime(&started.run.conversation_id)
@@ -2706,6 +2762,15 @@ pub fn run_resume(
     if request.text.trim().is_empty() || !request.answers.is_object() {
         return ApiResponse::failure("yuxi.resume_invalid", "请先完成需要补充的事项", false);
     }
+    if let Err(failure) = agent_backend_routing::gate_conversation(
+        &state.database,
+        fox_agent_backend::host_routing::HostEntry::Resume,
+        &request.conversation_id,
+        Some(&request.parent_run_id),
+        request.agent_backend.as_deref(),
+    ) {
+        return failure;
+    }
     let runtime = match state
         .database
         .conversation_runtime(&request.conversation_id)
@@ -2766,6 +2831,15 @@ pub async fn run_cancel(
     state: State<'_, AppState>,
     request: CancelRunRequest,
 ) -> Result<ApiResponse<bool>, String> {
+    // Plan 5.4: the backend comes from the run's conversation, never from the
+    // request; a request naming another backend is refused as misrouted.
+    if let Err(failure) = agent_backend_routing::gate_run_identity(
+        fox_agent_backend::host_routing::HostEntry::Cancel,
+        state.database.run_agent_backend(&request.run_id),
+        request.agent_backend.as_deref(),
+    ) {
+        return Ok(failure);
+    }
     // Frozen authority must be selected before touching Legacy read models.
     match cancel_kernel_owned_run(&state.database, &request.run_id, || state.runtime_host.cancel_managed_run(&request.run_id)) {
         Ok(Some(cancelled)) => return Ok(ApiResponse::success(cancelled)),
@@ -3019,6 +3093,13 @@ pub fn approval_resolve(
 ) -> ApiResponse<bool> {
     if let Err(error) = require_trusted_local_window(&window) {
         return ApiResponse::failure("permission.untrusted_origin", error, false);
+    }
+    if let Err(failure) = agent_backend_routing::gate_run_identity(
+        fox_agent_backend::host_routing::HostEntry::Approve,
+        state.database.approval_agent_backend(&request.approval_id),
+        request.agent_backend.as_deref(),
+    ) {
+        return failure;
     }
     match state
         .runtime_host
