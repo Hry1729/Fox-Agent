@@ -351,6 +351,11 @@ export interface ConversationSummary {
   projectId: string | null
   projectRoot: string | null
   permissionMode: ProjectRecord['permissionMode']
+  /**
+   * Outer Agent backend frozen at creation (plan v0.3.1 6.6). Optional only for
+   * summaries from an older Host; absent means `fox`. Not the Kernel engineId.
+   */
+  agentBackend?: import('./agent-backend').AgentBackendId
   status: string
   pinned?: boolean
   archived?: boolean
