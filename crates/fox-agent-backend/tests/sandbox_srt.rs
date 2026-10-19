@@ -33,13 +33,26 @@
 //! Same opt-in (`#[ignore]` + `FOX_TEST_REAL_SRT=1`). Needs, on a machine where
 //! `srt windows-install` has run (one UAC prompt) and as a normal user:
 //!
-//! * `FOX_RUNTIME_ROOT`: Fox's managed runtime directory, a folder the test
-//!   user created (e.g. `%LOCALAPPDATA%\Fox\runtime`). srt can only grant the
-//!   sandbox account read access to user-owned paths, so the next three must
-//!   live under it (Node may instead be a machine-wide install under
-//!   Program Files, which needs no grant).
+//! * The one-time setup done with `scripts/windows/enable-sandbox.ps1`
+//!   (one UAC prompt): the runtime package copied to
+//!   `%ProgramFiles%\Fox\sandbox-runtime\<version>` (administrator-owned,
+//!   Users read+execute), `%ProgramData%\Fox\sandbox` created, srt
+//!   `windows-install` run.
+//! * `FOX_RUNTIME_ROOT`: that runtime directory (or an override with the same
+//!   ACL rules; a folder under the user profile is refused with
+//!   `sandbox_runtime_not_installed`). The next three live under it.
 //! * `FOX_SRT_PREFIX`, `FOX_PI_ACP_PREFIX` (npm prefixes as above) and
 //!   `FOX_SRT_NODE` (absolute path to `node.exe`, >= 22.12).
+//! * `<FOX_RUNTIME_ROOT>\t04-fixtures`: `pi-gated.cmd`,
+//!   `fox-approval-gate.ts` (from `fixtures/pi`) and
+//!   `sandbox\scripted-cmd-provider.ts` (from `fixtures/sandbox`), placed
+//!   there by the setup (put them in the source package) or by an
+//!   administrator; the test cannot write into the runtime.
+//! * Optional `FOX_T04_PROJECT_PARENT` (default
+//!   `%USERPROFILE%\Documents\中文 空格`): the project is created there, so
+//!   the ancestor metadata ACEs (profile root, Documents, `中文 空格`) are
+//!   exercised; the test checks the sandbox cannot list Documents and that
+//!   the ACEs are gone after close.
 //! * Git for Windows installed machine-wide (pi's bash tool looks for
 //!   `%ProgramFiles%\Git\bin\bash.exe`). Probes run as PowerShell /
 //!   `cmd.exe` / `curl.exe` (System32) children of that bash, so every probe
@@ -59,6 +72,10 @@
 //! `dsh` / `dsh.cmd` entry of `@deepseek-ai/dsh@0.2.1-rc.2`, under
 //! `FOX_RUNTIME_ROOT` on Windows): version check outside, then initialize and
 //! session/new inside srt. No prompt (needs a key; a model turn is not T04).
+//! The `--patch` file is the runtime asset
+//! `<runtime>/dsh-patches/read-only-noweb.yml` (read-only assets must be in
+//! the managed runtime; on Windows the setup installs it, on Linux the test
+//! writes it into `FOX_RUNTIME_ROOT` or a private runtime directory).
 
 #![cfg(feature = "acp")]
 #![cfg_attr(not(any(target_os = "linux", windows)), allow(unused_imports, dead_code))]
@@ -520,11 +537,37 @@ fn icacls(path: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Windows sandbox state shared by the real tests: srt's sandbox SID (also
+/// recorded in the SID ledger), the per-user private root under
+/// `%ProgramData%\Fox\sandbox\<SID>` and the ancestor ACE coordinator.
+#[cfg(windows)]
+struct WindowsSandbox {
+    sid: String,
+    layout: fox_agent_backend::winruntime::WindowsPrivateLayout,
+    coordinator: fox_agent_backend::winancestor::AncestorAceCoordinator,
+}
+
+#[cfg(windows)]
+fn windows_sandbox(state: &Path) -> WindowsSandbox {
+    use fox_agent_backend::winacl::RealWindowsAcl;
+    use fox_agent_backend::winancestor::{srt_acl_lock_path, AncestorAceCoordinator};
+    use fox_agent_backend::winruntime::{prepare_windows_private_root, read_srt_registry, record_srt_sid, WindowsPrivateLayout};
+    let registry = read_srt_registry(&RealProbe).unwrap_or_else(|error| panic!("srt registry: {error}"));
+    let known = record_srt_sid(state, &registry).unwrap();
+    let layout = WindowsPrivateLayout::for_current_user(&RealWindowsAcl).unwrap();
+    prepare_windows_private_root(&layout, &RealWindowsAcl, &RealWindowsAcl, &known)
+        .unwrap_or_else(|error| panic!("private root: {error} remedy={:?}", error.remedy));
+    let acl = Arc::new(RealWindowsAcl);
+    let coordinator = AncestorAceCoordinator::new(state.to_path_buf(), acl.clone(), acl).with_srt_acl_lock(srt_acl_lock_path());
+    WindowsSandbox { sid: registry.sandbox_user_sid, layout, coordinator }
+}
+
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "real srt (Windows) + pi-acp; run with FOX_TEST_REAL_SRT=1 ... -- --include-ignored (see file header)"]
 async fn real_srt_pi_acp_t04_windows() {
-    use fox_agent_backend::winacl::{audit_broad_exposure, RealWindowsAcl, WindowsAclProbe};
+    use fox_agent_backend::winacl::{audit_broad_exposure, RealWindowsAcl, WindowsAclProbe, WindowsAclWriter};
+    use fox_agent_backend::winancestor::ANCESTOR_ACE_MASK;
     require_real("real_srt_pi_acp_t04_windows");
     let probe = RealProbe;
     let runtime_root = env_path("FOX_RUNTIME_ROOT");
@@ -533,19 +576,23 @@ async fn real_srt_pi_acp_t04_windows() {
     let ready = preflight(&install, &probe).unwrap_or_else(|error| panic!("preflight: {error}"));
     eprintln!("preflight ok: node {} srt {}", ready.node_version, ready.srt_version);
 
-    // Layout: everything private under the real profile (whose stock DACL
-    // admits only the user, SYSTEM and Administrators).
+    // Layout: Fox state and a secret under the real profile (stock DACL:
+    // the user, SYSTEM, Administrators); the project under
+    // Documents\中文 空格 (ancestor ACEs); private HOME / temp under
+    // %ProgramData%\Fox\sandbox\<SID>.
     let pid = std::process::id();
     let profile = PathBuf::from(std::env::var_os("USERPROFILE").expect("USERPROFILE"));
     let base = profile.join(format!(".fox-t04-{pid}"));
     let _ = std::fs::remove_dir_all(&base);
-    let proj = base.join("proj");
+    let project_parent = std::env::var_os("FOX_T04_PROJECT_PARENT").map(PathBuf::from).unwrap_or_else(|| profile.join("Documents").join("中文 空格"));
+    let proj = project_parent.join(format!("proj-{pid}"));
     let secret_dir = base.join("secret");
     let fox_data = base.join("fox-data");
     let state = fox_data.join("state");
     for dir in [&proj, &secret_dir, &state] {
         std::fs::create_dir_all(dir).unwrap();
     }
+    let sandbox = windows_sandbox(&state);
     let token = format!("FOXSECRET{pid}");
     std::fs::write(secret_dir.join("secret.txt"), &token).unwrap();
     std::fs::write(proj.join("readme.txt"), "authorized-content").unwrap();
@@ -554,16 +601,16 @@ async fn real_srt_pi_acp_t04_windows() {
     let public = PathBuf::from(std::env::var_os("PUBLIC").unwrap_or_else(|| r"C:\Users\Public".into()));
     let program_data = PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into()));
 
-    // Fixtures copied into the managed runtime directory (the repo checkout
-    // may be on a drive the sandbox account cannot be granted).
-    let fixtures_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-    let fixtures = runtime_root.join(format!("t04-fixtures-{pid}"));
-    let _ = std::fs::remove_dir_all(&fixtures);
-    std::fs::create_dir_all(fixtures.join("sandbox")).unwrap();
-    for file in ["pi-gated.cmd", "fox-approval-gate.ts"] {
-        std::fs::copy(fixtures_src.join("pi").join(file), fixtures.join(file)).unwrap();
+    // Fixtures live in the managed runtime directory (administrator-owned:
+    // installed by the setup, not written by this test).
+    let fixtures = runtime_root.join("t04-fixtures");
+    for file in ["pi-gated.cmd", "fox-approval-gate.ts", r"sandbox\scripted-cmd-provider.ts"] {
+        assert!(
+            fixtures.join(file).is_file(),
+            "{} missing: copy fixtures/pi/{{pi-gated.cmd,fox-approval-gate.ts}} and fixtures/sandbox/scripted-cmd-provider.ts into <runtime>\\t04-fixtures as administrator (or include them in the enable-sandbox source package)",
+            fixtures.join(file).display()
+        );
     }
-    std::fs::copy(fixtures_src.join("sandbox/scripted-cmd-provider.ts"), fixtures.join("sandbox/scripted-cmd-provider.ts")).unwrap();
 
     let exposed = std::env::var_os("FOX_T04_EXPOSED_DIR").map(PathBuf::from);
     if let Some(dir) = &exposed {
@@ -584,7 +631,7 @@ async fn real_srt_pi_acp_t04_windows() {
     let (allowed_before, blocked_before) = (allowed.hits(), blocked.hits());
 
     let pi_prefix = env_path("FOX_PI_ACP_PREFIX");
-    let homes = PrivateHomes::new(fox_data.join("sandbox-homes"));
+    let homes = PrivateHomes::new(sandbox.layout.homes_root());
     let private_home = homes.home_for(PROJECT_UUID, AgentBackend::Pi).unwrap();
     let policy = SandboxPolicy::new(
         vec![AuthorizedDir { path: proj.clone(), writable: true }],
@@ -613,7 +660,7 @@ async fn real_srt_pi_acp_t04_windows() {
             ("FOX_PI_EXTRA_ARGS".into(), "--provider foxcmd --model scripted".into()),
         ],
     };
-    let launcher = SrtLauncher::new(ready, state.clone()).with_managed_runtime_root(runtime_root.clone());
+    let launcher = SrtLauncher::new(ready, state.clone()).with_managed_runtime_root(runtime_root.clone()).with_tmp_root(sandbox.layout.tmp_root());
     let session_tmp = launcher.session_tmp("t04");
     let prepared = prepare_launch(
         PermissionMode::Sandboxed,
@@ -632,11 +679,23 @@ async fn real_srt_pi_acp_t04_windows() {
     assert_eq!(parsed["filesystem"]["denyRead"], serde_json::json!([]), "no denyRead C:\\Users");
     let allow_read = parsed["filesystem"]["allowRead"].to_string().to_ascii_lowercase();
     assert!(!allow_read.contains("program files"), "no ACE on Users-readable system paths");
+    let ancestors = prepared.windows_ancestor_aces.clone();
+    eprintln!("ancestor ACEs: {ancestors:?}");
+    assert!(ancestors.iter().any(|path| path == &profile), "profile root needs an ancestor ACE");
+    assert!(ancestors.iter().any(|path| path == &project_parent), "{} needs an ancestor ACE", project_parent.display());
 
+    // Global srt transition: ancestor ACEs before srt starts, reconcile after.
+    let mut transition = sandbox.coordinator.transition().unwrap();
+    let added = transition.begin_session("t04", &sandbox.sid, &ancestors).unwrap_or_else(|error| panic!("ancestor ACEs: {error} remedy={:?}", error.remedy));
+    eprintln!("MEASURE ancestor ACEs added: {added:?}");
     let mut connection = AcpConnection::spawn_prepared(prepared, &proj).await.expect("spawn pi-acp inside srt");
     let BackendEvent::Initialized { initialize_response, .. } = next(&mut connection).await else {
         panic!("expected Initialized first");
     };
+    eprintln!("MEASURE reconcile after start: {:?}", transition.finish());
+    for path in &ancestors {
+        assert!(RealWindowsAcl.has_exact_allow_ace(path, &sandbox.sid, ANCESTOR_ACE_MASK).unwrap(), "ancestor ACE missing on {}", path.display());
+    }
     check_initialize(&initialize_response).unwrap();
     let session = connection
         .new_session(proj.clone())
@@ -655,6 +714,13 @@ async fn real_srt_pi_acp_t04_windows() {
     let out = run(&mut connection, &session, "insidewrite", &ps_write(&proj.join("inside.txt"))).await;
     assert!(out.contains("WRITE-OK"));
     assert!(proj.join("inside.txt").exists());
+
+    // 0b. An ancestor ACE allows stat, not listing: Documents stays closed.
+    let documents = project_parent.parent().unwrap_or(&profile).to_path_buf();
+    let out = run(&mut connection, &session, "listdocs", &ps(&format!("try {{ Get-ChildItem -LiteralPath {} -ErrorAction Stop | Select-Object -First 1 | Out-Null; 'LIST-OK' }} catch {{ 'LIST-DENIED:' + $_.Exception.GetType().Name }}", ps_literal(&documents)))).await;
+    assert!(out.contains("LIST-DENIED") && !out.contains("LIST-OK"), "the sandbox could list {}", documents.display());
+    let out = run(&mut connection, &session, "listprofile", &ps(&format!("try {{ Get-ChildItem -LiteralPath {} -ErrorAction Stop | Select-Object -First 1 | Out-Null; 'LIST-OK' }} catch {{ 'LIST-DENIED:' + $_.Exception.GetType().Name }}", ps_literal(&profile)))).await;
+    assert!(out.contains("LIST-DENIED"), "the sandbox could list the profile root");
 
     // 1. Reads outside: the user's own profile (beside the project), Fox
     //    state (settings), through PowerShell, cmd.exe and pi's read tool.
@@ -733,10 +799,17 @@ async fn real_srt_pi_acp_t04_windows() {
     eprintln!("MEASURE USERPROFILE/TEMP inside: see the transcript of id=home above");
     let _ = session_tmp;
 
-    // 6. Close: job terminated, per-session state removed; ACL residue and
-    //    leftover processes measured.
+    // 6. Close (inside the srt transition): job terminated, per-session
+    //    state removed, ancestor ACEs revoked; ACL residue and leftover
+    //    processes measured.
+    let mut transition = sandbox.coordinator.transition().unwrap();
     let report = connection.close_with_report().await;
     eprintln!("MEASURE close: {report:?}");
+    eprintln!("MEASURE ancestor ACEs removed: {:?}", transition.end_session("t04").unwrap());
+    eprintln!("MEASURE reconcile after stop: {:?}", transition.finish());
+    for path in &ancestors {
+        assert!(!RealWindowsAcl.has_exact_allow_ace(path, &sandbox.sid, ANCESTOR_ACE_MASK).unwrap(), "ancestor ACE left on {}", path.display());
+    }
     tokio::time::sleep(Duration::from_secs(3)).await;
     let left = windows_processes_matching(&base.display().to_string());
     eprintln!("MEASURE visible processes left: {left:?} (srt-sandbox processes may be invisible without elevation)");
@@ -745,7 +818,7 @@ async fn real_srt_pi_acp_t04_windows() {
     let acl_after = icacls(&proj);
     eprintln!("MEASURE icacls proj after close (srt-sandbox ACE present = srt reset did not run):\n{acl_after}");
     let _ = std::fs::remove_dir_all(&base);
-    let _ = std::fs::remove_dir_all(&fixtures);
+    let _ = std::fs::remove_dir_all(&proj);
 }
 
 // ---------------------------------------------------------------------------
@@ -778,36 +851,75 @@ async fn real_srt_dsh_initialize_inside_sandbox() {
     let state = base.join("fox-data").join("state");
     std::fs::create_dir_all(&work).unwrap();
     std::fs::create_dir_all(&state).unwrap();
-    let patch_dir = base.join("fox-data").join("dsh-patch");
-    std::fs::create_dir_all(&patch_dir).unwrap();
-    let mapping = deepseek::policy_patch(&deepseek::HostPolicy { workspace_write: false, network: false });
-    let patch = patch_dir.join("fox-dsh-patch.yml");
-    std::fs::write(&patch, &mapping.patch_yaml).unwrap();
+    // The --patch file is a read-only runtime asset: it must sit inside the
+    // managed runtime directory (rule unchanged; the USERPROFILE location used
+    // before was refused with sandbox_path_not_owned on Windows).
+    let host_policy = deepseek::HostPolicy { workspace_write: false, network: false };
+    let runtime_root = match std::env::var_os("FOX_RUNTIME_ROOT") {
+        Some(root) => PathBuf::from(root),
+        None if os == HostOs::Windows => panic!("FOX_RUNTIME_ROOT must be set on Windows"),
+        None => base.join("fox-data").join("runtime"),
+    };
+    let patch = deepseek::default_patch_path(&runtime_root, &host_policy);
+    if deepseek::verify_installed_patch(&patch, &host_policy).is_err() {
+        // Linux / a writable test runtime: install it; Windows: the setup must have.
+        let written = std::fs::create_dir_all(patch.parent().unwrap())
+            .and_then(|()| std::fs::write(&patch, deepseek::policy_patch(&host_policy).patch_yaml));
+        assert!(
+            written.is_ok() && deepseek::verify_installed_patch(&patch, &host_policy).is_ok(),
+            "{} missing and not writable: install runtime-assets/dsh-patches into <runtime>\\dsh-patches (enable-sandbox source package)",
+            patch.display()
+        );
+    }
+    let mut extra = vec![dsh_prefix];
+    if os != HostOs::Windows {
+        extra.push(patch.parent().unwrap().to_path_buf());
+    }
+    #[cfg(windows)]
+    let sandbox = windows_sandbox(&state);
+    #[cfg(windows)]
+    let homes = PrivateHomes::new(sandbox.layout.homes_root());
+    #[cfg(not(windows))]
     let homes = PrivateHomes::new(base.join("fox-data").join("sandbox-homes"));
     let policy = SandboxPolicy::new(
         vec![AuthorizedDir { path: work.clone(), writable: false }],
         homes.home_for(PROJECT_UUID, AgentBackend::Deepseek).unwrap(),
-        vec![dsh_prefix, patch_dir],
+        extra,
         vec!["api.deepseek.com".into()],
         os,
     );
+    #[allow(unused_mut)]
     let mut launcher = SrtLauncher::new(ready, state);
-    if os == HostOs::Windows {
-        launcher = launcher.with_managed_runtime_root(env_path("FOX_RUNTIME_ROOT"));
+    #[cfg(windows)]
+    {
+        launcher = launcher.with_managed_runtime_root(runtime_root.clone()).with_tmp_root(sandbox.layout.tmp_root());
     }
     let spec = deepseek::launch_spec(&dsh.display().to_string(), &patch).unwrap();
     let prepared = prepare_launch(PermissionMode::Sandboxed, spec, "dsh1", SandboxSetup::Ready { launcher: &launcher, policy: &policy }, os)
         .unwrap_or_else(|error| panic!("prepare: {error} remedy={:?}", error.remedy));
+    #[cfg(windows)]
+    let mut transition = sandbox.coordinator.transition().unwrap();
+    #[cfg(windows)]
+    transition.begin_session("dsh1", &sandbox.sid, &prepared.windows_ancestor_aces).unwrap_or_else(|error| panic!("ancestor ACEs: {error}"));
     let mut connection = AcpConnection::spawn_prepared(prepared, &work).await.expect("spawn dsh inside srt");
     let BackendEvent::Initialized { initialize_response, .. } = next(&mut connection).await else {
         panic!("expected Initialized first");
     };
+    #[cfg(windows)]
+    eprintln!("MEASURE reconcile after start: {:?}", transition.finish());
     deepseek::check_initialize(&initialize_response).expect("dsh acp initialize inside srt");
     let session = connection
         .new_session(work.clone())
         .await
         .unwrap_or_else(|error| panic!("session/new inside srt: {error}\n{}", connection.stderr_tail()));
     assert!(!session.is_empty());
+    #[cfg(windows)]
+    let mut transition = sandbox.coordinator.transition().unwrap();
     eprintln!("MEASURE dsh close: {:?}", connection.close_with_report().await);
+    #[cfg(windows)]
+    {
+        eprintln!("MEASURE ancestor ACEs removed: {:?}", transition.end_session("dsh1").unwrap());
+        transition.finish();
+    }
     let _ = std::fs::remove_dir_all(&base);
 }
