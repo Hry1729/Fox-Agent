@@ -280,6 +280,49 @@ pub fn policy_patch(policy: &HostPolicy) -> PolicyMapping {
     PolicyMapping { mode, patch_yaml: patch, unenforced }
 }
 
+/// Directory, inside Fox's managed runtime directory, holding every `--patch`
+/// variant (`runtime-assets/dsh-patches` in this crate, copied there by the
+/// one-time sandbox setup). The patch is a read-only asset the sandbox must
+/// read, so on Windows it has to live in the managed runtime (Users
+/// read+execute, administrator-owned), never under the user profile
+/// (`sandbox_path_not_owned`).
+pub const PATCH_DIR: &str = "dsh-patches";
+
+/// File name of the variant for `policy`: `read-only.yml`,
+/// `read-only-noweb.yml`, `workspace-write.yml`, `workspace-write-noweb.yml`.
+pub fn patch_file_name(policy: &HostPolicy) -> String {
+    let mode = if policy.workspace_write { SandboxMode::WorkspaceWrite } else { SandboxMode::ReadOnly };
+    format!("{}{}.yml", mode.id(), if policy.network { "" } else { "-noweb" })
+}
+
+/// Every variant as `(file name, content)`; what the runtime package ships.
+pub fn patch_variants() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for workspace_write in [false, true] {
+        for network in [false, true] {
+            let policy = HostPolicy { workspace_write, network };
+            out.push((patch_file_name(&policy), policy_patch(&policy).patch_yaml));
+        }
+    }
+    out
+}
+
+/// Default `--patch` location: `<runtime_root>/dsh-patches/<variant>.yml`.
+pub fn default_patch_path(runtime_root: &std::path::Path, policy: &HostPolicy) -> std::path::PathBuf {
+    runtime_root.join(PATCH_DIR).join(patch_file_name(policy))
+}
+
+/// The installed patch must be byte-for-byte what Fox generates for
+/// `policy` (fail-closed: a missing or edited file refuses the launch).
+pub fn verify_installed_patch(path: &std::path::Path, policy: &HostPolicy) -> Result<(), PortError> {
+    let expected = policy_patch(policy).patch_yaml;
+    match std::fs::read_to_string(path) {
+        Ok(found) if found == expected => Ok(()),
+        Ok(_) => Err(PortError::Refused(format!("{} differs from the patch Fox generates; re-run the sandbox setup", path.display()))),
+        Err(error) => Err(PortError::Refused(format!("dsh patch {} is not installed: {error}", path.display()))),
+    }
+}
+
 /// Launch spec for a session: `dsh --profile acp --patch <abs path>`. The Host
 /// writes [`PolicyMapping::patch_yaml`] to a Fox-owned file first and spawns
 /// with the session root as the working directory (dsh's fallback workspace
@@ -374,6 +417,36 @@ mod tests {
     #[test]
     fn floor_blocks_enabling_today() {
         assert!(!floor_verdict().may_enable());
+    }
+
+    #[test]
+    fn shipped_patch_files_match_the_generated_variants_and_live_in_the_runtime() {
+        let shipped = |name: &str| -> &'static str {
+            match name {
+                "read-only-noweb.yml" => include_str!("../../runtime-assets/dsh-patches/read-only-noweb.yml"),
+                "read-only.yml" => include_str!("../../runtime-assets/dsh-patches/read-only.yml"),
+                "workspace-write-noweb.yml" => include_str!("../../runtime-assets/dsh-patches/workspace-write-noweb.yml"),
+                "workspace-write.yml" => include_str!("../../runtime-assets/dsh-patches/workspace-write.yml"),
+                other => panic!("unexpected variant {other}"),
+            }
+        };
+        let variants = patch_variants();
+        assert_eq!(variants.len(), 4);
+        for (name, content) in &variants {
+            assert_eq!(shipped(name), content, "runtime-assets/dsh-patches/{name} is stale");
+        }
+        let runtime = std::path::Path::new("/opt/fox/sandbox-runtime/0.1.0");
+        let policy = HostPolicy { workspace_write: false, network: false };
+        assert_eq!(default_patch_path(runtime, &policy), runtime.join("dsh-patches").join("read-only-noweb.yml"));
+        let dir = std::env::temp_dir().join(format!("fox-dsh-patch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("read-only-noweb.yml");
+        assert!(verify_installed_patch(&file, &policy).is_err(), "missing");
+        std::fs::write(&file, policy_patch(&policy).patch_yaml).unwrap();
+        verify_installed_patch(&file, &policy).unwrap();
+        std::fs::write(&file, "- id: approval\n  config:\n    policy: always\n").unwrap();
+        assert!(verify_installed_patch(&file, &policy).is_err(), "edited");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
