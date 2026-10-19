@@ -71,6 +71,7 @@ pub struct AcpConnection {
     pending: PendingPermissions,
     child_id: Option<u32>,
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
+    stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
 
 /// Map an ACP `initialize` response onto the port's capability declaration.
@@ -93,6 +94,47 @@ pub fn capabilities_from_initialize(response: &Value) -> CapabilityDeclaration {
     };
     declared.approval_answer_acknowledged = false;
     declared
+}
+
+/// How long `initialize` may take. Generous: a cold `npx` install or a slow
+/// filesystem (dsh measured ~76 s from a network-backed workspace) is normal.
+pub const INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// Grace between SIGTERM and SIGKILL on close. pi cleans up its own bash
+/// children (which run in their own process groups) on SIGTERM; a bare
+/// SIGKILL of Fox's group orphaned them in the pi branch measurement.
+pub const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+const STDERR_TAIL_BYTES: usize = 8 * 1024;
+
+fn signal_group(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args([signal, "--", &format!("-{pid}")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, signal);
+    }
+}
+
+/// Keep the last bytes of the backend's stderr for diagnostics, with
+/// secret-shaped tokens masked. Failure reasons (auth, missing binary) often
+/// appear only there.
+fn redact_line(line: &str) -> String {
+    line.split_whitespace()
+        .map(|word| {
+            let upper = word.to_ascii_uppercase();
+            let secretish = word.starts_with("sk-")
+                || ["KEY=", "TOKEN=", "SECRET=", "PASSWORD="].iter().any(|marker| upper.contains(marker))
+                || (word.len() >= 32 && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+            if secretish { "[redacted]".to_owned() } else { word.to_owned() }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn kill_tree(pid: u32) {
@@ -126,9 +168,10 @@ impl AcpConnection {
             .current_dir(cwd)
             .env_clear()
             .envs(child_environment(spec, std::env::vars()))
+            .envs(spec.session_env.iter().cloned())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
@@ -138,6 +181,22 @@ impl AcpConnection {
         let stdin = child.stdin.take().ok_or("backend stdin unavailable")?;
         let stdout = child.stdout.take().ok_or("backend stdout unavailable")?;
         let child_id = child.id();
+        let stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>> = Arc::default();
+        if let Some(stderr) = child.stderr.take() {
+            let tail = Arc::clone(&stderr_tail);
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Ok(mut tail) = tail.lock() {
+                        tail.push_back(redact_line(&line));
+                        while tail.iter().map(String::len).sum::<usize>() > STDERR_TAIL_BYTES {
+                            tail.pop_front();
+                        }
+                    }
+                }
+            });
+        }
         let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
 
         let (event_tx, events) = mpsc::unbounded_channel();
@@ -255,20 +314,21 @@ impl AcpConnection {
             let _ = event_tx.send(BackendEvent::Closed);
         });
 
-        match ready_rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                if let Some(pid) = child_id {
-                    kill_tree(pid);
-                }
-                return Err(error);
+        let tail_text = |tail: &Arc<Mutex<std::collections::VecDeque<String>>>| {
+            tail.lock().map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n")).unwrap_or_default()
+        };
+        let failure = match tokio::time::timeout(INITIALIZE_TIMEOUT, ready_rx).await {
+            Ok(Ok(Ok(()))) => None,
+            Ok(Ok(Err(error))) => Some(error),
+            Ok(Err(_)) => Some("backend closed before initialize completed".to_owned()),
+            Err(_) => Some(format!("initialize did not complete within {} s", INITIALIZE_TIMEOUT.as_secs())),
+        };
+        if let Some(error) = failure {
+            if let Some(pid) = child_id {
+                kill_tree(pid);
             }
-            Err(_) => {
-                if let Some(pid) = child_id {
-                    kill_tree(pid);
-                }
-                return Err("backend closed before initialize completed".into());
-            }
+            let tail = tail_text(&stderr_tail);
+            return Err(if tail.is_empty() { error } else { format!("{error}; backend stderr (redacted):\n{tail}") });
         }
         Ok(Self {
             commands,
@@ -276,6 +336,7 @@ impl AcpConnection {
             pending,
             child_id,
             child: Arc::new(tokio::sync::Mutex::new(child)),
+            stderr_tail,
         })
     }
 
@@ -343,13 +404,25 @@ impl AcpConnection {
         self.pending.lock().map(|registry| registry.len()).unwrap_or(0)
     }
 
-    /// Terminate the backend process tree. Pending permission requests are
-    /// dropped with the connection; the Host marks them per `reverse` rules.
+    /// Last lines of the backend's stderr, secret-shaped tokens masked.
+    pub fn stderr_tail(&self) -> String {
+        self.stderr_tail
+            .lock()
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default()
+    }
+
+    /// Terminate the backend process tree: SIGTERM to the group, a grace
+    /// period for the backend to stop its own children, then SIGKILL.
+    /// Pending permission requests are dropped with the connection; the Host
+    /// marks them per `reverse` rules.
     pub async fn close(self) {
+        let mut child = self.child.lock().await;
         if let Some(pid) = self.child_id {
+            signal_group(pid, "-TERM");
+            let _ = tokio::time::timeout(TERMINATE_GRACE, child.wait()).await;
             kill_tree(pid);
         }
-        let mut child = self.child.lock().await;
         let _ = child.kill().await;
     }
 }
@@ -357,6 +430,13 @@ impl AcpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_redaction_masks_secret_shaped_tokens() {
+        let line = redact_line("auth failed OPENAI_API_KEY=abc sk-1234567890 token ok");
+        assert!(!line.contains("abc") && !line.contains("sk-1234567890"));
+        assert!(line.contains("auth failed") && line.contains("ok"));
+    }
 
     #[test]
     fn capabilities_default_to_unsupported_and_read_declared_fields() {
