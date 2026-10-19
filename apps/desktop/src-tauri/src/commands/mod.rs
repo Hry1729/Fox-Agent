@@ -2488,6 +2488,11 @@ fn dispatch_started_run(
     // non-Fox conversation can never reach the Kernel / legacy / yuxi runtime
     // even when its caller did not gate. The already-created run is failed
     // with the routing code so it does not stay queued.
+    // Only a conversation whose stored backend is confirmed non-Fox stops
+    // here. An unknown conversation, a missing column or a storage error while
+    // reading it is audited by the gate and falls through to the existing
+    // path unchanged (fix 1 after the Windows acceptance of 3a82f5d), so this
+    // backstop can never add a failure that the old path did not have.
     if let Err(failure) = agent_backend_routing::gate_conversation::<StartRunResult>(
         &state.database,
         fox_agent_backend::host_routing::HostEntry::Start,
