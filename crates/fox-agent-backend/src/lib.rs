@@ -21,8 +21,16 @@
 //!   isolation layer for external backends (v0.3.2 addendum), fail-closed.
 //! * [`proctree`]: confirming that a stopped backend's whole process tree
 //!   ended (process group + tracked descendants on Unix).
-//! * [`winacl`]: Windows ACL queries for that layer (ownership / `WRITE_DAC`
-//!   preflight, report-only exposure audit of broadly readable folders).
+//! * [`winacl`]: Windows ACL queries and edits for that layer (ownership /
+//!   `WRITE_DAC` preflight, report-only exposure audit of broadly readable
+//!   folders, exact ACE add / remove, owner change, private directories).
+//! * [`winruntime`]: Windows layout and lifecycle (machine-wide runtime in
+//!   Program Files, per-user private root in ProgramData, srt registry state,
+//!   SID ledger, install record, uninstall boundary).
+//! * [`winancestor`]: Windows ancestor metadata ACEs for the sandbox account
+//!   and their reference ledger / reconcile / crash recovery.
+//! * [`winowner`]: Windows ownership repair of objects the sandbox created.
+//! * [`statefile`]: locked, atomically written JSON state files.
 //! * `acp` (feature `acp`): the Host-side ACP v1 client built on the official
 //!   `agent-client-protocol` crate.
 //!
@@ -37,7 +45,11 @@ pub mod proctree;
 pub mod reverse;
 pub mod sandbox;
 pub mod settlement;
+pub mod statefile;
 pub mod winacl;
+pub mod winancestor;
+pub mod winowner;
+pub mod winruntime;
 
 #[cfg(feature = "acp")]
 pub mod acp;
