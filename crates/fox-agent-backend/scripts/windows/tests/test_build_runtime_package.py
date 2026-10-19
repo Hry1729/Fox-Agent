@@ -84,15 +84,20 @@ DEEP_PARTS = ["node_modules", "@aws-sdk", "client-sso-oidc-extra-long-name", "no
 
 
 def make_prefix(root):
-    """A fake npm prefix with one very deep file and one shallow file."""
+    """A fake npm prefix with one very deep file and one shallow file.
+
+    The fixture itself is created through brp.fs_path (extended-length on
+    Windows), because plain os.makedirs/open hit WinError 206 past MAX_PATH.
+    The returned path stays relative: that is what stage/pack must handle.
+    """
     deep_dir = os.path.join(root, *DEEP_PARTS, "dist-types", "commands")
-    os.makedirs(deep_dir)
+    os.makedirs(brp.fs_path(deep_dir))
     deep_file = os.path.join(deep_dir, "GetRoleCredentialsCommand.js")
-    with open(deep_file, "w") as handle:
+    with open(brp.fs_path(deep_file), "w") as handle:
         handle.write("module.exports = 1\n")
-    with open(os.path.join(deep_dir, "GetRoleCredentialsCommand.d.ts"), "w") as handle:
+    with open(brp.fs_path(os.path.join(deep_dir, "GetRoleCredentialsCommand.d.ts")), "w") as handle:
         handle.write("export {}\n")
-    with open(os.path.join(root, "package.json"), "w") as handle:
+    with open(brp.fs_path(os.path.join(root, "package.json")), "w") as handle:
         handle.write("{}\n")
     return deep_file
 
@@ -105,7 +110,9 @@ class StagePackTest(unittest.TestCase):
 
     def tearDown(self):
         os.chdir(self.cwd)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        # Extended-length path so the >260-char fixture is really removed on
+        # Windows; a failure is reported instead of silently leaving debris.
+        shutil.rmtree(brp.fs_path(self.tmp))
 
     def test_stage_and_pack_deep_tree_from_relative_paths(self):
         node = os.path.join("in", "node")
