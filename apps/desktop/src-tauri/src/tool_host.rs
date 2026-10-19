@@ -1376,6 +1376,8 @@ enum CommandOutcome {
 struct CommandContainment {
     #[cfg(windows)]
     job: Option<crate::process_jobs::WindowsJob>,
+    #[cfg(not(windows))]
+    group: Option<u32>,
 }
 
 impl CommandContainment {
@@ -1387,8 +1389,8 @@ impl CommandContainment {
         }
         #[cfg(not(windows))]
         {
-            let _ = child;
-            Ok(Self {})
+            // `run_contained` spawns the child as the leader of its own group.
+            Ok(Self { group: Some(child.id()) })
         }
     }
 
@@ -1407,6 +1409,12 @@ impl CommandContainment {
             let terminated = job.terminate();
             drop(job);
             terminated?;
+        }
+        // Same scope on Unix: descendants left running after the parent exits
+        // would otherwise keep the output pipes open and outlive the tool call.
+        #[cfg(not(windows))]
+        if let Some(group) = self.group.take() {
+            kill_process_group(group);
         }
         Ok(())
     }
@@ -1451,18 +1459,30 @@ pub(crate) fn execute_command_with_test_backend(
     }
 }
 
-fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
-    // The reader budget is process-wide, so the tests that measure it cannot run
-    // against each other's reservations. Compiles out of the product build; in
-    // tests it serializes command execution on a re-entrant guard (a test that
-    // already holds it - the ceiling tests - simply nests).
-    #[cfg(test)]
-    let _budget = tests::lock_reader_budget();
-    check_cancellation(cancellation)?;
+/// What one contained process attempt produced: how it ended, both captured
+/// streams, and a wait failure when the exit could not be observed.
+struct ContainedRun {
+    outcome: CommandOutcome,
+    wait_failure: Option<String>,
+    stdout: CapturedStream,
+    stderr: CapturedStream,
+    started: Instant,
+}
+
+/// The single spawn/contain/drain path shared by `run_command` and the
+/// capability tools (git_read, test_run, lint, ...): allowlisted environment,
+/// Job Object (Windows) or process group (Unix), reader-slot ceiling, and a
+/// bounded drain so a descendant holding a pipe cannot hang the caller.
+fn run_contained(
+    spawn_spec: crate::process_jobs::SpawnSpec,
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<ContainedRun, String> {
+    check()?;
     // Reap output readers left behind by earlier commands whose pipes only now
     // reached EOF, before this call adds any of its own.
     reap_finished_readers();
-    let spawn_spec = command_spawn_spec(command, cwd);
     let mut process = Command::new(&spawn_spec.program);
     crate::process_jobs::apply_spawn_arguments(&mut process, &spawn_spec);
     #[cfg(windows)]
@@ -1472,6 +1492,13 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
                 | crate::process_jobs::CREATE_SUSPENDED_FLAG,
         );
     }
+    // Unix: own process group so cancel, timeout and post-exit cleanup reach
+    // descendants, the same scope the Windows Job Object gives.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        process.process_group(0);
+    }
     match &spawn_spec.env {
         crate::process_jobs::EnvMode::Inherit => {
             command_environment::apply_inherited(&mut process)
@@ -1480,6 +1507,9 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
             command_environment::apply_explicit(&mut process, entries)
                 .map_err(|error| ToolErrorCode::InvalidInput.error(error.to_string()))?;
         }
+    }
+    for (key, value) in extra_env {
+        process.env(key, value);
     }
     // A command costs two drain slots, and both of its pipes exist from here on.
     // Reserve them while there is still no child: after spawning, the only ways
@@ -1531,7 +1561,7 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
     let started = Instant::now();
     let mut wait_failure = None;
     let outcome = loop {
-        if let Err(error) = check_cancellation(cancellation) {
+        if let Err(error) = check() {
             containment.terminate(&mut child);
             break CommandOutcome::Cancelled(error);
         }
@@ -1571,6 +1601,77 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
     // surviving descendant keeps a pipe open past the grace window, and that
     // case is reported instead of being presented as an empty result.
     let (stdout, stderr) = collect_streams(stdout.take(), stderr.take(), STREAM_DRAIN_GRACE);
+    Ok(ContainedRun { outcome, wait_failure, stdout, stderr, started })
+}
+
+/// Output of a program the Host runs for a capability tool.
+pub(crate) struct ContainedProcessOutput {
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    /// Bytes were dropped past the retention cap, or a descendant still held a
+    /// pipe when the drain window closed, so the text is incomplete.
+    pub(crate) truncated: bool,
+    pub(crate) duration_ms: u128,
+}
+
+/// Run one program (no shell) under the same containment as `run_command`.
+/// `extra_env` is added on top of the allowlisted parent environment.
+pub(crate) fn run_contained_program(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<ContainedProcessOutput, String> {
+    // Same serialization as `execute_command`: the reader budget is global.
+    #[cfg(test)]
+    let _budget = tests::lock_reader_budget();
+    let spec = crate::process_jobs::SpawnSpec {
+        program: program.to_owned(),
+        args: args.to_vec(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        env: crate::process_jobs::EnvMode::Inherit,
+    };
+    let ContainedRun { outcome, wait_failure, stdout, stderr, started } =
+        run_contained(spec, timeout, extra_env, check)?;
+    if let Some(message) = wait_failure {
+        return Err(message);
+    }
+    match outcome {
+        CommandOutcome::Cancelled(error) => Err(error),
+        CommandOutcome::TimedOut => Err(format!(
+            "command timed out after {} seconds",
+            timeout.as_secs()
+        )),
+        CommandOutcome::WaitFailed => Err("failed to wait for command; whether it is still running is unknown".to_owned()),
+        CommandOutcome::Exited(exit_code) => Ok(ContainedProcessOutput {
+            exit_code,
+            truncated: stdout.undrained
+                || stderr.undrained
+                || stdout.dropped_bytes > 0
+                || stderr.dropped_bytes > 0,
+            stdout: stdout.text,
+            stderr: stderr.text,
+            duration_ms: started.elapsed().as_millis(),
+        }),
+    }
+}
+
+fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
+    // The reader budget is process-wide, so the tests that measure it cannot run
+    // against each other's reservations. Compiles out of the product build; in
+    // tests it serializes command execution on a re-entrant guard (a test that
+    // already holds it - the ceiling tests - simply nests).
+    #[cfg(test)]
+    let _budget = tests::lock_reader_budget();
+    let ContainedRun { outcome, wait_failure, stdout, stderr, started } = run_contained(
+        command_spawn_spec(command, cwd),
+        timeout,
+        &[],
+        &|| check_cancellation(cancellation),
+    )?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let undrained = stdout.undrained || stderr.undrained;
     let mut text = if stderr.text.trim().is_empty() {
@@ -1702,8 +1803,23 @@ pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
 
 #[cfg(not(windows))]
 pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
+    kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// SIGKILL the process group led by `pid`. A child spawned with
+/// `process_group(0)` leads its own group, so this reaches its descendants; for
+/// a child that is not a group leader no such group exists and the call is a
+/// harmless no-op.
+#[cfg(not(windows))]
+pub(crate) fn kill_process_group(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// What one output reader has absorbed so far, published under the lock after
@@ -2312,6 +2428,7 @@ fn validate_path_text(value: &str) -> Result<(), String> {
     if value.contains('\0') {
         return Err(ToolErrorCode::InvalidInput.error("tool path contains an invalid null byte"));
     }
+    reject_network_or_device_path(value)?;
     if Path::new(value)
         .components()
         .any(|component| matches!(component, Component::ParentDir))
@@ -2320,6 +2437,37 @@ fn validate_path_text(value: &str) -> Result<(), String> {
             .error("tool path cannot contain parent traversal"));
     }
     Ok(())
+}
+
+/// Refuse path text that names a network share or a device namespace before any
+/// filesystem call touches it: on Windows `exists`, `metadata` and
+/// `canonicalize` on a UNC path already open an SMB connection (and may send
+/// NTLM credentials) before the "inside the project" check could reject it.
+/// Verbatim drive paths (`\\?\C:\...`, what `canonicalize` itself returns)
+/// stay allowed; `\\server\share`, `\\?\UNC\...`, `\\.\device` and
+/// `\\?\GLOBALROOT\...` are refused. A network folder the user authorized
+/// as the project root is still reachable through relative paths.
+pub(crate) fn reject_network_or_device_path(value: &str) -> Result<(), String> {
+    if is_network_or_device_path(value) {
+        return Err(ToolErrorCode::PermissionDenied
+            .error("tool path cannot name a network share or device path; use a path inside the project folder"));
+    }
+    Ok(())
+}
+
+fn is_network_or_device_path(value: &str) -> bool {
+    let normalized = value.trim().replace('/', "\\");
+    let bytes = normalized.as_bytes();
+    if !normalized.starts_with("\\\\") {
+        return false;
+    }
+    // `\\?\X:` (optionally followed by `\...`) is a local drive.
+    let verbatim_disk = normalized.starts_with("\\\\?\\")
+        && bytes.len() >= 6
+        && bytes[4].is_ascii_alphabetic()
+        && bytes[5] == b':'
+        && (bytes.len() == 6 || bytes[6] == b'\\');
+    !verbatim_disk
 }
 
 fn ensure_inside(root: &Path, target: &Path) -> Result<(), String> {
@@ -2444,6 +2592,45 @@ fn failure_text_result(text: String, details: Value, failed: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 1 #5: network and device paths are refused from the text alone.
+    #[test]
+    fn network_and_device_paths_are_refused_before_any_filesystem_call() {
+        for path in [
+            r"\\server\share\x",
+            "//server/share",
+            r"\\?\UNC\server\x",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device",
+            r"  \\server\a",
+        ] {
+            assert!(is_network_or_device_path(path), "{path}");
+            assert!(validate_path_text(path).is_err(), "{path}");
+        }
+        for path in [r"\\?\C:\proj\a.txt", r"\\?\c:", "src/main.rs", r"C:\proj\a", "/home/u/p", r"a\b"] {
+            assert!(!is_network_or_device_path(path), "{path}");
+        }
+    }
+
+    /// Phase 1 #4: a descendant that keeps the output pipe open after the
+    /// parent exits cannot hang the call; the Unix process group is cleaned up.
+    #[cfg(unix)]
+    #[test]
+    fn contained_program_returns_when_a_descendant_holds_the_pipe() {
+        let started = Instant::now();
+        let output = run_contained_program(
+            "sh",
+            &["-c".to_owned(), "sleep 300 & echo started".to_owned()],
+            &std::env::temp_dir(),
+            Duration::from_secs(30),
+            &[],
+            &|| Ok(()),
+        )
+        .expect("parent exits normally");
+        assert!(started.elapsed() < Duration::from_secs(10), "descendant held the call open");
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.contains("started"));
+    }
     use std::cell::{Cell, RefCell};
     use uuid::Uuid;
 
