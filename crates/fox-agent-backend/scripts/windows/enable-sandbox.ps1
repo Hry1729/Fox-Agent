@@ -22,6 +22,15 @@
   （类型、消息、步骤、脚本位置）写日志并记入结果 JSON 的 primaryError，再做回滚与清理；清理失败单独记入
   cleanupErrors，不覆盖原始错误。暂存目录的删除在 Remove-Item 失败时改用 cmd rd /s /q "\\?\..."（长路径）。
 
+  失败处理（第六轮）：“保留原始错误 + 回滚/清理”抽成 Resolve-FoxFailure：先把原始错误写入结果
+  （error / primaryError）与日志，再逐项运行回滚/清理脚本块；任一项抛出只记入 cleanupErrors，绝不覆盖
+  primaryError。结果 JSON 另含 stagingDir（本次暂存目录，便于排查残留）。
+
+  测试用故障注入（仅测试；生产路径不受影响）：环境变量 FOX_SCRIPT_TEST_FAULTS 为逗号分隔的注入点列表
+  （extract、cleanup）。extract：解压开始时抛出注入错误；cleanup：Remove-FoxTree 不删除并记一条清理错误。
+  未设置该变量（或为空）时注入点是空操作；设置时日志首行会写明已启用的注入点。用于验证“解压与清理同时
+  失败”时 primaryError 为解压错误、cleanupErrors 含清理错误（scripts/windows/tests/test-enable-faults.ps1）。
+
   只修改本脚本创建或属于 Fox 的目录（运行时版本目录、%ProgramData%\Fox、%ProgramData%\Fox\sandbox）
   的 ACL，不改任何其他目录。每一步写日志（-LogPath，默认 %ProgramData%\Fox\logs）。
 
@@ -203,6 +212,7 @@ function Get-PackageLongPath([string] $ZipPath, [string[]] $Prefixes, [int] $Lim
 function Expand-FoxPackage([string] $ZipPath, [string] $Destination) {
     # tar.exe (bsdtar, Windows 10 1803+) handles paths over 260 characters; Expand-Archive on
     # Windows PowerShell 5.1 does not (DirectoryNotFoundException on the long DeepSeek paths).
+    Invoke-FoxTestFault 'extract'
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
     if (Test-Path -LiteralPath $tar -PathType Leaf) {
@@ -220,10 +230,65 @@ function Expand-FoxPackage([string] $ZipPath, [string] $Destination) {
 
 $script:CleanupErrors = New-Object System.Collections.Generic.List[string]
 
+function Get-FoxTestFault {
+    # TEST ONLY: injection points named in FOX_SCRIPT_TEST_FAULTS (comma-separated,
+    # e.g. "extract,cleanup"). Empty when the variable is unset: production runs inject nothing.
+    $raw = [string] $env:FOX_SCRIPT_TEST_FAULTS
+    if (-not $raw.Trim()) { return @() }
+    return @($raw.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+}
+
+function Test-FoxTestFault([string] $Point) {
+    # $true only when the test variable names this point.
+    return (@($script:FoxTestFaults) -contains $Point)
+}
+
+function Invoke-FoxTestFault([string] $Point) {
+    # No-op unless FOX_SCRIPT_TEST_FAULTS names $Point; then throws a recognisable error.
+    if (Test-FoxTestFault $Point) { throw "FOX_SCRIPT_TEST_FAULTS: injected $Point failure" }
+}
+
+function Resolve-FoxFailure {
+    # Record the original error FIRST (result + log), then run each roll-back / clean-up step.
+    # A step that throws is recorded in cleanupErrors and never replaces primaryError.
+    param(
+        [Parameter(Mandatory = $true)] [hashtable] $Result,
+        [Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord,
+        [Parameter(Mandatory = $true)] [string] $Step,
+        [System.Collections.IDictionary] $Cleanup
+    )
+    $exception = $ErrorRecord.Exception
+    $Result['error'] = $exception.Message
+    $Result['primaryError'] = @{
+        step = $Step
+        type = $exception.GetType().FullName
+        message = $exception.Message
+        inner = $(if ($exception.InnerException) { $exception.InnerException.Message } else { $null })
+        at = [string] $ErrorRecord.InvocationInfo.PositionMessage
+    }
+    Write-FoxLog ("FAILED at step ${Step}: " + $exception.GetType().FullName + ': ' + $exception.Message)
+    if ($ErrorRecord.ScriptStackTrace) { Write-FoxLog ("stack: " + $ErrorRecord.ScriptStackTrace) }
+    if ($Cleanup) {
+        foreach ($name in @($Cleanup.Keys)) {
+            try {
+                & $Cleanup[$name]
+            } catch {
+                $script:CleanupErrors.Add("${name}: $($_.Exception.Message)")
+                Write-FoxLog "clean-up step '$name' failed: $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 function Remove-FoxTree([string] $Path, [string] $What) {
     # Never throws: a clean-up failure is recorded on its own and must not replace the
     # primary error. Falls back to rd /s /q on the \\?\ form for paths over 260 characters.
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+    if (Test-FoxTestFault 'cleanup') {
+        $script:CleanupErrors.Add("$What ${Path}: injected cleanup failure (FOX_SCRIPT_TEST_FAULTS)")
+        Write-FoxLog "test fault: not removing $What $Path"
+        return
+    }
     try {
         Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
         Write-FoxLog "removed $What $Path"
@@ -255,13 +320,15 @@ function Get-SrtRegistry {
     }
 }
 
-$result = @{ ok = $false; version = $Version; error = $null; primaryError = $null; cleanupErrors = @(); runtimeRoot = $null; privateBase = $null; srt = $null; extractMethod = $null; packagePaths = $null; ownershipRepair = $null }
+$script:FoxTestFaults = Get-FoxTestFault
+$result = @{ ok = $false; version = $Version; error = $null; primaryError = $null; cleanupErrors = @(); runtimeRoot = $null; privateBase = $null; srt = $null; extractMethod = $null; packagePaths = $null; ownershipRepair = $null; stagingDir = $null }
 $staging = $null
 $backup = $null
 $installedNew = $false
 $step = 'start'
 try {
     Write-FoxLog "enable-sandbox start: version=$Version package=$PackagePath user=$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) ps=$($PSVersionTable.PSVersion)"
+    if (@($script:FoxTestFaults).Count -gt 0) { Write-FoxLog ("TEST FAULTS ACTIVE (FOX_SCRIPT_TEST_FAULTS): " + (@($script:FoxTestFaults) -join ',')) }
     $step = 'validate'
     if (-not (Test-Elevated)) { throw 'must run elevated (administrator)' }
     if ($Version -notmatch '^[0-9A-Za-z._-]+$') { throw "invalid version '$Version'" }
@@ -292,6 +359,7 @@ try {
         # Short staging name next to sandbox-runtime: never longer than the final directory.
         $staging = Join-Path $foxProgramFiles ('.s' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        $result.stagingDir = $staging
         $zipCopy = Join-Path $staging 'p.zip'
         Copy-Item -LiteralPath $PackagePath -Destination $zipCopy -Force
         $step = 'verify-hash'
@@ -374,24 +442,20 @@ try {
     Write-FoxLog 'enable-sandbox done'
 } catch {
     # The original error first, before any rollback or clean-up can fail and hide it.
-    $exception = $_.Exception
-    $result.error = $exception.Message
-    $result.primaryError = @{
-        step = $step
-        type = $exception.GetType().FullName
-        message = $exception.Message
-        inner = $(if ($exception.InnerException) { $exception.InnerException.Message } else { $null })
-        at = [string] $_.InvocationInfo.PositionMessage
-    }
-    Write-FoxLog ("FAILED at step ${step}: " + $exception.GetType().FullName + ': ' + $exception.Message)
-    if ($_.ScriptStackTrace) { Write-FoxLog ("stack: " + $_.ScriptStackTrace) }
-    # Roll back what this run copied; never touch anything else.
-    if ($installedNew -and $result.runtimeRoot -and (Test-Path -LiteralPath $result.runtimeRoot)) {
-        Remove-FoxTree $result.runtimeRoot 'new runtime (rollback)'
-    }
-    if ($backup -and (Test-Path -LiteralPath $backup)) {
-        try { Move-Item -LiteralPath $backup -Destination $result.runtimeRoot; Write-FoxLog "restored previous runtime" } catch { $script:CleanupErrors.Add("restore of the previous runtime failed: $($_.Exception.Message)"); Write-FoxLog "restore failed: $($_.Exception.Message)" }
-    }
+    # Roll back only what this run copied; never touch anything else.
+    Resolve-FoxFailure -Result $result -ErrorRecord $_ -Step $step -Cleanup ([ordered]@{
+        'rollback of the new runtime' = {
+            if ($installedNew -and $result.runtimeRoot -and (Test-Path -LiteralPath $result.runtimeRoot)) {
+                Remove-FoxTree $result.runtimeRoot 'new runtime (rollback)'
+            }
+        }
+        'restore of the previous runtime' = {
+            if ($backup -and (Test-Path -LiteralPath $backup)) {
+                Move-Item -LiteralPath $backup -Destination $result.runtimeRoot
+                Write-FoxLog 'restored previous runtime'
+            }
+        }
+    })
 } finally {
     if ($staging) { Remove-FoxTree $staging 'staging' }
 }
