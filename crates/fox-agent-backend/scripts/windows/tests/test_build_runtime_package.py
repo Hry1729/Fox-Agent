@@ -86,6 +86,9 @@ DEEP_PARTS = ["node_modules", "@aws-sdk", "client-sso-oidc-extra-long-name", "no
 def make_prefix(root):
     """A fake npm prefix with one very deep file and one shallow file.
 
+    Text is written with newline="\n" so the bytes are the same on every OS
+    (Windows text mode would turn LF into CRLF; the packer keeps bytes as-is).
+
     The fixture itself is created through brp.fs_path (extended-length on
     Windows), because plain os.makedirs/open hit WinError 206 past MAX_PATH.
     The returned path stays relative: that is what stage/pack must handle.
@@ -93,11 +96,11 @@ def make_prefix(root):
     deep_dir = os.path.join(root, *DEEP_PARTS, "dist-types", "commands")
     os.makedirs(brp.fs_path(deep_dir))
     deep_file = os.path.join(deep_dir, "GetRoleCredentialsCommand.js")
-    with open(brp.fs_path(deep_file), "w") as handle:
+    with open(brp.fs_path(deep_file), "w", newline="\n") as handle:
         handle.write("module.exports = 1\n")
-    with open(brp.fs_path(os.path.join(deep_dir, "GetRoleCredentialsCommand.d.ts")), "w") as handle:
+    with open(brp.fs_path(os.path.join(deep_dir, "GetRoleCredentialsCommand.d.ts")), "w", newline="\n") as handle:
         handle.write("export {}\n")
-    with open(brp.fs_path(os.path.join(root, "package.json")), "w") as handle:
+    with open(brp.fs_path(os.path.join(root, "package.json")), "w", newline="\n") as handle:
         handle.write("{}\n")
     return deep_file
 
@@ -121,7 +124,7 @@ class StagePackTest(unittest.TestCase):
             handle.write(b"MZ")
         srt = os.path.join("in", "srt")
         os.makedirs(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist"))
-        with open(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "cli.js"), "w") as handle:
+        with open(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "cli.js"), "w", newline="\n") as handle:
             handle.write("// cli\n")
         deep_file = make_prefix(os.path.join("in", "pi"))
         self.assertGreater(len(os.path.abspath(deep_file)), 300, "the fixture must be past MAX_PATH")
@@ -167,13 +170,13 @@ class StagePackTest(unittest.TestCase):
         shutil.copyfile(os.path.join(brp.ASSETS, "acp-bridge", "bridge.mjs"), os.path.join("pkg", "acp-bridge", "bridge.mjs"))
         problems = brp.verify_layout("pkg")
         self.assertEqual(problems, ["missing node/node.exe", f"missing {brp.SRT_CLI}"])
-        with open(os.path.join("pkg", "acp-bridge", "bridge.mjs"), "a") as handle:
+        with open(os.path.join("pkg", "acp-bridge", "bridge.mjs"), "a", newline="\n") as handle:
             handle.write("// edited\n")
         self.assertIn("acp-bridge/bridge.mjs differs", " ".join(brp.verify_layout("pkg")))
 
     def test_dsh_patch_mismatch_and_missing(self):
         os.makedirs(os.path.join("pkg", "dsh-patches"))
-        with open(os.path.join("pkg", "dsh-patches", "read-only.yml"), "w") as handle:
+        with open(os.path.join("pkg", "dsh-patches", "read-only.yml"), "w", newline="\n") as handle:
             handle.write("changed: true\n")
         problems = brp.verify_layout("pkg")
         self.assertIn("dsh-patches/read-only.yml differs from runtime-assets", problems)
@@ -182,7 +185,7 @@ class StagePackTest(unittest.TestCase):
     @unittest.skipIf(not hasattr(os, "symlink") or brp.IS_WINDOWS, "symlinks")
     def test_symlinks_refused_in_pack_and_followed_in_stage(self):
         os.makedirs("src")
-        with open(os.path.join("src", "real.js"), "w") as handle:
+        with open(os.path.join("src", "real.js"), "w", newline="\n") as handle:
             handle.write("x")
         os.symlink("real.js", os.path.join("src", "link.js"))
         self.assertEqual(brp.copy_tree("src", "dst", False), 2)
