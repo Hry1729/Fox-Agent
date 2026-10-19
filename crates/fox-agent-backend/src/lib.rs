@@ -33,6 +33,9 @@
 //! * [`statefile`]: locked, atomically written JSON state files.
 //! * `acp` (feature `acp`): the Host-side ACP v1 client built on the official
 //!   `agent-client-protocol` crate.
+//! * `bridge` (feature `acp`): Host side of the ACP bridge used on Windows in
+//!   sandboxed mode (srt 0.0.80 does not deliver stdin there): one-shot named
+//!   pipe, token handshake.
 //!
 //! This crate has no Tauri dependency so it builds and tests on any host.
 
@@ -53,5 +56,7 @@ pub mod winruntime;
 
 #[cfg(feature = "acp")]
 pub mod acp;
+#[cfg(feature = "acp")]
+pub mod bridge;
 
 pub mod backends;
