@@ -9,6 +9,8 @@
 // --home isolates HOME so pi's ~/.pi/agent (auth, sessions, settings) and
 // pi-acp's ~/.pi/pi-acp/session-map.json never touch the real user profile.
 import { spawn } from "node:child_process";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,7 +33,21 @@ if (piBin) {
 	// pi-acp also runs bare `pi --version` for its startup banner.
 	env.PATH = `${dirname(piBin)}${process.platform === "win32" ? ";" : ":"}${env.PATH ?? ""}`;
 }
-if (gate) env.PI_ACP_PI_COMMAND = join(here, "pi-gated.sh");
+if (gate) {
+	let gated = join(here, "pi-gated.sh");
+	// The repository stores the script without its executable bit (files
+	// committed through the contents API are 100644) and pi-acp spawns it
+	// directly (EACCES otherwise). Run a private executable copy, next to a
+	// copy of the gate it loads, instead of changing the checkout.
+	if (process.platform !== "win32") {
+		const dir = home ? join(home, ".fox-pi-launcher") : mkdtempSync(join(tmpdir(), "fox-pi-launcher-"));
+		mkdirSync(dir, { recursive: true });
+		for (const file of ["pi-gated.sh", "fox-approval-gate.ts"]) copyFileSync(join(here, file), join(dir, file));
+		gated = join(dir, "pi-gated.sh");
+		chmodSync(gated, 0o755);
+	}
+	env.PI_ACP_PI_COMMAND = gated;
+}
 if (extra) env.FOX_PI_EXTRA_ARGS = extra;
 
 const npx = process.platform === "win32" ? "npx.cmd" : "npx";
