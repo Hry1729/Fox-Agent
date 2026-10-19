@@ -365,6 +365,9 @@ pub struct ConversationSummary {
     pub project_id: Option<String>,
     pub project_root: Option<String>,
     pub permission_mode: String,
+    /// Outer Agent backend frozen at creation (`fox | pi | codex | deepseek`,
+    /// plan v0.3.1 6.6). Distinct from the Kernel's `engine_id`.
+    pub agent_backend: String,
     pub status: String,
     pub pinned: bool,
     pub archived: bool,
@@ -1962,6 +1965,11 @@ pub struct CreateConversationRequest {
     pub title: Option<String>,
     pub project_root: Option<String>,
     pub permission_mode: Option<String>,
+    /// Optional outer Agent backend (plan 5.4). On create it selects the
+    /// frozen backend (absent = `fox`); on every other entry a value that
+    /// differs from the conversation's frozen backend is refused as misrouted.
+    #[serde(default)]
+    pub agent_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2063,6 +2071,11 @@ pub struct ProjectIdRequest {
 pub struct ResolveApprovalRequest {
     pub approval_id: String,
     pub decision: ApprovalDecision,
+    /// Optional outer Agent backend (plan 5.4). On create it selects the
+    /// frozen backend (absent = `fox`); on every other entry a value that
+    /// differs from the conversation's frozen backend is refused as misrouted.
+    #[serde(default)]
+    pub agent_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2078,6 +2091,11 @@ pub struct StartRunRequest {
     /// default, so an old caller behaves exactly as before.
     #[serde(default)]
     pub budget: Option<RunBudgetSelection>,
+    /// Optional outer Agent backend (plan 5.4). On create it selects the
+    /// frozen backend (absent = `fox`); on every other entry a value that
+    /// differs from the conversation's frozen backend is refused as misrouted.
+    #[serde(default)]
+    pub agent_backend: Option<String>,
 }
 
 /// A user's explicit run-budget choice. The tier is frozen into the Run's control
@@ -2099,12 +2117,22 @@ pub struct ResumeYuxiRunRequest {
     pub parent_run_id: String,
     pub text: String,
     pub answers: Value,
+    /// Optional outer Agent backend (plan 5.4). On create it selects the
+    /// frozen backend (absent = `fox`); on every other entry a value that
+    /// differs from the conversation's frozen backend is refused as misrouted.
+    #[serde(default)]
+    pub agent_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelRunRequest {
     pub run_id: String,
+    /// Optional outer Agent backend (plan 5.4). On create it selects the
+    /// frozen backend (absent = `fox`); on every other entry a value that
+    /// differs from the conversation's frozen backend is refused as misrouted.
+    #[serde(default)]
+    pub agent_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
