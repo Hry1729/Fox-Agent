@@ -19,7 +19,9 @@
 
   不删除任何用户的私有 HOME（%ProgramData%\Fox\sandbox 下的内容一律不动）。
   -RemoveRuntime 时删除 %ProgramFiles%\Fox\sandbox-runtime\<Version>（在 windows-uninstall 之后）。
-  卸载前应先由 Fox 运行 repair_sandbox_ownership（见 docs/sandbox.md 7.8），本脚本不做。
+  卸载前应先由 Fox 运行 repair_sandbox_ownership（见 docs/sandbox.md 7.8）；其中因普通权限被拒
+  （needs_elevation）的对象，由 Fox 生成清单并通过 -RepairOwnershipList 交给本脚本在 windows-uninstall
+  之前以管理员身份修复（repair-ownership.ps1）。
 
   兼容 Windows PowerShell 5.1：UTF-8（带 BOM）、LF 换行。
 
@@ -37,6 +39,8 @@
   用户已确认本账户下没有其他使用 sandbox-runtime 的程序。
 .PARAMETER LogPath
   日志文件；默认 %ProgramData%\Fox\logs\disable-sandbox-<时间>.log。
+.PARAMETER RepairOwnershipList
+  可选：Fox 非提权所有权扫描输出的修复清单 JSON；在卸载判断之前执行（repair-ownership.ps1）。
 #>
 [CmdletBinding()]
 param(
@@ -46,7 +50,8 @@ param(
     [Parameter(Mandatory = $true)] [string] $ResultPath,
     [switch] $RemoveRuntime,
     [switch] $ConfirmNoOtherSrtClients,
-    [string] $LogPath
+    [string] $LogPath,
+    [string] $RepairOwnershipList
 )
 
 Set-StrictMode -Version 2.0
@@ -121,12 +126,22 @@ function Read-JsonFile([string] $Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
-$result = @{ ok = $false; decision = $null; reasons = @(); uninstalled = $false; removedDirs = @(); runtimeRemoved = $false; error = $null }
+$result = @{ ok = $false; decision = $null; reasons = @(); uninstalled = $false; removedDirs = @(); runtimeRemoved = $false; error = $null; ownershipRepair = $null }
 try {
     Write-FoxLog "disable-sandbox start: version=$Version user=$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
     if (-not (Test-Elevated)) { throw 'must run elevated (administrator)' }
     if ($Version -notmatch '^[0-9A-Za-z._-]+$') { throw "invalid version '$Version'" }
     $runtime = Join-Path (Join-Path (Join-Path (Get-ProgramFilesDir) 'Fox') 'sandbox-runtime') $Version
+    if ($RepairOwnershipList) {
+        # Before srt may be uninstalled: owners are compared as SID strings, but the repair
+        # must run while the recorded srt SIDs are still meaningful to the user.
+        try {
+            $result.ownershipRepair = & (Join-Path $PSScriptRoot 'repair-ownership.ps1') -ListPath $RepairOwnershipList -LogPath $LogPath
+        } catch {
+            $result.ownershipRepair = @{ ok = $false; error = $_.Exception.Message }
+            Write-FoxLog "ownership repair failed: $($_.Exception.Message)"
+        }
+    }
     $registry = Get-SrtRegistry
     $reasons = New-Object System.Collections.Generic.List[string]
 
