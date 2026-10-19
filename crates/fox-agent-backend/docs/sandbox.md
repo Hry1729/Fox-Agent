@@ -466,3 +466,43 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
   4. 在沙箱外：存在、是普通文件、能打开并读首字节（空文件也算合格），不做逐字节比对。
 - 结果：`DeliveredFile { path（规范路径）, authorized_root, len }`；拒绝统一为 `delivered_file_rejected`，带用户可读的 `remedy`（让 Agent 把文件保存到授权文件夹后重新交付）。
 - 测试：`delivered_files_must_be_real_files_in_a_writable_authorized_folder`、`delivered_symlinks_are_judged_by_their_target_and_unreadable_files_are_refused`（Unix）、`delivered_files_on_tmpfs_are_refused`（Linux，`/dev/shm` 为 tmpfs 时执行，本机已执行）。
+
+## 12 Host 接线第一批（2026-10-20：P3 四入口路由 + P5 身份字段 + P6 UI 最小部分）
+
+对应方案 v0.3.1 第 5.4、6.6 节。本批只把“会话绑定哪个外层后端”接进桌面 Host，**不接真实 ACP 运行**；外部后端的实际启动（sandbox `prepare_launch` + `bridge`）是下一批。
+
+### 12.1 做了什么
+
+- **身份字段（P5）**：`conversations.agent_backend TEXT NOT NULL DEFAULT 'fox' CHECK(IN fox/pi/codex/deepseek)`，桌面迁移 v95，只增不改（常量默认值的 `ADD COLUMN` 只改元数据，不重写旧行）。旧会话一律读作 `fox`；legacy 路径的标记照旧留在 `kernel_runs.kernel_mode='legacy'`，不改写。新建会话在 INSERT 中写入；触发器 `conversations_agent_backend_immutable`（`BEFORE UPDATE OF agent_backend … WHEN NEW IS NOT OLD → RAISE(ABORT,'agent_backend_immutable')`）拒绝任何修改（选触发器而非仓储层：任何代码路径包括手写 SQL 都绕不过去；同值写入与不涉及该列的更新不受影响）。`engine_id` 含义不变；不复用 `runtime_type`。迁移 SQL 的唯一来源是 `host_routing::AGENT_BACKEND_MIGRATION_SQL`，桌面 `MIGRATION_95` 直接引用它。
+- **路由（P3）**：纯逻辑在 `src/host_routing.rs`（`choose_for_new_conversation`、`route`/`route_stored`、`session_access`、`backend_options`、`audit_line`）。桌面胶水 `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs` 只读库、调用、转错误码：
+  - 新建：`conversation_create` 接受可选 `agentBackend`（缺省 fox），校验开关后写入；非 fox 与会话专家、知识库（yuxi）智能体组合直接拒绝（`agent_backend_invalid`）。
+  - start：`run_start` 在写任何 run / 附件绑定**之前**按冻结值路由；另在 `dispatch_started_run`（rewind、确认后派发等所有启动路径的汇合点）兜底，非 fox 会话的 run 被标为失败并返回同一错误码，绝不进入 Kernel / legacy / yuxi。
+  - cancel：`run_cancel` 从 run 所属会话读冻结值；approve：`approval_resolve` 从 approval → tool_call → run → 会话读冻结值；resume：`run_resume` 与 `kernel_run_continue` 按会话读冻结值。请求里带的 `agentBackend` 与冻结值不一致 → `agent_backend_misrouted`（先于开关判断）。找不到的会话 / run / 审批交回原有路径，旧错误码不变。
+  - 审计：cancel / approve 每次输出一行，start / resume / create 在拒绝时输出，格式 `fox.host_routing entry=… conversation=… run=… agent_backend=… engine_id=… routed=fox|refused=<code>`（stderr，与现有 Host 日志同路）。`engine_id` 取 `kernel_runs`，没有再取 `run_control_bindings`，都没有时打印 `-`，从不由 `agent_backend` 推断。
+- **功能开关**：环境变量 `FOX_EXTERNAL_BACKENDS`（未设 / 空 / `0` / `off` → 全关；`all` / `1` / `on` → 全开；或列表 `pi,codex`；未知项忽略并在状态里列出，绝不等同“全开”）。选环境变量而不是设置项：外部运行时尚未接通，这是工程 / 企业管控而非用户偏好；不会被界面误开；现有安装天然为“关”，无需迁移；属于 6.5 第 1 层 Host 强制策略，只能收紧；与现有 `FOX_KERNEL_MODE` 同类。
+  - 关闭：新建非 fox → `agent_backend_disabled`；已绑定外部后端的会话四个入口一律 `agent_backend_disabled`（只读，不启动运行时），读取与展示不受影响。
+  - 开启：可以新建外部后端会话（绑定被写入并锁定），但四个入口一律 `agent_backend_not_yet_wired`，在创建 run 行或进程之前返回。
+- **前端（P6 最小）**：`agent_backends_status` 命令给出四个后端的 enabled / wired / experimental / reason；输入框上方新会话显示“Agent 后端”选择，开关关闭时禁用并说明需设置 `FOX_EXTERNAL_BACKENDS`；已有非 Fox 会话显示“后端：X（已锁定）”与只读提示；已有 Fox 会话不加任何行。类型：`ConversationSummary.agentBackend`、`model/agent-backend.ts`；`startRun` / `resumeRun` 带冻结值，`cancelRun` / `resolveApproval` 在打开的会话上带冻结值。普通 Fox 新任务的 checklist / 强验收、work_mode_gate 未改。
+
+### 12.2 没做什么
+
+- 外部后端的真实启动、事件投影、审批卡映射（下一批：`sandbox::prepare_launch` + `bridge` + `AcpConnection`）。
+- 外部会话的输入框不禁用（发送会得到 Host 的明确错误）；能力声明 / 审批状态的 UI 展示（P6 其余部分）。
+- `conversation_fork` 产生的新会话按列默认值为 `fox`（外部会话当前无法运行，不存在需要继承的情况；接通外部后端时须决定 fork 规则）。子会话等其他 INSERT 同样走默认值 `fox`。
+- `work_mode_gate` 对非 Fox 后端是否适用（5.4 第 3 条）未审查；当前非 Fox 会话根本到不了 gate。
+- 迁移前自动备份：本批未新增（沿用现有发布 / 备份流程），验收清单要求手工备份副本演练。
+
+### 12.3 测试
+
+- `cargo test -p fox-agent-backend --features acp`：新增 `host_routing` 14 个单元测试（错投矩阵、开关解析、旧会话映射、关闭开关后的读取、审计行、迁移只增）。
+- `cargo test -p fox-agent-backend --features sqlite-tests --test host_routing_sqlite`（需 C 编译器，默认不编）：用真实 SQLite 跑 `AGENT_BACKEND_MIGRATION_SQL`：旧行映射 fox 且不改写、新行写入、触发器拒改、CHECK 拒绝 `deepseek_harness` 等、迁移副本不动原库。
+- 桌面 crate（未在本地运行）：`database/migrations.rs::agent_backend_migration_tests`（v94 → v95 升级、幂等、不可变）、`database/repositories/agent_backend.rs` 的两个测试、`apps/desktop/tests/agent-backend.test.ts`（bun）。
+
+### 12.4 工程师验收清单
+
+1. **Windows 编译**：`cargo build -p fox-desktop`（默认 features）与 `cargo test -p fox-desktop agent_backend`；确认 `agent_backend_migration_tests`、`repositories::agent_backend::tests`、`schema` 相关既有测试（含 `DATABASE_SCHEMA_VERSION == 95` 断言）全过；`bun test apps/desktop/tests/agent-backend.test.ts`；`tsc`（`pnpm --filter @fox/desktop build` 的 tsc 步骤）。
+2. **旧库副本演练**：复制一份真实旧数据目录（含 `fox.db`，先关 Fox）。用新版本指向副本启动 → 旧会话列表、历史、旧 run（含 Codex / DeepSeek 模型适配的旧会话、legacy 会话）照常显示；`SELECT agent_backend, COUNT(*) FROM conversations GROUP BY 1` 只有 `fox`；`SELECT version FROM schema_migrations WHERE version=95` 一行；Fox 旧会话继续对话 / 继续运行正常。再在副本上执行 `UPDATE conversations SET agent_backend='codex' WHERE id=…` 应报 `agent_backend_immutable`。中断重试：迁移中途杀进程后重启，v95 只记一次、数据完整。原库未被改动。
+3. **错投测试**（开发者工具或临时脚本调用 invoke）：对 Fox 会话 `run_start` / `run_cancel` / `approval_resolve` / `run_resume` 各带 `agentBackend: "codex"` → 均返回 `agent_backend_misrouted`，且 run_start 不产生新 run 行；带 `"fox"` 或不带 → 行为与改动前一致；带 `"deepseek_harness"` → `agent_backend_invalid`。stderr 中能看到 `fox.host_routing … agent_backend=fox engine_id=… refused=agent_backend_misrouted`。
+4. **开关关闭（默认）**：新会话“Agent 后端”下拉禁用，提示需设置 `FOX_EXTERNAL_BACKENDS`；普通 Fox 新任务（含 checklist / 强验收）与改动前一致；invoke `conversation_create` 带 `agentBackend:"pi"` → `agent_backend_disabled`。
+5. **开关开启**：设 `FOX_EXTERNAL_BACKENDS=pi` 重启 → 下拉只有 pi 可选（Codex / DeepSeek 显示未启用）；选 pi 发送 → 会话被创建并显示“后端：pi（已锁定）”，发送返回 `agent_backend_not_yet_wired`，无新 run 行、无子进程。
+6. **再关开关**：去掉变量重启 → 上一步的 pi 会话仍在列表中可打开查看，显示只读提示；发送 / 取消返回 `agent_backend_disabled`，不启动运行时。
