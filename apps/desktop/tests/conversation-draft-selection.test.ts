@@ -10,6 +10,13 @@ import {
   conversationRunIndicators,
   pruneRunOverlay,
 } from '../src/features/chat/conversation-run-indicator'
+import {
+  AGENT_BACKEND_REFUSED,
+  agentBackendInputLockedReason,
+  conversationAgentBackend,
+  isAgentBackendRefusalCode,
+  withoutRefusedSend,
+} from '../src/features/conversations/model/agent-backend'
 
 // Run the production hook's actions with deterministic state/ref slots. Effects
 // are excluded here; these tests exercise selection ordering without a Host or DOM.
@@ -82,6 +89,14 @@ function harness() {
     pruneRunOverlay,
     applyRunEventToOverlay,
     applyApprovalToOverlay,
+    // Host wiring (plan v0.3.1 5.4 / 6.6): the hook reads each conversation's
+    // frozen agent backend while rendering and on send, so the sandbox needs
+    // the same pure helpers the module imports.
+    AGENT_BACKEND_REFUSED,
+    agentBackendInputLockedReason,
+    conversationAgentBackend,
+    isAgentBackendRefusalCode,
+    withoutRefusedSend,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
   return {
