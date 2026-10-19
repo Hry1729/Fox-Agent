@@ -49,6 +49,19 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
   const owns = request => identity && ['runId', 'conversationId', 'runtimeSessionId'].every(key => request[key] === identity[key])
   // Durable round boundary: the Host owns proposals, approvals, execution and
   // results; this worker never resolves a tool result by itself.
+  // Cancellation and close must not leave the loop awaiting a Host answer that
+  // will never be read. The Host may already have acted on the request, so the
+  // worker cannot call it cancelled, failed or succeeded: it is settled as an
+  // outcome-unknown rejection and the Host's durable record stays authoritative.
+  const settlePendingHostRequests = reason => {
+    for (const request of pendingHostRequests.values()) {
+      const error = new Error(`Host round request abandoned by ${reason}; its outcome is unknown and must be reconciled by the Host`)
+      error.code = 'kernel.host_request_outcome_unknown'
+      error.outcomeUnknown = true
+      request.reject(error)
+    }
+    pendingHostRequests.clear()
+  }
   const requestHost = (type, payload) => new Promise((resolve, reject) => {
     const id = `kernel-host-${++nextHostRequestId}`
     pendingHostRequests.set(id, { resolve, reject })
@@ -362,6 +375,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
         case 'kernel.cancel':
           if (!owns(request)) throw new Error('Kernel cancellation identity mismatch')
           abort?.abort()
+          settlePendingHostRequests('cancellation')
           if (state === 'initializing' || state === 'ready') state = 'consumed'
           respond(request, 'kernel.cancelling', { cancelling: Boolean(active) })
           break
@@ -391,6 +405,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
   async function close() {
     state = 'consumed'
     abort?.abort()
+    settlePendingHostRequests('worker close')
     await setup?.catch(() => {})
     await active?.catch(() => {})
     await session?.abort()
