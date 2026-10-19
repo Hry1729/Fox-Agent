@@ -1,6 +1,6 @@
 # 外部 Agent 后端的权限模式与 srt 沙箱层
 
-- 代码：`src/sandbox.rs`（模式、策略、路径规范化、预检、启动包装、能力声明、交付文件校验），`src/winacl.rs`（Windows 所有权 / `WRITE_DAC` 预检、暴露面审计），`src/acp.rs` 的 `AcpConnection::spawn_prepared`、停止状态与 Windows Job Object，`src/proctree.rs`（进程树停止确认），`src/port.rs`（撤权停止与重建的状态机）。
+- 代码：`src/sandbox.rs`（模式、策略、路径规范化、预检、启动包装、能力声明、交付文件校验），`src/winacl.rs`（Windows 所有权 / `WRITE_DAC` 预检、暴露面审计、精确 ACE 增删、所有者修改、私有目录创建），`src/winruntime.rs`（Windows 运行时位置与检查、ProgramData 私有目录、srt 注册表状态、SID 台账、安装记录、卸载边界），`src/winancestor.rs`（祖先元数据 ACE 与引用台账），`src/winowner.rs`（所有权修复），`src/statefile.rs`（加锁的 JSON 状态文件），`scripts/windows/enable-sandbox.ps1` / `disable-sandbox.ps1`（一次提权的启用 / 停用脚本），`src/acp.rs` 的 `AcpConnection::spawn_prepared`、停止状态与 Windows Job Object，`src/proctree.rs`（进程树停止确认），`src/port.rs`（撤权停止与重建的状态机）。
 - 实测：`tests/sandbox_srt.rs`。真实测试标 `#[ignore]`，普通 `cargo test` 只把它计入 “ignored”（即跳过数），**cargo 全绿不等于实测通过**；统计口径见第 6.3 节。
 - 决策来源：用户 2026-10-19 拍板；方案文档 `docs/02-架构/四Agent改造实施方案-v0.3.1.md` 末尾“v0.3.2 增补”。
 - srt：`@anthropic-ai/sandbox-runtime`（Apache-2.0），本文按 0.0.80 及其 README 编写。
@@ -59,8 +59,9 @@ sandboxed 模式下，以下任何一项失败都**拒绝启动该后端**并返
 | `sandbox_unavailable` | 不支持的 OS；Linux 上 bwrap 无法建立 user/net namespace（预检实跑 `bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/true`）；macOS 无 `/usr/bin/sandbox-exec`；准备会话目录失败 |
 | `sandbox_policy_invalid` | 授权目录不存在或无法解析；路径规范化后为 UNC / 设备路径（Windows）；受管路径在缺失部分含 `..`（第 10 节）；无授权目录；无 denyRead 根（Linux/macOS）；Windows 上授权 / deny 目标是盘根或共享根、运行时目录与可写授权目录重叠、会话变量或参数含 `"` `%` 换行；路径非绝对；授权目录 / 私有 HOME / 额外只读路径等于或包含某个 denyRead 根（会把它重新打开，例如授权 `/`）；项目 UUID 为空 / 非法 / 全零；私有 HOME 不在私有 HOME 根下；授权目录与私有 HOME 根或会话临时目录重叠；域名格式错误；会话 ID 非 `[A-Za-z0-9_-]{1,128}`；settings 目录落在沙箱可读或可写范围内；撤权重建拿到的不是 sandboxed 启动 |
 | `sandbox_backend_not_installed` | 后端经 `npx` 启动（需要 npm 源与用户的 npx 缓存）；程序不是绝对路径；程序在沙箱内不可读 |
-| `sandbox_path_not_owned` | Windows：srt 需要加 ACE 的路径（授权目录、私有 HOME、会话临时目录、运行时、deny 路径及其父目录）当前用户拿不到 `WRITE_DAC`；或 Node / srt / 后端运行时不在 Fox 管理的运行时目录（也不在 Users 可读的系统位置）下。消息与 `missing` 指名路径（7.2） |
-| `sandbox_path_exposed` | Windows：Fox 私有目录（state、私有 HOME 根、会话临时根）的 DACL 对所有本地账户开放读或写，或运行时目录对所有账户开放写（7.2） |
+| `sandbox_path_not_owned` | Windows：srt 需要加 ACE 的路径（授权目录、私有 HOME、会话临时目录、deny 路径及其父目录）或 Fox 要加祖先元数据 ACE 的路径（7.6）当前用户拿不到 `WRITE_DAC`；或 Node / srt / 后端运行时不在 Fox 管理的运行时目录（也不在 Users 可读的系统位置）下。消息与 `missing` 指名路径（7.2） |
+| `sandbox_path_exposed` | Windows：Fox 私有目录（state、私有 HOME 根、会话临时根）的 DACL 对所有本地账户开放读或写；运行时目录不是管理员拥有或有其他账户可写；`%ProgramData%\Fox\sandbox\<SID>` 所有者不是本人或 DACL 含多余 ACE（7.2、7.5） |
+| `sandbox_runtime_not_installed` | Windows（第五轮）：受管运行时不在 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`（如旧的 `%LOCALAPPDATA%` 布局），或 `%ProgramData%\Fox\sandbox` 不存在。remedy：“需在设置中启用沙箱（一次管理员授权）”（7.5） |
 | `delivered_file_rejected` | 不是启动拒绝：`verify_delivered_file` 判定 Agent 交付的文件不合格（第 11 节） |
 
 调用顺序：`preflight(install, probe)` → `SrtLauncher::new(ready, state_root)`（Windows 另 `.with_managed_runtime_root(<Fox 运行时目录>)`）→ `prepare_launch(mode, spec, session_id, SandboxSetup::{Ready|Unavailable}, os)` → `AcpConnection::spawn_prepared(prepared, cwd)`。预检失败时把错误放进 `SandboxSetup::Unavailable(err)`，`prepare_launch` 在 sandboxed 下原样返回、在 full_access 下忽略。
@@ -95,7 +96,7 @@ srt 的读权限默认全放行（deny-then-allow，`allowRead` 优先于 `denyR
 - srt 包目录与 Node 运行时若不在上述系统路径内（例如 `/opt/fox/node`、`~/.nvm`），`SrtLauncher::effective_policy` 自动只读放行它们本身（Linux 上 srt 要在沙箱内执行 `vendor/seccomp/<arch>/apply-seccomp`，不放行会直接失败）。
 - 被拒读的目录在沙箱内是**空的 tmpfs**：允许路径的上级目录名会以空目录骨架出现（例如 `/home/<用户>/…`），在拒读区域内写入只落进该 tmpfs，主机上不可见、会话结束即丢失（实测：向 Fox state 目录写入在沙箱内“成功”，主机上无文件）。srt 另默认放行 `/tmp/claude` 写入（同为 tmpfs）。
 - settings 文件写在 `state_root/sandbox-sessions/<session_id>/srt-settings.json`（Unix 0600），`state_root` 必须既不可写也不可读（`wrap` 校验：不在任何可读 / 可写根之下）；`SandboxSession` 随连接释放（`close()` 或 drop）时删除会话 settings 目录**和本会话临时目录**，私有 HOME 保留。
-- 启动命令：Linux/macOS `<node> <srt>/dist/cli.js --settings <file> -- <后端程序绝对路径> <参数...>`；Windows `<node> <srt>/dist/cli.js --settings <file> -c "set \"K=V\" && ... && <程序> <参数>"`（7.6）。
+- 启动命令：Linux/macOS `<node> <srt>/dist/cli.js --settings <file> -- <后端程序绝对路径> <参数...>`；Windows `<node> <srt>/dist/cli.js --settings <file> -c "set \"K=V\" && ... && <程序> <参数>"`（7.10）。
 - 环境变量（在 launch spec 自身的 session_env 之后覆盖）：`HOME`、`XDG_CONFIG_HOME/CACHE_HOME/DATA_HOME/STATE_HOME`（私有 HOME 下）；`TMPDIR/TMP/TEMP` 与 `CLAUDE_CODE_TMPDIR` = 本会话临时目录；`NODE_USE_ENV_PROXY=1`；Windows 另设 `USERPROFILE/APPDATA/LOCALAPPDATA`；codex 设 `CODEX_HOME=<私有 HOME>/.codex`，deepseek 设 `DSH_HOME=<私有 HOME>/.dsh`；`PATH` = 后端程序目录 + Node 目录 + 系统目录，不继承用户 PATH。环境白名单（`launch::child_environment`）不变，仍先于这些覆盖生效。
   - 临时目录必须在沙箱内可读：srt 进程本身继承这些变量，把代理桥接 socket 建在自己的 `TMPDIR` 下再 bind 进沙箱；若该目录被 denyRead 覆盖，沙箱内所有经代理的请求都失败（实测报 `Proxy CONNECT aborted`）。
   - srt 会把沙箱内的 `TMPDIR` 改成 `CLAUDE_CODE_TMPDIR`（缺省 `/tmp/claude`，在 `/` 拒读下是内存 tmpfs），所以同时设置它（实测沙箱内 `TMPDIR` = 本会话临时目录）。
@@ -107,6 +108,7 @@ srt 的读权限默认全放行（deny-then-allow，`allowRead` 优先于 `denyR
 - 目录名只用 Host 数据库中的**稳定项目 UUID**（规范化为小写 8-4-4-4-12）加后端 ID，不再从项目路径或名称派生，因此同名项目、同名文件夹、中文或含特殊字符的路径都不会碰撞。UUID 为空、格式非法或为全零 UUID → `sandbox_policy_invalid`；FoxBackend 没有沙箱私有 HOME。
 - `SandboxPolicy` 携带 `private_home_root`；`validate` 拒绝：私有 HOME 不在该根下；任一授权目录等于、包含或位于私有 HOME 根之下（即不可能把其他项目 / 其他后端的私有 HOME 授权进来）；任一授权目录与本会话临时目录重叠。沙箱内只 bind 本项目本后端那一份 HOME，同根下的其他 HOME 不可见。
 - 临时目录（`TMPDIR` 等）按会话分开：`<tmp_root>/<session_id>`（默认 `tmp_root = state_root/sandbox-tmp`，可用 `SrtLauncher::with_tmp_root` 改），会话结束随 `SandboxSession` 删除。
+- **Windows 布局不同**（第五轮，见 7.5）：私有 HOME 与会话临时目录在 `%ProgramData%\Fox\sandbox\<用户 SID>\{homes\<项目 UUID>\<后端>, tmp\<会话>}`（`WindowsPrivateLayout::homes_root()` / `tmp_root()`），Fox state 仍在 `%LOCALAPPDATA%\Fox\state`。Linux / macOS 保持 `<fox_data>/sandbox-homes/...` 不变。
 - 认证：尊重各后端原生登录方式，不做统一认证，不复制用户真实 HOME，也不复制其中的原生凭据（6.5）。沙箱模式下用户在该项目该后端的私有 HOME 内按后端原生方式登录（如 codex `codex login` 写入私有 `CODEX_HOME`），或使用环境白名单内的凭据变量。私有 HOME 位于沙箱可读写范围内，后端进程（及其执行的命令）能读到其中保存的登录凭据；**不得宣称“Agent 接触不到密钥”，也不得宣称“一次登录到处用”**——换项目或换后端需要再次登录。
 
 ## 4 网络白名单
@@ -145,11 +147,13 @@ srt 的读权限默认全放行（deny-then-allow，`allowRead` 优先于 `denyR
 |---|---|---|---|---|---|
 | Linux | `/` | `authorized_only` | 是（本轮实测） | 读取限定在授权文件夹（另含运行必需的系统路径、私有 HOME 和会话临时目录） | 是 |
 | macOS | `/` | `authorized_only` | 否 | 读取限定在授权文件夹（另含运行必需的系统路径、私有 HOME 和会话临时目录；本平台待实测） | 否 |
-| Windows | 无（Host 可追加用户拥有的路径） | `users_group_readable` | 否 | 沙箱账户只能读取系统中对所有用户开放的位置和授权文件夹；你的个人文件夹受保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测） | 否 |
+| Windows | 无（Host 可追加用户拥有的路径） | `users_group_readable` | 否 | 沙箱账户可读取授权文件夹和系统中对所有用户开放的位置；个人文件夹按实际 ACL 保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测） | 否（产品决定 B：只警告） |
 | Linux / macOS，策略只拒读部分目录 | 非 `/` | `user_dirs_only` | — | 部分：仅用户目录受保护 | 否 |
 | full_access | — | `none` | — | 不限制读取 | 否 |
 
 `directory_isolation` 仅在 srt `enforced` 且 `read_scope = authorized_only` 且已实测时为真。
+
+**Windows 暴露面警告（第五轮，产品决定 B）**：工程师实测 D 盘继承默认 ACL 的目录沙箱可读写，产品定为“只警告、不隔离”：`directory_isolation` 恒为 false。`SandboxDeclaration` 新增 `exposed_dirs`（来自 `winacl::audit_broad_exposure`，可选，由 `declaration.with_exposure(&report)` 填入）与 `exposure_warning`；`exposed_dirs` 非空时 `exposure_warning` = 常量 `WINDOWS_EXPOSURE_WARNING`：“此模式不限制在授权目录内。对所有用户开放的目录仍可能被读取或修改；本机已检测到此类目录。”个人文件夹的表述改为“按实际 ACL 保护”，不做绝对保证（用户自己放开过 ACL 的个人文件夹同样可读）。full_access 与非 Windows 忽略审计结果。
 
 ## 6 Linux 实测（T04）
 
@@ -227,7 +231,7 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 - 默认 denyRead `/` + 第 3 节 macOS 起始集合；seatbelt 下拒读 `/` 后 dyld、系统框架、`/dev`、路径元数据（`stat` 上级目录）是否够用必须实测，按实测增删。在实测通过前 `read_scope_verified = false`，UI 显示“本平台待实测”。
 - Go 程序经代理验证 TLS 可能需要 `enableWeakerNetworkIsolation`，Fox 不开启；若 codex 二进制受影响需评审。
 
-**Windows**（alpha，未实测；本节按 srt 0.0.80 源码核实，2026-10-19 第三轮重写）
+**Windows**（alpha，未实测；本节按 srt 0.0.80 源码核实，2026-10-19 第三轮重写，第五轮补 7.5–7.8）
 
 7.1 权限模型（源码核实）
 - srt-win 以独立本地账户 `srt-sandbox` 运行后端：broker（调用用户、非提权）解密该账户密码后经 Secondary Logon 的 `CreateProcessWithLogonW` 启动 `srt-win runner`，runner 再以受限令牌（LUA、Administrators 改 deny-only、登录 SID 改 deny-only、Medium IL、只保留 `SeChangeNotifyPrivilege`）在自己的 Job 里启动目标进程（`vendor/srt-win-src/src/logon.rs`、`launch.rs`、`token.rs`）。
@@ -237,17 +241,19 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 
 7.2 Fox 的 Windows 策略（`sandbox.rs`）
 - `default_deny_read_roots(Windows)` = 空；不再生成 `denyRead C:\Users`。`validate` 在 Windows 上允许 deny 列表为空。
-- 只对用户拥有的路径生成 ACE：授权目录、私有 HOME、会话临时目录、Fox 管理的运行时目录下的路径、Host 追加的 deny 路径。`users_readable_roots`（`windows_users_readable_roots()`：`%ProgramFiles%`、`%ProgramFiles(x86)%`、`%ProgramW6432%`、`%SystemRoot%`）下的路径一律**不生成** allowRead（Users 组本就可读，用户也写不了 ACE）。
-- 运行时位置要求（`SrtLauncher::with_managed_runtime_root`）：Node、srt、各后端运行时及其他只读额外路径必须在 Fox 管理的运行时目录（用户拥有，建议 `%LOCALAPPDATA%\Fox\runtime`）下，或在上述 Users 可读的系统位置下；其余位置（如 `D:\tools\node`、nvm、`%APPDATA%\npm`）→ `sandbox_path_not_owned`，`missing` 列出路径，`remedy` 提示由 Fox 安装到运行时目录。运行时目录不得与任何可写授权目录重叠（沙箱可写 = 可在 broker 以真实用户执行的代码里植入）→ `sandbox_policy_invalid`。srt 包目录必须可读：runner 是以 `srt-sandbox` 身份执行的 `srt-win.exe`（`logon.rs` 用 `current_exe()`）。
+- srt 只对用户拥有的路径生成 ACE：授权目录、私有 HOME、会话临时目录、Host 追加的 deny 路径（第五轮起运行时目录不再生成 ACE，见下一条）。`users_readable_roots`（`windows_users_readable_roots()`：`%ProgramFiles%`、`%ProgramFiles(x86)%`、`%ProgramW6432%`、`%SystemRoot%`）下的路径一律**不生成** allowRead（Users 组本就可读，用户也写不了 ACE）。
+- 运行时位置要求（第五轮改，详见 7.5）：Node、srt、各后端运行时及其他只读额外路径必须在 Fox 管理的**机器级**运行时目录 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`（管理员拥有、Users 读取和执行）下，或在上述 Users 可读的系统位置下；两者都**不生成 ACE**（`effective_policy` 把运行时根并入 `users_readable_roots`，settings 的 allowRead 里不出现它）。其余位置（如 `D:\tools\node`、nvm、`%APPDATA%\npm`）→ `sandbox_path_not_owned`。旧布局 `%LOCALAPPDATA%\Fox\runtime` → `sandbox_runtime_not_installed`。运行时目录不得与任何可写授权目录重叠 → `sandbox_policy_invalid`。
 - 预检（`SrtLauncher::windows_ace_plan`，在 `wrap` 写任何东西之前）：
   1. 对每个 ACE 目标（grant、deny 及其父目录）用 `WindowsAclProbe::check_write_dac` 检查当前用户能否拿到 `WRITE_DAC`（真实实现：`CreateFileW(WRITE_DAC|READ_CONTROL, FILE_FLAG_BACKUP_SEMANTICS)`，与 `SetNamedSecurityInfoW` 打开对象的权限一致；不存在的路径查最近的已存在祖先）。任一失败 → `sandbox_path_not_owned`，消息与 `missing` 指名路径和 Win32 错误码，fail-closed。
-  2. Fox 私有目录（state、私有 HOME 根、会话临时根）的 DACL 若对所有本地账户开放读或写，运行时目录若对所有账户开放写 → `sandbox_path_exposed`（新 code），提示把 Fox 数据目录放在用户目录下。
+  0. （第五轮）运行时根检查 `winruntime::check_windows_runtime_root`：不在用户目录（`%USERPROFILE%`、`%LOCALAPPDATA%`、`%APPDATA%`）内，否则 `sandbox_runtime_not_installed`（remedy“需在设置中启用沙箱（一次管理员授权）”）；所有者为 Administrators / SYSTEM / TrustedInstaller，且作用于该目录本身的允许 ACE 中，除这三者与 CREATOR OWNER 外任何 SID（Users / Authenticated Users / Everyone / INTERACTIVE 在消息中点名）都没有写类权限（`WRITE_CLASS_MASK`：写数据、追加 / 建子目录、写 EA、写属性、删除、删子项、`WRITE_DAC`、`WRITE_OWNER`、GENERIC_WRITE / ALL），否则 `sandbox_path_exposed`；DACL / 所有者读不到也按 exposed 处理。测试环境变量 `FOX_RUNTIME_ROOT` 可覆盖位置，但同样受这些规则约束。
+  2. Fox 私有目录（state、私有 HOME 根、会话临时根）的 DACL 若对所有本地账户开放读或写 → `sandbox_path_exposed`。
   3. 盘根 / 共享根作为授权或 deny 目标 → `sandbox_policy_invalid`（srt 自身也不在盘根加 ACE：会改写整卷 DACL）。
-- 读范围如实声明：Windows `read_scope = users_group_readable`，`read_scope_verified = false`，`directory_isolation = false`。UI 文案（`ReadScope::ui_label`）：“沙箱账户只能读取系统中对所有用户开放的位置和授权文件夹；你的个人文件夹受保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测）”。与需求原文差一处：原文写“可能可读”，按 7.1 源码结论改为“可能可读写”。
+  4. （第五轮）祖先元数据 ACE（7.6）：每个要加 ACE 的祖先同样做 `WRITE_DAC` 预检，失败 → `sandbox_path_not_owned`，消息说明“需要能读到授权目录以上直到用户配置文件根的各级目录属性”。计划放在 `WindowsAcePlan.ancestors`，经 `SandboxedLaunch` / `PreparedLaunch.windows_ancestor_aces` 交给 Host。
+- 读范围如实声明：Windows `read_scope = users_group_readable`，`read_scope_verified = false`，`directory_isolation = false`（产品决定 B）。UI 文案（`ReadScope::ui_label`，第五轮改）：“沙箱账户可读取授权文件夹和系统中对所有用户开放的位置；个人文件夹按实际 ACL 保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测）”；检测到暴露目录时另显示 `WINDOWS_EXPOSURE_WARNING`（第 5 节）。
 - `SandboxPolicy::is_readable` 在 Windows 上表示“策略授予或系统位置可读”；盘上其他 DACL 宽松的目录无法按路径推断，交给暴露面审计。
 
 7.3 暴露面审计（`winacl::audit_broad_exposure`，只报告不修改）
-- 枚举固定盘（`GetLogicalDrives` + `GetDriveTypeW == DRIVE_FIXED`）的根及其一级子目录，读 DACL（`GetNamedSecurityInfoW`），列出允许 ACE 授予 Users / Authenticated Users / Everyone / INTERACTIVE 读（`FILE_READ_DATA`/`GENERIC_READ`/`GENERIC_ALL`）或写（`FILE_WRITE_DATA`/`FILE_APPEND_DATA`/`GENERIC_WRITE`/`GENERIC_ALL`）的目录；跳过 inherit-only ACE；不扣减 deny ACE（只会多报不会漏报）；NULL DACL 记为全开放。返回 `ExposureReport { supported, drives, exposed[{path, access{read, write, groups}}], errors }`，供 UI 警告。不扫描二级以下（更深处可能另设 DACL）。非 Windows 编译通过，`supported = false`。
+- 枚举固定盘（`GetLogicalDrives` + `GetDriveTypeW == DRIVE_FIXED`）的根及其一级子目录，读 DACL（`GetNamedSecurityInfoW`），列出允许 ACE 授予 Users / Authenticated Users / Everyone / INTERACTIVE 读（`FILE_READ_DATA`/`GENERIC_READ`/`GENERIC_ALL`）或写（第五轮起为整个 `WRITE_CLASS_MASK`，含删除、`WRITE_DAC`、`WRITE_OWNER` 等）的目录；结果经 `SandboxDeclaration::with_exposure` 进入声明的 `exposed_dirs`；跳过 inherit-only ACE；不扣减 deny ACE（只会多报不会漏报）；NULL DACL 记为全开放。返回 `ExposureReport { supported, drives, exposed[{path, access{read, write, groups}}], errors }`，供 UI 警告。不扫描二级以下（更深处可能另设 DACL）。非 Windows 编译通过，`supported = false`。
 
 7.4 进程清理：Job Object 与 two-hop 风险（`acp.rs`）
 - 实现：`AcpConnection::spawn` 在 Windows 上以 `CREATE_SUSPENDED` 启动子进程 → 新建 Job（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，不允许 breakaway，句柄不可继承）→ `AssignProcessToJobObject` → 用 Toolhelp 快照找到该进程的线程并 `ResumeThread`。进程在入 Job 之前无法运行，消除了“先 spawn 再 attach”的竞态（std/tokio 不返回主线程句柄，故用 Toolhelp 恢复；任何一步失败即杀掉挂起的子进程并报错，不在 Job 外运行）。
@@ -255,19 +261,59 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 - **two-hop 风险（源码核实）**：sandboxed 模式下我们的 Job 里只有 srt 的 node 进程和 srt-win broker（libuv 把 node 的子进程放进它自己的嵌套 Job，`SILENT_BREAKAWAY_OK` 只脱离 libuv 的 Job，不脱离不允许 breakaway 的外层 Job——此点按 Windows 嵌套 Job 文档推断，需实测）。runner 是 seclogon 服务代为创建的（`CreateProcessWithLogonW`），**不在我们的 Job 里**；后端本体由 runner 以 `CREATE_BREAKAWAY_FROM_JOB` 放进 runner 自己的 Job，**也不在我们的 Job 里**。清理链依赖 srt-win 自身：我们 `TerminateJobObject` → broker 死 → broker 持有的 broker→runner Job（kill-on-close）句柄关闭 → runner 死 → runner 的 Job（kill-on-close、不允许 breakaway）句柄关闭 → 后端整棵树死。若 broker→runner 的 assign 因 seclogon Job 不支持嵌套而失败（srt-win 打印 `broker→runner Job assign not supported`），外部杀 broker 后 runner 不会被杀（它的 `SpawnedChild` 守卫只在 broker 进程内正常退出时生效），只能等后端因 stdin 断开自行退出；srt 注释给出的兜底是**提权** `taskkill /F /FI "USERNAME eq srt-sandbox"`。
 - ACE 回收：硬杀 node 会跳过 srt 的 `reset()`，ACE 留在授权目录上，直到下一次任何 `srt-win acl` 操作的崩溃恢复按“持有者 PID 已死”清理（`with_init_lock`），或手动 `srt-win acl recover`。持有者 PID 被复用时清理会推迟。故关闭时先走 stdin 关闭的温和路径。
 
-7.5 网络
+7.5 运行时与私有目录布局（第五轮）
+- **受管运行时**：Windows 只接受 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`（`winruntime::default_windows_runtime_root`；`windows_runtime_root` 允许测试用 `FOX_RUNTIME_ROOT` 覆盖，覆盖值同样要求管理员拥有、Users 不可写）。由启用脚本（7.7）以管理员复制并设 ACL：去继承，Administrators / SYSTEM 完全控制，Users 读取和执行，所有者 Administrators。沙箱账户属于 Users，可直接读，Fox 不为它生成任何 ACE（用户对管理员拥有的目录也没有 `WRITE_DAC`）。包内布局：`node\node.exe`、`srt\node_modules\@anthropic-ai\sandbox-runtime\…`、`backends\<后端>\…`、`dsh-patches\*.yml`（本 crate `runtime-assets/dsh-patches`，与 `deepseek::patch_variants()` 逐字节一致，有单元测试守护）；实测夹具可放 `t04-fixtures\`。后端版本随运行时包固定，升级需重跑启用脚本（一次 UAC）。
+- 第三轮实机两个问题的处理：私有运行时（`%LOCALAPPDATA%`）下 srt 的 WFP 自检 helper 在 ACL 授权前就以 `srt-sandbox` 启动（`CreateProcessWithLogonW` 0x80070003 = 路径不可达）→ 运行时迁到 Program Files 后沙箱账户天然可达；`%LOCALAPPDATA%` 下的运行时返回结构化错误 `sandbox_runtime_not_installed`（remedy“需在设置中启用沙箱（一次管理员授权）”）。Program Files 下 Node 24 对 `C:/Users/<u>/AppData` 做 realpath/lstat 报 EPERM → 私有 HOME / 临时目录移出用户 profile（下一条），授权目录仍在 profile 内的由 7.6 的祖先 ACE 解决。
+- **私有 HOME / 会话临时目录**：`%ProgramData%\Fox\sandbox\<用户 SID>\{homes\<项目 UUID>\<后端>, tmp\<会话>}`（`WindowsPrivateLayout`）。父目录 `%ProgramData%\Fox\sandbox` 由启用脚本以管理员创建：Administrators / SYSTEM 完全控制；Users 只有“建子文件夹 + 读属性 + 遍历 + 同步”且只作用于该目录本身（不能列出、不能读他人的子目录）；CREATOR OWNER `(OI)(CI)(IO)` 完全控制。`prepare_windows_private_root` 在首次使用时：
+  1. 目录名必须等于当前令牌用户 SID（`current_user_sid()`，`GetTokenInformation(TokenUser)`），否则 `sandbox_policy_invalid`；
+  2. 父目录不存在 → `sandbox_runtime_not_installed`；
+  3. 用 `CreateDirectoryW` + 显式安全描述符 `O:<SID>D:P(A;OICI;FA;;;<SID>)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` 建 `<SID>` 目录（去继承，只留本人、SYSTEM、Administrators）；已存在则**校验而不信任**（父目录允许任何用户建子目录，别人可能抢先建一个以我 SID 命名的目录）：所有者必须是本人，DACL 不得含继承 ACE，允许 ACE 只能是本人 / SYSTEM / Administrators，外加 Fox 自己为已记录 srt SID 加的祖先 ACE（掩码恰为 `ANCESTOR_ACE_MASK`、无标志）；再跑原有的 `broad_access` 检查。任一不通过 → `sandbox_path_exposed`，拒绝使用；
+  4. 建 `homes`、`tmp`（继承 `<SID>` 目录的 ACL）。
+  Host 用 `PrivateHomes::new(layout.homes_root())` 与 `SrtLauncher::with_tmp_root(layout.tmp_root())`。Fox state 仍在 `%LOCALAPPDATA%\Fox\state`。Linux / macOS 布局不变。
+
+7.6 祖先元数据 ACE（第五轮，`winancestor.rs`，cfg 无关的逻辑 + `winacl` 的 Windows 实现）
+- 原因：srt 0.0.80 的 `acl grant` 只有 read（READ+EXECUTE）与 write，且固定 `(OI)(CI)` 继承，无法表达“只能读这一级目录的属性”；而 Node 解析模块 / realpath 时逐级 `lstat` 祖先，授权目录在 `C:\Users\<u>\Documents\…` 下时，沙箱账户在 `C:\Users\<u>` 等祖先上没有任何权限 → EPERM。
+- 计算（`ancestor_chain` / `plan_ancestor_aces`）：对 srt 本会话要授予的每个目标（`grant_read` ∪ `grant_write`），取遍历基点到目标之间的每级祖先（不含目标本身）：在用户 profile 下 = 从 profile 根（含）往下；在 `%ProgramData%\Fox\sandbox` 下 = 基点以下各级（不含基点）；其他位置 = 盘根以下、`broad_access` 显示 broad 组不可读的各级（读不到 DACL 也算，宁可多一条 ACE）。每级加一条 `ACCESS_ALLOWED`，SID = srt 沙箱账户，掩码只有 `FILE_READ_ATTRIBUTES | SYNCHRONIZE`（`ANCESTOR_ACE_MASK` = 0x00100080），**无继承标志**：可 `lstat`，不能列目录、不能读内容。SID 从 `HKLM\SOFTWARE\sandbox-runtime` 的 `SandboxUserSid` 读取（`winruntime::read_srt_registry`，`reg query … /reg:64`；`MarkerVersion` 是 srt 写入的提交点，缺失或 SID 不是本地账户 SID `S-1-5-21-…` → `sandbox_not_installed`，fail-closed）。
+- 写法：`GetFileSecurityW` 取 DACL → 新 ACL = 原有 ACE 原样复制，新 ACE 插在开头的显式 deny 之后（规范顺序）→ `SetFileSecurityW`，保留 `SE_DACL_PROTECTED` / `SE_DACL_AUTO_INHERITED`。**不用** `SetNamedSecurityInfoW`：后者会把继承重新传播到整棵子树（在 profile 根上就是整个用户目录）。删除只删 SID、掩码、无标志三者完全一致的 ACE，其他 ACE 一概不碰。写之前同样做 `WRITE_DAC` 预检；用户对 profile 根没有 `WRITE_DAC` → fail-closed 并说明。
+- **与 srt 的冲突**（srt 源码 626a5967 `state_db.rs` `recompose_at` → `acl.rs` `apply_sandbox_aces`）：srt 每次收敛某路径时，先删掉该路径上沙箱 SID 的**所有**显式 ACE（allow 与 deny），再写自己那一组；对象是 `working_aces` 里该路径的全部记录，触发点是本用户任何 broker 的 grant / stamp / release，以及每次拿锁时的崩溃恢复（死掉的持有者的路径会被重新收敛）。因此：
+  (a) 从祖先集合中剔除 srt 本会话会操作的路径（grant / deny 目标与每个 deny 的父目录，srt 在父目录写 `deny_fdc`）以及位于任一 grant 目标之内的路径——这些地方 srt 已给 READ+EXECUTE（超集），Fox 不加；
+  (b) Fox 在启动 srt **之前**加 ACE；
+  (c) 全局引用台账 `%LOCALAPPDATA%\Fox\state\win-ancestor-aces.json`（`AncestorLedger`，文件锁 `win-ancestor-aces.json.lock`），每条记录 path、SID、引用它的会话 id；会话关闭减引用，归零才移除 ACE；先写台账再改 ACL（与 srt 的 record-first 一致）；
+  (d) 其他并发会话的 srt 可能直接授权了同一路径并在启动 / 关闭时把 Fox 的 ACE 抹掉：Fox 内所有 srt 会话的启动与关闭都在 `AncestorAceCoordinator::transition()` 返回的 `SrtTransition` 内进行（同一把锁，跨 Fox 进程也有效：`File::lock` 在 Windows 上是整段 `LockFileEx`，同进程的两个句柄也互斥），每次以 `finish()` 结束，对台账做一次 reconcile（缺失的补上）；Fox 改 DACL 的那几步还同时持有 srt 自己的 `%LOCALAPPDATA%\sandbox-runtime\.acl-init.lock`（srt 用 `LockFileEx` 锁第 0 字节，Fox 的整文件锁与之重叠），避免与任何 srt 客户端（包括非 Fox 程序）的收敛交错；
+  (e) 崩溃恢复：Fox 启动时调用 `recover_ancestor_aces(&coordinator, &live_sessions)`（启动时没有存活会话，即移除台账中全部 ACE）；台账损坏 → 拒绝启动沙箱（不从空台账开始而忘掉要撤销的 ACE）。
+- 残余风险：非 Fox 的 srt 客户端在 Fox 两次 transition 之间收敛了同一路径，Fox 的 ACE 会缺失到下一次 transition 才补上（期间该会话的 Node 可能再报 EPERM）；`recover` 会在 Fox 下次启动时补齐 / 清理。
+- Host 接线（第 2 步）：
+  ```text
+  let mut t = coordinator.transition()?;              // 全局锁
+  t.begin_session(id, &srt_sid, &prepared.windows_ancestor_aces)?;
+  let conn = AcpConnection::spawn_prepared(prepared, cwd).await?;  // 等到 Initialized
+  t.finish();                                         // reconcile + 解锁
+  … 关闭：let mut t = coordinator.transition()?; conn.close_with_report().await; t.end_session(id)?; t.finish();
+  ```
+- 单元测试（Linux 可跑，ACL 调用用 trait mock）：祖先计算（中文与空格路径、大小写、profile 根本身、ProgramData 链、其他盘）、剔除 srt 目标、台账引用计数 / 归零 / 持久化、srt 抹掉后 reconcile 补回且不碰 srt 自己的 ACE、崩溃恢复、`WRITE_DAC` / 坏 SID fail-closed 与中途失败回滚、transition 互斥。
+
+7.7 启用脚本、安装记录与卸载边界（第五轮，取代原 7.7）
+- 脚本位置：`crates/fox-agent-backend/scripts/windows/enable-sandbox.ps1` 与 `disable-sandbox.ps1`。UTF-8 **带 BOM**、LF 换行（Windows PowerShell 5.1 对无 BOM 的脚本按系统 ANSI 代码页读，中文会乱码；LF 对解析器没有影响）；`.gitattributes` 对 `*.ps1` 显式 `text eol=lf`。不使用 PS 7 专有语法（已用 PowerShell 7.4.6 解析器 + PSScriptAnalyzer 1.25.0 的 `PSUseCompatibleSyntax/Commands/Types`（目标 5.1）检查通过，未在 Windows 上实跑）。提权进程可能是另一个管理员账户（标准用户输入管理员凭据），所以调用用户相关路径全部由参数传入。结果写 JSON 文件（`-ResultPath`，UTF-8 无 BOM），日志写 `%ProgramData%\Fox\logs\*.log`。
+- `enable-sandbox.ps1 -PackagePath <zip> -ExpectedSha256 <hex> -Version <v> -ResultPath <file>`，一次提权：先把 zip 复制到仅管理员可写的暂存目录再算 SHA256（避免校验后被替换）→ 解压、检查 `node\node.exe` 与 srt `cli.js` 存在 → 整体移动到 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`（已有同哈希版本则跳过复制；不同哈希先挪到备份、成功后删除）→ 设运行时 ACL → 建 `%ProgramData%\Fox`（Users 只读）与 `%ProgramData%\Fox\sandbox`（7.5 的 ACL；若已存在但所有者不是管理员 / SYSTEM，先 `takeown /A` 收回，这是 Fox 自己的命名空间）→ 记录运行前 `HKLM\SOFTWARE\sandbox-runtime` 是否已有完整安装 → `node cli.js windows-install --proxy-port-range 60080-60089`（不加 `--force`，不覆盖别人的不同配置）→ 读回 `SandboxUserSid`、`MarkerVersion`、`CreatedAt` 与 srt 包版本 → 输出 `{ok, version, runtimeRoot, privateBase, srt:{alreadyInstalled, packageVersion, sandboxUserSid, markerVersion, createdAt}, log}`。幂等；失败时删除本次复制的运行时目录、恢复备份、清暂存；不改任何其他目录的 ACL。
+- Fox 读结果：`winruntime::apply_enable_result(state_root, &EnableScriptResult)` 写 `srt-sids.json`（`record_srt_sid`，只追加）与 `srt-install.json`（`FoxSrtInstallRecord`）。“由 Fox 安装”只在 srt 原本未安装的那一次判定为真；之后重跑脚本看到“已安装”时，只有记录中的 `CreatedAt` 与 SID 与这次一致才保留真值。Fox 每次检测到 srt 安装（启动、启用后）都应调用 `record_srt_sid`。
+- **卸载边界**（`winruntime::decide_srt_uninstall`，脚本内同样规则）：只有同时满足——(1) 记录表明 Fox 安装；(2) 注册表仍是那一次安装（`CreatedAt`、SID、`MarkerVersion` 一致）；(3) 运行时里 srt 包版本与记录一致；(4) 没有活跃 srt 会话；(5) 没有其他使用者证据——才执行 `windows-uninstall` 并删除 srt 留下的 `%ProgramData%\sandbox-runtime` 与**调用用户自己的** `%LOCALAPPDATA%\sandbox-runtime`；否则保留并在结果中列出全部原因。“无法判断”一律按“有证据”处理。
+- 判断方法：活跃会话 = 以沙箱账户运行的进程（`Get-Process -IncludeUserName`，需提权，在脚本的提权阶段做）+ 命令行含 `sandbox-runtime` / `srt-win` 的进程（`Win32_Process`，可发现其他程序的 broker）+ Fox 祖先台账仍有会话。其他使用者 = 其他用户 profile 下存在 `AppData\Local\sandbox-runtime\state.db`（`Win32_UserProfile` 枚举）。**state.db 能否判断**（srt 源码 626a5967 `state_db.rs`）：会话库是每用户一份的 SQLite，表 `brokers(pid, process_create_time, started_at)`、`ace_holders(canonical_path, kind, pid, want_mask)`、`working_aces(canonical_path, kind, file_id, mask)`、`placeholders(canonical_path)`；**没有任何字段记录客户端程序**，只有 broker 的 pid 与创建时间，所以无法区分同一 Windows 用户下的 Fox 与其他 srt 客户端（如其他基于 srt 的工具）；其他用户的 state.db 在各自 profile 内。结论：调用用户自己的部分默认“无法排除”→ 保留，除非用户在 Fox 界面明确确认本账户没有其他使用 sandbox-runtime 的程序（脚本参数 `-ConfirmNoOtherSrtClients`）。
+- `disable-sandbox.ps1 -StateDir <%LOCALAPPDATA%\Fox\state> -InvokingUserProfile <%USERPROFILE%> -Version <v> -ResultPath <file> [-RemoveRuntime] [-ConfirmNoOtherSrtClients]`：按上述判断后才 `windows-uninstall`；`-RemoveRuntime` 在其后删除运行时目录；**不删任何用户的私有 HOME**（`%ProgramData%\Fox\sandbox` 一律不动）。卸载前 Fox 应先跑 7.8 的所有权修复与 `recover_ancestor_aces`。
+- srt 安装时在 13 个世界可写系统目录加沙箱 SID 的写拒绝 ACE（实机记录为 11 处），卸载时移除。
+
+7.8 所有权修复（第五轮，`winowner.rs`）
+- 沙箱内新建的文件 / 目录所有者是 `srt-sandbox` 的 SID，srt 卸载后成为孤儿（第三轮实机 7 个对象）。`repair_sandbox_ownership(roots, known_srt_sids, probe, writer) -> OwnershipReport`：只遍历传入的根（授权目录与私有 HOME 根），只处理所有者属于“Fox 记录的历代 srt SID”（`srt-sids.json`，`known_srt_sids(state_root)`）的对象，改为当前用户（`SetNamedSecurityInfoW(OWNER_SECURITY_INFORMATION)`，依赖 `WRITE_OWNER`，用户经其文件夹继承来的完全控制即有）；其他 SID（包括别的孤儿 SID）一律不动；不跟随重解析点（Windows 上任何 `FILE_ATTRIBUTE_REPARSE_POINT`，含符号链接、junction 和其他标签；既不改也不进入）；返回逐项报告（`repaired` / `failed` / `skipped_reparse_point` / `owner_unreadable`，另计 `scanned`、`untouched`、`errors`）。
+- 触发点只写 API 与文档：卸载 srt 之前、重装 srt 之后、用户手动；**不在每次会话后自动跑**。
+
+7.9 网络
 - WFP 在 `ALE_AUTH_CONNECT` 拦截 `srt-sandbox` SID 的一切出站连接，只放行回环上的代理端口段（默认 60080–60089，须与 `windows-install --proxy-port-range` 一致）；直连公网 IP、直连回环其他端口都被拒（curl exit 7）。
 - **系统 DNS 解析不受同等限制**（srt README Known limitations）：`getaddrinfo()` 由以 NETWORK SERVICE 运行的 Dnscache 服务完成，名字解析会成功（随后的 connect 仍被拦）；自己发 UDP/53 的工具（nslookup、dig）被拦。DNS 查询本身可作为外泄通道，**不能宣称 Windows 上网络完全封闭**。schannel 的 CRL/OCSP 吊销检查被 WFP 拦截（`CRYPT_E_REVOCATION_OFFLINE`）。
 - 代理令牌在 runner 命令行中可见（`HTTP_PROXY=http://srt:<token>@127.0.0.1:...`），同机其他本地主体可读。
 
-7.6 启动命令与环境变量（源码核实，影响很大）
+7.10 启动命令与环境变量（源码核实，影响很大）
 - srt CLI 在 Windows 上把 `--` 后的 argv 用 POSIX 单引号规则拼成字符串，再交给 `cmd.exe /d /s /c` 执行：含反斜杠的路径会被包成 `'C:\...'`，cmd 不认单引号，必然失败。srt-win 给子进程的是 `srt-sandbox` 账户的全新 profile 环境，只叠加 broker 的 `PATH`、`PATHEXT`、代理变量与 git 配置变量：Fox 设置的 `HOME/USERPROFILE/CODEX_HOME/DSH_HOME/TEMP/NODE_USE_ENV_PROXY` 和 `PI_ACP_PI_COMMAND` 等原本都传不进去。
 - 修正：Windows 上 `wrap` 改用 `srt -c "<cmd 行>"`，`windows_command_line()` 生成 `set "K=V" && ... && "<程序>" <参数>`（srt-win 对 `/c` 之后原样透传）。含 `"`、`%`、换行的值或参数无法安全经过 cmd → `sandbox_policy_invalid`。名字含 `KEY/TOKEN/SECRET/PASSWORD` 的变量**绝不**写进命令行（进程列表可见）；Host 环境中的凭据变量在 Windows 沙箱内本来也拿不到，所以 **Windows 沙箱模式下后端只能用私有 HOME 内的原生登录**。以 shell API 取已知文件夹的程序仍会拿到 `srt-sandbox` 自己的 profile。
-
-7.7 安装、卸载与状态目录
-- 首次选沙箱模式时安装器调用 `windows_install_command()`（`node <srt cli.js> windows-install`，一次 UAC，幂等）；卸载 Fox 时调用 `windows_uninstall_command()`（`windows-uninstall`，一次 UAC，移除 WFP、`srt-sandbox` 账户与 profile、`sandbox-runtime-users` 组、`HKLM\SOFTWARE\sandbox-runtime`）。
-- 卸载后 srt 不删的目录（srt README “Uninstall”）：`%ProgramData%\sandbox-runtime`（CA 密钥材料等）与每个用户的 `%LOCALAPPDATA%\sandbox-runtime`（srt 自己的会话库 `state.db` 与 `.acl-init.lock`，记录 ACE 引用计数，**由所有使用 srt 的程序共享**）。约定：Fox 卸载器在 `windows-uninstall` 成功后删除 `%ProgramData%\sandbox-runtime`；`%LOCALAPPDATA%\sandbox-runtime` **只在确认本机没有其他 srt 使用者**（无其他程序登记的 srt 依赖、库中无存活持有者）时删除，否则保留并在卸载日志中说明。实机报告中两处残留即属此类，未删除是正确的。
-- srt 安装时会在 13 个世界可写系统目录加该 SID 的写拒绝 ACE（实机记录为 11 处，按本机存在与否过滤），卸载移除；安装前完整 SDDL 未保存时只能核对该 SID 是否消失。
+- （第五轮）Windows 沙箱模式下每个后端（pi-acp / pi、codex-acp、dsh 都经 `.cmd` 启动 Node）的会话变量里加 `NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main`（`launch::WINDOWS_SANDBOX_NODE_FLAGS`，由 `SrtLauncher::sandbox_env` 写入 `set` 前缀，Node 允许这两个旗标出现在 `NODE_OPTIONS` 中并传给其子 Node 进程）。**只是辅助**：模块解析不再 realpath，可少一部分祖先 `lstat`；真正让 profile 链可 `lstat` 的是 7.6 的祖先 ACE，后端自己调用的 `fs.realpath` 不受影响。
 
 **通用**
 - `SandboxPolicy::validate` 强制：至少一个 denyRead 根（Windows 除外）；不允许 allowRead 一个 denyRead 根或其祖先（Linux/macOS 上即不允许授权 `/`）；授权目录不得与私有 HOME 根或会话临时目录重叠。
@@ -287,26 +333,28 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 - [x] ~~pi 第 6 步过时断言~~：第四轮已改为正向验证并实测（6.4），`cancel_process_tree = true`。
 - [ ] Windows：停止确认（`ActiveProcesses == 0`）、晚到审批、junction 规范化、交付校验在真机上跑（第 9 节 12–14）。
 - [ ] macOS：`ps` 快照的后代跟踪与停止确认实测（pi 的 detached bash、srt sandbox-exec 子树）。
+- [ ] （第五轮）Desktop Host 接线：启用 / 停用脚本的调用与结果读取（`apply_enable_result`）；每次检测到 srt 安装时 `record_srt_sid`；会话启动 / 关闭包在 `AncestorAceCoordinator::transition()` 内（7.6 的接线示意）；Fox 启动时 `recover_ancestor_aces`；`prepare_windows_private_root` + `PrivateHomes::new(layout.homes_root())` + `with_tmp_root(layout.tmp_root())`；UI 展示 `exposed_dirs` / `exposure_warning`；卸载流程先 `repair_sandbox_ownership`、`recover_ancestor_aces`，再调 `disable-sandbox.ps1`。
+- [ ] （第五轮）运行时包的构建脚本（组装 node / srt / backends / dsh-patches 并生成 SHA256）尚未编写；Fox 安装包需内置哈希。
 - [ ] Desktop Host 接线：交付文件在展示前调用 `verify_delivered_file(prepared.effective_policy, path)`；UI 依据 `PermissionAutoCancelled`、`StoppedUnconfirmed.remedy` 展示。
 
-## 9 Windows 实测清单（第三轮，给工程师）
+## 9 Windows 实测清单（第五轮，给工程师）
 
-以普通用户（非管理员）运行；记录 OS 版本、杀软状态（火绒 / Defender）、srt 0.0.80、Node、pi 0.84.2 / pi-acp 0.0.34、dsh 0.2.1-rc.2。
+以普通用户（非管理员）运行 Fox / cargo，只有启用 / 停用脚本经 UAC 提权；记录 OS 版本、杀软状态（火绒 / Defender）、srt 0.0.80、Node、pi 0.84.2 / pi-acp 0.0.34、dsh 0.2.1-rc.2。第三轮的清单已由第三轮报告覆盖，本轮清单针对第五轮改动；每项原样保存 `MEASURE` 行与脚本日志（`%ProgramData%\Fox\logs`）。
 
-1. 编译与单元测试：`cargo test --locked -p fox-agent-backend --features acp --no-fail-fast`，预期上一轮两个跨平台夹具失败消失（Windows 下运行的是 `srt_wrap_...` 的 Windows 变体）。
-2. 运行时布局：建 `%LOCALAPPDATA%\Fox\runtime`（用户自建 = 用户拥有），把 Node（或用 Program Files 下的机器级 Node）、`npm --prefix <runtime>\srt install @anthropic-ai/sandbox-runtime@0.0.80 --ignore-scripts`、`npm --prefix <runtime>\pi install pi-acp@0.0.34 @earendil-works/pi-coding-agent@0.84.2`、`npm --prefix <runtime>\dsh install @deepseek-ai/dsh@0.2.1-rc.2` 装进去；机器级安装 Git for Windows。`icacls <runtime>` 确认所有者为本人、无 Users/Authenticated Users 写权限。
-3. 管理员执行一次 `node <runtime>\srt\node_modules\@anthropic-ai\sandbox-runtime\dist\cli.js windows-install`（端口段保持默认 60080–60089）。
-4. 负向预检（不应再看到 ACL 0x5）：用 Program Files 外、用户不拥有的目录当授权目录（例如另一账户建的文件夹）或把 Node 指到 `D:\tools\node`，确认 `prepare_launch` 返回 `sandbox_path_not_owned` 并指名路径；Fox 数据目录放到 `D:\` 下继承默认 ACL 的位置，确认 `sandbox_path_exposed`。
-5. 真实 T04：`set FOX_TEST_REAL_SRT=1`，设 `FOX_RUNTIME_ROOT`、`FOX_SRT_PREFIX`、`FOX_PI_ACP_PREFIX`、`FOX_SRT_NODE`，可选 `FOX_T04_EXPOSED_DIR=D:\fox-t04-exposed`（先手建，确认继承了盘根 ACL），运行 `cargo test -p fox-agent-backend --features acp --test sandbox_srt real_srt_pi_acp_t04_windows -- --include-ignored --nocapture`。断言覆盖：身份为 `srt-sandbox`；授权目录读（PowerShell 孙进程 + pi read 工具）与写；个人目录与 settings 读被拒（PowerShell、cmd.exe 曾孙进程、pi read 工具）；个人目录、Fox state、`%PUBLIC%`、`%ProgramData%` 写被拒；白名单内经代理 200、白名单外 HTTP 403 与 CONNECT 403、直连回环与直连 `1.1.1.1` 为 curl exit 7；私有 HOME 生效。`MEASURE` 行需原样保存：暴露目录可读 / 可写结果、DNS 是否解析、USERPROFILE/TEMP、`TerminateReport`、关闭后可见进程、关闭后 `icacls proj` 是否残留 `srt-sandbox` ACE。
-6. sandboxed DeepSeek：设 `FOX_DSH_BIN=<runtime>\dsh\node_modules\.bin\dsh.cmd`，运行 `real_srt_dsh_initialize_inside_sandbox`（initialize + session/new 在 srt 内）。
-7. 清理链（two-hop）：T04 进行中用**提权** PowerShell `Get-Process -IncludeUserName | ? UserName -like '*srt-sandbox*'` 记录 runner / node / bash 进程；在 Process Explorer 查看 node 与 srt-win broker 是否在 Fox 的 Job 中、runner 与后端是否在 srt-win 的 Job 中；看 stderr 是否出现 `broker→runner Job assign not supported`。关闭后、以及“强杀 cargo 测试进程（模拟 Host 崩溃）”后，再用提权命令确认 `srt-sandbox` 名下无残留进程。
-8. ACE 回收：正常关闭后 `icacls <proj>` 不应再有 `srt-sandbox`；若有，再随便启动一次 sandboxed 会话或执行 `srt-win acl recover`，确认被清理。
-9. 暴露面审计：调用 `winacl::audit_broad_exposure()`（T04 输出已打印）与 `icacls D:\` 对照，确认报告的目录与实际一致、`errors` 合理。
-10. 卸载：`windows-uninstall` 后确认账户 / 组 / 注册表 / WFP 消失、13 个系统目录无该 SID；按 7.7 约定处理 `%ProgramData%\sandbox-runtime` 与 `%LOCALAPPDATA%\sandbox-runtime`。
-11. 有余力：Win10 22H2 复跑 5–8；Defender 开启、火绒开启各跑一次 5。
-12. 停止确认（第四轮）：完全访问模式起一个后端（例如 pi，让它跑一条长命令），调用 `close_with_report()`，确认 `confirmation = confirmed`、`job_terminated = Some(true)`；在 Process Explorer 里确认 Job 内进程全部消失。沙箱模式同样调用，确认 `confirmation_scope_note` 有值，并按第 7 项核对 runner / 后端是否随之结束。另在没有 Job 的路径（临时让 `Job::new` 失败）验证 taskkill 兜底的结果为 `failed_or_unconfirmed`，且 `rebuild_after_revocation` 拒绝重建。
-13. `cargo test` 中 `junctioned_authorized_folder_is_judged_by_its_target`（Windows 才运行）：`mklink /J` 建的联接指向私有 HOME 根时 `wrap` 拒绝；UNC 路径被拒。
-14. 交付校验：`verify_delivered_file` 对授权可写目录内的文件通过；对会话临时目录、私有 HOME、只读授权目录、目录外（含经联接 / 符号链接指出去的）文件拒绝。
+1. 编译与单元测试：`cargo test --locked -p fox-agent-backend --features acp --no-fail-fast`。预期第三轮 4 个夹具失败（`capability_declaration_follows_the_mode`、`authorized_dirs_may_not_reach_any_private_home_or_the_session_tmp`、`chinese_paths_are_literal_and_do_not_affect_the_home_name`、`settings_deny_the_root_and_reallow_only_granted_and_system_paths`）消失：Linux 规则用例在 Windows 上不编译（`cfg(not(windows))`），对应的 Windows 变体（`windows_declaration_is_partial_and_carries_the_exposure_warning`、`windows_authorized_dirs_may_not_reach_any_private_home_or_the_session_tmp`、`windows_chinese_profile_paths_are_literal_and_get_ancestor_aces`、`windows_settings_grant_only_user_paths_and_deny_nothing`）在所有平台都跑。需 Rust ≥ 1.89（`std::fs::File::lock`）。
+2. 运行时包：在任意目录组装 zip，顶层 `node\`（含 `node.exe`）、`srt\`（`npm --prefix srt install @anthropic-ai/sandbox-runtime@0.0.80 --ignore-scripts`）、`backends\pi`（`pi-acp@0.0.34 @earendil-works/pi-coding-agent@0.84.2`）、`backends\dsh`（`@deepseek-ai/dsh@0.2.1-rc.2`）、`dsh-patches\`（复制本 crate `runtime-assets/dsh-patches/*.yml`）、`t04-fixtures\`（`fixtures/pi/pi-gated.cmd`、`fixtures/pi/fox-approval-gate.ts`、`fixtures/sandbox/scripted-cmd-provider.ts` 放在 `t04-fixtures\sandbox\`）。`Get-FileHash` 取 SHA256。
+3. **一次 UAC 是否成立**：普通用户在 Windows PowerShell 5.1 中执行 `Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','<repo>\crates\fox-agent-backend\scripts\windows\enable-sandbox.ps1','-PackagePath','<zip>','-ExpectedSha256','<hex>','-Version','0.1.0','-ResultPath','%LOCALAPPDATA%\Fox\state\enable-sandbox-result.json'`。记录：共弹出几次 UAC（预期 1 次：srt 的 `windows-install` 自提权在已提权进程中不应再弹）；“标准用户 + 输入管理员凭据”的情形也跑一次（结果文件应写到调用用户的目录，因为路径由参数传入）。核对：`icacls "%ProgramFiles%\Fox\sandbox-runtime\0.1.0"` 为去继承、Administrators/SYSTEM F、Users RX、所有者 Administrators；`icacls "%ProgramData%\Fox\sandbox"` 为 Administrators/SYSTEM F、Users `(RA,X,AD,S)` 仅本目录、CREATOR OWNER `(OI)(CI)(IO)F`；结果 JSON 含 `srt.sandboxUserSid`、`markerVersion`、`createdAt`。再跑一次确认幂等（同哈希跳过复制）；改错 `-ExpectedSha256` 确认失败且不留目录；故意让 `windows-install` 失败（如端口段与已有安装不同）确认运行时目录被回滚。之后用 `apply_enable_result` 写入 `srt-sids.json` / `srt-install.json`（或手工按结果核对）。
+4. 原始 pi T04 与 dsh（在第 3 项之后）：`set FOX_TEST_REAL_SRT=1`、`FOX_RUNTIME_ROOT=%ProgramFiles%\Fox\sandbox-runtime\0.1.0`、`FOX_SRT_PREFIX=%FOX_RUNTIME_ROOT%\srt`、`FOX_PI_ACP_PREFIX=%FOX_RUNTIME_ROOT%\backends\pi`、`FOX_SRT_NODE=%FOX_RUNTIME_ROOT%\node\node.exe`、`FOX_DSH_BIN=%FOX_RUNTIME_ROOT%\backends\dsh\node_modules\.bin\dsh.cmd`，运行 `cargo test -p fox-agent-backend --features acp --test sandbox_srt -- --include-ignored --nocapture`（`real_srt_pi_acp_t04_windows`、`real_srt_dsh_initialize_inside_sandbox`）。预期不再出现：WFP 自检 0x80070003、Node EPERM、dsh patch 的 `sandbox_path_not_owned`。私有 HOME 应在 `%ProgramData%\Fox\sandbox\<你的 SID>\homes\…`。
+5. **中文空格路径 + 祖先 ACE**：T04 默认把项目建在 `%USERPROFILE%\Documents\中文 空格\proj-<pid>`（可用 `FOX_T04_PROJECT_PARENT` 改）。确认：`ancestor ACEs` 行列出 profile 根、`Documents`、`中文 空格`（以及 `%ProgramData%\Fox\sandbox\<SID>`、`homes`、`homes\<UUID>`、`tmp`）；沙箱内 `Get-ChildItem Documents` 与 profile 根均为 `LIST-DENIED`（只能 stat、不能列）；pi 能正常启动与读写项目；关闭后断言每个祖先上 Fox 的 ACE 已撤销，并用 `icacls` 人工复核这些目录上无 `srt-sandbox` 条目。另试一次 OneDrive 重定向的 Documents（若有）。
+6. **两个并发会话交叉验证台账**：会话 A 授权 `Documents\中文 空格\a`，会话 B 授权 `Documents`（B 的 srt 会在 `Documents` 上收敛并抹掉 A 的祖先 ACE）。顺序：起 A → 起 B → 看 B 的 transition `finish()` 报告 `restored` 含 `Documents` → 关 B（srt 撤销 B 在 `Documents` 上的授权时再次抹掉）→ 确认 `finish()` 再次补回、A 仍可正常 stat → 关 A → 全部撤销。期间对照 `%LOCALAPPDATA%\Fox\state\win-ancestor-aces.json` 的引用计数。
+7. **强杀 Host 后 reconcile**：T04 运行中强杀 cargo 测试进程（或 Fox Host），之后调用 `recover_ancestor_aces(&coordinator, &BTreeSet::new())`（或再次启动 Fox），确认台账清空、祖先 ACE 全部撤销；再启动一次 sandboxed 会话确认 srt 自己的崩溃恢复撤销了其 ACE。
+8. **7 个孤儿对象所有权修复**：在第三轮留下孤儿的目录（或新跑一次让沙箱在授权目录与私有 HOME 写文件）上，先 `record_srt_sid` 记录当前 SID，再调用 `repair_sandbox_ownership(&[授权目录, 私有 HOME 根], &known_srt_sids(state)?, &RealWindowsAcl, &RealWindowsAcl)`；确认报告逐项列出、所有者变为本人（`icacls /verbose` 或 `Get-Acl`）；手工建一个由其他账户 / 不在台账的 SID 拥有的对象，确认不被改；放一个指向目录外的 junction，确认 `skipped_reparse_point` 且不进入。卸载 srt 后已成孤儿的对象：先把旧 SID 写进 `srt-sids.json` 再修复。
+9. **跨账户强杀链**：T04 进行中用提权 PowerShell `Get-Process -IncludeUserName | ? UserName -like '*srt-sandbox*'` 记录 runner / node / bash；强杀 Fox 的 node（srt）进程后确认 `srt-sandbox` 名下进程全部结束（two-hop，7.4）；看 stderr 是否出现 `broker→runner Job assign not supported`。
+10. **第四轮（b0bed84）的 7 项在 Windows 上复核**：停止确认（`ActiveProcesses == 0` → `Confirmed`）；未确认 → `StoppedUnconfirmed` 且拒绝重建；Stopping 状态下晚到审批自动答为取消（`PermissionAutoCancelled`）、新任务被拒；声明逐项等于写出的 settings；路径规范化（`junctioned_authorized_folder_is_judged_by_its_target`、UNC 被拒）；`verify_delivered_file`（授权可写目录内通过，会话临时目录 / 私有 HOME / 只读授权目录 / 经联接指出去的文件拒绝）；pi `cancel_process_tree = true` 的进程树清理。
+11. **1.1.1.1 主机正对照**：在主机（沙箱外）先 `curl.exe -sS -m 15 http://1.1.1.1/` 确认可达（得到 HTTP 响应），再看 T04 中 `directip` 为 curl exit 7，证明拒绝来自 WFP 而不是目标不可达。
+12. 暴露面警告（B）：`audit_broad_exposure()` 的结果经 `declaration.with_exposure(&report)` 后 `exposed_dirs` 与 `icacls D:\` 一致，`exposure_warning` 为固定文案；`directory_isolation` 仍为 false。
+13. **停用 / 卸载边界**：`disable-sandbox.ps1 -StateDir … -InvokingUserProfile … -Version 0.1.0 -ResultPath …`：默认（未加 `-ConfirmNoOtherSrtClients`）应 `decision = keep` 并列出“无法排除其他使用者”；加上后在无活跃会话时 `decision = uninstall`、`windows-uninstall` 成功、`%ProgramData%\sandbox-runtime` 与本人 `%LOCALAPPDATA%\sandbox-runtime` 被删、`%ProgramData%\Fox\sandbox` 未动；T04 运行中执行应因活跃会话 `keep`；另一用户 profile 下放一个 `AppData\Local\sandbox-runtime\state.db` 应 `keep`；先用 npx 自行装 srt 再跑启用脚本，停用时应因“srt 原本已安装”`keep`。
+14. 有余力：Win10 22H2 复跑 4–7；Defender 开启、火绒开启各跑一次 4。
 
 ## 10 路径规范化（第四轮）
 
