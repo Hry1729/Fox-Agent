@@ -8,8 +8,13 @@
 //! `agent_backend_not_yet_wired` / `agent_backend_invalid`), and prints one
 //! audit line carrying both `agent_backend` and `engine_id`.
 //!
-//! A gate returns `Ok(())` only for the Fox route, in which case the caller
-//! continues on its existing, unchanged path (Kernel / legacy / yuxi).
+//! A gate returns `Err` only when the stored backend is confirmed to be
+//! something other than `fox` (or the request names a backend that differs
+//! from the stored one). Everything else, including an unknown conversation /
+//! run / approval, a database without the v95 column, or a storage error
+//! while reading it, returns `Ok(())` and the caller continues on its
+//! existing, unchanged path (Kernel / legacy / yuxi); a lookup that could not
+//! be answered is audited as `routed=fox_fallback`.
 use super::*;
 use fox_agent_backend::host_routing::{self, BackendSwitch, HostEntry, Route, RouteError};
 use fox_agent_backend::port::AgentBackend;
@@ -32,6 +37,31 @@ fn log_route(
         Err(error) => host_routing::audit_line(entry, conversation_id, run_id, backend, engine_id, Err(error)),
     };
     eprintln!("{line}");
+}
+
+/// Why a backend lookup could not be answered. `column_missing` is a
+/// database that has not run v95 yet (only possible for a connection opened
+/// below the current schema); everything else is a storage error.
+pub(crate) fn lookup_fallback_reason(error: &str) -> &'static str {
+    if error.contains("no such column") && error.contains("agent_backend") {
+        "column_missing"
+    } else {
+        "storage_error"
+    }
+}
+
+/// Audit line for a lookup that fell back to the existing path. The error
+/// text is reduced to one line so the audit stays one line per entry.
+fn log_lookup_fallback(entry: HostEntry, conversation_id: &str, run_id: Option<&str>, error: &str) {
+    let detail: String = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    eprintln!(
+        "fox.host_routing entry={} conversation={} run={} agent_backend=- engine_id=- routed=fox_fallback reason={} detail={:?}",
+        entry.as_str(),
+        conversation_id,
+        run_id.unwrap_or("-"),
+        lookup_fallback_reason(error),
+        detail
+    );
 }
 
 /// Choose the frozen backend for a conversation about to be created.
@@ -57,8 +87,16 @@ pub(crate) fn gate_conversation<T: serde::Serialize>(
 ) -> Result<(), ApiResponse<T>> {
     let stored = match database.conversation_agent_backend(conversation_id) {
         Ok(Some(stored)) => stored,
+        // Unknown conversation: the existing path answers exactly as before.
         Ok(None) => return Ok(()),
-        Err(error) => return Err(ApiResponse::failure("storage.operation_failed", error, true)),
+        // Fix 1 (Windows acceptance of 3a82f5d): a failed read never changes
+        // the existing path's behaviour. Audit it and let the original path
+        // run (and report its own storage error if the database is really
+        // unusable). Only a conversation confirmed as non-Fox is refused.
+        Err(error) => {
+            log_lookup_fallback(entry, conversation_id, run_id, &error);
+            return Ok(());
+        }
     };
     let outcome = host_routing::route_stored(entry, Some(&stored), requested, &BackendSwitch::from_env());
     let refused = outcome.is_err();
@@ -81,7 +119,11 @@ pub(crate) fn gate_run_identity<T: serde::Serialize>(
         Ok(Some(identity)) => identity,
         // Unknown run / approval: the existing path answers exactly as before.
         Ok(None) => return Ok(()),
-        Err(error) => return Err(ApiResponse::failure("storage.operation_failed", error, true)),
+        // Same rule as `gate_conversation`: audit, then the existing path.
+        Err(error) => {
+            log_lookup_fallback(entry, "-", None, &error);
+            return Ok(());
+        }
     };
     let outcome = host_routing::route_stored(
         entry,
@@ -143,4 +185,66 @@ pub fn agent_backends_status() -> ApiResponse<AgentBackendStatus> {
         options,
         unknown_entries: switch.unknown_entries().to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_fallback_reason_separates_old_schema_from_storage_errors() {
+        assert_eq!(lookup_fallback_reason("no such column: agent_backend"), "column_missing");
+        assert_eq!(lookup_fallback_reason("no such column: c.agent_backend"), "column_missing");
+        assert_eq!(lookup_fallback_reason("database is locked"), "storage_error");
+        assert_eq!(lookup_fallback_reason("no such column: title"), "storage_error");
+    }
+
+    #[test]
+    fn gates_fall_back_to_the_existing_path_when_the_lookup_cannot_be_answered() {
+        // A Fox conversation and an unknown conversation both continue on the
+        // existing path; a failed lookup (storage error / pre-v95 column) too.
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("fox"), None, None)
+            .expect("conversation");
+        let gated: Result<(), ApiResponse<()>> =
+            gate_conversation(&database, HostEntry::Start, &conversation.id, None, None);
+        assert!(gated.is_ok(), "fox conversation routes to the existing path");
+        let gated: Result<(), ApiResponse<()>> =
+            gate_conversation(&database, HostEntry::Start, "missing", None, None);
+        assert!(gated.is_ok(), "unknown conversation is left to the existing path");
+
+        let storage_error: Result<(), ApiResponse<()>> =
+            gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), None);
+        assert!(storage_error.is_ok(), "storage errors never change the existing path");
+        let missing_column: Result<(), ApiResponse<()>> =
+            gate_run_identity(HostEntry::Approve, Err("no such column: c.agent_backend".to_owned()), None);
+        assert!(missing_column.is_ok());
+        let unknown: Result<(), ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(None), None);
+        assert!(unknown.is_ok());
+    }
+
+    #[test]
+    fn only_a_confirmed_non_fox_backend_is_refused() {
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let pi = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
+            .expect("pi conversation");
+        let gated: Result<(), ApiResponse<()>> =
+            gate_conversation(&database, HostEntry::Start, &pi.id, None, None);
+        let failure = gated.expect_err("pi is refused before any runtime");
+        let code = failure.error.as_ref().map(|error| error.code.clone());
+        assert!(
+            matches!(code.as_deref(), Some("agent_backend_disabled") | Some("agent_backend_not_yet_wired")),
+            "{code:?}"
+        );
+        let identity = crate::database::RunBackendIdentity {
+            conversation_id: "c".to_owned(),
+            run_id: "r".to_owned(),
+            agent_backend: "fox".to_owned(),
+            engine_id: None,
+        };
+        let fox: Result<(), ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
+        assert!(fox.is_ok());
+    }
 }
