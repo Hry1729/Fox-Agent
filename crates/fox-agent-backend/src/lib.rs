@@ -15,6 +15,10 @@
 //! * [`config`]: five-layer configuration precedence; tightening applies to
 //!   existing sessions (section 6.5).
 //! * [`legacy`]: deterministic mapping of old run records (section 6.6).
+//! * [`host_routing`]: Host wiring first batch - conversation-level
+//!   `agent_backend` routing of start / cancel / approve / resume, misroute
+//!   refusal, the `FOX_EXTERNAL_BACKENDS` switch and the additive migration
+//!   SQL (sections 5.4, 6.6).
 //! * [`launch`]: process launch specs for the external backends, all over ACP
 //!   (section 6.7).
 //! * [`sandbox`]: permission modes (`full_access` / `sandboxed`) and the srt
@@ -40,6 +44,7 @@
 //! This crate has no Tauri dependency so it builds and tests on any host.
 
 pub mod config;
+pub mod host_routing;
 pub mod launch;
 pub mod legacy;
 pub mod limits;
