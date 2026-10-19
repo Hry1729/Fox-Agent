@@ -234,8 +234,74 @@ pub struct ExposureReport {
     /// read or write. The sandbox account can reach these without any srt
     /// grant (subject to deeper DACLs, which are not scanned).
     pub exposed: Vec<ExposedPath>,
-    /// Paths whose DACL could not be read (`path: reason`).
+    /// Paths whose DACL could not be read (`path: reason`). Same content as
+    /// [`Self::audit_errors`], kept for older readers.
     pub errors: Vec<String>,
+    /// Every path looked at with its result: exposed, not exposed, or read
+    /// failed. A read failure is neither exposed nor safe.
+    #[serde(default)]
+    pub checked: Vec<CheckedPath>,
+    /// Paths that could not be checked (DACL unreadable, drive root not
+    /// listable). Any entry makes the audit incomplete: it is not a
+    /// successful audit, whatever `exposed` says.
+    #[serde(default)]
+    pub audit_errors: Vec<AuditError>,
+}
+
+/// Result for one audited path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditResult {
+    Exposed,
+    NotExposed,
+    ReadFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckedPath {
+    pub path: PathBuf,
+    pub result: AuditResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditError {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// Overall state of an exposure audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExposureAuditStatus {
+    /// Off Windows: nothing scanned.
+    NotSupported,
+    /// Every path was read.
+    Complete,
+    /// At least one path could not be read ([`ExposureReport::audit_errors`]).
+    Incomplete,
+}
+
+impl ExposureReport {
+    pub fn status(&self) -> ExposureAuditStatus {
+        if !self.supported {
+            ExposureAuditStatus::NotSupported
+        } else if self.audit_errors.is_empty() {
+            ExposureAuditStatus::Complete
+        } else {
+            ExposureAuditStatus::Incomplete
+        }
+    }
+
+    /// True only for a supported audit that read every path.
+    pub fn is_complete(&self) -> bool {
+        self.status() == ExposureAuditStatus::Complete
+    }
+
+    fn read_failed(&mut self, path: PathBuf, reason: String) {
+        self.errors.push(format!("{}: {reason}", path.display()));
+        self.checked.push(CheckedPath { path: path.clone(), result: AuditResult::ReadFailed });
+        self.audit_errors.push(AuditError { path, reason });
+    }
 }
 
 /// Directories under a drive root that Windows itself guards or that are
@@ -268,13 +334,16 @@ pub fn audit_with(probe: &dyn WindowsAclProbe, roots: &[PathBuf]) -> ExposureRep
                 dirs.sort();
                 candidates.extend(dirs);
             }
-            Err(error) => report.errors.push(format!("{}: {error}", root.display())),
+            Err(error) => report.read_failed(root.clone(), format!("cannot list: {error}")),
         }
         for path in candidates {
             match probe.broad_access(&path) {
-                Ok(access) if access.any() => report.exposed.push(ExposedPath { path, access }),
-                Ok(_) => {}
-                Err(error) => report.errors.push(format!("{}: {error}", path.display())),
+                Ok(access) if access.any() => {
+                    report.checked.push(CheckedPath { path: path.clone(), result: AuditResult::Exposed });
+                    report.exposed.push(ExposedPath { path, access });
+                }
+                Ok(_) => report.checked.push(CheckedPath { path, result: AuditResult::NotExposed }),
+                Err(error) => report.read_failed(path, error),
             }
         }
     }
@@ -819,6 +888,7 @@ mod tests {
             Ok(match name.as_str() {
                 "shared" => BroadAccess { read: true, write: true, groups: vec!["Authenticated Users".into()] },
                 "readonly" => BroadAccess { read: true, write: false, groups: vec!["Users".into()] },
+                "locked" => return Err("cannot read the DACL (Win32 error 5)".into()),
                 _ => BroadAccess::default(),
             })
         }
@@ -836,7 +906,20 @@ mod tests {
         assert_eq!(exposed, ["readonly", "shared"]);
         assert!(report.exposed.iter().find(|item| item.path.ends_with("shared")).unwrap().access.write);
         assert!(report.errors.is_empty());
+        assert!(report.audit_errors.is_empty());
+        assert_eq!(report.status(), if cfg!(windows) { ExposureAuditStatus::Complete } else { ExposureAuditStatus::NotSupported });
         assert!(root.join("private").is_dir(), "report only");
+        // A DACL that cannot be read: listed, and the audit is incomplete.
+        std::fs::create_dir_all(root.join("locked")).unwrap();
+        let mut report = audit_with(&Fake, &[root.clone()]);
+        report.supported = true;
+        assert_eq!(report.audit_errors.len(), 1);
+        assert!(report.audit_errors[0].path.ends_with("locked"));
+        assert_eq!(report.status(), ExposureAuditStatus::Incomplete);
+        let result = |name: &str| report.checked.iter().find(|c| c.path.ends_with(name)).unwrap().result;
+        assert_eq!(result("locked"), AuditResult::ReadFailed);
+        assert_eq!(result("private"), AuditResult::NotExposed);
+        assert_eq!(result("shared"), AuditResult::Exposed);
         let _ = std::fs::remove_dir_all(&root);
     }
 
