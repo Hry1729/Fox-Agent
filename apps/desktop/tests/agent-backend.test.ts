@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  AGENT_BACKEND_REFUSED,
   agentBackendAccess,
+  agentBackendInputLockedReason,
+  isAgentBackendRefusalCode,
+  withoutRefusedSend,
   agentBackendLockNotice,
   agentBackendPickerDisabledReason,
   canPickAgentBackend,
@@ -46,5 +50,46 @@ describe('agent backend presentation (Host wiring first batch)', () => {
     expect(canPickAgentBackend('codex', status([]))).toBe(false)
     expect(canPickAgentBackend('codex', status(['codex']))).toBe(true)
     expect(canPickAgentBackend('pi', status(['codex']))).toBe(false)
+  })
+})
+
+describe('refused sends leave no optimistic trace (fix 1 after Windows acceptance)', () => {
+  test('only agent_backend_* codes are routing refusals', () => {
+    expect(isAgentBackendRefusalCode('agent_backend_not_yet_wired')).toBe(true)
+    expect(isAgentBackendRefusalCode('agent_backend_disabled')).toBe(true)
+    expect(isAgentBackendRefusalCode('agent_backend_misrouted')).toBe(true)
+    expect(isAgentBackendRefusalCode('agent_backend_invalid')).toBe(true)
+    expect(isAgentBackendRefusalCode('storage.operation_failed')).toBe(false)
+    expect(isAgentBackendRefusalCode('runtime.resolve_failed')).toBe(false)
+    expect(isAgentBackendRefusalCode(undefined)).toBe(false)
+    expect(AGENT_BACKEND_REFUSED).toBe('agent_backend_refused')
+  })
+
+  test('the pending message and pending run are removed, the previous run restored', () => {
+    const previous = { id: 'run-1', status: 'completed' }
+    const detail = {
+      conversation: { id: 'c' },
+      messages: [{ id: 'm-1' }, { id: 'pending-message-1' }],
+      lastRun: { id: 'pending-run-1', status: 'queued' },
+    }
+    const cleaned = withoutRefusedSend(detail, 'pending-message-1', previous)
+    expect(cleaned.messages.map((message) => message.id)).toEqual(['m-1'])
+    expect(cleaned.lastRun).toBe(previous)
+    expect(cleaned.conversation).toBe(detail.conversation)
+    // A new conversation had no run before the send.
+    expect(withoutRefusedSend({ messages: [{ id: 'p' }], lastRun: { id: 'pending-run-2' } }, 'p', null).lastRun).toBeNull()
+    // A real (persisted) run is never replaced, and nothing to remove keeps identity.
+    const settled = { messages: [{ id: 'm-1' }], lastRun: { id: 'run-9' } }
+    expect(withoutRefusedSend(settled, null, null)).toBe(settled)
+  })
+
+  test('input is locked only for an external conversation that is read-only because its backend is off', () => {
+    expect(agentBackendInputLockedReason('fox', null)).toBeNull()
+    expect(agentBackendInputLockedReason('fox', status([]))).toBeNull()
+    expect(agentBackendInputLockedReason('pi', status([]))).toContain('只能查看历史')
+    expect(agentBackendInputLockedReason('codex', null)).toContain('Codex')
+    // Switch on but runtime not wired: the send goes to the Host, which answers
+    // agent_backend_not_yet_wired, and the UI shows that one refusal.
+    expect(agentBackendInputLockedReason('pi', status(['pi']))).toBeNull()
   })
 })
