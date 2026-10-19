@@ -1,8 +1,13 @@
 //! Host-side ACP v1 client (plan 6.7) on the official `agent-client-protocol`
 //! crate. One process per bound session (6.1): spawned with an allowlisted
 //! environment, in its own process group on Unix, and killed as a tree on
-//! close. The Desktop Host additionally wraps the child in its existing Windows
-//! Job Object when it integrates this module.
+//! close. On Windows the child is created suspended, placed in a Job Object of
+//! its own (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, no breakaway) and only then
+//! resumed, so it and every descendant that stays in the job die with the job
+//! (`win_job`). In sandboxed mode the backend itself is NOT a descendant in
+//! that sense: srt-win starts it through the Secondary Logon service as the
+//! `srt-sandbox` account (two-hop launch), outside this job; its cleanup rests
+//! on srt-win's own job chain (docs/sandbox.md section 7.4).
 //!
 //! What this module guarantees, matching the port rules:
 //! * `session/cancel` answers every pending permission request of that session
@@ -71,6 +76,8 @@ pub struct AcpConnection {
     pending: PendingPermissions,
     child_id: Option<u32>,
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
+    /// Windows: the Job Object holding the backend tree (`None` elsewhere).
+    job: ProcessJob,
     stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>>,
     /// Per-session srt state (settings file), removed when the connection
     /// goes away. `None` in full-access mode.
@@ -141,9 +148,184 @@ fn redact_line(line: &str) -> String {
         .join(" ")
 }
 
-fn kill_tree(pid: u32) {
+/// Windows Job Object owning the backend process tree.
+///
+/// Race: the child is spawned with `CREATE_SUSPENDED`, assigned, and only then
+/// resumed (every thread of the new process, found with a Toolhelp snapshot;
+/// a fresh suspended process has exactly one). It cannot run, and so cannot
+/// spawn anything, before it is in the job. The job handle is not inheritable
+/// and the limit has no `BREAKAWAY_OK`, so a descendant can leave only through
+/// a different creation path: a process started by a service on its behalf
+/// (Secondary Logon / `CreateProcessWithLogonW`, Task Scheduler, COM servers,
+/// WMI) is created outside the job. srt-win's runner is exactly that case.
+#[cfg(windows)]
+pub mod win_job {
+    use std::os::windows::io::RawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, SetInformationJobObject, TerminateJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    /// `CREATE_SUSPENDED` for `Command::creation_flags`.
+    pub const CREATE_SUSPENDED: u32 = windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    pub struct Job(HANDLE);
+
+    // The handle is a kernel object handle owned only by this value.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    fn last_error() -> u32 {
+        unsafe { GetLastError() }
+    }
+
+    impl Job {
+        /// Unnamed job, kill-on-close, no breakaway allowed.
+        pub fn new() -> Result<Self, String> {
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(format!("CreateJobObjectW failed (Win32 error {})", last_error()));
+            }
+            let job = Self(handle);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if ok == 0 {
+                return Err(format!("SetInformationJobObject(KILL_ON_JOB_CLOSE) failed (Win32 error {})", last_error()));
+            }
+            Ok(job)
+        }
+
+        pub fn assign(&self, process: RawHandle) -> Result<(), String> {
+            if unsafe { AssignProcessToJobObject(self.0, process as HANDLE) } == 0 {
+                return Err(format!("AssignProcessToJobObject failed (Win32 error {})", last_error()));
+            }
+            Ok(())
+        }
+
+        /// Whether `process` is in this job (diagnostics and tests).
+        pub fn contains(&self, process: RawHandle) -> Option<bool> {
+            let mut result = 0;
+            (unsafe { IsProcessInJob(process as HANDLE, self.0, &mut result) } != 0).then_some(result != 0)
+        }
+
+        /// Kill every process in the job now. `Err` carries the Win32 error.
+        pub fn terminate(&self, exit_code: u32) -> Result<(), u32> {
+            if unsafe { TerminateJobObject(self.0, exit_code) } == 0 {
+                return Err(last_error());
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // KILL_ON_JOB_CLOSE: closing the last handle kills what is left.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// Resume every thread of a process created with `CREATE_SUSPENDED`.
+    /// Returns how many threads were resumed (must be at least one).
+    pub fn resume_process(pid: u32) -> Result<usize, String> {
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+            return Err(format!("CreateToolhelp32Snapshot failed (Win32 error {})", last_error()));
+        }
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut resumed = 0usize;
+        let mut failure = None;
+        let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    failure = Some(format!("OpenThread({}) failed (Win32 error {})", entry.th32ThreadID, last_error()));
+                } else {
+                    if unsafe { ResumeThread(thread) } == u32::MAX {
+                        failure = Some(format!("ResumeThread({}) failed (Win32 error {})", entry.th32ThreadID, last_error()));
+                    } else {
+                        resumed += 1;
+                    }
+                    unsafe { CloseHandle(thread) };
+                }
+            }
+            more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        unsafe { CloseHandle(snapshot) };
+        match (resumed, failure) {
+            (0, Some(error)) => Err(error),
+            (0, None) => Err(format!("no thread of process {pid} found to resume")),
+            (count, _) => Ok(count),
+        }
+    }
+}
+
+/// How a close ended, for the Host's process-cleanup record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminateReport {
+    /// The backend did not exit within [`TERMINATE_GRACE`] and was killed.
+    pub force_killed: bool,
+    /// Windows: `Some(true)` when `TerminateJobObject` succeeded, `Some(false)`
+    /// when it failed (see `notes`), `None` when there was no job (not
+    /// Windows, or the job was never created).
+    pub job_terminated: Option<bool>,
+    /// What happened beyond the normal path (job failure, taskkill fallback
+    /// and its result). Also written to stderr with a `fox-agent-backend:`
+    /// prefix.
+    pub notes: Vec<String>,
+}
+
+#[cfg(windows)]
+type ProcessJob = Option<win_job::Job>;
+#[cfg(not(windows))]
+type ProcessJob = Option<NoJob>;
+/// Placeholder: no Job Object off Windows (process groups instead).
+#[cfg(not(windows))]
+pub struct NoJob;
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn note(report: &mut TerminateReport, text: String) {
+    eprintln!("fox-agent-backend: {text}");
+    report.notes.push(text);
+}
+
+/// Kill the backend tree. Unix: SIGKILL to the process group. Windows:
+/// `TerminateJobObject`; `taskkill /T /F` only as a fallback when there is no
+/// job or terminating it failed, with its exit status checked and recorded.
+fn kill_tree(pid: u32, job: &ProcessJob, report: &mut TerminateReport) {
+    let _ = &job;
+    #[cfg(windows)]
+    {
+        if let Some(job) = job {
+            match job.terminate(1) {
+                Ok(()) => {
+                    report.job_terminated = Some(true);
+                    return;
+                }
+                Err(code) => {
+                    report.job_terminated = Some(false);
+                    note(report, format!("TerminateJobObject failed (Win32 error {code}); falling back to taskkill /T /F for pid {pid}"));
+                }
+            }
+        } else {
+            note(report, format!("no Job Object for pid {pid}; falling back to taskkill /T /F"));
+        }
+    }
     #[cfg(unix)]
     {
+        let _ = &report;
         let _ = std::process::Command::new("kill")
             .args(["-KILL", "--", &format!("-{pid}")])
             .stdin(std::process::Stdio::null())
@@ -153,12 +335,22 @@ fn kill_tree(pid: u32) {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
+        let result = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
+        match result {
+            // 128: no such process (it had already exited).
+            Ok(status) if status.success() => note(report, format!("taskkill /T /F pid {pid}: ok")),
+            Ok(status) => note(report, format!("taskkill /T /F pid {pid}: exit {:?} (128 = process already gone)", status.code())),
+            Err(error) => note(report, format!("taskkill /T /F pid {pid}: could not run ({error})")),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (pid, report);
     }
 }
 
@@ -179,9 +371,33 @@ impl AcpConnection {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(win_job::CREATE_SUSPENDED);
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start {}: {error}", spec.program))?;
+        // Windows: into the job while suspended, then resume. Any failure
+        // kills the suspended child; nothing runs outside the job.
+        #[cfg(windows)]
+        let job: ProcessJob = {
+            let placed = (|| {
+                let job = win_job::Job::new()?;
+                let handle = child.raw_handle().ok_or("backend exited before it could be placed in a Job Object")?;
+                job.assign(handle)?;
+                let pid = child.id().ok_or("backend has no pid")?;
+                win_job::resume_process(pid)?;
+                Ok::<_, String>(job)
+            })();
+            match placed {
+                Ok(job) => Some(job),
+                Err(error) => {
+                    let _ = child.start_kill();
+                    return Err(format!("could not contain {} in a Job Object: {error}", spec.program));
+                }
+            }
+        };
+        #[cfg(not(windows))]
+        let job: ProcessJob = None;
         let stdin = child.stdin.take().ok_or("backend stdin unavailable")?;
         let stdout = child.stdout.take().ok_or("backend stdout unavailable")?;
         let child_id = child.id();
@@ -329,7 +545,7 @@ impl AcpConnection {
         };
         if let Some(error) = failure {
             if let Some(pid) = child_id {
-                kill_tree(pid);
+                kill_tree(pid, &job, &mut TerminateReport::default());
             }
             let tail = tail_text(&stderr_tail);
             return Err(if tail.is_empty() { error } else { format!("{error}; backend stderr (redacted):\n{tail}") });
@@ -340,6 +556,7 @@ impl AcpConnection {
             pending,
             child_id,
             child: Arc::new(tokio::sync::Mutex::new(child)),
+            job,
             stderr_tail,
             sandbox: None,
             permission_mode: crate::sandbox::PermissionMode::FullAccess,
@@ -445,23 +662,40 @@ impl AcpConnection {
     /// Pending permission requests are dropped with the connection; the Host
     /// marks them per `reverse` rules.
     pub async fn close(self) {
-        self.terminate().await;
+        self.close_with_report().await;
     }
 
-    /// [`Self::close`], reporting whether the backend had to be force-killed
-    /// (it did not exit within [`TERMINATE_GRACE`] of SIGTERM).
-    async fn terminate(self) -> bool {
-        let mut child = self.child.lock().await;
-        let mut force_killed = false;
-        if let Some(pid) = self.child_id {
+    /// [`Self::close`], returning how it ended (force kill, Windows job
+    /// termination, taskkill fallback) for the Host's cleanup record.
+    pub async fn close_with_report(self) -> TerminateReport {
+        self.terminate().await
+    }
+
+    /// Stop the backend.
+    ///
+    /// Unix: SIGTERM to the group, [`TERMINATE_GRACE`], then SIGKILL to the
+    /// group. Windows has no SIGTERM: the command channel is dropped first
+    /// (the ACP connection then ends and the backend's stdin closes, which
+    /// lets srt run its own reset and remove its ACEs), then the grace, then
+    /// `TerminateJobObject` (taskkill only as a checked fallback).
+    async fn terminate(self) -> TerminateReport {
+        let Self { commands, child, child_id, job, sandbox, .. } = self;
+        let mut report = TerminateReport::default();
+        #[cfg(windows)]
+        drop(commands);
+        #[cfg(not(windows))]
+        let _commands = commands;
+        let mut child = child.lock().await;
+        if let Some(pid) = child_id {
             signal_group(pid, "-TERM");
-            force_killed = tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err();
-            kill_tree(pid);
+            report.force_killed = tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err();
+            kill_tree(pid, &job, &mut report);
         }
         let _ = child.kill().await;
         drop(child);
-        drop(self.sandbox);
-        force_killed
+        drop(job);
+        drop(sandbox);
+        report
     }
 
     /// OS process id of the backend (the srt broker in sandboxed mode).
@@ -491,7 +725,7 @@ impl AcpConnection {
     ) -> crate::port::RevocationStop {
         let cancelled = self.cancel(session_id);
         let settled = crate::port::settle_for_revocation(pending, arbiter, reason);
-        let force_killed = self.terminate().await;
+        let force_killed = self.terminate().await.force_killed;
         crate::port::finish_revocation(arbiter, reason, cancelled, settled, force_killed)
     }
 }
