@@ -1,22 +1,39 @@
-/* Four-agent plan v0.3.1, Host wiring first batch: backend picker / lock row
-   above the composer. Kept small and neutral; uses only inherited colors. */
+/* Four-agent plan v0.3.1, Host wiring: backend picker / lock row.
+   Fix 1 (Windows acceptance of 3a82f5d): the row is rendered INSIDE
+   `.fox-composer-wrap`, as its first child, directly above `.fox-prompt-shell`.
+   `.fox-composer-wrap` is absolutely positioned at the bottom of
+   `.fox-chat-stage` (centred in the empty state), so the row now moves with the
+   input box instead of falling to the bottom of the stage's flex column behind
+   the composer (z-index 16). Because the row is part of the composer box, the
+   composer height reported through `onHeightChange` (stage bottom − composer
+   top) already includes it, and the timeline reserves that space
+   (`--fox-composer-occlusion`): the lock / read-only notice is never covered.
+   Kept small and neutral; uses only inherited / theme colours. */
 .fox-agent-backend-bar {
+  position: relative; /* above the wrap's ::before fade, same stacking context */
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 10px;
-  margin: 0 auto 6px;
+  gap: 4px 10px;
+  box-sizing: border-box;
+  width: 100%;
   max-width: 100%;
-  padding: 0 4px;
+  margin: 0 0 6px;
+  padding: 3px 10px;
+  border-radius: 10px;
+  /* Opaque so timeline text scrolling under the composer never shows through. */
+  background: var(--fox-canvas, var(--background, transparent));
   font-size: 12px;
   line-height: 1.4;
-  opacity: 0.85;
+  color: inherit;
 }
 
 .fox-agent-backend-picker {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
+  opacity: 0.85;
 }
 
 .fox-agent-backend-picker select {
@@ -36,20 +53,32 @@
 
 .fox-agent-backend-chip {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 4px;
   padding: 1px 8px;
   border: 1px solid currentColor;
   border-radius: 999px;
+  opacity: 0.85;
+  white-space: nowrap;
 }
 
+/* The notice wraps inside the composer width (never overflows or is clipped).
+   At 1122×770 (below the 1180px compact breakpoint, sidebar expanded) the
+   history composer is about 100cqw − ~100px ≈ 700–750px wide; the longest
+   lock notice (~30 CJK chars + the env name ≈ 520px at 12px) plus the chip
+   (~140px) takes one, at most two, lines: the bar is ~24–42px tall and sits
+   inside the composer box, whose height the timeline reserves. */
 .fox-agent-backend-notice {
-  flex: 1 1 240px;
+  flex: 1 1 220px;
   min-width: 0;
   overflow-wrap: anywhere;
+  opacity: 0.85;
 }
 
 .fox-agent-backend-bar[data-access='read_only_disabled'] .fox-agent-backend-notice,
-.fox-agent-backend-bar[data-access='read_only_not_wired'] .fox-agent-backend-notice {
+.fox-agent-backend-bar[data-access='read_only_not_wired'] .fox-agent-backend-notice,
+.fox-agent-backend-refusal {
   font-weight: 500;
+  opacity: 1;
 }
