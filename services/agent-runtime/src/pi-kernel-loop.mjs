@@ -136,6 +136,20 @@ export function installKernelHostTools(session, definitions, { settledFor } = {}
   }))
   session.agent.state.tools = tools
   installedToolsBySession.set(session, tools)
+  // Pi 0.84.2 marks every normally returned tool result `isError: false` and
+  // never reads the returned object's own flag; only `afterToolCall` can set
+  // it. The Host's settled state is authoritative for Host tools, so a failed
+  // settlement stays an error even if an earlier hook returned the input flag;
+  // content is left as the earlier hooks produced it.
+  const installed = new Set(tools.map(tool => tool.name))
+  const priorAfter = session.agent.afterToolCall
+  session.agent.afterToolCall = async (context, signal) => {
+    const prior = typeof priorAfter === 'function' ? await priorAfter.call(session.agent, context, signal) : undefined
+    if (installed.has(context?.toolCall?.name) && context?.result?.isError === true) {
+      return { ...(prior ?? {}), isError: true }
+    }
+    return prior
+  }
   installHostSchemaProjection(session, strictParameters)
 }
 
@@ -276,18 +290,24 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       pendingHostNotices.push(hostJobNoticeMessage(notice))
     }
   }
-  const projectedStream = session.agent.streamFunction
-  session.agent.streamFunction = (model, context, options) => {
+  // Inject through the loop's own context. Pi 0.84.2 runs each continuation on
+  // a snapshot (`state.messages.slice()`) and hands `transformContext` that
+  // snapshot's live array before every model request; pushing there keeps the
+  // notice in every later round of the same continuation. The previous
+  // stream-function injection only touched the outer transcript and the
+  // per-request converted array, so a second tool round lost it.
+  const priorTransform = session.agent.transformContext
+  session.agent.transformContext = async (messages, signal) => {
     if (pendingSteering.length || pendingHostNotices.length) {
       const additions = [...pendingSteering.splice(0), ...pendingHostNotices.splice(0)]
       const transcript = session.agent.state.messages
-      if (!Array.isArray(transcript)) fail('engine transcript unavailable for steering')
+      if (!Array.isArray(transcript) || !Array.isArray(messages)) fail('engine transcript unavailable for steering')
       for (const message of additions) {
-        transcript.push(message)
-        if (Array.isArray(context?.messages) && context.messages !== transcript) context.messages.push(message)
+        if (messages !== transcript) transcript.push(message)
+        messages.push(message)
       }
     }
-    return projectedStream.call(session.agent, model, context, options)
+    return typeof priorTransform === 'function' ? priorTransform.call(session.agent, messages, signal) : messages
   }
 
   let roundCursor = prepared.checkpointSeq
