@@ -101,3 +101,34 @@ async fn cancel_answers_pending_permissions_with_cancelled() {
     assert_eq!(stop, Some(serde_json::json!("cancelled")));
     connection.close().await;
 }
+
+/// Revocation stop on a live connection: the pending permission is answered
+/// `cancelled`, in-flight work is `outcome_unknown`, the process is gone and
+/// the session waits for a sandboxed rebuild without replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn revocation_stop_cancels_settles_and_kills_the_backend() {
+    use fox_agent_backend::port::RevokedSessionState;
+    use fox_agent_backend::settlement::{PendingOutcome, PendingRegistry, RunTerminal, TerminalArbiter};
+    let Some(spec) = mock_spec() else { return };
+    let mut connection = AcpConnection::spawn(&spec, &std::env::temp_dir()).await.expect("spawn mock");
+    let _ = next(&mut connection).await;
+    let session = connection.new_session(std::env::temp_dir()).await.expect("session");
+    connection.prompt(&session, "hello").unwrap();
+    until(&mut connection, |event| matches!(event, BackendEvent::PermissionRequested { .. })).await;
+    let pid = connection.process_id().expect("pid");
+    let mut pending = PendingRegistry::default();
+    pending.open("prompt-1", 0);
+    pending.mark_in_flight("prompt-1");
+    let mut arbiter = TerminalArbiter::default();
+    let stop = connection.stop_for_revocation(&session, &mut pending, &mut arbiter, "full access withdrawn").await;
+    assert_eq!(stop.cancelled_permissions.len(), 1);
+    assert!(matches!(pending.outcome("prompt-1"), Some(PendingOutcome::OutcomeUnknown { .. })));
+    assert_eq!(stop.terminal.terminal, RunTerminal::Cancelled);
+    assert_eq!(stop.state, RevokedSessionState::NeedsSandboxedRebuild);
+    assert!(!stop.replay_last_operation);
+    #[cfg(unix)]
+    {
+        let alive = std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(false);
+        assert!(!alive, "backend process {pid} still running after the revocation stop");
+    }
+}
