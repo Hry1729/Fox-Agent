@@ -429,3 +429,27 @@ ACP 规范与本方案的对应：`session/cancel` 后客户端必须以 `cancel
 - vibe-kanban：https://github.com/BloopAI/vibe-kanban
 - Goose 维护者讨论：https://github.com/aaif-goose/goose/discussions/11384
 - steer 提案 RFD（未合并）：https://github.com/agentclientprotocol/agent-client-protocol/pull/1261
+
+# v0.3.2 增补：权限模式与 srt 隔离
+
+（2026 年 10 月 19 日用户拍板；实现与细节见 `crates/fox-agent-backend/src/sandbox.rs` 与 `crates/fox-agent-backend/docs/sandbox.md`。本节不改动前文各节，只补充外部后端的隔离方式。）
+
+**两种权限模式**
+
+| 模式 | 适用 | 边界 |
+|---|---|---|
+| `sandboxed`（默认） | 除明确授予 full_access 外的一切情况；旧会话未记录模式时一律按此 | 外部后端进程（codex-acp、pi-acp、dsh）整体在 srt（`@anthropic-ai/sandbox-runtime`，Apache-2.0）中运行，一个会话一个沙箱；只读写授权目录 + 私有 HOME + 运行所需系统目录；出站网络只放行该后端模型 API 域名白名单 |
+| `full_access` | 用户按会话或项目明确授予 | 不套沙箱，不承诺目录边界；能力声明的沙箱两维为“无” |
+
+两种模式下 Host 底线照旧：环境变量白名单与凭据不下发、取消与进程树清理、记录、原生审批如实转发。
+
+**规则**
+
+1. **fail-closed**：沙箱起不来、依赖缺失（srt、Node ≥ 22.12、Linux 的 bubblewrap/socat/ripgrep）、Windows 未执行 windows-install、策略无效、后端未装在沙箱可读的位置，一律拒绝启动该后端，返回结构化错误（`sandbox_unavailable` / `sandbox_not_installed` / `sandbox_dependency_missing` / `sandbox_policy_invalid` / `sandbox_backend_not_installed`），绝不自动退回 full_access。
+2. **读默认放行需配置**：srt 读权限默认全放行，每会话配置必须先拒读用户目录根（`/home`、`/root`、`/tmp`；`/Users`、`/Volumes`；`C:\Users`；Host 可追加），再放行授权目录、私有 HOME、后端安装目录、Node 运行时与 srt 自身。
+3. **只能收紧**（沿用 6.5）：域名白名单上限 = 后端默认 + Host 层追加；会话快照、用户、项目各层只能取交集收窄。full_access 只能来自“会话请求 + Host 持有的有效授予”，项目或用户配置不能单独开启；授予撤销对已有会话在下次继续前生效（停进程，按 sandboxed 重启，失败即拒绝）。
+4. **私有 HOME**：后端的 HOME / CODEX_HOME / DSH_HOME / XDG / TMPDIR 指向 Fox 管理目录；Host 不复制用户真实 home 中的原生凭据。
+5. **能力声明如实**：“沙箱范围”按模式与平台实测声明；Linux 已实测（T04 通过），macOS / Windows 在实测前声明为“待验证”，full_access 下不宣称目录隔离。
+6. **Windows 按需安装**：用户首次选择沙箱模式时调用 srt `windows-install`（一次 UAC）；卸载 Fox 时调用 `windows-uninstall`。Windows 支持为 alpha，后端与 Node 须装在 Fox 管理目录（沙箱账户读不到用户目录中的工具）。
+
+**已知限制**：Windows alpha；Windows 上代理令牌在 runner 命令行中可见；网络按域名过滤、不检查内容；macOS / Windows 尚未实测。
