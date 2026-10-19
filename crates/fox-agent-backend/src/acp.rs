@@ -72,6 +72,10 @@ pub struct AcpConnection {
     child_id: Option<u32>,
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
     stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>>,
+    /// Per-session srt state (settings file), removed when the connection
+    /// goes away. `None` in full-access mode.
+    sandbox: Option<crate::sandbox::SandboxSession>,
+    permission_mode: crate::sandbox::PermissionMode,
 }
 
 /// Map an ACP `initialize` response onto the port's capability declaration.
@@ -337,7 +341,31 @@ impl AcpConnection {
             child_id,
             child: Arc::new(tokio::sync::Mutex::new(child)),
             stderr_tail,
+            sandbox: None,
+            permission_mode: crate::sandbox::PermissionMode::FullAccess,
         })
+    }
+
+    /// Spawn what [`crate::sandbox::prepare_launch`] produced. In sandboxed
+    /// mode the backend runs inside srt and the per-session settings live as
+    /// long as this connection. Sandbox refusals happen before this call
+    /// (fail-closed); a sandboxed launch that cannot start is an error here
+    /// too, never a retry outside the sandbox.
+    pub async fn spawn_prepared(prepared: crate::sandbox::PreparedLaunch, cwd: &std::path::Path) -> Result<Self, String> {
+        let crate::sandbox::PreparedLaunch { mode, spec, sandbox, .. } = prepared;
+        let mut connection = Self::spawn(&spec, cwd).await.map_err(|error| match mode {
+            crate::sandbox::PermissionMode::Sandboxed => format!("sandboxed launch failed: {error}"),
+            crate::sandbox::PermissionMode::FullAccess => error,
+        })?;
+        connection.sandbox = sandbox;
+        connection.permission_mode = mode;
+        Ok(connection)
+    }
+
+    /// The mode this process runs in. A plain [`Self::spawn`] has no sandbox
+    /// and reports `FullAccess`, which is what it is.
+    pub fn permission_mode(&self) -> crate::sandbox::PermissionMode {
+        self.permission_mode
     }
 
     pub async fn new_session(&self, cwd: PathBuf) -> Result<String, String> {
@@ -424,6 +452,8 @@ impl AcpConnection {
             kill_tree(pid);
         }
         let _ = child.kill().await;
+        drop(child);
+        drop(self.sandbox);
     }
 }
 
