@@ -9,8 +9,12 @@
 // the backend and relays pipe <-> backend stdin/stdout. The backend's stderr
 // goes straight to this process's stderr (srt forwards it to Fox).
 //
-// * Pipe closed by Fox -> backend stdin is closed; if the backend has not
-//   exited after the grace period it is killed.
+// * Pipe gone -> backend stdin is closed; if the backend has not exited after
+//   the grace period (5 s) it is killed. "Gone" is whichever of the pipe's
+//   `end`, `close` or `error` comes first, handled once: a Windows named pipe
+//   has no half-close, so Fox closing its end may show up as `close` (or an
+//   `error`) without any `end`, and nothing written after that reaches Fox.
+//   Fox therefore never waits for backend output after it closes the pipe.
 // * Backend exited -> the pipe is closed and this script exits with the
 //   backend's exit code.
 // * The token is removed from the environment before the backend starts and
@@ -202,15 +206,28 @@ export async function runBridge({
       socket.end()
     }
     child.stdin.on('error', () => {})
-    socket.on('error', error => log(`pipe error: ${error.code || error.message}`))
+    socket.on('error', error => {
+      log(`pipe error: ${error.code || error.message}`)
+      peerGone('error')
+    })
     if (rest.length > 0) child.stdin.write(rest)
-    socket.pipe(child.stdin)
+    // Not `end: true`: stdin is closed in exactly one place (peerGone).
+    socket.pipe(child.stdin, { end: false })
     child.stdout.pipe(socket, { end: false })
     child.stdout.on('end', () => {
       if (!socket.destroyed) socket.end()
     })
-    const peerGone = () => {
-      if (exited || killTimer) return
+    let peerHandled = false
+    function peerGone(reason) {
+      if (reason !== 'end') {
+        // Nothing can reach Fox any more: keep draining the backend's stdout
+        // so a write cannot block it while it shuts down.
+        child.stdout.unpipe(socket)
+        child.stdout.resume()
+      }
+      if (peerHandled) return
+      peerHandled = true
+      if (exited) return
       child.stdin.end()
       killTimer = setTimeout(() => {
         if (!exited) {
@@ -219,8 +236,8 @@ export async function runBridge({
         }
       }, closeGraceMs)
     }
-    socket.on('end', peerGone)
-    socket.on('close', peerGone)
+    socket.on('end', () => peerGone('end'))
+    socket.on('close', () => peerGone('close'))
     socket.resume()
     child.on('error', error => {
       log(`backend error: ${error.message}`)
