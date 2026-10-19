@@ -22,6 +22,16 @@ pub struct HostPolicy {
     pub egress_allowed: bool,
     /// Keys lower layers may never set (e.g. sandbox off, network on).
     pub locked_keys: BTreeMap<String, String>,
+    /// Explicit full-access grants (`conversation:<id>` / `project:<root>`,
+    /// see [`crate::sandbox::FullAccessGrant`]). Revoking removes the key and
+    /// applies to existing sessions before their next continue.
+    pub full_access_grants: BTreeSet<String>,
+    /// Enterprise switch: no session may run in full access.
+    pub full_access_forbidden: bool,
+    /// Extra sandbox network domains per backend (for example a custom pi
+    /// provider endpoint). Only this layer may extend the allowlist ceiling;
+    /// lower layers can only narrow it.
+    pub sandbox_extra_domains: BTreeMap<AgentBackend, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
