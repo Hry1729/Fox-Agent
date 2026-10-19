@@ -80,6 +80,8 @@ pub(crate) use skill_activations::SkillActivationRecord;
 mod kernel_model_config;
 mod kernel_initial_input;
 mod kernel_host;
+mod agent_backend;
+pub(crate) use agent_backend::RunBackendIdentity;
 mod kernel_projection;
 mod kernel_display;
 pub(crate) use kernel_host::KernelHostScope;
@@ -1722,7 +1724,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -1747,7 +1749,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -1772,7 +1774,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -2016,7 +2018,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -2340,6 +2342,22 @@ impl Database {
         project_root: Option<&str>,
         permission_mode: Option<&str>,
     ) -> Result<ConversationSummary, String> {
+        self.create_conversation_with_backend(agent_id, title, project_root, permission_mode, "fox")
+    }
+
+    /// Same as [`Self::create_conversation`], writing the conversation's
+    /// frozen `agent_backend` in the INSERT itself (the v95 trigger refuses any
+    /// later change). The caller has already validated the value against Host
+    /// policy (`fox_agent_backend::host_routing::choose_for_new_conversation`);
+    /// the column CHECK is the last line of defence.
+    pub fn create_conversation_with_backend(
+        &self,
+        agent_id: &str,
+        title: Option<&str>,
+        project_root: Option<&str>,
+        permission_mode: Option<&str>,
+        agent_backend: &str,
+    ) -> Result<ConversationSummary, String> {
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
         let title = title
@@ -2373,8 +2391,8 @@ impl Database {
             connection.execute(
                 "INSERT INTO conversations(
                     id, agent_id, title, project_id, project_root, permission_mode, status,
-                    lineage_root_id, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?1, ?7, ?7)",
+                    lineage_root_id, created_at, updated_at, agent_backend
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?1, ?7, ?7, ?8)",
                 params![
                     id,
                     agent_id,
@@ -2382,7 +2400,8 @@ impl Database {
                     project_id,
                     project_root,
                     permission_mode,
-                    now
+                    now,
+                    agent_backend
                 ],
             )?;
             query_conversation(connection, &id)
@@ -7109,6 +7128,8 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         updated_at: row.get(15)?,
         last_message_at: row.get(16)?,
         permission_mode: row.get(17)?,
+        // Frozen at creation (v95); every pre-v95 conversation reads `fox`.
+        agent_backend: row.get(18)?,
         // Filled in by `apply_active_run_activity` from a single query over the
         // active runs, so the four conversation list queries stay untouched.
         active_run_id: None,
@@ -7477,7 +7498,7 @@ fn query_conversation(connection: &Connection, id: &str) -> rusqlite::Result<Con
                 c.parent_conversation_id, c.forked_from_message_id,
                 COALESCE(c.lineage_root_id, c.id),
                 c.created_at, c.updated_at, c.last_message_at,
-                COALESCE(kep.mode, c.permission_mode, 'ask')
+                COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
          FROM conversations c
          JOIN agents a ON a.id = c.agent_id
          LEFT JOIN projects p ON p.id = c.project_id
