@@ -9,15 +9,11 @@ use std::{
     io::Read,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 use sysinfo::{Disks, System};
 use url::Url;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 pub const CAPABILITY_TOOLS: &[&str] = &[
     "web_search",
@@ -2223,11 +2219,14 @@ fn execute_git_read(
             "status".to_owned(),
             "--short".to_owned(),
             "--branch".to_owned(),
+            "--ignore-submodules=all".to_owned(),
         ],
         GitOperation::Diff => {
             let mut args = vec![
                 "diff".to_owned(),
                 "--no-ext-diff".to_owned(),
+                "--no-textconv".to_owned(),
+                "--ignore-submodules=all".to_owned(),
                 "--no-color".to_owned(),
             ];
             if staged {
@@ -2248,7 +2247,11 @@ fn execute_git_read(
             "--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1e".to_owned(),
         ],
         GitOperation::Blame => {
-            let mut args = vec!["blame".to_owned(), "--line-porcelain".to_owned()];
+            let mut args = vec![
+                "blame".to_owned(),
+                "--line-porcelain".to_owned(),
+                "--no-textconv".to_owned(),
+            ];
             if let Some(start) = start_line {
                 let end = end_line.unwrap_or(start.saturating_add(199));
                 args.push(format!("-L{start},{end}"));
@@ -2266,7 +2269,9 @@ fn execute_git_read(
         args.push("--".to_owned());
         args.push(relative.to_string_lossy().to_string());
     }
-    let output = run_process("git", &args, root, Duration::from_secs(60))?;
+    let mut git_args = git_safety_overrides(root)?;
+    git_args.extend(args);
+    let output = run_process_with_env("git", &git_args, root, Duration::from_secs(60), GIT_HARDENED_ENV)?;
     if output.exit_code != Some(0) {
         return Err(format!("Git command failed: {}", output.stderr.trim()));
     }
@@ -3000,117 +3005,137 @@ fn package_script_command(cwd: &Path, script: &str) -> (String, Vec<String>) {
     }
 }
 
+/// Fixed environment for every Git invocation: no system config, no prompts,
+/// no optional lock writes, no pager.
+const GIT_HARDENED_ENV: &[(&str, &str)] = &[
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_OPTIONAL_LOCKS", "0"),
+    ("GIT_PAGER", "cat"),
+    ("PAGER", "cat"),
+];
+
+/// Command-line overrides (highest Git config precedence) that switch off the
+/// config keys a read-only Git command could otherwise execute: fsmonitor
+/// hooks, external diff, pager, signature verification and hooks.
+const GIT_FIXED_OVERRIDES: &[&str] = &[
+    "core.fsmonitor=false",
+    "core.hooksPath=",
+    "core.pager=cat",
+    "diff.external=",
+    "log.showSignature=false",
+];
+
+/// `-c` arguments for one repository. Filter and diff drivers are named by the
+/// repository's own config, so they are discovered first (reading config never
+/// executes anything) and each one is emptied: an empty `clean`/`smudge`/
+/// `process`/`textconv`/`command` is treated by Git as "no driver".
+fn git_safety_overrides(root: &Path) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    for value in GIT_FIXED_OVERRIDES {
+        args.push("-c".to_owned());
+        args.push((*value).to_owned());
+    }
+    let mut discover = args.clone();
+    discover.extend(["config", "--null", "--name-only", "--list"].map(str::to_owned));
+    let listed = run_process_with_env("git", &discover, root, Duration::from_secs(20), GIT_HARDENED_ENV)?;
+    if listed.exit_code != Some(0) {
+        return Err(format!("Git config could not be read: {}", listed.stderr.trim()));
+    }
+    args.extend(git_driver_overrides(&listed.stdout));
+    Ok(args)
+}
+
+fn git_driver_overrides(config_names_nul: &str) -> Vec<String> {
+    let mut drivers = std::collections::BTreeSet::new();
+    for name in config_names_nul.split('\0').map(str::trim).filter(|name| !name.is_empty()) {
+        let lower = name.to_ascii_lowercase();
+        let (section, rest) = match lower.split_once('.') {
+            Some(parts) => parts,
+            None => continue,
+        };
+        if section != "filter" && section != "diff" {
+            continue;
+        }
+        let Some((_, key)) = rest.rsplit_once('.') else { continue };
+        let dangerous = match section {
+            "filter" => matches!(key, "clean" | "smudge" | "process"),
+            _ => matches!(key, "textconv" | "command"),
+        };
+        if dangerous {
+            // Keep the subsection as written: subsection names are case-sensitive.
+            let original_rest = &name[section.len() + 1..];
+            let subsection = &original_rest[..original_rest.len() - key.len() - 1];
+            drivers.insert((section.to_owned(), subsection.to_owned()));
+        }
+    }
+    let mut args = Vec::new();
+    for (section, subsection) in drivers {
+        let keys: &[&str] = if section == "filter" {
+            &["clean", "smudge", "process"]
+        } else {
+            &["textconv", "command"]
+        };
+        for key in keys {
+            args.push("-c".to_owned());
+            args.push(format!("{section}.{subsection}.{key}="));
+        }
+        if section == "filter" {
+            args.push("-c".to_owned());
+            args.push(format!("filter.{subsection}.required=false"));
+        }
+    }
+    args
+}
+
 fn run_process(
     program: &str,
     args: &[String],
     cwd: &Path,
     timeout: Duration,
 ) -> Result<ProcessOutput, String> {
+    run_process_with_env(program, args, cwd, timeout, &[])
+}
+
+/// Runs through the shared Host containment (`tool_host::run_contained_program`):
+/// allowlisted environment instead of the whole parent environment, Job Object
+/// or process group, and a bounded output drain.
+fn run_process_with_env(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    timeout: Duration,
+    extra_env: &[(&str, &str)],
+) -> Result<ProcessOutput, String> {
     let timeout = bounded_timeout(timeout)?;
-    let start = Instant::now();
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let mut child = command.spawn().map_err(|error| {
-        format!(
-            "failed to start {}: {error}",
-            display_command(program, args)
-        )
-    })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "failed to capture command stdout".to_owned())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "failed to capture command stderr".to_owned())?;
-    let stdout_reader = thread::spawn(move || read_process_stream(stdout));
-    let stderr_reader = thread::spawn(move || read_process_stream(stderr));
-    loop {
-        if let Err(error) = check_execution_control() {
-            terminate_process_tree(&mut child);
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(error);
-        }
-        let status = match child.try_wait() {
-            Ok(status) => status,
-            Err(error) => {
-                terminate_process_tree(&mut child);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(format!("failed to wait for command: {error}"));
-            }
-        };
-        if let Some(status) = status {
-            let (stdout, stdout_truncated) = stdout_reader
-                .join()
-                .map_err(|_| "command stdout reader failed".to_owned())??;
-            let (stderr, stderr_truncated) = stderr_reader
-                .join()
-                .map_err(|_| "command stderr reader failed".to_owned())??;
-            let stdout_limit = MAX_PROCESS_OUTPUT_BYTES.min(stdout.len());
-            let remaining = MAX_PROCESS_OUTPUT_BYTES.saturating_sub(stdout_limit);
-            let stderr_limit = remaining.min(stderr.len());
-            return Ok(ProcessOutput {
-                exit_code: status.code(),
-                stdout: String::from_utf8_lossy(&stdout[..stdout_limit]).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr[..stderr_limit]).into_owned(),
-                duration_ms: start.elapsed().as_millis(),
-                truncated: stdout_truncated || stderr_truncated || stderr.len() > stderr_limit,
-            });
-        }
-        if start.elapsed() >= timeout {
-            terminate_process_tree(&mut child);
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(format!(
-                "command timed out after {} seconds",
-                timeout.as_secs()
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    let output = crate::tool_host::run_contained_program(
+        program,
+        args,
+        cwd,
+        timeout,
+        extra_env,
+        &check_execution_control,
+    )?;
+    let stdout_limit = MAX_PROCESS_OUTPUT_BYTES.min(output.stdout.len());
+    let stdout_end = floor_char_boundary(&output.stdout, stdout_limit);
+    let remaining = MAX_PROCESS_OUTPUT_BYTES.saturating_sub(stdout_end);
+    let stderr_end = floor_char_boundary(&output.stderr, remaining.min(output.stderr.len()));
+    Ok(ProcessOutput {
+        exit_code: output.exit_code,
+        truncated: output.truncated
+            || stdout_end < output.stdout.len()
+            || stderr_end < output.stderr.len(),
+        stdout: output.stdout[..stdout_end].to_owned(),
+        stderr: output.stderr[..stderr_end].to_owned(),
+        duration_ms: output.duration_ms,
+    })
 }
 
-fn read_process_stream(mut stream: impl Read) -> Result<(Vec<u8>, bool), String> {
-    let mut kept = Vec::new();
-    let mut buffer = [0u8; 16 * 1024];
-    let mut truncated = false;
-    loop {
-        let read = stream
-            .read(&mut buffer)
-            .map_err(|error| format!("failed to read command output: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        let remaining = MAX_PROCESS_OUTPUT_BYTES.saturating_sub(kept.len());
-        let take = remaining.min(read);
-        kept.extend_from_slice(&buffer[..take]);
-        truncated |= take < read;
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
     }
-    Ok((kept, truncated))
-}
-
-fn terminate_process_tree(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .creation_flags(0x08000000)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    index
 }
 
 fn parse_git_log(output: &str) -> Vec<Value> {
@@ -3596,6 +3621,76 @@ fn python_program() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_driver_overrides_empty_every_repository_named_driver() {
+        let names = "core.bare\0filter.evil.clean\0filter.Lfs.Smudge\0diff.my.drv.textconv\0diff.color\0filter.x.required\0";
+        let args = git_driver_overrides(names);
+        assert!(args.contains(&"filter.evil.clean=".to_owned()));
+        assert!(args.contains(&"filter.evil.process=".to_owned()));
+        assert!(args.contains(&"filter.evil.required=false".to_owned()));
+        assert!(args.contains(&"filter.Lfs.smudge=".to_owned()));
+        assert!(args.contains(&"diff.my.drv.textconv=".to_owned()));
+        assert!(args.contains(&"diff.my.drv.command=".to_owned()));
+        assert!(!args.iter().any(|arg| arg.starts_with("filter.x.")));
+        assert!(!args.iter().any(|arg| arg.starts_with("diff.color")));
+    }
+
+    /// Phase 1 #1: a repository whose own config names fsmonitor, a clean
+    /// filter and a textconv driver must not run any of them through git_read.
+    #[cfg(unix)]
+    #[test]
+    fn git_read_does_not_execute_repository_configured_helpers() {
+        let root = env::temp_dir().join(format!("fox-git-helpers-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let marker = |name: &str| root.join(format!("marker-{name}"));
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "."]);
+        git(&["config", "user.email", "fox@example.invalid"]);
+        git(&["config", "user.name", "fox"]);
+        fs::write(root.join(".gitattributes"), "*.txt filter=evil diff=evil\n").unwrap();
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        let clean = format!("sh -c 'touch {}; cat'", marker("clean").display());
+        let textconv = format!("sh -c 'touch {}; cat \"$0\"'", marker("textconv").display());
+        let fsmonitor = format!("sh -c 'touch {}'", marker("fsmonitor").display());
+        git(&["config", "filter.evil.clean", &clean]);
+        git(&["config", "diff.evil.textconv", &textconv]);
+        git(&["config", "core.fsmonitor", &fsmonitor]);
+        fs::write(root.join("a.txt"), "two\n").unwrap();
+        for operation in [GitOperation::Status, GitOperation::Diff, GitOperation::Log] {
+            execute_git_read(&root, operation, None, None, None, false, 20, None, None)
+                .expect("git_read succeeds without running helpers");
+        }
+        execute_git_read(&root, GitOperation::Blame, Some(&root.join("a.txt")), None, None, false, 20, None, None)
+            .expect("blame succeeds without running helpers");
+        for name in ["clean", "textconv", "fsmonitor"] {
+            assert!(!marker(name).exists(), "repository-configured {name} helper ran");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Phase 1 #3: capability processes see the allowlisted environment only.
+    #[cfg(unix)]
+    #[test]
+    fn capability_processes_do_not_inherit_secret_environment() {
+        std::env::set_var("FOX_TEST_CAPABILITY_SECRET_TOKEN", "must-not-cross");
+        let output = run_process("env", &[], &env::temp_dir(), Duration::from_secs(10));
+        std::env::remove_var("FOX_TEST_CAPABILITY_SECRET_TOKEN");
+        let output = output.expect("run env");
+        assert!(!output.stdout.contains("FOX_TEST_CAPABILITY_SECRET_TOKEN"));
+        assert!(output.stdout.contains("PATH="));
+    }
 
     #[test]
     fn kernel_capability_cancel_and_deadline_restore_the_previous_scope() {
