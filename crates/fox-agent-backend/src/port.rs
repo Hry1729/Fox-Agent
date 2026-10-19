@@ -299,28 +299,103 @@ impl EventIntake {
 // Revocation stop (full access withdrawn while the process runs unsandboxed)
 // ---------------------------------------------------------------------------
 
+/// Whether the old process tree is known to have ended. The rule is "the
+/// whole tree is gone", never "the parent exited" (see [`crate::proctree`]):
+///
+/// * Linux / macOS: the backend's process group is gone (`kill(-pgid, 0)` ->
+///   `ESRCH`, or only zombies left) and every tracked descendant that left
+///   the group (same pid + start time) is gone, within a short poll.
+/// * Windows: Fox's Job Object reports `ActiveProcesses == 0`. Without a job
+///   (the `taskkill /T /F` fallback) the result is always unconfirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum StopConfirmation {
+    Confirmed,
+    /// The kill failed, could not be checked, or something was still running
+    /// when the poll ran out. `reasons` name what (pids, errors).
+    FailedOrUnconfirmed { reasons: Vec<String> },
+}
+
+impl StopConfirmation {
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+
+    pub fn reasons(&self) -> &[String] {
+        match self {
+            Self::Confirmed => &[],
+            Self::FailedOrUnconfirmed { reasons } => reasons,
+        }
+    }
+}
+
+/// Result of terminating a backend process tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessTreeStop {
+    /// The backend did not exit within the grace period and was killed (side
+    /// effects of a running command unverified).
+    pub force_killed: bool,
+    pub confirmation: StopConfirmation,
+    /// What "confirmed" covers when it covers less than the whole tree. Set on
+    /// Windows sandboxed mode: Fox's job is empty, but the srt-win runner and
+    /// the backend it starts live outside that job (two-hop launch) and end
+    /// through srt-win's own job chain, not yet measured.
+    pub confirmation_scope_note: Option<String>,
+    /// Unix: the backend's process group, for [`crate::proctree::confirm_tree_gone`]
+    /// when the Host re-checks an unconfirmed stop later.
+    pub process_group: Option<u32>,
+    /// Unix: every descendant seen before the kill (pid + start time).
+    pub tracked: Vec<crate::proctree::ProcIdentity>,
+}
+
+impl ProcessTreeStop {
+    pub fn confirmed(force_killed: bool) -> Self {
+        Self { force_killed, confirmation: StopConfirmation::Confirmed, confirmation_scope_note: None, process_group: None, tracked: Vec::new() }
+    }
+
+    pub fn unconfirmed(force_killed: bool, reasons: Vec<String>) -> Self {
+        Self { confirmation: StopConfirmation::FailedOrUnconfirmed { reasons }, ..Self::confirmed(force_killed) }
+    }
+}
+
 /// What the Host must stop when [`crate::sandbox::recheck_permission_mode`]
 /// returns `RestartSandboxed`. Implemented by the live connection
 /// ([`crate::acp::AcpConnection`] has an async equivalent, see
 /// `AcpConnection::stop_for_revocation`) and by mocks in tests.
 pub trait RevocationTarget {
+    /// Enter the stopping state: from now on new tasks are refused and any
+    /// permission request that arrives is answered `cancelled` at once,
+    /// without reaching the user. Returns the native ids of requests that
+    /// were pending and got answered `cancelled`.
+    fn begin_stopping(&mut self) -> Vec<String>;
     /// Stop the current turn (`session/cancel`) and answer every pending
     /// native permission request with `cancelled`. Returns the native ids that
     /// were answered.
     fn cancel_turn(&mut self) -> Vec<String>;
-    /// Terminate the whole backend process tree. Returns `true` when the tree
-    /// had to be force-killed (side effects of a running command unverified).
-    fn kill_process_tree(&mut self) -> bool;
+    /// Terminate the whole backend process tree and say whether it is
+    /// confirmed gone ([`StopConfirmation`]).
+    fn kill_process_tree(&mut self) -> ProcessTreeStop;
 }
+
+/// User-facing remedy when the old process tree could not be confirmed gone.
+pub const STOP_UNCONFIRMED_REMEDY: &str = "Fox 无法确认原“完全访问”进程已全部结束，为安全起见不会在沙箱中重建这个会话。请在任务管理器（Windows）或活动监视器/终端（macOS、Linux）中结束列出的残留进程，或退出并重新打开 Fox，然后再继续。";
 
 /// Where a session stands after a revocation stop. There is no state in
 /// which it keeps running outside the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RevokedSessionState {
-    /// Process gone; the next continue must rebuild under srt (preflight
-    /// included, fail-closed).
+    /// The connection is refusing new work and auto-cancelling late
+    /// permission requests while its process tree is being stopped. Only
+    /// observed while a stop is in progress.
+    Stopping,
+    /// Process tree confirmed gone; the next continue must rebuild under srt
+    /// (preflight included, fail-closed).
     NeedsSandboxedRebuild,
+    /// The old process tree could not be confirmed gone. Blocked: no rebuild
+    /// in any mode until a later check confirms it
+    /// ([`RevocationStop::record_confirmation`]).
+    StoppedUnconfirmed { reasons: Vec<String>, remedy: String },
     /// The sandboxed rebuild failed; the session stays stopped until a later
     /// attempt succeeds. Never restarted in full access.
     StoppedSandboxUnavailable { error: crate::sandbox::SandboxError },
@@ -330,7 +405,8 @@ pub enum RevokedSessionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevocationStop {
     pub reason: String,
-    /// Native permission requests answered `cancelled`.
+    /// Native permission requests answered `cancelled` (pending at the start
+    /// of the stop).
     pub cancelled_permissions: Vec<String>,
     /// Every pending request of the run, settled: not yet sent ->
     /// `cancelled`, in flight -> `outcome_unknown` (settlement rule 1).
@@ -338,6 +414,8 @@ pub struct RevocationStop {
     /// The run's authoritative terminal (first one wins; a turn that already
     /// completed keeps `completed`).
     pub terminal: crate::settlement::Committed,
+    /// How the process tree ended and whether that is confirmed.
+    pub process_tree: ProcessTreeStop,
     pub state: RevokedSessionState,
     /// Always `false`: the rebuilt session never replays the last operation on
     /// its own, because it may already have had side effects.
@@ -354,6 +432,29 @@ impl RevocationStop {
             .map(|(id, _)| id.as_str())
             .collect()
     }
+
+    /// A later check of an unconfirmed stop (on Unix
+    /// [`crate::proctree::confirm_tree_gone`] with
+    /// `process_tree.process_group` / `tracked`). `Confirmed` unblocks the
+    /// rebuild; anything else keeps (and refreshes) `StoppedUnconfirmed`.
+    /// No effect on a stop that was already confirmed.
+    pub fn record_confirmation(&mut self, confirmation: StopConfirmation) {
+        if self.process_tree.confirmation.is_confirmed() {
+            return;
+        }
+        self.state = state_after_stop(&confirmation);
+        self.process_tree.confirmation = confirmation;
+    }
+}
+
+fn state_after_stop(confirmation: &StopConfirmation) -> RevokedSessionState {
+    match confirmation {
+        StopConfirmation::Confirmed => RevokedSessionState::NeedsSandboxedRebuild,
+        StopConfirmation::FailedOrUnconfirmed { reasons } => RevokedSessionState::StoppedUnconfirmed {
+            reasons: reasons.clone(),
+            remedy: STOP_UNCONFIRMED_REMEDY.to_owned(),
+        },
+    }
 }
 
 /// First half of a revocation stop: cancel was requested, permissions were
@@ -367,43 +468,51 @@ pub fn settle_for_revocation(
     pending.settle_all(&format!("stopped: {reason}"))
 }
 
-/// Second half, after the process tree is gone.
+/// Second half, after the process tree was terminated. An unconfirmed stop
+/// marks possible unverified side effects and blocks the rebuild.
 pub fn finish_revocation(
     arbiter: &mut crate::settlement::TerminalArbiter,
     reason: &str,
     cancelled_permissions: Vec<String>,
     settled: Vec<(String, crate::settlement::PendingOutcome)>,
-    force_killed: bool,
+    process_tree: ProcessTreeStop,
 ) -> RevocationStop {
     let unknown = settled
         .iter()
         .any(|(_, outcome)| matches!(outcome, crate::settlement::PendingOutcome::OutcomeUnknown { .. }));
-    let terminal = arbiter.commit(crate::settlement::RunTerminal::Cancelled, force_killed || unknown).clone();
+    let unverified = process_tree.force_killed || unknown || !process_tree.confirmation.is_confirmed();
+    let terminal = arbiter.commit(crate::settlement::RunTerminal::Cancelled, unverified).clone();
     RevocationStop {
         reason: reason.to_owned(),
         cancelled_permissions,
         settled,
         terminal,
-        state: RevokedSessionState::NeedsSandboxedRebuild,
+        state: state_after_stop(&process_tree.confirmation),
+        process_tree,
         replay_last_operation: false,
     }
 }
 
-/// The "revocation stop" entry: cancel the turn, settle every pending request
-/// (in flight -> `outcome_unknown`), kill the process tree, and mark the
-/// session as needing a sandboxed rebuild without replay. Order matters:
-/// cancel first so the backend gets a chance to stop cleanly and pending
-/// permissions are answered, then settle, then kill.
+/// The "revocation stop" entry: enter `Stopping` (new tasks refused, late
+/// permission requests auto-cancelled), cancel the turn, settle every pending
+/// request (in flight -> `outcome_unknown`), kill the process tree and confirm
+/// it is gone. Confirmed -> `NeedsSandboxedRebuild` without replay;
+/// unconfirmed -> `StoppedUnconfirmed` (blocked).
 pub fn stop_for_revocation(
     target: &mut dyn RevocationTarget,
     pending: &mut crate::settlement::PendingRegistry,
     arbiter: &mut crate::settlement::TerminalArbiter,
     reason: &str,
 ) -> RevocationStop {
-    let cancelled = target.cancel_turn();
+    let mut cancelled = target.begin_stopping();
+    for id in target.cancel_turn() {
+        if !cancelled.contains(&id) {
+            cancelled.push(id);
+        }
+    }
     let settled = settle_for_revocation(pending, arbiter, reason);
-    let force_killed = target.kill_process_tree();
-    finish_revocation(arbiter, reason, cancelled, settled, force_killed)
+    let process_tree = target.kill_process_tree();
+    finish_revocation(arbiter, reason, cancelled, settled, process_tree)
 }
 
 /// A session rebuilt after revocation. The Host spawns `launch` and opens a
@@ -417,16 +526,47 @@ pub struct RebuiltSession {
     pub review: Vec<String>,
 }
 
-/// Rebuild a revoked session. `prepare` is the normal sandboxed launch path
-/// (`preflight` + `prepare_launch(PermissionMode::Sandboxed, ..)`); it is
-/// given the mode so a caller cannot ask for anything else. On failure, or if
-/// what came back is not sandboxed, the stop record moves to
-/// `StoppedSandboxUnavailable` and the session stays stopped.
+/// Why a rebuild after revocation was refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RebuildError {
+    /// The old process tree is not confirmed gone; nothing was launched.
+    StopUnconfirmed { reasons: Vec<String>, remedy: String },
+    /// The sandbox could not start (or the launcher returned something
+    /// unsandboxed); nothing was launched.
+    Sandbox { error: crate::sandbox::SandboxError },
+}
+
+impl std::fmt::Display for RebuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StopUnconfirmed { reasons, .. } => {
+                write!(f, "revocation stop not confirmed; refusing to rebuild: {}", reasons.join("; "))
+            }
+            Self::Sandbox { error } => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for RebuildError {}
+
+/// Rebuild a revoked session. Refused, without calling `prepare`, while the
+/// old process tree is not confirmed gone (state stays `StoppedUnconfirmed`).
+/// `prepare` is the normal sandboxed launch path (`preflight` +
+/// `prepare_launch(PermissionMode::Sandboxed, ..)`); it is given the mode so a
+/// caller cannot ask for anything else. On failure, or if what came back is
+/// not sandboxed, the stop record moves to `StoppedSandboxUnavailable` and the
+/// session stays stopped.
 pub fn rebuild_after_revocation(
     stop: &mut RevocationStop,
     prepare: impl FnOnce(crate::sandbox::PermissionMode) -> Result<crate::sandbox::PreparedLaunch, crate::sandbox::SandboxError>,
-) -> Result<RebuiltSession, crate::sandbox::SandboxError> {
+) -> Result<RebuiltSession, RebuildError> {
     use crate::sandbox::{PermissionMode, SandboxError, SandboxErrorCode};
+    if !stop.process_tree.confirmation.is_confirmed() {
+        let reasons = stop.process_tree.confirmation.reasons().to_vec();
+        stop.state = state_after_stop(&stop.process_tree.confirmation);
+        return Err(RebuildError::StopUnconfirmed { reasons, remedy: STOP_UNCONFIRMED_REMEDY.to_owned() });
+    }
     let result = prepare(PermissionMode::Sandboxed).and_then(|launch| {
         if launch.mode == PermissionMode::Sandboxed && launch.sandbox.is_some() {
             Ok(launch)
@@ -448,7 +588,7 @@ pub fn rebuild_after_revocation(
         }
         Err(error) => {
             stop.state = RevokedSessionState::StoppedSandboxUnavailable { error: error.clone() };
-            Err(error)
+            Err(RebuildError::Sandbox { error })
         }
     }
 }
@@ -465,17 +605,26 @@ mod tests {
         calls: Vec<&'static str>,
         pending_permissions: Vec<String>,
         alive: bool,
+        stopping: bool,
+        /// What the kill reports (default: confirmed).
+        kill_result: Option<ProcessTreeStop>,
     }
 
     impl RevocationTarget for MockConnection {
+        fn begin_stopping(&mut self) -> Vec<String> {
+            self.calls.push("stopping");
+            self.stopping = true;
+            std::mem::take(&mut self.pending_permissions)
+        }
         fn cancel_turn(&mut self) -> Vec<String> {
             self.calls.push("cancel");
             std::mem::take(&mut self.pending_permissions)
         }
-        fn kill_process_tree(&mut self) -> bool {
+        fn kill_process_tree(&mut self) -> ProcessTreeStop {
             self.calls.push("kill");
-            self.alive = false;
-            true
+            let result = self.kill_result.clone().unwrap_or_else(|| ProcessTreeStop::confirmed(true));
+            self.alive = !result.confirmation.is_confirmed();
+            result
         }
     }
 
@@ -493,12 +642,18 @@ mod tests {
                 session_env: vec![],
             },
             sandbox: sandboxed.then(|| crate::sandbox::SandboxSession::for_test(dir)),
+            effective_policy: None,
             declaration: SandboxDeclaration::declare(mode, None, HostOs::Linux),
         }
     }
 
     fn revoked() -> (MockConnection, PendingRegistry, TerminalArbiter, RevocationStop) {
-        let mut connection = MockConnection { pending_permissions: vec!["perm-0".into()], alive: true, ..Default::default() };
+        revoked_with(None)
+    }
+
+    fn revoked_with(kill_result: Option<ProcessTreeStop>) -> (MockConnection, PendingRegistry, TerminalArbiter, RevocationStop) {
+        let mut connection =
+            MockConnection { pending_permissions: vec!["perm-0".into()], alive: true, kill_result, ..Default::default() };
         let mut pending = PendingRegistry::default();
         pending.open("tool-sent", 1);
         pending.mark_in_flight("tool-sent");
@@ -511,8 +666,10 @@ mod tests {
     #[test]
     fn revocation_stop_cancels_settles_kills_and_never_replays() {
         let (connection, pending, arbiter, stop) = revoked();
-        assert_eq!(connection.calls, ["cancel", "kill"], "cancel before kill");
+        assert_eq!(connection.calls, ["stopping", "cancel", "kill"], "stopping, then cancel, then kill");
+        assert!(connection.stopping);
         assert!(!connection.alive);
+        assert!(stop.process_tree.confirmation.is_confirmed());
         assert_eq!(stop.cancelled_permissions, ["perm-0"]);
         assert_eq!(pending.waiting(), 0, "nothing left waiting");
         assert!(matches!(pending.outcome("tool-sent"), Some(PendingOutcome::OutcomeUnknown { .. })), "in flight = unknown");
@@ -533,7 +690,7 @@ mod tests {
         arbiter.commit(RunTerminal::Completed, false);
         let stop = stop_for_revocation(&mut connection, &mut pending, &mut arbiter, "revoked");
         assert_eq!(stop.terminal.terminal, RunTerminal::Completed, "first terminal wins");
-        assert_eq!(connection.calls, ["cancel", "kill"], "process is stopped regardless");
+        assert_eq!(connection.calls, ["stopping", "cancel", "kill"], "process is stopped regardless");
         assert_eq!(arbiter.rejected().len(), 1);
     }
 
@@ -546,12 +703,12 @@ mod tests {
             Err(SandboxError::new(SandboxErrorCode::SandboxDependencyMissing, "srt missing"))
         })
         .unwrap_err();
-        assert_eq!(error.code, SandboxErrorCode::SandboxDependencyMissing);
+        assert!(matches!(&error, RebuildError::Sandbox { error } if error.code == SandboxErrorCode::SandboxDependencyMissing));
         assert!(matches!(stop.state, RevokedSessionState::StoppedSandboxUnavailable { .. }));
 
         // A launcher that hands back an unsandboxed launch is refused too.
         let error = rebuild_after_revocation(&mut stop, |_| Ok(launch(PermissionMode::FullAccess, false))).unwrap_err();
-        assert_eq!(error.code, SandboxErrorCode::SandboxPolicyInvalid);
+        assert!(matches!(&error, RebuildError::Sandbox { error } if error.code == SandboxErrorCode::SandboxPolicyInvalid));
         assert!(matches!(stop.state, RevokedSessionState::StoppedSandboxUnavailable { .. }));
 
         // Success: sandboxed, no replay, unknown operations handed over for review.
@@ -560,6 +717,54 @@ mod tests {
         assert!(!rebuilt.replay_last_operation);
         assert_eq!(rebuilt.review, ["tool-sent"]);
         assert_eq!(stop.state, RevokedSessionState::NeedsSandboxedRebuild);
+    }
+
+    /// Kill failed or the tree could not be confirmed gone: blocked, the
+    /// launcher is never called, and the state carries reasons + remedy.
+    #[test]
+    fn unconfirmed_stop_refuses_rebuild_and_stays_blocked() {
+        for reasons in [
+            vec!["kill(-4100, 9) failed: Operation not permitted".to_owned()],
+            // Parent exited, a child of the same group is still running.
+            vec!["process group 4100 still has running members [4102]".to_owned()],
+        ] {
+            let (connection, _, _, mut stop) = revoked_with(Some(ProcessTreeStop::unconfirmed(true, reasons.clone())));
+            assert!(connection.alive, "mock still has the child");
+            assert!(stop.terminal.possible_unverified_side_effects);
+            assert_eq!(
+                stop.state,
+                RevokedSessionState::StoppedUnconfirmed { reasons: reasons.clone(), remedy: STOP_UNCONFIRMED_REMEDY.to_owned() }
+            );
+            let mut called = false;
+            let error = rebuild_after_revocation(&mut stop, |_| {
+                called = true;
+                Ok(launch(PermissionMode::Sandboxed, true))
+            })
+            .unwrap_err();
+            assert!(!called, "no launch while the old tree may be alive");
+            assert_eq!(error, RebuildError::StopUnconfirmed { reasons: reasons.clone(), remedy: STOP_UNCONFIRMED_REMEDY.to_owned() });
+            assert!(matches!(stop.state, RevokedSessionState::StoppedUnconfirmed { .. }), "still blocked");
+
+            // A later check that still fails keeps it blocked; a confirmed
+            // one unblocks the (sandboxed-only) rebuild.
+            stop.record_confirmation(StopConfirmation::FailedOrUnconfirmed { reasons: vec!["still there".into()] });
+            assert!(matches!(&stop.state, RevokedSessionState::StoppedUnconfirmed { reasons, .. } if reasons == &["still there"]));
+            assert!(rebuild_after_revocation(&mut stop, |_| Ok(launch(PermissionMode::Sandboxed, true))).is_err());
+            stop.record_confirmation(StopConfirmation::Confirmed);
+            assert_eq!(stop.state, RevokedSessionState::NeedsSandboxedRebuild);
+            let rebuilt = rebuild_after_revocation(&mut stop, |_| Ok(launch(PermissionMode::Sandboxed, true))).unwrap();
+            assert!(!rebuilt.replay_last_operation);
+        }
+    }
+
+    #[test]
+    fn stop_records_serialize_for_the_host() {
+        let unconfirmed = StopConfirmation::FailedOrUnconfirmed { reasons: vec!["x".into()] };
+        assert_eq!(serde_json::to_value(&unconfirmed).unwrap(), serde_json::json!({"status": "failed_or_unconfirmed", "reasons": ["x"]}));
+        assert_eq!(serde_json::to_value(StopConfirmation::Confirmed).unwrap(), serde_json::json!({"status": "confirmed"}));
+        let state = RevokedSessionState::StoppedUnconfirmed { reasons: vec!["x".into()], remedy: "r".into() };
+        assert_eq!(serde_json::to_value(&state).unwrap()["state"], "stopped_unconfirmed");
+        assert_eq!(serde_json::to_value(RevokedSessionState::Stopping).unwrap()["state"], "stopping");
     }
 
     #[test]
