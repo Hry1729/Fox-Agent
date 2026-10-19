@@ -21,13 +21,22 @@ import {
 } from '@/features/conversations/model/agent-backend'
 import './agent-backend-bar.css'
 
-export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBackendChange }: {
+export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBackendChange, refusal = null }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
   draftBackend: AgentBackendId
   onDraftBackendChange: (backend: AgentBackendId) => void
+  /**
+   * The Host's refusal of the last send in this view (`agent_backend_*`).
+   * Shown as the ONE notice of the bar, replacing the generic lock / picker
+   * notice, so a refused send never produces two messages.
+   */
+  refusal?: string | null
 }) {
+  const refusalNotice = refusal
+    ? <span className="fox-agent-backend-notice fox-agent-backend-refusal" role="alert">{refusal}</span>
+    : null
   if (lockedBackend) {
     const access = agentBackendAccess(lockedBackend, status)
     const notice = agentBackendLockNotice(lockedBackend, access, status?.switchEnv)
@@ -39,7 +48,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
           <Lock size={11} aria-hidden="true" />
           后端：{AGENT_BACKEND_LABELS[lockedBackend]}（已锁定）
         </span>
-        {notice && <span className="fox-agent-backend-notice">{notice}</span>}
+        {refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)}
       </div>
     )
   }
@@ -75,8 +84,10 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
           })}
         </select>
       </label>
-      {disabledReason && <span className="fox-agent-backend-notice">{disabledReason}</span>}
-      {pickedNotice && <span className="fox-agent-backend-notice">{pickedNotice}</span>}
+      {refusalNotice ?? <>
+        {disabledReason && <span className="fox-agent-backend-notice">{disabledReason}</span>}
+        {pickedNotice && <span className="fox-agent-backend-notice">{pickedNotice}</span>}
+      </>}
     </div>
   )
 }
