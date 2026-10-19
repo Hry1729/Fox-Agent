@@ -16,7 +16,12 @@
 //! Fox has recorded (`srt-sids.json`, [`crate::winruntime::record_srt_sid`]).
 //! Objects owned by any other SID, including other orphaned SIDs, are left
 //! alone. It needs `WRITE_OWNER` on each object (the user has it through the
-//! inherited full-control ACE of their own folders). It is an API, not an
+//! inherited full-control ACE of their own folders). Where the user has only
+//! Modify (no `WRITE_OWNER`), the change is refused with Access denied; such
+//! objects are reported as `needs_elevation`, not as failures, and
+//! [`ownership_repair_list`] turns them into the input of the elevated
+//! `-RepairOwnershipList` step of the enable / disable scripts (docs/sandbox.md
+//! 7.8). It is an API, not an
 //! automatic step: run it before uninstalling srt, after reinstalling it,
 //! or on demand; never after every session.
 
@@ -31,6 +36,13 @@ pub enum OwnershipAction {
     Repaired { previous_owner: String },
     /// Owner was a recorded srt SID; changing it failed (reason).
     Failed { previous_owner: String, reason: String },
+    /// Owner was a recorded srt SID; the change was refused with Access
+    /// denied (Win32 error 5). Not a failure: without elevation the user has
+    /// no `WRITE_OWNER` on objects whose DACL gives them only Modify (the
+    /// Windows run found one under a folder granting Authenticated Users
+    /// Modify). Fixed by the elevated `-RepairOwnershipList` step of the
+    /// enable / disable scripts with [`ownership_repair_list`].
+    NeedsElevation { previous_owner: String, reason: String },
     /// A reparse point: neither changed nor descended into.
     SkippedReparsePoint,
     /// The owner could not be read (reason); left alone.
@@ -65,6 +77,79 @@ impl OwnershipReport {
     pub fn failed(&self) -> usize {
         self.items.iter().filter(|item| matches!(item.action, OwnershipAction::Failed { .. })).count()
     }
+
+    pub fn needs_elevation(&self) -> usize {
+        self.items.iter().filter(|item| matches!(item.action, OwnershipAction::NeedsElevation { .. })).count()
+    }
+}
+
+/// Whether a Win32 failure text is Access denied (error 5).
+pub fn is_access_denied(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("win32 error 5)") || lower.contains("win32 error 5,") || lower.ends_with("win32 error 5") || lower.contains("access is denied") || lower.contains("access denied")
+}
+
+/// Format version of the repair list ([`OwnershipRepairList`]).
+pub const OWNERSHIP_REPAIR_LIST_VERSION: u32 = 1;
+
+/// One object for the elevated repair: change the owner of `path` from
+/// `expected_owner` (a recorded srt SID, re-read and checked by the script
+/// before it changes anything) to `new_owner`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipRepairEntry {
+    pub path: PathBuf,
+    pub expected_owner: String,
+    pub new_owner: String,
+}
+
+/// Input of `enable-sandbox.ps1` / `disable-sandbox.ps1 -RepairOwnershipList
+/// <file>`: exactly the [`OwnershipAction::NeedsElevation`] items of a
+/// non-elevated [`repair_sandbox_ownership`] run. The script refuses entries
+/// whose current owner is not `expected_owner` or not in `srtSids`, never
+/// follows a reparse point, and writes one result per entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipRepairList {
+    pub version: u32,
+    /// Always "fox-nonelevated-ownership-scan".
+    pub source: String,
+    /// The user the objects go back to (the non-elevated scanning user).
+    pub user_sid: String,
+    /// Every srt sandbox SID Fox has recorded (`srt-sids.json`).
+    pub srt_sids: Vec<String>,
+    pub items: Vec<OwnershipRepairEntry>,
+}
+
+pub const OWNERSHIP_REPAIR_SOURCE: &str = "fox-nonelevated-ownership-scan";
+
+/// Build the repair list from a non-elevated scan. Only `NeedsElevation`
+/// items whose previous owner is a recorded srt SID are listed; `user_sid`
+/// and every SID must be string SIDs.
+pub fn ownership_repair_list(report: &OwnershipReport, user_sid: &str, known_srt_sids: &[String]) -> Result<OwnershipRepairList, String> {
+    if !crate::winacl::is_string_sid(user_sid) {
+        return Err(format!("{user_sid:?} is not a SID"));
+    }
+    if let Some(bad) = known_srt_sids.iter().find(|sid| !crate::winacl::is_string_sid(sid)) {
+        return Err(format!("{bad:?} is not a SID"));
+    }
+    let items = report
+        .items
+        .iter()
+        .filter_map(|item| match &item.action {
+            OwnershipAction::NeedsElevation { previous_owner, .. } if known_srt_sids.iter().any(|sid| sid.eq_ignore_ascii_case(previous_owner)) => {
+                Some(OwnershipRepairEntry { path: item.path.clone(), expected_owner: previous_owner.clone(), new_owner: user_sid.to_owned() })
+            }
+            _ => None,
+        })
+        .collect();
+    Ok(OwnershipRepairList {
+        version: OWNERSHIP_REPAIR_LIST_VERSION,
+        source: OWNERSHIP_REPAIR_SOURCE.to_owned(),
+        user_sid: user_sid.to_owned(),
+        srt_sids: known_srt_sids.to_vec(),
+        items,
+    })
 }
 
 /// Whether `metadata` (from `symlink_metadata`, i.e. not followed) is a
@@ -114,6 +199,7 @@ fn visit(path: &Path, metadata: &std::fs::Metadata, known: &[String], probe: &dy
         Ok(owner) if known.iter().any(|sid| sid.eq_ignore_ascii_case(&owner)) => {
             let action = match writer.set_owner_to_current_user(path) {
                 Ok(()) => OwnershipAction::Repaired { previous_owner: owner },
+                Err(reason) if is_access_denied(&reason) => OwnershipAction::NeedsElevation { previous_owner: owner, reason },
                 Err(reason) => OwnershipAction::Failed { previous_owner: owner, reason },
             };
             report.items.push(OwnershipItem { path: path.to_path_buf(), action });
@@ -187,7 +273,10 @@ mod tests {
         }
         fn set_owner_to_current_user(&self, path: &Path) -> Result<(), String> {
             if self.refuse.contains(&name(path).as_str()) {
-                return Err("WRITE_OWNER refused, Win32 error 5".into());
+                return Err(format!("cannot take ownership of {} (WRITE_OWNER refused?, Win32 error 5)", path.display()));
+            }
+            if name(path) == "busy.txt" {
+                return Err("cannot take ownership (Win32 error 32)".into());
             }
             self.owners.lock().unwrap().insert(name(path), USER.into());
             Ok(())
@@ -208,6 +297,7 @@ mod tests {
         std::fs::write(proj.join("by-user.txt"), "x").unwrap();
         std::fs::write(proj.join("by-stranger.txt"), "x").unwrap();
         std::fs::write(proj.join("locked.txt"), "x").unwrap();
+        std::fs::write(proj.join("busy.txt"), "x").unwrap();
         let outside = root.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("victim.txt"), "x").unwrap();
@@ -221,6 +311,7 @@ mod tests {
             ("by-user.txt".to_owned(), USER.to_owned()),
             ("by-stranger.txt".to_owned(), STRANGER.to_owned()),
             ("locked.txt".to_owned(), SRT_NOW.to_owned()),
+            ("busy.txt".to_owned(), SRT_NOW.to_owned()),
             ("victim.txt".to_owned(), SRT_NOW.to_owned()),
             ("link".to_owned(), SRT_NOW.to_owned()),
         ]);
@@ -231,7 +322,8 @@ mod tests {
         assert_eq!(by_name["build"], &OwnershipAction::Repaired { previous_owner: SRT_OLD.into() }, "older recorded SIDs too");
         assert_eq!(by_name["out.bin"], &OwnershipAction::Repaired { previous_owner: SRT_NOW.into() });
         assert_eq!(by_name["by-sandbox.txt"], &OwnershipAction::Repaired { previous_owner: SRT_NOW.into() });
-        assert!(matches!(by_name["locked.txt"], OwnershipAction::Failed { .. }));
+        assert!(matches!(by_name["locked.txt"], OwnershipAction::NeedsElevation { .. }), "Access denied is not a failure");
+        assert!(matches!(by_name["busy.txt"], OwnershipAction::Failed { .. }));
         assert!(!by_name.contains_key("by-stranger.txt"), "an unrecorded (orphan) SID is not touched");
         assert!(!by_name.contains_key("by-user.txt"));
         assert!(!by_name.contains_key("victim.txt"), "never reached through the link");
@@ -241,6 +333,19 @@ mod tests {
         assert_eq!(fake.owners.lock().unwrap()["by-stranger.txt"], STRANGER);
         assert_eq!(report.repaired(), 3);
         assert_eq!(report.failed(), 1);
+        assert_eq!(report.needs_elevation(), 1);
+        let list = ownership_repair_list(&report, USER, &known).unwrap();
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].path, proj.join("locked.txt"));
+        assert_eq!(list.items[0].expected_owner, SRT_NOW);
+        assert_eq!(list.items[0].new_owner, USER);
+        let json = serde_json::to_value(&list).unwrap();
+        assert_eq!(json["source"], OWNERSHIP_REPAIR_SOURCE);
+        assert_eq!(json["userSid"], USER);
+        assert_eq!(json["items"][0]["expectedOwner"], SRT_NOW);
+        assert!(ownership_repair_list(&report, "not-a-sid", &known).is_err());
+        // A list built with only the older SID recorded leaves the item out.
+        assert!(ownership_repair_list(&report, USER, &[SRT_OLD.to_owned()]).unwrap().items.is_empty());
         assert_eq!(report.untouched, 3, "proj, by-user, by-stranger");
         assert_eq!(report.errors.len(), 1, "missing root reported");
         let json = serde_json::to_value(&report.items[0]).unwrap();
