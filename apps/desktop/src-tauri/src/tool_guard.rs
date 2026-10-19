@@ -36,6 +36,8 @@ pub fn approve_read_only_tool(
     if path.contains('\0') {
         return Err("tool path contains an invalid null byte".to_owned());
     }
+    // Before `canonicalize`: resolving a UNC path is itself network access.
+    crate::tool_host::reject_network_or_device_path(path)?;
 
     let requested = Path::new(path);
     let joined = if requested.is_absolute() {
