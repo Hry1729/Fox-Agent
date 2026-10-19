@@ -20,6 +20,10 @@
 *.exe binary
 *.zip binary
 
+# PowerShell 脚本存 LF（Windows PowerShell 5.1 解析 LF 没有问题）；含中文的 .ps1
+# 必须以 UTF-8 with BOM 保存，否则 5.1 按系统 ANSI 代码页读取导致乱码。
+*.ps1 text eol=lf
+
 # Windows 批处理必须保留 CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf
