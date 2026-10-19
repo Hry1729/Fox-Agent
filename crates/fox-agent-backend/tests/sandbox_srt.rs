@@ -299,6 +299,15 @@ async fn real_srt_pi_acp_t04_filesystem_and_network_boundary() {
     assert!(prepared.declaration.directory_isolation);
     let settings_path = prepared.sandbox.as_ref().unwrap().settings_path().to_path_buf();
     eprintln!("settings: {}", std::fs::read_to_string(&settings_path).unwrap());
+    // The UI declaration lists exactly what the settings file says.
+    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    let listed = |key: &str| -> Vec<String> {
+        written["filesystem"][key].as_array().unwrap().iter().map(|entry| entry["path"].as_str().unwrap().to_owned()).collect()
+    };
+    assert_eq!(prepared.declaration.readable_roots, listed("allowRead"));
+    assert_eq!(prepared.declaration.writable_roots, listed("allowWrite"));
+    assert_eq!(prepared.declaration.denied_read_roots, listed("denyRead"));
+    assert!(prepared.declaration.readable_roots.contains(&session_tmp.display().to_string()));
 
     let mut connection = AcpConnection::spawn_prepared(prepared, &proj).await.expect("spawn pi-acp inside srt");
     assert_eq!(connection.permission_mode(), PermissionMode::Sandboxed);
@@ -381,9 +390,12 @@ async fn real_srt_pi_acp_t04_filesystem_and_network_boundary() {
     assert!(private_home.join("probe.txt").exists());
     assert!(session_tmp.join("t.txt").exists());
 
-    // 5. Close: process tree gone, per-session settings and temp removed,
-    //    the project x backend HOME kept.
-    connection.close().await;
+    // 5. Close: process tree gone (and confirmed: process group plus the
+    //    tracked descendants, bwrap's included), per-session settings and
+    //    temp removed, the project x backend HOME kept.
+    let report = connection.close_with_report().await;
+    eprintln!("close report: {report:?}");
+    assert_eq!(report.confirmation, fox_agent_backend::port::StopConfirmation::Confirmed, "{report:?}");
     tokio::time::sleep(Duration::from_secs(2)).await;
     let left = processes_matching(&base.display().to_string());
     assert!(left.is_empty(), "processes left after close: {left:?}");
