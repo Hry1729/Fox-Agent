@@ -644,6 +644,7 @@ mod tests {
             sandbox: sandboxed.then(|| crate::sandbox::SandboxSession::for_test(dir)),
             effective_policy: None,
             declaration: SandboxDeclaration::declare(mode, None, HostOs::Linux),
+            windows_ancestor_aces: Vec::new(),
         }
     }
 
