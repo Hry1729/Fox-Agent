@@ -425,6 +425,8 @@ pub fn run() {
             commands::model_providers_list,
             commands::model_provider_save,
             commands::model_provider_delete,
+            // Four-agent plan v0.3.1, Host wiring first batch: backend picker state.
+            commands::agent_backend_routing::agent_backends_status,
             commands::plugin_center::plugin_catalog_list,
             commands::plugin_center::plugin_installations_list,
             commands::plugin_center::plugin_set_activation,
