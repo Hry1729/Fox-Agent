@@ -114,15 +114,20 @@ pub fn capabilities(initialize_response: &Value) -> CapabilityDeclaration {
         // gone (pi abort kills the bash process tree). Not measured with a real
         // remote model mid-stream.
         cancel_turn: CancelReach::TurnConfirmed,
-        // NOT guaranteed on Unix: pi's bash tool spawns the shell with
-        // `detached: true` (dist/core/tools/bash.js), i.e. in its OWN process
-        // group. Measured: acp.rs `close()` (SIGKILL to the pi-acp process
-        // group) leaves an approved `sleep` running as an orphan. pi's abort
-        // (session/cancel) kills it, and SIGTERM to pi kills it (pi tracks
-        // detached children), so a TERM-then-KILL shutdown would close the gap;
-        // that change belongs to the shared acp.rs. Windows Job Object
-        // containment is unverified.
-        cancel_process_tree: false,
+        // pi's bash tool spawns the shell with `detached: true`
+        // (dist/core/tools/bash.js), i.e. in its OWN process group, so a group
+        // kill alone does not reach it. Fox's stop (acp.rs `terminate`) now
+        // also snapshots every descendant before the stop, SIGKILLs the ones
+        // that left the group (pid + start time checked) and reports
+        // `StopConfirmation::Confirmed` only when the group and every tracked
+        // descendant are gone (crate::proctree). Measured on Linux 2026-10-19
+        // with the gated launch (tests/pi_backend.rs): (a) normal close ->
+        // pi's SIGTERM handler ends the detached bash itself, confirmed;
+        // (b) pi SIGSTOPped before the close (cannot clean up) -> the group
+        // kill misses bash's subtree, descendant tracking kills it, confirmed.
+        // macOS (ps-based snapshot) and Windows (Job Object; the bash of Git
+        // Bash stays in the job unless it breaks away) are not yet measured.
+        cancel_process_tree: true,
         // ACP v1 has no acknowledgement for a permission response, and pi's
         // extension_ui_response has none either.
         approval_answer_acknowledged: false,
