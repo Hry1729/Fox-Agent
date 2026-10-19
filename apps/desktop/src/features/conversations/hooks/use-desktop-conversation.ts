@@ -7,6 +7,7 @@ import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '../model/pendin
 import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
+import { conversationAgentBackend, type AgentBackendId, type AgentBackendStatus } from '../model/agent-backend'
 import { useRuntimeEventStream } from './use-runtime-event-stream'
 import { useKernelStateStream } from './use-kernel-state-stream'
 import { useConversationCompletionNotices } from '@/features/chat/use-conversation-completion-notices'
@@ -78,6 +79,11 @@ interface DesktopConversationState {
   expertBindings: ConversationExpertBinding[]
   draftProjectRoot: string | null
   draftPermissionMode: ProjectRecord['permissionMode'] | null
+  /** Outer Agent backend for the next new conversation (frozen at creation). */
+  draftAgentBackend: AgentBackendId
+  setDraftAgentBackend: (backend: AgentBackendId) => void
+  /** Host picker / lock state; null until loaded or outside Tauri. */
+  agentBackendStatus: AgentBackendStatus | null
   knowledgeReferences: KnowledgeReference[] | undefined
   knowledgeReferenceNames: Record<string, string>
   selectProject: (projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => void
@@ -200,10 +206,26 @@ export function useDesktopConversation(): DesktopConversationState {
   const selectionVersionRef = useRef(0)
   const authoritativeRunIdRef = useRef<string | null>(null)
   authoritativeRunIdRef.current = detail ? snapshotForRun(detail)?.runId ?? null : null
+  // The open conversation's frozen backend, read by cancel / approve without
+  // widening their memo dependencies.
+  const frozenBackendRef = useRef<{ conversationId: string; backend: AgentBackendId } | null>(null)
+  frozenBackendRef.current = detail ? { conversationId: detail.conversation.id, backend: conversationAgentBackend(detail.conversation) } : null
+  const frozenBackendFor = (conversationId: string | null | undefined): AgentBackendId | undefined =>
+    conversationId && frozenBackendRef.current?.conversationId === conversationId ? frozenBackendRef.current.backend : undefined
   const [draftAgentId, setDraftAgentId] = useState<string | null>(null)
   const [draftExpertId, setDraftExpertId] = useState<string | null>(null)
   const [draftProjectRoot, setDraftProjectRoot] = useState<string | null>(null)
   const [draftPermissionMode, setDraftPermissionMode] = useState<ProjectRecord['permissionMode'] | null>(null)
+  // Plan v0.3.1 5.4: chosen only for a new conversation, sent once with
+  // `createConversation`, then frozen by the Host. Kept out of the draft
+  // snapshot so no existing draft path changes behaviour.
+  const [draftAgentBackend, setDraftAgentBackendState] = useState<AgentBackendId>('fox')
+  const draftAgentBackendRef = useRef<AgentBackendId>('fox')
+  const setDraftAgentBackend = useCallback((backend: AgentBackendId) => {
+    draftAgentBackendRef.current = backend
+    setDraftAgentBackendState(backend)
+  }, [])
+  const [agentBackendStatus, setAgentBackendStatus] = useState<AgentBackendStatus | null>(null)
   const [draftKnowledgeBases, setDraftKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
   const [draftKnowledgeReferences, setDraftKnowledgeReferences] = useState<KnowledgeReference[] | undefined>(undefined)
   const [draftKnowledgeNames, setDraftKnowledgeNames] = useState<Record<string, string>>({})
@@ -786,6 +808,16 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [applyDraft, initializeRuntime, refreshLifecycleLists, refreshRuntimeStatus, setDetail])
 
   useEffect(() => {
+    if (!desktopRuntimeAvailable || !ready) return
+    let disposed = false
+    desktopClient.agentBackendsStatus()
+      .then((status) => { if (!disposed) setAgentBackendStatus(status) })
+      // An older Host without the command: only Fox is offered (fail closed).
+      .catch(() => { if (!disposed) setAgentBackendStatus(null) })
+    return () => { disposed = true }
+  }, [ready])
+
+  useEffect(() => {
     if (!desktopRuntimeAvailable) return
     let disposed = false
     const stops: Array<() => void> = []
@@ -980,7 +1012,10 @@ export function useDesktopConversation(): DesktopConversationState {
           expertId: draft.expertId ?? draftExpertId ?? undefined,
           projectRoot: draft.projectRoot ?? draftProjectRoot ?? undefined,
           permissionMode: draft.permissionMode ?? draftPermissionMode ?? undefined,
+          // Absent for Fox so an older Host sees exactly the old request.
+          agentBackend: draftAgentBackendRef.current === 'fox' ? undefined : draftAgentBackendRef.current,
         })
+        setDraftAgentBackend('fox')
         active = await desktopClient.loadConversation(conversation.id)
         if (selectionVersion === selectionVersionRef.current) {
           activeConversationIdRef.current = conversation.id
@@ -1069,6 +1104,7 @@ export function useDesktopConversation(): DesktopConversationState {
         runtimeText: `${cleanRuntimeText}${attachmentNote}${extractedContext}`,
         model,
         attachmentIds: attachments.map((item) => item.id),
+        agentBackend: conversationAgentBackend(activeConversation.conversation),
       })
       if (activeConversationIdRef.current === activeConversation.conversation.id) activeRunIdRef.current = started.run.id
       void desktopClient.runtimeStatus().then(setRuntimeStatus).catch(() => undefined)
@@ -1218,6 +1254,7 @@ export function useDesktopConversation(): DesktopConversationState {
         parentRunId,
         text: cleanText,
         answers,
+        agentBackend: conversationAgentBackend(active.conversation),
       })
       if (activeConversationIdRef.current === active.conversation.id) activeRunIdRef.current = started.run.id
       setDetail((current) => {
@@ -1257,7 +1294,9 @@ export function useDesktopConversation(): DesktopConversationState {
     setError(null)
     setErrorDetails(null)
     try {
-      await desktopClient.cancelRun(runId)
+      // The Host routes by the frozen value; sending it lets a stale view be
+      // refused as misrouted instead of acting on another backend's run.
+      await desktopClient.cancelRun(runId, frozenBackendFor(conversationId))
       const deadline = Date.now() + 8_000
       let persisted = await desktopClient.loadConversation(conversationId)
       while (persisted.lastRun?.id === runId && runIsActive(persisted) && Date.now() < deadline) {
@@ -1296,6 +1335,7 @@ export function useDesktopConversation(): DesktopConversationState {
     const resolvedAt = Date.now()
     const approved = decision !== 'deny'
     let previous: ApprovalRecord | undefined
+    const frozenBackend = frozenBackendFor(conversationId)
     setDetail((current) => {
       if (!current) return current
       previous = current.approvals.find((item) => item.id === approvalId)
@@ -1314,7 +1354,7 @@ export function useDesktopConversation(): DesktopConversationState {
       }
     })
     try {
-      const resolved = await desktopClient.resolveApproval(approvalId, decision)
+      const resolved = await desktopClient.resolveApproval(approvalId, decision, frozenBackend)
       if (!resolved) throw new Error('这个审批已经处理或失效')
       if (conversationId && activeConversationIdRef.current === conversationId) {
         void desktopClient.loadConversation(conversationId).then((persisted) => {
@@ -1478,6 +1518,9 @@ export function useDesktopConversation(): DesktopConversationState {
     expertBindings: detail?.expertBindings ?? [],
     draftProjectRoot,
     draftPermissionMode,
+    draftAgentBackend,
+    setDraftAgentBackend,
+    agentBackendStatus,
     knowledgeReferences: detail?.knowledgeReferences ?? draftKnowledgeReferences,
     knowledgeReferenceNames: detail ? currentDraft().knowledgeNames ?? {} : draftKnowledgeNames,
     selectProject,
@@ -1527,7 +1570,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [agentBackendStatus, draftAgentBackend, setDraftAgentBackend, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {
