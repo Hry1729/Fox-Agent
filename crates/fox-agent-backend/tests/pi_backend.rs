@@ -44,7 +44,7 @@ fn stock_pi_acp_declares_no_approval_and_no_sandbox() {
     assert_eq!(declared.sandbox_filesystem, Enforcement::Absent);
     assert_eq!(declared.sandbox_network, Enforcement::Absent);
     assert_eq!(declared.cancel_turn, CancelReach::TurnConfirmed);
-    assert!(!declared.cancel_process_tree, "bash runs detached; group kill does not reach it");
+    assert!(declared.cancel_process_tree, "detached bash is reached through descendant tracking (measured on Linux)");
     assert!(!declared.approval_answer_acknowledged);
     assert_eq!(declared.observability, Visibility::ToolLifecycle);
 }
@@ -127,6 +127,8 @@ mod real {
     use fox_agent_backend::acp::{AcpConnection, BackendEvent};
     use fox_agent_backend::launch::{launch_spec, LaunchSpec};
     use fox_agent_backend::port::AgentBackend;
+    #[cfg(unix)]
+    use fox_agent_backend::port::StopConfirmation;
     use fox_agent_backend::reverse::WriteOutcome;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -360,27 +362,116 @@ mod real {
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(processes_matching("fox-sleep-s2").is_empty(), "pi abort left the bash command running");
 
-        // 6. Host kills the process tree while an approved bash runs: the bash
-        //    process group is detached from pi's and survives (measured gap).
+        // 6. Host closes the connection while an approved bash runs. bash runs
+        //    in its own process group (pi spawns it `detached`), so a group
+        //    kill alone would not reach it. Re-measured 2026-10-19 before this
+        //    change: with TERM -> grace -> KILL, pi's own SIGTERM handler
+        //    already ended the detached bash (the old "bash survives"
+        //    assertion failed). Now asserted positively: every process
+        //    recorded under the backend (pi-acp, pi, bash, sleep) is gone and
+        //    the stop is confirmed.
         let (_, id, _) = ask(&mut connection, &session, "please GATESLEEP:s3").await;
         connection.answer_permission(&id, Some(OPTION_ALLOW_ONCE)).unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let before = processes_matching("fox-sleep-s3");
-        eprintln!("running before Host kill: {before:?}");
-        assert!(!before.is_empty());
-        connection.close().await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let after = processes_matching("fox-sleep-s3");
-        eprintln!("after Host process-group kill: {after:?}");
-        // Clean up the orphan's whole process group (bash and its `sleep`).
-        for line in &after {
-            if let Some(pgid) = line.split_whitespace().nth(1) {
-                let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pgid}")]).status();
-            }
+        let root = connection.process_id().expect("backend pid");
+        let tree = process_tree(root);
+        eprintln!("process tree before close: {tree:#?}");
+        let recorded = check_tree_shape(&tree, root, "fox-sleep-s3");
+        let report = connection.close_with_report().await;
+        eprintln!("close report: {report:?}");
+        assert_eq!(report.confirmation, StopConfirmation::Confirmed, "stop not confirmed: {report:?}");
+        let alive = still_alive(&recorded);
+        assert!(alive.is_empty(), "processes survived the close: {alive:?}");
+        assert!(processes_matching("fox-sleep-s3").is_empty());
+    }
+
+    /// (pid, ppid, pgid, args) of `root` and all its descendants.
+    #[cfg(unix)]
+    fn process_tree(root: u32) -> Vec<(u32, u32, u32, String)> {
+        let output = std::process::Command::new("ps").args(["-eo", "pid=,ppid=,pgid=,args="]).output().expect("ps");
+        let rows: Vec<(u32, u32, u32, String)> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?.parse().ok()?;
+                let ppid = parts.next()?.parse().ok()?;
+                let pgid = parts.next()?.parse().ok()?;
+                Some((pid, ppid, pgid, parts.collect::<Vec<_>>().join(" ")))
+            })
+            .collect();
+        let mut tree: Vec<_> = rows.iter().filter(|row| row.0 == root).cloned().collect();
+        let mut index = 0;
+        while index < tree.len() {
+            let parent = tree[index].0;
+            tree.extend(rows.iter().filter(|row| row.1 == parent).cloned());
+            index += 1;
         }
-        assert!(
-            !after.is_empty(),
-            "bash survived no longer; revisit cancel_process_tree=false in backends/pi.rs"
-        );
+        tree
+    }
+
+    #[cfg(unix)]
+    /// The tree holds pi-acp, pi and the detached bash running `marker`
+    /// (own process group); returns every pid with its args.
+    fn check_tree_shape(tree: &[(u32, u32, u32, String)], root: u32, marker: &str) -> Vec<(u32, String)> {
+        assert!(tree.iter().any(|row| row.3.contains("pi-acp")), "pi-acp not under the backend: {tree:?}");
+        let bash = tree.iter().find(|row| row.3.contains(marker) && row.3.contains("bash")).expect("approved bash under the backend");
+        assert_ne!(bash.2, root, "bash expected in its own process group (pi spawns it detached)");
+        let pi = tree.iter().find(|row| row.0 == bash.1).expect("bash parent");
+        eprintln!("pi process (bash parent): {pi:?}; bash: {bash:?}");
+        tree.iter().map(|row| (row.0, row.3.clone())).collect()
+    }
+
+    #[cfg(unix)]
+    /// Recorded processes still alive with the same command line (zombies
+    /// count as gone).
+    fn still_alive(recorded: &[(u32, String)]) -> Vec<(u32, String)> {
+        recorded
+            .iter()
+            .filter(|(pid, args)| {
+                let output = std::process::Command::new("ps").args(["-o", "stat=,args=", "-p", &pid.to_string()]).output().expect("ps");
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                !text.is_empty() && !text.starts_with('Z') && text.contains(args.split_whitespace().next().unwrap_or(""))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// pi does not get to clean up (SIGSTOP before the close, so its SIGTERM
+    /// handler never runs): the group kill cannot reach the detached bash
+    /// (its own process group); whatever of that subtree is still running is
+    /// killed by Fox's descendant tracking, and the stop is confirmed only
+    /// when nothing recorded is left.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_gated_close_kills_detached_bash_even_when_pi_cannot_clean_up() {
+        if !real_enabled("real_gated_close_kills_detached_bash_even_when_pi_cannot_clean_up") {
+            return;
+        }
+        let home = temp_dir("home-stop");
+        let cwd = temp_dir("cwd-stop");
+        let mut connection = AcpConnection::spawn(&gated_spec(&home), &cwd).await.expect("spawn gated pi-acp");
+        let _ = next(&mut connection).await;
+        let session = connection.new_session(cwd.clone()).await.expect("session/new with scripted model");
+        let (_, id, _) = ask(&mut connection, &session, "please GATESLEEP:s4").await;
+        connection.answer_permission(&id, Some(OPTION_ALLOW_ONCE)).unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let root = connection.process_id().expect("backend pid");
+        let tree = process_tree(root);
+        let recorded = check_tree_shape(&tree, root, "fox-sleep-s4");
+        let bash = tree.iter().find(|row| row.3.contains("fox-sleep-s4") && row.3.contains("bash")).unwrap().clone();
+        let pi_pid = bash.1;
+        assert!(std::process::Command::new("kill").args(["-STOP", &pi_pid.to_string()]).status().unwrap().success());
+        let report = connection.close_with_report().await;
+        eprintln!("close report with pi stopped: {report:?}");
+        assert_eq!(report.confirmation, StopConfirmation::Confirmed, "stop not confirmed: {report:?}");
+        // Whether descendant tracking had to kill part of bash's subtree
+        // depends on timing (measured: in one run it killed the `sleep`,
+        // in another the subtree was already gone); the mechanism itself is
+        // covered deterministically by proctree's unit tests. What must hold
+        // is the outcome: confirmed, nothing left.
+        eprintln!("killed by descendant tracking: {:?}", report.notes.iter().filter(|note| note.contains("left process group")).collect::<Vec<_>>());
+        let alive = still_alive(&recorded);
+        assert!(alive.is_empty(), "processes survived the close: {alive:?}");
+        assert!(processes_matching("fox-sleep-s4").is_empty());
     }
 }
