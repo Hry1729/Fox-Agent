@@ -5,8 +5,8 @@
 # the Fox approval gate loaded. pi-acp appends `--mode rpc --no-themes
 # [--session <file>]`; extra flags for tests come from FOX_PI_EXTRA_ARGS
 # (word-split, test use only).
-# Unix only. Windows needs a .cmd equivalent (pi-acp spawns *.cmd through
-# cross-spawn); not written or tested yet.
+# Unix only. Windows: pi-gated.cmd next to this file (pi-acp spawns *.cmd
+# through cross-spawn); used by the Windows T04 in tests/sandbox_srt.rs.
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck disable=SC2086
 exec "${FOX_PI_BIN:-pi}" --no-extensions -e "$DIR/fox-approval-gate.ts" ${FOX_PI_EXTRA_ARGS:-} "$@"
