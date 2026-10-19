@@ -97,3 +97,55 @@ export function canPickAgentBackend(backend: AgentBackendId, status: AgentBacken
   if (backend === 'fox') return true
   return Boolean(status?.options.find((item) => item.backend === backend)?.enabled)
 }
+
+// ---------------------------------------------------------------------------
+// Fix 1 after the Windows acceptance of 3a82f5d: a send the Host refuses with
+// an `agent_backend_*` code started nothing (no message row, no run row), so
+// the UI must not keep any optimistic trace of it, must not show the generic
+// "处理失败" state, and shows exactly one refusal notice instead.
+
+/** Outcome of `send` when the Host (or the read-only guard) refused it by backend. */
+export const AGENT_BACKEND_REFUSED = 'agent_backend_refused' as const
+export type AgentBackendRefusedOutcome = typeof AGENT_BACKEND_REFUSED
+
+const REFUSAL_CODES = new Set<string>(Object.values(AGENT_BACKEND_ERROR_CODES))
+
+/** Whether a Host error code is a routing refusal (nothing was started). */
+export function isAgentBackendRefusalCode(code: string | null | undefined): boolean {
+  return typeof code === 'string' && REFUSAL_CODES.has(code)
+}
+
+/** The single refusal notice the UI shows, scoped to one conversation (null = new-conversation draft). */
+export interface AgentBackendRefusal {
+  conversationId: string | null
+  code: string
+  message: string
+}
+
+/**
+ * Why the composer input is disabled for this conversation; null when it may
+ * send. Only an external conversation whose backend is switched off
+ * (read-only) is locked, so a send is never made just to be refused. A Fox
+ * conversation is never locked here.
+ */
+export function agentBackendInputLockedReason(backend: AgentBackendId, status: AgentBackendStatus | null | undefined): string | null {
+  if (backend === 'fox') return null
+  if (agentBackendAccess(backend, status) !== 'read_only_disabled') return null
+  return `此会话绑定 ${AGENT_BACKEND_LABELS[backend]} 后端，该后端当前未启用，只能查看历史`
+}
+
+/**
+ * Remove the optimistic trace of one refused send: the pending user message
+ * and the pending run, restoring the run that was current before the send.
+ * Everything else in the detail is left as it is.
+ */
+export function withoutRefusedSend<M extends { id: string }, R extends { id: string }, D extends { messages: M[]; lastRun: R | null }>(
+  detail: D,
+  pendingMessageId: string | null,
+  previousLastRun: R | null,
+): D {
+  const messages = pendingMessageId ? detail.messages.filter((message) => message.id !== pendingMessageId) : detail.messages
+  const lastRun = detail.lastRun && detail.lastRun.id.startsWith('pending-run-') ? previousLastRun : detail.lastRun
+  if (messages === detail.messages && lastRun === detail.lastRun) return detail
+  return { ...detail, messages, lastRun }
+}
