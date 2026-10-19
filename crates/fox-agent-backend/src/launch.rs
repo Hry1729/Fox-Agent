@@ -9,7 +9,13 @@ use crate::port::AgentBackend;
 /// tokens, NODE_OPTIONS, proxies) is dropped unless named per backend in
 /// [`LaunchSpec::credential_env`].
 #[cfg(windows)]
-pub const ENV_ALLOWLIST: &[&str] = &[
+pub const ENV_ALLOWLIST: &[&str] = WINDOWS_ENV_ALLOWLIST;
+#[cfg(not(windows))]
+pub const ENV_ALLOWLIST: &[&str] = UNIX_ENV_ALLOWLIST;
+
+/// [`ENV_ALLOWLIST`] on Windows (named so the Windows planning is testable
+/// on any host).
+pub const WINDOWS_ENV_ALLOWLIST: &[&str] = &[
     "PATH", "PATHEXT", "SystemRoot", "WINDIR", "COMSPEC", "TEMP", "TMP",
     "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "APPDATA",
     "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
@@ -17,8 +23,8 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "OS", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
 ];
 
-#[cfg(not(windows))]
-pub const ENV_ALLOWLIST: &[&str] = &[
+/// [`ENV_ALLOWLIST`] on Linux / macOS.
+pub const UNIX_ENV_ALLOWLIST: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP",
     "LANG", "LC_ALL", "LC_CTYPE", "TERM", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
@@ -110,13 +116,147 @@ pub fn child_environment(
     spec: &LaunchSpec,
     parent: impl IntoIterator<Item = (String, String)>,
 ) -> Vec<(String, String)> {
+    child_environment_for(cfg!(windows), spec, parent)
+}
+
+/// [`child_environment`] with the Windows (`true`) or Unix rules.
+pub fn child_environment_for(
+    windows: bool,
+    spec: &LaunchSpec,
+    parent: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let list = if windows { WINDOWS_ENV_ALLOWLIST } else { UNIX_ENV_ALLOWLIST };
     let allowed = |key: &str| {
-        ENV_ALLOWLIST
-            .iter()
+        list.iter()
             .chain(spec.credential_env.iter())
-            .any(|name| if cfg!(windows) { name.eq_ignore_ascii_case(key) } else { *name == key })
+            .any(|name| if windows { name.eq_ignore_ascii_case(key) } else { *name == key })
     };
     parent.into_iter().filter(|(key, _)| allowed(key)).collect()
+}
+
+/// The full environment a launched process gets: [`child_environment`] of the
+/// parent plus the spec's own [`LaunchSpec::session_env`] (which wins). This
+/// is exactly what [`crate::acp::AcpConnection`] passes to the process it
+/// starts. For a sandboxed launch that process is the srt broker (`node
+/// cli.js`), so the spec's `session_env` there holds only what srt itself
+/// needs; the backend's private HOME and friends travel inside the command
+/// (Windows `-c` with `set`, Linux / macOS `env K=V` after `--`), see
+/// [`crate::sandbox::SrtLauncher`].
+pub fn process_environment(spec: &LaunchSpec, parent: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    process_environment_for(cfg!(windows), spec, parent)
+}
+
+/// [`process_environment`] with the Windows (`true`) or Unix rules.
+pub fn process_environment_for(windows: bool, spec: &LaunchSpec, parent: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    let mut env = child_environment_for(windows, spec, parent);
+    for (key, value) in &spec.session_env {
+        env.retain(|(existing, _)| if windows { !existing.eq_ignore_ascii_case(key) } else { existing != key });
+        env.push((key.clone(), value.clone()));
+    }
+    env
+}
+
+/// Environment variable carrying the bridge pipe name into the sandbox
+/// (Windows sandboxed mode, docs/sandbox.md 7.12).
+pub const BRIDGE_PIPE_ENV: &str = "FOX_ACP_PIPE";
+/// Environment variable carrying the one-shot bridge token. The only
+/// secret-shaped name [`crate::sandbox::windows_command_line`] puts on the
+/// command line (it is worthless once the single connection is made; see
+/// docs/sandbox.md 7.12 for who can read a command line).
+pub const BRIDGE_TOKEN_ENV: &str = "FOX_ACP_TOKEN";
+/// First line the bridge sends: `FOX-ACP-BRIDGE/1 <token>\n`.
+pub const BRIDGE_PROTOCOL: &str = "FOX-ACP-BRIDGE/1";
+/// The bridge script as shipped in the runtime package
+/// (`<runtime>\acp-bridge\bridge.mjs`; source
+/// `runtime-assets/acp-bridge/bridge.mjs` in this crate). The installed copy
+/// must equal it byte for byte (line endings normalized), same rule as the dsh
+/// patches.
+pub const BRIDGE_SCRIPT: &str = include_str!("../runtime-assets/acp-bridge/bridge.mjs");
+/// Location of the bridge inside the managed runtime directory.
+pub const BRIDGE_RELATIVE_PATH: &[&str] = &["acp-bridge", "bridge.mjs"];
+
+/// How long the Host waits for the bridge to connect and finish the handshake.
+pub const BRIDGE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A one-shot local endpoint the in-sandbox bridge connects back to
+/// (Windows: named pipe `\\.\pipe\fox-acp-<128-bit hex>`; Unix: a socket path,
+/// used by tests only). Created by the launcher, consumed once by
+/// [`crate::acp::AcpConnection`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct BridgeEndpoint {
+    /// Pipe name (Windows) or socket path (Unix).
+    pub address: String,
+    /// 128-bit random hex token the bridge must present.
+    pub token: String,
+    /// Windows: SID of the srt sandbox account (`HKLM\SOFTWARE\sandbox-runtime`
+    /// `SandboxUserSid`), the only account besides the current user the pipe
+    /// DACL admits. Required on Windows.
+    pub allowed_sid: Option<String>,
+    pub connect_timeout: std::time::Duration,
+}
+
+impl std::fmt::Debug for BridgeEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the token.
+        f.debug_struct("BridgeEndpoint")
+            .field("address", &self.address)
+            .field("token", &"[redacted]")
+            .field("allowed_sid", &self.allowed_sid)
+            .field("connect_timeout", &self.connect_timeout)
+            .finish()
+    }
+}
+
+impl BridgeEndpoint {
+    /// Fresh endpoint with a random name and token. `Err` when the system
+    /// random source is unavailable.
+    pub fn new_local(allowed_sid: Option<String>) -> Result<Self, String> {
+        let name = random_hex(16)?;
+        let token = random_hex(16)?;
+        let address = if cfg!(windows) {
+            format!(r"\\.\pipe\fox-acp-{name}")
+        } else {
+            std::env::temp_dir().join(format!("fox-acp-{name}.sock")).to_string_lossy().into_owned()
+        };
+        Ok(Self { address, token, allowed_sid, connect_timeout: BRIDGE_CONNECT_TIMEOUT })
+    }
+
+    /// The two variables the bridge reads.
+    pub fn env(&self) -> Vec<(String, String)> {
+        vec![(BRIDGE_PIPE_ENV.to_owned(), self.address.clone()), (BRIDGE_TOKEN_ENV.to_owned(), self.token.clone())]
+    }
+}
+
+/// `bytes` random bytes from the OS as lowercase hex.
+pub fn random_hex(bytes: usize) -> Result<String, String> {
+    let mut buffer = vec![0u8; bytes];
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+        let status = unsafe { BCryptGenRandom(std::ptr::null_mut(), buffer.as_mut_ptr(), buffer.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+        if status != 0 {
+            return Err(format!("BCryptGenRandom failed (NTSTATUS {status:#x})"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut buffer))
+            .map_err(|error| format!("cannot read /dev/urandom: {error}"))?;
+    }
+    Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Constant-time equality for tokens (no early exit on the first mismatch).
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8 | ((a.len() ^ b.len()) >> 8) as u8;
+    for index in 0..a.len().max(b.len()) {
+        let x = a.get(index).copied().unwrap_or(0);
+        let y = b.get(index).copied().unwrap_or(0);
+        diff |= x ^ y;
+    }
+    diff == 0 && a.len() == b.len()
 }
 
 #[cfg(test)]
@@ -148,5 +288,29 @@ mod tests {
         let env = child_environment(&spec, parent);
         let keys: Vec<_> = env.iter().map(|(key, _)| key.as_str()).collect();
         assert_eq!(keys, ["PATH", "DEEPSEEK_API_KEY"]);
+    }
+
+    #[test]
+    fn process_environment_is_allowlist_plus_session_vars() {
+        let mut spec = launch_spec(AgentBackend::Pi).unwrap();
+        spec.session_env = vec![("PATH".into(), "/fox".into()), ("X_FOX".into(), "1".into())];
+        let env = process_environment(&spec, vec![("PATH".into(), "/bin".into()), ("SECRET".into(), "s".into())]);
+        assert_eq!(env, vec![("PATH".to_string(), "/fox".to_string()), ("X_FOX".to_string(), "1".to_string())]);
+    }
+
+    #[test]
+    fn bridge_endpoint_is_random_and_never_prints_its_token() {
+        let a = BridgeEndpoint::new_local(None).unwrap();
+        let b = BridgeEndpoint::new_local(None).unwrap();
+        assert_eq!(a.token.len(), 32);
+        assert!(a.token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a.token, b.token);
+        assert_ne!(a.address, b.address);
+        assert!(a.address.contains("fox-acp-"));
+        assert!(!format!("{a:?}").contains(&a.token));
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"", b"a"));
     }
 }
