@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
 import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
+import type { AgentBackendId, AgentBackendStatus } from '../model/agent-backend'
 import type {
   AgentRecord,
   ApiResponse,
@@ -675,7 +676,9 @@ export const desktopClient = {
   updateConversationPermission: (conversationId: string, permissionMode: ProjectRecord['permissionMode'], requestId: string, expectedVersion: number) =>
     command<{ version: number; mode: ProjectRecord['permissionMode'] }>('conversation_permission_update', { conversationId, permissionMode, requestId, expectedVersion }),
   deleteProject: (projectId: string) => command<boolean>('project_delete', { projectId }),
-  createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode'] }) =>
+  // `agentBackend` is frozen at creation (absent = fox); the Host refuses a
+  // non-Fox value while FOX_EXTERNAL_BACKENDS keeps it off.
+  createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode']; agentBackend?: AgentBackendId }) =>
     command<ConversationSummary>('conversation_create', request),
   loadConversation: async (conversationId: string) => {
     const detail = await command<ConversationDetail>('conversation_load', { conversationId })
@@ -733,13 +736,18 @@ export const desktopClient = {
     })
     return normalizeKnowledgeBindingsSetPayload(payload)
   },
-  startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[]; budget?: import("../../chat/components/run-budget").RunBudgetSelection }) =>
+  // `agentBackend` is optional; the Host routes by the conversation's frozen
+  // value and refuses a different one as `agent_backend_misrouted`.
+  startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[]; budget?: import("../../chat/components/run-budget").RunBudgetSelection; agentBackend?: AgentBackendId }) =>
     command<StartRunResult>('run_start', request),
   rewindRun: (request: { conversationId: string; messageId: string; text: string; runtimeText?: string; model?: string }) =>
     command<StartRunResult>('run_rewind', request),
-  resumeRun: (request: { conversationId: string; parentRunId: string; text: string; answers: Record<string, string | string[]> }) =>
+  resumeRun: (request: { conversationId: string; parentRunId: string; text: string; answers: Record<string, string | string[]>; agentBackend?: AgentBackendId }) =>
     command<StartRunResult>('run_resume', request),
-  cancelRun: (runId: string) => command<boolean>('run_cancel', { runId }),
+  cancelRun: (runId: string, agentBackend?: AgentBackendId) =>
+    command<boolean>('run_cancel', agentBackend ? { runId, agentBackend } : { runId }),
+  /** Picker / lock state for the outer Agent backend (never fails). */
+  agentBackendsStatus: () => command<AgentBackendStatus>('agent_backends_status'),
   // Durably accept a supplementary request for the conversation's active
   // authoritative Run. Re-submitting an existing messageId is idempotent.
   // `lane: 'current'` delivers at the Run's next dispatch boundary;
@@ -789,8 +797,8 @@ export const desktopClient = {
   reconciliationResume: (request: ReconciliationRequest) => command<StartRunResult>('kernel_reconciliation_resume', request),
   cancelChildRun: (parentConversationId: string, childRunId: string) =>
     command<boolean>('child_run_cancel_by_user', { parentConversationId, childRunId }),
-  resolveApproval: (approvalId: string, decision: import('../model/types').ApprovalDecision) =>
-    command<boolean>('approval_resolve', { approvalId, decision }),
+  resolveApproval: (approvalId: string, decision: import('../model/types').ApprovalDecision, agentBackend?: AgentBackendId) =>
+    command<boolean>('approval_resolve', agentBackend ? { approvalId, decision, agentBackend } : { approvalId, decision }),
   // Package 2-D U1: accepting an unverified delivery. Separate from
   // `resolveApproval` on purpose — that one grants tool authority, this one
   // records that a user took responsibility for content that is not verified.
