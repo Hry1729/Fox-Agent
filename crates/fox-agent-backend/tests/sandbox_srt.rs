@@ -21,8 +21,13 @@
 //!   servers this test starts on the host loopback, checked from outside the
 //!   sandbox first so a refusal inside cannot be a dead target.
 //!
-//! The model is `fixtures/sandbox/scripted-cmd-provider.ts` (test only); pi,
-//! pi-acp, srt and bubblewrap are real. Every tool call goes through the Fox
+//! The model is [`ScriptedModel`], an HTTP server in this test process,
+//! outside the sandbox, on a port chosen before srt starts and listed in the
+//! allowlist (`127.0.0.1:<port>`); pi's provider
+//! `fixtures/sandbox/scripted-cmd-provider.ts` (test only, client only) gets
+//! its address as `FOX_SCRIPTED_MODEL_URL`. So the model call takes the same
+//! path as a real model API (srt proxy, allowlist). pi, pi-acp, srt and
+//! bubblewrap are real. Every tool call goes through the Fox
 //! approval gate and is allowed, so what stops it is the sandbox alone.
 //!
 //! `fail_closed_without_srt_refuses_sandboxed_launch` needs no srt and always
@@ -165,6 +170,273 @@ impl Target {
     }
 }
 
+/// TEST ONLY. The scripted "model" for T04, served from this test process,
+/// outside the sandbox (docs/sandbox.md 7.13). pi reaches it through the srt
+/// proxy like any model API: `127.0.0.1:<port>` is in the network allowlist,
+/// and the address reaches pi's scripted provider
+/// (`fixtures/sandbox/scripted-cmd-provider.ts`, client only) as
+/// `FOX_SCRIPTED_MODEL_URL`. Before round 6 the server ran inside pi, inside
+/// the sandbox, on a random port that was not in the allowlist: on Windows
+/// srt drops NO_PROXY, so pi's request went to the proxy and came back
+/// `403 Connection blocked by network allowlist`.
+///
+/// OpenAI Chat Completions compatible (stream only), same script as before:
+///
+///  - `RUN:<base64url command>`  -> one `bash` tool call running that command
+///  - `READ:<base64url path>`    -> one `read` tool call of that path
+///  - last message is a tool result -> text `tool-result: <first 400 chars>`
+///  - anything else -> text `scripted hello`
+struct ScriptedModel {
+    port: u16,
+    requests: Arc<AtomicUsize>,
+}
+
+impl ScriptedModel {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind scripted model");
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    if let Some((path, body)) = read_http_request(&stream) {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let (content_type, payload) = scripted_reply(&path, &body);
+                        let mut stream = stream;
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncache-control: no-cache\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                            payload.len()
+                        );
+                        let _ = stream.flush();
+                    }
+                });
+            }
+        });
+        Self { port, requests }
+    }
+
+    /// The base URL pi's provider uses (`/v1` like the OpenAI API).
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.port)
+    }
+
+    /// The allowlist entry for it.
+    fn allow_entry(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+/// One HTTP/1.1 request: (path, body). Content-Length and chunked bodies.
+fn read_http_request(stream: &std::net::TcpStream) -> Option<(String, Vec<u8>)> {
+    use std::io::BufRead;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let mut reader = std::io::BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let path = line.split_whitespace().nth(1)?.to_owned();
+    let (mut length, mut chunked) = (0usize, false);
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).ok()? == 0 {
+            return None;
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.parse().ok()?;
+            } else if name.eq_ignore_ascii_case("transfer-encoding") && value.to_ascii_lowercase().contains("chunked") {
+                chunked = true;
+            }
+        }
+    }
+    let mut body = Vec::new();
+    if chunked {
+        loop {
+            let mut size = String::new();
+            reader.read_line(&mut size).ok()?;
+            let size = usize::from_str_radix(size.trim().split(';').next()?, 16).ok()?;
+            let mut chunk = vec![0u8; size + 2];
+            reader.read_exact(&mut chunk).ok()?;
+            if size == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..size]);
+        }
+    } else {
+        body.resize(length, 0);
+        reader.read_exact(&mut body).ok()?;
+    }
+    Some((path, body))
+}
+
+fn content_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(parts) => parts.iter().filter_map(|part| part["text"].as_str()).collect(),
+        _ => String::new(),
+    }
+}
+
+fn b64url_decode(text: &str) -> Option<String> {
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut out = Vec::new();
+    for c in text.bytes() {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        };
+        bits = bits << 6 | value as u32;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `(RUN|READ):<b64url>( ID:<id>)?` anywhere in the text, first match wins.
+fn scripted_directive(text: &str) -> Option<(&'static str, String, String)> {
+    let is_b64 = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    for (index, _) in text.char_indices() {
+        let rest = &text[index..];
+        let (kind, after) = if let Some(after) = rest.strip_prefix("RUN:") {
+            ("RUN", after)
+        } else if let Some(after) = rest.strip_prefix("READ:") {
+            ("READ", after)
+        } else {
+            continue;
+        };
+        let end = after.find(|c: char| !is_b64(c)).unwrap_or(after.len());
+        if end == 0 {
+            continue;
+        }
+        let payload = b64url_decode(&after[..end])?;
+        let tail = &after[end..];
+        let trimmed = tail.trim_start();
+        let id = if trimmed.len() < tail.len() {
+            trimmed.strip_prefix("ID:").map(|id| id[..id.find(|c: char| !is_b64(c)).unwrap_or(id.len())].to_owned()).filter(|id| !id.is_empty())
+        } else {
+            None
+        };
+        return Some((kind, payload, id.unwrap_or_else(|| "x".to_owned())));
+    }
+    None
+}
+
+/// (content type, body) for one request.
+fn scripted_reply(path: &str, body: &[u8]) -> (&'static str, String) {
+    if path.ends_with("/models") {
+        return ("application/json", serde_json::json!({ "data": [{ "id": "scripted" }] }).to_string());
+    }
+    let request: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let empty = Vec::new();
+    let messages = request["messages"].as_array().unwrap_or(&empty);
+    let base = |choices: serde_json::Value| serde_json::json!({ "id": "scripted-1", "object": "chat.completion.chunk", "created": 0, "model": "scripted", "choices": choices });
+    let mut events = Vec::new();
+    let finish = |events: &mut Vec<serde_json::Value>, reason: &str| {
+        events.push(base(serde_json::json!([{ "index": 0, "delta": {}, "finish_reason": reason }])));
+        let mut usage = base(serde_json::json!([]));
+        usage["usage"] = serde_json::json!({ "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 });
+        events.push(usage);
+    };
+    let text = |events: &mut Vec<serde_json::Value>, value: String| {
+        events.push(base(serde_json::json!([{ "index": 0, "delta": { "role": "assistant", "content": value }, "finish_reason": null }])));
+        finish(events, "stop");
+    };
+    let last = messages.last();
+    if last.is_some_and(|message| message["role"] == "tool") {
+        let result: String = content_text(&last.unwrap()["content"]).chars().take(400).collect();
+        text(&mut events, format!("tool-result: {result}"));
+    } else {
+        let last_user = messages.iter().rev().find(|message| message["role"] == "user");
+        match last_user.and_then(|message| scripted_directive(&content_text(&message["content"]))) {
+            None => text(&mut events, "scripted hello".to_owned()),
+            Some((kind, payload, id)) => {
+                let (name, args) = if kind == "RUN" {
+                    ("bash", serde_json::json!({ "command": payload }))
+                } else {
+                    ("read", serde_json::json!({ "path": payload }))
+                };
+                events.push(base(serde_json::json!([{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [{ "index": 0, "id": format!("call_{id}"), "type": "function", "function": { "name": name, "arguments": args.to_string() } }],
+                    },
+                    "finish_reason": null,
+                }])));
+                finish(&mut events, "tool_calls");
+            }
+        }
+    }
+    let mut out = String::new();
+    for event in events {
+        out.push_str(&format!("data: {event}\n\n"));
+    }
+    out.push_str("data: [DONE]\n\n");
+    ("text/event-stream", out)
+}
+
+/// The scripted model's parsing and replies, without srt (always runs).
+#[test]
+fn scripted_model_serves_tool_calls_over_http() {
+    let model = ScriptedModel::start();
+    let post = |body: &str| -> String {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", model.port)).unwrap();
+        write!(stream, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let run = serde_json::json!({ "messages": [{ "role": "user", "content": format!("RUN:{} ID:who", b64url("echo 中文 && ls")) }] });
+    let out = post(&run.to_string());
+    assert!(out.starts_with("HTTP/1.1 200") && out.contains("text/event-stream"), "{out}");
+    assert!(out.contains("\"call_who\"") && out.contains("\"bash\"") && out.contains("echo 中文 && ls") && out.contains("tool_calls"), "{out}");
+    assert!(out.ends_with("data: [DONE]\n\n"));
+    let read = serde_json::json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": format!("READ:{}", b64url("C:\\x y\\a.txt")) }] }] });
+    let out = post(&read.to_string());
+    assert!(out.contains("\"read\"") && out.contains("\"call_x\"") && out.contains("a.txt"), "{out}");
+    let tool = serde_json::json!({ "messages": [{ "role": "user", "content": "RUN:eA" }, { "role": "tool", "content": "R".repeat(500) }] });
+    let out = post(&tool.to_string());
+    assert!(out.contains(&format!("tool-result: {}\"", "R".repeat(400))), "{out}");
+    let hello = serde_json::json!({ "messages": [{ "role": "user", "content": "hi" }] });
+    assert!(post(&hello.to_string()).contains("scripted hello"));
+    // Chunked request body and the /models listing.
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", model.port)).unwrap();
+    let body = hello.to_string();
+    write!(stream, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n", body.len()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.contains("scripted hello"), "{response}");
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", model.port)).unwrap();
+    write!(stream, "GET http://127.0.0.1:{}/v1/models HTTP/1.1\r\nHost: x\r\n\r\n", model.port).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.contains("\"scripted\"") && response.contains("application/json"));
+    assert_eq!(model.requests(), 6);
+    assert_eq!(model.url(), format!("http://127.0.0.1:{}/v1", model.port));
+    assert_eq!(model.allow_entry(), format!("127.0.0.1:{}", model.port));
+}
+
 async fn next(connection: &mut AcpConnection) -> BackendEvent {
     tokio::time::timeout(Duration::from_secs(120), connection.events.recv())
         .await
@@ -270,6 +542,9 @@ async fn real_srt_pi_acp_t04_filesystem_and_network_boundary() {
     allowed.assert_reachable_from_host();
     blocked.assert_reachable_from_host();
     let (allowed_before, blocked_before) = (allowed.hits(), blocked.hits());
+    // The scripted model runs here, outside the sandbox, on a port chosen
+    // before srt starts; only that port (and the allowed target) is listed.
+    let model = ScriptedModel::start();
 
     let pi_prefix = env_path("FOX_PI_ACP_PREFIX");
     let homes = PrivateHomes::new(fox_data.join("sandbox-homes"));
@@ -278,7 +553,7 @@ async fn real_srt_pi_acp_t04_filesystem_and_network_boundary() {
         vec![AuthorizedDir { path: proj.clone(), writable: true }],
         private_home.clone(),
         vec![fixtures.clone(), launcher_dir.clone(), pi_prefix.clone()],
-        vec![format!("127.0.0.1:{}", allowed.port)],
+        vec![format!("127.0.0.1:{}", allowed.port), model.allow_entry()],
         HostOs::Linux,
     );
     assert_eq!(policy.deny_read_roots, default_deny_read_roots(HostOs::Linux));
@@ -300,6 +575,15 @@ async fn real_srt_pi_acp_t04_filesystem_and_network_boundary() {
                 "FOX_PI_EXTRA_ARGS".into(),
                 format!("-e {} --provider foxcmd --model scripted", fixtures.join("sandbox/scripted-cmd-provider.ts").display()),
             ),
+            ("FOX_SCRIPTED_MODEL_URL".into(), model.url()),
+            // Linux only: srt sets NO_PROXY=localhost,127.0.0.1,... (bwrap
+            // has its own loopback), so pi would connect to 127.0.0.1 inside
+            // the network namespace and find nothing. Cleared for the pi
+            // process so its model request goes through the srt proxy to the
+            // host loopback like a real model API (srt on Windows already
+            // drops NO_PROXY). Probes below pass --noproxy explicitly.
+            ("NO_PROXY".into(), String::new()),
+            ("no_proxy".into(), String::new()),
         ],
     };
     let launcher = SrtLauncher::new(ready, state.clone());
@@ -341,6 +625,7 @@ async fn real_srt_pi_acp_t04_filesystem_and_network_boundary() {
     let out = run(&mut connection, &session, "inside", "cat readme.txt && echo inside-ok > inside.txt && echo wrote").await;
     assert!(out.contains("authorized-content"), "authorized read failed");
     assert!(out.contains("STOP \"end_turn\""), "turn did not complete normally");
+    assert!(model.requests() >= 2, "the model turn did not reach the scripted model outside the sandbox");
     assert_eq!(std::fs::read_to_string(proj.join("inside.txt")).unwrap().trim(), "inside-ok");
 
     // 1. Reads outside the authorized directory fail: beside it in the home,
@@ -629,6 +914,10 @@ async fn real_srt_pi_acp_t04_windows() {
     allowed.assert_reachable_from_host();
     blocked.assert_reachable_from_host();
     let (allowed_before, blocked_before) = (allowed.hits(), blocked.hits());
+    // Scripted model outside the sandbox (fixes round 5's 403: the in-pi
+    // server's random port was not in the allowlist and srt-win drops
+    // NO_PROXY, so the request went to the proxy and was refused).
+    let model = ScriptedModel::start();
 
     let pi_prefix = env_path("FOX_PI_ACP_PREFIX");
     let homes = PrivateHomes::new(sandbox.layout.homes_root());
@@ -637,7 +926,7 @@ async fn real_srt_pi_acp_t04_windows() {
         vec![AuthorizedDir { path: proj.clone(), writable: true }],
         private_home.clone(),
         vec![fixtures.clone(), pi_prefix.clone()],
-        vec![format!("127.0.0.1:{}", allowed.port)],
+        vec![format!("127.0.0.1:{}", allowed.port), model.allow_entry()],
         HostOs::Windows,
     );
     assert_eq!(policy.deny_read_roots, default_deny_read_roots(HostOs::Windows));
@@ -658,6 +947,7 @@ async fn real_srt_pi_acp_t04_windows() {
             // the sandbox as `set "K=V"`): the path travels on its own.
             ("FOX_PI_TEST_EXTENSION".into(), fixtures.join(r"sandbox\scripted-cmd-provider.ts").display().to_string()),
             ("FOX_PI_EXTRA_ARGS".into(), "--provider foxcmd --model scripted".into()),
+            ("FOX_SCRIPTED_MODEL_URL".into(), model.url()),
         ],
     };
     let launcher = SrtLauncher::new(ready, state.clone()).with_managed_runtime_root(runtime_root.clone()).with_tmp_root(sandbox.layout.tmp_root());
@@ -705,6 +995,7 @@ async fn real_srt_pi_acp_t04_windows() {
     // 0. Positive controls: identity, authorized read (bash grandchild and
     //    pi's own read tool), authorized write.
     let out = run(&mut connection, &session, "whoami", &ps("'WHO=' + [Security.Principal.WindowsIdentity]::GetCurrent().Name")).await;
+    assert!(model.requests() >= 2, "the model turn did not reach the scripted model outside the sandbox (403 from the srt proxy?)\n{}", tail(&out));
     assert!(out.to_ascii_lowercase().contains("srt-sandbox"), "probe must run as the srt-sandbox account");
     let out = run(&mut connection, &session, "inside", &ps_read(&proj.join("readme.txt"))).await;
     assert!(out.contains("READ-OK:authorized-content"), "authorized read failed");
