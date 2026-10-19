@@ -1,6 +1,6 @@
 # 外部 Agent 后端的权限模式与 srt 沙箱层
 
-- 代码：`src/sandbox.rs`（模式、策略、预检、启动包装、能力声明），`src/winacl.rs`（Windows 所有权 / `WRITE_DAC` 预检、暴露面审计），`src/acp.rs` 的 `AcpConnection::spawn_prepared` 与 Windows Job Object。
+- 代码：`src/sandbox.rs`（模式、策略、路径规范化、预检、启动包装、能力声明、交付文件校验），`src/winacl.rs`（Windows 所有权 / `WRITE_DAC` 预检、暴露面审计），`src/acp.rs` 的 `AcpConnection::spawn_prepared`、停止状态与 Windows Job Object，`src/proctree.rs`（进程树停止确认），`src/port.rs`（撤权停止与重建的状态机）。
 - 实测：`tests/sandbox_srt.rs`。真实测试标 `#[ignore]`，普通 `cargo test` 只把它计入 “ignored”（即跳过数），**cargo 全绿不等于实测通过**；统计口径见第 6.3 节。
 - 决策来源：用户 2026-10-19 拍板；方案文档 `docs/02-架构/四Agent改造实施方案-v0.3.1.md` 末尾“v0.3.2 增补”。
 - srt：`@anthropic-ai/sandbox-runtime`（Apache-2.0），本文按 0.0.80 及其 README 编写。
@@ -18,16 +18,35 @@
 
 ### 1.1 撤权停止：Host 接线契约
 
-crate 提供语义，Host 负责在对的时机调用（本轮未接入 Desktop Host）。
+crate 提供语义，Host 负责在对的时机调用（Desktop Host 接线是下一步）。
 
 | 步骤 | 入口 | 语义 |
 |---|---|---|
 | 0 触发 | `recheck_permission_mode(policy, snapshot, conversation_id, running_mode)` 返回 `RestartSandboxed(reason)` | Host 在撤销授予（UI 撤权、企业策略切换、`locked_keys.permission_mode=sandboxed`）**当下**对该会话调用一次，并在每次继续 / 恢复前再调用；不得等到下一轮 turn 才处理正在跑的进程 |
-| 1 停止 | 活连接：`AcpConnection::stop_for_revocation(self, session_id, &mut pending, &mut arbiter, reason).await`；其他形态：`port::stop_for_revocation(&mut dyn RevocationTarget, ..)` | 依次：① `session/cancel`，未答复的原生审批全部答 `cancelled`；② 本 run 的 `PendingRegistry` 全部结算——未发出 → `cancelled`，已发出 → `outcome_unknown`（复用 6.4 规则 1，保留关联 ID，晚到响应进审计不翻转）；③ 杀进程树（SIGTERM → 3 s 宽限 → 进程组 SIGKILL；Windows：关闭命令通道 → 3 s 宽限 → `TerminateJobObject`，sandboxed 下后端本体的清理依赖 srt-win 的 Job 链，见 7.4）；④ `TerminalArbiter` 提交 `cancelled`（已先提交 `completed` 的保持 `completed`），被强杀或有 `outcome_unknown` 时标 `possible_unverified_side_effects` |
-| 2 状态 | 返回 `RevocationStop { state: NeedsSandboxedRebuild, replay_last_operation: false, settled, cancelled_permissions, terminal }` | 会话不再有任何在沙箱外运行的进程；`needs_review()` 列出结果未知的操作 |
-| 3 重建 | `port::rebuild_after_revocation(&mut stop, \|mode\| { preflight + prepare_launch(mode, ..) })` | 闭包只会收到 `Sandboxed`；返回的启动若不是 sandboxed（或没有 srt 会话）一律拒绝。成功 → `RebuiltSession { launch, replay_last_operation: false, review }`，Host 用 `spawn_prepared` 启动并 `bump_generation()`；**不重发上一条提示、不重跑 `review` 中的操作**，交给用户核对。失败 → `stop.state = StoppedSandboxUnavailable { error }`，会话保持停止，UI 展示 `error.remedy`，绝不回退 full_access |
+| 1 进入 Stopping | 活连接：`AcpConnection::stop_for_revocation(self, session_id, &mut pending, &mut arbiter, reason).await` 的第一步即 `begin_stopping()`；其他形态：`port::stop_for_revocation(&mut dyn RevocationTarget, ..)` 先调 `RevocationTarget::begin_stopping()` | 连接进入“正在停止”：`prompt` / `new_session` 返回 `STOPPING_REFUSAL` 错误；当时挂起的原生审批（所有会话）全部答 `cancelled`；**之后才到达的** `session/request_permission` 在到达时即由 Host 答 `cancelled`，不进入待审批表、不发 `PermissionRequested`，只发观测事件 `BackendEvent::PermissionAutoCancelled { session_id, reason, request }`（UI 可显示“已自动取消”，不得提供允许按钮）。“停止标志 + 待审批表”在同一把锁下，检查与登记、置位与清空都是原子的，不存在漏进去的窗口（见 1.3） |
+| 2 取消与结算 | 同上 | ① `session/cancel`；② 本 run 的 `PendingRegistry` 全部结算——未发出 → `cancelled`，已发出 → `outcome_unknown`（复用 6.4 规则 1，保留关联 ID，晚到响应进审计不翻转） |
+| 3 停进程并确认 | 同上（内部 `terminate()`） | Unix：先快照后代（pid + 启动时间）→ 进程组 SIGTERM → 3 s 宽限 → 再快照 → 进程组 SIGKILL → 回收子进程 → 按 pid SIGKILL 已离开进程组的被跟踪后代 → 轮询确认（≤ 3 s）。Windows：关闭命令通道 → 3 s 宽限 → `TerminateJobObject`（无 Job 才兜底 `taskkill /T /F`）→ 轮询 `ActiveProcesses == 0`。结果是 `ProcessTreeStop { force_killed, confirmation: StopConfirmation, confirmation_scope_note, process_group, tracked }`；确认标准见 1.2 |
+| 4 状态 | 返回 `RevocationStop { state, process_tree, settled, cancelled_permissions, terminal, replay_last_operation: false }` | `TerminalArbiter` 提交 `cancelled`（已先提交 `completed` 的保持 `completed`）；被强杀、有 `outcome_unknown` **或停止未确认**时标 `possible_unverified_side_effects`。`state`：确认 → `NeedsSandboxedRebuild`；未确认 → `StoppedUnconfirmed { reasons, remedy }`（阻塞，`remedy` = `STOP_UNCONFIRMED_REMEDY`，提示用户结束残留进程或重启 Fox）。`needs_review()` 列出结果未知的操作 |
+| 5 重建 | `port::rebuild_after_revocation(&mut stop, \|mode\| { preflight + prepare_launch(mode, ..) })` → `Result<RebuiltSession, RebuildError>` | **停止未确认时直接返回 `RebuildError::StopUnconfirmed { reasons, remedy }`，不调用闭包，状态保持 `StoppedUnconfirmed`，任何模式都不启动。** 已确认时：闭包只会收到 `Sandboxed`；返回的启动若不是 sandboxed（或没有 srt 会话）一律拒绝。成功 → `RebuiltSession { launch, replay_last_operation: false, review }`，Host 用 `spawn_prepared` 启动并 `bump_generation()`；**不重发上一条提示、不重跑 `review` 中的操作**，交给用户核对。沙箱失败 → `RebuildError::Sandbox { error }`，`stop.state = StoppedSandboxUnavailable { error }`，会话保持停止，UI 展示 `error.remedy`，绝不回退 full_access |
+| 6 复查（可选） | Unix：`proctree::confirm_tree_gone(stop.process_tree.process_group?, &stop.process_tree.tracked, timeout)`；任意来源的结论：`stop.record_confirmation(confirmation)` | 用户按提示处理后 Host 可复查；`Confirmed` 把状态改回 `NeedsSandboxedRebuild`，否则刷新 `StoppedUnconfirmed` 的原因。Windows 上 Job 句柄随连接关闭（kill-on-close 已生效），无法事后复查：引导用户重启 Fox 后由 Host 记录确认 |
 
-Host 侧还需要：撤权与停止写审计；停止期间到达的原生事件按旧 generation 进审计；用户在 `review` 核对完之前，UI 不提供“一键重试上一步”。
+Host 侧还需要：撤权与停止写审计；停止期间到达的原生事件按旧 generation 进审计；`PermissionAutoCancelled` 只做展示；用户在 `review` 核对完之前，UI 不提供“一键重试上一步”。`AcpConnection::close()` / `close_with_report()` 同样先进入 Stopping，`TerminateReport` 带同样的 `confirmation`。
+
+### 1.2 停止确认标准（`StopConfirmation`）
+
+确认的对象是**旧进程树全部结束**，不是父进程退出：
+
+| 平台 / 模式 | `Confirmed` 的条件 | 说明 |
+|---|---|---|
+| Linux / macOS | 后端进程组已不存在：`kill(-pgid, 0)` 返回 `ESRCH`，或组内只剩僵尸（已退出、只等新父进程回收，不再执行代码）；**并且**停止前快照到的每个后代（pid + 启动时间相同）都已结束；在 `STOP_CONFIRM_TIMEOUT`（3 s）内轮询 | 后端以 `process_group(0)` 启动。离开进程组的后代（pi 的 bash 以 `detached` 启动，自成进程组；srt 的 bwrap 用 `--new-session`）靠快照找到、按 pid 杀掉后再确认。进程表：Linux 读 `/proc`，macOS 用 `ps -A -o pid=,ppid=,pgid=,stat=,lstart=`；读不到进程表、`kill` 返回 `EPERM` 等无法判定的情况一律不确认。已知盲区：最后一次快照之后才出生并立刻离开进程组的后代看不到 |
+| Windows 完全访问（撤权场景） | 我们的 Job Object `QueryInformationJobObject(JobObjectBasicAccountingInformation).ActiveProcesses == 0` | 完全访问模式下后端直接在我们的 Job 里（挂起 → 入 Job → 恢复），可确认。无 Job、只能走 `taskkill /T /F` 兜底时一律 `FailedOrUnconfirmed`（`taskkill` 的退出码不能证明每个后代都已结束） |
+| Windows 沙箱模式 | 同上：我们的 Job 已空 | **范围更小**：Job 里只有 srt 的 node 与 srt-win broker；runner 与后端由 seclogon 创建，不在我们的 Job（two-hop，7.4），其结束依赖 srt-win 的 Job 连锁关闭，**需实测**。此时 `confirmation_scope_note` = `WINDOWS_SANDBOXED_SCOPE_NOTE` 写明这一点。撤权场景停止的是完全访问进程，不受此影响 |
+
+未确认时 `reasons` 列出具体原因（仍在运行的 pid、系统调用错误、Job 中剩余进程数），以 `fox-agent-backend:` 前缀写 stderr。
+
+### 1.3 撤权后晚到的审批
+
+ACP 的审批回调是异步的：取消只能清掉“当时已在表里”的审批，后端可能在 `session/cancel` 之后、进程被杀之前又发来新的 `session/request_permission`。处理：连接一旦 `begin_stopping()`，回调在**同一把锁**下看到停止标志，直接以 `cancelled` 答复后端，不登记、不发 `PermissionRequested`，只发 `PermissionAutoCancelled`。测试 `tests/acp_mock_agent.rs::late_permission_after_stopping_is_auto_cancelled_and_new_work_is_refused` 用 mock agent（提示词 `late`：收到 `session/cancel` 后 100 ms 才发审批）断言：agent 收到 `cancelled`（回显 `late-permission:cancelled`）、事件流里没有可答复的 `PermissionRequested`、`pending_permissions() == 0`、新 `prompt` / `new_session` 返回 `STOPPING_REFUSAL`、随后的撤权停止为 `Confirmed`。
 
 ## 2 fail-closed 规则
 
@@ -38,10 +57,11 @@ sandboxed 模式下，以下任何一项失败都**拒绝启动该后端**并返
 | `sandbox_dependency_missing` | srt 包不在 Fox 管理目录、srt 版本 < 0.0.80、Node 缺失或 < 22.12、Linux 缺 bwrap / socat / rg、macOS 缺 rg |
 | `sandbox_not_installed` | Windows 未执行 `windows-install`（查 `HKLM\SOFTWARE\sandbox-runtime`） |
 | `sandbox_unavailable` | 不支持的 OS；Linux 上 bwrap 无法建立 user/net namespace（预检实跑 `bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/true`）；macOS 无 `/usr/bin/sandbox-exec`；准备会话目录失败 |
-| `sandbox_policy_invalid` | 无授权目录；无 denyRead 根（Linux/macOS）；Windows 上授权 / deny 目标是盘根或共享根、运行时目录与可写授权目录重叠、会话变量或参数含 `"` `%` 换行；路径非绝对；授权目录 / 私有 HOME / 额外只读路径等于或包含某个 denyRead 根（会把它重新打开，例如授权 `/`）；项目 UUID 为空 / 非法 / 全零；私有 HOME 不在私有 HOME 根下；授权目录与私有 HOME 根或会话临时目录重叠；域名格式错误；会话 ID 非 `[A-Za-z0-9_-]{1,128}`；settings 目录落在沙箱可读或可写范围内；撤权重建拿到的不是 sandboxed 启动 |
+| `sandbox_policy_invalid` | 授权目录不存在或无法解析；路径规范化后为 UNC / 设备路径（Windows）；受管路径在缺失部分含 `..`（第 10 节）；无授权目录；无 denyRead 根（Linux/macOS）；Windows 上授权 / deny 目标是盘根或共享根、运行时目录与可写授权目录重叠、会话变量或参数含 `"` `%` 换行；路径非绝对；授权目录 / 私有 HOME / 额外只读路径等于或包含某个 denyRead 根（会把它重新打开，例如授权 `/`）；项目 UUID 为空 / 非法 / 全零；私有 HOME 不在私有 HOME 根下；授权目录与私有 HOME 根或会话临时目录重叠；域名格式错误；会话 ID 非 `[A-Za-z0-9_-]{1,128}`；settings 目录落在沙箱可读或可写范围内；撤权重建拿到的不是 sandboxed 启动 |
 | `sandbox_backend_not_installed` | 后端经 `npx` 启动（需要 npm 源与用户的 npx 缓存）；程序不是绝对路径；程序在沙箱内不可读 |
 | `sandbox_path_not_owned` | Windows：srt 需要加 ACE 的路径（授权目录、私有 HOME、会话临时目录、运行时、deny 路径及其父目录）当前用户拿不到 `WRITE_DAC`；或 Node / srt / 后端运行时不在 Fox 管理的运行时目录（也不在 Users 可读的系统位置）下。消息与 `missing` 指名路径（7.2） |
 | `sandbox_path_exposed` | Windows：Fox 私有目录（state、私有 HOME 根、会话临时根）的 DACL 对所有本地账户开放读或写，或运行时目录对所有账户开放写（7.2） |
+| `delivered_file_rejected` | 不是启动拒绝：`verify_delivered_file` 判定 Agent 交付的文件不合格（第 11 节） |
 
 调用顺序：`preflight(install, probe)` → `SrtLauncher::new(ready, state_root)`（Windows 另 `.with_managed_runtime_root(<Fox 运行时目录>)`）→ `prepare_launch(mode, spec, session_id, SandboxSetup::{Ready|Unavailable}, os)` → `AcpConnection::spawn_prepared(prepared, cwd)`。预检失败时把错误放进 `SandboxSetup::Unavailable(err)`，`prepare_launch` 在 sandboxed 下原样返回、在 full_access 下忽略。
 
@@ -110,7 +130,11 @@ srt 的读权限默认全放行（deny-then-allow，`allowRead` 优先于 `denyR
 
 ## 5 能力声明（四维中的“沙箱范围”）
 
-`SandboxDeclaration::declare(mode, policy, os)` 给出模式、机制（`srt` 或无）、文件 / 网络强制程度、`directory_isolation`、可写 / 可读根与域名；`apply_to(&mut CapabilityDeclaration)` 并入后端实测能力：
+`SandboxDeclaration::declare(mode, policy, os)` 给出模式、机制（`srt` 或无）、文件 / 网络强制程度、`directory_isolation`、可写 / 可读 / 拒读根与域名；`apply_to(&mut CapabilityDeclaration)` 并入后端实测能力。
+
+**声明来源 = 最终生效配置**（第四轮）：`prepare_launch` 用 `wrap` 返回的 `SandboxedLaunch.effective_policy`（规范化后的路径、会话临时目录、启动时追加的 Node / srt 目录，即实际写进 srt settings 的那一份）生成声明，并放进 `PreparedLaunch.effective_policy`。`readable_roots` / `writable_roots` / `denied_read_roots` 分别**逐项等于** settings 的 `allowRead` / `allowWrite` / `denyRead`（同一个 `SandboxPolicy::settings_roots()`；Windows 上不含 Users 组本来就能读、不生成 ACE 的系统位置）。测试：`declaration_lists_exactly_what_the_written_settings_contain`（单元）与真实 T04 中对 settings 文件的逐项比对。此前按调用方传入的策略生成，漏掉会话临时目录、私有 HOME 之外的运行时目录。
+
+
 
 - full_access：`sandbox_filesystem = sandbox_network = absent`，`read_scope = none`，`directory_isolation = false`，不列任何根。UI 不得出现“限定在这些文件夹”。
 - sandboxed：取后端原生实测与 srt 两者较强者（排序 enforced > unverified > advisory > absent），既不隐藏原生沙箱，也不夸大 srt。
@@ -119,8 +143,8 @@ srt 的读权限默认全放行（deny-then-allow，`allowRead` 优先于 `denyR
 
 | 平台 | denyRead | `read_scope` | `read_scope_verified` | UI 文案 | `directory_isolation` |
 |---|---|---|---|---|---|
-| Linux | `/` | `authorized_only` | 是（本轮实测） | 读取限定在授权文件夹 | 是 |
-| macOS | `/` | `authorized_only` | 否 | 读取限定在授权文件夹（本平台待实测） | 否 |
+| Linux | `/` | `authorized_only` | 是（本轮实测） | 读取限定在授权文件夹（另含运行必需的系统路径、私有 HOME 和会话临时目录） | 是 |
+| macOS | `/` | `authorized_only` | 否 | 读取限定在授权文件夹（另含运行必需的系统路径、私有 HOME 和会话临时目录；本平台待实测） | 否 |
 | Windows | 无（Host 可追加用户拥有的路径） | `users_group_readable` | 否 | 沙箱账户只能读取系统中对所有用户开放的位置和授权文件夹；你的个人文件夹受保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测） | 否 |
 | Linux / macOS，策略只拒读部分目录 | 非 `/` | `user_dirs_only` | — | 部分：仅用户目录受保护 | 否 |
 | full_access | — | `none` | — | 不限制读取 | 否 |
@@ -174,8 +198,20 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 
 - **cargo 全绿不等于实测通过。** 真实测试有两种门控：
   - `tests/sandbox_srt.rs` 的真实测试标 `#[ignore]`：普通 `cargo test` 把它计入 `ignored`；加 `--include-ignored` 但没设 `FOX_TEST_REAL_SRT=1` 时**失败**而不是通过。`fail_closed_without_srt_refuses_sandboxed_launch` 不需要 srt，总是执行。
-  - `tests/pi_backend.rs`（2 个）、`tests/codex_backend.rs`（1 个）、`tests/deepseek_backend.rs`（1 个）的真实测试仍是旧式门控：未设 `FOX_TEST_REAL_ACP=1` 时打印 `SKIPPED` 后返回，cargo 计为 `passed`。报告时必须按名单从 passed 中扣除。
+  - `tests/pi_backend.rs`（3 个）、`tests/codex_backend.rs`（1 个）、`tests/deepseek_backend.rs`（1 个）的真实测试仍是旧式门控：未设 `FOX_TEST_REAL_ACP=1` 时打印 `SKIPPED` 后返回，cargo 计为 `passed`。报告时必须按名单从 passed 中扣除。
 - 报告格式：分列“真正执行并通过”“跳过（ignored + SKIPPED 名单）”“真实环境执行”三项，不得只报 cargo 的 passed 总数。
+
+### 6.4 第四轮（撤权收尾，2026-10-19）
+
+同环境（Debian 13 容器，Linux 6.12 aarch64，uid 1000，Node 22.23.3，bwrap 0.12.0，socat 1.8.0.3，srt 0.0.80，pi 0.84.2 / pi-acp 0.0.34）。
+
+- 真实 T04 重跑通过（`real_srt_pi_acp_t04_filesystem_and_network_boundary ... ok`，19.3 s），新增两项断言：声明三张清单与 settings 文件逐项一致（含会话临时目录）；`close_with_report()` 为 `Confirmed`。**发现**：srt 的 bwrap 以 `--new-session` 运行，bwrap 及其沙箱内子树（pi-acp、pi、bash…）**不在 Fox 的进程组里**；SIGTERM 后 srt 的 node 退出时它们仍在，单靠进程组判断会误报“已结束”。这次由后代跟踪按 pid 杀掉（`killed descendant pid … that had left process group …`）后才确认。此前它们依赖 bwrap 的 `--die-with-parent` 在稍后自行结束（旧测试 2 s 后看进程表因此能通过）。
+- pi 真实门控测试（非沙箱，`FOX_TEST_REAL_ACP=1`）：
+  - 改动前先在 fd48532 上重测旧第 6 步：`close()`（SIGTERM → 宽限 → KILL）后 bash 已不在（pi 的 SIGTERM 处理会结束它跟踪的 detached 子进程），旧断言“bash 仍存活”失败——缺口在加了 SIGTERM 宽限后已不存在。
+  - 新第 6 步（正向）：关闭前记录后端下的整棵树（launch node → npm exec → pi-acp → pi → **自成进程组**的 bash → sleep），关闭后全部结束且 `Confirmed`。通过。
+  - 新测试 `real_gated_close_kills_detached_bash_even_when_pi_cannot_clean_up`：关闭前 `SIGSTOP` pi（其 SIGTERM 处理无法运行），进程组 SIGKILL 杀不到自成进程组的 bash 子树。四次运行均 `Confirmed`、无残留；其中一次后代跟踪按 pid 杀掉了仍在运行的 `sleep`（日志 `killed descendant pid … that had left process group …`），另三次该子树在检查时已结束（原因未查明，与时序有关），因此测试只断言结果、不断言一定发生按 pid 击杀；机制本身由 `proctree` 单元测试 `escaped_descendant_blocks_confirmation_until_killed` 确定性覆盖。
+  - 据此 `backends/pi.rs` 的 `cancel_process_tree` 改为 `true`（Linux 实测；macOS 的 ps 快照与 Windows Job 未实测）。
+- 本机前置：`fixtures/pi/pi-gated.sh` 在仓库是 100644（pi-acp 直接执行它会 `EACCES`）；`launch-pi-acp.mjs` 现在与 T04 一样，把它和 `fox-approval-gate.ts` 复制到隔离 HOME 下的 `.fox-pi-launcher/` 并给副本加可执行位，不改动检出目录。
 
 ## 7 各平台注意事项与已知限制
 
@@ -215,7 +251,7 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 
 7.4 进程清理：Job Object 与 two-hop 风险（`acp.rs`）
 - 实现：`AcpConnection::spawn` 在 Windows 上以 `CREATE_SUSPENDED` 启动子进程 → 新建 Job（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，不允许 breakaway，句柄不可继承）→ `AssignProcessToJobObject` → 用 Toolhelp 快照找到该进程的线程并 `ResumeThread`。进程在入 Job 之前无法运行，消除了“先 spawn 再 attach”的竞态（std/tokio 不返回主线程句柄，故用 Toolhelp 恢复；任何一步失败即杀掉挂起的子进程并报错，不在 Job 外运行）。
-- 关闭（`close` / `close_with_report`）：Windows 先丢弃命令通道（ACP 连接结束、后端 stdin 关闭，给 srt 机会自己 `reset()` 撤销 ACE），等 `TERMINATE_GRACE`（3 s），再 `TerminateJobObject`；只有没有 Job 或 `TerminateJobObject` 失败时才兜底 `taskkill /PID <pid> /T /F`，并检查退出码（128 = 进程已不在）。结果放进 `TerminateReport { force_killed, job_terminated, notes }`，同时以 `fox-agent-backend:` 前缀写 stderr。连接被直接 drop 时，Job 句柄关闭同样触发 kill-on-close。
+- 关闭（`close` / `close_with_report`，先进入 Stopping）：Windows 先丢弃命令通道（ACP 连接结束、后端 stdin 关闭，给 srt 机会自己 `reset()` 撤销 ACE），等 `TERMINATE_GRACE`（3 s），再 `TerminateJobObject`；只有没有 Job 或 `TerminateJobObject` 失败时才兜底 `taskkill /PID <pid> /T /F`，并检查退出码（128 = 进程已不在）。之后在 `STOP_CONFIRM_TIMEOUT` 内轮询 `QueryInformationJobObject(JobObjectBasicAccountingInformation).ActiveProcesses`，为 0 才算 `Confirmed`（无 Job 走 taskkill 时一律未确认）。结果放进 `TerminateReport { confirmation, confirmation_scope_note, force_killed, job_terminated, notes, .. }`，同时以 `fox-agent-backend:` 前缀写 stderr。沙箱模式下“确认”只覆盖我们的 Job（1.2）。连接被直接 drop 时，Job 句柄关闭同样触发 kill-on-close。
 - **two-hop 风险（源码核实）**：sandboxed 模式下我们的 Job 里只有 srt 的 node 进程和 srt-win broker（libuv 把 node 的子进程放进它自己的嵌套 Job，`SILENT_BREAKAWAY_OK` 只脱离 libuv 的 Job，不脱离不允许 breakaway 的外层 Job——此点按 Windows 嵌套 Job 文档推断，需实测）。runner 是 seclogon 服务代为创建的（`CreateProcessWithLogonW`），**不在我们的 Job 里**；后端本体由 runner 以 `CREATE_BREAKAWAY_FROM_JOB` 放进 runner 自己的 Job，**也不在我们的 Job 里**。清理链依赖 srt-win 自身：我们 `TerminateJobObject` → broker 死 → broker 持有的 broker→runner Job（kill-on-close）句柄关闭 → runner 死 → runner 的 Job（kill-on-close、不允许 breakaway）句柄关闭 → 后端整棵树死。若 broker→runner 的 assign 因 seclogon Job 不支持嵌套而失败（srt-win 打印 `broker→runner Job assign not supported`），外部杀 broker 后 runner 不会被杀（它的 `SpawnedChild` 守卫只在 broker 进程内正常退出时生效），只能等后端因 stdin 断开自行退出；srt 注释给出的兜底是**提权** `taskkill /F /FI "USERNAME eq srt-sandbox"`。
 - ACE 回收：硬杀 node 会跳过 srt 的 `reset()`，ACE 留在授权目录上，直到下一次任何 `srt-win acl` 操作的崩溃恢复按“持有者 PID 已死”清理（`with_init_lock`），或手动 `srt-win acl recover`。持有者 PID 被复用时清理会推迟。故关闭时先走 stdin 关闭的温和路径。
 
@@ -248,7 +284,10 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 - [ ] Fox 管理目录内的后端安装并锁定版本（替代 `npx -y`），以及 `launch_spec` 在 sandboxed 下指向已安装的程序。
 - [ ] 运行中网络收紧经 `--control-fd` 即时下发（可选）。
 - [ ] Desktop Host 接线：会话创建 / 继续路径调用 `effective_permission_mode`、`recheck_permission_mode`、`PrivateHomes::home_for`（项目 UUID 取自 Host 数据库）、`prepare_launch`、`spawn_prepared`；撤权按第 1.1 节契约调用 `stop_for_revocation` / `rebuild_after_revocation`；UI 依据 `read_scope` / `read_scope_verified` 与 `SandboxError.remedy` 展示。
-- [ ] `tests/pi_backend.rs::real_gated_allow_reject_cancel_and_process_tree` 第 6 步断言“Host 杀进程树后 bash 仍存活”的已知缺口，在当前 `close()`（SIGTERM + 宽限）下已不成立，测试失败；需重新测量并更新 `backends/pi.rs` 的 `cancel_process_tree` 声明（本轮未改，见报告）。
+- [x] ~~pi 第 6 步过时断言~~：第四轮已改为正向验证并实测（6.4），`cancel_process_tree = true`。
+- [ ] Windows：停止确认（`ActiveProcesses == 0`）、晚到审批、junction 规范化、交付校验在真机上跑（第 9 节 12–14）。
+- [ ] macOS：`ps` 快照的后代跟踪与停止确认实测（pi 的 detached bash、srt sandbox-exec 子树）。
+- [ ] Desktop Host 接线：交付文件在展示前调用 `verify_delivered_file(prepared.effective_policy, path)`；UI 依据 `PermissionAutoCancelled`、`StoppedUnconfirmed.remedy` 展示。
 
 ## 9 Windows 实测清单（第三轮，给工程师）
 
@@ -265,3 +304,29 @@ FOX_TEST_REAL_SRT=1 FOX_SRT_PREFIX=<srt 前缀> FOX_PI_ACP_PREFIX=<pi 前缀> \
 9. 暴露面审计：调用 `winacl::audit_broad_exposure()`（T04 输出已打印）与 `icacls D:\` 对照，确认报告的目录与实际一致、`errors` 合理。
 10. 卸载：`windows-uninstall` 后确认账户 / 组 / 注册表 / WFP 消失、13 个系统目录无该 SID；按 7.7 约定处理 `%ProgramData%\sandbox-runtime` 与 `%LOCALAPPDATA%\sandbox-runtime`。
 11. 有余力：Win10 22H2 复跑 5–8；Defender 开启、火绒开启各跑一次 5。
+12. 停止确认（第四轮）：完全访问模式起一个后端（例如 pi，让它跑一条长命令），调用 `close_with_report()`，确认 `confirmation = confirmed`、`job_terminated = Some(true)`；在 Process Explorer 里确认 Job 内进程全部消失。沙箱模式同样调用，确认 `confirmation_scope_note` 有值，并按第 7 项核对 runner / 后端是否随之结束。另在没有 Job 的路径（临时让 `Job::new` 失败）验证 taskkill 兜底的结果为 `failed_or_unconfirmed`，且 `rebuild_after_revocation` 拒绝重建。
+13. `cargo test` 中 `junctioned_authorized_folder_is_judged_by_its_target`（Windows 才运行）：`mklink /J` 建的联接指向私有 HOME 根时 `wrap` 拒绝；UNC 路径被拒。
+14. 交付校验：`verify_delivered_file` 对授权可写目录内的文件通过；对会话临时目录、私有 HOME、只读授权目录、目录外（含经联接 / 符号链接指出去的）文件拒绝。
+
+## 10 路径规范化（第四轮）
+
+Host 传入的路径在做重叠检查、生成策略之前先规范化，不再只按文字比较：
+
+- 入口：`SrtLauncher::wrap` 在**沙箱实际启动的主机**上（`ready.os == HostOs::current()`）先规范化 `state_root`、`tmp_root`、`managed_runtime_root`，再对“生效策略”调用 `SandboxPolicy::canonicalized()`，然后才 `validate` / Windows ACE 预检 / 写 settings。为别的平台规划的策略（单元测试里的 Windows 规划）按原文使用。
+- 授权目录（`canonical_existing_path`）：**必须存在**。`std::fs::canonicalize` 解析符号链接；Windows 用 `dunce::canonicalize`，解析符号链接与 junction（`GetFinalPathNameByHandle`）并在能表示为盘符路径时去掉 `\\?\` 前缀。不存在 → `sandbox_policy_invalid`（`remedy`：重新选择文件夹）。选择“报错”而不是“规范化父目录”，因为授权一个还不存在的目录没有意义，且父目录规范化会让之后在该位置建立的符号链接逃过检查。
+- Fox 受管路径（私有 HOME 及其根、会话临时目录、state、运行时 / 安装目录、额外只读路径、拒读根；`canonical_managed_path`）：可以尚不存在。规范化最深的已存在祖先，再按原样拼上缺失部分；缺失部分含 `..` → 拒绝。
+- Windows：规范化结果仍以 `\\` 开头（UNC 共享、`\\.\` 设备路径、无法简化的 verbatim 路径）→ `sandbox_policy_invalid`。
+- 系统只读路径（`default_system_read_only`）是 Fox 自己实测过的清单，保持原文（例如 merged-usr 上 `/lib` → `/usr/lib` 的符号链接本身也要在沙箱内可见）。
+- 效果：符号链接 / junction 指向私有 HOME 根（或 `/`）的“授权目录”在文字上不重叠，规范化后被拒（`symlinked_authorized_folder_is_judged_by_its_target`，Linux 实测；`junctioned_authorized_folder_is_judged_by_its_target`，Windows 编译通过、待真机运行）；无害的链接以其目标写入 settings。
+- 遗留：规范化与 srt 实际 bind 之间仍有时间窗（检查后把目录换成链接）；授权目录内部的符号链接由 srt / bwrap 按挂载语义处理，不在本层。
+
+## 11 交付文件（第四轮，库层；桌面接线是下一步）
+
+- 规则：Agent 交付给用户的文件**必须位于授权的可写持久目录**。会话临时目录随会话删除，私有 HOME 是 Fox 私有区域，沙箱内被拒读区域的写入只落在 tmpfs、主机上根本没有。
+- Host 侧校验：`sandbox::verify_delivered_file(policy, path) -> Result<DeliveredFile, SandboxError>`，`policy` 用 `PreparedLaunch.effective_policy`（含会话临时目录）。
+  1. `canonical_existing_path(path)`：解析符号链接 / junction，指到外面的链接按目标判定；UNC / 设备路径拒绝；
+  2. 策略同样规范化后，文件必须在某个 `writable = true` 的授权目录内（只读授权目录内单独报错）；
+  3. 不在会话临时目录、私有 HOME、私有 HOME 根内；Linux 上不在 tmpfs 挂载上（`statfs` 的 `TMPFS_MAGIC`；重启即丢，也正是 srt 沙箱内临时区的形态）；
+  4. 在沙箱外：存在、是普通文件、能打开并读首字节（空文件也算合格），不做逐字节比对。
+- 结果：`DeliveredFile { path（规范路径）, authorized_root, len }`；拒绝统一为 `delivered_file_rejected`，带用户可读的 `remedy`（让 Agent 把文件保存到授权文件夹后重新交付）。
+- 测试：`delivered_files_must_be_real_files_in_a_writable_authorized_folder`、`delivered_symlinks_are_judged_by_their_target_and_unreadable_files_are_refused`（Unix）、`delivered_files_on_tmpfs_are_refused`（Linux，`/dev/shm` 为 tmpfs 时执行，本机已执行）。
