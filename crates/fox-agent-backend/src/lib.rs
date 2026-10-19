@@ -17,6 +17,8 @@
 //! * [`legacy`]: deterministic mapping of old run records (section 6.6).
 //! * [`launch`]: process launch specs for the external backends, all over ACP
 //!   (section 6.7).
+//! * [`sandbox`]: permission modes (`full_access` / `sandboxed`) and the srt
+//!   isolation layer for external backends (v0.3.2 addendum), fail-closed.
 //! * `acp` (feature `acp`): the Host-side ACP v1 client built on the official
 //!   `agent-client-protocol` crate.
 //!
@@ -28,6 +30,7 @@ pub mod legacy;
 pub mod limits;
 pub mod port;
 pub mod reverse;
+pub mod sandbox;
 pub mod settlement;
 
 #[cfg(feature = "acp")]
