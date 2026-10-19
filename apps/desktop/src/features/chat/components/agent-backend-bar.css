@@ -1,0 +1,55 @@
+/* Four-agent plan v0.3.1, Host wiring first batch: backend picker / lock row
+   above the composer. Kept small and neutral; uses only inherited colors. */
+.fox-agent-backend-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 0 auto 6px;
+  max-width: 100%;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.85;
+}
+
+.fox-agent-backend-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fox-agent-backend-picker select {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 1px 6px;
+  opacity: 0.9;
+}
+
+.fox-agent-backend-picker select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fox-agent-backend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.fox-agent-backend-notice {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fox-agent-backend-bar[data-access='read_only_disabled'] .fox-agent-backend-notice,
+.fox-agent-backend-bar[data-access='read_only_not_wired'] .fox-agent-backend-notice {
+  font-weight: 500;
+}
