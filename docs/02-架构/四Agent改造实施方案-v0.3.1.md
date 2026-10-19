@@ -438,7 +438,7 @@ ACP 规范与本方案的对应：`session/cancel` 后客户端必须以 `cancel
 
 | 模式 | 适用 | 边界 |
 |---|---|---|
-| `sandboxed`（默认） | 除明确授予 full_access 外的一切情况；旧会话未记录模式时一律按此 | 外部后端进程（codex-acp、pi-acp、dsh）整体在 srt（`@anthropic-ai/sandbox-runtime`，Apache-2.0）中运行，一个会话一个沙箱；只读写授权目录 + 私有 HOME + 运行所需系统目录；出站网络只放行该后端模型 API 域名白名单 |
+| `sandboxed`（默认） | 除明确授予 full_access 外的一切情况；旧会话未记录模式时一律按此 | 外部后端进程（codex-acp、pi-acp、dsh）整体在 srt（`@anthropic-ai/sandbox-runtime`，Apache-2.0）中运行，一个会话一个沙箱；Linux/macOS 只读写授权目录 + 本项目本后端私有 HOME + 本会话临时目录，另只读放行后端/Node/srt 安装目录与最小系统路径；Windows 仅用户目录受读保护；出站网络只放行该后端模型 API 域名白名单 |
 | `full_access` | 用户按会话或项目明确授予 | 不套沙箱，不承诺目录边界；能力声明的沙箱两维为“无” |
 
 两种模式下 Host 底线照旧：环境变量白名单与凭据不下发、取消与进程树清理、记录、原生审批如实转发。
@@ -446,10 +446,13 @@ ACP 规范与本方案的对应：`session/cancel` 后客户端必须以 `cancel
 **规则**
 
 1. **fail-closed**：沙箱起不来、依赖缺失（srt、Node ≥ 22.12、Linux 的 bubblewrap/socat/ripgrep）、Windows 未执行 windows-install、策略无效、后端未装在沙箱可读的位置，一律拒绝启动该后端，返回结构化错误（`sandbox_unavailable` / `sandbox_not_installed` / `sandbox_dependency_missing` / `sandbox_policy_invalid` / `sandbox_backend_not_installed`），绝不自动退回 full_access。
-2. **读默认放行需配置**：srt 读权限默认全放行，每会话配置必须先拒读用户目录根（`/home`、`/root`、`/tmp`；`/Users`、`/Volumes`；`C:\Users`；Host 可追加），再放行授权目录、私有 HOME、后端安装目录、Node 运行时与 srt 自身。
-3. **只能收紧**（沿用 6.5）：域名白名单上限 = 后端默认 + Host 层追加；会话快照、用户、项目各层只能取交集收窄。full_access 只能来自“会话请求 + Host 持有的有效授予”，项目或用户配置不能单独开启；授予撤销对已有会话在下次继续前生效（停进程，按 sandboxed 重启，失败即拒绝）。
-4. **私有 HOME**：后端的 HOME / CODEX_HOME / DSH_HOME / XDG / TMPDIR 指向 Fox 管理目录；Host 不复制用户真实 home 中的原生凭据。
-5. **能力声明如实**：“沙箱范围”按模式与平台实测声明；Linux 已实测（T04 通过），macOS / Windows 在实测前声明为“待验证”，full_access 下不宣称目录隔离。
-6. **Windows 按需安装**：用户首次选择沙箱模式时调用 srt `windows-install`（一次 UAC）；卸载 Fox 时调用 `windows-uninstall`。Windows 支持为 alpha，后端与 Node 须装在 Fox 管理目录（沙箱账户读不到用户目录中的工具）。
+2. **读边界的实际范围**（v0.3.2 修订，2026-10-19 第二轮）：srt 读权限默认全放行。Linux/macOS 每会话配置拒读根目录 `/`（srt 展开为 `/` 下除 `/proc` `/dev` `/sys` 外的每个目录），再只读放行最小系统路径（Linux：`/usr` 与 `/bin` `/sbin` `/lib*`，`/etc` 只放行名称解析、动态链接、TLS 信任、用户查询、alternatives 所需的若干项，**不整体放行**；macOS 为未实测的起始集合）、授权目录、本项目本后端私有 HOME、本会话临时目录、后端安装目录、Node 运行时与 srt 自身。Windows 无法廉价地对整盘加拒绝 ACE，只拒读 `C:\Users`（Host 可追加），`D:\` 等其他固定盘仍可读；“枚举非系统固定盘根加入拒读”的可行性列为工程师待验证项。
+3. **只能收紧**（沿用 6.5）：域名白名单上限 = 后端默认 + Host 层追加；会话快照、用户、项目各层只能取交集收窄。full_access 只能来自“会话请求 + Host 持有的有效授予”，项目或用户配置不能单独开启。
+4. **撤权契约**：授予撤销时 Host 立即对运行中的会话执行“撤权停止”——取消当前 turn 并把未答复的原生审批答为取消；本 run 未结算的请求按 6.4 结算（未发出 → 取消，已发出 → `outcome_unknown`）；杀进程树；会话标记为“需以沙箱模式重建”，**不自动重放**上一次可能有副作用的操作，结果未知的操作交用户核对；沙箱起不来则会话保持停止，绝不回退 full_access。crate 入口：`port::stop_for_revocation` / `AcpConnection::stop_for_revocation`、`port::rebuild_after_revocation`；Host 接线契约见 `crates/fox-agent-backend/docs/sandbox.md` 第 1.1 节。
+5. **私有 HOME（已定）**：粒度为**每个项目 × 每个后端一份**，同项目同后端的多个会话复用；目录名只用 Host 数据库中的稳定项目 UUID + 后端 ID（`<fox_data>/sandbox-homes/<UUID>/<后端>`），不从路径或名称派生，UUID 为空或非法即拒绝（`sandbox_policy_invalid`）；授权目录不得包含私有 HOME 根或与之重叠。临时目录（TMPDIR 等）按会话分开，会话结束清理。后端的 HOME / CODEX_HOME / DSH_HOME / XDG 指向该私有 HOME。
+6. **认证**：尊重各后端原生登录方式，不做统一认证，不复制用户真实 HOME 及其中的原生凭据。用户在各项目各后端的私有 HOME 内按原生方式登录；后端进程能读到其私有 HOME 中的凭据。文档、能力声明与 UI 不得宣称“Agent 接触不到密钥”或“一次登录到处用”。
+7. **能力声明如实**：“沙箱范围”按模式与平台实测声明，新增读边界字段 `read_scope`（`authorized_only` / `user_dirs_only` / `none`，由策略内容推出）与 `read_scope_verified`（按平台实测状态），UI 文案只依据这两项：Linux 本轮实测拒读 `/` 通过，声明 `authorized_only` 且已验证，可显示“读取限定在授权文件夹”；macOS 为 `authorized_only` 但未验证；Windows 为 `user_dirs_only`（“部分：仅用户目录受保护”）且未验证；full_access 为 `none`，不宣称目录隔离。
+8. **测试统计口径**：cargo 全绿不等于实测通过。真实 srt 测试标 `#[ignore]`，普通运行计入 ignored，加 `--include-ignored` 而未设 `FOX_TEST_REAL_SRT=1` 时失败；其余文件中以 `FOX_TEST_REAL_ACP=1` 门控的真实测试未开启时打印 SKIPPED 并被 cargo 计为 passed，报告须按名单扣除，分列“真正执行”“跳过”“真实环境执行”。
+9. **Windows 按需安装**：用户首次选择沙箱模式时调用 srt `windows-install`（一次 UAC）；卸载 Fox 时调用 `windows-uninstall`。Windows 支持为 alpha，后端与 Node 须装在 Fox 管理目录（沙箱账户读不到用户目录中的工具）。
 
-**已知限制**：Windows alpha；Windows 上代理令牌在 runner 命令行中可见；网络按域名过滤、不检查内容；macOS / Windows 尚未实测。
+**已知限制**：Windows alpha，读边界仅覆盖用户目录；Windows 上代理令牌在 runner 命令行中可见；网络按域名过滤、不检查内容；私有 HOME 中的原生凭据对后端进程可读；macOS / Windows 尚未实测。
