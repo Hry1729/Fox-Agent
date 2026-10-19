@@ -23,11 +23,16 @@
 //! to full access.
 //!
 //! srt reads are allowed everywhere by default (deny-then-allow, `allowRead`
-//! beats `denyRead`). The settings therefore always deny the user home roots
-//! (`/home`, `/Users`, `C:\Users`, plus whatever the Host adds) and re-allow
-//! only the authorized directories, the private HOME and the read-only paths
-//! the backend needs (its Fox-managed install directory, the Node runtime, the
-//! srt package itself). See `docs/sandbox.md`.
+//! beats `denyRead`). On Linux and macOS the settings therefore deny the
+//! filesystem root `/` (srt then denies every top-level directory except
+//! `/proc`, `/dev`, `/sys`) and re-allow only: the minimal system paths needed
+//! to run ([`default_system_read_only`]), the authorized directories, this
+//! project's private HOME for this backend, this session's temp directory and
+//! the read-only paths the backend needs (its Fox-managed install directory,
+//! the Node runtime, the srt package itself). Windows cannot cheaply deny a
+//! whole drive, so there only `C:\Users` (plus Host additions) is denied and
+//! the capability declaration says so ([`ReadScope::UserDirsOnly`]). See
+//! `docs/sandbox.md`.
 
 use crate::config::{HostPolicy, SessionSnapshot};
 use crate::launch::LaunchSpec;
@@ -154,8 +159,13 @@ pub fn effective_permission_mode(policy: &HostPolicy, snapshot: &SessionSnapshot
 pub enum ModeRecheck {
     Unchanged,
     /// The running process is outside the sandbox but full access has been
-    /// withdrawn: stop it and start it again under srt (preflight included,
-    /// fail-closed) before the next continue / resume.
+    /// withdrawn. The Host calls the revocation stop
+    /// ([`crate::port::stop_for_revocation`], or
+    /// `AcpConnection::stop_for_revocation` on a live connection): cancel the
+    /// turn, settle pending requests (in flight -> `outcome_unknown`), kill
+    /// the process tree; then [`crate::port::rebuild_after_revocation`]
+    /// starts it again under srt (preflight included, fail-closed, no replay
+    /// of the last operation) before the next continue / resume.
     RestartSandboxed(String),
 }
 
@@ -435,18 +445,112 @@ impl HostOs {
     }
 }
 
-/// Roots holding user data that are always read-denied (Linux: `/home`,
-/// `/root`, `/tmp`; macOS: `/Users`, `/Volumes`; Windows: `C:\Users`). The Host should add
-/// the real profile root when it is elsewhere (another drive, a network
-/// home) and any other data volume.
+/// Read-denied roots.
+///
+/// * Linux / macOS: the filesystem root `/`. srt expands it to every
+///   top-level directory except `/proc`, `/dev` and `/sys` (srt README,
+///   "Path Syntax (Linux)"), so `/data`, `/mnt`, `/opt`, `/srv`, `/tmp`,
+///   `/var`, `/workspace` ... are all unreadable unless re-allowed. Measured on
+///   Linux (docs/sandbox.md section 6); unverified on macOS.
+/// * Windows: `C:\Users` only. Other fixed drives (`D:\` ...) stay readable;
+///   the Host may add their roots, which is an engineer-verification item
+///   (docs/sandbox.md section 7). The declaration reports
+///   [`ReadScope::UserDirsOnly`] there.
 pub fn default_deny_read_roots(os: HostOs) -> Vec<PathBuf> {
     match os {
-        // `/tmp` too: other programs' temp files are user data. Measured on
-        // Linux with pi-acp inside (srt keeps working; the backend's own temp
-        // dir is TMPDIR under the private HOME).
-        HostOs::Linux | HostOs::Other => vec!["/home".into(), "/root".into(), "/tmp".into()],
-        HostOs::MacOs => vec!["/Users".into(), "/Volumes".into()],
+        HostOs::Linux | HostOs::MacOs | HostOs::Other => vec!["/".into()],
         HostOs::Windows => vec![r"C:\Users".into()],
+    }
+}
+
+/// Minimal system paths re-allowed (read-only) under `denyRead: ["/"]`.
+///
+/// Linux (measured with pi-acp + pi + bash/coreutils/curl/git/python inside,
+/// docs/sandbox.md section 6): `/usr` and the top-level library/binary
+/// directories (symlinks into `/usr` on merged-usr systems, real directories
+/// elsewhere), and only the parts of `/etc` that name resolution, the dynamic
+/// loader, TLS trust, user lookup and Debian alternatives need. `/etc` is NOT
+/// allowed as a whole. Paths that do not exist on the machine are dropped by
+/// the launcher before the settings are written.
+///
+/// macOS: unverified starting set (system frameworks, dyld cache, `/etc` and
+/// `/var` live under `/private`). Windows: empty (system directories are not
+/// denied there).
+pub fn default_system_read_only(os: HostOs) -> Vec<PathBuf> {
+    let list: &[&str] = match os {
+        HostOs::Linux | HostOs::Other => &[
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib32",
+            "/lib64",
+            "/libx32",
+            "/etc/alternatives",
+            "/etc/ca-certificates",
+            "/etc/crypto-policies",
+            "/etc/gai.conf",
+            "/etc/group",
+            "/etc/host.conf",
+            "/etc/hosts",
+            "/etc/ld.so.cache",
+            "/etc/ld.so.conf",
+            "/etc/ld.so.conf.d",
+            "/etc/localtime",
+            "/etc/nsswitch.conf",
+            "/etc/passwd",
+            "/etc/pki",
+            "/etc/resolv.conf",
+            "/etc/ssl",
+        ],
+        HostOs::MacOs => &[
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/System",
+            "/Library/Apple",
+            "/Library/Preferences/SystemConfiguration",
+            "/private/etc/hosts",
+            "/private/etc/resolv.conf",
+            "/private/etc/ssl",
+            "/private/etc/passwd",
+            "/private/etc/group",
+            "/private/etc/localtime",
+            "/private/var/db/timezone",
+            "/private/var/db/dyld",
+            "/dev",
+        ],
+        HostOs::Windows => &[],
+    };
+    list.iter().map(PathBuf::from).collect()
+}
+
+/// What the read boundary actually protects. The UI wording is chosen from
+/// this, never from the mode alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadScope {
+    /// Everything outside the authorized directories, the private HOME, the
+    /// session temp directory, the backend/Node/srt install paths and the
+    /// listed system paths is unreadable (`denyRead: ["/"]`).
+    AuthorizedOnly,
+    /// Only the user-profile roots (and any Host-added roots) are unreadable;
+    /// other drives and folders remain readable ("partial").
+    UserDirsOnly,
+    /// No read boundary (full access, or nothing denied).
+    None,
+}
+
+impl ReadScope {
+    /// UI text (Chinese product copy) for this scope.
+    pub fn ui_label(self, verified: bool) -> &'static str {
+        match (self, verified) {
+            (Self::AuthorizedOnly, true) => "读取限定在授权文件夹",
+            (Self::AuthorizedOnly, false) => "读取限定在授权文件夹（本平台待实测）",
+            (Self::UserDirsOnly, true) => "部分：仅用户目录受保护",
+            (Self::UserDirsOnly, false) => "部分：仅用户目录受保护（本平台待实测）",
+            (Self::None, _) => "不限制读取",
+        }
     }
 }
 
@@ -456,16 +560,44 @@ pub struct AuthorizedDir {
     pub writable: bool,
 }
 
+/// A private HOME together with the root all Fox private HOMEs live under.
+/// Built by [`PrivateHomes::home_for`]; the root lets
+/// [`SandboxPolicy::validate`] refuse an authorized directory that would
+/// expose another project's (or another backend's) private HOME.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateHome {
+    pub root: PathBuf,
+    pub path: PathBuf,
+}
+
+/// A bare path is a standalone HOME that is its own root (tests, tools). The
+/// Host uses [`PrivateHomes::home_for`].
+impl From<PathBuf> for PrivateHome {
+    fn from(path: PathBuf) -> Self {
+        Self { root: path.clone(), path }
+    }
+}
+
 /// What one sandboxed session may touch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxPolicy {
     /// The session's authorized directories (from the Host's authorization
     /// snapshot). Read-only entries are readable but not writable.
     pub authorized: Vec<AuthorizedDir>,
-    /// Fox-managed HOME for the backend (its own login store, history and
-    /// caches live here, never in the user's real home). Readable and
-    /// writable.
+    /// Fox-managed HOME for this project and this backend (its own login
+    /// store, history and caches live here, never in the user's real home).
+    /// Readable and writable. Shared by the sessions of the same project and
+    /// backend.
     pub private_home: PathBuf,
+    /// Root of every Fox private HOME (`<fox_data>/sandbox-homes`). No
+    /// authorized directory may contain it or lie inside it.
+    pub private_home_root: PathBuf,
+    /// This session's temp directory (TMPDIR/TMP/TEMP), set by the launcher,
+    /// removed when the session ends. Readable and writable.
+    pub session_tmp: Option<PathBuf>,
+    /// System paths re-allowed read-only under a `/` deny
+    /// ([`default_system_read_only`]).
+    pub system_read_only: Vec<PathBuf>,
     /// Extra read-only paths the backend needs to run: its Fox-managed install
     /// directory, the Node runtime, the srt package. The launcher adds the
     /// last two itself.
@@ -521,18 +653,37 @@ fn literal(path: &Path) -> Value {
 impl SandboxPolicy {
     pub fn new(
         authorized: Vec<AuthorizedDir>,
-        private_home: PathBuf,
+        private_home: impl Into<PrivateHome>,
         extra_read_only: Vec<PathBuf>,
         allowed_domains: Vec<String>,
         os: HostOs,
     ) -> Self {
-        Self { authorized, private_home, extra_read_only, allowed_domains, deny_read_roots: default_deny_read_roots(os) }
+        let home = private_home.into();
+        Self {
+            authorized,
+            private_home: home.path,
+            private_home_root: home.root,
+            session_tmp: None,
+            system_read_only: default_system_read_only(os),
+            extra_read_only,
+            allowed_domains,
+            deny_read_roots: default_deny_read_roots(os),
+        }
+    }
+
+    /// Paths the policy itself grants (authorized, private HOME, session temp,
+    /// backend install paths), without the system paths.
+    fn granted_roots(&self) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = self.authorized.iter().map(|dir| dir.path.as_path()).collect();
+        roots.push(&self.private_home);
+        roots.extend(self.session_tmp.as_deref());
+        roots.extend(self.extra_read_only.iter().map(PathBuf::as_path));
+        roots
     }
 
     fn readable_roots(&self) -> Vec<&Path> {
-        let mut roots: Vec<&Path> = self.authorized.iter().map(|dir| dir.path.as_path()).collect();
-        roots.push(&self.private_home);
-        roots.extend(self.extra_read_only.iter().map(PathBuf::as_path));
+        let mut roots = self.granted_roots();
+        roots.extend(self.system_read_only.iter().map(PathBuf::as_path));
         roots
     }
 
@@ -540,7 +691,23 @@ impl SandboxPolicy {
         let mut roots: Vec<&Path> =
             self.authorized.iter().filter(|dir| dir.writable).map(|dir| dir.path.as_path()).collect();
         roots.push(&self.private_home);
+        roots.extend(self.session_tmp.as_deref());
         roots
+    }
+
+    /// What the read boundary of this policy protects on `os`. A `/` deny is
+    /// [`ReadScope::AuthorizedOnly`]; on Windows (no whole-drive deny) any
+    /// deny list is [`ReadScope::UserDirsOnly`].
+    pub fn read_scope(&self, os: HostOs) -> ReadScope {
+        if self.deny_read_roots.is_empty() {
+            return ReadScope::None;
+        }
+        let denies_root = self.deny_read_roots.iter().any(|root| normalized(root, os) == "/");
+        if os != HostOs::Windows && denies_root {
+            ReadScope::AuthorizedOnly
+        } else {
+            ReadScope::UserDirsOnly
+        }
     }
 
     /// Whether a path is readable inside the sandbox this policy builds.
@@ -557,7 +724,11 @@ impl SandboxPolicy {
         if self.deny_read_roots.is_empty() {
             return invalid("no read-denied roots: srt would allow reading the whole disk".into());
         }
-        let all = self.readable_roots().into_iter().chain(self.deny_read_roots.iter().map(PathBuf::as_path));
+        let all = self
+            .readable_roots()
+            .into_iter()
+            .chain(self.deny_read_roots.iter().map(PathBuf::as_path))
+            .chain(std::iter::once(self.private_home_root.as_path()));
         for path in all {
             if !is_absolute_for(path, os) {
                 return invalid(format!("path must be absolute: {}", path.display()));
@@ -575,6 +746,28 @@ impl SandboxPolicy {
                         "{} would re-open the read-denied root {}",
                         root.display(),
                         deny.display()
+                    ));
+                }
+            }
+        }
+        // Private HOMEs: this one must sit under the root, and no authorized
+        // directory may reach any of them (another project's login and
+        // history live there) or the session temp directory.
+        if !within(&self.private_home, &self.private_home_root, os) {
+            return invalid(format!(
+                "private HOME {} is outside the private HOME root {}",
+                self.private_home.display(),
+                self.private_home_root.display()
+            ));
+        }
+        for dir in &self.authorized {
+            let reserved = std::iter::once(&self.private_home_root).chain(self.session_tmp.iter());
+            for fox in reserved {
+                if within(&dir.path, fox, os) || within(fox, &dir.path, os) {
+                    return invalid(format!(
+                        "authorized directory {} overlaps Fox's private directory {}",
+                        dir.path.display(),
+                        fox.display()
                     ));
                 }
             }
@@ -621,29 +814,64 @@ impl SandboxPolicy {
     }
 }
 
-/// Layout of the Fox-managed private HOME. `PerBackend` keeps the backend's
-/// own login across sessions but lets sessions of the same backend read each
-/// other's native history; `PerSession` isolates fully but needs a login per
-/// session. The Host chooses (see docs/sandbox.md, open question).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Granularity of the Fox-managed private HOME (product decision
+/// 2026-10-19): one per project x backend, shared by that project's sessions
+/// of that backend, so the backend's native login and history carry over
+/// between those sessions and never across projects or backends. Temp
+/// directories are per session regardless (see [`SrtLauncher`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrivateHomeScope {
-    PerBackend,
-    PerProject,
-    PerSession,
+    #[default]
+    PerProjectPerBackend,
 }
 
-/// `<fox_data>/backends/<backend>/home[/<scope key>]`.
-pub fn private_home_for(fox_data: &Path, backend: AgentBackend, scope: PrivateHomeScope, scope_key: &str) -> PathBuf {
-    let base = fox_data.join("backends").join(backend.as_str()).join("home");
-    let key: String = scope_key
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    match scope {
-        PrivateHomeScope::PerBackend => base,
-        PrivateHomeScope::PerProject => base.join("projects").join(key),
-        PrivateHomeScope::PerSession => base.join("sessions").join(key),
+/// Where the private HOMEs live: `<root>/<project uuid>/<backend id>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateHomes {
+    /// `<fox_data>/sandbox-homes`; Fox-owned, never an authorized directory.
+    pub root: PathBuf,
+    pub scope: PrivateHomeScope,
+}
+
+/// Canonical (lowercase, hyphenated) form of a project UUID from the Host
+/// database, or `None` when it is empty, not 8-4-4-4-12 hex, or the nil UUID.
+/// Names, paths and display titles are never accepted: two projects can
+/// share a name or a folder name, and a path can contain anything.
+pub fn canonical_project_uuid(value: &str) -> Option<String> {
+    let groups: Vec<&str> = value.split('-').collect();
+    let lengths = [8, 4, 4, 4, 12];
+    if groups.len() != 5
+        || groups.iter().zip(lengths).any(|(group, len)| group.len() != len || !group.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return None;
+    }
+    let canonical = value.to_ascii_lowercase();
+    (canonical != "00000000-0000-0000-0000-000000000000").then_some(canonical)
+}
+
+impl PrivateHomes {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root, scope: PrivateHomeScope::default() }
+    }
+
+    /// The private HOME of `backend` in the project with database id
+    /// `project_uuid`. An empty or malformed UUID is refused
+    /// (`sandbox_policy_invalid`); nothing is derived from paths or names.
+    pub fn home_for(&self, project_uuid: &str, backend: AgentBackend) -> Result<PrivateHome, SandboxError> {
+        let uuid = canonical_project_uuid(project_uuid).ok_or_else(|| {
+            SandboxError::new(
+                SandboxErrorCode::SandboxPolicyInvalid,
+                format!("project id {project_uuid:?} is not a valid project UUID"),
+            )
+        })?;
+        if backend == AgentBackend::Fox {
+            return Err(SandboxError::new(SandboxErrorCode::SandboxPolicyInvalid, "FoxBackend has no sandboxed private HOME"));
+        }
+        let path = match self.scope {
+            PrivateHomeScope::PerProjectPerBackend => self.root.join(&uuid).join(backend.as_str()),
+        };
+        Ok(PrivateHome { root: self.root.clone(), path })
     }
 }
 
@@ -890,12 +1118,15 @@ pub fn preflight(install: &SrtInstall, probe: &dyn SystemProbe) -> Result<Sandbo
 // Launcher
 // ---------------------------------------------------------------------------
 
-/// Per-session sandbox state on disk (the settings file). Removed on drop, so
-/// it goes away with the session's connection whatever path ends it.
+/// Per-session sandbox state on disk: the settings file (outside the
+/// sandbox) and the session temp directory (inside it). Both are removed on
+/// drop, so they go away with the session's connection whatever path ends
+/// it. The private HOME is per project x backend and is kept.
 #[derive(Debug)]
 pub struct SandboxSession {
     dir: PathBuf,
     settings_path: PathBuf,
+    tmp: Option<PathBuf>,
 }
 
 impl SandboxSession {
@@ -907,13 +1138,26 @@ impl SandboxSession {
         &self.dir
     }
 
-    /// Remove the session directory now (drop does the same).
+    /// The session temp directory (TMPDIR inside the sandbox).
+    pub fn tmp_dir(&self) -> Option<&Path> {
+        self.tmp.as_deref()
+    }
+
+    /// Remove the session directories now (drop does the same).
     pub fn cleanup(self) {}
+
+    #[cfg(test)]
+    pub(crate) fn for_test(dir: PathBuf) -> Self {
+        Self { settings_path: dir.join("srt-settings.json"), dir, tmp: None }
+    }
 }
 
 impl Drop for SandboxSession {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+        if let Some(tmp) = &self.tmp {
+            let _ = std::fs::remove_dir_all(tmp);
+        }
     }
 }
 
@@ -933,8 +1177,11 @@ pub trait SandboxLauncher {
 pub struct SrtLauncher {
     pub ready: SandboxReady,
     /// Fox private directory for per-session settings, outside every path
-    /// the sandbox may write.
+    /// the sandbox may write or read.
     pub state_root: PathBuf,
+    /// Parent of the per-session temp directories (`<tmp_root>/<session id>`).
+    /// Defaults to `<state_root>/sandbox-tmp`.
+    pub tmp_root: PathBuf,
 }
 
 fn path_sep(os: HostOs) -> &'static str {
@@ -961,12 +1208,25 @@ fn runtime_root(binary: &Path) -> Option<PathBuf> {
 
 impl SrtLauncher {
     pub fn new(ready: SandboxReady, state_root: PathBuf) -> Self {
-        Self { ready, state_root }
+        let tmp_root = state_root.join("sandbox-tmp");
+        Self { ready, state_root, tmp_root }
     }
 
-    /// Policy plus what srt itself needs readable.
+    pub fn with_tmp_root(mut self, tmp_root: PathBuf) -> Self {
+        self.tmp_root = tmp_root;
+        self
+    }
+
+    /// Temp directory of one session.
+    pub fn session_tmp(&self, session_id: &str) -> PathBuf {
+        self.tmp_root.join(session_id)
+    }
+
+    /// Policy plus what srt itself needs readable. System paths that do not
+    /// exist on this machine are dropped.
     pub fn effective_policy(&self, policy: &SandboxPolicy) -> SandboxPolicy {
         let mut policy = policy.clone();
+        policy.system_read_only.retain(|path| std::fs::symlink_metadata(path).is_ok());
         let mut extra: Vec<PathBuf> = Vec::new();
         extra.extend(self.ready.install.package_root());
         extra.extend(runtime_root(&self.ready.install.node));
@@ -985,15 +1245,34 @@ impl SrtLauncher {
         let os = self.ready.os;
         let home = policy.private_home.to_string_lossy().into_owned();
         let sub = |name: &str| policy.private_home.join(name).to_string_lossy().into_owned();
+        // Per-session temp directory. srt itself also inherits it and puts
+        // its proxy bridge sockets there, so it must be readable inside the
+        // sandbox (measured: with srt's TMPDIR under a denied `/tmp` the
+        // in-sandbox relay cannot reach the socket and every proxied request
+        // fails with "Proxy CONNECT aborted").
+        let tmp = policy
+            .session_tmp
+            .as_ref()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_else(|| sub("tmp"));
         let mut env = vec![
             ("HOME".to_owned(), home.clone()),
             ("XDG_CONFIG_HOME".to_owned(), sub(".config")),
             ("XDG_CACHE_HOME".to_owned(), sub(".cache")),
             ("XDG_DATA_HOME".to_owned(), sub(".local/share")),
             ("XDG_STATE_HOME".to_owned(), sub(".local/state")),
-            ("TMPDIR".to_owned(), sub("tmp")),
-            ("TMP".to_owned(), sub("tmp")),
-            ("TEMP".to_owned(), sub("tmp")),
+            ("TMPDIR".to_owned(), tmp.clone()),
+            ("TMP".to_owned(), tmp.clone()),
+            ("TEMP".to_owned(), tmp.clone()),
+            // srt replaces TMPDIR inside the sandbox with this variable's value
+            // (default `/tmp/claude`, which under a `/` deny is an in-memory
+            // tmpfs); point it at the session temp directory too (measured).
+            ("CLAUDE_CODE_TMPDIR".to_owned(), tmp),
+            // Node's built-in fetch ignores HTTP(S)_PROXY unless this is set;
+            // inside the sandbox the srt proxy is the only way out. Measured
+            // with `node -e fetch(...)` inside srt (EAI_AGAIN without it, 200
+            // with it); not yet measured with a real model provider.
+            ("NODE_USE_ENV_PROXY".to_owned(), "1".to_owned()),
         ];
         if os == HostOs::Windows {
             env.push(("USERPROFILE".to_owned(), home.clone()));
@@ -1047,7 +1326,9 @@ impl SandboxLauncher for SrtLauncher {
                 format!("backend program must be an absolute path inside a readable directory, got {:?}", spec.program),
             ));
         }
-        let policy = self.effective_policy(policy);
+        let mut policy = self.effective_policy(policy);
+        let session_tmp = self.session_tmp(session_id);
+        policy.session_tmp = Some(session_tmp.clone());
         policy.validate(os)?;
         if !policy.is_readable(program, os) {
             return Err(SandboxError::new(
@@ -1058,15 +1339,22 @@ impl SandboxLauncher for SrtLauncher {
         }
         if within(&self.state_root, &policy.private_home, os)
             || policy.writable_roots().iter().any(|root| within(&self.state_root, root, os))
+            || policy.readable_roots().iter().any(|root| within(&self.state_root, root, os))
+            || policy.granted_roots().iter().any(|root| within(root, &self.state_root, os) && !within(root, &self.tmp_root, os))
         {
-            return Err(SandboxError::new(SandboxPolicyInvalid, "sandbox state directory must not be writable by the sandbox"));
+            return Err(SandboxError::new(
+                SandboxPolicyInvalid,
+                "sandbox state directory must be neither writable nor readable by the sandbox",
+            ));
         }
 
         let io = |error: std::io::Error| SandboxError::new(SandboxUnavailable, format!("cannot prepare sandbox: {error}"));
         let dir = self.state_root.join("sandbox-sessions").join(session_id);
         std::fs::create_dir_all(&dir).map_err(io)?;
-        let session = SandboxSession { settings_path: dir.join("srt-settings.json"), dir };
-        std::fs::create_dir_all(policy.private_home.join("tmp")).map_err(io)?;
+        let _ = std::fs::remove_dir_all(&session_tmp);
+        std::fs::create_dir_all(&session_tmp).map_err(io)?;
+        let session = SandboxSession { settings_path: dir.join("srt-settings.json"), dir, tmp: Some(session_tmp) };
+        std::fs::create_dir_all(&policy.private_home).map_err(io)?;
         let settings = serde_json::to_vec_pretty(&policy.to_srt_settings()).expect("settings serialize");
         write_private(&session.settings_path, &settings).map_err(io)?;
 
@@ -1181,6 +1469,14 @@ pub fn srt_enforcement(os: HostOs) -> Enforcement {
     }
 }
 
+/// Whether the read boundary of a policy has been measured on `os` with the
+/// settings shape Fox writes there. Linux: measured 2026-10-19 with
+/// `denyRead: ["/"]` and real pi-acp (docs/sandbox.md section 6). macOS and
+/// Windows: not yet.
+pub fn srt_read_scope_verified(os: HostOs) -> bool {
+    os == HostOs::Linux
+}
+
 /// The "sandbox scope" dimension for one session, stated per mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxDeclaration {
@@ -1189,7 +1485,13 @@ pub struct SandboxDeclaration {
     pub mechanism: Option<String>,
     pub filesystem: Enforcement,
     pub network: Enforcement,
-    /// The UI may say "limited to these folders" only when true.
+    /// What the read boundary actually protects (UI wording comes from this
+    /// and [`Self::read_scope_verified`], see [`ReadScope::ui_label`]).
+    pub read_scope: ReadScope,
+    /// The read boundary was measured on this platform.
+    pub read_scope_verified: bool,
+    /// The UI may say "limited to these folders" only when true: srt enforced,
+    /// read scope `AuthorizedOnly` and measured.
     pub directory_isolation: bool,
     pub writable_roots: Vec<String>,
     pub readable_roots: Vec<String>,
@@ -1201,12 +1503,18 @@ impl SandboxDeclaration {
         match (mode, policy) {
             (PermissionMode::Sandboxed, Some(policy)) => {
                 let enforcement = srt_enforcement(os);
+                let read_scope = policy.read_scope(os);
+                let read_scope_verified = srt_read_scope_verified(os);
                 Self {
                     mode,
                     mechanism: Some("srt".into()),
                     filesystem: enforcement,
                     network: enforcement,
-                    directory_isolation: enforcement == Enforcement::Enforced,
+                    read_scope,
+                    read_scope_verified,
+                    directory_isolation: enforcement == Enforcement::Enforced
+                        && read_scope == ReadScope::AuthorizedOnly
+                        && read_scope_verified,
                     writable_roots: policy.writable_roots().iter().map(|p| p.to_string_lossy().into_owned()).collect(),
                     readable_roots: policy.readable_roots().iter().map(|p| p.to_string_lossy().into_owned()).collect(),
                     allowed_domains: policy.allowed_domains.clone(),
@@ -1219,6 +1527,8 @@ impl SandboxDeclaration {
                 mechanism: None,
                 filesystem: Enforcement::Absent,
                 network: Enforcement::Absent,
+                read_scope: ReadScope::None,
+                read_scope_verified: false,
                 directory_isolation: false,
                 writable_roots: Vec::new(),
                 readable_roots: Vec::new(),
@@ -1265,17 +1575,28 @@ mod tests {
     use super::*;
     use crate::port::CapabilityDeclaration;
 
+    const PROJECT: &str = "3f2a6c1e-8b4d-4e0a-9c55-0d1e2f3a4b5c";
+    const HOME_ROOT: &str = "/home/u/.local/share/fox/sandbox-homes";
+
+    fn homes() -> PrivateHomes {
+        PrivateHomes::new(HOME_ROOT.into())
+    }
+
     fn linux_policy() -> SandboxPolicy {
         SandboxPolicy::new(
             vec![
                 AuthorizedDir { path: "/home/u/proj".into(), writable: true },
                 AuthorizedDir { path: "/home/u/docs".into(), writable: false },
             ],
-            "/home/u/.local/share/fox/backends/pi/home".into(),
+            homes().home_for(PROJECT, AgentBackend::Pi).unwrap(),
             vec!["/home/u/.local/share/fox/backends/pi/install".into()],
             vec!["api.anthropic.com".into()],
             HostOs::Linux,
         )
+    }
+
+    fn pi_home() -> String {
+        format!("{HOME_ROOT}/{PROJECT}/pi")
     }
 
     fn paths(value: &Value) -> Vec<String> {
@@ -1291,36 +1612,43 @@ mod tests {
     }
 
     #[test]
-    fn settings_deny_home_roots_and_reallow_only_authorized_paths() {
+    fn settings_deny_the_root_and_reallow_only_granted_and_system_paths() {
         let policy = linux_policy();
         policy.validate(HostOs::Linux).unwrap();
         let settings = policy.to_srt_settings();
         let fs = &settings["filesystem"];
-        assert_eq!(paths(&fs["denyRead"]), ["/home", "/root", "/tmp"]);
-        assert_eq!(
-            paths(&fs["allowRead"]),
-            [
-                "/home/u/proj",
-                "/home/u/docs",
-                "/home/u/.local/share/fox/backends/pi/home",
-                "/home/u/.local/share/fox/backends/pi/install"
-            ]
-        );
-        assert_eq!(paths(&fs["allowWrite"]), ["/home/u/proj", "/home/u/.local/share/fox/backends/pi/home"]);
+        assert_eq!(paths(&fs["denyRead"]), ["/"]);
+        let allow_read = paths(&fs["allowRead"]);
+        let granted = ["/home/u/proj".to_owned(), "/home/u/docs".to_owned(), pi_home(), "/home/u/.local/share/fox/backends/pi/install".to_owned()];
+        assert_eq!(allow_read[..4], granted);
+        let system: Vec<String> = default_system_read_only(HostOs::Linux).iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(allow_read[4..], system[..]);
+        assert!(!allow_read.iter().any(|p| p == "/etc"), "/etc is never allowed as a whole");
+        assert!(system.contains(&"/etc/ssl".to_owned()) && system.contains(&"/usr".to_owned()));
+        assert_eq!(paths(&fs["allowWrite"]), ["/home/u/proj".to_owned(), pi_home()]);
         assert_eq!(settings["network"]["allowedDomains"], json!(["api.anthropic.com"]));
         assert_eq!(settings["network"]["allowLocalBinding"], json!(false));
         assert_eq!(settings["enableWeakerNestedSandbox"], json!(false));
         assert!(policy.is_readable(Path::new("/home/u/proj/src/a.rs"), HostOs::Linux));
         assert!(!policy.is_readable(Path::new("/home/u/.ssh/id_ed25519"), HostOs::Linux));
         assert!(!policy.is_readable(Path::new("/home/u/project-other"), HostOs::Linux), "prefix is not containment");
+        // Beyond the home roots: other volumes and system data are denied too.
+        for outside in ["/data/x.csv", "/mnt/usb/a", "/opt/secret", "/srv/db", "/var/lib/x", "/tmp/other", "/etc/shadow", "/etc/environment", "/workspace/repo"] {
+            assert!(!policy.is_readable(Path::new(outside), HostOs::Linux), "{outside} must be unreadable");
+        }
+        assert!(policy.is_readable(Path::new("/usr/lib/libc.so.6"), HostOs::Linux));
+        assert!(policy.is_readable(Path::new("/etc/ssl/certs/ca-certificates.crt"), HostOs::Linux));
+        assert_eq!(policy.read_scope(HostOs::Linux), ReadScope::AuthorizedOnly);
     }
 
     #[test]
-    fn windows_and_macos_deny_their_profile_roots() {
-        assert_eq!(default_deny_read_roots(HostOs::MacOs), [PathBuf::from("/Users"), PathBuf::from("/Volumes")]);
+    fn macos_denies_the_root_and_windows_only_the_profile_root() {
+        assert_eq!(default_deny_read_roots(HostOs::MacOs), [PathBuf::from("/")]);
+        assert!(default_system_read_only(HostOs::MacOs).contains(&PathBuf::from("/System")));
+        assert!(default_system_read_only(HostOs::Windows).is_empty());
         let policy = SandboxPolicy::new(
             vec![AuthorizedDir { path: r"C:\Users\u\proj".into(), writable: true }],
-            r"C:\Users\u\AppData\Local\Fox\backends\codex\home".into(),
+            PathBuf::from(r"C:\Users\u\AppData\Local\Fox\backends\codex\home"),
             vec![],
             vec![],
             HostOs::Windows,
@@ -1329,16 +1657,19 @@ mod tests {
         assert_eq!(paths(&policy.to_srt_settings()["filesystem"]["denyRead"]), [r"C:\Users"]);
         assert!(!policy.is_readable(Path::new(r"c:\users\u\Desktop\x.txt"), HostOs::Windows));
         assert!(policy.is_readable(Path::new(r"C:\Users\u\proj\a.txt"), HostOs::Windows));
+        // Partial boundary, stated as such: other drives stay readable.
+        assert!(policy.is_readable(Path::new(r"D:\data\x.csv"), HostOs::Windows));
+        assert_eq!(policy.read_scope(HostOs::Windows), ReadScope::UserDirsOnly);
     }
 
     #[test]
     fn policy_refuses_to_reopen_a_denied_root_or_use_relative_paths() {
         let mut policy = linux_policy();
-        policy.authorized.push(AuthorizedDir { path: "/home".into(), writable: false });
-        assert_eq!(policy.validate(HostOs::Linux).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
-        let mut policy = linux_policy();
         policy.authorized.push(AuthorizedDir { path: "/".into(), writable: true });
-        assert!(policy.validate(HostOs::Linux).is_err(), "authorizing / re-opens every home");
+        assert_eq!(policy.validate(HostOs::Linux).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid, "authorizing / re-opens everything");
+        let mut policy = linux_policy();
+        policy.extra_read_only.push("/".into());
+        assert!(policy.validate(HostOs::Linux).is_err());
         let mut policy = linux_policy();
         policy.authorized[0].path = "proj".into();
         assert!(policy.validate(HostOs::Linux).is_err());
@@ -1560,14 +1891,15 @@ mod tests {
     fn srt_wrap_writes_per_session_settings_and_points_home_at_the_private_dir() {
         let root = temp("wrap");
         let state = root.join("state");
-        let home = root.join("home/u/.fox/codex-home");
-        let policy = SandboxPolicy {
-            authorized: vec![AuthorizedDir { path: root.join("home/u/proj"), writable: true }],
-            private_home: home.clone(),
-            extra_read_only: vec!["/opt/fox/backends/codex".into()],
-            allowed_domains: vec!["api.openai.com".into()],
-            deny_read_roots: vec![root.join("home")],
-        };
+        let homes = PrivateHomes::new(root.join("fox/sandbox-homes"));
+        let home = homes.home_for(PROJECT, AgentBackend::Codex).unwrap().path;
+        let policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: root.join("home/u/proj"), writable: true }],
+            homes.home_for(PROJECT, AgentBackend::Codex).unwrap(),
+            vec!["/opt/fox/backends/codex".into()],
+            vec!["api.openai.com".into()],
+            HostOs::Linux,
+        );
         let launcher = launcher(state.clone());
         let wrapped = launcher.wrap(&spec("/opt/fox/backends/codex/bin/codex-acp"), &policy, "sess-1").unwrap();
         assert_eq!(wrapped.spec.program, "/opt/fox/node/bin/node");
@@ -1584,9 +1916,14 @@ mod tests {
             ]
         );
         let env: BTreeMap<_, _> = wrapped.spec.session_env.iter().cloned().collect();
+        let tmp = state.join("sandbox-tmp").join("sess-1");
+        assert_eq!(wrapped.session.tmp_dir(), Some(tmp.as_path()));
         assert_eq!(env["HOME"], home.display().to_string(), "private HOME overrides the spec's HOME");
         assert_eq!(env["CODEX_HOME"], home.join(".codex").display().to_string());
-        assert_eq!(env["TMPDIR"], home.join("tmp").display().to_string());
+        assert_eq!(env["TMPDIR"], tmp.display().to_string(), "temp is per session, not in the shared HOME");
+        assert_eq!(env["TEMP"], tmp.display().to_string());
+        assert_eq!(env["CLAUDE_CODE_TMPDIR"], tmp.display().to_string(), "srt hands this to the child as TMPDIR");
+        assert_eq!(env["NODE_USE_ENV_PROXY"], "1");
         assert_eq!(env["INITIAL_AGENT_MODE"], "read-only", "backend session vars kept");
         assert_eq!(env["PATH"], "/opt/fox/backends/codex/bin:/opt/fox/node/bin:/usr/local/bin:/usr/bin:/bin");
         assert_eq!(wrapped.spec.session_env.iter().filter(|(k, _)| k == "HOME").count(), 1);
@@ -1594,32 +1931,51 @@ mod tests {
         let written: Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
         let allow_read = paths(&written["filesystem"]["allowRead"]);
         assert_eq!(
-            allow_read,
-            [root.join("home/u/proj").display().to_string(), home.display().to_string(), "/opt/fox/backends/codex".to_owned()],
-            "srt and Node live outside the deny roots here, so nothing else is re-allowed"
+            allow_read[..4],
+            [
+                root.join("home/u/proj").display().to_string(),
+                home.display().to_string(),
+                tmp.display().to_string(),
+                "/opt/fox/backends/codex".to_owned()
+            ]
         );
-        assert_eq!(paths(&written["filesystem"]["denyRead"]), [root.join("home").display().to_string()]);
-        assert!(home.join("tmp").is_dir());
+        // srt package and Node (under /opt/fox, denied by `/`) are re-allowed;
+        // the rest are system paths that exist on this machine.
+        assert!(allow_read.contains(&"/opt/fox/srt/node_modules/@anthropic-ai/sandbox-runtime".to_owned()));
+        assert!(allow_read.contains(&"/opt/fox/node".to_owned()));
+        for path in &allow_read[4..] {
+            let system = default_system_read_only(HostOs::Linux).iter().any(|p| p.display().to_string() == *path);
+            assert!(system || path.starts_with("/opt/fox/"), "unexpected allowRead {path}");
+            if system {
+                assert!(std::fs::symlink_metadata(path).is_ok(), "missing system path {path} kept");
+            }
+        }
+        assert_eq!(paths(&written["filesystem"]["allowWrite"]), [root.join("home/u/proj").display().to_string(), home.display().to_string(), tmp.display().to_string()]);
+        assert_eq!(paths(&written["filesystem"]["denyRead"]), ["/"]);
+        assert!(home.is_dir() && tmp.is_dir());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&settings_path).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        std::fs::write(home.join("login.json"), "{}").unwrap();
         drop(wrapped);
         assert!(!settings_path.exists(), "per-session settings removed with the session");
+        assert!(!tmp.exists(), "per-session temp removed with the session");
+        assert!(home.join("login.json").exists(), "the project x backend HOME is kept for the next session");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn srt_wrap_refuses_npx_unreadable_programs_and_writable_state() {
         let root = temp("refuse");
-        let policy = SandboxPolicy {
-            authorized: vec![AuthorizedDir { path: root.join("home/u/proj"), writable: true }],
-            private_home: root.join("home/u/.fox/home"),
-            extra_read_only: vec![],
-            allowed_domains: vec![],
-            deny_read_roots: vec![root.join("home")],
-        };
+        let policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: root.join("home/u/proj"), writable: true }],
+            PrivateHomes::new(root.join("fox/sandbox-homes")).home_for(PROJECT, AgentBackend::Codex).unwrap(),
+            vec![],
+            vec![],
+            HostOs::Linux,
+        );
         let launcher = launcher(root.join("state"));
         let code = |program: &str| launcher.wrap(&spec(program), &policy, "s").unwrap_err().code;
         assert_eq!(code("npx"), SandboxErrorCode::SandboxBackendNotInstalled);
@@ -1630,11 +1986,25 @@ mod tests {
             launcher.wrap(&spec("/opt/x/codex-acp"), &policy, "../escape").unwrap_err().code,
             SandboxErrorCode::SandboxPolicyInvalid
         );
+        let mut readable = policy.clone();
+        readable.extra_read_only.push("/opt/x".into());
         let inside = SrtLauncher::new(launcher.ready.clone(), root.join("home/u/proj/.fox-state"));
         assert_eq!(
-            inside.wrap(&spec("/opt/x/codex-acp"), &policy, "s").unwrap_err().code,
+            inside.wrap(&spec("/opt/x/codex-acp"), &readable, "s").unwrap_err().code,
             SandboxErrorCode::SandboxPolicyInvalid,
             "settings must not be writable from inside"
+        );
+        let below_readonly = SrtLauncher::new(launcher.ready.clone(), "/opt/x/state".into());
+        assert_eq!(
+            below_readonly.wrap(&spec("/opt/x/codex-acp"), &readable, "s").unwrap_err().code,
+            SandboxErrorCode::SandboxPolicyInvalid,
+            "settings must not be readable from inside either"
+        );
+        let tmp_in_project = SrtLauncher::new(launcher.ready.clone(), root.join("state")).with_tmp_root(root.join("home/u/proj/tmp"));
+        assert_eq!(
+            tmp_in_project.wrap(&spec("/opt/x/codex-acp"), &readable, "s").unwrap_err().code,
+            SandboxErrorCode::SandboxPolicyInvalid,
+            "session temp may not overlap an authorized directory"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1697,13 +2067,36 @@ mod tests {
 
         let sandboxed = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
         assert_eq!(sandboxed.mechanism.as_deref(), Some("srt"));
+        assert_eq!(sandboxed.read_scope, ReadScope::AuthorizedOnly);
+        assert!(sandboxed.read_scope_verified);
         assert!(sandboxed.directory_isolation);
-        assert_eq!(sandboxed.writable_roots, ["/home/u/proj", "/home/u/.local/share/fox/backends/pi/home"]);
+        assert_eq!(sandboxed.writable_roots, ["/home/u/proj".to_owned(), pi_home()]);
+        assert_eq!(ReadScope::AuthorizedOnly.ui_label(true), "读取限定在授权文件夹");
+
+        // A Linux policy that only denies home roots is partial, and the UI
+        // may not say "limited to these folders".
+        let mut partial = policy.clone();
+        partial.deny_read_roots = vec!["/home".into(), "/root".into()];
+        let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&partial), HostOs::Linux);
+        assert_eq!(declaration.read_scope, ReadScope::UserDirsOnly);
+        assert!(!declaration.directory_isolation);
         let mut declared = native.clone();
         sandboxed.apply_to(&mut declared);
         assert_eq!((declared.sandbox_filesystem, declared.sandbox_network), (Enforcement::Enforced, Enforcement::Enforced));
 
         // Not measured on macOS / Windows: never shown as enforced.
+        let mac = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::MacOs);
+        assert_eq!((mac.read_scope, mac.read_scope_verified), (ReadScope::AuthorizedOnly, false));
+        let windows_policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: r"C:\Users\u\proj".into(), writable: true }],
+            PathBuf::from(r"C:\Users\u\AppData\Local\Fox\sandbox-homes\x\codex"),
+            vec![],
+            vec![],
+            HostOs::Windows,
+        );
+        let windows = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&windows_policy), HostOs::Windows);
+        assert_eq!((windows.read_scope, windows.read_scope_verified), (ReadScope::UserDirsOnly, false));
+        assert_eq!(windows.read_scope.ui_label(windows.read_scope_verified), "部分：仅用户目录受保护（本平台待实测）");
         for os in [HostOs::MacOs, HostOs::Windows] {
             let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), os);
             assert!(!declaration.directory_isolation);
@@ -1715,6 +2108,7 @@ mod tests {
         // Full access: no boundary claimed, even over a native Enforced sandbox.
         let full = SandboxDeclaration::declare(PermissionMode::FullAccess, Some(&policy), HostOs::Linux);
         assert!(!full.directory_isolation);
+        assert_eq!(full.read_scope, ReadScope::None);
         assert!(full.mechanism.is_none() && full.writable_roots.is_empty());
         let mut declared = native.clone();
         declared.sandbox_filesystem = Enforcement::Enforced;
@@ -1729,12 +2123,103 @@ mod tests {
     }
 
     #[test]
-    fn private_home_layouts() {
-        let data = Path::new("/d");
-        assert_eq!(private_home_for(data, AgentBackend::Pi, PrivateHomeScope::PerBackend, ""), PathBuf::from("/d/backends/pi/home"));
-        assert_eq!(
-            private_home_for(data, AgentBackend::Codex, PrivateHomeScope::PerSession, "a/../b"),
-            PathBuf::from("/d/backends/codex/home/sessions/a____b")
+    fn private_home_is_per_project_uuid_and_backend() {
+        assert_eq!(PrivateHomeScope::default(), PrivateHomeScope::PerProjectPerBackend);
+        let homes = homes();
+        let pi = homes.home_for(PROJECT, AgentBackend::Pi).unwrap();
+        assert_eq!(pi.path, PathBuf::from(pi_home()));
+        assert_eq!(pi.root, PathBuf::from(HOME_ROOT));
+        // Same project, other backend: separate HOME. Same backend, same
+        // project: the same HOME (sessions share it).
+        let codex = homes.home_for(PROJECT, AgentBackend::Codex).unwrap();
+        assert_ne!(codex.path, pi.path);
+        assert_eq!(homes.home_for(PROJECT, AgentBackend::Pi).unwrap(), pi);
+        // Uppercase input is the same project, not a second directory.
+        assert_eq!(homes.home_for(&PROJECT.to_ascii_uppercase(), AgentBackend::Pi).unwrap(), pi);
+        // Two projects that share a name and a folder name still differ: only
+        // the UUID is used.
+        let other = homes.home_for("9b7e0d3c-1a2b-4c3d-8e4f-5a6b7c8d9e0f", AgentBackend::Pi).unwrap();
+        assert_ne!(other.path, pi.path);
+        assert!(!other.path.starts_with(&pi.path) && !pi.path.starts_with(&other.path));
+    }
+
+    #[test]
+    fn private_home_refuses_empty_or_malformed_project_ids() {
+        let homes = homes();
+        for bad in [
+            "",
+            " ",
+            "00000000-0000-0000-0000-000000000000",
+            "3f2a6c1e8b4d4e0a9c550d1e2f3a4b5c",
+            "3f2a6c1e-8b4d-4e0a-9c55-0d1e2f3a4b5",
+            "3f2a6c1e-8b4d-4e0a-9c55-0d1e2f3a4b5c/..",
+            "../3f2a6c1e-8b4d-4e0a-9c55-0d1e2f3a4b5c",
+            "zzzzzzzz-8b4d-4e0a-9c55-0d1e2f3a4b5c",
+            "我的项目",
+            "/home/u/我的项目",
+        ] {
+            let error = homes.home_for(bad, AgentBackend::Pi).unwrap_err();
+            assert_eq!(error.code, SandboxErrorCode::SandboxPolicyInvalid, "{bad:?} must be refused");
+        }
+        assert_eq!(homes.home_for(PROJECT, AgentBackend::Fox).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
+    }
+
+    #[test]
+    fn chinese_paths_are_literal_and_do_not_affect_the_home_name() {
+        let homes = PrivateHomes::new("/home/用户/.local/share/fox/sandbox-homes".into());
+        let home = homes.home_for(PROJECT, AgentBackend::Deepseek).unwrap();
+        assert_eq!(home.path, PathBuf::from(format!("/home/用户/.local/share/fox/sandbox-homes/{PROJECT}/deepseek")));
+        let policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: "/home/用户/文档/[进行中] 项目 A".into(), writable: true }],
+            home,
+            vec![],
+            vec![],
+            HostOs::Linux,
         );
+        policy.validate(HostOs::Linux).unwrap();
+        let allow_read = paths(&policy.to_srt_settings()["filesystem"]["allowRead"]);
+        assert_eq!(allow_read[0], "/home/用户/文档/[进行中] 项目 A");
+        assert!(policy.is_readable(Path::new("/home/用户/文档/[进行中] 项目 A/说明.md"), HostOs::Linux));
+        assert!(!policy.is_readable(Path::new("/home/用户/文档/[进行中] 项目 B/说明.md"), HostOs::Linux));
+        // Windows profile with a Chinese user name.
+        let homes = PrivateHomes::new(r"C:\Users\张三\AppData\Local\Fox\sandbox-homes".into());
+        let policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: r"C:\Users\张三\项目".into(), writable: true }],
+            homes.home_for(PROJECT, AgentBackend::Codex).unwrap(),
+            vec![],
+            vec![],
+            HostOs::Windows,
+        );
+        policy.validate(HostOs::Windows).unwrap();
+        assert!(!policy.is_readable(Path::new(r"C:\Users\张三\桌面\a.txt"), HostOs::Windows));
+    }
+
+    #[test]
+    fn authorized_dirs_may_not_reach_any_private_home_or_the_session_tmp() {
+        let other_project_home = format!("{HOME_ROOT}/9b7e0d3c-1a2b-4c3d-8e4f-5a6b7c8d9e0f/pi");
+        for authorized in [
+            "/home/u/.local/share/fox".to_owned(),     // contains the root
+            HOME_ROOT.to_owned(),                       // is the root
+            other_project_home.clone(),                 // another project's HOME
+            format!("{other_project_home}/.pi"),        // inside it
+            pi_home(),                                  // its own HOME as a project folder
+        ] {
+            let mut policy = linux_policy();
+            policy.authorized.push(AuthorizedDir { path: authorized.clone().into(), writable: false });
+            let error = policy.validate(HostOs::Linux).unwrap_err();
+            assert_eq!(error.code, SandboxErrorCode::SandboxPolicyInvalid, "{authorized} must be refused");
+        }
+        // The private HOME must be under its root.
+        let mut policy = linux_policy();
+        policy.private_home = "/home/u/elsewhere".into();
+        assert!(policy.validate(HostOs::Linux).is_err());
+        // Session temp overlapping an authorized directory.
+        let mut policy = linux_policy();
+        policy.session_tmp = Some("/home/u/proj/.tmp".into());
+        assert!(policy.validate(HostOs::Linux).is_err());
+        // Siblings are fine.
+        let mut policy = linux_policy();
+        policy.authorized.push(AuthorizedDir { path: "/home/u/.local/share/fox-notes".into(), writable: false });
+        policy.validate(HostOs::Linux).unwrap();
     }
 }
