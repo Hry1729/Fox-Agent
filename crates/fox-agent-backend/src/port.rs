@@ -295,9 +295,272 @@ impl EventIntake {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Revocation stop (full access withdrawn while the process runs unsandboxed)
+// ---------------------------------------------------------------------------
+
+/// What the Host must stop when [`crate::sandbox::recheck_permission_mode`]
+/// returns `RestartSandboxed`. Implemented by the live connection
+/// ([`crate::acp::AcpConnection`] has an async equivalent, see
+/// `AcpConnection::stop_for_revocation`) and by mocks in tests.
+pub trait RevocationTarget {
+    /// Stop the current turn (`session/cancel`) and answer every pending
+    /// native permission request with `cancelled`. Returns the native ids that
+    /// were answered.
+    fn cancel_turn(&mut self) -> Vec<String>;
+    /// Terminate the whole backend process tree. Returns `true` when the tree
+    /// had to be force-killed (side effects of a running command unverified).
+    fn kill_process_tree(&mut self) -> bool;
+}
+
+/// Where a session stands after a revocation stop. There is no state in
+/// which it keeps running outside the sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RevokedSessionState {
+    /// Process gone; the next continue must rebuild under srt (preflight
+    /// included, fail-closed).
+    NeedsSandboxedRebuild,
+    /// The sandboxed rebuild failed; the session stays stopped until a later
+    /// attempt succeeds. Never restarted in full access.
+    StoppedSandboxUnavailable { error: crate::sandbox::SandboxError },
+}
+
+/// Record of one revocation stop, for audit and for the rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevocationStop {
+    pub reason: String,
+    /// Native permission requests answered `cancelled`.
+    pub cancelled_permissions: Vec<String>,
+    /// Every pending request of the run, settled: not yet sent ->
+    /// `cancelled`, in flight -> `outcome_unknown` (settlement rule 1).
+    pub settled: Vec<(String, crate::settlement::PendingOutcome)>,
+    /// The run's authoritative terminal (first one wins; a turn that already
+    /// completed keeps `completed`).
+    pub terminal: crate::settlement::Committed,
+    pub state: RevokedSessionState,
+    /// Always `false`: the rebuilt session never replays the last operation on
+    /// its own, because it may already have had side effects.
+    pub replay_last_operation: bool,
+}
+
+impl RevocationStop {
+    /// Operations whose effect is unknown. The rebuilt session shows them to
+    /// the user for reconciliation instead of running them again.
+    pub fn needs_review(&self) -> Vec<&str> {
+        self.settled
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, crate::settlement::PendingOutcome::OutcomeUnknown { .. }))
+            .map(|(id, _)| id.as_str())
+            .collect()
+    }
+}
+
+/// First half of a revocation stop: cancel was requested, permissions were
+/// answered, pending requests leave the waiting state.
+pub fn settle_for_revocation(
+    pending: &mut crate::settlement::PendingRegistry,
+    arbiter: &mut crate::settlement::TerminalArbiter,
+    reason: &str,
+) -> Vec<(String, crate::settlement::PendingOutcome)> {
+    arbiter.request_cancel();
+    pending.settle_all(&format!("stopped: {reason}"))
+}
+
+/// Second half, after the process tree is gone.
+pub fn finish_revocation(
+    arbiter: &mut crate::settlement::TerminalArbiter,
+    reason: &str,
+    cancelled_permissions: Vec<String>,
+    settled: Vec<(String, crate::settlement::PendingOutcome)>,
+    force_killed: bool,
+) -> RevocationStop {
+    let unknown = settled
+        .iter()
+        .any(|(_, outcome)| matches!(outcome, crate::settlement::PendingOutcome::OutcomeUnknown { .. }));
+    let terminal = arbiter.commit(crate::settlement::RunTerminal::Cancelled, force_killed || unknown).clone();
+    RevocationStop {
+        reason: reason.to_owned(),
+        cancelled_permissions,
+        settled,
+        terminal,
+        state: RevokedSessionState::NeedsSandboxedRebuild,
+        replay_last_operation: false,
+    }
+}
+
+/// The "revocation stop" entry: cancel the turn, settle every pending request
+/// (in flight -> `outcome_unknown`), kill the process tree, and mark the
+/// session as needing a sandboxed rebuild without replay. Order matters:
+/// cancel first so the backend gets a chance to stop cleanly and pending
+/// permissions are answered, then settle, then kill.
+pub fn stop_for_revocation(
+    target: &mut dyn RevocationTarget,
+    pending: &mut crate::settlement::PendingRegistry,
+    arbiter: &mut crate::settlement::TerminalArbiter,
+    reason: &str,
+) -> RevocationStop {
+    let cancelled = target.cancel_turn();
+    let settled = settle_for_revocation(pending, arbiter, reason);
+    let force_killed = target.kill_process_tree();
+    finish_revocation(arbiter, reason, cancelled, settled, force_killed)
+}
+
+/// A session rebuilt after revocation. The Host spawns `launch` and opens a
+/// new connection generation ([`EventIntake::bump_generation`]); it does not
+/// resend the last prompt or re-run `review`.
+#[derive(Debug)]
+pub struct RebuiltSession {
+    pub launch: crate::sandbox::PreparedLaunch,
+    pub replay_last_operation: bool,
+    /// Correlation ids settled `outcome_unknown` by the stop, for the user.
+    pub review: Vec<String>,
+}
+
+/// Rebuild a revoked session. `prepare` is the normal sandboxed launch path
+/// (`preflight` + `prepare_launch(PermissionMode::Sandboxed, ..)`); it is
+/// given the mode so a caller cannot ask for anything else. On failure, or if
+/// what came back is not sandboxed, the stop record moves to
+/// `StoppedSandboxUnavailable` and the session stays stopped.
+pub fn rebuild_after_revocation(
+    stop: &mut RevocationStop,
+    prepare: impl FnOnce(crate::sandbox::PermissionMode) -> Result<crate::sandbox::PreparedLaunch, crate::sandbox::SandboxError>,
+) -> Result<RebuiltSession, crate::sandbox::SandboxError> {
+    use crate::sandbox::{PermissionMode, SandboxError, SandboxErrorCode};
+    let result = prepare(PermissionMode::Sandboxed).and_then(|launch| {
+        if launch.mode == PermissionMode::Sandboxed && launch.sandbox.is_some() {
+            Ok(launch)
+        } else {
+            Err(SandboxError::new(
+                SandboxErrorCode::SandboxPolicyInvalid,
+                "rebuild after revocation must run sandboxed; refusing an unsandboxed launch",
+            ))
+        }
+    });
+    match result {
+        Ok(launch) => {
+            stop.state = RevokedSessionState::NeedsSandboxedRebuild;
+            Ok(RebuiltSession {
+                launch,
+                replay_last_operation: false,
+                review: stop.needs_review().into_iter().map(str::to_owned).collect(),
+            })
+        }
+        Err(error) => {
+            stop.state = RevokedSessionState::StoppedSandboxUnavailable { error: error.clone() };
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::sandbox::{PermissionMode, PreparedLaunch, SandboxDeclaration, SandboxError, SandboxErrorCode, HostOs};
+    use crate::settlement::{PendingOutcome, PendingRegistry, RunTerminal, TerminalArbiter};
+
+    #[derive(Default)]
+    struct MockConnection {
+        calls: Vec<&'static str>,
+        pending_permissions: Vec<String>,
+        alive: bool,
+    }
+
+    impl RevocationTarget for MockConnection {
+        fn cancel_turn(&mut self) -> Vec<String> {
+            self.calls.push("cancel");
+            std::mem::take(&mut self.pending_permissions)
+        }
+        fn kill_process_tree(&mut self) -> bool {
+            self.calls.push("kill");
+            self.alive = false;
+            true
+        }
+    }
+
+    fn launch(mode: PermissionMode, sandboxed: bool) -> PreparedLaunch {
+        let dir = std::env::temp_dir().join(format!("fox-port-rebuild-{}-{sandboxed}", std::process::id()));
+        PreparedLaunch {
+            mode,
+            spec: crate::launch::LaunchSpec {
+                backend: AgentBackend::Pi,
+                program: "/x".into(),
+                args: vec![],
+                version_pin: "x",
+                credential_env: &[],
+                experimental: false,
+                session_env: vec![],
+            },
+            sandbox: sandboxed.then(|| crate::sandbox::SandboxSession::for_test(dir)),
+            declaration: SandboxDeclaration::declare(mode, None, HostOs::Linux),
+        }
+    }
+
+    fn revoked() -> (MockConnection, PendingRegistry, TerminalArbiter, RevocationStop) {
+        let mut connection = MockConnection { pending_permissions: vec!["perm-0".into()], alive: true, ..Default::default() };
+        let mut pending = PendingRegistry::default();
+        pending.open("tool-sent", 1);
+        pending.mark_in_flight("tool-sent");
+        pending.open("tool-queued", 1);
+        let mut arbiter = TerminalArbiter::default();
+        let stop = stop_for_revocation(&mut connection, &mut pending, &mut arbiter, "full access withdrawn");
+        (connection, pending, arbiter, stop)
+    }
+
+    #[test]
+    fn revocation_stop_cancels_settles_kills_and_never_replays() {
+        let (connection, pending, arbiter, stop) = revoked();
+        assert_eq!(connection.calls, ["cancel", "kill"], "cancel before kill");
+        assert!(!connection.alive);
+        assert_eq!(stop.cancelled_permissions, ["perm-0"]);
+        assert_eq!(pending.waiting(), 0, "nothing left waiting");
+        assert!(matches!(pending.outcome("tool-sent"), Some(PendingOutcome::OutcomeUnknown { .. })), "in flight = unknown");
+        assert_eq!(pending.outcome("tool-queued"), Some(&PendingOutcome::Cancelled), "never sent = cancelled");
+        assert_eq!(stop.needs_review(), ["tool-sent"]);
+        assert_eq!(stop.terminal.terminal, RunTerminal::Cancelled);
+        assert!(stop.terminal.possible_unverified_side_effects);
+        assert_eq!(arbiter.committed().unwrap().terminal, RunTerminal::Cancelled);
+        assert_eq!(stop.state, RevokedSessionState::NeedsSandboxedRebuild);
+        assert!(!stop.replay_last_operation);
+    }
+
+    #[test]
+    fn revocation_after_a_completed_turn_keeps_completed() {
+        let mut connection = MockConnection { alive: true, ..Default::default() };
+        let mut pending = PendingRegistry::default();
+        let mut arbiter = TerminalArbiter::default();
+        arbiter.commit(RunTerminal::Completed, false);
+        let stop = stop_for_revocation(&mut connection, &mut pending, &mut arbiter, "revoked");
+        assert_eq!(stop.terminal.terminal, RunTerminal::Completed, "first terminal wins");
+        assert_eq!(connection.calls, ["cancel", "kill"], "process is stopped regardless");
+        assert_eq!(arbiter.rejected().len(), 1);
+    }
+
+    #[test]
+    fn rebuild_is_sandboxed_only_without_replay_and_stays_stopped_on_failure() {
+        let (_, _, _, mut stop) = revoked();
+        // Sandbox cannot start: session stays stopped, no fallback.
+        let error = rebuild_after_revocation(&mut stop, |mode| {
+            assert_eq!(mode, PermissionMode::Sandboxed, "rebuild asks for sandboxed only");
+            Err(SandboxError::new(SandboxErrorCode::SandboxDependencyMissing, "srt missing"))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxDependencyMissing);
+        assert!(matches!(stop.state, RevokedSessionState::StoppedSandboxUnavailable { .. }));
+
+        // A launcher that hands back an unsandboxed launch is refused too.
+        let error = rebuild_after_revocation(&mut stop, |_| Ok(launch(PermissionMode::FullAccess, false))).unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxPolicyInvalid);
+        assert!(matches!(stop.state, RevokedSessionState::StoppedSandboxUnavailable { .. }));
+
+        // Success: sandboxed, no replay, unknown operations handed over for review.
+        let rebuilt = rebuild_after_revocation(&mut stop, |_| Ok(launch(PermissionMode::Sandboxed, true))).unwrap();
+        assert_eq!(rebuilt.launch.mode, PermissionMode::Sandboxed);
+        assert!(!rebuilt.replay_last_operation);
+        assert_eq!(rebuilt.review, ["tool-sent"]);
+        assert_eq!(stop.state, RevokedSessionState::NeedsSandboxedRebuild);
+    }
 
     #[test]
     fn backend_ids_round_trip_and_only_deepseek_is_experimental() {
