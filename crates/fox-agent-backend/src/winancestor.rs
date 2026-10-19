@@ -288,9 +288,30 @@ impl std::fmt::Debug for AncestorAceCoordinator {
     }
 }
 
-/// srt-win's per-user ACL lock file (`state_db.rs` `InitMutex`).
+/// srt-win's per-user ACL lock file (`state_db.rs` `InitMutex`), for this
+/// process's environment. Fox's srt broker gets the same `LOCALAPPDATA`
+/// (the Host allowlist, never the private HOME's; see
+/// [`crate::sandbox::SrtLauncher`]), so this is the lock srt-win takes.
 pub fn srt_acl_lock_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()).map(|base| PathBuf::from(base).join("sandbox-runtime").join(".acl-init.lock"))
+    srt_acl_lock_path_in(std::env::vars())
+}
+
+/// [`srt_acl_lock_path`] for a given environment (case-insensitive on the
+/// name, last value wins, like a process environment block). Used to check
+/// the lock Fox holds against the environment the srt broker is started with.
+pub fn srt_acl_lock_path_in(env: impl IntoIterator<Item = (String, String)>) -> Option<PathBuf> {
+    srt_state_dir_in(env).map(|dir| dir.join(".acl-init.lock"))
+}
+
+/// srt-win's per-user state directory (`%LOCALAPPDATA%\sandbox-runtime`,
+/// holding `state.db` and `.acl-init.lock`) for a given environment.
+pub fn srt_state_dir_in(env: impl IntoIterator<Item = (String, String)>) -> Option<PathBuf> {
+    env.into_iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("LOCALAPPDATA"))
+        .last()
+        .map(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+        .map(|base| PathBuf::from(base).join("sandbox-runtime"))
 }
 
 fn ancestor_error(code: SandboxErrorCode, message: impl Into<String>) -> SandboxError {
