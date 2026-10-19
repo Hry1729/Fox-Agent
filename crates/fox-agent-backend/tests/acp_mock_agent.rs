@@ -18,6 +18,7 @@ fn mock_spec() -> Option<LaunchSpec> {
         version_pin: "mock",
         credential_env: &[],
         experimental: false,
+        session_env: vec![],
     })
 }
 
