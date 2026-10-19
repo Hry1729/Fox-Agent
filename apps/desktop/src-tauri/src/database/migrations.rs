@@ -6851,6 +6851,8 @@ enum MigrationTarget {
     V87,
     #[cfg(test)]
     V91,
+    #[cfg(test)]
+    V94,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7269,6 +7271,18 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // Explicit file delivery: two additive columns on `artifacts`. No existing
     // row is touched, so every prior artifact keeps `declared_at` NULL.
     apply_migration(&transaction, 94, MIGRATION_94, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V94) {
+        return finish_transaction(transaction);
+    }
+    // v95 (four-agent plan v0.3.1, 6.6): conversation-level `agent_backend`.
+    // Additive only: a constant NOT NULL DEFAULT 'fox' column (metadata-only,
+    // no historical row is rewritten, every existing conversation maps to
+    // `fox`) plus a trigger that refuses any later change. `engine_id`,
+    // `runtime_type` and the legacy marker (`kernel_runs.kernel_mode`) are not
+    // touched. The SQL text is owned by `fox_agent_backend::host_routing` so it
+    // is exercised against a real SQLite in that crate's tests.
+    apply_migration(&transaction, AGENT_BACKEND_SCHEMA_VERSION, MIGRATION_95, now)?;
     finish_transaction(transaction)
 }
 
@@ -15304,6 +15318,11 @@ CREATE INDEX IF NOT EXISTS idx_delivery_acceptance_audit_item
 /// Additive only: no table is rebuilt, no existing column is altered, and no
 /// existing row is read or written. Every pre-existing artifact keeps
 /// `declared_at` NULL and therefore keeps its current presentation.
+const AGENT_BACKEND_SCHEMA_VERSION: i64 =
+    fox_agent_backend::host_routing::AGENT_BACKEND_SCHEMA_VERSION;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= AGENT_BACKEND_SCHEMA_VERSION);
+const MIGRATION_95: &str = fox_agent_backend::host_routing::AGENT_BACKEND_MIGRATION_SQL;
+
 const MIGRATION_94: &str = r#"
 ALTER TABLE artifacts ADD COLUMN turn_call_id TEXT;
 ALTER TABLE artifacts ADD COLUMN declared_at INTEGER;
@@ -15431,7 +15450,8 @@ mod delivery_acceptance_migration_tests {
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
             .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
-        assert_eq!(DATABASE_SCHEMA_VERSION, 94);
+        // v95 (agent_backend) is the only migration after v94.
+        assert_eq!(DATABASE_SCHEMA_VERSION, 95);
 
         // The old rows are untouched.
         let title: String = connection
@@ -15576,3 +15596,78 @@ mod project_pinning_migration_tests {    use super::*;
 }
 
 
+
+#[cfg(test)]
+mod agent_backend_migration_tests {
+    use super::*;
+
+    /// A v94 install with historical rows written the way an old binary
+    /// would (no `agent_backend` column yet).
+    fn v94_database() -> Connection {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_with_target(&mut connection, 100, MigrationTarget::V94).expect("create v94 database");
+        let has_column: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('conversations') WHERE name='agent_backend')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table info");
+        assert!(!has_column, "v94 has no agent_backend column");
+        connection
+            .execute(
+                "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                 VALUES ('a-old','Old agent','','local','','',1,1)",
+                [],
+            )
+            .expect("old agent");
+        connection
+            .execute(
+                "INSERT INTO conversations(id,agent_id,title,permission_mode,status,created_at,updated_at)
+                 VALUES ('c-old','a-old','Old','read_only','active',1,1)",
+                [],
+            )
+            .expect("old conversation");
+        connection
+    }
+
+    #[test]
+    fn v95_maps_old_conversations_to_fox_and_is_idempotent() {
+        let mut connection = v94_database();
+        run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade");
+        run_with_target(&mut connection, 300, MigrationTarget::Latest).expect("repeat upgrade");
+        let backend: String = connection
+            .query_row("SELECT agent_backend FROM conversations WHERE id='c-old'", [], |row| row.get(0))
+            .expect("agent_backend");
+        assert_eq!(backend, "fox");
+        let records: i64 = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=95", [], |row| row.get(0))
+            .expect("version record");
+        assert_eq!(records, 1);
+        let (title, updated_at): (String, i64) = connection
+            .query_row("SELECT title, updated_at FROM conversations WHERE id='c-old'", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("old row");
+        assert_eq!((title.as_str(), updated_at), ("Old", 1), "no historical row is rewritten");
+    }
+
+    #[test]
+    fn v95_agent_backend_is_immutable() {
+        let mut connection = v94_database();
+        run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade");
+        let error = connection
+            .execute("UPDATE conversations SET agent_backend='codex' WHERE id='c-old'", [])
+            .expect_err("immutable");
+        assert!(error.to_string().contains("agent_backend_immutable"), "{error}");
+        connection
+            .execute("UPDATE conversations SET title='Renamed' WHERE id='c-old'", [])
+            .expect("unrelated update still works");
+        let error = connection
+            .execute(
+                "INSERT INTO conversations(id,agent_id,title,permission_mode,status,created_at,updated_at,agent_backend)
+                 VALUES ('c-bad','a-old','Bad','read_only','active',2,2,'deepseek_harness')",
+                [],
+            )
+            .expect_err("engine ids are not backend ids");
+        assert!(error.to_string().to_ascii_lowercase().contains("check"), "{error}");
+    }
+}
