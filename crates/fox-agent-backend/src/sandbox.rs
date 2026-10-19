@@ -386,6 +386,12 @@ pub enum SandboxErrorCode {
     /// managed runtime) has a DACL open to every local account, so the
     /// sandbox account could reach it without any grant.
     SandboxPathExposed,
+    /// Windows: the managed sandbox runtime is not installed machine-wide
+    /// (`%ProgramFiles%\Fox\sandbox-runtime\<version>`), e.g. a runtime
+    /// left in the old per-user location under `%LOCALAPPDATA%`, or the
+    /// `%ProgramData%\Fox\sandbox` base is missing. The one-time elevated
+    /// setup (`enable-sandbox.ps1`) installs it.
+    SandboxRuntimeNotInstalled,
     /// A file the Agent says it delivered is not a readable regular file
     /// inside an authorized writable folder, as seen from outside the sandbox
     /// ([`verify_delivered_file`]).
@@ -402,6 +408,7 @@ impl SandboxErrorCode {
             Self::SandboxBackendNotInstalled => "sandbox_backend_not_installed",
             Self::SandboxPathNotOwned => "sandbox_path_not_owned",
             Self::SandboxPathExposed => "sandbox_path_exposed",
+            Self::SandboxRuntimeNotInstalled => "sandbox_runtime_not_installed",
             Self::DeliveredFileRejected => "delivered_file_rejected",
         }
     }
@@ -594,7 +601,10 @@ pub enum ReadScope {
     /// location whose DACL is open to all local accounts (system directories;
     /// on other fixed drives, folders that inherit e.g. `Authenticated
     /// Users: Modify` from a stock drive root, which are then writable too).
-    /// The user's own profile folders are not readable.
+    /// The user's own profile folders are protected as far as their actual
+    /// DACLs go (stock profile DACLs admit only the user, SYSTEM and
+    /// Administrators; a folder the user opened up is readable). Product
+    /// decision B: warn, never claim directory isolation.
     UsersGroupReadable,
     /// No read boundary (full access, or nothing denied).
     None,
@@ -611,10 +621,10 @@ impl ReadScope {
             (Self::UserDirsOnly, true) => "部分：仅用户目录受保护",
             (Self::UserDirsOnly, false) => "部分：仅用户目录受保护（本平台待实测）",
             (Self::UsersGroupReadable, true) => {
-                "沙箱账户只能读取系统中对所有用户开放的位置和授权文件夹；你的个人文件夹受保护；其他盘上对所有用户开放的目录可能可读写"
+                "沙箱账户可读取授权文件夹和系统中对所有用户开放的位置；个人文件夹按实际 ACL 保护；其他盘上对所有用户开放的目录可能可读写"
             }
             (Self::UsersGroupReadable, false) => {
-                "沙箱账户只能读取系统中对所有用户开放的位置和授权文件夹；你的个人文件夹受保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测）"
+                "沙箱账户可读取授权文件夹和系统中对所有用户开放的位置；个人文件夹按实际 ACL 保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测）"
             }
             (Self::None, _) => "不限制读取",
         }
@@ -692,7 +702,7 @@ fn is_absolute_for(path: &Path, os: HostOs) -> bool {
     }
 }
 
-fn normalized(path: &Path, os: HostOs) -> String {
+pub(crate) fn normalized(path: &Path, os: HostOs) -> String {
     let mut text = path.to_string_lossy().into_owned();
     if os == HostOs::Windows {
         text = text.replace('/', "\\").to_ascii_lowercase();
@@ -709,7 +719,7 @@ fn normalized(path: &Path, os: HostOs) -> String {
 
 /// `inner` equals `outer` or lies beneath it (lexically; the Host passes
 /// canonical paths).
-fn within(inner: &Path, outer: &Path, os: HostOs) -> bool {
+pub(crate) fn within(inner: &Path, outer: &Path, os: HostOs) -> bool {
     let inner = normalized(inner, os);
     let outer = normalized(outer, os);
     let sep = if os == HostOs::Windows { '\\' } else { '/' };
@@ -717,7 +727,7 @@ fn within(inner: &Path, outer: &Path, os: HostOs) -> bool {
 }
 
 /// `C:\`, `C:`, `\\server\share` (with or without a trailing separator).
-fn is_volume_root(path: &Path) -> bool {
+pub(crate) fn is_volume_root(path: &Path) -> bool {
     let text = normalized(path, HostOs::Windows);
     let bytes = text.as_bytes();
     if bytes.len() <= 3 && bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
@@ -1410,6 +1420,9 @@ pub struct SandboxedLaunch {
     /// The policy as actually written into the srt settings (canonical paths,
     /// session temp, srt / Node runtime directories added).
     pub effective_policy: SandboxPolicy,
+    /// Windows: ancestors that need Fox's attribute-read ACE before srt
+    /// starts ([`WindowsAcePlan::ancestors`]). Empty elsewhere.
+    pub windows_ancestor_aces: Vec<PathBuf>,
 }
 
 /// Wraps a backend launch in a sandbox.
@@ -1427,16 +1440,26 @@ pub struct SrtLauncher {
     /// Parent of the per-session temp directories (`<tmp_root>/<session id>`).
     /// Defaults to `<state_root>/sandbox-tmp`.
     pub tmp_root: PathBuf,
-    /// Windows: Fox's managed runtime directory (user-owned, e.g.
-    /// `%LOCALAPPDATA%\Fox\runtime`), where Node, srt and the backends are
-    /// installed. Runtime paths the sandbox must read get an allowRead ACE
-    /// only under here (or need none under a Users-readable system location);
-    /// anything else is refused with `sandbox_path_not_owned`. Unused on
+    /// Windows: Fox's managed runtime directory,
+    /// `%ProgramFiles%\Fox\sandbox-runtime\<version>`
+    /// ([`crate::winruntime::windows_runtime_root`]; administrator-owned,
+    /// Users read+execute), where Node, srt and the backends are installed by
+    /// the one-time elevated setup. Checked by
+    /// [`crate::winruntime::check_windows_runtime_root`] before every launch;
+    /// runtime paths under it need no ACE (Users can read them); runtime paths
+    /// anywhere else are refused with `sandbox_path_not_owned`. Unused on
     /// Linux / macOS.
     pub managed_runtime_root: Option<PathBuf>,
     /// Windows ACL queries (ownership / `WRITE_DAC` preflight, broad-DACL
     /// check of Fox's private directories). Real API by default.
     pub windows_acl: std::sync::Arc<dyn crate::winacl::WindowsAclProbe>,
+    /// Windows: where the sandbox account cannot `lstat` ancestors on its own
+    /// (profile root, `%ProgramData%\Fox\sandbox`). Defaults to this
+    /// process's environment on Windows, empty elsewhere.
+    pub ancestor_bases: crate::winancestor::AncestorBases,
+    /// Windows: per-user directories a managed runtime may not live in
+    /// ([`crate::winruntime::windows_user_dirs`] by default).
+    pub windows_user_dirs: Vec<PathBuf>,
 }
 
 /// What srt-win will be asked to do on Windows, worked out (and checked) by
@@ -1451,8 +1474,14 @@ pub struct WindowsAcePlan {
     /// `acl stamp` deny ACEs (Host-added deny paths); srt also stamps each
     /// one's parent.
     pub deny: Vec<PathBuf>,
-    /// Readable without any ACE (under a Users-readable system location).
+    /// Readable without any ACE (under a Users-readable system location or
+    /// the managed runtime directory).
     pub system_readable: Vec<PathBuf>,
+    /// Ancestors that need Fox's attribute-read ACE for the sandbox account
+    /// ([`crate::winancestor::plan_ancestor_aces`]); Fox, not srt, writes
+    /// them, through [`crate::winancestor::SrtTransition::begin_session`].
+    #[serde(default)]
+    pub ancestors: Vec<PathBuf>,
 }
 
 fn path_sep(os: HostOs) -> &'static str {
@@ -1469,7 +1498,7 @@ fn system_path(os: HostOs) -> &'static str {
 
 /// Parent directory, also for a Windows-style path examined on another host
 /// (backslash separators), so the Windows planning is testable anywhere.
-fn lexical_parent(path: &Path) -> Option<PathBuf> {
+pub(crate) fn lexical_parent(path: &Path) -> Option<PathBuf> {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => Some(parent.to_path_buf()),
         _ => {
@@ -1500,7 +1529,21 @@ impl SrtLauncher {
             tmp_root,
             managed_runtime_root: None,
             windows_acl: std::sync::Arc::new(crate::winacl::RealWindowsAcl),
+            ancestor_bases: crate::winancestor::AncestorBases::from_env(),
+            windows_user_dirs: if cfg!(windows) { crate::winruntime::windows_user_dirs() } else { Vec::new() },
         }
+    }
+
+    /// Windows: override the per-user directories (tests).
+    pub fn with_windows_user_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.windows_user_dirs = dirs;
+        self
+    }
+
+    /// Windows: override the ancestor traversal bases (tests, Host).
+    pub fn with_ancestor_bases(mut self, bases: crate::winancestor::AncestorBases) -> Self {
+        self.ancestor_bases = bases;
+        self
     }
 
     /// Windows: where Fox installs Node, srt and the backends (see
@@ -1519,10 +1562,14 @@ impl SrtLauncher {
     /// Windows: classify every path srt-win would touch and check it before
     /// anything is written (fail-closed, each failure names its path):
     ///
+    /// 0. The managed runtime directory itself
+    ///    ([`crate::winruntime::check_windows_runtime_root`]): not in a user
+    ///    directory (`sandbox_runtime_not_installed`), administrator-owned and
+    ///    not writable by other accounts (`sandbox_path_exposed`).
     /// 1. Runtime paths the sandbox must read (backend install, Node, srt
     ///    package, other read-only extras): under a Users-readable system
-    ///    location -> no ACE; under [`Self::managed_runtime_root`] -> allowRead
-    ///    ACE; elsewhere -> `sandbox_path_not_owned`.
+    ///    location or under [`Self::managed_runtime_root`] -> no ACE;
+    ///    elsewhere -> `sandbox_path_not_owned`.
     /// 2. Every ACE target (grants, denies and each deny's parent): the
     ///    current user must hold `WRITE_DAC`, else `sandbox_path_not_owned`
     ///    (srt-win would fail with Access Denied and roll back).
@@ -1531,6 +1578,9 @@ impl SrtLauncher {
     ///    write), and the managed runtime root must not be writable by every
     ///    local account (code there runs as the real user):
     ///    `sandbox_path_exposed`.
+    /// 4. Ancestor metadata ACEs ([`crate::winancestor::plan_ancestor_aces`]):
+    ///    the current user needs `WRITE_DAC` on each, else
+    ///    `sandbox_path_not_owned`.
     ///
     /// `policy` is the effective policy (session temp set).
     pub fn windows_ace_plan(&self, policy: &SandboxPolicy) -> Result<WindowsAcePlan, SandboxError> {
@@ -1548,13 +1598,17 @@ impl SrtLauncher {
             error
         };
 
+        // 0. The managed runtime directory.
+        if let Some(root) = &self.managed_runtime_root {
+            let mut user_dirs = self.windows_user_dirs.clone();
+            user_dirs.extend(self.ancestor_bases.profile_root.iter().cloned());
+            crate::winruntime::check_windows_runtime_root(root, &user_dirs, self.windows_acl.as_ref())?;
+        }
         // 1. Runtime / read-only extras.
         let mut outside = Vec::new();
         for path in &policy.extra_read_only {
-            if system(path) {
+            if system(path) || self.managed_runtime_root.as_ref().is_some_and(|root| within(path, root, os)) {
                 plan.system_readable.push(path.clone());
-            } else if self.managed_runtime_root.as_ref().is_some_and(|root| within(path, root, os)) {
-                plan.grant_read.push(path.clone());
             } else {
                 outside.push(path.clone());
             }
@@ -1636,7 +1690,32 @@ impl SrtLauncher {
                 SandboxPathExposed,
                 format!("Fox's private directories are open to every local account: {}", exposed.join("; ")),
             )
-            .remedy("把 Fox 数据目录放在你的用户目录下（默认 %LOCALAPPDATA%\\Fox），不要放在其他盘根下继承“所有用户可修改”权限的位置"));
+            .remedy("Fox 状态目录应在 %LOCALAPPDATA%\\Fox，私有 HOME 与会话临时目录应在 %ProgramData%\\Fox\\sandbox\\<你的 SID>（由“启用沙箱”创建）；不要放在其他盘根下继承“所有用户可修改”权限的位置"));
+        }
+
+        // 4. Ancestor metadata ACEs (Fox writes them; same WRITE_DAC rule).
+        plan.ancestors = crate::winancestor::plan_ancestor_aces(&plan, &self.ancestor_bases, self.windows_acl.as_ref());
+        let mut refused = Vec::new();
+        let mut reasons = Vec::new();
+        for path in &plan.ancestors {
+            if let Err(reason) = self.windows_acl.check_write_dac(path) {
+                reasons.push(format!("{}: {reason}", path.display()));
+                refused.push(path.clone());
+            }
+        }
+        if !refused.is_empty() {
+            let mut error = SandboxError::new(
+                SandboxPathNotOwned,
+                format!(
+                    "the sandbox account must be able to read the attributes of the folders above an authorized folder (up to the user profile root), but the current user may not change permissions on: {}",
+                    reasons.join("; ")
+                ),
+            )
+            .remedy("把授权文件夹放在你有完全控制权限的位置（例如你自己的用户目录内）；若用户配置文件根目录的权限被改过，需要恢复你对它的“修改权限”");
+            for path in refused {
+                error = error.missing(path.display().to_string());
+            }
+            return Err(error);
         }
         Ok(plan)
     }
@@ -1656,6 +1735,17 @@ impl SrtLauncher {
     pub fn effective_policy(&self, policy: &SandboxPolicy) -> SandboxPolicy {
         let mut policy = policy.clone();
         policy.system_read_only.retain(|path| std::fs::symlink_metadata(path).is_ok());
+        // Windows: the managed runtime directory is Users read+execute by
+        // contract (checked in windows_ace_plan), so nothing under it is
+        // listed in allowRead and srt never tries to ACE it (the user has no
+        // WRITE_DAC on an administrator-owned directory).
+        if self.ready.os == HostOs::Windows {
+            if let Some(root) = &self.managed_runtime_root {
+                if !policy.users_readable_roots.iter().any(|known| within(root, known, HostOs::Windows)) {
+                    policy.users_readable_roots.push(root.clone());
+                }
+            }
+        }
         let mut extra: Vec<PathBuf> = Vec::new();
         extra.extend(self.ready.install.package_root());
         extra.extend(runtime_root(&self.ready.install.node));
@@ -1704,6 +1794,10 @@ impl SrtLauncher {
             ("NODE_USE_ENV_PROXY".to_owned(), "1".to_owned()),
         ];
         if os == HostOs::Windows {
+            // Auxiliary only (docs/sandbox.md 7.6): fewer realpath / lstat
+            // calls on ancestors during module resolution. The ancestor ACEs
+            // are what makes `lstat` of the profile chain work.
+            env.push(("NODE_OPTIONS".to_owned(), crate::launch::windows_sandbox_node_options()));
             env.push(("USERPROFILE".to_owned(), home.clone()));
             env.push(("APPDATA".to_owned(), sub(r"AppData\Roaming")));
             env.push(("LOCALAPPDATA".to_owned(), sub(r"AppData\Local")));
@@ -1748,6 +1842,8 @@ impl SandboxLauncher for SrtLauncher {
             tmp_root: canonical_managed_path(&self.tmp_root)?,
             managed_runtime_root: self.managed_runtime_root.as_deref().map(canonical_managed_path).transpose()?,
             windows_acl: std::sync::Arc::clone(&self.windows_acl),
+            ancestor_bases: self.ancestor_bases.clone(),
+            windows_user_dirs: self.windows_user_dirs.clone(),
         };
         resolved.wrap_resolved(spec, policy, session_id, true)
     }
@@ -1789,8 +1885,9 @@ impl SrtLauncher {
             policy = policy.canonicalized()?;
         }
         policy.validate(os)?;
+        let mut windows_ancestor_aces = Vec::new();
         if os == HostOs::Windows {
-            self.windows_ace_plan(&policy)?;
+            windows_ancestor_aces = self.windows_ace_plan(&policy)?.ancestors;
         }
         let program_resolved = if canonicalize { canonical_managed_path(program).unwrap_or_else(|_| program.to_path_buf()) } else { program.to_path_buf() };
         if !policy.is_readable(program, os) && !policy.is_readable(&program_resolved, os) {
@@ -1854,7 +1951,7 @@ impl SrtLauncher {
             experimental: spec.experimental,
             session_env,
         };
-        Ok(SandboxedLaunch { spec: wrapped, session, effective_policy: policy })
+        Ok(SandboxedLaunch { spec: wrapped, session, effective_policy: policy, windows_ancestor_aces })
     }
 }
 
@@ -1950,6 +2047,10 @@ pub struct PreparedLaunch {
     /// is generated from it, and [`verify_delivered_file`] takes it.
     pub effective_policy: Option<SandboxPolicy>,
     pub declaration: SandboxDeclaration,
+    /// Windows sandboxed: ancestors the Host must give the sandbox account an
+    /// attribute-read ACE on, inside the global srt transition, before
+    /// spawning (docs/sandbox.md 7.6). Empty otherwise.
+    pub windows_ancestor_aces: Vec<PathBuf>,
 }
 
 /// Turn a backend launch spec into what actually runs.
@@ -1972,16 +2073,17 @@ pub fn prepare_launch(
             sandbox: None,
             effective_policy: None,
             declaration: SandboxDeclaration::declare(PermissionMode::FullAccess, None, os),
+            windows_ancestor_aces: Vec::new(),
         }),
         PermissionMode::Sandboxed => match setup {
             SandboxSetup::Unavailable(error) => Err(error),
             SandboxSetup::Ready { launcher, policy } => {
-                let SandboxedLaunch { spec, session, effective_policy } = launcher.wrap(&spec, policy, session_id)?;
+                let SandboxedLaunch { spec, session, effective_policy, windows_ancestor_aces } = launcher.wrap(&spec, policy, session_id)?;
                 // From the policy that was written, not the one requested:
                 // the session temp, private HOME and runtime directories the
                 // launcher added are part of what the UI shows.
                 let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&effective_policy), os);
-                Ok(PreparedLaunch { mode, spec, sandbox: Some(session), effective_policy: Some(effective_policy), declaration })
+                Ok(PreparedLaunch { mode, spec, sandbox: Some(session), effective_policy: Some(effective_policy), declaration, windows_ancestor_aces })
             }
         },
     }
@@ -2037,9 +2139,35 @@ pub struct SandboxDeclaration {
     #[serde(default)]
     pub denied_read_roots: Vec<String>,
     pub allowed_domains: Vec<String>,
+    /// Windows: folders on fixed drives whose DACL lets every local account
+    /// (the sandbox account included) read or write them, from
+    /// [`crate::winacl::audit_broad_exposure`]; filled by
+    /// [`Self::with_exposure`]. Empty = not audited or nothing found.
+    #[serde(default)]
+    pub exposed_dirs: Vec<String>,
+    /// The warning the UI must show next to the scope when `exposed_dirs` is
+    /// non-empty ([`WINDOWS_EXPOSURE_WARNING`]).
+    #[serde(default)]
+    pub exposure_warning: Option<String>,
 }
 
+/// Product decision B (2026-10-19): on Windows the sandbox is not limited to
+/// the authorized folders; shown whenever the exposure audit found folders
+/// open to every account.
+pub const WINDOWS_EXPOSURE_WARNING: &str = "此模式不限制在授权目录内。对所有用户开放的目录仍可能被读取或修改；本机已检测到此类目录。";
+
 impl SandboxDeclaration {
+    /// Attach the exposure audit (Windows sandboxed only; ignored otherwise).
+    /// `directory_isolation` stays false whatever it finds.
+    pub fn with_exposure(mut self, report: &crate::winacl::ExposureReport) -> Self {
+        if self.mode != PermissionMode::Sandboxed || self.read_scope != ReadScope::UsersGroupReadable {
+            return self;
+        }
+        self.exposed_dirs = report.exposed.iter().map(|item| item.path.to_string_lossy().into_owned()).collect();
+        self.exposure_warning = (!self.exposed_dirs.is_empty()).then(|| WINDOWS_EXPOSURE_WARNING.to_owned());
+        self
+    }
+
     pub fn declare(mode: PermissionMode, policy: Option<&SandboxPolicy>, os: HostOs) -> Self {
         match (mode, policy) {
             (PermissionMode::Sandboxed, Some(policy)) => {
@@ -2062,6 +2190,8 @@ impl SandboxDeclaration {
                     readable_roots: text(&roots.allow_read),
                     denied_read_roots: text(&roots.deny_read),
                     allowed_domains: policy.allowed_domains.clone(),
+                    exposed_dirs: Vec::new(),
+                    exposure_warning: None,
                 }
             }
             // Full access, or sandboxed without a policy (never launched):
@@ -2078,6 +2208,8 @@ impl SandboxDeclaration {
                 readable_roots: Vec::new(),
                 denied_read_roots: Vec::new(),
                 allowed_domains: Vec::new(),
+                exposed_dirs: Vec::new(),
+                exposure_warning: None,
             },
         }
     }
@@ -2242,6 +2374,49 @@ mod tests {
             .collect()
     }
 
+    /// A path written for `os`, whatever the host: Linux `/a/b`, Windows
+    /// `C:\\a\\b` (the first segment is the drive, e.g. `C:`). Policy tests
+    /// build their paths with this so they do not depend on the host's
+    /// `PathBuf::join` separator.
+    fn os_path(os: HostOs, segments: &[&str]) -> PathBuf {
+        match os {
+            HostOs::Windows => {
+                let (drive, rest) = segments.split_first().expect("drive");
+                PathBuf::from(format!("{drive}\\{}", rest.join("\\")))
+            }
+            _ => PathBuf::from(format!("/{}", segments.join("/"))),
+        }
+    }
+
+    /// The private HOME of `backend` in `project` with each platform's layout:
+    /// Linux `<fox_data>/sandbox-homes/<uuid>/<backend>`, Windows
+    /// `%ProgramData%\\Fox\\sandbox\\<user SID>\\homes\\<uuid>\\<backend>`.
+    fn test_home(os: HostOs, project: &str, backend: AgentBackend) -> PrivateHome {
+        let root = match os {
+            HostOs::Windows => os_path(os, &["C:", "ProgramData", "Fox", "sandbox", WIN_SID, "homes"]),
+            _ => os_path(os, &["home", "u", ".local", "share", "fox", "sandbox-homes"]),
+        };
+        let sep = if os == HostOs::Windows { "\\" } else { "/" };
+        let path = PathBuf::from(format!("{}{sep}{project}{sep}{}", root.display(), backend.as_str()));
+        PrivateHome { root, path }
+    }
+
+    #[test]
+    fn os_path_and_test_home_follow_the_target_platform_not_the_host() {
+        assert_eq!(os_path(HostOs::Linux, &["home", "u", "proj"]), PathBuf::from("/home/u/proj"));
+        assert_eq!(os_path(HostOs::Windows, &["C:", "Users", "u", "proj"]), PathBuf::from(r"C:\Users\u\proj"));
+        let home = test_home(HostOs::Windows, PROJECT, AgentBackend::Pi);
+        assert_eq!(home.path.display().to_string(), format!(r"C:\ProgramData\Fox\sandbox\{WIN_SID}\homes\{PROJECT}\pi"));
+        assert!(within(&home.path, &home.root, HostOs::Windows));
+        let home = test_home(HostOs::Linux, PROJECT, AgentBackend::Pi);
+        assert_eq!(home.path, PathBuf::from(pi_home()));
+    }
+
+    // Linux rules (`/` deny, Linux system paths). The policy is built through
+    // `PrivateHomes::home_for`, whose `join` uses the host separator, so the
+    // Linux expectations only hold off Windows; the Windows rules have their
+    // own variant below.
+    #[cfg(not(windows))]
     #[test]
     fn settings_deny_the_root_and_reallow_only_granted_and_system_paths() {
         let policy = linux_policy();
@@ -2272,6 +2447,23 @@ mod tests {
         assert_eq!(policy.read_scope(HostOs::Linux), ReadScope::AuthorizedOnly);
     }
 
+    /// Windows rules: no denyRead, allowRead lists only what needs an ACE
+    /// (authorized folders, private HOME), never system or runtime paths.
+    #[test]
+    fn windows_settings_grant_only_user_paths_and_deny_nothing() {
+        let policy = windows_policy();
+        policy.validate(HostOs::Windows).unwrap();
+        let settings = policy.to_srt_settings();
+        let fs = &settings["filesystem"];
+        assert!(paths(&fs["denyRead"]).is_empty());
+        let home = test_home(HostOs::Windows, PROJECT, AgentBackend::Pi).path.display().to_string();
+        assert_eq!(paths(&fs["allowRead"]), [r"C:\Users\u\proj".to_owned(), r"D:\work\docs".to_owned(), home.clone()]);
+        assert_eq!(paths(&fs["allowWrite"]), [r"C:\Users\u\proj".to_owned(), home]);
+        assert!(!policy.is_readable(Path::new(r"C:\Users\u\Documents\x.txt"), HostOs::Windows));
+        assert!(policy.is_readable(Path::new(&format!(r"{WIN_RUNTIME}\backends\pi\pi-acp.cmd")), HostOs::Windows), "runtime in Program Files, Users-readable");
+        assert_eq!(policy.read_scope(HostOs::Windows), ReadScope::UsersGroupReadable);
+    }
+
     #[test]
     fn macos_denies_the_root_and_windows_denies_nothing_by_default() {
         assert_eq!(default_deny_read_roots(HostOs::MacOs), [PathBuf::from("/")]);
@@ -2294,49 +2486,84 @@ mod tests {
         assert_eq!(policy.read_scope(HostOs::Windows), ReadScope::UsersGroupReadable);
     }
 
+    /// `%LOCALAPPDATA%\\Fox`: Fox state stays here.
     const WIN_DATA: &str = r"C:\Users\u\AppData\Local\Fox";
+    const WIN_SID: &str = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+    /// `%ProgramData%\\Fox\\sandbox\\<SID>`: private HOMEs and session temp.
+    const WIN_PRIVATE: &str = r"C:\ProgramData\Fox\sandbox\S-1-5-21-1111111111-2222222222-3333333333-1001";
+    /// `%ProgramFiles%\\Fox\\sandbox-runtime\\<version>`: Node, srt, backends.
+    const WIN_RUNTIME: &str = r"C:\Program Files\Fox\sandbox-runtime\0.1.0";
 
     fn windows_policy() -> SandboxPolicy {
-        let homes = PrivateHomes::new(PathBuf::from(WIN_DATA).join("sandbox-homes"));
         SandboxPolicy::new(
             vec![
-                AuthorizedDir { path: r"C:\Users\u\proj".into(), writable: true },
-                AuthorizedDir { path: r"D:\work\docs".into(), writable: false },
+                AuthorizedDir { path: os_path(HostOs::Windows, &["C:", "Users", "u", "proj"]), writable: true },
+                AuthorizedDir { path: os_path(HostOs::Windows, &["D:", "work", "docs"]), writable: false },
             ],
-            homes.home_for(PROJECT, AgentBackend::Pi).unwrap(),
-            vec![PathBuf::from(WIN_DATA).join(r"runtime\pi")],
+            test_home(HostOs::Windows, PROJECT, AgentBackend::Pi),
+            vec![PathBuf::from(format!(r"{WIN_RUNTIME}\backends\pi"))],
             vec!["api.anthropic.com".into()],
             HostOs::Windows,
         )
     }
 
-    /// Fake Windows ACLs: `WRITE_DAC` everywhere except the listed prefixes;
-    /// broad DACLs on the listed prefixes.
+    fn windows_bases() -> crate::winancestor::AncestorBases {
+        crate::winancestor::AncestorBases {
+            profile_root: Some(PathBuf::from(r"C:\Users\u")),
+            private_base: Some(PathBuf::from(r"C:\ProgramData\Fox\sandbox")),
+        }
+    }
+
+    /// Fake Windows ACLs: `WRITE_DAC` everywhere except the listed prefixes
+    /// (or exact paths); broad DACLs on the listed prefixes; owner
+    /// Administrators except under `user_owned`.
     #[derive(Default)]
     struct FakeAcl {
         not_owned: Vec<&'static str>,
+        not_owned_exact: Vec<&'static str>,
         broad_read: Vec<&'static str>,
         broad_write: Vec<&'static str>,
+        user_owned: Vec<&'static str>,
         asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeAcl {
+        fn hit(list: &[&str], path: &Path) -> bool {
+            list.iter().any(|prefix| within(path, Path::new(prefix), HostOs::Windows))
+        }
     }
 
     impl crate::winacl::WindowsAclProbe for FakeAcl {
         fn check_write_dac(&self, path: &Path) -> Result<(), String> {
             self.asked.lock().unwrap().push(path.display().to_string());
-            if self.not_owned.iter().any(|prefix| within(path, Path::new(prefix), HostOs::Windows)) {
+            let exact = self.not_owned_exact.iter().any(|item| normalized(path, HostOs::Windows) == normalized(Path::new(item), HostOs::Windows));
+            if exact || Self::hit(&self.not_owned, path) {
                 Err("WRITE_DAC refused, Win32 error 5".into())
             } else {
                 Ok(())
             }
         }
         fn broad_access(&self, path: &Path) -> Result<crate::winacl::BroadAccess, String> {
-            let hit = |list: &Vec<&str>| list.iter().any(|prefix| within(path, Path::new(prefix), HostOs::Windows));
-            let (read, write) = (hit(&self.broad_read), hit(&self.broad_write));
+            let (read, write) = (Self::hit(&self.broad_read, path), Self::hit(&self.broad_write, path));
             Ok(crate::winacl::BroadAccess {
                 read: read || write,
                 write,
                 groups: if read || write { vec!["Authenticated Users".into()] } else { vec![] },
             })
+        }
+        fn owner_sid(&self, path: &Path) -> Result<String, String> {
+            Ok(if Self::hit(&self.user_owned, path) { WIN_SID.into() } else { crate::winacl::SID_BUILTIN_ADMINISTRATORS.into() })
+        }
+        fn dacl_entries(&self, path: &Path) -> Result<Vec<crate::winacl::AceEntry>, String> {
+            let ace = |sid: &str, mask: u32| crate::winacl::AceEntry { sid: sid.into(), allow: true, mask, flags: 3 };
+            let mut entries = vec![ace(crate::winacl::SID_BUILTIN_ADMINISTRATORS, 0x1f01ff), ace(crate::winacl::SID_LOCAL_SYSTEM, 0x1f01ff), ace("S-1-5-32-545", 0x1200a9)];
+            if Self::hit(&self.broad_write, path) {
+                entries.push(ace("S-1-5-11", 0x1301bf));
+            }
+            Ok(entries)
+        }
+        fn current_user_sid(&self) -> Result<String, String> {
+            Ok(WIN_SID.into())
         }
     }
 
@@ -2353,8 +2580,11 @@ mod tests {
     fn windows_launcher(node: &str, srt_prefix: &str, acl: FakeAcl) -> (SrtLauncher, std::sync::Arc<FakeAcl>) {
         let acl = std::sync::Arc::new(acl);
         let launcher = SrtLauncher::new(windows_ready(node, srt_prefix), PathBuf::from(WIN_DATA).join("state"))
-            .with_managed_runtime_root(PathBuf::from(WIN_DATA).join("runtime"))
-            .with_windows_acl(acl.clone());
+            .with_managed_runtime_root(PathBuf::from(WIN_RUNTIME))
+            .with_tmp_root(PathBuf::from(format!(r"{WIN_PRIVATE}\tmp")))
+            .with_windows_acl(acl.clone())
+            .with_ancestor_bases(windows_bases())
+            .with_windows_user_dirs(vec![PathBuf::from(r"C:\Users\u"), PathBuf::from(WIN_DATA)]);
         (launcher, acl)
     }
 
@@ -2366,45 +2596,85 @@ mod tests {
         policy
     }
 
+    fn srt_prefix() -> String {
+        format!(r"{WIN_RUNTIME}\srt")
+    }
+
     #[test]
-    fn windows_plan_grants_only_user_owned_paths_and_skips_users_readable_system_paths() {
-        // Node machine-wide in Program Files (Users can read it: no ACE),
-        // srt in Fox's managed runtime (ACE).
-        let (launcher, acl) = windows_launcher(
-            r"C:\Program Files\nodejs\node.exe",
-            &format!(r"{WIN_DATA}\runtime\srt"),
-            FakeAcl::default(),
-        );
+    fn windows_plan_grants_only_user_owned_paths_and_adds_ancestor_aces() {
+        // Node and srt in the machine-wide runtime (Users read+execute: no ACE).
+        let (launcher, acl) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), FakeAcl::default());
         let policy = effective_windows(&launcher);
         policy.validate(HostOs::Windows).unwrap();
         let plan = launcher.windows_ace_plan(&policy).unwrap();
-        let srt_root = format!(r"{WIN_DATA}\runtime\srt\node_modules\@anthropic-ai\sandbox-runtime");
-        assert!(!policy.extra_read_only.iter().any(|p| p.starts_with(r"C:\Program Files")), "readable without a grant");
         let win = |list: &[PathBuf]| list.iter().map(|p| normalized(p, HostOs::Windows)).collect::<Vec<_>>();
         let lower = |text: &str| text.to_ascii_lowercase();
+        assert_eq!(win(&plan.grant_read), [lower(r"D:\work\docs")], "runtime needs no ACE");
         assert_eq!(
-            win(&plan.grant_read),
-            [lower(&format!(r"{WIN_DATA}\runtime\pi")), lower(&srt_root), lower(r"D:\work\docs")]
+            win(&plan.grant_write),
+            [lower(r"C:\Users\u\proj"), normalized(&policy.private_home, HostOs::Windows), normalized(&launcher.session_tmp("s1"), HostOs::Windows)]
         );
-        assert_eq!(
-            plan.grant_write,
-            [PathBuf::from(r"C:\Users\u\proj"), policy.private_home.clone(), launcher.session_tmp("s1")]
-        );
+        assert!(plan.system_readable.iter().all(|p| within(p, Path::new(WIN_RUNTIME), HostOs::Windows)));
         assert!(plan.deny.is_empty());
+        // Ancestors (top-down by depth): D:\work (no broad read there), the
+        // profile root above the project, the private root chain above HOME
+        // and temp.
+        assert_eq!(
+            win(&plan.ancestors),
+            [
+                lower(r"D:\work"),
+                lower(r"C:\Users\u"),
+                lower(WIN_PRIVATE),
+                lower(&format!(r"{WIN_PRIVATE}\homes")),
+                lower(&format!(r"{WIN_PRIVATE}\tmp")),
+                lower(&format!(r"{WIN_PRIVATE}\homes\{PROJECT}")),
+            ]
+        );
         let asked = acl.asked.lock().unwrap().clone();
         assert!(!asked.iter().any(|p| p.eq_ignore_ascii_case(r"C:\Users") || p.starts_with(r"C:\Program Files")), "{asked:?}");
-        // The settings carry exactly the plan: no Program Files, no C:\Users.
+        assert!(asked.iter().any(|p| p.eq_ignore_ascii_case(r"C:\Users\u")), "WRITE_DAC checked on the profile root (ancestor ACE)");
         let settings = policy.to_srt_settings();
         let allow_read = paths(&settings["filesystem"]["allowRead"]);
         assert!(!allow_read.iter().any(|p| p.starts_with(r"C:\Program Files") || p.eq_ignore_ascii_case(r"C:\Users")), "{allow_read:?}");
-        assert!(allow_read.iter().any(|p| normalized(Path::new(p), HostOs::Windows) == lower(&srt_root)));
         assert!(paths(&settings["filesystem"]["denyRead"]).is_empty());
+    }
+
+    #[test]
+    fn windows_runtime_must_be_the_machine_wide_install() {
+        // The old per-user runtime under %LOCALAPPDATA%: structured "not installed".
+        let (launcher, _) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), FakeAcl::default());
+        let launcher = launcher.with_managed_runtime_root(PathBuf::from(WIN_DATA).join("runtime"));
+        let error = launcher.windows_ace_plan(&effective_windows(&launcher)).unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxRuntimeNotInstalled);
+        assert_eq!(error.code.as_str(), "sandbox_runtime_not_installed");
+        assert_eq!(error.remedy.as_deref(), Some("需在设置中启用沙箱（一次管理员授权）"));
+        // An override location the user owns, or one Users may write.
+        let acl = FakeAcl { user_owned: vec![r"D:\fox-rt"], ..Default::default() };
+        let (launcher, _) = windows_launcher(r"D:\fox-rt\node\node.exe", r"D:\fox-rt\srt", acl);
+        let launcher = launcher.with_managed_runtime_root(PathBuf::from(r"D:\fox-rt"));
+        assert_eq!(launcher.windows_ace_plan(&effective_windows(&launcher)).unwrap_err().code, SandboxErrorCode::SandboxPathExposed);
+        let acl = FakeAcl { broad_write: vec![r"D:\fox-rt"], ..Default::default() };
+        let (launcher, _) = windows_launcher(r"D:\fox-rt\node\node.exe", r"D:\fox-rt\srt", acl);
+        let launcher = launcher.with_managed_runtime_root(PathBuf::from(r"D:\fox-rt"));
+        assert_eq!(launcher.windows_ace_plan(&effective_windows(&launcher)).unwrap_err().code, SandboxErrorCode::SandboxPathExposed);
+        // An administrator-owned override: accepted, and nothing under it is
+        // put in allowRead (srt would fail to ACE it).
+        let (launcher, _) = windows_launcher(r"D:\fox-rt\node\node.exe", r"D:\fox-rt\srt", FakeAcl::default());
+        let launcher = launcher.with_managed_runtime_root(PathBuf::from(r"D:\fox-rt"));
+        let mut policy = launcher.effective_policy(&windows_policy());
+        policy.extra_read_only = vec![PathBuf::from(r"D:\fox-rt\backends\pi")];
+        let policy = launcher.effective_policy(&policy);
+        let mut policy = policy;
+        policy.session_tmp = Some(launcher.session_tmp("s1"));
+        let plan = launcher.windows_ace_plan(&policy).unwrap();
+        assert!(!plan.grant_read.iter().any(|p| within(p, Path::new(r"D:\fox-rt"), HostOs::Windows)));
+        assert!(!paths(&policy.to_srt_settings()["filesystem"]["allowRead"]).iter().any(|p| p.starts_with(r"D:\fox-rt")));
     }
 
     #[test]
     fn windows_plan_refuses_runtimes_outside_the_managed_directory() {
         // Node from a user-level install outside Fox's runtime directory.
-        let (launcher, _) = windows_launcher(r"D:\tools\node\node.exe", &format!(r"{WIN_DATA}\runtime\srt"), FakeAcl::default());
+        let (launcher, _) = windows_launcher(r"D:\tools\node\node.exe", &srt_prefix(), FakeAcl::default());
         let policy = effective_windows(&launcher);
         let error = launcher.windows_ace_plan(&policy).unwrap_err();
         assert_eq!(error.code, SandboxErrorCode::SandboxPathNotOwned);
@@ -2412,14 +2682,17 @@ mod tests {
         assert_eq!(error.missing, [r"D:\tools\node"]);
         assert!(error.remedy.as_deref().unwrap().contains("运行时目录"));
         // No managed runtime directory configured at all.
-        let mut bare = SrtLauncher::new(windows_ready(r"C:\Program Files\nodejs\node.exe", &format!(r"{WIN_DATA}\runtime\srt")), PathBuf::from(WIN_DATA).join("state"))
+        let mut bare = SrtLauncher::new(windows_ready(r"D:\tools\node\node.exe", &srt_prefix()), PathBuf::from(WIN_DATA).join("state"))
+            .with_tmp_root(PathBuf::from(format!(r"{WIN_PRIVATE}\tmp")))
+            .with_ancestor_bases(windows_bases())
             .with_windows_acl(std::sync::Arc::new(FakeAcl::default()));
         let policy = effective_windows(&bare);
         assert_eq!(bare.windows_ace_plan(&policy).unwrap_err().code, SandboxErrorCode::SandboxPathNotOwned);
         // Runtime directory inside a writable authorized folder: planting risk.
-        bare = bare.with_managed_runtime_root(r"C:\Users\u\proj\runtime".into());
+        bare = bare.with_managed_runtime_root(r"D:\proj\runtime".into());
         let mut policy = windows_policy();
-        policy.extra_read_only = vec![r"C:\Users\u\proj\runtime\pi".into()];
+        policy.authorized.push(AuthorizedDir { path: r"D:\proj".into(), writable: true });
+        policy.extra_read_only = vec![r"D:\proj\runtime\pi".into()];
         policy.session_tmp = Some(bare.session_tmp("s1"));
         assert_eq!(bare.windows_ace_plan(&policy).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
     }
@@ -2429,7 +2702,7 @@ mod tests {
         // A project in a folder another account owns, and a Host deny whose
         // parent the user does not own.
         let acl = FakeAcl { not_owned: vec![r"D:\work", r"C:\Users\Public"], ..Default::default() };
-        let (launcher, _) = windows_launcher(r"C:\Program Files\nodejs\node.exe", &format!(r"{WIN_DATA}\runtime\srt"), acl);
+        let (launcher, _) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), acl);
         let policy = effective_windows(&launcher);
         let error = launcher.windows_ace_plan(&policy).unwrap_err();
         assert_eq!(error.code, SandboxErrorCode::SandboxPathNotOwned);
@@ -2437,7 +2710,7 @@ mod tests {
         assert!(error.message.contains(r"D:\work\docs") && error.message.contains("error 5"), "{}", error.message);
 
         let acl = FakeAcl { not_owned: vec![r"C:\Users\Public"], ..Default::default() };
-        let (launcher, acl) = windows_launcher(r"C:\Program Files\nodejs\node.exe", &format!(r"{WIN_DATA}\runtime\srt"), acl);
+        let (launcher, acl) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), acl);
         let mut policy = effective_windows(&launcher);
         policy.deny_read_roots = vec![r"C:\Users\u\proj\secrets".into()];
         let plan = launcher.windows_ace_plan(&policy).unwrap();
@@ -2446,25 +2719,34 @@ mod tests {
         assert!(asked.contains(&r"C:\Users\u\proj".to_owned()), "deny parent checked too (srt stamps FILE_DELETE_CHILD there)");
         policy.deny_read_roots = vec![r"C:\Users\Public\x".into()];
         assert_eq!(launcher.windows_ace_plan(&policy).unwrap_err().code, SandboxErrorCode::SandboxPathNotOwned);
+
+        // No WRITE_DAC on the profile root itself: the ancestor ACE cannot be
+        // written, fail closed and say so.
+        let acl = FakeAcl { not_owned_exact: vec![r"C:\Users\u"], ..Default::default() };
+        let (launcher, _) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), acl);
+        let error = launcher.windows_ace_plan(&effective_windows(&launcher)).unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxPathNotOwned);
+        assert_eq!(error.missing, [r"C:\Users\u"]);
+        assert!(error.message.contains("profile root"), "{}", error.message);
     }
 
     #[test]
     fn windows_plan_refuses_private_dirs_open_to_every_account() {
-        // Fox data placed on a data drive that inherits Authenticated Users:(M).
-        let acl = FakeAcl { broad_write: vec![WIN_DATA], ..Default::default() };
-        let (launcher, _) = windows_launcher(r"C:\Program Files\nodejs\node.exe", &format!(r"{WIN_DATA}\runtime\srt"), acl);
+        // Fox state / private root on a location that inherits Authenticated Users:(M).
+        let acl = FakeAcl { broad_write: vec![WIN_DATA, WIN_PRIVATE], ..Default::default() };
+        let (launcher, _) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), acl);
         let policy = effective_windows(&launcher);
         let error = launcher.windows_ace_plan(&policy).unwrap_err();
         assert_eq!(error.code, SandboxErrorCode::SandboxPathExposed);
         assert_eq!(error.code.as_str(), "sandbox_path_exposed");
-        assert!(error.message.contains("state") && error.message.contains("runtime"), "{}", error.message);
-        // Read-only exposure of the runtime alone is acceptable (it is read
-        // by the sandbox anyway); of the state directory it is not.
-        let acl = FakeAcl { broad_read: vec![r"C:\Users\u\AppData\Local\Fox\runtime"], ..Default::default() };
-        let (launcher, _) = windows_launcher(r"C:\Program Files\nodejs\node.exe", &format!(r"{WIN_DATA}\runtime\srt"), acl);
+        assert!(error.message.contains("state") && error.message.contains("homes") && error.message.contains("tmp"), "{}", error.message);
+        // Read-only exposure of the runtime is expected (Users read+execute);
+        // of the state directory it is not.
+        let acl = FakeAcl { broad_read: vec![WIN_RUNTIME], ..Default::default() };
+        let (launcher, _) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), acl);
         launcher.windows_ace_plan(&effective_windows(&launcher)).unwrap();
         let acl = FakeAcl { broad_read: vec![r"C:\Users\u\AppData\Local\Fox\state"], ..Default::default() };
-        let (launcher, _) = windows_launcher(r"C:\Program Files\nodejs\node.exe", &format!(r"{WIN_DATA}\runtime\srt"), acl);
+        let (launcher, _) = windows_launcher(&format!(r"{WIN_RUNTIME}\node\node.exe"), &srt_prefix(), acl);
         assert_eq!(launcher.windows_ace_plan(&effective_windows(&launcher)).unwrap_err().code, SandboxErrorCode::SandboxPathExposed);
     }
 
@@ -2844,8 +3126,12 @@ mod tests {
             vec!["api.openai.com".into()],
             HostOs::Windows,
         );
+        // The temp directory is under %LOCALAPPDATA%: user directories are
+        // cleared so the (faked, administrator-owned) runtime is accepted.
         let launcher = SrtLauncher::new(windows_ready(&node.display().to_string(), &srt_prefix.display().to_string()), state.clone())
             .with_managed_runtime_root(runtime.clone())
+            .with_windows_user_dirs(vec![])
+            .with_ancestor_bases(Default::default())
             .with_windows_acl(std::sync::Arc::new(FakeAcl::default()));
         let wrapped = launcher.wrap(&spec(&program.display().to_string()), &policy, "sess-1").unwrap();
         assert_eq!(wrapped.spec.program, node.display().to_string());
@@ -2870,9 +3156,12 @@ mod tests {
         let written: Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
         assert!(paths(&written["filesystem"]["denyRead"]).is_empty(), "no denyRead on Windows");
         let allow_read = paths(&written["filesystem"]["allowRead"]);
-        for expected in [&proj, &home, &tmp, &backend_dir, &runtime.join("node"), &srt_prefix.join(r"node_modules\@anthropic-ai\sandbox-runtime")] {
+        for expected in [&proj, &home, &tmp] {
             assert!(allow_read.contains(&expected.display().to_string()), "missing allowRead {}: {allow_read:?}", expected.display());
         }
+        // The managed runtime is Users-readable by contract: never in allowRead.
+        assert!(!allow_read.iter().any(|path| within(Path::new(path), &runtime, HostOs::Windows)), "{allow_read:?}");
+        assert_eq!(env["NODE_OPTIONS"], "--preserve-symlinks --preserve-symlinks-main");
         assert_eq!(paths(&written["filesystem"]["allowWrite"]), [proj.display().to_string(), home.display().to_string(), tmp.display().to_string()]);
         drop(wrapped);
         assert!(!settings_path.exists() && !tmp.exists());
@@ -2972,6 +3261,10 @@ mod tests {
         assert!(!prepared.declaration.directory_isolation);
     }
 
+    // Linux rules (and the macOS / Windows "not measured" fold-in over a
+    // Linux-shaped policy). Built through `home_for`, so off Windows only; the
+    // Windows declaration has its own test below.
+    #[cfg(not(windows))]
     #[test]
     fn capability_declaration_follows_the_mode() {
         let policy = linux_policy();
@@ -3007,14 +3300,6 @@ mod tests {
         // Not measured on macOS / Windows: never shown as enforced.
         let mac = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::MacOs);
         assert_eq!((mac.read_scope, mac.read_scope_verified), (ReadScope::AuthorizedOnly, false));
-        let windows = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&windows_policy()), HostOs::Windows);
-        assert_eq!((windows.read_scope, windows.read_scope_verified), (ReadScope::UsersGroupReadable, false));
-        assert_eq!(serde_json::to_value(windows.read_scope).unwrap(), json!("users_group_readable"));
-        assert_eq!(
-            windows.read_scope.ui_label(windows.read_scope_verified),
-            "沙箱账户只能读取系统中对所有用户开放的位置和授权文件夹；你的个人文件夹受保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测）"
-        );
-        assert!(!windows.directory_isolation);
         for os in [HostOs::MacOs, HostOs::Windows] {
             let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), os);
             assert!(!declaration.directory_isolation);
@@ -3038,6 +3323,48 @@ mod tests {
         declared.sandbox_filesystem = Enforcement::Enforced;
         SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::MacOs).apply_to(&mut declared);
         assert_eq!(declared.sandbox_filesystem, Enforcement::Enforced);
+    }
+
+    /// Windows (decision B): partial scope, never directory isolation, the
+    /// exposure audit carried as `exposed_dirs` with the fixed warning.
+    #[test]
+    fn windows_declaration_is_partial_and_carries_the_exposure_warning() {
+        let windows = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&windows_policy()), HostOs::Windows);
+        assert_eq!((windows.read_scope, windows.read_scope_verified), (ReadScope::UsersGroupReadable, false));
+        assert_eq!(serde_json::to_value(windows.read_scope).unwrap(), json!("users_group_readable"));
+        let label = windows.read_scope.ui_label(windows.read_scope_verified);
+        assert_eq!(
+            label,
+            "沙箱账户可读取授权文件夹和系统中对所有用户开放的位置；个人文件夹按实际 ACL 保护；其他盘上对所有用户开放的目录可能可读写（本平台待实测）"
+        );
+        assert!(!label.contains("受保护；") && label.contains("按实际 ACL 保护"), "no absolute promise about personal folders");
+        assert!(!windows.directory_isolation);
+        assert!(windows.exposed_dirs.is_empty() && windows.exposure_warning.is_none(), "not audited yet");
+        let report = crate::winacl::ExposureReport {
+            supported: true,
+            drives: vec![PathBuf::from(r"C:\"), PathBuf::from(r"D:\")],
+            exposed: vec![crate::winacl::ExposedPath {
+                path: PathBuf::from(r"D:\data"),
+                access: crate::winacl::BroadAccess { read: true, write: true, groups: vec!["Authenticated Users".into()] },
+            }],
+            errors: vec![],
+        };
+        let audited = windows.clone().with_exposure(&report);
+        assert_eq!(audited.exposed_dirs, [r"D:\data"]);
+        assert_eq!(audited.exposure_warning.as_deref(), Some(WINDOWS_EXPOSURE_WARNING));
+        assert_eq!(WINDOWS_EXPOSURE_WARNING, "此模式不限制在授权目录内。对所有用户开放的目录仍可能被读取或修改；本机已检测到此类目录。");
+        assert!(!audited.directory_isolation, "B: warn only");
+        let clean = windows.clone().with_exposure(&crate::winacl::ExposureReport { supported: true, ..Default::default() });
+        assert!(clean.exposure_warning.is_none());
+        let json = serde_json::to_value(&audited).unwrap();
+        assert_eq!(json["exposed_dirs"], json!([r"D:\data"]));
+        // Full access / other platforms ignore the audit.
+        let full = SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::Windows).with_exposure(&report);
+        assert!(full.exposed_dirs.is_empty() && full.exposure_warning.is_none());
+        let mut declared = CapabilityDeclaration::unverified();
+        declared.sandbox_filesystem = Enforcement::Absent;
+        audited.apply_to(&mut declared);
+        assert_eq!(declared.sandbox_filesystem, Enforcement::Unverified);
     }
 
     #[test]
@@ -3082,6 +3409,8 @@ mod tests {
         assert_eq!(homes.home_for(PROJECT, AgentBackend::Fox).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
     }
 
+    // Linux rules; the Windows profile case is its own test below.
+    #[cfg(not(windows))]
     #[test]
     fn chinese_paths_are_literal_and_do_not_affect_the_home_name() {
         let homes = PrivateHomes::new("/home/用户/.local/share/fox/sandbox-homes".into());
@@ -3099,19 +3428,32 @@ mod tests {
         assert_eq!(allow_read[0], "/home/用户/文档/[进行中] 项目 A");
         assert!(policy.is_readable(Path::new("/home/用户/文档/[进行中] 项目 A/说明.md"), HostOs::Linux));
         assert!(!policy.is_readable(Path::new("/home/用户/文档/[进行中] 项目 B/说明.md"), HostOs::Linux));
-        // Windows profile with a Chinese user name.
-        let homes = PrivateHomes::new(r"C:\Users\张三\AppData\Local\Fox\sandbox-homes".into());
-        let policy = SandboxPolicy::new(
-            vec![AuthorizedDir { path: r"C:\Users\张三\项目".into(), writable: true }],
-            homes.home_for(PROJECT, AgentBackend::Codex).unwrap(),
-            vec![],
-            vec![],
-            HostOs::Windows,
-        );
-        policy.validate(HostOs::Windows).unwrap();
-        assert!(!policy.is_readable(Path::new(r"C:\Users\张三\桌面\a.txt"), HostOs::Windows));
     }
 
+    /// Windows profile with a Chinese user name and a project under
+    /// `Documents\中文 空格`: literal paths, the private HOME name comes from
+    /// the UUID only, and every folder between the profile root and the
+    /// project gets an ancestor ACE.
+    #[test]
+    fn windows_chinese_profile_paths_are_literal_and_get_ancestor_aces() {
+        let proj = os_path(HostOs::Windows, &["C:", "Users", "张三", "Documents", "中文 空格", "proj"]);
+        let home = test_home(HostOs::Windows, PROJECT, AgentBackend::Codex);
+        assert!(home.path.display().to_string().ends_with(&format!(r"\homes\{PROJECT}\codex")));
+        let policy = SandboxPolicy::new(vec![AuthorizedDir { path: proj.clone(), writable: true }], home, vec![], vec![], HostOs::Windows);
+        policy.validate(HostOs::Windows).unwrap();
+        let allow_write = paths(&policy.to_srt_settings()["filesystem"]["allowWrite"]);
+        assert_eq!(allow_write[0], r"C:\Users\张三\Documents\中文 空格\proj");
+        assert!(!policy.is_readable(Path::new(r"C:\Users\张三\桌面\a.txt"), HostOs::Windows));
+        assert!(!policy.is_readable(Path::new(r"C:\Users\张三\Documents\other.txt"), HostOs::Windows), "Documents itself is not granted");
+        let bases = crate::winancestor::AncestorBases { profile_root: Some(PathBuf::from(r"C:\Users\张三")), private_base: None };
+        let plan = WindowsAcePlan { grant_write: vec![proj], ..Default::default() };
+        let ancestors = crate::winancestor::plan_ancestor_aces(&plan, &bases, &FakeAcl::default());
+        let text: Vec<String> = ancestors.iter().map(|path| path.display().to_string()).collect();
+        assert_eq!(text, [r"C:\Users\张三", r"C:\Users\张三\Documents", r"C:\Users\张三\Documents\中文 空格"]);
+    }
+
+    // Linux rules (lexical containment with `/`); Windows variant below.
+    #[cfg(not(windows))]
     #[test]
     fn authorized_dirs_may_not_reach_any_private_home_or_the_session_tmp() {
         let other_project_home = format!("{HOME_ROOT}/9b7e0d3c-1a2b-4c3d-8e4f-5a6b7c8d9e0f/pi");
@@ -3139,6 +3481,36 @@ mod tests {
         let mut policy = linux_policy();
         policy.authorized.push(AuthorizedDir { path: "/home/u/.local/share/fox-notes".into(), writable: false });
         policy.validate(HostOs::Linux).unwrap();
+    }
+
+    /// Windows: the private root lives under `%ProgramData%\\Fox\\sandbox\\<SID>`;
+    /// no authorized folder may contain it, be it, or reach into another
+    /// project's HOME or the session temp (case-insensitive).
+    #[test]
+    fn windows_authorized_dirs_may_not_reach_any_private_home_or_the_session_tmp() {
+        let other_home = format!(r"{WIN_PRIVATE}\homes\9b7e0d3c-1a2b-4c3d-8e4f-5a6b7c8d9e0f\pi");
+        for authorized in [
+            r"C:\ProgramData\Fox".to_owned(),
+            WIN_PRIVATE.to_owned(),
+            format!(r"{WIN_PRIVATE}\HOMES"),
+            other_home.clone(),
+            format!(r"{other_home}\.pi"),
+            test_home(HostOs::Windows, PROJECT, AgentBackend::Pi).path.display().to_string().to_ascii_uppercase(),
+        ] {
+            let mut policy = windows_policy();
+            policy.authorized.push(AuthorizedDir { path: authorized.clone().into(), writable: false });
+            assert_eq!(policy.validate(HostOs::Windows).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid, "{authorized} must be refused");
+        }
+        let mut policy = windows_policy();
+        policy.private_home = PathBuf::from(r"C:\Users\u\elsewhere");
+        assert!(policy.validate(HostOs::Windows).is_err(), "HOME outside its root");
+        let mut policy = windows_policy();
+        policy.session_tmp = Some(PathBuf::from(r"C:\Users\u\proj\.tmp"));
+        assert!(policy.validate(HostOs::Windows).is_err());
+        let mut policy = windows_policy();
+        policy.session_tmp = Some(PathBuf::from(format!(r"{WIN_PRIVATE}\tmp\s1")));
+        policy.authorized.push(AuthorizedDir { path: r"C:\ProgramData\Fox\notes".into(), writable: false });
+        policy.validate(HostOs::Windows).unwrap();
     }
 
     // ---- effective policy -> declaration (item: UI declaration source) ----
@@ -3290,6 +3662,8 @@ mod tests {
         );
         let launcher = SrtLauncher::new(windows_ready(&node.display().to_string(), &srt_prefix.display().to_string()), root.join("state"))
             .with_managed_runtime_root(runtime.clone())
+            .with_windows_user_dirs(vec![])
+            .with_ancestor_bases(Default::default())
             .with_windows_acl(std::sync::Arc::new(FakeAcl::default()));
         let error = launcher.wrap(&spec(&backend_dir.join("codex-acp.cmd").display().to_string()), &policy, "s1").unwrap_err();
         assert_eq!(error.code, SandboxErrorCode::SandboxPolicyInvalid, "{error}");
