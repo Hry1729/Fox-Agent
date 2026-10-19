@@ -100,7 +100,7 @@ pi tool_call 钩子（工具执行前，可阻断）
 | read 工具被拒 | 不返回内容 | 状态 failed，内容为 “Rejected by Fox approval…” ✅ |
 | 审批挂起时 session/cancel | 挂起请求结算为 cancelled，工具不执行 | `cancel()` 结算 1 个；stopReason cancelled；文件不存在 ✅ |
 | 已批准的 bash 运行中 cancel | turn 停止、命令被杀 | stopReason cancelled；`sleep` 进程消失 ✅ |
-| Host `close()`（SIGKILL pi-acp 进程组）时已批准 bash 运行中 | 进程树清理 | **bash 与 sleep 存活（孤儿）** ❌ —— 见缺口 G3 |
+| Host `close()` 时已批准 bash 运行中 | 进程树清理 | 第四轮（2026-10-19）：SIGTERM → 宽限 → KILL 下 pi 自己结束 detached bash；即使 pi 被 SIGSTOP、无法清理，Fox 的后代跟踪也按 pid 杀掉 bash 子树；整棵树结束且 `StopConfirmation::Confirmed` ✅（G3 已关闭，Linux 实测） |
 
 审批前状态（实测）：pi 先发 `tool_execution_start` 再跑 `tool_call` 钩子，所以 pi-acp 在**等待审批时已报 `in_progress`**。Host 映射层必须把有挂起门控请求的 toolCallId 显示为“等待审批”。
 
@@ -139,7 +139,7 @@ pi tool_call 钩子（工具执行前，可阻断）
 |---|---|---|---|
 | G1 | stock pi-acp 工具不经审批 | 不能以 stock 形态发布 | 用门控原型；需要 G2 |
 | G2 | `PI_ACP_PI_COMMAND`、`FOX_PI_BIN` 不在 `launch.rs` 白名单，`LaunchSpec` 也没有“Host 注入的会话变量”字段 | 生产无法接上门控 / 锁定 pi | 向公共层提变更请求：PiBackend 需要 Host 显式注入这两个变量（6.5“白名单 + Host 显式注入”）。本分支未改 launch.rs |
-| G3 | `acp.rs::kill_tree` 直接 SIGKILL 进程组；pi 的 bash 自成进程组，成为孤儿 | T06/T07/T14 子进程清理不过 | 向公共层提：先 SIGTERM（pi-acp→pi 会清理已跟踪的 detached 子进程）、宽限后 KILL；或 Host 跟踪并杀后代进程组。Windows 依赖 Job Object，待测 |
+| G3（已关闭，第四轮） | 原：`acp.rs::kill_tree` 直接 SIGKILL 进程组，pi 的 bash 自成进程组成为孤儿 | — | 已实现两者：先 SIGTERM 宽限再 KILL；并在停止前快照后代、按 pid 杀掉离开进程组的后代，确认整棵树结束（`src/proctree.rs`）。Linux 实测通过；macOS（ps 快照）与 Windows（Job Object）待测 |
 | G4 | `credential_env` 为空：pi 读取的提供商环境变量（如 `ANTHROPIC_API_KEY`）被白名单丢弃 | 只能用 pi 自己的 `~/.pi/agent/auth.json` 登录 | 符合 7.5“后端自管登录”；若需环境变量登录，按提供商列名单再提变更 |
 | G5 | MCP 未接到 pi | Host 业务工具不可用 | 选项：上游 pi-acp 接线；或经 pi 扩展（如 pi-mcp-adapter / 自写扩展）把 Host MCP 窄接口注册为 pi 工具（同样会经门控）。未做 |
 | G6 | 等待审批时工具状态为 in_progress | UI 误导 | Host 映射层按 `parse_tool_approval` 覆盖显示 |
@@ -156,10 +156,10 @@ pi tool_call 钩子（工具执行前，可阻断）
 |---|---|
 | T04 越权阻断 | **未通过**。沙箱 Absent：路径/网络无任何强制；门控只能让用户逐次拒绝，且不约束已批准命令内部行为。需 Host 层沙箱（或按声明只读/受限目录）后才能验证 |
 | T05 审批允许/拒绝/重复/失效 | **部分通过（原型、Linux）**：允许、拒绝、重复答复被拒、取消使挂起请求失效均实测通过。未测：超时失效、连接代次变化后旧卡、Host 持久化（属公共层） |
-| T06 取消与竞争、结果未知 | **部分**：审批挂起时取消、命令运行中取消均通过；完成/取消竞争、结果未知未测；Host 强杀后 bash 孤儿（G3）**不通过** |
-| T07 断线/崩溃/重启/代次 | **未测**；崩溃清理受 G3 影响 |
+| T06 取消与竞争、结果未知 | **部分**：审批挂起时取消、命令运行中取消均通过；完成/取消竞争、结果未知未测；Host 关闭后进程树清理（G3）第四轮已通过（Linux） |
+| T07 断线/崩溃/重启/代次 | **未测** |
 | T10 迟到/重复事件、多会话、并发 | **未测**（依赖公共层 EventIntake / limits；pi 侧确认一进程一会话） |
 | T12 旧库升级/映射/回滚 | 不涉及 pi 分支代码（公共层 legacy.rs）；pi 侧未测 |
 | T14 Windows | **未测**：pi.cmd/cross-spawn、`pi-gated.cmd`、Job Object 均未验证 |
 
-结论：pi 可用 ACP 路线达到逐次审批（原型已证），但当前**不满足发布门槛**；阻塞项为 G2（启动注入）、G3（进程树）、T04（无沙箱）、T14（Windows）。
+结论：pi 可用 ACP 路线达到逐次审批（原型已证），但当前**不满足发布门槛**；阻塞项为 G2（启动注入）、T04（无沙箱）、T14（Windows）；G3（进程树）第四轮已在 Linux 关闭。
