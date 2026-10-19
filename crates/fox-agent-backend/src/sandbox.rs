@@ -392,6 +392,12 @@ pub enum SandboxErrorCode {
     /// `%ProgramData%\Fox\sandbox` base is missing. The one-time elevated
     /// setup (`enable-sandbox.ps1`) installs it.
     SandboxRuntimeNotInstalled,
+    /// Windows: the ACP bridge cannot be set up: `acp-bridge\bridge.mjs` is
+    /// missing from the managed runtime or differs from the copy Fox embeds,
+    /// or no srt sandbox SID is recorded for the pipe DACL. srt 0.0.80 does
+    /// not deliver stdin to the sandboxed process on Windows, so there is no
+    /// stdio fallback (docs/sandbox.md 7.12).
+    SandboxBridgeUnavailable,
     /// A file the Agent says it delivered is not a readable regular file
     /// inside an authorized writable folder, as seen from outside the sandbox
     /// ([`verify_delivered_file`]).
@@ -409,6 +415,7 @@ impl SandboxErrorCode {
             Self::SandboxPathNotOwned => "sandbox_path_not_owned",
             Self::SandboxPathExposed => "sandbox_path_exposed",
             Self::SandboxRuntimeNotInstalled => "sandbox_runtime_not_installed",
+            Self::SandboxBridgeUnavailable => "sandbox_bridge_unavailable",
             Self::DeliveredFileRejected => "delivered_file_rejected",
         }
     }
@@ -1423,6 +1430,19 @@ pub struct SandboxedLaunch {
     /// Windows: ancestors that need Fox's attribute-read ACE before srt
     /// starts ([`WindowsAcePlan::ancestors`]). Empty elsewhere.
     pub windows_ancestor_aces: Vec<PathBuf>,
+    /// The backend's own variables (private HOME, temp, PATH, the spec's
+    /// session variables). They travel inside the command (Windows `set` in
+    /// `-c`, Linux / macOS `env K=V` after `--`), never in the srt broker's
+    /// environment; `spec.session_env` holds only what srt itself needs.
+    pub backend_env: Vec<(String, String)>,
+    /// Windows: the ACP bridge endpoint (named pipe + one-shot token) the
+    /// sandboxed bridge connects back to. `None` elsewhere (stdio works).
+    pub acp_bridge: Option<crate::launch::BridgeEndpoint>,
+    /// Startup report: srt state directories found inside the private HOME
+    /// (`AppData\Local\sandbox-runtime`), left by earlier versions that gave
+    /// the srt broker the private `LOCALAPPDATA`. Reported only; see
+    /// [`remove_stray_srt_state`].
+    pub stray_srt_state: Vec<PathBuf>,
 }
 
 /// Wraps a backend launch in a sandbox.
@@ -1460,6 +1480,13 @@ pub struct SrtLauncher {
     /// Windows: per-user directories a managed runtime may not live in
     /// ([`crate::winruntime::windows_user_dirs`] by default).
     pub windows_user_dirs: Vec<PathBuf>,
+    /// Windows: the installed bridge script (default
+    /// `<managed runtime>\acp-bridge\bridge.mjs`); must equal
+    /// [`crate::launch::BRIDGE_SCRIPT`].
+    pub acp_bridge_script: Option<PathBuf>,
+    /// Windows: srt sandbox account SID for the bridge pipe DACL. `None` =
+    /// read `HKLM\SOFTWARE\sandbox-runtime` `SandboxUserSid` at launch.
+    pub srt_sandbox_sid: Option<String>,
 }
 
 /// What srt-win will be asked to do on Windows, worked out (and checked) by
@@ -1531,7 +1558,29 @@ impl SrtLauncher {
             windows_acl: std::sync::Arc::new(crate::winacl::RealWindowsAcl),
             ancestor_bases: crate::winancestor::AncestorBases::from_env(),
             windows_user_dirs: if cfg!(windows) { crate::winruntime::windows_user_dirs() } else { Vec::new() },
+            acp_bridge_script: None,
+            srt_sandbox_sid: None,
         }
+    }
+
+    /// Windows: where the bridge script is installed (default: under the
+    /// managed runtime root).
+    pub fn with_acp_bridge_script(mut self, path: PathBuf) -> Self {
+        self.acp_bridge_script = Some(path);
+        self
+    }
+
+    /// Windows: the srt sandbox SID for the bridge pipe DACL (tests, or a
+    /// Host that already read it).
+    pub fn with_srt_sandbox_sid(mut self, sid: String) -> Self {
+        self.srt_sandbox_sid = Some(sid);
+        self
+    }
+
+    fn bridge_script_path(&self) -> Option<PathBuf> {
+        self.acp_bridge_script.clone().or_else(|| {
+            self.managed_runtime_root.as_ref().map(|root| crate::launch::BRIDGE_RELATIVE_PATH.iter().fold(root.clone(), |path, part| path.join(part)))
+        })
     }
 
     /// Windows: override the per-user directories (tests).
@@ -1844,6 +1893,8 @@ impl SandboxLauncher for SrtLauncher {
             windows_acl: std::sync::Arc::clone(&self.windows_acl),
             ancestor_bases: self.ancestor_bases.clone(),
             windows_user_dirs: self.windows_user_dirs.clone(),
+            acp_bridge_script: self.acp_bridge_script.clone(),
+            srt_sandbox_sid: self.srt_sandbox_sid.clone(),
         };
         resolved.wrap_resolved(spec, policy, session_id, true)
     }
@@ -1918,16 +1969,24 @@ impl SrtLauncher {
         let settings = serde_json::to_vec_pretty(&policy.to_srt_settings()).expect("settings serialize");
         write_private(&session.settings_path, &settings).map_err(io)?;
 
-        let mut session_env = spec.session_env.clone();
+        // The backend's variables go into the command, not into the srt
+        // broker's environment: the broker (srt CLI / srt-win, running as the
+        // real user) must see the real LOCALAPPDATA / USERPROFILE / TEMP, or it
+        // keeps its state.db and ACL lock under the private HOME and disagrees
+        // with Fox about the lock (docs/sandbox.md 7.11).
+        let mut backend_env = spec.session_env.clone();
         for (key, value) in self.sandbox_env(spec, &policy) {
-            session_env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
-            session_env.push((key, value));
+            backend_env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
+            backend_env.push((key, value));
         }
+        let stray_srt_state = if os == HostOs::Windows { find_stray_srt_state(&policy.private_home) } else { Vec::new() };
         let mut args = vec![
             self.ready.install.cli_js.to_string_lossy().into_owned(),
             "--settings".to_owned(),
             session.settings_path.to_string_lossy().into_owned(),
         ];
+        let mut acp_bridge = None;
+        let broker_env: Vec<(String, String)>;
         if os == HostOs::Windows {
             // srt 0.0.80 on Windows: the argv form is POSIX-quoted and then
             // run by `cmd.exe /d /s /c`, which mangles any path with a
@@ -1935,10 +1994,31 @@ impl SrtLauncher {
             // profile environment plus only PATH/PATHEXT/proxy variables,
             // so the session variables would not arrive. `-c` with a
             // cmd.exe command line fixes both (see windows_command_line).
+            // stdin does not reach the child at all, so ACP goes through the
+            // bridge (docs/sandbox.md 7.12).
+            let endpoint = self.bridge_endpoint(canonicalize)?;
+            let script = self.verified_bridge_script()?;
+            let mut line_env = backend_env.clone();
+            line_env.extend(endpoint.env());
+            let mut bridge_args = vec![script.to_string_lossy().into_owned(), "--".to_owned(), spec.program.clone()];
+            bridge_args.extend(spec.args.iter().cloned());
             args.push("-c".to_owned());
-            args.push(windows_command_line(&spec.program, &spec.args, &session_env)?);
+            args.push(windows_command_line(&self.ready.install.node.to_string_lossy(), &bridge_args, &line_env)?);
+            acp_bridge = Some(endpoint);
+            broker_env = broker_session_env(os, &backend_env);
         } else {
+            // srt hands its own environment to the sandboxed child (bwrap /
+            // sandbox-exec inherit it), so the backend's variables are set
+            // with `env` inside the sandbox instead.
+            broker_env = broker_session_env(os, &backend_env);
             args.push("--".to_owned());
+            args.push(UNIX_ENV_PROGRAM.to_owned());
+            for (key, value) in &backend_env {
+                if key.is_empty() || key.contains('=') {
+                    return Err(SandboxError::new(SandboxPolicyInvalid, format!("invalid environment variable name {key:?}")));
+                }
+                args.push(format!("{key}={value}"));
+            }
             args.push(spec.program.clone());
             args.extend(spec.args.iter().cloned());
         }
@@ -1947,12 +2027,117 @@ impl SrtLauncher {
             program: self.ready.install.node.to_string_lossy().into_owned(),
             args,
             version_pin: spec.version_pin,
-            credential_env: spec.credential_env,
+            // Windows: host credentials never reach the sandboxed child
+            // anyway, so the broker does not get them either. Linux / macOS:
+            // they reach the backend through srt's environment.
+            credential_env: if os == HostOs::Windows { &[] } else { spec.credential_env },
             experimental: spec.experimental,
-            session_env,
+            session_env: broker_env,
         };
-        Ok(SandboxedLaunch { spec: wrapped, session, effective_policy: policy, windows_ancestor_aces })
+        Ok(SandboxedLaunch { spec: wrapped, session, effective_policy: policy, windows_ancestor_aces, backend_env, acp_bridge, stray_srt_state })
     }
+
+    /// Windows: a fresh bridge endpoint whose pipe DACL admits the srt
+    /// sandbox SID. On the real host the SID is read from the registry when
+    /// it was not given.
+    fn bridge_endpoint(&self, on_host: bool) -> Result<crate::launch::BridgeEndpoint, SandboxError> {
+        let sid = match &self.srt_sandbox_sid {
+            Some(sid) => Some(sid.clone()),
+            None if on_host => read_srt_sandbox_sid(&RealProbe),
+            None => None,
+        };
+        let sid = sid.filter(|sid| crate::winacl::is_string_sid(sid)).ok_or_else(|| {
+            SandboxError::new(SandboxErrorCode::SandboxBridgeUnavailable, "no srt sandbox account SID is recorded (HKLM\\SOFTWARE\\sandbox-runtime SandboxUserSid)")
+                .remedy("重新运行“启用沙箱”")
+        })?;
+        crate::launch::BridgeEndpoint::new_local(Some(sid)).map_err(|error| SandboxError::new(SandboxErrorCode::SandboxBridgeUnavailable, error))
+    }
+
+    /// Windows: the installed bridge script, checked against the embedded
+    /// copy (line endings normalized). Fail-closed like the dsh patches.
+    fn verified_bridge_script(&self) -> Result<PathBuf, SandboxError> {
+        let unavailable = |message: String| {
+            SandboxError::new(SandboxErrorCode::SandboxBridgeUnavailable, message).remedy("重新运行“启用沙箱”以安装与本版本 Fox 匹配的运行时包")
+        };
+        let path = self.bridge_script_path().ok_or_else(|| unavailable("no managed runtime directory, so no ACP bridge".into()))?;
+        let found = std::fs::read_to_string(&path).map_err(|error| unavailable(format!("ACP bridge {} is not installed: {error}", path.display())).missing(path.display().to_string()))?;
+        if !bridge_script_matches(&found) {
+            return Err(unavailable(format!("{} differs from the ACP bridge this Fox version ships", path.display())));
+        }
+        Ok(path)
+    }
+}
+
+/// What the srt broker process itself gets on top of the Host allowlist.
+///
+/// * Windows: nothing. srt-win runs as the real user and keeps its state
+///   (`%LOCALAPPDATA%\sandbox-runtime\{state.db,.acl-init.lock}`) under the
+///   real `LOCALAPPDATA`, the same one [`crate::winancestor::srt_acl_lock_path`]
+///   locks; USERPROFILE / APPDATA / TEMP / TMP / HOMEDRIVE / HOMEPATH /
+///   SystemRoot are the real ones too.
+/// * Linux / macOS: the session temp only. srt puts its proxy bridge sockets
+///   in TMPDIR and passes CLAUDE_CODE_TMPDIR to the child as TMPDIR
+///   (measured); the private HOME is not given to srt.
+pub fn broker_session_env(os: HostOs, backend_env: &[(String, String)]) -> Vec<(String, String)> {
+    match os {
+        HostOs::Windows => Vec::new(),
+        _ => backend_env.iter().filter(|(key, _)| matches!(key.as_str(), "TMPDIR" | "CLAUDE_CODE_TMPDIR")).cloned().collect(),
+    }
+}
+
+/// Linux / macOS: the program that sets the backend's variables inside the
+/// sandbox (`/usr` is in the system read-only set on both).
+pub const UNIX_ENV_PROGRAM: &str = "/usr/bin/env";
+
+/// Whether an installed bridge script is the one Fox embeds (CRLF and LF
+/// treated alike).
+pub fn bridge_script_matches(installed: &str) -> bool {
+    installed.replace("\r\n", "\n") == crate::launch::BRIDGE_SCRIPT.replace("\r\n", "\n")
+}
+
+/// srt sandbox account SID from `reg query HKLM\SOFTWARE\sandbox-runtime /v
+/// SandboxUserSid` (the value `windows-install` writes).
+pub fn read_srt_sandbox_sid(probe: &dyn SystemProbe) -> Option<String> {
+    let reg = probe.which("reg").unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\reg.exe"));
+    let output = probe.run(&reg, &["query", WINDOWS_INSTALL_REGISTRY_KEY, "/v", "SandboxUserSid"])?;
+    parse_reg_sz(&output, "SandboxUserSid")
+}
+
+/// The data of `name` in `reg query` output (`    Name    REG_SZ    value`).
+pub fn parse_reg_sz(output: &str, name: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        (parts.next()? .eq_ignore_ascii_case(name) && parts.next()? == "REG_SZ").then(|| parts.collect::<Vec<_>>().join(" ")).filter(|value| !value.is_empty())
+    })
+}
+
+/// srt state that should never be inside a private HOME
+/// (`<home>\AppData\Local\sandbox-runtime`, from a broker that was given
+/// the private `LOCALAPPDATA`). Returns what exists; changes nothing.
+pub fn find_stray_srt_state(private_home: &Path) -> Vec<PathBuf> {
+    let dir = private_home.join("AppData").join("Local").join("sandbox-runtime");
+    if std::fs::symlink_metadata(&dir).is_ok() {
+        vec![dir]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Explicit clean-up of [`find_stray_srt_state`] results. Never automatic:
+/// the caller must have established that no srt broker is alive (a running
+/// broker may still hold that state.db). Refuses anything that is not a
+/// `sandbox-runtime` directory under an `AppData\Local` of `private_home`,
+/// and does not follow a reparse point.
+pub fn remove_stray_srt_state(private_home: &Path, stray: &Path) -> Result<(), SandboxError> {
+    let expected = private_home.join("AppData").join("Local").join("sandbox-runtime");
+    if stray != expected {
+        return Err(SandboxError::new(SandboxErrorCode::SandboxPolicyInvalid, format!("{} is not the stray srt state of {}", stray.display(), private_home.display())));
+    }
+    let metadata = std::fs::symlink_metadata(stray).map_err(|error| SandboxError::new(SandboxErrorCode::SandboxUnavailable, format!("{}: {error}", stray.display())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(SandboxError::new(SandboxErrorCode::SandboxPolicyInvalid, format!("{} is a link or not a directory; left alone", stray.display())));
+    }
+    std::fs::remove_dir_all(stray).map_err(|error| SandboxError::new(SandboxErrorCode::SandboxUnavailable, format!("cannot remove {}: {error}", stray.display())))
 }
 
 /// cmd.exe command line for srt's `-c` on Windows: `set "K=V"` for each
@@ -1989,7 +2174,7 @@ pub fn windows_command_line(program: &str, args: &[String], env: &[(String, Stri
     let mut parts = Vec::new();
     for (key, value) in env {
         let upper = key.to_ascii_uppercase();
-        if ["KEY", "TOKEN", "SECRET", "PASSWORD"].iter().any(|marker| upper.contains(marker)) {
+        if upper != crate::launch::BRIDGE_TOKEN_ENV && ["KEY", "TOKEN", "SECRET", "PASSWORD"].iter().any(|marker| upper.contains(marker)) {
             continue;
         }
         if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
@@ -2051,6 +2236,14 @@ pub struct PreparedLaunch {
     /// attribute-read ACE on, inside the global srt transition, before
     /// spawning (docs/sandbox.md 7.6). Empty otherwise.
     pub windows_ancestor_aces: Vec<PathBuf>,
+    /// Sandboxed: the backend's own variables (see
+    /// [`SandboxedLaunch::backend_env`]). Empty in full access.
+    pub backend_env: Vec<(String, String)>,
+    /// Windows sandboxed: ACP runs over this bridge endpoint, not stdio.
+    pub acp_bridge: Option<crate::launch::BridgeEndpoint>,
+    /// Startup report: stray srt state inside the private HOME (reported,
+    /// never removed automatically).
+    pub stray_srt_state: Vec<PathBuf>,
 }
 
 /// Turn a backend launch spec into what actually runs.
@@ -2074,16 +2267,29 @@ pub fn prepare_launch(
             effective_policy: None,
             declaration: SandboxDeclaration::declare(PermissionMode::FullAccess, None, os),
             windows_ancestor_aces: Vec::new(),
+            backend_env: Vec::new(),
+            acp_bridge: None,
+            stray_srt_state: Vec::new(),
         }),
         PermissionMode::Sandboxed => match setup {
             SandboxSetup::Unavailable(error) => Err(error),
             SandboxSetup::Ready { launcher, policy } => {
-                let SandboxedLaunch { spec, session, effective_policy, windows_ancestor_aces } = launcher.wrap(&spec, policy, session_id)?;
+                let SandboxedLaunch { spec, session, effective_policy, windows_ancestor_aces, backend_env, acp_bridge, stray_srt_state } = launcher.wrap(&spec, policy, session_id)?;
                 // From the policy that was written, not the one requested:
                 // the session temp, private HOME and runtime directories the
                 // launcher added are part of what the UI shows.
                 let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&effective_policy), os);
-                Ok(PreparedLaunch { mode, spec, sandbox: Some(session), effective_policy: Some(effective_policy), declaration, windows_ancestor_aces })
+                Ok(PreparedLaunch {
+                    mode,
+                    spec,
+                    sandbox: Some(session),
+                    effective_policy: Some(effective_policy),
+                    declaration,
+                    windows_ancestor_aces,
+                    backend_env,
+                    acp_bridge,
+                    stray_srt_state,
+                })
             }
         },
     }
@@ -2149,12 +2355,25 @@ pub struct SandboxDeclaration {
     /// non-empty ([`WINDOWS_EXPOSURE_WARNING`]).
     #[serde(default)]
     pub exposure_warning: Option<String>,
+    /// Windows: whether the exposure audit read every path. `None` = not
+    /// audited. `incomplete` is never a successful audit.
+    #[serde(default)]
+    pub exposure_audit: Option<crate::winacl::ExposureAuditStatus>,
+    /// Windows: paths the audit could not check (`path: reason`).
+    #[serde(default)]
+    pub audit_errors: Vec<String>,
 }
 
 /// Product decision B (2026-10-19): on Windows the sandbox is not limited to
 /// the authorized folders; shown whenever the exposure audit found folders
 /// open to every account.
 pub const WINDOWS_EXPOSURE_WARNING: &str = "此模式不限制在授权目录内。对所有用户开放的目录仍可能被读取或修改；本机已检测到此类目录。";
+/// Appended (or used alone after the first sentence) when the audit could not
+/// read every path.
+pub const WINDOWS_EXPOSURE_INCOMPLETE: &str = "部分目录无法检查。";
+/// First sentence of [`WINDOWS_EXPOSURE_WARNING`], used when nothing exposed
+/// was found but the audit is incomplete.
+pub const WINDOWS_SCOPE_NOT_LIMITED: &str = "此模式不限制在授权目录内。";
 
 impl SandboxDeclaration {
     /// Attach the exposure audit (Windows sandboxed only; ignored otherwise).
@@ -2164,7 +2383,14 @@ impl SandboxDeclaration {
             return self;
         }
         self.exposed_dirs = report.exposed.iter().map(|item| item.path.to_string_lossy().into_owned()).collect();
-        self.exposure_warning = (!self.exposed_dirs.is_empty()).then(|| WINDOWS_EXPOSURE_WARNING.to_owned());
+        self.audit_errors = report.audit_errors.iter().map(|error| format!("{}: {}", error.path.display(), error.reason)).collect();
+        self.exposure_audit = Some(if report.audit_errors.is_empty() { crate::winacl::ExposureAuditStatus::Complete } else { crate::winacl::ExposureAuditStatus::Incomplete });
+        self.exposure_warning = match (self.exposed_dirs.is_empty(), self.audit_errors.is_empty()) {
+            (false, true) => Some(WINDOWS_EXPOSURE_WARNING.to_owned()),
+            (false, false) => Some(format!("{WINDOWS_EXPOSURE_WARNING}{WINDOWS_EXPOSURE_INCOMPLETE}")),
+            (true, false) => Some(format!("{WINDOWS_SCOPE_NOT_LIMITED}{WINDOWS_EXPOSURE_INCOMPLETE}")),
+            (true, true) => None,
+        };
         self
     }
 
@@ -2192,6 +2418,8 @@ impl SandboxDeclaration {
                     allowed_domains: policy.allowed_domains.clone(),
                     exposed_dirs: Vec::new(),
                     exposure_warning: None,
+                    exposure_audit: None,
+                    audit_errors: Vec::new(),
                 }
             }
             // Full access, or sandboxed without a policy (never launched):
@@ -2210,6 +2438,8 @@ impl SandboxDeclaration {
                 allowed_domains: Vec::new(),
                 exposed_dirs: Vec::new(),
                 exposure_warning: None,
+                exposure_audit: None,
+                audit_errors: Vec::new(),
             },
         }
     }
@@ -2781,6 +3011,121 @@ mod tests {
     }
 
     #[test]
+    fn windows_broker_gets_the_real_localappdata_so_the_acl_lock_paths_agree() {
+        let (launcher, _) = windows_launcher(r"C:\Program Files\Fox\sandbox-runtime\0.1.0\node\node.exe", &srt_prefix(), FakeAcl::default());
+        let policy = effective_windows(&launcher);
+        let spec = LaunchSpec {
+            backend: AgentBackend::Pi,
+            program: format!(r"{WIN_RUNTIME}\backends\pi\pi-acp.cmd"),
+            args: vec![],
+            version_pin: "x",
+            credential_env: &["OPENAI_API_KEY"],
+            experimental: false,
+            session_env: vec![],
+        };
+        let backend_env = launcher.sandbox_env(&spec, &policy);
+        let private_local = backend_env.iter().find(|(k, _)| k == "LOCALAPPDATA").unwrap().1.clone();
+        assert!(private_local.starts_with(WIN_PRIVATE), "{private_local}");
+        // What AcpConnection hands the srt broker on Windows: the Host
+        // allowlist of the parent plus broker_session_env (empty), no
+        // credentials (the wrapped spec's credential_env is empty there).
+        let broker_spec = LaunchSpec { session_env: broker_session_env(HostOs::Windows, &backend_env), credential_env: &[], ..spec.clone() };
+        let parent: Vec<(String, String)> = [
+            ("LOCALAPPDATA", r"C:\Users\u\AppData\Local"),
+            ("USERPROFILE", r"C:\Users\u"),
+            ("APPDATA", r"C:\Users\u\AppData\Roaming"),
+            ("TEMP", r"C:\Users\u\AppData\Local\Temp"),
+            ("TMP", r"C:\Users\u\AppData\Local\Temp"),
+            ("HOMEDRIVE", "C:"),
+            ("HOMEPATH", r"\Users\u"),
+            ("SystemRoot", r"C:\Windows"),
+            ("OPENAI_API_KEY", "sk-x"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let broker = crate::launch::process_environment_for(true, &broker_spec, parent.clone());
+        let lock_fox = crate::winancestor::srt_acl_lock_path_in(parent.clone()).unwrap();
+        let lock_broker = crate::winancestor::srt_acl_lock_path_in(broker.clone()).unwrap();
+        assert_eq!(lock_fox, lock_broker, "Fox locks the file srt-win locks");
+        assert_eq!(lock_broker, PathBuf::from(r"C:\Users\u\AppData\Local").join("sandbox-runtime").join(".acl-init.lock"));
+        let get = |name: &str| broker.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+        for name in ["LOCALAPPDATA", "USERPROFILE", "APPDATA", "TEMP", "TMP", "HOMEDRIVE", "HOMEPATH", "SystemRoot"] {
+            assert_eq!(get(name), parent.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()), "{name} is the real one");
+        }
+        assert_eq!(get("OPENAI_API_KEY"), None);
+        assert_eq!(get("HOME"), None, "no private HOME for the broker");
+        // The old behaviour, for contrast: private LOCALAPPDATA in the broker
+        // moves srt's lock under the private HOME.
+        let old = LaunchSpec { session_env: backend_env.clone(), ..broker_spec };
+        let lock_old = crate::winancestor::srt_acl_lock_path_in(crate::launch::process_environment_for(true, &old, parent)).unwrap();
+        assert_ne!(lock_old, lock_fox);
+        // Unix: only the session temp reaches srt.
+        let unix = broker_session_env(HostOs::Linux, &backend_env);
+        assert!(unix.iter().all(|(k, _)| k == "TMPDIR" || k == "CLAUDE_CODE_TMPDIR"));
+    }
+
+    #[test]
+    fn windows_bridge_line_carries_pipe_and_token_and_runs_the_backend_behind_the_bridge() {
+        let endpoint = crate::launch::BridgeEndpoint::new_local(Some(WIN_SID.into())).unwrap();
+        let mut env = vec![("HOME".to_owned(), r"C:\h".to_owned()), ("OPENAI_API_KEY".to_owned(), "sk-no".to_owned())];
+        env.extend(endpoint.env());
+        let line = windows_command_line(
+            r"C:\Program Files\Fox\sandbox-runtime\0.1.0\node\node.exe",
+            &[r"C:\Program Files\Fox\sandbox-runtime\0.1.0\acp-bridge\bridge.mjs".into(), "--".into(), r"C:\rt\pi-acp.cmd".into()],
+            &env,
+        )
+        .unwrap();
+        assert!(line.contains(&format!("set \"FOX_ACP_TOKEN={}\"", endpoint.token)), "the one token allowed on the line");
+        assert!(line.contains("set \"FOX_ACP_PIPE=") && !line.contains("sk-no"));
+        assert!(line.ends_with(r#""C:\Program Files\Fox\sandbox-runtime\0.1.0\node\node.exe" "C:\Program Files\Fox\sandbox-runtime\0.1.0\acp-bridge\bridge.mjs" -- C:\rt\pi-acp.cmd"#), "{line}");
+    }
+
+    #[test]
+    fn bridge_asset_must_match_the_embedded_copy() {
+        assert!(bridge_script_matches(crate::launch::BRIDGE_SCRIPT));
+        assert!(bridge_script_matches(&crate::launch::BRIDGE_SCRIPT.replace('\n', "\r\n")), "CRLF checkout is the same script");
+        assert!(!bridge_script_matches(&format!("{}\n// edited", crate::launch::BRIDGE_SCRIPT)));
+        let root = temp("bridge-asset");
+        let script = root.join("bridge.mjs");
+        let launcher = launcher(root.join("state")).with_acp_bridge_script(script.clone());
+        assert_eq!(launcher.verified_bridge_script().unwrap_err().code, SandboxErrorCode::SandboxBridgeUnavailable);
+        std::fs::write(&script, "tampered").unwrap();
+        assert_eq!(launcher.verified_bridge_script().unwrap_err().code.as_str(), "sandbox_bridge_unavailable");
+        std::fs::write(&script, crate::launch::BRIDGE_SCRIPT).unwrap();
+        assert_eq!(launcher.verified_bridge_script().unwrap(), script);
+        // No SID recorded (off the real host): refused, never stdio.
+        assert_eq!(launcher.bridge_endpoint(false).unwrap_err().code, SandboxErrorCode::SandboxBridgeUnavailable);
+        let with_sid = launcher.with_srt_sandbox_sid(WIN_SID.into());
+        assert_eq!(with_sid.bridge_endpoint(false).unwrap().allowed_sid.as_deref(), Some(WIN_SID));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn srt_sandbox_sid_is_read_from_reg_query_output() {
+        let output = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\sandbox-runtime\r\n    SandboxUserSid    REG_SZ    S-1-5-21-1-2-3-1010\r\n\r\n";
+        assert_eq!(parse_reg_sz(output, "SandboxUserSid").as_deref(), Some("S-1-5-21-1-2-3-1010"));
+        assert_eq!(parse_reg_sz(output, "MarkerVersion"), None);
+    }
+
+    #[test]
+    fn stray_srt_state_in_a_private_home_is_reported_and_removed_only_on_request() {
+        let root = temp("stray");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        assert!(find_stray_srt_state(&home).is_empty());
+        let stray = home.join("AppData").join("Local").join("sandbox-runtime");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("state.db"), "x").unwrap();
+        assert_eq!(find_stray_srt_state(&home), vec![stray.clone()]);
+        assert!(stray.join("state.db").exists(), "finding changes nothing");
+        assert!(remove_stray_srt_state(&home, &home.join("AppData")).is_err(), "only the sandbox-runtime dir itself");
+        remove_stray_srt_state(&home, &stray).unwrap();
+        assert!(!stray.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn windows_policy_refuses_drive_and_share_roots_as_ace_targets() {
         for root in [r"D:\", "D:", r"\\nas\share", r"\\nas\share\"] {
             let mut policy = windows_policy();
@@ -3041,18 +3386,29 @@ mod tests {
         assert_eq!(wrapped.spec.program, "/opt/fox/node/bin/node");
         let settings_path = wrapped.session.settings_path().to_path_buf();
         assert_eq!(
-            wrapped.spec.args,
+            wrapped.spec.args[..5],
             [
                 "/opt/fox/srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js".to_owned(),
                 "--settings".to_owned(),
                 settings_path.display().to_string(),
                 "--".to_owned(),
-                "/opt/fox/backends/codex/bin/codex-acp".to_owned(),
-                "--flag".to_owned(),
+                UNIX_ENV_PROGRAM.to_owned(),
             ]
         );
-        let env: BTreeMap<_, _> = wrapped.spec.session_env.iter().cloned().collect();
+        // The backend's variables ride on `env K=V` inside the sandbox ...
+        let n = wrapped.spec.args.len();
+        assert_eq!(wrapped.spec.args[n - 2..], ["/opt/fox/backends/codex/bin/codex-acp".to_owned(), "--flag".to_owned()]);
+        let on_line: Vec<String> = wrapped.backend_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        assert_eq!(wrapped.spec.args[5..n - 2], on_line[..]);
+        let env: BTreeMap<_, _> = wrapped.backend_env.iter().cloned().collect();
         let tmp = state.join("sandbox-tmp").join("sess-1");
+        // ... and the srt broker gets only the session temp it needs itself
+        // (no private HOME: it keeps the real one from the Host allowlist).
+        let broker: BTreeMap<_, _> = wrapped.spec.session_env.iter().cloned().collect();
+        assert_eq!(broker.keys().map(String::as_str).collect::<Vec<_>>(), ["CLAUDE_CODE_TMPDIR", "TMPDIR"]);
+        assert_eq!(broker["TMPDIR"], tmp.display().to_string());
+        assert!(wrapped.acp_bridge.is_none(), "stdio on Linux / macOS");
+        assert!(wrapped.stray_srt_state.is_empty());
         assert_eq!(wrapped.session.tmp_dir(), Some(tmp.as_path()));
         assert_eq!(env["HOME"], home.display().to_string(), "private HOME overrides the spec's HOME");
         assert_eq!(env["CODEX_HOME"], home.join(".codex").display().to_string());
@@ -3062,7 +3418,7 @@ mod tests {
         assert_eq!(env["NODE_USE_ENV_PROXY"], "1");
         assert_eq!(env["INITIAL_AGENT_MODE"], "read-only", "backend session vars kept");
         assert_eq!(env["PATH"], "/opt/fox/backends/codex/bin:/opt/fox/node/bin:/usr/local/bin:/usr/bin:/bin");
-        assert_eq!(wrapped.spec.session_env.iter().filter(|(k, _)| k == "HOME").count(), 1);
+        assert_eq!(wrapped.backend_env.iter().filter(|(k, _)| k == "HOME").count(), 1);
 
         let written: Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
         let allow_read = paths(&written["filesystem"]["allowRead"]);
@@ -3132,18 +3488,30 @@ mod tests {
             .with_managed_runtime_root(runtime.clone())
             .with_windows_user_dirs(vec![])
             .with_ancestor_bases(Default::default())
-            .with_windows_acl(std::sync::Arc::new(FakeAcl::default()));
+            .with_windows_acl(std::sync::Arc::new(FakeAcl::default()))
+            .with_srt_sandbox_sid(WIN_SID.into());
+        // Without the bridge asset there is no Windows sandboxed launch.
+        assert_eq!(launcher.wrap(&spec(&program.display().to_string()), &policy, "sess-0").unwrap_err().code, SandboxErrorCode::SandboxBridgeUnavailable);
+        let bridge = runtime.join("acp-bridge").join("bridge.mjs");
+        std::fs::create_dir_all(bridge.parent().unwrap()).unwrap();
+        std::fs::write(&bridge, crate::launch::BRIDGE_SCRIPT).unwrap();
         let wrapped = launcher.wrap(&spec(&program.display().to_string()), &policy, "sess-1").unwrap();
         assert_eq!(wrapped.spec.program, node.display().to_string());
+        let endpoint = wrapped.acp_bridge.clone().expect("Windows sandboxed ACP goes through the bridge");
+        assert!(endpoint.address.starts_with(r"\\.\pipe\fox-acp-"));
+        assert_eq!(endpoint.allowed_sid.as_deref(), Some(WIN_SID));
+        assert!(wrapped.spec.session_env.is_empty(), "nothing private for the srt broker");
+        assert!(wrapped.spec.credential_env.is_empty());
         let settings_path = wrapped.session.settings_path().to_path_buf();
         // Windows: `-c` with a cmd.exe line (srt's argv form POSIX-quotes
         // backslash paths, and its child would not see session variables).
         assert_eq!(wrapped.spec.args[1..4], ["--settings".to_owned(), settings_path.display().to_string(), "-c".to_owned()]);
         let line = &wrapped.spec.args[4];
         assert!(line.contains(&format!("set \"HOME={}\"", home.display())), "{line}");
-        assert!(line.ends_with(&format!("{} --flag", program.display())), "{line}");
+        assert!(line.ends_with(&format!("{} -- {} --flag", bridge.display(), program.display())), "{line}");
+        assert!(line.contains(&format!("set \"FOX_ACP_TOKEN={}\"", endpoint.token)));
         assert!(!line.contains("OPENAI_API_KEY"));
-        let env: BTreeMap<_, _> = wrapped.spec.session_env.iter().cloned().collect();
+        let env: BTreeMap<_, _> = wrapped.backend_env.iter().cloned().collect();
         let tmp = state.join("sandbox-tmp").join("sess-1");
         assert_eq!(env["HOME"], home.display().to_string());
         assert_eq!(env["USERPROFILE"], home.display().to_string());
@@ -3348,14 +3716,26 @@ mod tests {
                 access: crate::winacl::BroadAccess { read: true, write: true, groups: vec!["Authenticated Users".into()] },
             }],
             errors: vec![],
+            ..Default::default()
         };
         let audited = windows.clone().with_exposure(&report);
         assert_eq!(audited.exposed_dirs, [r"D:\data"]);
         assert_eq!(audited.exposure_warning.as_deref(), Some(WINDOWS_EXPOSURE_WARNING));
         assert_eq!(WINDOWS_EXPOSURE_WARNING, "此模式不限制在授权目录内。对所有用户开放的目录仍可能被读取或修改；本机已检测到此类目录。");
         assert!(!audited.directory_isolation, "B: warn only");
+        assert_eq!(audited.exposure_audit, Some(crate::winacl::ExposureAuditStatus::Complete));
         let clean = windows.clone().with_exposure(&crate::winacl::ExposureReport { supported: true, ..Default::default() });
         assert!(clean.exposure_warning.is_none());
+        // Read failures: listed, the audit is incomplete, and the warning
+        // says so (also when nothing exposed was found).
+        let errors = vec![crate::winacl::AuditError { path: PathBuf::from(r"D:ault"), reason: "cannot read the DACL (Win32 error 5)".into() }];
+        let partial = windows.clone().with_exposure(&crate::winacl::ExposureReport { audit_errors: errors.clone(), ..report.clone() });
+        assert_eq!(partial.exposure_audit, Some(crate::winacl::ExposureAuditStatus::Incomplete));
+        assert_eq!(partial.audit_errors, [r"D:ault: cannot read the DACL (Win32 error 5)"]);
+        assert_eq!(partial.exposure_warning.as_deref(), Some("此模式不限制在授权目录内。对所有用户开放的目录仍可能被读取或修改；本机已检测到此类目录。部分目录无法检查。"));
+        let only_errors = windows.clone().with_exposure(&crate::winacl::ExposureReport { supported: true, audit_errors: errors, ..Default::default() });
+        assert_eq!(only_errors.exposure_warning.as_deref(), Some("此模式不限制在授权目录内。部分目录无法检查。"));
+        assert_eq!(serde_json::to_value(&only_errors).unwrap()["exposure_audit"], "incomplete");
         let json = serde_json::to_value(&audited).unwrap();
         assert_eq!(json["exposed_dirs"], json!([r"D:\data"]));
         // Full access / other platforms ignore the audit.
