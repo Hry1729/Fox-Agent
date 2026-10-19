@@ -18,6 +18,11 @@ tokio = { version = "1", features = ["process", "io-util", "rt", "rt-multi-threa
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
 futures = { version = "0.3", optional = true }
 
+# Unix: process-group signals and the stop confirmation (src/proctree.rs).
+# Already in the workspace lock.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 serde_json = "1"
 
@@ -34,3 +39,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
 ] }
+# Windows: canonical paths without the `\\?\` prefix (src/sandbox.rs
+# path normalization). Already in the workspace lock.
+dunce = "1"
+
