@@ -386,6 +386,10 @@ pub enum SandboxErrorCode {
     /// managed runtime) has a DACL open to every local account, so the
     /// sandbox account could reach it without any grant.
     SandboxPathExposed,
+    /// A file the Agent says it delivered is not a readable regular file
+    /// inside an authorized writable folder, as seen from outside the sandbox
+    /// ([`verify_delivered_file`]).
+    DeliveredFileRejected,
 }
 
 impl SandboxErrorCode {
@@ -398,6 +402,7 @@ impl SandboxErrorCode {
             Self::SandboxBackendNotInstalled => "sandbox_backend_not_installed",
             Self::SandboxPathNotOwned => "sandbox_path_not_owned",
             Self::SandboxPathExposed => "sandbox_path_exposed",
+            Self::DeliveredFileRejected => "delivered_file_rejected",
         }
     }
 }
@@ -599,8 +604,10 @@ impl ReadScope {
     /// UI text (Chinese product copy) for this scope.
     pub fn ui_label(self, verified: bool) -> &'static str {
         match (self, verified) {
-            (Self::AuthorizedOnly, true) => "读取限定在授权文件夹",
-            (Self::AuthorizedOnly, false) => "读取限定在授权文件夹（本平台待实测）",
+            (Self::AuthorizedOnly, true) => "读取限定在授权文件夹（另含运行必需的系统路径、私有 HOME 和会话临时目录）",
+            (Self::AuthorizedOnly, false) => {
+                "读取限定在授权文件夹（另含运行必需的系统路径、私有 HOME 和会话临时目录；本平台待实测）"
+            }
             (Self::UserDirsOnly, true) => "部分：仅用户目录受保护",
             (Self::UserDirsOnly, false) => "部分：仅用户目录受保护（本平台待实测）",
             (Self::UsersGroupReadable, true) => {
@@ -720,6 +727,83 @@ fn is_volume_root(path: &Path) -> bool {
         return rest.trim_end_matches('\\').split('\\').filter(|part| !part.is_empty()).count() <= 2;
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Path normalization (before overlap checks and before writing settings)
+// ---------------------------------------------------------------------------
+
+fn host_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    // Windows: resolves symlinks and junctions (GetFinalPathNameByHandle) and
+    // drops the `\\?\` prefix whenever the result is an ordinary drive path.
+    #[cfg(windows)]
+    {
+        dunce::canonicalize(path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::canonicalize(path)
+    }
+}
+
+/// Windows: what is left starting with `\\` after simplification is a UNC
+/// share, a device path or a verbatim path that cannot be expressed as a
+/// drive path. srt-win cannot place ACEs there safely; refused.
+fn refuse_device_path(original: &Path, resolved: PathBuf) -> Result<PathBuf, SandboxError> {
+    if cfg!(windows) && resolved.to_string_lossy().starts_with(r"\\") {
+        return Err(SandboxError::new(
+            SandboxErrorCode::SandboxPolicyInvalid,
+            format!("{} resolves to a UNC or device path ({}); only folders on a local drive can be used", original.display(), resolved.display()),
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Canonical form of a path that must exist (an authorized folder, a
+/// delivered file): absolute, symlinks / junctions resolved, Windows
+/// `\\?\` prefix removed, UNC and device paths refused. Never compared by
+/// text alone.
+pub fn canonical_existing_path(path: &Path) -> Result<PathBuf, SandboxError> {
+    let invalid = |message: String| SandboxError::new(SandboxErrorCode::SandboxPolicyInvalid, message);
+    if !is_absolute_for(path, HostOs::current()) {
+        return Err(invalid(format!("path must be absolute: {}", path.display())));
+    }
+    let resolved = host_canonicalize(path).map_err(|error| invalid(format!("{} does not exist or cannot be resolved: {error}", path.display())))?;
+    refuse_device_path(path, resolved)
+}
+
+/// Canonical form of a Fox-managed path that may not exist yet (private HOME
+/// and its root, session temp, state root, runtime and install paths, deny
+/// roots): the deepest existing ancestor is canonicalized and the missing
+/// components are appended as written. A missing component may not be `..`.
+pub fn canonical_managed_path(path: &Path) -> Result<PathBuf, SandboxError> {
+    let invalid = |message: String| SandboxError::new(SandboxErrorCode::SandboxPolicyInvalid, message);
+    if !is_absolute_for(path, HostOs::current()) {
+        return Err(invalid(format!("path must be absolute: {}", path.display())));
+    }
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        match host_canonicalize(&current) {
+            Ok(base) => {
+                let mut resolved = refuse_device_path(path, base)?;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) => {
+                let (Some(name), Some(parent)) = (current.file_name(), current.parent()) else {
+                    return Err(invalid(format!("{} cannot be resolved: {error}", path.display())));
+                };
+                if current.ends_with("..") {
+                    return Err(invalid(format!("{} contains `..` below a missing directory", path.display())));
+                }
+                missing.push(name.to_os_string());
+                current = parent.to_path_buf();
+            }
+        }
+    }
 }
 
 fn literal(path: &Path) -> Value {
@@ -901,22 +985,51 @@ impl SandboxPolicy {
             .collect()
     }
 
+    /// This policy with every Host-supplied path in canonical form
+    /// (symlinks and Windows junctions resolved, `\\?\` removed, UNC /
+    /// device paths refused): authorized folders must exist
+    /// ([`canonical_existing_path`]); Fox-managed paths may not exist yet
+    /// ([`canonical_managed_path`]). System read-only paths are Fox's own
+    /// measured list and stay as written. Run on the host the sandbox starts
+    /// on; [`SrtLauncher::wrap`] does it before validating.
+    pub fn canonicalized(&self) -> Result<Self, SandboxError> {
+        let mut policy = self.clone();
+        for dir in &mut policy.authorized {
+            dir.path = canonical_existing_path(&dir.path).map_err(|error| {
+                SandboxError::new(error.code, format!("authorized folder: {}", error.message))
+                    .remedy("授权文件夹必须存在；请重新选择文件夹")
+            })?;
+        }
+        policy.private_home = canonical_managed_path(&policy.private_home)?;
+        policy.private_home_root = canonical_managed_path(&policy.private_home_root)?;
+        if let Some(tmp) = &policy.session_tmp {
+            policy.session_tmp = Some(canonical_managed_path(tmp)?);
+        }
+        policy.extra_read_only = policy.extra_read_only.iter().map(|path| canonical_managed_path(path)).collect::<Result<_, _>>()?;
+        policy.deny_read_roots = policy.deny_read_roots.iter().map(|path| canonical_managed_path(path)).collect::<Result<_, _>>()?;
+        Ok(policy)
+    }
+
+    /// The three path lists written into the srt settings, deduplicated, in
+    /// the order written. The UI declaration is generated from the same lists
+    /// ([`SandboxDeclaration::declare`]), so it cannot drift from the file.
+    pub fn settings_roots(&self) -> SettingsRoots {
+        let dedup = |paths: Vec<&Path>| {
+            let mut seen = BTreeSet::new();
+            paths.into_iter().filter(|path| seen.insert(path.to_path_buf())).map(Path::to_path_buf).collect::<Vec<_>>()
+        };
+        SettingsRoots {
+            allow_read: dedup(self.readable_roots_needing_grant()),
+            allow_write: dedup(self.writable_roots()),
+            deny_read: dedup(self.deny_read_roots.iter().map(PathBuf::as_path).collect()),
+        }
+    }
+
     /// The srt settings document for this policy.
     pub fn to_srt_settings(&self) -> Value {
-        let mut allow_read: Vec<Value> = Vec::new();
-        let mut seen = BTreeSet::new();
-        for root in self.readable_roots_needing_grant() {
-            if seen.insert(root.to_path_buf()) {
-                allow_read.push(literal(root));
-            }
-        }
-        let mut allow_write = Vec::new();
-        let mut seen = BTreeSet::new();
-        for root in self.writable_roots() {
-            if seen.insert(root.to_path_buf()) {
-                allow_write.push(literal(root));
-            }
-        }
+        let roots = self.settings_roots();
+        let allow_read: Vec<Value> = roots.allow_read.iter().map(|root| literal(root)).collect();
+        let allow_write: Vec<Value> = roots.allow_write.iter().map(|root| literal(root)).collect();
         json!({
             "network": {
                 "allowedDomains": self.allowed_domains,
@@ -924,7 +1037,7 @@ impl SandboxPolicy {
                 "allowLocalBinding": false,
             },
             "filesystem": {
-                "denyRead": self.deny_read_roots.iter().map(|root| literal(root)).collect::<Vec<_>>(),
+                "denyRead": roots.deny_read.iter().map(|root| literal(root)).collect::<Vec<_>>(),
                 "allowRead": allow_read,
                 "allowWrite": allow_write,
                 "denyWrite": [],
@@ -933,6 +1046,14 @@ impl SandboxPolicy {
             "allowNestedUserNamespaces": false,
         })
     }
+}
+
+/// The path lists of one srt settings file ([`SandboxPolicy::settings_roots`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsRoots {
+    pub allow_read: Vec<PathBuf>,
+    pub allow_write: Vec<PathBuf>,
+    pub deny_read: Vec<PathBuf>,
 }
 
 /// Granularity of the Fox-managed private HOME (product decision
@@ -1286,6 +1407,9 @@ impl Drop for SandboxSession {
 pub struct SandboxedLaunch {
     pub spec: LaunchSpec,
     pub session: SandboxSession,
+    /// The policy as actually written into the srt settings (canonical paths,
+    /// session temp, srt / Node runtime directories added).
+    pub effective_policy: SandboxPolicy,
 }
 
 /// Wraps a backend launch in a sandbox.
@@ -1610,7 +1734,27 @@ fn valid_session_id(id: &str) -> bool {
 }
 
 impl SandboxLauncher for SrtLauncher {
+    /// On the host the sandbox starts on, every root (Fox state, temp root,
+    /// managed runtime root, and the policy's paths) is canonicalized first,
+    /// so overlap checks compare real locations rather than spellings. A
+    /// policy planned for another OS (tests) is used as written.
     fn wrap(&self, spec: &LaunchSpec, policy: &SandboxPolicy, session_id: &str) -> Result<SandboxedLaunch, SandboxError> {
+        if self.ready.os != HostOs::current() {
+            return self.wrap_resolved(spec, policy, session_id, false);
+        }
+        let resolved = SrtLauncher {
+            ready: self.ready.clone(),
+            state_root: canonical_managed_path(&self.state_root)?,
+            tmp_root: canonical_managed_path(&self.tmp_root)?,
+            managed_runtime_root: self.managed_runtime_root.as_deref().map(canonical_managed_path).transpose()?,
+            windows_acl: std::sync::Arc::clone(&self.windows_acl),
+        };
+        resolved.wrap_resolved(spec, policy, session_id, true)
+    }
+}
+
+impl SrtLauncher {
+    fn wrap_resolved(&self, spec: &LaunchSpec, policy: &SandboxPolicy, session_id: &str, canonicalize: bool) -> Result<SandboxedLaunch, SandboxError> {
         use SandboxErrorCode::*;
         let os = self.ready.os;
         if !valid_session_id(session_id) {
@@ -1634,11 +1778,22 @@ impl SandboxLauncher for SrtLauncher {
         let mut policy = self.effective_policy(policy);
         let session_tmp = self.session_tmp(session_id);
         policy.session_tmp = Some(session_tmp.clone());
+        // Relative paths are left for validate() to name.
+        let all_absolute = policy
+            .authorized
+            .iter()
+            .map(|dir| dir.path.as_path())
+            .chain(std::iter::once(policy.private_home.as_path()))
+            .all(|path| is_absolute_for(path, os));
+        if canonicalize && all_absolute {
+            policy = policy.canonicalized()?;
+        }
         policy.validate(os)?;
         if os == HostOs::Windows {
             self.windows_ace_plan(&policy)?;
         }
-        if !policy.is_readable(program, os) {
+        let program_resolved = if canonicalize { canonical_managed_path(program).unwrap_or_else(|_| program.to_path_buf()) } else { program.to_path_buf() };
+        if !policy.is_readable(program, os) && !policy.is_readable(&program_resolved, os) {
             return Err(SandboxError::new(
                 SandboxBackendNotInstalled,
                 format!("{} is not readable inside the sandbox", program.display()),
@@ -1699,7 +1854,7 @@ impl SandboxLauncher for SrtLauncher {
             experimental: spec.experimental,
             session_env,
         };
-        Ok(SandboxedLaunch { spec: wrapped, session })
+        Ok(SandboxedLaunch { spec: wrapped, session, effective_policy: policy })
     }
 }
 
@@ -1790,6 +1945,10 @@ pub struct PreparedLaunch {
     pub spec: LaunchSpec,
     /// Held for the life of the connection; dropping it removes the settings.
     pub sandbox: Option<SandboxSession>,
+    /// Sandboxed: the policy exactly as written into the srt settings
+    /// (canonical paths, session temp, runtime directories). `declaration`
+    /// is generated from it, and [`verify_delivered_file`] takes it.
+    pub effective_policy: Option<SandboxPolicy>,
     pub declaration: SandboxDeclaration,
 }
 
@@ -1811,18 +1970,18 @@ pub fn prepare_launch(
             mode,
             spec,
             sandbox: None,
+            effective_policy: None,
             declaration: SandboxDeclaration::declare(PermissionMode::FullAccess, None, os),
         }),
         PermissionMode::Sandboxed => match setup {
             SandboxSetup::Unavailable(error) => Err(error),
             SandboxSetup::Ready { launcher, policy } => {
-                let wrapped = launcher.wrap(&spec, policy, session_id)?;
-                Ok(PreparedLaunch {
-                    mode,
-                    spec: wrapped.spec,
-                    sandbox: Some(wrapped.session),
-                    declaration: SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(policy), os),
-                })
+                let SandboxedLaunch { spec, session, effective_policy } = launcher.wrap(&spec, policy, session_id)?;
+                // From the policy that was written, not the one requested:
+                // the session temp, private HOME and runtime directories the
+                // launcher added are part of what the UI shows.
+                let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&effective_policy), os);
+                Ok(PreparedLaunch { mode, spec, sandbox: Some(session), effective_policy: Some(effective_policy), declaration })
             }
         },
     }
@@ -1868,8 +2027,15 @@ pub struct SandboxDeclaration {
     /// The UI may say "limited to these folders" only when true: srt enforced,
     /// read scope `AuthorizedOnly` and measured.
     pub directory_isolation: bool,
+    /// Exactly the srt settings `allowWrite` list.
     pub writable_roots: Vec<String>,
+    /// Exactly the srt settings `allowRead` list (authorized folders, private
+    /// HOME, session temp, backend / Node / srt runtime, system paths; on
+    /// Windows without the system locations the Users group reads anyway).
     pub readable_roots: Vec<String>,
+    /// Exactly the srt settings `denyRead` list.
+    #[serde(default)]
+    pub denied_read_roots: Vec<String>,
     pub allowed_domains: Vec<String>,
 }
 
@@ -1880,6 +2046,8 @@ impl SandboxDeclaration {
                 let enforcement = srt_enforcement(os);
                 let read_scope = policy.read_scope(os);
                 let read_scope_verified = srt_read_scope_verified(os);
+                let roots = policy.settings_roots();
+                let text = |paths: &[PathBuf]| paths.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>();
                 Self {
                     mode,
                     mechanism: Some("srt".into()),
@@ -1890,8 +2058,9 @@ impl SandboxDeclaration {
                     directory_isolation: enforcement == Enforcement::Enforced
                         && read_scope == ReadScope::AuthorizedOnly
                         && read_scope_verified,
-                    writable_roots: policy.writable_roots().iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-                    readable_roots: policy.readable_roots().iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+                    writable_roots: text(&roots.allow_write),
+                    readable_roots: text(&roots.allow_read),
+                    denied_read_roots: text(&roots.deny_read),
                     allowed_domains: policy.allowed_domains.clone(),
                 }
             }
@@ -1907,6 +2076,7 @@ impl SandboxDeclaration {
                 directory_isolation: false,
                 writable_roots: Vec::new(),
                 readable_roots: Vec::new(),
+                denied_read_roots: Vec::new(),
                 allowed_domains: Vec::new(),
             },
         }
@@ -1930,6 +2100,92 @@ impl SandboxDeclaration {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Delivered files (Host-side check, docs/sandbox.md section 11)
+// ---------------------------------------------------------------------------
+
+/// A file the Agent delivered, checked from outside the sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveredFile {
+    /// Canonical path (symlinks resolved).
+    pub path: PathBuf,
+    /// The authorized writable folder it lies in (canonical).
+    pub authorized_root: PathBuf,
+    /// Size in bytes at check time.
+    pub len: u64,
+}
+
+/// Host-side check of a file an Agent says it delivered. It must be a real,
+/// persistent file the user can open after the session ends:
+///
+/// 1. resolved to its canonical path (symlinks, Windows junctions; UNC /
+///    device paths refused) - a link pointing out of the folder is judged by
+///    where it points;
+/// 2. inside an authorized folder that is writable for the session (not a
+///    read-only one), with `policy` canonicalized the same way;
+/// 3. not inside the session temp directory, the private HOME or the private
+///    HOME root (removed / Fox-private), and on Linux not on a `tmpfs` mount
+///    (lost at reboot; also what srt's in-sandbox temp is);
+/// 4. as seen outside the sandbox: exists, is a regular file, opens and its
+///    first byte reads (no byte-by-byte comparison).
+///
+/// `policy` is the session's effective policy ([`PreparedLaunch::effective_policy`]).
+/// Every refusal is `delivered_file_rejected` with a user-facing remedy.
+pub fn verify_delivered_file(policy: &SandboxPolicy, path: &Path) -> Result<DeliveredFile, SandboxError> {
+    use std::io::Read;
+    let reject = |message: String| {
+        SandboxError::new(SandboxErrorCode::DeliveredFileRejected, message)
+            .remedy("交付文件必须保存在本会话授权的可写文件夹中（不能放在会话临时目录、私有 HOME 或内存盘里）；请让 Agent 把文件保存到授权文件夹后重新交付")
+    };
+    let os = HostOs::current();
+    let resolved = canonical_existing_path(path)
+        .map_err(|error| reject(format!("delivered file {} is not available outside the sandbox: {}", path.display(), error.message)))?;
+    let policy = policy.canonicalized().map_err(|error| reject(format!("authorization snapshot cannot be resolved: {}", error.message)))?;
+    let private = [Some(&policy.private_home_root), Some(&policy.private_home), policy.session_tmp.as_ref()];
+    for root in private.into_iter().flatten() {
+        if within(&resolved, root, os) {
+            return Err(reject(format!("{} lies in Fox's private session directory {}", resolved.display(), root.display())));
+        }
+    }
+    let Some(root) = policy.authorized.iter().filter(|dir| dir.writable).find(|dir| within(&resolved, &dir.path, os)) else {
+        let read_only = policy.authorized.iter().any(|dir| !dir.writable && within(&resolved, &dir.path, os));
+        return Err(reject(if read_only {
+            format!("{} is in a read-only authorized folder; deliveries go to a writable one", resolved.display())
+        } else {
+            format!("{} is outside every authorized writable folder", resolved.display())
+        }));
+    };
+    #[cfg(target_os = "linux")]
+    {
+        if on_tmpfs(&resolved) {
+            return Err(reject(format!("{} is on a tmpfs (in-memory) mount and would not persist", resolved.display())));
+        }
+    }
+    let metadata = std::fs::metadata(&resolved).map_err(|error| reject(format!("{}: {error}", resolved.display())))?;
+    if !metadata.is_file() {
+        return Err(reject(format!("{} is not a regular file", resolved.display())));
+    }
+    let mut first = [0u8; 1];
+    std::fs::File::open(&resolved)
+        .and_then(|mut file| file.read(&mut first))
+        .map_err(|error| reject(format!("{} cannot be opened for reading: {error}", resolved.display())))?;
+    Ok(DeliveredFile { path: resolved, authorized_root: root.path.clone(), len: metadata.len() })
+}
+
+#[cfg(target_os = "linux")]
+fn on_tmpfs(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: valid NUL-terminated path and a zeroed out-buffer.
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut buf) } != 0 {
+        return false;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    let kind = buf.f_type as i64;
+    kind == libc::TMPFS_MAGIC as i64
 }
 
 fn rank(value: Enforcement) -> u8 {
@@ -2467,11 +2723,13 @@ mod tests {
         }
     }
 
+    /// A fresh directory in canonical form (macOS `/var` -> `/private/var`,
+    /// Windows 8.3 short names expanded), since wrap canonicalizes too.
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fox-sandbox-unit-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        canonical_existing_path(&dir).unwrap()
     }
 
     fn launcher(state_root: PathBuf) -> SrtLauncher {
@@ -2485,6 +2743,7 @@ mod tests {
     #[test]
     fn srt_wrap_writes_per_session_settings_and_points_home_at_the_private_dir() {
         let root = temp("wrap");
+        std::fs::create_dir_all(root.join("home/u/proj")).unwrap();
         let state = root.join("state");
         let homes = PrivateHomes::new(root.join("fox/sandbox-homes"));
         let home = homes.home_for(PROJECT, AgentBackend::Codex).unwrap().path;
@@ -2577,6 +2836,7 @@ mod tests {
         let homes = PrivateHomes::new(root.join("fox").join("sandbox-homes"));
         let home = homes.home_for(PROJECT, AgentBackend::Codex).unwrap().path;
         let proj = root.join("home").join("u").join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
         let policy = SandboxPolicy::new(
             vec![AuthorizedDir { path: proj.clone(), writable: true }],
             homes.home_for(PROJECT, AgentBackend::Codex).unwrap(),
@@ -2623,6 +2883,7 @@ mod tests {
     #[test]
     fn srt_wrap_refuses_npx_unreadable_programs_and_writable_state() {
         let root = temp("refuse");
+        std::fs::create_dir_all(root.join("home/u/proj")).unwrap();
         let policy = SandboxPolicy::new(
             vec![AuthorizedDir { path: root.join("home/u/proj"), writable: true }],
             PrivateHomes::new(root.join("fox/sandbox-homes")).home_for(PROJECT, AgentBackend::Codex).unwrap(),
@@ -2725,7 +2986,12 @@ mod tests {
         assert!(sandboxed.read_scope_verified);
         assert!(sandboxed.directory_isolation);
         assert_eq!(sandboxed.writable_roots, ["/home/u/proj".to_owned(), pi_home()]);
-        assert_eq!(ReadScope::AuthorizedOnly.ui_label(true), "读取限定在授权文件夹");
+        assert_eq!(
+            ReadScope::AuthorizedOnly.ui_label(true),
+            "读取限定在授权文件夹（另含运行必需的系统路径、私有 HOME 和会话临时目录）",
+            "the label names what else is readable"
+        );
+        assert!(ReadScope::AuthorizedOnly.ui_label(false).ends_with("本平台待实测）"));
 
         // A Linux policy that only denies home roots is partial, and the UI
         // may not say "limited to these folders".
@@ -2873,5 +3139,271 @@ mod tests {
         let mut policy = linux_policy();
         policy.authorized.push(AuthorizedDir { path: "/home/u/.local/share/fox-notes".into(), writable: false });
         policy.validate(HostOs::Linux).unwrap();
+    }
+
+    // ---- effective policy -> declaration (item: UI declaration source) ----
+
+    /// The declaration shown to the user is generated from the policy that
+    /// was written: its three lists equal the settings file, including the
+    /// session temp, the private HOME and the srt / Node directories the
+    /// launcher added.
+    #[cfg(not(windows))]
+    #[test]
+    fn declaration_lists_exactly_what_the_written_settings_contain() {
+        let root = temp("declare");
+        std::fs::create_dir_all(root.join("proj")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let homes = PrivateHomes::new(root.join("fox/sandbox-homes"));
+        let home = homes.home_for(PROJECT, AgentBackend::Codex).unwrap();
+        let policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: root.join("proj"), writable: true }, AuthorizedDir { path: root.join("docs"), writable: false }],
+            home.clone(),
+            vec!["/opt/fox/backends/codex".into()],
+            vec!["api.openai.com".into()],
+            HostOs::Linux,
+        );
+        let launcher = launcher(root.join("state"));
+        let prepared = prepare_launch(
+            PermissionMode::Sandboxed,
+            spec("/opt/fox/backends/codex/bin/codex-acp"),
+            "sess-d",
+            SandboxSetup::Ready { launcher: &launcher, policy: &policy },
+            HostOs::Linux,
+        )
+        .unwrap();
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(prepared.sandbox.as_ref().unwrap().settings_path()).unwrap()).unwrap();
+        let declaration = &prepared.declaration;
+        assert_eq!(declaration.readable_roots, paths(&written["filesystem"]["allowRead"]), "allowRead");
+        assert_eq!(declaration.writable_roots, paths(&written["filesystem"]["allowWrite"]), "allowWrite");
+        assert_eq!(declaration.denied_read_roots, paths(&written["filesystem"]["denyRead"]), "denyRead");
+        assert_eq!(declaration.allowed_domains, ["api.openai.com"]);
+        let effective = prepared.effective_policy.as_ref().expect("sandboxed launch carries its effective policy");
+        assert_eq!(effective.to_srt_settings(), written, "effective policy is what was written");
+        let tmp = root.join("state/sandbox-tmp/sess-d").display().to_string();
+        for expected in [
+            tmp.clone(),
+            home.path.display().to_string(),
+            "/opt/fox/node".to_owned(),
+            "/opt/fox/srt/node_modules/@anthropic-ai/sandbox-runtime".to_owned(),
+        ] {
+            assert!(declaration.readable_roots.contains(&expected), "declaration misses {expected}: {:?}", declaration.readable_roots);
+        }
+        assert!(declaration.writable_roots.contains(&tmp));
+        assert!(!declaration.writable_roots.contains(&root.join("docs").display().to_string()), "read-only stays read-only");
+        // Declaring from the requested policy (the old behaviour) would have
+        // hidden the session temp and the runtime directories.
+        let requested = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
+        assert!(!requested.readable_roots.contains(&tmp) && !requested.readable_roots.contains(&"/opt/fox/node".to_owned()));
+        drop(prepared);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- path normalization ----
+
+    #[cfg(not(windows))]
+    #[test]
+    fn managed_paths_resolve_the_existing_part_and_keep_the_missing_tail() {
+        let root = temp("managed");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        assert_eq!(canonical_managed_path(&root.join("link/not/yet")).unwrap(), root.join("real/not/yet"));
+        assert_eq!(canonical_managed_path(&root.join("link")).unwrap(), root.join("real"));
+        assert!(canonical_managed_path(&root.join("missing/../escape")).is_err(), "`..` below a missing directory");
+        assert!(canonical_managed_path(Path::new("relative/dir")).is_err());
+        assert!(canonical_existing_path(&root.join("missing")).is_err(), "authorized folders must exist");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An authorized folder that is a symlink is judged by its target: a link
+    /// to the private HOME root (or to `/`) is refused although its spelling
+    /// overlaps nothing; a harmless link is written as its target.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_authorized_folder_is_judged_by_its_target() {
+        let root = temp("symlink");
+        let homes_root = root.join("fox/sandbox-homes");
+        std::fs::create_dir_all(&homes_root).unwrap();
+        std::fs::create_dir_all(root.join("real-proj")).unwrap();
+        std::os::unix::fs::symlink(&homes_root, root.join("innocent")).unwrap();
+        std::os::unix::fs::symlink(root.join("real-proj"), root.join("proj-link")).unwrap();
+        std::os::unix::fs::symlink("/", root.join("everything")).unwrap();
+        let homes = PrivateHomes::new(homes_root.clone());
+        let launcher = launcher(root.join("state"));
+        let policy_for = |authorized: PathBuf| {
+            SandboxPolicy::new(
+                vec![AuthorizedDir { path: authorized, writable: true }],
+                homes.home_for(PROJECT, AgentBackend::Codex).unwrap(),
+                vec!["/opt/fox/backends/codex".into()],
+                vec![],
+                HostOs::Linux,
+            )
+        };
+        let program = spec("/opt/fox/backends/codex/bin/codex-acp");
+        // Text alone says "no overlap"; the target is the private HOME root.
+        let lexical = policy_for(root.join("innocent"));
+        lexical.validate(HostOs::Linux).expect("lexically this looks fine");
+        let error = launcher.wrap(&program, &lexical, "s1").unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxPolicyInvalid);
+        assert!(error.message.contains("overlaps"), "{}", error.message);
+        // A link to `/` would re-open the denied root.
+        let error = launcher.wrap(&program, &policy_for(root.join("everything")), "s2").unwrap_err();
+        assert!(error.message.contains("re-open"), "{}", error.message);
+        // A harmless link is written as its target.
+        let wrapped = launcher.wrap(&program, &policy_for(root.join("proj-link")), "s3").unwrap();
+        let written: Value = serde_json::from_slice(&std::fs::read(wrapped.session.settings_path()).unwrap()).unwrap();
+        let allow_write = paths(&written["filesystem"]["allowWrite"]);
+        assert_eq!(allow_write[0], root.join("real-proj").display().to_string());
+        assert!(!allow_write.iter().any(|path| path.contains("proj-link")));
+        drop(wrapped);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows: a junction to the private HOME root is refused the same way
+    /// (compiled everywhere Windows is checked; runs on Windows only).
+    #[cfg(windows)]
+    #[test]
+    fn junctioned_authorized_folder_is_judged_by_its_target() {
+        let root = temp("junction");
+        let runtime = root.join("runtime");
+        let node = runtime.join("node").join("node.exe");
+        let srt_prefix = runtime.join("srt");
+        let backend_dir = runtime.join("codex");
+        let homes_root = root.join("fox").join("sandbox-homes");
+        std::fs::create_dir_all(&homes_root).unwrap();
+        let junction = root.join("innocent");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&homes_root)
+            .status()
+            .expect("cmd mklink");
+        assert!(status.success(), "mklink /J failed");
+        assert_eq!(canonical_existing_path(&junction).unwrap(), canonical_existing_path(&homes_root).unwrap());
+        let homes = PrivateHomes::new(homes_root.clone());
+        let policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: junction.clone(), writable: true }],
+            homes.home_for(PROJECT, AgentBackend::Codex).unwrap(),
+            vec![backend_dir.clone()],
+            vec![],
+            HostOs::Windows,
+        );
+        let launcher = SrtLauncher::new(windows_ready(&node.display().to_string(), &srt_prefix.display().to_string()), root.join("state"))
+            .with_managed_runtime_root(runtime.clone())
+            .with_windows_acl(std::sync::Arc::new(FakeAcl::default()));
+        let error = launcher.wrap(&spec(&backend_dir.join("codex-acp.cmd").display().to_string()), &policy, "s1").unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxPolicyInvalid, "{error}");
+        // UNC paths are refused outright.
+        assert!(canonical_managed_path(Path::new(r"\\server\share\proj")).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- delivered files ----
+
+    fn delivery_policy(root: &Path) -> SandboxPolicy {
+        std::fs::create_dir_all(root.join("proj")).unwrap();
+        std::fs::create_dir_all(root.join("ref")).unwrap();
+        let homes = PrivateHomes::new(root.join("fox").join("sandbox-homes"));
+        let home = homes.home_for(PROJECT, AgentBackend::Pi).unwrap();
+        std::fs::create_dir_all(&home.path).unwrap();
+        let mut policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: root.join("proj"), writable: true }, AuthorizedDir { path: root.join("ref"), writable: false }],
+            home,
+            vec![],
+            vec![],
+            HostOs::current(),
+        );
+        let tmp = root.join("state").join("sandbox-tmp").join("s1");
+        std::fs::create_dir_all(&tmp).unwrap();
+        policy.session_tmp = Some(tmp);
+        policy
+    }
+
+    #[test]
+    fn delivered_files_must_be_real_files_in_a_writable_authorized_folder() {
+        let root = temp("deliver");
+        let policy = delivery_policy(&root);
+        let rejected = |path: &Path| {
+            let error = verify_delivered_file(&policy, path).unwrap_err();
+            assert_eq!(error.code, SandboxErrorCode::DeliveredFileRejected, "{}", path.display());
+            assert!(error.remedy.is_some());
+            error.message
+        };
+        let report = root.join("proj").join("report.md");
+        std::fs::write(&report, "# 结果").unwrap();
+        let delivered = verify_delivered_file(&policy, &report).unwrap();
+        assert_eq!(delivered.path, report);
+        assert_eq!(delivered.authorized_root, root.join("proj"));
+        assert_eq!(delivered.len, "# 结果".len() as u64);
+        // Empty files are files too.
+        std::fs::write(root.join("proj").join("empty.txt"), "").unwrap();
+        assert_eq!(verify_delivered_file(&policy, &root.join("proj").join("empty.txt")).unwrap().len, 0);
+
+        rejected(&root.join("proj").join("never-written.md"));
+        rejected(&root.join("proj"));
+        std::fs::write(root.join("ref").join("a.md"), "x").unwrap();
+        assert!(rejected(&root.join("ref").join("a.md")).contains("read-only"));
+        let in_tmp = policy.session_tmp.clone().unwrap().join("out.md");
+        std::fs::write(&in_tmp, "x").unwrap();
+        assert!(rejected(&in_tmp).contains("private"));
+        let in_home = policy.private_home.join("out.md");
+        std::fs::write(&in_home, "x").unwrap();
+        assert!(rejected(&in_home).contains("private"));
+        let outside = root.join("elsewhere.md");
+        std::fs::write(&outside, "x").unwrap();
+        assert!(rejected(&outside).contains("outside"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delivered_symlinks_are_judged_by_their_target_and_unreadable_files_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp("deliver-link");
+        let policy = delivery_policy(&root);
+        let outside = root.join("secret.txt");
+        std::fs::write(&outside, "x").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("proj").join("looks-inside.txt")).unwrap();
+        let error = verify_delivered_file(&policy, &root.join("proj").join("looks-inside.txt")).unwrap_err();
+        assert!(error.message.contains("outside"), "{}", error.message);
+        std::fs::write(root.join("proj").join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("proj").join("real.txt"), root.join("proj").join("alias.txt")).unwrap();
+        assert_eq!(verify_delivered_file(&policy, &root.join("proj").join("alias.txt")).unwrap().path, root.join("proj").join("real.txt"));
+        // Unreadable (meaningless as root, who can read anything).
+        if unsafe { libc::geteuid() } != 0 {
+            let locked = root.join("proj").join("locked.txt");
+            std::fs::write(&locked, "x").unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let error = verify_delivered_file(&policy, &locked).unwrap_err();
+            assert!(error.message.contains("cannot be opened"), "{}", error.message);
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Linux: an authorized folder on tmpfs (here /dev/shm) does not persist;
+    /// a delivery there is refused. Skipped when /dev/shm is not a writable
+    /// tmpfs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn delivered_files_on_tmpfs_are_refused() {
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() || !on_tmpfs(shm) {
+            eprintln!("SKIPPED delivered_files_on_tmpfs_are_refused: /dev/shm is not a tmpfs here");
+            return;
+        }
+        let dir = shm.join(format!("fox-deliver-{}", std::process::id()));
+        if std::fs::create_dir_all(&dir).is_err() {
+            eprintln!("SKIPPED delivered_files_on_tmpfs_are_refused: /dev/shm not writable");
+            return;
+        }
+        let root = temp("deliver-tmpfs");
+        let mut policy = delivery_policy(&root);
+        policy.authorized.push(AuthorizedDir { path: dir.clone(), writable: true });
+        std::fs::write(dir.join("out.md"), "x").unwrap();
+        let error = verify_delivered_file(&policy, &dir.join("out.md")).unwrap_err();
+        assert!(error.message.contains("tmpfs"), "{}", error.message);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
