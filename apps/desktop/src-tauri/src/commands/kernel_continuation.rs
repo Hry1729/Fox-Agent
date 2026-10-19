@@ -40,6 +40,17 @@ pub fn kernel_run_continue(
     // attempt with those frozen values, then start it through the ordinary
     // Kernel run-start path. The previous version inserted placeholder values and
     // never froze the artifacts, so the run could not start at all.
+    // Plan 5.4 (resume entry): continuing a run is routed by the conversation's
+    // frozen backend; only Fox conversations reach the Kernel.
+    if let Err(failure) = super::agent_backend_routing::gate_conversation(
+        &state.database,
+        fox_agent_backend::host_routing::HostEntry::Resume,
+        &request.conversation_id,
+        Some(&request.source_run_id),
+        None,
+    ) {
+        return failure;
+    }
     match state.runtime_host.continue_kernel_run(&request) {
         Ok(started) => ApiResponse::success(started),
         Err(error) => ApiResponse::failure("kernel.continuation_failed", error, false),
