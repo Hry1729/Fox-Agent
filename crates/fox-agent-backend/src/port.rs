@@ -645,6 +645,9 @@ mod tests {
             effective_policy: None,
             declaration: SandboxDeclaration::declare(mode, None, HostOs::Linux),
             windows_ancestor_aces: Vec::new(),
+            backend_env: Vec::new(),
+            acp_bridge: None,
+            stray_srt_state: Vec::new(),
         }
     }
 
