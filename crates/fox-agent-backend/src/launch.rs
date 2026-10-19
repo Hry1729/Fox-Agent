@@ -88,6 +88,22 @@ pub fn launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
     }
 }
 
+/// Node flags for every backend started inside the Windows sandbox (pi-acp /
+/// pi, codex-acp, dsh are Node programs launched through `.cmd` shims, so
+/// the flags travel as `NODE_OPTIONS`, which Node allows for both and passes
+/// on to the Node children the backend starts). `--preserve-symlinks`
+/// (`-main`) makes module resolution keep the path as given instead of
+/// `realpath`ing it, which avoids part of the ancestor `lstat` calls the
+/// sandbox account may not be allowed to make. Auxiliary only: the ancestor
+/// metadata ACEs (crate::winancestor) are what makes the profile chain
+/// stat-able; `fs.realpath` calls of the backend itself are unaffected.
+pub const WINDOWS_SANDBOX_NODE_FLAGS: &[&str] = &["--preserve-symlinks", "--preserve-symlinks-main"];
+
+/// [`WINDOWS_SANDBOX_NODE_FLAGS`] as one `NODE_OPTIONS` value.
+pub fn windows_sandbox_node_options() -> String {
+    WINDOWS_SANDBOX_NODE_FLAGS.join(" ")
+}
+
 /// The child environment: allowlisted parent variables plus this backend's
 /// named credential variables. Case-insensitive on Windows.
 pub fn child_environment(
