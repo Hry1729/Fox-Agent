@@ -487,7 +487,7 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
 ### 12.2 没做什么
 
 - 外部后端的真实启动、事件投影、审批卡映射（下一批：`sandbox::prepare_launch` + `bridge` + `AcpConnection`）。
-- 外部会话的输入框不禁用（发送会得到 Host 的明确错误）；能力声明 / 审批状态的 UI 展示（P6 其余部分）。
+- ~~外部会话的输入框不禁用~~（第一批修复已改：开关关闭的只读外部会话禁用输入框，见 12.5）；能力声明 / 审批状态的 UI 展示（P6 其余部分）。
 - `conversation_fork` 产生的新会话按列默认值为 `fox`（外部会话当前无法运行，不存在需要继承的情况；接通外部后端时须决定 fork 规则）。子会话等其他 INSERT 同样走默认值 `fox`。
 - `work_mode_gate` 对非 Fox 后端是否适用（5.4 第 3 条）未审查；当前非 Fox 会话根本到不了 gate。
 - 迁移前自动备份：本批未新增（沿用现有发布 / 备份流程），验收清单要求手工备份副本演练。
@@ -506,3 +506,84 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
 4. **开关关闭（默认）**：新会话“Agent 后端”下拉禁用，提示需设置 `FOX_EXTERNAL_BACKENDS`；普通 Fox 新任务（含 checklist / 强验收）与改动前一致；invoke `conversation_create` 带 `agentBackend:"pi"` → `agent_backend_disabled`。
 5. **开关开启**：设 `FOX_EXTERNAL_BACKENDS=pi` 重启 → 下拉只有 pi 可选（Codex / DeepSeek 显示未启用）；选 pi 发送 → 会话被创建并显示“后端：pi（已锁定）”，发送返回 `agent_backend_not_yet_wired`，无新 run 行、无子进程。
 6. **再关开关**：去掉变量重启 → 上一步的 pi 会话仍在列表中可打开查看，显示只读提示；发送 / 取消返回 `agent_backend_disabled`，不启动运行时。
+
+### 12.5 第一批修复（2026-10-20，针对 3a82f5d 的 Windows 验收）
+
+**A. 桌面全量测试 63 项失败**
+
+- 结论：不是本批引入的。工程师在父提交 `a9254d3` 上复跑同一名单，其中 61 项同样失败，属既有问题，本批不修。另外 2 项在 `3a82f5d` 上精确复测通过，父提交也通过，判断为负载 / 时序波动：
+  - `delivery_live_tests::a_crash_while_finalizing_the_nth_item_leaves_recoverable_state`
+  - `work_tools::tests::a0_snapshot_and_state_update_p95_stay_within_budget`
+- 代码证据：
+  - `dispatch_started_run` 需要 Tauri `AppHandle`，只有 `commands/` 里的命令会调用它（`run_start`、rewind、`kernel_reconciliation`、确认后派发）。`runtime_host/kernel_coordinator/**` 的测试直接驱动 `Database` + `RuntimeHost`，在 `runtime_host/` 里搜不到对 `dispatch_started_run` 或 `commands::` 的调用。也就是说，本批加的兜底和那次多出的查库，这些测试一次都执行不到。
+  - 上面 2 项波动测试的实测路径也都不经过 Host 命令层：
+    - 前者是 delivery finalize 的故障注入（`finalize_fault`，按线程设置），加上本地模型桩。
+    - 后者计时的是 `load_conversation` 和 `work_tasks().update`。本批在这条路径上只多了 `query_conversation` 的一列 `c.agent_backend`，没有多一次查询。v95 触发器是 `BEFORE UPDATE OF agent_backend`，不更新这一列的 UPDATE 不会触发它；`work_tasks` 本身也不在 `conversations` 表上。
+  - 没有找到能说明“多出的一次查库会放大波动”的证据，所以这两项不改。
+- 其他嫌疑点的排查（都没发现问题）：
+  - 没有对 `conversations` 做无列名的 `INSERT … VALUES`。
+  - 没有在 v95 之后重建 `conversations` 表。
+  - `ConversationSummary` 只有 Serialize，没有 Deserialize，也没有快照比对。
+  - 版本号断言都引用常量 `DATABASE_SCHEMA_VERSION`，写死 94 的只有已改成 95 的那一处。
+  - 5 处会话查询都已带出新列，`map_conversation` 的 5 个调用点全部覆盖。
+- 兜底改为与其他入口一致（`commands/agent_backend_routing.rs`）。`gate_conversation`（start / resume / `kernel_run_continue` / `dispatch_started_run` 兜底）和 `gate_run_identity`（cancel / approve）统一按以下规则处理：
+  - 会话 / run / 审批不存在（`None`）：交回原有路径，和以前一样。
+  - 读库出错：不再返回 `storage.operation_failed`。先写一行审计 `fox.host_routing entry=… routed=fox_fallback reason=storage_error|column_missing detail="…"`（列不存在记为 `column_missing`），再放行到原有路径，由原有路径自己按原来的方式报错。
+  - 只有确认存储值不是 `fox` 时才拦下：外部后端得到 `disabled` / `not_yet_wired`；存储值非法得到 `agent_backend_invalid`。请求里显式写了不同的后端，照旧返回 `misrouted`。
+  - 取舍：读库失败时是“放行”（fail-open）而不是“拦截”。这样兜底永远不会制造原有路径本来没有的失败。本批外部运行时还没接通，即使放行，也只会走 Fox 自己的路径，而这条路径依赖同一个数据库，坏库会由它自己报错。接通外部后端时要重新评估：届时读库失败对非 Fox 会话应改为拦截，并且要在 `prepare_launch` 前再校验一次。
+  - 新增单元测试 `commands::agent_backend_routing::tests`，共 3 个。
+
+**B. 后端选择栏位置**
+
+- 原因：选择栏原先作为 `.fox-chat-stage`（flex 列）的普通子元素，渲染在 Composer 之外。`.fox-composer-wrap` 是 `position:absolute; bottom:12px; z-index:16`，所以选择栏掉到舞台底部，被输入框盖住。时间线预留的底部空间（`--fox-composer-occlusion`，等于舞台底到 composer 顶的距离）也没有算上它。
+- 修复：
+  - Composer 新增 `topSlot`，选择栏作为 `.fox-composer-wrap` 的第一个子元素，紧贴在 `.fox-prompt-shell` 之上，随输入框一起定位（新会话居中态和历史态都一样）。
+  - 它的高度计入 `onHeightChange`，因此锁定 / 只读说明不会再被输入框或时间线遮挡。
+  - 选择栏改为不透明底色（`--fox-canvas`），宽度 100%，说明文字在 composer 宽度内换行。
+  - workbench 用 `useMemo` 缓存这个元素，避免破坏 `MemoizedComposer` 的 memo。
+- 1122×770 下的推算：低于 1180px 的紧凑断点，侧栏展开时历史态 composer 宽约 700–750px，最长的锁定说明加上 chip 占 1 行，最多 2 行，选择栏高约 24–42px。
+
+**C. pi 发送被 Host 拒绝后的界面残留**
+
+- 原因：
+  - `send` 的 catch 里调用了 `refreshSelectedConversation`，而它用的 `mergeConversationDetail` 会保留当前的乐观消息和 `pending-run-*`，所以“正在处理 / 等待开始”残留下来。
+  - catch 还执行了 `setError`，workbench 随之把 `chatState` 设为 `error`，页头显示“处理失败”。
+- 修复：
+  - Host 返回 `agent_backend_*`（invalid / disabled / misrouted / not_yet_wired）时，`send` 先用 `withoutRefusedSend` 撤掉乐观消息和 pending run，恢复发送前的 lastRun。
+  - 不设置 `error` / `errorDetails`，改为写入 `agentBackendRefusal`（按会话区分），并返回 `'agent_backend_refused'`。
+  - workbench 收到这个结果后清掉自己的 `pendingUserMessage`，`chatState` 设为 `complete`，并对 composer 返回 `'error'`，这样草稿保留、发送按钮复位。
+  - 拒绝原因只在选择栏里显示一条（`role="alert"`），替换掉原来的锁定 / 选择说明，不弹 toast。
+  - 其他错误码的处理路径不变。
+- 只读禁用：外部会话在开关关闭时（`agentBackendInputLockedReason`，即 access 为 `read_only_disabled`；状态还没读到时同样按只读处理）：
+  - 输入框和发送按钮禁用，并显示占位说明；
+  - hook 层也会在乐观渲染之前本地拒绝，不调用 Host；
+  - 开关开启但运行时未接通（`read_only_not_wired`）时，输入框仍可用，发送会得到 Host 的 `not_yet_wired`，按上面的方式干净地显示拒绝。
+  - Fox 会话不受影响。
+- 顺带修复（本批引入的前端回归）：`apps/desktop/tests/conversation-draft-selection.test.ts` 把 hook 源码放进沙箱运行，依赖注入表里缺少 `conversationAgentBackend`，所以在 `3a82f5d` 上有 2 项抛 ReferenceError，`a9254d3` 上 16/16 通过。已把本批用到的纯函数补进注入表。
+- 新增前端测试：
+  - `tests/agent-backend.test.ts` 增加 3 项；
+  - 新文件 `tests/agent-backend-send.test.ts` 3 项，沿用沙箱写法，覆盖 not_yet_wired 撤掉乐观状态、只读会话不发送、其他错误路径不变。
+
+**复测清单（工程师，在本次修复的新提交上执行）**
+
+1. `cargo test -p fox-desktop`（全量）：
+   - 预期只剩父提交 `a9254d3` 上同样失败的 61 项，名单逐项一致；
+   - 另外单独复跑那 2 项波动测试各 3 次，应当通过；
+   - 再跑 `cargo test -p fox-desktop agent_backend`，应包含 `commands::agent_backend_routing::tests` 3 项、`repositories::agent_backend::tests` 2 项、`agent_backend_migration_tests` 2 项，全部通过。
+2. 跑以下前端测试，都应通过：
+   - `bun test apps/desktop/tests/agent-backend.test.ts apps/desktop/tests/agent-backend-send.test.ts apps/desktop/tests/conversation-draft-selection.test.ts`；
+   - 相关 DOM 测试 `fox-composer-*-dom`、`fox-thread-hybrid-dom`、`conversation-change-expert-dom`。
+   - 另跑前端 `tsc`。
+3. `cargo test -p fox-agent-backend --features acp`：163 个，156 执行 / 7 跳过 / 0 失败。
+4. **界面复测 B**（窗口 1122×770，另各看一次最大化）：
+   - 设置 `FOX_EXTERNAL_BACKENDS=pi` 后，新会话页的“Agent 后端”行紧贴在输入框正上方，不再贴着窗口底部；
+   - 选 pi 发送后，历史态的“后端：pi（已锁定）”和说明完整可见，没有被输入框遮挡，滚动时间线时说明下面没有文字透出；
+   - Fox 会话的输入框区域与改动前一致。
+5. **界面复测 C**：
+   - 在 `FOX_EXTERNAL_BACKENDS=pi` 下选 pi 新会话发送 → 不残留临时消息，没有“正在处理”“等待开始”，页头没有“处理失败”；选择栏里只出现一条拒绝提示（not_yet_wired 的文案），草稿保留；数据库里没有对应的 message 或 run。
+   - 去掉变量重启 → 打开该 pi 会话，输入框和发送按钮都是禁用状态，占位文字为“此会话为只读，不能发送”。stderr 里没有 `run_start` 的审计行，说明请求没有发到 Host。
+   - Fox 会话正常发送不受影响。
+6. **兜底回归**：
+   - 普通 Fox 会话的发送、rewind、确认后派发、继续运行都与改动前一致；
+   - 可选：用只读文件锁让读库失败，stderr 应出现 `routed=fox_fallback reason=storage_error`，并且之后报出的错误码与 `a9254d3` 相同。
+
