@@ -15,6 +15,15 @@
     srt-bridge           经 Fox 的 ACP 桥接（<RuntimeRoot>\acp-bridge\bridge.mjs）：本脚本建一次性命名管道
                          （DACL：当前用户 + srt 沙箱 SID），srt 的 stdin 不用；桥接连回管道、握手（token）后
                          启动回显后端，ECHO 经管道往返
+    pipe-other-user      （第六轮；须显式指定，需 -OtherUserCredential）第二个普通用户能否打开 Fox 创建的桥接
+                         管道。管道由 Fox 自己的 Rust 实现创建（-PipeServerTest 给出测试二进制
+                         tests/bridge_pipe_windows.rs 编译产物，FOX_TEST_PIPE_SERVE=1 运行
+                         bridge_pipe_serve_for_other_user_probe：BridgeListener::bind，受保护 DACL = 当前用户完全
+                         控制 + srt 沙箱 SID 读写）；未给 -PipeServerTest 时脚本以相同 DACL 自建管道（结果中
+                         pipeCreatedBy 注明）。随后以 Start-Process -Credential 用另一账户启动 powershell.exe
+                         尝试打开管道，以 Win32 错误码作为退出码（预期 5 = 拒绝访问），再由所有者自连一次作对照
+                         （证明尝试期间管道可用）。凭据只存在于 PSCredential 对象中：不进命令行、不写日志或
+                         结果文件；结果只记录另一账户的 SID。
 
   stdio 变体：回显脚本先打印 READY；看到 READY 后写一行 hello，保持 stdin 打开 5 秒，再关闭 stdin。
   记录：是否收到 ECHO 及时间、是否收到 END 及时间（END 早于关闭 stdin = stdin 提前 EOF）、
@@ -41,7 +50,12 @@
 .PARAMETER ResultPath
   结果 JSON；默认 %TEMP%\fox-diag-srt-stdio-<时间>.json。
 .PARAMETER Variants
-  要运行的变体，默认全部。
+  要运行的变体，默认 direct、srt、srt-no-node-options、srt-bridge；pipe-other-user 需显式列出。
+.PARAMETER OtherUserCredential
+  pipe-other-user 用的第二个普通（非管理员）本地账户凭据，例如 (Get-Credential)。不写入任何文件。
+.PARAMETER PipeServerTest
+  可选：tests/bridge_pipe_windows.rs 的测试二进制（target\debug\deps\bridge_pipe_windows-*.exe），
+  用 Fox 的 Rust 实现创建管道。
 #>
 [CmdletBinding()]
 param(
@@ -51,7 +65,9 @@ param(
     [string] $BridgePath,
     [string] $WorkDir,
     [string] $ResultPath,
-    [string[]] $Variants = @('direct', 'srt', 'srt-no-node-options', 'srt-bridge')
+    [string[]] $Variants = @('direct', 'srt', 'srt-no-node-options', 'srt-bridge'),
+    [System.Management.Automation.PSCredential] $OtherUserCredential,
+    [string] $PipeServerTest
 )
 
 Set-StrictMode -Version 2.0
@@ -309,6 +325,109 @@ function Invoke-BridgeVariant([string] $Node, [string] $Srt, [string] $Settings,
     return $out
 }
 
+# Exit code = Win32 error of opening the pipe (0 = opened). Runs as the other account; the
+# pipe name is the only input. NamedPipeClientStream maps ERROR_ACCESS_DENIED to
+# UnauthorizedAccessException.
+$PipeAttemptScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', '__PIPE__', [System.IO.Pipes.PipeDirection]::InOut)
+    $c.Connect(5000)
+    $c.Dispose()
+    exit 0
+} catch [System.UnauthorizedAccessException] {
+    exit 5
+} catch [System.TimeoutException] {
+    exit 1460
+} catch {
+    $h = $_.Exception.HResult
+    if (($h -band 0xFFFF0000) -eq 0x80070000) { exit ($h -band 0xFFFF) }
+    exit 9999
+}
+'@
+
+function Invoke-PipeOtherUserAttempt([string] $PipeName, [System.Management.Automation.PSCredential] $Credential) {
+    # The credential goes to Start-Process only (CreateProcessWithLogonW); never logged.
+    $code = $PipeAttemptScript.Replace('__PIPE__', $PipeName)
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($code))
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $proc = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -Credential $Credential `
+        -WorkingDirectory $env:SystemRoot -WindowStyle Hidden -PassThru -Wait
+    return $proc.ExitCode
+}
+
+function Invoke-PipeOtherUserVariant([System.Management.Automation.PSCredential] $Credential, [string] $SrtSid, [string] $ServerTest) {
+    $out = @{ variant = 'pipe-other-user'; error = $null; expectedWin32Error = 5 }
+    # Even the account name is redacted from anything recorded; only its SID is kept.
+    $script:Secrets.Add($Credential.UserName)
+    try {
+        $out.otherUserSid = $null
+        try { $out.otherUserSid = (New-Object System.Security.Principal.NTAccount($Credential.UserName)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $out.otherUserSid = 'unresolved' }
+        $out.currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ($out.otherUserSid -eq $out.currentUserSid) { throw 'OtherUserCredential is the current user; use a second account' }
+        if ($ServerTest) {
+            # Fox's own Rust implementation creates and holds the pipe.
+            $out.pipeCreatedBy = 'fox-rust (tests/bridge_pipe_windows.rs, BridgeListener::bind)'
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $ServerTest
+            $psi.Arguments = 'bridge_pipe_serve_for_other_user_probe --exact --ignored --nocapture --test-threads=1'
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.EnvironmentVariables['FOX_TEST_PIPE_SERVE'] = '1'
+            $psi.EnvironmentVariables['FOX_TEST_PIPE_SANDBOX_SID'] = $SrtSid
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            $server = [System.Diagnostics.Process]::Start($psi)
+            try {
+                $stdout = New-LineReader $server.StandardOutput
+                $stderr = New-LineReader $server.StandardError
+                $readers = @($stdout, $stderr)
+                [void] (Wait-Until { [bool] (Find-Line $stdout 'FOX_PIPE_NAME=*') -or $server.HasExited } 60000 $readers $clock)
+                $nameLine = Find-Line $stdout 'FOX_PIPE_NAME=*'
+                if (-not $nameLine) { throw 'the pipe server test did not report a pipe name' }
+                $full = $nameLine.line.Substring('FOX_PIPE_NAME='.Length).Trim()
+                $out.pipeName = $full
+                $out.win32Error = Invoke-PipeOtherUserAttempt ($full -replace '^\\\\\.\\pipe\\', '') $Credential
+                $server.StandardInput.WriteLine('done')
+                $server.StandardInput.Close()
+                [void] (Wait-Until { $server.HasExited -and $stdout.Done -and $stderr.Done } 30000 $readers $clock)
+                $out.serverResult = $(if (Find-Line $stdout 'FOX_PIPE_RESULT=*') { (Find-Line $stdout 'FOX_PIPE_RESULT=*').line } else { $null })
+                $out.ownerControl = [bool] (Find-Line $stdout 'FOX_PIPE_CONTROL=owner-connected*')
+                $out.serverExitCode = $(if ($server.HasExited) { $server.ExitCode } else { $null })
+                $out.serverStdout = Format-Lines $stdout
+                $out.serverStderr = Format-Lines $stderr
+            } finally {
+                if (-not $server.HasExited) { try { $server.Kill() } catch { Write-Verbose 'kill failed' } }
+                $server.Dispose()
+            }
+        } else {
+            # Same protected DACL as Fox (bridge.rs pipe_sddl): current user full control, srt SID read/write.
+            $out.pipeCreatedBy = 'script (same DACL as Fox: D:P(A;;FA;;;<user>)(A;;FRFW;;;<srt SID>))'
+            $name = 'fox-acp-' + [guid]::NewGuid().ToString('N')
+            $security = New-Object System.IO.Pipes.PipeSecurity
+            $security.SetSecurityDescriptorSddlForm(('D:P(A;;FA;;;{0})(A;;FRFW;;;{1})' -f $out.currentUserSid, $SrtSid))
+            $pipe = New-Object System.IO.Pipes.NamedPipeServerStream($name, [System.IO.Pipes.PipeDirection]::InOut, 1,
+                [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous, 4096, 4096, $security)
+            try {
+                $out.pipeName = '\\.\pipe\' + $name
+                $wait = $pipe.WaitForConnectionAsync()
+                $out.win32Error = Invoke-PipeOtherUserAttempt $name $Credential
+                $out.serverResult = $(if ($wait.IsCompleted) { 'FOX_PIPE_RESULT=connected' } else { 'FOX_PIPE_RESULT=no-connection' })
+                $client = New-Object System.IO.Pipes.NamedPipeClientStream('.', $name, [System.IO.Pipes.PipeDirection]::InOut)
+                try { $client.Connect(5000); $out.ownerControl = $true } catch { $out.ownerControl = $false; $out.ownerControlError = $_.Exception.Message } finally { $client.Dispose() }
+            } finally {
+                $pipe.Dispose()
+            }
+        }
+        $out.deniedAsExpected = [bool] ($out.win32Error -eq 5 -and $out.serverResult -eq 'FOX_PIPE_RESULT=no-connection' -and $out.ownerControl)
+    } catch {
+        $out.error = Hide-Secret $_.Exception.Message
+    }
+    return $out
+}
+
 $result = @{ ok = $false; error = $null; startedAt = (Get-Date).ToUniversalTime().ToString('o'); variants = @() }
 $createdWorkDir = $null
 try {
@@ -396,6 +515,11 @@ try {
                 if (-not $srtSid) { $list.Add(@{ variant = 'srt-bridge'; skipped = 'no SandboxUserSid in HKLM\SOFTWARE\sandbox-runtime' }); break }
                 $list.Add((Invoke-BridgeVariant $NodePath $SrtPath $settingsPath $BridgePath $WorkDir $srtSid $vars))
             }
+            'pipe-other-user' {
+                if (-not $OtherUserCredential) { $list.Add(@{ variant = 'pipe-other-user'; skipped = 'needs -OtherUserCredential (a second, non-administrator account)' }); break }
+                if (-not $srtSid) { $list.Add(@{ variant = 'pipe-other-user'; skipped = 'no SandboxUserSid in HKLM\SOFTWARE\sandbox-runtime' }); break }
+                $list.Add((Invoke-PipeOtherUserVariant $OtherUserCredential $srtSid $PipeServerTest))
+            }
             default { $list.Add(@{ variant = $variant; skipped = 'unknown variant' }) }
         }
     }
@@ -417,6 +541,10 @@ $json = $result | ConvertTo-Json -Depth 8
 Write-Output "result: $ResultPath"
 foreach ($v in $result.variants) {
     if ($v.ContainsKey('skipped')) { Write-Output ("{0,-20} skipped: {1}" -f $v.variant, $v.skipped); continue }
+    if ($v.variant -eq 'pipe-other-user') {
+        Write-Output ("{0,-20} createdBy={1} win32Error={2} (expected 5) server={3} ownerControl={4} deniedAsExpected={5} error={6}" -f $v.variant, $v['pipeCreatedBy'], $v['win32Error'], $v['serverResult'], $v['ownerControl'], $v['deniedAsExpected'], $v.error)
+        continue
+    }
     if ($v.variant -eq 'srt-bridge') {
         Write-Output ("{0,-20} connected={1} handshake={2} echoViaPipe={3} endViaPipe={4} exit={5} error={6}" -f $v.variant, $v['connected'], $v['handshakeOk'], $v['echoViaPipe'], $v['endViaPipe'], $v['exitCode'], $v.error)
     } else {
