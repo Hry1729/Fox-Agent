@@ -1,6 +1,6 @@
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { AgentBackendBar } from './components/AgentBackendBar'
-import { conversationAgentBackend } from '@/features/conversations/model/agent-backend'
+import { AGENT_BACKEND_REFUSED, agentBackendInputLockedReason, conversationAgentBackend } from '@/features/conversations/model/agent-backend'
 import { type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { expertErrorMessage, expertInteractionLocked, latestExpertToolAvailability } from './components/expert-binding-ui'
 import { useGoalProgress } from './hooks/use-goal-progress'
@@ -1299,6 +1299,14 @@ export function Workbench() {
     if (desktopConversation.enabled) {
       setChatState('running')
       const started = await desktopConversation.send(prompt, conversationModelOverride(activeAgent, model, yuxiModels.models), submittedFiles, runtimeText)
+      if (started === AGENT_BACKEND_REFUSED) {
+        // Backend routing refused the send before anything was written: no
+        // optimistic turn, no "处理失败" header. The one refusal notice is
+        // shown by the backend bar inside the composer; the draft is kept.
+        setPendingUserMessage(null)
+        setChatState('complete')
+        return 'error' as const
+      }
       if (!started) {
         setPendingUserMessage((message) => message ? { ...message, status: 'failed', updatedAt: Date.now() } : message)
         setChatState('error')
@@ -1409,23 +1417,38 @@ export function Workbench() {
   const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings])
   // Plan v0.3.1 5.4 / 6.6: pick the backend for a new conversation, or show the
   // open conversation's frozen backend as locked. Only in the desktop runtime.
+  // Fix 1 (Windows acceptance of 3a82f5d): the bar is rendered INSIDE the
+  // composer container, directly above the input box, so it moves with the
+  // composer and is counted in the composer height the timeline reserves.
   const openConversationSummary = desktopConversation.detail?.conversation ?? null
-  const agentBackendBar = desktopConversation.enabled ? (
+  const lockedAgentBackend = openConversationSummary ? conversationAgentBackend(openConversationSummary) : null
+  const agentBackendStatus = desktopConversation.agentBackendStatus
+  const agentBackendRefusalRecord = desktopConversation.agentBackendRefusal
+  const visibleAgentBackendRefusal = agentBackendRefusalRecord
+    && agentBackendRefusalRecord.conversationId === (desktopConversation.selectedConversationId ?? null)
+    ? agentBackendRefusalRecord.message
+    : null
+  const composerInputLockedReason = desktopConversation.enabled && lockedAgentBackend
+    ? agentBackendInputLockedReason(lockedAgentBackend, agentBackendStatus)
+    : null
+  const draftAgentBackend = desktopConversation.draftAgentBackend
+  const setDraftAgentBackend = desktopConversation.setDraftAgentBackend
+  const agentBackendBar = useMemo(() => desktopConversation.enabled ? (
     <AgentBackendBar
-      status={desktopConversation.agentBackendStatus}
-      lockedBackend={openConversationSummary ? conversationAgentBackend(openConversationSummary) : null}
-      draftBackend={desktopConversation.draftAgentBackend}
-      onDraftBackendChange={desktopConversation.setDraftAgentBackend}
+      status={agentBackendStatus}
+      lockedBackend={lockedAgentBackend}
+      draftBackend={draftAgentBackend}
+      onDraftBackendChange={setDraftAgentBackend}
+      refusal={visibleAgentBackendRefusal}
     />
-  ) : null
+  ) : null, [desktopConversation.enabled, agentBackendStatus, lockedAgentBackend, draftAgentBackend, setDraftAgentBackend, visibleAgentBackendRefusal])
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
-    {agentBackendBar}
-    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
+    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
     </ComposerEntryContext.Provider>
   )
   const assistantUiThreadPanel = (
-    <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载对话" />}><div className="fox-thread-shell"><AssistantUiChat statusBar={<FoxRunStatusBar key={desktopConversation.selectedConversationId ?? 'draft'} detail={desktopConversation.enabled ? desktopConversation.detail : null} conversationId={desktopConversation.selectedConversationId} />} key={desktopConversation.detail?.conversation.id ?? 'draft'} conversation={desktopConversation} pendingMessage={pendingUserMessage} isSendDisabled={expertReadOnly} suggestions={activeAgent?.openingSuggestions} onStart={handleTimelineStart} planRevision={assistantUiPlanRevision} onOpenArtifact={handleTimelineOpenArtifact} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} callbacks={{ onSubmit: (prompt, files) => handleComposerSubmitPrompt(prompt, undefined, files), onOptimistic: handleComposerPromptCommit, onEdit: (messageId, prompt) => handleTimelineRerun(messageId, prompt), onReload: () => retryLatestRun() }} /></div></Suspense>
+    <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载对话" />}><div className="fox-thread-shell"><AssistantUiChat statusBar={<FoxRunStatusBar key={desktopConversation.selectedConversationId ?? 'draft'} detail={desktopConversation.enabled ? desktopConversation.detail : null} conversationId={desktopConversation.selectedConversationId} />} key={desktopConversation.detail?.conversation.id ?? 'draft'} conversation={desktopConversation} pendingMessage={pendingUserMessage} isSendDisabled={expertReadOnly || Boolean(composerInputLockedReason)} suggestions={activeAgent?.openingSuggestions} onStart={handleTimelineStart} planRevision={assistantUiPlanRevision} onOpenArtifact={handleTimelineOpenArtifact} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} callbacks={{ onSubmit: (prompt, files) => handleComposerSubmitPrompt(prompt, undefined, files), onOptimistic: handleComposerPromptCommit, onEdit: (messageId, prompt) => handleTimelineRerun(messageId, prompt), onReload: () => retryLatestRun() }} /></div></Suspense>
   )
 
   const navigationRoute = {
