@@ -1,4 +1,6 @@
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
+import { AgentBackendBar } from './components/AgentBackendBar'
+import { conversationAgentBackend } from '@/features/conversations/model/agent-backend'
 import { type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { expertErrorMessage, expertInteractionLocked, latestExpertToolAvailability } from './components/expert-binding-ui'
 import { useGoalProgress } from './hooks/use-goal-progress'
@@ -1405,8 +1407,20 @@ export function Workbench() {
   // assistant-ui thread subscribes to the same store, so sends from this one
   // instance stream into whichever message list is mounted.
   const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings])
+  // Plan v0.3.1 5.4 / 6.6: pick the backend for a new conversation, or show the
+  // open conversation's frozen backend as locked. Only in the desktop runtime.
+  const openConversationSummary = desktopConversation.detail?.conversation ?? null
+  const agentBackendBar = desktopConversation.enabled ? (
+    <AgentBackendBar
+      status={desktopConversation.agentBackendStatus}
+      lockedBackend={openConversationSummary ? conversationAgentBackend(openConversationSummary) : null}
+      draftBackend={desktopConversation.draftAgentBackend}
+      onDraftBackendChange={desktopConversation.setDraftAgentBackend}
+    />
+  ) : null
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
+    {agentBackendBar}
     <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
     </ComposerEntryContext.Provider>
   )
