@@ -37,6 +37,10 @@ pub struct LaunchSpec {
     pub credential_env: &'static [&'static str],
     /// Experimental: safety floor applies, function/stability gates do not.
     pub experimental: bool,
+    /// Variables the Host itself sets for this session (for example codex-acp
+    /// `INITIAL_AGENT_MODE`, pi-acp `PI_ACP_PI_COMMAND`). Added after the
+    /// allowlist; never taken from the parent environment.
+    pub session_env: Vec<(String, String)>,
 }
 
 fn npx() -> String {
@@ -46,7 +50,7 @@ fn npx() -> String {
 pub const CODEX_ACP_VERSION: &str = "2.2.2";
 pub const PI_ACP_VERSION: &str = "0.0.34";
 /// DeepSeek Harness is a developer preview; pinned by `dsh --version` check.
-pub const DSH_VERSION: &str = "0.1";
+pub const DSH_VERSION: &str = "0.2.1-rc.2";
 
 /// `None` for FoxBackend, which runs in-process through the existing Kernel.
 pub fn launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
@@ -59,6 +63,9 @@ pub fn launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
             version_pin: CODEX_ACP_VERSION,
             credential_env: &["OPENAI_API_KEY", "CODEX_HOME"],
             experimental: false,
+            // Without this codex-acp starts in `agent` mode, where Codex's own
+            // reviewer answers approvals and the Host never sees them.
+            session_env: vec![("INITIAL_AGENT_MODE".into(), "read-only".into())],
         }),
         AgentBackend::Pi => Some(LaunchSpec {
             backend,
@@ -67,6 +74,7 @@ pub fn launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
             version_pin: PI_ACP_VERSION,
             credential_env: &[],
             experimental: false,
+            session_env: vec![],
         }),
         AgentBackend::Deepseek => Some(LaunchSpec {
             backend,
@@ -75,6 +83,7 @@ pub fn launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
             version_pin: DSH_VERSION,
             credential_env: &["DEEPSEEK_API_KEY"],
             experimental: true,
+            session_env: vec![],
         }),
     }
 }
