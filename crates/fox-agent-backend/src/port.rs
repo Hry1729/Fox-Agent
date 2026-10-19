@@ -219,6 +219,8 @@ pub enum PortError {
         received: u64,
     },
     Refused(String),
+    /// Sandboxed mode could not start; never degraded to full access.
+    Sandbox(crate::sandbox::SandboxError),
 }
 
 impl std::fmt::Display for PortError {
@@ -237,11 +239,18 @@ impl std::fmt::Display for PortError {
                 "event from connection generation {received} ignored (current {current})"
             ),
             Self::Refused(reason) => write!(f, "{reason}"),
+            Self::Sandbox(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for PortError {}
+
+impl From<crate::sandbox::SandboxError> for PortError {
+    fn from(error: crate::sandbox::SandboxError) -> Self {
+        Self::Sandbox(error)
+    }
+}
 
 /// Dedupe and generation filter for incoming events. Events from an older
 /// generation, or already seen ids, are returned as audit-only.
