@@ -225,7 +225,7 @@ mod real_binary {
                 }
                 BackendEvent::Update { update, .. } => eprintln!("update: {update}"),
                 BackendEvent::Closed => break,
-                BackendEvent::Initialized { .. } => {}
+                BackendEvent::Initialized { .. } | BackendEvent::PermissionAutoCancelled { .. } => {}
             }
         }
         eprintln!("prompt outcome (key present: {has_key}): {outcome:?}");
