@@ -15,6 +15,12 @@
 //! * Permission answers are reported as written, never as acknowledged: ACP v1
 //!   has no acknowledgement for a permission response (plan 6.3 rule 3).
 //! * Capabilities are read from `initialize` and default to "unsupported".
+//! * Once a stop has begun ([`AcpConnection::begin_stopping`]) the connection
+//!   refuses new work and answers every permission request that still arrives
+//!   with `cancelled` itself; such a request never reaches the user as
+//!   answerable ([`BackendEvent::PermissionAutoCancelled`] is observation only).
+//! * A stop reports whether the whole process tree is confirmed gone
+//!   ([`crate::port::StopConfirmation`], see [`crate::proctree`]).
 
 use crate::launch::{child_environment, LaunchSpec};
 use crate::port::{CapabilityDeclaration, SessionCapabilities};
@@ -49,6 +55,15 @@ pub enum BackendEvent {
         option_ids: Vec<String>,
         request: Value,
     },
+    /// A permission request that arrived after the connection began stopping
+    /// (revocation). The Host already answered it `cancelled`; it is NOT
+    /// answerable and must not be shown as a pending approval. Observation
+    /// only.
+    PermissionAutoCancelled {
+        session_id: String,
+        reason: String,
+        request: Value,
+    },
     TurnEnded { session_id: String, stop_reason: Value },
     Failed(String),
     Closed,
@@ -68,7 +83,20 @@ enum Command {
     },
 }
 
-type PendingPermissions = Arc<Mutex<HashMap<String, (String, Responder<RequestPermissionResponse>)>>>;
+/// Pending permission requests plus the stopping flag, under ONE lock: the
+/// request handler checks the flag and registers the request atomically, and
+/// [`AcpConnection::begin_stopping`] sets the flag and drains the map
+/// atomically, so a request can never slip in between.
+#[derive(Default)]
+struct PermissionRegistry {
+    stopping: bool,
+    map: HashMap<String, (String, Responder<RequestPermissionResponse>)>,
+}
+
+type PendingPermissions = Arc<Mutex<PermissionRegistry>>;
+
+/// Error text for work refused while the connection is stopping.
+pub const STOPPING_REFUSAL: &str = "backend connection is stopping (full access revoked); no new tasks are accepted";
 
 pub struct AcpConnection {
     commands: mpsc::UnboundedSender<Command>,
@@ -116,21 +144,6 @@ pub const INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 pub const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
-fn signal_group(pid: u32, signal: &str) {
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .args([signal, "--", &format!("-{pid}")])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (pid, signal);
-    }
-}
 
 /// Keep the last bytes of the backend's stderr for diagnostics, with
 /// secret-shaped tokens masked. Failure reasons (auth, missing binary) often
@@ -164,8 +177,9 @@ pub mod win_job {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, SetInformationJobObject, TerminateJobObject,
-        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
@@ -217,6 +231,43 @@ pub mod win_job {
         pub fn contains(&self, process: RawHandle) -> Option<bool> {
             let mut result = 0;
             (unsafe { IsProcessInJob(process as HANDLE, self.0, &mut result) } != 0).then_some(result != 0)
+        }
+
+        /// Number of processes currently in the job
+        /// (`JobObjectBasicAccountingInformation.ActiveProcesses`). `Err`
+        /// carries the Win32 error.
+        pub fn active_processes(&self) -> Result<u32, u32> {
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectBasicAccountingInformation,
+                    &mut info as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(last_error());
+            }
+            Ok(info.ActiveProcesses)
+        }
+
+        /// Poll [`Self::active_processes`] until it is zero or `timeout`
+        /// passes. Only an observed zero is `Confirmed`.
+        pub fn confirm_empty(&self, timeout: std::time::Duration) -> crate::port::StopConfirmation {
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                let reason = match self.active_processes() {
+                    Ok(0) => return crate::port::StopConfirmation::Confirmed,
+                    Ok(count) => format!("Job Object still holds {count} active process(es)"),
+                    Err(code) => format!("QueryInformationJobObject failed (Win32 error {code})"),
+                };
+                if std::time::Instant::now() >= deadline {
+                    return crate::port::StopConfirmation::FailedOrUnconfirmed { reasons: vec![reason] };
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
         }
 
         /// Kill every process in the job now. `Err` carries the Win32 error.
@@ -273,8 +324,19 @@ pub mod win_job {
 }
 
 /// How a close ended, for the Host's process-cleanup record.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminateReport {
+    /// Whether the whole process tree is confirmed gone: Unix, process group
+    /// gone (or zombies only) and every tracked descendant gone; Windows,
+    /// Fox's Job Object empty (`taskkill` fallback: never confirmed).
+    pub confirmation: crate::port::StopConfirmation,
+    /// Set when "confirmed" covers less than the whole tree (Windows
+    /// sandboxed: the srt-win runner subtree is outside Fox's job).
+    pub confirmation_scope_note: Option<String>,
+    /// Unix: the backend's process group.
+    pub process_group: Option<u32>,
+    /// Unix: every descendant seen before the kill (pid + start time).
+    pub tracked: Vec<crate::proctree::ProcIdentity>,
     /// The backend did not exit within [`TERMINATE_GRACE`] and was killed.
     pub force_killed: bool,
     /// Windows: `Some(true)` when `TerminateJobObject` succeeded, `Some(false)`
@@ -287,6 +349,36 @@ pub struct TerminateReport {
     pub notes: Vec<String>,
 }
 
+impl Default for TerminateReport {
+    fn default() -> Self {
+        Self {
+            confirmation: crate::port::StopConfirmation::FailedOrUnconfirmed { reasons: vec!["not checked".into()] },
+            confirmation_scope_note: None,
+            process_group: None,
+            tracked: Vec::new(),
+            force_killed: false,
+            job_terminated: None,
+            notes: Vec::new(),
+        }
+    }
+}
+
+impl TerminateReport {
+    /// The port-level record of this stop.
+    pub fn process_tree_stop(&self) -> crate::port::ProcessTreeStop {
+        crate::port::ProcessTreeStop {
+            force_killed: self.force_killed,
+            confirmation: self.confirmation.clone(),
+            confirmation_scope_note: self.confirmation_scope_note.clone(),
+            process_group: self.process_group,
+            tracked: self.tracked.clone(),
+        }
+    }
+}
+
+/// What "confirmed" means for a Windows sandboxed process (two-hop launch).
+pub const WINDOWS_SANDBOXED_SCOPE_NOTE: &str = "Windows sandboxed: confirmed = Fox's Job Object is empty (node + srt CLI). The srt-win runner and the backend it starts as srt-sandbox are outside that job; they end through srt-win's own job chain when srt exits, which is not yet measured (docs/sandbox.md section 7.4).";
+
 #[cfg(windows)]
 type ProcessJob = Option<win_job::Job>;
 #[cfg(not(windows))]
@@ -295,7 +387,6 @@ type ProcessJob = Option<NoJob>;
 #[cfg(not(windows))]
 pub struct NoJob;
 
-#[cfg_attr(not(windows), allow(dead_code))]
 fn note(report: &mut TerminateReport, text: String) {
     eprintln!("fox-agent-backend: {text}");
     report.notes.push(text);
@@ -325,13 +416,9 @@ fn kill_tree(pid: u32, job: &ProcessJob, report: &mut TerminateReport) {
     }
     #[cfg(unix)]
     {
-        let _ = &report;
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        if let Err(error) = crate::proctree::signal_group(pid, libc::SIGKILL) {
+            note(report, error);
+        }
     }
     #[cfg(windows)]
     {
@@ -454,16 +541,29 @@ impl AcpConnection {
                         let session_id = request.session_id.to_string();
                         let option_ids = request.options.iter().map(|option| option.option_id.to_string()).collect();
                         let raw = serde_json::to_value(&request).unwrap_or(Value::Null);
-                        permission_pending
-                            .lock()
-                            .expect("permission registry poisoned")
-                            .insert(id.clone(), (session_id.clone(), responder));
+                        let mut registry = permission_pending.lock().expect("permission registry poisoned");
+                        if registry.stopping {
+                            // Late request after the stop began: answer it
+                            // `cancelled` here; it never becomes answerable.
+                            drop(registry);
+                            let _ = responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+                            let _ = permission_tx.send(BackendEvent::PermissionAutoCancelled {
+                                session_id,
+                                reason: "connection stopping (full access revoked)".to_owned(),
+                                request: raw,
+                            });
+                            return Ok(());
+                        }
+                        registry.map.insert(id.clone(), (session_id.clone(), responder));
+                        // Queued while holding the lock, so it is ordered
+                        // before any drain by begin_stopping.
                         let _ = permission_tx.send(BackendEvent::PermissionRequested {
                             native_request_id: id,
                             session_id,
                             option_ids,
                             request: raw,
                         });
+                        drop(registry);
                         Ok(())
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -586,6 +686,9 @@ impl AcpConnection {
     }
 
     pub async fn new_session(&self, cwd: PathBuf) -> Result<String, String> {
+        if self.is_stopping() {
+            return Err(STOPPING_REFUSAL.to_owned());
+        }
         let (reply, response) = oneshot::channel();
         self.commands
             .send(Command::NewSession { cwd, reply })
@@ -595,6 +698,9 @@ impl AcpConnection {
 
     /// Start a turn. Its end is reported as `TurnEnded` or `Failed`.
     pub fn prompt(&self, session_id: &str, text: &str) -> Result<(), String> {
+        if self.is_stopping() {
+            return Err(STOPPING_REFUSAL.to_owned());
+        }
         self.commands
             .send(Command::Prompt {
                 session_id: session_id.to_owned(),
@@ -611,12 +717,13 @@ impl AcpConnection {
         });
         let mut registry = self.pending.lock().expect("permission registry poisoned");
         let ids: Vec<String> = registry
+            .map
             .iter()
             .filter(|(_, (session, _))| session == session_id)
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
-            if let Some((_, responder)) = registry.remove(id) {
+            if let Some((_, responder)) = registry.map.remove(id) {
                 let _ = responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
             }
         }
@@ -632,6 +739,7 @@ impl AcpConnection {
             .pending
             .lock()
             .expect("permission registry poisoned")
+            .map
             .remove(native_request_id)
             .ok_or_else(|| "permission request already answered or no longer pending".to_string())?;
         let outcome = match option_id {
@@ -646,7 +754,32 @@ impl AcpConnection {
 
     /// Number of permission requests still waiting for the user.
     pub fn pending_permissions(&self) -> usize {
-        self.pending.lock().map(|registry| registry.len()).unwrap_or(0)
+        self.pending.lock().map(|registry| registry.map.len()).unwrap_or(0)
+    }
+
+    /// Enter the stopping state (idempotent): new prompts and sessions are
+    /// refused with [`STOPPING_REFUSAL`], every pending permission request (all
+    /// sessions) is answered `cancelled` now, and any that arrives later is
+    /// answered `cancelled` on arrival and reported only as
+    /// [`BackendEvent::PermissionAutoCancelled`]. Returns the native ids that
+    /// were pending.
+    pub fn begin_stopping(&self) -> Vec<String> {
+        let mut registry = self.pending.lock().expect("permission registry poisoned");
+        registry.stopping = true;
+        let drained: Vec<_> = registry.map.drain().collect();
+        drop(registry);
+        let mut ids = Vec::with_capacity(drained.len());
+        for (id, (_, responder)) in drained {
+            let _ = responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+            ids.push(id);
+        }
+        ids.sort();
+        ids
+    }
+
+    /// Whether [`Self::begin_stopping`] has run.
+    pub fn is_stopping(&self) -> bool {
+        self.pending.lock().map(|registry| registry.stopping).unwrap_or(true)
     }
 
     /// Last lines of the backend's stderr, secret-shaped tokens masked.
@@ -666,33 +799,96 @@ impl AcpConnection {
     }
 
     /// [`Self::close`], returning how it ended (force kill, Windows job
-    /// termination, taskkill fallback) for the Host's cleanup record.
+    /// termination, taskkill fallback, whether the tree is confirmed gone)
+    /// for the Host's cleanup record. Enters the stopping state first.
     pub async fn close_with_report(self) -> TerminateReport {
+        self.begin_stopping();
         self.terminate().await
     }
 
-    /// Stop the backend.
+    /// Stop the backend and confirm its process tree is gone.
     ///
-    /// Unix: SIGTERM to the group, [`TERMINATE_GRACE`], then SIGKILL to the
-    /// group. Windows has no SIGTERM: the command channel is dropped first
-    /// (the ACP connection then ends and the backend's stdin closes, which
-    /// lets srt run its own reset and remove its ACEs), then the grace, then
-    /// `TerminateJobObject` (taskkill only as a checked fallback).
+    /// Unix: snapshot the descendants, SIGTERM to the group,
+    /// [`TERMINATE_GRACE`], snapshot again, SIGKILL to the group, reap the
+    /// child, SIGKILL tracked descendants that left the group, then poll
+    /// ([`crate::proctree::confirm_tree_gone`]). Windows has no SIGTERM: the
+    /// command channel is dropped first (the ACP connection then ends and the
+    /// backend's stdin closes, which lets srt run its own reset and remove its
+    /// ACEs), then the grace, then `TerminateJobObject` (taskkill only as a
+    /// checked fallback), then `ActiveProcesses == 0` is polled.
     async fn terminate(self) -> TerminateReport {
-        let Self { commands, child, child_id, job, sandbox, .. } = self;
+        let Self { commands, child, child_id, job, sandbox, permission_mode, .. } = self;
         let mut report = TerminateReport::default();
         #[cfg(windows)]
         drop(commands);
         #[cfg(not(windows))]
         let _commands = commands;
+        let _ = permission_mode;
         let mut child = child.lock().await;
         if let Some(pid) = child_id {
-            signal_group(pid, "-TERM");
+            #[cfg(unix)]
+            {
+                report.process_group = Some(pid);
+                report.tracked = crate::proctree::snapshot_tree(pid);
+                if let Err(error) = crate::proctree::signal_group(pid, libc::SIGTERM) {
+                    note(&mut report, error);
+                }
+            }
             report.force_killed = tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err();
+            #[cfg(unix)]
+            {
+                let late = crate::proctree::snapshot_tree(pid);
+                crate::proctree::merge(&mut report.tracked, late);
+            }
             kill_tree(pid, &job, &mut report);
         }
         let _ = child.kill().await;
+        let _ = child.wait().await;
         drop(child);
+        report.confirmation = match child_id {
+            None => crate::port::StopConfirmation::FailedOrUnconfirmed { reasons: vec!["backend had no process id".into()] },
+            Some(pid) => {
+                #[cfg(unix)]
+                {
+                    let tracked = report.tracked.clone();
+                    let (notes, confirmation) = tokio::task::spawn_blocking(move || {
+                        let notes = crate::proctree::kill_escaped(pid, &tracked);
+                        (notes, crate::proctree::confirm_tree_gone(pid, &tracked, crate::proctree::STOP_CONFIRM_TIMEOUT))
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        (Vec::new(), crate::port::StopConfirmation::FailedOrUnconfirmed { reasons: vec![format!("confirmation task failed: {error}")] })
+                    });
+                    for text in notes {
+                        note(&mut report, text);
+                    }
+                    confirmation
+                }
+                #[cfg(windows)]
+                {
+                    let _ = pid;
+                    match &job {
+                        Some(job) => {
+                            if permission_mode == crate::sandbox::PermissionMode::Sandboxed {
+                                report.confirmation_scope_note = Some(WINDOWS_SANDBOXED_SCOPE_NOTE.to_owned());
+                            }
+                            job.confirm_empty(crate::proctree::STOP_CONFIRM_TIMEOUT)
+                        }
+                        None => crate::port::StopConfirmation::FailedOrUnconfirmed {
+                            reasons: vec!["no Job Object: taskkill /T /F cannot prove that every descendant ended".into()],
+                        },
+                    }
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    let _ = pid;
+                    crate::port::StopConfirmation::FailedOrUnconfirmed { reasons: vec!["no tree confirmation on this platform".into()] }
+                }
+            }
+        };
+        if let crate::port::StopConfirmation::FailedOrUnconfirmed { reasons } = &report.confirmation {
+            eprintln!("fox-agent-backend: process tree stop NOT confirmed: {}", reasons.join("; "));
+        }
         drop(job);
         drop(sandbox);
         report
@@ -707,15 +903,16 @@ impl AcpConnection {
     /// this process runs outside the sandbox
     /// ([`crate::sandbox::ModeRecheck::RestartSandboxed`]).
     ///
-    /// 1. `session/cancel` and every pending permission answered `cancelled`;
-    /// 2. the run's pending requests settled (in flight -> `outcome_unknown`);
-    /// 3. the process tree terminated (SIGTERM, grace, SIGKILL), the
-    ///    connection consumed;
-    /// 4. the run's terminal committed and the session marked
-    ///    `NeedsSandboxedRebuild` with `replay_last_operation = false`.
-    ///
-    /// The Host then calls [`crate::port::rebuild_after_revocation`]; if the
-    /// sandbox cannot start, the session stays stopped.
+    /// 1. stopping state ([`Self::begin_stopping`]): new tasks refused, every
+    ///    pending permission answered `cancelled`, late ones auto-cancelled;
+    /// 2. `session/cancel`;
+    /// 3. the run's pending requests settled (in flight -> `outcome_unknown`);
+    /// 4. the process tree terminated and confirmed gone, the connection
+    ///    consumed;
+    /// 5. the run's terminal committed. Confirmed -> `NeedsSandboxedRebuild`
+    ///    with `replay_last_operation = false`; not confirmed ->
+    ///    `StoppedUnconfirmed` and [`crate::port::rebuild_after_revocation`]
+    ///    refuses.
     pub async fn stop_for_revocation(
         self,
         session_id: &str,
@@ -723,10 +920,15 @@ impl AcpConnection {
         arbiter: &mut crate::settlement::TerminalArbiter,
         reason: &str,
     ) -> crate::port::RevocationStop {
-        let cancelled = self.cancel(session_id);
+        let mut cancelled = self.begin_stopping();
+        for id in self.cancel(session_id) {
+            if !cancelled.contains(&id) {
+                cancelled.push(id);
+            }
+        }
         let settled = crate::port::settle_for_revocation(pending, arbiter, reason);
-        let force_killed = self.terminate().await.force_killed;
-        crate::port::finish_revocation(arbiter, reason, cancelled, settled, force_killed)
+        let report = self.terminate().await;
+        crate::port::finish_revocation(arbiter, reason, cancelled, settled, report.process_tree_stop())
     }
 }
 
