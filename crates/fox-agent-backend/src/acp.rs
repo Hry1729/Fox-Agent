@@ -22,7 +22,7 @@
 //! * A stop reports whether the whole process tree is confirmed gone
 //!   ([`crate::port::StopConfirmation`], see [`crate::proctree`]).
 
-use crate::launch::{child_environment, LaunchSpec};
+use crate::launch::{BridgeEndpoint, LaunchSpec};
 use crate::port::{CapabilityDeclaration, SessionCapabilities};
 use crate::reverse::WriteOutcome;
 use agent_client_protocol::schema::v1::{
@@ -106,7 +106,7 @@ pub struct AcpConnection {
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
     /// Windows: the Job Object holding the backend tree (`None` elsewhere).
     job: ProcessJob,
-    stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>>,
+    stderr_tail: Tail,
     /// Per-session srt state (settings file), removed when the connection
     /// goes away. `None` in full-access mode.
     sandbox: Option<crate::sandbox::SandboxSession>,
@@ -145,20 +145,228 @@ pub const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_secs(
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 
-/// Keep the last bytes of the backend's stderr for diagnostics, with
-/// secret-shaped tokens masked. Failure reasons (auth, missing binary) often
-/// appear only there.
+/// How long a failed start waits for stderr to drain after the process ended.
+const STDERR_DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
+/// After a transport error during `initialize`: how long to wait for the
+/// process to exit so the failure can be reported as an exit.
+const EXIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+/// At most this much of each stderr / stdout tail goes into a failure report.
+pub const FAILURE_TAIL_BYTES: usize = 4 * 1024;
+
+type Tail = Arc<Mutex<std::collections::VecDeque<String>>>;
+
+/// Keep the last bytes of a stream for diagnostics, redacted line by line.
+fn collect_tail<R: tokio::io::AsyncRead + Unpin + Send + 'static>(stream: R, tail: Tail) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(mut tail) = tail.lock() {
+                tail.push_back(redact_line(&line));
+                while tail.iter().map(String::len).sum::<usize>() > STDERR_TAIL_BYTES {
+                    tail.pop_front();
+                }
+            }
+        }
+    })
+}
+
+fn tail_text(tail: &Tail) -> String {
+    tail.lock().map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n")).unwrap_or_default()
+}
+
+/// The last `max` bytes of `text`, cut at a line (or char) boundary.
+fn limit_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let cut = &text[start..];
+    match cut.find('\n') {
+        Some(newline) if newline + 1 < cut.len() => cut[newline + 1..].to_owned(),
+        _ => cut.to_owned(),
+    }
+}
+
+fn describe_exit(status: Option<std::process::ExitStatus>) -> String {
+    match status.and_then(|status| status.code()) {
+        Some(code) => format!("exit code {code}"),
+        None => match status {
+            Some(_) => "terminated by a signal".to_owned(),
+            None => "exit status unknown".to_owned(),
+        },
+    }
+}
+
+/// Whether a stderr line comes from srt / srt-win / the Fox bridge rather than
+/// the backend. Heuristic by prefix: all of them share one stderr pipe.
+pub fn is_sandbox_stderr_line(line: &str) -> bool {
+    let line = line.trim_start();
+    ["srt-win:", "srt:", "[SandboxDebug]", "[sandbox-runtime]", "fox-acp-bridge:", "Sandbox ", "sandbox-runtime:"]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+}
+
+/// Why a backend did not get through `initialize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitializeFailureCode {
+    /// The process could not be started or contained.
+    SpawnFailed,
+    /// The process (the backend, or srt in sandboxed mode) exited, with any
+    /// exit code including 0, before the `initialize` response arrived, or
+    /// before the bridge connected (`stage = bridge_not_connected`).
+    BackendExitedBeforeInitialize,
+    /// No `initialize` response within [`INITIALIZE_TIMEOUT`].
+    InitializeTimeout,
+    /// `initialize` failed while the process kept running (protocol error).
+    InitializeFailed,
+    BridgeListenFailed,
+    /// The bridge did not connect and authenticate within its timeout.
+    BridgeConnectTimeout,
+    BridgeHandshakeFailed,
+    /// The client presented a wrong token.
+    BridgeHandshakeRejected,
+}
+
+impl InitializeFailureCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnFailed => "spawn_failed",
+            Self::BackendExitedBeforeInitialize => "backend_exited_before_initialize",
+            Self::InitializeTimeout => "initialize_timeout",
+            Self::InitializeFailed => "initialize_failed",
+            Self::BridgeListenFailed => "bridge_listen_failed",
+            Self::BridgeConnectTimeout => "bridge_connect_timeout",
+            Self::BridgeHandshakeFailed => "bridge_handshake_failed",
+            Self::BridgeHandshakeRejected => "bridge_handshake_rejected",
+        }
+    }
+}
+
+/// Structured start failure. Every text field is redacted
+/// ([`redact_line`]: API keys, tokens, proxy credentials; user-name paths are
+/// kept) and each tail is at most [`FAILURE_TAIL_BYTES`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InitializeFailure {
+    pub code: InitializeFailureCode,
+    pub message: String,
+    /// `bridge_not_connected` or `initialize`.
+    pub stage: Option<String>,
+    /// Exit code of the process Fox started (the srt broker in sandboxed mode).
+    pub exit_code: Option<i32>,
+    /// Whole stderr tail as received.
+    pub stderr_tail: String,
+    /// Lines from srt / srt-win / the bridge ([`is_sandbox_stderr_line`]).
+    pub srt_stderr_tail: String,
+    /// Every other line (the backend's own stderr).
+    pub backend_stderr_tail: String,
+    /// Bridge mode: stdout of the process (not used for ACP there).
+    pub stdout_tail: String,
+}
+
+impl InitializeFailure {
+    pub fn new(code: InitializeFailureCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            stage: None,
+            exit_code: None,
+            stderr_tail: String::new(),
+            srt_stderr_tail: String::new(),
+            backend_stderr_tail: String::new(),
+            stdout_tail: String::new(),
+        }
+    }
+
+    fn stage(mut self, stage: &str) -> Self {
+        self.stage = Some(stage.to_owned());
+        self
+    }
+
+    fn from_bridge(error: crate::bridge::BridgeError) -> Self {
+        use crate::bridge::BridgeErrorKind as Kind;
+        let code = match error.kind {
+            Kind::ListenFailed => InitializeFailureCode::BridgeListenFailed,
+            Kind::ConnectTimeout => InitializeFailureCode::BridgeConnectTimeout,
+            Kind::HandshakeFailed => InitializeFailureCode::BridgeHandshakeFailed,
+            Kind::HandshakeRejected => InitializeFailureCode::BridgeHandshakeRejected,
+        };
+        Self::new(code, error.message).stage("bridge_not_connected")
+    }
+
+    fn attach_tails(&mut self, stderr: &str, stdout: &str) {
+        let (sandbox, backend): (Vec<&str>, Vec<&str>) = stderr.lines().partition(|line| is_sandbox_stderr_line(line));
+        self.stderr_tail = limit_tail(stderr, FAILURE_TAIL_BYTES);
+        self.srt_stderr_tail = limit_tail(&sandbox.join("\n"), FAILURE_TAIL_BYTES);
+        self.backend_stderr_tail = limit_tail(&backend.join("\n"), FAILURE_TAIL_BYTES);
+        self.stdout_tail = limit_tail(stdout, FAILURE_TAIL_BYTES);
+    }
+}
+
+impl std::fmt::Display for InitializeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.message)?;
+        if let Some(code) = self.exit_code {
+            write!(f, " [exit code {code}]")?;
+        }
+        if !self.stderr_tail.is_empty() {
+            write!(f, "; backend stderr (redacted):\n{}", self.stderr_tail)?;
+        }
+        if !self.stdout_tail.is_empty() {
+            write!(f, "\nstdout (redacted):\n{}", self.stdout_tail)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for InitializeFailure {}
+
+/// Mask secret-shaped tokens in one diagnostic line: `sk-...`, `KEY=` /
+/// `TOKEN=` / `SECRET=` / `PASSWORD=` assignments, long opaque strings (the
+/// bridge token included), and the user-info part of URLs
+/// (`http://user:pass@host` -> `http://[redacted]@host`, the srt proxy
+/// credentials). Paths, user names in paths included, are kept.
 fn redact_line(line: &str) -> String {
     line.split_whitespace()
         .map(|word| {
             let upper = word.to_ascii_uppercase();
             let secretish = word.starts_with("sk-")
-                || ["KEY=", "TOKEN=", "SECRET=", "PASSWORD="].iter().any(|marker| upper.contains(marker))
+                || ["KEY=", "TOKEN=", "SECRET=", "PASSWORD=", "PROXY-AUTHORIZATION"].iter().any(|marker| upper.contains(marker))
                 || (word.len() >= 32 && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
-            if secretish { "[redacted]".to_owned() } else { word.to_owned() }
+            if secretish {
+                return "[redacted]".to_owned();
+            }
+            redact_url_userinfo(word)
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `scheme://user:pass@host...` -> `scheme://[redacted]@host...` (every URL
+/// in the word).
+fn redact_url_userinfo(word: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    let mut rest = word;
+    while let Some(index) = rest.find("://") {
+        let (head, tail) = rest.split_at(index + 3);
+        out.push_str(head);
+        let authority_end = tail.find(['/', '?', '#', '"', '\'', ',', ')']).unwrap_or(tail.len());
+        let authority = &tail[..authority_end];
+        match authority.rfind('@') {
+            Some(at) => {
+                out.push_str("[redacted]");
+                out.push_str(&authority[at..]);
+            }
+            None => out.push_str(authority),
+        }
+        rest = &tail[authority_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Windows Job Object owning the backend process tree.
@@ -442,17 +650,37 @@ fn kill_tree(pid: u32, job: &ProcessJob, report: &mut TerminateReport) {
 }
 
 impl AcpConnection {
-    /// Spawn the backend and complete `initialize`. Returns after the
-    /// `Initialized` event has been queued.
+    /// Spawn the backend and complete `initialize` over its stdin / stdout.
+    /// Returns after the `Initialized` event has been queued. The error text
+    /// starts with the [`InitializeFailureCode`] (see [`Self::spawn_detailed`]).
     pub async fn spawn(spec: &LaunchSpec, cwd: &std::path::Path) -> Result<Self, String> {
+        Self::spawn_detailed(spec, cwd, None).await.map_err(|failure| failure.to_string())
+    }
+
+    /// [`Self::spawn`] with a structured failure, and optionally over the ACP
+    /// bridge instead of stdio (Windows sandboxed mode, docs/sandbox.md 7.12):
+    /// the endpoint is created first, the process is started with stdin
+    /// `null` (its stdout / stderr are kept for diagnostics only), and ACP
+    /// runs over the one connection that completes the token handshake.
+    ///
+    /// Initialization succeeds only when the `initialize` response arrived.
+    /// A process that exits first, with any exit code including 0, is
+    /// [`InitializeFailureCode::BackendExitedBeforeInitialize`] (stage
+    /// `bridge_not_connected` when the bridge never connected).
+    pub async fn spawn_detailed(spec: &LaunchSpec, cwd: &std::path::Path, bridge: Option<BridgeEndpoint>) -> Result<Self, InitializeFailure> {
+        use InitializeFailureCode as Code;
+        // Bridge: listen before the process exists.
+        let listener = match &bridge {
+            Some(endpoint) => Some(crate::bridge::BridgeListener::bind(endpoint).map_err(InitializeFailure::from_bridge)?),
+            None => None,
+        };
         let mut command = tokio::process::Command::new(&spec.program);
         command
             .args(&spec.args)
             .current_dir(cwd)
             .env_clear()
-            .envs(child_environment(spec, std::env::vars()))
-            .envs(spec.session_env.iter().cloned())
-            .stdin(std::process::Stdio::piped())
+            .envs(crate::launch::process_environment(spec, std::env::vars()))
+            .stdin(if bridge.is_some() { std::process::Stdio::null() } else { std::process::Stdio::piped() })
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -462,7 +690,7 @@ impl AcpConnection {
         command.creation_flags(win_job::CREATE_SUSPENDED);
         let mut child = command
             .spawn()
-            .map_err(|error| format!("failed to start {}: {error}", spec.program))?;
+            .map_err(|error| InitializeFailure::new(Code::SpawnFailed, format!("failed to start {}: {error}", spec.program)))?;
         // Windows: into the job while suspended, then resume. Any failure
         // kills the suspended child; nothing runs outside the job.
         #[cfg(windows)]
@@ -479,32 +707,89 @@ impl AcpConnection {
                 Ok(job) => Some(job),
                 Err(error) => {
                     let _ = child.start_kill();
-                    return Err(format!("could not contain {} in a Job Object: {error}", spec.program));
+                    return Err(InitializeFailure::new(Code::SpawnFailed, format!("could not contain {} in a Job Object: {error}", spec.program)));
                 }
             }
         };
         #[cfg(not(windows))]
         let job: ProcessJob = None;
-        let stdin = child.stdin.take().ok_or("backend stdin unavailable")?;
-        let stdout = child.stdout.take().ok_or("backend stdout unavailable")?;
         let child_id = child.id();
-        let stderr_tail: Arc<Mutex<std::collections::VecDeque<String>>> = Arc::default();
-        if let Some(stderr) = child.stderr.take() {
-            let tail = Arc::clone(&stderr_tail);
-            tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Ok(mut tail) = tail.lock() {
-                        tail.push_back(redact_line(&line));
-                        while tail.iter().map(String::len).sum::<usize>() > STDERR_TAIL_BYTES {
-                            tail.pop_front();
-                        }
+        let stderr_tail: Tail = Arc::default();
+        let mut stderr_task = child.stderr.take().map(|stderr| collect_tail(stderr, Arc::clone(&stderr_tail)));
+        let stdout_tail: Tail = Arc::default();
+        let stdout = child.stdout.take().ok_or_else(|| InitializeFailure::new(Code::SpawnFailed, "backend stdout unavailable"))?;
+
+        // Fail: stop what was started, give stderr a moment to drain, attach
+        // the tails. `exit` = the process had already exited.
+        async fn fail(
+            mut failure: InitializeFailure,
+            child_id: Option<u32>,
+            job: &ProcessJob,
+            exit: Option<std::process::ExitStatus>,
+            stderr_task: &mut Option<tokio::task::JoinHandle<()>>,
+            stderr_tail: &Tail,
+            stdout_tail: &Tail,
+        ) -> InitializeFailure {
+            if let Some(pid) = child_id {
+                kill_tree(pid, job, &mut TerminateReport::default());
+            }
+            if let Some(task) = stderr_task.as_mut() {
+                let _ = tokio::time::timeout(STDERR_DRAIN, task).await;
+            }
+            failure.exit_code = exit.and_then(|status| status.code());
+            failure.attach_tails(&tail_text(stderr_tail), &tail_text(stdout_tail));
+            failure
+        }
+
+        let (reader, writer): (Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box<dyn tokio::io::AsyncWrite + Unpin + Send>) = match (listener, &bridge) {
+            (Some(listener), Some(endpoint)) => {
+                // stdout of srt / the bridge is diagnostics only.
+                let _ = collect_tail(stdout, Arc::clone(&stdout_tail));
+                enum Connect {
+                    Accepted(Result<Box<dyn crate::bridge::BridgeStream>, crate::bridge::BridgeError>),
+                    TimedOut,
+                    Exited(std::io::Result<std::process::ExitStatus>),
+                }
+                let outcome = tokio::select! {
+                    biased;
+                    accepted = listener.accept() => Connect::Accepted(accepted),
+                    status = child.wait() => Connect::Exited(status),
+                    _ = tokio::time::sleep(endpoint.connect_timeout) => Connect::TimedOut,
+                };
+                match outcome {
+                    Connect::Accepted(Ok(stream)) => {
+                        let (read, write) = tokio::io::split(stream);
+                        (Box::new(read), Box::new(write))
+                    }
+                    Connect::Accepted(Err(error)) => {
+                        let failure = InitializeFailure::from_bridge(error);
+                        return Err(fail(failure, child_id, &job, None, &mut stderr_task, &stderr_tail, &stdout_tail).await);
+                    }
+                    Connect::TimedOut => {
+                        let failure = InitializeFailure::new(
+                            Code::BridgeConnectTimeout,
+                            format!("the sandbox bridge did not connect within {} s", endpoint.connect_timeout.as_secs_f32()),
+                        )
+                        .stage("bridge_not_connected");
+                        return Err(fail(failure, child_id, &job, None, &mut stderr_task, &stderr_tail, &stdout_tail).await);
+                    }
+                    Connect::Exited(status) => {
+                        let status = status.ok();
+                        let failure = InitializeFailure::new(
+                            Code::BackendExitedBeforeInitialize,
+                            format!("the sandboxed process exited ({}) before the bridge pipe connected", describe_exit(status)),
+                        )
+                        .stage("bridge_not_connected");
+                        return Err(fail(failure, child_id, &job, status, &mut stderr_task, &stderr_tail, &stdout_tail).await);
                     }
                 }
-            });
-        }
-        let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
+            }
+            _ => {
+                let stdin = child.stdin.take().ok_or_else(|| InitializeFailure::new(Code::SpawnFailed, "backend stdin unavailable"))?;
+                (Box::new(stdout), Box::new(stdin))
+            }
+        };
+        let transport = ByteStreams::new(writer.compat_write(), reader.compat());
 
         let (event_tx, events) = mpsc::unbounded_channel();
         let (commands, mut command_rx) = mpsc::unbounded_channel::<Command>();
@@ -634,21 +919,62 @@ impl AcpConnection {
             let _ = event_tx.send(BackendEvent::Closed);
         });
 
-        let tail_text = |tail: &Arc<Mutex<std::collections::VecDeque<String>>>| {
-            tail.lock().map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n")).unwrap_or_default()
+        // Only an `initialize` response counts. A process exit first (exit
+        // code 0 included) is a failure; so is a transport error, which is
+        // reported as an exit when the process is gone shortly after.
+        enum Init {
+            Ready(Result<Result<(), String>, oneshot::error::RecvError>),
+            Exited(std::io::Result<std::process::ExitStatus>),
+            TimedOut,
+        }
+        let mut ready_rx = ready_rx;
+        let outcome = tokio::select! {
+            biased;
+            ready = &mut ready_rx => Init::Ready(ready),
+            status = child.wait() => Init::Exited(status),
+            _ = tokio::time::sleep(INITIALIZE_TIMEOUT) => Init::TimedOut,
         };
-        let failure = match tokio::time::timeout(INITIALIZE_TIMEOUT, ready_rx).await {
-            Ok(Ok(Ok(()))) => None,
-            Ok(Ok(Err(error))) => Some(error),
-            Ok(Err(_)) => Some("backend closed before initialize completed".to_owned()),
-            Err(_) => Some(format!("initialize did not complete within {} s", INITIALIZE_TIMEOUT.as_secs())),
-        };
-        if let Some(error) = failure {
-            if let Some(pid) = child_id {
-                kill_tree(pid, &job, &mut TerminateReport::default());
+        let failure = match outcome {
+            Init::Ready(Ok(Ok(()))) => None,
+            Init::Ready(other) => {
+                let error = match other {
+                    Ok(Err(error)) => error,
+                    _ => "backend connection closed before initialize completed".to_owned(),
+                };
+                match tokio::time::timeout(EXIT_SETTLE, child.wait()).await {
+                    Ok(status) => {
+                        let status = status.ok();
+                        Some((
+                            InitializeFailure::new(
+                                Code::BackendExitedBeforeInitialize,
+                                format!("backend process exited ({}) before initialize completed ({error})", describe_exit(status)),
+                            )
+                            .stage("initialize"),
+                            status,
+                        ))
+                    }
+                    Err(_) => Some((InitializeFailure::new(Code::InitializeFailed, error).stage("initialize"), None)),
+                }
             }
-            let tail = tail_text(&stderr_tail);
-            return Err(if tail.is_empty() { error } else { format!("{error}; backend stderr (redacted):\n{tail}") });
+            Init::Exited(status) => {
+                let status = status.ok();
+                Some((
+                    InitializeFailure::new(
+                        Code::BackendExitedBeforeInitialize,
+                        format!("backend process exited ({}) before initialize completed", describe_exit(status)),
+                    )
+                    .stage("initialize"),
+                    status,
+                ))
+            }
+            Init::TimedOut => Some((
+                InitializeFailure::new(Code::InitializeTimeout, format!("initialize did not complete within {} s", INITIALIZE_TIMEOUT.as_secs()))
+                    .stage("initialize"),
+                None,
+            )),
+        };
+        if let Some((failure, status)) = failure {
+            return Err(fail(failure, child_id, &job, status, &mut stderr_task, &stderr_tail, &stdout_tail).await);
         }
         Ok(Self {
             commands,
@@ -665,14 +991,24 @@ impl AcpConnection {
 
     /// Spawn what [`crate::sandbox::prepare_launch`] produced. In sandboxed
     /// mode the backend runs inside srt and the per-session settings live as
-    /// long as this connection. Sandbox refusals happen before this call
-    /// (fail-closed); a sandboxed launch that cannot start is an error here
-    /// too, never a retry outside the sandbox.
+    /// long as this connection; on Windows ACP runs over the bridge the
+    /// launcher set up ([`crate::sandbox::PreparedLaunch::acp_bridge`]).
+    /// Sandbox refusals happen before this call (fail-closed); a sandboxed
+    /// launch that cannot start is an error here too, never a retry outside
+    /// the sandbox.
     pub async fn spawn_prepared(prepared: crate::sandbox::PreparedLaunch, cwd: &std::path::Path) -> Result<Self, String> {
-        let crate::sandbox::PreparedLaunch { mode, spec, sandbox, .. } = prepared;
-        let mut connection = Self::spawn(&spec, cwd).await.map_err(|error| match mode {
-            crate::sandbox::PermissionMode::Sandboxed => format!("sandboxed launch failed: {error}"),
-            crate::sandbox::PermissionMode::FullAccess => error,
+        Self::spawn_prepared_detailed(prepared, cwd).await.map_err(|failure| failure.to_string())
+    }
+
+    /// [`Self::spawn_prepared`] with a structured failure; in sandboxed mode
+    /// the message is prefixed `sandboxed launch failed:`.
+    pub async fn spawn_prepared_detailed(prepared: crate::sandbox::PreparedLaunch, cwd: &std::path::Path) -> Result<Self, InitializeFailure> {
+        let crate::sandbox::PreparedLaunch { mode, spec, sandbox, acp_bridge, .. } = prepared;
+        let mut connection = Self::spawn_detailed(&spec, cwd, acp_bridge).await.map_err(|mut failure| {
+            if mode == crate::sandbox::PermissionMode::Sandboxed {
+                failure.message = format!("sandboxed launch failed: {}", failure.message);
+            }
+            failure
         })?;
         connection.sandbox = sandbox;
         connection.permission_mode = mode;
@@ -941,6 +1277,34 @@ mod tests {
         let line = redact_line("auth failed OPENAI_API_KEY=abc sk-1234567890 token ok");
         assert!(!line.contains("abc") && !line.contains("sk-1234567890"));
         assert!(line.contains("auth failed") && line.contains("ok"));
+    }
+
+    #[test]
+    fn redaction_masks_proxy_credentials_and_keeps_paths() {
+        let line = redact_line(r"HTTPS_PROXY=http://srt:abc123@127.0.0.1:60080 failed at C:\Users\张三\x.js fox-acp-bridge: 0123456789abcdef0123456789abcdef");
+        assert!(!line.contains("abc123"), "{line}");
+        assert!(line.contains("http://[redacted]@127.0.0.1:60080") || line.contains("[redacted]"), "{line}");
+        assert!(line.contains(r"C:\Users\张三\x.js"), "user-name paths kept: {line}");
+        assert!(!line.contains("0123456789abcdef0123456789abcdef"));
+        assert_eq!(redact_url_userinfo("see https://u:p@h.example/x?y and http://plain/z"), "see https://[redacted]@h.example/x?y and http://plain/z");
+    }
+
+    #[test]
+    fn failure_tails_are_split_limited_and_coded() {
+        let mut failure = InitializeFailure::new(InitializeFailureCode::BackendExitedBeforeInitialize, "exited");
+        let mut stderr = String::from("srt-win: WFP self-check ok\nfox-acp-bridge: connected\nError: cannot find module\n");
+        stderr.push_str(&"x".repeat(10_000));
+        failure.attach_tails(&stderr, "");
+        assert!(failure.stderr_tail.len() <= FAILURE_TAIL_BYTES);
+        let mut short = InitializeFailure::new(InitializeFailureCode::BackendExitedBeforeInitialize, "exited");
+        short.exit_code = Some(0);
+        short.attach_tails("srt-win: WFP self-check ok\nfox-acp-bridge: connected\nError: cannot find module", "");
+        assert_eq!(short.srt_stderr_tail, "srt-win: WFP self-check ok\nfox-acp-bridge: connected");
+        assert_eq!(short.backend_stderr_tail, "Error: cannot find module");
+        let text = short.to_string();
+        assert!(text.starts_with("backend_exited_before_initialize: exited [exit code 0]"), "{text}");
+        assert_eq!(serde_json::to_value(&short).unwrap()["code"], "backend_exited_before_initialize");
+        assert_eq!(limit_tail("a\nb\nc", 3), "c");
     }
 
     #[test]
