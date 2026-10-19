@@ -445,15 +445,54 @@ impl AcpConnection {
     /// Pending permission requests are dropped with the connection; the Host
     /// marks them per `reverse` rules.
     pub async fn close(self) {
+        self.terminate().await;
+    }
+
+    /// [`Self::close`], reporting whether the backend had to be force-killed
+    /// (it did not exit within [`TERMINATE_GRACE`] of SIGTERM).
+    async fn terminate(self) -> bool {
         let mut child = self.child.lock().await;
+        let mut force_killed = false;
         if let Some(pid) = self.child_id {
             signal_group(pid, "-TERM");
-            let _ = tokio::time::timeout(TERMINATE_GRACE, child.wait()).await;
+            force_killed = tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err();
             kill_tree(pid);
         }
         let _ = child.kill().await;
         drop(child);
         drop(self.sandbox);
+        force_killed
+    }
+
+    /// OS process id of the backend (the srt broker in sandboxed mode).
+    pub fn process_id(&self) -> Option<u32> {
+        self.child_id
+    }
+
+    /// Revocation stop for a live connection: full access was withdrawn while
+    /// this process runs outside the sandbox
+    /// ([`crate::sandbox::ModeRecheck::RestartSandboxed`]).
+    ///
+    /// 1. `session/cancel` and every pending permission answered `cancelled`;
+    /// 2. the run's pending requests settled (in flight -> `outcome_unknown`);
+    /// 3. the process tree terminated (SIGTERM, grace, SIGKILL), the
+    ///    connection consumed;
+    /// 4. the run's terminal committed and the session marked
+    ///    `NeedsSandboxedRebuild` with `replay_last_operation = false`.
+    ///
+    /// The Host then calls [`crate::port::rebuild_after_revocation`]; if the
+    /// sandbox cannot start, the session stays stopped.
+    pub async fn stop_for_revocation(
+        self,
+        session_id: &str,
+        pending: &mut crate::settlement::PendingRegistry,
+        arbiter: &mut crate::settlement::TerminalArbiter,
+        reason: &str,
+    ) -> crate::port::RevocationStop {
+        let cancelled = self.cancel(session_id);
+        let settled = crate::port::settle_for_revocation(pending, arbiter, reason);
+        let force_killed = self.terminate().await;
+        crate::port::finish_revocation(arbiter, reason, cancelled, settled, force_killed)
     }
 }
 
