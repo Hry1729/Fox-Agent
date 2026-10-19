@@ -2,7 +2,8 @@
 //! not installed; the CI image has it.
 #![cfg(feature = "acp")]
 
-use fox_agent_backend::acp::{AcpConnection, BackendEvent};
+use fox_agent_backend::acp::{AcpConnection, BackendEvent, InitializeFailureCode};
+use fox_agent_backend::launch::BridgeEndpoint;
 use fox_agent_backend::launch::LaunchSpec;
 use fox_agent_backend::port::AgentBackend;
 use fox_agent_backend::reverse::WriteOutcome;
@@ -177,4 +178,127 @@ async fn late_permission_after_stopping_is_auto_cancelled_and_new_work_is_refuse
     let stop = connection.stop_for_revocation(&session, &mut pending, &mut arbiter, "full access withdrawn").await;
     assert_eq!(stop.process_tree.confirmation, StopConfirmation::Confirmed, "{:?}", stop.process_tree);
     assert_eq!(stop.state, RevokedSessionState::NeedsSandboxedRebuild);
+}
+
+// ---- initialization diagnostics (backend_exited_before_initialize) ----
+
+fn node_spec(args: &[&str]) -> Option<LaunchSpec> {
+    let mut spec = mock_spec()?;
+    spec.args = args.iter().map(|arg| arg.to_string()).collect();
+    Some(spec)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backend_exiting_0_before_initialize_is_not_initialized() {
+    let Some(spec) = node_spec(&["-e", "process.exit(0)"]) else { return };
+    let failure = AcpConnection::spawn_detailed(&spec, &std::env::temp_dir(), None).await.err().expect("exit 0 must not count as initialized");
+    assert_eq!(failure.code, InitializeFailureCode::BackendExitedBeforeInitialize);
+    assert_eq!(failure.code.as_str(), "backend_exited_before_initialize");
+    assert_eq!(failure.exit_code, Some(0));
+    assert_eq!(failure.stage.as_deref(), Some("initialize"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backend_writing_stderr_then_exit_1_reports_code_and_redacted_tail() {
+    let script = "console.error('srt-win: runner launched'); console.error('boom: proxy http://srt:s3cr3tpass@127.0.0.1:60080 OPENAI_API_KEY=sk-live'); process.exit(1)";
+    let Some(spec) = node_spec(&["-e", script]) else { return };
+    let failure = AcpConnection::spawn_detailed(&spec, &std::env::temp_dir(), None).await.err().expect("must fail");
+    assert_eq!(failure.code, InitializeFailureCode::BackendExitedBeforeInitialize);
+    assert_eq!(failure.exit_code, Some(1));
+    assert!(failure.backend_stderr_tail.contains("boom"), "{failure:?}");
+    assert!(failure.srt_stderr_tail.contains("srt-win: runner launched"), "{failure:?}");
+    let text = failure.to_string();
+    assert!(text.starts_with("backend_exited_before_initialize:"), "{text}");
+    assert!(!text.contains("s3cr3tpass") && !text.contains("sk-live"), "{text}");
+    // The string API carries the same code.
+    let error = AcpConnection::spawn(&spec, &std::env::temp_dir()).await.err().unwrap();
+    assert!(error.starts_with("backend_exited_before_initialize:"), "{error}");
+}
+
+// ---- ACP bridge (Windows sandboxed transport; Unix socket here) ----
+
+/// Unix: a socket path. Windows: a real named pipe whose DACL admits the
+/// current user twice over (the test bridge runs as this user, not as the
+/// srt sandbox account).
+fn endpoint() -> BridgeEndpoint {
+    #[cfg(windows)]
+    let sid = {
+        use fox_agent_backend::winacl::{RealWindowsAcl, WindowsAclProbe};
+        Some(RealWindowsAcl.current_user_sid().expect("current user SID"))
+    };
+    #[cfg(not(windows))]
+    let sid = None;
+    BridgeEndpoint::new_local(sid).unwrap()
+}
+
+fn bridge_script() -> &'static str {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/runtime-assets/acp-bridge/bridge.mjs")
+}
+
+fn bridged_spec(endpoint: &BridgeEndpoint, token_override: Option<&str>, backend: &[&str]) -> Option<LaunchSpec> {
+    let mut spec = mock_spec()?;
+    spec.args = vec![bridge_script().into(), "--".into(), "node".into()];
+    spec.args.extend(backend.iter().map(|arg| arg.to_string()));
+    spec.session_env = endpoint.env();
+    if let Some(token) = token_override {
+        spec.session_env.retain(|(key, _)| key != "FOX_ACP_TOKEN");
+        spec.session_env.push(("FOX_ACP_TOKEN".into(), token.into()));
+    }
+    Some(spec)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_carries_acp_both_ways_after_the_handshake() {
+    let endpoint = endpoint();
+    let mock = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mock-acp-agent.mjs");
+    let Some(spec) = bridged_spec(&endpoint, None, &[mock]) else { return };
+    let mut connection = AcpConnection::spawn_detailed(&spec, &std::env::temp_dir(), Some(endpoint.clone())).await.expect("spawn through the bridge");
+    assert!(matches!(next(&mut connection).await, BackendEvent::Initialized { .. }));
+    let session = connection.new_session(std::env::temp_dir()).await.expect("session over the pipe");
+    connection.prompt(&session, "hello").unwrap();
+    let events = until(&mut connection, |event| matches!(event, BackendEvent::PermissionRequested { .. })).await;
+    assert!(text_of(&events).contains("env:clean"));
+    let BackendEvent::PermissionRequested { native_request_id, .. } = events.last().unwrap().clone() else { unreachable!() };
+    connection.answer_permission(&native_request_id, Some("allow")).unwrap();
+    let events = until(&mut connection, |event| matches!(event, BackendEvent::TurnEnded { .. })).await;
+    assert!(text_of(&events).contains("permission:allow"));
+    #[cfg(unix)]
+    assert!(!std::path::Path::new(&endpoint.address).exists(), "one connection only: the endpoint is gone");
+    let report = connection.close_with_report().await;
+    assert!(matches!(report.confirmation, fox_agent_backend::port::StopConfirmation::Confirmed), "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_with_a_wrong_token_is_rejected() {
+    let endpoint = endpoint();
+    let mock = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mock-acp-agent.mjs");
+    let Some(spec) = bridged_spec(&endpoint, Some("00000000000000000000000000000000"), &[mock]) else { return };
+    let failure = AcpConnection::spawn_detailed(&spec, &std::env::temp_dir(), Some(endpoint.clone())).await.err().expect("wrong token refused");
+    assert_eq!(failure.code, InitializeFailureCode::BridgeHandshakeRejected, "{failure:?}");
+    assert!(!failure.to_string().contains(&endpoint.token));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_never_connecting_times_out() {
+    let mut endpoint = endpoint();
+    endpoint.connect_timeout = Duration::from_millis(700);
+    let Some(mut spec) = node_spec(&["-e", "setTimeout(()=>{}, 30000)"]) else { return };
+    spec.session_env = endpoint.env();
+    let started = std::time::Instant::now();
+    let failure = AcpConnection::spawn_detailed(&spec, &std::env::temp_dir(), Some(endpoint)).await.err().expect("timeout");
+    assert_eq!(failure.code, InitializeFailureCode::BridgeConnectTimeout);
+    assert_eq!(failure.stage.as_deref(), Some("bridge_not_connected"));
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn process_exiting_before_the_bridge_connects_is_reported_as_exit() {
+    let endpoint = endpoint();
+    let Some(mut spec) = node_spec(&["-e", "console.error('srt-win: WFP self-check ok'); process.exit(0)"]) else { return };
+    spec.session_env = endpoint.env();
+    let failure = AcpConnection::spawn_detailed(&spec, &std::env::temp_dir(), Some(endpoint)).await.err().expect("must fail");
+    assert_eq!(failure.code, InitializeFailureCode::BackendExitedBeforeInitialize);
+    assert_eq!(failure.stage.as_deref(), Some("bridge_not_connected"));
+    assert_eq!(failure.exit_code, Some(0));
+    assert!(failure.srt_stderr_tail.contains("WFP self-check ok"));
 }
