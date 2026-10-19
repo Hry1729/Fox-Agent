@@ -3,9 +3,11 @@
 //!
 //! The real-binary test is gated by `FOX_TEST_REAL_ACP=1`. When the variable is
 //! not set the test returns early: that is a SKIP, not a pass, and says nothing
-//! about the real backend. Binary path: `FOX_DSH_BIN`, default
-//! `/workspace/work/tools/dsh/node_modules/.bin/dsh` (npm --prefix install of
-//! `@deepseek-ai/dsh@0.2.1-rc.2`).
+//! about the real backend. Binary path: `FOX_DSH_BIN`, an absolute path to the
+//! `dsh` entry of an `npm --prefix <dir> install @deepseek-ai/dsh@0.2.1-rc.2`
+//! (`<dir>/node_modules/.bin/dsh`, on Windows `...\dsh.cmd`). Linux defaults
+//! to `/workspace/work/tools/dsh/node_modules/.bin/dsh`; Windows has no
+//! default and the test fails if the variable is missing or relative.
 
 use fox_agent_backend::backends::deepseek::{
     self, capabilities, check_initialize, check_version, filesystem_detail, floor_verdict,
@@ -112,8 +114,14 @@ fn policy_patch_maps_host_policy_without_widening() {
 #[test]
 fn launch_spec_requires_absolute_patch_and_pins_version() {
     assert!(deepseek::launch_spec("dsh", std::path::Path::new("rel.yml")).is_err());
-    let spec = deepseek::launch_spec("dsh", std::path::Path::new("/abs/fox-dsh.yml")).unwrap();
-    assert_eq!(spec.args, ["--profile", "acp", "--patch", "/abs/fox-dsh.yml"]);
+    // Absolute on the host running the test: `/abs/...` is not absolute on
+    // Windows (no drive), so build the path from the temp directory.
+    let patch = std::env::temp_dir().join("fox-dsh.yml");
+    assert!(patch.is_absolute());
+    let spec = deepseek::launch_spec("dsh", &patch).unwrap();
+    assert_eq!(spec.args, ["--profile".to_owned(), "acp".to_owned(), "--patch".to_owned(), patch.display().to_string()]);
+    #[cfg(windows)]
+    assert!(deepseek::launch_spec("dsh", std::path::Path::new("/abs/fox-dsh.yml")).is_err(), "drive-less path is relative on Windows");
     assert_eq!(spec.version_pin, PINNED_VERSION);
     assert_eq!(spec.credential_env, ["DEEPSEEK_API_KEY"]);
     assert!(spec.experimental);
@@ -140,7 +148,15 @@ mod real_binary {
     use std::time::Duration;
 
     fn dsh_bin() -> String {
-        std::env::var("FOX_DSH_BIN").unwrap_or_else(|_| "/workspace/work/tools/dsh/node_modules/.bin/dsh".into())
+        let bin = match std::env::var("FOX_DSH_BIN") {
+            Ok(bin) => bin,
+            Err(_) if cfg!(windows) => {
+                panic!("FOX_DSH_BIN must be set on Windows: absolute path to dsh.cmd of @deepseek-ai/dsh@0.2.1-rc.2")
+            }
+            Err(_) => "/workspace/work/tools/dsh/node_modules/.bin/dsh".into(),
+        };
+        assert!(std::path::Path::new(&bin).is_absolute(), "FOX_DSH_BIN must be an absolute path, got {bin:?}");
+        bin
     }
 
     fn enabled() -> bool {
