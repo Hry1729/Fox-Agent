@@ -9,12 +9,10 @@ rem from FOX_PI_EXTRA_ARGS (word-split, no paths: Fox passes variables to
 rem the sandbox as `set "K=V"`, which cannot carry quotes) and one optional
 rem extra extension path in FOX_PI_TEST_EXTENSION (quoted here; test use only).
 rem The gate must sit next to this file (%~dp0 ends with a backslash).
-rem pi.cmd is started without `call`, so control does not come back here.
+rem No labels / goto: the repository stores LF line endings (.gitattributes),
+rem and cmd.exe label lookup is unreliable in LF-only batch files.
 setlocal
 if not defined FOX_PI_BIN set "FOX_PI_BIN=pi"
-if not defined FOX_PI_TEST_EXTENSION goto plain
-"%FOX_PI_BIN%" --no-extensions -e "%~dp0fox-approval-gate.ts" -e "%FOX_PI_TEST_EXTENSION%" %FOX_PI_EXTRA_ARGS% %*
-exit /b %ERRORLEVEL%
-:plain
-"%FOX_PI_BIN%" --no-extensions -e "%~dp0fox-approval-gate.ts" %FOX_PI_EXTRA_ARGS% %*
-exit /b %ERRORLEVEL%
+set "FOX_PI_TEST_EXT_ARGS="
+if defined FOX_PI_TEST_EXTENSION set "FOX_PI_TEST_EXT_ARGS=-e "%FOX_PI_TEST_EXTENSION%""
+"%FOX_PI_BIN%" --no-extensions -e "%~dp0fox-approval-gate.ts" %FOX_PI_TEST_EXT_ARGS% %FOX_PI_EXTRA_ARGS% %*
