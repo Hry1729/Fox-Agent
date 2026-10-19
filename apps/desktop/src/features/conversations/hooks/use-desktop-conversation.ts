@@ -7,7 +7,17 @@ import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '../model/pendin
 import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
-import { conversationAgentBackend, type AgentBackendId, type AgentBackendStatus } from '../model/agent-backend'
+import {
+  AGENT_BACKEND_REFUSED,
+  agentBackendInputLockedReason,
+  conversationAgentBackend,
+  isAgentBackendRefusalCode,
+  withoutRefusedSend,
+  type AgentBackendId,
+  type AgentBackendRefusal,
+  type AgentBackendRefusedOutcome,
+  type AgentBackendStatus,
+} from '../model/agent-backend'
 import { useRuntimeEventStream } from './use-runtime-event-stream'
 import { useKernelStateStream } from './use-kernel-state-stream'
 import { useConversationCompletionNotices } from '@/features/chat/use-conversation-completion-notices'
@@ -84,6 +94,12 @@ interface DesktopConversationState {
   setDraftAgentBackend: (backend: AgentBackendId) => void
   /** Host picker / lock state; null until loaded or outside Tauri. */
   agentBackendStatus: AgentBackendStatus | null
+  /**
+   * The one notice for a send refused by backend routing (`agent_backend_*`).
+   * Such a refusal is not a run failure: `error` stays null and nothing
+   * optimistic is kept.
+   */
+  agentBackendRefusal: AgentBackendRefusal | null
   knowledgeReferences: KnowledgeReference[] | undefined
   knowledgeReferenceNames: Record<string, string>
   selectProject: (projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => void
@@ -92,7 +108,8 @@ interface DesktopConversationState {
   streamingText: string
   error: string | null
   errorDetails: DesktopErrorDetails | null
-  send: (text: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => Promise<boolean>
+  /** `true` started, `false` failed, `'agent_backend_refused'` refused by backend routing (nothing started). */
+  send: (text: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => Promise<boolean | AgentBackendRefusedOutcome>
   rerunFromMessage: (messageId: string, text: string, model?: string) => Promise<boolean>
   resumeQuestion: (parentRunId: string, text: string, answers: Record<string, string | string[]>) => Promise<boolean>
   cancel: () => Promise<boolean>
@@ -226,6 +243,9 @@ export function useDesktopConversation(): DesktopConversationState {
     setDraftAgentBackendState(backend)
   }, [])
   const [agentBackendStatus, setAgentBackendStatus] = useState<AgentBackendStatus | null>(null)
+  const agentBackendStatusRef = useRef<AgentBackendStatus | null>(null)
+  agentBackendStatusRef.current = agentBackendStatus
+  const [agentBackendRefusal, setAgentBackendRefusal] = useState<AgentBackendRefusal | null>(null)
   const [draftKnowledgeBases, setDraftKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
   const [draftKnowledgeReferences, setDraftKnowledgeReferences] = useState<KnowledgeReference[] | undefined>(undefined)
   const [draftKnowledgeNames, setDraftKnowledgeNames] = useState<Record<string, string>>({})
@@ -260,6 +280,7 @@ export function useDesktopConversation(): DesktopConversationState {
     activeRunIdRef.current = null
     setSelectedConversationId(null)
     setDetail(null)
+    setAgentBackendRefusal(null)
   }, [setDetail])
 
   const applyDraft = useCallback((nextDraft: typeof draftRef.current) => {
@@ -994,7 +1015,20 @@ export function useDesktopConversation(): DesktopConversationState {
     if (!cleanText) return false
     setError(null)
     setErrorDetails(null)
+    setAgentBackendRefusal(null)
     let active = detail
+    // Optimistic trace of this send, removed again if backend routing refuses it.
+    let pendingMessageId: string | null = null
+    let previousLastRun: RunRecord | null = detail?.lastRun ?? null
+    if (active) {
+      // An external conversation whose backend is switched off is read-only:
+      // refuse locally, before anything optimistic, instead of send-then-refuse.
+      const lockedReason = agentBackendInputLockedReason(conversationAgentBackend(active.conversation), agentBackendStatusRef.current)
+      if (lockedReason) {
+        setAgentBackendRefusal({ conversationId: active.conversation.id, code: 'agent_backend_disabled', message: lockedReason })
+        return AGENT_BACKEND_REFUSED
+      }
+    }
     try {
       if (!active) {
         const draft = draftRef.current
@@ -1065,7 +1099,8 @@ export function useDesktopConversation(): DesktopConversationState {
 
       const pendingRun = optimisticRun(activeConversation.conversation.id, model)
       if (activeConversationIdRef.current === activeConversation.conversation.id) activeRunIdRef.current = null
-      const pendingMessageId = optimisticId('pending-message')
+      previousLastRun = activeConversation.lastRun
+      pendingMessageId = optimisticId('pending-message')
       const now = Date.now()
       const nextOrdinal = activeConversation.messages.reduce((highest, message) => Math.max(highest, message.ordinal), 0) + 1
       const optimisticMessage: ConversationMessage = {
@@ -1139,6 +1174,25 @@ export function useDesktopConversation(): DesktopConversationState {
     } catch (cause) {
       if (active) uiDispatchStartedRef.current.delete(active.conversation.id)
       const details = desktopErrorDetails(cause)
+      if (isAgentBackendRefusalCode(details.code)) {
+        // Backend routing refused before any message or run row was written:
+        // drop the optimistic message and pending run, keep `error` null (this
+        // is not a failed run), and show one refusal notice.
+        const refusedConversationId = active?.conversation.id ?? null
+        const refusedMessageId = pendingMessageId
+        const restoredRun = previousLastRun
+        if (refusedConversationId) {
+          setDetail((current) => current?.conversation.id === refusedConversationId
+            ? withoutRefusedSend(current, refusedMessageId, restoredRun)
+            : current)
+          await refreshSelectedConversation(refusedConversationId).catch(() => undefined)
+        }
+        await refreshList().catch(() => undefined)
+        if (selectionVersion === selectionVersionRef.current) {
+          setAgentBackendRefusal({ conversationId: refusedConversationId, code: details.code, message: details.message })
+        }
+        return AGENT_BACKEND_REFUSED
+      }
       if (active) await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
       await refreshList().catch(() => undefined)
       if (selectionVersion === selectionVersionRef.current) {
@@ -1147,7 +1201,7 @@ export function useDesktopConversation(): DesktopConversationState {
       }
       return false
     }
-  }, [applyDraft, defaultAgentId, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, initializeRuntime, refreshList, refreshSelectedConversation])
+  }, [setDetail, applyDraft, defaultAgentId, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, initializeRuntime, refreshList, refreshSelectedConversation])
 
   const rerunFromMessage = useCallback(async (messageId: string, text: string, model?: string) => {
     const active = detail
@@ -1521,6 +1575,7 @@ export function useDesktopConversation(): DesktopConversationState {
     draftAgentBackend,
     setDraftAgentBackend,
     agentBackendStatus,
+    agentBackendRefusal,
     knowledgeReferences: detail?.knowledgeReferences ?? draftKnowledgeReferences,
     knowledgeReferenceNames: detail ? currentDraft().knowledgeNames ?? {} : draftKnowledgeNames,
     selectProject,
@@ -1570,7 +1625,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [agentBackendStatus, draftAgentBackend, setDraftAgentBackend, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [agentBackendStatus, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {
