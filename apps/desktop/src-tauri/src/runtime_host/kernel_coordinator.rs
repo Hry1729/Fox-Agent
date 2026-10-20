@@ -1,6 +1,8 @@
 //! Durable coordinator for opt-in authoritative RuntimeHost execution.
 //! Default Legacy mode and production rollout gates remain separate.
 //! The executor receives a frozen binding and must revalidate resources itself.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::{
     database::Database,
     kernel::{
@@ -47,7 +49,7 @@ pub(crate) fn replan_or_error(error: String) -> String {
 fn checkpoint_hash(value: &Value) -> String {
     format!(
         "sha256:{}",
-        hex::encode(Sha256::digest(value.to_string().as_bytes()))
+        hex::encode(Sha256::digest(value.canonical_string().as_bytes()))
     )
 }
 
@@ -291,7 +293,7 @@ fn completion_effects(
             Some(CompletionDelivery::Repair { prompt, input, .. }) => {
                 controller.request_delivery_repair(
                     prompt,
-                    &serde_json::to_string(input)
+                    &crate::canonical_json::to_string(input)
                         .map_err(|error| KernelError::FailClosed(error.to_string()))?,
                 )
             }
@@ -1754,7 +1756,7 @@ impl<'a> KernelCoordinator<'a> {
             let payload=serde_json::json!({"turnId":input.turn_id,
                 "effectKey":effect_key,"lane":"job_notice","prompt":"",
                 "input":input,"hostJobNotices":notices});
-            controller.wake_waiting_jobs(park_seq,now.wall_ms,&payload.to_string())
+            controller.wake_waiting_jobs(park_seq,now.wall_ms,&payload.canonical_string())
         })?;
         Ok(true)
     }
@@ -1850,7 +1852,7 @@ impl<'a> KernelCoordinator<'a> {
             .map(|(source_order, call)| ToolCallRequest {
                 tool_call_id: call["id"].as_str().unwrap().into(),
                 tool: call["name"].as_str().unwrap().into(),
-                canonical_input_json: call["arguments"].to_string(),
+                canonical_input_json: call["arguments"].canonical_string(),
                 source_order,
             })
             .collect();
@@ -1864,7 +1866,7 @@ impl<'a> KernelCoordinator<'a> {
                 now.wall_ms,
             )?;
             effects
-                .push(controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?);
+                .push(controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.canonical_string())?);
             Ok(effects)
         })
     }
@@ -2419,7 +2421,7 @@ impl<'a> KernelCoordinator<'a> {
         let mut derived = config.clone();
         derived.model_service = derived_service;
         derived.hash()?;
-        let encoded = serde_json::to_string(&record).map_err(|_| "invalid length-recovery record")?;
+        let encoded = crate::canonical_json::to_string(&record).map_err(|_| "invalid length-recovery record")?;
         if encoded.len() > LENGTH_RECOVERY_MAX_RECORD_BYTES {
             return Err("length-recovery record exceeds its durable bound".into());
         }
@@ -2762,7 +2764,7 @@ impl<'a> KernelCoordinator<'a> {
         }
         self.tick_settled_model()?;
         self.cancellation.run_token(&self.binding.run_id)?.check()?;
-        let failure_json = serde_json::to_string(&failure).map_err(|_| "invalid model failure")?;
+        let failure_json = crate::canonical_json::to_string(&failure).map_err(|_| "invalid model failure")?;
         // A length truncation needs the Host's own delivery facts to build its one
         // recovery instruction, and the adapter's own wire record to decide whether
         // a lowered parameter can change the request at all. Both are read before
@@ -3021,7 +3023,7 @@ impl<'a> KernelCoordinator<'a> {
                 super::kernel_model_worker::MODEL_WINDOW_EXPIRED.into());
         }
         token.check()?;
-        let encoded = serde_json::to_string(&response).map_err(|_| "invalid initial response")?;
+        let encoded = crate::canonical_json::to_string(&response).map_err(|_| "invalid initial response")?;
         let mut initial_history = frame.input.messages.clone();
         initial_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let next = if response.assistant_message["stopReason"] == "toolUse" {
@@ -3060,7 +3062,7 @@ impl<'a> KernelCoordinator<'a> {
         let notice_followup = if next.is_none() && steering_input.is_none() && wait_jobs.is_empty() {
             self.job_notice_followup_input(&initial_history,&response.assistant_message)?
         } else { None };
-        let parked_history = serde_json::to_string(&initial_history)
+        let parked_history = crate::canonical_json::to_string(&initial_history)
             .map_err(|_| "invalid parked initial history")?;
         // A request accepted between the queue read above and this write-set can
         // make a **Final** decision refuse. The model result is still in hand and
@@ -3116,7 +3118,7 @@ impl<'a> KernelCoordinator<'a> {
                         .map(|(source_order, call)| ToolCallRequest {
                             tool_call_id: call["id"].as_str().unwrap().into(),
                             tool: call["name"].as_str().unwrap().into(),
-                            canonical_input_json: call["arguments"].to_string(),
+                            canonical_input_json: call["arguments"].canonical_string(),
                             source_order,
                         })
                         .collect();
@@ -3128,10 +3130,10 @@ impl<'a> KernelCoordinator<'a> {
                         now.wall_ms,
                     )?);
                     effects.push(
-                        controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
+                        controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.canonical_string())?,
                     );
                 } else if let Some(input) = &steering_input {
-                    let stored = serde_json::to_string(input)
+                    let stored = crate::canonical_json::to_string(input)
                         .map_err(|error| KernelError::FailClosed(error.to_string()))?;
                     effects.extend(
                         controller.request_steering_followup(steering::STEERING_PROMPT, &stored)?,
@@ -3144,9 +3146,9 @@ impl<'a> KernelCoordinator<'a> {
                     )?);
                 } else if let Some((input,notices)) = &notice_followup {
                     effects.extend(controller.request_job_notice_followup(
-                        &serde_json::to_string(input)
+                        &crate::canonical_json::to_string(input)
                             .map_err(|error| KernelError::FailClosed(error.to_string()))?,
-                        &serde_json::to_string(notices)
+                        &crate::canonical_json::to_string(notices)
                             .map_err(|error| KernelError::FailClosed(error.to_string()))?,
                     )?);
                 } else {
@@ -3369,7 +3371,7 @@ impl<'a> KernelCoordinator<'a> {
                 super::kernel_model_worker::MODEL_WINDOW_EXPIRED.into());
         }
         token.check()?;
-        let response_json = serde_json::to_string(&response).map_err(|error| error.to_string())?;
+        let response_json = crate::canonical_json::to_string(&response).map_err(|error| error.to_string())?;
         // Node supplies only the new assistant message. Preserve the original
         // history and reconstruct prior results exclusively from durable facts.
         // The batch's own history is needed for both branches: the next tool
@@ -3408,7 +3410,7 @@ impl<'a> KernelCoordinator<'a> {
         let notice_followup = if next.is_none() && steering_input.is_none() && wait_jobs.is_empty() {
             self.job_notice_followup_input(&batch_history,&response.assistant_message)?
         } else { None };
-        let parked_history = serde_json::to_string(&batch_history)
+        let parked_history = crate::canonical_json::to_string(&batch_history)
             .map_err(|_| "invalid parked batch history")?;
         // Same recovery as the initial path: a Final decision that loses a race
         // with a freshly accepted request is re-planned into its own steering
@@ -3456,7 +3458,7 @@ impl<'a> KernelCoordinator<'a> {
                             .map(|(source_order, call)| ToolCallRequest {
                                 tool_call_id: call["id"].as_str().unwrap().into(),
                                 tool: call["name"].as_str().unwrap().into(),
-                                canonical_input_json: call["arguments"].to_string(),
+                                canonical_input_json: call["arguments"].canonical_string(),
                                 source_order,
                             })
                             .collect();
@@ -3469,10 +3471,10 @@ impl<'a> KernelCoordinator<'a> {
                         )?);
                         effects.push(
                             controller
-                                .checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
+                                .checkpoint_tool_batch(&checkpoint.batch_id, &stored.canonical_string())?,
                         );
                     } else if let Some(input) = &steering_input {
-                        let stored = serde_json::to_string(input)
+                        let stored = crate::canonical_json::to_string(input)
                             .map_err(|error| KernelError::FailClosed(error.to_string()))?;
                         effects.extend(controller.request_steering_followup(
                             steering::STEERING_PROMPT,
@@ -3486,9 +3488,9 @@ impl<'a> KernelCoordinator<'a> {
                         )?);
                     } else if let Some((input,notices)) = &notice_followup {
                         effects.extend(controller.request_job_notice_followup(
-                            &serde_json::to_string(input)
+                            &crate::canonical_json::to_string(input)
                                 .map_err(|error| KernelError::FailClosed(error.to_string()))?,
-                            &serde_json::to_string(notices)
+                            &crate::canonical_json::to_string(notices)
                                 .map_err(|error| KernelError::FailClosed(error.to_string()))?,
                         )?);
                     } else {
@@ -3606,7 +3608,7 @@ impl<'a> KernelCoordinator<'a> {
         self.apply(
             Some(DecisionLease::Tool(tool_call_id, owner)),
             |controller, _| {
-                controller.tool_settled(tool_call_id, succeeded, &result.to_string())
+                controller.tool_settled(tool_call_id, succeeded, &result.canonical_string())
             },
         )
     }
