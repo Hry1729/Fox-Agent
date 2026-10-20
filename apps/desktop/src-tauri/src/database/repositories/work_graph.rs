@@ -5219,12 +5219,27 @@ impl TaskEvidenceRepository {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = timestamp();
         with_write_transaction(&self.database, |transaction| {
+            // A ToolCall reference may name the runtime/provider call id the
+            // model actually holds; it is resolved to the canonical
+            // `tool_calls.id` BEFORE validation, the duplicate check and the
+            // write, so Evidence is only ever stored (and deduplicated) by the
+            // canonical id. Resolution is read-only and scoped to the Task's
+            // conversation.
+            let ref_id = match input.ref_kind {
+                EvidenceReferenceKind::ToolCall => resolve_tool_call_reference(
+                    transaction,
+                    &input.task_id,
+                    &input.ref_id,
+                    input.source_run_id.as_deref(),
+                )?,
+                _ => input.ref_id.clone(),
+            };
             validate_reference(
                 transaction,
                 &input.task_id,
                 &input.evidence_type,
                 &input.ref_kind,
-                &input.ref_id,
+                &ref_id,
                 input.trace_id.as_deref(),
                 input.span_id.as_deref(),
             )?;
@@ -5241,7 +5256,7 @@ impl TaskEvidenceRepository {
                         input.task_id,
                         evidence_type_text(&input.evidence_type),
                         reference_kind_text(&input.ref_kind),
-                        input.ref_id,
+                        ref_id,
                     ],
                     |row| row.get(0),
                 )
@@ -5261,7 +5276,7 @@ impl TaskEvidenceRepository {
                         input.source_run_id,
                         evidence_type_text(&input.evidence_type),
                         reference_kind_text(&input.ref_kind),
-                        input.ref_id,
+                        ref_id,
                         input.summary,
                         metadata_json,
                         input.trace_id,
@@ -5593,6 +5608,90 @@ pub(super) fn validate_reference(
         }
     }
     Ok(())
+}
+
+/// The Evidence type → reference kind pairs [`validate_reference`] accepts,
+/// spelled for model-facing guidance. Kept identical to
+/// `validate_evidence_pair` by `evidence_reference_pairs_match_the_validator`.
+pub const EVIDENCE_REFERENCE_PAIRS: &[(&str, &[&str])] = &[
+    ("tool_call", &["tool_call"]),
+    ("test_result", &["tool_call", "artifact"]),
+    ("file_diff", &["artifact", "run_event"]),
+    ("artifact", &["artifact"]),
+    ("trace_span", &["run_event"]),
+    ("user_confirmation", &["message"]),
+    ("external_reference", &["source"]),
+];
+
+/// Resolve a ToolCall Evidence reference to its canonical `tool_calls.id`.
+///
+/// The canonical id (`kernel-tool:{run}:{call}` for Kernel Runs, a Host UUID
+/// for legacy Runs) is returned unchanged when such a row exists; conversation
+/// and status are then checked by [`validate_reference`] exactly as before.
+/// Otherwise `ref_id` is read as a runtime/provider call id
+/// (`tool_calls.runtime_tool_call_id`) and looked up ONLY inside the Task's
+/// conversation, which grants nothing the canonical path does not already
+/// allow (any completed ToolCall of that conversation is citable by its
+/// canonical id). Inside the conversation:
+///
+/// * a call of `preferred_run_id` (the Run adding the Evidence) wins; the
+///   `(run_id, runtime_tool_call_id)` uniqueness makes it a single row;
+/// * otherwise exactly one match in the conversation is used;
+/// * several matches are refused as ambiguous, naming the canonical ids;
+/// * no match leaves `ref_id` unchanged, so validation reports it missing
+///   (a provider id that exists only in another conversation is therefore
+///   "not found", without disclosing the foreign row).
+///
+/// Read-only. Callers run it inside the Evidence write transaction before any
+/// write, so a refusal still rolls the transaction back cleanly.
+pub(super) fn resolve_tool_call_reference(
+    connection: &Connection,
+    task_id: &str,
+    ref_id: &str,
+    preferred_run_id: Option<&str>,
+) -> Result<String, RepositoryError> {
+    let canonical: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE id = ?1)",
+            [ref_id],
+            |row| row.get(0),
+        )
+        .map_err(RepositoryError::database)?;
+    if canonical {
+        return Ok(ref_id.to_owned());
+    }
+    let conversation_id = task_conversation(connection, task_id)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, run_id FROM tool_calls
+             WHERE conversation_id = ?1 AND runtime_tool_call_id = ?2
+             ORDER BY started_at, id",
+        )
+        .map_err(RepositoryError::database)?;
+    let candidates = statement
+        .query_map(params![conversation_id, ref_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(RepositoryError::database)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(RepositoryError::database)?;
+    if let Some(run_id) = preferred_run_id {
+        if let Some((id, _)) = candidates.iter().find(|(_, owner)| owner == run_id) {
+            return Ok(id.clone());
+        }
+    }
+    match candidates.as_slice() {
+        [] => Ok(ref_id.to_owned()),
+        [(id, _)] => Ok(id.clone()),
+        many => Err(RepositoryError::InvalidReference(format!(
+            "tool call id '{ref_id}' is ambiguous in this conversation; cite the canonical refId instead, one of: {}",
+            many.iter()
+                .take(5)
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 fn validate_evidence_pair(
@@ -8121,6 +8220,142 @@ mod tests {
         assert_eq!(stored.validity_status, EvidenceValidityStatus::Stale);
         assert_eq!(stored.invalid_reason.as_deref(), Some("workspace changed"));
         assert!(stored.checked_at.is_some());
+        cleanup(database, path);
+    }
+
+    #[test]
+    fn evidence_reference_pairs_match_the_validator() {
+        let types = [
+            EvidenceType::ToolCall,
+            EvidenceType::TraceSpan,
+            EvidenceType::TestResult,
+            EvidenceType::FileDiff,
+            EvidenceType::Artifact,
+            EvidenceType::UserConfirmation,
+            EvidenceType::ExternalReference,
+        ];
+        let kinds = [
+            EvidenceReferenceKind::ToolCall,
+            EvidenceReferenceKind::Artifact,
+            EvidenceReferenceKind::RunEvent,
+            EvidenceReferenceKind::Message,
+            EvidenceReferenceKind::Source,
+        ];
+        for evidence_type in &types {
+            for ref_kind in &kinds {
+                let listed = EVIDENCE_REFERENCE_PAIRS.iter().any(|(listed_type, listed_kinds)| {
+                    *listed_type == evidence_type_text(evidence_type)
+                        && listed_kinds.contains(&reference_kind_text(ref_kind))
+                });
+                assert_eq!(
+                    validate_evidence_pair(evidence_type, ref_kind).is_ok(),
+                    listed,
+                    "{} -> {}",
+                    evidence_type_text(evidence_type),
+                    reference_kind_text(ref_kind)
+                );
+            }
+        }
+    }
+
+    /// Evidence scheme 3: a ToolCall reference may use the runtime/provider
+    /// call id. It resolves only inside the Task's conversation (preferring the
+    /// adding Run), is stored and deduplicated by the canonical id, and an
+    /// ambiguous, foreign or unknown id is refused before any write.
+    #[test]
+    fn tool_call_evidence_resolves_provider_ids_to_canonical_ids_within_the_conversation() {
+        let (database, path) = test_database();
+        let conversation_id = conversation_id(&database);
+        let goal = database
+            .goals()
+            .create(goal_input(&conversation_id, GoalStatus::Active))
+            .unwrap();
+        let task = database
+            .work_tasks()
+            .create(task_input(&goal.id, 0))
+            .unwrap();
+        let first_run = insert_running_reviewer_run(&database, &conversation_id);
+        let second_run = insert_running_reviewer_run(&database, &conversation_id);
+        let third_run = insert_running_reviewer_run(&database, &conversation_id);
+        let foreign_conversation = database
+            .create_conversation(database.default_agent_id(), Some("foreign"), None, None)
+            .unwrap()
+            .id;
+        let foreign_run = insert_running_reviewer_run(&database, &foreign_conversation);
+        database
+            .with_connection(|connection| {
+                for (id, runtime_id, run_id, owner) in [
+                    ("kernel-tool:r1:call_0", "call_0", &first_run, &conversation_id),
+                    ("kernel-tool:r2:call_0", "call_0", &second_run, &conversation_id),
+                    ("kernel-tool:r1:call_unique", "call_unique", &first_run, &conversation_id),
+                    ("kernel-tool:rf:call_foreign", "call_foreign", &foreign_run, &foreign_conversation),
+                ] {
+                    connection.execute(
+                        "INSERT INTO tool_calls(
+                            id, runtime_tool_call_id, run_id, conversation_id, tool_name,
+                            status, result_json, started_at, completed_at, updated_at
+                         ) VALUES (?1, ?2, ?3, ?4, 'work_snapshot_get', 'completed', '{}', 1, 2, 2)",
+                        params![id, runtime_id, run_id, owner],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let repository = database.task_evidence();
+        let add = |ref_id: &str, run_id: &str| {
+            repository.add(AddEvidenceInput {
+                id: None,
+                task_id: task.id.clone(),
+                source_run_id: Some(run_id.to_owned()),
+                evidence_type: EvidenceType::ToolCall,
+                ref_kind: EvidenceReferenceKind::ToolCall,
+                ref_id: ref_id.to_owned(),
+                summary: "计算结果 396".to_owned(),
+                metadata: serde_json::json!({ "validationCheckType": "inspection" }),
+                trace_id: None,
+                span_id: None,
+            })
+        };
+
+        // A unique provider id from an earlier Run of the same conversation.
+        let stored = add("call_unique", &third_run).unwrap();
+        assert_eq!(stored.ref_id, "kernel-tool:r1:call_unique", "stored canonically");
+        assert_eq!(
+            repository.validate(&stored.id).unwrap(),
+            EvidenceValidityStatus::Valid,
+            "the canonical id revalidates"
+        );
+        // The same call cited by its canonical id is the same Evidence.
+        assert!(matches!(
+            add("kernel-tool:r1:call_unique", &third_run),
+            Err(RepositoryError::DuplicateEvidence)
+        ));
+        // A provider id reused across Runs: the adding Run's own call wins.
+        assert_eq!(
+            add("call_0", &second_run).unwrap().ref_id,
+            "kernel-tool:r2:call_0"
+        );
+        // ...and from a Run that owns neither it is ambiguous, never guessed.
+        match add("call_0", &third_run) {
+            Err(RepositoryError::InvalidReference(message)) => {
+                assert!(message.contains("ambiguous"), "{message}");
+                assert!(message.contains("kernel-tool:r1:call_0"), "{message}");
+            }
+            other => panic!("expected an ambiguity refusal, got {other:?}"),
+        }
+        // A provider id that only exists in another conversation is unknown here.
+        match add("call_foreign", &third_run) {
+            Err(RepositoryError::MissingReference(message)) => {
+                assert!(message.contains("was not found"), "{message}");
+            }
+            other => panic!("expected a missing reference, got {other:?}"),
+        }
+        // A foreign canonical id keeps the existing cross-conversation refusal.
+        assert!(matches!(
+            add("kernel-tool:rf:call_foreign", &third_run),
+            Err(RepositoryError::CrossConversationReference)
+        ));
+        assert_eq!(repository.list_by_task(&task.id, 50).unwrap().len(), 2);
         cleanup(database, path);
     }
 
