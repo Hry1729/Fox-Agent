@@ -1,5 +1,7 @@
 //! Compaction uses the existing event transaction and a single Run-owned intent.
 //! No mutable history table, credential snapshot or separate commit window.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::Database;
 use crate::kernel::{CompactionState, KernelPersistCommand, RunState};
 use crate::kernel_compaction::{
@@ -14,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 /// the compact JSON form. Reconstructed views are only used for estimation,
 /// never fed back into durable state.
 fn checkpoint_hash_mirror(value: &Value) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(value.to_string().as_bytes())))
+    format!("sha256:{}", hex::encode(Sha256::digest(value.canonical_string().as_bytes())))
 }
 
 fn invalid(message: impl Into<String>) -> rusqlite::Error {
@@ -434,7 +436,7 @@ impl Database {
         self.with_connection(|c| {c.execute("UPDATE kernel_context_budget_reports SET report_json=json_set(report_json,'$.triggerReason',?2),updated_at=?3 WHERE run_id=?1",params![run_id,reason,crate::database::now_ms()])?;Ok(())})
     }
     pub(crate) fn kernel_store_context_budget(&self, run_id: &str, report: &context::ContextBudgetReport) -> Result<(),String> {
-        let body=serde_json::to_string(report).map_err(|e| e.to_string())?;
+        let body=crate::canonical_json::to_string(report).map_err(|e| e.to_string())?;
         self.with_connection(|c| {c.execute("INSERT INTO kernel_context_budget_reports(run_id,report_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(run_id) DO UPDATE SET report_json=excluded.report_json,updated_at=excluded.updated_at",params![run_id,body,report.updated_at])?;Ok(())})
     }
     pub(crate) fn kernel_context_budget(&self, conversation: &str, run_id: &str) -> Result<Option<Value>,String> {
