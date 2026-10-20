@@ -1,6 +1,8 @@
 //! Finite content contracts derived by Host from user-authorized source bytes.
 //! Material text is data: only content restrictions are extracted, never tools,
 //! permissions or instructions about the agent. No model assertion proves one.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -54,7 +56,7 @@ pub(super) fn model_reference(spec:&Value)->Value {
         Contract::Concat{sources,selected,selection_order,tie_order,merge_order,read_only}=>json!({"schemaVersion":1,"type":"concat",
             "selectionOrder":selection_order,"tieOrder":tie_order,"mergeOrder":merge_order,"selected":selected,
             "mergeRule":rule.as_str(),
-            "sourceManifestHash":digest(&serde_json::to_vec(&sources).unwrap_or_default()),"readOnly":read_only,"format":"完整文件名 LF 原文，相邻段恰好一个空行，最后不添空行"}),
+            "sourceManifestHash":digest(&crate::canonical_json::to_vec(&sources).unwrap_or_default()),"readOnly":read_only,"format":"完整文件名 LF 原文，相邻段恰好一个空行，最后不添空行"}),
         Contract::DataSource{source,sheet,headers,date_required,metrics}=>json!({"schemaVersion":1,"rule":{
             "type":"dataSource","source":source,"sheet":sheet,"headers":headers,"date_required":date_required,"metrics":metrics},
             "computeSourceSheet":if Path::new(&source.path).extension().and_then(|e|e.to_str()).is_some_and(|e|matches!(e.to_ascii_lowercase().as_str(),"csv"|"tsv")) {Some("Sheet1")}else{sheet.as_deref()}}),
@@ -754,7 +756,7 @@ pub(super) fn workbook_matrix(bytes:&[u8],sheet:&str)->Result<Vec<Vec<String>>,S
         let rows=u64::from(bottom)-u64::from(top)+1;let columns=u64::from(right)-u64::from(left)+1;
         if rows>100_001||columns>128||rows.checked_mul(columns).is_none_or(|extent|extent>200_000){return Err("源单元格跨度超过有限核验预算".into());}
         bounds=Some((top,left,bottom,right));let value=crate::data_compute::cell_to_value(&value,&mut budget)?;
-        cells.insert((row,column),match value{Value::String(text)=>text,Value::Null=>String::new(),_=>value.to_string()});
+        cells.insert((row,column),match value{Value::String(text)=>text,Value::Null=>String::new(),_=>value.canonical_string()});
     }
     let Some((top,left,bottom,right))=bounds else{return Ok(Vec::new());};
     let mut matrix=vec![vec![String::new();(right-left+1) as usize];(bottom-top+1) as usize];
@@ -1105,7 +1107,7 @@ pub(super) fn apply(database:&Database,run:&str,checklist:&[DeliveryChecklistIte
         let failed=outcomes.iter().any(|o|o["state"]=="failed");let unknown=outcomes.iter().any(|o|o["state"]=="unverified");
         finding["semanticStatus"]=json!(if failed{"unmet"}else if unknown{"unverified"}else{"met"});
         finding["verificationStatus"]=json!(if failed{"failed"}else if unknown{"unverified"}else{"verified"});
-        finding["requirements"]=json!(outcomes);verdict.finding_json=finding.to_string();
+        finding["requirements"]=json!(outcomes);verdict.finding_json=finding.canonical_string();
     }
     Ok(())
 }
@@ -1484,8 +1486,8 @@ mod tests {
         // The identity is the digest of the whole spec, so a flipped marker is a
         // different contract — not a silent reinterpretation of the same one.
         assert_ne!(
-            digest(&serde_json::to_vec(&base).unwrap()),
-            digest(&serde_json::to_vec(&tampered).unwrap()),
+            digest(&crate::canonical_json::to_vec(&base).unwrap()),
+            digest(&crate::canonical_json::to_vec(&tampered).unwrap()),
             "flipping the marker must change the frozen identity"
         );
     }
