@@ -212,7 +212,7 @@ fn project_permission_label(permission: &ProjectPermission) -> &'static str {
 }
 
 fn parse_package(raw: Value) -> Result<ValidatedPackage, PackageError> {
-    let encoded = serde_json::to_vec(&raw)
+    let encoded = crate::canonical_json::to_vec(&raw)
         .map_err(|error| PackageError::invalid(format!("package cannot be encoded: {error}")))?;
     if encoded.len() > MAX_PACKAGE_BYTES {
         return Err(PackageError::invalid(format!(
@@ -469,7 +469,7 @@ fn canonical_json(value: &Value) -> String {
         Value::Null => "null".to_owned(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).expect("serialize JSON string"),
+        Value::String(value) => crate::canonical_json::to_string(value).expect("serialize JSON string"),
         Value::Array(values) => format!(
             "[{}]",
             values
@@ -486,7 +486,7 @@ fn canonical_json(value: &Value) -> String {
                     .into_iter()
                     .map(|(key, value)| format!(
                         "{}:{}",
-                        serde_json::to_string(key).expect("serialize JSON key"),
+                        crate::canonical_json::to_string(key).expect("serialize JSON key"),
                         canonical_json(value)
                     ))
                     .collect::<Vec<_>>()
