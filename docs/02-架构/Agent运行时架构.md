@@ -425,12 +425,36 @@ Host-owned ToolCall 执行期间，Runtime 仍可能回传同一调用的 `tool.
 - 范围以 legacy 为准，只覆盖 `plan_revision_create`。
 - 同一个 block 原地更新，worker 转录和 Host 持久历史保持一致。
 
-**待产品决定（方案 3）。** 纯文本任务里，模型能引用的 id 仍然解析不了：
+**证据引用 id（方案 3，2026-10-20 实施）。** 目标：模型在纯文本任务里也能拿到一个可以引用的证据 id，第一次调用 `task_evidence_add` 就能成功，不用把 5 次纠错机会花在猜 id 上。
 
-- Kernel 工具调用在 `tool_calls` 里投影成 `kernel-tool:{run}:{call}`，模型只知道原始 provider id；
-- message 证据要求的是用户消息 id，模型看不到。
+- **规范 id。** 证据只按 `tool_calls.id` 存储，这是规范 id。Kernel Run 的规范 id 是投影 id `kernel-tool:{run}:{call}`，legacy Run 是 Host UUID。`task_evidence` 里永远存规范 id，所以去重（`DuplicateEvidence`）、后续 `task_evidence_validate`、checklist、强验收、Graph 证据读到的都是规范 id。`validate_reference` 本身仍然只认规范 id。
+- **结果回传。** Kernel 路径上，工作工具和委派工具调用**成功**后，结果里会带上：
+  - `details.evidenceRef = {evidenceType:"tool_call", refKind:"tool_call", refId:"kernel-tool:…"}`；
+  - 一行追加的文本块 `Evidence reference for this call: refKind=tool_call refId=…`。provider 投影只序列化 `content`，会丢掉 `details`，所以要再给一行文本。第一个文本块（JSON 正文）一个字节都不变。
+  - 失败（`isError`）的结果不带这个字段。context、knowledge、MCP 等其他资源工具的结果形状不变，它们靠下面的 provider id 解析来引用。
+  - legacy 路径的结果内容不变。
+- **接受 provider id。** `TaskEvidenceRepository::add` 在同一个写事务里、做任何校验和写入之前，先只读地调用 `resolve_tool_call_reference`：
+  - `refId` 已经是规范 id：原样使用。会话和状态由 `validate_reference` 照旧检查，跨会话仍然报 `CrossConversationReference`。
+  - 否则把 `refId` 当作 `tool_calls.runtime_tool_call_id`（provider 原始调用 id），**只在 Task 所属会话内**查找：
+    - 本次添加证据的 Run（`source_run_id`）里有这个 id：用它。`(run_id, runtime_tool_call_id)` 唯一，所以最多一条；
+    - 否则会话内正好一条：用它。successor、recovery 等同会话的 Run 都在这个范围内；
+    - 会话内多条：作为歧义拒绝（`InvalidReference`），错误里列出候选的规范 id；
+    - 一条也没有：保持原值，由 `validate_reference` 报 “was not found”。只存在于别的会话里的 provider id 也会这样被拒，而且不暴露那个会话的存在。
+  - 这样做没有放宽权限：同一会话内任何已完成的调用本来就可以用规范 id 引用。
+  - 解析失败和其他领域拒绝一样，发生在事务回滚之内，所以仍然是方案 1 的 `Rejected`，作为数据交还模型，上限和阶段判定不变。
+  - 这一步在仓储层，legacy 路径也会受益：legacy 的 `tool_calls.id` 是 UUID，模型手里同样只有 provider id。
+- **合法配对与提示。** 合法配对只有一份定义：`EVIDENCE_REFERENCE_PAIRS`（`work_graph.rs`）。Rust 测试保证它和 `validate_evidence_pair` 一致，Node 测试保证它和工具描述一致。配对如下：
+  - `tool_call→tool_call`
+  - `test_result→tool_call|artifact`
+  - `file_diff→artifact|run_event`
+  - `artifact→artifact`
+  - `trace_span→run_event`
+  - `user_confirmation→message`（必须是用户消息）
+  - `external_reference→source`（http(s) URL）
 
-这类 `task_evidence_add` 现在会作为数据交还模型，不会再让 Run 崩溃。但模型仍然没有可用的引用。要不要在结果里回传可引用 id、让 `validate_reference` 接受 runtime id、或者在工具描述里说明纯文本任务该用哪种证据，还需要产品决定。
+  纯文本任务的合法组合：`evidenceType=tool_call`、`refKind=tool_call`、`refId=某个已完成调用的 evidenceRef.refId`；冻结策略允许时加 `validationCheckType=inspection`（`inspection` 接受 tool_call 证据）。这是矩阵里本来就有的组合，没有新增证据类型，也没有放宽 checklist 或强验收。
+
+  `task_evidence_add` 的工具描述（`host-tools.mjs`，legacy 和 Kernel 共用）会写明以上内容。Kernel 路径上，被拒绝的 `task_evidence_add` 在 `details.error.details.evidenceGuidance` 里带上 `allowedPairs` 和这些提示，并且通过 `Fox error details` 出现在给模型的文本里。
 
 ## Goal 和 Planning Extension
 
