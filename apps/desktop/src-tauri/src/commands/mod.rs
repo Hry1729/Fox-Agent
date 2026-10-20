@@ -1835,6 +1835,7 @@ pub fn conversation_pin(
 #[tauri::command]
 pub fn conversation_archive(
     state: State<'_, AppState>,
+    external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: ConversationIdRequest,
 ) -> ApiResponse<ConversationSummary> {
     match state
@@ -1855,7 +1856,10 @@ pub fn conversation_archive(
         .database
         .archive_conversation(&request.conversation_id)
     {
-        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(Some(conversation)) => {
+            external.close_conversation_detached(&request.conversation_id, "会话已归档");
+            ApiResponse::success(conversation)
+        }
         Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
         Err(error) => storage_error(error),
     }
@@ -2011,6 +2015,7 @@ pub fn conversations_search(
 #[tauri::command]
 pub async fn conversation_delete(
     state: State<'_, AppState>,
+    external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: ConversationIdRequest,
 ) -> Result<ApiResponse<bool>, String> {
     match state
@@ -2028,7 +2033,10 @@ pub async fn conversation_delete(
         Err(error) => return Ok(storage_error(error)),
     }
     match state.database.trash_conversation(&request.conversation_id) {
-        Ok(Some(_)) => Ok(ApiResponse::success(true)),
+        Ok(Some(_)) => {
+            external.close_conversation_detached(&request.conversation_id, "会话已移入回收站");
+            Ok(ApiResponse::success(true))
+        }
         Ok(None) => Ok(ApiResponse::failure(
             "conversation.not_found",
             "未找到可移入回收站的对话",
@@ -2379,14 +2387,24 @@ pub fn run_start(
     // Plan 5.4: route by the conversation's frozen backend before any run row
     // or attachment binding is written. A non-Fox conversation is refused here
     // (disabled / not yet wired); a mismatched `agentBackend` is misrouted.
-    if let Err(failure) = agent_backend_routing::gate_conversation(
+    let route = match agent_backend_routing::gate_conversation(
         &state.database,
         fox_agent_backend::host_routing::HostEntry::Start,
         &request.conversation_id,
         None,
         request.agent_backend.as_deref(),
     ) {
-        return failure;
+        Ok(route) => route,
+        Err(failure) => return failure,
+    };
+    // External backend wiring batch: a non-Fox conversation (switch on) runs
+    // on the external ACP runtime; nothing below (attachments, budgets, work
+    // gate, Kernel / legacy / yuxi) applies to it.
+    if let agent_backend_routing::Route::External(backend) = route {
+        use tauri::Manager;
+        return app
+            .state::<crate::external_backend::ExternalBackendHost>()
+            .start_run(&request, backend);
     }
     let runtime_text = request
         .runtime_text
@@ -2493,13 +2511,24 @@ fn dispatch_started_run(
     // reading it is audited by the gate and falls through to the existing
     // path unchanged (fix 1 after the Windows acceptance of 3a82f5d), so this
     // backstop can never add a failure that the old path did not have.
-    if let Err(failure) = agent_backend_routing::gate_conversation::<StartRunResult>(
+    // An external conversation is started only by `run_start`'s external
+    // branch; any other start path (rewind, confirmed dispatch) is refused.
+    let gated = agent_backend_routing::gate_conversation::<StartRunResult>(
         &state.database,
         fox_agent_backend::host_routing::HostEntry::Start,
         &started.run.conversation_id,
         Some(&started.run.id),
         None,
-    ) {
+    )
+    .and_then(|route| match route {
+        agent_backend_routing::Route::Fox => Ok(()),
+        agent_backend_routing::Route::External(backend) => Err(ApiResponse::failure(
+            fox_agent_backend::host_routing::RouteError::CODE_ENTRY_UNSUPPORTED,
+            format!("外部 Agent 后端「{}」的会话不支持此启动方式（重写 / 确认后派发）；请直接发送新消息", backend.as_str()),
+            false,
+        )),
+    });
+    if let Err(failure) = gated {
         if let Some(error) = failure.error.as_ref() {
             let _ = state
                 .database
@@ -2767,6 +2796,8 @@ pub fn run_resume(
     if request.text.trim().is_empty() || !request.answers.is_object() {
         return ApiResponse::failure("yuxi.resume_invalid", "请先完成需要补充的事项", false);
     }
+    // Resume never routes External (refused as entry_unsupported by the
+    // routing itself), so a successful gate is always the Fox path.
     if let Err(failure) = agent_backend_routing::gate_conversation(
         &state.database,
         fox_agent_backend::host_routing::HostEntry::Resume,
@@ -2834,16 +2865,20 @@ pub fn run_resume(
 #[tauri::command]
 pub async fn run_cancel(
     state: State<'_, AppState>,
+    external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: CancelRunRequest,
 ) -> Result<ApiResponse<bool>, String> {
     // Plan 5.4: the backend comes from the run's conversation, never from the
     // request; a request naming another backend is refused as misrouted.
-    if let Err(failure) = agent_backend_routing::gate_run_identity(
+    match agent_backend_routing::gate_run_identity(
         fox_agent_backend::host_routing::HostEntry::Cancel,
         state.database.run_agent_backend(&request.run_id),
         request.agent_backend.as_deref(),
     ) {
-        return Ok(failure);
+        Ok(agent_backend_routing::Route::Fox) => {}
+        // ACP `session/cancel`; the result may be "unknown" (see the runtime).
+        Ok(agent_backend_routing::Route::External(_)) => return Ok(external.cancel_run(&request.run_id)),
+        Err(failure) => return Ok(failure),
     }
     // Frozen authority must be selected before touching Legacy read models.
     match cancel_kernel_owned_run(&state.database, &request.run_id, || state.runtime_host.cancel_managed_run(&request.run_id)) {
@@ -3099,12 +3134,20 @@ pub fn approval_resolve(
     if let Err(error) = require_trusted_local_window(&window) {
         return ApiResponse::failure("permission.untrusted_origin", error, false);
     }
-    if let Err(failure) = agent_backend_routing::gate_run_identity(
+    match agent_backend_routing::gate_run_identity(
         fox_agent_backend::host_routing::HostEntry::Approve,
         state.database.approval_agent_backend(&request.approval_id),
         request.agent_backend.as_deref(),
     ) {
-        return failure;
+        Ok(agent_backend_routing::Route::Fox) => {}
+        Ok(agent_backend_routing::Route::External(_)) => {
+            use tauri::Manager;
+            return window
+                .app_handle()
+                .state::<crate::external_backend::ExternalBackendHost>()
+                .resolve_approval(&request.approval_id, request.decision);
+        }
+        Err(failure) => return failure,
     }
     match state
         .runtime_host
