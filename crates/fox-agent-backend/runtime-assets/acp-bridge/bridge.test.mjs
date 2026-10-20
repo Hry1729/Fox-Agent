@@ -10,7 +10,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { runBridge, connectPipe, parseArgs, backendEnv, spawnSpec, EXIT, PROTOCOL, BridgeError } from './bridge.mjs'
+import { runBridge, connectPipe, parseArgs, backendEnv, parseAnswer, spawnSpec, EXIT, PROTOCOL, BridgeError } from './bridge.mjs'
 
 const TOKEN = crypto.randomBytes(16).toString('hex')
 const address = () =>
@@ -71,7 +71,7 @@ function host(answer, then) {
         const line = buf.slice(0, nl)
         const reply = answer(line)
         socket.write(reply)
-        if (!reply.startsWith('OK\n')) return socket.end()
+        if (!reply.startsWith('OK')) return socket.end()
         then?.(socket, buf.slice(nl + 1))
       }
       socket.on('data', onData)
@@ -221,6 +221,70 @@ test('backend exits first: pipe closed, its exit code returned', async () => {
 
 test('nobody listening: connect error is exit 66', async () => {
   await assert.rejects(connectPipe(address(), 2000), error => error.exitCode === EXIT.connect)
+})
+
+// Fox's answer carries the backend's environment and working directory
+// (Windows: never on the srt cmd.exe line). Values cmd.exe cannot carry
+// (quotes, %, line breaks) must arrive intact, and the backend must start in
+// the given cwd (srt-win does not pass the caller's cwd into the sandbox).
+test('answer env (quotes, %, line breaks) and cwd reach the backend', async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fox-acp-cwd-')))
+  const env = {
+    CODEX_CONFIG: '{"web_search":"disabled"}',
+    PERCENT: '100%PATH%',
+    MULTI: 'a\r\nb\nc',
+    OVERRIDDEN: 'from-fox',
+  }
+  const answer = line => (line === `${PROTOCOL} ${TOKEN}` ? `OK ${JSON.stringify({ cwd, env })}\n` : 'DENIED\n')
+  let received
+  const where = await host(answer, socket => {
+    received = collect(socket)
+  })
+  const socket = await connectPipe(where)
+  const report = "process.stdout.write(JSON.stringify({cwd:process.cwd(),env:{CODEX_CONFIG:process.env.CODEX_CONFIG,PERCENT:process.env.PERCENT,MULTI:process.env.MULTI,OVERRIDDEN:process.env.OVERRIDDEN,token:process.env.FOX_ACP_TOKEN||null}})+'\\n',()=>process.exit(0))"
+  const code = await runBridge({
+    socket, token: TOKEN, program: process.execPath, args: ['-e', report],
+    env: { ...process.env, FOX_ACP_TOKEN: TOKEN, FOX_ACP_PIPE: where, OVERRIDDEN: 'from-bridge' },
+  })
+  assert.equal(code, 0)
+  await waitFor(() => received && received().includes('\n'))
+  const seen = JSON.parse(received().split('\n')[0])
+  assert.equal(fs.realpathSync(seen.cwd), cwd, 'backend runs in the cwd from the answer')
+  assert.equal(seen.env.CODEX_CONFIG, env.CODEX_CONFIG)
+  assert.equal(seen.env.PERCENT, env.PERCENT)
+  assert.equal(seen.env.MULTI, env.MULTI)
+  assert.equal(seen.env.OVERRIDDEN, 'from-fox', "Fox's value wins over the bridge's own")
+  assert.equal(seen.env.token, null, 'token never reaches the backend')
+  fs.rmSync(cwd, { recursive: true, force: true })
+})
+
+test('without a cwd in the answer the backend keeps the bridge cwd; plain OK still accepted', async () => {
+  let received
+  const where = await host(goodToken, socket => {
+    received = collect(socket)
+  })
+  const socket = await connectPipe(where)
+  const code = await runBridge({
+    socket, token: TOKEN, program: process.execPath, args: ['-e', "process.stdout.write(process.cwd()+'\\n',()=>process.exit(0))"],
+    env: { ...process.env, FOX_ACP_TOKEN: TOKEN, FOX_ACP_PIPE: where },
+  })
+  assert.equal(code, 0)
+  await waitFor(() => received && received().includes('\n'))
+  assert.equal(received().split('\n')[0], process.cwd())
+})
+
+test('answer parsing and env merge', () => {
+  assert.deepEqual(parseAnswer('OK'), { env: {}, cwd: undefined })
+  assert.deepEqual(parseAnswer('OK {"env":{}}'), { env: {}, cwd: undefined })
+  assert.deepEqual(parseAnswer('OK {"cwd":"C:\\\\w","env":{"A":"\\"%\\n"}}'), { env: { A: '"%\n' }, cwd: 'C:\\w' })
+  for (const bad of ['DENIED', 'OKAY', 'OK ', 'OK {', 'OK []', 'OK {"env":[]}', 'OK {"env":{"A":1}}', 'OK {"env":{"A=B":"x"}}', 'OK {"cwd":""}', 'OK {"cwd":5}']) {
+    assert.equal(parseAnswer(bad), null, bad)
+  }
+  // Windows: names are case-insensitive, Fox's value replaces any casing.
+  assert.deepEqual(backendEnv({ Path: 'C:\\old', home: 'x', FOX_ACP_TOKEN: 't' }, { PATH: 'C:\\new' }, 'win32'), { home: 'x', PATH: 'C:\\new' })
+  assert.deepEqual(backendEnv({ Path: '/old' }, { PATH: '/new' }, 'linux'), { Path: '/old', PATH: '/new' })
+  // A bridge variable in the answer never reaches the backend either.
+  assert.deepEqual(backendEnv({}, { FOX_ACP_PIPE: 'p', A: 'b' }, 'linux'), { A: 'b' })
 })
 
 test('helpers', () => {
