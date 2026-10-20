@@ -204,7 +204,7 @@ async fn real_codex_acp_smoke_skips_unless_fox_test_real_acp() {
             let outcome = tokio::time::timeout(Duration::from_secs(120), async {
                 loop {
                     match connection.events.recv().await {
-                        Some(event @ (BackendEvent::TurnEnded { .. } | BackendEvent::Failed(_))) => return Some(event),
+                        Some(event @ (BackendEvent::TurnEnded { .. } | BackendEvent::TurnFailed { .. } | BackendEvent::Failed(_))) => return Some(event),
                         Some(other) => eprintln!("EVENT {other:?}"),
                         None => return None,
                     }
