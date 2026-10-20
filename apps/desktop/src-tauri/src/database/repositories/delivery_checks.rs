@@ -6,6 +6,8 @@
 //! check results; repair rounds are counted here, never in model-failure
 //! retry counters.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 
 fn bounded_display_text(value: &str, limit: usize) -> String {
@@ -44,7 +46,7 @@ fn safe_finding(value: &Value) -> Option<Value> {
         };
         if let Some(projected)=projected {
             result.insert(key.into(),projected);
-            if serde_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
+            if crate::canonical_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
                 result.remove(key);
                 if key=="requirementFindings" {requirements_truncated=true;}
             }
@@ -67,7 +69,7 @@ fn safe_finding(value: &Value) -> Option<Value> {
         }
         // Capacity is checked before accepting: an over-budget projection is
         // recorded as explicitly missing instead of being silently truncated.
-        if !bounded || serde_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
+        if !bounded || crate::canonical_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
             result.remove("deliveryVerdict");
             result.insert("deliveryVerdictOmitted".into(),json!(true));
         }
@@ -126,7 +128,7 @@ fn project_verdict(value: Option<&Value>) -> Option<Option<Value>> {
                 entry.insert("detail".into(),json!(bounded_display_text(detail,512)));
             }
             if let Some(locator)=source.get("locator") {
-                if let Ok(text)=serde_json::to_string(locator) {
+                if let Ok(text)=crate::canonical_json::to_string(locator) {
                     entry.insert("locator".into(),json!(bounded_display_text(&text,512)));
                 }
             }
@@ -481,7 +483,7 @@ pub(super) fn cancelled_unverified(transaction: &rusqlite::Transaction<'_>, run_
     transaction.execute("UPDATE delivery_checklist_items SET finding_json=?2, updated_at=?3
         WHERE run_id=?1 AND status='pending' AND checked_at IS NULL AND finding_json IS NULL",
         params![run_id, serde_json::json!({"reasonCode":"delivery.cancelled_unverified",
-            "reason":"运行已取消，此交付项未完成核验","verificationStatus":"unverified","cancelled":true}).to_string(), now])?;
+            "reason":"运行已取消，此交付项未完成核验","verificationStatus":"unverified","cancelled":true}).canonical_string(), now])?;
     Ok(())
 }
 
@@ -539,8 +541,8 @@ impl Database {
                         seed.target_path,
                         seed.artifact_id,
                         seed.display_name,
-                        serde_json::to_string(&seed.checks).unwrap_or_else(|_| "[]".into()),
-                        serde_json::to_string(&seed.requirements).unwrap_or_else(|_| "[]".into()),
+                        crate::canonical_json::to_string(&seed.checks).unwrap_or_else(|_| "[]".into()),
+                        crate::canonical_json::to_string(&seed.requirements).unwrap_or_else(|_| "[]".into()),
                         now,
                     ],
                 )?;
