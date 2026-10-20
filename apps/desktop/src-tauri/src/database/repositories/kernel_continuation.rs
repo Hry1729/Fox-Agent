@@ -486,7 +486,7 @@ impl Database {
             binding.permission = verified.permission.clone();
             binding.permission_snapshot_id = verified.permission_snapshot_id.clone();
             binding.validate().map_err(|_| invalid("续做绑定无效"))?;
-            let body = serde_json::to_string(&binding).map_err(|_| invalid("续做绑定无效"))?;
+            let body = crate::canonical_json::to_string(&binding).map_err(|_| invalid("续做绑定无效"))?;
             transaction.execute(
                 "INSERT INTO run_control_bindings
                  (run_id, conversation_id, authority, engine_id, binding_json, binding_hash, created_at)
@@ -804,7 +804,7 @@ mod tests {
             budgets: TimeBudgets::default(),
             prompt_config_hash: "prompt-hash".into(),
             capability_manifest_hash: "manifest-hash".into(),
-            frozen_config_json: serde_json::to_string(&crate::kernel::RunFrozenConfig {
+            frozen_config_json: crate::canonical_json::to_string(&crate::kernel::RunFrozenConfig {
                 engine_id: "pi".into(),
                 kernel_mode: "authoritative".into(),
                 capability_manifest_version: 2,
