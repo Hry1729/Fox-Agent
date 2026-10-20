@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -76,7 +78,7 @@ fn real_host_auto_wake_survives_park_lock_contention() {
 fn run_auto_park_then_settle(live: bool, hold_park_lock: bool) {
     let arguments = json!({"idempotencyKey":"one-auto-compute",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     let (address, server) = start_http_model_fixture(vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -221,9 +223,9 @@ fn run_auto_park_then_settle(live: bool, hold_park_lock: bool) {
     assert_eq!(job.attempts, 1);
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 3, "tool, parked Final, and one automatic continuation");
-    assert!(requests[1]["messages"].to_string().contains(&job_id));
-    assert!(!requests[1]["messages"].to_string().contains("FOX_HOST_JOB_NOTICE_V1"));
-    let continued = requests[2]["messages"].to_string();
+    assert!(requests[1]["messages"].canonical_string().contains(&job_id));
+    assert!(!requests[1]["messages"].canonical_string().contains("FOX_HOST_JOB_NOTICE_V1"));
+    let continued = requests[2]["messages"].canonical_string();
     assert_eq!(continued.matches("FOX_HOST_JOB_NOTICE_V1").count(), 1);
     assert!(continued.contains(&job_id));
     assert_eq!(
@@ -318,7 +320,7 @@ fn isolated_stop_modes(test_name: &str, child_env: &str, expire: bool) {
 fn run_parked_stop(live: bool, expire: bool) {
     let arguments = json!({"idempotencyKey":"one-stopped-compute",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     let (address, server) = start_http_model_fixture(vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -528,7 +530,7 @@ fn real_host_independent_run_dispatches_during_auto_wake() {
 
     let arguments = json!({"idempotencyKey":"one-queued-compute",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     let (first_address, first_server) = start_http_model_fixture(vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -584,7 +586,7 @@ fn real_host_independent_run_dispatches_during_auto_wake() {
     second_frozen.experimental_compute_job_notice = false;
     db.kernel_create_run(&second, "pi", "authoritative", 2,
         &second_binding.permission_snapshot_id, &second_binding.execution_profile_id,
-        &second_hash, &serde_json::to_string(&second_frozen).unwrap()).unwrap();
+        &second_hash, &crate::canonical_json::to_string(&second_frozen).unwrap()).unwrap();
     db.freeze_kernel_model_config(&second, &second_model).unwrap();
     db.freeze_kernel_initial_input(&initial_input(&second, &second_hash)).unwrap();
     db.freeze_kernel_host_scope(&second, &crate::database::KernelHostScope {
