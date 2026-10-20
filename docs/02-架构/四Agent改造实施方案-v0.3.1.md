@@ -471,6 +471,15 @@ ACP 规范与本方案的对应：`session/cancel` 后客户端必须以 `cancel
     - 前端显示四维能力 chip。
     - DeepSeek 的模型由私有 HOME 补丁的 `acp` 行决定，Host 补丁不碰 `USER_OWNED_ROWS`。
     - 环境变量、待办与 Windows 复测清单见 `crates/fox-agent-backend/docs/sandbox.md` 第 13 节，DeepSeek 细节见 `crates/fox-agent-backend/docs/deepseek.md` 4.1。
-    - 待办：srt 内真实冒烟（pi-acp / dsh）、Codex 对接假 Responses API、迁移前自动备份、受管运行时布局与 0.1.1 包核对。
+    - 待办：Codex 对接假 Responses API、受管运行时布局与 0.1.1 包核对（srt 内真实冒烟与迁移前自动备份已在第 15 条完成）。
+
+
+15. **审批无超时批（2026-10-20）**：**审批语义变化**——原生审批与 Fox 审批都不再有期限（与 Claude Code / Codex CLI / ACP 一致），不再“超过窗口自动记为过期并按拒绝处理”。
+    - 一条审批只在以下情况结束：用户允许 / 拒绝；用户取消本轮（外部后端的待答原生请求答为 `outcome: cancelled`）→ `cancelled`；关闭、归档、移入回收站或删除会话 → `cancelled`（`conversation_closed`）；Fox 退出或重启时本轮被中断 → `cancelled`（`app_restarted`）；本轮因其他原因结束 → `expired` 并标明本轮结束的原因（界面“已结束（本轮已结束）”）。界面：`cancelled` 显示“已取消”，旧版本按窗口写下的 `expired` 显示“已过期”，绝不显示为“用户拒绝”；会话列表对有待处理审批的会话显示“等你处理”。
+    - 超时来源 A–H（Kernel 控制器、Kernel 数据库、Kernel Host 审批命令、桌面数据库审批窗口、legacy 运行时 Host、Node agent-runtime 的 6 分钟 `HOST_REQUEST_TIMEOUT_MS`、协议 `approval_wait_ms`、外部运行时与 pi 审批门）全部去掉期限；子 Run、数字同事 Run 与托管 Run 的墙钟期限扣除审批等待区间的并集。数字同事无人值守时的审批策略暂不定。
+    - 迁移前自动备份：有待执行迁移时先 `VACUUM INTO` 到 `<data>/backups/`，保留 5 份，备份失败则不迁移。
+    - 真实 ACP 测试入口改为 `FOX_*_PROGRAM` → 受管运行时 → `npx`（仅测试）；dsh 真实 prompt 测试要求 `end_turn` 且有非空回复，模型报错即失败。
+    - Linux 真实冒烟：`ExternalRuntime` + `HostLauncher` 在 srt 内驱动真实 pi-acp（启动、流式、允许、拒绝、长时间不答仍可批、取消后审批为 `cancelled`、关闭）与真实 dsh。
+    - 细节、运行方法与合并后的 Windows 复测清单（13.5，取代 13.4）见 `crates/fox-agent-backend/docs/sandbox.md` 第 13.5–13.8 节。
 
 **已知限制**：Windows alpha，沙箱账户可读写 DACL 对所有本地账户开放的位置（产品决定只警告），非 Fox 的 srt 客户端可能在 Fox 两次启停之间抹掉祖先 ACE（下次启停 reconcile 才补回），系统 DNS 解析不受限，Windows 沙箱内拿不到 Host 环境凭据（只能用私有 HOME 内的原生登录）；Windows 上代理令牌在 runner 命令行中可见；网络按域名过滤、不检查内容；私有 HOME 中的原生凭据对后端进程可读；macOS / Windows 尚未实测。
