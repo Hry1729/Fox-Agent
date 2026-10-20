@@ -459,7 +459,7 @@ async fn turn(connection: &mut AcpConnection, session: &str, prompt: &str) -> St
                 transcript.push_str(&format!("STOP {stop_reason}\n"));
                 return transcript;
             }
-            BackendEvent::Failed(error) => panic!("backend failed: {error}\n{transcript}\n{}", connection.stderr_tail()),
+            BackendEvent::Failed(error) | BackendEvent::TurnFailed { error, .. } => panic!("backend failed: {error}\n{transcript}\n{}", connection.stderr_tail()),
             other => transcript.push_str(&format!("{other:?}\n")),
         }
     }
