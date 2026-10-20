@@ -51,4 +51,10 @@ describe('approval wording', () => {
     const tool = { id: 't1', errorMessage: null }
     expect(toolCallApprovalNote(tool, [{ toolCallId: 't1', status: 'expired', decision: { reason: 'run_interrupted' } }])).toBe('已结束（本轮已结束）')
   })
+
+  test('closing / archiving / deleting the conversation or restarting Fox records cancelled and reads 已取消', () => {
+    const tool = { id: 't1', errorMessage: '用户拒绝' }
+    expect(toolCallApprovalNote(tool, [{ toolCallId: 't1', status: 'cancelled', decision: { reason: 'conversation_closed' } }])).toBe('已取消')
+    expect(toolCallApprovalNote(tool, [{ toolCallId: 't1', status: 'cancelled', decision: { reason: 'app_restarted' } }])).toBe('已取消')
+  })
 })
