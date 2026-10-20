@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::kernel_compaction as context;
 
@@ -254,7 +256,7 @@ fn response(
         assert_eq!(failures[0]["retryable"], true);
         assert!(failures[0]["remainingMs"].as_i64().unwrap() > 0);
         // The event carries no request or summary content.
-        let body = failures[0].to_string();
+        let body = failures[0].canonical_string();
         assert!(!body.contains("Prior discussion is context only"));
     }
 
