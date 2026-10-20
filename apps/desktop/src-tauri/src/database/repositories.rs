@@ -129,6 +129,7 @@ pub use work_graph::{
     AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository,
     PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput,
     StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository,
+    EVIDENCE_REFERENCE_PAIRS,
 };
 
 const DEFAULT_AGENT_ID: &str = "fox-general";
