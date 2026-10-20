@@ -42,6 +42,8 @@ pub(crate) mod present_files;
 #[cfg(test)]
 pub(crate) use work_tools::WORK_TOOLS;
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::yuxi::{get_access_token, YuxiClient};
 use crate::kernel::CancellationPort;
 use crate::{
@@ -579,7 +581,7 @@ fn package_string_list(package: &Value, key: &str) -> Vec<String> {
 }
 
 fn validate_expert_package_snapshot(snapshot: &Value, expected_hash: &str) -> Result<(), String> {
-    let actual_hash = hex::encode(Sha256::digest(snapshot.to_string().as_bytes()));
+    let actual_hash = hex::encode(Sha256::digest(snapshot.canonical_string().as_bytes()));
     if expected_hash != actual_hash {
         return Err(
             "[conversation.expert_snapshot_invalid] Expert package snapshot hash does not match; choose the expert again."
@@ -843,7 +845,7 @@ fn shadow_prompt_config_hash(snapshot: &Value) -> Result<String, String> {
         "stablePromptHash".to_owned(),
         Value::String(stable_prompt_hash.to_owned()),
     );
-    Ok(runtime_shadow_hash(&Value::Object(identity).to_string()))
+    Ok(runtime_shadow_hash(&Value::Object(identity).canonical_string()))
 }
 
 fn shadow_permission_snapshot_id(permission_mode: &str, project_access: &str) -> String {
@@ -1230,7 +1232,7 @@ impl RuntimeHost {
             .stdin
             .take()
             .ok_or_else(|| "offline evaluator stdin was unavailable".to_owned())?;
-        serde_json::to_writer(&mut stdin, &request).map_err(|error| error.to_string())?;
+        crate::canonical_json::to_writer(&mut stdin, &request).map_err(|error| error.to_string())?;
         stdin
             .write_all(b"\n")
             .and_then(|_| stdin.flush())
@@ -1702,7 +1704,7 @@ impl RuntimeHost {
         let manifest_hash = runtime_shadow_hash(&format!(
             "manifest|{engine}|v{manifest_version}|{capabilities_json}"
         ));
-        let permission_snapshot_id = runtime_shadow_hash(&permission_snapshot.to_string());
+        let permission_snapshot_id = runtime_shadow_hash(&permission_snapshot.canonical_string());
         let budgets = self.database.run_time_budgets(legacy_run_id)?;
         let frozen = crate::kernel::RunFrozenConfig {
             engine_id: engine.to_owned(),
@@ -1852,8 +1854,8 @@ impl RuntimeHost {
                     if let Some(arr) = v.as_array() {
                         let mut sorted = arr.clone();
                         sorted.sort_by(|a, b| {
-                            a.to_string()
-                                .partial_cmp(&b.to_string())
+                            a.canonical_string()
+                                .partial_cmp(&b.canonical_string())
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         });
                         *v = serde_json::Value::Array(sorted);
@@ -1861,7 +1863,7 @@ impl RuntimeHost {
                 }
             }
         }
-        Some(value.to_string())
+        Some(value.canonical_string())
     }
 
     /// Feed a legacy terminal event into the run's shadow context and persist
@@ -2225,7 +2227,7 @@ impl RuntimeHost {
         };
         let scope =
             kernel_gateway::freeze_scope(&self.database, &verified_binding, &prompt, &config)?;
-        let manifest_hash=runtime_shadow_hash(&serde_json::to_string(&scope).map_err(|_|"invalid resource scope")?);
+        let manifest_hash=runtime_shadow_hash(&crate::canonical_json::to_string(&scope).map_err(|_|"invalid resource scope")?);
         kernel_model_worker::bind_runtime_capabilities(&mut config,&verified_binding,&manifest_hash);
         let hash = config.hash()?;
         let input = kernel_host::initial_input(&verified_binding, &prompt, &hash)?;
@@ -2234,7 +2236,7 @@ impl RuntimeHost {
             kernel_mode: "authoritative".into(),
             capability_manifest_version: 2,
             capability_manifest_hash: runtime_shadow_hash(
-                &serde_json::to_string(&scope).map_err(|_| "invalid resource scope")?,
+                &crate::canonical_json::to_string(&scope).map_err(|_| "invalid resource scope")?,
             ),
             permission_snapshot_id: verified_binding.permission_snapshot_id.clone(),
             execution_profile_id: verified_binding.execution_profile_id.clone(),
@@ -2254,7 +2256,7 @@ impl RuntimeHost {
             budgets: budgets.clone(),
             prompt_config_hash: hash.clone(),
             capability_manifest_hash: frozen.capability_manifest_hash.clone(),
-            frozen_config_json: serde_json::to_string(&frozen)
+            frozen_config_json: crate::canonical_json::to_string(&frozen)
                 .map_err(|_| "invalid frozen Kernel Run")?,
             artifacts: Some((config, input, scope)),
             skill_activations: context.skill_activations,
@@ -3990,7 +3992,7 @@ impl RuntimeHost {
             .map_err(|_| "runtime response map is poisoned".to_owned())?
             .insert(request_id.clone(), sender);
 
-        let line = serde_json::to_string(&request).map_err(|error| error.to_string())?;
+        let line = crate::canonical_json::to_string(&request).map_err(|error| error.to_string())?;
         let write_result = stdin
             .lock()
             .map_err(|_| "runtime stdin lock is poisoned".to_owned())
@@ -4989,7 +4991,7 @@ fn write_protocol_message<T: Serialize>(
     stdin: &Arc<Mutex<ChildStdin>>,
     message: &T,
 ) -> Result<(), String> {
-    let line = serde_json::to_string(message).map_err(|error| error.to_string())?;
+    let line = crate::canonical_json::to_string(message).map_err(|error| error.to_string())?;
     let mut writer = stdin
         .lock()
         .map_err(|_| "runtime stdin lock is poisoned".to_owned())?;
@@ -6759,7 +6761,7 @@ fn mcp_permission_scope(tool: &str, input: &Value) -> Option<String> {
     if server_id == crate::office::SERVER_ID {
         // Office grants are bound to the exact request (files and operations),
         // never to the entire connector's read/write command surface.
-        return Some(permission_scope_hash("office-request", input.to_string().as_bytes()));
+        return Some(permission_scope_hash("office-request", input.canonical_string().as_bytes()));
     }
     if server_id.is_empty() || remote_tool.is_empty() {
         return None;
@@ -6783,7 +6785,7 @@ fn host_permission_scope(tool: &str, preview: &crate::tool_host::ToolPreview) ->
 }
 
 fn capability_permission_scope(tool: &str, input: &Value) -> Option<String> {
-    let encoded = serde_json::to_vec(input).ok()?;
+    let encoded = crate::canonical_json::to_vec(input).ok()?;
     Some(permission_scope_hash(
         &format!("capability-{tool}"),
         &encoded,
@@ -7759,7 +7761,7 @@ fn execute_mcp_tool_request(
         None
     };
     let permission_scope = if managed_office {
-        Some(permission_scope_hash("office-project-request", json!({"access":office_access,"input":input}).to_string().as_bytes()))
+        Some(permission_scope_hash("office-project-request", json!({"access":office_access,"input":input}).canonical_string().as_bytes()))
     } else { mcp_permission_scope(tool, &input) };
     let has_conversation_permission = match permission_scope.as_deref() {
         Some(scope) => {
@@ -7927,7 +7929,7 @@ fn execute_mcp_tool_request(
                             .into_iter()
                             .filter(|item| {
                                 query.is_empty()
-                                    || item.to_string().to_ascii_lowercase().contains(&query)
+                                    || item.canonical_string().to_ascii_lowercase().contains(&query)
                             })
                             .collect::<Vec<_>>();
                         if !tools.is_empty() {
@@ -8186,7 +8188,7 @@ fn execute_mcp_tool_request(
         };
         Ok(json!({
             "content": if managed_office { result.get("content").cloned().unwrap_or_else(|| json!([])) }
-                else { json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }]) },
+                else { json!([{ "type": "text", "text": crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string()) }]) },
             "details": result,
             "untrusted": true,
             "sourceType": "knowledge",
@@ -8408,7 +8410,7 @@ fn execute_attachment_tool_request(
             let id=input["attachmentId"].as_str().ok_or("attachmentId is required")?;
             read_attachment_text(database,attachments_dir,conversation_id,id,&input)?
         };
-        let content = result.to_string();
+        let content = result.canonical_string();
         if let Some(metadata) = result.as_object_mut() { metadata.remove("text"); }
         Ok(json!({
                 "content": [{ "type": "text", "text": content }],
@@ -9420,7 +9422,7 @@ mod knowledge_tool_contract_tests {
 }
 
 fn bounded_knowledge_tool_result(result: Value) -> Value {
-    let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+    let text = crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string());
     if text.len() <= MAX_KNOWLEDGE_TOOL_TEXT_BYTES {
         return json!({
             "content": [{ "type": "text", "text": text }],
@@ -9474,7 +9476,7 @@ fn require_rust_reader_binding(database: &Database, envelope: &RuntimeEnvelope) 
         let node_id = payload.get("graphNodeId").and_then(Value::as_str).ok_or("nested reader has no node identity")?;
         let raw_id = payload.get("nodeToolCallId").and_then(Value::as_str).filter(|id| !id.trim().is_empty()).ok_or("nested reader has no local tool identity")?;
         let parent = database.get_runtime_tool_call(run_id, parent_id)?.ok_or("nested reader parent is missing")?;
-        let expected_id = format!("graph-read:{}", hex::encode(Sha256::digest(serde_json::to_vec(&[parent_id, node_id, raw_id]).map_err(|e| e.to_string())?)));
+        let expected_id = format!("graph-read:{}", hex::encode(Sha256::digest(crate::canonical_json::to_vec(&[parent_id, node_id, raw_id]).map_err(|e| e.to_string())?)));
         if payload.get("observationScope").and_then(Value::as_str) != Some("nested")
             || binding.execution_profile_id != "graph_readonly_preview"
             || parent.tool_name != "graph_readonly_run" || parent.execution_location != "runtime" || parent.status != "running"
@@ -9805,7 +9807,7 @@ fn execute_legacy_admitted_file(
     let tool = durable.tool_name.as_str();
     let input = &durable.input;
     let credential = database.issue_legacy_file_credential(run_id, tool_call_id, policy_version)?;
-    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.to_string()) {
+    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.canonical_string()) {
         return Err("credential_mismatch: file credential input binding differs".into());
     }
     if credential.file_baseline.as_ref() != observed {
@@ -10121,6 +10123,7 @@ fn record_runtime_crash(
 
 #[cfg(test)]
 mod attachment_tests {
+    use crate::canonical_json::CanonicalJson;
     use super::{
         apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx,
         attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result,
@@ -10671,7 +10674,7 @@ mod attachment_tests {
                 "outputEncoding": "utf-8",
             },
         });
-        let serialized = serde_json::to_string(&reported).unwrap();
+        let serialized = crate::canonical_json::to_string(&reported).unwrap();
         assert!(
             serialized.len() > 8 * INLINE_CAP,
             "the fixture must be far past the inline cap, got {}",
@@ -10688,7 +10691,7 @@ mod attachment_tests {
             Ok(reported.clone()),
         )
         .unwrap();
-        let wire = serde_json::to_string(&response).unwrap();
+        let wire = crate::canonical_json::to_string(&response).unwrap();
         assert_eq!(response["isError"], Value::Bool(true));
         assert_eq!(response["errorCode"], "tool.nonzero_exit");
         assert!(
@@ -10996,7 +10999,7 @@ mod attachment_tests {
             },
         });
         assert!(
-            serde_json::to_string(&reported).unwrap().len() > INLINE_CAP,
+            crate::canonical_json::to_string(&reported).unwrap().len() > INLINE_CAP,
             "the racing failure has to be big enough to be compacted"
         );
         assert!(matches!(
@@ -11984,7 +11987,7 @@ mod attachment_tests {
                 }),
             )
             .unwrap();
-        let reviewer_result = serde_json::to_string(&json!({
+        let reviewer_result = crate::canonical_json::to_string(&json!({
             "criteria": [{
                 "criterion": criterion,
                 "status": "passed",
@@ -12536,7 +12539,7 @@ mod attachment_tests {
                 "allowedTools": ["read"]
             }
         });
-        let package_hash = hex::encode(Sha256::digest(snapshot.to_string().as_bytes()));
+        let package_hash = hex::encode(Sha256::digest(snapshot.canonical_string().as_bytes()));
         let package = runtime_expert_package(
             &snapshot,
             &package_hash,
@@ -12577,7 +12580,7 @@ mod attachment_tests {
                 ]
             }
         });
-        let package_hash = hex::encode(Sha256::digest(snapshot.to_string().as_bytes()));
+        let package_hash = hex::encode(Sha256::digest(snapshot.canonical_string().as_bytes()));
         let package = runtime_expert_package(
             &snapshot,
             &package_hash,
@@ -12909,20 +12912,20 @@ mod attachment_tests {
             wrapped["details"]["originalBytes"].as_u64().unwrap()
                 > super::MAX_KNOWLEDGE_TOOL_TEXT_BYTES as u64
         );
-        assert!(serde_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+        assert!(crate::canonical_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
     }
 
     #[test]
     fn attachment_pages_preserve_unicode_and_bound_protocol_size() {
         let text = "AGV等待🦊\n".repeat(55000);
         let old_result = json!({"content":[{"type":"text","text":text}],"details":{"text":text}});
-        assert!(serde_json::to_vec(&old_result).unwrap().len() > super::MAX_PROTOCOL_LINE_BYTES);
+        assert!(crate::canonical_json::to_vec(&old_result).unwrap().len() > super::MAX_PROTOCOL_LINE_BYTES);
         let mut offset = 0;
         let mut recovered = String::new();
         loop {
             let page = super::attachment_text_page(&text, &json!({"offset":offset,"limit":24000})).unwrap();
-            let wrapped = json!({"content":[{"type":"text","text":page.to_string()}],"details":page});
-            assert!(serde_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+            let wrapped = json!({"content":[{"type":"text","text":page.canonical_string()}],"details":page});
+            assert!(crate::canonical_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
             recovered.push_str(page["text"].as_str().unwrap());
             if !page["hasMore"].as_bool().unwrap() { break; }
             offset = page["nextOffset"].as_u64().unwrap();
@@ -12953,7 +12956,7 @@ mod attachment_tests {
         let direct = super::read_attachment_text(&database, &root, &conversation.id, "agv", &json!({"offset":overview["sheets"][1]["offset"]})).unwrap();
         assert!(direct["text"].as_str().unwrap().starts_with("[Sheet: 第二页]"));
         assert!(super::read_attachment_text(&database, &root, "foreign", "agv", &json!({})).is_err());
-        assert!(serde_json::to_vec(&overview).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+        assert!(crate::canonical_json::to_vec(&overview).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
