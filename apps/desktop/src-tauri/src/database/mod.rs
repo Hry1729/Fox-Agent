@@ -38,7 +38,7 @@ pub use repositories::{
     MessageFeedbackRecord, NotificationPreferencesRecord, PendingGraphAcceptance,
     PreflightTaskRepairOverrideInput, ProjectManagementRecord, RepositoryError,
     StartReadyReadOnlyGraphNodeInput, StartTaskAttemptInput, StartTaskRepairOverrideInput,
-    WORK_EVENT_TYPES,
+    EVIDENCE_REFERENCE_PAIRS, WORK_EVENT_TYPES,
 };
 pub(crate) use repositories::{
     package_snapshot_hash, CreateChildRunInput, DeliveryArtifactRow, DeliveryChecklistItem,
