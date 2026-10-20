@@ -14,6 +14,8 @@
 //! Live Pi / 逐轮**引擎**分支不在本文件覆盖；本文件覆盖的是 Host 侧的完整交付链
 //! （读取 → durable 行 → 生产投影 → 交付事实 → 准入 → 真实文件提交）。
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 
 use crate::database::Database;
@@ -319,7 +321,7 @@ fn node_projection_view(db: &Database, run_id: &str, call: &str, result: &Value,
         .stderr(std::fs::File::create(&stderr_path).expect("Node stderr file"))
         .spawn()
         .expect("start the real Legacy adapter bridge");
-    child.stdin.take().expect("stdin").write_all(input.to_string().as_bytes())
+    child.stdin.take().expect("stdin").write_all(input.canonical_string().as_bytes())
         .expect("send Host result to Node");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -388,7 +390,7 @@ fn f1_long_history_fixture(
     db.kernel_create_run(
         &run.id, "pi", "authoritative", 2,
         &binding.permission_snapshot_id, &binding.execution_profile_id,
-        &config_hash, &serde_json::to_string(&frozen).expect("frozen json"),
+        &config_hash, &crate::canonical_json::to_string(&frozen).expect("frozen json"),
     ).expect("kernel run");
     db.freeze_kernel_model_config(&run.id, &model).expect("model config");
     let mut messages = vec![json!({"role":"user","content":"F1 fixture task"})];
@@ -483,7 +485,7 @@ fn propose_f1_write(run: &F1Run, candidate: &str) {
                 canonical_input_json: json!({
                     "path":run.target_path,"content":candidate,"expectedVersion":run.version
                 })
-                .to_string(),
+                .canonical_string(),
                 source_order: 0,
             }],
             &policy,
@@ -500,7 +502,7 @@ fn propose_f1_continued_read(run: &F1Run, call: &str, input: Value) -> Value {
         "f1-continued-read",
         vec![kernel::ToolCallRequest {
             tool_call_id: call.into(), tool: "read".into(),
-            canonical_input_json: input.to_string(), source_order: 0,
+            canonical_input_json: input.canonical_string(), source_order: 0,
         }], &policy,
     ).expect("second read proposal");
     let results = execute_pending_dispatches(
@@ -564,7 +566,7 @@ fn f1_whole_read_that_the_model_never_received_cannot_replace_the_file() {
     // 2) 源快照与 durable 结果都没有被改写。
     assert!(
         durable_result_json(&run.db, &run.run_id, &run.read_call)
-            .to_string()
+            .canonical_string()
             .contains(F1_MARKER),
         "durable 结果必须保留全部原始字节：源快照不因模型视图而被篡改"
     );
@@ -996,7 +998,7 @@ fn f1_cropped_read_confirmation_is_bound_to_one_candidate_and_consumed_once() {
         "path":"target.txt", "content":"different candidate", "expectedVersion":run.version,
     });
     let changed_credential = run.db.issue_dispatch_credential(
-        &run.run_id, "write-changed", "write_file", &changed.to_string(),
+        &run.run_id, "write-changed", "write_file", &changed.canonical_string(),
     ).expect("issue changed candidate").expect("file credential");
     assert!(changed_credential.requires_replace_grant);
     let refused = run.db.claim_execution_attempt(
@@ -1289,7 +1291,7 @@ fn item5_propose(run: &F1Run, call: &str, tool: &str, input: Value) -> Result<()
             vec![kernel::ToolCallRequest {
                 tool_call_id: call.into(),
                 tool: tool.into(),
-                canonical_input_json: input.to_string(),
+                canonical_input_json: input.canonical_string(),
                 source_order: 0,
             }],
             &policy,
