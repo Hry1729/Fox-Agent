@@ -1214,3 +1214,422 @@ async fn real_srt_dsh_initialize_inside_sandbox() {
     }
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// External runtime, real srt + real backends, whole session (Linux)
+// ---------------------------------------------------------------------------
+//
+// `real_srt_external_runtime_pi_session` and `real_srt_external_runtime_dsh_session`
+// drive the Host's `ExternalRuntime` with the production `HostLauncher`
+// (managed runtime layout, `prepare_launch`, srt + bubblewrap, initialize
+// check), not a mock launcher. Opt-in twice: `#[ignore]` plus
+// `FOX_TEST_REAL_SRT=1` and `FOX_TEST_REAL_ACP=1`.
+//
+// ```text
+// FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_SRT_PREFIX=<srt prefix> \
+//   FOX_PI_ACP_PREFIX=<pi prefix> [FOX_DSH_BIN=<abs dsh>] [FOX_TEST_APPROVAL_WAIT_SECS=20] \
+//   cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_external_runtime \
+//   -- --include-ignored --nocapture --test-threads=1
+// ```
+//
+// The managed runtime is `FOX_AGENT_RUNTIME_ROOT` when set (a writable Linux
+// layout: `srt/`, `backends/pi/`, `backends/deepseek/`), else assembled under
+// cargo's target tmp dir from the prefixes (`cp -al`, falling back to
+// `cp -a`; it must be a real directory tree, a symlink out of the runtime is
+// not readable inside the sandbox). The test writes `pi-gate/` (a test
+// wrapper around `fixtures/pi/pi-gated.sh` that loads the scripted provider)
+// and `dsh-patches/` into it. The model is `ScriptedModel`, outside the
+// sandbox, its `127.0.0.1:<port>` on the Host allowlist
+// (`extra_domains`), which also clears NO_PROXY for the backend.
+
+#[cfg(target_os = "linux")]
+mod external_real {
+    use super::*;
+    use fox_agent_backend::capability_view::PiLaunch;
+    use fox_agent_backend::external::{AnswerOutcome, CancelOutcome, ExternalRuntime, ExternalSink, LaunchRequest, TurnRequest};
+    use fox_agent_backend::external_launch::{FullAccessSwitch, HostLaunchConfig, HostLauncher};
+    use fox_agent_backend::port::StopConfirmation;
+    use fox_agent_backend::projection::PermissionCard;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    pub(super) fn require_real_acp(test: &str) {
+        require_real(test);
+        if std::env::var("FOX_TEST_REAL_ACP").as_deref() != Ok("1") {
+            panic!("{test} launches real ACP backends: set FOX_TEST_REAL_ACP=1 as well (not run = not passed)");
+        }
+        for name in ["FOX_PI_ACP_PROGRAM", "FOX_DSH_PROGRAM", "FOX_EXTERNAL_FULL_ACCESS"] {
+            assert!(std::env::var_os(name).is_none(), "{name} must be unset: the test uses the managed runtime in sandboxed mode");
+        }
+    }
+
+    #[derive(Default)]
+    struct Recorded {
+        events: Vec<(String, Value)>,
+        approvals: Vec<(String, String, PermissionCard)>,
+    }
+
+    #[derive(Clone, Default)]
+    pub(super) struct Sink(Arc<Mutex<Recorded>>);
+
+    impl ExternalSink for Sink {
+        fn emit(&self, run_id: &str, _conversation_id: &str, event: Value) -> Result<(), String> {
+            self.0.lock().unwrap().events.push((run_id.to_owned(), event));
+            Ok(())
+        }
+
+        fn request_approval(&self, run_id: &str, _conversation_id: &str, _key: &str, card: &PermissionCard) -> Result<String, String> {
+            let mut recorded = self.0.lock().unwrap();
+            let id = format!("appr-{}", recorded.approvals.len() + 1);
+            recorded.approvals.push((run_id.to_owned(), id.clone(), card.clone()));
+            Ok(id)
+        }
+    }
+
+    const TERMINALS: [&str; 4] = ["run.completed", "run.cancelled", "run.failed", "run.interrupted"];
+
+    impl Sink {
+        pub(super) fn events(&self, run_id: &str) -> Vec<Value> {
+            self.0.lock().unwrap().events.iter().filter(|(run, _)| run == run_id).map(|(_, event)| event.clone()).collect()
+        }
+
+        pub(super) fn types(&self, run_id: &str) -> Vec<String> {
+            self.events(run_id).iter().map(|event| event["type"].as_str().unwrap_or_default().to_owned()).collect()
+        }
+
+        pub(super) fn text(&self, run_id: &str) -> String {
+            self.events(run_id)
+                .iter()
+                .filter(|event| event["type"] == "message.delta")
+                .filter_map(|event| event["delta"].as_str().map(str::to_owned))
+                .collect()
+        }
+
+        fn approvals(&self) -> Vec<(String, String, PermissionCard)> {
+            self.0.lock().unwrap().approvals.clone()
+        }
+
+        fn terminal_now(&self, run_id: &str) -> Option<Value> {
+            self.events(run_id).into_iter().find(|event| event["type"].as_str().is_some_and(|kind| TERMINALS.contains(&kind)))
+        }
+
+        pub(super) async fn terminal(&self, run_id: &str) -> Value {
+            self.terminal_within(run_id, 120).await
+        }
+
+        pub(super) async fn terminal_within(&self, run_id: &str, secs: u64) -> Value {
+            for _ in 0..secs * 10 {
+                if let Some(event) = self.terminal_now(run_id) {
+                    return event;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("no terminal for {run_id} within {secs}s; got {:?}", self.types(run_id));
+        }
+
+        /// The `count`-th approval, or the run's terminal if it ended first.
+        async fn approval(&self, run_id: &str, count: usize) -> (String, PermissionCard) {
+            for _ in 0..1200 {
+                let approvals = self.approvals();
+                if approvals.len() >= count {
+                    let (run, id, card) = approvals[count - 1].clone();
+                    assert_eq!(run, run_id);
+                    return (id, card);
+                }
+                if let Some(terminal) = self.terminal_now(run_id) {
+                    panic!("{run_id} ended before approval #{count}: {terminal}\n{:?}", self.types(run_id));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("no approval #{count} for {run_id} within 120s; got {:?}", self.types(run_id));
+        }
+    }
+
+    /// `cp -al src dst`, else `cp -a` (hard links need one file system).
+    fn copy_tree(src: &Path, dst: &Path) {
+        if dst.exists() {
+            return;
+        }
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let linked = std::process::Command::new("cp").arg("-al").arg(src).arg(dst).status().map(|status| status.success()).unwrap_or(false);
+        if !linked {
+            let _ = std::fs::remove_dir_all(dst);
+            let copied = std::process::Command::new("cp").arg("-a").arg(src).arg(dst).status().expect("cp");
+            assert!(copied.success(), "copy {} -> {}", src.display(), dst.display());
+        }
+    }
+
+    /// The managed runtime (see the section comment).
+    pub(super) fn runtime_root(with_dsh: bool) -> PathBuf {
+        if let Some(root) = std::env::var_os("FOX_AGENT_RUNTIME_ROOT") {
+            return PathBuf::from(root);
+        }
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fox-linux-runtime");
+        copy_tree(&env_path("FOX_SRT_PREFIX"), &root.join("srt"));
+        copy_tree(&env_path("FOX_PI_ACP_PREFIX"), &root.join("backends").join("pi"));
+        if with_dsh {
+            let dsh = env_path("FOX_DSH_BIN");
+            let prefix = dsh.parent().and_then(Path::parent).and_then(Path::parent).expect("dsh under <prefix>/node_modules/.bin");
+            copy_tree(prefix, &root.join("backends").join("deepseek"));
+        }
+        root
+    }
+
+    /// Writes the test pi gate into `<runtime>/pi-gate`: the committed gate
+    /// and launcher, plus a `pi-gated.sh` wrapper that points pi at the
+    /// scripted provider and model (the Host clears the environment, so they
+    /// cannot come from the test process).
+    fn install_test_pi_gate(runtime: &Path, model: &ScriptedModel) -> PathBuf {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let gate = runtime.join("pi-gate");
+        std::fs::create_dir_all(&gate).unwrap();
+        std::fs::copy(fixtures.join("pi/fox-approval-gate.ts"), gate.join("fox-approval-gate.ts")).unwrap();
+        std::fs::copy(fixtures.join("pi/pi-gated.sh"), gate.join("pi-gated-fixture.sh")).unwrap();
+        std::fs::copy(fixtures.join("sandbox/scripted-cmd-provider.ts"), gate.join("scripted-cmd-provider.ts")).unwrap();
+        let wrapper = format!(
+            "#!/bin/sh\n# TEST ONLY (tests/sandbox_srt.rs external_real).\nDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexport FOX_SCRIPTED_MODEL_URL='{}'\nexport FOX_PI_EXTRA_ARGS=\"-e $DIR/scripted-cmd-provider.ts --provider foxcmd --model scripted\"\nexec /bin/sh \"$DIR/pi-gated-fixture.sh\" \"$@\"\n",
+            model.url()
+        );
+        std::fs::write(gate.join("pi-gated.sh"), wrapper).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for file in ["pi-gated.sh", "pi-gated-fixture.sh"] {
+            std::fs::set_permissions(gate.join(file), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        gate
+    }
+
+    pub(super) fn config(runtime: PathBuf, fox_data: &Path, extra: BTreeMap<AgentBackend, Vec<String>>) -> HostLaunchConfig {
+        HostLaunchConfig {
+            os: HostOs::Linux,
+            fox_data: fox_data.to_path_buf(),
+            state_root: fox_data.join("agent-state"),
+            runtime_root: runtime,
+            full_access: FullAccessSwitch::Off,
+            full_access_forbidden: false,
+            pi_providers: vec![],
+            extra_domains: extra,
+            env_passthrough: vec![],
+        }
+    }
+
+    pub(super) fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, project: &Path) -> TurnRequest {
+        TurnRequest {
+            run_id: run.into(),
+            prompt: prompt.into(),
+            stored_native_session: None,
+            launch: LaunchRequest {
+                conversation_id: conversation.into(),
+                backend,
+                project_uuid: Some(PROJECT_UUID.into()),
+                project_root: project.to_path_buf(),
+                session_key: format!("ext-{run}"),
+            },
+        }
+    }
+
+    fn run_prompt(id: &str, command: &str) -> String {
+        format!("RUN:{} ID:{id}", b64url(command))
+    }
+
+    fn assert_no_terminal(sink: &Sink, run: &str) {
+        assert!(sink.terminal_now(run).is_none(), "{run} ended on its own while the approval was unanswered: {:?}", sink.types(run));
+    }
+
+    pub(super) async fn pi_session() {
+        let pid = std::process::id();
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        let base = home.join(format!(".fox-ext-{pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("proj");
+        let fox_data = base.join("fox-data");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&fox_data).unwrap();
+
+        let model = ScriptedModel::start();
+        let runtime = runtime_root(false);
+        let gate = install_test_pi_gate(&runtime, &model);
+        let config = config(runtime.clone(), &fox_data, BTreeMap::from([(AgentBackend::Pi, vec![model.allow_entry()])]));
+        assert_eq!(config.pi_launch(), PiLaunch::Gated);
+        assert!(config.allows_loopback(AgentBackend::Pi));
+        let sink = Sink::default();
+        let runtime_handle = ExternalRuntime::new(sink.clone(), HostLauncher::new(config), tokio::runtime::Handle::current());
+        let rt = &runtime_handle;
+        let conv = "ext-pi";
+        let wait = Duration::from_secs(std::env::var("FOX_TEST_APPROVAL_WAIT_SECS").ok().and_then(|value| value.parse().ok()).unwrap_or(20));
+
+        // 1. Start, streamed text, completion.
+        rt.start_turn(turn(conv, "e1", "hello", AgentBackend::Pi, &project)).unwrap();
+        let terminal = sink.terminal("e1").await;
+        eprintln!("MEASURE e1 types {:?}\nterminal {terminal}", sink.types("e1"));
+        assert_eq!(terminal["type"], "run.completed", "{terminal}");
+        let types = sink.types("e1");
+        assert_eq!(types.first().map(String::as_str), Some("run.started"));
+        for expected in ["agent_backend.launching", "agent_backend.session", "message.started", "message.delta", "message.completed"] {
+            assert!(types.iter().any(|kind| kind == expected), "missing {expected}: {types:?}");
+        }
+        assert!(sink.text("e1").contains("scripted hello"), "{}", sink.text("e1"));
+        assert!(model.requests() >= 1, "the turn did not reach the scripted model outside the sandbox");
+        let info = rt.session_info(conv).expect("session");
+        assert!(info.live && info.active_run.is_none());
+        assert_eq!(info.mode, Some(PermissionMode::Sandboxed));
+        assert_eq!(info.pi_launch, PiLaunch::Gated);
+        assert!(info.declaration.as_ref().is_some_and(|declaration| declaration.directory_isolation));
+
+        // 2. Permission request -> allow -> the tool runs, the turn completes.
+        rt.start_turn(turn(conv, "e2", &run_prompt("allow", "echo allowed-ok > allowed.txt && echo ran"), AgentBackend::Pi, &project)).unwrap();
+        let (approval, card) = sink.approval("e2", 1).await;
+        eprintln!("MEASURE e2 card {card:?}");
+        assert!(card.available_decisions.contains(&"allow_once") && card.available_decisions.contains(&"deny"), "{card:?}");
+        assert!(!card.available_decisions.contains(&"allow_conversation"));
+        assert!(rt.approval_pending(&approval));
+        assert_eq!(rt.answer(&approval, true), AnswerOutcome::Written);
+        let terminal = sink.terminal("e2").await;
+        eprintln!("MEASURE e2 terminal {terminal} text {:?}", sink.text("e2"));
+        assert_eq!(terminal["type"], "run.completed", "{terminal}");
+        assert_eq!(std::fs::read_to_string(project.join("allowed.txt")).unwrap_or_default().trim(), "allowed-ok");
+        assert!(sink.text("e2").contains("tool-result"), "{}", sink.text("e2"));
+
+        // 3. Permission request -> deny -> the tool is blocked, the turn completes.
+        rt.start_turn(turn(conv, "e3", &run_prompt("deny", "echo denied > denied.txt"), AgentBackend::Pi, &project)).unwrap();
+        let (approval, _) = sink.approval("e3", 2).await;
+        assert_eq!(rt.answer(&approval, false), AnswerOutcome::Written);
+        let terminal = sink.terminal("e3").await;
+        eprintln!("MEASURE e3 terminal {terminal} text {:?}", sink.text("e3"));
+        assert_eq!(terminal["type"], "run.completed", "{terminal}");
+        assert!(!project.join("denied.txt").exists(), "a denied tool ran");
+        let completed = sink.events("e3").into_iter().find(|event| event["type"] == "tool.completed");
+        eprintln!("MEASURE e3 tool.completed {completed:?}");
+
+        // 4. No deadline: the request stays pending, the turn keeps running,
+        //    nothing ends it on its own; a late allow still runs the tool.
+        rt.start_turn(turn(conv, "e4", &run_prompt("late", "echo late-ok > late.txt"), AgentBackend::Pi, &project)).unwrap();
+        let (approval, _) = sink.approval("e4", 3).await;
+        let started = std::time::Instant::now();
+        while started.elapsed() < wait {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(rt.approval_pending(&approval), "approval ended on its own after {:?}", started.elapsed());
+            assert_no_terminal(&sink, "e4");
+        }
+        assert_eq!(rt.active_runs(), vec!["e4".to_owned()]);
+        assert!(rt.session_info(conv).unwrap().live, "backend process stopped while waiting");
+        assert!(!project.join("late.txt").exists());
+        eprintln!("MEASURE e4 still pending after {:?}", started.elapsed());
+        assert_eq!(rt.answer(&approval, true), AnswerOutcome::Written);
+        let terminal = sink.terminal("e4").await;
+        assert_eq!(terminal["type"], "run.completed", "{terminal}");
+        assert_eq!(std::fs::read_to_string(project.join("late.txt")).unwrap_or_default().trim(), "late-ok");
+
+        // 5. Cancel the turn while its approval is pending: the native request
+        //    is answered `cancelled`, the run ends cancelled, a late answer is
+        //    not written, the tool never runs.
+        rt.start_turn(turn(conv, "e5", &run_prompt("cancel", "echo cancelled > cancelled.txt"), AgentBackend::Pi, &project)).unwrap();
+        let (approval, _) = sink.approval("e5", 4).await;
+        match rt.cancel("e5") {
+            CancelOutcome::Requested { answered_permissions } => assert_eq!(answered_permissions.len(), 1, "pending request answered `cancelled`"),
+            other => panic!("{other:?}"),
+        }
+        assert!(!rt.approval_pending(&approval));
+        let terminal = sink.terminal("e5").await;
+        eprintln!("MEASURE e5 terminal {terminal}");
+        assert_eq!(terminal["type"], "run.cancelled", "{terminal}");
+        assert_eq!(rt.answer(&approval, true), AnswerOutcome::NotPending, "a late approval is never written");
+        assert_eq!(rt.cancel("e5"), CancelOutcome::NotActive);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!project.join("cancelled.txt").exists(), "the tool of a cancelled turn ran");
+
+        // 6. The conversation takes another turn after the cancel.
+        rt.start_turn(turn(conv, "e6", "hello again", AgentBackend::Pi, &project)).unwrap();
+        let terminal = sink.terminal("e6").await;
+        eprintln!("MEASURE e6 terminal {terminal} live-before-close {:?}", rt.session_info(conv).map(|info| info.live));
+        assert_eq!(terminal["type"], "run.completed", "{terminal}");
+
+        // 7. Close: confirmed stop, nothing left running from this session.
+        let report = rt.close_conversation(conv, "test done").await.expect("live process");
+        eprintln!("MEASURE close {report:?}");
+        assert_eq!(report.confirmation, StopConfirmation::Confirmed, "{report:?}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let left = processes_matching(&base.display().to_string());
+        assert!(left.is_empty(), "processes left after close: {left:?}");
+        let _ = std::fs::remove_dir_all(&gate);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    pub(super) async fn dsh_session() {
+        use fox_agent_backend::backends::deepseek;
+        let pid = std::process::id();
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        let base = home.join(format!(".fox-ext-dsh-{pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("proj");
+        let fox_data = base.join("fox-data");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&fox_data).unwrap();
+        let runtime = runtime_root(true);
+        let host_policy = deepseek::HostPolicy { workspace_write: true, network: false };
+        let patch = deepseek::default_patch_path(&runtime, &host_policy);
+        if deepseek::verify_installed_patch(&patch, &host_policy).is_err() {
+            std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+            std::fs::write(&patch, deepseek::policy_patch(&host_policy).patch_yaml).unwrap();
+        }
+        let config = config(runtime, &fox_data, BTreeMap::new());
+        let sink = Sink::default();
+        let rt = ExternalRuntime::new(sink.clone(), HostLauncher::new(config), tokio::runtime::Handle::current());
+        rt.start_turn(turn("ext-dsh", "d1", "Reply with the single word: pong", AgentBackend::Deepseek, &project)).unwrap();
+        // dsh's cold start inside srt (many small files) is slow.
+        let started = std::time::Instant::now();
+        let terminal = sink.terminal_within("d1", 600).await;
+        eprintln!("MEASURE d1 settled after {:?}", started.elapsed());
+        eprintln!("MEASURE d1 types {:?}\nterminal {terminal}\ntext {:?}", sink.types("d1"), sink.text("d1"));
+        let types = sink.types("d1");
+        assert!(types.iter().any(|kind| kind == "agent_backend.session"), "dsh session/new inside srt: {types:?}");
+        assert_eq!(types.iter().filter(|kind| TERMINALS.contains(&kind.as_str())).count(), 1, "one terminal");
+        let info = rt.session_info("ext-dsh").expect("session");
+        assert_eq!(info.mode, Some(PermissionMode::Sandboxed));
+        // A real prompt passes only with a real reply: a model error (no key,
+        // refused key, no outside network) fails the test.
+        let close_first = rt.close_conversation("ext-dsh", "test done");
+        let check = || {
+            assert_eq!(terminal["type"], "run.completed", "the model call failed (needs DEEPSEEK_API_KEY and the network): {terminal}");
+            assert_eq!(terminal["stopReason"], "end_turn", "{terminal}");
+            assert!(!sink.text("d1").trim().is_empty(), "end_turn without agent text");
+        };
+        let report = close_first.await;
+        eprintln!("MEASURE dsh close {report:?}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let left = processes_matching(&base.display().to_string());
+        let _ = std::fs::remove_dir_all(&base);
+        if let Some(report) = &report {
+            assert_eq!(report.confirmation, StopConfirmation::Confirmed, "{report:?}");
+        }
+        assert!(left.is_empty(), "processes left after close: {left:?}");
+        check();
+    }
+}
+
+/// Whole external session through `ExternalRuntime` + `HostLauncher`, real
+/// pi-acp / pi inside real srt (Linux): start, streamed output, completion;
+/// permission allow and deny; an unanswered permission keeps waiting (no
+/// deadline) and a late allow still works; cancelling the turn answers the
+/// pending request `cancelled` and ends the run cancelled; close confirmed.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real srt + pi-acp through ExternalRuntime; FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 ... -- --include-ignored"]
+async fn real_srt_external_runtime_pi_session() {
+    external_real::require_real_acp("real_srt_external_runtime_pi_session");
+    external_real::pi_session().await;
+}
+
+/// DeepSeek (dsh) through `ExternalRuntime` + `HostLauncher` inside real srt
+/// (Linux): launch, initialize check, session/new, one turn that must end
+/// `run.completed` / `end_turn` with non-empty agent text (a model error fails
+/// the test; needs `DEEPSEEK_API_KEY` and a reachable api.deepseek.com), close
+/// confirmed and no process left. Needs `FOX_DSH_BIN` unless the runtime has
+/// `backends/deepseek`.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real srt + dsh through ExternalRuntime; FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_DSH_BIN=<abs> ... -- --include-ignored"]
+async fn real_srt_external_runtime_dsh_session() {
+    external_real::require_real_acp("real_srt_external_runtime_dsh_session");
+    external_real::dsh_session().await;
+}
