@@ -2781,6 +2781,7 @@ fn kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway() {
     assert!(coordinator.dispatch_tool("work-1","work-executor",|_,_,token| {
         let result = policy.execute_work(&db,"work-1","work_snapshot_get",&json!({}),token)?;
         assert!(result["content"].is_array());
+        assert_eq!(result["details"]["evidenceRef"]["refId"],format!("kernel-tool:{run_id}:work-1"));
         // A missing required field is refused before any write, so it is data
         // for the model (an isError result), not a fatal executor error.
         let refused = policy.execute_work(&db,"work-1","goal_propose",&json!({}),token)?;
@@ -2915,6 +2916,8 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     })).unwrap();
     coordinator.dispatch_tool("delegate","child-owner",|_,_,token| {
         let result = policy.execute_delegation(&db,"delegate","child_run_start",&input,token)?;
+        // Evidence scheme 3: a successful delegation names its citable id.
+        assert_eq!(result["details"]["evidenceRef"]["refId"],format!("kernel-tool:{run_id}:delegate"));
         let child_id = result["details"]["childRun"]["childRunId"].as_str().unwrap();
         assert!(db.kernel_host_run_state(child_id)?.is_none());
         assert!(db.run_control_binding(child_id)?.is_none());
