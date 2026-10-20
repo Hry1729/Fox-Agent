@@ -72,6 +72,10 @@ pub const EXIT_POLL: Duration = Duration::from_millis(250);
 /// How long a failed `session/prompt` waits for the connection to close
 /// (process exit) before it is settled as a protocol failure.
 pub const PROMPT_FAILURE_SETTLE: Duration = Duration::from_millis(800);
+/// After a `session/load` reply, how long the Host waits for the
+/// [`BackendEvent::LoadSettled`] fence (it is queued right behind the reply,
+/// so this only bounds a connection that died meanwhile).
+pub const LOAD_FENCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the launcher needs to start one conversation's backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +138,14 @@ impl LaunchFailure {
 
 impl From<crate::sandbox::SandboxError> for LaunchFailure {
     fn from(error: crate::sandbox::SandboxError) -> Self {
-        let mut failure = Self::new(error.code.as_str(), error.message.clone());
+        // A missing / unusable backend entry is the same user-facing problem
+        // whichever layer finds it: the external backend is not installed.
+        // The sandbox code stays in `detail.code` for diagnostics.
+        let code = match error.code {
+            crate::sandbox::SandboxErrorCode::SandboxBackendNotInstalled => "agent_backend_not_installed",
+            other => other.as_str(),
+        };
+        let mut failure = Self::new(code, error.message.clone());
         failure.remedy = error.remedy.clone();
         failure.detail = serde_json::to_value(&error).unwrap_or(Value::Null);
         failure
@@ -250,6 +261,11 @@ struct Turn {
     approvals: HashMap<String, PendingApproval>,
     cancel_requested: bool,
     prompt_sent: bool,
+    /// The [`BackendEvent::PromptStarted`] fence of this turn's prompt has
+    /// come through the event stream: only `session/update`s after it belong
+    /// to this Run (anything before it is a history replay or other output
+    /// from before the prompt, never projected into the new Run).
+    prompt_fence_seen: bool,
     /// `session/prompt` failed; settled as a prompt failure unless the
     /// connection closes within [`PROMPT_FAILURE_SETTLE`] (then an exit).
     prompt_error: Option<String>,
@@ -264,6 +280,7 @@ impl Turn {
             approvals: HashMap::new(),
             cancel_requested: false,
             prompt_sent: false,
+            prompt_fence_seen: false,
             prompt_error: None,
         }
     }
@@ -527,25 +544,48 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let cwd = request.launch.project_root.clone();
         let (native, reopened, load_error) = match previous {
             Some(id) if can_load => {
-                // Replayed history arrives as session/update before the load
-                // reply; it is drained and dropped here, never projected.
+                // Everything from sending session/load until its reply (the
+                // replayed history, as session/update) is dropped here and
+                // never projected. The reply is followed in the event stream
+                // by the LoadSettled fence, so draining up to the fence drops
+                // exactly the updates that came before the reply, however the
+                // two channels interleave. A permission request in that
+                // window is refused (no turn can own it).
                 let load_id = id.clone();
                 let load = connection.load_session(&load_id, cwd.clone());
                 tokio::pin!(load);
+                let mut dropped = 0usize;
+                let mut fenced = false;
+                let drop_event = |event: BackendEvent, fenced: &mut bool, dropped: &mut usize| match event {
+                    BackendEvent::PermissionRequested { native_request_id, .. } => {
+                        let _ = connection.answer_permission(&native_request_id, None);
+                    }
+                    BackendEvent::LoadSettled { .. } => *fenced = true,
+                    BackendEvent::Update { .. } => *dropped += 1,
+                    _ => {}
+                };
                 let loaded = loop {
                     tokio::select! {
                         result = &mut load => break result,
-                        event = events.recv() => {
-                            if let Some(BackendEvent::PermissionRequested { native_request_id, .. }) = event {
-                                let _ = connection.answer_permission(&native_request_id, None);
-                            }
+                        event = events.recv() => match event {
+                            Some(event) => drop_event(event, &mut fenced, &mut dropped),
+                            None => {}
                         }
                     }
                 };
-                while let Ok(event) = events.try_recv() {
-                    if let BackendEvent::PermissionRequested { native_request_id, .. } = event {
-                        let _ = connection.answer_permission(&native_request_id, None);
+                let deadline = tokio::time::Instant::now() + LOAD_FENCE_TIMEOUT;
+                while !fenced {
+                    match tokio::time::timeout_at(deadline, events.recv()).await {
+                        Ok(Some(event)) => drop_event(event, &mut fenced, &mut dropped),
+                        Ok(None) | Err(_) => break,
                     }
+                }
+                if dropped > 0 {
+                    eprintln!(
+                        "fox.external conversation={} agent_backend={} load_replay_dropped={dropped} fenced={fenced}",
+                        session.conversation_id,
+                        session.backend.as_str()
+                    );
                 }
                 match loaded {
                     Ok(()) => (Ok(id), "load", None),
@@ -649,8 +689,15 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
         let connection = state.connection.clone();
         match event {
+            BackendEvent::PromptStarted { .. } => {
+                if let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent) {
+                    turn.prompt_fence_seen = true;
+                }
+            }
+            BackendEvent::LoadSettled { .. } => {}
             BackendEvent::Update { update, .. } => {
-                let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent) else {
+                // Only output after this turn's prompt fence belongs to it.
+                let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent && turn.prompt_fence_seen) else {
                     return;
                 };
                 let run_id = turn.run_id.clone();
