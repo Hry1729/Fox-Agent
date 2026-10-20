@@ -461,4 +461,16 @@ ACP 规范与本方案的对应：`session/cancel` 后客户端必须以 `cancel
 
 13. **Host 接线第一批（2026-10-20）**：会话级 `agent_backend` 已落库（桌面迁移 v95，只增不改，旧会话映射 `fox`，触发器保证不可变）；start / cancel / approve / resume 按会话冻结值路由，错投返回 `agent_backend_misrouted`；非 Fox 后端由环境变量 `FOX_EXTERNAL_BACKENDS` 控制、默认关闭（关闭时 `agent_backend_disabled`、已绑定会话只读；开启时本批统一 `agent_backend_not_yet_wired`，不接真实 ACP 运行）；前端新会话后端选择与旧会话锁定显示。纯逻辑与测试在 `crates/fox-agent-backend/src/host_routing.rs`，做了什么 / 没做什么 / 验收清单见 `crates/fox-agent-backend/docs/sandbox.md` 第 12 节。
 
+
+14. **外部后端接通批（2026-10-20）**：开关打开后，外部会话的 start / cancel / approve 交给外部运行时（`crates/fox-agent-backend/src/external.rs`，每会话一个 ACP 连接），不再返回 `agent_backend_not_yet_wired`；resume 返回 `agent_backend_entry_unsupported`。
+    - 后端入口只从 Fox 受管运行时目录找，不用 `npx`，找不到返回 `agent_backend_not_installed`。
+    - 进程崩溃 → `agent_backend_exited`；取消后 15 s 未确认 → 记为“结果未知”。
+    - 原生审批只给“允许一次 / 拒绝”。DeepSeek 的审批由 Host 直接拒绝。
+    - 读冻结值失败时，只要有外部后端开着就拦截（`agent_backend_lookup_failed`）。
+    - 外部 run 没有 `run_control_binding`，审批窗口回落默认预算，完成预算检查不适用，均有测试。
+    - 前端显示四维能力 chip。
+    - DeepSeek 的模型由私有 HOME 补丁的 `acp` 行决定，Host 补丁不碰 `USER_OWNED_ROWS`。
+    - 环境变量、待办与 Windows 复测清单见 `crates/fox-agent-backend/docs/sandbox.md` 第 13 节，DeepSeek 细节见 `crates/fox-agent-backend/docs/deepseek.md` 4.1。
+    - 待办：srt 内真实冒烟（pi-acp / dsh）、Codex 对接假 Responses API、迁移前自动备份、受管运行时布局与 0.1.1 包核对。
+
 **已知限制**：Windows alpha，沙箱账户可读写 DACL 对所有本地账户开放的位置（产品决定只警告），非 Fox 的 srt 客户端可能在 Fox 两次启停之间抹掉祖先 ACE（下次启停 reconcile 才补回），系统 DNS 解析不受限，Windows 沙箱内拿不到 Host 环境凭据（只能用私有 HOME 内的原生登录）；Windows 上代理令牌在 runner 命令行中可见；网络按域名过滤、不检查内容；私有 HOME 中的原生凭据对后端进程可读；macOS / Windows 尚未实测。
