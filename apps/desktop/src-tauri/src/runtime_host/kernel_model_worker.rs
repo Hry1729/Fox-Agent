@@ -583,7 +583,7 @@ impl Worker {
         preview: Option<&PreviewSink>,
         diagnostic_attempt: Option<&str>,
     ) -> Result<Value, String> {
-        let mut bytes = serde_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
+        let mut bytes = crate::canonical_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
         bytes.push(b'\n');
         if bytes.len() > MAX_FRAME { return Err("Kernel request exceeds frame limit".into()); }
         let mut stdin = self.stdin.take().ok_or("Kernel worker input unavailable")?;
@@ -704,7 +704,7 @@ impl Worker {
                 self.record_settled_model_failure(&request,cursor,waiting_identity,&response["payload"]["responseDiagnostic"],&failure)?;
                 return Err(format!(
                     "{SETTLED_FAILURE_PREFIX}{}",
-                    serde_json::to_string(&failure).map_err(|_| "invalid failure")?
+                    crate::canonical_json::to_string(&failure).map_err(|_| "invalid failure")?
                 ));
             }
             if response["type"] != expected {
@@ -1115,7 +1115,7 @@ impl LiveKernelSession {
     ) -> Result<Value, String> {
         cancel.check()?;
         let request = Self::envelope(request_type, request_payload, binding, &self.session_id);
-        let mut bytes = serde_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
+        let mut bytes = crate::canonical_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
         bytes.push(b'\n');
         if bytes.len() > MAX_FRAME {
             return Err("Kernel request exceeds frame limit".into());
@@ -1207,7 +1207,7 @@ impl LiveKernelSession {
                     serde_json::to_value(&directive).map_err(|_| "invalid directive")?,
                 );
                 let mut reply_bytes =
-                    serde_json::to_vec(&reply).map_err(|_| "invalid directive")?;
+                    crate::canonical_json::to_vec(&reply).map_err(|_| "invalid directive")?;
                 reply_bytes.push(b'\n');
                 if reply_bytes.len() > MAX_FRAME {
                     return Err("Kernel directive exceeds frame limit".into());
@@ -1274,7 +1274,7 @@ impl LiveKernelSession {
                 self.worker.record_settled_model_failure(&request,cursor,waiting_identity,&response["payload"]["responseDiagnostic"],&failure)?;
                 return Err(format!(
                     "{SETTLED_FAILURE_PREFIX}{}",
-                    serde_json::to_string(&failure).map_err(|_| "invalid failure")?
+                    crate::canonical_json::to_string(&failure).map_err(|_| "invalid failure")?
                 ));
             }
             if response["type"] != "kernel.model_response" {
