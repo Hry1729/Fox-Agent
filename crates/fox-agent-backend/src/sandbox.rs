@@ -1993,17 +1993,21 @@ impl SrtLauncher {
             // backslash; and the child starts from the `srt-sandbox`
             // profile environment plus only PATH/PATHEXT/proxy variables,
             // so the session variables would not arrive. `-c` with a
-            // cmd.exe command line fixes both (see windows_command_line).
+            // cmd.exe command line fixes the quoting.
             // stdin does not reach the child at all, so ACP goes through the
-            // bridge (docs/sandbox.md 7.12).
+            // bridge (docs/sandbox.md 7.12), and so do ALL of the backend's
+            // variables and its working directory: they are sent in the
+            // bridge handshake answer over the private pipe, never on the
+            // cmd.exe line (which refuses quotes, `%` and line breaks, e.g.
+            // Codex's JSON `CODEX_CONFIG`, and is visible in the process
+            // list). Only the bridge's own pipe name and one-shot token are
+            // on the line. Path values are passed in their ordinary form
+            // (`\\?\` removed, see launch::backend_visible_path).
             let endpoint = self.bridge_endpoint(canonicalize)?;
             let script = self.verified_bridge_script()?;
-            let mut line_env = backend_env.clone();
-            line_env.extend(endpoint.env());
-            let mut bridge_args = vec![script.to_string_lossy().into_owned(), "--".to_owned(), spec.program.clone()];
-            bridge_args.extend(spec.args.iter().cloned());
+            let (line, endpoint) = windows_bridge_command(&self.ready.install.node.to_string_lossy(), &script, spec, &backend_env, endpoint)?;
             args.push("-c".to_owned());
-            args.push(windows_command_line(&self.ready.install.node.to_string_lossy(), &bridge_args, &line_env)?);
+            args.push(line);
             acp_bridge = Some(endpoint);
             broker_env = broker_session_env(os, &backend_env);
         } else {
@@ -2138,6 +2142,35 @@ pub fn remove_stray_srt_state(private_home: &Path, stray: &Path) -> Result<(), S
         return Err(SandboxError::new(SandboxErrorCode::SandboxPolicyInvalid, format!("{} is a link or not a directory; left alone", stray.display())));
     }
     std::fs::remove_dir_all(stray).map_err(|error| SandboxError::new(SandboxErrorCode::SandboxUnavailable, format!("cannot remove {}: {error}", stray.display())))
+}
+
+/// Windows sandboxed launch through the ACP bridge: the cmd.exe line for
+/// srt's `-c` (only the bridge's pipe name and one-shot token, then
+/// `node bridge.mjs -- <backend> <args>`), and the endpoint carrying the
+/// backend's whole environment and working directory for the handshake
+/// answer ([`crate::launch::BridgeEndpoint::handshake_answer`]). No backend
+/// variable is ever put on the line, so values cmd.exe cannot carry (Codex's
+/// JSON `CODEX_CONFIG`, `%`, line breaks) start fine. Paths cross in their
+/// ordinary form (`\\?\` removed where that is the same file,
+/// [`crate::launch::backend_visible_path`]).
+pub fn windows_bridge_command(
+    node: &str,
+    script: &Path,
+    spec: &LaunchSpec,
+    backend_env: &[(String, String)],
+    mut endpoint: crate::launch::BridgeEndpoint,
+) -> Result<(String, crate::launch::BridgeEndpoint), SandboxError> {
+    let plain = |text: &str| crate::launch::simplify_verbatim_path(text).unwrap_or_else(|| text.to_owned());
+    for (key, _) in backend_env {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(SandboxError::new(SandboxErrorCode::SandboxPolicyInvalid, format!("invalid environment variable name {key:?}")));
+        }
+    }
+    endpoint.child_env = backend_env.iter().map(|(key, value)| (key.clone(), plain(value))).collect();
+    let mut bridge_args = vec![crate::launch::backend_visible_path(script).to_string_lossy().into_owned(), "--".to_owned(), plain(&spec.program)];
+    bridge_args.extend(spec.args.iter().map(|arg| plain(arg)));
+    let line = windows_command_line(&plain(node), &bridge_args, &endpoint.env())?;
+    Ok((line, endpoint))
 }
 
 /// cmd.exe command line for srt's `-c` on Windows: `set "K=V"` for each
@@ -3081,6 +3114,59 @@ mod tests {
         assert!(line.ends_with(r#""C:\Program Files\Fox\sandbox-runtime\0.1.0\node\node.exe" "C:\Program Files\Fox\sandbox-runtime\0.1.0\acp-bridge\bridge.mjs" -- C:\rt\pi-acp.cmd"#), "{line}");
     }
 
+    /// Item: Codex could not start on Windows because its JSON
+    /// `CODEX_CONFIG` (quotes) was refused by the cmd.exe safety check. Now
+    /// every backend variable travels in the bridge handshake; the line only
+    /// has the pipe and token. Runs on any host (pure).
+    #[test]
+    fn windows_bridge_command_sends_backend_env_through_the_bridge_not_cmd() {
+        let endpoint = crate::launch::BridgeEndpoint::new_local(Some(WIN_SID.into())).unwrap();
+        let token = endpoint.token.clone();
+        let mut spec = spec(r"\\?\C:\Program Files\Fox\sandbox-runtime\0.1.2\backends\codex\node_modules\.bin\codex-acp.cmd");
+        spec.args = vec!["--flag".into()];
+        let backend_env = vec![
+            ("CODEX_CONFIG".to_owned(), r#"{"web_search":"disabled"}"#.to_owned()),
+            ("PERCENT".to_owned(), "100%PATH%".to_owned()),
+            ("MULTI".to_owned(), "a\r\nb\nc".to_owned()),
+            ("HOME".to_owned(), r"\\?\C:\ProgramData\Fox\sandbox\S-1\homes\x\codex".to_owned()),
+            ("UNC_DIR".to_owned(), r"\\?\UNC\srv\share\d".to_owned()),
+            ("OPENAI_API_KEY".to_owned(), "sk-not-on-the-line".to_owned()),
+        ];
+        let (line, endpoint) = windows_bridge_command(
+            r"C:\Program Files\Fox\sandbox-runtime\0.1.2\node\node.exe",
+            Path::new(r"\\?\C:\Program Files\Fox\sandbox-runtime\0.1.2\acp-bridge\bridge.mjs"),
+            &spec,
+            &backend_env,
+            endpoint,
+        )
+        .expect("values with quotes, % and line breaks no longer block the launch");
+        // The line: pipe + token, then node bridge.mjs -- backend args. No backend variable.
+        assert!(line.starts_with("set \"FOX_ACP_PIPE="), "{line}");
+        assert!(line.contains(&format!("set \"FOX_ACP_TOKEN={token}\"")));
+        for absent in ["CODEX_CONFIG", "web_search", "PERCENT", "MULTI", "HOME=", "sk-not-on-the-line", r"\\?\"] {
+            assert!(!line.contains(absent), "{absent} must not be on the cmd line: {line}");
+        }
+        assert!(line.ends_with(r#""C:\Program Files\Fox\sandbox-runtime\0.1.2\node\node.exe" "C:\Program Files\Fox\sandbox-runtime\0.1.2\acp-bridge\bridge.mjs" -- "C:\Program Files\Fox\sandbox-runtime\0.1.2\backends\codex\node_modules\.bin\codex-acp.cmd" --flag"#), "{line}");
+        // The bridge gets every value intact, paths in their ordinary form.
+        let env: BTreeMap<_, _> = endpoint.child_env.iter().cloned().collect();
+        assert_eq!(env["CODEX_CONFIG"], r#"{"web_search":"disabled"}"#);
+        assert_eq!(env["PERCENT"], "100%PATH%");
+        assert_eq!(env["MULTI"], "a\r\nb\nc");
+        assert_eq!(env["HOME"], r"C:\ProgramData\Fox\sandbox\S-1\homes\x\codex");
+        assert_eq!(env["UNC_DIR"], r"\\srv\share\d");
+        assert_eq!(env["OPENAI_API_KEY"], "sk-not-on-the-line", "private pipe, not the process list");
+        let answer = endpoint.handshake_answer();
+        let payload: Value = serde_json::from_slice(&answer[3..answer.len() - 1]).unwrap();
+        assert_eq!(payload["env"]["CODEX_CONFIG"], r#"{"web_search":"disabled"}"#);
+        // A bad variable name is still refused.
+        let endpoint = crate::launch::BridgeEndpoint::new_local(Some(WIN_SID.into())).unwrap();
+        let bad = vec![("A=B".to_owned(), "v".to_owned())];
+        assert_eq!(
+            windows_bridge_command(r"C:\n\node.exe", Path::new(r"C:\b.mjs"), &spec, &bad, endpoint).unwrap_err().code,
+            SandboxErrorCode::SandboxPolicyInvalid
+        );
+    }
+
     #[test]
     fn bridge_asset_must_match_the_embedded_copy() {
         assert!(bridge_script_matches(crate::launch::BRIDGE_SCRIPT));
@@ -3507,7 +3593,11 @@ mod tests {
         // backslash paths, and its child would not see session variables).
         assert_eq!(wrapped.spec.args[1..4], ["--settings".to_owned(), settings_path.display().to_string(), "-c".to_owned()]);
         let line = &wrapped.spec.args[4];
-        assert!(line.contains(&format!("set \"HOME={}\"", home.display())), "{line}");
+        // The backend's variables go through the bridge handshake, not the line.
+        assert!(!line.contains("set \"HOME="), "{line}");
+        let child: BTreeMap<_, _> = endpoint.child_env.iter().cloned().collect();
+        assert_eq!(child["HOME"], home.display().to_string());
+        assert_eq!(child["INITIAL_AGENT_MODE"], "read-only");
         assert!(line.ends_with(&format!("{} -- {} --flag", bridge.display(), program.display())), "{line}");
         assert!(line.contains(&format!("set \"FOX_ACP_TOKEN={}\"", endpoint.token)));
         assert!(!line.contains("OPENAI_API_KEY"));
