@@ -16,12 +16,28 @@ import {
   agentBackendPickerDisabledReason,
   canPickAgentBackend,
   isAgentBackendId,
+  agentBackendCapabilityChips,
+  type AgentBackendCapabilities,
   type AgentBackendId,
   type AgentBackendStatus,
 } from '@/features/conversations/model/agent-backend'
 import './agent-backend-bar.css'
 
-export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBackendChange, refusal = null }: {
+/** The four effective capability dimensions (external backend wiring batch). */
+function CapabilityChips({ capabilities }: { capabilities: AgentBackendCapabilities | null }) {
+  const chips = agentBackendCapabilityChips(capabilities)
+  if (chips.length === 0) return null
+  return (
+    <span className="fox-agent-backend-capabilities" aria-label="后端能力声明">
+      {chips.map((chip) => (
+        <span key={chip.key} className="fox-agent-backend-capability" data-dimension={chip.key} title={chip.title}>{chip.label}</span>
+      ))}
+      {capabilities?.warning && <span className="fox-agent-backend-notice" role="note">{capabilities.warning}</span>}
+    </span>
+  )
+}
+
+export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBackendChange, refusal = null, capabilities = null }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
@@ -33,6 +49,8 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
    * notice, so a refused send never produces two messages.
    */
   refusal?: string | null
+  /** Effective capabilities of the shown external backend (locked or picked); null for Fox. */
+  capabilities?: AgentBackendCapabilities | null
 }) {
   const refusalNotice = refusal
     ? <span className="fox-agent-backend-notice fox-agent-backend-refusal" role="alert">{refusal}</span>
@@ -49,6 +67,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
           后端：{AGENT_BACKEND_LABELS[lockedBackend]}（已锁定）
         </span>
         {refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)}
+        {access === 'runnable' && <CapabilityChips capabilities={capabilities} />}
       </div>
     )
   }
@@ -87,6 +106,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
       {refusalNotice ?? <>
         {disabledReason && <span className="fox-agent-backend-notice">{disabledReason}</span>}
         {pickedNotice && <span className="fox-agent-backend-notice">{pickedNotice}</span>}
+        {value !== 'fox' && <CapabilityChips capabilities={capabilities} />}
       </>}
     </div>
   )
