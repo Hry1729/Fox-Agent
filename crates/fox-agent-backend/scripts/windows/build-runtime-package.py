@@ -4,7 +4,7 @@
 Runs on any OS (Linux CI included); paths are judged as they will be on
 Windows: ``<install root>\\<version>\\<relative path with backslashes>``.
 
-  check <dir|zip> --version V [--budget 240] [--install-root ...]
+  check <dir|zip> [--version V] [--budget 240] [--install-root ...]
       Fail (exit 1) when any file's installed path is >= budget characters,
       listing the offenders. Also checked: the enable script's staging path
       (``%ProgramFiles%\\Fox\\.s<8 hex>\\c\\...``).
@@ -12,13 +12,17 @@ Windows: ``<install root>\\<version>\\<relative path with backslashes>``.
   stage <out-dir> [--node-dir D] [--srt-prefix P] [--backend NAME=PREFIX ...]
       Assemble a package directory: copies the given Node directory to node\\,
       the srt npm prefix to srt\\, each backend prefix to backends\\<NAME>\\, and
-      Fox's runtime assets (acp-bridge\\bridge.mjs, dsh-patches\\*.yml) from this
-      crate. Does not download anything (prefixes come from
+      Fox's runtime assets from this crate: acp-bridge\\bridge.mjs,
+      dsh-patches\\*.yml and the pi approval gate pi-gate\\{pi-gated.cmd,
+      fox-approval-gate.ts} (from fixtures/pi/; Fox launches pi gated only when
+      <runtime>\\pi-gate\\pi-gated.cmd exists, otherwise stock pi without Host
+      approvals). Does not download anything (prefixes come from
       ``npm install --prefix <p> --os=win32 --cpu=x64 <pkg>@<version>``).
 
-  pack <dir> --version V --out <zip> [--budget 240]
-      Verify the layout (node\\node.exe, srt cli.js, acp-bridge\\bridge.mjs equal
-      to this crate's copy, dsh-patches equal if present), run the budget
+  pack <dir> [--version V] --out <zip> [--budget 240]
+      Verify the layout (node\\node.exe, srt cli.js, acp-bridge\\bridge.mjs and
+      pi-gate\\{pi-gated.cmd,fox-approval-gate.ts} equal to this crate's copies,
+      dsh-patches equal if present), run the budget
       check, write a deterministic zip, <zip>.sha256 and <zip>.manifest.json
       (every file with size and SHA256, longest installed path).
 
@@ -49,12 +53,22 @@ import zipfile
 
 CRATE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ASSETS = os.path.join(CRATE, "runtime-assets")
+PI_FIXTURES = os.path.join(CRATE, "fixtures", "pi")
+# Must equal fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION (the
+# directory Fox looks for under the install root); a unit test checks it.
+DEFAULT_VERSION = "0.1.2"
+# Package key -> source file in this crate. Each is copied by `stage` and must
+# be byte-equal (modulo CRLF) in `pack`.
+PI_GATE_FILES = {
+    "pi-gate/pi-gated.cmd": os.path.join(PI_FIXTURES, "pi-gated.cmd"),
+    "pi-gate/fox-approval-gate.ts": os.path.join(PI_FIXTURES, "fox-approval-gate.ts"),
+}
 DEFAULT_INSTALL_ROOT = r"C:\Program Files\Fox\sandbox-runtime"
 # enable-sandbox.ps1 extracts to %ProgramFiles%\Fox\.s<8 hex>\c first.
 STAGING_PREFIX = r"C:\Program Files\Fox\.s00000000\c"
 DEFAULT_BUDGET = 240
 SRT_CLI = "srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
-REQUIRED = ["node/node.exe", SRT_CLI, "acp-bridge/bridge.mjs"]
+REQUIRED = ["node/node.exe", SRT_CLI, "acp-bridge/bridge.mjs", *PI_GATE_FILES]
 FIXED_TIME = (2026, 1, 1, 0, 0, 0)
 
 
@@ -201,6 +215,9 @@ def verify_layout(directory):
     if "acp-bridge/bridge.mjs" in keys:
         if norm_text(read_bytes(child(root, "acp-bridge/bridge.mjs"))) != norm_text(read_bytes(fs_path(os.path.join(ASSETS, "acp-bridge", "bridge.mjs")))):
             problems.append("acp-bridge/bridge.mjs differs from runtime-assets/acp-bridge/bridge.mjs (Fox refuses to start)")
+    for key, source in PI_GATE_FILES.items():
+        if key in keys and norm_text(read_bytes(child(root, key))) != norm_text(read_bytes(fs_path(source))):
+            problems.append(f"{key} differs from fixtures/pi/{os.path.basename(source)}")
     if any(key.startswith("dsh-patches/") for key in keys):
         for name in sorted(os.listdir(fs_path(os.path.join(ASSETS, "dsh-patches")))):
             key = f"dsh-patches/{name}"
@@ -260,6 +277,10 @@ def cmd_stage(args):
     if os.path.exists(test_file):
         os.remove(test_file)
     copy_tree(os.path.join(ASSETS, "dsh-patches"), os.path.join(out, "dsh-patches"), False)
+    for key, source in PI_GATE_FILES.items():
+        target = child(fs_path(out), key)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(fs_path(source), target)
     print(f"staged {out}")
     return 0
 
@@ -315,7 +336,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     check = sub.add_parser("check")
     check.add_argument("source")
-    check.add_argument("--version", required=True)
+    check.add_argument("--version", default=DEFAULT_VERSION)
     check.add_argument("--budget", type=int, default=DEFAULT_BUDGET)
     check.add_argument("--install-root", default=DEFAULT_INSTALL_ROOT)
     check.add_argument("--json")
@@ -327,7 +348,7 @@ def main(argv=None):
     stage.add_argument("--prune-dts", action="store_true")
     pack = sub.add_parser("pack")
     pack.add_argument("source")
-    pack.add_argument("--version", required=True)
+    pack.add_argument("--version", default=DEFAULT_VERSION)
     pack.add_argument("--out", required=True)
     pack.add_argument("--budget", type=int, default=DEFAULT_BUDGET)
     pack.add_argument("--install-root", default=DEFAULT_INSTALL_ROOT)
