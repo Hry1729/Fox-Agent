@@ -596,7 +596,7 @@ impl Database {
                 .map(|node| (node.normalized.node_key.as_str(), node.task_id.as_str()))
                 .collect::<HashMap<_, _>>();
             for node in &bound_nodes {
-                let criteria_json = serde_json::to_string(&node.normalized.acceptance_criteria)
+                let criteria_json = crate::canonical_json::to_string(&node.normalized.acceptance_criteria)
                     .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
                 transaction
                     .execute(
@@ -853,7 +853,7 @@ impl Database {
     ) -> Result<GraphLeadNodeFinishResult, RepositoryError> {
         validate_graph_node_finish_input(&input)?;
         let canonical_input = node_finish_tool_input(&input);
-        let input_json = serde_json::to_string(&canonical_input)
+        let input_json = crate::canonical_json::to_string(&canonical_input)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let input_hash = sha256_hex(input_json.as_bytes());
         let now = now_ms();
@@ -1099,7 +1099,7 @@ impl Database {
     ) -> Result<GraphNodeReviewRequestResult, RepositoryError> {
         validate_graph_node_review_input(&input)?;
         let canonical_input = node_review_tool_input(&input);
-        let input_json = serde_json::to_string(&canonical_input)
+        let input_json = crate::canonical_json::to_string(&canonical_input)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let input_hash = sha256_hex(input_json.as_bytes());
         let now = now_ms();
@@ -1237,7 +1237,7 @@ impl Database {
                 "summary": input.summary,
                 "taskId": input.task_id,
             });
-            let candidate_json = serde_json::to_string(&candidate)
+            let candidate_json = crate::canonical_json::to_string(&candidate)
                 .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
             let candidate_hash = sha256_hex(candidate_json.as_bytes());
             let request_id = graph_review_request_id(&input.review_tool_call_id);
@@ -1538,7 +1538,7 @@ impl Database {
     ) -> Result<GraphAcceptanceIntentResult, RepositoryError> {
         validate_graph_acceptance_input(&input)?;
         let canonical_input = graph_accept_tool_input(&input);
-        let input_json = serde_json::to_string(&canonical_input)
+        let input_json = crate::canonical_json::to_string(&canonical_input)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let input_hash = sha256_hex(input_json.as_bytes());
         let now = now_ms();
@@ -1604,9 +1604,9 @@ impl Database {
                 false,
             )?;
             let (node_projection, checks) = graph_acceptance_projection(transaction, &spec)?;
-            let node_projection_json = serde_json::to_string(&node_projection)
+            let node_projection_json = crate::canonical_json::to_string(&node_projection)
                 .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
-            let checks_json = serde_json::to_string(&checks)
+            let checks_json = crate::canonical_json::to_string(&checks)
                 .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
             let acceptance_id = graph_acceptance_id(&input.accept_tool_call_id);
             transaction
@@ -1711,9 +1711,9 @@ impl Database {
                 &row.input_json,
             )?;
             let (projection, checks) = graph_acceptance_projection(transaction, &spec)?;
-            let projection_json = serde_json::to_string(&projection)
+            let projection_json = crate::canonical_json::to_string(&projection)
                 .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
-            let checks_json = serde_json::to_string(&checks)
+            let checks_json = crate::canonical_json::to_string(&checks)
                 .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
             if projection_json != row.node_projection_json
                 || sha256_hex(projection_json.as_bytes()) != row.node_projection_hash
@@ -1826,7 +1826,7 @@ impl Database {
     ) -> Result<GraphNodeCancelIntentResult, RepositoryError> {
         validate_graph_node_cancel_input(&input)?;
         let canonical_input = node_cancel_tool_input(&input);
-        let input_json = serde_json::to_string(&canonical_input)
+        let input_json = crate::canonical_json::to_string(&canonical_input)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let input_hash = sha256_hex(input_json.as_bytes());
         let now = now_ms();
@@ -2293,7 +2293,7 @@ fn settle_graph_node_review_by(
                     outcome = GraphNodeReviewOutcome::Inconclusive;
                     summary =
                         "independent Graph Reviewer proof was invalid or incomplete".to_owned();
-                    decision_json = serde_json::to_string(&json!({
+                    decision_json = crate::canonical_json::to_string(&json!({
                         "criteria": [],
                         "findings": [],
                         "recommendation": "inconclusive",
@@ -2311,7 +2311,7 @@ fn settle_graph_node_review_by(
             "result": raw_result,
             "status": run_status,
         });
-        let terminal_json = serde_json::to_string(&terminal)
+        let terminal_json = crate::canonical_json::to_string(&terminal)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let terminal_hash = sha256_hex(terminal_json.as_bytes());
         let proof_tool_call_mappings = proof_bindings
@@ -2323,7 +2323,7 @@ fn settle_graph_node_review_by(
                 })
             })
             .collect::<Vec<_>>();
-        let proof_tool_call_mappings_json = serde_json::to_string(&proof_tool_call_mappings)
+        let proof_tool_call_mappings_json = crate::canonical_json::to_string(&proof_tool_call_mappings)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let proof = json!({
             "candidateHash": row.5,
@@ -2335,7 +2335,7 @@ fn settle_graph_node_review_by(
             "toolCallMappings": proof_tool_call_mappings,
             "toolCallMappingsHash": sha256_hex(proof_tool_call_mappings_json.as_bytes()),
         });
-        let proof_json = serde_json::to_string(&proof)
+        let proof_json = crate::canonical_json::to_string(&proof)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let decision_id = graph_review_decision_id(&request_id);
         transaction
@@ -2499,7 +2499,7 @@ pub(super) fn reconcile_graph_child_terminal_in_transaction(
         // Graph attempts are never rewritten by Child reconciliation.
         return Ok(false);
     }
-    let terminal_json = serde_json::to_string(&json!({
+    let terminal_json = crate::canonical_json::to_string(&json!({
         "childRunId": child_run_id,
         "errorCode": &candidate.child_error_code,
         "errorMessage": &candidate.child_error_message,
@@ -3305,7 +3305,7 @@ fn authoritative_graph_review_decision(
         return (
             GraphNodeReviewOutcome::Inconclusive,
             summary,
-            serde_json::to_string(&decision).expect("static Reviewer decision is JSON"),
+            crate::canonical_json::to_string(&decision).expect("static Reviewer decision is JSON"),
         );
     }
     let parsed = raw_result
@@ -3322,7 +3322,7 @@ fn authoritative_graph_review_decision(
         return (
             GraphNodeReviewOutcome::Inconclusive,
             summary,
-            serde_json::to_string(&decision).expect("static Reviewer decision is JSON"),
+            crate::canonical_json::to_string(&decision).expect("static Reviewer decision is JSON"),
         );
     };
     let object = parsed.as_object().expect("filtered object");
@@ -3350,7 +3350,7 @@ fn authoritative_graph_review_decision(
         return (
             GraphNodeReviewOutcome::Inconclusive,
             summary,
-            serde_json::to_string(&decision).expect("static Reviewer decision is JSON"),
+            crate::canonical_json::to_string(&decision).expect("static Reviewer decision is JSON"),
         );
     }
     let outcome = match recommendation {
@@ -3369,10 +3369,10 @@ fn authoritative_graph_review_decision(
         return (
             GraphNodeReviewOutcome::Inconclusive,
             summary,
-            serde_json::to_string(&decision).expect("canonical inconclusive is JSON"),
+            crate::canonical_json::to_string(&decision).expect("canonical inconclusive is JSON"),
         );
     }
-    let canonical = serde_json::to_string(&parsed).expect("parsed Reviewer output is JSON");
+    let canonical = crate::canonical_json::to_string(&parsed).expect("parsed Reviewer output is JSON");
     (outcome, summary, canonical)
 }
 
@@ -4348,7 +4348,7 @@ fn authoritative_completed_graph_child(
         )));
     }
     require_frozen_durable_child_run(transaction, &child.0, parent_run_id, &child.1)?;
-    let result_json = serde_json::to_string(&json!({
+    let result_json = crate::canonical_json::to_string(&json!({
         "childRunId": &child.0,
         "status": &child.3,
         "finishedAt": child.4,
@@ -4822,7 +4822,7 @@ fn require_frozen_durable_child_run(
             "Graph Child Run lineage does not match its parent delegation".to_owned(),
         ));
     }
-    let expected_snapshot = serde_json::to_string(&json!({
+    let expected_snapshot = crate::canonical_json::to_string(&json!({
         "schemaVersion": 1,
         "id": GRAPH_CHILD_PROFILE
     }))
@@ -5216,7 +5216,7 @@ fn require_frozen_durable_parent_run(
             "Graph parent Run '{run_id}' must be a depth-zero primary Lead Run"
         )));
     }
-    let expected_snapshot = serde_json::to_string(&json!({
+    let expected_snapshot = crate::canonical_json::to_string(&json!({
         "schemaVersion": 1,
         "id": "durable_v2"
     }))
@@ -5325,7 +5325,7 @@ fn graph_spec_hash(
         "maxDepth": GRAPH_MAX_DEPTH,
         "nodes": canonical_nodes,
     });
-    let encoded = serde_json::to_vec(&canonical)
+    let encoded = crate::canonical_json::to_vec(&canonical)
         .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
@@ -7205,7 +7205,7 @@ mod tests {
             )
             .unwrap();
         thread::sleep(std::time::Duration::from_millis(2));
-        let reviewer_result = serde_json::to_string(&json!({
+        let reviewer_result = crate::canonical_json::to_string(&json!({
             "criteria": [{
                 "criterion": "result inspected",
                 "status": "passed",
@@ -7464,7 +7464,7 @@ mod tests {
             )
             .unwrap();
         thread::sleep(std::time::Duration::from_millis(2));
-        let reviewer_result = serde_json::to_string(&json!({
+        let reviewer_result = crate::canonical_json::to_string(&json!({
             "criteria": [{
                 "criterion": "result inspected",
                 "status": "failed",
