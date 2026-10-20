@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use crate::database::{AcceptanceRecord, PlanRevisionRecord, ReviewFindingRecord};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -38,7 +40,7 @@ impl Database {
                 "INSERT INTO plan_revisions(id, goal_id, conversation_id, revision, title, summary,
                      tasks_json, status, created_by, created_at, approved_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'proposed', ?8, ?9, NULL)",
-                params![id, goal_id, conversation_id, revision, title, summary, tasks.to_string(), created_by, created_at],
+                params![id, goal_id, conversation_id, revision, title, summary, tasks.canonical_string(), created_by, created_at],
             )?;
             let record = transaction.query_row("SELECT id, goal_id, conversation_id, revision, title, summary, tasks_json, status, created_by, created_at, approved_at FROM plan_revisions WHERE id = ?1", [&id], plan_revision_from_row)?;
             transaction.commit()?;
