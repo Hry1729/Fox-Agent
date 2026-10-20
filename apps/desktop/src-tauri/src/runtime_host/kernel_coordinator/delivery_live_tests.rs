@@ -69,6 +69,7 @@ fn delivery_provider_with_ids(
                 assert!(Instant::now() < deadline, "only abandoned sockets for {reply}");
             };
             requests.push(request);
+            note_stub_request(address);
             // "drop" answers nothing and closes: the worker sees a transport
             // failure, so this round goes through the Host's model-retry lane
             // before the next scripted reply is served.
@@ -113,6 +114,283 @@ fn delivery_provider_with_ids(
         requests
     });
     (address, server)
+}
+
+// ---------------------------------------------------------------------------
+// Failure diagnostics for the live delivery drives.
+//
+// These helpers only *read* state after the drive has ended and format it into
+// assertion messages; they never change what a test asserts. They exist because
+// `a_crash_while_finalizing_the_nth_item_leaves_recoverable_state` failed on one
+// Windows checkout with nothing but `left: 0, right: 1`, and the drive result
+// was discarded (`let _ = drive`).
+// ---------------------------------------------------------------------------
+
+/// Model requests the scripted stub has received, keyed by its (unique) bound
+/// address so parallel tests never read each other's counters.
+fn stub_request_counts() -> &'static std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, usize>> {
+    static COUNTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::net::SocketAddr, usize>>,
+    > = std::sync::OnceLock::new();
+    COUNTS.get_or_init(Default::default)
+}
+
+fn note_stub_request(address: std::net::SocketAddr) {
+    if let Ok(mut counts) = stub_request_counts().lock() {
+        *counts.entry(address).or_default() += 1;
+    }
+}
+
+fn stub_requests_seen(address: std::net::SocketAddr) -> usize {
+    stub_request_counts()
+        .lock()
+        .map(|counts| counts.get(&address).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
+/// Consume the stub's join handle the way `drop(server)` did (a still-running
+/// stub stays detached), but report what it saw: how many model requests
+/// arrived and whether the stub thread itself panicked (e.g. "missing model
+/// request" after its 25 s accept deadline).
+fn stub_report(
+    address: std::net::SocketAddr,
+    scripted: usize,
+    server: std::thread::JoinHandle<Vec<Value>>,
+) -> String {
+    let seen = stub_requests_seen(address);
+    if server.is_finished() {
+        match server.join() {
+            Ok(requests) => format!(
+                "model stub {address}: finished, {} of {scripted} scripted request(s) received",
+                requests.len()
+            ),
+            Err(payload) => format!(
+                "model stub {address}: thread PANICKED after {seen} of {scripted} request(s): {}",
+                panic_text(payload.as_ref())
+            ),
+        }
+    } else {
+        format!(
+            "model stub {address}: still waiting (detached) after {seen} of {scripted} scripted request(s)"
+        )
+    }
+}
+
+fn describe_drive<T>(drive: &Result<T, String>) -> String {
+    match drive {
+        Ok(_) => "Ok(())".to_owned(),
+        Err(error) => format!("Err({error})"),
+    }
+}
+
+fn describe_caught<T>(outcome: &std::thread::Result<Result<T, String>>) -> String {
+    match outcome {
+        Ok(drive) => format!("returned without panicking: {}", describe_drive(drive)),
+        Err(payload) => format!("panicked: {}", panic_text(payload.as_ref())),
+    }
+}
+
+/// `finalize_fault`/`stage_fault` are thread-local. Read them on the test
+/// thread **before** `disarm`; `counted` is how many guarded updates ran on this
+/// thread, so `counted == 0` means the guarded write never ran here (not reached,
+/// or reached on another thread where the fault is not armed).
+fn describe_fault(name: &str, observed: (Option<usize>, usize)) -> String {
+    let (limit, counted) = observed;
+    let fired = limit.is_some_and(|limit| counted > limit);
+    format!(
+        "{name}: armed={limit:?} counted_on_test_thread={counted} fired={fired} (test thread {:?})",
+        std::thread::current().id()
+    )
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        text.to_owned()
+    } else {
+        format!("{}…(+{} chars)", text.chars().take(limit).collect::<String>(), count - limit)
+    }
+}
+
+fn diag_rows(db: &Database, sql: &str, run_id: &str) -> String {
+    let rows = db.with_connection(|connection| {
+        let mut statement = connection.prepare(sql)?;
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([run_id], |row| {
+                let mut cells = Vec::with_capacity(columns);
+                for index in 0..columns {
+                    let cell = match row.get_ref(index)? {
+                        rusqlite::types::ValueRef::Null => "NULL".to_owned(),
+                        rusqlite::types::ValueRef::Integer(value) => value.to_string(),
+                        rusqlite::types::ValueRef::Real(value) => value.to_string(),
+                        rusqlite::types::ValueRef::Text(value) => {
+                            truncate_chars(&String::from_utf8_lossy(value), 400)
+                        }
+                        rusqlite::types::ValueRef::Blob(value) => format!("<blob {} bytes>", value.len()),
+                    };
+                    cells.push(cell);
+                }
+                Ok(cells.join(" | "))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    });
+    match rows {
+        Ok(rows) if rows.is_empty() => "    (none)".to_owned(),
+        Ok(rows) => rows.iter().map(|row| format!("    {row}")).collect::<Vec<_>>().join("\n"),
+        Err(error) => format!("    <query failed: {error}>"),
+    }
+}
+
+/// Everything known about a finished live drive, for an assertion message.
+fn drive_diagnostics(
+    db: &Database,
+    root: &Path,
+    run_id: &str,
+    drive: &str,
+    elapsed: Duration,
+    stub: &str,
+    faults: &[String],
+) -> String {
+    let worker = real_worker_command();
+    let script = worker.script.clone().unwrap_or_default();
+    let runtime_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../services/agent-runtime");
+    let node_version = std::process::Command::new(&worker.program)
+        .arg("--version")
+        .output()
+        .map(|output| {
+            format!(
+                "status={} stdout={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                truncate_chars(String::from_utf8_lossy(&output.stderr).trim(), 300)
+            )
+        })
+        .unwrap_or_else(|error| format!("<spawn failed: {error}>"));
+    let root_text = root.to_string_lossy();
+    let canonical = std::fs::canonicalize(root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|error| format!("<canonicalize failed: {error}>"));
+    let staged = db
+        .staged_delivery_rounds()
+        .map(|rounds| format!("{rounds:?}"))
+        .unwrap_or_else(|error| format!("<failed: {error}>"));
+    let mut out = String::new();
+    out.push_str("\n===== live delivery drive diagnostics =====\n");
+    out.push_str(&format!("drive result: {drive}\n"));
+    out.push_str(&format!("drive elapsed: {} ms\n", elapsed.as_millis()));
+    out.push_str(&format!("{stub}\n"));
+    for fault in faults {
+        out.push_str(&format!("{fault}\n"));
+    }
+    out.push_str("--- environment (checkout-dependent) ---\n");
+    out.push_str(&format!(
+        "worker: program={:?} script={} (exists={}, {} chars)\n",
+        worker.program,
+        script.display(),
+        script.is_file(),
+        script.to_string_lossy().chars().count()
+    ));
+    out.push_str(&format!(
+        "worker deps: {} exists={} ; node --version: {node_version}\n",
+        runtime_dir.join("node_modules").display(),
+        runtime_dir.join("node_modules").is_dir()
+    ));
+    // pnpm links each package into node_modules; a copied/moved checkout can
+    // keep links that point into ANOTHER checkout or nowhere. Print where each
+    // worker dependency really resolves.
+    for package in [
+        "@earendil-works/pi-ai",
+        "@earendil-works/pi-agent-core",
+        "@earendil-works/pi-coding-agent",
+        "typebox",
+    ] {
+        let manifest = runtime_dir.join("node_modules").join(package).join("package.json");
+        let resolved = std::fs::canonicalize(&manifest)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|error| format!("<unresolved: {error}>"));
+        let version = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|manifest| manifest["version"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "?".to_owned());
+        out.push_str(&format!("  dep {package}@{version} -> {resolved}\n"));
+    }
+    let protocol = runtime_dir.join("../../packages/fox-engine-protocol/index.mjs");
+    out.push_str(&format!(
+        "  packages/fox-engine-protocol/index.mjs exists={}\n",
+        protocol.is_file()
+    ));
+    // Load the worker's own module graph exactly as the Host's `node <script>`
+    // would resolve it (no model call, no stdin protocol): a missing or broken
+    // dependency shows up here as an import error.
+    let import_probe = std::process::Command::new(&worker.program)
+        .current_dir(&runtime_dir)
+        .args([
+            "--input-type=module",
+            "-e",
+            "for (const m of ['@earendil-works/pi-ai','@earendil-works/pi-agent-core','@earendil-works/pi-coding-agent','typebox']) { await import(m) } console.log('imports ok')",
+        ])
+        .output()
+        .map(|output| {
+            format!(
+                "status={} stdout={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                truncate_chars(String::from_utf8_lossy(&output.stderr).trim(), 800)
+            )
+        })
+        .unwrap_or_else(|error| format!("<spawn failed: {error}>"));
+    out.push_str(&format!("  worker import probe (cwd={}): {import_probe}\n", runtime_dir.display()));
+    out.push_str(&format!(
+        "FOX_KERNEL_WORKER_STDERR={:?} (set to `inherit` to see the Node worker's own stderr)\n",
+        std::env::var("FOX_KERNEL_WORKER_STDERR").ok()
+    ));
+    out.push_str(&format!(
+        "fixture root: {root_text} ({} chars, {} bytes); canonical: {canonical}\n",
+        root_text.chars().count(),
+        root_text.len()
+    ));
+    out.push_str(&format!(
+        "temp_dir: {} ; CARGO_MANIFEST_DIR: {} ({} chars)\n",
+        std::env::temp_dir().display(),
+        env!("CARGO_MANIFEST_DIR"),
+        env!("CARGO_MANIFEST_DIR").chars().count()
+    ));
+    out.push_str("--- durable state ---\n");
+    out.push_str(&format!("run_id: {run_id}\n"));
+    out.push_str("kernel_runs (state | last_event_seq | terminal_at | updated_at):\n");
+    out.push_str(&diag_rows(db, "SELECT state, last_event_seq, terminal_at, updated_at FROM kernel_runs WHERE run_id=?1", run_id));
+    out.push_str("\nruns (status | error_code | error_message):\n");
+    out.push_str(&diag_rows(db, "SELECT status, error_code, error_message FROM runs WHERE id=?1", run_id));
+    out.push_str("\nrun.failed / budget events (seq | type | code | message):\n");
+    out.push_str(&diag_rows(db,
+        "SELECT seq, event_type, json_extract(payload_json,'$.code'), json_extract(payload_json,'$.message')
+         FROM kernel_events WHERE run_id=?1 AND event_type IN ('run.failed','run.budget_exhausted','run.approval_expired','run.cancelled')
+         ORDER BY seq", run_id));
+    out.push_str("\nkernel_events tail, newest first (seq | type | payload):\n");
+    out.push_str(&diag_rows(db,
+        "SELECT seq, event_type, payload_json FROM kernel_events WHERE run_id=?1 ORDER BY seq DESC LIMIT 20", run_id));
+    out.push_str("\nkernel_tool_calls (tool_call_id | tool | state):\n");
+    out.push_str(&diag_rows(db, "SELECT tool_call_id, tool, state FROM kernel_tool_calls WHERE run_id=?1 ORDER BY created_at", run_id));
+    out.push_str("\nkernel_decision_marks (mark | created_at):\n");
+    out.push_str(&diag_rows(db, "SELECT mark, created_at FROM kernel_decision_marks WHERE run_id=?1 ORDER BY created_at", run_id));
+    out.push_str("\ndelivery_outcome_stage (item_key | passed | decision_mark):\n");
+    out.push_str(&diag_rows(db, "SELECT item_key, passed, decision_mark FROM delivery_outcome_stage WHERE run_id=?1 ORDER BY item_key", run_id));
+    out.push_str("\ndelivery_checklist_items (item_key | status | has_finding):\n");
+    out.push_str(&diag_rows(db, "SELECT item_key, status, finding_json IS NOT NULL FROM delivery_checklist_items WHERE run_id=?1 ORDER BY item_key", run_id));
+    out.push_str(&format!("\nstaged_delivery_rounds(): {staged}\n"));
+    out.push_str("===== end diagnostics =====\n");
+    out
 }
 
 struct DeliveryLive {
@@ -697,6 +975,7 @@ fn a_crash_after_the_round_decision_is_recovered_from_the_staged_verdicts() {
         Box::new(|| panic!("injected: process died after the round decision committed")),
     );
     let executions = AtomicUsize::new(0);
+    let started = Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::runtime_host::kernel_host::drive_with_actions(
             &crate::runtime_host::kernel_host::acquire(&root, &run_id).unwrap(),
@@ -709,22 +988,34 @@ fn a_crash_after_the_round_decision_is_recovered_from_the_staged_verdicts() {
             |_| Ok(()), |_| Ok(()), &|_: &fox_engine_protocol::KernelModelPreview| {},
         )
     }));
+    let elapsed = started.elapsed();
+    let barrier_key = format!("{run_id}:delivery:committed");
+    let barrier = format!(
+        "test_barrier {barrier_key}: fired={}",
+        !super::live::test_barrier::pending(&barrier_key)
+    );
+    let stub = stub_report(address, 1, server);
+    let diagnostics = || {
+        drive_diagnostics(&db, &root, &run_id, &describe_caught(&outcome), elapsed, &stub,
+            std::slice::from_ref(&barrier))
+    };
     assert!(
         outcome.is_err(),
-        "the injected death must really interrupt the drive"
+        "the injected death must really interrupt the drive{}",
+        diagnostics()
     );
-    drop(server);
 
     // Fact 1: the decision committed before the crash, and its mark with it.
     let state = db.kernel_build_full_snapshot(&run_id).unwrap().state;
-    assert_eq!(state, "completed", "the injected window is after the commit");
+    assert_eq!(state, "completed", "the injected window is after the commit{}", diagnostics());
     let staged = db.staged_delivery_rounds().unwrap();
-    assert_eq!(staged.len(), 1, "{staged:?}");
+    assert_eq!(staged.len(), 1, "{staged:?}{}", diagnostics());
     let (staged_run, mark) = staged[0].clone();
     assert_eq!(staged_run, run_id);
     assert!(
         db.decision_mark_committed(&run_id, &mark).unwrap(),
-        "the committed decision must have left its mark"
+        "the committed decision must have left its mark{}",
+        diagnostics()
     );
 
     // Fact 2: nothing was finalized, and no item was touched before the decision
@@ -795,6 +1086,7 @@ fn a_crash_while_finalizing_the_nth_item_leaves_recoverable_state() {
     // Abort inside the finalize transaction once the first item was updated. The
     // transaction rolls back, which is exactly what a process death does.
     crate::database::finalize_fault::abort_after(1);
+    let started = Instant::now();
     let drive = crate::runtime_host::kernel_host::drive_with_actions(
         &crate::runtime_host::kernel_host::acquire(&root, &run_id).unwrap(),
         &db, &clock, &CancellationRegistry::default(), &run_id, &real_worker_command(),
@@ -802,26 +1094,37 @@ fn a_crash_while_finalizing_the_nth_item_leaves_recoverable_state() {
         |_, _, _| Ok((true, json!({"content":[{"type":"text","text":"no tool expected"}]}))),
         |_| Ok(()), |_| Ok(()), &|_: &fox_engine_protocol::KernelModelPreview| {},
     );
+    let elapsed = started.elapsed();
+    // Read the thread-local fault counter before `disarm` resets it.
+    let fault = describe_fault(
+        "finalize_fault",
+        crate::database::finalize_fault::observed(),
+    );
     crate::database::finalize_fault::disarm();
-    drop(server);
+    let stub = stub_report(address, 1, server);
     // The interrupted ledger write must leave the delivery *unfinished*: the
     // drive may end the Run (a failed round is a terminal condition), but it
-    // must never report these items as delivered.
-    let _ = drive;
+    // must never report these items as delivered. The drive result itself is
+    // not asserted (unchanged semantics); it is only reported on failure.
+    let diagnostics = || {
+        drive_diagnostics(&db, &root, &run_id, &describe_drive(&drive), elapsed, &stub,
+            std::slice::from_ref(&fault))
+    };
 
     // Nothing was half-written: the stage survives with its committed mark, and
     // no item carries a verdict yet.
     let statuses = item_statuses(&db, &run_id);
-    assert_eq!(statuses.len(), 2, "{statuses:?}");
+    assert_eq!(statuses.len(), 2, "{statuses:?}{}", diagnostics());
     for (item_key, status) in &statuses {
-        assert_eq!(status, "pending", "{item_key} must not be half-finalized");
+        assert_eq!(status, "pending", "{item_key} must not be half-finalized{}", diagnostics());
     }
-    assert_eq!(finalized_item_count(&db, &run_id), 0);
+    assert_eq!(finalized_item_count(&db, &run_id), 0, "{}", diagnostics());
     let staged = db.staged_delivery_rounds().unwrap();
-    assert_eq!(staged.len(), 1, "{staged:?}");
+    assert_eq!(staged.len(), 1, "{staged:?}{}", diagnostics());
     assert!(
         db.decision_mark_committed(&staged[0].0, &staged[0].1).unwrap(),
-        "the decision committed, so recovery is allowed to finish it"
+        "the decision committed, so recovery is allowed to finish it{}",
+        diagnostics()
     );
 
     // A new Host recovers the whole set, and the repair budget stays unspent.
@@ -869,6 +1172,7 @@ fn a_crash_before_the_round_decision_never_finalizes_the_staged_verdicts() {
         &format!("{run_id}:delivery:staged"),
         Box::new(|| panic!("injected: process died after staging, before the decision committed")),
     );
+    let started = Instant::now();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::runtime_host::kernel_host::drive_with_actions(
             &crate::runtime_host::kernel_host::acquire(&root, &run_id).unwrap(),
@@ -878,21 +1182,32 @@ fn a_crash_before_the_round_decision_never_finalizes_the_staged_verdicts() {
             |_| Ok(()), |_| Ok(()), &|_: &fox_engine_protocol::KernelModelPreview| {},
         )
     }));
-    assert!(outcome.is_err(), "the injected death must interrupt the drive");
-    drop(server);
+    let elapsed = started.elapsed();
+    let barrier_key = format!("{run_id}:delivery:staged");
+    let barrier = format!(
+        "test_barrier {barrier_key}: fired={}",
+        !super::live::test_barrier::pending(&barrier_key)
+    );
+    let stub = stub_report(address, 1, server);
+    let diagnostics = || {
+        drive_diagnostics(&db, &root, &run_id, &describe_caught(&outcome), elapsed, &stub,
+            std::slice::from_ref(&barrier))
+    };
+    assert!(outcome.is_err(), "the injected death must interrupt the drive{}", diagnostics());
 
     // The stage exists, but its mark was never written by a commit.
     let staged = db.staged_delivery_rounds().unwrap();
-    assert_eq!(staged.len(), 1, "the stage must be there: {staged:?}");
+    assert_eq!(staged.len(), 1, "the stage must be there: {staged:?}{}", diagnostics());
     let (staged_run, mark) = staged[0].clone();
     assert_eq!(staged_run, run_id);
     assert!(
         !db.decision_mark_committed(&run_id, &mark).unwrap(),
-        "the decision never committed, so its mark must be absent"
+        "the decision never committed, so its mark must be absent{}",
+        diagnostics()
     );
     // And the decision really did not land: the Run is not completed.
     let state = db.kernel_build_full_snapshot(&run_id).unwrap().state;
-    assert_ne!(state, "completed", "the decision must not have committed: {state}");
+    assert_ne!(state, "completed", "the decision must not have committed: {state}{}", diagnostics());
 
     // Recovery must refuse to finalize those verdicts, and must not leave the
     // stage behind for a later round to pick up either.
@@ -944,6 +1259,7 @@ fn a_stage_failure_at_the_nth_item_leaves_no_partial_round() {
 
     // Abort while inserting the second item's stage row.
     crate::database::stage_fault::abort_after(1);
+    let started = Instant::now();
     let drive = crate::runtime_host::kernel_host::drive_with_actions(
         &crate::runtime_host::kernel_host::acquire(&root, &run_id).unwrap(),
         &db, &clock, &CancellationRegistry::default(), &run_id, &real_worker_command(),
@@ -951,20 +1267,27 @@ fn a_stage_failure_at_the_nth_item_leaves_no_partial_round() {
         |_, _, _| Ok((true, json!({"content":[{"type":"text","text":"no tool expected"}]}))),
         |_| Ok(()), |_| Ok(()), &|_: &fox_engine_protocol::KernelModelPreview| {},
     );
+    let elapsed = started.elapsed();
+    let fault = describe_fault("stage_fault", crate::database::stage_fault::observed());
     crate::database::stage_fault::disarm();
-    drop(server);
-    let _ = drive;
+    let stub = stub_report(address, 1, server);
+    // The drive result is not asserted (unchanged semantics); it is reported.
+    let diagnostics = || {
+        drive_diagnostics(&db, &root, &run_id, &describe_drive(&drive), elapsed, &stub,
+            std::slice::from_ref(&fault))
+    };
 
     // The whole batch rolled back: no partial stage, and nothing finalized.
     assert!(
         db.staged_delivery_rounds().unwrap().is_empty(),
-        "a failed stage must leave no round behind: {:?}",
-        db.staged_delivery_rounds().unwrap()
+        "a failed stage must leave no round behind: {:?}{}",
+        db.staged_delivery_rounds().unwrap(),
+        diagnostics()
     );
     for (item_key, status) in item_statuses(&db, &run_id) {
-        assert_eq!(status, "pending", "{item_key}");
+        assert_eq!(status, "pending", "{item_key}{}", diagnostics());
     }
-    assert_eq!(finalized_item_count(&db, &run_id), 0);
+    assert_eq!(finalized_item_count(&db, &run_id), 0, "{}", diagnostics());
     assert_eq!(
         crate::runtime_host::delivery::finalize_staged_outcomes(&db).unwrap(),
         0
@@ -1011,6 +1334,8 @@ fn a_steering_takeover_withdraws_the_abandoned_rounds_stage() {
             let _ = &request_id;
         }),
     );
+    let barrier_key = format!("{run_id}:delivery:staged");
+    let started = Instant::now();
     let drive = crate::runtime_host::kernel_host::drive_with_actions(
         &crate::runtime_host::kernel_host::acquire(&root, &run_id).unwrap(),
         &db, &clock, &CancellationRegistry::default(), &run_id, &real_worker_command(),
@@ -1018,15 +1343,25 @@ fn a_steering_takeover_withdraws_the_abandoned_rounds_stage() {
         |_, _, _| Ok((true, json!({"content":[{"type":"text","text":"no tool expected"}]}))),
         |_| Ok(()), |_| Ok(()), &|_: &fox_engine_protocol::KernelModelPreview| {},
     );
-    drop(server);
-    let _ = drive;
+    let elapsed = started.elapsed();
+    let barrier = format!(
+        "test_barrier {barrier_key}: fired={}",
+        !super::live::test_barrier::pending(&barrier_key)
+    );
+    let stub = stub_report(address, 2, server);
+    // The drive result is not asserted (unchanged semantics); it is reported.
+    let diagnostics = || {
+        drive_diagnostics(&db, &root, &run_id, &describe_drive(&drive), elapsed, &stub,
+            std::slice::from_ref(&barrier))
+    };
 
     // Whatever the round did, no stage may survive without a committed mark, and
     // the checklist must not contain a verdict no decision authorized.
     for (run, mark) in db.staged_delivery_rounds().unwrap() {
         assert!(
             db.decision_mark_committed(&run, &mark).unwrap(),
-            "a lingering stage must belong to a committed decision: {mark}"
+            "a lingering stage must belong to a committed decision: {mark}{}",
+            diagnostics()
         );
     }
     let statuses = item_statuses(&db, &run_id);
@@ -1034,7 +1369,8 @@ fn a_steering_takeover_withdraws_the_abandoned_rounds_stage() {
         if !db.staged_delivery_rounds().unwrap().is_empty() {
             assert!(
                 status == "pending" || status == "passed" || status == "failed",
-                "{item_key} has an impossible status {status}"
+                "{item_key} has an impossible status {status}{}",
+                diagnostics()
             );
         }
     }
