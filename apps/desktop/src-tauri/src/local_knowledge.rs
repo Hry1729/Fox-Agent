@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::{
     app_state::AppState,
     database::{ApiResponse, Database},
@@ -2267,7 +2269,7 @@ impl LocalKnowledgeStore {
                     "parserVersion": parser_version,
                     "chunkConfigHash": chunk_config_hash,
                 })
-                .to_string();
+                .canonical_string();
                 transaction.execute(
                     "INSERT INTO local_kb_jobs(
                         id, parent_operation_id, knowledge_base_id, job_type, status,
