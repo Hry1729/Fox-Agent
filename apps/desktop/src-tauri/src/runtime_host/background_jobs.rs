@@ -1,4 +1,6 @@
 //! Production orchestration shared by Kernel tools, Legacy tools and desktop commands.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::attachment_compute::host_lifecycle::{self, HostJobLaunch, JobTokenRegistry};
 use crate::{database::{Database, JobStartRequest, JobState}, kernel::CancellationToken};
 use serde_json::{json, Value};
@@ -78,7 +80,7 @@ pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
             match tool {
                 "compute_job_cancel" => serde_json::to_value(host_lifecycle::cancel_host_job(database,registry(),id)?).map_err(|e|e.to_string())?,
                 "compute_job_result" => {
-                    let text=database.kernel_job_result_value(&conversation,id)?.to_string();
+                    let text=database.kernel_job_result_value(&conversation,id)?.canonical_string();
                     let offset=input.get("offset").map(|v|v.as_u64().ok_or("invalid offset")).transpose()?.unwrap_or(0) as usize;
                     let limit=input.get("limit").map(|v|v.as_u64().ok_or("invalid limit")).transpose()?.unwrap_or(16384) as usize;
                     if !(4..=65536).contains(&limit)||offset>text.len()||!text.is_char_boundary(offset) {return Err("invalid UTF-8 result range; limit must be 4..65536".into());}
@@ -98,7 +100,7 @@ pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
             }
         }
     };
-    Ok(json!({"content":[{"type":"text","text":result.to_string()}],"details":{}}))
+    Ok(json!({"content":[{"type":"text","text":result.canonical_string()}],"details":{}}))
 }
 
 impl Database {
