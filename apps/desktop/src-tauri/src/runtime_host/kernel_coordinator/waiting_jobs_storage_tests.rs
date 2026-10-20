@@ -1,5 +1,7 @@
 //! B2b-1 storage tests. These use a real SQLite Run, model lease and Job
 //! settlement; they do not claim that the detached Host/wake loop is wired.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::{JobStartRequest, ModelNoticeInput};
 use crate::kernel::{RunState, WaitingJobFact};
@@ -76,13 +78,13 @@ fn parked_job_fixture_with_inputs(mutation: Option<&str>, history_override: Opti
             "content":[{"type":"text","text":"The child Job is still running."}]}),
     };
     response.validate().unwrap();
-    let response_json = serde_json::to_string(&response).unwrap();
+    let response_json = crate::canonical_json::to_string(&response).unwrap();
     let settled = controller.record_initial_model_response(&response_json).unwrap();
     let response_seq = controller.last_event_seq();
     let mut effects = vec![settled];
     let parked_history = history_override.unwrap_or_else(||json!(frame.input.messages));
     effects.extend(controller.park_waiting_jobs(now,now,db.kernel_data_root_id(),
-        response_seq,&response_json,&parked_history.to_string(),
+        response_seq,&response_json,&parked_history.canonical_string(),
         &[WaitingJobFact {job_id: job.clone(),attempt:1,deadline_wall_ms:now+6_000}]).unwrap());
     let committed=db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
         "owner",true,None,None);
@@ -303,7 +305,7 @@ fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice
         { let mut value=payload.clone(); value["input"]["messages"][0]["content"]=json!("forged"); value },
     ] {
         let mut rejected=first.clone();
-        let effects=rejected.wake_waiting_jobs(park_seq,now+1_000,&forged.to_string()).unwrap();
+        let effects=rejected.wake_waiting_jobs(park_seq,now+1_000,&forged.canonical_string()).unwrap();
         let error=db.kernel_commit_decision(&run,now+1_000,&rejected.persist_command(&effects)).unwrap_err();
         assert!(error.contains("job notice"),"unexpected wake refusal: {error}");
         assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
@@ -312,7 +314,7 @@ fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice
             [&run],|row|row.get(0))).unwrap();
         assert_eq!(pending,0,"forged wake may not create an outbox");
     }
-    let payload=payload.to_string();
+    let payload=payload.canonical_string();
     let effects=first.wake_waiting_jobs(park_seq,now+1_000,&payload).unwrap();
     let command=first.persist_command(&effects);
     let old_policy=db.execution_policy(&conversation).unwrap();
@@ -368,7 +370,7 @@ fn automatic_waiting_wake_cannot_overtake_a_queued_cancel() {
     let next_seq=controller.last_event_seq()+2;
     let payload=json!({"turnId":input.turn_id,"effectKey":format!("continuation:{next_seq}"),
         "lane":"job_notice","prompt":"","input":input,"hostJobNotices":notices});
-    let effects=controller.wake_waiting_jobs(park_seq,now+1_000,&payload.to_string()).unwrap();
+    let effects=controller.wake_waiting_jobs(park_seq,now+1_000,&payload.canonical_string()).unwrap();
     let version=db.execution_policy(&conversation).unwrap().version;
     db.queue_kernel_host_command(&run,None).unwrap();
     let rejected=db.kernel_commit_waiting_wake(&run,now+1_000,
@@ -469,7 +471,7 @@ fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() 
         assistant_message:json!({"role":"assistant","stopReason":"stop",
             "content":[{"type":"text","text":"The calculation is ready."}]}),
     };
-    let response_json=serde_json::to_string(&response).unwrap();
+    let response_json=crate::canonical_json::to_string(&response).unwrap();
     let mut next_input=frame.input.clone();
     next_input.messages.push(response.assistant_message.clone());
     for forged in [
@@ -483,12 +485,12 @@ fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() 
             // The controller itself may refuse a missing notice before the
             // transaction, which is still a fail-closed result.
             assert!(rejected.request_job_notice_followup(
-                &serde_json::to_string(&forged.0).unwrap(),"[]").is_err());
+                &crate::canonical_json::to_string(&forged.0).unwrap(),"[]").is_err());
             continue;
         }
         effects.extend(rejected.request_job_notice_followup(
-            &serde_json::to_string(&forged.0).unwrap(),
-            &serde_json::to_string(&forged.1).unwrap()).unwrap());
+            &crate::canonical_json::to_string(&forged.0).unwrap(),
+            &crate::canonical_json::to_string(&forged.1).unwrap()).unwrap());
         let error=db.kernel_commit_initial_model(&run,now,&rejected.persist_command(&effects),
             "owner",true,None,None).unwrap_err();
         assert!(error.contains("job notice"),"unexpected direct refusal: {error}");
@@ -496,8 +498,8 @@ fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() 
     let mut accepted=controller;
     let mut effects=vec![accepted.record_initial_model_response(&response_json).unwrap()];
     effects.extend(accepted.request_job_notice_followup(
-        &serde_json::to_string(&next_input).unwrap(),
-        &serde_json::to_string(&notices).unwrap()).unwrap());
+        &crate::canonical_json::to_string(&next_input).unwrap(),
+        &crate::canonical_json::to_string(&notices).unwrap()).unwrap());
     db.kernel_commit_initial_model(&run,now,&accepted.persist_command(&effects),
         "owner",true,None,None).unwrap();
     let outbox:i64=db.with_connection(|conn|conn.query_row(
