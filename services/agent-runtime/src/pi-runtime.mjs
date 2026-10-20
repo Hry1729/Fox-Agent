@@ -56,7 +56,11 @@ const sessions = new Map()
 const activeRuns = new Map()
 const pendingHostRequests = new Map()
 const RUNTIME_HTTP_IDLE_TIMEOUT_MS = 90_000
-const HOST_REQUEST_TIMEOUT_MS = 6 * 60_000
+// Host requests have no fixed timeout. A Host tool may wait for a human
+// approval, and approvals wait for the user without expiring (Claude Code /
+// Codex CLI / ACP semantics). Every Host operation is still bounded on the Host
+// side (tool execution / Run budgets), and a request ends early when the Run is
+// cancelled (`signal`) or the runtime shuts down (`cancelPendingHostRequests`).
 // No-progress guard (#8/#9/#6 of the ABC review). There is no fixed per-run
 // search count and no cross-run identical-call counter: a 7th productive
 // search, a poll whose state keeps changing, and a read-after-write all
@@ -151,7 +155,6 @@ function requestHost(request, type, payload, signal) {
   return new Promise((resolve, reject) => {
     let settled = false
     const cleanup = () => {
-      clearTimeout(timeout)
       signal?.removeEventListener('abort', abort)
       pendingHostRequests.delete(message.id)
     }
@@ -166,11 +169,6 @@ function requestHost(request, type, payload, signal) {
       error.code = 'runtime.host_request_cancelled'
       settle(reject, error)
     }
-    const timeout = setTimeout(() => {
-      const error = new Error(`Host request ${type} timed out after ${HOST_REQUEST_TIMEOUT_MS}ms.`)
-      error.code = 'runtime.host_request_timeout'
-      settle(reject, error)
-    }, HOST_REQUEST_TIMEOUT_MS)
     signal?.addEventListener('abort', abort, { once: true })
     pendingHostRequests.set(message.id, {
       runId: request.runId,
