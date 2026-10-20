@@ -270,6 +270,23 @@ fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite:
 }
 
 impl Database {
+    /// Open the desktop database, first backing it up into `backups_dir` when
+    /// it has a pending schema migration. When the backup fails the database
+    /// is not opened (and so not migrated): the error says why.
+    pub fn open_with_migration_backup(path: PathBuf, backups_dir: &Path) -> Result<Self, String> {
+        if path.as_path() != Path::new(":memory:") {
+            super::migration_backup::backup_before_migration(
+                &path,
+                backups_dir,
+                super::DATABASE_SCHEMA_VERSION,
+                super::migration_backup::MIGRATION_BACKUP_KEEP,
+                now_ms(),
+            )
+            .map_err(|error| format!("数据库升级前的自动备份失败，已停止升级，数据库未改动：{error}"))?;
+        }
+        Self::open(path)
+    }
+
     pub fn open(path: PathBuf) -> Result<Self, String> {
         let memory = path.as_path() == Path::new(":memory:");
         let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
@@ -4840,21 +4857,22 @@ impl Database {
                     .to_owned(),
             );
         }
-        // Denial cleanup must remain possible even if a frozen binding is corrupt.
-        let window = if decision.approved() {
-            Some(self.run_approval_window(&existing.run_id, approval_id)?)
-        } else { None };
+        // Denial cleanup must remain possible even if a frozen binding is corrupt;
+        // a grant still requires an intact frozen binding. Approvals have no
+        // deadline any more (they wait for the user however long it takes), so
+        // the binding is only validated, never used to expire a late grant.
+        if decision.approved() {
+            self.run_approval_requested_at(&existing.run_id, approval_id)?;
+        }
         self.with_connection(|connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             require_legacy_run_writer(&transaction, &existing.run_id)?;
             let now = now_ms();
-            let expired = window.is_some_and(|(start, deadline)| now < start || now >= deadline);
-            let approved = decision.approved() && !expired;
+            let approved = decision.approved();
             let decision_json = json!({
                 "approved": approved,
-                "scope": if expired { "none" } else { decision.scope() },
+                "scope": decision.scope(),
                 "category": existing.category,
-                "reason": if expired { Some("approval_wait_timeout") } else { None },
             }).to_string();
             let updated = transaction.execute(
                 "UPDATE approvals
@@ -4869,7 +4887,7 @@ impl Database {
                    )",
                 params![
                     approval_id,
-                    if expired { "expired" } else if approved { "approved" } else { "denied" },
+                    if approved { "approved" } else { "denied" },
                     decision_json,
                     now
                 ],
@@ -8683,7 +8701,7 @@ fn validate_managed_tool_acquisition_with_clock(
         )
         .optional()?;
     if let Some((started_at, max_duration)) = child_duration {
-        if wall_clock { enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?; }
+        if wall_clock { enforce_completion_deadline(transaction, run_id, "child_run", started_at, max_duration, now)?; }
         return Ok(());
     }
 
@@ -8755,7 +8773,7 @@ fn validate_managed_tool_acquisition_with_clock(
                 "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen daily window"
             ))
         })?;
-    if wall_clock { enforce_completion_deadline(run_id, "digital_colleague", started_at, max_duration, now)?; }
+    if wall_clock { enforce_completion_deadline(transaction, run_id, "digital_colleague", started_at, max_duration, now)?; }
     if total >= max_total {
         return Err(projection_violation(format!(
             "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run total-token budget ({total}/{max_total})"
@@ -8803,7 +8821,7 @@ fn enforce_managed_run_completion_budget(
         )
         .optional()?;
     if let Some((started_at, max_duration)) = child_duration {
-        enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?;
+        enforce_completion_deadline(transaction, run_id, "child_run", started_at, max_duration, now)?;
         return Ok(());
     }
 
@@ -8875,7 +8893,7 @@ fn enforce_managed_run_completion_budget(
                 "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen daily window"
             ))
         })?;
-    enforce_completion_deadline(run_id, "digital_colleague", started_at, max_duration, now)?;
+    enforce_completion_deadline(transaction, run_id, "digital_colleague", started_at, max_duration, now)?;
     if total >= max_total {
         return Err(projection_violation(format!(
             "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run total-token budget ({total}/{max_total})"
@@ -8907,7 +8925,40 @@ fn enforce_managed_run_completion_budget(
     Ok(())
 }
 
+/// Total wall time a Run spent waiting for human approvals (union of the
+/// `[requested_at, resolved_at or now]` intervals, so parallel approvals are not
+/// counted twice). Approvals have no deadline, and waiting for the user must
+/// not consume a managed Run's wall-clock duration budget.
+pub(crate) fn approval_wait_ms_in_tx(connection: &rusqlite::Connection, run_id: &str, now: i64) -> rusqlite::Result<i64> {
+    let mut query = connection.prepare(
+        "SELECT a.requested_at, COALESCE(a.resolved_at, ?2)
+         FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+         WHERE t.run_id = ?1 ORDER BY a.requested_at",
+    )?;
+    let intervals = query
+        .query_map(params![run_id, now], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut total = 0_i64;
+    let mut current: Option<(i64, i64)> = None;
+    for (start, end) in intervals {
+        let end = end.min(now).max(start);
+        match current {
+            Some((open_start, open_end)) if start <= open_end => current = Some((open_start, open_end.max(end))),
+            Some((open_start, open_end)) => {
+                total = total.saturating_add(open_end - open_start);
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+    if let Some((open_start, open_end)) = current {
+        total = total.saturating_add(open_end - open_start);
+    }
+    Ok(total.max(0))
+}
+
 fn enforce_completion_deadline(
+    transaction: &rusqlite::Connection,
     run_id: &str,
     budget_owner: &str,
     started_at: Option<i64>,
@@ -8934,7 +8985,9 @@ fn enforce_completion_deadline(
             "[{code}] Managed Run '{run_id}' has an invalid authoritative duration boundary"
         )));
     }
-    if now >= deadline {
+    // Time spent waiting for the user's approval is not execution time.
+    let waited = approval_wait_ms_in_tx(transaction, run_id, now)?;
+    if now.saturating_sub(waited) >= deadline {
         return Err(projection_violation(format!(
             "[{code}] Managed Run '{run_id}' reached its frozen duration deadline"
         )));
