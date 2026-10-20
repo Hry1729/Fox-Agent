@@ -1,5 +1,7 @@
 //! A bounded, Host-authored projection for model reporting. It does not alter
 //! stored tool output, reread resources, grant permission, or replay effects.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -102,7 +104,7 @@ mod tests {
         assert_eq!(facts["write"]["exactSubmittedContent"], text);
         assert_eq!(facts["write"]["utf8Bytes"], text.len());
         assert_eq!(facts["write"]["independentReadbackPerformed"], false);
-        assert!(!facts.to_string().contains("must-not-be-projected"));
+        assert!(!facts.canonical_string().contains("must-not-be-projected"));
         assert_eq!(output["content"][0]["text"], "original tool output");
     }
 
