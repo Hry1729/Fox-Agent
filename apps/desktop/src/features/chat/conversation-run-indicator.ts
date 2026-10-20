@@ -184,3 +184,14 @@ export function conversationRunIndicators(
   }
   return indicators
 }
+
+/**
+ * Visible "needs you" label for a sidebar row. Approvals wait for the user
+ * indefinitely (they no longer expire), so a conversation with a pending
+ * approval keeps this marker until the user answers or the turn ends.
+ */
+export const CONVERSATION_ATTENTION_LABEL = '等你处理'
+
+export function conversationAttentionLabel(indicator: ConversationRunIndicator | null | undefined): string | null {
+  return indicator === 'approval' ? CONVERSATION_ATTENTION_LABEL : null
+}
