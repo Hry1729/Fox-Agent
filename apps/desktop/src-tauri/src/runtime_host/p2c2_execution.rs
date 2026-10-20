@@ -1,4 +1,6 @@
 //! Owns one controlled verification. Executable receipts never leave this module.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::super::p2b_decision::{self as decision, DecisionFact, FactContext, FactOrigin};
 use super::*;
 use crate::runtime_host::attachment_compute::{
@@ -213,7 +215,7 @@ fn execute_with_limits(
         std::process::id(),
         NEXT_EXECUTION.fetch_add(1, Ordering::Relaxed)
     );
-    let spec_hash = digest(&serde_json::to_vec(spec).expect("JSON value serialization"));
+    let spec_hash = digest(&crate::canonical_json::to_vec(spec).expect("JSON value serialization"));
     let decoded = decode_spec(spec);
     let mut coverage = Coverage::Unstated;
     if let DecodedSpec::V2(rule) = &decoded {
@@ -574,7 +576,7 @@ fn execute_with_limits(
         audit.checker_version = Some(2);
         audit.detail = Some(json!({"executionId":execution_id,"runId":run,"itemKey":item,"specHash":spec_hash,
             "candidate":candidate,"sources":source_receipts,"rowBound":row_bound,"checks":outcome.observations,
-            "authorizationRechecked":root.is_some(),"obligations":obligation_audit,"auditOnly":true}).to_string());
+            "authorizationRechecked":root.is_some(),"obligations":obligation_audit,"auditOnly":true}).canonical_string());
         result.facts.push(audit);
     }
     result
