@@ -690,7 +690,7 @@ fn store_applying(journal: &Path, record: &ReplaceJournal) -> Result<(), String>
     use std::io::Write;
     let mut file = fs::File::create_new(journal)
         .map_err(|error| format!("cannot create the applying record: {error}"))?;
-    let body = serde_json::to_string(record)
+    let body = crate::canonical_json::to_string(record)
         .map_err(|error| format!("cannot encode the applying record: {error}"))?;
     file.write_all(body.as_bytes())
         .and_then(|_| file.sync_all())
@@ -735,7 +735,7 @@ fn store_settled(
         3 => {
             let mut file = fs::File::create_new(settled)
                 .map_err(|error| format!("cannot create the settlement record: {error}"))?;
-            let body = serde_json::to_string(record)
+            let body = crate::canonical_json::to_string(record)
                 .map_err(|error| format!("cannot encode the settlement record: {error}"))?;
             file.write_all(body.as_bytes())
                 .map_err(|error| format!("cannot write the settlement record: {error}"))?;
@@ -748,7 +748,7 @@ fn store_settled(
     }
     let mut file = fs::File::create_new(settled)
         .map_err(|error| format!("cannot create the settlement record: {error}"))?;
-    let body = serde_json::to_string(record)
+    let body = crate::canonical_json::to_string(record)
         .map_err(|error| format!("cannot encode the settlement record: {error}"))?;
     file.write_all(body.as_bytes())
         .and_then(|_| file.sync_all())
