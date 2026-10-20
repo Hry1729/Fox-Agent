@@ -94,6 +94,74 @@ impl Database {
     }
 }
 
+/// Where an external backend runs for a conversation: the project's database
+/// id (private HOME key) and the authorized root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExternalConversationContext {
+    pub project_id: Option<String>,
+    pub project_root: Option<String>,
+}
+
+impl Database {
+    /// `Ok(None)` when the conversation does not exist.
+    pub(crate) fn external_conversation_context(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ExternalConversationContext>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT c.project_id, COALESCE(p.root_path, c.project_root)
+                     FROM conversations c LEFT JOIN projects p ON p.id = c.project_id
+                     WHERE c.id = ?1",
+                    [conversation_id],
+                    |row| {
+                        Ok(ExternalConversationContext {
+                            project_id: row.get(0)?,
+                            project_root: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+        })
+    }
+
+    /// The backend's own session id last recorded for the conversation (the
+    /// `agent_backend.session` run event the external runtime writes when it
+    /// opens or reopens a native session). Used to `session/load` it after a
+    /// restart. No schema change: the run events are the record.
+    pub(crate) fn latest_native_session(&self, conversation_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            let json: Option<String> = connection
+                .query_row(
+                    "SELECT e.event_json FROM run_events e JOIN runs r ON r.id = e.run_id
+                     WHERE r.conversation_id = ?1 AND e.event_type = 'agent_backend.session'
+                     ORDER BY e.created_at DESC, e.seq DESC LIMIT 1",
+                    [conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(json
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                .and_then(|event| event.get("nativeSessionId").and_then(|id| id.as_str()).map(str::to_owned)))
+        })
+    }
+
+    /// Runs of external-backend conversations that a previous Fox process
+    /// left non-terminal. Their backend process died with that Fox.
+    pub(crate) fn external_runs_left_active(&self) -> Result<Vec<String>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT r.id FROM runs r JOIN conversations c ON c.id = r.conversation_id
+                 WHERE c.agent_backend <> 'fox'
+                   AND r.status IN ('queued', 'running', 'cancelling')",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +193,107 @@ mod tests {
         assert_eq!(database.conversation_agent_backend("missing").unwrap(), None);
         assert_eq!(database.run_agent_backend("missing").unwrap(), None);
         assert_eq!(database.approval_agent_backend("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn external_lookups_read_context_native_session_and_left_runs() {
+        let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let pi = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
+            .expect("pi conversation");
+        let context = database.external_conversation_context(&pi.id).unwrap().expect("context");
+        assert_eq!(context.project_id, None);
+        assert_eq!(database.external_conversation_context("missing").unwrap(), None);
+        assert_eq!(database.latest_native_session(&pi.id).unwrap(), None);
+        let started = database.create_run(&pi.id, "hello", None).expect("run");
+        assert_eq!(database.external_runs_left_active().unwrap(), vec![started.run.id.clone()]);
+        let run_id = started.run.id.clone();
+        database
+            .record_external_event(&run_id, &serde_json::json!({ "type": "run.started" }))
+            .expect("started");
+        database
+            .record_external_event(
+                &run_id,
+                &serde_json::json!({ "type": "agent_backend.session", "nativeSessionId": "sess-1" }),
+            )
+            .expect("session event");
+        assert_eq!(database.latest_native_session(&pi.id).unwrap().as_deref(), Some("sess-1"));
+        database
+            .record_external_event(&run_id, &serde_json::json!({ "type": "run.completed" }))
+            .expect("completed");
+        assert!(database.external_runs_left_active().unwrap().is_empty());
+        let fox = database
+            .create_conversation(database.default_agent_id(), Some("fox"), None, None)
+            .expect("fox conversation");
+        database.create_run(&fox.id, "hi", None).expect("fox run");
+        assert!(database.external_runs_left_active().unwrap().is_empty(), "Fox runs are never touched");
+    }
+
+    /// External runs carry no `run_control_bindings` row. The shared approval
+    /// and completion paths must still work for them: `resolve_approval` reads
+    /// its wait window through `run_time_budgets`, which falls back to the
+    /// default budget when no binding exists, and `run.completed` goes through
+    /// `enforce_managed_run_completion_budget`, which only constrains child and
+    /// digital-colleague runs. Pins both so a later change that starts requiring
+    /// a binding there fails here instead of in a live external session.
+    #[test]
+    fn external_runs_without_a_binding_resolve_approvals_and_complete() {
+        use crate::database::ApprovalDecision;
+        let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        // One conversation per case so no case depends on another run having ended.
+        let approve_once = |key: &str| {
+            let pi = database
+                .create_conversation_with_backend(database.default_agent_id(), Some(key), None, None, "pi")
+                .expect("pi conversation");
+            let started = database.create_run(&pi.id, "hello", None).expect("run");
+            let run_id = started.run.id.clone();
+            database
+                .record_external_event(&run_id, &serde_json::json!({ "type": "run.started" }))
+                .expect("started");
+            assert!(database.run_control_binding(&run_id).unwrap().is_none(), "external runs are never bound");
+            let (tool, _) = database
+                .create_host_tool_call_once(&run_id, key, "agent_permission", &serde_json::json!({}), "pending", true)
+                .expect("permission tool call");
+            let approval = database
+                .create_approval(&tool.id, "run a command", &serde_json::json!({ "availableDecisions": ["allow_once", "deny"] }))
+                .expect("approval");
+            (run_id, approval.id)
+        };
+
+        let (approved_run, approved_id) = approve_once("perm-allow");
+        let resolved = database
+            .resolve_approval(&approved_id, ApprovalDecision::AllowOnce)
+            .expect("no binding is not an error")
+            .expect("resolved");
+        assert_eq!(resolved.status, "approved");
+        assert_eq!(
+            database.approval_agent_backend(&approved_id).unwrap().map(|identity| identity.agent_backend).as_deref(),
+            Some("pi")
+        );
+
+        let (_denied_run, denied_id) = approve_once("perm-deny");
+        let denied = database
+            .resolve_approval(&denied_id, ApprovalDecision::Deny)
+            .expect("deny without binding")
+            .expect("resolved");
+        assert_eq!(denied.status, "denied");
+
+        let (_late_run, late_id) = approve_once("perm-late");
+        database
+            .with_connection(|connection| {
+                connection.execute("UPDATE approvals SET requested_at = requested_at - 600000 WHERE id = ?1", [&late_id])
+            })
+            .expect("age the approval past the default 5 minute window");
+        let late = database
+            .resolve_approval(&late_id, ApprovalDecision::AllowOnce)
+            .expect("late approval without binding")
+            .expect("resolved");
+        assert_eq!(late.status, "expired", "an approval after the default window is not a grant");
+
+        database
+            .record_external_event(&approved_run, &serde_json::json!({ "type": "run.completed" }))
+            .expect("run.completed without a binding")
+            .expect("applied");
     }
 
     #[test]
