@@ -587,3 +587,19 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
    - 普通 Fox 会话的发送、rewind、确认后派发、继续运行都与改动前一致；
    - 可选：用只读文件锁让读库失败，stderr 应出现 `routed=fox_fallback reason=storage_error`，并且之后报出的错误码与 `a9254d3` 相同。
 
+
+### 12.6 `fox-agent-backend` 测试计数：Linux 与 Windows 的口径（2026-10-20）
+
+两边都是 **0 失败**。总数不同是平台条件编译和门控方式不同造成的，不是回退。
+
+| 平台 | 命令 | 总数 | 执行 | 跳过 / 未执行 | 失败 |
+|---|---|---|---|---|---|
+| Linux（aarch64，本机基线） | `cargo test -p fox-agent-backend --features acp` | 163 | 156 | 7 | 0 |
+| Windows（工程师实测） | 同上 | 152 | 146 | 6 | 0 |
+
+- **Linux 的 7 个跳过** = 2 个 `#[ignore]` + 5 个由 `FOX_TEST_REAL_ACP` 门控的 real ACP 测试。后者在函数体内打印 `SKIPPED` 后直接返回，libtest 把它们记为 passed，所以统计里显示为“passed”，实际没有执行。
+- **Windows 的 6 个未执行** = 3 个 real ACP 测试（同样在函数体内 `SKIPPED`，计为 passed）+ 3 个 `ignored`。
+- **平台独有的单元测试**：Linux 独有 14 个，Windows 独有 4 个（条件编译，只在各自平台编进测试二进制）。real ACP 门控测试的数量两边也不同（Linux 5 个、Windows 3 个）。因此两边的总数和执行数本来就不相等；按执行数判断回退时，用**同一平台**上一轮的结果做基线，不要拿 Linux 和 Windows 互比。
+- 说明：按上面的分项粗算，Windows 总数（152）与“Linux 163 − 14 + 4 = 153”差 1 项，差异来源尚未逐项核对（可能在门控/ignore 的分布里）。下一轮 Windows 复测时请导出 `cargo test -p fox-agent-backend --features acp -- --list` 的名单，与 Linux 名单逐项比对后补齐这一行。
+- **`host_routing_sqlite` 在只开 `acp` 时是 0 项**：这个集成测试文件要求 feature `sqlite-tests`（rusqlite bundled，需要 C 编译器，默认不编）。只开 `acp` 时这个测试二进制的用例数为 0，这是预期行为，不是测试丢失。要跑它，用 `cargo test -p fox-agent-backend --features sqlite-tests --test host_routing_sqlite`。
+- **回退判定**：同一平台上，执行数下降、或任何一项从 ok 变成 FAILED / 从执行变成 SKIPPED，才算回退。
