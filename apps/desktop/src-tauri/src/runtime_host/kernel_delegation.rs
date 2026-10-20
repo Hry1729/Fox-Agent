@@ -1,5 +1,7 @@
 //! Delegation operations create durable records only. Starting or cancelling
 //! owned child executors is a post-result action of the parent Kernel loop.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::{
     database::{CreateChildRunInput, Database},
     kernel::CancellationToken,
@@ -43,7 +45,7 @@ fn argument_error(tool: &str, input: &Value, field: &str, message: &str) -> Valu
             }
         }
     }
-    json!({"isError":true,"content":[{"type":"text","text":details.to_string()}],"details":details})
+    json!({"isError":true,"content":[{"type":"text","text":details.canonical_string()}],"details":details})
 }
 
 #[cfg(test)]
@@ -84,7 +86,7 @@ mod correction_tests {
                 result["details"].get("suggestedArguments").is_none(),
                 "{input}"
             );
-            assert!(!result.to_string().contains("must-not-be-reflected"));
+            assert!(!result.canonical_string().contains("must-not-be-reflected"));
         }
     }
 }
@@ -93,7 +95,7 @@ pub(super) fn correction_limit_result() -> Value {
     let details = json!({"source":"fox_kernel_host","error":{"code":"child.correction_limit",
         "message":"子任务参数连续校验失败，3 次纠错机会已耗尽。此调用未执行；这不是 API 额度不足。"},
         "executionStarted":false,"retryable":false});
-    json!({"isError":true,"content":[{"type":"text","text":details.to_string()}],"details":details})
+    json!({"isError":true,"content":[{"type":"text","text":details.canonical_string()}],"details":details})
 }
 
 pub(super) fn correction_limit_reached(snapshot: &crate::kernel::KernelSnapshot) -> bool {
@@ -326,7 +328,7 @@ fn stage(
     tool_id: &str,
     action: &impl Serialize,
 ) -> Result<(), String> {
-    let body = serde_json::to_string(action).map_err(|_| "invalid Kernel delegation action")?;
+    let body = crate::canonical_json::to_string(action).map_err(|_| "invalid Kernel delegation action")?;
     database.stage_kernel_host_action(run_id, tool_id, &body)
 }
 
@@ -607,5 +609,5 @@ pub(super) fn execute(
         _ => return Err("unsupported Kernel delegation operation".into()),
     };
     token.check()?;
-    Ok(json!({"content":[{"type":"text","text":result.to_string()}],"details":result}))
+    Ok(json!({"content":[{"type":"text","text":result.canonical_string()}],"details":result}))
 }
