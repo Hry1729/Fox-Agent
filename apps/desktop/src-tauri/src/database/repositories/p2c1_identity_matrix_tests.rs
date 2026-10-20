@@ -25,6 +25,8 @@
 //! itself was taken on the old binary and is recorded in the round's log rather
 //! than asserted here, because the old binary is a different artifact.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::Database;
 use crate::database::now_ms;
 
@@ -77,7 +79,7 @@ fn requirements_json_many(specs: Vec<serde_json::Value>) -> String {
             source_text: "内容契约".to_owned(),
         })
         .collect();
-    serde_json::to_string(&requirements).unwrap()
+    crate::canonical_json::to_string(&requirements).unwrap()
 }
 
 /// One real, end-to-end delivery world on disk.
@@ -221,7 +223,7 @@ impl MatrixWorld {
                      WHERE run_id=?3 AND item_key=?4",
                     rusqlite::params![
                         status,
-                        finding.map(|value| value.to_string()),
+                        finding.map(|value| value.canonical_string()),
                         self.run_id,
                         self.item_key
                     ],
