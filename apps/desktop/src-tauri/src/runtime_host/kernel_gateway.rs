@@ -953,7 +953,10 @@ impl GatewayPolicy {
                 &self.binding.run_id,
                 input,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                log_work_tool_failure(&self.binding.run_id, tool_id, tool, input, &error);
+                error.to_string()
+            })?;
             super::work_tools::execute_approved_task_repair_override(
                 database,
                 &self.binding.conversation_id,
@@ -972,7 +975,12 @@ impl GatewayPolicy {
                 input,
             )
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            // Diagnostics only: the returned error text (and therefore every
+            // downstream classification and control decision) is unchanged.
+            log_work_tool_failure(&self.binding.run_id, tool_id, tool, input, &error);
+            error.to_string()
+        })?;
         if let Some(directive) = outcome.post_finalize {
             let body =
                 serde_json::to_string(&directive).map_err(|_| "invalid Kernel work action")?;
@@ -1635,4 +1643,59 @@ mod revision_tests {
         policy.database = None;
         let _ = std::fs::remove_dir_all(root);
     }
+}
+
+
+/// JSON type names of an input's top-level fields, e.g. `goalId:string,
+/// tasks:string`. Only the shape is reported, never a value, so a decode error
+/// can be tied to the field the model sent with the wrong type (an array
+/// serialized as a JSON string is the case this exists for).
+pub(super) fn input_field_types(input: &Value) -> String {
+    fn kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(text) => {
+                let trimmed = text.trim_start();
+                if trimmed.starts_with('[') {
+                    "string(json-array?)"
+                } else if trimmed.starts_with('{') {
+                    "string(json-object?)"
+                } else {
+                    "string"
+                }
+            }
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+    match input.as_object() {
+        Some(object) => object
+            .iter()
+            .map(|(key, value)| format!("{key}:{}", kind(value)))
+            .collect::<Vec<_>>()
+            .join(","),
+        None => format!("<input is {}>", kind(input)),
+    }
+}
+
+/// One stderr line per failed Kernel work tool, keeping what `to_string()`
+/// drops: the stable WorkToolError code and its details. Information only; the
+/// caller's error value and control flow are untouched. Bounded and redacted
+/// like every other Host execution diagnostic.
+fn log_work_tool_failure(
+    run_id: &str,
+    tool_id: &str,
+    tool: &str,
+    input: &Value,
+    error: &super::work_tools::WorkToolError,
+) {
+    eprintln!(
+        "fox.kernel_diag kind=work_tool_error run={run_id} tool_call={tool_id} tool={tool} code={} message=\"{}\" details={} input_fields=[{}]",
+        error.code,
+        super::redact_execution_diagnostic(&error.message, 500).replace('\n', " "),
+        super::redact_execution_diagnostic(&error.details.to_string(), 1000).replace('\n', " "),
+        input_field_types(input),
+    );
 }
