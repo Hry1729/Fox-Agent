@@ -8,6 +8,33 @@ const VALIDATION_CHECK_TYPE_SCHEMA = Type.Union(
   VALIDATION_CHECK_TYPES.map((checkType) => Type.Literal(checkType)),
 )
 
+// Mirrors `EVIDENCE_REFERENCE_PAIRS` / `validate_evidence_pair` in the Host
+// (apps/desktop/src-tauri/src/database/repositories/work_graph.rs). Guidance
+// only: the Host remains the authority and refuses any other pair.
+export const TASK_EVIDENCE_REFERENCE_PAIRS = Object.freeze({
+  tool_call: Object.freeze(['tool_call']),
+  test_result: Object.freeze(['tool_call', 'artifact']),
+  file_diff: Object.freeze(['artifact', 'run_event']),
+  artifact: Object.freeze(['artifact']),
+  trace_span: Object.freeze(['run_event']),
+  user_confirmation: Object.freeze(['message']),
+  external_reference: Object.freeze(['source']),
+})
+
+const TASK_EVIDENCE_PAIR_TEXT = Object.entries(TASK_EVIDENCE_REFERENCE_PAIRS)
+  .map(([evidenceType, refKinds]) => `${evidenceType}->${refKinds.join('|')}`)
+  .join(', ')
+
+export const TASK_EVIDENCE_ADD_DESCRIPTION = [
+  'Attach validated evidence to a task in this conversation. validationCheckType must be allowed by the frozen Host ValidationPolicy for the Run.',
+  `Valid evidenceType->refKind pairs: ${TASK_EVIDENCE_PAIR_TEXT}.`,
+  'refKind=tool_call cites a tool call that already completed successfully in this conversation: use details.evidenceRef.refId from that tool result (kernel-tool:<run>:<call>), or the id of your own completed tool call.',
+  'A text-only task with no file, test or artifact cites a completed tool call: evidenceType=tool_call, refKind=tool_call, validationCheckType=inspection when the policy allows it.',
+  'refKind=message is only for user_confirmation and must be a user message id.',
+].join(' ')
+
+export const TASK_EVIDENCE_REF_ID_DESCRIPTION = 'For refKind=tool_call: the evidenceRef.refId of a successful earlier tool result, or your own completed tool call id. For message: a user message id. For source: an http(s) URL.'
+
 const TASK_ATTEMPT_STATUS_SCHEMA = Type.Union([
   Type.Literal('succeeded'),
   Type.Literal('failed'),
@@ -902,7 +929,7 @@ export function createHostTools(requestHost) {
     {
       name: 'task_evidence_add',
       label: 'Add task evidence',
-      description: 'Attach validated evidence to a task in this conversation. validationCheckType must be allowed by the frozen Host ValidationPolicy for the Run.',
+      description: TASK_EVIDENCE_ADD_DESCRIPTION,
       parameters: Type.Object({
         taskId: Type.String(),
         evidenceType: Type.Union([
@@ -914,7 +941,7 @@ export function createHostTools(requestHost) {
           Type.Literal('tool_call'), Type.Literal('artifact'), Type.Literal('run_event'),
           Type.Literal('message'), Type.Literal('source'),
         ]),
-        refId: Type.String(),
+        refId: Type.String({ description: TASK_EVIDENCE_REF_ID_DESCRIPTION }),
         summary: Type.String(),
         validationCheckType: Type.Optional(VALIDATION_CHECK_TYPE_SCHEMA),
       }, { additionalProperties: false }),
