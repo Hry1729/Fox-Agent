@@ -438,7 +438,7 @@ mod tests {
 
         // The real durable shape, through the real requirement type.
         let requirement = RequirementKind::ContentContract { spec: spec.clone() };
-        let persisted = serde_json::to_string(&requirement).expect("the requirement serializes");
+        let persisted = crate::canonical_json::to_string(&requirement).expect("the requirement serializes");
         let reloaded: RequirementKind =
             serde_json::from_str(&persisted).expect("the durable shape reloads");
         let reloaded_spec = match reloaded {
