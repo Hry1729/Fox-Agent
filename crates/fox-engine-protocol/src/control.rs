@@ -102,6 +102,10 @@ pub struct TimeBudgets {
     /// opt out of a whole-run deadline; model/tool stall limits still apply.
     #[serde(default = "default_run_execution_limited", skip_serializing_if = "is_true")]
     pub run_execution_limited: bool,
+    /// Nominal approval window, kept in frozen records for compatibility (and
+    /// still validated). It is NOT a deadline any more: a human approval waits
+    /// until the user answers, cancels the turn, closes the conversation or
+    /// exits Fox, or a grant is revoked. Hosts use it only as the wait's anchor.
     pub approval_wait_ms: i64,
 }
 
