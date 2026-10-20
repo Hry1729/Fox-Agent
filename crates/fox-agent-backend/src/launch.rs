@@ -115,7 +115,8 @@ pub fn managed_entry(runtime_root: &std::path::Path, backend: AgentBackend, wind
     let (dir, bin) = match backend {
         AgentBackend::Pi => ("pi", "pi-acp"),
         AgentBackend::Codex => ("codex", "codex-acp"),
-        AgentBackend::Deepseek => ("deepseek", "dsh"),
+        // Runtime package 0.1.1 layout: `backends\dsh` (not `deepseek`).
+        AgentBackend::Deepseek => ("dsh", "dsh"),
         AgentBackend::Fox => return None,
     };
     let exe = if windows { format!("{bin}.cmd") } else { bin.to_owned() };
@@ -142,6 +143,10 @@ pub fn dev_runtime_root() -> Option<std::path::PathBuf> {
         return Some(crate::winruntime::default_windows_runtime_root(version.trim()));
     }
     let parent = crate::winruntime::default_windows_runtime_root("");
+    let expected = parent.join(RUNTIME_PACKAGE_VERSION);
+    if expected.is_dir() {
+        return Some(expected);
+    }
     let mut versions: Vec<std::path::PathBuf> = std::fs::read_dir(&parent)
         .ok()?
         .filter_map(Result::ok)
@@ -277,6 +282,13 @@ pub fn process_environment_for(windows: bool, spec: &LaunchSpec, parent: impl In
     env
 }
 
+/// The runtime package this Fox build ships with and checks against (its
+/// `acp-bridge\bridge.mjs` must equal the embedded copy). Windows default
+/// when `FOX_RUNTIME_VERSION` / `FOX_RUNTIME_ROOT` are unset: this version
+/// directory if installed, else the newest installed one. Keep in step with
+/// `scripts/windows/build-runtime-package.py` `DEFAULT_VERSION`.
+pub const RUNTIME_PACKAGE_VERSION: &str = "0.1.2";
+
 /// Environment variable carrying the bridge pipe name into the sandbox
 /// (Windows sandboxed mode, docs/sandbox.md 7.12).
 pub const BRIDGE_PIPE_ENV: &str = "FOX_ACP_PIPE";
@@ -314,6 +326,16 @@ pub struct BridgeEndpoint {
     /// DACL admits. Required on Windows.
     pub allowed_sid: Option<String>,
     pub connect_timeout: std::time::Duration,
+    /// The backend's environment, delivered to the bridge in the handshake
+    /// answer (never on the srt `-c` command line: cmd.exe cannot carry
+    /// quotes, `%` or line breaks safely, and a command line is visible in
+    /// the process list). The bridge sets exactly these over its own
+    /// environment when it starts the backend.
+    pub child_env: Vec<(String, String)>,
+    /// The backend's working directory (a plain path, see
+    /// [`backend_visible_path`]); srt-win does not carry the caller's cwd into
+    /// the sandbox, so the bridge sets it explicitly.
+    pub child_cwd: Option<String>,
 }
 
 impl std::fmt::Debug for BridgeEndpoint {
@@ -324,6 +346,9 @@ impl std::fmt::Debug for BridgeEndpoint {
             .field("token", &"[redacted]")
             .field("allowed_sid", &self.allowed_sid)
             .field("connect_timeout", &self.connect_timeout)
+            // Names only: values may be secrets.
+            .field("child_env", &self.child_env.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>())
+            .field("child_cwd", &self.child_cwd)
             .finish()
     }
 }
@@ -339,7 +364,28 @@ impl BridgeEndpoint {
         } else {
             std::env::temp_dir().join(format!("fox-acp-{name}.sock")).to_string_lossy().into_owned()
         };
-        Ok(Self { address, token, allowed_sid, connect_timeout: BRIDGE_CONNECT_TIMEOUT })
+        Ok(Self { address, token, allowed_sid, connect_timeout: BRIDGE_CONNECT_TIMEOUT, child_env: Vec::new(), child_cwd: None })
+    }
+
+    /// The handshake answer Fox sends after a valid token:
+    /// `OK {"cwd":..,"env":{..}}\n` (compact JSON, so one line; keys in a
+    /// fixed order). The bridge applies `env` over its own environment and
+    /// starts the backend in `cwd`.
+    pub fn handshake_answer(&self) -> Vec<u8> {
+        let env: serde_json::Map<String, serde_json::Value> = self
+            .child_env
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect();
+        let mut payload = serde_json::Map::new();
+        if let Some(cwd) = &self.child_cwd {
+            payload.insert("cwd".into(), serde_json::Value::String(cwd.clone()));
+        }
+        payload.insert("env".into(), serde_json::Value::Object(env));
+        let mut line = b"OK ".to_vec();
+        line.extend(serde_json::to_vec(&serde_json::Value::Object(payload)).expect("bridge answer serializes"));
+        line.push(b'\n');
+        line
     }
 
     /// The two variables the bridge reads.
@@ -369,6 +415,93 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// `path` as handed to a backend (ACP `cwd`, process cwd, bridge cwd, path
+/// values in its environment): a Windows extended-length path
+/// (`\\?\C:\x`, `\\?\UNC\server\share\x`, what `std::fs::canonicalize`
+/// returns) becomes the ordinary form (`C:\x`, `\\server\share\x`) when that
+/// is the same file; otherwise it is returned unchanged. Node-based backends
+/// mis-handle the verbatim prefix (pi recorded `cwd = C:\Windows`, dsh failed
+/// with `realpath 'D:' EISDIR`). The Host keeps comparing and auditing the
+/// canonical form; only what crosses into a backend is simplified. Same
+/// rules as `dunce::simplified`, as a pure string function so every OS
+/// tests the Windows forms.
+pub fn backend_visible_path(path: &std::path::Path) -> std::path::PathBuf {
+    match path.to_str().and_then(simplify_verbatim_path) {
+        Some(simple) => std::path::PathBuf::from(simple),
+        None => path.to_path_buf(),
+    }
+}
+
+/// [`backend_visible_path`] for text (an environment value): `Some` only
+/// when `text` is a verbatim path that can be simplified.
+pub fn simplify_verbatim_path(text: &str) -> Option<String> {
+    const VERBATIM: &str = r"\\?\";
+    let rest = text.strip_prefix(VERBATIM)?;
+    let (prefix, tail) = if let Some(unc) = rest.strip_prefix("UNC\\").or_else(|| rest.strip_prefix("unc\\")) {
+        // \\?\UNC\server\share[\rest]
+        let mut parts = unc.splitn(3, '\\');
+        let server = parts.next().filter(|part| !part.is_empty())?;
+        let share = parts.next().filter(|part| !part.is_empty())?;
+        if !plain_component(server) || !plain_component(share) {
+            return None;
+        }
+        (format!(r"\\{server}\{share}"), parts.next().unwrap_or(""))
+    } else {
+        // \\?\X:[\rest]
+        let bytes = rest.as_bytes();
+        if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+            return None;
+        }
+        let tail = &rest[2..];
+        if !tail.is_empty() && !tail.starts_with('\\') {
+            return None;
+        }
+        (rest[..2].to_owned(), tail.strip_prefix('\\').unwrap_or(""))
+    };
+    let mut out = prefix;
+    let components: Vec<&str> = tail.split('\\').collect();
+    let trailing_separator = tail.ends_with('\\');
+    for (index, component) in components.iter().enumerate() {
+        if component.is_empty() {
+            // Only a single trailing separator is ordinary ("C:\x\").
+            if index + 1 == components.len() && (trailing_separator || tail.is_empty()) {
+                continue;
+            }
+            return None;
+        }
+        if !plain_component(component) {
+            return None;
+        }
+        out.push('\\');
+        out.push_str(component);
+    }
+    if out.len() == 2 {
+        // `\\?\D:` / `\\?\D:\` -> `D:\` (never the drive-relative `D:`).
+        out.push('\\');
+    }
+    // Ordinary paths are limited to MAX_PATH; longer ones need the prefix.
+    if out.encode_utf16().count() >= 260 {
+        return None;
+    }
+    Some(out)
+}
+
+/// A path component that means the same with and without `\\?\`.
+fn plain_component(component: &str) -> bool {
+    if component == "." || component == ".." || component.ends_with('.') || component.ends_with(' ') {
+        return false;
+    }
+    if component.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '|' | '?' | '*') || (c as u32) < 32) {
+        return false;
+    }
+    let stem = component.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'0'..=b'9' | 0xB9 | 0xB2 | 0xB3));
+    !reserved
+}
+
 /// Constant-time equality for tokens (no early exit on the first mismatch).
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = (a.len() ^ b.len()) as u8 | ((a.len() ^ b.len()) >> 8) as u8;
@@ -383,6 +516,69 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_windows_paths_are_simplified_for_backends() {
+        let cases = [
+            (r"\\?\C:\Users\me\proj", Some(r"C:\Users\me\proj")),
+            (r"\\?\D:\", Some(r"D:\")),
+            (r"\\?\D:", Some(r"D:\")),
+            (r"\\?\c:\a\b\", Some(r"c:\a\b")),
+            (r"\\?\C:\中文 目录\x.txt", Some(r"C:\中文 目录\x.txt")),
+            (r"\\?\UNC\server\share\dir\f", Some(r"\\server\share\dir\f")),
+            (r"\\?\UNC\server\share", Some(r"\\server\share")),
+            (r"\\?\UNC\server\share\", Some(r"\\server\share")),
+            // Not simplifiable: would change meaning or exceed MAX_PATH.
+            (r"\\?\C:\a\..\b", None),
+            (r"\\?\C:\a\.\b", None),
+            (r"\\?\C:\a\NUL", None),
+            (r"\\?\C:\a\com1.txt", None),
+            (r"\\?\C:\a\trailing.", None),
+            (r"\\?\C:\a\trailing ", None),
+            (r"\\?\C:\a\\b", None),
+            (r"\\?\C:\a/b", None),
+            (r"\\?\Volume{0b5c1d3e-0000-0000-0000-100000000000}\x", None),
+            (r"\\?\UNC\server", None),
+            (r"\\?\C:x", None),
+            // Already ordinary, or not a path at all: left alone.
+            (r"C:\Users\me", None),
+            (r"\\server\share", None),
+            ("/home/me/proj", None),
+            (r#"{"web_search":"disabled"}"#, None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(simplify_verbatim_path(input).as_deref(), expected, "{input}");
+        }
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(simplify_verbatim_path(&long), None, "over MAX_PATH keeps the prefix");
+        assert_eq!(backend_visible_path(std::path::Path::new(r"\\?\C:\w")), std::path::PathBuf::from(r"C:\w"));
+        assert_eq!(backend_visible_path(std::path::Path::new("/w/x")), std::path::PathBuf::from("/w/x"));
+    }
+
+    #[test]
+    fn bridge_answer_carries_env_and_cwd_as_one_json_line() {
+        let mut endpoint = BridgeEndpoint::new_local(None).unwrap();
+        assert_eq!(endpoint.handshake_answer(), b"OK {\"env\":{}}\n".to_vec());
+        endpoint.child_cwd = Some(r"C:\Users\me\proj".into());
+        endpoint.child_env = vec![
+            ("CODEX_CONFIG".into(), r#"{"web_search":"disabled"}"#.into()),
+            ("PCT".into(), "100%DONE%".into()),
+            ("MULTI".into(), "line1\r\nline2".into()),
+            ("OPENAI_API_KEY".into(), "sk-test".into()),
+        ];
+        let answer = endpoint.handshake_answer();
+        assert!(answer.starts_with(b"OK {"));
+        assert_eq!(answer.iter().filter(|byte| **byte == b'\n').count(), 1, "exactly one line");
+        assert_eq!(answer.last(), Some(&b'\n'));
+        let payload: serde_json::Value = serde_json::from_slice(&answer[3..answer.len() - 1]).unwrap();
+        assert_eq!(payload["cwd"], r"C:\Users\me\proj");
+        assert_eq!(payload["env"]["CODEX_CONFIG"], r#"{"web_search":"disabled"}"#);
+        assert_eq!(payload["env"]["PCT"], "100%DONE%");
+        assert_eq!(payload["env"]["MULTI"], "line1\r\nline2");
+        assert_eq!(payload["env"]["OPENAI_API_KEY"], "sk-test");
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("sk-test") && !debug.contains(&endpoint.token), "no values or token in Debug");
+    }
 
     #[test]
     fn external_backends_launch_pinned_acp_entry_points() {
