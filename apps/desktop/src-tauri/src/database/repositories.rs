@@ -6039,7 +6039,7 @@ impl Database {
                  WHERE run_id = ?1 AND status IN ('pending', 'running')",
                 params![run_id, message, now],
             )?;
-            expire_pending_approvals_for_run(&transaction, run_id, "run_interrupted", now)?;
+            end_pending_approvals_for_interrupted_run(&transaction, run_id, Some(code), now)?;
             observability::close_run_trace_in_transaction(
                 &transaction,
                 run_id,
@@ -6817,12 +6817,7 @@ impl Database {
                          WHERE run_id = ?1 AND status IN ('pending', 'running')",
                         params![run_id, message, now],
                     )?;
-                    expire_pending_approvals_for_run(
-                        &transaction,
-                        run_id,
-                        "run_interrupted",
-                        now,
-                    )?;
+                    end_pending_approvals_for_interrupted_run(&transaction, run_id, code, now)?;
                     interrupt_tasks_owned_by_run(
                         &transaction,
                         run_id,
@@ -7089,6 +7084,32 @@ fn expire_pending_approvals_for_run(
            AND tool_call_id IN (SELECT id FROM tool_calls WHERE run_id = ?1)",
         params![run_id, decision_json, now],
     )
+}
+
+/// Interruption codes that mean the conversation's session went away (the
+/// conversation was closed, archived or moved to the trash, or Fox exited /
+/// restarted under it), mapped to the reason recorded on its open approvals.
+/// Those approvals end `cancelled` (the user's decision, 2026-10-20): nothing
+/// expired, the turn was ended for them. Any other interruption keeps
+/// `expired` + `run_interrupted`.
+pub(crate) fn approval_cancel_reason_for_interruption(code: Option<&str>) -> Option<&'static str> {
+    match code? {
+        "agent_backend_session_closed" => Some("conversation_closed"),
+        "agent_backend_host_restarted" | "runtime.application_exit" => Some("app_restarted"),
+        _ => None,
+    }
+}
+
+fn end_pending_approvals_for_interrupted_run(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    code: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    match approval_cancel_reason_for_interruption(code) {
+        Some(reason) => cancel_pending_approvals_for_run(transaction, run_id, reason, now),
+        None => expire_pending_approvals_for_run(transaction, run_id, "run_interrupted", now),
+    }
 }
 
 fn cancel_pending_approvals_for_run(
