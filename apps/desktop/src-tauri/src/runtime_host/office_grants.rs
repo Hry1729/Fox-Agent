@@ -2,6 +2,8 @@
 //! element/property set. This only names a permission; Office preparation,
 //! version checks, execution admission, and commit checks remain independent.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -68,7 +70,7 @@ pub(crate) fn reusable_edit_scope(input: &Value, project_root: Option<&str>) -> 
     let selectors = selectors.into_iter().collect::<Vec<_>>();
     let identity = json!({"server": crate::office::SERVER_ID, "tool": "office_edit", "target": &target, "operation": "set", "selectors": &selectors});
     Some(OfficeReuseScope {
-        key: super::permission_scope_hash("office-edit-v1", identity.to_string().as_bytes()),
+        key: super::permission_scope_hash("office-edit-v1", identity.canonical_string().as_bytes()),
         target,
         selectors,
     })
