@@ -12,6 +12,8 @@
 //! * the completion lane (`stage_completion_delivery` → `CompletionDelivery`);
 //! * the length-recovery lane (`length_recovery_delivery` → instruction kind).
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::runtime_host::delivery::{DecisionFact, DeliveryVerdict, FactOrigin, ItemDecision};
 
@@ -215,7 +217,7 @@ fn force_finding(db: &Database, run_id: &str, finding: &serde_json::Value, statu
     db.with_connection(|connection| {
         connection.execute(
             "UPDATE delivery_checklist_items SET finding_json=?1, status=?2 WHERE run_id=?3",
-            rusqlite::params![finding.to_string(), status, run_id],
+            rusqlite::params![finding.canonical_string(), status, run_id],
         )?;
         Ok(())
     })
