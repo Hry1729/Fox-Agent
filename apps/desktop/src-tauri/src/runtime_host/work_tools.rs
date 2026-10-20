@@ -106,11 +106,32 @@ pub struct WorkToolGraphAcceptanceDirective {
     pub acceptance_id: String,
 }
 
+/// When a work tool failed, relative to its durable write.
+///
+/// "Tool errors are data, not errors": a call the Host refused while it was
+/// still only reading the model's arguments and the current durable state
+/// wrote nothing, so the model can be told why and correct itself. Every
+/// other failure keeps the conservative meaning it always had.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkToolErrorPhase {
+    /// Refused before any write began: argument decoding, required fields,
+    /// types, enums, reference and state preconditions, policy refusals, or a
+    /// domain refusal from a single write transaction that rolled back. The
+    /// call has no durable effect and is safe to return to the model.
+    Rejected,
+    /// The failure may follow a committed write (a child Run, a durable
+    /// intent, a blocked Task), comes from storage, or was not classified.
+    /// This is the default: a site must opt in to `Rejected`.
+    #[default]
+    Uncertain,
+}
+
 #[derive(Debug)]
 pub struct WorkToolError {
     pub code: String,
     pub message: String,
     pub details: Value,
+    pub phase: WorkToolErrorPhase,
 }
 
 impl WorkToolError {
@@ -119,8 +140,94 @@ impl WorkToolError {
             code: code.into(),
             message: message.into(),
             details,
+            phase: WorkToolErrorPhase::Uncertain,
         }
     }
+
+    /// A refusal found before any write began (see [`WorkToolErrorPhase::Rejected`]).
+    fn rejected(code: impl Into<String>, message: impl Into<String>, details: Value) -> Self {
+        Self::new(code, message, details).into_rejected()
+    }
+
+    /// Mark an error produced by a pure input check as a pre-write refusal.
+    pub(crate) fn into_rejected(mut self) -> Self {
+        self.phase = WorkToolErrorPhase::Rejected;
+        self
+    }
+
+    /// True only for a failure that is known to have written nothing.
+    pub fn is_rejected_before_execution(&self) -> bool {
+        self.phase == WorkToolErrorPhase::Rejected
+    }
+}
+
+/// A malformed model argument found by a pure input helper. It becomes a
+/// `Rejected` [`WorkToolError`] with the same `work_tool.failed` code and text
+/// the helper always produced; a caller that still collects plain text gets
+/// that text (and, conservatively, loses the phase).
+#[derive(Debug)]
+struct InputRejection(String);
+
+impl From<InputRejection> for WorkToolError {
+    fn from(error: InputRejection) -> Self {
+        WorkToolError::from(error.0).into_rejected()
+    }
+}
+
+impl From<InputRejection> for String {
+    fn from(error: InputRejection) -> Self {
+        error.0
+    }
+}
+
+/// The legacy text error of a pre-write check, marked `Rejected`. Code and
+/// message are unchanged (`work_tool.failed`), so the legacy path answers the
+/// model exactly as before.
+fn rejected_text(message: impl Into<String>) -> WorkToolError {
+    WorkToolError::from(message.into()).into_rejected()
+}
+
+/// Whether a repository refusal came from inside a single write transaction
+/// that rolled back. Only domain refusals qualify; storage failures (including
+/// a commit whose connection reset then failed) stay uncertain.
+fn repository_refusal_phase(error: &RepositoryError) -> WorkToolErrorPhase {
+    match error {
+        RepositoryError::NotFound { .. }
+        | RepositoryError::InvalidInput(_)
+        | RepositoryError::InvalidTransition { .. }
+        | RepositoryError::OptimisticLockFailed { .. }
+        | RepositoryError::ConstraintViolation(_)
+        | RepositoryError::EvidenceRequired { .. }
+        | RepositoryError::ValidationChecksMissing { .. }
+        | RepositoryError::ReviewBlocked { .. }
+        | RepositoryError::IndependentReviewRequired { .. }
+        | RepositoryError::DuplicateEvidence
+        | RepositoryError::MissingReference(_)
+        | RepositoryError::InvalidReference(_)
+        | RepositoryError::CrossConversationReference => WorkToolErrorPhase::Rejected,
+        RepositoryError::InvalidValidationPolicy(_)
+        | RepositoryError::ProjectionHashMismatch { .. }
+        | RepositoryError::SqliteBusyExhausted { .. }
+        | RepositoryError::Database { .. } => WorkToolErrorPhase::Uncertain,
+    }
+}
+
+/// The main write of a work tool whose repository call is ONE write
+/// transaction (`with_write_transaction`), reported with the legacy text error.
+fn text_repository_write_error(error: RepositoryError) -> WorkToolError {
+    let phase = repository_refusal_phase(&error);
+    let mut converted = WorkToolError::from(error.to_string());
+    converted.phase = phase;
+    converted
+}
+
+/// As [`text_repository_write_error`], for sites that already map the
+/// repository error to its typed code.
+fn typed_repository_write_error(error: RepositoryError) -> WorkToolError {
+    let phase = repository_refusal_phase(&error);
+    let mut converted = repository_work_tool_error(error);
+    converted.phase = phase;
+    converted
 }
 
 impl fmt::Display for WorkToolError {
@@ -191,7 +298,7 @@ fn execute_with_optional_host_tool_call_id(
             .validation_policy_id_for_run(run_id, None)
             .map_err(repository_work_tool_error)?;
         if policy_id != "legacy_v1" {
-            return Err(WorkToolError::new(
+            return Err(WorkToolError::rejected(
                 "workflow.durable_attempt_required",
                 "durable execution cannot use workflow mutators until workflow stages share the Host Attempt, Evidence, Review, and Acceptance transaction boundary",
                 json!({ "tool": tool, "validationPolicyId": policy_id }),
@@ -242,7 +349,7 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_start_request(input)?;
+            let request = parse_graph_node_start_request(input).map_err(WorkToolError::into_rejected)?;
             let started = database
                 .start_ready_read_only_graph_node(StartReadyReadOnlyGraphNodeInput {
                     goal_id: request.goal_id,
@@ -282,7 +389,7 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_finish_request(input)?;
+            let request = parse_graph_node_finish_request(input).map_err(WorkToolError::into_rejected)?;
             let finished = database
                 .finish_read_only_graph_node(FinishReadOnlyGraphNodeInput {
                     goal_id: request.goal_id,
@@ -334,7 +441,7 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_cancel_request(input)?;
+            let request = parse_graph_node_cancel_request(input).map_err(WorkToolError::into_rejected)?;
             let cancellation = database
                 .create_graph_node_cancel_intent(
                     crate::database::CreateGraphNodeCancelIntentInput {
@@ -377,7 +484,7 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_review_request(input)?;
+            let request = parse_graph_node_review_request(input).map_err(WorkToolError::into_rejected)?;
             let review = database
                 .create_graph_node_review_request(CreateGraphNodeReviewRequestInput {
                     goal_id: request.goal_id,
@@ -417,7 +524,7 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_acceptance_request(input)?;
+            let request = parse_graph_acceptance_request(input).map_err(WorkToolError::into_rejected)?;
             let acceptance = database
                 .create_read_only_graph_acceptance(CreateReadOnlyGraphAcceptanceInput {
                     goal_id: request.goal_id,
@@ -482,7 +589,7 @@ fn execute_with_optional_host_tool_call_id(
                 .map_err(repository_work_tool_error)?
                 .is_some()
             {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "graph.readonly_dedicated_accept_required",
                     "an activated read-only Graph can complete its Goal only through graph_readonly_accept",
                     json!({ "goalId": goal_id, "tool": "graph_readonly_accept" }),
@@ -490,7 +597,7 @@ fn execute_with_optional_host_tool_call_id(
             }
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "goal.not_active",
                     "only an active goal can be completed",
                     json!({ "goalId": goal_id, "status": goal.status }),
@@ -505,7 +612,7 @@ fn execute_with_optional_host_tool_call_id(
                 .filter(|task| task.goal_id == goal_id)
                 .collect::<Vec<_>>();
             if goal_tasks.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "goal.tasks_required",
                     "a goal cannot complete before at least one task is recorded",
                     json!({ "goalId": goal_id }),
@@ -524,7 +631,7 @@ fn execute_with_optional_host_tool_call_id(
                 )
                 .collect::<Vec<_>>();
             if !unfinished.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "goal.tasks_unfinished",
                     "a goal cannot complete while required tasks remain unfinished",
                     json!({ "goalId": goal_id, "tasks": unfinished }),
@@ -547,7 +654,7 @@ fn execute_with_optional_host_tool_call_id(
                 })
                 .collect::<Vec<_>>();
             if !durable_skipped.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "task.skip_not_authorized",
                     "durable Tasks cannot complete a Goal through model-selected skip",
                     json!({ "goalId": goal_id, "tasks": durable_skipped }),
@@ -582,7 +689,7 @@ fn execute_with_optional_host_tool_call_id(
                 })
                 .collect::<Vec<_>>();
             if !tasks_without_valid_evidence.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "goal.valid_evidence_required",
                     "each completed task needs at least one valid evidence record before the goal can complete",
                     json!({ "goalId": goal_id, "tasks": tasks_without_valid_evidence }),
@@ -593,7 +700,7 @@ fn execute_with_optional_host_tool_call_id(
                 .filter(|policy| policy.snapshot.completion_requires_acceptance)
                 .collect::<Vec<_>>();
             if !acceptance_required.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "goal.acceptance_required",
                     "one or more frozen ValidationPolicies require acceptance_submit; goal_complete cannot bypass review and acceptance",
                     json!({ "goalId": goal_id, "validationPolicies": acceptance_required }),
@@ -602,7 +709,7 @@ fn execute_with_optional_host_tool_call_id(
             let goal = database
                 .goals()
                 .complete(&goal_id, required_version(input)?)
-                .map_err(|error| error.to_string())?;
+                .map_err(text_repository_write_error)?;
             if let Ok(event) = database.append_work_event(
                 "goal.completed",
                 conversation_id,
@@ -619,16 +726,16 @@ fn execute_with_optional_host_tool_call_id(
             let goal_id = required_string(input, "goalId")?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err("tasks can only be added after Fox Host activates the goal".into());
+                return Err(rejected_text("tasks can only be added after Fox Host activates the goal"));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let submitted_tasks = input
                 .get("tasks")
                 .and_then(Value::as_array)
                 .filter(|tasks| !tasks.is_empty())
-                .ok_or_else(|| "tasks must be a non-empty array".to_owned())?;
+                .ok_or_else(|| "tasks must be a non-empty array".to_owned()).map_err(rejected_text)?;
             if submitted_tasks.len() > 64 {
-                return Err("tasks cannot contain more than 64 items".into());
+                return Err(rejected_text("tasks cannot contain more than 64 items"));
             }
             let policy_ids = submitted_tasks
                 .iter()
@@ -653,16 +760,16 @@ fn execute_with_optional_host_tool_call_id(
                             .filter(|ordinal| *ordinal >= 0)
                             .ok_or_else(|| {
                                 "task ordinal must be a non-negative integer".to_owned()
-                            })?,
+                            }).map_err(rejected_text)?,
                         title: required_string(task, "title")?,
                         detail: optional_string(task, "detail")?,
                     })
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>, WorkToolError>>()?;
             let tasks = database
                 .work_tasks()
                 .create_many_with_policy_ids(tasks, policy_ids)
-                .map_err(|error| error.to_string())?;
+                .map_err(text_repository_write_error)?;
             for task in &tasks {
                 if let Ok(event) = database.append_work_event(
                     "task.created",
@@ -687,14 +794,14 @@ fn execute_with_optional_host_tool_call_id(
             let (task, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err("the goal is paused; resume it before updating tasks".into());
+                return Err(rejected_text("the goal is paused; resume it before updating tasks"));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let status = parse_task_status(
                 input
                     .get("status")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| "status is required".to_owned())?,
+                    .ok_or_else(|| "status is required".to_owned()).map_err(rejected_text)?,
             )?;
             let policy = database
                 .task_validation_policy(&task.id)
@@ -709,7 +816,7 @@ fn execute_with_optional_host_tool_call_id(
                         | WorkTaskStatus::Skipped
                 )
             {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "task.attempt_required",
                     "durable Tasks must change execution state through task_attempt_start, task_attempt_finish, or task_repair_start",
                     json!({ "taskId": task.id, "validationPolicy": policy.snapshot }),
@@ -726,7 +833,7 @@ fn execute_with_optional_host_tool_call_id(
                     owner_run_id,
                     blocked_reason,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(text_repository_write_error)?;
             if let Some(event_type) = task_event_type(&status) {
                 if let Ok(event) = database.append_work_event(
                     event_type,
@@ -746,7 +853,7 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err("the goal is paused; resume it before starting an Attempt".into());
+                return Err(rejected_text("the goal is paused; resume it before starting an Attempt"));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let result = database
@@ -759,7 +866,7 @@ fn execute_with_optional_host_tool_call_id(
                     root_cause: None,
                     finding_ids: Vec::new(),
                 })
-                .map_err(repository_work_tool_error)?;
+                .map_err(typed_repository_write_error)?;
             if let Some(event) = database
                 .append_work_event(
                     "task.started",
@@ -780,7 +887,7 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err("the goal is paused; resume it before starting a repair".into());
+                return Err(rejected_text("the goal is paused; resume it before starting a repair"));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let finding_ids = required_string_array(input, "findingIds", 32)?;
@@ -794,7 +901,7 @@ fn execute_with_optional_host_tool_call_id(
                     root_cause: Some(required_string(input, "rootCause")?),
                     finding_ids,
                 })
-                .map_err(repository_work_tool_error)?;
+                .map_err(typed_repository_write_error)?;
             if result.budget_exhausted {
                 if let Ok(event) = database.append_work_event(
                     "task.blocked",
@@ -840,7 +947,7 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err("the goal is paused; resume it before finishing an Attempt".into());
+                return Err(rejected_text("the goal is paused; resume it before finishing an Attempt"));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let attempt_status = parse_attempt_status(&required_string(input, "status")?)?;
@@ -854,11 +961,11 @@ fn execute_with_optional_host_tool_call_id(
                         .get("expectedAttemptVersion")
                         .and_then(Value::as_i64)
                         .filter(|version| *version >= 1)
-                        .ok_or_else(|| "expectedAttemptVersion must be at least 1".to_owned())?,
+                        .ok_or_else(|| "expectedAttemptVersion must be at least 1".to_owned()).map_err(rejected_text)?,
                     status: attempt_status,
                     failure_reason: optional_string(input, "failureReason")?,
                 })
-                .map_err(repository_work_tool_error)?;
+                .map_err(typed_repository_write_error)?;
             if let Some(event_type) = task_event_type(&result.task.status) {
                 if let Ok(event) = database.append_work_event(
                     event_type,
@@ -878,23 +985,23 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err("the goal is paused; resume it before adding evidence".into());
+                return Err(rejected_text("the goal is paused; resume it before adding evidence"));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let evidence_type: EvidenceType = serde_json::from_value(
                 input
                     .get("evidenceType")
                     .cloned()
-                    .ok_or_else(|| "evidenceType is required".to_owned())?,
+                    .ok_or_else(|| "evidenceType is required".to_owned()).map_err(rejected_text)?,
             )
-            .map_err(|_| "unsupported evidenceType".to_owned())?;
+            .map_err(|_| rejected_text("unsupported evidenceType"))?;
             let ref_kind: EvidenceReferenceKind = serde_json::from_value(
                 input
                     .get("refKind")
                     .cloned()
-                    .ok_or_else(|| "refKind is required".to_owned())?,
+                    .ok_or_else(|| "refKind is required".to_owned()).map_err(rejected_text)?,
             )
-            .map_err(|_| "unsupported refKind".to_owned())?;
+            .map_err(|_| rejected_text("unsupported refKind"))?;
             let policy = database
                 .task_validation_policy(&task_id)
                 .map_err(repository_work_tool_error)?;
@@ -906,7 +1013,7 @@ fn execute_with_optional_host_tool_call_id(
                     .iter()
                     .any(|allowed| allowed == check_type)
                 {
-                    return Err(WorkToolError::new(
+                    return Err(WorkToolError::rejected(
                         "task.validation_check_type_not_allowed",
                         "the frozen ValidationPolicy does not allow this validation check type",
                         json!({ "taskId": task_id, "checkType": check_type, "validationPolicy": policy.snapshot }),
@@ -929,7 +1036,7 @@ fn execute_with_optional_host_tool_call_id(
                     trace_id: None,
                     span_id: None,
                 })
-                .map_err(|error| error.to_string())?;
+                .map_err(text_repository_write_error)?;
             if let Ok(event) = database.append_work_event(
                 "evidence.added",
                 conversation_id,
@@ -948,11 +1055,11 @@ fn execute_with_optional_host_tool_call_id(
                 .task_evidence()
                 .get(&evidence_id)
                 .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("task evidence '{evidence_id}' was not found"))?;
+                .ok_or_else(|| format!("task evidence '{evidence_id}' was not found")).map_err(rejected_text)?;
             let (_, goal_id) = require_task(database, conversation_id, &evidence.task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err("the goal is paused; resume it before validating evidence".into());
+                return Err(rejected_text("the goal is paused; resume it before validating evidence"));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let status = database
@@ -980,13 +1087,14 @@ fn execute_with_optional_host_tool_call_id(
             let goal_id = required_string(input, "goalId")?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "plan.goal_not_active",
                     "a plan revision requires an active goal",
                     json!({ "goalId": goal_id, "status": goal.status }),
                 ));
             }
-            let tasks = validate_plan_tasks(input, &goal_id)?;
+            let tasks =
+                validate_plan_tasks(input, &goal_id).map_err(WorkToolError::into_rejected)?;
             let revision = database.create_plan_revision(
                 conversation_id,
                 &goal_id,
@@ -1014,7 +1122,7 @@ fn execute_with_optional_host_tool_call_id(
             if let Some(task_id) = task_id.as_deref() {
                 let (_, task_goal_id) = require_task(database, conversation_id, task_id)?;
                 if task_goal_id != goal_id {
-                    return Err(WorkToolError::new(
+                    return Err(WorkToolError::rejected(
                         "review.task_goal_mismatch",
                         "review task must belong to the reviewed goal",
                         json!({ "goalId": goal_id, "taskId": task_id }),
@@ -1023,11 +1131,11 @@ fn execute_with_optional_host_tool_call_id(
             }
             let severity = required_string(input, "severity")?;
             if !["critical", "high", "medium", "low", "info"].contains(&severity.as_str()) {
-                return Err("unsupported review severity".into());
+                return Err(rejected_text("unsupported review severity"));
             }
             let status = optional_string(input, "status")?.unwrap_or_else(|| "open".to_owned());
             if !["open", "resolved", "waived"].contains(&status.as_str()) {
-                return Err("unsupported review status".into());
+                return Err(rejected_text("unsupported review status"));
             }
             let plan_revision_id = required_string(input, "planRevisionId")?;
             let (plans, _, _) = database.load_a1_snapshot(conversation_id)?;
@@ -1035,14 +1143,14 @@ fn execute_with_optional_host_tool_call_id(
                 .iter()
                 .find(|plan| plan.id == plan_revision_id && plan.goal_id == goal_id)
                 .ok_or_else(|| {
-                    WorkToolError::new(
+                    WorkToolError::rejected(
                         "review.plan_not_found",
                         "the reviewed PlanRevision was not found for this goal",
                         json!({ "goalId": goal_id, "planRevisionId": plan_revision_id }),
                     )
                 })?;
             if reviewed_plan.status != "approved" {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "review.plan_not_approved",
                     "independent review requires a user-approved PlanRevision",
                     json!({ "goalId": goal_id, "planRevisionId": plan_revision_id, "status": reviewed_plan.status }),
@@ -1053,7 +1161,7 @@ fn execute_with_optional_host_tool_call_id(
                     && candidate.status == "proposed"
                     && candidate.revision > reviewed_plan.revision
             }) {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "review.plan_pending",
                     "review cannot finalize while a newer PlanRevision awaits user approval",
                     json!({ "goalId": goal_id, "reviewedPlanRevisionId": reviewed_plan.id, "pendingPlanRevisionId": pending.id }),
@@ -1073,7 +1181,7 @@ fn execute_with_optional_host_tool_call_id(
                     .task_has_attempt_run(task_id, run_id)
                     .unwrap_or(true)
             }) {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "review.not_independent",
                     "independent review must run after implementation in a different Fox run",
                     json!({ "goalId": goal_id, "implementationRunId": run_id }),
@@ -1107,13 +1215,13 @@ fn execute_with_optional_host_tool_call_id(
             let finding_id = required_string(input, "findingId")?;
             let status = required_string(input, "status")?;
             if !["resolved", "waived"].contains(&status.as_str()) {
-                return Err("status must be resolved or waived".into());
+                return Err(rejected_text("status must be resolved or waived"));
             }
             let (_, findings, _) = database.load_a1_snapshot(conversation_id)?;
             let existing = findings
                 .iter()
                 .find(|finding| finding.id == finding_id)
-                .ok_or_else(|| "review finding was not found in this conversation".to_owned())?;
+                .ok_or_else(|| "review finding was not found in this conversation".to_owned()).map_err(rejected_text)?;
             if ["critical", "high", "medium"].contains(&existing.severity.as_str()) {
                 let affected_tasks = if let Some(task_id) = existing.task_id.as_deref() {
                     vec![require_task(database, conversation_id, task_id)?.0]
@@ -1132,7 +1240,7 @@ fn execute_with_optional_host_tool_call_id(
                             .unwrap_or(true)
                 });
                 if implementation_owned_high_risk {
-                    return Err(WorkToolError::new(
+                    return Err(WorkToolError::rejected(
                         "review.not_independent",
                         "the implementation run cannot provide final resolution for a high-risk critical/high finding",
                         json!({ "findingId": finding_id, "implementationRunId": run_id }),
@@ -1161,7 +1269,7 @@ fn execute_with_optional_host_tool_call_id(
                 .map_err(repository_work_tool_error)?
                 .is_some()
             {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "graph.readonly_dedicated_accept_required",
                     "an activated read-only Graph requires Host-derived graph_readonly_accept instead of model-supplied acceptance checks",
                     json!({ "goalId": goal_id, "tool": "graph_readonly_accept" }),
@@ -1175,7 +1283,7 @@ fn execute_with_optional_host_tool_call_id(
                 .filter(|plan| plan.goal_id == goal_id && plan.status == "approved")
                 .max_by_key(|plan| plan.revision)
                 .ok_or_else(|| {
-                    WorkToolError::new(
+                    WorkToolError::rejected(
                         "acceptance.plan_required",
                         "an approved PlanRevision is required before final acceptance",
                         json!({ "goalId": goal_id }),
@@ -1186,7 +1294,7 @@ fn execute_with_optional_host_tool_call_id(
                     && candidate.status == "proposed"
                     && candidate.revision > plan.revision
             }) {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "acceptance.plan_pending",
                     "a newer PlanRevision is still awaiting user approval",
                     json!({ "goalId": goal_id, "approvedPlanRevisionId": plan.id, "pendingPlanRevisionId": pending.id }),
@@ -1200,7 +1308,7 @@ fn execute_with_optional_host_tool_call_id(
                 })
                 .collect::<Vec<_>>();
             if goal_findings.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "acceptance.review_required",
                     "an independent review record is required before final acceptance",
                     json!({ "goalId": goal_id }),
@@ -1211,7 +1319,7 @@ fn execute_with_optional_host_tool_call_id(
                 .filter(|finding| finding.created_by == run_id)
                 .collect::<Vec<_>>();
             if reviewer_findings.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "acceptance.reviewer_run_required",
                     "final acceptance must be submitted by the run that reviewed the approved plan",
                     json!({ "goalId": goal_id, "planRevisionId": plan.id, "reviewerRunId": run_id }),
@@ -1230,7 +1338,7 @@ fn execute_with_optional_host_tool_call_id(
                     .task_has_attempt_run(task_id, run_id)
                     .unwrap_or(true)
             }) {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "acceptance.reviewer_not_independent",
                     "the acceptance reviewer run must be different from every implementation evidence run",
                     json!({ "goalId": goal_id, "reviewerRunId": run_id }),
@@ -1242,7 +1350,7 @@ fn execute_with_optional_host_tool_call_id(
                     && ["critical", "high", "medium"].contains(&finding.severity.as_str())
             }).map(|finding| json!({ "findingId": finding.id, "severity": finding.severity, "title": finding.title })).collect::<Vec<_>>();
             if !blockers.is_empty() {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "acceptance.review_blocked",
                     "open review findings block final acceptance",
                     json!({ "goalId": goal_id, "findings": blockers }),
@@ -1283,7 +1391,7 @@ fn execute_with_optional_host_tool_call_id(
         tool if crate::expert_workflows::is_workflow_tool(tool) => {
             crate::expert_workflows::execute_tool(database, conversation_id, run_id, tool, input)?
         }
-        _ => return Err(format!("unsupported work tool: {tool}").into()),
+        _ => return Err(rejected_text(format!("unsupported work tool: {tool}"))),
     };
     let mut details = details;
     if let Some(object) = details.as_object_mut() {
@@ -2144,7 +2252,7 @@ fn validate_goal_for_completion(
         .filter(|task| task.goal_id == goal_id)
         .collect::<Vec<_>>();
     if goal_tasks.is_empty() {
-        return Err(WorkToolError::new(
+        return Err(WorkToolError::rejected(
             "goal.tasks_required",
             "a goal cannot complete before at least one task is recorded",
             json!({ "goalId": goal_id }),
@@ -2161,7 +2269,7 @@ fn validate_goal_for_completion(
         .map(|task| json!({ "taskId": task.id, "title": task.title, "status": task.status }))
         .collect::<Vec<_>>();
     if !unfinished.is_empty() {
-        return Err(WorkToolError::new(
+        return Err(WorkToolError::rejected(
             "goal.tasks_unfinished",
             "a goal cannot complete while required tasks remain unfinished",
             json!({ "goalId": goal_id, "tasks": unfinished }),
@@ -2179,7 +2287,7 @@ fn validate_goal_for_completion(
         })
         .collect::<Vec<_>>();
     if !durable_skipped.is_empty() {
-        return Err(WorkToolError::new(
+        return Err(WorkToolError::rejected(
             "task.skip_not_authorized",
             "durable Tasks cannot be treated as verified through model-selected skip",
             json!({ "goalId": goal_id, "tasks": durable_skipped }),
@@ -2196,7 +2304,7 @@ fn validate_goal_for_completion(
         .map(|task| json!({ "taskId": task.id, "title": task.title }))
         .collect::<Vec<_>>();
     if !missing.is_empty() {
-        return Err(WorkToolError::new("goal.valid_evidence_required", "each completed task needs at least one valid evidence record before the goal can complete", json!({ "goalId": goal_id, "tasks": missing })));
+        return Err(WorkToolError::rejected("goal.valid_evidence_required", "each completed task needs at least one valid evidence record before the goal can complete", json!({ "goalId": goal_id, "tasks": missing })));
     }
     let goal_task_ids = goal_tasks
         .iter()
@@ -2217,7 +2325,7 @@ fn require_no_pending_plan(
         .iter()
         .find(|plan| plan.goal_id == goal_id && plan.status == "proposed")
     {
-        return Err(WorkToolError::new(
+        return Err(WorkToolError::rejected(
             "plan.approval_required",
             "state-changing work is paused until the user approves or rejects the proposed PlanRevision",
             json!({ "goalId": goal_id, "planRevisionId": plan.id, "revision": plan.revision }),
@@ -2612,7 +2720,7 @@ fn validate_acceptance_checks(
         .and_then(Value::as_array)
         .filter(|checks| !checks.is_empty())
         .ok_or_else(|| {
-            WorkToolError::new(
+            WorkToolError::rejected(
                 "acceptance.checks_required",
                 "final acceptance requires at least one explicit criterion check",
                 json!({ "goalId": goal_id }),
@@ -2641,7 +2749,7 @@ fn validate_acceptance_checks(
     for check in submitted {
         let criterion = required_string(check, "criterion")?;
         if !criterion_names.insert(criterion.to_lowercase()) {
-            return Err(WorkToolError::new(
+            return Err(WorkToolError::rejected(
                 "acceptance.criterion_duplicate",
                 "acceptance criteria must be unique",
                 json!({ "goalId": goal_id, "criterion": criterion }),
@@ -2649,7 +2757,7 @@ fn validate_acceptance_checks(
         }
         let method = required_string(check, "method")?;
         if !["test", "inspection", "review", "manual", "other"].contains(&method.as_str()) {
-            return Err(WorkToolError::new(
+            return Err(WorkToolError::rejected(
                 "acceptance.method_unsupported",
                 "acceptance method must be test, inspection, review, manual, or other",
                 json!({ "goalId": goal_id, "criterion": criterion, "method": method }),
@@ -2657,7 +2765,7 @@ fn validate_acceptance_checks(
         }
         let status = required_string(check, "status")?;
         if !["passed", "not_applicable"].contains(&status.as_str()) {
-            return Err(WorkToolError::new(
+            return Err(WorkToolError::rejected(
                 "acceptance.check_not_passed",
                 "final acceptance only permits passed or justified not_applicable criteria",
                 json!({ "goalId": goal_id, "criterion": criterion, "status": status }),
@@ -2665,7 +2773,7 @@ fn validate_acceptance_checks(
         }
         let detail = optional_string(check, "detail")?;
         if status == "not_applicable" && detail.is_none() {
-            return Err(WorkToolError::new(
+            return Err(WorkToolError::rejected(
                 "acceptance.not_applicable_reason_required",
                 "a not_applicable criterion requires a detail explaining why",
                 json!({ "goalId": goal_id, "criterion": criterion }),
@@ -2682,11 +2790,12 @@ fn validate_acceptance_checks(
                         .map(str::to_owned)
                         .ok_or_else(|| "evidenceIds must contain non-empty strings".to_owned())
                 })
-                .collect::<Result<Vec<_>, _>>()?,
-            Some(_) => return Err("evidenceIds must be an array".into()),
+                .collect::<Result<Vec<_>, String>>()
+                .map_err(rejected_text)?,
+            Some(_) => return Err(rejected_text("evidenceIds must be an array")),
         };
         if status == "passed" && evidence_ids.is_empty() {
-            return Err(WorkToolError::new(
+            return Err(WorkToolError::rejected(
                 "acceptance.evidence_required",
                 "each passed criterion requires at least one valid evidence record",
                 json!({ "goalId": goal_id, "criterion": criterion }),
@@ -2694,14 +2803,14 @@ fn validate_acceptance_checks(
         }
         for evidence_id in &evidence_ids {
             let item = evidence_by_id.get(evidence_id.as_str()).ok_or_else(|| {
-                WorkToolError::new(
+                WorkToolError::rejected(
                     "acceptance.evidence_not_found",
                     "acceptance evidence must belong to this goal",
                     json!({ "goalId": goal_id, "criterion": criterion, "evidenceId": evidence_id }),
                 )
             })?;
             if item.validity_status != EvidenceValidityStatus::Valid {
-                return Err(WorkToolError::new(
+                return Err(WorkToolError::rejected(
                     "acceptance.evidence_not_valid",
                     "acceptance evidence must be Host-validated",
                     json!({ "goalId": goal_id, "criterion": criterion, "evidenceId": evidence_id, "validityStatus": item.validity_status }),
@@ -2725,7 +2834,7 @@ fn validate_acceptance_checks(
         .map(|task| json!({ "taskId": task.id, "title": task.title }))
         .collect::<Vec<_>>();
     if !uncovered_tasks.is_empty() {
-        return Err(WorkToolError::new(
+        return Err(WorkToolError::rejected(
             "acceptance.task_coverage_required",
             "acceptance criteria must cite evidence covering every completed task",
             json!({ "goalId": goal_id, "tasks": uncovered_tasks }),
@@ -2743,14 +2852,14 @@ fn require_goal(
     database: &Database,
     conversation_id: &str,
     goal_id: &str,
-) -> Result<crate::database::GoalRecord, String> {
+) -> Result<crate::database::GoalRecord, WorkToolError> {
     let goal = database
         .goals()
         .get(goal_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("goal '{goal_id}' was not found"))?;
+        .map_err(|error| WorkToolError::from(error.to_string()))?
+        .ok_or_else(|| rejected_text(format!("goal '{goal_id}' was not found")))?;
     if goal.conversation_id != conversation_id {
-        return Err("goal belongs to a different conversation".to_owned());
+        return Err(rejected_text("goal belongs to a different conversation"));
     }
     Ok(goal)
 }
@@ -2759,51 +2868,55 @@ fn require_task(
     database: &Database,
     conversation_id: &str,
     task_id: &str,
-) -> Result<(crate::database::WorkTaskRecord, String), String> {
+) -> Result<(crate::database::WorkTaskRecord, String), WorkToolError> {
     let task = database
         .work_tasks()
         .get(task_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("work task '{task_id}' was not found"))?;
+        .map_err(|error| WorkToolError::from(error.to_string()))?
+        .ok_or_else(|| rejected_text(format!("work task '{task_id}' was not found")))?;
     let goal = require_goal(database, conversation_id, &task.goal_id)?;
     Ok((task, goal.id))
 }
 
-fn required_string(input: &Value, key: &str) -> Result<String, String> {
+fn required_string(input: &Value, key: &str) -> Result<String, InputRejection> {
     input
         .get(key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| format!("{key} is required"))
+        .ok_or_else(|| InputRejection(format!("{key} is required")))
 }
 
-fn optional_string(input: &Value, key: &str) -> Result<Option<String>, String> {
+fn optional_string(input: &Value, key: &str) -> Result<Option<String>, InputRejection> {
     match input.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
-        Some(Value::String(_)) => Err(format!("{key} cannot be empty")),
-        Some(_) => Err(format!("{key} must be a string")),
+        Some(Value::String(_)) => Err(InputRejection(format!("{key} cannot be empty"))),
+        Some(_) => Err(InputRejection(format!("{key} must be a string"))),
     }
 }
 
-fn required_version(input: &Value) -> Result<i64, String> {
+fn required_version(input: &Value) -> Result<i64, InputRejection> {
     input
         .get("expectedVersion")
         .and_then(Value::as_i64)
         .filter(|version| *version >= 1)
-        .ok_or_else(|| "expectedVersion must be an integer of at least 1".to_owned())
+        .ok_or_else(|| InputRejection("expectedVersion must be an integer of at least 1".to_owned()))
 }
 
-fn required_string_array(input: &Value, key: &str, limit: usize) -> Result<Vec<String>, String> {
+fn required_string_array(
+    input: &Value,
+    key: &str,
+    limit: usize,
+) -> Result<Vec<String>, InputRejection> {
     let values = input
         .get(key)
         .and_then(Value::as_array)
         .filter(|values| !values.is_empty())
-        .ok_or_else(|| format!("{key} must be a non-empty array"))?;
+        .ok_or_else(|| InputRejection(format!("{key} must be a non-empty array")))?;
     if values.len() > limit {
-        return Err(format!("{key} cannot contain more than {limit} values"));
+        return Err(InputRejection(format!("{key} cannot contain more than {limit} values")));
     }
     let mut unique = HashSet::new();
     values
@@ -2822,16 +2935,17 @@ fn required_string_array(input: &Value, key: &str, limit: usize) -> Result<Vec<S
             }
             Ok(value.to_owned())
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(InputRejection)
 }
 
-fn parse_attempt_status(value: &str) -> Result<TaskAttemptStatus, String> {
+fn parse_attempt_status(value: &str) -> Result<TaskAttemptStatus, InputRejection> {
     match value {
         "succeeded" => Ok(TaskAttemptStatus::Succeeded),
         "failed" => Ok(TaskAttemptStatus::Failed),
         "blocked" => Ok(TaskAttemptStatus::Blocked),
         "cancelled" => Ok(TaskAttemptStatus::Cancelled),
-        _ => Err(format!("unsupported terminal Attempt status: {value}")),
+        _ => Err(InputRejection(format!("unsupported terminal Attempt status: {value}"))),
     }
 }
 
@@ -2878,7 +2992,7 @@ fn require_durable_v2_graph_profile(
         .frozen_run_execution_profile_id(run_id)
         .map_err(|error| graph_repository_work_tool_error("profile", error))?;
     if profile.as_deref() != Some("durable_v2") {
-        return Err(WorkToolError::new(
+        return Err(WorkToolError::rejected(
             "graph.readonly_profile_required",
             "persistent read-only Graph tools require the current Run to freeze durable_v2",
             json!({
@@ -3264,7 +3378,7 @@ fn graph_acceptance_repository_error(error: RepositoryError) -> WorkToolError {
     )
 }
 
-fn parse_task_status(value: &str) -> Result<WorkTaskStatus, String> {
+fn parse_task_status(value: &str) -> Result<WorkTaskStatus, InputRejection> {
     match value {
         "queued" => Ok(WorkTaskStatus::Queued),
         "in_progress" => Ok(WorkTaskStatus::InProgress),
@@ -3272,7 +3386,7 @@ fn parse_task_status(value: &str) -> Result<WorkTaskStatus, String> {
         "blocked" => Ok(WorkTaskStatus::Blocked),
         "interrupted" => Ok(WorkTaskStatus::Interrupted),
         "skipped" => Ok(WorkTaskStatus::Skipped),
-        _ => Err(format!("unsupported task status: {value}")),
+        _ => Err(InputRejection(format!("unsupported task status: {value}"))),
     }
 }
 
@@ -5505,5 +5619,77 @@ mod tests {
         assert_eq!(error.code, "graph.readonly_plan_changed");
         assert_eq!(error.details["retryable"], true);
         assert_eq!(error.details["operation"], "node_start");
+    }
+}
+
+/// "Tool errors are data": the phase boundary. Only a refusal proven to have
+/// written nothing is `Rejected`; storage failures, and every repository that
+/// may create a child Run or a durable intent, stay `Uncertain` (fatal on the
+/// Kernel path).
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    fn database_error() -> RepositoryError {
+        RepositoryError::Database { message: "disk I/O error".to_owned(), busy: false }
+    }
+
+    #[test]
+    fn unclassified_errors_default_to_uncertain() {
+        assert!(!WorkToolError::from("boom").is_rejected_before_execution());
+        assert!(!WorkToolError::new("x.y", "boom", json!({})).is_rejected_before_execution());
+        assert!(WorkToolError::rejected("x.y", "bad", json!({})).is_rejected_before_execution());
+        let text = rejected_text("goalId is required");
+        assert!(text.is_rejected_before_execution());
+        assert_eq!(text.code, "work_tool.failed", "legacy code is unchanged");
+        assert_eq!(text.message, "goalId is required", "legacy text is unchanged");
+        let input: WorkToolError = required_string(&json!({}), "goalId").unwrap_err().into();
+        assert!(input.is_rejected_before_execution());
+        assert_eq!(input.message, "goalId is required");
+    }
+
+    #[test]
+    fn only_rolled_back_domain_refusals_are_rejected() {
+        for error in [
+            RepositoryError::MissingReference("tool call 'x' was not found".to_owned()),
+            RepositoryError::InvalidReference("cannot reference".to_owned()),
+            RepositoryError::OptimisticLockFailed { id: "t".to_owned(), expected_version: 1 },
+            RepositoryError::NotFound { entity: "work task", id: "t".to_owned() },
+            RepositoryError::DuplicateEvidence,
+        ] {
+            assert_eq!(repository_refusal_phase(&error), WorkToolErrorPhase::Rejected, "{error}");
+        }
+        for error in [
+            database_error(),
+            RepositoryError::Database { message: "database is locked".to_owned(), busy: true },
+            RepositoryError::SqliteBusyExhausted { attempts: 5 },
+            RepositoryError::InvalidValidationPolicy("corrupt snapshot".to_owned()),
+            RepositoryError::ProjectionHashMismatch { expected: "a".to_owned(), actual: "b".to_owned() },
+        ] {
+            assert_eq!(repository_refusal_phase(&error), WorkToolErrorPhase::Uncertain, "{error}");
+            assert!(!text_repository_write_error(error).is_rejected_before_execution());
+        }
+        assert!(!typed_repository_write_error(database_error()).is_rejected_before_execution());
+        assert!(typed_repository_write_error(RepositoryError::OptimisticLockFailed {
+            id: "t".to_owned(),
+            expected_version: 1,
+        })
+        .is_rejected_before_execution());
+    }
+
+    #[test]
+    fn child_and_intent_creating_repositories_never_become_rejections() {
+        // These repository calls create (or replay) a child Run, a cancel
+        // intent, a reviewer request or an acceptance record. Even a domain
+        // refusal from them stays on the conservative fatal path.
+        let invalid = || RepositoryError::InvalidInput("refused".to_owned());
+        assert!(!graph_node_start_repository_error(invalid()).is_rejected_before_execution());
+        assert!(!graph_node_finish_repository_error(invalid()).is_rejected_before_execution());
+        assert!(!graph_node_cancel_repository_error(invalid()).is_rejected_before_execution());
+        assert!(!graph_node_review_repository_error(invalid()).is_rejected_before_execution());
+        assert!(!graph_acceptance_repository_error(invalid()).is_rejected_before_execution());
+        assert!(!graph_repository_work_tool_error("activation", invalid()).is_rejected_before_execution());
+        assert!(!repository_work_tool_error(invalid()).is_rejected_before_execution(),
+            "the shared mapper itself never decides the phase");
     }
 }
