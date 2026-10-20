@@ -12,6 +12,8 @@
 //! 3. `legacy_*` — characterization of the *unchanged* legacy path, including
 //!    the fact that a schemaVersion-2 artifact still records `unverified` with
 //!    `passed` untouched (the completion gate is a later package's job).
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::{
     Database, DeliveryChecklistItem, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
 };
@@ -202,7 +204,7 @@ fn p2a_decode_v2_rejects_unknown_fields_and_bad_enums() {
         json!({"table": {"header": "nope"}}),
         json!({"table": {"quote": "nope"}}),
     ] {
-        let rendered = bad.to_string();
+        let rendered = bad.canonical_string();
         assert!(
             invalid_reason(&v2_spec(bad)).contains("v2"),
             "bad policy must be rejected: {rendered}"
@@ -568,7 +570,7 @@ fn p2a_typed_root_structurally_invalid_binding_is_io() {
         permission,
         budgets,
     };
-    let stored = serde_json::to_string(&invalid).expect("serialize binding");
+    let stored = crate::canonical_json::to_string(&invalid).expect("serialize binding");
     // Keep the stored hash consistent so the hash gate passes and the binding's
     // own validation is the gate that rejects it.
     use sha2::{Digest, Sha256};
@@ -710,7 +712,7 @@ fn p2a_legacy_schema2_records_unverified_but_keeps_passed() {
     let mut verdicts = vec![ItemVerdict {
         item_key: "out/report.txt".to_owned(),
         passed: true,
-        finding_json: json!({"checks": {}}).to_string(),
+        finding_json: json!({"checks": {}}).canonical_string(),
         bound_path: None,
     }];
 
@@ -798,7 +800,7 @@ fn p2a_legacy_other_unsupported_schema_keeps_the_fail_closed_reason() {
         let mut verdicts = vec![ItemVerdict {
             item_key: "out/report.txt".to_owned(),
             passed: true,
-            finding_json: json!({"checks": {}}).to_string(),
+            finding_json: json!({"checks": {}}).canonical_string(),
             bound_path: None,
         }];
 
