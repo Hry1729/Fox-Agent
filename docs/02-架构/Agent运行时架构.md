@@ -374,6 +374,64 @@ Host-owned ToolCall 执行期间，Runtime 仍可能回传同一调用的 `tool.
 
 `list_mcp_tools/call_mcp_tool` 统一投影持久 stdio、Streamable HTTP 和 OpenAPI 源；连接方式、凭据、Session ID 和健康状态都留在 Host，不进入 Sidecar。完整边界见[扩展源与策略生命周期架构](扩展源与策略生命周期架构.md)。
 
+### 工具错误是数据（Kernel 路径）
+
+> 2026-10-20 增补。原则（产品决定）：**工具错误应该是数据，而不是错误。** 模型能读懂并改正的失败，要作为失败的工具结果交还模型，Run 继续；只有无法确认有没有产生副作用的失败，才终止 Run。
+
+**执行前拒绝与执行中失败的划分。** 判断依据是类型，不靠错误文本：
+
+- `WorkToolError.phase` 有两个值。`Rejected` 表示 Host 只读了模型参数和当前持久状态就拒绝了，没有开始任何写入；`Uncertain` 是默认值，每个错误点要明确标记，才能算 `Rejected`。
+- 算作 `Rejected` 的情况：
+  - 参数解码、必填字段、类型、枚举（`evidenceType`、`refKind`、状态等）、数组形状；
+  - `validate_plan_tasks`，以及只读 Graph 请求的纯解析；
+  - Goal/Task/证据不存在或不属于本会话；Goal 不是 active；PlanRevision 等待批准；
+  - 冻结 ValidationPolicy 不允许的检查类型；Profile 或 workflow 策略不允许；未知工作工具；
+  - 单一写事务（`with_write_transaction`）内部抛出的领域拒绝，例如 `validate_reference` 的 MissingReference / InvalidReference、乐观锁版本不符、非法状态转换、重复证据。这些事务已经整体回滚。
+- 一律保持 `Uncertain`、按原来的致命路径处理的情况：
+  - SQLite/存储错误、忙重试耗尽、冻结策略快照损坏（包括事务已提交、但恢复连接设置失败的情况）；
+  - 写入之后的失败，例如修复预算耗尽时 Task 已经标为 blocked；
+  - 会创建子 Run 或持久意图的仓储调用：Graph 节点启动、完成、取消、审查、验收、激活。即使它们返回领域拒绝，也不算 `Rejected`；
+  - `post_finalize` 动作暂存失败、冻结身份漂移、执行凭据重验失败、资源获取失败、取消令牌触发、超时、未分类错误。
+  - 委派工具保持原有机制：`preflight_child` 拒绝参数，累计 3 次后返回 `child.correction_limit`。
+- legacy 路径行为不变：错误码、文本和 `errorDetails` 都和以前一样，legacy 不读 `phase`。
+
+**结算。** `GatewayPolicy::execute_work` 遇到 `Rejected` 错误时（取消令牌优先，取消照旧走取消路径），返回 `isError` 结果，结构如下：
+
+- `details.errorCode`、`details.error.{code,message,details}`：原 `WorkToolError` 的错误码和 details，不再用 `to_string()` 丢掉；
+- `toolErrorPhase:"rejected_before_execution"`、`executionStarted:false`、`source:"fox_kernel_host"`、`consecutiveRejections`、`rejectionLimit`；
+- 给模型的文本是 `[code] … Fox error details: {...}`，再加一句修正提示。
+
+这个结果走 Kernel 已有的结算链路：
+
+1. 执行尝试按 `NotStarted + Failed{code}` 记录为 refusal，refusal code 就是具体错误码；
+2. `tool_settled(false)` 把调用结算为 `failed`，不会留下 leased 或未结算的调用；
+3. 事件、投影、checkpoint 照常提交；
+4. 重启后不会重新派发：已结算的调用不再被租用；如果 refusal 已落库但 settle 之前崩溃了，按已有规则答复 refusal 回执，或者按 `kernel.uncertain_execution` 停止，都不会重放。
+
+**上限。** 同一 Run 内，连续出现工作工具执行前拒绝时，前 `WORK_TOOL_REJECTION_STREAK_LIMIT = 5` 次作为数据交还模型。第 6 次连续拒绝不再交还，这次调用改为结算成带类型的预算结果 `kernel.tool_error_budget_exhausted`（`retryable:false`，同样没有执行）。之后 drive 循环和 live 批次循环会从持久快照读到这个结果，在下一轮模型调用之前，用 `kernel.tool_error_budget_exhausted` 让 Run 失败，重启后也是如此。
+
+- 计数顺序：按持久批次顺序加 source order。成功调用、其他失败、取消都会把计数清零。
+- 取 5 的理由：
+  - 一次可纠正的拒绝通常一到两次就能改对；
+  - legacy no-progress 防护是 3 次重复加 3 次纠正；
+  - 工作工具的前置条件还依赖持久状态，所以比委派的 3 次宽一些；
+  - 同时把浪费的模型轮次控制在约 6 轮。
+
+**仍然致命时的错误码。** 工作工具或委派工具的非拒绝失败仍然会让 Run 失败。现在用具体错误码 `kernel.work_tool_failed` / `kernel.delegation_tool_failed`，不再是通用的 `kernel.execution_failed`。`run.failed` 仍然只持久化固定文案，不保存适配器原始错误。原始原因只写到本地 stderr 诊断：`fox.kernel_diag kind=work_tool_error … phase=…`、`host_tool_error_fatal`、`run_failed`、`tool_error_budget_exhausted`。
+
+**参数规范化（与 legacy 对齐）。** Kernel live loop 和单轮传输在把 round output 提交给 Host **之前**，用 legacy 的 `preparePlanRevisionArguments`（`services/agent-runtime/src/tool-argument-preparers.mjs`）规范化 `plan_revision_create.tasks`。这样持久提案、审批身份和派发 payload 都是数组。
+
+- 规范化是严格的：只有能解析成数组的字符串才会被替换，其他值保持原样，交给 Host 按上面的规则作为数据拒绝。
+- 范围以 legacy 为准，只覆盖 `plan_revision_create`。
+- 同一个 block 原地更新，worker 转录和 Host 持久历史保持一致。
+
+**待产品决定（方案 3）。** 纯文本任务里，模型能引用的 id 仍然解析不了：
+
+- Kernel 工具调用在 `tool_calls` 里投影成 `kernel-tool:{run}:{call}`，模型只知道原始 provider id；
+- message 证据要求的是用户消息 id，模型看不到。
+
+这类 `task_evidence_add` 现在会作为数据交还模型，不会再让 Run 崩溃。但模型仍然没有可用的引用。要不要在结果里回传可引用 id、让 `validate_reference` 接受 runtime id、或者在工具描述里说明纯文本任务该用哪种证据，还需要产品决定。
+
 ## Goal 和 Planning Extension
 
 `fox-planning-extension.mjs` 使用 Pi Extension API 注册 Work Tools，并可消费 Host 已传入的结构化 Work Snapshot 做本地规划判断。模型可见注入只由 Prompt Composer 完成；扩展不注册 `before_agent_start` 注入处理器。它不承担以下职责：
