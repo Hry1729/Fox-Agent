@@ -1,4 +1,6 @@
 //! User-initiated, bounded read-only queries over the original operation's scope.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::{
     Database, McpServerRecord, ReconciliationItem, ReconciliationRequest, ReconciliationView,
 };
@@ -31,7 +33,7 @@ fn connection(
         .get_mcp_server(id)?
         .filter(|s| s.enabled)
         .ok_or("原连接器已停用或不存在")?;
-    let digest=hash(&json!({"id":server.id,"transport":server.transport,"command":server.command,"args":server.args,"endpoint":server.endpoint_url,"definition":server.definition}).to_string());
+    let digest=hash(&json!({"id":server.id,"transport":server.transport,"command":server.command,"args":server.args,"endpoint":server.endpoint_url,"definition":server.definition}).canonical_string());
     if db
         .kernel_host_scope(&request.run_id)?
         .mcp_server_hashes
@@ -123,7 +125,7 @@ pub fn query(db: &Database, request: &ReconciliationRequest) -> Result<Reconcili
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .ok_or("请选择只读查询工具")?;
-        if !request.arguments.is_object() || request.arguments.to_string().len() > 16_384 {
+        if !request.arguments.is_object() || request.arguments.canonical_string().len() > 16_384 {
             return Err("查询条件必须为不超过 16 KiB 的对象".into());
         }
         let result = crate::mcp::execute_owned_readonly(
@@ -132,7 +134,7 @@ pub fn query(db: &Database, request: &ReconciliationRequest) -> Result<Reconcili
             &token(),
             Duration::from_secs(15),
         )?;
-        let body = result.to_string();
+        let body = result.canonical_string();
         let excerpt: String = body.chars().take(4000).collect();
         json!({"source":"connector_read_query","serverId":server.id,"tool":tool,"arguments":request.arguments,"observedAt":observed,
             "status":if result["isError"]==true {"query_error"} else {"observed"},"result":excerpt,"truncated":body.chars().count()>4000,
