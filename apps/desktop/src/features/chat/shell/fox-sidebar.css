@@ -208,3 +208,18 @@
     transition: none;
   }
 }
+
+/* "等你处理": a conversation with a pending approval. Approvals wait for the
+   user without expiring, so the marker stays until it is answered. */
+.fox-sidebar-attention {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-right: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fox-warning, #d97706) 14%, transparent);
+  color: var(--fox-warning, #b45309);
+  font-size: var(--fox-type-caption);
+  line-height: 1.4;
+  white-space: nowrap;
+}
