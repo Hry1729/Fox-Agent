@@ -308,6 +308,38 @@ async fn a_crash_fails_the_run_and_the_next_turn_reloads_without_replaying_histo
     runtime.shutdown().await;
 }
 
+/// Reopening a conversation: the backend replays its whole history between
+/// `session/load` and its reply (and here also emits more old output right
+/// after the reply, before any prompt). None of it may appear in the new
+/// Run: only what the backend sends for the new prompt is projected.
+#[tokio::test(flavor = "multi_thread")]
+async fn reopening_with_session_load_projects_only_events_after_the_load() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    let (runtime, sink) = new_runtime(launcher.clone());
+    runtime.start_turn(turn("c-replay", "r-replay", "after-load", AgentBackend::Pi, Some("sess-longreplay-1"))).unwrap();
+    let terminal = sink.terminal("r-replay").await;
+    assert_eq!(terminal["type"], "run.completed", "{:?}", sink.types("r-replay"));
+    let session = sink.events("r-replay").into_iter().find(|event| event["type"] == "agent_backend.session").unwrap();
+    assert_eq!(session["reopened"], "load");
+    assert_eq!(session["nativeSessionId"], "sess-longreplay-1");
+    assert_eq!(sink.text("r-replay"), "fresh-after-load", "only the new turn's text");
+    let rendered = serde_json::to_string(&sink.events("r-replay")).unwrap();
+    for old in ["replayed-old", "old question", "old thought", "old-tool-", "late old tool", "replayed-after-reply"] {
+        assert!(!rendered.contains(old), "history leaked into the new Run ({old}): {rendered}");
+    }
+    assert!(rendered.contains("new-tool"), "the new turn's tool call is projected: {rendered}");
+    // A second turn on the same connection sees only its own output too.
+    runtime.start_turn(turn("c-replay", "r-replay-2", "simple", AgentBackend::Pi, Some("sess-longreplay-1"))).unwrap();
+    assert_eq!(sink.terminal("r-replay-2").await["type"], "run.completed");
+    assert!(sink.text("r-replay-2").starts_with("pid:"), "{}", sink.text("r-replay-2"));
+    assert!(!sink.text("r-replay-2").contains("fresh-after-load"));
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+    runtime.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn turns_reuse_one_process_and_session_and_busy_is_refused() {
     if !node_available() {
