@@ -317,7 +317,7 @@ struct ShadowCheckpoint {
 
 impl ShadowContext {
     pub fn checkpoint(&self, monotonic_ms: i64) -> Result<String, String> {
-        serde_json::to_string(&ShadowCheckpoint {
+        crate::canonical_json::to_string(&ShadowCheckpoint {
             version: 1,
             shadow_run_id: self.shadow_run_id.clone(),
             cursor: self.cursor,
