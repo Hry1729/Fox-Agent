@@ -195,6 +195,43 @@ fn execution_failure_code(error: &str) -> String {
     "kernel.execution_failed".to_owned()
 }
 
+/// Local (stderr) diagnostic for a drive error that is about to fail the Run.
+///
+/// The persisted `run.failed` keeps its fixed message (adapter errors can carry
+/// request bodies); this line carries the redacted, bounded cause plus the
+/// tool calls that are still unresolved — those are the ones the Kernel will
+/// mark `cancelled` when the Run terminates, so "cancelled" in the UI is a
+/// consequence of this failure, not its source. Information only.
+fn log_drive_failure(coordinator: &KernelCoordinator<'_>, run_id: &str, code: &str, error: &str) {
+    let lower = error.to_ascii_lowercase();
+    let source = if error.contains("[tool.cancelled]") {
+        "cancellation_token"
+    } else if lower.contains("timed out") || lower.contains("timeout") || lower.contains("deadline") {
+        "timeout"
+    } else if lower.contains("worker") || lower.contains("broken pipe") || lower.contains("exited") {
+        "worker"
+    } else {
+        "executor_or_model_error"
+    };
+    let unresolved = coordinator
+        .snapshot()
+        .map(|snapshot| {
+            snapshot
+                .tool_calls
+                .iter()
+                .filter(|call| !matches!(call.state.as_str(), "completed" | "failed" | "cancelled"))
+                .map(|call| format!("{}:{}:{}", call.tool_call_id, call.tool, call.state))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|snapshot_error| format!("<snapshot failed: {snapshot_error}>"));
+    eprintln!(
+        "fox.kernel_diag kind=run_failed run={run_id} code={code} source_hint={source} unresolved_tools=[{unresolved}] error_len={} error=\"{}\"",
+        error.len(),
+        super::redact_execution_diagnostic(error, 2000).replace('\n', " "),
+    );
+}
+
 /// A tagged Kernel notice refusal gets a durable, bounded diagnostic.
 /// Never persist the original error: it can contain untrusted adapter content.
 fn job_notice_failure(error: &str) -> Option<(&'static str, &'static str)> {
@@ -1540,6 +1577,7 @@ pub(super) fn drive_with_actions_transport(
                     _ => None,
                 };
                 if let Some(reason)=reason {let _=database.kernel_context_budget_stopped(run_id,reason);}
+                log_drive_failure(&coordinator, run_id, code, &error);
                 coordinator.fail(code, message)?;
             }
         }
@@ -2242,6 +2280,19 @@ impl super::RuntimeHost {
                         if super::work_tools::is_work_tool(tool)
                             || super::kernel_delegation::TOOLS.contains(&tool) =>
                     {
+                        // Diagnostics only: this Err leaves the call leased and
+                        // ends the drive, so the Run fails with a generic code
+                        // and the Kernel later marks the call `cancelled`. Say
+                        // here which call it was and whether a cancellation
+                        // token (user cancel / budget) was the source.
+                        eprintln!(
+                            "fox.kernel_diag kind=host_tool_error_fatal run={} tool_call={} tool={tool} token_cancelled={} classified={} error=\"{}\"",
+                            binding.run_id,
+                            effect.tool_call_id.as_deref().unwrap_or("?"),
+                            token.check().is_err(),
+                            execution_failure_code(&error),
+                            super::redact_execution_diagnostic(&error, 1000).replace('\n', " "),
+                        );
                         Err(error)
                     }
                     Err(error) if token.check().is_ok() => {
