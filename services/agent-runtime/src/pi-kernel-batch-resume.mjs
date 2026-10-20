@@ -10,6 +10,7 @@ import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.m
 import { modelToolResultContent, toolResultRef } from './tool-view.mjs'
 import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
 import { hostJobNoticeMarker, materializeHostJobHistory, validateHostJobNotices } from './host-job-notice.mjs'
+import { prepareKernelToolCallArguments } from './tool-argument-preparers.mjs'
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const deliveries = new WeakMap()
@@ -42,6 +43,10 @@ function preparePiReplayHistory(messages) {
 }
 
 export function prepareKernelModelResponse(assistantMessage, prepared) {
+  // The single-round transport commits proposals here, so it gets the same
+  // legacy-equivalent argument repair as the live loop before the Host makes
+  // the proposal durable (strict: only a string that parses to an array).
+  prepareKernelToolCallArguments(assistantMessage)
   // Pi uses undefined for absent optional metadata. Omit those object fields
   // as JSON transport does, but never repair non-JSON proposed arguments.
   for (const block of assistantMessage?.content ?? []) {
