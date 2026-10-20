@@ -159,7 +159,7 @@ mod real {
         let mut seen = Vec::new();
         loop {
             let event = next(connection).await;
-            if let BackendEvent::Failed(error) = &event {
+            if let BackendEvent::Failed(error) | BackendEvent::TurnFailed { error, .. } = &event {
                 panic!("backend failed: {error}; seen so far: {seen:?}");
             }
             let done = wanted(&event);
