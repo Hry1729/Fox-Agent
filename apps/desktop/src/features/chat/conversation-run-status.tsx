@@ -1,10 +1,10 @@
-import type { ConversationRunIndicator } from './conversation-run-indicator'
+import { conversationAttentionLabel, type ConversationRunIndicator } from './conversation-run-indicator'
 import { ConversationStatusIcon } from './conversation-status-icon'
 
 export const CONVERSATION_RUN_LABELS: Record<ConversationRunIndicator, string> = {
   running: '运行中',
   queued: '运行中',
-  approval: '等待审批或回复',
+  approval: '等你处理',
   reply: '等待审批或回复',
   completed: '任务结束',
 }
@@ -26,4 +26,11 @@ export function ConversationRunStatus({ indicator, className = 'fox-sidebar-conv
   >
     <ConversationStatusIcon state={state} size={9.8} />
   </span>
+}
+
+/** Small text badge after the title when the conversation waits for the user's approval. */
+export function ConversationAttentionBadge({ indicator }: { indicator?: ConversationRunIndicator }) {
+  const label = conversationAttentionLabel(indicator)
+  if (!label) return null
+  return <span className="fox-sidebar-attention" data-attention="approval" title="有待处理的审批">{label}</span>
 }
