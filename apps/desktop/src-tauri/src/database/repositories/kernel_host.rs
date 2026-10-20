@@ -71,7 +71,7 @@ fn scope_body(scope: &KernelHostScope) -> Result<String, String> {
     {
         return Err("invalid Kernel Host resource scope".into());
     }
-    let body = serde_json::to_string(scope).map_err(|_| "invalid Kernel Host scope")?;
+    let body = crate::canonical_json::to_string(scope).map_err(|_| "invalid Kernel Host scope")?;
     if body.len() > 1_048_576 {
         return Err("Kernel Host scope exceeds size limit".into());
     }
