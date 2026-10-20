@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use crate::database::{
     AcceptanceRecord, AppendContinuationDecisionInput, ContinuationDecisionKind,
@@ -124,7 +126,7 @@ fn canonical_run_execution_profile(profile_id: &str) -> Result<(String, String),
         )));
     }
     let snapshot = serde_json::json!({ "schemaVersion": 1, "id": profile_id });
-    let encoded = serde_json::to_string(&snapshot)
+    let encoded = crate::canonical_json::to_string(&snapshot)
         .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
     let hash = format!("{:x}", Sha256::digest(encoded.as_bytes()));
     Ok((encoded, hash))
@@ -467,7 +469,7 @@ impl Database {
                             plan_revision_id,
                             conversation_id,
                             summary,
-                            checks.to_string(),
+                            checks.canonical_string(),
                             reviewer_run_id,
                             now,
                         ],
@@ -812,7 +814,7 @@ pub(super) fn start_task_attempt_in_transaction(
             |row| row.get::<_, i64>(0),
         )
         .map_err(RepositoryError::database)?;
-    let finding_ids_json = serde_json::to_string(&input.finding_ids)
+    let finding_ids_json = crate::canonical_json::to_string(&input.finding_ids)
         .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
     transaction
         .execute(
@@ -885,7 +887,7 @@ impl Database {
 
         validate_start_task_repair_override(&input)?;
         let canonical_input = task_repair_override_input_value(&input);
-        let encoded_input = serde_json::to_string(&canonical_input)
+        let encoded_input = crate::canonical_json::to_string(&canonical_input)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let input_hash = format!("{:x}", Sha256::digest(encoded_input.as_bytes()));
         let now = timestamp();
@@ -1093,7 +1095,7 @@ impl Database {
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(RepositoryError::database)?;
-            let finding_ids_json = serde_json::to_string(&input.finding_ids)
+            let finding_ids_json = crate::canonical_json::to_string(&input.finding_ids)
                 .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
             transaction
                 .execute(
@@ -1468,15 +1470,15 @@ impl Database {
                         record.event_cursor,
                         continuation_decision_text(&record.decision),
                         continuation_reason_text(&record.reason_code),
-                        serde_json::to_string(&record.active_task_ids)
+                        crate::canonical_json::to_string(&record.active_task_ids)
                             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?,
-                        serde_json::to_string(&record.evidence_ids)
+                        crate::canonical_json::to_string(&record.evidence_ids)
                             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?,
-                        serde_json::to_string(&record.missing_acceptance)
+                        crate::canonical_json::to_string(&record.missing_acceptance)
                             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?,
                         record.next_action,
                         record.retry_class.as_ref().map(continuation_retry_text),
-                        serde_json::to_string(&record.blocked_dependency_refs)
+                        crate::canonical_json::to_string(&record.blocked_dependency_refs)
                             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?,
                         continuation_validation_text(&record.host_validation_outcome),
                         record.host_validation_error,
@@ -1990,7 +1992,7 @@ fn finish_task_attempt_with_authority_in_transaction(
             )?;
         }
     }
-    let evidence_ids_json = serde_json::to_string(&evidence_ids)
+    let evidence_ids_json = crate::canonical_json::to_string(&evidence_ids)
         .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
     let changed = transaction
         .execute(
@@ -2623,7 +2625,7 @@ fn load_bounded_task_attempts(
     if task_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let task_ids_json = serde_json::to_string(task_ids)
+    let task_ids_json = crate::canonical_json::to_string(task_ids)
         .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
     let global_limit = task_ids.len().saturating_mul(per_task_limit) as i64;
     connection
@@ -3697,7 +3699,7 @@ fn projection_hash(
         event_range: &projection.projection_meta.event_range,
         evidence_validity,
     };
-    let encoded = serde_json::to_vec(&material)
+    let encoded = crate::canonical_json::to_vec(&material)
         .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
@@ -4948,7 +4950,7 @@ impl WorkTaskRepository {
                         ],
                     )
                     .map_err(RepositoryError::database)?;
-                let snapshot_json = serde_json::to_string(policy)
+                let snapshot_json = crate::canonical_json::to_string(policy)
                     .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
                 transaction
                     .execute(
@@ -5211,7 +5213,7 @@ impl TaskEvidenceRepository {
         validate_non_empty("task_id", &input.task_id)?;
         validate_non_empty("ref_id", &input.ref_id)?;
         validate_non_empty("summary", &input.summary)?;
-        let metadata_json = serde_json::to_string(&input.metadata)
+        let metadata_json = crate::canonical_json::to_string(&input.metadata)
             .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let id = input
             .id
@@ -6482,6 +6484,34 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
 
+    /// Regression guard (serde_json `preserve_order` unified into the desktop
+    /// binary by `agent-client-protocol`): the frozen execution profile must
+    /// stay byte-identical to the literals and hashes the SQL triggers check
+    /// (migrations: `run_execution_profiles` joins in the Graph triggers, and
+    /// the reviewer profile the review trigger inserts itself).
+    #[test]
+    fn canonical_run_execution_profile_matches_trigger_literals_and_hashes() {
+        assert_eq!(
+            serde_json::json!({"b": 1, "a": 2}).to_string(),
+            r#"{"b":1,"a":2}"#,
+            "this guard is only meaningful with preserve_order on (desktop build)"
+        );
+        let (snapshot, hash) = canonical_run_execution_profile("durable_v2").unwrap();
+        assert_eq!(snapshot, r#"{"id":"durable_v2","schemaVersion":1}"#);
+        assert_eq!(hash, "ae08f4dc8c1327cbd3de30879f01aa7475d9a728a3c0f738579086435d714f7e");
+        let (snapshot, hash) = canonical_run_execution_profile("graph_reviewer_v1").unwrap();
+        assert_eq!(snapshot, r#"{"id":"graph_reviewer_v1","schemaVersion":1}"#);
+        assert_eq!(hash, "24a66ac5c9d85eeacabaf662192815995c600ff77703231624d2971e191b1c18");
+        for profile in ["legacy", "durable_v2_shadow", "graph_readonly_preview"] {
+            let (snapshot, hash) = canonical_run_execution_profile(profile).unwrap();
+            assert_eq!(snapshot, format!(r#"{{"id":"{profile}","schemaVersion":1}}"#));
+            assert_eq!(hash, format!("{:x}", Sha256::digest(snapshot.as_bytes())));
+        }
+        let migrations = include_str!("../migrations.rs");
+        assert!(migrations.contains(r#"snapshot_json = '{"id":"durable_v2","schemaVersion":1}'"#));
+        assert!(migrations.contains("'ae08f4dc8c1327cbd3de30879f01aa7475d9a728a3c0f738579086435d714f7e'"));
+    }
+
     fn test_database() -> (Database, PathBuf) {
         let path = std::env::temp_dir().join(format!("fox-work-graph-{}.db", Uuid::new_v4()));
         let database = Database::open(path.clone()).expect("open test database");
@@ -6776,7 +6806,7 @@ mod tests {
             experimental_compute_job_notice: false,
         };
         database.kernel_create_run(&fixture.run_id,"pi","authoritative",2,&binding.permission_snapshot_id,
-            "durable_v2","repair-fixture",&serde_json::to_string(&config).unwrap()).unwrap();
+            "durable_v2","repair-fixture",&crate::canonical_json::to_string(&config).unwrap()).unwrap();
         let clock=kernel::TestClock::new(super::now_ms());
         let (controller,effects)=kernel::RunController::start(&fixture.run_id,"repair-turn",config,&clock).unwrap();
         database.kernel_commit_decision(&fixture.run_id,clock.now_wall_ms(),&controller.persist_command(&effects)).unwrap();
@@ -6792,7 +6822,7 @@ mod tests {
         };
         coordinator.propose_tools("repair-batch",vec![kernel::ToolCallRequest {
             tool_call_id:"repair".into(),tool:"task_repair_escalate_start".into(),
-            canonical_input_json:task_repair_override_input_value(&input).to_string(),source_order:0,
+            canonical_input_json:task_repair_override_input_value(&input).canonical_string(),source_order:0,
         }],&Ask).unwrap();
         let approval=database.load_conversation(&fixture.conversation_id).unwrap().approvals.into_iter()
             .find(|approval|approval.id==input.approval_id).unwrap();
@@ -7472,7 +7502,7 @@ mod tests {
                         serde_json::json!([
                             {"taskId": queued_task.id, "name": "tests_pass", "passed": true}
                         ])
-                        .to_string(),
+                        .canonical_string(),
                     ],
                 )?;
                 Ok(())
@@ -10075,7 +10105,7 @@ mod tests {
             )
             .unwrap();
         let cross_finding_ids_json =
-            serde_json::to_string(&vec![cross_finding.id.clone()]).unwrap();
+            crate::canonical_json::to_string(&vec![cross_finding.id.clone()]).unwrap();
         database
             .with_connection(|connection| {
                 connection.execute(
