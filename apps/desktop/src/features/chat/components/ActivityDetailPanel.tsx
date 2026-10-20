@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Activity, AlertTriangle, Pause, Play, Trash2 } from 'lucide-react'
-import type { ConversationDetail, TaskEvidenceRecord, ToolCallRecord } from '@/features/conversations/model/types'
+import type { ApprovalRecord, ConversationDetail, TaskEvidenceRecord, ToolCallRecord } from '@/features/conversations/model/types'
+import { toolCallApprovalNote } from '@/features/conversations/model/approval-labels'
 import type { GoalProgressData } from '../hooks/use-goal-progress'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { notify as toast } from '@/features/notifications'
@@ -47,12 +48,12 @@ function sourceTool(detail: ConversationDetail | null, evidence: TaskEvidenceRec
   return detail?.toolCalls.find((tool) => tool.id === evidence.refId || tool.runtimeToolCallId === evidence.refId) ?? null
 }
 
-function ToolEntry({ tool, focused }: { tool: ToolCallRecord; focused: boolean }) {
+function ToolEntry({ tool, focused, approvals }: { tool: ToolCallRecord; focused: boolean; approvals?: ApprovalRecord[] }) {
   const [open, setOpen] = useState(focused)
   useEffect(() => { if (focused) setOpen(true) }, [focused])
   return <details id={`fox-activity-tool-${tool.id}`} className={focused ? 'is-focused' : ''} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary><span>{tool.toolName}</span><small>{toolStatus(tool)}</small></summary>
-    {open && <>{tool.errorMessage && <p className="fox-activity-warning">{tool.errorMessage}</p>}<pre>{JSON.stringify({ input: tool.input, result: tool.result }, null, 2).slice(0, 3000)}</pre></>}
+    {open && <>{(() => { const note = toolCallApprovalNote(tool, approvals); return note && <p className="fox-activity-warning">{note}</p> })()}<pre>{JSON.stringify({ input: tool.input, result: tool.result }, null, 2).slice(0, 3000)}</pre></>}
   </details>
 }
 
@@ -116,7 +117,7 @@ export function ActivityDetailPanel({ detail, goal, focusedEvidence, onEvidenceC
       </details>
     </section>}
     <section className="fox-activity-tools"><div className="fox-activity-section-head"><strong>工具记录</strong><small>{detail?.toolCalls.length ?? 0} 条</small></div>
-      {tools.length === 0 ? <p className="fox-activity-empty">当前没有工具记录。</p> : tools.map((tool) => <ToolEntry key={tool.id} tool={tool} focused={matchedTool?.id === tool.id} />)}
+      {tools.length === 0 ? <p className="fox-activity-empty">当前没有工具记录。</p> : tools.map((tool) => <ToolEntry key={tool.id} tool={tool} focused={matchedTool?.id === tool.id} approvals={detail?.approvals} />)}
       {(detail?.toolCalls.length ?? 0) > tools.length && <small>仅显示最近 100 条；更早的记录可在对话历史中查看。</small>}
     </section>
     <section className="fox-activity-events"><div className="fox-activity-section-head"><strong>运行记录</strong><small>{detail?.runtimeEvents.length ?? 0} 条</small></div>
