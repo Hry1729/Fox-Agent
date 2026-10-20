@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::McpServerRecord;
 use keyring::Entry;
 use reqwest::blocking::{Client, Response};
@@ -47,7 +49,7 @@ pub fn save_environment(
     server_id: &str,
     environment: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let value = serde_json::to_string(environment).map_err(|error| error.to_string())?;
+    let value = crate::canonical_json::to_string(environment).map_err(|error| error.to_string())?;
     credential_entry(server_id)?
         .set_password(&value)
         .map_err(|error| error.to_string())?;
@@ -355,7 +357,7 @@ impl McpSession {
     }
 
     fn write(&mut self, value: &Value) -> Result<(), String> {
-        let line = serde_json::to_string(value).map_err(|error| error.to_string())?;
+        let line = crate::canonical_json::to_string(value).map_err(|error| error.to_string())?;
         self.stdin
             .write_all(format!("{line}\n").as_bytes())
             .and_then(|_| self.stdin.flush())
@@ -903,7 +905,7 @@ mod tests {
                         &json!({
                             "jsonrpc": "2.0", "id": body["id"],
                             "result": { "protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": { "tools": {} }, "serverInfo": { "name": "test", "version": "1" } }
-                        }).to_string(),
+                        }).canonical_string(),
                         true,
                     ),
                     "notifications/initialized" => write_http_response(
@@ -920,7 +922,7 @@ mod tests {
                         &json!({
                             "jsonrpc": "2.0", "id": body["id"],
                             "result": { "tools": [{ "name": "echo", "description": "Echo", "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } } }] }
-                        }).to_string(),
+                        }).canonical_string(),
                         false,
                     ),
                     "tools/call" => write_http_response(
