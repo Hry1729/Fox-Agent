@@ -105,6 +105,17 @@ def make_prefix(root):
     return deep_file
 
 
+class VersionTest(unittest.TestCase):
+    def test_default_version_matches_the_rust_constant(self):
+        import re
+        launch = os.path.join(brp.CRATE, "src", "launch.rs")
+        with open(launch, encoding="utf-8") as handle:
+            match = re.search(r'pub const RUNTIME_PACKAGE_VERSION: &str = "([^"]+)";', handle.read())
+        self.assertIsNotNone(match, "RUNTIME_PACKAGE_VERSION not found in src/launch.rs")
+        self.assertEqual(brp.DEFAULT_VERSION, match.group(1))
+        self.assertEqual(brp.DEFAULT_VERSION, "0.1.2")
+
+
 class StagePackTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="fox-brp-")
@@ -141,6 +152,12 @@ class StagePackTest(unittest.TestCase):
         self.assertIn("acp-bridge/bridge.mjs", keys)
         self.assertNotIn("acp-bridge/bridge.test.mjs", keys)
         self.assertIn("dsh-patches/read-only.yml", keys)
+        # The pi approval gate ships next to each other under pi-gate/.
+        self.assertIn("pi-gate/pi-gated.cmd", keys)
+        self.assertIn("pi-gate/fox-approval-gate.ts", keys)
+        for key, source in brp.PI_GATE_FILES.items():
+            with open(brp.child(brp.fs_path(out), key), "rb") as staged, open(source, "rb") as original:
+                self.assertEqual(staged.read(), original.read(), key)
         self.assertTrue(all("\\" not in key for key in keys))
         self.assertEqual(brp.verify_layout(out), [])
 
@@ -163,16 +180,34 @@ class StagePackTest(unittest.TestCase):
         # check on the zip and on the directory agree; default budget refuses.
         self.assertEqual(brp.main(["check", zip_path, "--version", "0.0.1"]), 1)
         self.assertEqual(brp.main(["check", out, "--version", "0.0.1", "--budget", "2000"]), 0)
+        # --version defaults to the runtime version Fox looks for.
+        default_zip = os.path.join("dist", "default.zip")
+        self.assertEqual(brp.main(["pack", out, "--out", default_zip, "--budget", "2000"]), 0)
+        with open(default_zip + ".manifest.json", encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["version"], brp.DEFAULT_VERSION)
         self.assertEqual(brp.main(["pack", out, "--version", "0.0.1", "--out", os.path.join("dist", "refused.zip")]), 1)
 
     def test_pack_reports_real_missing_files_only(self):
         os.makedirs(os.path.join("pkg", "acp-bridge"))
         shutil.copyfile(os.path.join(brp.ASSETS, "acp-bridge", "bridge.mjs"), os.path.join("pkg", "acp-bridge", "bridge.mjs"))
         problems = brp.verify_layout("pkg")
-        self.assertEqual(problems, ["missing node/node.exe", f"missing {brp.SRT_CLI}"])
+        self.assertEqual(
+            problems,
+            ["missing node/node.exe", f"missing {brp.SRT_CLI}", "missing pi-gate/pi-gated.cmd", "missing pi-gate/fox-approval-gate.ts"],
+        )
         with open(os.path.join("pkg", "acp-bridge", "bridge.mjs"), "a", newline="\n") as handle:
             handle.write("// edited\n")
         self.assertIn("acp-bridge/bridge.mjs differs", " ".join(brp.verify_layout("pkg")))
+
+    def test_pi_gate_mismatch_is_refused(self):
+        os.makedirs(os.path.join("pkg", "pi-gate"))
+        shutil.copyfile(brp.PI_GATE_FILES["pi-gate/pi-gated.cmd"], os.path.join("pkg", "pi-gate", "pi-gated.cmd"))
+        with open(os.path.join("pkg", "pi-gate", "fox-approval-gate.ts"), "w", newline="\n") as handle:
+            handle.write("// not the gate\n")
+        problems = brp.verify_layout("pkg")
+        self.assertIn("pi-gate/fox-approval-gate.ts differs from fixtures/pi/fox-approval-gate.ts", problems)
+        self.assertNotIn("missing pi-gate/pi-gated.cmd", problems)
+        self.assertFalse(any("pi-gated.cmd differs" in problem for problem in problems))
 
     def test_dsh_patch_mismatch_and_missing(self):
         os.makedirs(os.path.join("pkg", "dsh-patches"))
