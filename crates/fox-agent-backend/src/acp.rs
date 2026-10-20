@@ -64,6 +64,17 @@ pub enum BackendEvent {
         reason: String,
         request: Value,
     },
+    /// Ordering fence: the `session/load` reply for `session_id` arrived.
+    /// Every `session/update` the agent sent before that reply (the history
+    /// replay) is ahead of this event in the stream. Queued by the command
+    /// task after the reply, so it can never overtake those updates (the
+    /// connection dispatches incoming messages on one task, in order).
+    LoadSettled { session_id: String },
+    /// Ordering fence: Fox is about to write `session/prompt` for
+    /// `session_id`. Queued before the request is written, so nothing the
+    /// agent sends in answer to that prompt can be ahead of it; anything ahead
+    /// of it (a late history replay) is not part of the turn.
+    PromptStarted { session_id: String },
     TurnEnded { session_id: String, stop_reason: Value },
     /// `session/prompt` itself failed (JSON-RPC error, transport closed while
     /// the turn ran). The turn is over; the connection may still be alive.
@@ -680,6 +691,18 @@ impl AcpConnection {
     /// `bridge_not_connected` when the bridge never connected).
     pub async fn spawn_detailed(spec: &LaunchSpec, cwd: &std::path::Path, bridge: Option<BridgeEndpoint>) -> Result<Self, InitializeFailure> {
         use InitializeFailureCode as Code;
+        // What the backend sees is the ordinary path form (no `\\?\`), see
+        // launch::backend_visible_path. Over the bridge (Windows sandboxed)
+        // the bridge sets it as the backend's cwd explicitly: srt-win does
+        // not carry the caller's cwd into the sandbox.
+        let cwd = crate::launch::backend_visible_path(cwd);
+        let cwd = cwd.as_path();
+        let bridge = bridge.map(|mut endpoint| {
+            if endpoint.child_cwd.is_none() {
+                endpoint.child_cwd = Some(cwd.to_string_lossy().into_owned());
+            }
+            endpoint
+        });
         // Bridge: listen before the process exists.
         let listener = match &bridge {
             Some(endpoint) => Some(crate::bridge::BridgeListener::bind(endpoint).map_err(InitializeFailure::from_bridge)?),
@@ -885,6 +908,7 @@ impl AcpConnection {
                     while let Some(command) = command_rx.recv().await {
                         match command {
                             Command::NewSession { cwd, reply } => {
+                                let cwd = crate::launch::backend_visible_path(&cwd);
                                 let created = connection
                                     .send_request(NewSessionRequest::new(cwd))
                                     .block_task()
@@ -894,15 +918,21 @@ impl AcpConnection {
                                 let _ = reply.send(created);
                             }
                             Command::LoadSession { session_id, cwd, reply } => {
+                                let cwd = crate::launch::backend_visible_path(&cwd);
+                                let fence_session = session_id.clone();
                                 let loaded = connection
                                     .send_request(LoadSessionRequest::new(session_id, cwd))
                                     .block_task()
                                     .await
                                     .map(|_| ())
                                     .map_err(|error| error.to_string());
+                                let _ = main_tx.send(BackendEvent::LoadSettled { session_id: fence_session });
                                 let _ = reply.send(loaded);
                             }
                             Command::Prompt { session_id, text } => {
+                                // Fence first: queued before the request is
+                                // written (see BackendEvent::PromptStarted).
+                                let _ = main_tx.send(BackendEvent::PromptStarted { session_id: session_id.to_string() });
                                 // Prompt completion arrives on its own task so
                                 // cancel and permission answers keep flowing.
                                 let connection = connection.clone();
