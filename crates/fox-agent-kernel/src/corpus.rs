@@ -11,7 +11,7 @@
 //! * cancellation race and late success after cancellation,
 //! * duplicate vs conflicting tool/event identities,
 //! * provider retry vs turn retry (independent),
-//! * approval wait timeout vs execution budget (separate clocks),
+//! * approval wait (no deadline) vs execution budget (suspended while waiting),
 //! * compaction vs retry state distinction,
 //! * crash-after-approval recovery is covered in the repository outbox tests.
 
@@ -256,16 +256,19 @@ fn clock_separation_case() -> bool {
     c.tick(clock.now_monotonic_ms(), clock.now_wall_ms()); // accrue 800ms
     c.propose_tool_batch("b", vec![req("a", "write_file", 0)], &policy, 800, 800)
         .unwrap();
-    // A long human wait (wall 800 -> 100800) crosses the approval deadline
-    // (800 + 5000 = 5800). It fires the APPROVAL timeout — never the execution
-    // budget, which was suspended for the whole wait — and reports it as a
-    // continuable expiry rather than a plain failure.
+    // A long human wait (wall 800 -> 100800) goes far past the nominal
+    // approval window (5000) and the execution budget (1000). Neither fires:
+    // an approval waits for the human, and the execution budget is suspended
+    // for the whole wait. Resolving afterwards resumes with 200ms of budget.
     clock.advance(100_000);
     let effects = c.tick(clock.now_monotonic_ms(), clock.now_wall_ms());
-    let approval_expired = effects.iter().any(|e| match e {
-        crate::Effect::AppendEvent { event_type, .. } => event_type == "run.approval_expired",
-        _ => false,
-    });
+    let still_waiting = effects.is_empty() && c.state() == RunState::WaitingApproval;
+    let resumed = c
+        .resolve_approval("a", ApprovalDecision::AllowOnce, clock.now_monotonic_ms())
+        .is_ok()
+        && c.state() == RunState::Running;
+    clock.advance(100);
+    let effects = c.tick(clock.now_monotonic_ms(), clock.now_wall_ms());
     let budget_used = effects.iter().any(|e| match e {
         crate::Effect::AppendEvent {
             event_type,
@@ -276,10 +279,7 @@ fn clock_separation_case() -> bool {
         }
         _ => false,
     });
-    approval_expired
-        && !budget_used
-        && c.state() == RunState::ApprovalExpired
-        && c.state().is_continuable()
+    still_waiting && resumed && !budget_used
 }
 
 fn compaction_case() -> bool {
