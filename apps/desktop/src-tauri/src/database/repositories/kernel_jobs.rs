@@ -20,6 +20,8 @@
 //!   timestamp decide whether a `running` row is ours; an orphaned job becomes
 //!   `paused` (resumable) instead of being silently replayed.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -156,7 +158,7 @@ fn params_hash(params: &Value) -> String {
             other => other.clone(),
         }
     }
-    let encoded = canonical(params).to_string();
+    let encoded = canonical(params).canonical_string();
     format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())))
 }
 
@@ -267,7 +269,7 @@ impl Database {
                     request.kind,
                     request.idempotency_key,
                     hash,
-                    request.params.to_string(),
+                    request.params.canonical_string(),
                     request.progress_total.map(|total| total as i64),
                     request.deadline_ms,
                     now,
