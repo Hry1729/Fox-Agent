@@ -211,6 +211,12 @@ pub(super) mod test_barrier {
         hooks().lock().expect("barrier lock").insert(run_id.to_owned(), hook);
     }
 
+    /// Test diagnostics only: whether a hook is still installed (i.e. never
+    /// fired) under this key.
+    pub(crate) fn pending(run_id: &str) -> bool {
+        hooks().lock().map(|hooks| hooks.contains_key(run_id)).unwrap_or(false)
+    }
+
     pub(crate) fn fire(run_id: &str) {        let hook = hooks().lock().expect("barrier lock").remove(run_id);
         if let Some(hook) = hook {
             hook();
