@@ -96,6 +96,19 @@ impl ExternalSink for DesktopSink {
 
 pub type DesktopRuntime = ExternalRuntime<DesktopSink, HostLauncher>;
 
+/// Wording for a settled approval that did not grant the action. Approvals no
+/// longer expire, but rows written by older builds may still be `expired`;
+/// they read "已过期", never "用户拒绝".
+pub(crate) fn approval_outcome_label(status: &str) -> &'static str {
+    match status {
+        "denied" => "用户拒绝",
+        "expired" => "已过期",
+        "cancelled" => "已取消",
+        "approved" => "已批准",
+        _ => "未批准",
+    }
+}
+
 /// Managed Tauri state.
 pub struct ExternalBackendHost {
     runtime: DesktopRuntime,
@@ -220,7 +233,7 @@ impl ExternalBackendHost {
         let outcome = self.runtime.answer(approval_id, approved);
         let written = matches!(outcome, AnswerOutcome::Written);
         let result = json!({
-            "decision": if approved { "allow_once" } else { "deny" },
+            "decision": if approved { "allow_once" } else if resolved.status == "expired" { "expired" } else { "deny" },
             "nativeAnswer": match outcome {
                 AnswerOutcome::Written => "response_written",
                 AnswerOutcome::Unconfirmed => "outcome_unknown",
@@ -239,7 +252,11 @@ impl ExternalBackendHost {
                     let _ = self.database.complete_host_tool_call(&resolved.run_id, &key, Some(&result), None);
                 }
             } else {
-                let message = if approved { "已批准，但外部后端已不在等待这次审批（结果未知）" } else { "用户拒绝" };
+                let message = if approved {
+                    "已批准，但外部后端已不在等待这次审批（结果未知）"
+                } else {
+                    approval_outcome_label(&resolved.status)
+                };
                 let _ = self.database.complete_host_tool_call(&resolved.run_id, &key, Some(&result), Some(message));
             }
         }
@@ -282,5 +299,18 @@ impl ExternalBackendHost {
         });
         let pi_launch = launcher.config.pi_launch();
         capability_view(backend, None, &SandboxDeclaration::declare(mode, None, HostOs::current()), pi_launch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::approval_outcome_label;
+
+    #[test]
+    fn expired_approvals_read_expired_not_user_denied() {
+        assert_eq!(approval_outcome_label("expired"), "已过期");
+        assert_eq!(approval_outcome_label("denied"), "用户拒绝");
+        assert_eq!(approval_outcome_label("cancelled"), "已取消");
+        assert_ne!(approval_outcome_label("expired"), approval_outcome_label("denied"));
     }
 }
