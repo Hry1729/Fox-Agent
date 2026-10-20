@@ -1,4 +1,6 @@
 //! Frozen resource policy shared by proposal admission and final dispatch.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::{
     database::kernel_execution_admission::{write_operation_kind, WriteOperationKind},
     database::{Database, KernelHostScope},
@@ -85,13 +87,13 @@ fn server_hash(server: &crate::database::McpServerRecord) -> String {
     super::runtime_shadow_hash(
         &json!({"id":server.id,"transport":server.transport,"command":server.command,
         "args":server.args,"endpoint":server.endpoint_url,"definition":server.definition})
-        .to_string(),
+        .canonical_string(),
     )
 }
 
 fn reference_hash(reference: &crate::database::KnowledgeReference) -> String {
     super::runtime_shadow_hash(
-        &serde_json::to_string(reference).expect("serializable knowledge reference"),
+        &crate::canonical_json::to_string(reference).expect("serializable knowledge reference"),
     )
 }
 
@@ -160,7 +162,7 @@ pub(super) fn freeze_scope(
         {
             let hash = super::runtime_shadow_hash(
                 &json!({"baseUrl":service.base_url,"connectionType":service.connection_type})
-                    .to_string(),
+                    .canonical_string(),
             );
             for reference in &references {
                 if let Some(id) = &reference.connection_id {
@@ -546,7 +548,7 @@ impl GatewayPolicy {
             .ok_or("tool requires a frozen project root")?;
         if !crate::resource_gateway::is_reader(tool) {
             if self.current_mode()? == PermissionMode::ReadOnly
-                && crate::database::kernel_execution_admission::operation_class(tool, &input.to_string()) != fox_engine_protocol::ActionClass::Manage {
+                && crate::database::kernel_execution_admission::operation_class(tool, &input.canonical_string()) != fox_engine_protocol::ActionClass::Manage {
                 return Err("project permission is read-only".into());
             }
             let mut checked = input.clone();
@@ -921,7 +923,7 @@ impl GatewayPolicy {
         if tool == "skill_load" {
             return Ok(result);
         }
-        let content = result.to_string();
+        let content = result.canonical_string();
         let mut details = result;
         if tool == "read_attachment" {
             if let Some(details) = details.as_object_mut() { details.remove("text"); }
@@ -997,7 +999,7 @@ impl GatewayPolicy {
         };
         if let Some(directive) = outcome.post_finalize {
             let body =
-                serde_json::to_string(&directive).map_err(|_| "invalid Kernel work action")?;
+                crate::canonical_json::to_string(&directive).map_err(|_| "invalid Kernel work action")?;
             database.stage_kernel_host_action(&self.binding.run_id, tool_id, &body)?;
         }
         token.check()?;
@@ -1127,7 +1129,7 @@ impl GatewayPolicy {
                 .ok_or("frozen knowledge connection is unavailable")?;
             let hash = super::runtime_shadow_hash(
                 &json!({"baseUrl":service.base_url,"connectionType":service.connection_type})
-                    .to_string(),
+                    .canonical_string(),
             );
             if bindings
                 .iter()
@@ -1314,7 +1316,7 @@ impl GatewayPolicy {
         let mut servers = Vec::new();
         for id in self.scope.mcp_server_hashes.keys() {
             let server = load(id)?;
-            let manifest_hash=super::runtime_shadow_hash(&serde_json::to_string(&self.scope).map_err(|_|"invalid resource scope")?);
+            let manifest_hash=super::runtime_shadow_hash(&crate::canonical_json::to_string(&self.scope).map_err(|_|"invalid resource scope")?);
             let (tools, metadata) = super::mcp_catalog::catalog(&self.binding, &manifest_hash, &server, token, remaining()?,
                 self.scope.office_tools.contains("office_help"), || {
                 let tools = if server.id == crate::office::SERVER_ID {
@@ -1339,7 +1341,7 @@ impl GatewayPolicy {
             let tools = tools
                 .into_iter()
                 .filter(|tool: &Value| {
-                    query.is_empty() || tool.to_string().to_lowercase().contains(&query)
+                    query.is_empty() || tool.canonical_string().to_lowercase().contains(&query)
                 })
                 .collect::<Vec<_>>();
             if !tools.is_empty() {
@@ -1348,7 +1350,7 @@ impl GatewayPolicy {
             }
         }
         token.check()?;
-        Ok(json!({"content":[{"type":"text","text":json!({"servers":servers}).to_string()}]}))
+        Ok(json!({"content":[{"type":"text","text":json!({"servers":servers}).canonical_string()}]}))
     }
 }
 
@@ -1534,10 +1536,10 @@ mod revision_tests {
                 scope:KernelHostScope{schema_version:1,tool_names:["run_command".into()].into_iter().collect(),mcp_server_hashes:Default::default(),
                     knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:vec![]},
                 database:None,sessions_dir:None,artifacts_dir:None};
-            let decision=policy.decide("r","t","run_command",&json!({"action":"start","command":"echo blocked"}).to_string());
+            let decision=policy.decide("r","t","run_command",&json!({"action":"start","command":"echo blocked"}).canonical_string());
             assert!(matches!(decision,PolicyDecision::Reject{ref code,..} if code=="tool.sandbox_unavailable"),"{decision:?}");
             for action in ["status","output","cancel"] {
-                assert!(matches!(policy.decide("r","m","run_command",&json!({"action":action,"jobId":"owned"}).to_string()),PolicyDecision::Allow));
+                assert!(matches!(policy.decide("r","m","run_command",&json!({"action":action,"jobId":"owned"}).canonical_string()),PolicyDecision::Allow));
             }
         }
     }
@@ -1577,22 +1579,22 @@ mod revision_tests {
             database:None,sessions_dir:None,artifacts_dir:None,
         };
         for old in ["absent","hello"] {
-            let input=json!({"path":"a.txt","oldText":old,"newText":"x"}).to_string();
+            let input=json!({"path":"a.txt","oldText":old,"newText":"x"}).canonical_string();
             let PolicyDecision::Reject {code,message}=policy.decide("r","t","edit_file",&input) else {panic!("match error must not become permission denial")};
             assert_eq!(code,"tool.invalid_input");
             assert!(message.contains(if old=="absent" {"not found"} else {"occurs 2 times"}));
         }
         let input=json!({"path":"a.txt","oldText":"hello hello","newText":"fixed",
-            "expectedVersion":crate::tool_host::file_version(b"hello hello")}).to_string();
+            "expectedVersion":crate::tool_host::file_version(b"hello hello")}).canonical_string();
         assert!(matches!(policy.decide("r","t","edit_file",&input),PolicyDecision::RequireApproval));
         assert!(matches!(policy.decide("wrong","t","edit_file",&input),PolicyDecision::Deny {..}));
         policy.binding.permission.mode = PermissionMode::ReadOnly;
         policy.binding.permission_snapshot_id = Database::run_control_permission_hash(&policy.binding.permission).unwrap();
         policy.scope.tool_names.insert("run_command".into());
         for action in ["status", "output", "cancel"] {
-            assert!(matches!(policy.decide("r", "manage", "run_command", &json!({"action":action,"jobId":"owned-job"}).to_string()), PolicyDecision::Allow));
+            assert!(matches!(policy.decide("r", "manage", "run_command", &json!({"action":action,"jobId":"owned-job"}).canonical_string()), PolicyDecision::Allow));
         }
-        assert!(matches!(policy.decide("r", "start", "run_command", &json!({"action":"start","command":"echo no"}).to_string()), PolicyDecision::Deny { .. }));
+        assert!(matches!(policy.decide("r", "start", "run_command", &json!({"action":"start","command":"echo no"}).canonical_string()), PolicyDecision::Deny { .. }));
         policy.scope.tool_names.clear();
         assert!(matches!(policy.decide("r","t","edit_file",&input),PolicyDecision::Deny {..}));
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(),"hello hello");
@@ -1653,7 +1655,7 @@ mod revision_tests {
         // and the refusal names the reason so the model can pick another path.
         let write_input = json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
             "arguments": {"output": "source.xlsx", "overwrite": true}});
-        let decision = policy.decide(&run, "tc", "call_mcp_tool", &write_input.to_string());
+        let decision = policy.decide(&run, "tc", "call_mcp_tool", &write_input.canonical_string());
         let PolicyDecision::Deny { reason } = decision else {
             panic!("an Office write to a read-only input must be denied: {decision:?}");
         };
@@ -1668,7 +1670,7 @@ mod revision_tests {
         let allowed_input = json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
             "arguments": {"output": "报告.docx"}});
         assert!(
-            !matches!(policy.decide(&run, "tc", "call_mcp_tool", &allowed_input.to_string()),
+            !matches!(policy.decide(&run, "tc", "call_mcp_tool", &allowed_input.canonical_string()),
                 PolicyDecision::Deny { reason } if reason.contains("tool.read_only_input")),
             "a declared output must stay writable"
         );
@@ -1677,7 +1679,7 @@ mod revision_tests {
         let read_input = json!({"serverId": crate::office::SERVER_ID, "tool": "office_read",
             "arguments": {"file": "source.xlsx", "mode": "text"}});
         assert!(
-            !matches!(policy.decide(&run, "tc", "call_mcp_tool", &read_input.to_string()),
+            !matches!(policy.decide(&run, "tc", "call_mcp_tool", &read_input.canonical_string()),
                 PolicyDecision::Deny { reason } if reason.contains("tool.read_only_input")),
             "reading the input must stay allowed"
         );
@@ -1737,7 +1739,7 @@ fn log_work_tool_failure(
         error.code,
         if error.is_rejected_before_execution() { "rejected_before_execution" } else { "uncertain" },
         super::redact_execution_diagnostic(&error.message, 500).replace('\n', " "),
-        super::redact_execution_diagnostic(&error.details.to_string(), 1000).replace('\n', " "),
+        super::redact_execution_diagnostic(&error.details.canonical_string(), 1000).replace('\n', " "),
         input_field_types(input),
     );
 }
@@ -1761,7 +1763,7 @@ const REJECTED_BEFORE_EXECUTION: &str = "rejected_before_execution";
 const REJECTION_DETAILS_MAX_BYTES: usize = 8_000;
 
 fn bounded_rejection_details(details: &Value) -> Value {
-    let rendered = details.to_string();
+    let rendered = details.canonical_string();
     if rendered.len() <= REJECTION_DETAILS_MAX_BYTES {
         details.clone()
     } else {
@@ -1875,7 +1877,7 @@ pub(super) fn work_tool_error_budget_result(
         "error": { "code": TOOL_ERROR_BUDGET_EXHAUSTED, "message": message, "lastRefusalCode": error.code },
         "rejectionLimit": WORK_TOOL_REJECTION_STREAK_LIMIT,
     });
-    json!({ "isError": true, "content": [{ "type": "text", "text": details.to_string() }], "details": details })
+    json!({ "isError": true, "content": [{ "type": "text", "text": details.canonical_string() }], "details": details })
 }
 
 fn host_rejection_details(call: &crate::kernel::SnapshotToolCall) -> Option<Value> {
