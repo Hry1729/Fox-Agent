@@ -666,9 +666,10 @@ mod tests {
     }
 
     #[test]
-    fn approval_wait_has_its_own_expiry_and_cannot_wait_forever() {
+    fn approval_wait_never_expires_and_does_not_consume_the_run_budget() {
         let clock = TestClock::new(0);
         let mut config = test_config();
+        config.run_execution_limited = true;
         config.run_execution_budget_ms = 1_000;
         config.approval_wait_timeout_ms = 5_000;
         let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
@@ -684,37 +685,62 @@ mod tests {
             clock.now_ms(),
         )
         .unwrap();
+        assert_eq!(c.state(), RunState::WaitingApproval);
 
-        clock.advance(4_999);
-        assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
-        clock.advance(1);
-        let effects = c.tick(clock.now_ms(), clock.now_ms());
-        // The un-decided call was never dispatched, so it expires instead of
-        // failing, and the run reports a continuable expiry rather than a plain
-        // failure that would look unrecoverable to the user.
-        assert!(has_event(&effects, "tool.expired"));
-        assert!(has_event(&effects, "run.awaiting_approval_expired"));
-        assert!(has_event(&effects, "run.approval_expired"));
-        assert!(!has_event(&effects, "tool.failed"));
-        assert!(!has_event(&effects, "run.failed"));
-        assert_eq!(c.state(), RunState::ApprovalExpired);
-        assert!(c.state().is_continuable());
-        assert!(RunOutcome::ApprovalExpired {
-            code: "approval.wait_timeout".into(),
-            message: String::new(),
+        // Far past the nominal approval window AND the whole-run budget: an
+        // approval waits for the human, and the wait is not execution time.
+        for _ in 0..10 {
+            clock.advance(3 * 24 * 60 * 60 * 1_000);
+            assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
         }
-        .is_continuable());
-        // The expired approval is dead: resolving it now fails closed.
+        assert_eq!(c.state(), RunState::WaitingApproval);
+        assert_eq!(c.tool_call_state("a"), Some(ToolCallState::WaitingApproval));
+        assert!(c.approval_deadline_wall_ms().is_some());
+
+        // The user finally answers: the call is dispatched and the Run resumes
+        // with its execution budget intact.
+        let effects = c
+            .resolve_approval("a", ApprovalDecision::AllowOnce, clock.now_ms())
+            .unwrap();
+        assert!(effects.iter().any(
+            |effect| matches!(effect, Effect::DispatchTool { tool_call_id, .. } if tool_call_id == "a")
+        ));
+        assert_eq!(c.state(), RunState::Running);
+        assert!(c.approval_deadline_wall_ms().is_none());
+        clock.advance(500);
+        let effects = c.tick(clock.now_ms(), clock.now_ms());
+        assert!(!has_event(&effects, "run.budget_exhausted"));
+        assert!(!has_event(&effects, "run.approval_expired"));
+    }
+
+    #[test]
+    fn cancelling_a_run_ends_its_unanswered_approval_as_cancelled() {
+        let clock = TestClock::new(0);
+        let mut config = test_config();
+        config.approval_wait_timeout_ms = 5_000;
+        let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
+        let policy = TestPolicy {
+            allow: vec![],
+            deny: vec![],
+        };
+        c.propose_tool_batch("b", vec![call("a", "write_file", 0)], &policy, 0, 0)
+            .unwrap();
+        clock.advance(60 * 60 * 1_000);
+        assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
+        let effects = c.request_cancel();
+        assert!(effects.iter().any(
+            |effect| matches!(effect, Effect::ApprovalCancelled { tool_call_id } if tool_call_id == "a")
+        ));
+        assert!(!effects.iter().any(|effect| matches!(effect, Effect::ApprovalExpired { .. })));
         assert!(c
             .resolve_approval("a", ApprovalDecision::AllowOnce, clock.now_ms())
             .is_err());
     }
 
-    /// Expiry must not throw away work that already succeeded, and it must leave
-    /// behind the facts a continuation needs: which approval died and what was
-    /// already banked.
+    /// A long unanswered approval keeps work that already succeeded, and the
+    /// waiting call stays answerable.
     #[test]
-    fn approval_expiry_preserves_completed_results_and_records_the_dead_approval() {
+    fn long_unanswered_approval_preserves_completed_results_and_stays_pending() {
         let clock = TestClock::new(0);
         let mut config = test_config();
         config.approval_wait_timeout_ms = 5_000;
@@ -723,7 +749,6 @@ mod tests {
             allow: vec!["read"],
             deny: vec![],
         };
-        // First batch: a read that settles successfully.
         c.propose_tool_batch(
             "b1",
             vec![call("done", "read", 0)],
@@ -733,7 +758,6 @@ mod tests {
         )
         .unwrap();
         c.tool_settled("done", true, "{\"ok\":true}").unwrap();
-        // Second batch: a write that requires a human and is never answered.
         c.propose_tool_batch(
             "b2",
             vec![call("pending", "write_file", 0)],
@@ -744,30 +768,18 @@ mod tests {
         .unwrap();
         assert_eq!(c.state(), RunState::WaitingApproval);
         clock.advance(5_000);
-        let effects = c.tick(clock.now_ms(), clock.now_ms());
-        assert!(has_event(&effects, "run.approval_expired"));
-        assert_eq!(c.state(), RunState::ApprovalExpired);
-        // The completed result survives, and the resume evidence names both the
-        // dead approval and the banked result.
-        let evidence = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::AppendEvent {
-                    event_type,
-                    payload_json,
-                    ..
-                } if event_type == "run.awaiting_approval_expired" => Some(payload_json.clone()),
-                _ => None,
-            })
-            .expect("expiry evidence event");
-        assert!(evidence.contains("\"pending\""), "{evidence}");
-        assert!(evidence.contains("\"done\""), "{evidence}");
-        assert!(evidence.contains("\"expiredApprovalsExecutable\":false"));
-        assert!(evidence.contains("\"resumable\":true"));
-        // The banked tool is still completed and its result is still present.
+        assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
+        clock.advance(7 * 24 * 60 * 60 * 1_000);
+        assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
+        assert_eq!(c.state(), RunState::WaitingApproval);
         assert_eq!(c.tool_call_state("done"), Some(ToolCallState::Completed));
         assert_eq!(c.tool_call_result_json("done"), Some("{\"ok\":true}"));
-        assert_eq!(c.tool_call_state("pending"), Some(ToolCallState::Expired));
+        assert_eq!(c.tool_call_state("pending"), Some(ToolCallState::WaitingApproval));
+        let effects = c
+            .resolve_approval("pending", ApprovalDecision::Deny, clock.now_ms())
+            .unwrap();
+        assert!(has_event(&effects, "tool.failed"));
+        assert_eq!(c.state(), RunState::Running);
     }
 
     #[test]
@@ -955,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_wall_clock_rollback_fails_closed() {
+    fn approval_wall_clock_rollback_does_not_end_the_wait() {
         let clock = TestClock::new(1_000_000);
         let mut config = test_config();
         config.approval_wait_timeout_ms = 5_000;
@@ -973,11 +985,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.state(), RunState::WaitingApproval);
-        // Wall clock jumps BACKWARDS far beyond the wait start: fail closed.
-        let effects = c.tick(1_000_000, 1_000_000 - 10_000);
-        assert!(effects.iter().any(|e| matches!(
-            e, Effect::AppendEvent { event_type, .. } if event_type == "run.failed"
-        )));
+        // A wall jump cannot shorten or extend a wait with no deadline, so it
+        // is no longer a reason to fail the Run.
+        assert!(c.tick(1_000_000, 1_000_000 - 10_000).is_empty());
+        assert_eq!(c.state(), RunState::WaitingApproval);
+        assert!(c
+            .resolve_approval("a", ApprovalDecision::AllowOnce, 1_000_000)
+            .is_ok());
     }
 
     #[test]
@@ -1013,30 +1027,12 @@ mod tests {
         c.propose_tool_batch("b", vec![call("a", "write_file", 0)], &policy, 0, 0)
             .unwrap();
         assert_eq!(c.state(), RunState::WaitingApproval);
-        // Far past the model timeout: the approval wall clock governs, not model.
+        // Far past the model timeout and the nominal approval window: the Run
+        // keeps waiting for the human and no timeout fires.
         clock.advance(100_000);
         let effects = c.tick(clock.now_ms(), clock.now_ms());
-        // Approval wait timeout fires (approval.wait_timeout), not model timeout.
-        assert!(has_event(&effects, "run.approval_expired"));
-        assert!(!has_event(&effects, "run.failed"));
-        let code = effects.iter().any(|e| match e {
-            Effect::AppendEvent { payload_json, .. } => {
-                payload_json.contains("approval.wait_timeout")
-            }
-            _ => false,
-        });
-        assert!(
-            code,
-            "should be the approval-wait timeout, not model timeout"
-        );
-        assert!(!effects.iter().any(|e| match e {
-            Effect::AppendEvent { payload_json, .. } => {
-                payload_json.contains("model.first_response_timeout")
-                    || payload_json.contains("model.idle_timeout")
-                    || payload_json.contains("model.request_timeout")
-            }
-            _ => false,
-        }));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(c.state(), RunState::WaitingApproval);
     }
 
     #[test]
