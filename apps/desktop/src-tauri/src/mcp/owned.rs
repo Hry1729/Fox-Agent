@@ -102,7 +102,7 @@ impl OwnedStdio {
 
     fn write(&mut self, value: Value, token: &CancellationToken, deadline: Instant) -> Result<(),String> {
         token.check()?;
-        let mut bytes = serde_json::to_vec(&value).map_err(|_| "invalid owned MCP request")?;
+        let mut bytes = crate::canonical_json::to_vec(&value).map_err(|_| "invalid owned MCP request")?;
         if bytes.len() > 1_048_576 { return Err("owned MCP request exceeds limit".into()); }
         bytes.push(b'\n');
         let mut stdin = self.stdin.take().ok_or("owned MCP pipe is unavailable")?;
