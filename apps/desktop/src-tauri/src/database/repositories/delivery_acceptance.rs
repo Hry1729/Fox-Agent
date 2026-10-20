@@ -181,7 +181,7 @@ impl Database {
             let requirements: serde_json::Value =
                 serde_json::from_str(&row.requirements_json).unwrap_or(serde_json::json!({}));
             let spec_hash = digest_hex(
-                serde_json::to_vec(&requirements)
+                crate::canonical_json::to_vec(&requirements)
                     .unwrap_or_default()
                     .as_slice(),
             );
