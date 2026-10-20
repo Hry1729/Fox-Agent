@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -311,7 +313,7 @@ impl Database {
                     item.entity_id,
                     item.progress,
                     item.status,
-                    item.action.to_string(),
+                    item.action.canonical_string(),
                     now
                 ],
             )?;
@@ -498,7 +500,7 @@ impl Database {
                 "projectPermissionMode": source.4,
                 "tools": tools,
             })
-            .to_string();
+            .canonical_string();
             let id = connection.query_row(
                 "SELECT id FROM message_feedback WHERE message_id = ?1", [message_id],
                 |row| row.get::<_, String>(0),
