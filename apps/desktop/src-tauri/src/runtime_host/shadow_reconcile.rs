@@ -14,6 +14,8 @@
 //! This never executes tools or leases the executable outbox: it is
 //! observation-only. Legacy remains the production authority.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -513,7 +515,7 @@ impl ShadowReconciler {
         canonical_input: Value,
         legacy_decision: &str,
     ) -> Result<ReconcileOutcome, String> {
-        let input_json = canonical_input.to_string();
+        let input_json = canonical_input.canonical_string();
         let batch_id = format!("preflight-batch-{tool_call_id}");
         let legacy_tool = ToolDisposition {
             tool_call_id: tool_call_id.to_string(),
@@ -846,7 +848,7 @@ impl ShadowReconciler {
                         record.requires_approval,
                     )?;
                     let batch = format!("projection-batch-{id}");
-                    let input = record.input.to_string();
+                    let input = record.input.canonical_string();
                     let outcome = self.feed_batch_inner(
                         legacy_run_id,
                         &batch,
@@ -875,7 +877,7 @@ impl ShadowReconciler {
                         legacy_run_id,
                         &id,
                         record.status == "completed",
-                        &record.result.unwrap_or_else(|| json!({})).to_string(),
+                        &record.result.unwrap_or_else(|| json!({})).canonical_string(),
                     )?;
                 }
             }
@@ -956,7 +958,7 @@ impl ShadowReconciler {
                             canonical_input_json: call
                                 .get("input")
                                 .ok_or("Pi tool missing input")?
-                                .to_string(),
+                                .canonical_string(),
                             source_order: call
                                 .get("sourceOrder")
                                 .and_then(Value::as_u64)
