@@ -1,4 +1,6 @@
 //! Attempt-fenced worker writes and atomic publication in the existing blob store.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{Database, now_ms};
 use super::kernel_jobs::{JobSnapshot, JobState, read_snapshot};
 use rusqlite::{params, Transaction, OptionalExtension};
@@ -177,7 +179,7 @@ pub(super) fn pending_model_facts(
             .ok_or_else(|| invalid("scoped job notice disappeared"))?;
         let fact = notice.model_fact();
         fact.validate().map_err(|_| invalid("job notice exceeds model bound"))?;
-        let size = serde_json::to_vec(&fact).map_err(|_| invalid("invalid job notice"))?.len();
+        let size = crate::canonical_json::to_vec(&fact).map_err(|_| invalid("invalid job notice"))?.len();
         if total_bytes.saturating_add(size) > max_bytes { break; }
         total_bytes += size;
         facts.push(fact);
@@ -249,7 +251,7 @@ impl Database {
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let row=owned(&tx,id,attempt)?;
             if row.kind!="command" {return Err(invalid("not a command job"));}
-            let body=value.to_string();
+            let body=value.canonical_string();
             if row.cursor.as_deref()!=Some(body.as_str()) {
                 tx.execute("UPDATE kernel_jobs SET cursor=?2,updated_at=?3 WHERE job_id=?1",params![id,body,now_ms()])?;
             }
@@ -268,7 +270,7 @@ impl Database {
             if job.cancel_requested_at.is_some() && state=="completed" {
                 state="cancelled";body_value["state"]=Value::from(state);body_value["errorCode"]=Value::from("tool.cancelled");
             }
-            let body=body_value.to_string();let sha=format!("sha256:{}",hex::encode(Sha256::digest(body.as_bytes())));
+            let body=body_value.canonical_string();let sha=format!("sha256:{}",hex::encode(Sha256::digest(body.as_bytes())));
             tx.execute("INSERT OR IGNORE INTO tool_call_result_blobs(sha256,body_json,byte_size,created_at) VALUES(?1,?2,?3,?4)",params![sha,body,body.len() as i64,now_ms()])?;
             let stored:String=tx.query_row("SELECT body_json FROM tool_call_result_blobs WHERE sha256=?1",[&sha],|r|r.get(0))?;
             if stored!=body {return Err(invalid("command result integrity mismatch"));}
@@ -342,7 +344,7 @@ impl Database {
         })
     }
     pub(crate) fn kernel_job_complete_attempt(&self,id:&str,attempt:u32,conversation:&str,result:&Value)->Result<(),String> {
-        let body=serde_json::to_string(result).map_err(|e|format!("job.result_storage_failed: {e}"))?;
+        let body=crate::canonical_json::to_string(result).map_err(|e|format!("job.result_storage_failed: {e}"))?;
         let sha=format!("sha256:{}",hex::encode(Sha256::digest(body.as_bytes())));
         self.with_connection(|conn| {
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -568,7 +570,7 @@ mod notice_tests {
             };
             db.kernel_create_run(&run, "pi", "authoritative", 2,
                 &binding.permission_snapshot_id, &binding.execution_profile_id,
-                "b1-prompt", &serde_json::to_string(&frozen).unwrap()).unwrap();
+                "b1-prompt", &crate::canonical_json::to_string(&frozen).unwrap()).unwrap();
             Self { root, db, conversation, run }
         }
 
