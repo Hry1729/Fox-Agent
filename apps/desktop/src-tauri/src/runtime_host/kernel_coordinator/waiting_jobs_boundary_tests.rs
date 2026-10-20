@@ -1,4 +1,6 @@
 //! Real Host lifecycle and current-policy boundaries for automatic Job wakes.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -120,7 +122,7 @@ fn shutdown_owned_wake(live: bool) {
     use std::sync::atomic::Ordering;
     let arguments = json!({"idempotencyKey":"shutdown-owned-wake",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     let (address, requests, stop_provider, server) = counted_local_provider(vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -296,7 +298,7 @@ fn parked_job_policy_switch(live: bool) {
     let write_input = json!({"path":"denied.txt", "content":"must not land", "expectedVersion":"missing"});
     let arguments = json!({"idempotencyKey":"policy-switch-compute",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     // The first real batch also reads the absent target. This produces a
     // verified missing-file observation, so the later write would pass the
     // ordinary Allow gateway gate; no F1 or missing-baseline refusal can
@@ -306,12 +308,12 @@ fn parked_job_policy_switch(live: bool) {
             {"index":0,"id":"job-start","type":"function","function":{
                 "name":"compute_job_start","arguments":arguments}},
             {"index":1,"id":"read-absent","type":"function","function":{
-                "name":"read","arguments":json!({"path":"denied.txt"}).to_string()}}
+                "name":"read","arguments":json!({"path":"denied.txt"}).canonical_string()}}
         ]}),
         json!({"role":"assistant","content":"The Job remains in progress."}),
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"write-after-park",
             "type":"function","function":{"name":"write_file",
-                "arguments":write_input.to_string()}}]}),
+                "arguments":write_input.canonical_string()}}]}),
         json!({"role":"assistant","content":"The current policy refused the proposed write."}),
     ]);
     let mut model = worker_configuration();
@@ -359,7 +361,7 @@ fn parked_job_policy_switch(live: bool) {
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: 0, turn_max_retries: 1, experimental_compute_job_notice: true };
     db.kernel_create_run(&run, "pi", "authoritative", 2, &binding.permission_snapshot_id,
-        "legacy", &hash, &serde_json::to_string(&config).unwrap()).unwrap();
+        "legacy", &hash, &crate::canonical_json::to_string(&config).unwrap()).unwrap();
     db.freeze_kernel_model_config(&run, &model).unwrap();
     db.freeze_kernel_initial_input(&initial_input(&run, &hash)).unwrap();
     let scope = crate::database::KernelHostScope { schema_version: 1,
