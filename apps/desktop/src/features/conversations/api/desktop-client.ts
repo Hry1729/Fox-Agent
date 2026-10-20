@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
 import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
-import type { AgentBackendId, AgentBackendStatus } from '../model/agent-backend'
+import type { AgentBackendCapabilities, AgentBackendId, AgentBackendStatus } from '../model/agent-backend'
 import type {
   AgentRecord,
   ApiResponse,
@@ -748,6 +748,9 @@ export const desktopClient = {
     command<boolean>('run_cancel', agentBackend ? { runId, agentBackend } : { runId }),
   /** Picker / lock state for the outer Agent backend (never fails). */
   agentBackendsStatus: () => command<AgentBackendStatus>('agent_backends_status'),
+  /** Effective capability dimensions of an external backend (live after the first launch). */
+  agentBackendCapabilities: (backend: AgentBackendId, conversationId?: string | null) =>
+    command<AgentBackendCapabilities>('agent_backend_capabilities', conversationId ? { backend, conversationId } : { backend }),
   // Durably accept a supplementary request for the conversation's active
   // authoritative Run. Re-submitting an existing messageId is idempotent.
   // `lane: 'current'` delivers at the Run's next dispatch boundary;
