@@ -468,6 +468,14 @@ impl KernelCoordinator<'_> {
                 )?;
                 return Err(LIVE_DETACHED.to_string());
             }
+            if super::super::kernel_gateway::tool_error_budget_exhausted(&snapshot) {
+                settle_children(true)?;
+                self.fail(
+                    super::super::kernel_gateway::TOOL_ERROR_BUDGET_EXHAUSTED,
+                    super::super::kernel_host::TOOL_ERROR_BUDGET_MESSAGE,
+                )?;
+                return Err(LIVE_DETACHED.to_string());
+            }
             if snapshot
                 .pending_effects
                 .iter()
