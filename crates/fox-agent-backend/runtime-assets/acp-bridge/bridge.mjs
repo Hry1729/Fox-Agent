@@ -5,9 +5,17 @@
 // srt-win broker closes the runner's stdin right after writing its launch
 // spec), so ACP cannot run over the backend's stdin. Instead Fox listens on a
 // one-shot named pipe; this script connects to it (FOX_ACP_PIPE), sends
-// `FOX-ACP-BRIDGE/1 <FOX_ACP_TOKEN>\n`, waits for `OK\n`, and only then starts
-// the backend and relays pipe <-> backend stdin/stdout. The backend's stderr
-// goes straight to this process's stderr (srt forwards it to Fox).
+// `FOX-ACP-BRIDGE/1 <FOX_ACP_TOKEN>\n`, waits for `OK {"cwd":..,"env":{..}}\n`
+// (plain `OK\n` = no settings), and only then starts the backend and relays
+// pipe <-> backend stdin/stdout. The backend's stderr goes straight to this
+// process's stderr (srt forwards it to Fox).
+//
+// * The backend's environment and working directory come from that answer,
+//   not from the srt command line: cmd.exe cannot carry quotes, `%` or line
+//   breaks (Codex's JSON CODEX_CONFIG), and srt-win does not carry the
+//   caller's cwd into the sandbox. `env` is applied over this process's
+//   environment (names compared case-insensitively on Windows); the backend
+//   starts in `cwd` when given.
 //
 // * Pipe gone -> backend stdin is closed; if the backend has not exited after
 //   the grace period (5 s) it is killed. "Gone" is whichever of the pipe's
@@ -38,6 +46,8 @@ export const TOKEN_ENV = 'FOX_ACP_TOKEN'
 export const EXIT = Object.freeze({ usage: 64, config: 65, connect: 66, handshake: 67, spawn: 68 })
 export const CONNECT_TIMEOUT_MS = 30000
 export const CLOSE_GRACE_MS = 5000
+// Longest handshake answer accepted (the backend's environment rides in it).
+export const MAX_ANSWER_BYTES = 1024 * 1024
 
 export class BridgeError extends Error {
   constructor(exitCode, message) {
@@ -55,14 +65,51 @@ export function parseArgs(argv) {
   return { program: argv[index + 1], args: argv.slice(index + 2) }
 }
 
-/** The backend's environment: everything except the bridge variables. */
-export function backendEnv(env) {
+/**
+ * The backend's environment: this process's environment minus the bridge
+ * variables, with `extra` (from Fox's handshake answer) applied on top. On
+ * Windows names are case-insensitive, so an `extra` name replaces any
+ * differently cased copy.
+ */
+export function backendEnv(env, extra = {}, platform = process.platform) {
   const out = { ...env }
+  const fold = name => (platform === 'win32' ? name.toUpperCase() : name)
+  for (const [key, value] of Object.entries(extra)) {
+    for (const existing of Object.keys(out)) {
+      if (fold(existing) === fold(key)) delete out[existing]
+    }
+    out[key] = value
+  }
   for (const key of Object.keys(out)) {
     const upper = key.toUpperCase()
     if (upper === PIPE_ENV || upper === TOKEN_ENV) delete out[key]
   }
   return out
+}
+
+/**
+ * Parse Fox's answer line (without the newline): `OK` or
+ * `OK {"cwd":"..","env":{"NAME":"value"}}`. Returns `{ env, cwd }` or null
+ * when the line is not a valid acceptance.
+ */
+export function parseAnswer(line) {
+  if (line === 'OK') return { env: {}, cwd: undefined }
+  if (!line.startsWith('OK ')) return null
+  let payload
+  try {
+    payload = JSON.parse(line.slice(3))
+  } catch {
+    return null
+  }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const env = payload.env ?? {}
+  if (env === null || typeof env !== 'object' || Array.isArray(env)) return null
+  for (const [key, value] of Object.entries(env)) {
+    if (!key || key.includes('=') || key.includes('\0') || typeof value !== 'string' || value.includes('\0')) return null
+  }
+  const cwd = payload.cwd
+  if (cwd !== undefined && (typeof cwd !== 'string' || cwd === '' || cwd.includes('\0'))) return null
+  return { env, cwd }
 }
 
 const quoteCmd = arg => (arg === '' || /[\s&|<>^(),;=!]/.test(arg) ? `"${arg}"` : arg)
@@ -82,10 +129,11 @@ export function spawnSpec(program, args, platform = process.platform, env = proc
 }
 
 /**
- * Send the handshake and wait for the answer. Resolves with any bytes that
- * arrived after `OK\n` (Fox may already have sent its first ACP request);
- * rejects with a BridgeError (exit 67) otherwise. The socket is paused when
- * this resolves.
+ * Send the handshake and wait for the answer. Resolves with
+ * `{ rest, settings }`: any bytes that arrived after the answer line (Fox may
+ * already have sent its first ACP request) and the parsed answer
+ * (`{ env, cwd }`); rejects with a BridgeError (exit 67) otherwise. The
+ * socket is paused when this resolves.
  */
 export function handshake(socket, token, timeoutMs = CONNECT_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
@@ -109,11 +157,12 @@ export function handshake(socket, token, timeoutMs = CONNECT_TIMEOUT_MS) {
       buffered = Buffer.concat([buffered, chunk])
       const newline = buffered.indexOf(0x0a)
       if (newline < 0) {
-        if (buffered.length > 64) finish(new BridgeError(EXIT.handshake, 'handshake answer too long'))
+        if (buffered.length > MAX_ANSWER_BYTES) finish(new BridgeError(EXIT.handshake, 'handshake answer too long'))
         return
       }
       const line = buffered.subarray(0, newline).toString('utf8').replace(/\r$/, '')
-      if (line === 'OK') finish(null, buffered.subarray(newline + 1))
+      const settings = parseAnswer(line)
+      if (settings) finish(null, { rest: buffered.subarray(newline + 1), settings })
       else finish(new BridgeError(EXIT.handshake, `handshake refused by Fox (${line === 'DENIED' ? 'DENIED' : 'unexpected answer'})`))
     }
     const onEnd = () => finish(new BridgeError(EXIT.handshake, 'Fox closed the pipe during the handshake'))
@@ -166,21 +215,25 @@ export async function runBridge({
   log = defaultLog,
 }) {
   let rest
+  let settings
   try {
-    rest = await handshake(socket, token, handshakeTimeoutMs)
+    ;({ rest, settings } = await handshake(socket, token, handshakeTimeoutMs))
   } catch (error) {
     socket.destroy()
     throw error
   }
-  const spec = spawnSpec(program, args, platform, env)
+  const childEnv = backendEnv(env, settings.env, platform)
+  const spec = spawnSpec(program, args, platform, childEnv)
   let child
   try {
-    child = spawnImpl(spec.file, spec.args, {
+    const options = {
       stdio: ['pipe', 'pipe', 'inherit'],
-      env: backendEnv(env),
+      env: childEnv,
       windowsHide: true,
       windowsVerbatimArguments: spec.windowsVerbatimArguments,
-    })
+    }
+    if (settings.cwd !== undefined) options.cwd = settings.cwd
+    child = spawnImpl(spec.file, spec.args, options)
   } catch (error) {
     socket.destroy()
     throw new BridgeError(EXIT.spawn, `cannot start the backend: ${error.message}`)
