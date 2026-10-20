@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{
     migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactDeliveryView, ArtifactRecord,
     AttachmentRecord, ConversationDetail, ConversationExpertBinding,
@@ -534,7 +536,7 @@ impl Database {
         &self,
         profile: &super::UserProfileRecord,
     ) -> Result<super::UserProfileRecord, String> {
-        let value = serde_json::to_string(profile).map_err(|error| error.to_string())?;
+        let value = crate::canonical_json::to_string(profile).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)
@@ -1120,7 +1122,7 @@ impl Database {
                     params![
                         id,
                         category,
-                        manifest.to_string(),
+                        manifest.canonical_string(),
                         agent_kind,
                         invocation_mode,
                         visibility
@@ -1337,7 +1339,7 @@ impl Database {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let enabled_skills_json =
-            serde_json::to_string(&enabled_skills).map_err(|error| error.to_string())?;
+            crate::canonical_json::to_string(&enabled_skills).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             if request.id.is_some() {
@@ -1363,7 +1365,7 @@ impl Database {
                          package_version = '1.0.0', package_manifest_json = ?9, updated_at = ?10,
                          agent_kind = ?11, invocation_mode = ?12, visibility = ?13
                      WHERE id = ?1",
-                    params![id, name, request.description.trim(), request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), prompt, request.default_model.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string(), now, agent_kind, invocation_mode, visibility],
+                    params![id, name, request.description.trim(), request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), prompt, request.default_model.trim(), crate::canonical_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.canonical_string(), now, agent_kind, invocation_mode, visibility],
                 )?;
             } else {
                 transaction.execute(
@@ -1372,7 +1374,7 @@ impl Database {
                          package_version, package_manifest_json, agent_kind, invocation_mode, visibility)
                      VALUES (?1, ?2, ?3, 'pi', ?4, ?5, ?6, ?6, ?7, ?8, ?9, 0, '1.0.0', ?10,
                              'expert', 'inline', 'expert_center')",
-                    params![id, name, request.description.trim(), prompt, request.default_model.trim(), now, request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string()],
+                    params![id, name, request.description.trim(), prompt, request.default_model.trim(), now, request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), crate::canonical_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.canonical_string()],
                 )?;
             }
             transaction.execute(
@@ -1563,9 +1565,9 @@ impl Database {
         }
 
         let now = now_ms();
-        let suggestions_json = serde_json::to_string(&request.opening_suggestions)
+        let suggestions_json = crate::canonical_json::to_string(&request.opening_suggestions)
             .map_err(|error| error.to_string())?;
-        let manifest_json = request.package_manifest.to_string();
+        let manifest_json = request.package_manifest.canonical_string();
         if let Some((expert_id, _, _, _)) = current {
             if expert_id != request.expert_id {
                 return Err("expert.package_identity_conflict".to_owned());
@@ -1652,7 +1654,7 @@ impl Database {
                         request.package_id,
                         request.version,
                         request.package_hash,
-                        request.package.to_string(),
+                        request.package.canonical_string(),
                         now
                     ],
                 )
@@ -1668,7 +1670,7 @@ impl Database {
                     value_json = excluded.value_json, source = 'package', updated_at = excluded.updated_at",
                 params![
                     request.expert_id,
-                    serde_json::to_string(&request.enabled_skills)
+                    crate::canonical_json::to_string(&request.enabled_skills)
                         .map_err(|error| error.to_string())?,
                     now
                 ],
@@ -2300,8 +2302,8 @@ impl Database {
                 activation_source,
                 expert.package_version,
                 package_hash,
-                package_snapshot.to_string(),
-                display_snapshot_json.to_string(),
+                package_snapshot.canonical_string(),
+                display_snapshot_json.canonical_string(),
                 now
             ],
         )?;
@@ -2841,7 +2843,7 @@ impl Database {
                 } else {
                     ("expert", "inline", "expert_center")
                 };
-                let system_prompt = serde_json::to_string(&json!({
+                let system_prompt = crate::canonical_json::to_string(&json!({
                     "remoteAgentId": agent.slug,
                     "backendId": agent.backend_id,
                     "icon": agent.icon,
@@ -2895,7 +2897,7 @@ impl Database {
                     }
                     transaction.execute(
                         "UPDATE agents SET system_prompt = ?2, updated_at = ?3 WHERE id = ?1",
-                        params![id, metadata.to_string(), now],
+                        params![id, metadata.canonical_string(), now],
                     )?;
                 }
             }
@@ -2926,7 +2928,7 @@ impl Database {
                 }
                 transaction.execute(
                     "UPDATE agents SET system_prompt = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![id, metadata.to_string(), now],
+                    params![id, metadata.canonical_string(), now],
                 )?;
             }
 
@@ -3702,7 +3704,7 @@ impl Database {
         }
         skills.sort();
         skills.dedup();
-        let value = serde_json::to_string(&skills).map_err(|error| error.to_string())?;
+        let value = crate::canonical_json::to_string(&skills).map_err(|error| error.to_string())?;
         let now = now_ms();
         self.with_connection(|connection| {
             connection.execute(
@@ -3878,7 +3880,7 @@ impl Database {
             return Err("Office 文档由 Fox 管理，请使用启用/停用操作。".to_owned());
         }
         let now = now_ms();
-        let args_json = serde_json::to_string(args).map_err(|error| error.to_string())?;
+        let args_json = crate::canonical_json::to_string(args).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO mcp_servers(
@@ -4043,7 +4045,7 @@ impl Database {
         details: &Value,
     ) -> Result<(), String> {
         let now = now_ms();
-        let details_json = serde_json::to_string(details).map_err(|error| error.to_string())?;
+        let details_json = crate::canonical_json::to_string(details).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO lifecycle_hook_executions(
@@ -4248,7 +4250,7 @@ impl Database {
             );
         }
         let now = now_ms();
-        let input_json = serde_json::to_string(input).map_err(|error| error.to_string())?;
+        let input_json = crate::canonical_json::to_string(input).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -4401,7 +4403,7 @@ impl Database {
         };
         let result_json = compact_result
             .as_ref()
-            .map(serde_json::to_string)
+            .map(crate::canonical_json::to_string)
             .transpose()
             .map_err(|error| error.to_string())?;
         let terminal_status = if error_message.is_some() {
@@ -4758,7 +4760,7 @@ impl Database {
         }
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
-        let request_json = serde_json::to_string(request).map_err(|error| error.to_string())?;
+        let request_json = crate::canonical_json::to_string(request).map_err(|error| error.to_string())?;
         let approval = self.with_connection(|connection| {
             let run_id: String = connection.query_row("SELECT run_id FROM tool_calls WHERE id=?1", [tool_call_id], |row| row.get(0))?;
             require_legacy_run_writer(connection, &run_id)?;
@@ -4873,7 +4875,7 @@ impl Database {
                 "approved": approved,
                 "scope": decision.scope(),
                 "category": existing.category,
-            }).to_string();
+            }).canonical_string();
             let updated = transaction.execute(
                 "UPDATE approvals
                  SET status = ?2, decision_json = ?3, resolved_at = ?4
@@ -5660,7 +5662,7 @@ impl Database {
                     Uuid::new_v4().to_string(),
                     parent_run_id,
                     seq,
-                    serde_json::to_string(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    crate::canonical_json::to_string(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     now_ms()
                 ],
             )?;
@@ -6436,7 +6438,7 @@ impl Database {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| "runtime event type is missing".to_owned())?;
-        let event_json = serde_json::to_string(payload).map_err(|error| error.to_string())?;
+        let event_json = crate::canonical_json::to_string(payload).map_err(|error| error.to_string())?;
         let now = now_ms();
 
         self.with_connection(|connection| {
@@ -7076,7 +7078,7 @@ fn expire_pending_approvals_for_run(
     reason: &str,
     now: i64,
 ) -> rusqlite::Result<usize> {
-    let decision_json = json!({ "reason": reason }).to_string();
+    let decision_json = json!({ "reason": reason }).canonical_string();
     transaction.execute(
         "UPDATE approvals
          SET status = 'expired', decision_json = ?2, resolved_at = ?3
@@ -7118,7 +7120,7 @@ fn cancel_pending_approvals_for_run(
     reason: &str,
     now: i64,
 ) -> rusqlite::Result<usize> {
-    let decision_json = json!({ "reason": reason }).to_string();
+    let decision_json = json!({ "reason": reason }).canonical_string();
     transaction.execute(
         "UPDATE approvals
          SET status = 'cancelled', decision_json = ?2, resolved_at = ?3
@@ -7134,7 +7136,7 @@ fn expire_pending_approvals_for_conversation(
     reason: &str,
     now: i64,
 ) -> rusqlite::Result<usize> {
-    let decision_json = json!({ "reason": reason }).to_string();
+    let decision_json = json!({ "reason": reason }).canonical_string();
     transaction.execute(
         "UPDATE approvals
          SET status = 'expired', decision_json = ?2, resolved_at = ?3
@@ -7218,7 +7220,7 @@ fn apply_active_run_activity(
     // One batched read of the listed conversations' latest Runs. A requested
     // question can outlive run.completed, so non-terminal state alone is not
     // sufficient to distinguish waiting for a choice from successful completion.
-    let ids = json!(records.iter().map(|record| &record.id).collect::<Vec<_>>()).to_string();
+    let ids = json!(records.iter().map(|record| &record.id).collect::<Vec<_>>()).canonical_string();
     let mut latest_statement = connection.prepare(
         "WITH ranked_runs AS (
              SELECT id, conversation_id, status,
@@ -7421,7 +7423,7 @@ pub(crate) fn agent_package_snapshot(agent: &AgentRecord) -> Value {
 }
 
 pub(crate) fn package_snapshot_hash(package_snapshot: &Value) -> String {
-    hex::encode(Sha256::digest(package_snapshot.to_string().as_bytes()))
+    hex::encode(Sha256::digest(package_snapshot.canonical_string().as_bytes()))
 }
 
 fn conversation_expert_binding_lock_reason(
@@ -7755,7 +7757,7 @@ fn stored_result_text(result: Option<&Value>) -> (String, bool, usize) {
             (joined, false, length)
         }
         Some(other) => {
-            let text = other.to_string();
+            let text = other.canonical_string();
             let length = text.len();
             (text, false, length)
         }
@@ -8276,7 +8278,7 @@ fn project_tool_started(
         .get("tool")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let input_json = serde_json::to_string(payload.get("input").unwrap_or(&Value::Null))
+    let input_json = crate::canonical_json::to_string(payload.get("input").unwrap_or(&Value::Null))
         .unwrap_or_else(|_| "null".to_owned());
     let (conversation_id, run_status): (String, String) = transaction.query_row(
         "SELECT conversation_id, status FROM runs WHERE id = ?1",
@@ -8374,7 +8376,7 @@ fn project_tool_updated(
         return Ok(());
     };
     let (inline_result, blob) = split_tool_result(payload.get("update").unwrap_or(&Value::Null));
-    let result_json = serde_json::to_string(&inline_result)
+    let result_json = crate::canonical_json::to_string(&inline_result)
         .unwrap_or_else(|_| "null".to_owned());
     let incoming_tool_name = payload.get("tool").and_then(Value::as_str);
     if let Some((sha, full, bytes)) = &blob {
@@ -8436,7 +8438,7 @@ fn project_tool_completed(
         return Ok(());
     };
     let (inline_result, blob) = split_tool_result(payload.get("result").unwrap_or(&Value::Null));
-    let result_json = serde_json::to_string(&inline_result).unwrap_or_else(|_| "null".to_owned());
+    let result_json = crate::canonical_json::to_string(&inline_result).unwrap_or_else(|_| "null".to_owned());
     let is_error = payload
         .get("isError")
         .and_then(Value::as_bool)
@@ -9021,7 +9023,7 @@ fn parse_json(value: &str) -> Value {
 }
 
 fn compact_tool_result(value: &Value) -> Value {
-    let Ok(serialized) = serde_json::to_string(value) else {
+    let Ok(serialized) = crate::canonical_json::to_string(value) else {
         return Value::Null;
     };
     if serialized.len() <= MAX_STORED_TOOL_RESULT_BYTES {
@@ -9048,7 +9050,7 @@ fn split_tool_result(value: &Value) -> (Value, Option<(String, String, usize)>) 
     if inline.get("truncated").and_then(Value::as_bool) != Some(true) {
         return (inline, None);
     }
-    let Ok(full) = serde_json::to_string(value) else {
+    let Ok(full) = crate::canonical_json::to_string(value) else {
         return (inline, None);
     };
     let sha = format!(
@@ -9572,7 +9574,7 @@ mod tests {
         let expected_snapshot: Value =
             serde_json::from_str(expected_snapshot_bytes).expect("parse compact snapshot");
         assert_eq!(
-            expected_snapshot.to_string(),
+            expected_snapshot.canonical_string(),
             expected_snapshot_bytes,
             "fixture snapshot must remain compact and byte-stable"
         );
@@ -9587,7 +9589,7 @@ mod tests {
             .with_connection(|connection| {
                 connection.execute(
                     "UPDATE agents SET package_manifest_json = ?2 WHERE id = ?1",
-                    params![agent_id, package_manifest.to_string()],
+                    params![agent_id, package_manifest.canonical_string()],
                 )?;
                 Ok(())
             })
@@ -9598,7 +9600,7 @@ mod tests {
             .expect("v1 expert exists");
         let actual_snapshot = agent_package_snapshot(&saved);
         assert_eq!(
-            actual_snapshot.to_string(),
+            actual_snapshot.canonical_string(),
             expected_snapshot_bytes,
             "current snapshot serialization must not rewrite the v1 fixture"
         );
@@ -9660,7 +9662,7 @@ mod tests {
             .with_connection(|connection| {
                 connection.execute(
                     "UPDATE agents SET package_manifest_json = ?2 WHERE id = ?1",
-                    params![agent_id, package_manifest.to_string()],
+                    params![agent_id, package_manifest.canonical_string()],
                 )?;
                 Ok(())
             })
@@ -9685,7 +9687,7 @@ mod tests {
                 "source": "remote",
                 "ids": legacy_ids
             },
-            "packageSnapshotBytes": snapshot.to_string(),
+            "packageSnapshotBytes": snapshot.canonical_string(),
             "packageSnapshotHash": package_snapshot_hash(&snapshot)
         });
         let fixture_path = legacy_expert_v1_fixture_path();
@@ -9693,7 +9695,7 @@ mod tests {
             .expect("create fixture directory");
         std::fs::write(
             fixture_path,
-            serde_json::to_vec_pretty(&fixture).expect("serialize fixture"),
+            crate::canonical_json::to_vec_pretty(&fixture).expect("serialize fixture"),
         )
         .expect("write generated fixture");
 
@@ -9770,7 +9772,7 @@ mod tests {
         let mut old_manifest = agent.package_manifest;
         old_manifest["allowedTools"].as_array_mut().unwrap().retain(|name| name != "attachment_compute");
         database.with_connection(|connection| {
-            connection.execute("UPDATE agents SET package_manifest_json=?1 WHERE id=?2", params![old_manifest.to_string(), DEFAULT_AGENT_ID])?;
+            connection.execute("UPDATE agents SET package_manifest_json=?1 WHERE id=?2", params![old_manifest.canonical_string(), DEFAULT_AGENT_ID])?;
             Ok(())
         }).unwrap();
         drop(database);
@@ -11049,7 +11051,7 @@ mod tests {
                     params![
                         Uuid::new_v4().to_string(),
                         conflicting.id,
-                        serde_json::to_string(
+                        crate::canonical_json::to_string(
                             &json!({"type":"run.completed","completionReason":"stop"})
                         )
                         .unwrap(),
@@ -13386,7 +13388,7 @@ mod tests {
                         stale_tool_id,
                         cancelled.run.id,
                         conversation.id,
-                        serde_json::to_string(&json!({ "path": "stale.txt" })).unwrap(),
+                        crate::canonical_json::to_string(&json!({ "path": "stale.txt" })).unwrap(),
                         now,
                     ],
                 )?;
@@ -14094,7 +14096,7 @@ mod tests {
                             Uuid::new_v4().to_string(),
                             legacy.id,
                             seq,
-                            payload.to_string(),
+                            payload.canonical_string(),
                             created_at
                         ],
                     )?;
@@ -14310,7 +14312,7 @@ mod tests {
                         run_id,
                         conversation_id,
                         tool_name,
-                        serde_json::to_string(result).unwrap(),
+                        crate::canonical_json::to_string(result).unwrap(),
                     ],
                 )?;
                 Ok(())
@@ -14499,7 +14501,7 @@ mod tests {
                 }).unwrap();
             }
             let range = database.tool_result_range(&reference,&conversation.id,0,4096).unwrap();
-            let expected = final_result["content"][0]["text"].as_str().map(str::to_owned).unwrap_or_else(||final_result.to_string());
+            let expected = final_result["content"][0]["text"].as_str().map(str::to_owned).unwrap_or_else(||final_result.canonical_string());
             assert_eq!(range.content,expected);
             database.with_connection(|connection| {
                 let pointer: Option<String> = connection.query_row("SELECT result_blob_sha256 FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",params![started.run.id,call],|row|row.get(0))?;
