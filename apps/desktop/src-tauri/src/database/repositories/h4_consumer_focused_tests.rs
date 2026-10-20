@@ -17,6 +17,8 @@
 //! database, a real file and a real `managed_file_versions` binding — not an
 //! in-memory schema and not an internal helper.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::Database;
 use crate::database::now_ms;
 
@@ -166,7 +168,7 @@ impl World {
                      WHERE run_id=?3 AND item_key=?4",
                     rusqlite::params![
                         status,
-                        finding.map(|value| value.to_string()),
+                        finding.map(|value| value.canonical_string()),
                         self.run_id,
                         self.item_key
                     ],
