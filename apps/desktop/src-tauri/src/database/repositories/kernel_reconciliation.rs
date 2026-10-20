@@ -1,5 +1,7 @@
 //! Post-terminal evidence is separate from execution facts. Confirmation never
 //! manufactures a tool result, reopens a lease, or changes an old Run outcome.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -192,7 +194,7 @@ fn append(
     body: &Value,
 ) -> rusqlite::Result<()> {
     tx.execute("INSERT INTO kernel_reconciliation_events(run_id,revision,effect_key,kind,body_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![request.run_id,request.expected_revision+1,request.effect_key,kind,body.to_string(),now_ms()])?;
+        params![request.run_id,request.expected_revision+1,request.effect_key,kind,body.canonical_string(),now_ms()])?;
     Ok(())
 }
 
@@ -222,7 +224,7 @@ impl Database {
         request: &ReconciliationRequest,
         evidence: &Value,
     ) -> Result<ReconciliationView, String> {
-        if evidence.to_string().len() > 32_768 {
+        if evidence.canonical_string().len() > 32_768 {
             return Err("查询证据超过大小上限".into());
         }
         self.with_connection(|c| {
@@ -289,7 +291,7 @@ impl Database {
             binding.permission.grants.clear();
             binding.permission_snapshot_id=Self::run_control_permission_hash(&binding.permission).map_err(|_|invalid("恢复权限无效"))?;
             binding.validate().map_err(|_|invalid("恢复绑定无效"))?;
-            let body=serde_json::to_string(&binding).map_err(|_|invalid("恢复绑定无效"))?;
+            let body=crate::canonical_json::to_string(&binding).map_err(|_|invalid("恢复绑定无效"))?;
             tx.execute("INSERT INTO run_control_bindings(run_id,conversation_id,authority,engine_id,binding_json,binding_hash,created_at) VALUES(?1,?2,'authoritative',?6,?3,?4,?5)",
                 params![started.run.id,request.conversation_id,body,hash(&body),now_ms(),binding.engine_id])?;
             tx.execute("INSERT INTO kernel_recovery_runs(source_run_id,recovery_run_id,created_at) VALUES(?1,?2,?3)",params![request.run_id,started.run.id,now_ms()])?;
