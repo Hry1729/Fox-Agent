@@ -113,7 +113,7 @@ impl Fixture {
     }
     fn set_rule(&mut self, rule: Value) {
         self.spec["rule"] = rule;
-        let requirements = serde_json::to_string(&[DeliveryRequirement {
+        let requirements = crate::canonical_json::to_string(&[DeliveryRequirement {
             item_key: Some(self.item.clone()),
             id: "content:concat".into(),
             kind: RequirementKind::ContentContract {
@@ -197,7 +197,7 @@ fn c2_complete_concat_confirms_at_the_actual_entry_with_full_identity() {
     );
     assert_eq!(
         proof["specHash"],
-        digest(&serde_json::to_vec(&fixture.spec).unwrap())
+        digest(&crate::canonical_json::to_vec(&fixture.spec).unwrap())
     );
     assert_eq!(proof["rowBound"], true);
     assert_eq!(proof["checks"][0]["checkerVersion"], 2);
@@ -625,7 +625,7 @@ fn c2_contract_change_during_the_real_leaf_cannot_keep_the_receipt() {
     let mut other = fixture.spec.clone();
     other["ruleId"] = json!("replacement");
     test_after_check(move |database, run| {
-        let requirements = serde_json::to_string(&[DeliveryRequirement {
+        let requirements = crate::canonical_json::to_string(&[DeliveryRequirement {
             item_key: Some(item.clone()),
             id: "content:concat".into(),
             kind: RequirementKind::ContentContract { spec: other },
