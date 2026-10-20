@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -310,7 +312,7 @@ fn assert_live_total_retry(continuation: bool) {
     assert_eq!(executions.load(Ordering::SeqCst),usize::from(continuation));
     let requests = server.join().unwrap();
     assert_eq!(requests.len(),if continuation {4}else{2});
-    if continuation { assert!(requests[3]["messages"].to_string().contains("durable read proof")); }
+    if continuation { assert!(requests[3]["messages"].canonical_string().contains("durable read proof")); }
     println!("live_total_retry continuation={continuation} requests={} executions={} final=completed",requests.len(),executions.load(Ordering::SeqCst));
 }
 
