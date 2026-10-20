@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 
 #[test]
@@ -135,7 +137,7 @@ fn kernel_reads_project_root_and_office_attachments_through_frozen_gateway() {
                     let call = effect.tool_call_id.as_deref().unwrap_or("display-call");
                     policy.execute(&db, tool, &payload["input"], call, token)?
                 };
-                assert!(result.to_string().contains(expected));
+                assert!(result.canonical_string().contains(expected));
                 Ok((true, result))
             })
             .unwrap();
@@ -431,7 +433,7 @@ fn exercise_projectless_compute(source: Option<&std::path::Path>, code: &str) ->
         assert!(policy.execute_context_resource(&db,&root,&root,&root,"attachment_compute",&json!({"attachmentIds":["foreign"],"code":"return 1;"}),token).is_err());
         let payload:Value=serde_json::from_str(&effect.payload_json).unwrap();
         let result=policy.execute_context_resource(&db,&root,&root,&root,"attachment_compute",&payload["input"],token)?;
-        assert!(serde_json::to_vec(&result).unwrap().len()<256*1024);
+        assert!(crate::canonical_json::to_vec(&result).unwrap().len()<256*1024);
         actual=result["details"]["result"].clone();
         Ok((true,result))
     }).unwrap();
@@ -463,7 +465,7 @@ fn exercise_projectless_compute(source: Option<&std::path::Path>, code: &str) ->
     }).unwrap();
     assert_eq!(std::fs::read(file).unwrap(),original,"source attachment must remain unchanged");
     if let Some(source)=source {
-        std::fs::write(source.parent().unwrap().join("product-artifacts.json"),serde_json::to_vec_pretty(&conversation.artifacts).unwrap()).unwrap();
+        std::fs::write(source.parent().unwrap().join("product-artifacts.json"),crate::canonical_json::to_vec_pretty(&conversation.artifacts).unwrap()).unwrap();
     }
     actual
 }
@@ -480,7 +482,7 @@ fn projectless_real_xlsx_code_acceptance() {
     let root=std::path::PathBuf::from(std::env::var("FOX_COMPUTE_ACCEPTANCE_DIR").expect("external fixture directory"));
     let code=std::fs::read_to_string(root.join("analyze.js")).unwrap();
     let actual=exercise_projectless_compute(Some(&root.join("AGV-927-task-acceptance.xlsx")),&code);
-    std::fs::write(root.join("product-actual.json"),serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+    std::fs::write(root.join("product-actual.json"),crate::canonical_json::to_vec_pretty(&actual).unwrap()).unwrap();
 }
 
 
