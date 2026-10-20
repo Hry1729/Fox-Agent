@@ -136,17 +136,14 @@ impl ExternalBackendHost {
     /// Runs of external conversations a previous Fox process left
     /// non-terminal: their backend died with that process.
     fn interrupt_runs_left_active(&self) {
-        match self.database.external_runs_left_active() {
-            Ok(runs) => {
-                for run_id in runs {
-                    let _ = self.database.mark_run_interrupted(
-                        &run_id,
-                        "agent_backend_host_restarted",
-                        "Fox 已重启，外部后端的这一轮随上次进程结束，结果未知",
-                    );
-                }
-            }
-            Err(error) => eprintln!("fox.external left_active_lookup_failed={error:?}"),
+        // The generic `repair_interrupted_runs` skips these runs; this is the
+        // only place they are ended (`agent_backend_host_restarted`, pending
+        // approvals `cancelled` / `app_restarted`).
+        if let Err(error) = self
+            .database
+            .interrupt_external_runs_left_active("Fox 已重启，外部后端的这一轮随上次进程结束，结果未知")
+        {
+            eprintln!("fox.external left_active_lookup_failed={error:?}");
         }
     }
 
