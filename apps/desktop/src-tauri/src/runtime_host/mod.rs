@@ -2887,7 +2887,15 @@ impl RuntimeHost {
                     // Kernel owns its paused execution clock and terminal
                     // facts. The Legacy wall timer must not override approval
                     // waits or settle the child ahead of executor cleanup.
-                    let duration_exceeded = !kernel_owned && Instant::now() >= deadline;
+                    // Time waiting for the user's approval does not count:
+                    // approvals have no deadline of their own.
+                    let approval_wait = coordinator
+                        .database
+                        .run_approval_wait_ms(&child_run_id, chrono::Utc::now().timestamp_millis())
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let duration_exceeded = !kernel_owned
+                        && Instant::now() >= deadline + Duration::from_millis(approval_wait);
                     if duration_exceeded {
                         let _ = child_host.cancel_run(&child_run_id);
                         let _ = child_host.stop_worker();
@@ -3029,7 +3037,14 @@ impl RuntimeHost {
                         .database
                         .digital_colleague_budget_exceeded(&run_id)
                         .unwrap_or(false);
-                    let duration_exceeded = Instant::now() >= deadline;
+                    // Time waiting for the user's approval does not count:
+                    // approvals have no deadline of their own.
+                    let approval_wait = coordinator
+                        .database
+                        .run_approval_wait_ms(&run_id, chrono::Utc::now().timestamp_millis())
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let duration_exceeded = Instant::now() >= deadline + Duration::from_millis(approval_wait);
                     if token_budget_exceeded || duration_exceeded {
                         let _ = managed_host.cancel_run(&run_id);
                         let _ = managed_host.stop_worker();
@@ -6797,20 +6812,18 @@ fn attach_permission_scope(request: &mut Value, scope: Option<&str>) {
 }
 
 /// Keep cleanup in the caller on both binding failures and receive failures.
-/// Invalid persisted control must never silently reset the approval deadline.
+/// Invalid persisted control still fails closed before waiting. An approval has
+/// no deadline: it waits until the user answers, or until the sender is used or
+/// dropped by run cancellation / conversation close / shutdown (a `false` or a
+/// disconnect, never an approval).
 fn receive_run_approval(
     database: &Database,
     run_id: &str,
     approval_id: &str,
     receiver: &mpsc::Receiver<bool>,
 ) -> Result<bool, String> {
-    let remaining = database.run_approval_wait_remaining_ms(run_id, approval_id, chrono::Utc::now().timestamp_millis())?;
-    if remaining == 0 { return Err("Approval request timed out".into()); }
-    receiver.recv_timeout(Duration::from_millis(remaining))
-        .map_err(|error| match error {
-            mpsc::RecvTimeoutError::Timeout => "Approval request timed out".to_owned(),
-            mpsc::RecvTimeoutError::Disconnected => "Approval request was interrupted".to_owned(),
-        })
+    database.run_approval_requested_at(run_id, approval_id)?;
+    receiver.recv().map_err(|_| "Approval request was interrupted".to_owned())
 }
 
 #[cfg(test)]
@@ -7110,7 +7123,7 @@ mod frozen_approval_tests {
     }
 
     #[test]
-    fn frozen_approval_deadline_is_enforced_and_corruption_cannot_fall_back() {
+    fn frozen_approval_has_no_deadline_and_corruption_cannot_fall_back() {
         let path = std::env::temp_dir().join(format!("fox-approval-budget-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(path.clone()).unwrap();
         let conversation = db.create_conversation("fox-general", Some("budget test"), None, None).unwrap();
@@ -7127,10 +7140,15 @@ mod frozen_approval_tests {
         drop(db);
         let db = Database::open(path.clone()).unwrap();
         assert_eq!(db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms, 1);
+        // Long past the frozen nominal window: the user's answer still counts.
         let (sender, receiver) = mpsc::channel();
-        assert_eq!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err(), "Approval request timed out");
-        sender.send(true).unwrap();
-        assert_eq!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err(), "Approval request timed out");
+        let answer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            sender.send(true).unwrap();
+            sender
+        });
+        assert!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap());
+        let sender = answer.join().unwrap();
         rusqlite::Connection::open(path).unwrap().execute(
             "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1", [&run.run.id],
         ).unwrap();
