@@ -130,7 +130,7 @@ fn insert_event(
     connection: &rusqlite::Connection,
     event: &WorkEventRecord,
 ) -> rusqlite::Result<bool> {
-    let event_json = serde_json::to_string(event)
+    let event_json = crate::canonical_json::to_string(event)
         .map_err(|_| rusqlite::Error::InvalidParameterName("event_json".to_owned()))?;
     Ok(connection.execute(
         "INSERT OR IGNORE INTO work_events(
