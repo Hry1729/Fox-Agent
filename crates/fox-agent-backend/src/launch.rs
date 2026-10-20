@@ -58,8 +58,44 @@ pub const PI_ACP_VERSION: &str = "0.0.34";
 /// DeepSeek Harness is a developer preview; pinned by `dsh --version` check.
 pub const DSH_VERSION: &str = "0.2.1-rc.2";
 
+/// Environment variable naming an installed entry point for `backend`
+/// (`FOX_PI_ACP_PROGRAM`, `FOX_CODEX_ACP_PROGRAM`, `FOX_DSH_PROGRAM`). When
+/// set, [`launch_spec`] runs that program with no `npx` arguments; the Host
+/// launcher ([`crate::external_launch`]) also honours it before the managed
+/// runtime. Lets the real-binary tests run against an installed runtime.
+pub fn program_override_env(backend: AgentBackend) -> Option<&'static str> {
+    match backend {
+        AgentBackend::Pi => Some("FOX_PI_ACP_PROGRAM"),
+        AgentBackend::Codex => Some("FOX_CODEX_ACP_PROGRAM"),
+        AgentBackend::Deepseek => Some("FOX_DSH_PROGRAM"),
+        AgentBackend::Fox => None,
+    }
+}
+
+/// The override of [`program_override_env`], when set and non-empty.
+pub fn program_override(backend: AgentBackend) -> Option<String> {
+    let name = program_override_env(backend)?;
+    std::env::var(name).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+}
+
 /// `None` for FoxBackend, which runs in-process through the existing Kernel.
+///
+/// The `npx -y <pinned package>` entry points are for development and the
+/// real-binary tests only; set [`program_override_env`] to use an installed
+/// program instead. The desktop Host never launches through `npx` (it resolves
+/// the Fox-managed runtime, see `crate::external_launch`).
 pub fn launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
+    let mut spec = default_launch_spec(backend)?;
+    if let Some(program) = program_override(backend) {
+        spec.program = program;
+        if backend != AgentBackend::Deepseek {
+            spec.args.clear();
+        }
+    }
+    Some(spec)
+}
+
+fn default_launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
     match backend {
         AgentBackend::Fox => None,
         AgentBackend::Codex => Some(LaunchSpec {
