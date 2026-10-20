@@ -11,3 +11,8 @@ test-support = []
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+# Tests build serde_json exactly like the desktop binary does (agent-client-protocol
+# turns preserve_order on there), so canonical JSON is exercised under it.
+serde_json = { version = "1", features = ["preserve_order"] }
