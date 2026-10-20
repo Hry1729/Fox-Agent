@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::repositories::{agent_package_snapshot, package_snapshot_hash, query_agent_record};
 use super::DATABASE_SCHEMA_VERSION;
 use rusqlite::{Connection, OptionalExtension, Result};
@@ -7579,7 +7581,7 @@ fn apply_expert_package_snapshot_migration(
             "UPDATE conversation_expert_bindings
              SET package_snapshot_json = ?2, package_hash = ?3
              WHERE id = ?1",
-            rusqlite::params![binding_id, package_snapshot.to_string(), package_hash],
+            rusqlite::params![binding_id, package_snapshot.canonical_string(), package_hash],
         )?;
     }
     transaction.execute(
@@ -7835,7 +7837,7 @@ fn migrate_builtin_expert_conversations(transaction: &rusqlite::Transaction<'_>)
                 expert_id,
                 expert_version,
                 package_hash,
-                display_snapshot.to_string(),
+                display_snapshot.canonical_string(),
                 activated_at,
             ],
         )?;
@@ -8283,7 +8285,7 @@ mod tests {
         let after = snapshot(&copy);
 
         let summary = serde_json::json!({ "before": before, "after": after });
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+        println!("{}", crate::canonical_json::to_string_pretty(&summary).unwrap());
 
         assert_eq!(
             before["artifacts"], after["artifacts"],
@@ -10789,7 +10791,7 @@ mod tests {
         const HIGH_RISK_POLICY: &str = r#"{"schemaVersion":1,"id":"high_risk_v1","riskLevel":"high","requiredChecks":["inspection","review"],"allowedCheckTypes":["test","inspection","review","manual"],"reviewerPolicy":"independent","maxRepairAttempts":1,"completionRequiresAcceptance":true,"hash":"bb1258169c5d923dfd5fd1980dd52150ab96e159bd01d07ff0d04c48998dc5ea"}"#;
 
         fn finish_input(first_evidence_ids: &[&str], second_evidence_ids: &[&str]) -> String {
-            serde_json::to_string(&json!({
+            crate::canonical_json::to_string(&json!({
                 "goalId": "finish-goal",
                 "taskId": "finish-task",
                 "attemptId": "finish-attempt",
@@ -11506,7 +11508,7 @@ mod tests {
     #[test]
     fn graph_node_cancel_migration_enforces_two_phase_negative_reconciliation() {
         fn cancel_input(reason: &str) -> String {
-            serde_json::to_string(&json!({
+            crate::canonical_json::to_string(&json!({
                 "goalId": "cancel-goal",
                 "taskId": "cancel-task",
                 "attemptId": "cancel-attempt",
@@ -11527,7 +11529,7 @@ mod tests {
             error_code: Option<&str>,
             error_message: Option<&str>,
         ) -> String {
-            serde_json::to_string(&json!({
+            crate::canonical_json::to_string(&json!({
                 "childRunId": "cancel-child-run",
                 "status": status,
                 "finishedAt": finished_at,
@@ -14452,7 +14454,7 @@ DELETE FROM schema_migrations WHERE version=79;
         let root = std::env::temp_dir().join(format!("fox-v84-from-v83-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("scratch dir");
         let path = root.join("facts.db");
-        let body = serde_json::json!({"legacy":"result"}).to_string();
+        let body = serde_json::json!({"legacy":"result"}).canonical_string();
         let sha = format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes())));
         {
             let mut connection = Connection::open(&path).expect("open historical fixture");
