@@ -63,7 +63,7 @@ pub(super) fn initialize_run_trace(
         "UPDATE runs SET trace_id = ?2, root_span_id = ?3 WHERE id = ?1",
         params![run_id, trace_id, root_span_id],
     )?;
-    let attributes = serde_json::to_string(&json!({
+    let attributes = crate::canonical_json::to_string(&json!({
         "gen_ai.operation.name": "invoke_agent",
         "gen_ai.agent.name": "Fox",
         "gen_ai.request.model": model,
@@ -124,7 +124,7 @@ pub(super) fn initialize_child_run_trace(
         "UPDATE runs SET trace_id = ?2, root_span_id = ?3 WHERE id = ?1",
         params![child_run_id, trace_id, root_span_id],
     )?;
-    let attributes = serde_json::to_string(&json!({
+    let attributes = crate::canonical_json::to_string(&json!({
         "gen_ai.operation.name": "invoke_agent",
         "gen_ai.agent.id": worker_agent_id,
         "gen_ai.agent.name": worker_agent_name,
@@ -217,7 +217,7 @@ fn insert_phase_span(
     )?;
     let span_id = new_span_id();
     let operation = phase_operation(phase);
-    let attributes = serde_json::to_string(&json!({
+    let attributes = crate::canonical_json::to_string(&json!({
         "fox.phase": phase,
         "gen_ai.operation.name": operation,
     }))
@@ -279,7 +279,7 @@ fn tool_span(
     let parent =
         current_phase_span(transaction, run_id)?.unwrap_or_else(|| root_span_id.to_owned());
     let span_id = new_span_id();
-    let attributes = serde_json::to_string(&json!({
+    let attributes = crate::canonical_json::to_string(&json!({
         "gen_ai.operation.name": "execute_tool",
         "gen_ai.tool.name": tool_name,
         "fox.tool.execution_location": "runtime",
@@ -376,7 +376,7 @@ pub(super) fn project_runtime_span(
                 "UPDATE trace_spans SET attributes_json = ?2 WHERE id = ?1",
                 params![
                     root_span_id,
-                    serde_json::to_string(&attributes).unwrap_or_else(|_| "{}".to_owned())
+                    crate::canonical_json::to_string(&attributes).unwrap_or_else(|_| "{}".to_owned())
                 ],
             )?;
             current_phase_span(transaction, run_id)?.unwrap_or_else(|| root_span_id.clone())
@@ -451,7 +451,7 @@ impl Database {
                 params![run_id, entity_id], |row| row.get(0),
             )?;
             if !exists {
-                let attributes = serde_json::to_string(&json!({
+                let attributes = crate::canonical_json::to_string(&json!({
                     "fox.host.stage": stage,
                     "fox.host.attempt_id": attempt_id,
                     "fox.host.clock": "host_unix_ms",
@@ -501,7 +501,7 @@ impl Database {
                 |row| row.get::<_, bool>(0),
             )?;
             if !exists {
-                let attributes = serde_json::to_string(&json!({ "fox.ui.metric": metric }))
+                let attributes = crate::canonical_json::to_string(&json!({ "fox.ui.metric": metric }))
                     .unwrap_or_else(|_| "{}".to_owned());
                 transaction.execute(
                     "INSERT INTO trace_spans(
@@ -535,7 +535,7 @@ impl Database {
         report: &Value,
         duration_ms: i64,
     ) -> Result<EvaluationRunSummary, String> {
-        let serialized = serde_json::to_string(report).map_err(|error| error.to_string())?;
+        let serialized = crate::canonical_json::to_string(report).map_err(|error| error.to_string())?;
         if serialized.len() > MAX_EVALUATION_REPORT_BYTES {
             return Err("evaluation report is too large".to_owned());
         }
