@@ -141,7 +141,7 @@ impl KernelModelConfig {
                 return Err(format!("invalid Kernel proposal tool schema: `{name}` has no object parameter schema").into());
             }
         }
-        let bytes = serde_json::to_vec(self).map_err(|_| "invalid Kernel model configuration")?;
+        let bytes = crate::canonical_json::to_vec(self).map_err(|_| "invalid Kernel model configuration")?;
         if bytes.len() > 1_048_576 { return Err("Kernel model configuration exceeds frame limit".into()); }
         Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
     }
