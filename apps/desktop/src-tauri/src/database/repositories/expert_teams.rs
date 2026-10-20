@@ -20,7 +20,7 @@ impl Database {
         }
         let now = now_ms();
         let team_run_id = Uuid::new_v4().to_string();
-        let team_json = serde_json::to_string(&input.team).map_err(|error| error.to_string())?;
+        let team_json = crate::canonical_json::to_string(&input.team).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             let (run_conversation_id, run_status, run_kind, run_depth): (
@@ -186,7 +186,7 @@ impl Database {
                 "errorMessage": member.error_message,
             })).collect::<Vec<_>>()
         });
-        let result_json = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+        let result_json = crate::canonical_json::to_string(&result).map_err(|error| error.to_string())?;
         let now = now_ms();
         self.with_connection(|connection| {
             connection.execute(
