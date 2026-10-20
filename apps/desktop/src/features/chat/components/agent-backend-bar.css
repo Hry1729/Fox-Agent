@@ -82,3 +82,22 @@
   font-weight: 500;
   opacity: 1;
 }
+
+/* External backend wiring batch: capability dimensions. */
+.fox-agent-backend-capabilities {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.fox-agent-backend-capability {
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--fox-border, rgba(127, 127, 127, 0.3));
+  color: var(--fox-text-secondary, inherit);
+  white-space: nowrap;
+  cursor: help;
+}
