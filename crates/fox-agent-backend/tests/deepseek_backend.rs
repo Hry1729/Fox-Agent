@@ -3,11 +3,17 @@
 //!
 //! The real-binary test is gated by `FOX_TEST_REAL_ACP=1`. When the variable is
 //! not set the test returns early: that is a SKIP, not a pass, and says nothing
-//! about the real backend. Binary path: `FOX_DSH_BIN`, an absolute path to the
-//! `dsh` entry of an `npm --prefix <dir> install @deepseek-ai/dsh@0.2.1-rc.2`
-//! (`<dir>/node_modules/.bin/dsh`, on Windows `...\dsh.cmd`). Linux defaults
-//! to `/workspace/work/tools/dsh/node_modules/.bin/dsh`; Windows has no
-//! default and the test fails if the variable is missing or relative.
+//! about the real backend. Entry, in order: `FOX_DSH_PROGRAM`, `FOX_DSH_BIN`
+//! (older name; both an absolute path to the `dsh` / `dsh.cmd` entry of
+//! `@deepseek-ai/dsh@0.2.1-rc.2`), the managed runtime
+//! (`<runtime>/backends/deepseek/...`, `FOX_AGENT_RUNTIME_ROOT`; Windows also
+//! the installed runtime), else `npx -y @deepseek-ai/dsh@0.2.1-rc.2`
+//! (`launch::dev_launch_spec`, tests only).
+//!
+//! The prompt must succeed: `stopReason: end_turn` and non-empty agent text.
+//! A model error (no key, refused key, wrong provider route) FAILS the test;
+//! it is never reported as passed. Give dsh a model with `DEEPSEEK_API_KEY`
+//! or through the private HOME (`acp` row, deepseek::USER_OWNED_ROWS).
 
 use fox_agent_backend::backends::deepseek::{
     self, capabilities, check_initialize, check_version, filesystem_detail, floor_verdict,
@@ -147,16 +153,22 @@ mod real_binary {
     use fox_agent_backend::acp::{AcpConnection, BackendEvent};
     use std::time::Duration;
 
-    fn dsh_bin() -> String {
-        let bin = match std::env::var("FOX_DSH_BIN") {
-            Ok(bin) => bin,
-            Err(_) if cfg!(windows) => {
-                panic!("FOX_DSH_BIN must be set on Windows: absolute path to dsh.cmd of @deepseek-ai/dsh@0.2.1-rc.2")
-            }
-            Err(_) => "/workspace/work/tools/dsh/node_modules/.bin/dsh".into(),
+    /// (program, args before `--patch`), see the file header.
+    fn dsh_entry() -> (String, Vec<String>) {
+        use fox_agent_backend::launch::{dev_launch_spec, DevEntrySource};
+        use fox_agent_backend::port::AgentBackend;
+        let legacy = std::env::var("FOX_DSH_BIN").ok().filter(|bin| !bin.trim().is_empty());
+        let (spec, source) = dev_launch_spec(AgentBackend::Deepseek).unwrap();
+        let (program, prefix) = match (source, legacy) {
+            (DevEntrySource::Npx, Some(bin)) => (bin, vec![]),
+            (DevEntrySource::Npx, None) => (spec.program, spec.args[..2].to_vec()),
+            (_, _) => (spec.program, vec![]),
         };
-        assert!(std::path::Path::new(&bin).is_absolute(), "FOX_DSH_BIN must be an absolute path, got {bin:?}");
-        bin
+        if prefix.is_empty() {
+            assert!(std::path::Path::new(&program).is_absolute(), "dsh entry must be an absolute path, got {program:?}");
+        }
+        eprintln!("dsh entry: {program} {prefix:?}");
+        (program, prefix)
     }
 
     fn enabled() -> bool {
@@ -168,16 +180,21 @@ mod real_binary {
     }
 
     /// Real `dsh --profile acp --patch <host patch>`: version, initialize,
-    /// session/new, and a prompt. Without DEEPSEEK_API_KEY the prompt must end
-    /// in a failure, never a fabricated success.
+    /// session/new, and a prompt that must end `end_turn` with non-empty
+    /// agent text (a model error fails the test).
     #[tokio::test(flavor = "multi_thread")]
     async fn real_dsh_initialize_session_and_prompt() {
         if !enabled() {
             eprintln!("SKIPPED: set FOX_TEST_REAL_ACP=1 to run against the real dsh binary (not a pass)");
             return;
         }
-        let bin = dsh_bin();
-        let version = std::process::Command::new(&bin).arg("--version").output().expect("run dsh --version");
+        let (bin, prefix) = dsh_entry();
+        let mut version_command = std::process::Command::new(&bin);
+        if cfg!(windows) && bin.to_ascii_lowercase().ends_with(".cmd") {
+            version_command = std::process::Command::new("cmd");
+            version_command.args(["/d", "/c", &bin]);
+        }
+        let version = version_command.args(&prefix).arg("--version").output().expect("run dsh --version");
         let version = String::from_utf8_lossy(&version.stdout).to_string();
         eprintln!("dsh --version: {}", version.trim());
         check_version(&version).expect("pinned dsh version");
@@ -187,7 +204,8 @@ mod real_binary {
         let mapping = policy_patch(&HostPolicy { workspace_write: false, network: false });
         let patch = work.join("fox-dsh-patch.yml");
         std::fs::write(&patch, &mapping.patch_yaml).unwrap();
-        let spec = deepseek::launch_spec(&bin, &patch).unwrap();
+        let mut spec = deepseek::launch_spec(&bin, &patch).unwrap();
+        spec.args.splice(0..0, prefix.iter().cloned());
 
         let mut connection = AcpConnection::spawn(&spec, &work).await.expect("spawn dsh");
         let init = match next(&mut connection, 60).await {
@@ -205,12 +223,6 @@ mod real_binary {
         assert!(!session.is_empty());
 
         connection.prompt(&session, "Reply with the single word: pong").unwrap();
-        // A model is expected to answer when a key is present or the tester
-        // says the private HOME configures one (e.g. a local gateway through
-        // the `acp` row, see deepseek::USER_OWNED_ROWS):
-        // FOX_TEST_DSH_EXPECT_REPLY=1.
-        let has_key = std::env::var("DEEPSEEK_API_KEY").map(|key| !key.is_empty()).unwrap_or(false)
-            || std::env::var("FOX_TEST_DSH_EXPECT_REPLY").as_deref() == Ok("1");
         let mut outcome = None;
         let mut reply = String::new();
         while let Some(event) = next(&mut connection, 120).await {
@@ -241,22 +253,15 @@ mod real_binary {
                 BackendEvent::Initialized { .. } | BackendEvent::PermissionAutoCancelled { .. } => {}
             }
         }
-        eprintln!("prompt outcome (key present: {has_key}): {outcome:?}");
-        if !has_key {
-            assert!(
-                matches!(outcome, Some(Err(_))),
-                "without DEEPSEEK_API_KEY the prompt must fail, got {outcome:?}"
-            );
-        } else {
-            // A refused model (wrong provider routing, rejected key) used to
-            // pass here; it must now fail the test.
-            match &outcome {
-                Some(Ok(stop_reason)) => assert_eq!(stop_reason, &serde_json::json!("end_turn"), "turn did not end normally"),
-                other => panic!("expected end_turn with a reply, got {other:?}"),
-            }
-            assert!(!reply.trim().is_empty(), "end_turn without any agent text (model refused or empty)");
-            eprintln!("reply: {}", reply.trim());
+        eprintln!("prompt outcome: {outcome:?}");
+        // A refused model (no key, rejected key, wrong provider route) used to
+        // pass here; it fails now. Only a real reply passes.
+        match &outcome {
+            Some(Ok(stop_reason)) => assert_eq!(stop_reason, &serde_json::json!("end_turn"), "turn did not end normally"),
+            other => panic!("the model call failed or never ended (needs DEEPSEEK_API_KEY or a model in the private HOME): {other:?}"),
         }
+        assert!(!reply.trim().is_empty(), "end_turn without any agent text (model refused or empty)");
+        eprintln!("reply: {}", reply.trim());
         connection.close().await;
         let _ = std::fs::remove_dir_all(&work);
     }
