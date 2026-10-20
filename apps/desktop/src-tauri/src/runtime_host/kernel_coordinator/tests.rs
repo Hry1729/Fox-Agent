@@ -657,18 +657,22 @@ fn uncertain_execution_is_not_retried_and_siblings_stay_pending() {
 }
 
 #[test]
-fn expired_approval_and_cancel_never_reach_executor() {
+fn unanswered_approval_stays_answerable_and_cancel_never_reaches_executor() {
     let clock = TestClock::new(1_000);
     let cancellation = CancellationRegistry::default();
     let (db, _, run_id) = fixture(&clock);
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     coordinator.propose_tools("batch", calls(), &Ask).unwrap();
-    clock.advance(300_000);
-    assert!(coordinator
-        .resolve_approval("read-a", kernel::ApprovalDecision::AllowOnce)
-        .is_err());
+    // Far past the frozen nominal window: approvals do not expire, the call is
+    // still waiting and the user's (late) denial is accepted, not executed.
+    clock.advance(100 * 300_000);
+    coordinator.tick().unwrap();
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "waiting_approval");
+    coordinator
+        .resolve_approval("read-a", kernel::ApprovalDecision::Deny)
+        .unwrap();
     assert!(!coordinator
-        .dispatch_tool("read-a", "owner", |_, _, _| panic!("expired"))
+        .dispatch_tool("read-a", "owner", |_, _, _| panic!("denied"))
         .unwrap());
     let (db2, _, run2) = fixture(&clock);
     let cancelled = KernelCoordinator::reopen(&db2, &clock, &run2, &cancellation).unwrap();
@@ -2872,18 +2876,19 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
 fn kernel_gateway_catalogue_size_is_pinned() {
     // Moved out of `kernel_delegation_stages_a_single_child_without_starting_an_executor`
     // so that test (and its evidenceRef assertion) no longer depends on the
-    // catalogue count. Known stale on every platform: the count is 72 since
-    // 4b54e68 added `present_files` (35 resource + 28 work + 9 delegation
-    // tools); left at 71 until the owner confirms the catalogue.
+    // catalogue count.
     let supported = super::super::kernel_gateway::supported_tools();
-    // 71 = the frozen catalogue including the four compute job tools, `read_tool_result` (the reader that
-    // keeps a bounded model view's promise that omitted content is reachable)
-    // and `skill_load` (on-demand loading of catalog skills without growing
-    // the frozen scope).
-    assert_eq!(supported.len(),71);
-    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),71);
+    // 72 = 35 resource tools + 28 work tools + 9 delegation tools. The frozen
+    // catalogue includes the four compute job tools, `read_tool_result` (the
+    // reader that keeps a bounded model view's promise that omitted content is
+    // reachable), `skill_load` (on-demand loading of catalog skills without
+    // growing the frozen scope) and `present_files` (added by 4b54e68, which
+    // moved the count from 71 to 72; confirmed by the catalogue owner).
+    assert_eq!(supported.len(),72);
+    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),72);
     assert!(supported.iter().any(|tool| *tool == "read_tool_result"));
     assert!(supported.iter().any(|tool| *tool == "skill_load"));
+    assert!(supported.iter().any(|tool| *tool == "present_files"));
 }
 
 #[test]
@@ -3904,16 +3909,16 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// #4 acceptance: an unanswered approval must not destroy the work.
+/// An unanswered approval waits for the user (no automatic expiry):
 ///
-/// * the run ends as a *continuable* expiry, not a plain failure;
-/// * the call that was waiting was never dispatched, so nothing executed;
-/// * the expired approval cannot be executed afterwards (a late decision is
-///   refused, and the durable row stays non-executable);
-/// * the Host banked the pause, and a continuation re-verifies to build a NEW
-///   attempt without rewriting the source run.
+/// * long past the frozen nominal window the Run is still `waiting_approval`
+///   and the call is still pending, with nothing dispatched;
+/// * the user's late decision is accepted and dispatches the call.
+///
+/// Continuation of runs that an OLD build ended as `approval_expired` stays
+/// covered by the `paused_attempt` tests below (they write that state directly).
 #[test]
-fn expired_approval_is_never_executable_and_the_run_stays_continuable() {
+fn unanswered_approval_keeps_waiting_and_a_late_decision_is_accepted() {
     use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding};
     use rusqlite::params;
 
@@ -4003,31 +4008,14 @@ fn expired_approval_is_never_executable_and_the_run_stays_continuable() {
         .unwrap();
     assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "waiting_approval");
 
-    // The human never answers.
-    let expired = controller.tick(1_001, 1_001);
-    assert!(expired.iter().any(|effect| matches!(
-        effect,
-        kernel::Effect::AppendEvent { event_type, .. } if event_type == "run.approval_expired"
-    )));
-    db.kernel_commit_decision(&run_id, 1_001, &controller.persist_command(&expired))
-        .unwrap();
+    // The human does not answer for ten hours: nothing expires.
+    let late_wall = 10 * 60 * 60 * 1_000;
+    let waited = controller.tick(late_wall, late_wall);
+    assert!(waited.is_empty(), "an unanswered approval must not end on its own: {waited:?}");
     let snapshot = db.kernel_build_full_snapshot(&run_id).unwrap();
-    assert_eq!(
-        snapshot.state, "approval_expired",
-        "an unanswered approval must not be a plain failure"
-    );
+    assert_eq!(snapshot.state, "waiting_approval");
     assert_eq!(snapshot.tool_calls.len(), 1);
-    assert_eq!(
-        snapshot.tool_calls[0].state, "expired",
-        "the un-decided call was never dispatched, so it is expired"
-    );
-
-    // A late decision cannot execute the dead approval.
-    let late = db.kernel_resolve_approval(&run_id, "never-answered", "allow_once");
-    assert!(
-        matches!(late, Ok(false)) || late.is_err(),
-        "a late approval must not be accepted: {late:?}"
-    );
+    assert_eq!(snapshot.tool_calls[0].state, "waiting_approval");
     let (approval_state, dispatched): (String, i64) = db
         .with_connection(|connection| {
             let state = connection.query_row(
@@ -4036,70 +4024,31 @@ fn expired_approval_is_never_executable_and_the_run_stays_continuable() {
                 |row| row.get(0),
             )?;
             let dispatched = connection.query_row(
-                "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='dispatch_tool' AND status='completed'",
+                "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='dispatch_tool'",
                 params![run_id],
                 |row| row.get(0),
             )?;
             Ok((state, dispatched))
         })
         .unwrap();
-    assert_eq!(approval_state, "expired");
-    assert_eq!(dispatched, 0, "nothing may have executed");
+    assert_eq!(approval_state, "pending");
+    assert_eq!(dispatched, 0, "nothing may have executed while waiting");
 
-    // The Host banked the pause, so the work is offerable again.
-    let progress = db.kernel_continuable_run(&conversation.id, &run_id).unwrap();
-    assert_eq!(progress.pause_reason, "approval_expired");
-    assert!(!progress.summary.is_null());
-
-    // A continuation creates a NEW attempt; the source run stays terminal.
-    let prepared = crate::database::PreparedContinuation {
-        artifacts: None,
-        skill_activations: Vec::new(),
-        budgets: db.run_time_budgets(&run_id).unwrap(),
-        prompt_config_hash: "continuation-hash".into(),
-        capability_manifest_hash: "continuation-manifest".into(),
-        frozen_config_json: "{}".into(),
-    };
-    let continuation_request = || crate::database::ContinuationRequest {
-        conversation_id: conversation.id.clone(),
-        source_run_id: run_id.clone(),
-        tier: crate::database::BudgetTier::Standard,
-        custom_execution_ms: None,
-    };
-    let next = db
-        .kernel_insert_continuation_attempt(&continuation_request(), "继续未完成的任务", &prepared)
+    // The user finally answers: the decision is accepted and dispatches.
+    let approved = controller
+        .resolve_approval("never-answered", kernel::ApprovalDecision::AllowOnce, late_wall)
         .unwrap();
-    assert_ne!(next.run.id, run_id);
-    assert_eq!(
-        db.kernel_build_full_snapshot(&run_id).unwrap().state,
-        "approval_expired",
-        "a continuation must not rewrite the source run state"
-    );
-    let (child_link, source_link): (Option<String>, Option<String>) = db
-        .with_connection(|connection| {
-            Ok((
-                connection.query_row(
-                    "SELECT continued_from_run_id FROM kernel_runs WHERE run_id=?1",
-                    params![next.run.id],
-                    |row| row.get(0),
-                )?,
-                connection.query_row(
-                    "SELECT continued_from_run_id FROM kernel_runs WHERE run_id=?1",
-                    params![run_id],
-                    |row| row.get(0),
-                )?,
-            ))
-        })
+    db.kernel_commit_decision(&run_id, late_wall + 1, &controller.persist_command(&approved))
         .unwrap();
-    assert_eq!(child_link.as_deref(), Some(run_id.as_str()));
-    assert_eq!(
-        source_link, None,
-        "the source must not point forward at its own successor (that formed a cycle)"
-    );
-    // Repeating the continuation is refused rather than starting a third run.
-    assert!(db
-        .kernel_insert_continuation_attempt(&continuation_request(), "重复续做", &prepared)
-        .is_err());
+    let approval_state: String = db
+        .with_connection(|connection| connection.query_row(
+            "SELECT state FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",
+            params![run_id, "never-answered"],
+            |row| row.get(0),
+        ))
+        .unwrap();
+    assert_eq!(approval_state, "allow_once");
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "running");
     drop(db);
     let _ = std::fs::remove_dir_all(root);
 }
