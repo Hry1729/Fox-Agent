@@ -352,7 +352,7 @@ pub fn issue_execution_credential_in_tx(
     credential: &ExecutionCredential,
     now: i64,
 ) -> Result<(), String> {
-    let json = serde_json::to_string(credential)
+    let json = crate::canonical_json::to_string(credential)
         .map_err(|error| format!("serialize execution credential: {error}"))?;
     let existing: Option<(String, String)> = transaction
         .query_row(
@@ -375,7 +375,7 @@ pub fn issue_execution_credential_in_tx(
     let file_baseline_json = credential
         .file_baseline
         .as_ref()
-        .map(serde_json::to_string)
+        .map(crate::canonical_json::to_string)
         .transpose()
         .map_err(|error| format!("serialize host observation: {error}"))?;
     transaction
@@ -2529,7 +2529,7 @@ mod tests {
                 .expect("approval must resolve");
             assert!(db.claim_approved_tool_call(&run, tool_call_id).unwrap());
         }
-        let input_json = serde_json::to_string(&input).unwrap();
+        let input_json = crate::canonical_json::to_string(&input).unwrap();
         let resolver = crate::runtime_host::managed_files::HostFileTargetResolver {
             project_root: root.as_path(),
         };
@@ -2924,7 +2924,7 @@ mod tests {
                         conversation_id,
                         historical.intent_digest,
                         historical.credential_digest,
-                        serde_json::to_string(&historical).unwrap(),
+                        crate::canonical_json::to_string(&historical).unwrap(),
                     ],
                 )
                 .unwrap();
