@@ -615,7 +615,7 @@ pub fn export_work_trace(
             })
             .collect(),
     };
-    let bytes = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
+    let bytes = crate::canonical_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
     let directory = data_dir.join("exports");
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let safe_id = conversation_id
@@ -866,7 +866,7 @@ mod tests {
             .unwrap()
             .iter()
             .all(|event| event.get("event").is_none()));
-        let serialized = serde_json::to_string(&value).expect("serialize exported trace");
+        let serialized = crate::canonical_json::to_string(&value).expect("serialize exported trace");
         for private_content in [
             "诊断 A0",
             "确认工作状态与事件可导出",
