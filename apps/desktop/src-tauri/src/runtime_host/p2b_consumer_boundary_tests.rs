@@ -11,6 +11,8 @@
 //! coordinator, because they need the coordinator's private scope and its real
 //! HTTP provider harness.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use super::super::p2b_decision::{
     DecisionFact, FactClass, FactOrigin, decide,
@@ -878,7 +880,7 @@ fn p2b_consumer_stop_mapping_refuses_a_requires_u1_verdict_and_accepts_the_rest(
             display_name: "out/one.json".to_owned(),
             checks: Vec::new(),
             status: "pending".to_owned(),
-            finding: Some(serde_json::json!({"reasonCode": "legacy"}).to_string()),
+            finding: Some(serde_json::json!({"reasonCode": "legacy"}).canonical_string()),
             checked_at: None,
             updated_at: 0,
             inherited_from_run_id: None,
