@@ -1,7 +1,7 @@
 import { sidebarDateGroups } from '../sidebar-date-groups'
 import '@/components/fox-ui/sidebar-list-pane.css'
 import { type ConversationRunIndicator } from '../conversation-run-indicator'
-import { ConversationRunStatus } from '../conversation-run-status'
+import { ConversationAttentionBadge, ConversationRunStatus } from '../conversation-run-status'
 import { SidebarCollapsedMenus } from './fox-sidebar-collapsed-menus'
 import { type SidebarProjectGroup, sidebarProjectGroups } from '../sidebar-project-groups'
 import { Button } from '@/components/ui/button'
@@ -355,6 +355,7 @@ export function Sidebar({
                     <ContextMenuTrigger asChild>
                       <SidebarMotionItem><div className={`fox-sidebar-tree-row fox-project-conversation-row ${item.active ? 'is-active' : ''}`}>
                         <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
+                        <ConversationAttentionBadge indicator={runIndicators?.get(item.id)} />
                         <span className="fox-sidebar-row-time">{item.time}</span>
                         <span className="fox-sidebar-row-actions">
                           <DropdownMenu>
@@ -404,6 +405,7 @@ export function Sidebar({
                   <ContextMenuTrigger asChild>
                     <SidebarMotionItem><div className={`fox-sidebar-tree-row ${item.active ? 'is-active' : ''}`}>
                       <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
+                      <ConversationAttentionBadge indicator={runIndicators?.get(item.id)} />
                       <span className="fox-sidebar-row-time">{item.time}</span>
                       <span className="fox-sidebar-row-actions">
                         <DropdownMenu>
