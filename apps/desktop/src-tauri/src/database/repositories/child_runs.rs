@@ -224,11 +224,11 @@ pub(super) fn create_child_run_in_transaction(
             lineage_root_id,
         ],
     )?;
-    let budget_json = serde_json::to_string(input.budget)
+    let budget_json = crate::canonical_json::to_string(input.budget)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let allowed_tools_json = input
         .allowed_tools
-        .map(serde_json::to_string)
+        .map(crate::canonical_json::to_string)
         .transpose()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
