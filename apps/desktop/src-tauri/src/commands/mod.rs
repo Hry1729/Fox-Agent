@@ -5,6 +5,8 @@ mod kernel_reconciliation;
 pub use kernel_continuation::*;
 pub use kernel_reliability::*;
 pub use kernel_reconciliation::*;
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::model_service::{
     api_key_configured, clear_api_key, get_api_key, normalize_model_base_url, normalize_model_id,
     set_api_key,
@@ -4648,7 +4650,7 @@ fn knowledge_preview_cache_key(
         "sourceRevision": source_revision,
         "variant": KNOWLEDGE_PREVIEW_VARIANT,
     });
-    hex::encode(Sha256::digest(identity.to_string().as_bytes()))
+    hex::encode(Sha256::digest(identity.canonical_string().as_bytes()))
 }
 
 fn knowledge_preview_cache_dir(state: &AppState) -> PathBuf {
