@@ -17,6 +17,8 @@
 //! (its return value is the result). `attachments` carries metadata only
 //! (`sheets[].rowCount`, never row data).
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{
     cell_to_value_capped, check_load_limits, format_js_error, parse_output_specs,
     selected_attachment_ids, validate_input_path, validate_zip_expansion, write_outputs,
@@ -200,7 +202,7 @@ where
             })
         })
         .collect::<Vec<_>>();
-    let meta_json = serde_json::to_string(&meta)
+    let meta_json = crate::canonical_json::to_string(&meta)
         .map_err(|error| format!("Unable to serialize attachment metadata: {error}"))?;
     let (script, code_line_offset) = build_chunked_script(code);
 
@@ -272,7 +274,7 @@ where
     let envelope: Value = serde_json::from_str(&envelope)
         .map_err(|error| format!("JavaScript returned invalid JSON: {error}"))?;
     let result = envelope.get("result").cloned().unwrap_or(Value::Null);
-    let result_bytes = serde_json::to_vec(&result)
+    let result_bytes = crate::canonical_json::to_vec(&result)
         .map_err(|error| format!("Unable to serialize JavaScript result: {error}"))?;
     if result_bytes.len() > MAX_RESULT_BYTES {
         return Err(format!(
@@ -638,7 +640,7 @@ fn emit_delimited_chunks(
             "rows": chunk,
             "final": final_chunk,
         })
-        .to_string();
+        .canonical_string();
         deliver_chunk(
             ctx,
             payload,
@@ -761,7 +763,7 @@ fn emit_workbook_chunks(
                     "rows": matrix,
                     "final": window_end > bottom,
                 })
-                .to_string();
+                .canonical_string();
                 deliver_chunk(
                     ctx,
                     payload,
