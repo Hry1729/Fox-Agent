@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 
 #[test]
@@ -69,7 +71,7 @@ fn job_model_tools_use_real_gateway_worker_storage_and_scope() {
         text.push_str(page["content"].as_str().unwrap());
         if page["complete"]==true {break;}let next=page["nextOffset"].as_u64().unwrap();assert!(next>offset);offset=next;
     }
-    let actual=db.kernel_job_result_value(&binding.conversation_id,id).unwrap();assert_eq!(text,actual.to_string());
+    let actual=db.kernel_job_result_value(&binding.conversation_id,id).unwrap();assert_eq!(text,actual.canonical_string());
     assert!(text.contains("42"));
     assert!(execute("compute_job_status",&json!({"jobId":id,"conversationId":"fake"})).is_err());
     assert!(db.kernel_job_result_value("foreign",id).is_err());
@@ -170,9 +172,9 @@ fn experimental_compute_job_operations_still_serve_their_own_run() {
         &db, &root, &root, &run, tool, &input, None,
         std::time::Duration::from_secs(1), None);
     assert!(call("compute_job_status", json!({"jobId":completed})).unwrap()
-        .to_string().contains("completed"));
+        .canonical_string().contains("completed"));
     assert!(call("compute_job_result", json!({"jobId":completed})).unwrap()
-        .to_string().contains("own-result"));
+        .canonical_string().contains("own-result"));
     call("compute_job_cancel", json!({"jobId":queued})).unwrap();
     assert!(db.kernel_job_snapshot(&queued).unwrap().cancel_requested_at.is_some());
 }
@@ -204,9 +206,9 @@ fn default_off_and_legacy_compute_job_operations_keep_conversation_compatibility
             &db, &root, &root, &run, tool, &input, None,
             std::time::Duration::from_secs(1), None);
         let status = call("compute_job_status", json!({"jobId":completed})).unwrap();
-        assert!(status.to_string().contains("completed"));
+        assert!(status.canonical_string().contains("completed"));
         let result = call("compute_job_result", json!({"jobId":completed})).unwrap();
-        assert!(result.to_string().contains("older-result"));
+        assert!(result.canonical_string().contains("older-result"));
         call("compute_job_cancel", json!({"jobId":queued})).unwrap();
         assert!(db.kernel_job_snapshot(&queued).unwrap().cancel_requested_at.is_some());
     }
