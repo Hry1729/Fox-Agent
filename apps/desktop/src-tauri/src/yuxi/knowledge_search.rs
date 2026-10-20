@@ -1,4 +1,6 @@
 //! Prefer Yuxi's indexed retrieval; older servers can use authorized document reads.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{api_url, YuxiClient};
 use reqwest::{Response, StatusCode};
 use serde_json::{json, Value};
@@ -649,7 +651,7 @@ mod tests {
                 "POST /api/knowledge/databases/kb-1/query".to_owned(),
                 200,
                 "application/json",
-                payload.to_string().into_bytes(),
+                payload.canonical_string().into_bytes(),
             )]);
             let result = tauri::async_runtime::block_on(
                 YuxiClient::new().unwrap().query_knowledge_with_limits(
@@ -726,8 +728,8 @@ mod tests {
     #[test]
     fn remote_search_reads_authorized_parsed_documents_with_sources_and_pagination() {
         let (base, handle) = server(vec![
-            (tree_path(1), 200, "application/json", json!({"entries":[{"file_id":"file-1","name":"轨道吊起升赋值.pdf"}],"has_more":true}).to_string().into_bytes()),
-            (tree_path(2), 200, "application/json", json!({"entries":[{"file_id":"file-2","name":"其他说明.md"}],"has_more":false}).to_string().into_bytes()),
+            (tree_path(1), 200, "application/json", json!({"entries":[{"file_id":"file-1","name":"轨道吊起升赋值.pdf"}],"has_more":true}).canonical_string().into_bytes()),
+            (tree_path(2), 200, "application/json", json!({"entries":[{"file_id":"file-2","name":"其他说明.md"}],"has_more":false}).canonical_string().into_bytes()),
             (file_path("file-1"), 200, "text/markdown; charset=utf-8", "# 轨道吊起升赋值\n这是接口回归测试的资料，不是设备操作指导。".as_bytes().to_vec()),
             (file_path("file-2"), 200, "text/markdown", "无关资料".as_bytes().to_vec()),
         ]);
@@ -767,7 +769,7 @@ mod tests {
                 200,
                 "application/json",
                 json!({"entries":[{"file_id":"file-1"},{"file_id":"file-2"}]})
-                    .to_string()
+                    .canonical_string()
                     .into_bytes(),
             ),
             (file_path("file-1"), 400, "application/json", b"{}".to_vec()),
@@ -832,7 +834,7 @@ mod tests {
                 200,
                 "application/json",
                 json!({"entries":[{"file_id":"file-1"}]})
-                    .to_string()
+                    .canonical_string()
                     .into_bytes(),
             ),
             (file_path("file-1"), 400, "application/json", b"{}".to_vec()),
