@@ -86,7 +86,7 @@ pub(crate) fn validate_team_definition(value: &Value) -> Result<(), String> {
 }
 
 pub(crate) fn parse_team(value: Value) -> Result<TeamDefinition, String> {
-    let encoded = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+    let encoded = crate::canonical_json::to_vec(&value).map_err(|error| error.to_string())?;
     if encoded.len() > MAX_TEAM_BYTES {
         return Err(format!("team exceeds the {MAX_TEAM_BYTES} byte limit"));
     }
