@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::{JobStartRequest, JobState};
 use crate::kernel::CancellationRegistry;
@@ -104,7 +106,7 @@ impl Fixture {
         let input = json!({"action":"start","command":command,"timeoutSeconds":30});
         let binding = self.database.run_control_binding(&self.run_id)?.unwrap();
         let dispatch = fox_engine_protocol::encode_dispatch_id(&self.run_id, key)?;
-        let digest = crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.to_string());
+        let digest = crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.canonical_string());
         let credential = if let Some(stored) = self.database.read_execution_credential(&self.run_id, &dispatch)? {
             if stored.intent_digest != digest { return Err("job_idempotency_conflict".into()); }
             stored
@@ -635,7 +637,7 @@ fn r2_status_excludes_full_checkpoints_and_unchanged_checkpoint_does_not_write()
     fixture.database.kernel_command_job_checkpoint(&id,1,&value).expect("identical checkpoint must issue no UPDATE");
     for _ in 0..5 {
         let status=fixture.action(json!({"action":"status","jobId":id})).unwrap();
-        assert!(status.to_string().len()<2000,"{status}");
+        assert!(status.canonical_string().len()<2000,"{status}");
         assert!(status["details"].get("cursor").is_none());
         assert!(status["details"]["stdout"].get("data").is_none());
         assert_eq!(status["details"]["stderr"]["totalBytes"],262244);
@@ -649,7 +651,7 @@ fn r2_status_excludes_full_checkpoints_and_unchanged_checkpoint_does_not_write()
     fixture.database.kernel_command_job_publish(&id,1,&done).unwrap();
     let status=fixture.action(json!({"action":"status","jobId":id})).unwrap();
     assert_eq!(status["details"]["exitCode"],0);
-    assert!(status.to_string().len()<2000);
+    assert!(status.canonical_string().len()<2000);
 }
 
 #[cfg(windows)]
@@ -661,8 +663,8 @@ fn r2_live_noisy_command_status_remains_small_and_cancel_is_responsive() {
     let deadline=Instant::now()+Duration::from_secs(15);
     loop {
         let status=fixture.action(json!({"action":"status","jobId":id})).unwrap();
-        assert!(status.to_string().len()<2000);
-        assert!(!status.to_string().contains("cursor"));
+        assert!(status.canonical_string().len()<2000);
+        assert!(!status.canonical_string().contains("cursor"));
         if status["details"]["stderr"]["totalBytes"].as_u64().unwrap_or(0)>=400000 {break;}
         assert!(Instant::now()<deadline,"noisy command produced no checkpoint: {status}");
         std::thread::sleep(Duration::from_millis(100));
@@ -671,7 +673,7 @@ fn r2_live_noisy_command_status_remains_small_and_cancel_is_responsive() {
     assert_eq!(page["details"]["content"],"yyyyyyyy");
     let stopped=Instant::now();
     let status=fixture.action(json!({"action":"cancel","jobId":id})).unwrap();
-    assert!(status.to_string().len()<2000);
+    assert!(status.canonical_string().len()<2000);
     assert_eq!(fixture.wait_terminal(&id).state,JobState::Cancelled);
     assert!(stopped.elapsed()<Duration::from_secs(5));
 }
@@ -706,7 +708,7 @@ fn claimed_fixture_credential(fixture: &Fixture, call: &str, input: &Value, dige
     let mut credential = ExecutionCredential::new(
         fox_engine_protocol::encode_dispatch_id(&fixture.run_id, call).unwrap(),
         fixture.run_id.clone(), binding.conversation_id.clone(),
-        crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.to_string()),
+        crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.canonical_string()),
         fox_engine_protocol::ActionClass::Execute, None,
         binding.execution_profile_id, binding.permission_snapshot_id, Some(1),
         binding.budgets.tool_execution_ms, None,
