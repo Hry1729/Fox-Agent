@@ -603,3 +603,81 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
 - 说明：按上面的分项粗算，Windows 总数（152）与“Linux 163 − 14 + 4 = 153”差 1 项，差异来源尚未逐项核对（可能在门控/ignore 的分布里）。下一轮 Windows 复测时请导出 `cargo test -p fox-agent-backend --features acp -- --list` 的名单，与 Linux 名单逐项比对后补齐这一行。
 - **`host_routing_sqlite` 在只开 `acp` 时是 0 项**：这个集成测试文件要求 feature `sqlite-tests`（rusqlite bundled，需要 C 编译器，默认不编）。只开 `acp` 时这个测试二进制的用例数为 0，这是预期行为，不是测试丢失。要跑它，用 `cargo test -p fox-agent-backend --features sqlite-tests --test host_routing_sqlite`。
 - **回退判定**：同一平台上，执行数下降、或任何一项从 ok 变成 FAILED / 从执行变成 SKIPPED，才算回退。
+
+## 13 外部后端接通批（2026-10-20：pi / Codex / DeepSeek 经 ACP 真实运行）
+
+对应方案 v0.3.1 第 6.1–6.4、6.7 节与 v0.3.2 增补。第 12 节的路由不再返回 `agent_backend_not_yet_wired`：开关打开后，外部会话的 start / cancel / approve 交给外部运行时，Fox 会话的路径不变。
+
+### 13.1 做了什么
+
+- **crate（`--features acp`）**
+  - `src/external.rs`：每个会话一个 ACP 连接的运行时。
+    - 一个会话同时只有一轮。
+    - 已知原生会话 id 且后端声明了 `loadSession` 时用 `session/load`（不回放历史），否则 `session/new`。原生 id 记为 `agent_backend.session` 事件。
+    - `session/update` 经 `src/projection.rs` 投影成 Fox 运行事件（与 yuxi 同一套，复用现有线程与工具卡）。旧连接代次的事件只审计。
+    - 取消后 15 s（`CANCEL_CONFIRM_TIMEOUT`）内后端没有以 `cancelled` 结束，就以 `cancelled` + `outcome: "unknown"` 结束并停进程，不显示为“已确认取消”。
+    - 进程在一轮中途退出：run 失败，错误码 `agent_backend_exited`，附脱敏的 stderr 尾部。下一轮重新启动并重开原生会话。
+    - 原生审批：显示为审批卡，用户的回答写成原生一次性选项（`allow_once` / `reject_once`）。DeepSeek 在 Host 补丁下审批策略为 `never`，如果仍有请求到达，由 Host 直接拒绝，不显示为可答。
+  - `src/external_launch.rs`：真实启动器。按会话的权限模式（默认 `sandboxed`，不降级）走 `prepare_launch` + srt，Windows 走桥接。
+    - 后端入口**只**从受管运行时 `<runtime>/backends/<pi|codex|deepseek>/node_modules/.bin/<pi-acp|codex-acp|dsh>[.cmd]` 找，或用开发覆盖 `FOX_*_PROGRAM`。不用 `npx`。都找不到时返回 `agent_backend_not_installed`。
+  - `src/capability_view.rs`：四维能力视图（审批 / 沙箱 / 取消 / 可观测）。启动前给预估（`planned`），启动后给实际值（`live`）。
+  - `host_routing.rs`：新增 `Route::External`。resume 对外部会话没有意义，返回 `agent_backend_entry_unsupported`。读冻结值失败时：只要有一个外部后端开着，或请求里写了非 Fox 后端，就拦下（`agent_backend_lookup_failed`）；外部后端全关时照旧回落 Fox 路径（第 12.5 节 A 的取舍在此按约定收紧）。
+- **桌面**
+  - `src-tauri/src/external_backend.rs`：薄胶水。
+    - 事件经 `record_external_event` 落库并发 `fox://runtime-event`。
+    - 审批卡用 Host 工具调用 `agent_permission`（pending）+ `approvals` 行 + `fox://approval-requested`。
+    - 外部审批只接受“允许一次 / 拒绝”。
+    - 附件暂不支持（`agent_backend_attachments_unsupported`）。
+    - 会话必须绑定一个可访问的项目文件夹（`agent_backend_project_required`）。
+    - 启动时把上次残留的外部 run 标为中断（`agent_backend_host_restarted`，结果未知）。
+    - 会话归档或移入回收站时在后台停掉它的后端。
+  - 新命令 `agent_backend_capabilities`。
+  - `Cargo.toml` 给 `fox-agent-backend` 打开 `acp`。
+- **前端**：后端栏显示四个能力 chip（`agentBackendCapabilityChips`，顺序固定；预估值的 title 带“（启动前预估）”）。
+- **无 `run_control_binding` 的外部 run**（已核实，并有测试 `repositories::agent_backend::tests::external_runs_without_a_binding_resolve_approvals_and_complete`）：
+  - `resolve_approval` → `run_approval_window` → `run_time_budgets` 在没有 binding 时回落 `TimeBudgets::default()`（审批等待 300 000 ms），不报错。超过窗口才批准的记为 `expired`，并按拒绝答给后端。
+  - `run.completed` → `enforce_managed_run_completion_budget` 只约束子 run 和数字同事 run，外部 run 直接通过。
+  - Fox 路径未改。
+
+### 13.2 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `FOX_EXTERNAL_BACKENDS` | 总开关（第 12 节），默认关 |
+| `FOX_AGENT_RUNTIME_ROOT` | 覆盖受管运行时目录（所有 OS）。默认：Windows `%ProgramFiles%\Fox\sandbox-runtime\<版本>`（`FOX_RUNTIME_ROOT`，否则 `FOX_RUNTIME_VERSION`，否则取已安装的最新版本）；Linux / macOS `<fox data>/agent-runtime` |
+| `FOX_PI_ACP_PROGRAM` / `FOX_CODEX_ACP_PROGRAM` / `FOX_DSH_PROGRAM` | 开发覆盖：指定已安装的入口，优先于受管运行时。不经 `npx` |
+| `FOX_EXTERNAL_FULL_ACCESS` | 工程授予 full_access：`1` 表示所有外部会话，或列 `conversation:<id>` / `project:<root>` |
+| `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN` | `1` 时禁止任何 full_access，优先级最高 |
+| `FOX_EXTERNAL_ENV_PASSTHROUGH` | 透传给后端的 Host 变量名列表（如 `RUSTUP_HOME,CARGO_HOME`），**仅 full_access 生效**，沙箱模式忽略 |
+| `FOX_EXTERNAL_EXTRA_DOMAINS` | Host 层追加的沙箱域名，按后端写，如 `pi=api.example.com;codex=127.0.0.1:3425`。本地模型网关写成 `127.0.0.1:<端口>` |
+| `FOX_PI_PROVIDERS` | pi 允许的 provider 域名组（如 `anthropic,openai`） |
+
+### 13.3 没做什么（待办）
+
+- 真实冒烟：在 srt 内跑 pi-acp / dsh，以及 Codex 对接假的 Responses API。本批只有 mock ACP agent 的 9 个用例（`tests/external_runtime.rs`）。
+- 迁移前自动备份（沿用第 12.2 节）。
+- 受管运行时目录布局（`backends/<后端>/node_modules/.bin/<入口>`）需要与工程师 0.1.1 运行时包的实际结构核对，不一致时以包为准改 `external_launch.rs`。
+- `kernel_gateway_catalogue_size_is_pinned` 仍断言 71；实际是 72 = 35 资源 + 28 工作 + 9 委派（`4b54e68` 新增 `present_files`），等目录负责人确认后再改。
+- fork / 子会话的后端继承规则（第 12.2 节）未定。
+
+### 13.4 精简 Windows 复测清单（在本批 HEAD 上）
+
+1. **定向测试**
+   - `cargo test -p fox-agent-backend --features acp`：0 失败。Linux 本机为 187 项（180 执行 + 2 ignored + 5 个 `FOX_TEST_REAL_ACP` 门控 SKIPPED），其中 `external_runtime` 9 项。Windows 用上一轮 Windows 的数字做基线（12.6），预期执行数比上一轮多出本批新增的用例。
+   - `cargo test -p fox-desktop agent_backend`：应包含 `commands::agent_backend_routing::tests` 3 项、`repositories::agent_backend::tests` 4 项（新增 `external_runs_without_a_binding_resolve_approvals_and_complete`）、`agent_backend_migration_tests` 2 项，全部通过。
+   - `cargo test -p fox-desktop kernel_work_tool_missing_field_is_refused_before_execution_as_data kernel_delegation_stages_a_single_child_without_starting_an_executor`：两项通过。`kernel_gateway_catalogue_size_is_pinned` 预期失败（72 ≠ 71，见 13.3）。
+   - `bun test apps/desktop/tests/agent-backend.test.ts apps/desktop/tests/agent-backend-send.test.ts apps/desktop/tests/conversation-draft-selection.test.ts`：28 项通过。另跑前端 `tsc`。
+2. **每个后端一次真实会话冒烟**（`FOX_EXTERNAL_BACKENDS=pi,codex,deepseek`，受管运行时已装，会话绑定项目文件夹，沙箱模式）
+   - pi 和 Codex 各做一次：
+     - 新会话发一条会用到工具的消息 → 流式文本 + 工具卡 → 正常结束；
+     - 再发一条 → 复用同一原生会话（stderr / 事件里 `agent_backend.session` 的 id 不变）；
+     - 触发一次原生审批 → 审批卡只有“允许一次 / 拒绝”，批准后工具继续；
+     - 一轮中途点取消 → 以 `cancelled` 结束。15 s 内没有确认的显示“结果未知”。
+   - DeepSeek：私有 HOME 的 `.dsh/cordis.patch.yml` 有 `- id: acp` 行（见 `docs/deepseek.md` 第 4 节）→ 一轮正常结束、回复非空，且不出现可答的审批卡。
+   - 负向检查：
+     - 临时改名入口 → `agent_backend_not_installed`，没有子进程；
+     - 一轮进行中杀掉后端进程 → `agent_backend_exited`；
+     - 一轮进行中重启 Fox → 那一轮显示 `agent_backend_host_restarted`；
+     - 后端栏四个 chip 在启动前带“（启动前预估）”，启动后去掉。
+   - Fox 会话的发送、审批、取消与改动前一致。
+3. **一次全量** `cargo test -p fox-desktop`：与父基线 `a9254d3` 的 61 项既有失败逐项比对。名单的变化只允许来自本批拆分出的测试：`kernel_gateway_catalogue_size_is_pinned` 预期失败（新名字）；如果 `kernel_delegation_stages_a_single_child_without_starting_an_executor` 或 `kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway` 在基线名单里，它们现在应当通过，并从名单中消失。
