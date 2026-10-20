@@ -80,9 +80,11 @@ impl std::fmt::Display for BridgeError {
 }
 
 /// Server side of the handshake on an accepted stream. Reads one line byte by
-/// byte (never past the newline), checks protocol and token, answers `OK\n`
-/// or `DENIED\n`. The token never appears in an error message.
-pub async fn server_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, token: &str) -> Result<(), BridgeError> {
+/// byte (never past the newline), checks protocol and token, answers
+/// `answer` (normally [`BridgeEndpoint::handshake_answer`]:
+/// `OK {"cwd":..,"env":{..}}\n`, the backend's working directory and
+/// environment) or `DENIED\n`. The token never appears in an error message.
+pub async fn server_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, token: &str, answer: &[u8]) -> Result<(), BridgeError> {
     let mut line = Vec::with_capacity(64);
     loop {
         let mut byte = [0u8; 1];
@@ -115,7 +117,7 @@ pub async fn server_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S,
         return Err(BridgeError::new(BridgeErrorKind::HandshakeRejected, "the bridge presented a wrong token"));
     }
     stream
-        .write_all(b"OK\n")
+        .write_all(answer)
         .await
         .map_err(|error| BridgeError::new(BridgeErrorKind::HandshakeFailed, format!("answering the handshake failed: {error}")))?;
     stream
@@ -129,6 +131,7 @@ pub async fn server_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S,
 pub struct BridgeListener {
     inner: imp::Listener,
     token: String,
+    answer: Vec<u8>,
 }
 
 impl std::fmt::Debug for BridgeListener {
@@ -140,16 +143,16 @@ impl std::fmt::Debug for BridgeListener {
 impl BridgeListener {
     /// Create the endpoint. Must happen before the sandboxed process starts.
     pub fn bind(endpoint: &BridgeEndpoint) -> Result<Self, BridgeError> {
-        Ok(Self { inner: imp::Listener::bind(endpoint)?, token: endpoint.token.clone() })
+        Ok(Self { inner: imp::Listener::bind(endpoint)?, token: endpoint.token.clone(), answer: endpoint.handshake_answer() })
     }
 
     /// Wait for the one connection and run the handshake. The listener is
     /// consumed: no second connection is ever accepted. No timeout here; the
     /// caller races this against the connect timeout and the process exit.
     pub async fn accept(self) -> Result<Box<dyn BridgeStream>, BridgeError> {
-        let Self { inner, token } = self;
+        let Self { inner, token, answer } = self;
         let mut stream = inner.accept_one().await?;
-        server_handshake(&mut stream, &token).await?;
+        server_handshake(&mut stream, &token, &answer).await?;
         Ok(stream)
     }
 }
@@ -287,7 +290,7 @@ mod tests {
     async fn run(client_line: &'static [u8], token: &str) -> (Result<(), BridgeError>, Vec<u8>) {
         let (mut host, mut bridge) = tokio::io::duplex(1024);
         let token = token.to_owned();
-        let server = tokio::spawn(async move { server_handshake(&mut host, &token).await });
+        let server = tokio::spawn(async move { server_handshake(&mut host, &token, b"OK\n").await });
         bridge.write_all(client_line).await.unwrap();
         let result = server.await.unwrap();
         let mut answer = vec![0u8; 16];
@@ -317,7 +320,7 @@ mod tests {
     async fn handshake_fails_on_early_close_and_overlong_lines() {
         let (mut host, bridge) = tokio::io::duplex(1024);
         drop(bridge);
-        assert_eq!(server_handshake(&mut host, "t").await.unwrap_err().kind, BridgeErrorKind::HandshakeFailed);
+        assert_eq!(server_handshake(&mut host, "t", b"OK\n").await.unwrap_err().kind, BridgeErrorKind::HandshakeFailed);
         let (long, _) = run(&[b'A'; 300], "t").await;
         assert_eq!(long.unwrap_err().kind, BridgeErrorKind::HandshakeFailed);
     }
@@ -333,9 +336,10 @@ mod tests {
         let client = tokio::spawn(async move {
             let mut stream = tokio::net::UnixStream::connect(&address).await.unwrap();
             stream.write_all(format!("FOX-ACP-BRIDGE/1 {token}\n").as_bytes()).await.unwrap();
-            let mut answer = [0u8; 3];
+            let expected = b"OK {\"env\":{}}\n";
+            let mut answer = vec![0u8; expected.len()];
             stream.read_exact(&mut answer).await.unwrap();
-            assert_eq!(&answer, b"OK\n");
+            assert_eq!(answer, expected.to_vec());
             stream.write_all(b"ping").await.unwrap();
         });
         let mut stream = listener.accept().await.unwrap();
@@ -372,9 +376,10 @@ mod tests {
         };
         assert!(ClientOptions::new().open(&address).is_err(), "one instance only");
         first.write_all(format!("FOX-ACP-BRIDGE/1 {token}\n").as_bytes()).await.unwrap();
-        let mut answer = [0u8; 3];
+        let expected = b"OK {\"env\":{}}\n";
+        let mut answer = vec![0u8; expected.len()];
         first.read_exact(&mut answer).await.unwrap();
-        assert_eq!(&answer, b"OK\n");
+        assert_eq!(answer, expected.to_vec());
         let mut stream = accept.await.unwrap().unwrap();
         first.write_all(b"ping").await.unwrap();
         let mut ping = [0u8; 4];
@@ -388,6 +393,40 @@ mod tests {
     fn windows_pipe_without_a_sandbox_sid_is_refused() {
         let endpoint = BridgeEndpoint::new_local(None).unwrap();
         assert_eq!(BridgeListener::bind(&endpoint).unwrap_err().kind, BridgeErrorKind::ListenFailed);
+    }
+
+    /// The backend's environment and cwd travel in the handshake answer, so
+    /// values cmd.exe cannot carry (quotes, `%`, line breaks) arrive intact.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listener_answers_with_the_child_env_and_cwd() {
+        let mut endpoint = BridgeEndpoint::new_local(None).unwrap();
+        endpoint.child_env = vec![("CODEX_CONFIG".into(), "{\"web_search\":\"disabled\"}".into()), ("PCT".into(), "a%b%\nc".into())];
+        endpoint.child_cwd = Some("/w/proj".into());
+        let listener = BridgeListener::bind(&endpoint).unwrap();
+        let address = endpoint.address.clone();
+        let token = endpoint.token.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::UnixStream::connect(&address).await.unwrap();
+            stream.write_all(format!("FOX-ACP-BRIDGE/1 {token}\n").as_bytes()).await.unwrap();
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                stream.read_exact(&mut byte).await.unwrap();
+                if byte[0] == b'\n' {
+                    break;
+                }
+                line.push(byte[0]);
+            }
+            line
+        });
+        let _stream = listener.accept().await.unwrap();
+        let line = client.await.unwrap();
+        assert!(line.starts_with(b"OK "));
+        let payload: serde_json::Value = serde_json::from_slice(&line[3..]).unwrap();
+        assert_eq!(payload["cwd"], "/w/proj");
+        assert_eq!(payload["env"]["CODEX_CONFIG"], "{\"web_search\":\"disabled\"}");
+        assert_eq!(payload["env"]["PCT"], "a%b%\nc");
     }
 
     #[test]
