@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::tool_host::ToolPreview;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use quick_xml::{events::Event, Reader, XmlVersion};
@@ -541,7 +543,7 @@ fn prepare_http_request(input: &Value) -> Result<PreparedCapabilityTool, String>
         .map(|value| match value {
             Value::String(value) => Ok(value.as_bytes().to_vec()),
             value => {
-                serde_json::to_vec(value).map_err(|error| format!("invalid HTTP body: {error}"))
+                crate::canonical_json::to_vec(value).map_err(|error| format!("invalid HTTP body: {error}"))
             }
         })
         .transpose()?;
@@ -1976,7 +1978,7 @@ fn execute_sqlite_read(
             value.insert(name.clone(), sqlite_value_to_json(cell));
         }
         let value = Value::Object(value);
-        let value_size = serde_json::to_vec(&value)
+        let value_size = crate::canonical_json::to_vec(&value)
             .map_err(|error| format!("failed to encode SQLite row: {error}"))?
             .len();
         if serialized_bytes.saturating_add(value_size) > MAX_SQL_OUTPUT_BYTES {
@@ -2291,7 +2293,7 @@ fn execute_git_read(
         .get("output")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .unwrap_or_else(|| serde_json::to_string_pretty(&details).unwrap_or_default());
+        .unwrap_or_else(|| crate::canonical_json::to_string_pretty(&details).unwrap_or_default());
     Ok(tool_result(text, details))
 }
 
@@ -2371,7 +2373,7 @@ fn execute_tabular_data(
     if matches!(operation, TableOperation::Aggregate) {
         let value = aggregate_table(&rows, aggregate, aggregate_column)?;
         return Ok(tool_result(
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+            crate::canonical_json::to_string_pretty(&value).unwrap_or_else(|_| value.canonical_string()),
             json!({
                 "operation": "aggregate",
                 "aggregate": aggregate_name(aggregate),
@@ -2397,7 +2399,7 @@ fn execute_tabular_data(
         "hasMore": offset.saturating_add(limit) < total_rows,
     });
     Ok(tool_result(
-        serde_json::to_string_pretty(&details).unwrap_or_else(|_| details.to_string()),
+        crate::canonical_json::to_string_pretty(&details).unwrap_or_else(|_| details.canonical_string()),
         details,
     ))
 }
@@ -2570,7 +2572,7 @@ fn parse_structured_value(source: &str, format: DataFormat) -> Result<Value, Str
 
 fn render_structured_value(value: &Value, format: DataFormat) -> Result<String, String> {
     match format {
-        DataFormat::Json => serde_json::to_string_pretty(value).map_err(|error| error.to_string()),
+        DataFormat::Json => crate::canonical_json::to_string_pretty(value).map_err(|error| error.to_string()),
         DataFormat::Yaml => serde_yaml::to_string(value).map_err(|error| error.to_string()),
         DataFormat::Toml => toml::to_string_pretty(value)
             .map_err(|error| format!("value cannot be represented as TOML: {error}")),
@@ -3409,7 +3411,7 @@ fn value_to_cell(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(value) => value.clone(),
-        _ => value.to_string(),
+        _ => value.canonical_string(),
     }
 }
 
