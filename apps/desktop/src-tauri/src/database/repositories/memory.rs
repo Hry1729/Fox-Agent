@@ -745,10 +745,10 @@ fn insert_revision(
     before: Option<&MemoryEntityRecord>,
 ) -> rusqlite::Result<()> {
     let before_json = before
-        .map(serde_json::to_string)
+        .map(crate::canonical_json::to_string)
         .transpose()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let after_json = serde_json::to_string(after)
+    let after_json = crate::canonical_json::to_string(after)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
         "INSERT INTO memory_revisions(
