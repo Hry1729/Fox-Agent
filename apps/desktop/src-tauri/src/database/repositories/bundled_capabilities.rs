@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 
 impl Database {
@@ -94,19 +96,19 @@ impl Database {
                        package_version=excluded.package_version,package_manifest_json=excluded.package_manifest_json,
                        package_source='imported',package_id=excluded.package_id,package_hash=excluded.package_hash,updated_at=excluded.updated_at",
                     params![r.expert_id,r.name,r.description,r.system_prompt,now,r.icon,r.category,
-                        json!(r.opening_suggestions).to_string(),r.version,r.package_manifest.to_string(),r.package_id,r.package_hash],
+                        json!(r.opening_suggestions).canonical_string(),r.version,r.package_manifest.canonical_string(),r.package_id,r.package_hash],
                 )?;
                 tx.execute("UPDATE expert_package_versions SET status='historical' WHERE expert_id=?1 AND status='active'",[&r.expert_id])?;
                 tx.execute(
                     "INSERT INTO expert_package_versions(id,expert_id,package_id,version,package_hash,package_json,source,status,created_at,activated_at)
                      VALUES (?1,?2,?3,?4,?5,?6,'builtin','active',?7,?7)",
-                    params![format!("expert-package-version-{}",Uuid::new_v4().simple()),r.expert_id,r.package_id,r.version,r.package_hash,r.package.to_string(),now],
+                    params![format!("expert-package-version-{}",Uuid::new_v4().simple()),r.expert_id,r.package_id,r.version,r.package_hash,r.package.canonical_string(),now],
                 )?;
                 tx.execute(
                     "INSERT INTO agent_runtime_config(agent_id,scope_type,scope_id,config_key,value_json,source,created_at,updated_at)
                      VALUES (?1,'agent',?1,'skills.enabled',?2,'package',?3,?3)
                      ON CONFLICT(agent_id,scope_type,scope_id,config_key) DO NOTHING",
-                    params![r.expert_id,json!(r.enabled_skills).to_string(),now],
+                    params![r.expert_id,json!(r.enabled_skills).canonical_string(),now],
                 )?;
                 refresh_compute_bindings(&tx,&r.expert_id,&r.version,now)?;
             }
@@ -137,7 +139,7 @@ fn refresh_compute_bindings(tx: &rusqlite::Transaction<'_>, expert_id: &str, ver
                             package_hash,package_snapshot_json,display_snapshot_json,activated_at,deactivated_at)
                             SELECT ?1,conversation_id,expert_id,'active','bundled-capability-upgrade',?2,?3,?4,
                             json_set(display_snapshot_json,'$.packageVersion',?2),?5,NULL FROM conversation_expert_bindings WHERE id=?6",
-                            params![Uuid::new_v4().to_string(),version,hash,snapshot.to_string(),now,old])?;
+                            params![Uuid::new_v4().to_string(),version,hash,snapshot.canonical_string(),now,old])?;
                     }
                 }
     Ok(())
@@ -223,7 +225,7 @@ mod compute_upgrade_tests {
         let mut old=agent.package_manifest;
         old["allowedTools"].as_array_mut().unwrap().retain(|tool|tool!="attachment_compute");
         db.with_connection(|c| {
-            c.execute("UPDATE agents SET package_version='1.1.0',package_manifest_json=?1,icon='custom-avatar.png' WHERE id='fox-data-analyst'",[old.to_string()])?;
+            c.execute("UPDATE agents SET package_version='1.1.0',package_manifest_json=?1,icon='custom-avatar.png' WHERE id='fox-data-analyst'",[old.canonical_string()])?;
             c.execute("UPDATE expert_package_versions SET version='1.1.0' WHERE expert_id='fox-data-analyst' AND version=?1",[&installed_version])?;
             c.execute("UPDATE agent_runtime_config SET value_json='[\"custom-skill\"]',source='user' WHERE agent_id='fox-data-analyst' AND config_key='skills.enabled'",[])?;
             Ok(())
