@@ -817,7 +817,7 @@ impl StagingLedger {
     fn write_record(&self, record: &StagingRecord) -> Result<(), String> {
         let dir = self.entries_dir();
         create_dir_checked(&dir)?;
-        let body = serde_json::to_vec(record).map_err(|error| error.to_string())?;
+        let body = crate::canonical_json::to_vec(record).map_err(|error| error.to_string())?;
         let path = dir.join(format!("{}.json", record.token));
         // Written through a sibling temp name and renamed, so a crash can never
         // leave a half-written record that a later pass would misread.
@@ -1193,7 +1193,7 @@ pub(crate) fn write_staging_record_for_test(
         .join(STAGING_LEDGER_DIR)
         .join(STAGING_ENTRY_DIR);
     create_dir_checked(&dir)?;
-    let body = serde_json::to_vec(record).map_err(|error| error.to_string())?;
+    let body = crate::canonical_json::to_vec(record).map_err(|error| error.to_string())?;
     fs::write(dir.join(format!("{}.json", record.token)), body)
         .map_err(|error| format!("无法写入测试暂存台账: {error}"))
 }
@@ -1715,7 +1715,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(format!("{}.json", record.token)),
-            serde_json::to_vec(record).unwrap(),
+            crate::canonical_json::to_vec(record).unwrap(),
         )
         .unwrap();
     }
