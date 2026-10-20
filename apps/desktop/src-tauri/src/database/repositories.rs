@@ -1133,6 +1133,15 @@ impl Database {
         })
     }
 
+    /// Startup repair of runs a previous Fox process left non-terminal.
+    ///
+    /// Runs of conversations bound to an external agent backend
+    /// (`agent_backend <> 'fox'`) are skipped here, together with their
+    /// streaming messages, open tool calls and pending approvals: the external
+    /// Host owns them and interrupts them itself at startup
+    /// (`ExternalBackendHost::interrupt_runs_left_active`) with
+    /// `agent_backend_host_restarted`, which ends their pending approvals as
+    /// `cancelled` / `app_restarted`.
     pub fn repair_interrupted_runs(&self) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
@@ -1148,6 +1157,10 @@ impl Database {
                  WHERE status IN ('queued', 'running', 'cancelling')
                    AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=runs.id AND b.authority='authoritative')
                    AND NOT EXISTS (
+                       SELECT 1 FROM conversations ec
+                       WHERE ec.id = runs.conversation_id AND ec.agent_backend <> 'fox'
+                   )
+                   AND NOT EXISTS (
                        SELECT 1 FROM conversations c JOIN agents a ON a.id = c.agent_id
                        WHERE c.id = runs.conversation_id AND a.runtime_type = 'yuxi'
                          AND runs.external_run_id IS NOT NULL
@@ -1158,6 +1171,11 @@ impl Database {
                 "UPDATE messages SET status = 'interrupted', updated_at = ?1
                  WHERE status = 'streaming'
                    AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=messages.run_id AND b.authority='authoritative')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs er JOIN conversations ec ON ec.id = er.conversation_id
+                       WHERE er.id = messages.run_id AND ec.agent_backend <> 'fox'
+                         AND er.status IN ('queued', 'running', 'cancelling')
+                   )
                    AND NOT EXISTS (
                        SELECT 1 FROM runs r
                        JOIN conversations c ON c.id = r.conversation_id
@@ -1172,6 +1190,11 @@ impl Database {
                 "UPDATE tool_calls SET status = 'interrupted', completed_at = ?1, updated_at = ?1
                  WHERE status IN ('pending', 'running')
                    AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=tool_calls.run_id AND b.authority='authoritative')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs er JOIN conversations ec ON ec.id = er.conversation_id
+                       WHERE er.id = tool_calls.run_id AND ec.agent_backend <> 'fox'
+                         AND er.status IN ('queued', 'running', 'cancelling')
+                   )
                    AND NOT EXISTS (
                        SELECT 1 FROM runs r
                        JOIN conversations c ON c.id = r.conversation_id
@@ -1189,6 +1212,13 @@ impl Database {
                  WHERE status = 'pending'
                    AND NOT EXISTS (SELECT 1 FROM tool_calls t JOIN run_control_bindings b ON b.run_id=t.run_id
                        WHERE t.id=approvals.tool_call_id AND b.authority='authoritative')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM tool_calls et
+                       JOIN runs er ON er.id = et.run_id
+                       JOIN conversations ec ON ec.id = er.conversation_id
+                       WHERE et.id = approvals.tool_call_id AND ec.agent_backend <> 'fox'
+                         AND er.status IN ('queued', 'running', 'cancelling')
+                   )
                    AND NOT EXISTS (
                        SELECT 1 FROM tool_calls t
                        JOIN runs r ON r.id = t.run_id
