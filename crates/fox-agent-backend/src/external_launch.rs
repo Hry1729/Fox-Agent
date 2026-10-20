@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 pub const AGENT_RUNTIME_ROOT_ENV: &str = "FOX_AGENT_RUNTIME_ROOT";
 /// Windows: the runtime version directory under `%ProgramFiles%\Fox\sandbox-runtime`.
 pub const RUNTIME_VERSION_ENV: &str = "FOX_RUNTIME_VERSION";
+pub use crate::launch::RUNTIME_PACKAGE_VERSION;
 /// Engineering full-access grant (see the module docs).
 pub const FULL_ACCESS_ENV: &str = "FOX_EXTERNAL_FULL_ACCESS";
 /// Enterprise switch: no external session may run in full access.
@@ -142,7 +143,8 @@ impl HostLaunchConfig {
                     crate::winruntime::windows_runtime_root(&env(RUNTIME_VERSION_ENV).unwrap_or_default())
                 } else {
                     let parent = crate::winruntime::default_windows_runtime_root("");
-                    newest_version_dir(&parent).unwrap_or(parent)
+                    let expected = parent.join(RUNTIME_PACKAGE_VERSION);
+                    if expected.is_dir() { expected } else { newest_version_dir(&parent).unwrap_or(parent) }
                 }
             }
             _ => fox_data.join("agent-runtime"),
@@ -215,7 +217,10 @@ impl HostLaunchConfig {
     /// `<runtime>/backends/<dir>/<bin>[.cmd]`. Never `npx`.
     pub fn managed_program(&self, backend: AgentBackend) -> Option<PathBuf> {
         if let Some(program) = crate::launch::program_override(backend) {
-            return Some(PathBuf::from(program));
+            // An override that points at nothing is "not installed", not a
+            // launch that fails later inside the sandbox.
+            let program = PathBuf::from(program);
+            return program.is_file().then_some(program);
         }
         crate::launch::managed_entry(&self.runtime_root, backend, self.os == HostOs::Windows)
     }
@@ -297,7 +302,7 @@ impl HostLaunchConfig {
         };
         match backend {
             AgentBackend::Codex => {
-                let policy = crate::backends::codex::HostPolicy { cwd: project_root.to_path_buf(), writable: true, network: false };
+                let policy = crate::backends::codex::HostPolicy { cwd: crate::launch::backend_visible_path(project_root), writable: true, network: false };
                 spec.session_env = crate::backends::codex::session_env(&policy)
                     .map_err(|error| LaunchFailure::new("agent_backend_launch_invalid", error.to_string()))?;
             }
@@ -619,21 +624,27 @@ mod tests {
             let error = config.launch_spec(AgentBackend::Pi, mode, &root).unwrap_err();
             assert_eq!(error.code, "agent_backend_not_installed");
         }
+        // Paths are built and compared per component (`Path` equality), so the
+        // test means the same on Windows, where `join("a/b")` would mix
+        // separators and a string comparison would fail.
+        let under = |base: &Path, parts: &[&str]| parts.iter().fold(base.to_path_buf(), |path, part| path.join(part));
         // Managed install: absolute program, no npx arguments; the pi gate when shipped.
-        let bin = root.join("runtime/backends/pi/node_modules/.bin");
+        let bin = under(&root, &["runtime", "backends", "pi", "node_modules", ".bin"]);
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("pi-acp"), "").unwrap();
         let (spec, launch) = config.launch_spec(AgentBackend::Pi, PermissionMode::Sandboxed, &root).unwrap();
-        assert_eq!(spec.program, bin.join("pi-acp").to_string_lossy());
+        assert_eq!(Path::new(&spec.program), bin.join("pi-acp"));
         assert!(spec.args.is_empty());
         assert_eq!(launch, PiLaunch::Stock);
-        std::fs::create_dir_all(root.join("runtime/pi-gate")).unwrap();
-        std::fs::write(root.join("runtime/pi-gate/pi-gated.sh"), "").unwrap();
+        let gate_dir = under(&root, &["runtime", "pi-gate"]);
+        std::fs::create_dir_all(&gate_dir).unwrap();
+        std::fs::write(gate_dir.join("pi-gated.sh"), "").unwrap();
         let (spec, launch) = config.launch_spec(AgentBackend::Pi, PermissionMode::Sandboxed, &root).unwrap();
         assert_eq!(launch, PiLaunch::Gated);
-        assert!(spec.session_env.iter().any(|(key, value)| key == "FOX_PI_BIN" && value.ends_with("/.bin/pi")));
+        assert!(spec.session_env.iter().any(|(key, value)| key == "FOX_PI_BIN" && Path::new(value) == bin.join("pi")));
+        assert!(spec.session_env.iter().any(|(key, value)| key == "PI_ACP_PI_COMMAND" && Path::new(value) == gate_dir.join("pi-gated.sh")));
         // Codex: workspace-write mode; tool-chain passthrough only in full access.
-        let codex = root.join("runtime/backends/codex/node_modules/.bin");
+        let codex = under(&root, &["runtime", "backends", "codex", "node_modules", ".bin"]);
         std::fs::create_dir_all(&codex).unwrap();
         std::fs::write(codex.join("codex-acp"), "").unwrap();
         config.env_passthrough = vec!["PATH".into()];
@@ -642,8 +653,9 @@ mod tests {
         assert!(spec.session_env.iter().any(|(key, _)| key == "PATH"), "passthrough in full access");
         let (spec, _) = config.launch_spec(AgentBackend::Codex, PermissionMode::Sandboxed, &root).unwrap();
         assert!(!spec.session_env.iter().any(|(key, _)| key == "PATH"), "never in sandboxed mode");
-        // DeepSeek managed: the installed patch must match byte for byte.
-        let dsh = root.join("runtime/backends/deepseek/node_modules/.bin");
+        // DeepSeek managed (runtime package 0.1.1 layout: `backends/dsh`): the
+        // installed patch must match byte for byte.
+        let dsh = under(&root, &["runtime", "backends", "dsh", "node_modules", ".bin"]);
         std::fs::create_dir_all(&dsh).unwrap();
         std::fs::write(dsh.join("dsh"), "").unwrap();
         let error = config.launch_spec(AgentBackend::Deepseek, PermissionMode::Sandboxed, &root).unwrap_err();
@@ -653,7 +665,8 @@ mod tests {
         std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
         std::fs::write(&patch, crate::backends::deepseek::policy_patch(&patch_policy).patch_yaml).unwrap();
         let (spec, _) = config.launch_spec(AgentBackend::Deepseek, PermissionMode::Sandboxed, &root).unwrap();
-        assert!(spec.args.contains(&patch.to_string_lossy().into_owned()));
+        assert!(spec.args.iter().any(|arg| Path::new(arg) == patch));
+        assert_eq!(Path::new(&spec.program), dsh.join("dsh"));
         // A local gateway on the pi allowlist clears NO_PROXY for the backend (Linux / macOS).
         config.extra_domains = parse_extra_domains(Some("pi=127.0.0.1:3425"));
         assert!(config.allows_loopback(AgentBackend::Pi));
