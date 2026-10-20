@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{ArtifactDeliveryView, ArtifactRecord};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -435,7 +437,7 @@ mod tests {
         connection.execute("INSERT INTO delivery_checklist_items
             (run_id,item_key,target_path,artifact_id,status,finding_json)
             VALUES ('run','file:summary.json','summary.json',NULL,'passed',?1)",
-            [serde_json::json!({"boundPath":path,"managedVersionId":"v1","reason":null}).to_string()]).unwrap();
+            [serde_json::json!({"boundPath":path,"managedVersionId":"v1","reason":null}).canonical_string()]).unwrap();
         let mut artifact = ArtifactRecord {
             id: "artifact".into(),
             conversation_id: "conv".into(),
@@ -463,7 +465,7 @@ mod tests {
         assert_eq!(view.purpose_source, "user_request");
 
         connection.execute("UPDATE delivery_checklist_items SET status='failed',finding_json=?1", [
-            serde_json::json!({"boundPath":path,"managedVersionId":"v1","reason":"内容检查失败"}).to_string(),
+            serde_json::json!({"boundPath":path,"managedVersionId":"v1","reason":"内容检查失败"}).canonical_string(),
         ]).unwrap();
         enrich(&connection, &mut artifact).unwrap();
         assert_eq!(
