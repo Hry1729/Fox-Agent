@@ -162,7 +162,12 @@ pub fn run() {
             let isolated_webview_dir = app_data_dir.join("webviews");
             maintenance::apply_pending_restore(&app_data_dir)?;
 
-            let database = Database::open(app_data_dir.join("fox.db"))?;
+            // A pending schema migration is preceded by an automatic
+            // consistent copy in `<data>/backups/` (newest five kept).
+            let database = Database::open_with_migration_backup(
+                app_data_dir.join("fox.db"),
+                &app_data_dir.join("backups"),
+            )?;
             database.repair_interrupted_runs()?;
             database.audit_interrupted_tasks()?;
             app.manage(kernel_state_publisher::KernelStatePublisher::start(app.handle().clone(), &database)?);
