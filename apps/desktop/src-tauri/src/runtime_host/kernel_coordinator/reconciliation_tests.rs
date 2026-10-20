@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::ReconciliationRequest;
 
@@ -12,7 +14,7 @@ fn reconciliation_office_reads_committed_output_and_rejects_connector_drift() {
     db.ensure_office_connector("isolated-office-query-fixture", None).unwrap();
     let server = db.get_mcp_server(crate::office::SERVER_ID).unwrap().unwrap();
     let digest = format!("sha256:{}", hex::encode(Sha256::digest(json!({"id":server.id,"transport":server.transport,
-        "command":server.command,"args":server.args,"endpoint":server.endpoint_url,"definition":server.definition}).to_string().as_bytes())));
+        "command":server.command,"args":server.args,"endpoint":server.endpoint_url,"definition":server.definition}).canonical_string().as_bytes())));
     let scope = crate::database::KernelHostScope { schema_version: 1, tool_names: ["call_mcp_tool".into()].into_iter().collect(),
         mcp_server_hashes: [(crate::office::SERVER_ID.into(), digest)].into_iter().collect(),
         knowledge_reference_hashes: Default::default(), knowledge_connection_hashes: Default::default(), office_tools: Default::default(), lifecycle_hooks: vec![] };
@@ -86,7 +88,7 @@ fn recovery_worker_flow(reapprove: bool) {
         &binding.permission_snapshot_id,
         &binding.execution_profile_id,
         &frozen.prompt_config_hash,
-        &serde_json::to_string(&frozen).unwrap(),
+        &crate::canonical_json::to_string(&frozen).unwrap(),
     )
     .unwrap();
     db.freeze_kernel_model_config(&continued.run.id, &model)
