@@ -2,6 +2,7 @@ import { Type } from 'typebox'
 import { KNOWLEDGE_TOOL_NAMES } from './runtime-contract.mjs'
 import { defineFoxTools } from './tool-adapter.mjs'
 import { VALIDATION_CHECK_TYPES } from './validation-policy.mjs'
+import { preparePlanRevisionArguments } from './tool-argument-preparers.mjs'
 
 const VALIDATION_CHECK_TYPE_SCHEMA = Type.Union(
   VALIDATION_CHECK_TYPES.map((checkType) => Type.Literal(checkType)),
@@ -57,19 +58,6 @@ const PLAN_TASKS_SCHEMA = Type.Union([
   Type.Array(GRAPH_PLAN_TASK_SCHEMA, { minItems: 1, maxItems: 3 }),
 ])
 
-function preparePlanRevisionArguments(args) {
-  if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.tasks !== 'string') {
-    return args
-  }
-  const serializedTasks = args.tasks.trim()
-  if (!serializedTasks.startsWith('[') || serializedTasks.length > 400_000) return args
-  try {
-    const tasks = JSON.parse(serializedTasks)
-    return Array.isArray(tasks) ? { ...args, tasks } : args
-  } catch {
-    return args
-  }
-}
 
 const hostStorage = new WeakMap()
 export const hostToolResultStorage = (_id, result) => result && typeof result === "object" ? hostStorage.get(result) : null
