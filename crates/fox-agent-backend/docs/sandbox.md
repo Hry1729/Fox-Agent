@@ -635,7 +635,7 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
   - `Cargo.toml` 给 `fox-agent-backend` 打开 `acp`。
 - **前端**：后端栏显示四个能力 chip（`agentBackendCapabilityChips`，顺序固定；预估值的 title 带“（启动前预估）”）。
 - **无 `run_control_binding` 的外部 run**（已核实，并有测试 `repositories::agent_backend::tests::external_runs_without_a_binding_resolve_approvals_and_complete`）：
-  - `resolve_approval` → `run_approval_window` → `run_time_budgets` 在没有 binding 时回落 `TimeBudgets::default()`（审批等待 300 000 ms），不报错。超过窗口才批准的记为 `expired`，并按拒绝答给后端。
+  - `resolve_approval` → `run_approval_window` 在没有 binding 时不报错。（审批无超时批起）审批不再有窗口，多久之后批准都有效，见 13.6；原先“超过 300 000 ms 记为 `expired` 并按拒绝答给后端”已取消。
   - `run.completed` → `enforce_managed_run_completion_budget` 只约束子 run 和数字同事 run，外部 run 直接通过。
   - Fox 路径未改。
 
@@ -654,13 +654,13 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
 
 ### 13.3 没做什么（待办）
 
-- 真实冒烟：在 srt 内跑 pi-acp / dsh，以及 Codex 对接假的 Responses API。本批只有 mock ACP agent 的 9 个用例（`tests/external_runtime.rs`）。
-- 迁移前自动备份（沿用第 12.2 节）。
+- ~~真实冒烟：在 srt 内跑 pi-acp / dsh~~：Linux 已做，见 13.8；Codex 对接假的 Responses API 仍未做。
+- ~~迁移前自动备份~~：已做，见 13.7。
 - 受管运行时目录布局（`backends/<后端>/node_modules/.bin/<入口>`）需要与工程师 0.1.1 运行时包的实际结构核对，不一致时以包为准改 `external_launch.rs`。
 - `kernel_gateway_catalogue_size_is_pinned` 仍断言 71；实际是 72 = 35 资源 + 28 工作 + 9 委派（`4b54e68` 新增 `present_files`），等目录负责人确认后再改。
 - fork / 子会话的后端继承规则（第 12.2 节）未定。
 
-### 13.4 精简 Windows 复测清单（在本批 HEAD 上）
+### 13.4 精简 Windows 复测清单（在本批 HEAD 上；**已被 13.5 取代**，保留作历史）
 
 1. **定向测试**
    - `cargo test -p fox-agent-backend --features acp`：0 失败。Linux 本机为 187 项（180 执行 + 2 ignored + 5 个 `FOX_TEST_REAL_ACP` 门控 SKIPPED），其中 `external_runtime` 9 项。Windows 用上一轮 Windows 的数字做基线（12.6），预期执行数比上一轮多出本批新增的用例。
@@ -681,3 +681,80 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
      - 后端栏四个 chip 在启动前带“（启动前预估）”，启动后去掉。
    - Fox 会话的发送、审批、取消与改动前一致。
 3. **一次全量** `cargo test -p fox-desktop`：与父基线 `a9254d3` 的 61 项既有失败逐项比对。名单的变化只允许来自本批拆分出的测试：`kernel_gateway_catalogue_size_is_pinned` 预期失败（新名字）；如果 `kernel_delegation_stages_a_single_child_without_starting_an_executor` 或 `kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway` 在基线名单里，它们现在应当通过，并从名单中消失。
+
+### 13.5 合并精简 Windows 复测清单（取代 13.4）
+
+在审批无超时批的最终 HEAD 上跑一次即可，13.4 不再单独执行。
+
+1. **定向测试**
+   - `cargo test -p fox-agent-backend --features acp`：0 失败。按名单区分“真正执行 / ignored / `FOX_TEST_REAL_ACP` 门控 SKIPPED”（12.6）。新增：`launch::tests::dev_entry_prefers_override_then_managed_runtime_then_npx`（普通单测）；`sandbox_srt` 新增两项 `#[ignore]`：`real_srt_external_runtime_pi_session`、`real_srt_external_runtime_dsh_session`（Linux 专用，Windows 上不编译）。
+   - `cargo test -p fox-desktop agent_backend`、`approval`、`migration_backup`：全部通过。重点：`repositories::agent_backend::tests::external_runs_without_a_binding_resolve_approvals_and_complete` 现在断言关闭会话 → 审批 `cancelled`（`conversation_closed`）、重启中断 → `cancelled`（`app_restarted`）、其他中断仍为 `expired`（`run_interrupted`）。
+   - `bun test`：`apps/desktop/tests/conversation-attention.test.ts`（含新增“关闭/归档/删除会话或重启 Fox 记为 cancelled，显示已取消”）、`agent-backend*.test.ts` 等；另跑前端 `tsc`。
+2. **真实 ACP 测试的入口（新）**：Codex / pi / dsh 的真实测试不再写死 `npx -y <包>`。入口顺序：`FOX_CODEX_ACP_PROGRAM` / `FOX_PI_ACP_PROGRAM` / `FOX_DSH_PROGRAM`（dsh 也认旧名 `FOX_DSH_BIN`）→ 受管运行时 `<runtime>/backends/<后端>/node_modules/.bin/<入口>.cmd`（`FOX_AGENT_RUNTIME_ROOT`；Windows 还认 `FOX_RUNTIME_ROOT`、`FOX_RUNTIME_VERSION` 或 `%ProgramFiles%\Fox\sandbox-runtime` 下最新版本）→ 最后才 `npx`（只在测试中用，`launch::dev_launch_spec`）。Windows 上不再需要 `npx.cmd` 转发：装好受管运行时后直接 `set FOX_TEST_REAL_ACP=1` 跑 `pi_backend`、`codex_backend`、`deepseek_backend`。测试会在 stderr 打印实际入口（`pi-acp entry (Managed(..))` 等），请把这一行贴进报告。
+3. **dsh 真实 prompt 测试必须有真回复（新）**：`deepseek_backend::real::real_dsh_initialize_session_and_prompt` 断言 `stopReason = end_turn` 且收到非空 agent 文本；模型报错（无 key、key 被拒、provider 路由不对）一律**失败**，不再算通过。跑之前给 dsh 配好模型（`DEEPSEEK_API_KEY` 或私有 HOME 的 `acp` 行）；没有模型时这一项的预期结果是 FAILED，报告里写明原因，不要当回退。
+4. **三后端真实会话冒烟**（`FOX_EXTERNAL_BACKENDS=pi,codex,deepseek`，沙箱模式，会话绑定项目文件夹）
+   - pi 与 Codex 各一次：流式文本 + 工具卡 → 正常结束；第二轮复用同一原生会话；原生审批只有“允许一次 / 拒绝”，批准后工具继续、拒绝后工具不执行。
+   - **审批 > 6 分钟不答**：卡片一直是“等你处理”，本轮不自动结束，之后点“允许一次”工具照常执行（旧的 Node 6 分钟与 5 分钟窗口都已去掉）。
+   - **取消本轮**：审批卡显示“已取消”，本轮以 `cancelled` 结束；15 s 内后端没确认的显示“结果未知”。
+   - **关闭 / 归档 / 移入回收站 / 删除会话（新语义）**：若有待处理审批，库里记为 `cancelled`（`decision_json.reason = conversation_closed`），界面显示“已取消”，不再是“已过期”或“已结束（本轮已结束）”。
+   - **退出 Fox 后重启（新语义）**：上次留下的外部 run 记为中断（`agent_backend_host_restarted`），其待处理审批记为 `cancelled`（`reason = app_restarted`），显示“已取消”；Fox 自己的 legacy run 在退出时（`runtime.application_exit`）同样处理。
+   - DeepSeek：一轮正常结束、回复非空，不出现可答的审批卡。
+   - 负向：入口改名 → `agent_backend_not_installed`；杀后端 → `agent_backend_exited`；四个能力 chip 的“（启动前预估）”在启动后去掉。
+5. **Fox 会话同测**：发送、审批（含 > 6 分钟后再批）、取消（显示“已取消”）与改动前一致；会话列表“等你处理”徽标在审批出现时亮、作答或取消后灭。
+6. **旧库启动**：用一份旧版本数据库启动 Fox，`<data>/backups/` 生成一份迁移前备份（最多保留 5 份）；人为让备份失败（例如目录只读）时不迁移、启动报错。
+7. **一次全量** `cargo test -p fox-desktop`：与父基线 `a9254d3` 的 61 项既有失败逐项比对；名单变化只允许来自本批改名/拆分的测试（5 个旧测试名改名后消失），其余新增失败都算回退。
+
+### 13.6 审批无超时（审批语义变化）
+
+原生审批和 Fox 自己的审批都**不再有期限**，与 Claude Code / Codex CLI / ACP 的语义一致：一条审批只在下面几种情况结束。
+
+| 结束条件 | 审批记为 | 界面 |
+|---|---|---|
+| 用户点“允许一次” / “拒绝” | `approved` / `denied` | 已批准 / 用户拒绝 |
+| 用户取消本轮（外部：Host 把待答的原生请求答为 `outcome: cancelled`） | `cancelled` | 已取消 |
+| 关闭、归档、移入回收站或删除会话（外部：`agent_backend_session_closed`） | `cancelled`（`reason: conversation_closed`） | 已取消 |
+| Fox 退出或重启时本轮被中断（`runtime.application_exit`、`agent_backend_host_restarted`） | `cancelled`（`reason: app_restarted`） | 已取消 |
+| 本轮因其他原因结束（失败、完成、其他中断、新一轮开始） | `expired`（`reason` 为 `run_failed` / `run_completed` / `run_interrupted` / `new_run_started`） | 已结束（本轮已结束） |
+| 旧版本写下的按窗口过期的行 | `expired` | 已过期 |
+
+关闭会话和重启的处理在本批由 `expired + run_interrupted` 改为 `cancelled`（用户决定，2026-10-20）：这两种情况不是“过期”，是本轮被结束了。判定在 `database/repositories.rs` 的 `approval_cancel_reason_for_interruption`（按中断码）。数字同事无人值守时的审批策略（例如自动拒绝）本批不处理。
+
+**超时来源 A–H 的处理摘要**（按本批提交归纳）：
+
+- **A Kernel 控制器**：`WaitingApproval` 不再自动过期，只等用户；等待期间执行预算暂停（`crates/fox-agent-kernel/src/controller.rs`）。
+- **B Kernel 数据库**：审批提交不再拒绝“迟到”的决定，时钟回拨也不作废等待（`repositories/kernel.rs`）。
+- **C Kernel Host 审批命令**：过了名义窗口也照常接受（`repositories/kernel_host.rs`）。
+- **D 桌面数据库**：审批不再按窗口记为 `expired`；`run_approval_window` 只校验冻结绑定；新增审批请求时间与等待时长（`repositories.rs`、`repositories/run_control.rs`）。
+- **E legacy 运行时 Host**：审批等待无超时，只在用户作答或取消 / 关闭时结束（`runtime_host/mod.rs`）。
+- **F Node agent-runtime**：去掉 `HOST_REQUEST_TIMEOUT_MS`（原 6 分钟固定超时）。代价：Host 卡死时这一轮只能靠取消结束（见风险）。
+- **G 协议**：`approval_wait_ms` 只保留为兼容字段，不再是期限（`fox-engine-protocol/src/control.rs`）。
+- **H 外部运行时**：`src/external.rs` 对原生审批不设期限；pi 的 Fox 审批门（`fox-approval-gate.ts`）也不设超时，只在 Host 作答、`cancelled` 或本轮中止时放行 / 阻止；dsh 在 Host 补丁下不发审批，到达的由 Host 直接拒绝。
+
+**墙钟扣除审批等待**：子 Run 和数字同事 Run 的墙钟期限只计“非等待审批”的时间，扣除的是本 run 所有审批等待区间的**并集**（并行的两条审批不重复扣）；托管 Run 的完成期限同样扣除。外部 run 没有 `run_control_binding`，不受这些期限约束。
+
+### 13.7 迁移前自动备份
+
+- 桌面启动用 `open_with_migration_backup` 打开数据库：有待执行的迁移时，先用 `VACUUM INTO` 把当前库备份到 `<data>/backups/`，再迁移。
+- 只保留最近 5 份。
+- 备份失败就**不迁移**，启动报错，原库不动。
+- 测试：`migration_backup` 4 项（纯 SQLite），Linux 已跑通。
+
+### 13.8 真实冒烟：Linux srt 内的外部会话（`tests/sandbox_srt.rs`）
+
+两项新测试走生产路径 `ExternalRuntime` + `HostLauncher`（受管运行时布局、`prepare_launch`、srt + bubblewrap、initialize 版本检查），不是 mock 启动器：
+
+- `real_srt_external_runtime_pi_session`：真实 pi-acp 0.0.34 + pi 0.84.2 在 srt 里。依次：启动 → 流式文本 → `run.completed`；权限请求 → 允许 → 工具执行、文件写入；权限请求 → 拒绝 → 工具不执行、本轮正常结束；审批不答等待 `FOX_TEST_APPROVAL_WAIT_SECS`（默认 20 s）期间每秒断言“仍 pending、本轮无终态、进程活着”，之后允许仍有效；审批待答时取消本轮 → 原生请求被答 `cancelled`、run 以 `cancelled` 结束、晚到的回答不写、工具不执行；再来一轮正常完成；关闭会话确认停止且无残留进程。
+- `real_srt_external_runtime_dsh_session`：真实 dsh 0.2.1-rc.2 在 srt 里：启动、initialize、session/new、一轮 prompt 必须 `end_turn` 且有非空文本，否则失败；关闭确认。需要 `DEEPSEEK_API_KEY` 和能连到 api.deepseek.com 的网络。
+- 模型：沿用 T04 的 `ScriptedModel`，在沙箱外的测试进程里，`127.0.0.1:<端口>` 写进 Host 允许列表（`extra_domains`，同时让 Host 为后端清掉 NO_PROXY）。Host 会清空子进程环境，所以测试往受管运行时写一个 `pi-gate/pi-gated.sh` 包装脚本，由它带上脚本 provider 和模型地址（仅测试）。
+- 运行方法（Linux，需 bubblewrap、socat、ripgrep、Node ≥ 22.12）：
+
+```text
+FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 \
+FOX_SRT_PREFIX=<srt 的 npm prefix> FOX_PI_ACP_PREFIX=<pi-acp 的 npm prefix> [FOX_DSH_BIN=<dsh 绝对路径>] \
+[FOX_AGENT_RUNTIME_ROOT=<可写的受管运行时>] [FOX_TEST_APPROVAL_WAIT_SECS=400] \
+cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_external_runtime \
+  -- --include-ignored --nocapture --test-threads=1
+```
+
+  不设 `FOX_AGENT_RUNTIME_ROOT` 时，测试在 cargo 的 target tmp 下用 `cp -al`（失败则 `cp -a`）拼出受管运行时；不能用指向运行时外的符号链接，沙箱里读不到。`FOX_PI_ACP_PROGRAM`、`FOX_DSH_PROGRAM`、`FOX_EXTERNAL_FULL_ACCESS` 必须不设。两个门控变量缺一个就失败，不会静默通过。
+- Linux 实测结果见审批无超时批报告：pi 全流程通过（含一次 400 s 不答仍可批）；dsh 在无 key 时启动、会话、结算与关闭都正常，但按新规则 prompt 断言失败。
