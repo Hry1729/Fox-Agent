@@ -1,6 +1,6 @@
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { AgentBackendBar } from './components/AgentBackendBar'
-import { AGENT_BACKEND_REFUSED, agentBackendInputLockedReason, conversationAgentBackend, type AgentBackendCapabilities } from '@/features/conversations/model/agent-backend'
+import { AGENT_BACKEND_REFUSED, agentBackendInputLockedReason, conversationAgentBackend, refreshesAgentBackendCapabilities, type AgentBackendCapabilities } from '@/features/conversations/model/agent-backend'
 import { type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { expertErrorMessage, expertInteractionLocked, latestExpertToolAvailability } from './components/expert-binding-ui'
 import { useGoalProgress } from './hooks/use-goal-progress'
@@ -1437,8 +1437,21 @@ export function Workbench() {
   // of the shown external backend (locked conversation or picked draft).
   const shownExternalBackend = lockedAgentBackend ?? draftAgentBackend
   const openConversationId = openConversationSummary?.id ?? null
-  const lastRunStatus = desktopConversation.detail?.lastRun?.status ?? null
   const [agentBackendCapabilities, setAgentBackendCapabilities] = useState<AgentBackendCapabilities | null>(null)
+  // Refresh the chips as soon as the backend's handshake settles (the
+  // `agent_backend.session` run event), not when the run ends: the real
+  // declaration replaces the pre-launch estimate right away.
+  const [agentBackendSessionTick, setAgentBackendSessionTick] = useState(0)
+  const capabilityConversationId = lockedAgentBackend ? openConversationId : null
+  useEffect(() => {
+    if (!desktopConversation.enabled || !capabilityConversationId) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    desktopClient.listenRuntimeEvents((notification) => {
+      if (refreshesAgentBackendCapabilities(notification, capabilityConversationId)) setAgentBackendSessionTick((tick) => tick + 1)
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop }).catch(() => {})
+    return () => { disposed = true; unlisten?.() }
+  }, [desktopConversation.enabled, capabilityConversationId])
   useEffect(() => {
     if (!desktopConversation.enabled || shownExternalBackend === 'fox') {
       setAgentBackendCapabilities(null)
@@ -1449,7 +1462,7 @@ export function Workbench() {
       .then((view) => { if (!cancelled) setAgentBackendCapabilities(view) })
       .catch(() => { if (!cancelled) setAgentBackendCapabilities(null) })
     return () => { cancelled = true }
-  }, [desktopConversation.enabled, shownExternalBackend, lockedAgentBackend, openConversationId, lastRunStatus])
+  }, [desktopConversation.enabled, shownExternalBackend, lockedAgentBackend, openConversationId, agentBackendSessionTick])
   const agentBackendBar = useMemo(() => desktopConversation.enabled ? (
     <AgentBackendBar
       status={agentBackendStatus}
