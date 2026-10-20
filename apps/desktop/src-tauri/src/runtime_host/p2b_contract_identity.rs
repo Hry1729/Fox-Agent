@@ -53,6 +53,8 @@
 //! together, or a rewrite of both columns into a self-consistent pair, is not
 //! something a single-row reader can see.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::content_requirements::{DecodedSpec, decode_spec};
 use super::display_pass_of_finding;
 use super::p2b_consumer::envelope_item_key_of_finding;
@@ -282,7 +284,7 @@ mod tests {
     }
 
     fn content_contract(spec: serde_json::Value) -> String {
-        serde_json::to_string(&vec![DeliveryRequirement {
+        crate::canonical_json::to_string(&vec![DeliveryRequirement {
             item_key: Some("file:out.json".into()),
             id: "content:concat".into(),
             source_text: "冻结内容契约".into(),
@@ -346,9 +348,9 @@ mod tests {
             },
         };
         // v2 last among several: not merely the first requirement is consulted.
-        let body = serde_json::to_string(&vec![legacy.clone(), v2.clone()]).unwrap();
+        let body = crate::canonical_json::to_string(&vec![legacy.clone(), v2.clone()]).unwrap();
         assert_eq!(classify_requirements(Some(&body)), ContractIdentity::HostV2);
-        let body = serde_json::to_string(&vec![v2, legacy]).unwrap();
+        let body = crate::canonical_json::to_string(&vec![v2, legacy]).unwrap();
         assert_eq!(classify_requirements(Some(&body)), ContractIdentity::HostV2);
     }
 
@@ -421,7 +423,7 @@ mod tests {
                 }]
             }
         })
-        .to_string();
+        .canonical_string();
         let v1_contract = content_contract(json!({"schemaVersion": 1, "rule": unbound_rule()}));
         for contract in [Some("[]"), None, Some(v1_contract.as_str())] {
             assert_eq!(
@@ -452,7 +454,7 @@ mod tests {
                                "ruleId": "content:0", "blocking": false, "needsRepair": false}]
                 }
             })
-            .to_string()
+            .canonical_string()
         };
         let qualification = passed_qualification_of_row(
             "passed",
@@ -490,7 +492,7 @@ mod tests {
                            "ruleId": "content:0", "blocking": false, "needsRepair": false}]
             }
         })
-        .to_string();
+        .canonical_string();
         for key in ["", " ", "file:out\n.json"] {
             assert!(matches!(passed_qualification_of_row("passed", Some(&sound), Some("[]"), key),
                 PassQualification::RecordUnusable(_)));
@@ -498,7 +500,7 @@ mod tests {
         for value in [serde_json::Value::Null, json!(""), json!(7), json!("file:foreign.json")] {
             let mut damaged: serde_json::Value = serde_json::from_str(&sound).unwrap();
             damaged["deliveryVerdict"]["itemKey"] = value;
-            assert!(matches!(passed_qualification_of_row("passed", Some(&damaged.to_string()), Some("[]"), "file:out.json"),
+            assert!(matches!(passed_qualification_of_row("passed", Some(&damaged.canonical_string()), Some("[]"), "file:out.json"),
                 PassQualification::RecordUnusable(_)));
         }
     }
