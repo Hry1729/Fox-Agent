@@ -2,7 +2,9 @@
 //!
 //! * Unit tests: capability mapping from the `initialize` response recorded
 //!   against the real `@agentclientprotocol/codex-acp@2.2.2` (see docs/codex.md).
-//! * `real_codex_acp_smoke_skips_unless_fox_test_real_acp`: starts the real adapter through npx. Gated by
+//! * `real_codex_acp_smoke_skips_unless_fox_test_real_acp`: starts the real adapter
+//!   (`FOX_CODEX_ACP_PROGRAM`, else the managed runtime, else npx; see
+//!   `launch::dev_launch_spec`). Gated by
 //!   `FOX_TEST_REAL_ACP=1`; without it the test returns immediately and prints
 //!   "SKIPPED" - that is a skip, not a pass (plan section 2).
 
@@ -158,7 +160,7 @@ fn host_policy_maps_to_mode_env_and_is_verified_fail_closed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn real_codex_acp_smoke_skips_unless_fox_test_real_acp() {
     use fox_agent_backend::acp::{AcpConnection, BackendEvent};
-    use fox_agent_backend::launch::launch_spec;
+    use fox_agent_backend::launch::dev_launch_spec;
     use fox_agent_backend::port::AgentBackend;
     use std::time::Duration;
 
@@ -168,10 +170,11 @@ async fn real_codex_acp_smoke_skips_unless_fox_test_real_acp() {
     }
     let cwd = std::env::temp_dir().join(format!("fox-codex-smoke-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).unwrap();
-    let spec = launch_spec(AgentBackend::Codex).unwrap();
+    let (spec, source) = dev_launch_spec(AgentBackend::Codex).unwrap();
+    eprintln!("codex-acp entry ({source:?}): {} {:?}", spec.program, spec.args);
     let mut connection = tokio::time::timeout(Duration::from_secs(180), AcpConnection::spawn(&spec, &cwd))
         .await
-        .expect("codex-acp initialize within 180s (npx download)")
+        .expect("codex-acp initialize within 180s (npx may download)")
         .expect("codex-acp spawn + initialize");
 
     let event = tokio::time::timeout(Duration::from_secs(10), connection.events.recv()).await.unwrap().unwrap();
