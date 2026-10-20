@@ -95,6 +95,91 @@ pub fn launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
     Some(spec)
 }
 
+/// Where a development / real-binary-test entry point came from
+/// ([`dev_launch_spec`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevEntrySource {
+    /// [`program_override_env`] (`FOX_*_PROGRAM`).
+    Override,
+    /// `<runtime>/backends/<dir>/...` of the managed runtime ([`dev_runtime_root`]).
+    Managed(std::path::PathBuf),
+    /// `npx -y <pinned package>` (tests only; never the Host).
+    Npx,
+}
+
+/// `<runtime>/backends/<dir>/node_modules/.bin/<bin>[.cmd]`, else
+/// `<runtime>/backends/<dir>/<bin>[.cmd]`, whichever exists. The one layout
+/// rule shared by the Host launcher ([`crate::external_launch`]) and the
+/// real-binary tests.
+pub fn managed_entry(runtime_root: &std::path::Path, backend: AgentBackend, windows: bool) -> Option<std::path::PathBuf> {
+    let (dir, bin) = match backend {
+        AgentBackend::Pi => ("pi", "pi-acp"),
+        AgentBackend::Codex => ("codex", "codex-acp"),
+        AgentBackend::Deepseek => ("deepseek", "dsh"),
+        AgentBackend::Fox => return None,
+    };
+    let exe = if windows { format!("{bin}.cmd") } else { bin.to_owned() };
+    let base = runtime_root.join("backends").join(dir);
+    [base.join("node_modules").join(".bin").join(&exe), base.join(&exe)].into_iter().find(|candidate| candidate.is_file())
+}
+
+/// The managed runtime the real-binary tests look in: `FOX_AGENT_RUNTIME_ROOT`;
+/// on Windows otherwise `FOX_RUNTIME_ROOT`, `FOX_RUNTIME_VERSION` or the
+/// newest version under `%ProgramFiles%\Fox\sandbox-runtime`. Linux / macOS
+/// have no default here (the Host's is `<fox data>/agent-runtime`).
+pub fn dev_runtime_root() -> Option<std::path::PathBuf> {
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
+    if let Some(root) = set("FOX_AGENT_RUNTIME_ROOT") {
+        return Some(root);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    if set(crate::winruntime::RUNTIME_ROOT_ENV).is_some() {
+        return Some(crate::winruntime::windows_runtime_root(""));
+    }
+    if let Some(version) = std::env::var("FOX_RUNTIME_VERSION").ok().filter(|value| !value.trim().is_empty()) {
+        return Some(crate::winruntime::default_windows_runtime_root(version.trim()));
+    }
+    let parent = crate::winruntime::default_windows_runtime_root("");
+    let mut versions: Vec<std::path::PathBuf> = std::fs::read_dir(&parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .collect();
+    versions.sort();
+    versions.pop()
+}
+
+/// Entry point for the real-binary tests and development, in order:
+/// [`program_override_env`] (`FOX_CODEX_ACP_PROGRAM` / `FOX_PI_ACP_PROGRAM` /
+/// `FOX_DSH_PROGRAM`), then the managed runtime entry under
+/// [`dev_runtime_root`], then `npx -y <pinned package>` (dsh:
+/// `@deepseek-ai/dsh@<pin>`). Tests only: the desktop Host resolves the
+/// managed runtime through [`crate::external_launch::HostLaunchConfig`] and
+/// never falls back to `npx`.
+pub fn dev_launch_spec(backend: AgentBackend) -> Option<(LaunchSpec, DevEntrySource)> {
+    let mut spec = default_launch_spec(backend)?;
+    let (program, source) = if let Some(program) = program_override(backend) {
+        (program, DevEntrySource::Override)
+    } else if let Some((root, entry)) = dev_runtime_root().and_then(|root| managed_entry(&root, backend, cfg!(windows)).map(|entry| (root, entry))) {
+        (entry.to_string_lossy().into_owned(), DevEntrySource::Managed(root))
+    } else {
+        if backend == AgentBackend::Deepseek {
+            spec.program = npx();
+            spec.args = vec!["-y".into(), format!("@deepseek-ai/dsh@{DSH_VERSION}"), "--profile".into(), "acp".into()];
+        }
+        return Some((spec, DevEntrySource::Npx));
+    };
+    spec.program = program;
+    if backend != AgentBackend::Deepseek {
+        spec.args.clear();
+    }
+    Some((spec, source))
+}
+
 fn default_launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
     match backend {
         AgentBackend::Fox => None,
@@ -309,6 +394,33 @@ mod tests {
         let deepseek = launch_spec(AgentBackend::Deepseek).unwrap();
         assert_eq!(deepseek.args, ["--profile", "acp"]);
         assert!(deepseek.experimental);
+    }
+
+    #[test]
+    fn dev_entry_prefers_override_then_managed_runtime_then_npx() {
+        let windows = cfg!(windows);
+        let root = std::env::temp_dir().join(format!("fox-dev-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(managed_entry(&root, AgentBackend::Pi, windows), None);
+        let bin = root.join("backends/pi/node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let entry = bin.join(if windows { "pi-acp.cmd" } else { "pi-acp" });
+        std::fs::write(&entry, "").unwrap();
+        assert_eq!(managed_entry(&root, AgentBackend::Pi, windows), Some(entry));
+        assert_eq!(managed_entry(&root, AgentBackend::Codex, windows), None);
+        assert_eq!(managed_entry(&root, AgentBackend::Fox, windows), None);
+        let _ = std::fs::remove_dir_all(&root);
+        // Without any override or runtime the tests fall back to npx (the
+        // process environment is not modified here; skip when it is set).
+        let clean = ["FOX_PI_ACP_PROGRAM", "FOX_AGENT_RUNTIME_ROOT", "FOX_RUNTIME_ROOT", "FOX_RUNTIME_VERSION"].iter().all(|name| std::env::var_os(name).is_none());
+        if clean && !cfg!(windows) {
+            let (spec, source) = dev_launch_spec(AgentBackend::Pi).unwrap();
+            assert_eq!(source, DevEntrySource::Npx);
+            assert!(spec.args.iter().any(|arg| arg == "pi-acp@0.0.34"));
+            let (spec, source) = dev_launch_spec(AgentBackend::Deepseek).unwrap();
+            assert_eq!(source, DevEntrySource::Npx);
+            assert_eq!(spec.args, ["-y", "@deepseek-ai/dsh@0.2.1-rc.2", "--profile", "acp"]);
+        }
     }
 
     #[test]
