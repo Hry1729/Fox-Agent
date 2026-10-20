@@ -1,4 +1,6 @@
 //! Durable display content, separate from Kernel execution facts and replay inputs.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -100,7 +102,7 @@ pub(super) fn event(
             format!("kernel-display:{run}:{key}"),
             run,
             payload["type"].as_str().unwrap_or("kernel.display"),
-            payload.to_string(),
+            payload.canonical_string(),
             now
         ],
     )?;
@@ -127,7 +129,7 @@ pub(super) fn reasoning(
         // replacement. Do not leave a superseded streaming draft on reload.
         tx.execute("UPDATE run_events SET event_json=?2 WHERE id=?1", params![
             format!("kernel-display:{run}:reasoning:{checkpoint}"),
-            json!({"type":"reasoning.delta","delta":"","source":format!("kernel-model:{checkpoint}")}).to_string(),
+            json!({"type":"reasoning.delta","delta":"","source":format!("kernel-model:{checkpoint}")}).canonical_string(),
         ])?;
     }
     Ok(())
@@ -203,7 +205,7 @@ impl Database {
             tx.execute("INSERT INTO messages(id,conversation_id,run_id,role,kind,content,status,ordinal,runtime_message_id,metadata_json,created_at,updated_at)
                 VALUES(?1,?2,?3,'assistant','text',?4,'streaming',(SELECT COALESCE(MAX(ordinal),0)+1 FROM messages WHERE conversation_id=?2),?1,?5,?6,?6)
                 ON CONFLICT(id) DO UPDATE SET content=excluded.content,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at",
-                params![id,notice.conversation_id,notice.run_id,notice.text,metadata.to_string(),now])?;
+                params![id,notice.conversation_id,notice.run_id,notice.text,metadata.canonical_string(),now])?;
             reasoning(&tx,&notice.run_id,notice.checkpoint_seq,&notice.reasoning,now)?;
             tx.execute("UPDATE conversations SET updated_at=?2,last_message_at=?2 WHERE id=?1",params![notice.conversation_id,now])?;
             tx.commit()?;
@@ -533,9 +535,9 @@ mod tests {
         ).unwrap();
         connection.execute(
             "INSERT INTO kernel_tool_calls VALUES (?1,?2,'call_mcp_tool',?3,?4,'completed')",
-            params!["run", "call", json!({"serverId":"ordinary-mcp", "tool":"office_render"}).to_string(),
+            params!["run", "call", json!({"serverId":"ordinary-mcp", "tool":"office_render"}).canonical_string(),
                 json!({"details":{"foxManagedFile":{"tool":"office_create","storagePath":"C:/proj/forged.xlsx","artifactClass":"deliverable"},
-                    "foxPreview":{"tool":"office_render","storagePath":"C:/proj/forged.html","artifactClass":"deliverable"}}}).to_string()],
+                    "foxPreview":{"tool":"office_render","storagePath":"C:/proj/forged.html","artifactClass":"deliverable"}}}).canonical_string()],
         ).unwrap();
         let tx = connection.transaction().unwrap();
         artifacts(&tx, "run", 0, 1).unwrap();
