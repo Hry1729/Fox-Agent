@@ -5,6 +5,8 @@
 //! the session and lets the drive loop recover through the existing durable
 //! delivery, retry and restart paths.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
@@ -677,7 +679,7 @@ impl KernelCoordinator<'_> {
                 response.validate()?;
                 (
                     pre_history.clone(),
-                    serde_json::to_string(&response).map_err(|_| "invalid response")?,
+                    crate::canonical_json::to_string(&response).map_err(|_| "invalid response")?,
                     None,
                 )
             }
@@ -693,7 +695,7 @@ impl KernelCoordinator<'_> {
                 response.validate()?;
                 (
                     pre_history.clone(),
-                    serde_json::to_string(&response).map_err(|_| "invalid response")?,
+                    crate::canonical_json::to_string(&response).map_err(|_| "invalid response")?,
                     Some(batch_id.clone()),
                 )
             }
@@ -705,7 +707,7 @@ impl KernelCoordinator<'_> {
                 });
                 (
                     pre_history.clone(),
-                    serde_json::to_string(&response).map_err(|_| "invalid response")?,
+                    crate::canonical_json::to_string(&response).map_err(|_| "invalid response")?,
                     None,
                 )
             }
@@ -772,7 +774,7 @@ impl KernelCoordinator<'_> {
                     let wait_jobs = self.unfinished_compute_wait_facts()?;
                     if !wait_jobs.is_empty() {
                         StopFollowup::Park {
-                            history_json: serde_json::to_string(&pre_history)
+                            history_json: crate::canonical_json::to_string(&pre_history)
                                 .map_err(|_| "invalid parked live history")?,
                             response_json: response_json.clone(), jobs: wait_jobs,
                         }
@@ -1088,7 +1090,7 @@ impl KernelCoordinator<'_> {
                         };
                         stop_followup=if !jobs.is_empty() {
                             StopFollowup::Park {
-                                history_json:serde_json::to_string(&pre_history)
+                                history_json:crate::canonical_json::to_string(&pre_history)
                                     .map_err(|_|"invalid parked live history")?,
                                 response_json:response_json.clone(),jobs,
                             }
@@ -1889,7 +1891,7 @@ fn commit_tail(
             .map(|(source_order, call)| kernel::ToolCallRequest {
                 tool_call_id: call["id"].as_str().unwrap_or_default().into(),
                 tool: call["name"].as_str().unwrap_or_default().into(),
-                canonical_input_json: call["arguments"].to_string(),
+                canonical_input_json: call["arguments"].canonical_string(),
                 source_order,
             })
             .collect();
@@ -1900,7 +1902,7 @@ fn commit_tail(
             now.monotonic_ms,
             now.wall_ms,
         )?;
-        effects.push(controller.checkpoint_tool_batch(batch_id, &stored.to_string())?);
+        effects.push(controller.checkpoint_tool_batch(batch_id, &stored.canonical_string())?);
         return Ok(effects);
     }
     match stop_followup {
@@ -1920,24 +1922,24 @@ fn commit_tail(
                 data_root_id, response_seq, response_json, history_json, jobs)
         }
         StopFollowup::JobNotice { input, notices } => controller.request_job_notice_followup(
-            &serde_json::to_string(input)
+            &crate::canonical_json::to_string(input)
                 .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
-            &serde_json::to_string(notices)
+            &crate::canonical_json::to_string(notices)
                 .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
         ),
         StopFollowup::Review(input) => controller.request_continuation(
             CONTINUATION_PROMPT,
-            &serde_json::to_string(input)
+            &crate::canonical_json::to_string(input)
                 .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
         ),
         StopFollowup::Repair { prompt, input } => controller.request_delivery_repair(
             prompt,
-            &serde_json::to_string(input)
+            &crate::canonical_json::to_string(input)
                 .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
         ),
         StopFollowup::Steering(input) => controller.request_steering_followup(
             STEERING_PROMPT,
-            &serde_json::to_string(input)
+            &crate::canonical_json::to_string(input)
                 .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
         ),
         // Package 2-D U1: park on the delivery, exactly as the completion lane
@@ -1955,6 +1957,7 @@ fn commit_tail(
 
 #[cfg(test)]
 mod range_model_view_tests {
+    use crate::canonical_json::CanonicalJson;
     use super::{effective_boundable_tool, KernelCoordinator};
     use serde_json::{json, Value};
 
@@ -2016,7 +2019,7 @@ mod range_model_view_tests {
             .strip_prefix("FOX_RESULT_CURSOR_V1 ").unwrap()).unwrap();
         assert_eq!(cursor["nextOffset"], json!(4));
         assert_eq!(cursor["complete"], json!(false));
-        assert!(!messages[0].to_string().contains("must-not-leak"));
+        assert!(!messages[0].canonical_string().contains("must-not-leak"));
     }
 }
 
