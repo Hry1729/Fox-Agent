@@ -2908,6 +2908,50 @@ fn spawn_approval_watcher(
     })
 }
 
+/// Stand-in for a user who never answers and then cancels the turn: waits for
+/// the first pending approval, keeps not answering for `unanswered`, checks the
+/// approval is STILL pending (approvals no longer expire) and then queues a
+/// cancel. Returns whether the approval was still pending after the wait.
+fn spawn_unanswered_then_cancel_watcher(
+    root: &std::path::Path,
+    run_id: &str,
+    stop: Arc<AtomicBool>,
+    unanswered: Duration,
+) -> std::thread::JoinHandle<bool> {
+    let root = root.to_path_buf();
+    let run_id = run_id.to_owned();
+    std::thread::spawn(move || {
+        let writer = Database::open(eval_host_dir(&root).join("facts.db")).unwrap();
+        let reader = rusqlite::Connection::open(eval_host_dir(&root).join("facts.db")).unwrap();
+        reader.busy_timeout(Duration::from_secs(5)).unwrap();
+        let pending = |reader: &rusqlite::Connection| -> bool {
+            reader
+                .query_row(
+                    "SELECT COUNT(*) FROM kernel_approvals WHERE run_id = ?1 AND state = 'pending'",
+                    [&run_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .is_ok_and(|count| count > 0)
+        };
+        let give_up = Instant::now() + eval_deadline_from_environment();
+        while !pending(&reader) {
+            if stop.load(Ordering::SeqCst) || Instant::now() >= give_up {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(unanswered);
+        let still_pending = pending(&reader);
+        while Instant::now() < give_up && !stop.load(Ordering::SeqCst) {
+            if matches!(writer.queue_kernel_host_command(&run_id, None), Ok(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        still_pending
+    })
+}
+
 /// Drive one prepared Run end to end with the REAL production tool routing:
 /// kernel_host.rs classifies context resources (`read_tool_result`) and sends
 /// everything else (`read`, `call_mcp_tool`) through the GatewayPolicy, whose
@@ -2944,6 +2988,10 @@ fn drive_real_run_with_approvals(
     // The human-at-UI stand-in starts approving before the first request
     // reaches `waiting_approval`; it only writes to the durable command queue.
     let approver = approve.then(|| spawn_approval_watcher(root, run_id, watcher_stop.clone()));
+    // Approvals do not expire: without an approver the user "never answers"
+    // well past the frozen nominal window, then cancels the turn.
+    let canceller = (!approve).then(|| spawn_unanswered_then_cancel_watcher(
+        root, run_id, watcher_stop.clone(), Duration::from_millis(2_000)));
     let binding = db.run_control_binding(run_id).unwrap().unwrap();
     let scope = db.kernel_host_scope(run_id).unwrap();
     let host_dir = eval_host_dir(root);
@@ -3061,6 +3109,9 @@ fn drive_real_run_with_approvals(
     };
     eval_phase("post:approver-join");
     let approvals = approver.map(|thread| thread.join().unwrap()).unwrap_or(0);
+    if let Some(canceller) = canceller {
+        assert!(canceller.join().unwrap(), "an unanswered approval must still be pending after its nominal window");
+    }
     eval_phase("post:observations");
     RunObservations {
         state,
@@ -6470,12 +6521,18 @@ fn exercise_eval_approval_clock(approve: bool) {
         let records = db.list_runtime_tool_calls_for_run(&run_id).unwrap();
         assert_eq!(records.iter().filter(|row| row.status == "completed").count(), 1);
     } else {
-        assert_eq!(observed.state, "approval_expired");
+        // Never answered: still pending past the 600 ms nominal window (checked
+        // by the watcher), then the user's cancel ends it as cancelled.
+        assert_eq!(observed.state, "cancelled");
         assert_eq!(observed.approvals, 0);
+        let approval_state: String = rusqlite::Connection::open(eval_host_dir(&root).join("facts.db")).unwrap()
+            .query_row("SELECT state FROM kernel_approvals WHERE run_id=?1 AND tool_call_id='write-proof'",
+                [&run_id], |row| row.get(0)).unwrap();
+        assert_eq!(approval_state, "cancelled");
         assert_eq!(
             std::fs::read_to_string(root.join("proof.txt")).unwrap(),
             "observed before approval",
-            "an expired approval must leave the observed target unchanged",
+            "an unanswered approval must leave the observed target unchanged",
         );
         assert!(db.queue_kernel_host_command(&run_id, Some(("write-proof", "allow_once"))).is_err());
         assert!(db.queue_kernel_host_command(&run_id, None).is_err());
@@ -6486,7 +6543,7 @@ fn exercise_eval_approval_clock(approve: bool) {
 }
 
 #[test]
-fn real_eval_driver_expires_unanswered_approval_with_wall_time() {
+fn real_eval_driver_keeps_unanswered_approval_pending_until_cancel() {
     exercise_eval_approval_clock(false);
 }
 
