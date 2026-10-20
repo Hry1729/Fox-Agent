@@ -12,8 +12,9 @@
 //! Time is split into two domains (see [`crate::ports::Clock`]):
 //! in-process execution time uses a monotonic clock that is not comparable
 //! across restarts (the accumulated execution time is persisted instead), and
-//! the human-approval deadline uses wall time so an approval wait survives
-//! restart; a backwards wall jump is detected and fails closed.
+//! the human-approval wait is anchored in wall time so it survives restart.
+//! A human approval has no deadline: it waits until the user answers, the Run
+//! is cancelled, the conversation is closed, Fox exits, or a grant is revoked.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -125,6 +126,8 @@ pub enum Effect {
         decision: ApprovalDecision,
     },
     /// Durable bookkeeping for a request that timed out before a human decision.
+    /// No longer produced (approvals do not expire); kept so recorded effects
+    /// and old Runs still decode and settle.
     ApprovalExpired { tool_call_id: String },
     /// Durable bookkeeping for a request abandoned by run cancellation.
     ApprovalCancelled { tool_call_id: String },
@@ -2551,103 +2554,24 @@ impl RunController {
         }
 
         if self.state == RunState::WaitingApproval {
-            let Some(deadline) = self.approval_deadline_wall_ms else {
+            // A human approval waits for the human (Claude Code / Codex CLI /
+            // ACP semantics): it never expires on its own. It ends only when the
+            // user answers, cancels the Run, the conversation is closed, Fox
+            // exits (recovery applies the interrupt semantics) or a permission
+            // is revoked. `approval_deadline_wall_ms` is still persisted as the
+            // wait's wall anchor (requested-at + the frozen nominal window) for
+            // the `WaitingApproval <=> anchor` invariant and for old records,
+            // but it is no longer a deadline. The execution budget is suspended
+            // for the whole wait (`suspend_running_clock`), and a wall-clock
+            // jump cannot shorten or extend a wait that has no deadline, so it
+            // is no longer a reason to fail the Run either.
+            if self.approval_deadline_wall_ms.is_none() {
                 return vec![Effect::Audit {
-                    message: "waiting_approval has no persisted approval deadline".into(),
+                    message: "waiting_approval has no persisted approval anchor".into(),
                 }];
-            };
-            // Fail closed on a backwards wall clock rather than waiting forever.
-            if wall_ms < deadline.saturating_sub(self.config.approval_wait_timeout_ms) {
-                return self.terminate(RunOutcome::Failed {
-                    code: "approval.clock_rollback".into(),
-                    message: "Wall clock moved backwards during an approval wait.".into(),
-                });
             }
-            if wall_ms < deadline {
-                return Vec::new();
-            }
-            let waiting_ids = self
-                .tools
-                .values()
-                .filter(|tool| tool.state == ToolCallState::WaitingApproval)
-                .map(|tool| tool.tool_call_id.clone())
-                .collect::<Vec<_>>();
-            let running_ids = self
-                .tools
-                .values()
-                .filter(|tool| tool.state == ToolCallState::Running)
-                .map(|tool| tool.tool_call_id.clone())
-                .collect::<Vec<_>>();
-            for id in &waiting_ids {
-                if let Some(tool) = self.tools.get_mut(id) {
-                    // A call that was waiting for a human was NEVER dispatched.
-                    // It is expired, not failed: the work is still open and a
-                    // continuation may re-propose it under a fresh approval.
-                    // Marking it `Failed` made the whole Run look unrecoverable.
-                    tool.state = ToolCallState::Expired;
-                }
-            }
-            for id in &running_ids {
-                if let Some(tool) = self.tools.get_mut(id) {
-                    tool.state = ToolCallState::Cancelled;
-                }
-            }
-            self.approval_deadline_wall_ms = None;
-            let completed_ids = self
-                .tools
-                .values()
-                .filter(|tool| tool.state == ToolCallState::Completed)
-                .map(|tool| tool.tool_call_id.clone())
-                .collect::<Vec<_>>();
-            let mut effects = Vec::new();
-            for tool_call_id in &waiting_ids {
-                effects.push(Effect::ApprovalExpired {
-                    tool_call_id: tool_call_id.clone(),
-                });
-                effects.push(self.append_event(
-                    "tool.expired",
-                    serde_json::json!({
-                        "toolCallId": tool_call_id,
-                        "code": "approval.wait_timeout",
-                        "message": "The approval request expired before the user decided; the call was not executed.",
-                        "continuable": true
-                    }),
-                ));
-            }
-            for tool_call_id in running_ids {
-                effects.push(Effect::CancelToolCall {
-                    tool_call_id: tool_call_id.clone(),
-                });
-                effects.push(self.append_event(
-                    "tool.cancelled",
-                    serde_json::json!({
-                        "toolCallId": tool_call_id,
-                        "reason": "approval_wait_timeout"
-                    }),
-                ));
-            }
-            // Record the durable resume facts before the terminal write: which
-            // approvals are dead, that they are not executable, and which
-            // results were already banked. A continuation re-verifies the scope
-            // and opens a NEW approval; it never reuses these.
-            effects.push(self.append_event(
-                "run.awaiting_approval_expired",
-                serde_json::json!({
-                    "approvalWaitTimeoutMs": self.config.approval_wait_timeout_ms,
-                    "expiredToolCallIds": waiting_ids,
-                    "expiredApprovalsExecutable": false,
-                    "completedToolCallIds": completed_ids,
-                    "resumable": true
-                }),
-            ));
-            effects.extend(self.terminate(RunOutcome::ApprovalExpired {
-                code: "approval.wait_timeout".into(),
-                message: format!(
-                    "Approval was not resolved within {}ms. The expired approval cannot be executed; the Host can re-verify the scope and open a new one.",
-                    self.config.approval_wait_timeout_ms
-                ),
-            }));
-            return effects;
+            let _ = wall_ms;
+            return Vec::new();
         }
 
         if self.state == RunState::Running
