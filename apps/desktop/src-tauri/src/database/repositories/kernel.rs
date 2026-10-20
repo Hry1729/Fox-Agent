@@ -6,6 +6,8 @@
 //! application restart. Pending approval and external-effect facts MUST survive
 //! restart — they are never held only in an in-memory promise.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
@@ -65,7 +67,7 @@ fn project_settled_tools_on(
             None => return Err(notice_error("completed tool has no durable result")),
         };
         let mut result = if raw.get("content").is_some() { raw } else {
-            serde_json::json!({"content":[{"type":"text","text":raw.to_string()}]})
+            serde_json::json!({"content":[{"type":"text","text":raw.canonical_string()}]})
         };
         let canonical_input: serde_json::Value = serde_json::from_str(&input_json)
             .map_err(|_| notice_error("invalid durable tool input"))?;
@@ -134,7 +136,7 @@ impl Database {
         turn_id: &str, checkpoint_seq: u64, worker: &Value, host_category: &str,
         identity: Option<(i64,i64)>) -> Result<bool,String> {
         if request_id.is_empty() || request_id.len() > 128 || turn_id.len() > 512
-            || worker.to_string().len() > 2048 || !matches!(host_category,
+            || worker.canonical_string().len() > 2048 || !matches!(host_category,
                 "worker_rejected"|"settled_model_failure"|"protocol_invalid"|"transport_outcome_unknown") {
             return Err("invalid response diagnostic".into());
         }
@@ -282,7 +284,7 @@ fn bound_batch_source_on(
     let payload: Value = serde_json::from_str(body)
         .map_err(|_| notice_error("invalid durable batch checkpoint"))?;
     let value = &payload["checkpoint"]["value"];
-    let hash = format!("sha256:{}",hex::encode(Sha256::digest(value.to_string().as_bytes())));
+    let hash = format!("sha256:{}",hex::encode(Sha256::digest(value.canonical_string().as_bytes())));
     let engine_id: String = tx.query_row(
         "SELECT engine_id FROM kernel_runs WHERE run_id=?1 AND kernel_mode='authoritative'",
         [run], |row| row.get(0))?;
@@ -507,7 +509,7 @@ fn bind_model_notices(
         "deliveredHistory":input.delivered_history,
         "checkpointSeq":input.checkpoint_seq,"historyStart":input.history_start,
         "historicalHostNoticeBytes":input.historical_bytes});
-    let input_json = bound.to_string();
+    let input_json = bound.canonical_string();
     let input_hash = format!("sha256:{}", hex::encode(Sha256::digest(input_json.as_bytes())));
     tx.execute("INSERT INTO kernel_model_notice_inputs
         (run_id,dispatch_key,lease_owner,input_hash,input_json,history_start,historical_bytes,state,bound_at)
@@ -2147,9 +2149,9 @@ impl Database {
         if cmd.running_elapsed_ms < 0 {
             return Err("kernel running elapsed time must not be negative".into());
         }
-        let retry_json = serde_json::to_string(&cmd.retry)
+        let retry_json = crate::canonical_json::to_string(&cmd.retry)
             .map_err(|error| format!("serialize kernel retry state: {error}"))?;
-        let compaction_json = serde_json::to_string(&cmd.compaction)
+        let compaction_json = crate::canonical_json::to_string(&cmd.compaction)
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
         let changed = self.with_connection(|connection| {
             // A decision always writes (events, run state, leases), and it reads
@@ -2379,7 +2381,7 @@ impl Database {
                             "continue_remaining_work"
                         },
                     })
-                    .to_string();
+                    .canonical_string();
                     transaction.execute(
                         "INSERT INTO kernel_run_progress
                          (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
@@ -2817,7 +2819,7 @@ impl Database {
                         params![
                             batch.batch_id,
                             run_id,
-                            serde_json::to_string(&batch.ordered_tool_call_ids)
+                            crate::canonical_json::to_string(&batch.ordered_tool_call_ids)
                                 .map_err(|error| kernel_err(error.to_string()))?,
                             batch.barrier_emitted as i64,
                             wall_now_ms,
@@ -3704,7 +3706,7 @@ impl Database {
                         "lastEventSeq": final_last_seq,
                         "resumable": true,
                     })
-                    .to_string();
+                    .canonical_string();
                     transaction.execute(
                         "INSERT INTO kernel_run_progress
                          (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
@@ -3773,7 +3775,7 @@ impl Database {
                         "outstandingItems": outstanding,
                     },
                 })
-                .to_string();
+                .canonical_string();
                 transaction.execute(
                     "INSERT INTO kernel_run_progress
                      (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
@@ -3949,7 +3951,7 @@ impl Database {
                 "input": serde_json::from_str::<serde_json::Value>(&input)
                     .map_err(|error| kernel_err(error.to_string()))?
             });
-            let payload = payload_value.to_string();
+            let payload = payload_value.canonical_string();
             let effect_key = crate::kernel::dispatch_effect_key(tool_call_id);
             let idempotency_key = crate::kernel::dispatch_idempotency_key(run_id, tool_call_id);
             let existing: Option<(String, String, Option<String>, Option<String>, String)> =
@@ -4608,7 +4610,7 @@ impl Database {
                     let expected = serde_json::json!({
                         "orderedToolCallIds": batch.ordered
                     })
-                    .to_string();
+                    .canonical_string();
                     if delivery != Some(("deliver_tool_batch".to_string(), expected)) {
                         return Err(kernel_err(format!(
                             "settled batch is missing exact durable delivery for {run_id}/{}",
@@ -5177,7 +5179,7 @@ impl Database {
         if frozen.capability_manifest_hash.trim().is_empty() {
             return Err("shadow frozen config requires a capability manifest hash".into());
         }
-        let frozen_json = serde_json::to_string(frozen)
+        let frozen_json = crate::canonical_json::to_string(frozen)
             .map_err(|error| format!("failed to serialize frozen shadow config: {error}"))?;
         let now = now_ms();
         self.with_connection(|connection| {
@@ -5240,11 +5242,11 @@ impl Database {
         diff: &crate::kernel::ShadowDiff,
     ) -> Result<(), String> {
         let category = diff.category.as_str();
-        let legacy_json = serde_json::to_string(&diff.legacy)
+        let legacy_json = crate::canonical_json::to_string(&diff.legacy)
             .map_err(|error| format!("legacy disposition: {error}"))?;
-        let kernel_json = serde_json::to_string(&diff.kernel)
+        let kernel_json = crate::canonical_json::to_string(&diff.kernel)
             .map_err(|error| format!("kernel disposition: {error}"))?;
-        let detail_json = diff.detail.to_string();
+        let detail_json = diff.detail.canonical_string();
         let now = now_ms();
         self.with_connection(|connection| {
             // The shadow run must exist and reference this legacy run.
@@ -5307,11 +5309,11 @@ impl Database {
         state: &str,
     ) -> Result<(), String> {
         let category = diff.category.as_str();
-        let legacy_json = serde_json::to_string(&diff.legacy)
+        let legacy_json = crate::canonical_json::to_string(&diff.legacy)
             .map_err(|error| format!("legacy disposition: {error}"))?;
-        let kernel_json = serde_json::to_string(&diff.kernel)
+        let kernel_json = crate::canonical_json::to_string(&diff.kernel)
             .map_err(|error| format!("kernel disposition: {error}"))?;
-        let detail_json = diff.detail.to_string();
+        let detail_json = diff.detail.canonical_string();
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.unchecked_transaction()?;
@@ -5890,7 +5892,7 @@ mod tests {
             "perm-v1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         db.kernel_update_run_state("run-e2e", "running").unwrap();
@@ -6201,7 +6203,7 @@ mod tests {
         assert!(db.kernel_conversation_snapshot("snapshot-conversation", "missing").is_err());
         let config = phase3b_config();
         db.kernel_create_run("snapshot-auth", "pi", "authoritative", 2, "perm-1", "legacy", "h",
-            &serde_json::to_string(&config).unwrap()).unwrap();
+            &crate::canonical_json::to_string(&config).unwrap()).unwrap();
         let (mut controller, effects) = crate::kernel::RunController::start(
             "snapshot-auth", "turn-1", config, &crate::kernel::TestClock::new(0)).unwrap();
         db.kernel_commit_decision("snapshot-auth", 0, &controller.persist_command(&effects)).unwrap();
@@ -6213,7 +6215,7 @@ mod tests {
         assert_eq!(snapshot.run_id, "snapshot-auth");
         assert_eq!(snapshot.state, "running");
         assert_eq!(snapshot.last_event_seq, controller.last_event_seq().to_string());
-        let json = serde_json::to_string(&snapshot).unwrap();
+        let json = crate::canonical_json::to_string(&snapshot).unwrap();
         for forbidden in ["payloadJson", "resultJson", "permissionSnapshot", "pendingEffects"] {
             assert!(!json.contains(forbidden));
         }
@@ -6242,7 +6244,7 @@ mod tests {
         let db = Database::open(temporary_db_path("single-effect-lease")).unwrap();
         for mode in ["legacy", "authoritative"] {
             let config = crate::kernel::RunFrozenConfig { kernel_mode: mode.into(), ..phase3b_config() };
-            db.kernel_create_run(mode, "pi", mode, 2, "perm-1", "legacy", "h", &serde_json::to_string(&config).unwrap()).unwrap();
+            db.kernel_create_run(mode, "pi", mode, 2, "perm-1", "legacy", "h", &crate::canonical_json::to_string(&config).unwrap()).unwrap();
             db.kernel_update_run_state(mode, "running").unwrap();
             for key in ["one", "two"] {
                 db.with_connection(|connection| connection.execute(
@@ -6273,7 +6275,7 @@ mod tests {
         config.kernel_mode = kernel_mode.to_string();
         config.permission_snapshot_id = permission.to_string();
         config.prompt_config_hash = prompt_hash.to_string();
-        serde_json::to_string(&config).unwrap()
+        crate::canonical_json::to_string(&config).unwrap()
     }
 
     /// The key acceptance flow: an approval-required run is durably committed, the
@@ -6312,7 +6314,7 @@ mod tests {
                 "perm-1",
                 "legacy",
                 "h",
-                &serde_json::to_string(&config).unwrap(),
+                &crate::canonical_json::to_string(&config).unwrap(),
             )
             .unwrap();
             let (mut controller, start_effects) =
@@ -6472,7 +6474,7 @@ mod tests {
                 "perm-1",
                 "legacy",
                 "h",
-                &serde_json::to_string(&config).unwrap(),
+                &crate::canonical_json::to_string(&config).unwrap(),
             )
             .unwrap();
             let clock = crate::kernel::TestClock::new(0);
@@ -6547,7 +6549,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -6632,7 +6634,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -6699,7 +6701,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -6786,7 +6788,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -6866,7 +6868,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -7010,7 +7012,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -7091,7 +7093,7 @@ mod tests {
                 "perm-1",
                 "legacy",
                 "h",
-                &serde_json::to_string(&config).unwrap(),
+                &crate::canonical_json::to_string(&config).unwrap(),
             )
             .unwrap();
             let clock = crate::kernel::TestClock::new(0);
@@ -7147,7 +7149,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -7234,7 +7236,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -7305,7 +7307,7 @@ mod tests {
             "perm-1",
             "legacy",
             "h",
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         let clock = crate::kernel::TestClock::new(0);
@@ -7657,7 +7659,7 @@ mod tests {
                 &frozen.permission_snapshot_id,
                 &frozen.execution_profile_id,
                 &frozen.prompt_config_hash,
-                &serde_json::to_string(&frozen).unwrap(),
+                &crate::canonical_json::to_string(&frozen).unwrap(),
             )
             .is_err());
     }
@@ -7686,7 +7688,7 @@ mod tests {
                 &frozen.permission_snapshot_id,
                 &frozen.execution_profile_id,
                 &frozen.prompt_config_hash,
-                &serde_json::to_string(&frozen).unwrap(),
+                &crate::canonical_json::to_string(&frozen).unwrap(),
             )
             .unwrap();
             db.kernel_update_run_state("auth-1", "running").unwrap();
@@ -7793,7 +7795,7 @@ mod tests {
             &frozen.permission_snapshot_id,
             &frozen.execution_profile_id,
             &frozen.prompt_config_hash,
-            &serde_json::to_string(&frozen).unwrap(),
+            &crate::canonical_json::to_string(&frozen).unwrap(),
         )
         .unwrap();
         db.kernel_update_run_state("auth-pending", "running")
