@@ -131,7 +131,7 @@ pub fn build_u1_parked_fixture(
         &binding.permission_snapshot_id,
         "legacy",
         &prompt_config_hash,
-        &serde_json::to_string(&config).map_err(|error| error.to_string())?,
+        &crate::canonical_json::to_string(&config).map_err(|error| error.to_string())?,
     )?;
     // `start_prepared` needs a frozen model configuration as well as a frozen
     // initial input; both are what the coordinator requires to begin a round.
@@ -196,7 +196,7 @@ pub fn build_u1_parked_fixture(
             "content": [{"type": "text", "text": "收到，正在整理交付清单。"}],
         }),
     };
-    let response_json = serde_json::to_string(&response).map_err(|error| error.to_string())?;
+    let response_json = crate::canonical_json::to_string(&response).map_err(|error| error.to_string())?;
     let effects = controller
         .record_initial_model_response(&response_json)
         .map_err(|error| error.to_string())?;
