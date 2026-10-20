@@ -3,6 +3,8 @@
 //! ignored real-runtime test; these cover the durable state machine without a
 //! Node worker.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use serde_json::json;
 
@@ -153,7 +155,7 @@ fn record_steering_lane_rounds(db_path: &std::path::Path, run_id: &str, count: i
                 run_id,
                 10_000 + index,
                 serde_json::json!({"lane": "steering", "effectKey": format!("continuation:{index}")})
-                    .to_string(),
+                    .canonical_string(),
                 crate::database::now_ms()
             ],
         )
@@ -396,7 +398,7 @@ fn the_batch_steering_follow_up_appends_the_reply_exactly_once() {
     let staged = db
         .kernel_continuation_input(&run_id, &format!("continuation:{staged_seq}"))
         .expect("frozen follow-up input");
-    let text = serde_json::to_string(&staged).unwrap();
+    let text = crate::canonical_json::to_string(&staged).unwrap();
     // Exactly one copy of this round's reply, and the settled tool round intact.
     assert_eq!(
         text.matches("批后汇报。").count(),
@@ -498,7 +500,7 @@ fn a_steering_follow_up_keeps_the_settled_tool_history() {
     let staged = db
         .kernel_continuation_input(&run_id, &format!("continuation:{staged_seq}"))
         .expect("the steering round input is frozen with its decision");
-    let text = serde_json::to_string(&staged).unwrap();
+    let text = crate::canonical_json::to_string(&staged).unwrap();
     assert!(
         text.contains("read the file"),
         "the batch history must survive into the follow-up round: {text}"
