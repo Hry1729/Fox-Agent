@@ -8,15 +8,19 @@
 //! `agent_backend_not_yet_wired` / `agent_backend_invalid`), and prints one
 //! audit line carrying both `agent_backend` and `engine_id`.
 //!
-//! A gate returns `Err` only when the stored backend is confirmed to be
-//! something other than `fox` (or the request names a backend that differs
-//! from the stored one). Everything else, including an unknown conversation /
-//! run / approval, a database without the v95 column, or a storage error
-//! while reading it, returns `Ok(())` and the caller continues on its
-//! existing, unchanged path (Kernel / legacy / yuxi); a lookup that could not
-//! be answered is audited as `routed=fox_fallback`.
+//! A gate returns the route: `Route::Fox` (the existing, unchanged path),
+//! `Route::External(backend)` (the external runtime, `crate::external_backend`;
+//! only with `FOX_EXTERNAL_BACKENDS` on), or `Err` with the routing code. An
+//! unknown conversation / run / approval returns `Route::Fox` so the old error
+//! codes are unchanged. A lookup that fails (storage error, pre-v95 column)
+//! falls back to the Fox path (audited `routed=fox_fallback`) only while every
+//! external backend is off and the request names none; otherwise it is
+//! refused (`agent_backend_lookup_failed`), so a possibly external
+//! conversation never reaches the Fox runtime because a read failed
+//! (external backend wiring batch, item 5).
 use super::*;
-use fox_agent_backend::host_routing::{self, BackendSwitch, HostEntry, Route, RouteError};
+use fox_agent_backend::host_routing::{self, BackendSwitch, HostEntry, RouteError};
+pub(crate) use fox_agent_backend::host_routing::Route;
 use fox_agent_backend::port::AgentBackend;
 
 pub(crate) fn route_failure<T: serde::Serialize>(error: &RouteError) -> ApiResponse<T> {
@@ -64,6 +68,34 @@ fn log_lookup_fallback(entry: HostEntry, conversation_id: &str, run_id: Option<&
     );
 }
 
+/// A lookup that could not be answered: Fox fallback (audited) only while no
+/// external backend is involved, else refused.
+fn on_lookup_error<T: serde::Serialize>(
+    entry: HostEntry,
+    conversation_id: &str,
+    run_id: Option<&str>,
+    requested: Option<&str>,
+    error: &str,
+) -> Result<Route, ApiResponse<T>> {
+    match host_routing::on_lookup_failure(entry, requested, &BackendSwitch::from_env(), error) {
+        Ok(()) => {
+            log_lookup_fallback(entry, conversation_id, run_id, error);
+            Ok(Route::Fox)
+        }
+        Err(refusal) => {
+            eprintln!(
+                "fox.host_routing entry={} conversation={} run={} agent_backend=- engine_id=- refused={} reason={}",
+                entry.as_str(),
+                conversation_id,
+                run_id.unwrap_or("-"),
+                refusal.code(),
+                lookup_fallback_reason(error)
+            );
+            Err(route_failure(&refusal))
+        }
+    }
+}
+
 /// Choose the frozen backend for a conversation about to be created.
 pub(crate) fn choose_new_conversation_backend<T: serde::Serialize>(
     requested: Option<&str>,
@@ -84,28 +116,23 @@ pub(crate) fn gate_conversation<T: serde::Serialize>(
     conversation_id: &str,
     run_id: Option<&str>,
     requested: Option<&str>,
-) -> Result<(), ApiResponse<T>> {
+) -> Result<Route, ApiResponse<T>> {
     let stored = match database.conversation_agent_backend(conversation_id) {
         Ok(Some(stored)) => stored,
         // Unknown conversation: the existing path answers exactly as before.
-        Ok(None) => return Ok(()),
-        // Fix 1 (Windows acceptance of 3a82f5d): a failed read never changes
-        // the existing path's behaviour. Audit it and let the original path
-        // run (and report its own storage error if the database is really
-        // unusable). Only a conversation confirmed as non-Fox is refused.
-        Err(error) => {
-            log_lookup_fallback(entry, conversation_id, run_id, &error);
-            return Ok(());
-        }
+        Ok(None) => return Ok(Route::Fox),
+        // Switch off: unchanged since fix 1 (audit, existing path). Any
+        // external backend on: refused (`on_lookup_error`).
+        Err(error) => return on_lookup_error(entry, conversation_id, run_id, requested, &error),
     };
     let outcome = host_routing::route_stored(entry, Some(&stored), requested, &BackendSwitch::from_env());
     let refused = outcome.is_err();
     // Successful Fox routes are not logged per entry on start/resume: the
     // Kernel already logs the run with its engine_id; refusals always are.
-    if refused {
+    if refused || matches!(outcome, Ok((_, Route::External(_)))) {
         log_route(entry, conversation_id, run_id, Some(&stored), None, &outcome);
     }
-    outcome.map(|_| ()).map_err(|error| route_failure(&error))
+    outcome.map(|(_, route)| route).map_err(|error| route_failure(&error))
 }
 
 /// Gate an entry that names a run or an approval (cancel / approve). The
@@ -114,16 +141,13 @@ pub(crate) fn gate_run_identity<T: serde::Serialize>(
     entry: HostEntry,
     identity: Result<Option<crate::database::RunBackendIdentity>, String>,
     requested: Option<&str>,
-) -> Result<(), ApiResponse<T>> {
+) -> Result<Route, ApiResponse<T>> {
     let identity = match identity {
         Ok(Some(identity)) => identity,
         // Unknown run / approval: the existing path answers exactly as before.
-        Ok(None) => return Ok(()),
-        // Same rule as `gate_conversation`: audit, then the existing path.
-        Err(error) => {
-            log_lookup_fallback(entry, "-", None, &error);
-            return Ok(());
-        }
+        Ok(None) => return Ok(Route::Fox),
+        // Same rule as `gate_conversation`.
+        Err(error) => return on_lookup_error(entry, "-", None, requested, &error),
     };
     let outcome = host_routing::route_stored(
         entry,
@@ -139,7 +163,7 @@ pub(crate) fn gate_run_identity<T: serde::Serialize>(
         identity.engine_id.as_deref(),
         &outcome,
     );
-    outcome.map(|_| ()).map_err(|error| route_failure(&error))
+    outcome.map(|(_, route)| route).map_err(|error| route_failure(&error))
 }
 
 /// One backend in the new-conversation picker.
@@ -187,6 +211,31 @@ pub fn agent_backends_status() -> ApiResponse<AgentBackendStatus> {
     })
 }
 
+/// The four effective capability dimensions of an external backend
+/// (approval / sandbox / cancel / observability), for the UI. `live` when a
+/// session of this conversation ran in this Fox process, `planned` before.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendCapabilitiesRequest {
+    pub backend: String,
+    pub conversation_id: Option<String>,
+}
+
+#[tauri::command]
+pub fn agent_backend_capabilities(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendCapabilitiesRequest,
+) -> ApiResponse<fox_agent_backend::capability_view::CapabilityView> {
+    match AgentBackend::parse(&request.backend) {
+        Some(AgentBackend::Fox) | None => ApiResponse::failure(
+            RouteError::CODE_INVALID,
+            format!("只有外部 Agent 后端有能力声明：{}", request.backend),
+            false,
+        ),
+        Some(backend) => ApiResponse::success(external.capabilities(request.conversation_id.as_deref(), backend)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,20 +256,24 @@ mod tests {
         let conversation = database
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("conversation");
-        let gated: Result<(), ApiResponse<()>> =
+        let gated: Result<Route, ApiResponse<()>> =
             gate_conversation(&database, HostEntry::Start, &conversation.id, None, None);
         assert!(gated.is_ok(), "fox conversation routes to the existing path");
-        let gated: Result<(), ApiResponse<()>> =
+        let gated: Result<Route, ApiResponse<()>> =
             gate_conversation(&database, HostEntry::Start, "missing", None, None);
         assert!(gated.is_ok(), "unknown conversation is left to the existing path");
 
-        let storage_error: Result<(), ApiResponse<()>> =
+        let storage_error: Result<Route, ApiResponse<()>> =
             gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), None);
         assert!(storage_error.is_ok(), "storage errors never change the existing path");
-        let missing_column: Result<(), ApiResponse<()>> =
+        let missing_column: Result<Route, ApiResponse<()>> =
             gate_run_identity(HostEntry::Approve, Err("no such column: c.agent_backend".to_owned()), None);
         assert!(missing_column.is_ok());
-        let unknown: Result<(), ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(None), None);
+        let unknown: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(None), None);
+        // A request that names an external backend is refused when the read fails.
+        let named: Result<Route, ApiResponse<()>> =
+            gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), Some("pi"));
+        assert_eq!(named.unwrap_err().error.unwrap().code, "agent_backend_lookup_failed");
         assert!(unknown.is_ok());
     }
 
@@ -230,12 +283,12 @@ mod tests {
         let pi = database
             .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
             .expect("pi conversation");
-        let gated: Result<(), ApiResponse<()>> =
+        let gated: Result<Route, ApiResponse<()>> =
             gate_conversation(&database, HostEntry::Start, &pi.id, None, None);
         let failure = gated.expect_err("pi is refused before any runtime");
         let code = failure.error.as_ref().map(|error| error.code.clone());
         assert!(
-            matches!(code.as_deref(), Some("agent_backend_disabled") | Some("agent_backend_not_yet_wired")),
+            matches!(code.as_deref(), Some("agent_backend_disabled")),
             "{code:?}"
         );
         let identity = crate::database::RunBackendIdentity {
@@ -244,7 +297,7 @@ mod tests {
             agent_backend: "fox".to_owned(),
             engine_id: None,
         };
-        let fox: Result<(), ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
+        let fox: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
         assert!(fox.is_ok());
     }
 }
