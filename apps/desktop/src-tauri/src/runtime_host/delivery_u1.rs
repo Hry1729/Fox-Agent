@@ -1268,7 +1268,7 @@ fn plain_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 fn spec_digest(requirements_json: &str) -> String {
     let value: serde_json::Value =
         serde_json::from_str(requirements_json).unwrap_or(serde_json::json!({}));
-    digest_hex(serde_json::to_vec(&value).unwrap_or_default().as_slice())
+    digest_hex(crate::canonical_json::to_vec(&value).unwrap_or_default().as_slice())
 }
 
 fn acceptance_snapshot(
@@ -1277,7 +1277,7 @@ fn acceptance_snapshot(
     binding: &AcceptanceBinding,
     accepted_version_id: Option<&str>,
 ) -> String {
-    serde_json::to_string(&serde_json::json!({
+    crate::canonical_json::to_string(&serde_json::json!({
         "runId": run_id,
         "itemKey": item_key,
         "candidatePath": binding.candidate_path,
