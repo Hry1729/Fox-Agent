@@ -1,4 +1,6 @@
 //! Request accounting is telemetry, not a second controller or budget authority.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -8,7 +10,7 @@ pub(super) fn store(tx: &Transaction<'_>, run: &str, record: &Value) -> rusqlite
     let bad = || rusqlite::Error::InvalidParameterName("invalid usage-v1 request record".into());
     if record["schemaVersion"] != "usage-v1"
         || record["runId"] != run
-        || record.to_string().len() > 32768
+        || record.canonical_string().len() > 32768
     {
         return Err(bad());
     }
@@ -40,12 +42,12 @@ pub(super) fn store(tx: &Transaction<'_>, run: &str, record: &Value) -> rusqlite
             return Err(bad());
         }
     }
-    let identity = json!([run, record["requestId"], record["attemptId"]]).to_string();
+    let identity = json!([run, record["requestId"], record["attemptId"]]).canonical_string();
     let id = format!(
         "usage-request:{}",
         hex::encode(Sha256::digest(identity.as_bytes()))
     );
-    let payload = json!({"type":"usage.request","record":record}).to_string();
+    let payload = json!({"type":"usage.request","record":record}).canonical_string();
     let old: Option<String> = tx
         .query_row(
             "SELECT event_json FROM run_events WHERE id=?1",
