@@ -770,7 +770,8 @@ impl Database {
                     [run_id], |row| row.get(0))?;
                 let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2 AND state='pending')",
                     params![run_id,tool], |row| row.get(0))?;
-                if cancelled || state != "waiting_approval" || !pending || !deadline.is_some_and(|value| value > now) {
+                // Approvals do not expire: the persisted anchor only has to exist.
+                if cancelled || state != "waiting_approval" || !pending || deadline.is_none() {
                     return Err(invalid("Kernel approval is no longer actionable"));
                 }
             }
