@@ -1,4 +1,6 @@
 //! Versioned model-view policy. Original execution history is never edited.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::kernel_model_config::KernelModelConfig;
 use fox_engine_protocol::{KernelCompactionRequest, KernelCompactionResponse};
 use serde::{Deserialize, Serialize};
@@ -73,13 +75,13 @@ pub(crate) fn hash(value: &impl Serialize) -> Result<String, String> {
     Ok(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(
-            serde_json::to_vec(value).map_err(|_| "invalid compaction JSON")?,
+            crate::canonical_json::to_vec(value).map_err(|_| "invalid compaction JSON")?,
         ))
     ))
 }
 
 pub(crate) fn bytes(value: &impl Serialize) -> Result<usize, String> {
-    Ok(serde_json::to_vec(value)
+    Ok(crate::canonical_json::to_vec(value)
         .map_err(|_| "invalid compaction JSON")?
         .len())
 }
@@ -245,7 +247,7 @@ pub(crate) fn input_token_budget(config: &KernelModelConfig) -> usize {
 
 fn tokens_of(value: &impl Serialize) -> Result<usize, String> {
     Ok(estimate_tokens(
-        &serde_json::to_string(value).map_err(|_| "invalid compaction JSON")?,
+        &crate::canonical_json::to_string(value).map_err(|_| "invalid compaction JSON")?,
     ))
 }
 
@@ -920,7 +922,7 @@ pub(crate) fn project_structured_text(
         return None;
     }
     let is_array = parsed.is_array();
-    let total_bytes = serde_json::to_string(parsed).ok()?.len();
+    let total_bytes = crate::canonical_json::to_string(parsed).ok()?.len();
     // Decided once for the whole payload: omitting anything is only honest while
     // the omitted bytes stay reachable, and reachability comes from the Host's
     // storage fact — never from the payload's size.
@@ -934,7 +936,7 @@ pub(crate) fn project_structured_text(
 
     let (body, next) = split_next(parsed);
     let next_bytes = match &next {
-        Some(value) => serde_json::to_string(value).ok()?.len(),
+        Some(value) => crate::canonical_json::to_string(value).ok()?.len(),
         None => 0,
     };
     // Navigation is reserved *inside* the budget. If it cannot be carried, do
@@ -953,7 +955,7 @@ pub(crate) fn project_structured_text(
             is_array,
             next.as_ref(),
         );
-        if let Ok(text) = serde_json::to_string(&candidate) {
+        if let Ok(text) = crate::canonical_json::to_string(&candidate) {
             if text.len() <= max_bytes {
                 return Some(text);
             }
@@ -1028,7 +1030,7 @@ pub(crate) fn project_structured_text(
                     map.insert(key.clone(), Value::Array(full[..keep].to_vec()));
                 }
                 let candidate = compose_view(&body_at, &dropped, false, composed_next.as_ref());
-                if let Ok(text) = serde_json::to_string(&candidate) {
+                if let Ok(text) = crate::canonical_json::to_string(&candidate) {
                     if text.len() <= max_bytes {
                         return Some(text);
                     }
@@ -1045,7 +1047,7 @@ pub(crate) fn project_structured_text(
     fallback_note["omitted"] = json!(true);
     fallback_note["note"] = json!(retrieval_instruction(reference, None, retrievable));
     let fallback = compose_view(&Value::Null, &fallback_note, false, next.as_ref());
-    let text = serde_json::to_string(&fallback).ok()?;
+    let text = crate::canonical_json::to_string(&fallback).ok()?;
     (text.len() <= max_bytes).then_some(text)
 }
 
@@ -1058,7 +1060,7 @@ fn navigation_of(text: &str) -> Option<String> {
     }
     let parsed: Value = serde_json::from_str(trimmed).ok()?;
     let next = parsed.get("next").filter(|value| !value.is_null())?;
-    serde_json::to_string(next).ok()
+    crate::canonical_json::to_string(next).ok()
 }
 
 /// Bound one tool result text block. Returns `Some(replacement)` for the text
@@ -1328,7 +1330,7 @@ pub(crate) fn read_tool_result_model_view(result: &Value) -> Option<Value> {
     }
     let rendered = format!(
         "{READ_RESULT_CURSOR_MARKER} {}",
-        serde_json::to_string(&nav).ok()?
+        crate::canonical_json::to_string(&nav).ok()?
     );
     let mut content = result.get("content")?.as_array()?.clone();
     // Replayed views may already carry this cursor, including Node's different
@@ -1607,7 +1609,7 @@ fn tool_round_note(source: &[Value], start: usize, end: usize, run_id: &str) -> 
             lines.push(format!(
                 "- 调用 {} 参数 {}",
                 block["name"].as_str().unwrap_or("?"),
-                safe_excerpt(&block["arguments"].to_string(), PROJECTION_EXCERPT_CHARS / 2)
+                safe_excerpt(&block["arguments"].canonical_string(), PROJECTION_EXCERPT_CHARS / 2)
             ));
         }
     }
@@ -2244,7 +2246,7 @@ mod tests {
     #[test]
     fn structured_office_catalog_stays_valid_json_with_every_property_and_the_next_page() {
         let catalog = office_catalog();
-        let text = catalog.to_string();
+        let text = catalog.canonical_string();
         assert!(text.len() < 24 * 1024, "fixture must sit inside the Office page budget");
         let bounded = bounded_with_store("office_help", false, &text, Some(TEST_REF)).unwrap();
         assert!(
@@ -2270,14 +2272,14 @@ mod tests {
     #[test]
     fn structured_projection_keeps_navigation_verbatim_and_falls_back_to_valid_json() {
         let catalog = office_catalog();
-        let bounded = bounded_with_store("office_help", false, &catalog.to_string(), Some(TEST_REF)).unwrap();
+        let bounded = bounded_with_store("office_help", false, &catalog.canonical_string(), Some(TEST_REF)).unwrap();
         let parsed: Value = serde_json::from_str(&bounded).unwrap();
         assert_eq!(parsed["next"]["tool"], "office_help");
         // A payload with no shrinkable structure still yields parseable JSON.
         let rows = json!((0..200)
             .map(|index| json!({"name": format!("row-{index}"), "blob": "z".repeat(4_000)}))
             .collect::<Vec<_>>());
-        let bounded = bounded_with_store("list_mcp_tools", false, &rows.to_string(), Some(TEST_REF)).unwrap();
+        let bounded = bounded_with_store("list_mcp_tools", false, &rows.canonical_string(), Some(TEST_REF)).unwrap();
         assert!(bounded.len() <= TOOL_VIEW_MAX_BYTES);
         let parsed: Value = serde_json::from_str(&bounded).expect("fallback stays valid JSON");
         assert_eq!(parsed[STRUCT_VIEW_KEY]["bounded"], true);
@@ -2290,12 +2292,12 @@ mod tests {
         let prose = "y".repeat(40_000);
         let bounded = bounded_with_store("read", false, &prose, Some(&reference)).unwrap();
         assert!(bounded.contains("fox-result://run-1/call-9"));
-        let catalog = office_catalog().to_string();
+        let catalog = office_catalog().canonical_string();
         let bounded = bounded_with_store("office_help", false, &catalog, Some(&reference)).unwrap();
         let parsed: Value = serde_json::from_str(&bounded).unwrap();
         assert_eq!(parsed[STRUCT_VIEW_KEY]["resultRef"], "fox-result://run-1/call-9");
         // Small content is returned untouched, not merely re-serialized.
-        let small = json!({"ok": true, "value": "short"}).to_string();
+        let small = json!({"ok": true, "value": "short"}).canonical_string();
         assert!(bounded_with_store("office_help", false, &small, None).is_none());
         // Incomplete identities have no reference.
         assert!(tool_result_ref("", "call").is_none());
@@ -2308,7 +2310,7 @@ mod tests {
         // a safe read, so the result must pass through verbatim.
         let write_result = json!([{"type":"text","text": json!({
             "operation": "created", "id": "example-only", "body": "x".repeat(12_000)
-        }).to_string()}]);
+        }).canonical_string()}]);
         assert!(bound_tool_result_content("call_mcp_tool", false, &write_result, None).is_none());
         // The tool listing itself is read-only reference material, but it is only
         // bounded while Host keeps the whole of it — omitted entries have to stay
@@ -2317,7 +2319,7 @@ mod tests {
         let listing = |tools: usize, description: usize| {
             json!([{"type":"text","text": json!({"tools": (0..tools)
                 .map(|index| json!({"name": format!("mcp_{index}"), "description": "y".repeat(description)}))
-                .collect::<Vec<_>>()}).to_string()}])
+                .collect::<Vec<_>>()}).canonical_string()}])
         };
         // With the Host confirming it stored the whole listing, the view may be
         // bounded and the note must say the reference actually reaches it.
@@ -2637,7 +2639,7 @@ mod tests {
         for round in 0..12usize {
             let result = 2 + 2 * round;
             assert!(
-                serde_json::to_string(&plan.source[result]).unwrap().contains(RECEIPT_MARKER),
+                crate::canonical_json::to_string(&plan.source[result]).unwrap().contains(RECEIPT_MARKER),
                 "the durable receipt must stay in the source"
             );
         }
@@ -2922,7 +2924,7 @@ mod tests {
                 "arguments":{"format":"xlsx","element":"chart","page":2,"pageSize":60},
                 "instruction":"page 1/7"},
         });
-        let text = catalog.to_string();
+        let text = catalog.canonical_string();
         assert!(text.len() > TOOL_VIEW_MAX_BYTES, "fixture must need a projection");
         let bounded = bounded_with_store("office_help", false, &text, Some(TEST_REF)).unwrap();
         assert!(bounded.len() <= TOOL_VIEW_MAX_BYTES, "projection must stay in budget");
@@ -2977,7 +2979,7 @@ mod tests {
     fn navigation_survives_the_projection_or_the_result_is_left_unbounded() {
         // Structured path: navigation stays verbatim even when records are dropped.
         let catalog = office_catalog();
-        let bounded = bounded_with_store("office_help", false, &catalog.to_string(), Some(TEST_REF)).unwrap();
+        let bounded = bounded_with_store("office_help", false, &catalog.canonical_string(), Some(TEST_REF)).unwrap();
         let parsed: Value = serde_json::from_str(&bounded).unwrap();
         assert_eq!(parsed["next"]["tool"], "office_help");
 
@@ -2999,7 +3001,7 @@ mod tests {
             json!({"rows":[{"id":1}], "next":{"tool":"office_read","arguments":{"selector":selector}}}),
             reviewed_paging_shape,
         ] {
-            let text = payload.to_string();
+            let text = payload.canonical_string();
             assert!(text.len() > TOOL_VIEW_MAX_BYTES, "fixture must be over the view budget");
             // No trusted storage fact here: the payload must come back whole.
             let out = bound_tool_text("office_read", false, &text, None, &ToolResultStorage::unknown())
