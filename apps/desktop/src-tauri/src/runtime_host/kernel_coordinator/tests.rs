@@ -60,6 +60,8 @@ mod tool_result_read_tests;
 mod skill_load_tests;
 #[path = "delivery_live_tests.rs"]
 mod delivery_live_tests;
+#[path = "work_tool_failure_diag_tests.rs"]
+mod work_tool_failure_diag_tests;
 #[path = "concurrency_tests.rs"]
 mod concurrency_tests;
 #[path = "steering_tests.rs"]
