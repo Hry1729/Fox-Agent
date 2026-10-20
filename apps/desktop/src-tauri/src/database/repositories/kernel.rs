@@ -2890,25 +2890,14 @@ impl Database {
                             "pending approval has no durable deadline for {run_id}"
                         ))
                     })?;
+                    // Approvals no longer expire: `deadline` is only the wait's
+                    // wall anchor. A decision is accepted however long the user
+                    // took, and a wall-clock jump does not void it. The Kernel
+                    // itself never produces `expired` any more; refuse one that
+                    // claims to have arrived before the nominal window ended.
                     if resolution.state == "expired" && wall_now_ms < deadline {
                         return Err(kernel_err(format!(
                             "approval cannot expire before its deadline for {}/{}",
-                            run_id, resolution.tool_call_id
-                        )));
-                    }
-                    if wall_now_ms >= deadline
-                        && !matches!(resolution.state.as_str(), "expired" | "cancelled")
-                    {
-                        return Err(kernel_err(format!(
-                            "approval decision arrived after its deadline for {}/{}",
-                            run_id, resolution.tool_call_id
-                        )));
-                    }
-                    if wall_now_ms
-                        < deadline.saturating_sub(frozen.approval_wait_timeout_ms)
-                    {
-                        return Err(kernel_err(format!(
-                            "wall clock rolled back during approval for {}/{}",
                             run_id, resolution.tool_call_id
                         )));
                     }
@@ -3920,14 +3909,11 @@ impl Database {
                 transaction.commit()?;
                 return Ok(None);
             }
-            let deadline = deadline.ok_or_else(|| {
+            // Approvals do not expire: the persisted anchor must exist, but a
+            // decision is accepted however long the user took.
+            deadline.ok_or_else(|| {
                 kernel_err(format!("pending approval has no deadline for {run_id}"))
             })?;
-            if wall_now_ms > deadline {
-                return Err(kernel_err(format!(
-                    "approval decision arrived after its deadline for {run_id}/{tool_call_id}"
-                )));
-            }
             let affected = transaction.execute(
                 "UPDATE kernel_approvals SET state=?3, decided_at=?4
                   WHERE run_id=?1 AND tool_call_id=?2 AND state='pending'",
@@ -7004,7 +6990,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_commit_rejects_late_human_decision() {
+    fn approval_commit_accepts_late_human_decision_and_refuses_premature_expiry() {
         use crate::kernel::{ApprovalDecision, PolicyDecision, PolicyDecisionPort, RunController};
         struct RequireApproval;
         impl PolicyDecisionPort for RequireApproval {
@@ -7078,14 +7064,15 @@ mod tests {
             .unwrap_err();
         assert!(mismatch_error.contains("approval resolution conflicts"));
 
-        assert!(db
-            .kernel_commit_decision("run-late-approval", 1_100, &approved_command,)
-            .is_err());
+        // Long after the nominal window (100 ms) the user's decision is still
+        // accepted: approvals wait for the user and never expire.
+        db.kernel_commit_decision("run-late-approval", 1_000 + 10 * 60 * 60 * 1_000, &approved_command)
+            .unwrap();
         let facts = db
             .kernel_recovery_facts("run-late-approval")
             .unwrap()
             .unwrap();
-        assert_eq!(facts.pending_approvals.len(), 1);
+        assert_eq!(facts.pending_approvals.len(), 0);
     }
 
     #[test]
