@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use serde_json::json;
 use std::io::{Read, Write};
@@ -9,7 +11,7 @@ use std::sync::{
 use std::time::Duration;
 
 fn send_request(address: SocketAddr, body: &serde_json::Value) -> String {
-    let payload = body.to_string();
+    let payload = body.canonical_string();
     let mut stream = TcpStream::connect(address).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     write!(
