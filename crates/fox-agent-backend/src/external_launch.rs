@@ -217,16 +217,7 @@ impl HostLaunchConfig {
         if let Some(program) = crate::launch::program_override(backend) {
             return Some(PathBuf::from(program));
         }
-        let (dir, bin) = match backend {
-            AgentBackend::Pi => ("pi", "pi-acp"),
-            AgentBackend::Codex => ("codex", "codex-acp"),
-            AgentBackend::Deepseek => ("deepseek", "dsh"),
-            AgentBackend::Fox => return None,
-        };
-        let base = self.runtime_root.join("backends").join(dir);
-        [base.join("node_modules").join(".bin").join(self.exe(bin)), base.join(self.exe(bin))]
-            .into_iter()
-            .find(|candidate| candidate.is_file())
+        crate::launch::managed_entry(&self.runtime_root, backend, self.os == HostOs::Windows)
     }
 
     pub fn managed_node(&self) -> Option<PathBuf> {
