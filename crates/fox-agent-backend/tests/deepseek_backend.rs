@@ -205,15 +205,21 @@ mod real_binary {
         assert!(!session.is_empty());
 
         connection.prompt(&session, "Reply with the single word: pong").unwrap();
-        let has_key = std::env::var("DEEPSEEK_API_KEY").map(|key| !key.is_empty()).unwrap_or(false);
+        // A model is expected to answer when a key is present or the tester
+        // says the private HOME configures one (e.g. a local gateway through
+        // the `acp` row, see deepseek::USER_OWNED_ROWS):
+        // FOX_TEST_DSH_EXPECT_REPLY=1.
+        let has_key = std::env::var("DEEPSEEK_API_KEY").map(|key| !key.is_empty()).unwrap_or(false)
+            || std::env::var("FOX_TEST_DSH_EXPECT_REPLY").as_deref() == Ok("1");
         let mut outcome = None;
+        let mut reply = String::new();
         while let Some(event) = next(&mut connection, 120).await {
             match event {
                 BackendEvent::TurnEnded { stop_reason, .. } => {
                     outcome = Some(Ok(stop_reason));
                     break;
                 }
-                BackendEvent::Failed(error) => {
+                BackendEvent::Failed(error) | BackendEvent::TurnFailed { error, .. } => {
                     outcome = Some(Err(error));
                     break;
                 }
@@ -223,7 +229,14 @@ mod real_binary {
                         let _ = connection.answer_permission(&native_request_id, Some(answer));
                     }
                 }
-                BackendEvent::Update { update, .. } => eprintln!("update: {update}"),
+                BackendEvent::Update { update, .. } => {
+                    eprintln!("update: {update}");
+                    if update.get("sessionUpdate").and_then(|kind| kind.as_str()) == Some("agent_message_chunk") {
+                        if let Some(text) = update.pointer("/content/text").and_then(|text| text.as_str()) {
+                            reply.push_str(text);
+                        }
+                    }
+                }
                 BackendEvent::Closed => break,
                 BackendEvent::Initialized { .. } | BackendEvent::PermissionAutoCancelled { .. } => {}
             }
@@ -235,7 +248,14 @@ mod real_binary {
                 "without DEEPSEEK_API_KEY the prompt must fail, got {outcome:?}"
             );
         } else {
-            assert!(outcome.is_some(), "prompt did not settle within the timeout");
+            // A refused model (wrong provider routing, rejected key) used to
+            // pass here; it must now fail the test.
+            match &outcome {
+                Some(Ok(stop_reason)) => assert_eq!(stop_reason, &serde_json::json!("end_turn"), "turn did not end normally"),
+                other => panic!("expected end_turn with a reply, got {other:?}"),
+            }
+            assert!(!reply.trim().is_empty(), "end_turn without any agent text (model refused or empty)");
+            eprintln!("reply: {}", reply.trim());
         }
         connection.close().await;
         let _ = std::fs::remove_dir_all(&work);
