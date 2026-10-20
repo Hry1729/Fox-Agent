@@ -14,6 +14,16 @@ use fox_engine_protocol::RunControlBinding;
 use serde_json::{json, Value};
 use std::{path::Path, time::Duration};
 
+/// Run failure codes for a Host work/delegation tool failure that is NOT a
+/// pre-execution refusal (a write may have begun, or the outcome is unknown).
+/// The drive closure returns exactly these strings and the drive loop maps
+/// them by equality, like `kernel.jobs_pending`; the original error text stays
+/// in the local stderr diagnostics only.
+pub(super) const WORK_TOOL_UNCERTAIN: &str = "kernel.work_tool_failed";
+pub(super) const DELEGATION_TOOL_UNCERTAIN: &str = "kernel.delegation_tool_failed";
+pub(super) const TOOL_ERROR_BUDGET_MESSAGE: &str =
+    "工作工具连续多次在执行前被拒绝（参数或前置条件错误），纠错机会已用完，任务已停止。被拒绝的调用都没有执行、没有写入；这不是 API 额度不足。";
+
 fn terminal(state: &str) -> bool {
     matches!(
         state,
@@ -1354,6 +1364,18 @@ pub(super) fn drive_with_actions_transport(
             )?;
             continue;
         }
+        // Same shape for Host work tools: a typed, durable budget result means
+        // the model kept ignoring pre-execution refusals. Nothing was executed
+        // for any of them; stop before another model round.
+        if super::kernel_gateway::tool_error_budget_exhausted(&snapshot) {
+            settle_children(true)?;
+            coordinator.tick()?;
+            coordinator.fail(
+                super::kernel_gateway::TOOL_ERROR_BUDGET_EXHAUSTED,
+                TOOL_ERROR_BUDGET_MESSAGE,
+            )?;
+            continue;
+        }
         if snapshot.state == "retry_scheduled" {
             std::thread::sleep(Duration::from_millis(100));
             continue;
@@ -1557,6 +1579,10 @@ pub(super) fn drive_with_actions_transport(
                     .or_else(||super::kernel_model_worker::response_failure_code(&error))
                     .unwrap_or_else(|| match error.as_str() {
                     "kernel.jobs_pending" => ("kernel.jobs_pending", "后台计算尚未完成；任务已保留进度，请检查作业状态后继续。"),
+                    WORK_TOOL_UNCERTAIN => (WORK_TOOL_UNCERTAIN,
+                        "工作工具执行失败或结果无法确认（不属于可交还模型纠正的执行前拒绝）；为避免重复写入，任务已停止且未自动重放。请检查工作状态后重新发起。"),
+                    DELEGATION_TOOL_UNCERTAIN => (DELEGATION_TOOL_UNCERTAIN,
+                        "子任务委派执行失败或结果无法确认（不属于可交还模型纠正的参数拒绝）；为避免重复创建子任务，任务已停止且未自动重放。"),
                     crate::kernel_compaction::UNCERTAIN => (crate::kernel_compaction::UNCERTAIN,
                         "上下文压缩请求已发出，但结果未确认。原始历史保留，未自动重复请求；请检查后重新发起任务。"),
                     crate::kernel_compaction::INSUFFICIENT => (crate::kernel_compaction::INSUFFICIENT,
@@ -2293,7 +2319,17 @@ impl super::RuntimeHost {
                             execution_failure_code(&error),
                             super::redact_execution_diagnostic(&error, 1000).replace('\n', " "),
                         );
-                        Err(error)
+                        // Not a pre-execution refusal (those come back as
+                        // data above): the work may have started. Keep the
+                        // fatal path, but give the Run failure a specific
+                        // code. A cancellation keeps its own text and path.
+                        if token.check().is_err() {
+                            Err(error)
+                        } else if super::work_tools::is_work_tool(tool) {
+                            Err(WORK_TOOL_UNCERTAIN.to_owned())
+                        } else {
+                            Err(DELEGATION_TOOL_UNCERTAIN.to_owned())
+                        }
                     }
                     Err(error) if token.check().is_ok() => {
                         let dispatch_id = fox_engine_protocol::encode_dispatch_id(&binding.run_id, effect.tool_call_id.as_deref().ok_or("missing dispatch identity")?)?;
