@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -1458,7 +1460,7 @@ fn live_delivery_repair_loop_rides_continuation_without_consuming_review_budget_
     assert_eq!(requests.len(), 3);
     // The repair directive reached the model as a user turn naming the failed
     // deliverable; it never masquerades as the stop-review prompt.
-    let second_request = requests[1].to_string();
+    let second_request = requests[1].canonical_string();
     assert!(second_request.contains("Fox 交付核验"));
     assert!(!second_request.contains("Fox 续答检查"));
 }
@@ -1616,7 +1618,7 @@ fn a_batch_stage_provider_failure_retries_and_still_records_the_verdict() {
         requests.len()
     );
     assert!(
-        requests[1].to_string().contains("PROOF-READ-OK"),
+        requests[1].canonical_string().contains("PROOF-READ-OK"),
         "the dropped request must be the batch stage that follows the tool result"
     );
     let retries: i64 = db
@@ -1801,7 +1803,7 @@ fn live_delivery_gate_repairs_a_parseable_artifact_that_misses_a_stated_demand()
     assert_eq!(requests.len(), 4);
     // The repair prompt names the missing chart requirement and rides the
     // delivery lane rather than masquerading as the stop-review prompt.
-    let repair_request = requests[2].to_string();
+    let repair_request = requests[2].canonical_string();
     assert!(repair_request.contains("Fox 交付核验"));
     assert!(repair_request.contains("图表"), "repair must name the demand");
     assert!(!repair_request.contains("Fox 续答检查"));
