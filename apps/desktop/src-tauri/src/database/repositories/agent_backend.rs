@@ -244,6 +244,15 @@ mod tests {
             .expect("approval status")
     }
 
+    fn approval_reason(database: &Database, approval_id: &str) -> String {
+        let decision: String = database
+            .with_connection(|connection| {
+                connection.query_row("SELECT decision_json FROM approvals WHERE id = ?1", [approval_id], |row| row.get::<_, String>(0))
+            })
+            .expect("approval decision");
+        serde_json::from_str::<serde_json::Value>(&decision).expect("decision json")["reason"].as_str().unwrap_or_default().to_owned()
+    }
+
     #[test]
     fn external_runs_without_a_binding_resolve_approvals_and_complete() {
         use crate::database::ApprovalDecision;
@@ -308,8 +317,9 @@ mod tests {
         assert_eq!(approval_status(&database, &cancel_id), "cancelled");
         assert!(database.resolve_approval(&cancel_id, ApprovalDecision::AllowOnce).unwrap().is_none());
 
-        // Closing the conversation (backend session closed: the turn ends
-        // interrupted) ends its open approval; it can no longer be granted.
+        // Closing the conversation (archive / trash / delete: backend session
+        // closed, the turn ends interrupted) ends its open approval as
+        // `cancelled` (not `expired`); it can no longer be granted.
         let (closed_run, closed_id) = approve_once("perm-closed");
         database
             .record_external_event(
@@ -317,8 +327,27 @@ mod tests {
                 &serde_json::json!({ "type": "run.interrupted", "code": "agent_backend_session_closed", "message": "外部后端会话已关闭", "outcome": "unknown" }),
             )
             .expect("run.interrupted");
-        assert_ne!(approval_status(&database, &closed_id), "pending");
+        assert_eq!(approval_status(&database, &closed_id), "cancelled");
+        assert_eq!(approval_reason(&database, &closed_id), "conversation_closed");
         assert!(database.resolve_approval(&closed_id, ApprovalDecision::AllowOnce).unwrap().is_none());
+
+        // Fox exited with the approval open; the restart interrupts the run
+        // and the approval ends `cancelled` too.
+        let (restarted_run, restarted_id) = approve_once("perm-restart");
+        database
+            .mark_run_interrupted(&restarted_run, "agent_backend_host_restarted", "Fox 已重启")
+            .expect("interrupted at startup");
+        assert_eq!(approval_status(&database, &restarted_id), "cancelled");
+        assert_eq!(approval_reason(&database, &restarted_id), "app_restarted");
+        assert!(database.resolve_approval(&restarted_id, ApprovalDecision::AllowOnce).unwrap().is_none());
+
+        // Any other interruption still records `expired` + `run_interrupted`.
+        let (other_run, other_id) = approve_once("perm-other");
+        database
+            .mark_run_interrupted(&other_run, "runtime.cancel_not_active", "gone")
+            .expect("interrupted");
+        assert_eq!(approval_status(&database, &other_id), "expired");
+        assert_eq!(approval_reason(&database, &other_id), "run_interrupted");
 
         database
             .record_external_event(&approved_run, &serde_json::json!({ "type": "run.completed" }))
