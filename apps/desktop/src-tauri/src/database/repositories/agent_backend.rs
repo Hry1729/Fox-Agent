@@ -160,6 +160,25 @@ impl Database {
             rows.collect()
         })
     }
+
+    /// Startup step owned by the external Host: every run of an external
+    /// conversation that a previous Fox process left non-terminal is
+    /// interrupted with `agent_backend_host_restarted` (its backend died with
+    /// that process). `mark_run_interrupted` ends the run's pending approvals
+    /// as `cancelled` / `app_restarted`. The generic
+    /// `repair_interrupted_runs` skips these runs so this code is what they get.
+    /// Returns the interrupted run ids; a run that fails to transition is
+    /// logged and skipped, never aborting startup.
+    pub(crate) fn interrupt_external_runs_left_active(&self, message: &str) -> Result<Vec<String>, String> {
+        let mut interrupted = Vec::new();
+        for run_id in self.external_runs_left_active()? {
+            match self.mark_run_interrupted(&run_id, "agent_backend_host_restarted", message) {
+                Ok(()) => interrupted.push(run_id),
+                Err(error) => eprintln!("fox.external left_active_interrupt_failed run={run_id} error={error:?}"),
+            }
+        }
+        Ok(interrupted)
+    }
 }
 
 #[cfg(test)]
@@ -367,5 +386,57 @@ mod tests {
         assert_eq!(identity.run_id, started.run.id);
         assert_eq!(identity.agent_backend, "fox");
         assert_eq!(identity.engine_id, None, "no Kernel record before dispatch");
+    }
+
+    /// Item 6 (restart): the generic startup repair leaves external runs to
+    /// the external Host, which interrupts them with
+    /// `agent_backend_host_restarted` and cancels their pending approvals
+    /// (`app_restarted`). Fox runs keep the generic repair.
+    #[test]
+    fn restart_leaves_external_runs_to_the_external_host() {
+        let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let pi = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("restart"), None, None, "pi")
+            .expect("pi conversation");
+        let pi_run = database.create_run(&pi.id, "hello", None).expect("pi run").run.id;
+        database
+            .record_external_event(&pi_run, &serde_json::json!({ "type": "run.started" }))
+            .expect("started");
+        let (tool, _) = database
+            .create_host_tool_call_once(&pi_run, "perm-restart-gen", "agent_permission", &serde_json::json!({}), "pending", true)
+            .expect("permission tool call");
+        let approval = database
+            .create_approval(&tool.id, "run a command", &serde_json::json!({ "availableDecisions": ["allow_once", "deny"] }))
+            .expect("approval");
+        let fox = database
+            .create_conversation(database.default_agent_id(), Some("fox"), None, None)
+            .expect("fox conversation");
+        let fox_run = database.create_run(&fox.id, "hello", None).expect("fox run").run.id;
+
+        let run_state = |run_id: &str| -> (String, Option<String>) {
+            database
+                .with_connection(|connection| {
+                    connection.query_row("SELECT status, error_code FROM runs WHERE id = ?1", [run_id], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                })
+                .expect("run state")
+        };
+
+        database.repair_interrupted_runs().expect("generic repair");
+        assert_eq!(run_state(&fox_run), ("interrupted".to_owned(), Some("runtime.application_restarted".to_owned())));
+        let (pi_status, pi_code) = run_state(&pi_run);
+        assert!(matches!(pi_status.as_str(), "queued" | "running"), "generic repair must skip external runs: {pi_status}");
+        assert_eq!(pi_code, None);
+        assert_eq!(approval_status(&database, &approval.id), "pending", "generic repair must not expire external approvals");
+
+        let interrupted = database.interrupt_external_runs_left_active("Fox 已重启").expect("external host step");
+        assert_eq!(interrupted, vec![pi_run.clone()]);
+        assert_eq!(run_state(&pi_run), ("interrupted".to_owned(), Some("agent_backend_host_restarted".to_owned())));
+        assert_eq!(approval_status(&database, &approval.id), "cancelled");
+        assert_eq!(approval_reason(&database, &approval.id), "app_restarted");
+        assert!(database.resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce).unwrap().is_none());
+        // Idempotent on a second startup.
+        assert!(database.interrupt_external_runs_left_active("Fox 已重启").expect("second pass").is_empty());
     }
 }
