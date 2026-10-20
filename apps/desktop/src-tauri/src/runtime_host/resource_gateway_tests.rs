@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::kernel::{CancellationRegistry, CancellationPort};
 use fox_engine_protocol::ResourceExecutor;
@@ -22,7 +24,7 @@ fn legacy_file_read_claim_commit_and_duplicate_use_the_real_host_chain() {
     let identity = crate::database::kernel_execution_admission::FileTargetResolver::resolve(
         &resolver,
         fox_engine_protocol::ActionClass::Write,
-        &json!({"path":"note.txt","content":"committed"}).to_string(),
+        &json!({"path":"note.txt","content":"committed"}).canonical_string(),
     )
     .unwrap();
     let observed = db.host_observation_for(&run.id, &identity).unwrap().unwrap();
@@ -118,7 +120,7 @@ fn nested_rust_reader_requires_running_declared_node_and_namespaced_identity() {
     let (db, binding, _, _) = fixture("graph_readonly_preview");
     db.apply_runtime_event(&binding.run_id, 1, &json!({"type":"run.started"})).unwrap();
     db.apply_runtime_event(&binding.run_id, 2, &json!({"type":"tool.started","toolCallId":"parent","tool":"graph_readonly_run","input":{"nodes":[{"id":"node-a","task":"read"}]}})).unwrap();
-    let id = format!("graph-read:{}", hex::encode(Sha256::digest(serde_json::to_vec(&["parent", "node-a", "local-id"]).unwrap())));
+    let id = format!("graph-read:{}", hex::encode(Sha256::digest(crate::canonical_json::to_vec(&["parent", "node-a", "local-id"]).unwrap())));
     let mut request = request(&binding, &id);
     let payload = request.payload.as_mut().unwrap();
     payload["observationScope"] = json!("nested");
