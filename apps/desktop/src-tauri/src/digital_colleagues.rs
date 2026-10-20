@@ -221,7 +221,7 @@ fn validate_id(field: &str, value: &str, max: usize) -> Result<(), String> {
 }
 
 fn validate_payload(payload: &Value) -> Result<(), String> {
-    let size = serde_json::to_vec(payload)
+    let size = crate::canonical_json::to_vec(payload)
         .map_err(|error| error.to_string())?
         .len();
     if size > MAX_TRIGGER_BYTES {
@@ -603,7 +603,7 @@ fn canonical_json(value: &Value) -> String {
         Value::Null => "null".to_owned(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).expect("serialize JSON string"),
+        Value::String(value) => crate::canonical_json::to_string(value).expect("serialize JSON string"),
         Value::Array(values) => format!(
             "[{}]",
             values
@@ -620,7 +620,7 @@ fn canonical_json(value: &Value) -> String {
                     .into_iter()
                     .map(|(key, value)| format!(
                         "{}:{}",
-                        serde_json::to_string(key).expect("serialize JSON key"),
+                        crate::canonical_json::to_string(key).expect("serialize JSON key"),
                         canonical_json(value)
                     ))
                     .collect::<Vec<_>>()
