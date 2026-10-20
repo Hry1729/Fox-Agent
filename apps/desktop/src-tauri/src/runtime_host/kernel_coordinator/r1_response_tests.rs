@@ -1,5 +1,7 @@
 //! R1 exercises the owning Host with a real isolated Node worker and local SSE.
 //! These fixtures do not use an operator database, UI, or business model.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -205,8 +207,8 @@ fn r1_host_records_invalid_wire_old_worker_and_untrusted_errors_without_copying_
             assert_eq!(diagnostic["worker"]["providerFinishReason"],"unknown");
             assert_eq!(diagnostic["worker"]["source"],"worker_observation");
             assert_eq!(diagnostic["resultAccepted"],false);
-            assert!(!diagnostic.to_string().contains("private-r1"));
-            assert!(diagnostic.to_string().len()<4096);
+            assert!(!diagnostic.canonical_string().contains("private-r1"));
+            assert!(diagnostic.canonical_string().len()<4096);
         }
     }
 }
@@ -294,7 +296,7 @@ fn r1_length_and_interrupted_stream_retain_distinct_durable_evidence() {
             assert_eq!(diagnostics[0]["worker"]["providerFinishReason"],if interrupt {"unknown"} else {"length"});
             assert_eq!(diagnostics[0]["worker"]["category"],if interrupt {"stream_interrupted"} else {"length"});
             assert_eq!(diagnostics[0]["hostCategory"],"settled_model_failure");
-            assert!(!diagnostics[0].to_string().contains("private-r1"));
+            assert!(!diagnostics[0].canonical_string().contains("private-r1"));
             assert_eq!(provider.requests.load(Ordering::SeqCst),1);
         }
     }
