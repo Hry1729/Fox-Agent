@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   AGENT_BACKEND_REFUSED,
   agentBackendAccess,
+  agentBackendCapabilityChips,
   agentBackendInputLockedReason,
   isAgentBackendRefusalCode,
   withoutRefusedSend,
@@ -9,6 +10,7 @@ import {
   agentBackendPickerDisabledReason,
   canPickAgentBackend,
   conversationAgentBackend,
+  type AgentBackendCapabilities,
   type AgentBackendStatus,
 } from '../src/features/conversations/model/agent-backend'
 
@@ -91,5 +93,38 @@ describe('refused sends leave no optimistic trace (fix 1 after Windows acceptanc
     // Switch on but runtime not wired: the send goes to the Host, which answers
     // agent_backend_not_yet_wired, and the UI shows that one refusal.
     expect(agentBackendInputLockedReason('pi', status(['pi']))).toBeNull()
+  })
+})
+
+describe('capability chips (external backend wiring)', () => {
+  function view(source: 'live' | 'planned'): AgentBackendCapabilities {
+    const dim = (name: string) => ({ summary: `${name}-summary`, detail: `${name}-detail` })
+    return {
+      backend: 'pi',
+      mode: 'sandboxed',
+      source,
+      approval: dim('approval'),
+      sandbox: dim('sandbox'),
+      cancel: dim('cancel'),
+      observability: dim('observability'),
+      warning: null,
+    }
+  }
+
+  test('no view means no chips', () => {
+    expect(agentBackendCapabilityChips(null)).toEqual([])
+    expect(agentBackendCapabilityChips(undefined)).toEqual([])
+  })
+
+  test('four chips in a fixed order; live detail is unmarked', () => {
+    const chips = agentBackendCapabilityChips(view('live'))
+    expect(chips.map((chip) => chip.key)).toEqual(['approval', 'sandbox', 'cancel', 'observability'])
+    expect(chips[0]).toEqual({ key: 'approval', label: 'approval-summary', title: 'approval-detail' })
+  })
+
+  test('a planned view marks every title as a pre-launch estimate', () => {
+    const chips = agentBackendCapabilityChips(view('planned'))
+    expect(chips.every((chip) => chip.title.endsWith('（启动前预估）'))).toBe(true)
+    expect(chips[3].label).toBe('observability-summary')
   })
 })
