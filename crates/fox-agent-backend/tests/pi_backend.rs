@@ -3,7 +3,10 @@
 //! * Unit tests run always: recorded pi-acp 0.0.34 `initialize` response
 //!   (fixtures/pi/initialize-pi-acp-0.0.34.json, captured from a real
 //!   `npx -y pi-acp@0.0.34` on 2026-10-19) mapped to the capability declaration.
-//! * `real_*` tests drive the real `npx -y pi-acp@0.0.34` and real pi 0.84.2.
+//! * `real_*` tests drive the real pi-acp 0.0.34 and real pi 0.84.2. Entry:
+//!   `FOX_PI_ACP_PROGRAM`, else the managed runtime (`FOX_AGENT_RUNTIME_ROOT`;
+//!   Windows also `FOX_RUNTIME_ROOT` / the installed runtime), else
+//!   `npx -y pi-acp@0.0.34` (`launch::dev_launch_spec`, tests only).
 //!   They only run with `FOX_TEST_REAL_ACP=1`. Without it they `return` early:
 //!   that is a SKIP and does not count as passing (plan section 2).
 //!   Needs Node 22, npx with network (first run downloads pi-acp), and pi at
@@ -125,7 +128,7 @@ fn failures_from_pi_acp_are_classified() {
 mod real {
     use super::*;
     use fox_agent_backend::acp::{AcpConnection, BackendEvent};
-    use fox_agent_backend::launch::{launch_spec, LaunchSpec};
+    use fox_agent_backend::launch::{dev_launch_spec, DevEntrySource, LaunchSpec};
     use fox_agent_backend::port::AgentBackend;
     #[cfg(unix)]
     use fox_agent_backend::port::StopConfirmation;
@@ -191,16 +194,17 @@ mod real {
         }
     }
 
-    /// Stock launch spec (`npx -y pi-acp@0.0.34`), real environment allowlist.
+    /// Stock launch spec (`launch::dev_launch_spec`), real environment allowlist.
     /// pi is whatever is on PATH; without credentials session/new fails.
     #[tokio::test(flavor = "multi_thread")]
     async fn real_stock_initialize_and_session_new() {
         if !real_enabled("real_stock_initialize_and_session_new") {
             return;
         }
-        let spec = launch_spec(AgentBackend::Pi).unwrap();
+        let (spec, source) = dev_launch_spec(AgentBackend::Pi).unwrap();
+        eprintln!("pi-acp entry ({source:?}): {} {:?}", spec.program, spec.args);
         let cwd = temp_dir("stock");
-        let mut connection = AcpConnection::spawn(&spec, &cwd).await.expect("spawn npx pi-acp");
+        let mut connection = AcpConnection::spawn(&spec, &cwd).await.expect("spawn pi-acp");
         let BackendEvent::Initialized { initialize_response, .. } = next(&mut connection).await else {
             panic!("expected Initialized first");
         };
@@ -248,7 +252,13 @@ mod real {
                 pi.display().to_string(),
                 "--extra".into(),
                 extra,
-            ],
+            ]
+            .into_iter()
+            .chain(match dev_launch_spec(AgentBackend::Pi) {
+                Some((spec, DevEntrySource::Override | DevEntrySource::Managed(_))) => vec!["--program".to_owned(), spec.program],
+                _ => vec![],
+            })
+            .collect(),
             version_pin: fox_agent_backend::launch::PI_ACP_VERSION,
             credential_env: &[],
             experimental: false,
