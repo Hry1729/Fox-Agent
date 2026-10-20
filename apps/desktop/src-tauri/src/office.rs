@@ -1,5 +1,7 @@
 //! Managed Office connector. The protocol catalog is shared with MCP, while typed
 //! arguments are translated to a pinned CLI without a shell or arbitrary flags.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::{Database, McpServerRecord};
 use base64::Engine;
 use serde_json::{json, Value};
@@ -1304,7 +1306,7 @@ pub fn prepare_with_context(
             // exceed the Windows command-line limit well before 100 verbose
             // operations, and the pinned CLI reads the same array from stdin.
             action.args = vec!["batch".into(), "{output}".into(), "--json".into()];
-            action.stdin_data = Some(input["operations"].to_string());
+            action.stdin_data = Some(input["operations"].canonical_string());
         }
         "office_import_data" => {
             let sheet = string(input, "sheet")?;
@@ -1379,7 +1381,7 @@ pub fn prepare_with_context(
         "office_merge" => {
             // Data values are literal template content, not file names or flags.
             for v in input["data"].as_object().ok_or("data 必须为对象")?.values() {
-                if v.to_string().len() > 32_000 {
+                if v.canonical_string().len() > 32_000 {
                     return Err("合并数据单项过长".into());
                 }
             }
@@ -1388,7 +1390,7 @@ pub fn prepare_with_context(
                 source,
                 "{output}".into(),
                 "--data".into(),
-                input["data"].to_string(),
+                input["data"].canonical_string(),
                 "--json".into(),
             ];
         }
@@ -1571,7 +1573,7 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
                 "bounded".into(),
                 json!({"tool":"office_help","format":format,"note":"Use format+element for a paged property catalog; property=<name> for full definition."}),
             );
-            return Ok(Value::Object(compact).to_string());
+            return Ok(Value::Object(compact).canonical_string());
         }
     };
 
@@ -1593,7 +1595,7 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
                 "availableProperties": properties.keys().take(HELP_PAGE_SIZE).cloned().collect::<Vec<_>>(),
                 "moreProperties": properties.len().saturating_sub(HELP_PAGE_SIZE),
                 "hint": "Unknown property for this element. Re-read the catalog page that lists it, then request property=<exact name>."
-            }).to_string());
+            }).canonical_string());
         };
         let mut detail = serde_json::Map::new();
         detail.insert("format".into(), json!(format));
@@ -1601,7 +1603,7 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
         detail.insert("property".into(), json!(name));
         detail.insert("found".into(), json!(true));
         detail.insert("definition".into(), cap_detail_value(value)?);
-        return Ok(Value::Object(detail).to_string());
+        return Ok(Value::Object(detail).canonical_string());
     }
 
     // Paged catalog: name/type/ops/short hint only.
@@ -1616,7 +1618,7 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
             "format": format, "element": element, "page": page, "pageSize": page_size,
             "totalProperties": total, "properties": [],
             "hint": format!("Requested page {page} but there are only {} pages; request page 1..{}", total.div_ceil(page_size), total.div_ceil(page_size))
-        }).to_string());
+        }).canonical_string());
     }
     let mut items = Vec::new();
     for name in names.iter().skip(start).take(page_size) {
@@ -1651,7 +1653,7 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
             "instruction": format!("All {total} properties are listed. For any property you need full examples/aliases/readback for, call office_help(format={format}, element={element}, property=<name>) once per property; do not prefetch properties you will not use."),
         });
     }
-    let text = shaped.to_string();
+    let text = shaped.canonical_string();
     if text.len() > HELP_MAX_BYTES {
         // Keep the contract by shrinking the page automatically rather than truncating mid-JSON.
         return Ok(json!({
@@ -1662,7 +1664,7 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
             "next": { "tool": "office_help",
                 "arguments": { "format": format, "element": element, "page": 1, "pageSize": (page_size / 2).max(10) },
                 "instruction": "Catalog exceeded the single-response budget; re-read with the smaller pageSize and continue paging." },
-        }).to_string());
+        }).canonical_string());
     }
     Ok(text)
 }
@@ -1679,7 +1681,7 @@ fn cap_detail_value(value: &Value) -> Result<Value, String> {
                 let mut bytes = 0usize;
                 let mut truncated = false;
                 array.retain(|item| {
-                    bytes += item.to_string().len();
+                    bytes += item.canonical_string().len();
                     if bytes > HELP_DETAIL_MAX_BYTES {
                         truncated = true;
                         false
@@ -2002,7 +2004,7 @@ pub(crate) fn execute_with_cancellation(
                     invoke_with_stdin(
                         binary,
                         &["batch".into(), temp_path.clone(), "--json".into()],
-                        Some(&add.to_string()),
+                        Some(&add.canonical_string()),
                         cwd,
                         cancellation,
                         deadline,
@@ -2214,11 +2216,11 @@ pub(crate) fn execute_with_cancellation(
                     },
                     "nextStartCell": next_cell,
                     "continuation": format!("已写入 {rows} 行 x {cols} 列到 /{}（{} 起）。续写下一批时使用同一 output/sheet，startCell={next_cell}；相同 startCell 重跑会覆盖相同单元格，不会重复追加。", spec.sheet, spec.start_cell),
-                }).to_string()}),
+                }).canonical_string()}),
             ]
         } else {
             vec![
-                json!({"type":"text","text":json!({"output":action.output,"result":stdout,"validation":validation,"saved":action.output.is_some(),"visualChecked":false}).to_string()}),
+                json!({"type":"text","text":json!({"output":action.output,"result":stdout,"validation":validation,"saved":action.output.is_some(),"visualChecked":false}).canonical_string()}),
             ]
         };
         if action.screenshot {
@@ -2401,7 +2403,7 @@ mod tests {
             "paths":["/chart[1]"],
             "note":"test reference",
             "properties": Value::Object(properties)
-        }).to_string()
+        }).canonical_string()
     }
 
     #[test]
@@ -2520,7 +2522,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                read.to_string().contains("Fox roundtrip 2026"),
+                read.canonical_string().contains("Fox roundtrip 2026"),
                 "{ext}: {read}"
             );
             execute(
@@ -2651,7 +2653,7 @@ mod tests {
             Some(&context),
         )
         .unwrap();
-        let text = read.to_string();
+        let text = read.canonical_string();
         assert!(text.contains("agv-0"), "{text}");
         assert!(text.contains("id"), "{text}");
         // The imported payload came from the artifact, never from a re-typed copy.
@@ -2714,7 +2716,7 @@ mod tests {
         .unwrap();
 
         let read = run("office_read", json!({"file":"keep.xlsx"})).unwrap();
-        assert!(read.to_string().contains("second"), "{read}");
+        assert!(read.canonical_string().contains("second"), "{read}");
         assert_eq!(
             transient_entries(&root),
             Vec::<String>::new(),
@@ -3509,7 +3511,7 @@ mod tests {
 
     #[test]
     fn import_summary_is_parsed_from_the_writer_envelope() {
-        let stdout = json!({"success":true,"data":"Imported 12 rows x 3 cols into /Sheet1 starting at A1"}).to_string();
+        let stdout = json!({"success":true,"data":"Imported 12 rows x 3 cols into /Sheet1 starting at A1"}).canonical_string();
         assert_eq!(parse_import_summary(&stdout), Some((12, 3)));
         assert_eq!(parse_import_summary("{\"success\":false}"), None);
         assert_eq!(parse_import_summary("not json"), None);
@@ -3699,7 +3701,7 @@ mod tests {
             .collect();
         for chunk in all_ops.chunks(100) {
             let input = json!({"file":"old.xlsx","output":"old.xlsx","overwrite":true,"operations":chunk});
-            old_bytes += input.to_string().len();
+            old_bytes += input.canonical_string().len();
             old_calls += 1;
             execute(&server, "office_edit", &input, r, "allow").unwrap();
         }
@@ -3717,7 +3719,7 @@ mod tests {
             csv.push('\n');
         }
         let new_input = json!({"output":"new.xlsx","sheet":"Sheet1","data":csv});
-        let new_bytes = new_input.to_string().len();
+        let new_bytes = new_input.canonical_string().len();
         let new_start = Instant::now();
         execute(&server, "office_import_data", &new_input, r, "allow").unwrap();
         let new_ms = new_start.elapsed().as_millis() as u64;
