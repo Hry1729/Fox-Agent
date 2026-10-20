@@ -145,7 +145,7 @@ impl KernelCoordinator<'_> {
         self.database
             .kernel_validate_resource_acquisition(&self.binding.run_id)?;
         self.cancellation.run_token(&self.binding.run_id)?.check()?;
-        let encoded = serde_json::to_string(&plan).map_err(|_| "invalid compaction plan")?;
+        let encoded = crate::canonical_json::to_string(&plan).map_err(|_| "invalid compaction plan")?;
         self.apply(None, |controller, now| {
             controller.prepare_context_compaction(
                 &plan.request.compaction_id,
@@ -265,7 +265,7 @@ impl KernelCoordinator<'_> {
         self.tick()?;
         token.check()?;
         let result = CompactionResult::new(&plan, response).map_err(|_| context::FAILED)?;
-        let encoded = serde_json::to_string(&result).map_err(|_| context::FAILED)?;
+        let encoded = crate::canonical_json::to_string(&result).map_err(|_| context::FAILED)?;
         self.apply(None, |controller, now| {
             controller.complete_context_compaction(
                 &pending.id,
