@@ -3,6 +3,8 @@
 //! `office::prepare_with_context`. A legitimate `artifactId` produced by this
 //! run's own conversation passes the gate; cross-session, tampered, malformed
 //! and dual-payload references are rejected before dispatch.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -78,7 +80,7 @@ fn artifact_gate_fixture() -> (Database, PathBuf, String, String, std::path::Pat
         &binding.permission_snapshot_id,
         "legacy",
         &prompt_hash,
-        &serde_json::to_string(&config).unwrap(),
+        &crate::canonical_json::to_string(&config).unwrap(),
     )
     .unwrap();
     db.freeze_kernel_model_config(&run_id, &model).unwrap();
@@ -97,7 +99,7 @@ fn artifact_gate_fixture() -> (Database, PathBuf, String, String, std::path::Pat
             Sha256::digest(
                 json!({"id":server.id,"transport":server.transport,"command":server.command,
                     "args":server.args,"endpoint":server.endpoint_url,"definition":server.definition})
-                    .to_string()
+                    .canonical_string()
                     .as_bytes()
             )
         )
@@ -204,7 +206,7 @@ fn kernel_gate_accepts_own_conversation_artifact_and_rejects_abuse() {
     //    mutation reaches the human-approval gate (RequireApproval), proving
     //    the prepare inside decide resolved the artifact rather than refusing
     //    an unresolvable id.
-    let decision = policy.decide(&run, "tc-import", "call_mcp_tool", &valid.to_string());
+    let decision = policy.decide(&run, "tc-import", "call_mcp_tool", &valid.canonical_string());
     assert!(
         !matches!(decision, PolicyDecision::Deny { .. }),
         "a resolved artifact import must reach the approval gate, not be denied: {decision:?}"
