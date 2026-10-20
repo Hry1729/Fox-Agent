@@ -2781,7 +2781,12 @@ fn kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway() {
     assert!(coordinator.dispatch_tool("work-1","work-executor",|_,_,token| {
         let result = policy.execute_work(&db,"work-1","work_snapshot_get",&json!({}),token)?;
         assert!(result["content"].is_array());
-        assert!(policy.execute_work(&db,"work-1","goal_propose",&json!({}),token).is_err());
+        // A missing required field is refused before any write, so it is data
+        // for the model (an isError result), not a fatal executor error.
+        let refused = policy.execute_work(&db,"work-1","goal_propose",&json!({}),token)?;
+        assert_eq!(refused["isError"],true);
+        assert_eq!(refused["details"]["toolErrorPhase"],"rejected_before_execution");
+        assert_eq!(refused["details"]["executionStarted"],false);
         Ok((true,result))
     }).unwrap());
     assert_eq!(coordinator.snapshot().unwrap().tool_calls[0].state,"completed");
