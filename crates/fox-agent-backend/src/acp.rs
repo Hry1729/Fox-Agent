@@ -26,7 +26,7 @@ use crate::launch::{BridgeEndpoint, LaunchSpec};
 use crate::port::{CapabilityDeclaration, SessionCapabilities};
 use crate::reverse::WriteOutcome;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
+    CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, TextContent,
 };
@@ -65,6 +65,10 @@ pub enum BackendEvent {
         request: Value,
     },
     TurnEnded { session_id: String, stop_reason: Value },
+    /// `session/prompt` itself failed (JSON-RPC error, transport closed while
+    /// the turn ran). The turn is over; the connection may still be alive.
+    TurnFailed { session_id: String, error: String },
+    /// The connection failed (not tied to one turn).
     Failed(String),
     Closed,
 }
@@ -73,6 +77,13 @@ enum Command {
     NewSession {
         cwd: PathBuf,
         reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// `session/load` (history replay arrives as `session/update` before the
+    /// reply). Only sent when the agent declared `loadSession`.
+    LoadSession {
+        session_id: String,
+        cwd: PathBuf,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Prompt {
         session_id: String,
@@ -882,6 +893,15 @@ impl AcpConnection {
                                     .map_err(|error| error.to_string());
                                 let _ = reply.send(created);
                             }
+                            Command::LoadSession { session_id, cwd, reply } => {
+                                let loaded = connection
+                                    .send_request(LoadSessionRequest::new(session_id, cwd))
+                                    .block_task()
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|error| error.to_string());
+                                let _ = reply.send(loaded);
+                            }
                             Command::Prompt { session_id, text } => {
                                 // Prompt completion arrives on its own task so
                                 // cancel and permission answers keep flowing.
@@ -901,7 +921,10 @@ impl AcpConnection {
                                             stop_reason: serde_json::to_value(&response.stop_reason)
                                                 .unwrap_or(Value::Null),
                                         },
-                                        Err(error) => BackendEvent::Failed(format!("prompt failed: {error}")),
+                                        Err(error) => BackendEvent::TurnFailed {
+                                            session_id,
+                                            error: format!("prompt failed: {error}"),
+                                        },
                                     });
                                 });
                             }
@@ -1032,7 +1055,30 @@ impl AcpConnection {
         response.await.map_err(|_| "backend connection closed".to_string())?
     }
 
-    /// Start a turn. Its end is reported as `TurnEnded` or `Failed`.
+    /// Reopen an existing native session with history replay
+    /// (`session/load`). Call only when `initialize` declared `loadSession`
+    /// ([`crate::port::SessionCapabilities::load`]); the replayed
+    /// `session/update`s arrive on [`Self::events`] before this returns.
+    pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<(), String> {
+        if self.is_stopping() {
+            return Err(STOPPING_REFUSAL.to_owned());
+        }
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(Command::LoadSession { session_id: session_id.to_owned(), cwd, reply })
+            .map_err(|_| "backend connection closed".to_string())?;
+        response.await.map_err(|_| "backend connection closed".to_string())?
+    }
+
+    /// Move the event stream out of the connection, for a Host task that
+    /// pumps it while other tasks keep calling `cancel` / `answer_permission`
+    /// on the connection. [`Self::events`] is left with a closed receiver.
+    pub fn take_events(&mut self) -> mpsc::UnboundedReceiver<BackendEvent> {
+        let (_closed_tx, closed) = mpsc::unbounded_channel();
+        std::mem::replace(&mut self.events, closed)
+    }
+
+    /// Start a turn. Its end is reported as `TurnEnded` or `TurnFailed`.
     pub fn prompt(&self, session_id: &str, text: &str) -> Result<(), String> {
         if self.is_stopping() {
             return Err(STOPPING_REFUSAL.to_owned());
@@ -1228,6 +1274,19 @@ impl AcpConnection {
         drop(job);
         drop(sandbox);
         report
+    }
+
+    /// Whether the process Fox started (the srt broker in sandboxed mode) has
+    /// exited. `None` when it cannot be checked right now (a stop holds the
+    /// child). The ACP stream itself does not end on exit, so the Host polls
+    /// this to notice a crash.
+    pub fn has_exited(&self) -> Option<bool> {
+        let mut child = self.child.try_lock().ok()?;
+        match child.try_wait() {
+            Ok(Some(_)) => Some(true),
+            Ok(None) => Some(false),
+            Err(_) => None,
+        }
     }
 
     /// OS process id of the backend (the srt broker in sandboxed mode).
