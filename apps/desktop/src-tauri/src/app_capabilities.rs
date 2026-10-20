@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::{
     app_state::AppState,
     database::{
@@ -288,7 +290,7 @@ pub fn app_notification_publish(
     let action = request
         .action
         .unwrap_or_else(|| json!({"open": "workspace"}));
-    if action.to_string().chars().count() > 4_096 {
+    if action.canonical_string().chars().count() > 4_096 {
         return failure(
             "notifications.action_invalid",
             "通知操作数据不能超过 4096 个字符",
