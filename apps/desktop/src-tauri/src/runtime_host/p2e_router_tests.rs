@@ -161,7 +161,7 @@ impl Fixture {
             &binding.permission_snapshot_id,
             "legacy",
             &prompt_hash,
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         db.freeze_kernel_model_config(&run, &model).unwrap();
