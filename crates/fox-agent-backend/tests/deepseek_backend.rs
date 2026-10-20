@@ -6,7 +6,7 @@
 //! about the real backend. Entry, in order: `FOX_DSH_PROGRAM`, `FOX_DSH_BIN`
 //! (older name; both an absolute path to the `dsh` / `dsh.cmd` entry of
 //! `@deepseek-ai/dsh@0.2.1-rc.2`), the managed runtime
-//! (`<runtime>/backends/deepseek/...`, `FOX_AGENT_RUNTIME_ROOT`; Windows also
+//! (`<runtime>/backends/dsh/...`, `FOX_AGENT_RUNTIME_ROOT`; Windows also
 //! the installed runtime), else `npx -y @deepseek-ai/dsh@0.2.1-rc.2`
 //! (`launch::dev_launch_spec`, tests only).
 //!
@@ -250,7 +250,10 @@ mod real_binary {
                     }
                 }
                 BackendEvent::Closed => break,
-                BackendEvent::Initialized { .. } | BackendEvent::PermissionAutoCancelled { .. } => {}
+                BackendEvent::Initialized { .. }
+                | BackendEvent::PermissionAutoCancelled { .. }
+                | BackendEvent::LoadSettled { .. }
+                | BackendEvent::PromptStarted { .. } => {}
             }
         }
         eprintln!("prompt outcome: {outcome:?}");
