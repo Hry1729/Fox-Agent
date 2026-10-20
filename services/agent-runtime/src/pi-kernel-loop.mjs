@@ -12,6 +12,7 @@ import { steeringNoticeText, validateSteeringNotices } from './steering-notice.m
 import { hostJobNoticeMessage, validateHostJobNotices } from './host-job-notice.mjs'
 import { describeKernelError, diagnosticLine } from './pi-kernel-diagnostics.mjs'
 import { responseAdmissionError } from './pi-kernel-response-diagnostic.mjs'
+import { KERNEL_TOOL_ARGUMENT_PREPARERS, prepareKernelToolCallArguments } from './tool-argument-preparers.mjs'
 
 export { steeringNoticeText }
 
@@ -127,6 +128,11 @@ export function installKernelHostTools(session, definitions, { settledFor } = {}
   const tools = [...strict.entries()].map(([name, { description }]) => Object.freeze({
     name, label: name, description,
     parameters: PERMISSIVE_TOOL_PARAMETERS,
+    // Same repair as the legacy Node tool. The round output is already
+    // normalized before it is committed (prepareKernelToolCallArguments), so
+    // this only keeps the engine-side view identical to the Host's proposal.
+    ...(Object.prototype.hasOwnProperty.call(KERNEL_TOOL_ARGUMENT_PREPARERS, name)
+      ? { prepareArguments: KERNEL_TOOL_ARGUMENT_PREPARERS[name] } : {}),
     executionMode: HOST_PARALLEL_READ_ONLY_TOOLS.has(name) ? 'parallel' : 'sequential',
     execute: async toolCallId => {
       const settled = settledFor(toolCallId)
@@ -412,6 +418,9 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
     try {
       hooks?.assertProposal?.(message)
       if (message.stopReason !== 'toolUse') throw responseAdmissionError('truncated_tool_proposal', 'tool_proposal')
+      // Legacy-equivalent argument repair BEFORE the proposal becomes durable:
+      // the Host persists, approves and dispatches exactly the prepared value.
+      prepareKernelToolCallArguments(message)
       const output = prepareRoundOutput(message, { turnId: prepared.turnId, requireCompletion })
       pendingBatch = null
       hooks?.onSettled?.(null)
