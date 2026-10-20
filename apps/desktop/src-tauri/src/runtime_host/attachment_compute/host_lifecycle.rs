@@ -451,7 +451,7 @@ mod tests {
             .expect("a completed job's result is readable");
         assert_eq!(result["rowsProcessed"], 80_002);
         assert_eq!(result["result"]["rows"], 80_002);
-        let bytes = serde_json::to_vec(&result).unwrap();
+        let bytes = crate::canonical_json::to_vec(&result).unwrap();
         assert_eq!(settled.result_bytes, Some(bytes.len() as u64));
         assert_eq!(settled.result_sha256, Some(format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))));
         let _ = std::fs::remove_dir_all(&fixture.root);
@@ -667,7 +667,7 @@ mod tests {
         };
         f.database.kernel_create_run(&f.run_id,"pi","authoritative",2,
             &binding.permission_snapshot_id,&binding.execution_profile_id,"host-notice-prompt",
-            &serde_json::to_string(&frozen).unwrap()).unwrap();
+            &crate::canonical_json::to_string(&frozen).unwrap()).unwrap();
         let job=f.database.kernel_job_start(&f.start_request("host-notice",chunked_params(&[])))
             .unwrap().snapshot().job_id.clone();
         let lifecycle=HostJobLifecycle::new(f.database.clone(),&f.sessions,&f.conversation_id,&job,1);
