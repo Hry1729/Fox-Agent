@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::{
     ActivateReadOnlyGraphInput, AddEvidenceInput, ChildRunBudget, ChildRunRecord,
     CreateGraphNodeReviewRequestInput, CreateReadOnlyGraphAcceptanceInput, CreateTaskInput,
@@ -2235,7 +2237,7 @@ fn work_snapshot_source_hash(
         "taskLedger": ledger,
         "historySummary": history_summary
     });
-    let encoded = serde_json::to_vec(&material).map_err(|error| error.to_string())?;
+    let encoded = crate::canonical_json::to_vec(&material).map_err(|error| error.to_string())?;
     Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
@@ -3418,7 +3420,7 @@ pub(crate) fn evidence_reference_guidance() -> Value {
 }
 
 fn tool_result(details: Value) -> Value {
-    let text = serde_json::to_string_pretty(&details).unwrap_or_else(|_| details.to_string());
+    let text = crate::canonical_json::to_string_pretty(&details).unwrap_or_else(|_| details.canonical_string());
     json!({
         "content": [{ "type": "text", "text": text }],
         "details": details,
@@ -3788,7 +3790,7 @@ mod tests {
         )
         .expect_err("missing PlanRevision must expose a stable WorkTool error");
         assert_eq!(missing_plan_error.code, "graph.readonly_plan_not_found");
-        serde_json::to_string(&missing_plan_error.details)
+        crate::canonical_json::to_string(&missing_plan_error.details)
             .expect("Graph Repository error details serialize");
 
         let activation_call = database
@@ -3827,7 +3829,7 @@ mod tests {
             activated.result["details"]["graph"]["nodes"][1]["readiness"],
             "waiting"
         );
-        serde_json::to_string(&activated.result).expect("Graph WorkTool result serializes");
+        crate::canonical_json::to_string(&activated.result).expect("Graph WorkTool result serializes");
 
         let root_task_id = activated.result["details"]["graph"]["nodes"][0]["taskId"]
             .as_str()
