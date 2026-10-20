@@ -190,3 +190,20 @@ export function agentBackendCapabilityChips(view: AgentBackendCapabilities | nul
     title: `${view[key].detail}${source}`,
   }))
 }
+
+/**
+ * Run event the external runtime writes right after the backend's handshake
+ * (`session/new` or `session/load` settled): from then on the backend's real
+ * capability declaration is known, so the capability chips refresh on it
+ * instead of waiting for the run to finish.
+ */
+export const AGENT_BACKEND_SESSION_EVENT = 'agent_backend.session' as const
+
+/** Whether a runtime event should refresh the shown conversation's capability chips. */
+export function refreshesAgentBackendCapabilities(
+  notification: { conversationId: string; event: { type: string } } | null | undefined,
+  conversationId: string | null | undefined,
+): boolean {
+  if (!notification || !conversationId) return false
+  return notification.conversationId === conversationId && notification.event?.type === AGENT_BACKEND_SESSION_EVENT
+}
