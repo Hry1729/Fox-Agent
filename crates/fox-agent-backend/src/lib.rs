@@ -40,9 +40,21 @@
 //! * `bridge` (feature `acp`): Host side of the ACP bridge used on Windows in
 //!   sandboxed mode (srt 0.0.80 does not deliver stdin there): one-shot named
 //!   pipe, token handshake.
+//! * [`projection`]: ACP `session/update` / `request_permission` -> the Fox
+//!   runtime events and approval card the desktop already renders.
+//! * [`capability_view`]: the four capability dimensions as UI text, from the
+//!   backend's measured declaration and the session's sandbox declaration.
+//! * `external` (feature `acp`): the Host's external backend runtime (one
+//!   ACP connection per conversation: start, stream, approvals, cancel,
+//!   crash, close).
+//! * `external_launch` (feature `acp`): the real launcher (Fox-managed
+//!   runtime layout, per-backend launch specs, `prepare_launch` in the
+//!   session's permission mode, Windows bridge / private layout / ancestor
+//!   ACEs).
 //!
 //! This crate has no Tauri dependency so it builds and tests on any host.
 
+pub mod capability_view;
 pub mod config;
 pub mod host_routing;
 pub mod launch;
@@ -50,6 +62,7 @@ pub mod legacy;
 pub mod limits;
 pub mod port;
 pub mod proctree;
+pub mod projection;
 pub mod reverse;
 pub mod sandbox;
 pub mod settlement;
@@ -63,5 +76,9 @@ pub mod winruntime;
 pub mod acp;
 #[cfg(feature = "acp")]
 pub mod bridge;
+#[cfg(feature = "acp")]
+pub mod external;
+#[cfg(feature = "acp")]
+pub mod external_launch;
 
 pub mod backends;
