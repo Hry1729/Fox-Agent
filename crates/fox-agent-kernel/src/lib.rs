@@ -10,6 +10,7 @@
 //! extracting the crate does not change production authority.
 
 pub mod cancellation;
+pub mod canonical_json;
 pub mod controller;
 pub use cancellation::{CancellationRegistry, CancellationToken};
 #[cfg(test)]
