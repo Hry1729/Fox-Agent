@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::JobStartRequest;
 use sha2::{Digest, Sha256};
@@ -438,7 +440,7 @@ fn real_host_to_local_provider_delivers_notice_once_in_live_and_single_round() {
         }
         let sent=server.join().unwrap();
         assert_eq!(sent.len(),1);
-        let wire=serde_json::to_string(&sent[0]["messages"]).unwrap();
+        let wire=crate::canonical_json::to_string(&sent[0]["messages"]).unwrap();
         assert_eq!(wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1);
         assert!(wire.contains(&job));
         let (state,user_notices):(String,i64)=db.with_connection(|conn|conn.query_row(
@@ -513,8 +515,8 @@ fn real_node_live_and_single_round_park_then_wake_with_one_typed_notice() {
         }
         let requests=server.join().unwrap();
         assert_eq!(requests.len(),2);
-        let first_wire=requests[0]["messages"].to_string();
-        let second_wire=requests[1]["messages"].to_string();
+        let first_wire=requests[0]["messages"].canonical_string();
+        let second_wire=requests[1]["messages"].canonical_string();
         assert!(!first_wire.contains("FOX_HOST_JOB_NOTICE_V1"));
         assert_eq!(second_wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1);
         assert!(second_wire.contains(&job));
@@ -563,7 +565,7 @@ fn real_runtime_host_job_start_parks_and_wakes_on_both_pi_transports() {
     let live=selected=="live";
     let arguments=json!({"idempotencyKey":"one-real-compute",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     let (address,server)=start_http_model_fixture(vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -661,8 +663,8 @@ fn real_runtime_host_job_start_parks_and_wakes_on_both_pi_transports() {
     assert_eq!(woke.unwrap(),true);
     let requests=server.join().unwrap();
     assert_eq!(requests.len(),3,"original tool, parked Final and resumed answer only");
-    let second=requests[1]["messages"].to_string();
-    let third=requests[2]["messages"].to_string();
+    let second=requests[1]["messages"].canonical_string();
+    let third=requests[2]["messages"].canonical_string();
     assert!(second.contains(&job.job_id),"the single formal result reached the model");
     assert!(!second.contains("FOX_HOST_JOB_NOTICE_V1"));
     assert_eq!(third.matches("FOX_HOST_JOB_NOTICE_V1").count(),1);
@@ -715,7 +717,7 @@ fn real_runtime_host_job_finishes_during_second_lease_or_retains_flag_off_behavi
     let (finish_tx,finish_rx)=std::sync::mpsc::channel();
     let arguments=json!({"idempotencyKey":"one-real-compute",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     let mut replies=vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -825,14 +827,14 @@ fn real_runtime_host_job_finishes_during_second_lease_or_retains_flag_off_behavi
             [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
         assert_eq!((code.as_str(),parks,notices),("kernel.jobs_pending",0,0),
             "the pre-B2b single-round terminal guard remains in force");
-        assert!(requests[1]["messages"].to_string().contains(&job_id));
+        assert!(requests[1]["messages"].canonical_string().contains(&job_id));
         drop(host);drop(app);
         return;
     }
     started.unwrap();
     assert_eq!(requests.len(),3,"one formal tool call and two model replies");
-    let second=requests[1]["messages"].to_string();
-    let third=requests[2]["messages"].to_string();
+    let second=requests[1]["messages"].canonical_string();
+    let third=requests[2]["messages"].canonical_string();
     assert!(second.contains(&job_id));
     assert!(!second.contains("FOX_HOST_JOB_NOTICE_V1"));
     if direct {
@@ -1029,14 +1031,14 @@ fn exercise_same_round_steering_and_notice(live:bool) {
     }
     let requests=server.join().unwrap();
     assert_eq!(requests.len(),if live {2} else {3});
-    let second_wire=serde_json::to_string(&requests[1]["messages"]).unwrap();
+    let second_wire=crate::canonical_json::to_string(&requests[1]["messages"]).unwrap();
     assert_eq!(second_wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1);
     assert_eq!(second_wire.matches("用户在运行过程中补充要求").count(),1);
     assert!(second_wire.find("用户在运行过程中补充要求")<second_wire.find("FOX_HOST_JOB_NOTICE_V1"));
     assert_eq!(requests[1]["messages"].as_array().unwrap().iter().filter(|message|
         message["role"]=="tool" && message["tool_call_id"]=="read-once").count(),1);
     if !live {
-        let third_wire=serde_json::to_string(&requests[2]["messages"]).unwrap();
+        let third_wire=crate::canonical_json::to_string(&requests[2]["messages"]).unwrap();
         assert_eq!(third_wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1,
             "an acknowledged fact stays once in a subsequent Provider request");
     }
