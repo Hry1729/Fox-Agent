@@ -22,6 +22,8 @@
 //! over-capacity case asserts the explicit omission, which is the behaviour the
 //! frozen capacity contract requires.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::runtime_host::delivery::{
     decode_stored_verdict, decide_facts, DecisionFact, DeliveryVerdict, FactOrigin, ItemDecision,
@@ -110,7 +112,7 @@ fn force_finding(db: &Database, run_id: &str, finding: &Value, status: &str) {
     db.with_connection(|connection| {
         connection.execute(
             "UPDATE delivery_checklist_items SET finding_json=?1, status=?2 WHERE run_id=?3",
-            rusqlite::params![finding.to_string(), status, run_id],
+            rusqlite::params![finding.canonical_string(), status, run_id],
         )?;
         Ok(())
     })
@@ -407,7 +409,7 @@ fn p2b_projection_an_over_capacity_envelope_is_visibly_omitted_never_widened() {
     }
     // The total projected finding stays under the capacity the store enforces.
     assert!(
-        serde_json::to_vec(&finding).unwrap().len() <= 7680,
+        crate::canonical_json::to_vec(&finding).unwrap().len() <= 7680,
         "the finding ceiling must hold, not be widened for this record"
     );
     let _ = std::fs::remove_dir_all(root);
