@@ -245,7 +245,7 @@ pub fn create_diagnostics(state: &AppState) -> Result<MaintenanceResult, String>
         yuxi,
         mcp,
     );
-    let bytes = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
+    let bytes = crate::canonical_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
     fs::write(&path, &bytes).map_err(|error| error.to_string())?;
     Ok(MaintenanceResult {
         path: Some(path.to_string_lossy().into_owned()),
@@ -495,7 +495,7 @@ fn write_archive(
 ) -> Result<(), String> {
     let mut writer = BufWriter::new(File::create(path).map_err(|error| error.to_string())?);
     writeln!(writer, "{BACKUP_MAGIC}").map_err(|error| error.to_string())?;
-    let manifest_bytes = serde_json::to_vec(manifest).map_err(|error| error.to_string())?;
+    let manifest_bytes = crate::canonical_json::to_vec(manifest).map_err(|error| error.to_string())?;
     writeln!(writer, "{}", manifest_bytes.len()).map_err(|error| error.to_string())?;
     writer
         .write_all(&manifest_bytes)
@@ -1095,7 +1095,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_bytes = crate::canonical_json::to_vec(&manifest).unwrap();
         let mut writer = BufWriter::new(File::create(&archive).unwrap());
         writeln!(writer, "{BACKUP_MAGIC}").unwrap();
         writeln!(writer, "{}", manifest_bytes.len()).unwrap();
@@ -1150,7 +1150,7 @@ mod tests {
                 updated_at: 1,
             }],
         );
-        let serialized = serde_json::to_string(&report).unwrap();
+        let serialized = crate::canonical_json::to_string(&report).unwrap();
         assert!(!serialized.contains(secret));
         assert!(!serialized.contains(conversation));
         assert!(!serialized.contains(project_content));
