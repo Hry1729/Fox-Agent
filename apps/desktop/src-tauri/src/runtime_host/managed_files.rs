@@ -20,6 +20,8 @@
 //!   restore path re-verifies the bytes it is about to copy. `force` overrides
 //!   *content drift only*: it never bypasses conversation ownership, provenance,
 //!   or snapshot integrity.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -500,7 +502,7 @@ pub(crate) fn execute_admitted_file(
     revalidate: &mut dyn FnMut() -> Result<(), String>,
 ) -> (Result<serde_json::Value, String>, fox_engine_protocol::ExecutionEvidence) {
     use fox_engine_protocol::{ExecutionCredential, ExecutionEvidence};
-    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.to_string()) {
+    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.canonical_string()) {
         return (Err("credential_mismatch: file payload differs from the admitted intent".into()), ExecutionEvidence::NotStarted);
     }
     struct Hooks<'a, 'b> {
@@ -1589,7 +1591,7 @@ mod tests {
             .record_host_observation(run_id, &harness.conversation, &observation)
             .expect("persist Host observation");
 
-        let canonical_input = serde_json::to_string(input).unwrap();
+        let canonical_input = crate::canonical_json::to_string(input).unwrap();
         let policy = harness
             .db
             .execution_policy(&harness.conversation)
@@ -2953,8 +2955,8 @@ mod tests {
         // The Host streams the saved bytes to stdin; the model's arguments
         // carry only the id — no body, no source path on the command line.
         assert_eq!(prepared.stdin_payload().expect("resolved payload"), csv);
-        assert!(wrapper.to_string().contains(artifact_id.as_str()));
-        assert!(!wrapper.to_string().contains("agv-task-00500"), "the data body must not be re-copied through the request");
+        assert!(wrapper.canonical_string().contains(artifact_id.as_str()));
+        assert!(!wrapper.canonical_string().contains("agv-task-00500"), "the data body must not be re-copied through the request");
 
         // read-only is a hard refusal in pre-check, before any write.
         let read_only_error = crate::office::prepare_with_context(
@@ -2972,7 +2974,7 @@ mod tests {
         let scope = super::super::permission_scope_hash(
             "office-project-request",
             serde_json::json!({"access": office_access, "input": wrapper})
-                .to_string()
+                .canonical_string()
                 .as_bytes(),
         );
         let granted_before = db
