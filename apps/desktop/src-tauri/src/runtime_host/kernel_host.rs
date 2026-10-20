@@ -1,5 +1,7 @@
 //! One owning loop per durable Run. Model workers and resource executors finish
 //! (including cancellation cleanup) before the loop can publish a terminal.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{
     kernel_coordinator::KernelCoordinator, kernel_run_lock::KernelRunLock, RuntimeCommand,
 };
@@ -284,7 +286,7 @@ impl HostAdmission<'_> {
         // substituted path/content never reaches an executor.
         let payload_input = payload
             .get("input")
-            .map(|input| input.to_string())
+            .map(|input| input.canonical_string())
             .unwrap_or_else(|| "null".to_owned());
         if payload_input != durable_input {
             return Err(
@@ -923,6 +925,7 @@ pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
 
 #[cfg(test)]
 mod failure_tests {
+    use crate::canonical_json::CanonicalJson;
     use serde_json::json;
     #[test]
     fn o14_local_diagnostics_follow_real_with_input_path_and_remote_tags_cannot_forge_provenance() {
@@ -941,7 +944,7 @@ mod failure_tests {
         }
         let remote=super::resource_failure_result_with_input("call_mcp_tool",Some(&json!({"serverId":"remote","tool":"fetch","arguments":{"file":"report.csv"}})),
             "[tool.invalid_input] private remote document sk-secret123456 token=abc");
-        assert!(!remote.to_string().contains("private remote document"));
+        assert!(!remote.canonical_string().contains("private remote document"));
         assert_eq!(remote["details"]["errorCode"],"mcp.remote_failure");
         assert_eq!(remote["details"]["operation"],"fetch");
         let compute=super::resource_failure_result_with_input("attachment_compute",Some(&json!({"attachmentIds":["source"]})),
@@ -968,9 +971,9 @@ mod failure_tests {
     fn kernel_reader_failure_preserves_reason_without_claiming_policy_denial() {
         let result = super::resource_failure_result("ls", "tool path cannot be resolved: file not found");
         assert!(result["content"][0]["text"].as_str().unwrap().contains("file not found"));
-        assert!(!result.to_string().contains("frozen policy"));
+        assert!(!result.canonical_string().contains("frozen policy"));
         let remote = super::resource_failure_result("http_request", "response includes private token");
-        assert!(!remote.to_string().contains("private token"));
+        assert!(!remote.canonical_string().contains("private token"));
     }
 
     // A02 (EX-v1): a failed local execution must reach the model as a reason it
@@ -1023,7 +1026,7 @@ mod failure_tests {
             .as_str()
             .unwrap()
             .contains("No successful result is available"));
-        assert!(!mcp.to_string().contains("secret=abcd"));
+        assert!(!mcp.canonical_string().contains("secret=abcd"));
         // No tag, no invented classification.
         let local = super::resource_failure_result("run_command", "the child died oddly");
         assert!(local["details"].get("errorCode").is_none());
@@ -2138,7 +2141,7 @@ impl super::RuntimeHost {
             )?;
             let scope =
                 super::kernel_gateway::freeze_scope(&self.database, binding, &prompt, &config)?;
-            let manifest_hash=super::runtime_shadow_hash(&serde_json::to_string(&scope).map_err(|_|"invalid resource scope")?);
+            let manifest_hash=super::runtime_shadow_hash(&crate::canonical_json::to_string(&scope).map_err(|_|"invalid resource scope")?);
             super::kernel_model_worker::bind_runtime_capabilities(&mut config,binding,&manifest_hash);
             let hash = config.hash()?;
             let input = initial_input(binding, &prompt, &hash)?;
@@ -2147,7 +2150,7 @@ impl super::RuntimeHost {
                 kernel_mode: "authoritative".into(),
                 capability_manifest_version: 2,
                 capability_manifest_hash: super::runtime_shadow_hash(
-                    &serde_json::to_string(&scope).map_err(|_| "invalid resource scope")?,
+                    &crate::canonical_json::to_string(&scope).map_err(|_| "invalid resource scope")?,
                 ),
                 permission_snapshot_id: binding.permission_snapshot_id.clone(),
                 execution_profile_id: binding.execution_profile_id.clone(),
@@ -2172,7 +2175,7 @@ impl super::RuntimeHost {
                 &binding.permission_snapshot_id,
                 &binding.execution_profile_id,
                 &hash,
-                &serde_json::to_string(&frozen).map_err(|_| "invalid frozen Kernel Run")?,
+                &crate::canonical_json::to_string(&frozen).map_err(|_| "invalid frozen Kernel Run")?,
             )?;
             self.database
                 .freeze_kernel_model_config(&binding.run_id, &config)?;
@@ -2836,7 +2839,7 @@ mod host_order_tests {
         kernel::OutboxEffect {
             effect_key: format!("dispatch:{tool_call_id}"),
             kind: kernel::OutboxEffectKind::DispatchTool,
-            payload_json: serde_json::json!({"tool": "read", "input": input}).to_string(),
+            payload_json: serde_json::json!({"tool": "read", "input": input}).canonical_string(),
             tool_call_id: Some(tool_call_id.to_owned()),
             batch_id: Some("b1".to_owned()),
             idempotency_key: format!("tool-dispatch:{tool_call_id}"),
@@ -3434,7 +3437,7 @@ mod host_order_tests {
             c.execute(
                 "UPDATE kernel_tool_calls SET tool='call_mcp_tool', canonical_input_json=?2
                   WHERE run_id=?1 AND tool_call_id='call-1'",
-                rusqlite::params![binding.run_id, input.to_string()],
+                rusqlite::params![binding.run_id, input.canonical_string()],
             )?;
             Ok(())
         })
@@ -3447,13 +3450,13 @@ mod host_order_tests {
             conversation_id,
             "call-1",
             "call_mcp_tool",
-            &input.to_string(),
+            &input.canonical_string(),
             fox_engine_protocol::ActionClass::Read,
         );
         let effect = crate::kernel::OutboxEffect {
             effect_key: "dispatch:call-1".to_owned(),
             kind: crate::kernel::OutboxEffectKind::DispatchTool,
-            payload_json: serde_json::json!({"tool": "call_mcp_tool", "input": input}).to_string(),
+            payload_json: serde_json::json!({"tool": "call_mcp_tool", "input": input}).canonical_string(),
             tool_call_id: Some("call-1".to_owned()),
             batch_id: Some("b1".to_owned()),
             idempotency_key: "tool-dispatch:call-1".to_owned(),
