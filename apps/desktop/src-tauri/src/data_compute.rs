@@ -84,7 +84,7 @@ where
     F: Fn() -> bool + 'static,
 {
     let started = Instant::now();
-    let input_bytes = serde_json::to_vec(input)
+    let input_bytes = crate::canonical_json::to_vec(input)
         .map_err(|error| format!("Unable to serialize data-compute input: {error}"))?;
     if input_bytes.len() > MAX_INPUT_BYTES {
         return Err(format!(
@@ -132,7 +132,7 @@ where
         )?);
     }
 
-    let attachments_json = serde_json::to_string(&attachments)
+    let attachments_json = crate::canonical_json::to_string(&attachments)
         .map_err(|error| format!("Unable to serialize attachment data: {error}"))?;
     if attachments_json.len() > MAX_INPUT_BYTES {
         return Err(format!(
@@ -215,7 +215,7 @@ where
     let envelope: Value = serde_json::from_str(&envelope)
         .map_err(|error| format!("JavaScript returned invalid JSON: {error}"))?;
     let result = envelope.get("result").cloned().unwrap_or(Value::Null);
-    let result_bytes = serde_json::to_vec(&result)
+    let result_bytes = crate::canonical_json::to_vec(&result)
         .map_err(|error| format!("Unable to serialize JavaScript result: {error}"))?;
     let output_specs = parse_output_specs_with_limits(envelope.get("files"), &*cancelled, deadline)?;
     let mut files = write_outputs(output_root, output_specs)?;
@@ -1255,7 +1255,7 @@ fn render_table(value: &Value, cancelled: &dyn Fn()->bool, deadline: Instant) ->
             Ok(cell)
         }).collect::<Result<Vec<_>,String>>()?;
         if !key_indices.is_empty() {
-            let key=serde_json::to_string(&key_indices.iter().map(|index|&cells[*index]).collect::<Vec<_>>()).map_err(|_|"[tool.invalid_input] key encoding failed")?;
+            let key=crate::canonical_json::to_string(&key_indices.iter().map(|index|&cells[*index]).collect::<Vec<_>>()).map_err(|_|"[tool.invalid_input] key encoding failed")?;
             if !seen_keys.insert(key) {return Err("[tool.invalid_input] saveTable has a duplicate key tuple".into());}
         }
         append(&mut csv,cells)?;
@@ -1316,7 +1316,7 @@ pub(crate) fn parse_output_specs_with_limits(value: Option<&Value>, cancelled: &
             None => (object.get("content").and_then(Value::as_str).ok_or_else(|| "saved file content must be a string or JSON value".to_owned())?.as_bytes().to_vec(), None,None),
         };
         if let Some(contract)=data_contract.as_ref() {
-            let size=serde_json::to_vec(contract).map_err(|_|"[tool.invalid_input] dataContract encoding failed")?.len().saturating_add(128);
+            let size=crate::canonical_json::to_vec(contract).map_err(|_|"[tool.invalid_input] dataContract encoding failed")?.len().saturating_add(128);
             contract_bytes=contract_bytes.saturating_add(size);
             if size>512*1024 || contract_bytes>1024*1024 {return Err("[tool.invalid_input] dataContract exceeds 512 KiB/file or 1 MiB/call".into());}
         }
@@ -1446,7 +1446,7 @@ fn spill_large_result(
             ));
         }
     };
-    let content = serde_json::to_vec(&result)
+    let content = crate::canonical_json::to_vec(&result)
         .map_err(|error| format!("Unable to serialize the large result: {error}"))?;
     if content.len() > MAX_FILE_BYTES {
         return Err(format!(
@@ -1516,7 +1516,7 @@ fn spill_large_result(
             "resultBytes": result_bytes.len(),
             "resultLimitBytes": MAX_RESULT_BYTES,
         });
-        let envelope_len = serde_json::to_vec(&candidate).map(|b| b.len()).unwrap_or(usize::MAX);
+        let envelope_len = crate::canonical_json::to_vec(&candidate).map(|b| b.len()).unwrap_or(usize::MAX);
         if envelope_len <= MAX_RESULT_BYTES || sample_budget == 0 {
             if envelope_len > MAX_RESULT_BYTES {
                 return Err(
@@ -1608,7 +1608,7 @@ fn result_shape(result: &Value, sample_budget: usize) -> ResultShape {
 
 /// Serialized UTF-8 length of a JSON value.
 fn json_len(value: &Value) -> usize {
-    serde_json::to_vec(value)
+    crate::canonical_json::to_vec(value)
         .map(|bytes| bytes.len())
         .unwrap_or(usize::MAX)
 }
@@ -1739,7 +1739,7 @@ fn reduce_sample_value(value: &Value, budget: usize) -> Value {
 /// UTF-8 bytes, cutting only at char boundaries so CJK and emoji stay valid.
 fn truncate_sample_string(text: &str, budget: usize) -> String {
     const TAIL: &str = "…";
-    if serde_json::to_string(text)
+    if crate::canonical_json::to_string(text)
         .map(|encoded| encoded.len() <= budget)
         .unwrap_or(false)
     {
@@ -1756,7 +1756,7 @@ fn truncate_sample_string(text: &str, budget: usize) -> String {
     }
     loop {
         let candidate = format!("{}{}", &text[..end], TAIL);
-        if serde_json::to_string(&candidate)
+        if crate::canonical_json::to_string(&candidate)
             .map(|encoded| encoded.len() <= budget)
             .unwrap_or(false)
         {
@@ -2283,7 +2283,7 @@ mod execution_tests {
         assert_eq!(stored["displayName"], "large-result.json");
         assert_eq!(stored["bytes"], MAX_RESULT_BYTES + 1);
         // The bounded summary itself never exceeds the inline limit.
-        let summary_len = serde_json::to_vec(&over["result"]).unwrap().len();
+        let summary_len = crate::canonical_json::to_vec(&over["result"]).unwrap().len();
         assert!(summary_len <= MAX_RESULT_BYTES, "summary is {summary_len} bytes");
         // The whole value is really on disk, untruncated.
         let on_disk = fs::read(stored["path"].as_str().unwrap()).unwrap();
@@ -2317,7 +2317,7 @@ mod execution_tests {
         // The inline result is the small object — no spill summary.
         assert_eq!(response["result"]["rows"], 6000);
         assert!(response["result"].get("summary").is_none());
-        assert_eq!(serde_json::to_vec(&response["result"]).unwrap().len() < MAX_RESULT_BYTES, true);
+        assert_eq!(crate::canonical_json::to_vec(&response["result"]).unwrap().len() < MAX_RESULT_BYTES, true);
 
         let file = &response["files"][0];
         let bytes = file["bytes"].as_u64().unwrap();
@@ -2360,7 +2360,7 @@ mod execution_tests {
                 || false,
             )
             .unwrap_or_else(|error| panic!("{name} failed: {error}"));
-            let envelope = serde_json::to_vec(&response["result"]).unwrap();
+            let envelope = crate::canonical_json::to_vec(&response["result"]).unwrap();
             assert!(
                 envelope.len() <= MAX_RESULT_BYTES,
                 "{name}: returned result {} bytes exceeds {MAX_RESULT_BYTES}",
@@ -2371,7 +2371,7 @@ mod execution_tests {
             assert_eq!(summary["storedAs"], "compute-artifact", "{name}");
             assert_eq!(summary["sampleTruncated"], true, "{name}: a huge first row must flag the sample as truncated");
             assert!(
-                serde_json::to_vec(&summary["sampleRows"]).unwrap().len() <= SAMPLE_MAX_BYTES + 4,
+                crate::canonical_json::to_vec(&summary["sampleRows"]).unwrap().len() <= SAMPLE_MAX_BYTES + 4,
                 "{name}: sample rows exceed the sample budget"
             );
             let stored = &response["files"][0];
@@ -2417,13 +2417,13 @@ mod execution_tests {
             || false,
         )
         .unwrap();
-        let emoji_envelope = serde_json::to_vec(&emoji_response["result"]).unwrap();
+        let emoji_envelope = crate::canonical_json::to_vec(&emoji_response["result"]).unwrap();
         assert!(emoji_envelope.len() <= MAX_RESULT_BYTES);
         let emoji_summary = &emoji_response["result"]["summary"];
         // Every sampled string must remain valid UTF-8/JSON (it parsed above)
         // and not contain a replacement from a split codepoint.
         for row in emoji_summary["sampleRows"].as_array().unwrap() {
-            let serialized = serde_json::to_string(row).unwrap();
+            let serialized = crate::canonical_json::to_string(row).unwrap();
             assert!(!serialized.contains('\u{FFFD}'), "emoji must not be split into replacement chars");
         }
         let emoji_stored = &emoji_response["files"][0];
@@ -2555,7 +2555,7 @@ mod execution_tests {
         ] {
             let code = format!(
                 "saveFile({}, 'unsafe'); return true;",
-                serde_json::to_string(name).unwrap()
+                crate::canonical_json::to_string(name).unwrap()
             );
             assert!(execute(
                 &paths,
@@ -2651,7 +2651,7 @@ mod sparse_allocation_tests {
         )
         .unwrap_or_else(|e| panic!("COMPUTE_ERR::{e}"));
         let res = &response["result"];
-        println!("real AGV workbook -> {}", serde_json::to_string(res).unwrap());
+        println!("real AGV workbook -> {}", crate::canonical_json::to_string(res).unwrap());
         assert_eq!(res["sheetCount"].as_u64().unwrap() >= 1, true);
         // 2,213 data rows (+ header row in the parsed grid) per 2026-09 history.
         assert!(
