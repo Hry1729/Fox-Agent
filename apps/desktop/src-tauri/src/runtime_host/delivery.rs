@@ -19,6 +19,8 @@
 //! retries, and they never replace the reply-end marker check. A plain question
 //! seeds no checklist and is never charged verification or repair work.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::{
     Database, DeliveryArtifactRow, DeliveryChecklistItem, DeliveryChecklistSeed,
 };
@@ -2006,7 +2008,7 @@ fn typed_stop_from_rows(
     let (repair_prompt, repair_findings_json) = match verdict.disposition() {
         p2b_consumer::DeliveryDisposition::Repair => (
             Some(typed_repair_prompt(&verdict)),
-            Some(typed_repair_findings(&verdict).to_string()),
+            Some(typed_repair_findings(&verdict).canonical_string()),
         ),
         _ => (None, None),
     };
@@ -2124,7 +2126,7 @@ fn typed_row(item: &p2b_consumer::ItemDecision, existing: Value) -> TypedDeliver
         class: p2b_consumer::delivery_class_str(item.class),
         terminal: item.is_final_class(),
         stage: item.may_enter_terminal_stage(),
-        finding_json: existing.to_string(),
+        finding_json: existing.canonical_string(),
     }
 }
 
@@ -2314,7 +2316,7 @@ pub(crate) fn evaluate_stop(
                 let mut finding: Value = serde_json::from_str(&first.finding_json)
                     .unwrap_or_else(|_| json!({}));
                 finding["undeclaredWrites"] = json!(undeclared);
-                first.finding_json = finding.to_string();
+                first.finding_json = finding.canonical_string();
             }
         }
     }
@@ -2364,7 +2366,7 @@ pub(crate) fn evaluate_stop(
                 .unwrap_or_else(|_| json!({"reason": verdict.finding_json}))
         })
         .collect();
-    let findings_json = serde_json::to_string(&findings).map_err(|error| error.to_string())?;
+    let findings_json = crate::canonical_json::to_string(&findings).map_err(|error| error.to_string())?;
     Ok(DeliveryStop::Repair {
         items: verdicts,
         prompt: repair_prompt(&findings),
@@ -3045,7 +3047,7 @@ fn verify_item(
         return Ok(ItemVerdict {item_key:item.item_key.clone(),passed:false,bound_path:None,
             finding_json:json!({"itemKey":item.item_key,"displayName":item.display_name,
                 "reasonCode":RECOGNITION_UNRESOLVED_CODE,"verificationStatus":"unverified",
-                "reason":reason,"checks":{"recognition":"unverified"},"stats":Value::Null}).to_string()});
+                "reason":reason,"checks":{"recognition":"unverified"},"stats":Value::Null}).canonical_string()});
     }
     let target_directory=item_requirements.iter().find_map(|r|match &r.kind {
         StoredRequirementKind::TargetDirectory{directory}=>Some(directory.as_str()),_=>None});
@@ -3368,7 +3370,7 @@ fn verify_item(
     Ok(ItemVerdict {
         item_key: item.item_key.clone(),
         passed,
-        finding_json: finding.to_string(),
+        finding_json: finding.canonical_string(),
         bound_path: Some(candidate.path),
     })
 }
@@ -3405,7 +3407,7 @@ fn missing_verdict(item: &DeliveryChecklistItem,receipts:&[RunWriteReceipt],root
     ItemVerdict {
         item_key: item.item_key.clone(),
         passed: false,
-        finding_json: finding.to_string(),
+        finding_json: finding.canonical_string(),
         bound_path: None,
     }
 }
@@ -3506,7 +3508,7 @@ fn untouched_verdict(item: &DeliveryChecklistItem, path: &Path) -> ItemVerdict {
     ItemVerdict {
         item_key: item.item_key.clone(),
         passed: false,
-        finding_json: finding.to_string(),
+        finding_json: finding.canonical_string(),
         bound_path: Some(path.to_path_buf()),
     }
 }
@@ -6358,7 +6360,7 @@ pub(crate) fn apply_requirement_outcomes(
         }
     }
     finding["requirements"] = json!(listed);
-    Some((finding.to_string(), failure))
+    Some((finding.canonical_string(), failure))
 }
 
 /// Evaluate the task's structured requirements against the bound artifacts and
@@ -6828,7 +6830,7 @@ fn record_field_convention_check(
             violations.join("；")
         ));
     }
-    verdict.finding_json = finding.to_string();
+    verdict.finding_json = finding.canonical_string();
 }
 
 fn apply_delivery_requirements(
