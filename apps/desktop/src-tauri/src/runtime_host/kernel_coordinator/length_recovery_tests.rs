@@ -5,6 +5,8 @@
 //! budget, never a silent model switch), the state-derived instruction, the
 //! single-use durable accounting, restart / effect-key / new-batch independence,
 //! cancellation, no tool replay, and the honest ending when the recovery fails.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -981,11 +983,11 @@ fn the_recovery_request_reaches_the_provider_with_the_recorded_instruction_and_p
         .as_str()
         .unwrap()
         .to_owned();
-    let messages = requests[1]["messages"].to_string();
+    let messages = requests[1]["messages"].canonical_string();
     assert!(messages.contains("Fox 长度恢复提示"), "{messages}");
     assert!(messages.contains(&instruction), "the provider saw exactly the recorded text");
     assert!(
-        !requests[0]["messages"].to_string().contains("Fox 长度恢复提示"),
+        !requests[0]["messages"].canonical_string().contains("Fox 长度恢复提示"),
         "the first attempt had no recovery instruction"
     );
 
@@ -1102,8 +1104,8 @@ fn a_transport_that_never_serializes_the_parameter_gets_the_instruction_only() {
     // The instruction is the effective change, and it is in the real request.
     let record = durable_record(&db, &run_id).unwrap();
     let instruction = record["instruction"].as_str().expect("the instruction is recorded").to_owned();
-    assert!(requests[1]["messages"].to_string().contains(&instruction));
-    assert!(!requests[0]["messages"].to_string().contains("Fox 长度恢复提示"));
+    assert!(requests[1]["messages"].canonical_string().contains(&instruction));
+    assert!(!requests[0]["messages"].canonical_string().contains("Fox 长度恢复提示"));
 
     // The wire evidence: the transport serialized no reasoning field, before or
     // after, and the parameters are identical — asserted, not skipped.
