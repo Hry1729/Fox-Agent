@@ -236,6 +236,14 @@ mod tests {
     /// `enforce_managed_run_completion_budget`, which only constrains child and
     /// digital-colleague runs. Pins both so a later change that starts requiring
     /// a binding there fails here instead of in a live external session.
+    fn approval_status(database: &Database, approval_id: &str) -> String {
+        database
+            .with_connection(|connection| {
+                connection.query_row("SELECT status FROM approvals WHERE id = ?1", [approval_id], |row| row.get::<_, String>(0))
+            })
+            .expect("approval status")
+    }
+
     #[test]
     fn external_runs_without_a_binding_resolve_approvals_and_complete() {
         use crate::database::ApprovalDecision;
@@ -278,17 +286,39 @@ mod tests {
             .expect("resolved");
         assert_eq!(denied.status, "denied");
 
+        // Approvals wait for the user: hours after the request (far past the
+        // old default 5 minute window) the approval is still pending, and the
+        // user's late "allow once" is a real grant.
         let (_late_run, late_id) = approve_once("perm-late");
         database
             .with_connection(|connection| {
-                connection.execute("UPDATE approvals SET requested_at = requested_at - 600000 WHERE id = ?1", [&late_id])
+                connection.execute("UPDATE approvals SET requested_at = requested_at - 36000000 WHERE id = ?1", [&late_id])
             })
-            .expect("age the approval past the default 5 minute window");
+            .expect("age the approval by ten hours");
+        assert_eq!(approval_status(&database, &late_id), "pending", "a long unanswered approval stays pending");
         let late = database
             .resolve_approval(&late_id, ApprovalDecision::AllowOnce)
             .expect("late approval without binding")
             .expect("resolved");
-        assert_eq!(late.status, "expired", "an approval after the default window is not a grant");
+        assert_eq!(late.status, "approved", "approvals no longer expire");
+
+        // Cancelling the turn ends its open approval as cancelled.
+        let (cancel_run, cancel_id) = approve_once("perm-cancel");
+        database.mark_run_cancelling(&cancel_run).expect("cancelling").expect("was running");
+        assert_eq!(approval_status(&database, &cancel_id), "cancelled");
+        assert!(database.resolve_approval(&cancel_id, ApprovalDecision::AllowOnce).unwrap().is_none());
+
+        // Closing the conversation (backend session closed: the turn ends
+        // interrupted) ends its open approval; it can no longer be granted.
+        let (closed_run, closed_id) = approve_once("perm-closed");
+        database
+            .record_external_event(
+                &closed_run,
+                &serde_json::json!({ "type": "run.interrupted", "code": "agent_backend_session_closed", "message": "外部后端会话已关闭", "outcome": "unknown" }),
+            )
+            .expect("run.interrupted");
+        assert_ne!(approval_status(&database, &closed_id), "pending");
+        assert!(database.resolve_approval(&closed_id, ApprovalDecision::AllowOnce).unwrap().is_none());
 
         database
             .record_external_event(&approved_run, &serde_json::json!({ "type": "run.completed" }))
