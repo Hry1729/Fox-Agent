@@ -1,5 +1,7 @@
 //! Compatibility read models for the existing desktop. These are committed in
 //! the same transaction as Kernel facts and are never an execution authority.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -151,7 +153,7 @@ pub(super) fn project(
             continue;
         }
         let id = format!("kernel-message:{run_id}:{checkpoint}");
-        let metadata = json!({"authority":"kernel","checkpointSeq":checkpoint}).to_string();
+        let metadata = json!({"authority":"kernel","checkpointSeq":checkpoint}).canonical_string();
         tx.execute("INSERT INTO messages(id,conversation_id,run_id,role,kind,content,status,ordinal,runtime_message_id,metadata_json,created_at,updated_at)
             VALUES(?1,?2,?3,'assistant','text',?4,'completed',
                 (SELECT COALESCE(MAX(ordinal),0)+1 FROM messages WHERE conversation_id=?2),?1,?5,?6,?6)
@@ -343,7 +345,7 @@ fn project_hooks(tx: &Transaction<'_>, run_id: &str, now: i64) -> rusqlite::Resu
          -> rusqlite::Result<()> {
             let audit_key = hex::encode(sha2::Sha256::digest(
                 json!([run_id, hook.id, hook.event, tool_id])
-                    .to_string()
+                    .canonical_string()
                     .as_bytes(),
             ));
             // Deleted hook definitions retain their frozen policy in scope, but
@@ -351,7 +353,7 @@ fn project_hooks(tx: &Transaction<'_>, run_id: &str, now: i64) -> rusqlite::Resu
             tx.execute("INSERT INTO lifecycle_hook_executions(id,hook_id,run_id,tool_call_id,event,tool_name,action,outcome,details_json,created_at)
                 SELECT ?1,?2,?3,?4,?5,?6,?7,'applied',?8,?9 WHERE EXISTS(SELECT 1 FROM lifecycle_hooks WHERE id=?2)
                 ON CONFLICT(id) DO NOTHING",params![format!("kernel-hook:{audit_key}"),hook.id,
-                run_id,tool_id,hook.event,name,hook.action,details.to_string(),now])?;
+                run_id,tool_id,hook.event,name,hook.action,details.canonical_string(),now])?;
             Ok(())
         };
         if matches!(hook.event.as_str(), "before_tool" | "after_tool") {
@@ -466,7 +468,7 @@ fn project_usage(
             format!("kernel-usage:{run_id}:{seq}"),
             run_id,
             display_seq,
-            payload.to_string(),
+            payload.canonical_string(),
             now
         ],
     )?;
@@ -787,7 +789,7 @@ fn declare_kernel_approval_decisions(tx: &Transaction<'_>, run_id: &str) -> rusq
             "UPDATE approvals
                 SET request_json = json_set(request_json,'$.availableDecisions',json(?2))
               WHERE id=?1 AND json_type(request_json,'$.availableDecisions') IS NULL",
-            params![approval_id, decisions.to_string()],
+            params![approval_id, decisions.canonical_string()],
         )?;
     }
     Ok(())
