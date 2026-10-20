@@ -9,11 +9,11 @@ fn content_hash(json: &str) -> String { format!("sha256:{}", hex::encode(Sha256:
 
 fn encode(binding: &RunControlBinding) -> Result<String, String> {
     binding.validate()?;
-    let permission = serde_json::to_string(&binding.permission).map_err(|e| e.to_string())?;
+    let permission = crate::canonical_json::to_string(&binding.permission).map_err(|e| e.to_string())?;
     if binding.permission_snapshot_id != content_hash(&permission) {
         return Err("frozen permission hash does not match its content".into());
     }
-    serde_json::to_string(binding).map_err(|e| e.to_string())
+    crate::canonical_json::to_string(binding).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -350,7 +350,7 @@ impl Database {
     }
 
     pub fn run_control_permission_hash(permission: &fox_engine_protocol::FrozenPermission) -> Result<String, String> {
-        Ok(content_hash(&serde_json::to_string(permission).map_err(|e| e.to_string())?))
+        Ok(content_hash(&crate::canonical_json::to_string(permission).map_err(|e| e.to_string())?))
     }
 
     pub fn freeze_run_control(&self, binding: &RunControlBinding) -> Result<(), String> {
