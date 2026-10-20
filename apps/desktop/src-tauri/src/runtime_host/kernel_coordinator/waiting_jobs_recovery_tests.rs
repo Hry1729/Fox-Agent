@@ -1,5 +1,7 @@
 //! Real Host recovery from a committed WaitingJobs notice, with an isolated
 //! SQLite database reopened after the original Host shuts down.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::{JobStartRequest, ModelNoticeInput};
 use crate::kernel::WaitingJobFact;
@@ -41,7 +43,7 @@ fn committed_job_notice_recovers_once_across_reopened_hosts_and_pi_transports() 
 fn recover_committed_notice(live: bool) {
     let arguments = json!({"idempotencyKey":"one-recovered-compute",
         "params":{"processing":"chunked",
-            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).canonical_string();
     let (address, server) = start_http_model_fixture(vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -266,12 +268,12 @@ fn prepare_waiting_lease(limited: bool,
             "content":[{"type":"text","text":"The child Job is still running."}]}),
     };
     response.validate().unwrap();
-    let response_json = serde_json::to_string(&response).unwrap();
+    let response_json = crate::canonical_json::to_string(&response).unwrap();
     let settled = controller.record_initial_model_response(&response_json).unwrap();
     let response_seq = controller.last_event_seq();
     let mut effects = vec![settled];
     effects.extend(controller.park_waiting_jobs(now, now, db.kernel_data_root_id(),
-        response_seq, &response_json, &serde_json::to_string(&history).unwrap(),
+        response_seq, &response_json, &crate::canonical_json::to_string(&history).unwrap(),
         &[WaitingJobFact { job_id: job.clone(), attempt: 1, deadline_wall_ms: now + 12_000 }]).unwrap());
     db.kernel_commit_initial_model(&run, now, &controller.persist_command(&effects),
         "orphan-fixture-owner", true, None, None).unwrap();
