@@ -10,7 +10,10 @@
 //   crash       -> text, then exits with code 3
 //   maxtokens   -> text, stop max_tokens
 // session/load replays one user and one agent chunk ("replayed-old") before
-// answering, as the ACP spec describes.
+// answering, as the ACP spec describes. A session id containing "longreplay"
+// replays a long history (text, thoughts, tool calls) and sends more old
+// output right after the reply; the prompt "after-load" answers with
+// "fresh-after-load" and one tool call ("new-tool").
 import readline from 'node:readline'
 const rl = readline.createInterface({ input: process.stdin })
 const send = message => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n')
@@ -36,6 +39,22 @@ rl.on('line', line => {
     send({ id: msg.id, result: { sessionId: `sess-${process.pid}-${nextSession++}` } })
   } else if (msg.method === 'session/load') {
     const sessionId = msg.params.sessionId
+    if (sessionId.includes('longreplay')) {
+      // A long history: user / agent / thought chunks and finished tool
+      // calls, written in one burst right before the reply, then (like
+      // pi-acp's available_commands_update) more output after the reply but
+      // before any prompt.
+      for (let i = 0; i < 40; i++) {
+        update(sessionId, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: `old question ${i}` } })
+        update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: `old thought ${i}` } })
+        update(sessionId, { sessionUpdate: 'tool_call', toolCallId: `old-tool-${i}`, title: `old tool ${i}`, kind: 'read', status: 'completed', rawInput: { path: `old-${i}.txt` } })
+        text(sessionId, `replayed-old-${i} `)
+      }
+      send({ id: msg.id, result: {} })
+      text(sessionId, 'replayed-after-reply')
+      update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'old-tool-late', title: 'late old tool', kind: 'read', status: 'completed' })
+      return
+    }
     update(sessionId, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'old question' } })
     text(sessionId, 'replayed-old')
     send({ id: msg.id, result: {} })
@@ -43,7 +62,11 @@ rl.on('line', line => {
     const sessionId = msg.params.sessionId
     const prompt = msg.params.prompt?.[0]?.text ?? ''
     prompts.set(sessionId, msg.id)
-    if (prompt === 'simple') {
+    if (prompt === 'after-load') {
+      text(sessionId, 'fresh-after-load')
+      update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'new-tool', title: 'new tool', kind: 'read', status: 'completed', rawInput: { path: 'new.txt' } })
+      finish(sessionId, 'end_turn')
+    } else if (prompt === 'simple') {
       text(sessionId, `pid:${process.pid} session:${sessionId}`)
       finish(sessionId, 'end_turn')
     } else if (prompt === 'hello') {
