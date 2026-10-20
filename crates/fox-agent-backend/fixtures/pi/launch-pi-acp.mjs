@@ -1,10 +1,15 @@
 #!/usr/bin/env node
-// TEST launcher: real `npx -y pi-acp@<version>` with the Fox approval gate wired
+// TEST launcher: real pi-acp with the Fox approval gate wired
 // in through PI_ACP_PI_COMMAND. In production the Host would inject these
 // variables itself (they are not in launch.rs ENV_ALLOWLIST today; see
 // docs/pi.md "Known gaps").
 //
 //   node launch-pi-acp.mjs --home <dir> --pi-bin <path to pi> [--extra "<pi args>"] [--version 0.0.34] [--no-gate]
+//     [--program <installed pi-acp entry>]
+//
+// --program (from FOX_PI_ACP_PROGRAM or the managed runtime, see
+// launch::dev_launch_spec) runs that entry directly; without it the launcher
+// falls back to `npx -y pi-acp@<version>` (tests only).
 //
 // --home isolates HOME so pi's ~/.pi/agent (auth, sessions, settings) and
 // pi-acp's ~/.pi/pi-acp/session-map.json never touch the real user profile.
@@ -25,6 +30,7 @@ const piBin = opt("--pi-bin");
 const extra = opt("--extra", "");
 const version = opt("--version", "0.0.34");
 const gate = !args.includes("--no-gate");
+const program = opt("--program", "");
 
 const env = { ...process.env };
 if (home) env.HOME = home;
@@ -50,7 +56,14 @@ if (gate) {
 }
 if (extra) env.FOX_PI_EXTRA_ARGS = extra;
 
-const npx = process.platform === "win32" ? "npx.cmd" : "npx";
-const child = spawn(npx, ["-y", `pi-acp@${version}`], { stdio: "inherit", env });
+let child;
+if (program) {
+	// A Windows .cmd shim needs a shell (Node refuses to spawn it directly).
+	const shim = process.platform === "win32" && /\.(cmd|bat)$/i.test(program);
+	child = shim ? spawn(`"${program}"`, [], { stdio: "inherit", env, shell: true }) : spawn(program, [], { stdio: "inherit", env });
+} else {
+	const npx = process.platform === "win32" ? "npx.cmd" : "npx";
+	child = spawn(npx, ["-y", `pi-acp@${version}`], { stdio: "inherit", env, shell: process.platform === "win32" });
+}
 for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => child.kill(signal));
 child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
