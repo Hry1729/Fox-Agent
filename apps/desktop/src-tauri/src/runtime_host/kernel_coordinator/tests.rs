@@ -8,6 +8,8 @@ mod r1_response_tests;
 mod model_retry_policy_tests;
 #[path = "length_recovery_tests.rs"]
 mod length_recovery_tests;
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 #[path = "reconciliation_tests.rs"]
 mod reconciliation_tests;
@@ -165,8 +167,8 @@ pub(super) fn record_kernel_read_fact(
                 run_id,
                 tool_call_id,
                 batch_id,
-                input.to_string(),
-                result.to_string()
+                input.canonical_string(),
+                result.canonical_string()
             ],
         )?;
         Ok(())
@@ -315,7 +317,7 @@ fn fixture_with_budgets_notice_permission_opt(clock: &dyn Clock, prompt_hash: &s
         &binding.permission_snapshot_id,
         "legacy",
         prompt_hash,
-        &serde_json::to_string(&config).unwrap(),
+        &crate::canonical_json::to_string(&config).unwrap(),
     )
     .unwrap();
     if let Some(model) = model { db.freeze_kernel_model_config(&run_id, model).unwrap(); }
@@ -384,7 +386,7 @@ fn calls() -> Vec<ToolCallRequest> {
         .map(|(source_order, id)| ToolCallRequest {
             tool_call_id: (*id).into(),
             tool: "read".into(),
-            canonical_input_json: json!({"path":"proof.txt"}).to_string(),
+            canonical_input_json: json!({"path":"proof.txt"}).canonical_string(),
             source_order,
         })
         .collect()
@@ -885,7 +887,7 @@ fn pi_batch_probe(mode: &str, input: Value) -> Value {
         .stdin
         .take()
         .unwrap()
-        .write_all(input.to_string().as_bytes())
+        .write_all(input.canonical_string().as_bytes())
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
@@ -1165,7 +1167,7 @@ fn kernel_repair_override_cannot_be_auto_approved_or_prompt_for_ineligible_work(
     binding.permission_snapshot_id=Database::run_control_permission_hash(&binding.permission).unwrap();
     let policy=super::super::kernel_gateway::GatewayPolicy {binding,scope, database: None, sessions_dir: None, artifacts_dir: None };
     let input=json!({"taskId":"missing-task","attemptId":"repair-attempt","expectedVersion":1,
-        "rootCause":"Confirmed root cause","findingIds":["missing-finding"],"escalationReason":"One bounded repair"}).to_string();
+        "rootCause":"Confirmed root cause","findingIds":["missing-finding"],"escalationReason":"One bounded repair"}).canonical_string();
     assert!(matches!(policy.decide(&run_id,"repair","task_repair_escalate_start",&input),PolicyDecision::RequireApproval));
     let proposals=super::super::kernel_gateway::GatewayProposalPolicy {gateway:&policy,database:&db};
     assert!(matches!(proposals.decide(&run_id,"repair","task_repair_escalate_start",&input),PolicyDecision::Deny {..}));
@@ -1404,7 +1406,7 @@ fn model_snapshot_is_immutable_and_tampering_fails_before_any_dispatch_lease() {
     let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
     assert!(connection.execute("UPDATE kernel_model_configs SET config_json=config_json WHERE run_id=?1", [&run_id]).is_err());
     connection.execute_batch("DROP TRIGGER kernel_model_config_immutable;").unwrap();
-    let original = serde_json::to_string(&config).unwrap();
+    let original = crate::canonical_json::to_string(&config).unwrap();
     for (column, changed) in [
         ("config_json", "{}"), ("config_hash", "wrong-hash"), ("adapter_version", "pi-future-incompatible"),
     ] {
@@ -1486,7 +1488,7 @@ fn initial_input_tampering_is_rejected_without_exposing_message_content() {
     let (db, root, run_id) = fixture_with_initial_opt(&clock, &config.hash().unwrap(), Some(&config), true);
     let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
     let original = initial_input(&run_id, &config.hash().unwrap());
-    let encoded = serde_json::to_string(&original).unwrap();
+    let encoded = crate::canonical_json::to_string(&original).unwrap();
     let original_hash = format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())));
     connection.execute_batch("DROP TRIGGER kernel_initial_input_immutable").unwrap();
     for (column, changed) in [("input_json", "{}"), ("input_hash", "wrong"), ("turn_id", "wrong"), ("prompt_config_hash", "wrong")] {
@@ -1851,8 +1853,8 @@ fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_resu
     assert!(db.kernel_reconciliation_view(&coordinator.binding.conversation_id, &run_id).unwrap().items.is_empty());
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(!requests[0]["messages"].to_string().contains("Fox 续答提示"));
-    assert!(requests[1]["messages"].to_string().contains("Fox 续答提示"));
+    assert!(!requests[0]["messages"].canonical_string().contains("Fox 续答提示"));
+    assert!(requests[1]["messages"].canonical_string().contains("Fox 续答提示"));
     assert!(requests.iter().all(|request| request["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool")));
 }
 
@@ -1862,7 +1864,7 @@ fn settled_incomplete_http_recovery_after_new_compute_error_keeps_prior_progress
     let valid_code = "const count = attachments[0].sheets[0].rows.length - 1;\nsaveFile('summary.json', {count});\nreturn {count};";
     let tool_reply = |id: &str, code: &str| json!({"role":"assistant", "tool_calls":[{
         "index":0,"id":id,"type":"function","function":{"name":"attachment_compute",
-        "arguments":json!({"attachmentIds":["a"],"code":code}).to_string()}}]});
+        "arguments":json!({"attachmentIds":["a"],"code":code}).canonical_string()}}]});
     let (address, server) = start_http_model_fixture(vec![
         json!({"role":"assistant","content":"Let me analyze the data comprehensively."}),
         tool_reply("compute-invalid", invalid_code),
@@ -1929,7 +1931,7 @@ fn settled_incomplete_http_recovery_after_new_compute_error_keeps_prior_progress
     assert_eq!(requests.len(), 5);
     for index in [2, 3, 4] {
         let messages = requests[index]["messages"].as_array().unwrap();
-        assert!(messages.iter().any(|message| message["role"] == "tool" && message.to_string().contains("Syntax error")));
+        assert!(messages.iter().any(|message| message["role"] == "tool" && message.canonical_string().contains("Syntax error")));
     }
     let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
     let replayed: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='dispatch_tool' AND attempts<>1", [&run_id], |row| row.get(0)).unwrap();
@@ -2698,7 +2700,7 @@ fn kernel_host_action_waits_for_result_commit_and_never_replays_claimed_action()
         let (db,root,run_id) = fixture(&clock);
         let coordinator = KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap();
         coordinator.propose_tools("actions",calls(),&Allow).unwrap();
-        let body = json!({"kind":"start_child","childRunId":"test-child"}).to_string();
+        let body = json!({"kind":"start_child","childRunId":"test-child"}).canonical_string();
         assert!(db.stage_kernel_host_action(&run_id,"read-a",&body).is_err());
         let result = coordinator.dispatch_tool("read-a","action-owner",|_,_,_| {
             db.stage_kernel_host_action(&run_id,"read-a",&body)?;
@@ -2797,8 +2799,65 @@ fn kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway() {
 /// `work_snapshot_get`, which the gateway rightly refuses as outside the
 /// frozen catalogue). Here the scope is frozen with `goal_propose` itself;
 /// no production permission changes.
+///
+/// The fixture Run's user message is "test". For a conversational message the
+/// Host work-mode gate answers `goal_propose` first (a successful
+/// `{"goal":null,"gateDecision":"stay_conversation",..}`, no `isError`), so
+/// the missing fields were never examined and `refused["isError"]` was
+/// `Null` (not the serde_json key-order regression). The gate answering first
+/// is intended production behaviour (nothing is written either way; see
+/// `kernel_goal_propose_in_conversation_is_answered_by_the_gate`). To reach
+/// the field check the user message here explicitly asks for a Goal.
 #[test]
 fn kernel_work_tool_missing_field_is_refused_before_execution_as_data() {
+    let mut config = worker_configuration();
+    config.proposal_tools = vec![json!({"name":"goal_propose","description":"Propose a goal",
+        "parameters":{"type":"object","properties":{}}})];
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db,_,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    let scope = crate::database::KernelHostScope { schema_version:1,tool_names:["goal_propose".into()].into_iter().collect(),
+        mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:Vec::new() };
+    db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
+    set_run_user_message(&db,&run_id,"/目标 整理本周报告");
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None, artifacts_dir: None };
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+    coordinator.dispatch_initial("work-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"goal-1","name":"goal_propose","arguments":{}}]}),
+    })).unwrap();
+    coordinator.dispatch_tool("goal-1","work-executor",|_,_,token| {
+        // A missing required field is refused before any write, so it is data
+        // for the model (an isError result), not a fatal executor error.
+        let refused = policy.execute_work(&db,"goal-1","goal_propose",&json!({}),token)?;
+        assert_eq!(refused["details"]["errorCode"],"work_tool.failed","{refused}");
+        assert!(refused["content"][0]["text"].as_str().unwrap().contains("title is required"),"{refused}");
+        assert_eq!(refused["isError"],true);
+        assert_eq!(refused["details"]["toolErrorPhase"],"rejected_before_execution");
+        assert_eq!(refused["details"]["executionStarted"],false);
+        Ok((false,refused))
+    }).unwrap();
+    assert!(db.pending_kernel_host_action_ids(&run_id).unwrap().is_empty());
+}
+
+/// Rewrite the fixture Run's user message (the work-mode gate reads it).
+fn set_run_user_message(db: &Database, run_id: &str, content: &str) {
+    let updated = db.with_connection(|connection| {
+        connection.execute(
+            "UPDATE messages SET content = ?1 WHERE run_id = ?2 AND role = 'user' AND kind = 'text'",
+            rusqlite::params![content, run_id],
+        )
+    }).unwrap();
+    assert_eq!(updated, 1, "fixture Run has exactly one user text message");
+}
+
+/// What the model actually received in the old version of the test above:
+/// in a conversational turn the gate answers `goal_propose` (whatever its
+/// arguments) with a successful "do not create a Goal" result, and nothing
+/// is written.
+#[test]
+fn kernel_goal_propose_in_conversation_is_answered_by_the_gate() {
     let mut config = worker_configuration();
     config.proposal_tools = vec![json!({"name":"goal_propose","description":"Propose a goal",
         "parameters":{"type":"object","properties":{}}})];
@@ -2816,13 +2875,11 @@ fn kernel_work_tool_missing_field_is_refused_before_execution_as_data() {
             {"type":"toolCall","id":"goal-1","name":"goal_propose","arguments":{}}]}),
     })).unwrap();
     coordinator.dispatch_tool("goal-1","work-executor",|_,_,token| {
-        // A missing required field is refused before any write, so it is data
-        // for the model (an isError result), not a fatal executor error.
-        let refused = policy.execute_work(&db,"goal-1","goal_propose",&json!({}),token)?;
-        assert_eq!(refused["isError"],true);
-        assert_eq!(refused["details"]["toolErrorPhase"],"rejected_before_execution");
-        assert_eq!(refused["details"]["executionStarted"],false);
-        Ok((false,refused))
+        let answered = policy.execute_work(&db,"goal-1","goal_propose",&json!({}),token)?;
+        assert!(answered["isError"].is_null(),"{answered}");
+        assert!(answered["details"]["goal"].is_null(),"{answered}");
+        assert_eq!(answered["details"]["gateDecision"],"stay_conversation","{answered}");
+        Ok((true,answered))
     }).unwrap();
     assert!(db.pending_kernel_host_action_ids(&run_id).unwrap().is_empty());
 }
@@ -3522,7 +3579,7 @@ fn assert_live_continuation_projection(after_tool: bool) {
         requests
             .last()
             .unwrap()["messages"]
-            .to_string()
+            .canonical_string()
             .contains("Fox 续答检查"),
         !after_tool,
         "the stop-review prompt must match whether a review round was warranted"
@@ -3733,7 +3790,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
         &binding.permission_snapshot_id,
         "legacy",
         &prompt_hash,
-        &serde_json::to_string(&config).unwrap(),
+        &crate::canonical_json::to_string(&config).unwrap(),
     )
     .unwrap();
     // The frozen model config must agree with the run's frozen engine, and it
@@ -3820,7 +3877,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
              (run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json,
               state, result_json, created_at, settled_at, dispatch_idempotency_key)
              VALUES (?1, 'g-write-1', 'gb', 'write_file', 0, ?2, 'running', NULL, 0, 0, NULL)",
-            params![run_id, target_input.to_string()],
+            params![run_id, target_input.canonical_string()],
         )?;
         connection.execute(
             "INSERT INTO kernel_approvals(run_id, tool_call_id, state, created_at, decided_at)
@@ -3832,7 +3889,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
     .unwrap();
 
     let asks = |policy: &super::super::kernel_gateway::GatewayPolicy, input: &serde_json::Value| {
-        policy.decide(&run_id, "perm", "write_file", &input.to_string())
+        policy.decide(&run_id, "perm", "write_file", &input.canonical_string())
     };
     let policy = || super::super::kernel_gateway::GatewayPolicy {
         binding: db.run_control_binding(&run_id).unwrap().unwrap(),
@@ -3975,7 +4032,7 @@ fn unanswered_approval_keeps_waiting_and_a_late_decision_is_accepted() {
         &binding.permission_snapshot_id,
         "legacy",
         "expiry-hash",
-        &serde_json::to_string(&config).unwrap(),
+        &crate::canonical_json::to_string(&config).unwrap(),
     )
     .unwrap();
 
@@ -3995,7 +4052,7 @@ fn unanswered_approval_keeps_waiting_and_a_late_decision_is_accepted() {
                     "path": root.join("a.txt").to_string_lossy(),
                     "content": "x"
                 })
-                .to_string(),
+                .canonical_string(),
                 source_order: 0,
             }],
             &Ask,
@@ -4296,7 +4353,7 @@ fn an_approved_effect_waits_for_other_approvals_instead_of_failing_admission() {
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     let requests = ["first", "second"].iter().enumerate().map(|(source_order, id)| ToolCallRequest {
         tool_call_id: (*id).into(), tool: "write_file".into(),
-        canonical_input_json: json!({"path":format!("{id}.txt"),"content":id}).to_string(), source_order,
+        canonical_input_json: json!({"path":format!("{id}.txt"),"content":id}).canonical_string(), source_order,
     }).collect();
     coordinator.propose_tools("two-approvals", requests, &Ask).unwrap();
     coordinator.resolve_approval("first", kernel::ApprovalDecision::AllowOnce).unwrap();
@@ -4335,7 +4392,7 @@ fn r1_rejected_input_survives_sqlite_reopen_and_reaches_model_resume_frame() {
     let coordinator=KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap();
     coordinator.propose_tools("rejected",vec![kernel::ToolCallRequest {
         tool_call_id:"bad-edit".into(),tool:"edit_file".into(),
-        canonical_input_json:json!({"path":"proof.txt","oldText":"absent","newText":"x"}).to_string(),source_order:0
+        canonical_input_json:json!({"path":"proof.txt","oldText":"absent","newText":"x"}).canonical_string(),source_order:0
     }],&Invalid).unwrap();
     drop(coordinator);
     let coordinator=KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap();
