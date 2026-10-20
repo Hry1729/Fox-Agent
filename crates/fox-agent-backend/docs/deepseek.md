@@ -86,6 +86,15 @@ dsh 支持用 `--patch <绝对路径>` 叠加配置（优先于 home 级补丁�
 
 `PolicyMapping.unenforced` 列出补丁做不到的部分：目录外读取、fs 工具写入只是用户态检查、用户级补丁插入的行无法中和、（关网络时）子进程网络。
 
+### 4.1 `acp` 行与 `USER_OWNED_ROWS`（2026-10-20，外部后端接通批）
+
+- **现象**（Windows 实测，dsh 0.2.1-rc.2）：`--profile acp` 的配置里，ACP profile 自带一行 `acp`，内容是 `config: { provider: deepseek-official, model: deepseek-v4-flash }`（`--dump-config` 可见）。这一行优先于 `agent-default-model`，所以用户在那里配的 provider 不生效。官方端点如果不提供这个模型，这一轮会被拒。
+- **做法**：在私有 HOME 自己的补丁 `$DSH_HOME/cordis.patch.yml`（即 `<私有 HOME>/.dsh/cordis.patch.yml`）里写一行 `- id: acp`，填上用户自己的 `provider` 和 `model`。`deepseek::acp_model_patch(provider, model)` 生成这一行，值写成单引号 YAML 标量，供安装 / 设置工具和文档使用。Fox 不会自行写入。
+- **Host 补丁不碰的行**：`deepseek::USER_OWNED_ROWS = ["acp", "agent-default-model", "llm"]`。原因是 Host 的 `--patch` 叠加会**整行替换**它点名的每一行的 config，点名了就会悄悄重置用户的选择。所以 `policy_patch` 生成的每个变体都不得出现这三行，也不得出现 `provider:` / `model:`。单元测试 `host_patch_never_touches_the_users_model_rows` 钉住这一点。
+- **审批**：接通批中，DeepSeek 在 Host 补丁下的审批策略为 `never`。如果仍有 `request_permission` 到达，`external.rs` 经 `host_permission_answer` 直接拒绝，不显示为可答的审批卡。
+- **真实测试**：`FOX_TEST_REAL_ACP=1` 下的 dsh 测试现在断言 `stopReason = end_turn` 且回复非空，不再只看“没有报错”。
+- **第 8 节第 8 条的更新**：模型不再固定为 `deepseek-v4-flash`。用户经私有 HOME 的 `acp` 行自选模型，Host 补丁不覆盖。
+
 ## 5 四维能力声明（`capabilities()`）
 
 | 维度 | 声明 | 证据 / 说明 |
@@ -133,10 +142,10 @@ dsh 支持用 `--patch <绝对路径>` 叠加配置（优先于 home 级补丁�
 
 1. **T04 不满足**（见第 6 节），这是开放前的硬阻塞。
 2. 无 DeepSeek 凭据，未跑任何真实 turn：工具调用、审批往返、cancel 确认、沙箱经 turn 生效、`session/update` 映射全部未测。拿到 key 后用 `FOX_TEST_REAL_ACP=1 DEEPSEEK_API_KEY=... cargo test -p fox-agent-backend --features acp --test deepseek_backend -- --nocapture` 复测，并补充提权被 never 拒绝、read-only 下写入被拒的用例。
-3. `src/launch.rs` 的 `DSH_VERSION` 仍为占位 `"0.1"`，应改为 `0.2.1-rc.2`（公共层文件，本分支未改；`deepseek::launch_spec` 已用 `PINNED_VERSION`，并加 `--patch`）。
+3. ~~`src/launch.rs` 的 `DSH_VERSION` 仍为占位 `"0.1"`~~ 已是 `0.2.1-rc.2`；`deepseek::launch_spec` 用 `PINNED_VERSION`，并加 `--patch`。
 4. 公共层建议：`AcpConnection::spawn` 等待 `initialize` 没有超时，且子进程 stderr 被丢弃。实测冷启动耗时差异很大：从本地盘（/tmp）启动到完成 prompt 约 2 秒；从 JuiceFS 工作区路径启动约 76 秒（850 MB 依赖的模块加载慢）；安装损坏时 dsh 报 `required plugin did not activate`，冒烟测试表现为长时间无响应（是否会无限挂起未核实；立即退出的假二进制会快速失败）。建议公共层给 initialize 加可配置超时并在失败时附带 stderr 摘要；生产安装应放在本地盘。
 5. 会话可在运行中切换沙箱模式（`/permission` 命令、UI）；ACP 文档称 commands 不在 ACP 面上，但提示词中的斜杠命令是否被解析未经实测。
 6. 用户级 dsh 配置（`$HOME/.dsh` 下的 home 补丁、profile 补丁、settings）仍然生效：`--patch` 能覆盖同 id 行，但无法中和用户插入的新插件行。HOME 在白名单中，Host 目前无法给 dsh 私有 DSH_HOME。
 7. dsh 把会话日志（含提示词与工具结果）写在 `$HOME/.dsh/sessions`，位于 Fox 数据管理之外。
-8. Model 只提供 `deepseek-v4-flash`（acp profile 固定），切换需改补丁。
+8. ~~Model 只提供 `deepseek-v4-flash`（acp profile 固定），切换需改补丁。~~ 已解决：用户在私有 HOME 补丁里写 `acp` 行自选模型，见 4.1。
 9. 上游为 developer preview，rc 版本之间会破坏性变更；每次升级必须重新实测并更新 `PINNED_VERSION`。
