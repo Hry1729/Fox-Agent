@@ -9,6 +9,7 @@ mod digital_colleagues;
 mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
+mod external_backend;
 mod kernel;
 mod kernel_compaction;
 mod kernel_reconciliation;
@@ -193,6 +194,15 @@ pub fn run() {
                 yuxi_client.clone(),
             );
             yuxi_runtime.recover_pending_runs_detached();
+            // External Agent backends (pi / Codex / DeepSeek over ACP). Built
+            // whatever FOX_EXTERNAL_BACKENDS says: with the switch off no
+            // route ever reaches it; startup only interrupts runs a previous
+            // process left active and recovers Windows ancestor ACEs.
+            app.manage(external_backend::ExternalBackendHost::new(
+                app.handle().clone(),
+                database.clone(),
+                &app_data_dir,
+            ));
             let model_service_client = ModelServiceClient::new()?;
             let configured_local_knowledge_root =
                 local_knowledge_storage::database_storage_path(&database)?;
@@ -427,6 +437,8 @@ pub fn run() {
             commands::model_provider_delete,
             // Four-agent plan v0.3.1, Host wiring first batch: backend picker state.
             commands::agent_backend_routing::agent_backends_status,
+            // External backend wiring batch: effective capability dimensions.
+            commands::agent_backend_routing::agent_backend_capabilities,
             commands::plugin_center::plugin_catalog_list,
             commands::plugin_center::plugin_installations_list,
             commands::plugin_center::plugin_set_activation,
@@ -486,6 +498,7 @@ pub fn run() {
             app_handle.state::<kernel_state_publisher::KernelStatePublisher>().shutdown();
             let _ = app_handle.state::<AppState>().runtime_host.shutdown();
             mcp::shutdown_connections();
+            app_handle.state::<external_backend::ExternalBackendHost>().shutdown_blocking();
         }
     });
 }
