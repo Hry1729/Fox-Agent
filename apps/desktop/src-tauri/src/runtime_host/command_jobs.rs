@@ -1,5 +1,7 @@
 //! Durable adapter for run_command jobs. Admission and approval remain in the
 //! ordinary Host tool path; a claimed command is never resumed or replayed.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::{
     database::{Database, JobStartOutcome, JobStartRequest, JobState},
     kernel::CancellationToken,
@@ -135,7 +137,7 @@ fn sample(manager: &ProcessJobManager, id: &str) -> Result<Value, String> {
         "readersOrphaned":s.readers_orphaned}))
 }
 fn result(value: Value, failed: bool) -> Value {
-    json!({"content":[{"type":"text","text":value.to_string()}],"details":value,"isError":failed})
+    json!({"content":[{"type":"text","text":value.canonical_string()}],"details":value,"isError":failed})
 }
 /// Model-facing allowlist. Internal checkpoints and result blobs never cross
 /// this boundary; only output explicitly returns a page of log bytes.
@@ -244,7 +246,7 @@ fn verify_start(
     if credential.run_id != run_id
         || credential.action_class != fox_engine_protocol::ActionClass::Execute
         || credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(
-            "run_command", &input.to_string()) {
+            "run_command", &input.canonical_string()) {
         return Err("credential_mismatch: command scope or input differs".into());
     }
     let binding = database.run_control_binding(run_id)?.ok_or("command run binding missing")?;
@@ -334,7 +336,7 @@ fn execute_inner(
         if let Some(credential) = credential {
             database.verify_execution_credential(run_id, credential)?;
             if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(
-                "run_command", &input.to_string()) {
+                "run_command", &input.canonical_string()) {
                 return Err("credential_mismatch: command input differs".into());
             }
         }
