@@ -18,6 +18,8 @@
 //!   * revocation and expiry are checked on every read, so a revoked grant cannot
 //!     be resurrected by a cached decision.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -533,7 +535,7 @@ mod tests {
                 "perm-1",
                 "legacy",
                 "hash",
-                &serde_json::to_string(&config).expect("serialize frozen config"),
+                &crate::canonical_json::to_string(&config).expect("serialize frozen config"),
             )
             .expect("kernel run");
         database
@@ -615,7 +617,7 @@ mod tests {
             "operations":[{"command":"set","path":"/Sheet1/A1","props":{"value":"first"}}]}});
         database.with_connection(|connection| {
             connection.execute("UPDATE kernel_tool_calls SET tool='call_mcp_tool',canonical_input_json=?2 WHERE run_id=?1",
-                params!["run-1", input.to_string()])?;
+                params!["run-1", input.canonical_string()])?;
             Ok(())
         }).unwrap();
         let scope = crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text)).expect("narrow scope");
@@ -654,7 +656,7 @@ mod tests {
             "operations":[{"command":"set","path":"/Sheet1/A1","props":{"value":"first"}}]}});
         database.with_connection(|connection| {
             connection.execute("UPDATE kernel_tool_calls SET tool='call_mcp_tool',canonical_input_json=?2 WHERE run_id=?1",
-                params!["run-1", input.to_string()])?;
+                params!["run-1", input.canonical_string()])?;
             Ok(())
         }).unwrap();
         let scope = crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text)).unwrap();
