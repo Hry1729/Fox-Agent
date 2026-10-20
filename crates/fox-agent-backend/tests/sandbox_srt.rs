@@ -1233,7 +1233,7 @@ async fn real_srt_dsh_initialize_inside_sandbox() {
 // ```
 //
 // The managed runtime is `FOX_AGENT_RUNTIME_ROOT` when set (a writable Linux
-// layout: `srt/`, `backends/pi/`, `backends/deepseek/`), else assembled under
+// layout: `srt/`, `backends/pi/`, `backends/dsh/`), else assembled under
 // cargo's target tmp dir from the prefixes (`cp -al`, falling back to
 // `cp -a`; it must be a real directory tree, a symlink out of the runtime is
 // not readable inside the sandbox). The test writes `pi-gate/` (a test
@@ -1371,7 +1371,7 @@ mod external_real {
         if with_dsh {
             let dsh = env_path("FOX_DSH_BIN");
             let prefix = dsh.parent().and_then(Path::parent).and_then(Path::parent).expect("dsh under <prefix>/node_modules/.bin");
-            copy_tree(prefix, &root.join("backends").join("deepseek"));
+            copy_tree(prefix, &root.join("backends").join("dsh"));
         }
         root
     }
@@ -1625,7 +1625,7 @@ async fn real_srt_external_runtime_pi_session() {
 /// `run.completed` / `end_turn` with non-empty agent text (a model error fails
 /// the test; needs `DEEPSEEK_API_KEY` and a reachable api.deepseek.com), close
 /// confirmed and no process left. Needs `FOX_DSH_BIN` unless the runtime has
-/// `backends/deepseek`.
+/// `backends/dsh`.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "real srt + dsh through ExternalRuntime; FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_DSH_BIN=<abs> ... -- --include-ignored"]
