@@ -88,7 +88,7 @@ pub(super) fn read_input(
 
 pub(super) fn freeze_initial_input_in_tx(transaction: &rusqlite::Transaction<'_>, input: &KernelInitialModelInput) -> rusqlite::Result<()> {
         input.validate().map_err(invalid)?;
-        let body = serde_json::to_string(input).map_err(|_| invalid("invalid Kernel initial input"))?;
+        let body = crate::canonical_json::to_string(input).map_err(|_| invalid("invalid Kernel initial input"))?;
             if read_model_config(&transaction, &input.run_id)?.hash().map_err(invalid)? != input.prompt_config_hash {
                 return Err(invalid("Kernel initial input model configuration mismatch"));
             }
