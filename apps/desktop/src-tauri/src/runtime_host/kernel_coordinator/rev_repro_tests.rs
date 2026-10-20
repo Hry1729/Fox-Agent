@@ -9,6 +9,8 @@
 //! 用例编号与实施计划 §5 / §10 对应：F1–F6 失败场景，N1–N6 对应正常场景，
 //! H1–H18 加固用例分布在本文件与各机制实现处。
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::Database;
 use crate::kernel::CancellationRegistry;
@@ -153,7 +155,7 @@ fn kernel_gateway_fixture_with_model(
         &binding.permission_snapshot_id,
         &binding.execution_profile_id,
         &config_hash,
-        &serde_json::to_string(&frozen).expect("serialize frozen config"),
+        &crate::canonical_json::to_string(&frozen).expect("serialize frozen config"),
     )
     .expect("kernel run");
     db.freeze_kernel_model_config(&run.id, model).expect("freeze model config");
@@ -248,7 +250,7 @@ fn kernel_fixture(label: &str, mode: &str) -> (Database, PathBuf, String, String
         "perm-1",
         "legacy",
         "hash",
-        &serde_json::to_string(&config).expect("serialize frozen config"),
+        &crate::canonical_json::to_string(&config).expect("serialize frozen config"),
     )
     .expect("kernel run");
     db.apply_runtime_event(&run.id, 1, &json!({ "type": "run.started" }))
@@ -560,7 +562,7 @@ fn rev05_one_line_read_cannot_authorize_a_whole_file_replacement() {
 
     let policy = gateway_policy(&db, &run, scope);
     let input = json!({"path":"big.txt","content":"whole file replacement","expectedVersion":version});
-    let decision = policy.decide(&run, "call-write", "write_file", &input.to_string());
+    let decision = policy.decide(&run, "call-write", "write_file", &input.canonical_string());
     assert!(
         matches!(decision, fox_agent_kernel::PolicyDecision::RequireApproval),
         "a whole-file replacement after a one-line read must require an explicit, \
@@ -977,7 +979,7 @@ fn rev_replace_grant_fields_are_verified_field_by_field() {
     ));
     let input = json!({"path":"a.txt","content":"whole file","expectedVersion":version});
     let credential = db
-        .issue_dispatch_credential(&run, "write-1", "write_file", &input.to_string())
+        .issue_dispatch_credential(&run, "write-1", "write_file", &input.canonical_string())
         .expect("issue")
         .expect("credential");
 
@@ -1121,7 +1123,7 @@ fn rev_persistent_refusal_is_not_retried() {
     ));
     let input = json!({"path":"a.txt","content":"whole file","expectedVersion":version});
     let credential = db
-        .issue_dispatch_credential(&run, "write-1", "write_file", &input.to_string())
+        .issue_dispatch_credential(&run, "write-1", "write_file", &input.canonical_string())
         .expect("issue")
         .expect("credential");
 
@@ -1271,7 +1273,7 @@ fn rev_old_binding_without_epoch_never_authorizes_reuse() {
             .expect("budgets"),
     });
     let old: fox_engine_protocol::RunControlBinding =
-        serde_json::from_str(&serde_json::to_string(&legacy_binding).expect("serialize"))
+        serde_json::from_str(&crate::canonical_json::to_string(&legacy_binding).expect("serialize"))
             .expect("an old binding must still deserialize");
     assert_eq!(
         old.permission.approval_epoch, None,
@@ -1638,7 +1640,7 @@ fn rev_kernel_projection_binds_the_replacement_request() {
             "INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool, source_order,
                  canonical_input_json, state, created_at)
              VALUES (?1, 'write-1', 'b1', 'write_file', 0, ?2, 'waiting_approval', 1)",
-            rusqlite::params![run, input.to_string()],
+            rusqlite::params![run, input.canonical_string()],
         )?;
         c.execute(
             "UPDATE kernel_runs SET state='waiting_approval', turn_id='turn-1', approval_deadline_wall_ms=?2 WHERE run_id=?1",
@@ -1663,8 +1665,8 @@ fn rev_kernel_projection_binds_the_replacement_request() {
               WHERE run_id=?1 AND (retry_state_json IS NULL OR compaction_state_json IS NULL)",
             rusqlite::params![
                 run,
-                serde_json::to_string(&crate::kernel::RetryState::default()).unwrap(),
-                serde_json::to_string(&crate::kernel::CompactionState::default()).unwrap(),
+                crate::canonical_json::to_string(&crate::kernel::RetryState::default()).unwrap(),
+                crate::canonical_json::to_string(&crate::kernel::CompactionState::default()).unwrap(),
             ],
         )?;
         Ok(())
@@ -1751,7 +1753,7 @@ fn rev_replace_grant_is_consumed_atomically_with_the_claim() {
         "read-one",
     ));
     let input = json!({"path":"a.txt","content":"whole file","expectedVersion":version});
-    let canonical = input.to_string();
+    let canonical = input.canonical_string();
     let target = tool_host::canonical_file_identity(&root, "a.txt").expect("target");
 
     let credential = db
@@ -1846,7 +1848,7 @@ fn rev_replace_grant_is_refused_once_withdrawn() {
     ));
     let input = json!({"path":"a.txt","content":"whole file","expectedVersion":version});
     let credential = db
-        .issue_dispatch_credential(&run, "write-1", "write_file", &input.to_string())
+        .issue_dispatch_credential(&run, "write-1", "write_file", &input.canonical_string())
         .expect("issue")
         .expect("a file dispatch carries a credential");
 
@@ -1947,7 +1949,7 @@ fn rev_replace_grant_is_refused_once_withdrawn() {
             &run,
             "write-2",
             "write_file",
-            &json!({"path":"a.txt","content":"another","expectedVersion":version}).to_string(),
+            &json!({"path":"a.txt","content":"another","expectedVersion":version}).canonical_string(),
         )
         .expect("issue")
         .expect("credential");
@@ -2118,19 +2120,19 @@ fn rev_old_credential_and_binding_stay_loadable_and_conservative() {
             &run,
             "write-1",
             "write_file",
-            &json!({"path":"a.txt","content":"x","expectedVersion":version}).to_string(),
+            &json!({"path":"a.txt","content":"x","expectedVersion":version}).canonical_string(),
         )
         .expect("issue")
         .expect("a file dispatch carries a credential");
 
     // Simulate a row persisted before the new fields existed.
     let mut legacy_json: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&credential).expect("serialize")).expect("json");
+        serde_json::from_str(&crate::canonical_json::to_string(&credential).expect("serialize")).expect("json");
     let object = legacy_json.as_object_mut().expect("object");
     object.remove("requiresReplaceGrant");
     object.remove("replaceCandidateDigest");
     object.remove("replaceRequestDigest");
-    let legacy_text = serde_json::to_string(&object).expect("serialize legacy");
+    let legacy_text = crate::canonical_json::to_string(&object).expect("serialize legacy");
     let loaded: fox_engine_protocol::ExecutionCredential =
         serde_json::from_str(&legacy_text).expect("an older credential must still deserialize");
     assert!(
@@ -2161,7 +2163,7 @@ fn rev_old_credential_and_binding_stay_loadable_and_conservative() {
         "budgets": serde_json::to_value(&binding.budgets).expect("budgets"),
     });
     let loaded_binding: fox_engine_protocol::RunControlBinding =
-        serde_json::from_str(&serde_json::to_string(&legacy_binding).expect("serialize"))
+        serde_json::from_str(&crate::canonical_json::to_string(&legacy_binding).expect("serialize"))
             .expect("an older binding must still deserialize");
     assert_eq!(
         loaded_binding.permission.grants[0].kind,
@@ -2440,7 +2442,7 @@ fn parked_kernel_replacement(
             "INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool, source_order,
                  canonical_input_json, state, created_at)
              VALUES (?1, 'write-1', 'b1', 'write_file', 0, ?2, 'waiting_approval', 1)",
-            rusqlite::params![run, input.to_string()],
+            rusqlite::params![run, input.canonical_string()],
         )?;
         c.execute(
             "UPDATE kernel_runs SET state='waiting_approval', turn_id='turn-1', approval_deadline_wall_ms=?2 WHERE run_id=?1",
@@ -2463,8 +2465,8 @@ fn parked_kernel_replacement(
               WHERE run_id=?1 AND (retry_state_json IS NULL OR compaction_state_json IS NULL)",
             rusqlite::params![
                 run,
-                serde_json::to_string(&crate::kernel::RetryState::default()).unwrap(),
-                serde_json::to_string(&crate::kernel::CompactionState::default()).unwrap(),
+                crate::canonical_json::to_string(&crate::kernel::RetryState::default()).unwrap(),
+                crate::canonical_json::to_string(&crate::kernel::CompactionState::default()).unwrap(),
             ],
         )?;
         Ok(())
@@ -2472,7 +2474,7 @@ fn parked_kernel_replacement(
     .expect("seed the durable run counters");
     db.kernel_project_for_test(&run).expect("project");
     let credential = db
-        .issue_dispatch_credential(&run, "write-1", "write_file", &input.to_string())
+        .issue_dispatch_credential(&run, "write-1", "write_file", &input.canonical_string())
         .expect("issue")
         .expect("credential");
     let approval_id = db
