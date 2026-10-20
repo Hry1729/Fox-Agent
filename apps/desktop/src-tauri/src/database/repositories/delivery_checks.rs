@@ -391,6 +391,13 @@ pub(crate) mod finalize_fault {
         DONE.with(|value| value.set(0));
     }
 
+    /// Read-only probe for test diagnostics: `(armed limit, item updates counted
+    /// on this thread since arming)`. The fault fired iff `counted > limit`.
+    /// Must be read before `disarm`, which resets both.
+    pub(crate) fn observed() -> (Option<usize>, usize) {
+        (ABORT_AFTER.with(Cell::get), DONE.with(Cell::get))
+    }
+
     /// Called before each item update; returns true when this update must abort.
     pub(crate) fn should_abort() -> bool {
         DONE.with(|done| {
@@ -421,6 +428,12 @@ pub(crate) mod stage_fault {
     pub(crate) fn disarm() {
         ABORT_AFTER.with(|value| value.set(None));
         DONE.with(|value| value.set(0));
+    }
+
+    /// Read-only probe for test diagnostics: `(armed limit, stage rows counted
+    /// on this thread since arming)`. The fault fired iff `counted > limit`.
+    pub(crate) fn observed() -> (Option<usize>, usize) {
+        (ABORT_AFTER.with(Cell::get), DONE.with(Cell::get))
     }
 
     pub(crate) fn should_abort() -> bool {
