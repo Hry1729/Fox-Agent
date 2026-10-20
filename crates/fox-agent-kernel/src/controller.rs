@@ -16,6 +16,8 @@
 //! A human approval has no deadline: it waits until the user answers, the Run
 //! is cancelled, the conversation is closed, Fox exits, or a grant is revoked.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ports::{
@@ -1210,7 +1212,7 @@ impl RunController {
             "throughWallMs": wall_ms,
             "runningElapsedMs": elapsed,
         })));
-        let payload_json = payload.to_string();
+        let payload_json = payload.canonical_string();
         effects.push(self.append_event("engine.continuation_requested", payload));
         effects.push(Effect::RequestContinuationModel { effect_key, payload_json });
         effects.push(Effect::PublishSnapshot);
@@ -1241,7 +1243,7 @@ impl RunController {
         Effect::AppendEvent {
             seq,
             event_type: event_type.to_string(),
-            payload_json: payload.to_string(),
+            payload_json: payload.canonical_string(),
         }
     }
 
@@ -1432,7 +1434,7 @@ impl RunController {
                     });
                     let tool = self.tools.get_mut(&call.tool_call_id).unwrap();
                     tool.state = ToolCallState::Failed;
-                    tool.result_json = Some(result.to_string());
+                    tool.result_json = Some(result.canonical_string());
                     effects.push(self.append_event("tool.failed", serde_json::json!({
                         "toolCallId":call.tool_call_id, "tool":call.tool,
                         "code":code, "message":message, "executionStarted":false
@@ -1467,7 +1469,7 @@ impl RunController {
                             "stage":"policy","executionStarted":false}});
                     let tool = self.tools.get_mut(&call.tool_call_id).unwrap();
                     tool.state = ToolCallState::Failed;
-                    tool.result_json = Some(result.to_string());
+                    tool.result_json = Some(result.canonical_string());
                     effects.push(self.append_event(
                         "tool.failed",
                         serde_json::json!({
@@ -1560,7 +1562,7 @@ impl RunController {
                         "stage":"policy","executionStarted":false}});
                 let tool = self.tools.get_mut(tool_call_id).unwrap();
                 tool.state = ToolCallState::Failed;
-                tool.result_json = Some(result.to_string());
+                tool.result_json = Some(result.canonical_string());
                 effects.push(self.append_event("tool.failed", serde_json::json!({
                     "toolCallId":tool_call_id,"tool":tool_name,"code":"kernel.policy_denied",
                     "reasonCode":&reason_code,"operationKind":&operation_kind,"operation":&operation,
@@ -1572,7 +1574,7 @@ impl RunController {
                     "details":{"errorCode":code,"executionStarted":false}});
                 let tool = self.tools.get_mut(tool_call_id).unwrap();
                 tool.state = ToolCallState::Failed;
-                tool.result_json = Some(result.to_string());
+                tool.result_json = Some(result.canonical_string());
                 effects.push(self.append_event("tool.failed", serde_json::json!({
                     "toolCallId":tool_call_id,"tool":tool_name,"code":code,"message":message,"executionStarted":false})));
             }
@@ -2863,7 +2865,7 @@ impl RunController {
             "lane": "job_notice", "prompt": "", "input": input,
             "hostJobNotices": notices,
         });
-        let payload_json = payload.to_string();
+        let payload_json = payload.canonical_string();
         Ok(vec![
             self.append_event("engine.continuation_requested", payload),
             Effect::RequestContinuationModel { effect_key, payload_json },
@@ -2893,7 +2895,7 @@ impl RunController {
         if let Some(lane) = lane {
             payload["lane"] = serde_json::Value::String(lane.to_owned());
         }
-        let payload_json = payload.to_string();
+        let payload_json = payload.canonical_string();
         let event = self.append_event("engine.continuation_requested",
             serde_json::from_str(&payload_json).unwrap());
         Ok(vec![event, Effect::RequestContinuationModel { effect_key, payload_json }])
@@ -2994,7 +2996,7 @@ impl RunController {
                         && value.get("appliedAtWallMs").is_some_and(|applied| applied.is_null())
                     {
                         value["appliedAtWallMs"] = serde_json::json!(wall_ms);
-                        if let Ok(encoded) = serde_json::to_string(&value) {
+                        if let Ok(encoded) = crate::canonical_json::to_string(&value) {
                             kept = Some(encoded);
                         }
                     } else if matches {
@@ -3256,7 +3258,7 @@ impl RunController {
                 Effect::RequestInitialModel { input_hash } => outbox.push(PersistOutboxEffect {
                     effect_key: INITIAL_MODEL_EFFECT_KEY.into(), kind: crate::ports::OutboxEffectKind::InitialModel,
                     idempotency_key: INITIAL_MODEL_IDEMPOTENCY_KEY.into(), tool_call_id: None, batch_id: None,
-                    payload_json: serde_json::json!({"turnId":self.turn_id,"inputHash":input_hash}).to_string(),
+                    payload_json: serde_json::json!({"turnId":self.turn_id,"inputHash":input_hash}).canonical_string(),
                 }),
                 Effect::AppendEvent {
                     seq,
@@ -3282,7 +3284,7 @@ impl RunController {
                         "input": serde_json::from_str::<serde_json::Value>(input_json)
                             .expect("controller tool input invariant")
                     })
-                    .to_string(),
+                    .canonical_string(),
                 }),
                 Effect::RequestApproval {
                     tool_call_id,
@@ -3299,7 +3301,7 @@ impl RunController {
                         "input": serde_json::from_str::<serde_json::Value>(input_json)
                             .expect("controller tool input invariant")
                     })
-                    .to_string(),
+                    .canonical_string(),
                 }),
                 Effect::CancelEngineTurn { turn_id } => outbox.push(PersistOutboxEffect {
                     effect_key: format!("cancel-engine:{turn_id}"),
@@ -3307,7 +3309,7 @@ impl RunController {
                     idempotency_key: format!("cancel-engine:{turn_id}"),
                     tool_call_id: None,
                     batch_id: None,
-                    payload_json: serde_json::json!({ "turnId": turn_id }).to_string(),
+                    payload_json: serde_json::json!({ "turnId": turn_id }).canonical_string(),
                 }),
                 Effect::CancelToolCall { tool_call_id } => outbox.push(PersistOutboxEffect {
                     effect_key: format!("cancel-tool:{tool_call_id}"),
@@ -3351,7 +3353,7 @@ impl RunController {
                     payload_json: serde_json::json!({
                         "orderedToolCallIds": ordered_tool_call_ids
                     })
-                    .to_string(),
+                    .canonical_string(),
                 }),
                 Effect::PublishSnapshot | Effect::Audit { .. } => {}
             }
