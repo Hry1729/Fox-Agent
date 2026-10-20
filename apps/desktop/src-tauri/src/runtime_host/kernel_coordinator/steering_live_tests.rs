@@ -6,6 +6,8 @@
 //! must be answered by a model round, never silently discarded by a normal
 //! completion.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::steering_tests::{steering_model_fixture, stop_response};
 use super::*;
 use std::io::{Read, Write};
@@ -284,7 +286,7 @@ fn live_loop_answers_input_accepted_during_the_last_round_instead_of_completing(
     let staged = db
         .kernel_continuation_input(&run_id, &format!("continuation:{staged_seq}"))
         .expect("the steering round input is frozen with its decision");
-    let staged_text = serde_json::to_string(&staged).unwrap();
+    let staged_text = crate::canonical_json::to_string(&staged).unwrap();
     assert!(
         staged_text.contains("Fox 补充要求处理"),
         "the steering round must carry the steering prompt: {staged_text}"
@@ -383,7 +385,7 @@ fn a_request_accepted_inside_the_live_decision_window_is_answered_and_applied() 
     // prompt, never the stop-review prompt.
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 2, "the accepted request needs its own round");
-    let steering_request = requests[1].to_string();
+    let steering_request = requests[1].canonical_string();
     assert!(steering_request.contains("窗口内追加的现场要求"));
     assert!(steering_request.contains("Fox 补充要求处理"));
     assert!(!steering_request.contains("Fox 续答检查"));
@@ -520,7 +522,7 @@ fn a_request_accepted_inside_a_tool_batch_window_executes_the_tool_once() {
     // request did not wait for a separate lane round.
     let bodies = requests
         .iter()
-        .map(|request| request.to_string())
+        .map(|request| request.canonical_string())
         .collect::<Vec<_>>();
     let first_with_request = bodies
         .iter()
