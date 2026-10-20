@@ -12,6 +12,8 @@
 //! admission/claim → managed execute → durable receipt — through the same
 //! `KernelCoordinator` transport the product uses, rather than a helper alone.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::kernel::{self, CancellationRegistry, PolicyDecision, PolicyDecisionPort, TestClock};
 use crate::runtime_host::{kernel_coordinator::KernelCoordinator, kernel_gateway::GatewayPolicy};
@@ -254,7 +256,7 @@ fn a_deliberate_write_is_decided_and_committed_under_a_canonical_project_root() 
             &gate.run,
             "tc",
             "write_file",
-            &json!({"path":"summary.json","content":"{}"}).to_string(),
+            &json!({"path":"summary.json","content":"{}"}).canonical_string(),
         );
         assert_may_proceed(&decision, &format!("mode={mode} write_file"));
         // The exact positive outcome, so an unexpected Reject can never hide
@@ -297,7 +299,7 @@ fn positive_write_decisions_never_accept_a_reject_or_a_denial() {
         &gate.run,
         "tc",
         "edit_file",
-        &json!({"path":"summary.json","oldText":"absent","newText":"x"}).to_string(),
+        &json!({"path":"summary.json","oldText":"absent","newText":"x"}).canonical_string(),
     );
     assert!(
         matches!(invalid, PolicyDecision::Reject { .. }),
@@ -314,7 +316,7 @@ fn positive_write_decisions_never_accept_a_reject_or_a_denial() {
         &gate.run,
         "tc",
         "write_file",
-        &json!({"path": outside.to_string_lossy(), "content":"x"}).to_string(),
+        &json!({"path": outside.to_string_lossy(), "content":"x"}).canonical_string(),
     );
     assert!(
         matches!(denied, PolicyDecision::Deny { .. }),
@@ -403,7 +405,7 @@ fn a_mutating_office_write_is_not_refused_by_the_merge_gate() {
         "call_mcp_tool",
         &json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
             "arguments": {"output": "报告.docx"}})
-        .to_string(),
+        .canonical_string(),
     );
     assert_may_proceed(&decision, "mutating Office on a declared output");
     assert!(
@@ -418,7 +420,7 @@ fn a_mutating_office_write_is_not_refused_by_the_merge_gate() {
         "call_mcp_tool",
         &json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
             "arguments": {"output": "source.xlsx", "overwrite": true}})
-        .to_string(),
+        .canonical_string(),
     );
     let PolicyDecision::Deny { reason } = decision else {
         panic!("a mutating Office call on the task's input must be denied: {decision:?}");
@@ -761,7 +763,7 @@ impl Gate {
             &binding.permission_snapshot_id,
             "legacy",
             &prompt_hash,
-            &serde_json::to_string(&config).unwrap(),
+            &crate::canonical_json::to_string(&config).unwrap(),
         )
         .unwrap();
         db.freeze_kernel_model_config(&run, &model).unwrap();
