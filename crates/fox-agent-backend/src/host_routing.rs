@@ -21,9 +21,18 @@
 //!   [`EXTERNAL_BACKENDS_ENV`] environment variable. With the switch off, a new
 //!   non-Fox conversation is refused (`agent_backend_disabled`) and an already
 //!   bound one is read-only: no runtime is started for it.
-//! * With the switch on, the external runtime is not wired yet in this batch:
-//!   every runtime entry for a non-Fox conversation fails with
-//!   `agent_backend_not_yet_wired`, before any run row or process is created.
+//! * With the switch on (external backend wiring batch), start / cancel /
+//!   approve of a non-Fox conversation route to the external runtime
+//!   ([`Route::External`]); resume (the yuxi / Kernel continuation entries)
+//!   has no external meaning and is refused with
+//!   `agent_backend_entry_unsupported`. `agent_backend_not_yet_wired` is no
+//!   longer produced (the code stays known so an older UI still reads it).
+//! * A lookup of the frozen value that fails (storage error, missing column)
+//!   is decided by [`on_lookup_failure`]: with every external backend off it
+//!   falls back to the Fox path as before; as soon as one is on, or the
+//!   request names a non-Fox backend, it is refused
+//!   (`agent_backend_lookup_failed`), because a non-Fox conversation must
+//!   never reach the Fox runtime by accident.
 //! * `engine_id` keeps its historical meaning; [`audit_line`] always prints it
 //!   next to `agent_backend`.
 
@@ -156,6 +165,11 @@ impl BackendSwitch {
     pub fn unknown_entries(&self) -> &[String] {
         &self.unknown
     }
+
+    /// Whether any non-Fox backend is enabled.
+    pub fn any_external(&self) -> bool {
+        !self.enabled.is_empty()
+    }
 }
 
 /// A routing refusal. Each variant has a stable, machine-readable code that
@@ -178,10 +192,23 @@ pub enum RouteError {
         bound: AgentBackend,
         requested: AgentBackend,
     },
-    /// The backend is enabled but its runtime is not wired in this batch.
+    /// The backend is enabled but its runtime is not wired. No longer
+    /// produced since the external backend wiring batch; kept for the code.
     NotYetWired {
         entry: HostEntry,
         backend: AgentBackend,
+    },
+    /// The entry has no meaning for an external backend (resume of a yuxi /
+    /// Kernel run).
+    EntryUnsupported {
+        entry: HostEntry,
+        backend: AgentBackend,
+    },
+    /// The frozen value could not be read while an external backend may be
+    /// involved; refused instead of falling back to the Fox path.
+    LookupFailed {
+        entry: HostEntry,
+        detail: String,
     },
 }
 
@@ -190,6 +217,8 @@ impl RouteError {
     pub const CODE_DISABLED: &'static str = "agent_backend_disabled";
     pub const CODE_MISROUTED: &'static str = "agent_backend_misrouted";
     pub const CODE_NOT_YET_WIRED: &'static str = "agent_backend_not_yet_wired";
+    pub const CODE_ENTRY_UNSUPPORTED: &'static str = "agent_backend_entry_unsupported";
+    pub const CODE_LOOKUP_FAILED: &'static str = "agent_backend_lookup_failed";
 
     pub fn code(&self) -> &'static str {
         match self {
@@ -197,6 +226,8 @@ impl RouteError {
             Self::Disabled { .. } => Self::CODE_DISABLED,
             Self::Misrouted { .. } => Self::CODE_MISROUTED,
             Self::NotYetWired { .. } => Self::CODE_NOT_YET_WIRED,
+            Self::EntryUnsupported { .. } => Self::CODE_ENTRY_UNSUPPORTED,
+            Self::LookupFailed { .. } => Self::CODE_LOOKUP_FAILED,
         }
     }
 
@@ -238,12 +269,21 @@ impl RouteError {
                 backend.as_str(),
                 entry.as_str()
             ),
+            Self::EntryUnsupported { entry, backend } => format!(
+                "外部 Agent 后端「{}」的会话不支持此操作（{}）；请直接发送新消息继续",
+                backend.as_str(),
+                entry.as_str()
+            ),
+            Self::LookupFailed { entry, detail } => format!(
+                "无法读取会话绑定的 Agent 后端（{}），为避免把外部会话交给错误的运行时，已拒绝本次操作，请稍后重试：{detail}",
+                entry.as_str()
+            ),
         }
     }
 
     /// Whether retrying the same request can succeed without a change.
     pub fn retryable(&self) -> bool {
-        false
+        matches!(self, Self::LookupFailed { .. })
     }
 }
 
@@ -300,6 +340,31 @@ pub fn choose_for_new_conversation(
 pub enum Route {
     /// The existing Fox path (Kernel / legacy / yuxi selection unchanged).
     Fox,
+    /// The external runtime of this backend (ACP, see `crate::external`).
+    External(AgentBackend),
+}
+
+/// What to do when the frozen value could not be read (storage error,
+/// pre-v95 column). `Ok(())` = continue on the existing Fox path (audited by
+/// the caller); `Err` = refuse.
+///
+/// * every external backend off and the request names no non-Fox backend:
+///   the existing path, exactly as before this batch (switch-off behaviour
+///   unchanged);
+/// * otherwise: refused with `agent_backend_lookup_failed` (retryable). A
+///   conversation that may be bound to an external backend must never run on
+///   the Fox runtime because a read failed.
+pub fn on_lookup_failure(entry: HostEntry, requested: Option<&str>, switch: &BackendSwitch, detail: &str) -> Result<(), RouteError> {
+    let names_external = match parse_requested(requested) {
+        Ok(Some(backend)) => backend != AgentBackend::Fox,
+        Ok(None) => false,
+        Err(error) => return Err(error),
+    };
+    if switch.any_external() || names_external {
+        let detail: String = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+        return Err(RouteError::LookupFailed { entry, detail });
+    }
+    Ok(())
 }
 
 /// Route one Host entry for a conversation whose frozen backend is `bound`.
@@ -327,10 +392,8 @@ pub fn route(
             backend: external,
             existing_conversation: true,
         }),
-        external => Err(RouteError::NotYetWired {
-            entry,
-            backend: external,
-        }),
+        external if entry == HostEntry::Resume => Err(RouteError::EntryUnsupported { entry, backend: external }),
+        external => Ok(Route::External(external)),
     }
 }
 
@@ -353,7 +416,8 @@ pub enum SessionAccess {
     Runnable,
     /// History is shown; no runtime is started (switch off).
     ReadOnlyDisabled,
-    /// History is shown; the backend is on but not wired in this batch.
+    /// History is shown; the backend is on but not wired. No longer produced
+    /// (every enabled external backend is wired); kept for the UI code.
     ReadOnlyNotWired,
 }
 
@@ -373,7 +437,7 @@ pub fn session_access(bound: AgentBackend, switch: &BackendSwitch) -> SessionAcc
     match bound {
         AgentBackend::Fox => SessionAccess::Runnable,
         external if !switch.is_enabled(external) => SessionAccess::ReadOnlyDisabled,
-        _ => SessionAccess::ReadOnlyNotWired,
+        _ => SessionAccess::Runnable,
     }
 }
 
@@ -382,7 +446,8 @@ pub fn session_access(bound: AgentBackend, switch: &BackendSwitch) -> SessionAcc
 pub struct BackendOption {
     pub backend: AgentBackend,
     pub enabled: bool,
-    /// Runtime wired in this build (only Fox in this batch).
+    /// Runtime wired in this build (every backend since the external backend
+    /// wiring batch).
     pub wired: bool,
     pub experimental: bool,
     /// Why it cannot be picked / used, for the UI tooltip.
@@ -394,13 +459,11 @@ pub fn backend_options(switch: &BackendSwitch) -> Vec<BackendOption> {
         .into_iter()
         .map(|backend| {
             let enabled = switch.is_enabled(backend);
-            let wired = backend == AgentBackend::Fox;
+            let wired = true;
             let reason = if !enabled {
                 Some(format!(
                     "默认关闭；需由管理员设置环境变量 {EXTERNAL_BACKENDS_ENV} 后重启 Fox"
                 ))
-            } else if !wired {
-                Some("已启用，但本版本尚未接通运行时，发送消息会返回 agent_backend_not_yet_wired".to_owned())
             } else {
                 None
             };
@@ -428,6 +491,7 @@ pub fn audit_line(
 ) -> String {
     let outcome = match outcome {
         Ok(Route::Fox) => "routed=fox".to_owned(),
+        Ok(Route::External(backend)) => format!("routed=external:{}", backend.as_str()),
         Err(error) => format!("refused={}", error.code()),
     };
     format!(
@@ -543,20 +607,45 @@ mod tests {
     }
 
     #[test]
-    fn external_conversations_are_not_yet_wired_when_the_switch_is_on() {
-        for entry in ENTRIES {
+    fn external_conversations_route_to_their_runtime_when_the_switch_is_on() {
+        for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve] {
             for backend in EXTERNAL {
-                let error = route(entry, backend, Some(backend), &on()).unwrap_err();
-                assert_eq!(error, RouteError::NotYetWired { entry, backend });
-                assert_eq!(error.code(), "agent_backend_not_yet_wired");
+                assert_eq!(route(entry, backend, Some(backend), &on()), Ok(Route::External(backend)));
+                assert_eq!(route(entry, backend, None, &on()), Ok(Route::External(backend)));
             }
+        }
+        for backend in EXTERNAL {
+            let error = route(HostEntry::Resume, backend, None, &on()).unwrap_err();
+            assert_eq!(error, RouteError::EntryUnsupported { entry: HostEntry::Resume, backend });
+            assert_eq!(error.code(), "agent_backend_entry_unsupported");
+        }
+        // Only the listed backend is routed; the others stay read-only.
+        let only_pi = BackendSwitch::from_env_value(Some("pi"));
+        assert_eq!(route(HostEntry::Start, AgentBackend::Pi, None, &only_pi), Ok(Route::External(AgentBackend::Pi)));
+        assert_eq!(route(HostEntry::Start, AgentBackend::Codex, None, &only_pi).unwrap_err().code(), "agent_backend_disabled");
+    }
+
+    #[test]
+    fn a_failed_lookup_falls_back_only_while_every_external_backend_is_off() {
+        for entry in ENTRIES {
+            assert_eq!(on_lookup_failure(entry, None, &BackendSwitch::all_off(), "database is locked"), Ok(()));
+            assert_eq!(on_lookup_failure(entry, Some("fox"), &BackendSwitch::all_off(), "x"), Ok(()));
+            let error = on_lookup_failure(entry, None, &on(), "database\n is locked").unwrap_err();
+            assert_eq!(error.code(), "agent_backend_lookup_failed");
+            assert!(error.retryable());
+            assert!(error.message().contains("database is locked"));
+            // A request that names a non-Fox backend is refused even with the switch off.
+            assert_eq!(on_lookup_failure(entry, Some("pi"), &BackendSwitch::all_off(), "x").unwrap_err().code(), "agent_backend_lookup_failed");
+            assert_eq!(on_lookup_failure(entry, Some("gpt"), &BackendSwitch::all_off(), "x").unwrap_err().code(), "agent_backend_invalid");
+            let only_codex = BackendSwitch::from_env_value(Some("codex"));
+            assert!(on_lookup_failure(entry, None, &only_codex, "x").is_err());
         }
     }
 
     #[test]
     fn closing_the_switch_keeps_bound_conversations_readable() {
         for backend in EXTERNAL {
-            assert_eq!(session_access(backend, &on()), SessionAccess::ReadOnlyNotWired);
+            assert_eq!(session_access(backend, &on()), SessionAccess::Runnable);
             assert_eq!(session_access(backend, &BackendSwitch::all_off()), SessionAccess::ReadOnlyDisabled);
             // The frozen value itself is still read back unchanged.
             assert_eq!(bound_backend(Some(backend.as_str())), Ok(backend));
@@ -610,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_options_explain_disabled_and_unwired_backends() {
+    fn picker_options_explain_disabled_backends() {
         let off = backend_options(&BackendSwitch::all_off());
         assert_eq!(off.len(), 4);
         assert!(off[0].enabled && off[0].wired && off[0].reason.is_none());
@@ -620,8 +709,8 @@ mod tests {
         }
         let all = backend_options(&on());
         for option in &all[1..] {
-            assert!(option.enabled && !option.wired);
-            assert!(option.reason.as_deref().unwrap().contains("agent_backend_not_yet_wired"));
+            assert!(option.enabled && option.wired);
+            assert!(option.reason.is_none());
         }
         assert!(all.iter().find(|option| option.backend == AgentBackend::Deepseek).unwrap().experimental);
     }
@@ -633,6 +722,8 @@ mod tests {
         let error = RouteError::Misrouted { entry: HostEntry::Start, bound: AgentBackend::Fox, requested: AgentBackend::Pi };
         let line = audit_line(HostEntry::Start, "c1", None, Some(AgentBackend::Fox), None, Err(&error));
         assert!(line.contains("agent_backend=fox engine_id=- refused=agent_backend_misrouted"));
+        let line = audit_line(HostEntry::Start, "c2", Some("r2"), Some(AgentBackend::Pi), None, Ok(Route::External(AgentBackend::Pi)));
+        assert!(line.ends_with("agent_backend=pi engine_id=- routed=external:pi"), "{line}");
     }
 
     #[test]
