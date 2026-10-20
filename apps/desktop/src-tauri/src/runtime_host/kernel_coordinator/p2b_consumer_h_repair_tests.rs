@@ -20,6 +20,8 @@
 //! Every assertion reads durable database state or a real `load_conversation`
 //! projection. Nothing here asserts an enum conversion alone.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::runtime_host::delivery::{DecisionFact, DeliveryVerdict, FactOrigin, ItemDecision};
 use crate::runtime_host::kernel_coordinator::live::StopFollowup;
@@ -215,7 +217,7 @@ fn force_finding(db: &Database, run_id: &str, finding: &serde_json::Value, statu
     db.with_connection(|connection| {
         connection.execute(
             "UPDATE delivery_checklist_items SET finding_json=?1, status=?2 WHERE run_id=?3",
-            rusqlite::params![finding.to_string(), status, run_id],
+            rusqlite::params![finding.canonical_string(), status, run_id],
         )?;
         Ok(())
     })
@@ -751,7 +753,7 @@ fn h4_repair_the_real_finalize_never_writes_passed_for_contradicted_facts() {
         &[crate::database::StagedDeliveryItem {
             item_key: key.clone(),
             passed: true,
-            finding_json: finding.to_string(),
+            finding_json: finding.canonical_string(),
         }],
         None,
         crate::database::now_ms(),
@@ -975,7 +977,7 @@ fn b_corrupt_candidate_fact_stays_pending_on_real_finalize() {
     assert!(matches!(crate::runtime_host::delivery::decode_stored_verdict(&finding),
         crate::runtime_host::delivery::StoredVerdict::Corrupt { .. }));
     let mark="delivery:completion:b-corrupt-fact";let now=crate::database::now_ms();
-    db.stage_delivery_outcome(run_id,mark,&[crate::database::StagedDeliveryItem {item_key:key,passed:true,finding_json:finding.to_string()}],None,now).unwrap();
+    db.stage_delivery_outcome(run_id,mark,&[crate::database::StagedDeliveryItem {item_key:key,passed:true,finding_json:finding.canonical_string()}],None,now).unwrap();
     db.record_decision_mark_for_test(run_id,mark,now).unwrap();db.finalize_staged_delivery_outcome(run_id,mark,now).unwrap();
     assert_eq!(rows(db,run_id)[0].1,"pending","corrupt evidence cannot manufacture a definite failure");
     drop(coordinator);let _=std::fs::remove_dir_all(root);
