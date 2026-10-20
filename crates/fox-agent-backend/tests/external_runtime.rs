@@ -389,3 +389,48 @@ async fn closing_a_conversation_interrupts_its_turn_and_confirms_the_stop() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(sink.types("r13").iter().filter(|kind| kind.starts_with("run.") && *kind != "run.started").count(), 1, "no second terminal after close");
 }
+
+/// Approvals have no deadline (Claude Code / Codex CLI / ACP semantics): a
+/// permission request left unanswered keeps waiting, and the turn keeps
+/// running, until the user acts. Cancelling the turn then answers the native
+/// request with `outcome: cancelled`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_permission_waits_without_a_deadline_until_the_turn_is_cancelled() {
+    if !node_available() {
+        return;
+    }
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    runtime.start_turn(turn("c20", "r20", "hello", AgentBackend::Pi, None)).unwrap();
+    let (_, approval, _) = sink.wait_approval(1).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(runtime.approval_pending(&approval), "still waiting for the user");
+    assert_eq!(runtime.active_runs(), vec!["r20".to_owned()]);
+    let terminals = ["run.completed", "run.cancelled", "run.failed", "run.interrupted"];
+    assert!(!sink.types("r20").iter().any(|kind| terminals.contains(&kind.as_str())), "no terminal while waiting");
+    match runtime.cancel("r20") {
+        CancelOutcome::Requested { answered_permissions } => assert_eq!(answered_permissions.len(), 1, "answered `cancelled`"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!runtime.approval_pending(&approval));
+    assert_eq!(sink.terminal("r20").await["type"], "run.cancelled");
+    assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending);
+    runtime.shutdown().await;
+}
+
+/// Closing the conversation ends a pending permission with the turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_a_conversation_ends_its_pending_permission() {
+    if !node_available() {
+        return;
+    }
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    runtime.start_turn(turn("c21", "r21", "hello", AgentBackend::Codex, None)).unwrap();
+    let (_, approval, _) = sink.wait_approval(1).await;
+    let report = runtime.close_conversation("c21", "会话已归档").await.expect("process");
+    assert_eq!(report.confirmation, StopConfirmation::Confirmed);
+    let terminal = sink.terminal("r21").await;
+    assert_eq!(terminal["type"], "run.interrupted");
+    assert_eq!(terminal["code"], "agent_backend_session_closed");
+    assert!(!runtime.approval_pending(&approval));
+    assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending);
+}
