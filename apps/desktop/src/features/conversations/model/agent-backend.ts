@@ -23,13 +23,20 @@ export const AGENT_BACKEND_ERROR_CODES = {
   invalid: 'agent_backend_invalid',
   disabled: 'agent_backend_disabled',
   misrouted: 'agent_backend_misrouted',
+  /** No longer returned since the external backend wiring batch; kept for older Hosts. */
   notYetWired: 'agent_backend_not_yet_wired',
+  entryUnsupported: 'agent_backend_entry_unsupported',
+  lookupFailed: 'agent_backend_lookup_failed',
+  // Refusals of an external send before anything ran (external backend wiring batch).
+  turnBusy: 'agent_backend_turn_busy',
+  attachmentsUnsupported: 'agent_backend_attachments_unsupported',
+  projectRequired: 'agent_backend_project_required',
 } as const
 
 export interface AgentBackendOption {
   backend: AgentBackendId
   enabled: boolean
-  /** Runtime wired in this build (only Fox in the first batch). */
+  /** Runtime wired in this build (every backend since the external backend wiring batch). */
   wired: boolean
   experimental: boolean
   reason: string | null
@@ -148,4 +155,38 @@ export function withoutRefusedSend<M extends { id: string }, R extends { id: str
   const lastRun = detail.lastRun && detail.lastRun.id.startsWith('pending-run-') ? previousLastRun : detail.lastRun
   if (messages === detail.messages && lastRun === detail.lastRun) return detail
   return { ...detail, messages, lastRun }
+}
+
+// ---------------------------------------------------------------------------
+// External backend wiring batch: the four effective capability dimensions
+// (`agent_backend_capabilities`, built by `fox_agent_backend::capability_view`
+// from the backend's measured declaration and the session's sandbox
+// declaration). Display only.
+
+export interface AgentBackendCapabilityDimension {
+  summary: string
+  detail: string
+}
+
+export interface AgentBackendCapabilities {
+  backend: AgentBackendId
+  mode: 'sandboxed' | 'full_access' | string
+  /** `live`: from this session's launch; `planned`: before the first launch. */
+  source: 'live' | 'planned' | string
+  approval: AgentBackendCapabilityDimension
+  sandbox: AgentBackendCapabilityDimension
+  cancel: AgentBackendCapabilityDimension
+  observability: AgentBackendCapabilityDimension
+  warning: string | null
+}
+
+/** The four chips in a fixed order (approval, sandbox, cancel, observability). */
+export function agentBackendCapabilityChips(view: AgentBackendCapabilities | null | undefined): { key: string; label: string; title: string }[] {
+  if (!view) return []
+  const source = view.source === 'live' ? '' : '（启动前预估）'
+  return (['approval', 'sandbox', 'cancel', 'observability'] as const).map((key) => ({
+    key,
+    label: view[key].summary,
+    title: `${view[key].detail}${source}`,
+  }))
 }
