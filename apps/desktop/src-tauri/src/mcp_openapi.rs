@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::McpServerRecord;
 use crate::mcp::{
     credential_headers, http_client, http_status_error, parse_endpoint, read_limited,
@@ -213,7 +215,7 @@ impl OpenApiConnector {
             Value::String(String::from_utf8_lossy(&bytes).into_owned())
         };
         Ok(json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()) }],
+            "content": [{ "type": "text", "text": crate::canonical_json::to_string_pretty(&body).unwrap_or_else(|_| body.canonical_string()) }],
             "structuredContent": { "status": status.as_u16(), "contentType": content_type, "body": body },
         }))
     }
