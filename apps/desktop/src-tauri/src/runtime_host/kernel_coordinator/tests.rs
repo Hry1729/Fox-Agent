@@ -2782,15 +2782,44 @@ fn kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway() {
         let result = policy.execute_work(&db,"work-1","work_snapshot_get",&json!({}),token)?;
         assert!(result["content"].is_array());
         assert_eq!(result["details"]["evidenceRef"]["refId"],format!("kernel-tool:{run_id}:work-1"));
-        // A missing required field is refused before any write, so it is data
-        // for the model (an isError result), not a fatal executor error.
-        let refused = policy.execute_work(&db,"work-1","goal_propose",&json!({}),token)?;
-        assert_eq!(refused["isError"],true);
-        assert_eq!(refused["details"]["toolErrorPhase"],"rejected_before_execution");
-        assert_eq!(refused["details"]["executionStarted"],false);
         Ok((true,result))
     }).unwrap());
     assert_eq!(coordinator.snapshot().unwrap().tool_calls[0].state,"completed");
+    assert!(db.pending_kernel_host_action_ids(&run_id).unwrap().is_empty());
+}
+
+/// Split out of `kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway`
+/// (624ada6 called `goal_propose` under a scope frozen with only
+/// `work_snapshot_get`, which the gateway rightly refuses as outside the
+/// frozen catalogue). Here the scope is frozen with `goal_propose` itself;
+/// no production permission changes.
+#[test]
+fn kernel_work_tool_missing_field_is_refused_before_execution_as_data() {
+    let mut config = worker_configuration();
+    config.proposal_tools = vec![json!({"name":"goal_propose","description":"Propose a goal",
+        "parameters":{"type":"object","properties":{}}})];
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db,_,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    let scope = crate::database::KernelHostScope { schema_version:1,tool_names:["goal_propose".into()].into_iter().collect(),
+        mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:Vec::new() };
+    db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None, artifacts_dir: None };
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+    coordinator.dispatch_initial("work-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"goal-1","name":"goal_propose","arguments":{}}]}),
+    })).unwrap();
+    coordinator.dispatch_tool("goal-1","work-executor",|_,_,token| {
+        // A missing required field is refused before any write, so it is data
+        // for the model (an isError result), not a fatal executor error.
+        let refused = policy.execute_work(&db,"goal-1","goal_propose",&json!({}),token)?;
+        assert_eq!(refused["isError"],true);
+        assert_eq!(refused["details"]["toolErrorPhase"],"rejected_before_execution");
+        assert_eq!(refused["details"]["executionStarted"],false);
+        Ok((false,refused))
+    }).unwrap();
     assert!(db.pending_kernel_host_action_ids(&run_id).unwrap().is_empty());
 }
 
@@ -2840,7 +2869,12 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
 }
 
 #[test]
-fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
+fn kernel_gateway_catalogue_size_is_pinned() {
+    // Moved out of `kernel_delegation_stages_a_single_child_without_starting_an_executor`
+    // so that test (and its evidenceRef assertion) no longer depends on the
+    // catalogue count. Known stale on every platform: the count is 72 since
+    // 4b54e68 added `present_files` (35 resource + 28 work + 9 delegation
+    // tools); left at 71 until the owner confirms the catalogue.
     let supported = super::super::kernel_gateway::supported_tools();
     // 71 = the frozen catalogue including the four compute job tools, `read_tool_result` (the reader that
     // keeps a bounded model view's promise that omitted content is reachable)
@@ -2850,6 +2884,10 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),71);
     assert!(supported.iter().any(|tool| *tool == "read_tool_result"));
     assert!(supported.iter().any(|tool| *tool == "skill_load"));
+}
+
+#[test]
+fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     let mut config = worker_configuration();
     config.model_service["maxOutputTokens"] = json!(1024);
     config.proposal_tools = ["child_agent_list","child_run_start","child_run_collect","child_run_cancel"].iter()
