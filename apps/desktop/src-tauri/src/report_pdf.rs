@@ -523,7 +523,7 @@ pub(crate) fn render_chart(value: &Value) -> Result<Vec<u8>, String> {
     render_chart_output(value).map(|output|output.bytes)
 }
 pub(crate) fn render_chart_output(value: &Value) -> Result<ChartOutput, String> {
-    if serde_json::to_vec(value).map_err(invalid)?.len() > MAX_SPEC_BYTES {
+    if crate::canonical_json::to_vec(value).map_err(invalid)?.len() > MAX_SPEC_BYTES {
         return Err(invalid("chart specification exceeds 512 KiB"));
     }
     let chart: ChartSpec = serde_json::from_value(value.clone()).map_err(invalid)?;
@@ -675,7 +675,7 @@ pub(crate) fn render_pdf(
     deadline: Instant,
 ) -> Result<PdfOutput, String> {
     check(cancelled, deadline)?;
-    if serde_json::to_vec(value).map_err(invalid)?.len() > MAX_SPEC_BYTES {
+    if crate::canonical_json::to_vec(value).map_err(invalid)?.len() > MAX_SPEC_BYTES {
         return Err(invalid("PDF specification exceeds 512 KiB"));
     }
     let spec: ReportSpec = serde_json::from_value(value.clone()).map_err(invalid)?;
@@ -968,10 +968,10 @@ mod tests {
             fs::write(dir.join("synthetic_vector_cjk.pdf"), &output.bytes).unwrap();
             fs::write(
                 dir.join("synthetic_spec.json"),
-                serde_json::to_vec_pretty(&value).unwrap(),
+                crate::canonical_json::to_vec_pretty(&value).unwrap(),
             )
             .unwrap();
-            fs::write(dir.join("font_identity.json"),serde_json::to_vec_pretty(&json!({"font":output.font_name,"fontSha256":output.font_sha256,"pages":output.pages,"bytes":output.bytes.len(),"renderer":"krilla-0.8.2"})).unwrap()).unwrap();
+            fs::write(dir.join("font_identity.json"),crate::canonical_json::to_vec_pretty(&json!({"font":output.font_name,"fontSha256":output.font_sha256,"pages":output.pages,"bytes":output.bytes.len(),"renderer":"krilla-0.8.2"})).unwrap()).unwrap();
         }
     }
     #[test]
