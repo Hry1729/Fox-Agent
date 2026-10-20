@@ -1,5 +1,7 @@
 //! Bounded Rust executors for the four canonical project readers. Every opened
 //! resource is checked against the frozen root; no runtime fallback is allowed.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::kernel::CancellationToken;
 use fox_engine_protocol::{ResourceExecutor, RunControlBinding};
 use regex::RegexBuilder;
@@ -285,12 +287,12 @@ fn bounded_nonempty_utf16(text: &str, max_units: usize) -> Result<String, String
 enum CursorPosition { Entry(usize), Pair(usize, usize) }
 
 fn encode_search_cursor(scope: &str, consumed: usize) -> String {
-    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": consumed }).to_string();
+    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": consumed }).canonical_string();
     base64_encode_url(payload.as_bytes())
 }
 
 fn encode_search_cursor_pair(scope: &str, file: usize, line: usize) -> String {
-    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": { "f": file, "l": line } }).to_string();
+    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": { "f": file, "l": line } }).canonical_string();
     base64_encode_url(payload.as_bytes())
 }
 
