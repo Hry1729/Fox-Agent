@@ -15,6 +15,8 @@
 //! so the summary is produced by the production terminal path rather than written by
 //! the fixture.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::runtime_host::{kernel_host, RuntimeCommand};
 use std::path::Path;
@@ -187,7 +189,7 @@ fn host_v2_spec() -> Value {
 
 fn requirements_json(spec: Value) -> String {
     use crate::database::{DeliveryRequirement, RequirementKind};
-    serde_json::to_string(&vec![DeliveryRequirement {
+    crate::canonical_json::to_string(&vec![DeliveryRequirement {
         item_key: None,
         id: "c-0".to_owned(),
         kind: RequirementKind::ContentContract { spec },
@@ -543,7 +545,7 @@ fn b_the_finalize_defence_withholds_a_foreign_record() {
         "reason": null,
         "deliveryVerdict": envelope
     })
-    .to_string();
+    .canonical_string();
     let now = crate::database::now_ms();
     let mark = format!("test-decision:{}", uuid::Uuid::new_v4());
     db.stage_delivery_outcome(
@@ -607,12 +609,12 @@ fn b_row_binding_reaches_real_summary_continuation_and_reopen() {
             "deliveryVerdict":{"verdictSchemaVersion":2,"verdictEnvelopeVersion":2,"itemKey":"file:proof.csv","class":"confirmed","aggregateClass":"confirmed",
                 "itemCount":1,"terminal":true,"repairBudgetRemaining":true,"facts":[{"class":"passed","origin":"checkUnbound","blocking":false,"needsRepair":false}]}});
         let now=crate::database::now_ms();let mark=format!("b-binding:{}",uuid::Uuid::new_v4());
-        db.stage_delivery_outcome(&run,&mark,&[crate::database::StagedDeliveryItem {item_key:"file:proof.csv".into(),passed:true,finding_json:finding.to_string()}],None,now).unwrap();
+        db.stage_delivery_outcome(&run,&mark,&[crate::database::StagedDeliveryItem {item_key:"file:proof.csv".into(),passed:true,finding_json:finding.canonical_string()}],None,now).unwrap();
         db.record_decision_mark_for_test(&run,&mark,now).unwrap();db.finalize_staged_delivery_outcome(&run,&mark,now).unwrap();
         assert_eq!(projected_status(&db,&conversation,"file:proof.csv"),"passed");
         assert_eq!(artifact_status(&db,&conversation,&artifact),"passed","real matching version positive control");
         finding["deliveryVerdict"]["itemKey"]=key;
-        db.with_connection(|connection|{connection.execute("UPDATE delivery_checklist_items SET status='passed',finding_json=?2 WHERE run_id=?1",rusqlite::params![run,finding.to_string()])?;Ok(())}).unwrap();
+        db.with_connection(|connection|{connection.execute("UPDATE delivery_checklist_items SET status='passed',finding_json=?2 WHERE run_id=?1",rusqlite::params![run,finding.canonical_string()])?;Ok(())}).unwrap();
         assert_eq!(projected_status(&db,&conversation,"file:proof.csv"),"pending");
         assert_eq!(artifact_status(&db,&conversation,&artifact),"unverified");
         let script=exit_script(&root,&format!("b-row-{tag}.mjs"));let summary=drive_to_terminal_summary(&db,&root,&run,&clock,&script);
