@@ -26,7 +26,7 @@ fn packed_bytes(db: &Database, conversation: &str, run: &str, job: &str) -> usiz
     let facts = db.pending_host_job_notices(conversation, run, NOTICE_BUDGET).unwrap();
     let fact = facts.iter().find(|fact| fact.job_id == job)
         .unwrap_or_else(|| panic!("notice {job} is not inside the packed prefix"));
-    serde_json::to_vec(fact).unwrap().len()
+    crate::canonical_json::to_vec(fact).unwrap().len()
 }
 
 /// Cumulative serialized byte offsets of the first `count` pending notices,
@@ -171,7 +171,7 @@ fn capacity_exact_fit_delivers_acknowledges_and_completes_without_loss_or_duplic
             frame.host_job_notices.iter().map(|notice| notice.job_id.clone()).collect();
         assert_eq!(delivered, order, "the frame must carry the durable byte order");
         let bytes: usize = frame.host_job_notices.iter()
-            .map(|notice| serde_json::to_vec(notice).unwrap().len()).sum();
+            .map(|notice| crate::canonical_json::to_vec(notice).unwrap().len()).sum();
         assert_eq!(bytes, NOTICE_BUDGET, "the delivered batch must be exactly the whole budget");
         Ok(stop_response(binding, frame))
     }).expect("a batch that fits exactly must be deliverable and completable");
@@ -616,7 +616,7 @@ fn real_runtime_host_capacity_prefix_remainder_lifecycle_on_both_pi_transports()
     // The Provider was asked exactly once, and only the prefix reached the wire.
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 1, "the Host must ask the Provider exactly once per transport");
-    let wire = serde_json::to_string(&requests[0]["messages"]).unwrap();
+    let wire = crate::canonical_json::to_string(&requests[0]["messages"]).unwrap();
     assert_eq!(wire.matches("FOX_HOST_JOB_NOTICE_V1").count(), prefix.len(),
         "the request must carry exactly the packed prefix");
     for job in &prefix { assert!(wire.contains(job.as_str()), "packed notice {job} is missing"); }
