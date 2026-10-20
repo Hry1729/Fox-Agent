@@ -1485,7 +1485,7 @@ mod tests {
         )
         .unwrap();
         let first_result_bytes =
-            serde_json::to_vec(&first["result"]).unwrap().len();
+            crate::canonical_json::to_vec(&first["result"]).unwrap().len();
         assert!(first_result_bytes <= 64 * 1024, "the inline result stays bounded");
         let summary = &first["result"]["summary"];
         assert_eq!(summary["complete"], false);
