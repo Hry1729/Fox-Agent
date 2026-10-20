@@ -16,6 +16,8 @@
 //! the whole of the claimed scope — single-writer atomicity on one database — and
 //! the tests say so rather than implying more.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::kernel::RunController;
 use crate::runtime_host::delivery::delivery_u1::{
@@ -165,7 +167,7 @@ impl ReviewFixture {
                                        "detail": "内容核验没有绑定真实产物"}]
                         }
                     })
-                    .to_string()
+                    .canonical_string()
                 ],
             )?;
             Ok(())
@@ -428,7 +430,7 @@ fn d1_a_definite_failure_sibling_keeps_the_run_parked_even_when_the_other_item_i
                             "facts": [{"class": "failed", "origin": "spec", "detail": "确定失败"}]
                         }
                     })
-                    .to_string()
+                    .canonical_string()
                 ],
             )?;
             Ok(())
@@ -486,7 +488,7 @@ fn d1_a_repairable_sibling_keeps_the_run_parked() {
                                        "detail": "可修复", "blocking": true}]
                         }
                     })
-                    .to_string()
+                    .canonical_string()
                 ],
             )?;
             Ok(())
