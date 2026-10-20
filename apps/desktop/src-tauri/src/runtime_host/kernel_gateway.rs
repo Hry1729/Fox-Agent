@@ -974,13 +974,24 @@ impl GatewayPolicy {
                 tool,
                 input,
             )
-        }
-        .map_err(|error| {
-            // Diagnostics only: the returned error text (and therefore every
-            // downstream classification and control decision) is unchanged.
-            log_work_tool_failure(&self.binding.run_id, tool_id, tool, input, &error);
-            error.to_string()
-        })?;
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                log_work_tool_failure(&self.binding.run_id, tool_id, tool, input, &error);
+                // "Tool errors are data, not errors": a refusal the work tool
+                // proved happened before any write is settled as an ordinary
+                // failed tool result the model can read and correct, exactly
+                // like the legacy path. A cancellation that raced it keeps the
+                // cancellation path. Everything else (a failure after a write
+                // began, storage, unclassified) stays the fatal executor error.
+                if error.is_rejected_before_execution() {
+                    token.check()?;
+                    return self.work_tool_rejection(database, tool_id, tool, &error);
+                }
+                return Err(error.to_string());
+            }
+        };
         if let Some(directive) = outcome.post_finalize {
             let body =
                 serde_json::to_string(&directive).map_err(|_| "invalid Kernel work action")?;
@@ -988,6 +999,30 @@ impl GatewayPolicy {
         }
         token.check()?;
         Ok(outcome.result)
+    }
+
+    /// Settle a pre-write work tool refusal as data. The consecutive-refusal
+    /// bound is read from durable tool results (so it survives a restart):
+    /// past it, the call is settled with the typed budget result instead, and
+    /// the drive loop fails the Run with `kernel.tool_error_budget_exhausted`
+    /// before any further model round.
+    fn work_tool_rejection(
+        &self,
+        database: &Database,
+        tool_id: &str,
+        tool: &str,
+        error: &super::work_tools::WorkToolError,
+    ) -> Result<Value, String> {
+        let snapshot = database.kernel_build_full_snapshot(&self.binding.run_id)?;
+        let streak = consecutive_work_tool_rejections(&snapshot, tool_id);
+        if streak >= WORK_TOOL_REJECTION_STREAK_LIMIT {
+            eprintln!(
+                "fox.kernel_diag kind=tool_error_budget_exhausted run={} tool_call={tool_id} tool={tool} code={} consecutive={streak} limit={WORK_TOOL_REJECTION_STREAK_LIMIT}",
+                self.binding.run_id, error.code,
+            );
+            return Ok(work_tool_error_budget_result(tool, error));
+        }
+        Ok(work_tool_rejection_result(tool, error, streak + 1))
     }
 
     pub(super) fn execute_delegation(
@@ -1692,10 +1727,155 @@ fn log_work_tool_failure(
     error: &super::work_tools::WorkToolError,
 ) {
     eprintln!(
-        "fox.kernel_diag kind=work_tool_error run={run_id} tool_call={tool_id} tool={tool} code={} message=\"{}\" details={} input_fields=[{}]",
+        "fox.kernel_diag kind=work_tool_error run={run_id} tool_call={tool_id} tool={tool} code={} phase={} message=\"{}\" details={} input_fields=[{}]",
         error.code,
+        if error.is_rejected_before_execution() { "rejected_before_execution" } else { "uncertain" },
         super::redact_execution_diagnostic(&error.message, 500).replace('\n', " "),
         super::redact_execution_diagnostic(&error.details.to_string(), 1000).replace('\n', " "),
         input_field_types(input),
     );
+}
+
+/// "Tool errors are data, not errors" (Agent运行时架构.md, 工具错误是数据).
+///
+/// How many work tool refusals in a row one Run may hand back to the model
+/// before the next one ends the Run with `kernel.tool_error_budget_exhausted`.
+/// Five: a correctable refusal usually needs one or two tries (a field type, an
+/// expected version, an id from a previous result), and legacy's no-progress
+/// guard likewise allows a few repeats plus a few corrections before it stops
+/// (`pi-runtime.mjs`, 3 + 3). It is deliberately more generous than the child
+/// delegation bound (3 refusals in total) because work tool preconditions also
+/// depend on durable state, yet still caps a model that ignores the feedback at
+/// about six wasted rounds. Any settled call that is not such a refusal resets
+/// the count; the Run's own tool/time budgets still bound everything else.
+pub(super) const WORK_TOOL_REJECTION_STREAK_LIMIT: usize = 5;
+/// Durable code of the Run failure once the bound above is exceeded.
+pub(super) const TOOL_ERROR_BUDGET_EXHAUSTED: &str = "kernel.tool_error_budget_exhausted";
+const REJECTED_BEFORE_EXECUTION: &str = "rejected_before_execution";
+const REJECTION_DETAILS_MAX_BYTES: usize = 8_000;
+
+fn bounded_rejection_details(details: &Value) -> Value {
+    let rendered = details.to_string();
+    if rendered.len() <= REJECTION_DETAILS_MAX_BYTES {
+        details.clone()
+    } else {
+        json!({ "omitted": true, "bytes": rendered.len() })
+    }
+}
+
+/// The model-visible failed result of a pre-write work tool refusal. Mirrors
+/// the legacy `isError + errorDetails.code/details` answer, plus the Host
+/// marks (`source`, `toolErrorPhase`, `executionStarted:false`) the refusal
+/// bound reads back from durable results.
+pub(super) fn work_tool_rejection_result(
+    tool: &str,
+    error: &super::work_tools::WorkToolError,
+    consecutive: usize,
+) -> Value {
+    let message = super::redact_execution_diagnostic(&error.message, 2_000);
+    let details = bounded_rejection_details(&error.details);
+    let error_details = json!({ "code": error.code, "details": details });
+    let recovery = "No work state was changed. Correct the arguments or the precondition named above and make a NEW tool call; do not repeat the same call unchanged.";
+    let text = format!(
+        "[{}] {tool} was refused before execution: {message}\nFox error details: {error_details}\n{recovery}",
+        error.code
+    );
+    json!({
+        "isError": true,
+        "content": [{ "type": "text", "text": text }],
+        "details": {
+            "source": "fox_kernel_host",
+            "toolErrorPhase": REJECTED_BEFORE_EXECUTION,
+            "executionStarted": false,
+            "retryable": true,
+            "tool": tool,
+            "errorCode": error.code,
+            "error": { "code": error.code, "message": message, "details": details },
+            "consecutiveRejections": consecutive,
+            "rejectionLimit": WORK_TOOL_REJECTION_STREAK_LIMIT,
+            "recovery": recovery,
+        }
+    })
+}
+
+/// The typed, durable result that settles the call which exceeded the bound.
+/// Nothing was executed for it either.
+pub(super) fn work_tool_error_budget_result(
+    tool: &str,
+    error: &super::work_tools::WorkToolError,
+) -> Value {
+    let message = format!(
+        "工作工具连续 {} 次在执行前被拒绝，纠错机会已用完。此调用未执行，也没有写入任何工作状态；这不是 API 额度不足。",
+        WORK_TOOL_REJECTION_STREAK_LIMIT
+    );
+    let details = json!({
+        "source": "fox_kernel_host",
+        "toolErrorPhase": REJECTED_BEFORE_EXECUTION,
+        "executionStarted": false,
+        "retryable": false,
+        "tool": tool,
+        "errorCode": TOOL_ERROR_BUDGET_EXHAUSTED,
+        "error": { "code": TOOL_ERROR_BUDGET_EXHAUSTED, "message": message, "lastRefusalCode": error.code },
+        "rejectionLimit": WORK_TOOL_REJECTION_STREAK_LIMIT,
+    });
+    json!({ "isError": true, "content": [{ "type": "text", "text": details.to_string() }], "details": details })
+}
+
+fn host_rejection_details(call: &crate::kernel::SnapshotToolCall) -> Option<Value> {
+    if !super::work_tools::is_work_tool(&call.tool) || call.state != "failed" {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(call.result_json.as_deref()?).ok()?;
+    let details = value.get("details")?;
+    (value["isError"] == true
+        && details["source"] == "fox_kernel_host"
+        && details["toolErrorPhase"] == REJECTED_BEFORE_EXECUTION
+        && details["executionStarted"] == false)
+        .then(|| details.clone())
+}
+
+/// Consecutive pre-write work tool refusals immediately before `current`, in
+/// the order the model proposed the calls (durable batch order, then source
+/// order). Calls still pending or running are skipped; any other settled call
+/// — a success, a different failure, a cancellation — ends the streak.
+pub(super) fn consecutive_work_tool_rejections(
+    snapshot: &crate::kernel::KernelSnapshot,
+    current: &str,
+) -> usize {
+    let by_id = snapshot
+        .tool_calls
+        .iter()
+        .map(|call| (call.tool_call_id.as_str(), call))
+        .collect::<std::collections::HashMap<_, _>>();
+    let ordered = snapshot
+        .batches
+        .iter()
+        .flat_map(|batch| batch.ordered_tool_call_ids.iter())
+        .collect::<Vec<_>>();
+    let mut streak = 0;
+    for id in ordered.into_iter().rev() {
+        if id == current {
+            continue;
+        }
+        let Some(call) = by_id.get(id.as_str()) else { continue };
+        if !matches!(call.state.as_str(), "completed" | "failed" | "cancelled" | "expired") {
+            continue;
+        }
+        match host_rejection_details(call) {
+            Some(details) if details["error"]["code"] != TOOL_ERROR_BUDGET_EXHAUSTED => streak += 1,
+            _ => break,
+        }
+    }
+    streak
+}
+
+/// True once a call was settled with the typed budget result. Read from the
+/// durable snapshot by the drive loop and the live batch loop, so the Run stops
+/// before any further model round, also after a restart.
+pub(super) fn tool_error_budget_exhausted(snapshot: &crate::kernel::KernelSnapshot) -> bool {
+    snapshot.tool_calls.iter().any(|call| {
+        host_rejection_details(call).is_some_and(|details| {
+            details["error"]["code"] == TOOL_ERROR_BUDGET_EXHAUSTED && details["retryable"] == false
+        })
+    })
 }
