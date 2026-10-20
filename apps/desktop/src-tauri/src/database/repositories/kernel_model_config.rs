@@ -98,7 +98,7 @@ pub(super) fn freeze_model_config_in_tx(transaction: &rusqlite::Transaction<'_>,
         let hash = config.hash().map_err(invalid)?;
         let adapter_version = config.adapter_version().map_err(invalid)?;
         let encoded =
-            serde_json::to_string(config).map_err(|_| invalid("invalid Kernel model configuration"))?;
+            crate::canonical_json::to_string(config).map_err(|_| invalid("invalid Kernel model configuration"))?;
             let existing: Option<(i64, String, String, String)> = transaction.query_row(
                 "SELECT schema_version,adapter_version,config_json,config_hash FROM kernel_model_configs WHERE run_id=?1",
                 [run_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
