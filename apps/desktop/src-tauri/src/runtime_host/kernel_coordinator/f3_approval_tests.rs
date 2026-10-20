@@ -70,7 +70,7 @@ fn f3_live_ask_to_allow_reevaluates_pending_write() {
 }
 
 #[test]
-fn f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal() {
+fn f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal() {
     let version = Arc::new(Mutex::new(None));
     let provider = LocalProvider::start(version.clone());
     let run = run_fixture_with_mode("f3-fixed-clock-expired", SMALL, model(provider.address), "ask");
@@ -98,11 +98,13 @@ fn f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal() {
         if snapshot.tool_calls.iter().any(|call| call.tool_call_id == "f1-write"
             && call.state == "waiting_approval") {
             let deadline = snapshot.approval_deadline_wall_ms.expect("pending approval deadline");
-            assert!(deadline < crate::database::now_ms(), "the test card is deliberately expired by real wall time");
+            assert!(deadline < crate::database::now_ms(), "the card is deliberately past its nominal window by real wall time");
             let card = run.db.kernel_approval_identity(&run.id, "f1-write")?;
-            let refusal = run.db.queue_kernel_host_approval(&card, "allow_once")
-                .expect_err("expired card must be refused by the real Host repository");
-            assert!(refusal.contains("Kernel approval is no longer actionable"), "{refusal}");
+            // Approvals no longer expire: the real Host repository still accepts
+            // the user's decision long after the nominal window.
+            let queued = run.db.queue_kernel_host_approval(&card, "allow_once")
+                .expect("a card past its nominal window is still actionable");
+            assert!(queued);
             observed_expiry.store(true, Ordering::SeqCst);
             return Err(super::super::super::live::LIVE_DETACHED.into());
         }
@@ -116,10 +118,12 @@ fn f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal() {
     assert_eq!(result.unwrap_err(), super::super::super::live::LIVE_DETACHED);
     assert_eq!(provider.finish().len(), 2, "real Node produced read then pending write");
     assert!(observed_expiry.load(Ordering::SeqCst));
+    // Detached right after queueing: the accepted decision waits for the
+    // consumer, nothing has been written yet.
     assert_eq!(writes.load(Ordering::SeqCst), 0);
     assert_eq!(std::fs::read_to_string(run.root.join("target.txt")).unwrap(), SMALL);
     assert_eq!(version_count(&run), 0);
-    assert!(run.db.pending_kernel_host_commands(&run.id).unwrap().is_empty());
+    assert_eq!(run.db.pending_kernel_host_commands(&run.id).unwrap().len(), 1);
 }
 
 pub(super) fn take_and_print_timeline(label: &str, run_id: &str, anchor_ms: u128) {
