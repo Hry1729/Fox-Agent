@@ -55,6 +55,8 @@
 //! determinism, checker negative cases and the cloud not-run/identity contract)
 //! and need neither Node, OfficeCLI nor credentials.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 // O-REVIEW-03：O 完整编译发现本文件漏了这三个导入（e-compile-glue.patch），
 // 导致 E-T-01/02/05 无法编译执行。此处按 O 已验证的形式补齐。
@@ -1990,7 +1992,7 @@ fn spawn_provider(
                     send_chunk(
                         "",
                         json!({"role":"assistant","tool_calls":[{"index":0,"id":id,"type":"function",
-                            "function":{"name":name,"arguments":arguments.to_string()}}]}),
+                            "function":{"name":name,"arguments":arguments.canonical_string()}}]}),
                         Value::Null,
                     );
                     send_chunk("-usage", json!({}), json!("tool_calls"));
@@ -2309,7 +2311,7 @@ fn the_evaluation_describes_the_production_tool_surface() {
     let initial = db
         .kernel_initial_input(&run_id)
         .expect("read the frozen initial input");
-    let encoded = serde_json::to_string(&initial.messages).unwrap();
+    let encoded = crate::canonical_json::to_string(&initial.messages).unwrap();
     assert!(
         encoded.contains("AGV"),
         "the submitted task text must reach the model: {encoded}"
@@ -2706,7 +2708,7 @@ fn prepare_eval_run_with_budgets(
         &binding.permission_snapshot_id,
         "legacy",
         &config_hash,
-        &serde_json::to_string(&frozen)
+        &crate::canonical_json::to_string(&frozen)
             .map_err(|error| ("prepare:config".into(), error.to_string()))?,
     )
     .map_err(|error| ("prepare:kernel-run".into(), error))?;
@@ -2754,7 +2756,7 @@ fn prepare_eval_run_with_budgets(
     // compared rather than assumed equal.
     if let Some((prompt_payload, described)) = &described {
         let evidence = model_visible_request_evidence(&db, &run_id, described, prompt_payload);
-        if let Ok(encoded) = serde_json::to_string_pretty(&evidence) {
+        if let Ok(encoded) = crate::canonical_json::to_string_pretty(&evidence) {
             let _ = std::fs::write(eval_host_dir(scenario_root).join("model-visible-request.json"), encoded);
         }
         println!("EVAL-MODEL-VISIBLE {evidence}");
@@ -3606,7 +3608,7 @@ fn real_tier_structural_checks(
     results.check(
         "model:not-the-synthetic-provider",
         identity.model_id != SYNTHETIC_MODEL_ID
-            && !frozen_service.to_string().contains(SYNTHETIC_MODEL_ID),
+            && !frozen_service.canonical_string().contains(SYNTHETIC_MODEL_ID),
         format!("modelId={} frozen={frozen_service}", identity.model_id),
     );
     results.check(
@@ -3954,7 +3956,7 @@ fn managed_office_gate_checks(
              versionsAfter={} result={:?}",
             count(),
             failed.as_ref().err().cloned().or_else(|| failed.as_ref().ok().map(|value| {
-                value.to_string().chars().take(240).collect::<String>()
+                value.canonical_string().chars().take(240).collect::<String>()
             })),
         ),
     );
@@ -4382,7 +4384,7 @@ fn run_agv_checks(
     checks.check(
         "delivery:three-artifacts-passed",
         passed,
-        delivery.to_string(),
+        delivery.canonical_string(),
     );
 
     // N1: every document this Run really saved through the frozen built-in
@@ -4688,7 +4690,7 @@ fn run_short_document_scenario() -> ScenarioOutcome {
     checks.check(
         "delivery:one-passed",
         delivery_passed,
-        delivery.to_string(),
+        delivery.canonical_string(),
     );
 
     let (tool_executions, records) = tool_execution_report(&db, &run_id);
@@ -4763,7 +4765,7 @@ fn large_result_text() -> String {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&json!({"records": records, "total": 300})).unwrap()
+    crate::canonical_json::to_string(&json!({"records": records, "total": 300})).unwrap()
 }
 
 fn run_large_result_scenario() -> ScenarioOutcome {
@@ -4899,7 +4901,7 @@ fn run_large_result_scenario() -> ScenarioOutcome {
     checks.check(
         "delivery:no-checklist-for-read-task",
         delivery.as_array().is_some_and(|items| items.is_empty()),
-        delivery.to_string(),
+        delivery.canonical_string(),
     );
     // Pure read scenario: nothing mutates, so no human approval is ever asked.
     checks.check(
@@ -5161,7 +5163,7 @@ fn try_write_report(
     report: &Value,
     secret: Option<&str>,
 ) -> Result<std::path::PathBuf, String> {
-    let serialized = serde_json::to_string_pretty(report)
+    let serialized = crate::canonical_json::to_string_pretty(report)
         .map_err(|error| format!("the report does not serialize: {error}"))?;
     if let Some(secret) = secret.filter(|secret| secret.trim().len() >= 4) {
         if serialized.contains(secret) {
@@ -5337,7 +5339,7 @@ fn real_eval_plan_is_deterministic_and_carries_charts_sections_and_derived_value
     let first = serde_json::to_value(agv_script(&expected).iter().collect::<Vec<_>>()).unwrap();
     let second = serde_json::to_value(agv_script(&expected).iter().collect::<Vec<_>>()).unwrap();
     assert_eq!(first, second, "the synthetic plan must be reproducible");
-    let rendered = first.to_string();
+    let rendered = first.canonical_string();
     assert!(rendered.contains("office_create"));
     assert!(rendered.contains("office_validate"));
     assert!(rendered.contains("\"bar\""));
@@ -5551,7 +5553,7 @@ fn real_eval_cloud_mode_reports_not_run_and_names_missing_environment() {
     );
     assert_eq!(report["tiers"]["gui"]["status"], "unverified");
     assert_eq!(report["tiers"]["install"]["status"], "unverified");
-    let rendered = serde_json::to_string(&report).unwrap();
+    let rendered = crate::canonical_json::to_string(&report).unwrap();
     assert!(
         !rendered.contains(SYNTHETIC_MODEL_ID),
         "a not-run cloud report must not present the synthetic provider as its model"
@@ -5677,7 +5679,7 @@ fn real_eval_cloud_environment_resolution_is_explicit_and_never_records_the_key(
     assert_eq!(report["modelIdentity"]["apiKeyRecorded"], false);
     assert_eq!(report["fixedInputs"]["credential"]["apiKeyRecorded"], false);
     assert_eq!(report["syntheticProviderSpawned"], false);
-    let rendered = serde_json::to_string(&report).unwrap();
+    let rendered = crate::canonical_json::to_string(&report).unwrap();
     assert!(
         !rendered.contains(SECRET),
         "the API key must never reach a report"
@@ -6963,7 +6965,7 @@ fn record_rust_host_case(case: &str, problems: &[&str], tool: &str, checks: &Che
             // Each run writes its own timestamped file; earlier runs' files are
             // never overwritten, only superseded by a newer timestamp.
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default());
+            let _ = std::fs::write(&path, crate::canonical_json::to_string_pretty(&report).unwrap_or_default());
             path
         }
         Err(reason) => {
@@ -7030,7 +7032,7 @@ fn real_eval_command_stdout_only_non_zero_exit_preserves_diagnostics() {
         "cmd-stdout-only",
     );
     let receipt = model_receipt(&outcome);
-    let blob = receipt.to_string();
+    let blob = receipt.canonical_string();
 
     // 1. The executor really ran: the side-effect file exists and holds the
     //    marker. Independent of anything the tool returned.
@@ -7123,7 +7125,7 @@ fn real_eval_edit_file_allows_deleting_matched_text_to_empty() {
     checks.check(
         "et02:legal-deletion-is-accepted",
         accepted,
-        format!("accepted={accepted} receipt={}", receipt.to_string().chars().take(200).collect::<String>()),
+        format!("accepted={accepted} receipt={}", receipt.canonical_string().chars().take(200).collect::<String>()),
     );
     checks.check(
         "et02:deleted-text-is-gone-from-disk",
@@ -7142,7 +7144,7 @@ fn real_eval_edit_file_allows_deleting_matched_text_to_empty() {
         rejection_is_a_rejection,
         match &rejected {
             Err(error) => format!("rejected with: {error}"),
-            Ok(value) => format!("accepted (business failure): {}", value.to_string().chars().take(200).collect::<String>()),
+            Ok(value) => format!("accepted (business failure): {}", value.canonical_string().chars().take(200).collect::<String>()),
         },
     );
     // The rejected call must not have mutated the file.
@@ -7220,7 +7222,7 @@ fn real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable() {
         "et05:in-root-read-succeeds",
         inside_ok,
         match &inside {
-            Ok(value) => format!("receipt={}", value.to_string().chars().take(200).collect::<String>()),
+            Ok(value) => format!("receipt={}", value.canonical_string().chars().take(200).collect::<String>()),
             Err(error) => format!("in-root read failed: {error}"),
         },
     );
@@ -7260,7 +7262,7 @@ fn real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable() {
         denial,
         match &denied {
             Err(error) => format!("denied with: {error}"),
-            Ok(value) => format!("ACCEPTED (leak): {}", value.to_string().chars().take(200).collect::<String>()),
+            Ok(value) => format!("ACCEPTED (leak): {}", value.canonical_string().chars().take(200).collect::<String>()),
         },
     );
     // The refusal must be distinguishable from an ordinary read failure: a file
@@ -7300,7 +7302,7 @@ fn real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable() {
         denial_from_root,
         match &denied_from_root {
             Err(error) => format!("denied with: {error}"),
-            Ok(value) => format!("ACCEPTED (leak): {}", value.to_string().chars().take(200).collect::<String>()),
+            Ok(value) => format!("ACCEPTED (leak): {}", value.canonical_string().chars().take(200).collect::<String>()),
         },
     );
     // Persisted state: the denial is a failed ToolCall with the refusal reason,
