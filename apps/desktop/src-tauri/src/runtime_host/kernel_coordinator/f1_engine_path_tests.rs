@@ -2,6 +2,8 @@
 //! worker. The local Provider is scripted; the Node worker and Host read,
 //! projection, admission and file execution paths are real. No UI is involved.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::Database;
 use crate::runtime_host::{kernel_gateway, managed_files};
@@ -130,7 +132,7 @@ fn run_fixture_with_mode(
         &binding.permission_snapshot_id,
         &binding.execution_profile_id,
         &hash,
-        &serde_json::to_string(&frozen).unwrap(),
+        &crate::canonical_json::to_string(&frozen).unwrap(),
     )
     .unwrap();
     db.freeze_kernel_model_config(&id, &config).unwrap();
@@ -437,7 +439,7 @@ impl LocalProvider {
                             .expect("read settled before write proposal");
                         let arguments = json!({"path":"target.txt","content":CANDIDATE,
                             "expectedVersion":expected})
-                        .to_string();
+                        .canonical_string();
                         (
                             json!({"role":"assistant","tool_calls":[{"index":0,"id":"f1-write",
                             "type":"function","function":{"name":"write_file",
@@ -454,7 +456,7 @@ impl LocalProvider {
                     3 if repeat_write => {
                         let expected = version.lock().unwrap().clone().expect("second read settled");
                         let arguments = json!({"path":"target.txt","content":SECOND_CANDIDATE,
-                            "expectedVersion":expected}).to_string();
+                            "expectedVersion":expected}).canonical_string();
                         (
                             json!({"role":"assistant","tool_calls":[{"index":0,"id":"f3-write-2",
                             "type":"function","function":{"name":"write_file",
