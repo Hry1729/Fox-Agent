@@ -52,7 +52,7 @@ fn stored_payload() -> String {
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&json!({ "records": records, "total": 220 })).unwrap()
+    crate::canonical_json::to_string(&json!({ "records": records, "total": 220 })).unwrap()
 }
 
 fn sha256(text: &str) -> String {
