@@ -945,7 +945,7 @@ impl GatewayPolicy {
             return Err("frozen Kernel work identity changed".into());
         }
         database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
-        let projected_id = format!("kernel-tool:{}:{tool_id}", self.binding.run_id);
+        let projected_id = projected_tool_call_id(&self.binding.run_id, tool_id);
         let outcome = if tool == "task_repair_escalate_start" {
             super::work_tools::preflight_task_repair_override(
                 database,
@@ -977,7 +977,7 @@ impl GatewayPolicy {
         };
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(error) => {
+            Err(mut error) => {
                 log_work_tool_failure(&self.binding.run_id, tool_id, tool, input, &error);
                 // "Tool errors are data, not errors": a refusal the work tool
                 // proved happened before any write is settled as an ordinary
@@ -987,6 +987,9 @@ impl GatewayPolicy {
                 // began, storage, unclassified) stays the fatal executor error.
                 if error.is_rejected_before_execution() {
                     token.check()?;
+                    if tool == "task_evidence_add" {
+                        attach_evidence_guidance(&mut error);
+                    }
                     return self.work_tool_rejection(database, tool_id, tool, &error);
                 }
                 return Err(error.to_string());
@@ -998,7 +1001,7 @@ impl GatewayPolicy {
             database.stage_kernel_host_action(&self.binding.run_id, tool_id, &body)?;
         }
         token.check()?;
-        Ok(outcome.result)
+        Ok(with_evidence_ref(outcome.result, &projected_id))
     }
 
     /// Settle a pre-write work tool refusal as data. The consecutive-refusal
@@ -1078,7 +1081,10 @@ impl GatewayPolicy {
             token,
         )?;
         token.check()?;
-        Ok(result)
+        Ok(with_evidence_ref(
+            result,
+            &projected_tool_call_id(&self.binding.run_id, tool_id),
+        ))
     }
 
     pub(super) fn execute_knowledge(
@@ -1760,6 +1766,57 @@ fn bounded_rejection_details(details: &Value) -> Value {
         details.clone()
     } else {
         json!({ "omitted": true, "bytes": rendered.len() })
+    }
+}
+
+/// The id a Kernel tool call has in the `tool_calls` read model
+/// (`kernel_projection::project`), i.e. the canonical id Evidence stores.
+pub(super) fn projected_tool_call_id(run_id: &str, tool_call_id: &str) -> String {
+    format!("kernel-tool:{run_id}:{tool_call_id}")
+}
+
+/// Evidence scheme 3: a SUCCESSFUL work/delegation result carries the citable
+/// id of its own call, so the model can later reference it in
+/// `task_evidence_add` without knowing the projection. `details.evidenceRef`
+/// is the structured form; one short trailing text block repeats it because
+/// the provider projection serialises `content` text and drops `details`. The
+/// first text block (the JSON body) is left byte-identical. `isError` results
+/// (which `call_outcome` settles as failed) and non-object results are returned
+/// unchanged: only a completed call is citable.
+pub(super) fn with_evidence_ref(mut result: Value, ref_id: &str) -> Value {
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return result;
+    }
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+    let details = object.entry("details").or_insert_with(|| json!({}));
+    let Some(details) = details.as_object_mut() else {
+        return result;
+    };
+    details.insert(
+        "evidenceRef".to_owned(),
+        json!({ "evidenceType": "tool_call", "refKind": "tool_call", "refId": ref_id }),
+    );
+    if let Some(content) = object.get_mut("content").and_then(Value::as_array_mut) {
+        content.push(json!({
+            "type": "text",
+            "text": format!("Evidence reference for this call: refKind=tool_call refId={ref_id}"),
+        }));
+    }
+    result
+}
+
+/// Adds [`super::work_tools::evidence_reference_guidance`] to a refused
+/// `task_evidence_add`, keeping its code, message and phase. Any details the
+/// refusal already carried stay under their own keys.
+fn attach_evidence_guidance(error: &mut super::work_tools::WorkToolError) {
+    let guidance = super::work_tools::evidence_reference_guidance();
+    if error.details.is_null() {
+        error.details = json!({});
+    }
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert("evidenceGuidance".to_owned(), guidance);
     }
 }
 
