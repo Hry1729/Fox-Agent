@@ -13,6 +13,8 @@
 //!   * per-tool cancellation stops the remaining calls without duplicates;
 //!   * the end-to-end live scheduler fans two reads out and only starts the
 //!     following write after both reader closures have returned.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -117,7 +119,7 @@ fn classifier_whitelists_only_host_native_readers() {
     let classify = |tool: &str| {
         super::super::live::parallel_read_only_dispatch(&classifier_effect(
             kernel::OutboxEffectKind::DispatchTool,
-            &json!({"tool": tool, "input": {}}).to_string(),
+            &json!({"tool": tool, "input": {}}).canonical_string(),
         ))
     };
     for tool in ["read", "ls", "find", "grep", "skill_load"] {
@@ -146,7 +148,7 @@ fn classifier_whitelists_only_host_native_readers() {
     )));
     assert!(!super::super::live::parallel_read_only_dispatch(&classifier_effect(
         kernel::OutboxEffectKind::InitialModel,
-        &json!({"tool": "read"}).to_string(),
+        &json!({"tool": "read"}).canonical_string(),
     )));
 }
 
@@ -546,7 +548,7 @@ fn live_scheduler_fans_readers_out_and_never_overlaps_the_following_write() {
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 4, "tool round plus two bounded reviews and final");
     assert!(
-        requests.last().unwrap().to_string().contains("Fox 续答检查"),
+        requests.last().unwrap().canonical_string().contains("Fox 续答检查"),
         "the final round still goes through the bounded continuation check"
     );
     // "任务全部完成。" is the fourth *response* — the owned final answer.
