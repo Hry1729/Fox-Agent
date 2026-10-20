@@ -21,6 +21,8 @@
 //! The Run-lifecycle half (single entry edge, exits, fail-closed preconditions)
 //! lives in `fox-agent-kernel`'s `delivery_review_tests`.
 
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use crate::database::{
     AcceptanceWrite, CURRENT_U1_AWARE_SCHEMA_VERSION, Database, DeliveryChecklistSeed,
@@ -183,7 +185,7 @@ impl Fixture {
             "ruleId":"content:concat",
             "rule":{"type":"factQualifiers","sources":[{"path":"in/a.txt",
                 "sha256":digest(b"alpha"),"bytes":5,"firstLine":1,"lastLine":1}]}});
-        let requirements = serde_json::to_string(&[DeliveryRequirement {
+        let requirements = crate::canonical_json::to_string(&[DeliveryRequirement {
             item_key: Some(self.item.clone()),
             id: "content:qualifiers".into(),
             kind: RequirementKind::ContentContract { spec },
@@ -211,7 +213,7 @@ impl Fixture {
         self.database.with_connection(|connection| {
             connection.execute(
                 "UPDATE delivery_checklist_items SET status='pending', finding_json=?3 WHERE run_id=?1 AND item_key=?2",
-                rusqlite::params![self.run, self.item, finding.to_string()],
+                rusqlite::params![self.run, self.item, finding.canonical_string()],
             )?;
             Ok(())
         }).unwrap();
@@ -340,7 +342,7 @@ fn a_corrupt_envelope_cannot_be_accepted() {
     fixture.database.with_connection(|connection| {
         connection.execute(
             "UPDATE delivery_checklist_items SET finding_json=?3 WHERE run_id=?1 AND item_key=?2",
-            rusqlite::params![fixture.run, fixture.item, finding.to_string()],
+            rusqlite::params![fixture.run, fixture.item, finding.canonical_string()],
         )?;
         Ok(())
     }).unwrap();
@@ -630,7 +632,7 @@ fn rewriting_the_contract_withdraws_the_acceptance() {
     assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
 
     // The row's own frozen contract column is replaced.
-    let requirements = serde_json::to_string(&[DeliveryRequirement {
+    let requirements = crate::canonical_json::to_string(&[DeliveryRequirement {
         item_key: Some(fixture.item.clone()),
         id: "content:other".into(),
         kind: RequirementKind::ContentContract {
