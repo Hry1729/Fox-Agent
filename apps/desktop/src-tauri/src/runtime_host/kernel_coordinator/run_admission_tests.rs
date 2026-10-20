@@ -51,7 +51,7 @@ fn independent_conversations_reach_three_model_endpoints_before_either_finishes(
     second_frozen.prompt_config_hash = second_hash.clone();
     db.kernel_create_run(&second, "pi", "authoritative", 2,
         &second_binding.permission_snapshot_id, &second_binding.execution_profile_id,
-        &second_hash, &serde_json::to_string(&second_frozen).unwrap()).unwrap();
+        &second_hash, &crate::canonical_json::to_string(&second_frozen).unwrap()).unwrap();
     db.freeze_kernel_model_config(&second, &second_model).unwrap();
     db.freeze_kernel_initial_input(&initial_input(&second, &second_hash)).unwrap();
     let third_conversation = db.create_conversation(db.default_agent_id(), None,
@@ -69,7 +69,7 @@ fn independent_conversations_reach_three_model_endpoints_before_either_finishes(
     third_frozen.prompt_config_hash = third_hash.clone();
     db.kernel_create_run(&third, "pi", "authoritative", 2,
         &third_binding.permission_snapshot_id, &third_binding.execution_profile_id,
-        &third_hash, &serde_json::to_string(&third_frozen).unwrap()).unwrap();
+        &third_hash, &crate::canonical_json::to_string(&third_frozen).unwrap()).unwrap();
     db.freeze_kernel_model_config(&third, &third_model).unwrap();
     db.freeze_kernel_initial_input(&initial_input(&third, &third_hash)).unwrap();
     for run in [&first, &second, &third] {
