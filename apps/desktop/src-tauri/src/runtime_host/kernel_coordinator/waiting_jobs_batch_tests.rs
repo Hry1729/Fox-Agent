@@ -5,6 +5,8 @@
 //!
 //! Every ordering decision uses a bounded barrier on the real settlement path;
 //! no assertion here infers order from a sleep.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -417,9 +419,9 @@ fn job_key_map(db: &Database, run: &str) -> HashMap<String, String> {
 fn run_two_job_notice_batch(live: bool, a_first: bool) {
     let code = "function onChunk(c){} function onFinish(){return {answer:42};}";
     let arguments_a = json!({"idempotencyKey":"batch-notice-a",
-        "params":{"processing":"chunked","code":code}}).to_string();
+        "params":{"processing":"chunked","code":code}}).canonical_string();
     let arguments_b = json!({"idempotencyKey":"batch-notice-b",
-        "params":{"processing":"chunked","code":code}}).to_string();
+        "params":{"processing":"chunked","code":code}}).canonical_string();
     // Three Provider requests: the initial tool round, the tool-batch round that
     // parks, and the single notice continuation.
     let (address, server) = start_http_model_fixture(vec![
@@ -575,9 +577,9 @@ fn run_two_job_notice_batch(live: bool, a_first: bool) {
     // the initial tool round and the parked batch round are real requests too.
     assert_eq!(requests.len(), 3,
         "two Jobs in one park need exactly one automatic continuation");
-    assert_eq!(requests[1]["messages"].to_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 0,
+    assert_eq!(requests[1]["messages"].canonical_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 0,
         "the parked round delivered a notice before every Job settled");
-    assert_eq!(requests[2]["messages"].to_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 2,
+    assert_eq!(requests[2]["messages"].canonical_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 2,
         "the single notice continuation must carry both typed notices");
     let delivered = delivered_notices(&requests[2]["messages"]);
 
@@ -675,7 +677,7 @@ formal=({formal_a},{formal_b}) parks={parks} wakes={wakes} notice_intents={inten
 response_kinds={:?}",
         if live { "live" } else { "per_round" }, if a_first { "a_first" } else { "b_first" },
         requests.len(),
-        requests.iter().map(|request| request["messages"].to_string()
+        requests.iter().map(|request| request["messages"].canonical_string()
             .matches("FOX_HOST_JOB_NOTICE_V1").count()).collect::<Vec<_>>(),
         delivered.iter().map(|notice| (notice.job_id.clone(), notice.finished_at)).collect::<Vec<_>>(),
         jobs.iter().map(|job| job.attempts).collect::<Vec<_>>(),
