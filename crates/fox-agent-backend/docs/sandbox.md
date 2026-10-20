@@ -682,9 +682,9 @@ Host 传入的路径在做重叠检查、生成策略之前先规范化，不再
    - Fox 会话的发送、审批、取消与改动前一致。
 3. **一次全量** `cargo test -p fox-desktop`：与父基线 `a9254d3` 的 61 项既有失败逐项比对。名单的变化只允许来自本批拆分出的测试：`kernel_gateway_catalogue_size_is_pinned` 预期失败（新名字）；如果 `kernel_delegation_stages_a_single_child_without_starting_an_executor` 或 `kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway` 在基线名单里，它们现在应当通过，并从名单中消失。
 
-### 13.5 合并精简 Windows 复测清单（取代 13.4）
+### 13.5 合并精简 Windows 复测清单（取代 13.4；**已被 13.9 取代**，保留作历史）
 
-在审批无超时批的最终 HEAD 上跑一次即可，13.4 不再单独执行。
+在审批无超时批的最终 HEAD 上跑一次即可，13.4 不再单独执行。仍需要的项已并入 13.9。
 
 1. **定向测试**
    - `cargo test -p fox-agent-backend --features acp`：0 失败。按名单区分“真正执行 / ignored / `FOX_TEST_REAL_ACP` 门控 SKIPPED”（12.6）。新增：`launch::tests::dev_entry_prefers_override_then_managed_runtime_then_npx`（普通单测）；`sandbox_srt` 新增两项 `#[ignore]`：`real_srt_external_runtime_pi_session`、`real_srt_external_runtime_dsh_session`（Linux 专用，Windows 上不编译）。
@@ -758,3 +758,44 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
 
   不设 `FOX_AGENT_RUNTIME_ROOT` 时，测试在 cargo 的 target tmp 下用 `cp -al`（失败则 `cp -a`）拼出受管运行时；不能用指向运行时外的符号链接，沙箱里读不到。`FOX_PI_ACP_PROGRAM`、`FOX_DSH_PROGRAM`、`FOX_EXTERNAL_FULL_ACCESS` 必须不设。两个门控变量缺一个就失败，不会静默通过。
 - Linux 实测结果见审批无超时批报告：pi 全流程通过（含一次 400 s 不答仍可批）；dsh 在无 key 时启动、会话、结算与关闭都正常，但按新规则 prompt 断言失败。
+
+### 13.9 合并精简 Windows 复测清单（afb 修复批；取代 13.5）
+
+在 afb 修复批的最终 HEAD 上跑一次即可，13.4 / 13.5 不再单独执行。本批内容：规范 JSON（`fox_agent_kernel::canonical_json`，桌面 `crate::canonical_json` 重导出）、bridge 握手带 `{cwd, env}`、verbatim 路径简化、`LoadSettled` / `PromptStarted` 栅栏、`agent_backend_not_installed`、Path 比较、受管目录 `backends\dsh` + 运行时 0.1.2、重启由外部 Host 中断外部 run、能力 chip 随 `agent_backend.session` 刷新、打包脚本打入 pi 审批门。
+
+1. **定向测试**（挑代表，不跑全部 37 项 Graph 用例）
+   - 规范 JSON（Graph 37 项回退的根因）：
+     - `cargo test -p fox-desktop canonical_json`：`canonical_json::tests::desktop_build_has_preserve_order_and_canonical_json_still_sorts`、`canonical_json::tests::host_source_has_no_raw_serde_json_serializers`（守护测试：Host 源码里不得再出现 `serde_json::to_string(` 等）。
+     - `database::repositories::work_graph::tests::canonical_run_execution_profile_matches_trigger_literals_and_hashes`。
+     - graph_lead 3 项：`database::repositories::graph_lead::tests::activates_branching_read_only_graph_and_projects_stable_readiness`、`...::a_new_same_conversation_durable_lead_run_can_resume_the_persisted_graph`、`...::active_node_attempt_and_child_snapshot_survive_database_restart`。
+     - migrations graph_node 2 项：`database::migrations::tests::graph_node_cancel_migration_enforces_two_phase_negative_reconciliation`、`database::migrations::tests::graph_node_finish_migration_is_idempotent_and_enforces_evidence_contract`。
+     - legacy_expert：`database::repositories::tests::legacy_expert_v1_fixture_preserves_snapshot_and_remote_knowledge_contract`。
+     - attachment 1 项：`database::repositories::tests::persists_attachments_artifacts_bindings_and_approval_lifecycle`。
+     - `cargo test -p fox-agent-kernel`：全部通过（本 crate 的测试以 `preserve_order` 构建，与桌面二进制同条件）。
+   - 第 4 项两个测试（只改测试，用户消息改为 `/目标`）：`runtime_host::kernel_coordinator::tests::kernel_work_tool_missing_field_is_refused_before_execution_as_data`、`runtime_host::kernel_coordinator::tests::kernel_goal_propose_in_conversation_is_answered_by_the_gate`（新增）。
+   - 重启（第 6 项）：`database::repositories::agent_backend::tests::restart_leaves_external_runs_to_the_external_host`（新增）与 `...::external_runs_without_a_binding_resolve_approvals_and_complete`；另跑 `cargo test -p fox-desktop agent_backend`、`approval`、`migration_backup` 全部通过。
+   - `cargo test -p fox-agent-backend --features acp`：0 失败。本批新增：`bridge::tests::listener_answers_with_the_child_env_and_cwd`、`launch::tests::bridge_answer_carries_env_and_cwd_as_one_json_line`、`launch::tests::verbatim_windows_paths_are_simplified_for_backends`、`sandbox::tests::windows_bridge_command_sends_backend_env_through_the_bridge_not_cmd`、`external_runtime::reopening_with_session_load_projects_only_events_after_the_load`（longreplay mock）。Windows 上 `bridge_pipe_windows` 也要跑。按名单区分“真正执行 / ignored / `FOX_TEST_REAL_ACP` 门控 SKIPPED”（12.6）。
+   - `node --test crates/fox-agent-backend/runtime-assets/acp-bridge/`：14 项通过（含 env/cwd 握手 3 项）。
+   - `bun test apps/desktop/tests/agent-backend-capability-refresh.test.ts apps/desktop/tests/agent-backend.test.ts apps/desktop/tests/agent-backend-send.test.ts apps/desktop/tests/conversation-attention.test.ts`：全部通过；另跑前端 `tsc`。
+   - `python -m unittest discover -s crates/fox-agent-backend/scripts/windows/tests`：17 项通过。
+2. **运行时包 0.1.2 用打包脚本重打，不再手工拷贝**
+   - `python crates\fox-agent-backend\scripts\windows\build-runtime-package.py stage <out> --node-dir <node> --srt-prefix <srt> --backend pi=<prefix> --backend codex=<prefix> --backend dsh=<prefix> --prune-dts`
+   - `... pack <out> --out <zip>`（`--version` 默认 0.1.2，与 `RUNTIME_PACKAGE_VERSION` 一致，单测会核对）。pack 会检查 `acp-bridge\bridge.mjs`、`pi-gate\pi-gated.cmd`、`pi-gate\fox-approval-gate.ts` 与仓库副本一致，缺任何一个都拒绝打包。
+   - 用 `enable-sandbox.ps1` 装到 `%ProgramFiles%\Fox\sandbox-runtime\0.1.2\`；确认 `backends\dsh`（不是 `deepseek`）与 `pi-gate\` 都在。
+3. **三个后端各一次真实 UI 冒烟**（`FOX_EXTERNAL_BACKENDS=pi,codex,deepseek`，沙箱模式，会话绑定项目文件夹）
+   - Codex 能启动，一轮正常结束（流式文本 + 工具卡）。
+   - 相对路径读取正确（如“读 README.md”）；dsh 不再报 `realpath 'D:'`。
+   - 一轮结束后杀后端进程，再打开会话发消息：`session/load` 复用原生会话，历史不重复、不漏（时间线不出现回放的旧事件）。
+   - 审批超过 6 分钟不答，之后点“允许一次”，工具照常执行。
+   - 取消本轮：本轮以 `cancelled` 结束，审批卡显示“已取消”。
+   - 关闭 / 归档 / 删除会话后，原待处理审批显示“已取消”（`reason = conversation_closed`）。
+   - 一轮进行中（最好带一条待处理审批）退出 Fox 再启动：那一轮的错误码为 `agent_backend_host_restarted`（不是 `runtime.application_restarted`），待处理审批为 `cancelled`（`reason = app_restarted`），显示“已取消”。
+   - 能力 chip：握手完成（`agent_backend.session` 事件）后立即从“（启动前预估）”切到后端实际声明，不必等这一轮结束。
+   - 入口缺失（临时改名受管入口）：错误码为 `agent_backend_not_installed`，没有子进程。
+   - DeepSeek 一轮正常结束、回复非空（需配置模型），不出现可答的审批卡。
+   - Fox 会话的发送、审批、取消与改动前一致。
+   - 13.5 中仍需要的：旧库启动生成迁移前备份（`<data>/backups/`，最多 5 份；备份失败不迁移）；真实 ACP 测试按 13.5 第 2 项的入口顺序跑并贴出 stderr 的入口行；dsh 真实 prompt 无模型时预期 FAILED（13.5 第 3 项）。
+4. **一次全量** `cargo test -p fox-desktop`：与 `c058c2f` 的 64 项既有失败基线逐项对比。
+   - Graph 那 37 项（规范 JSON 回退）应全部恢复，从失败名单中消失。
+   - 单独列出：`runtime_host::kernel_coordinator::tests::kernel_gateway_catalogue_size_is_pinned`（目录数 72）；第 4 项两个测试（`kernel_work_tool_missing_field_is_refused_before_execution_as_data`、`kernel_goal_propose_in_conversation_is_answered_by_the_gate`），写明通过与否。
+   - 其余任何新增失败都算回退。
