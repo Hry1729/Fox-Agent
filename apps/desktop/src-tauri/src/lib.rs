@@ -1,6 +1,7 @@
 mod app_capabilities;
 mod app_state;
 mod artifact_gateway;
+mod canonical_json;
 mod commands;
 mod database;
 mod data_compute;
