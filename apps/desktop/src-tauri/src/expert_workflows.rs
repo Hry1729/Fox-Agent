@@ -126,7 +126,7 @@ pub(crate) fn validate_workflow_definition(value: &Value) -> Result<(), String> 
 }
 
 fn parse_workflow(value: Value) -> Result<WorkflowDefinition, String> {
-    let encoded = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+    let encoded = crate::canonical_json::to_vec(&value).map_err(|error| error.to_string())?;
     if encoded.len() > MAX_WORKFLOW_BYTES {
         return Err(format!(
             "workflow exceeds the {MAX_WORKFLOW_BYTES} byte limit"
@@ -211,7 +211,7 @@ fn validate_criteria(field: &str, values: &[String]) -> Result<(), String> {
 }
 
 fn validate_schema(field: &str, schema: &Value) -> Result<(), String> {
-    let encoded = serde_json::to_vec(schema).map_err(|error| error.to_string())?;
+    let encoded = crate::canonical_json::to_vec(schema).map_err(|error| error.to_string())?;
     if encoded.len() > MAX_SCHEMA_BYTES {
         return Err(format!("{field} exceeds the {MAX_SCHEMA_BYTES} byte limit"));
     }
