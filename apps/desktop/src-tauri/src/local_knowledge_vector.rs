@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::{
     app_state::AppState,
     database::{now_ms, ApiResponse},
@@ -602,7 +604,7 @@ fn run_retrieval_worker_process(
     let executable = std::env::current_exe().map_err(|error| {
         LocalKnowledgeError::storage(format!("无法定位 Fox 当前可执行文件：{error}"))
     })?;
-    let request_json = serde_json::to_string(request).map_err(LocalKnowledgeError::storage)?;
+    let request_json = crate::canonical_json::to_string(request).map_err(LocalKnowledgeError::storage)?;
     let mut command = Command::new(executable);
     command
         .env(RETRIEVAL_WORKER_ROOT_ENV, store.root.as_os_str())
@@ -902,7 +904,7 @@ impl LocalKnowledgeStore {
                 manifest.name,
                 manifest.version,
                 manifest.dimension as i64,
-                serde_json::to_string(&manifest.languages).unwrap_or_else(|_| "[]".to_owned()),
+                crate::canonical_json::to_string(&manifest.languages).unwrap_or_else(|_| "[]".to_owned()),
                 manifest.license,
                 source_url,
                 package_path.to_string_lossy(),
@@ -921,7 +923,7 @@ impl LocalKnowledgeStore {
                 manifest.id,
                 manifest.version,
                 total_bytes,
-                serde_json::to_string(&manifest).map_err(LocalKnowledgeError::storage)?,
+                crate::canonical_json::to_string(&manifest).map_err(LocalKnowledgeError::storage)?,
                 now,
             ],
         )?;
@@ -1054,7 +1056,7 @@ impl LocalKnowledgeStore {
         }
         fs::write(
             package_path.join("manifest.json"),
-            serde_json::to_vec_pretty(manifest).map_err(LocalKnowledgeError::storage)?,
+            crate::canonical_json::to_vec_pretty(manifest).map_err(LocalKnowledgeError::storage)?,
         )?;
         validate_embedding_package(&package_path)?;
         let now = now_ms();
@@ -1340,7 +1342,7 @@ impl LocalKnowledgeStore {
                 },
                 manifest.version,
                 manifest.dimension as i64,
-                serde_json::to_string(&manifest.languages).unwrap_or_else(|_| "[]".to_owned()),
+                crate::canonical_json::to_string(&manifest.languages).unwrap_or_else(|_| "[]".to_owned()),
                 manifest.license,
                 destination.to_string_lossy(),
                 normalize_sha256(&manifest.hash)?,
@@ -2280,8 +2282,8 @@ impl LocalKnowledgeStore {
                 expected_document_ids_json = excluded.expected_document_ids_json,
                 expected_keywords_json = excluded.expected_keywords_json, updated_at = excluded.updated_at",
             params![id, request.knowledge_base_id, question,
-                serde_json::to_string(&request.expected_document_ids.unwrap_or_default()).map_err(LocalKnowledgeError::storage)?,
-                serde_json::to_string(&request.expected_keywords.unwrap_or_default()).map_err(LocalKnowledgeError::storage)?, now],
+                crate::canonical_json::to_string(&request.expected_document_ids.unwrap_or_default()).map_err(LocalKnowledgeError::storage)?,
+                crate::canonical_json::to_string(&request.expected_keywords.unwrap_or_default()).map_err(LocalKnowledgeError::storage)?, now],
         )?;
         self.get_retrieval_case(&id)
     }
@@ -2431,7 +2433,7 @@ impl LocalKnowledgeStore {
                         "documentId": request.document_id,
                         "relativePath": relative_path,
                     })
-                    .to_string();
+                    .canonical_string();
                     transaction.execute(
                         "INSERT INTO local_kb_jobs(
                             id, parent_operation_id, knowledge_base_id, job_type, status,
@@ -2480,7 +2482,7 @@ impl LocalKnowledgeStore {
         let job_id = Uuid::new_v4().to_string();
         let operation_id = Uuid::new_v4().to_string();
         let now = now_ms();
-        let checkpoint = serde_json::to_string(&request).map_err(LocalKnowledgeError::storage)?;
+        let checkpoint = crate::canonical_json::to_string(&request).map_err(LocalKnowledgeError::storage)?;
         self.connection()?.execute(
             "INSERT INTO local_kb_jobs(
                 id, parent_operation_id, knowledge_base_id, job_type, status, stage,
