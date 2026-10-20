@@ -1,5 +1,7 @@
 //! Real Host/QuickJS terminal Job facts delivered by automatic WaitingJobs wake.
 //! A child Job failure or cancellation is distinct from cancelling its parent Run.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -53,7 +55,7 @@ fn run_terminal_job_chain(live: bool, fail: bool) {
         "function onChunk(c){} function onFinish(){return {answer:42};}"
     };
     let arguments = json!({"idempotencyKey":"one-terminal-compute",
-        "params":{"processing":"chunked","code":code}}).to_string();
+        "params":{"processing":"chunked","code":code}}).canonical_string();
     let (address, server) = start_http_model_fixture(vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
@@ -158,7 +160,7 @@ fn run_terminal_job_chain(live: bool, fail: bool) {
         Some(if fail { "compute.execution_failed" } else { "compute.cancelled" }));
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 3, "a terminal Job has one automatic continuation");
-    assert_eq!(requests[2]["messages"].to_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 1);
+    assert_eq!(requests[2]["messages"].canonical_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 1);
     let message = provider_notice_text(&requests[2]["messages"])
         .expect("the third Provider request omitted the typed Host notice");
     let wire: fox_engine_protocol::HostJobNotice = serde_json::from_str(
