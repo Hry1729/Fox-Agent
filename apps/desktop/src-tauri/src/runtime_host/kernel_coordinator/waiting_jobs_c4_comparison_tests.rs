@@ -1,6 +1,8 @@
 //! C4: the same two real QuickJS Jobs through the real Host/Node/Pi path,
 //! comparing a frozen typed-notice Run with a frozen legacy polling Run.
 //! The polling policy is one predetermined pair of status(waitMs=5000) calls.
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use super::*;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -186,7 +188,7 @@ fn provider(
                     let args = |key: &str| {
                         json!({"idempotencyKey":key,
                         "params":{"processing":"chunked","code":code}})
-                        .to_string()
+                        .canonical_string()
                     };
                     json!({"role":"assistant","tool_calls":[
                         {"index":0,"id":"c4-start-a","type":"function",
@@ -197,7 +199,7 @@ fn provider(
                 }
                 1 if notice => {
                     let count = body["messages"]
-                        .to_string()
+                        .canonical_string()
                         .matches("FOX_HOST_JOB_NOTICE_V1")
                         .count();
                     json!({"role":"assistant","content":if count == 2 {
@@ -205,7 +207,7 @@ fn provider(
                     } else { "Wait for both Host Job notices." }})
                 }
                 1 => {
-                    let text = body["messages"].to_string();
+                    let text = body["messages"].canonical_string();
                     let ids = job_ids_from_model_input(&text);
                     assert_eq!(
                         ids.len(),
@@ -214,9 +216,9 @@ fn provider(
                     );
                     json!({"role":"assistant","tool_calls":[
                         {"index":0,"id":"c4-poll-a","type":"function",
-                            "function":{"name":"compute_job_status","arguments":json!({"jobId":ids[0],"waitMs":5000}).to_string()}},
+                            "function":{"name":"compute_job_status","arguments":json!({"jobId":ids[0],"waitMs":5000}).canonical_string()}},
                         {"index":1,"id":"c4-poll-b","type":"function",
-                            "function":{"name":"compute_job_status","arguments":json!({"jobId":ids[1],"waitMs":5000}).to_string()}}
+                            "function":{"name":"compute_job_status","arguments":json!({"jobId":ids[1],"waitMs":5000}).canonical_string()}}
                     ]})
                 }
                 2 => {
@@ -446,7 +448,7 @@ fn run_case(mode: &str, live: bool, notice: bool) {
         .iter()
         .map(|request| {
             request.body["messages"]
-                .to_string()
+                .canonical_string()
                 .matches("FOX_HOST_JOB_NOTICE_V1")
                 .count()
         })
