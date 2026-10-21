@@ -18,21 +18,64 @@ export interface RunFailure {
   stderrTail?: string
   /** Which failure the tail belongs to (`prompt_failed`, `backend_exited`, ...). */
   stderrTailSource?: string
+  /**
+   * The backend's JSON-RPC error `data` (`source: "rpc_error_data"`), redacted
+   * by the Host and at most 4 KiB. Never part of `message`.
+   */
+  rpcErrorData?: string
 }
 
-/** Shape of `run.failed.diagnostic` written by the external backend Host. */
+/** One entry of `run.failed.diagnostics` (or the legacy single `diagnostic`). */
 interface RunFailureDiagnostic {
   kind?: string
   source?: string
+  /** `kind: "stderr_tail"`. */
   stderrTail?: string
+  /** `kind: "rpc_error_data"`. */
+  text?: string
 }
 
-function diagnosticOf(payload: unknown): { stderrTail: string; source?: string } | null {
-  const diagnostic = (payload as { diagnostic?: RunFailureDiagnostic } | null)?.diagnostic
-  if (!diagnostic || typeof diagnostic !== 'object') return null
-  const tail = typeof diagnostic.stderrTail === 'string' ? diagnostic.stderrTail : ''
-  if (!tail.trim()) return null
-  return { stderrTail: tail, source: typeof diagnostic.source === 'string' ? diagnostic.source : undefined }
+export const RPC_ERROR_DATA_SOURCE = 'rpc_error_data'
+
+interface ParsedDiagnostic { stderrTail?: string; source?: string; rpcErrorData?: string }
+
+/**
+ * Reads the Host's diagnostics. Newer Hosts write `diagnostics` (array: the
+ * stderr tail, then the JSON-RPC `data`) plus `diagnostic` (the first entry);
+ * older ones only `diagnostic` (always a stderr tail). Both are accepted.
+ */
+function diagnosticOf(payload: unknown): ParsedDiagnostic | null {
+  const record = payload as { diagnostic?: RunFailureDiagnostic; diagnostics?: RunFailureDiagnostic[] } | null
+  const entries: RunFailureDiagnostic[] = Array.isArray(record?.diagnostics)
+    ? record!.diagnostics.filter((entry) => entry && typeof entry === 'object')
+    : record?.diagnostic && typeof record.diagnostic === 'object' ? [record.diagnostic] : []
+  const parsed: ParsedDiagnostic = {}
+  for (const entry of entries) {
+    const isData = entry.source === RPC_ERROR_DATA_SOURCE || entry.kind === RPC_ERROR_DATA_SOURCE
+    if (isData) {
+      const text = typeof entry.text === 'string' ? entry.text : ''
+      if (text.trim() && parsed.rpcErrorData === undefined) parsed.rpcErrorData = text
+      continue
+    }
+    const tail = typeof entry.stderrTail === 'string' ? entry.stderrTail : ''
+    if (tail.trim() && parsed.stderrTail === undefined) {
+      parsed.stderrTail = tail
+      if (typeof entry.source === 'string') parsed.source = entry.source
+    }
+  }
+  return parsed.stderrTail !== undefined || parsed.rpcErrorData !== undefined ? parsed : null
+}
+
+/** Whether "查看错误详情" has more than the bare message to show. */
+export function hasRunFailureDiagnostic(failure: Pick<RunFailure, 'stderrTail' | 'rpcErrorData'>): boolean {
+  return Boolean(failure.stderrTail?.trim() || failure.rpcErrorData?.trim())
+}
+
+/** Section title of each diagnostic source in "查看错误详情". */
+export function diagnosticTitle(source: string | undefined): string {
+  if (source === RPC_ERROR_DATA_SOURCE) return '后端错误数据（已脱敏，最多 4 KiB）：'
+  const label = source ? SOURCE_LABELS[source] ?? source : ''
+  return `后端 stderr 尾部（已脱敏，最多 4 KiB${label ? `；${label}` : ''}）：`
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -46,11 +89,13 @@ const SOURCE_LABELS: Record<string, string> = {
  * Text for "查看错误详情": the failure message, then the backend stderr tail
  * (already redacted by the Host) when the run carried one.
  */
-export function runFailureDetailText(failure: Pick<RunFailure, 'code' | 'message' | 'stderrTail' | 'stderrTailSource'>): string {
+export function runFailureDetailText(failure: Pick<RunFailure, 'code' | 'message' | 'stderrTail' | 'stderrTailSource' | 'rpcErrorData'>): string {
   const lines = [`${failure.code}: ${failure.message}`]
   if (failure.stderrTail && failure.stderrTail.trim()) {
-    const label = failure.stderrTailSource ? SOURCE_LABELS[failure.stderrTailSource] ?? failure.stderrTailSource : ''
-    lines.push('', `后端 stderr 尾部（已脱敏，最多 4 KiB${label ? `；${label}` : ''}）：`, failure.stderrTail)
+    lines.push('', diagnosticTitle(failure.stderrTailSource), failure.stderrTail)
+  }
+  if (failure.rpcErrorData && failure.rpcErrorData.trim()) {
+    lines.push('', diagnosticTitle(RPC_ERROR_DATA_SOURCE), failure.rpcErrorData)
   }
   return lines.join('\n')
 }
@@ -91,11 +136,15 @@ function failureFor(
   }
 }
 
-function withDiagnostic(failure: RunFailure, diagnostic: { stderrTail: string; source?: string } | null): RunFailure {
+function withDiagnostic(failure: RunFailure, diagnostic: ParsedDiagnostic | null): RunFailure {
   if (!diagnostic) return failure
-  return diagnostic.source
-    ? { ...failure, stderrTail: diagnostic.stderrTail, stderrTailSource: diagnostic.source }
-    : { ...failure, stderrTail: diagnostic.stderrTail }
+  const next: RunFailure = { ...failure }
+  if (diagnostic.stderrTail !== undefined) {
+    next.stderrTail = diagnostic.stderrTail
+    if (diagnostic.source) next.stderrTailSource = diagnostic.source
+  }
+  if (diagnostic.rpcErrorData !== undefined) next.rpcErrorData = diagnostic.rpcErrorData
+  return next
 }
 
 function kindForStatus(status: string | null | undefined): RunFailureKind | null {
@@ -126,7 +175,7 @@ export function deriveRunTerminalStates(input: RunFailureInput): RunTerminalStat
   const cancelled = new Set<string>()
   // The stderr tail lives only in the terminal event payload; the persisted
   // run row (which wins for code / message) never carries it.
-  const diagnostics = new Map<string, { stderrTail: string; source?: string }>()
+  const diagnostics = new Map<string, ParsedDiagnostic>()
 
   // Realtime events first: they are the only source for a failure that is not
   // (yet) reflected by a persisted run snapshot.
