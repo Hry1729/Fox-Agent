@@ -466,3 +466,40 @@ async fn closing_a_conversation_ends_its_pending_permission() {
     assert!(!runtime.approval_pending(&approval));
     assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending);
 }
+
+/// A failed prompt (JSON-RPC error, process alive) and a backend that exits
+/// mid-turn both persist the redacted stderr tail in `run.failed.diagnostic`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_prompt_or_exit_persists_the_redacted_stderr_tail() {
+    if !node_available() {
+        return;
+    }
+    let secrets = ["sk-mock-0123456789abcdef", "mock-bearer-value", "mock-header-key", "mock-plain-bearer", "mock-token-value"];
+    let check = |terminal: &Value, code: &str, source: &str| {
+        assert_eq!(terminal["type"], "run.failed", "{terminal}");
+        assert_eq!(terminal["code"], code, "{terminal}");
+        let diagnostic = &terminal["diagnostic"];
+        assert_eq!(diagnostic["kind"], "stderr_tail", "{terminal}");
+        assert_eq!(diagnostic["source"], source);
+        assert_eq!(diagnostic["redacted"], true);
+        let tail = diagnostic["stderrTail"].as_str().expect("stderrTail");
+        assert!(tail.len() <= 4096, "{}", tail.len());
+        assert!(tail.contains("Connection error (last line)"), "{tail}");
+        assert!(tail.contains("DEEPSEEK_API_KEY=[redacted]"), "{tail}");
+        assert!(tail.contains("[redacted]"), "{tail}");
+        let whole = terminal.to_string();
+        for secret in secrets {
+            assert!(!whole.contains(secret), "{secret} leaked: {whole}");
+        }
+    };
+
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    runtime.start_turn(turn("c-diag", "r-diag-1", "stderr-fail", AgentBackend::Deepseek, None)).unwrap();
+    let terminal = sink.terminal("r-diag-1").await;
+    check(&terminal, "agent_backend_prompt_failed", "prompt_failed");
+
+    runtime.start_turn(turn("c-diag", "r-diag-2", "stderr-crash", AgentBackend::Deepseek, None)).unwrap();
+    let terminal = sink.terminal("r-diag-2").await;
+    check(&terminal, "agent_backend_exited", "backend_exited");
+    runtime.shutdown().await;
+}
