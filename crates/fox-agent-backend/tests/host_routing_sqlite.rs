@@ -9,6 +9,7 @@
 
 use fox_agent_backend::host_routing::{
     route_stored, BackendSwitch, HostEntry, Route, AGENT_BACKEND_MIGRATION_SQL,
+    FULL_ACCESS_MIGRATION_SQL, FULL_ACCESS_SCHEMA_VERSION,
 };
 use fox_agent_backend::port::AgentBackend;
 use rusqlite::Connection;
@@ -181,4 +182,69 @@ fn migrating_a_copy_leaves_the_original_readable_by_the_old_schema() {
     assert!(!has_column, "the original is not modified by migrating the copy");
     drop(untouched);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v96 (UX batch ②): the exact SQL the desktop applies as version 96. Same
+/// semantics as the desktop test
+/// `grant_is_persisted_per_conversation_and_only_removable` (which needs the
+/// Windows/macOS desktop crate): sandboxed by default, one grant per
+/// conversation, grants are per conversation, only removable, cascade with
+/// the conversation, old rows untouched; the audit log stores names only.
+#[test]
+fn v96_full_access_grant_is_per_conversation_and_only_removable() {
+    assert_eq!(FULL_ACCESS_SCHEMA_VERSION, 96);
+    let connection = old_database();
+    migrate(&connection);
+    connection.execute_batch("PRAGMA foreign_keys = ON;").expect("fk");
+    connection.execute_batch(FULL_ACCESS_MIGRATION_SQL).expect("v96");
+    // Additive and re-runnable (IF NOT EXISTS), old rows untouched.
+    connection.execute_batch(FULL_ACCESS_MIGRATION_SQL).expect("v96 twice");
+    assert_eq!(stored(&connection, "old-pi"), "fox");
+
+    let granted = |id: &str| -> bool {
+        connection
+            .query_row("SELECT COUNT(*) FROM agent_backend_full_access_grants WHERE conversation_id=?1", [id], |row| row.get::<_, i64>(0))
+            .expect("count")
+            > 0
+    };
+    let grant = |id: &str| connection.execute(
+        "INSERT INTO agent_backend_full_access_grants(grant_key, conversation_id, granted_at) VALUES ('conversation:' || ?1, ?1, 1)",
+        [id],
+    );
+    connection
+        .execute_batch(
+            "INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at,agent_backend)
+                 VALUES ('a','a','A','active',1,1,'deepseek'),('b','a','B','active',1,1,'deepseek');",
+        )
+        .expect("new rows");
+    assert!(!granted("a"), "sandboxed by default");
+    grant("a").expect("grant a");
+    assert!(granted("a"));
+    assert!(!granted("b"), "per conversation");
+    assert!(grant("a").is_err(), "one grant per conversation");
+    assert!(
+        connection
+            .execute("INSERT INTO agent_backend_full_access_grants VALUES ('conversation:other', 'b', 1)", [])
+            .is_err(),
+        "grant_key must name its own conversation"
+    );
+    assert!(grant("missing").is_err(), "no grant without a conversation");
+    assert_eq!(connection.execute("DELETE FROM agent_backend_full_access_grants WHERE conversation_id='a'", []).unwrap(), 1);
+    assert_eq!(connection.execute("DELETE FROM agent_backend_full_access_grants WHERE conversation_id='a'", []).unwrap(), 0);
+    assert!(!granted("a"));
+    grant("b").expect("grant b");
+    connection.execute("DELETE FROM conversations WHERE id='b'", []).expect("delete b");
+    assert!(!granted("b"), "grant goes with its conversation");
+
+    connection
+        .execute(
+            "INSERT INTO agent_backend_audit_log(id, conversation_id, agent_backend, event, details_json, created_at)
+             VALUES ('e1', 'a', 'deepseek', 'agent_backend.credentials_imported', ?1, 1)",
+            [r#"{"files":[".dsh/.env"],"keys":["DEEPSEEK_API_KEY"]}"#],
+        )
+        .expect("audit");
+    let details: String = connection
+        .query_row("SELECT details_json FROM agent_backend_audit_log", [], |row| row.get(0))
+        .expect("details");
+    assert!(details.contains("DEEPSEEK_API_KEY") && !details.contains("sk-"));
 }
