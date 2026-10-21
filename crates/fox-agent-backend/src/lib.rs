@@ -60,6 +60,7 @@ pub mod host_routing;
 pub mod launch;
 pub mod legacy;
 pub mod limits;
+pub mod loopback;
 pub mod port;
 pub mod proctree;
 pub mod projection;
