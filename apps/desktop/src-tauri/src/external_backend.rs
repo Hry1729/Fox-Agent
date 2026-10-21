@@ -15,7 +15,7 @@
 use crate::database::{ApiResponse, ApprovalDecision, Database, StartRunRequest, StartRunResult};
 use crate::runtime_host::RuntimeEventNotification;
 use fox_agent_backend::capability_view::{capability_view, CapabilityView};
-use fox_agent_backend::external::{AnswerOutcome, CancelOutcome, ExternalRuntime, ExternalSink, LaunchRequest, TurnRequest};
+use fox_agent_backend::external::{AnswerOutcome, CancelOutcome, ExternalRuntime, ExternalSink, LaunchRequest, RevokeOutcome, TurnRequest};
 use fox_agent_backend::external_launch::{HostLaunchConfig, HostLauncher};
 use fox_agent_backend::port::AgentBackend;
 use fox_agent_backend::projection::PermissionCard;
@@ -120,6 +120,14 @@ fn failure<T: serde::Serialize>(code: &str, message: impl Into<String>, retryabl
     ApiResponse::failure(code, message.into(), retryable)
 }
 
+/// Carry a refusal over to another payload type.
+fn retype<T: serde::Serialize>(refusal: ApiResponse<()>) -> ApiResponse<T> {
+    match refusal.error {
+        Some(error) => ApiResponse::failure(&error.code, error.message, error.retryable),
+        None => ApiResponse::failure("internal", "unexpected empty refusal", false),
+    }
+}
+
 impl ExternalBackendHost {
     pub fn new(app: AppHandle, database: Database, fox_data: &std::path::Path) -> Self {
         let config = HostLaunchConfig::from_env(fox_data);
@@ -189,6 +197,8 @@ impl ExternalBackendHost {
                 project_uuid: context.project_id,
                 project_root,
                 session_key: started.run.id.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'), "_"),
+                // Fail-closed: a grant that cannot be read is no grant.
+                full_access_granted: self.database.conversation_full_access_granted(&request.conversation_id).unwrap_or(false),
             },
         };
         if let Err(error) = self.runtime.start_turn(turn) {
@@ -293,9 +303,174 @@ impl ExternalBackendHost {
             project_uuid: None,
             project_root: std::path::PathBuf::new(),
             session_key: "planned".into(),
+            full_access_granted: conversation_id.is_some_and(|id| self.database.conversation_full_access_granted(id).unwrap_or(false)),
         });
         let pi_launch = launcher.config.pi_launch();
-        capability_view(backend, None, &SandboxDeclaration::declare(mode, None, HostOs::current()), pi_launch)
+        let mut view = capability_view(backend, None, &SandboxDeclaration::declare(mode, None, HostOs::current()), pi_launch);
+        if launcher.config.full_access_forbidden {
+            fox_agent_backend::capability_view::apply_full_access_forbidden(&mut view);
+        }
+        view
+    }
+
+    /// The launch request a turn of `conversation_id` would use (backend,
+    /// project, grant), for the probe / import / revoke entries.
+    fn planned_request(&self, conversation_id: &str) -> Result<LaunchRequest, ApiResponse<()>> {
+        let backend = match self.database.conversation_agent_backend(conversation_id) {
+            Ok(Some(stored)) => match AgentBackend::parse(&stored) {
+                Some(AgentBackend::Fox) | None => return Err(failure("agent_backend_invalid", "这不是外部 Agent 后端的会话", false)),
+                Some(backend) => backend,
+            },
+            Ok(None) => return Err(failure("conversation.not_found", "会话不存在", false)),
+            Err(error) => return Err(failure("agent_backend_lookup_failed", error, true)),
+        };
+        let context = match self.database.external_conversation_context(conversation_id) {
+            Ok(Some(context)) => context,
+            Ok(None) => return Err(failure("conversation.not_found", "会话不存在", false)),
+            Err(error) => return Err(failure("storage.operation_failed", error, true)),
+        };
+        if context.project_id.is_none() {
+            return Err(failure("agent_backend_project_required", "外部 Agent 后端的会话需要先绑定项目（私有 HOME 按项目区分）", false));
+        }
+        Ok(LaunchRequest {
+            conversation_id: conversation_id.to_owned(),
+            backend,
+            project_uuid: context.project_id,
+            project_root: context.project_root.map(std::path::PathBuf::from).unwrap_or_default(),
+            session_key: "planned".into(),
+            full_access_granted: self.database.conversation_full_access_granted(conversation_id).unwrap_or(false),
+        })
+    }
+
+    /// Login probe (UX batch ①): names only, never a value.
+    pub fn credential_probe(&self, conversation_id: &str) -> ApiResponse<fox_agent_backend::onboarding::CredentialProbe> {
+        let request = match self.planned_request(conversation_id) {
+            Ok(request) => request,
+            Err(refusal) => return retype(refusal),
+        };
+        match self.runtime.launcher().config.credential_probe(&request) {
+            Ok(probe) => ApiResponse::success(probe),
+            Err(error) => failure(&error.code, error.message, false),
+        }
+    }
+
+    fn real_home() -> Option<fox_agent_backend::onboarding::RealHome> {
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).filter(|value| !value.is_empty())?;
+        let codex_home = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
+        Some(fox_agent_backend::onboarding::RealHome { home: std::path::PathBuf::from(home), codex_home })
+    }
+
+    /// What the real HOME has for this backend (file / key names only).
+    pub fn import_candidates(&self, conversation_id: &str) -> ApiResponse<Vec<fox_agent_backend::onboarding::ImportItem>> {
+        let request = match self.planned_request(conversation_id) {
+            Ok(request) => request,
+            Err(refusal) => return retype(refusal),
+        };
+        let Some(real) = Self::real_home() else {
+            return failure("agent_backend_import_failed", "找不到当前用户的 HOME 目录", false);
+        };
+        ApiResponse::success(fox_agent_backend::onboarding::import_candidates(request.backend, &real))
+    }
+
+    /// Copy the confirmed items into this project's private HOME, or every
+    /// known project's ("套用到我所有项目"); one audit event, names only.
+    pub fn import_credentials(&self, conversation_id: &str, selected: &[String], all_projects: bool) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
+        let request = match self.planned_request(conversation_id) {
+            Ok(request) => request,
+            Err(refusal) => return retype(refusal),
+        };
+        let Some(real) = Self::real_home() else {
+            return failure("agent_backend_import_failed", "找不到当前用户的 HOME 目录", false);
+        };
+        let projects = if all_projects {
+            match self.database.known_project_ids() {
+                Ok(ids) => ids,
+                Err(error) => return failure("storage.operation_failed", error, true),
+            }
+        } else {
+            request.project_uuid.clone().into_iter().collect()
+        };
+        match self.runtime.launcher().config.import_credentials(request.backend, &projects, &real, selected) {
+            Ok(report) => {
+                let mut details = report.audit_event();
+                details["allProjects"] = json!(all_projects);
+                let _ = self.database.append_agent_backend_audit(Some(conversation_id), request.backend.as_str(), "agent_backend.credentials_imported", &details);
+                ApiResponse::success(report)
+            }
+            Err(error) => failure(&error.code, error.message, false),
+        }
+    }
+
+    /// Open the private HOME in the system file manager (created when
+    /// missing; Windows through the same private-root preparation as a launch).
+    pub fn open_private_home(&self, conversation_id: &str) -> ApiResponse<String> {
+        let request = match self.planned_request(conversation_id) {
+            Ok(request) => request,
+            Err(refusal) => return retype(refusal),
+        };
+        let private = match self.runtime.launcher().config.full_access_private(&request) {
+            Ok(private) => private,
+            Err(error) => return failure(&error.code, error.message, false),
+        };
+        if let Err(error) = std::fs::create_dir_all(&private.private_home) {
+            return failure("agent_backend_open_failed", format!("无法创建私有 HOME：{error}"), false);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&private.private_home, std::fs::Permissions::from_mode(0o700));
+        }
+        match crate::app_capabilities::open_folder(&private.private_home) {
+            Ok(()) => ApiResponse::success(private.private_home.to_string_lossy().into_owned()),
+            Err(error) => failure("agent_backend_open_failed", error, false),
+        }
+    }
+
+    /// Permission mode of a conversation and whether full access can be
+    /// chosen on this machine (new-conversation picker, lock chip).
+    pub fn permission_status(&self, conversation_id: Option<&str>) -> Value {
+        let config = &self.runtime.launcher().config;
+        let forbidden = config.full_access_forbidden;
+        let mut status = json!({
+            "fullAccessForbidden": forbidden,
+            "forbiddenReason": if forbidden { Some(fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON) } else { None },
+            "engineeringSwitch": config.full_access != fox_agent_backend::external_launch::FullAccessSwitch::Off,
+        });
+        if let Some(id) = conversation_id {
+            if let Ok(request) = self.planned_request(id) {
+                status["granted"] = json!(request.full_access_granted);
+                status["mode"] = json!(config.permission_mode(&request).as_str());
+                status["locked"] = json!(true);
+            }
+        }
+        status
+    }
+
+    /// Revoke full access mid-session (semantics A; enabling mid-session does
+    /// not exist). The grant is removed first, so a relaunch can only be
+    /// sandboxed; a live full-access process is then stopped through
+    /// `recheck_permission_mode` -> RestartSandboxed.
+    pub async fn revoke_full_access(&self, conversation_id: &str) -> ApiResponse<Value> {
+        let request = match self.planned_request(conversation_id) {
+            Ok(request) => request,
+            Err(refusal) => return retype(refusal),
+        };
+        match self.database.revoke_full_access_grant(conversation_id) {
+            Ok(true) => {}
+            Ok(false) => return failure("agent_backend_no_full_access", "本会话没有完全访问授权", false),
+            Err(error) => return failure("storage.operation_failed", error, true),
+        }
+        let request = LaunchRequest { full_access_granted: false, ..request };
+        let outcome = self.runtime.revoke_full_access(&request).await;
+        let (label, confirmed) = match outcome {
+            RevokeOutcome::NotRunning => ("not_running", true),
+            RevokeOutcome::Unchanged => ("unchanged", true),
+            RevokeOutcome::RestartSandboxed { confirmed } => ("restart_sandboxed", confirmed),
+        };
+        let backend = self.database.conversation_agent_backend(conversation_id).ok().flatten().unwrap_or_default();
+        let details = json!({ "outcome": label, "stopConfirmed": confirmed });
+        let _ = self.database.append_agent_backend_audit(Some(conversation_id), &backend, "agent_backend.full_access_revoked", &details);
+        ApiResponse::success(details)
     }
 }
 
