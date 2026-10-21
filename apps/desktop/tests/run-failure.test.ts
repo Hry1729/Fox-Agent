@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   deriveRunCancellations,
   deriveRunFailures,
+  runFailureDetailText,
   type RunFailureInput,
 } from '../src/features/conversations/model/run-failure'
 
@@ -153,5 +154,62 @@ describe('deriveRunFailures', () => {
       code: 'unknown',
       message: '运行中断',
     })
+  })
+})
+
+describe('run failure stderr diagnostic', () => {
+  const tail = 'mock: DEEPSEEK_API_KEY=[redacted]\nmock: Authorization: Bearer [redacted]\nmock: Error: Connection error (last line)'
+
+  test('a failed run event carries the redacted stderr tail into the failure', () => {
+    const failures = deriveRunFailures({
+      persistedRuns: [],
+      events: [{
+        runId: 'run-ext',
+        eventType: 'run.failed',
+        event: {
+          type: 'run.failed',
+          code: 'agent_backend_prompt_failed',
+          message: 'prompt failed: Internal error',
+          diagnostic: { kind: 'stderr_tail', source: 'prompt_failed', redacted: true, maxBytes: 4096, stderrTail: tail },
+        },
+      }],
+    })
+    const failure = failures.get('run-ext')!
+    expect(failure.stderrTail).toBe(tail)
+    expect(failure.stderrTailSource).toBe('prompt_failed')
+    const text = runFailureDetailText(failure)
+    expect(text.startsWith('agent_backend_prompt_failed: prompt failed: Internal error')).toBe(true)
+    expect(text).toContain('后端 stderr 尾部（已脱敏，最多 4 KiB；本轮请求失败）：')
+    expect(text.endsWith('Error: Connection error (last line)')).toBe(true)
+    expect(text).not.toContain('sk-')
+  })
+
+  test('the persisted run row wins for code and message but keeps the tail from the event', () => {
+    const failures = deriveRunFailures({
+      persistedRuns: [persistedRun({ id: 'run-ext', status: 'failed', errorCode: 'agent_backend_exited', errorMessage: '外部后端进程意外退出' })],
+      events: [{
+        runId: 'run-ext',
+        eventType: 'run.failed',
+        event: { type: 'run.failed', code: 'agent_backend_exited', message: 'x', diagnostic: { source: 'backend_exited', stderrTail: tail } },
+      }],
+    })
+    expect(failures.get('run-ext')).toEqual({
+      kind: 'failed',
+      code: 'agent_backend_exited',
+      message: '外部后端进程意外退出',
+      stderrTail: tail,
+      stderrTailSource: 'backend_exited',
+    })
+  })
+
+  test('without a diagnostic the failure and its detail text are unchanged', () => {
+    const failures = deriveRunFailures({
+      persistedRuns: [],
+      events: [{ runId: 'run-plain', eventType: 'run.failed', event: { type: 'run.failed', code: 'kernel.x', message: 'boom', diagnostic: { stderrTail: '   ' } } }],
+    })
+    const failure = failures.get('run-plain')!
+    expect(failure).toEqual({ kind: 'failed', code: 'kernel.x', message: 'boom' })
+    expect('stderrTail' in failure).toBe(false)
+    expect(runFailureDetailText(failure)).toBe('kernel.x: boom')
   })
 })
