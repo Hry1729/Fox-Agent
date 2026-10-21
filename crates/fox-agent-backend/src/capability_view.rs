@@ -138,12 +138,23 @@ fn sandbox_dimension(declared: &CapabilityDeclaration, declaration: &SandboxDecl
                     enforcement_label(declared.sandbox_network)
                 ),
                 detail: format!(
-                    "{scope}；可写：{}；网络白名单：{}",
+                    "{scope}；可写：{}；网络白名单：{}{}",
                     if declaration.writable_roots.is_empty() { "无".to_owned() } else { declaration.writable_roots.join("、") },
-                    if declaration.allowed_domains.is_empty() { "无".to_owned() } else { declaration.allowed_domains.join("、") }
+                    if declaration.allowed_domains.is_empty() { "无".to_owned() } else { declaration.allowed_domains.join("、") },
+                    loopback_detail(declaration)
                 ),
             }
         }
+    }
+}
+
+/// The loopback gateway sentence of the sandbox detail: which one loopback
+/// port is allowed and from which base URL, or why none is.
+fn loopback_detail(declaration: &SandboxDeclaration) -> String {
+    match &declaration.loopback_gateway {
+        Some(gateway) => format!("；放行本机回环端口：{}（仅此一个，来自 {}）", gateway.entry, gateway.source),
+        None if !declaration.loopback_diagnostics.is_empty() => format!("；未放行本机回环端口：{}", declaration.loopback_diagnostics.join("；")),
+        None => String::new(),
     }
 }
 
