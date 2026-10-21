@@ -1541,6 +1541,17 @@ pub async fn conversation_create(
         Err(failure) => return Ok(failure),
     };
     let external_backend = agent_backend != fox_agent_backend::port::AgentBackend::Fox;
+    // UX batch ② (semantics A): the external permission mode is chosen here,
+    // once, and locked with the backend. FORBIDDEN refuses full access
+    // outright, whatever the UI sent.
+    let grant_full_access = match fox_agent_backend::host_routing::decide_new_conversation_mode(
+        request.external_permission_mode.as_deref(),
+        agent_backend,
+        fox_agent_backend::external_launch::full_access_forbidden_from_env(),
+    ) {
+        Ok(grant) => grant,
+        Err(refusal) => return Ok(ApiResponse::failure(refusal.code, refusal.message, false)),
+    };
     if external_backend && request.expert_id.is_some() {
         return Ok(ApiResponse::failure(
             "agent_backend_invalid",
@@ -1635,6 +1646,18 @@ pub async fn conversation_create(
             ))
         }
     };
+    if grant_full_access {
+        if let Err(error) = state.database.grant_full_access_at_creation(&conversation.id) {
+            let _ = state.database.delete_conversation(&conversation.id);
+            return Ok(ApiResponse::failure("conversation.create_failed", format!("无法记录完全访问授权：{error}"), false));
+        }
+        let _ = state.database.append_agent_backend_audit(
+            Some(&conversation.id),
+            agent_backend.as_str(),
+            "agent_backend.full_access_granted",
+            &serde_json::json!({ "grant": "conversation", "source": "new_conversation" }),
+        );
+    }
     if let Some(expert_id) = request.expert_id.as_deref() {
         if let Err(error) = state.database.bind_conversation_expert(
             &conversation.id,
