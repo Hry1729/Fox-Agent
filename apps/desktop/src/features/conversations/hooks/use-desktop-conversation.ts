@@ -6,6 +6,7 @@ import { conversationRunFingerprint, conversationRunIsActive, conversationRunSta
 import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '../model/pending-interactions'
 import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
+import type { ExternalPermissionMode } from '../model/agent-backend-onboarding'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
 import {
   AGENT_BACKEND_REFUSED,
@@ -92,6 +93,9 @@ interface DesktopConversationState {
   /** Outer Agent backend for the next new conversation (frozen at creation). */
   draftAgentBackend: AgentBackendId
   setDraftAgentBackend: (backend: AgentBackendId) => void
+  /** UX batch ②: permission mode of the next new EXTERNAL conversation (locked with the backend). */
+  draftExternalPermissionMode: ExternalPermissionMode
+  setDraftExternalPermissionMode: (mode: ExternalPermissionMode) => void
   /** Host picker / lock state; null until loaded or outside Tauri. */
   agentBackendStatus: AgentBackendStatus | null
   /**
@@ -241,6 +245,14 @@ export function useDesktopConversation(): DesktopConversationState {
   const setDraftAgentBackend = useCallback((backend: AgentBackendId) => {
     draftAgentBackendRef.current = backend
     setDraftAgentBackendState(backend)
+  }, [])
+  // UX batch ②: chosen with the backend for a new external conversation,
+  // sent once, then locked by the Host (sandboxed unless explicitly chosen).
+  const [draftExternalPermissionMode, setDraftExternalPermissionModeState] = useState<ExternalPermissionMode>('sandboxed')
+  const draftExternalPermissionModeRef = useRef<ExternalPermissionMode>('sandboxed')
+  const setDraftExternalPermissionMode = useCallback((mode: ExternalPermissionMode) => {
+    draftExternalPermissionModeRef.current = mode
+    setDraftExternalPermissionModeState(mode)
   }, [])
   const [agentBackendStatus, setAgentBackendStatus] = useState<AgentBackendStatus | null>(null)
   const agentBackendStatusRef = useRef<AgentBackendStatus | null>(null)
@@ -1048,8 +1060,12 @@ export function useDesktopConversation(): DesktopConversationState {
           permissionMode: draft.permissionMode ?? draftPermissionMode ?? undefined,
           // Absent for Fox so an older Host sees exactly the old request.
           agentBackend: draftAgentBackendRef.current === 'fox' ? undefined : draftAgentBackendRef.current,
+          // Only for an external backend and only when full access was chosen
+          // (absent = sandboxed, so an older Host sees the old request).
+          externalPermissionMode: draftAgentBackendRef.current !== 'fox' && draftExternalPermissionModeRef.current === 'full_access' ? 'full_access' : undefined,
         })
         setDraftAgentBackend('fox')
+        setDraftExternalPermissionMode('sandboxed')
         active = await desktopClient.loadConversation(conversation.id)
         if (selectionVersion === selectionVersionRef.current) {
           activeConversationIdRef.current = conversation.id
@@ -1574,6 +1590,8 @@ export function useDesktopConversation(): DesktopConversationState {
     draftPermissionMode,
     draftAgentBackend,
     setDraftAgentBackend,
+    draftExternalPermissionMode,
+    setDraftExternalPermissionMode,
     agentBackendStatus,
     agentBackendRefusal,
     knowledgeReferences: detail?.knowledgeReferences ?? draftKnowledgeReferences,
@@ -1625,7 +1643,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [agentBackendStatus, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [agentBackendStatus, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, draftExternalPermissionMode, setDraftExternalPermissionMode, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {
