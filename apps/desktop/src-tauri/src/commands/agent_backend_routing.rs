@@ -236,6 +236,85 @@ pub fn agent_backend_capabilities(
     }
 }
 
+/// UX batch ①②: requests that name a conversation.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendConversationRequest {
+    pub conversation_id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendImportRequest {
+    pub conversation_id: String,
+    /// Ids from `agent_backend_import_candidates` the user confirmed.
+    pub selected: Vec<String>,
+    /// "套用到我所有项目".
+    #[serde(default)]
+    pub all_projects: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendPermissionStatusRequest {
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+/// Login probe of the conversation's private HOME (names only).
+#[tauri::command]
+pub fn agent_backend_credentials(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendConversationRequest,
+) -> ApiResponse<fox_agent_backend::onboarding::CredentialProbe> {
+    external.credential_probe(&request.conversation_id)
+}
+
+/// Whitelisted login files / key names found in the real HOME (no values).
+#[tauri::command]
+pub fn agent_backend_import_candidates(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendConversationRequest,
+) -> ApiResponse<Vec<fox_agent_backend::onboarding::ImportItem>> {
+    external.import_candidates(&request.conversation_id)
+}
+
+/// Copy the confirmed items into the private HOME(s); audited by name.
+#[tauri::command]
+pub fn agent_backend_import_credentials(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendImportRequest,
+) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
+    external.import_credentials(&request.conversation_id, &request.selected, request.all_projects)
+}
+
+/// Open the private HOME in the system file manager.
+#[tauri::command]
+pub fn agent_backend_open_private_home(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendConversationRequest,
+) -> ApiResponse<String> {
+    external.open_private_home(&request.conversation_id)
+}
+
+/// Permission mode / lock / FORBIDDEN for the picker and the chip.
+#[tauri::command]
+pub fn agent_backend_permission_status(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendPermissionStatusRequest,
+) -> ApiResponse<serde_json::Value> {
+    ApiResponse::success(external.permission_status(request.conversation_id.as_deref()))
+}
+
+/// Revoke full access mid-session (restarts the backend in the sandbox).
+#[tauri::command]
+pub async fn agent_backend_revoke_full_access(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendConversationRequest,
+) -> Result<ApiResponse<serde_json::Value>, ()> {
+    Ok(external.revoke_full_access(&request.conversation_id).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
