@@ -695,6 +695,16 @@ pub struct SandboxPolicy {
     /// roots under them. Empty on other platforms.
     #[serde(default)]
     pub users_readable_roots: Vec<PathBuf>,
+    /// The one loopback model gateway port this session's backend is
+    /// configured to use, derived from its own base URL
+    /// ([`crate::loopback`]); its entry is also in `allowed_domains`. `None`
+    /// when the base URL is remote, absent or its port could not be
+    /// determined (see `loopback_diagnostics`).
+    #[serde(default)]
+    pub loopback_gateway: Option<crate::loopback::LoopbackGateway>,
+    /// Why no loopback port was allowed, when a loopback base URL was seen.
+    #[serde(default)]
+    pub loopback_diagnostics: Vec<String>,
 }
 
 fn is_absolute_for(path: &Path, os: HostOs) -> bool {
@@ -848,7 +858,24 @@ impl SandboxPolicy {
             allowed_domains,
             deny_read_roots: default_deny_read_roots(os),
             users_readable_roots: if os == HostOs::Windows { windows_users_readable_roots() } else { Vec::new() },
+            loopback_gateway: None,
+            loopback_diagnostics: Vec::new(),
         }
+    }
+
+    /// Allow exactly the loopback gateway port `derivation` found (the same
+    /// IP-literal allowlist entry the round-6 scripted model uses, e.g.
+    /// `127.0.0.1:3425`), and record it and the diagnostics for the
+    /// declaration. No gateway: nothing is added.
+    pub fn with_loopback_derivation(mut self, derivation: crate::loopback::LoopbackDerivation) -> Self {
+        if let Some(gateway) = &derivation.gateway {
+            if !self.allowed_domains.iter().any(|domain| domain.eq_ignore_ascii_case(&gateway.entry)) {
+                self.allowed_domains.push(gateway.entry.clone());
+            }
+        }
+        self.loopback_gateway = derivation.gateway;
+        self.loopback_diagnostics = derivation.diagnostics;
+        self
     }
 
     /// Paths the policy itself grants (authorized, private HOME, session temp,
@@ -2395,6 +2422,14 @@ pub struct SandboxDeclaration {
     /// Windows: paths the audit could not check (`path: reason`).
     #[serde(default)]
     pub audit_errors: Vec<String>,
+    /// The loopback port allowed for the backend's own model gateway
+    /// (`127.0.0.1:3425`), with where its base URL came from; `None` = no
+    /// loopback port allowed ([`SandboxPolicy::loopback_gateway`]).
+    #[serde(default)]
+    pub loopback_gateway: Option<crate::loopback::LoopbackGateway>,
+    /// Why a loopback base URL did not get its port allowed.
+    #[serde(default)]
+    pub loopback_diagnostics: Vec<String>,
 }
 
 /// Product decision B (2026-10-19): on Windows the sandbox is not limited to
@@ -2453,6 +2488,8 @@ impl SandboxDeclaration {
                     exposure_warning: None,
                     exposure_audit: None,
                     audit_errors: Vec::new(),
+                    loopback_gateway: policy.loopback_gateway.clone(),
+                    loopback_diagnostics: policy.loopback_diagnostics.clone(),
                 }
             }
             // Full access, or sandboxed without a policy (never launched):
@@ -2473,6 +2510,8 @@ impl SandboxDeclaration {
                 exposure_warning: None,
                 exposure_audit: None,
                 audit_errors: Vec::new(),
+                loopback_gateway: None,
+                loopback_diagnostics: Vec::new(),
             },
         }
     }
