@@ -349,6 +349,37 @@ pub fn verify_installed_patch(path: &std::path::Path, policy: &HostPolicy) -> Re
     }
 }
 
+/// Environment variable dsh's `llm-deepseek` reads for its Messages base URL
+/// (`config.baseURL ?? $DEEPSEEK_BASE_URL ?? https://api.deepseek.com/anthropic`).
+pub const BASE_URL_ENV: &str = "DEEPSEEK_BASE_URL";
+
+/// Every model base URL a sandboxed dsh session can actually use, read from
+/// the dsh configuration in its private HOME:
+/// `<private HOME>/.dsh/cordis.patch.yml` and
+/// `<private HOME>/.dsh/profiles/acp/cordis.patch.yml`, every `baseURL:` key
+/// (the `llm-deepseek` row, or a provider route such as a local gateway
+/// `magpie`; dsh's config wins over the environment).
+///
+/// Not read, measured on Linux with dsh 0.2.1-rc.2 (2026-10-21): `.env`
+/// files. dsh refuses to start when a `.env` (project or `$DSH_HOME`) sets
+/// [`BASE_URL_ENV`] ("only the launching environment may set it"), and the
+/// launching environment of a sandboxed session never carries it (not in the
+/// child environment allowlist; on Windows no Host variable crosses srt).
+///
+/// Missing files are skipped. Feed the result to
+/// [`crate::loopback::derive_loopback_gateway`].
+pub fn base_url_candidates(private_home: &std::path::Path, project_root: &std::path::Path) -> Vec<crate::loopback::BaseUrlCandidate> {
+    let _ = project_root;
+    let dsh_home = private_home.join(".dsh");
+    let mut out = Vec::new();
+    for patch in [dsh_home.join("cordis.patch.yml"), dsh_home.join("profiles").join("acp").join("cordis.patch.yml")] {
+        if let Ok(text) = std::fs::read_to_string(&patch) {
+            out.extend(crate::loopback::yaml_base_urls(&text, &patch.display().to_string()));
+        }
+    }
+    out
+}
+
 /// Launch spec for a session: `dsh --profile acp --patch <abs path>`. The Host
 /// writes [`PolicyMapping::patch_yaml`] to a Fox-owned file first and spawns
 /// with the session root as the working directory (dsh's fallback workspace
@@ -439,6 +470,42 @@ pub fn floor_verdict() -> FloorVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_gateway_port_comes_from_the_private_home_dsh_config() {
+        let base = std::env::temp_dir().join(format!("fox-dsh-baseurl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let project = base.join("proj");
+        std::fs::create_dir_all(home.join(".dsh").join("profiles").join("acp")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        // Nothing configured: no candidate, no gateway, no diagnostic.
+        let derived = crate::loopback::derive_loopback_gateway(&base_url_candidates(&home, &project));
+        assert_eq!(derived, crate::loopback::LoopbackDerivation::default());
+        // .env files are never read (dsh refuses DEEPSEEK_BASE_URL there).
+        std::fs::write(project.join(".env"), "DEEPSEEK_BASE_URL=http://127.0.0.1:9\n").unwrap();
+        std::fs::write(home.join(".dsh").join(".env"), "DEEPSEEK_BASE_URL=http://127.0.0.1:9\n").unwrap();
+        assert!(base_url_candidates(&home, &project).is_empty());
+        // A local gateway provider in the private HOME patch.
+        std::fs::write(
+            home.join(".dsh").join("cordis.patch.yml"),
+            "- id: llm-pi-ai\n  config:\n    providers:\n      magpie:\n        baseURL: http://127.0.0.1:3425/v1\n- id: acp\n  config:\n    provider: 'magpie'\n    model: 'm'\n",
+        )
+        .unwrap();
+        std::fs::write(home.join(".dsh").join("profiles").join("acp").join("cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: 'http://127.0.0.1:3425/anthropic'\n").unwrap();
+        let candidates = base_url_candidates(&home, &project);
+        assert_eq!(candidates.len(), 2, "{candidates:?}");
+        let derived = crate::loopback::derive_loopback_gateway(&candidates);
+        let gateway = derived.gateway.expect("the one loopback port");
+        assert_eq!(gateway.entry, "127.0.0.1:3425");
+        assert!(gateway.source.contains("cordis.patch.yml"), "{gateway:?}");
+        // A second loopback endpoint: ambiguous, nothing allowed.
+        std::fs::write(home.join(".dsh").join("profiles").join("acp").join("cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: http://localhost:4000\n").unwrap();
+        let derived = crate::loopback::derive_loopback_gateway(&base_url_candidates(&home, &project));
+        assert!(derived.gateway.is_none());
+        assert!(!derived.diagnostics.is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn floor_blocks_enabling_today() {
