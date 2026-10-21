@@ -170,22 +170,30 @@ impl From<crate::acp::InitializeFailure> for LaunchFailure {
         if !failure.backend_stderr_tail.is_empty() {
             message.push_str(&format!("；后端输出（已脱敏）：{}", tail_chars(&failure.backend_stderr_tail, 600)));
         }
-        let tail = failure.stderr_tail.clone();
-        Self::new(failure.code.as_str(), message)
-            .detail(serde_json::to_value(&failure).unwrap_or(Value::Null))
-            .with_stderr_tail(&tail, "initialize")
+        // Already redacted once (InitializeFailure::attach_tails); not again.
+        let diagnostic = diagnostic_value(&crate::acp::limit_failure_tail(&failure.stderr_tail), "initialize");
+        let mut launch = Self::new(failure.code.as_str(), message).detail(serde_json::to_value(&failure).unwrap_or(Value::Null));
+        launch.diagnostic = diagnostic;
+        launch
     }
 }
 
 /// The `diagnostic` field of a failed run's terminal event: the backend's
-/// stderr tail, redacted again before it is persisted
+/// stderr tail, redacted (once) before it is persisted
 /// ([`crate::acp::redact_diagnostic_tail`]: keys, tokens, `Authorization` /
 /// `Bearer` values, `*_API_KEY=` values, proxy credentials) and limited to the
 /// last [`crate::acp::FAILURE_TAIL_BYTES`] (4 KiB). `None` when there is no
 /// output. `source` says which failure it belongs to: `prompt_failed`,
 /// `backend_exited`, `session_failed`, `initialize`.
+///
+/// `tail` is the unredacted text ([`crate::acp::AcpConnection::diagnostic_stderr_tail`]);
+/// this is the one place it is redacted.
 pub fn stderr_diagnostic(tail: &str, source: &str) -> Option<Value> {
-    let tail = crate::acp::redact_diagnostic_tail(tail);
+    diagnostic_value(&crate::acp::redact_diagnostic_tail(tail), source)
+}
+
+/// The diagnostic object for an already redacted, already limited tail.
+fn diagnostic_value(tail: &str, source: &str) -> Option<Value> {
     if tail.trim().is_empty() {
         return None;
     }
