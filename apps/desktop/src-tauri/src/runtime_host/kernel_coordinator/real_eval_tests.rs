@@ -6537,7 +6537,15 @@ fn exercise_eval_approval_clock(approve: bool) {
             "an unanswered approval must leave the observed target unchanged",
         );
         assert!(db.queue_kernel_host_command(&run_id, Some(("write-proof", "allow_once"))).is_err());
-        assert!(db.queue_kernel_host_command(&run_id, None).is_err());
+        // The watcher already queued the one cancel, so a repeated cancel hits
+        // the idempotent replay branch: Ok(false) is success, not an error. A
+        // terminal-run Err is also acceptable; only a NEW command (Ok(true)) on
+        // a cancelled Run would be wrong.
+        let repeated_cancel = db.queue_kernel_host_command(&run_id, None);
+        assert!(
+            matches!(repeated_cancel, Ok(false) | Err(_)),
+            "a repeated cancel on a cancelled Run must be an idempotent no-op, got {repeated_cancel:?}",
+        );
     }
     assert!(!root.join("facts.db").exists());
     assert!(!root.join("model-visible-request.json").exists());
