@@ -119,7 +119,21 @@ fn approval_dimension(declared: &CapabilityDeclaration) -> Dimension {
     Dimension { summary, detail: parts.join("；") }
 }
 
-fn sandbox_dimension(declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
+/// DeepSeek in sandboxed mode: a loopback model gateway cannot be reached
+/// (dsh dials loopback directly, never through the srt proxy), so such a
+/// session is refused before launch.
+pub const DEEPSEEK_LOOPBACK_LIMIT: &str = "限制：DeepSeek 的 base URL 若指向本机回环网关（如 Magpie 的 127.0.0.1:端口），沙箱模式下不可达（dsh 对回环地址总是直连、不经 srt 代理，srt 也无法按端口放行回环直连），Fox 会在启动前拒绝（agent_backend_loopback_requires_full_access）；请切换到“完全访问”，或改用官方 api.deepseek.com";
+
+fn sandbox_dimension(backend: AgentBackend, declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
+    let mut dimension = sandbox_dimension_base(declared, declaration, launched);
+    if backend == AgentBackend::Deepseek && declaration.mode == PermissionMode::Sandboxed && !crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
+        dimension.detail.push('；');
+        dimension.detail.push_str(DEEPSEEK_LOOPBACK_LIMIT);
+    }
+    dimension
+}
+
+fn sandbox_dimension_base(declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
     match declaration.mode {
         PermissionMode::FullAccess => Dimension {
             summary: "沙箱：无（完全访问）".to_owned(),
@@ -205,7 +219,7 @@ pub fn capability_view(
         mode: declaration.mode.as_str().to_owned(),
         source: if launched { "live" } else { "planned" },
         approval: approval_dimension(&declared),
-        sandbox: sandbox_dimension(&declared, declaration, launched),
+        sandbox: sandbox_dimension(backend, &declared, declaration, launched),
         cancel: cancel_dimension(&declared),
         observability: observability_dimension(&declared),
         warning: declaration.exposure_warning.clone(),
@@ -247,6 +261,12 @@ mod tests {
         assert_eq!(view.cancel.summary, "取消：仅发送请求");
         assert_eq!(view.observability.summary, "可观测：未验证");
         assert!(view.cancel.detail.contains("未知"));
+        assert!(view.sandbox.detail.contains("本机回环网关") && view.sandbox.detail.contains("完全访问"), "{}", view.sandbox.detail);
+        let full = SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::Linux);
+        let view = capability_view(AgentBackend::Deepseek, None, &full, PiLaunch::Stock);
+        assert!(!view.sandbox.detail.contains("本机回环网关"), "full access is not limited: {}", view.sandbox.detail);
+        let pi = capability_view(AgentBackend::Pi, None, &planned, PiLaunch::Stock);
+        assert!(!pi.sandbox.detail.contains("本机回环网关"));
     }
 
     #[test]
