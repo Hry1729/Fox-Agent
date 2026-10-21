@@ -9,7 +9,8 @@
 //   hang        -> text, then never answers (ignores session/cancel)
 //   crash       -> text, then exits with code 3
 //   maxtokens   -> text, stop max_tokens
-//   stderr-fail -> writes secret-bearing lines to stderr, then answers the
+//   stderr-fail -> writes secret-bearing lines (plus a ~2000-byte line and
+//                  a CJK line) to stderr, then answers the
 //                  prompt with a JSON-RPC error (process stays alive)
 //   stderr-crash -> writes secret-bearing lines to stderr, then exits 4
 // session/load replays one user and one agent chunk ("replayed-old") before
@@ -90,6 +91,10 @@ rl.on('line', line => {
       process.stderr.write('mock: connecting to http://127.0.0.1:3425/v1 with DEEPSEEK_API_KEY=sk-mock-0123456789abcdef\n')
       process.stderr.write('mock: request headers {"authorization":"Bearer mock-bearer-value","x-api-key":"mock-header-key"}\n')
       process.stderr.write('mock: Authorization: Bearer mock-plain-bearer token: mock-token-value\n')
+      // A ~2000-byte line with no spaces (renders only if the tail wraps)
+      // and a CJK line (byte vs char cutting, wide glyphs).
+      process.stderr.write('mock: long ' + Array.from({ length: 150 }, (_, i) => `/segment-${String(i).padStart(4, '0')}`).join('') + ' end-of-long-line\n')
+      process.stderr.write('mock: 错误：无法连接本机网关（127.0.0.1:3425），请检查 Magpie 是否在运行；路径 C:\\Users\\张三\\.dsh\n')
       process.stderr.write('mock: Error: Connection error (last line)\n')
       if (prompt === 'stderr-crash') {
         setTimeout(() => process.exit(4), 150)
