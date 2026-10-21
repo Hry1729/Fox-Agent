@@ -84,6 +84,69 @@ END;
 /// Schema version the desktop records for [`AGENT_BACKEND_MIGRATION_SQL`].
 pub const AGENT_BACKEND_SCHEMA_VERSION: i64 = 95;
 
+/// Schema v96 (UX batch ①②): the per-conversation full-access grant the
+/// user chose when creating an external conversation (semantics A: chosen at
+/// creation, locked, revocable mid-session, never enabled mid-session), and
+/// an audit log for external-backend Host actions (credential import:
+/// file / key names only). Additive; no existing row is touched.
+pub const FULL_ACCESS_MIGRATION_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS agent_backend_full_access_grants (
+    grant_key TEXT PRIMARY KEY CHECK(grant_key = 'conversation:' || conversation_id),
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    granted_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_backend_audit_log (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT,
+    agent_backend TEXT NOT NULL,
+    event TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_backend_audit_log_created
+    ON agent_backend_audit_log(created_at);
+"#;
+
+/// Schema version the desktop records for [`FULL_ACCESS_MIGRATION_SQL`].
+pub const FULL_ACCESS_SCHEMA_VERSION: i64 = 96;
+
+/// Permission mode an external conversation is created with.
+pub const NEW_MODE_SANDBOXED: &str = "sandboxed";
+pub const NEW_MODE_FULL_ACCESS: &str = "full_access";
+
+/// Refusal code: full access requested where it cannot be granted.
+pub const CODE_FULL_ACCESS_FORBIDDEN: &str = "agent_backend_full_access_forbidden";
+
+/// Whether a new conversation gets a full-access grant. `requested` is the
+/// UI's choice (absent = sandboxed). Full access is only for external
+/// backends and is refused outright (not silently downgraded) when the
+/// machine forbids it (`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`), so a UI that
+/// ignores the disabled option cannot get around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeRefusal {
+    pub code: &'static str,
+    pub message: String,
+}
+
+pub fn decide_new_conversation_mode(requested: Option<&str>, backend: AgentBackend, forbidden: bool) -> Result<bool, ModeRefusal> {
+    match requested.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(false),
+        Some(NEW_MODE_SANDBOXED) => Ok(false),
+        Some(NEW_MODE_FULL_ACCESS) if backend == AgentBackend::Fox => Err(ModeRefusal {
+            code: RouteError::CODE_INVALID,
+            message: "完全访问只适用于外部 Agent 后端".into(),
+        }),
+        Some(NEW_MODE_FULL_ACCESS) if forbidden => Err(ModeRefusal {
+            code: CODE_FULL_ACCESS_FORBIDDEN,
+            message: "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），外部后端只能在沙箱中运行".into(),
+        }),
+        Some(NEW_MODE_FULL_ACCESS) => Ok(true),
+        Some(other) => Err(ModeRefusal { code: RouteError::CODE_INVALID, message: format!("未知的权限模式：{other}") }),
+    }
+}
+
 /// The four Host entries that touch a runtime (plan 5.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostEntry {
@@ -507,6 +570,20 @@ pub fn audit_line(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_conversation_mode_is_sandboxed_by_default_and_forbidden_refuses_full_access() {
+        use super::{decide_new_conversation_mode as decide, CODE_FULL_ACCESS_FORBIDDEN};
+        use crate::port::AgentBackend;
+        assert_eq!(decide(None, AgentBackend::Codex, false), Ok(false));
+        assert_eq!(decide(Some("sandboxed"), AgentBackend::Pi, true), Ok(false));
+        assert_eq!(decide(Some("full_access"), AgentBackend::Deepseek, false), Ok(true));
+        let refused = decide(Some("full_access"), AgentBackend::Deepseek, true).unwrap_err();
+        assert_eq!(refused.code, CODE_FULL_ACCESS_FORBIDDEN, "FORBIDDEN is a refusal, not a silent downgrade");
+        assert!(refused.message.contains("FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN"));
+        assert_eq!(decide(Some("full_access"), AgentBackend::Fox, false).unwrap_err().code, "agent_backend_invalid");
+        assert_eq!(decide(Some("root"), AgentBackend::Pi, false).unwrap_err().code, "agent_backend_invalid");
+    }
+
     use super::*;
     use crate::legacy::{map_legacy, LegacyRecord};
 
