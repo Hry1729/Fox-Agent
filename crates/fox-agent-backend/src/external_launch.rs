@@ -103,6 +103,13 @@ pub struct HostLaunchConfig {
     pub env_passthrough: Vec<String>,
 }
 
+/// [`FULL_ACCESS_FORBIDDEN_ENV`] as the Host reads it (`1` / `true` / `on` /
+/// `yes`). Shared by the launcher and the new-conversation command, so the
+/// UI's disabled option and the backend refusal can never disagree.
+pub fn full_access_forbidden_from_env() -> bool {
+    matches!(env(FULL_ACCESS_FORBIDDEN_ENV).as_deref().map(str::trim), Some("1" | "true" | "on" | "yes"))
+}
+
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
@@ -161,7 +168,7 @@ impl HostLaunchConfig {
             state_root,
             runtime_root,
             full_access: FullAccessSwitch::parse(env(FULL_ACCESS_ENV).as_deref()),
-            full_access_forbidden: matches!(env(FULL_ACCESS_FORBIDDEN_ENV).as_deref().map(str::trim), Some("1" | "true" | "on" | "yes")),
+            full_access_forbidden: full_access_forbidden_from_env(),
             pi_providers: env(PI_PROVIDERS_ENV)
                 .map(|value| value.split(',').map(str::trim).filter(|item| !item.is_empty()).map(str::to_owned).collect())
                 .unwrap_or_default(),
@@ -191,9 +198,16 @@ impl HostLaunchConfig {
 
     /// Effective permission mode of a conversation: sandboxed unless the Host
     /// both requests and grants full access (and policy does not forbid it).
+    /// Grant sources (OR): the engineering switch [`FULL_ACCESS_ENV`] and the
+    /// user's per-conversation choice at creation
+    /// ([`LaunchRequest::full_access_granted`], persisted as
+    /// `conversation:<id>`). [`FULL_ACCESS_FORBIDDEN_ENV`] beats both.
     pub fn permission_mode(&self, request: &LaunchRequest) -> PermissionMode {
-        let policy = self.host_policy(&request.conversation_id, &request.project_root);
-        let requested = if self.full_access == FullAccessSwitch::Off { "sandboxed" } else { "full_access" };
+        let mut policy = self.host_policy(&request.conversation_id, &request.project_root);
+        if request.full_access_granted {
+            policy.full_access_grants.insert(crate::sandbox::FullAccessGrant::Conversation(request.conversation_id.clone()).key());
+        }
+        let requested = if self.full_access == FullAccessSwitch::Off && !request.full_access_granted { "sandboxed" } else { "full_access" };
         let snapshot = SessionSnapshot {
             backend: request.backend,
             project_root: request.project_root.to_string_lossy().into_owned(),
@@ -416,9 +430,16 @@ impl HostLaunchConfig {
 /// gateway (e.g. Magpie on 127.0.0.1), refused before launch.
 pub const LOOPBACK_REQUIRES_FULL_ACCESS: &str = "agent_backend_loopback_requires_full_access";
 
-/// Remedy of [`LOOPBACK_REQUIRES_FULL_ACCESS`]. There is no full-access
-/// switch in the UI yet: the Host enables it with [`FULL_ACCESS_ENV`].
-pub const LOOPBACK_REFUSAL_REMEDY: &str = "需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com";
+/// Remedy of [`LOOPBACK_REQUIRES_FULL_ACCESS`]: full access is chosen when a
+/// conversation is created (it cannot be turned on mid-session).
+pub const LOOPBACK_REFUSAL_REMEDY: &str = "需要完全访问权限：新建会话时选择“完全访问”（会话中不能开启），或改用官方 api.deepseek.com";
+
+/// [`LOOPBACK_REFUSAL_REMEDY`] when [`FULL_ACCESS_FORBIDDEN_ENV`] is set.
+pub const LOOPBACK_REFUSAL_REMEDY_FORBIDDEN: &str = "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），请改用官方 api.deepseek.com";
+
+/// Why the full-access choice is unavailable, for the new-conversation UI
+/// (`None` when it can be chosen).
+pub const FULL_ACCESS_FORBIDDEN_REASON: &str = "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），外部后端只能在沙箱中运行";
 
 impl HostLaunchConfig {
     /// Full access: the private HOME and session temp root a sandboxed launch
@@ -441,6 +462,62 @@ impl HostLaunchConfig {
         };
         let home = PrivateHomes::new(homes_root).home_for(&project_uuid, request.backend)?;
         Ok(FullAccessPrivate { private_home: home.path, tmp_root })
+    }
+
+    /// The private HOME of `backend` in project `project_uuid` (the one both
+    /// modes use). Reads only; nothing is created.
+    pub fn private_home_path(&self, project_uuid: &str, backend: AgentBackend) -> Result<PathBuf, LaunchFailure> {
+        let root = self
+            .sandbox_homes_root()
+            .ok_or_else(|| LaunchFailure::new("sandbox_runtime_not_installed", "Fox 私有 HOME 的根目录不可用（Windows 需先启用一次沙箱）"))?;
+        Ok(PrivateHomes::new(root).home_for(project_uuid, backend)?.path)
+    }
+
+    /// Login probe for a conversation's backend (UX batch ①): which login
+    /// files / key names its private HOME has, in the mode a launch would
+    /// use now. Names only ([`crate::onboarding::probe`]).
+    pub fn credential_probe(&self, request: &LaunchRequest) -> Result<crate::onboarding::CredentialProbe, LaunchFailure> {
+        let project_uuid = request.project_uuid.clone().unwrap_or_default();
+        let home = self.private_home_path(&project_uuid, request.backend)?;
+        let mode = self.permission_mode(request);
+        let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+        Ok(crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env))
+    }
+
+    /// Copy the confirmed login items from the real HOME into the private
+    /// HOME of `backend` in every project of `project_uuids` (UX batch ①).
+    /// Windows: the private root is created / verified before and its DACL
+    /// re-applied after the copy (the same [`prepare_windows_private_root`]
+    /// the launch uses); Unix: files 0600, directories 0700.
+    pub fn import_credentials(
+        &self,
+        backend: AgentBackend,
+        project_uuids: &[String],
+        real: &crate::onboarding::RealHome,
+        selected: &[String],
+    ) -> Result<crate::onboarding::ImportReport, LaunchFailure> {
+        if backend == AgentBackend::Fox || project_uuids.is_empty() {
+            return Err(LaunchFailure::new("agent_backend_import_invalid", "没有可导入的外部后端或项目"));
+        }
+        let prepare_windows = || -> Result<PathBuf, LaunchFailure> {
+            use crate::winacl::RealWindowsAcl;
+            use crate::winruntime::{known_srt_sids, prepare_windows_private_root, WindowsPrivateLayout};
+            let layout = WindowsPrivateLayout::for_current_user(&RealWindowsAcl)?;
+            let known = known_srt_sids(&self.state_root)?;
+            prepare_windows_private_root(&layout, &RealWindowsAcl, &RealWindowsAcl, &known)?;
+            Ok(layout.homes_root())
+        };
+        let homes_root = if self.os == HostOs::Windows { prepare_windows()? } else { self.fox_data.join("sandbox-homes") };
+        let homes = PrivateHomes::new(homes_root);
+        let paths = project_uuids
+            .iter()
+            .map(|uuid| homes.home_for(uuid, backend).map(|home| home.path).map_err(LaunchFailure::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let report = crate::onboarding::import_into(backend, real, selected, &paths).map_err(|error| LaunchFailure::new("agent_backend_import_failed", error))?;
+        if self.os == HostOs::Windows {
+            prepare_windows()?;
+        }
+        Ok(report)
     }
 
     /// Root of the private HOMEs a sandboxed launch on this OS uses (Windows:
@@ -479,7 +556,7 @@ impl HostLaunchConfig {
                 LOOPBACK_REQUIRES_FULL_ACCESS,
                 format!("本机网关在沙箱模式下不可达：DeepSeek 的 base URL 指向本机回环地址 {named}，dsh 对回环地址总是直连、不经沙箱代理"),
             )
-            .remedy(LOOPBACK_REFUSAL_REMEDY)
+            .remedy(if self.full_access_forbidden { LOOPBACK_REFUSAL_REMEDY_FORBIDDEN } else { LOOPBACK_REFUSAL_REMEDY })
             .detail(serde_json::json!({
                 "reason": "dsh_proxy_bypasses_loopback",
                 "mode": mode.as_str(),
@@ -717,6 +794,7 @@ mod tests {
             project_uuid: Some("8f14e45f-ceea-467a-9a36-dedd4bea2543".into()),
             project_root: root.join("proj"),
             session_key: "s1".into(),
+            full_access_granted: false,
         }
     }
 
@@ -736,6 +814,67 @@ mod tests {
         assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "enterprise switch wins");
         assert_eq!(FullAccessSwitch::parse(Some(" off ")), FullAccessSwitch::Off);
         assert_eq!(FullAccessSwitch::parse(None), FullAccessSwitch::Off);
+    }
+
+    /// UX batch ①: the Host glue probes the private HOME a launch would use
+    /// (mode included) and imports into every listed project's private HOME.
+    #[cfg(unix)]
+    #[test]
+    fn credential_probe_and_import_use_the_launch_private_homes() {
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-onboarding-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = config(&root);
+        let mut req = request(AgentBackend::Deepseek, &root);
+        let probe = config.credential_probe(&req).unwrap();
+        assert_eq!(probe.state, crate::onboarding::CredentialState::MissingCredentials);
+        assert_eq!(probe.private_home, root.join("data/sandbox-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek"));
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join(".dsh/profiles/acp")).unwrap();
+        std::fs::write(real.join(".dsh/.env"), "DEEPSEEK_API_KEY=sk-glue-secret-1
+").unwrap();
+        std::fs::write(real.join(".dsh/profiles/acp/cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:3425/v1\n").unwrap();
+        let real = crate::onboarding::RealHome { home: real, codex_home: None };
+        let projects = vec!["8f14e45f-ceea-467a-9a36-dedd4bea2543".to_owned(), "c9f0f895-fb98-4b91-a5c3-2b5f3e3a7a11".to_owned()];
+        let selected = vec!["env:.dsh/.env#DEEPSEEK_API_KEY".to_owned(), "file:.dsh/profiles/acp/cordis.patch.yml".to_owned()];
+        let report = config.import_credentials(AgentBackend::Deepseek, &projects, &real, &selected).unwrap();
+        assert_eq!(report.homes, 2);
+        assert!(!report.audit_event().to_string().contains("sk-glue-secret-1"));
+        // Sandboxed + loopback base URL: refused category; full access: ready.
+        let probe = config.credential_probe(&req).unwrap();
+        assert_eq!(probe.state, crate::onboarding::CredentialState::LoopbackRequiresFullAccess);
+        req.full_access_granted = true;
+        assert_eq!(config.credential_probe(&req).unwrap().state, crate::onboarding::CredentialState::Ready);
+        let mut second = request(AgentBackend::Deepseek, &root);
+        second.project_uuid = Some(projects[1].clone());
+        second.full_access_granted = true;
+        assert_eq!(config.credential_probe(&second).unwrap().state, crate::onboarding::CredentialState::Ready, "applied to every project");
+        assert!(config.import_credentials(AgentBackend::Deepseek, &[], &real, &selected).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// UX batch ②: the user's per-conversation choice (persisted, carried as
+    /// `LaunchRequest::full_access_granted`) grants full access to exactly
+    /// that conversation, OR-ed with the engineering switch; FORBIDDEN beats
+    /// both.
+    #[test]
+    fn the_conversation_grant_from_the_ui_or_the_switch_and_forbidden_wins() {
+        let root = std::env::temp_dir().join("fox-ext-launch-grant");
+        let mut config = config(&root);
+        let mut req = request(AgentBackend::Deepseek, &root);
+        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "sandboxed by default");
+        req.full_access_granted = true;
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess, "chosen at creation");
+        let mut other = request(AgentBackend::Deepseek, &root);
+        other.conversation_id = "c2".into();
+        assert_eq!(config.permission_mode(&other), PermissionMode::Sandboxed, "the grant is per conversation");
+        req.full_access_granted = false;
+        config.full_access = FullAccessSwitch::All;
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess, "engineering switch alone");
+        req.full_access_granted = true;
+        config.full_access_forbidden = true;
+        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "FORBIDDEN beats the UI grant and the switch");
+        config.full_access = FullAccessSwitch::Off;
+        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "FORBIDDEN beats the UI grant alone");
     }
 
     #[test]
@@ -926,8 +1065,15 @@ mod tests {
         let refusal = config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).expect("refused in the sandbox");
         assert_eq!(refusal.code, LOOPBACK_REQUIRES_FULL_ACCESS);
         assert!(refusal.message.contains("本机网关在沙箱模式下不可达") && refusal.message.contains("http://127.0.0.1:3425/anthropic"), "{}", refusal.message);
-        assert_eq!(refusal.remedy.as_deref(), Some("需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com"));
-        assert!(!refusal.remedy.as_deref().unwrap().contains("请切换到"));
+        assert_eq!(refusal.remedy.as_deref(), Some(LOOPBACK_REFUSAL_REMEDY));
+        assert!(refusal.remedy.as_deref().unwrap().contains("新建会话时选择“完全访问”"));
+        assert!(!refusal.remedy.as_deref().unwrap().contains("请切换到") && !refusal.remedy.as_deref().unwrap().contains("FOX_EXTERNAL_FULL_ACCESS"));
+        // Forbidden on this machine: the remedy no longer offers full access.
+        let mut forbidden = config.clone();
+        forbidden.full_access_forbidden = true;
+        let refusal = forbidden.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).expect("refused");
+        assert_eq!(refusal.remedy.as_deref(), Some(LOOPBACK_REFUSAL_REMEDY_FORBIDDEN));
+        assert!(refusal.remedy.as_deref().unwrap().contains("已禁止完全访问") && !refusal.remedy.as_deref().unwrap().contains("新建会话时选择"));
         assert_eq!(refusal.detail["reason"], "dsh_proxy_bypasses_loopback");
         // Full access: not refused.
         assert!(config.loopback_refusal(&request, PermissionMode::FullAccess, homes.clone()).is_none());
