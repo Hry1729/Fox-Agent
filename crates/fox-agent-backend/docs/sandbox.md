@@ -926,15 +926,55 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
 
 - 路径规则（Windows）：`%ProgramData%\Fox\sandbox\<你的用户 SID>\homes\<项目 UUID>\deepseek`，dsh 的配置目录是其下的 `.dsh`（即 `DSH_HOME`）。Codex 是 `...\homes\<项目 UUID>\codex\.codex`，pi 是 `...\homes\<项目 UUID>\pi`（配置在其下 `.pi`）。用户 SID 可用 `whoami /user` 查；项目 UUID 是 Fox 数据库里项目的稳定 UUID（小写 8-4-4-4-12），一个项目一份、一个后端一份，换项目或换后端要重新配置。
 - 路径规则（Linux / macOS）：`<Fox 数据目录>/sandbox-homes/<项目 UUID>/<后端>`。
-- dsh 需要的文件：`.dsh\.env` 里写 `DEEPSEEK_API_KEY=...`；Magpie 的 baseURL 写在 `.dsh\cordis.patch.yml`（或 `.dsh\profiles\acp\cordis.patch.yml`）的 `llm-deepseek` 行，例如：
+- dsh 需要的文件（**979313c 收尾批按 Windows 实测更正**；原示例 `baseURL: http://127.0.0.1:3425/anthropic` 经 Magpie 会 404）：
+  - 两份文件都在私有 HOME 的 `.dsh` 下（即 `DSH_HOME`）：`.dsh\.env` 放密钥，`.dsh\cordis.patch.yml`（或 `.dsh\profiles\acp\cordis.patch.yml`）放 baseURL 和模型。dsh 不接受在 `.env` 里写 `DEEPSEEK_BASE_URL`（只认启动环境），所以 baseURL 必须写在 patch 里。
+  - **baseURL 与 `/v1` 的关系**（对照已安装的 dsh 0.2.1-rc.2 源码 `@deepseek-ai/dsh-llm-deepseek/lib/index.js` 的 `messagesApiRoot()`）：去掉末尾 `/` 后，路径以 `/v1` 结尾就原样用，否则补 `/v1`，请求发到 `<根>/messages`。所以写 `http://127.0.0.1:3425/v1` 请求 `/v1/messages`；写 `http://127.0.0.1:3425/anthropic` 会请求 `/anthropic/v1/messages`，Magpie 0.1.1307 对这个路径返回 404。
+  - **provider 是 `deepseek-official`**，不是 `deepseek`。这是 dsh 的 API key 路由名（`@deepseek-ai/dsh-llm-deepseek-api-key` 的 `PROVIDER`），它的配置行 id 是 `llm-deepseek`（`dsh-base/cordis.patch.yml`：`- id: llm-deepseek`，`name: '@deepseek-ai/dsh-llm-deepseek-api-key'`）。
+  - **model 写全名**，即网关上的完整模型名，例如 Magpie 的 `opendesign/deepseek-v4.1-flash`，不要只写 `deepseek-v4.1-flash`。
+  - 模型写在 `- id: acp` 行（见 `docs/deepseek.md` 4.1）：ACP profile 自带的 `acp` 行是 `provider: deepseek-official, model: deepseek-v4-flash`，优先于 `agent-default-model`，不覆盖就会用官方模型名去请求网关。
+
+  经 Magpie（本机网关，只能在完全访问下用）：
 
   ```yaml
+  # <私有 HOME>\.dsh\cordis.patch.yml
   - id: llm-deepseek
     config:
-      baseURL: http://127.0.0.1:3425/anthropic
+      baseURL: http://127.0.0.1:3425/v1
+  - id: acp
+    config:
+      provider: deepseek-official
+      model: opendesign/deepseek-v4.1-flash
   ```
 
-  dsh 不接受在 `.env` 里写 `DEEPSEEK_BASE_URL`（只认启动环境），所以 baseURL 必须写在 patch 里。
+  ```dotenv
+  # <私有 HOME>\.dsh\.env
+  MAGPIE_GATEWAY_KEY=<Magpie 的 key>
+  DEEPSEEK_API_KEY=magpie
+  ```
+
+  `DEEPSEEK_API_KEY=magpie` 只是占位：`deepseek-official` 路由没有 `DEEPSEEK_API_KEY` 就直接报 `MISSING_CREDENTIAL`（“no API key for provider route "deepseek-official"”），不发请求，所以经 Magpie 时也必须有一个非空值。
+
+  直连官方 api.deepseek.com（沙箱模式和完全访问都可以用）：
+
+  ```yaml
+  # <私有 HOME>\.dsh\cordis.patch.yml（可省略 llm-deepseek 行，dsh 默认就是这个地址）
+  - id: llm-deepseek
+    config:
+      baseURL: https://api.deepseek.com/anthropic
+  - id: acp
+    config:
+      provider: deepseek-official
+      model: deepseek-v4-flash
+  ```
+
+  ```dotenv
+  # <私有 HOME>\.dsh\.env
+  DEEPSEEK_API_KEY=<DeepSeek 平台的 key>
+  ```
+
+  官方示例保留 `/anthropic`：dsh 源码里的默认值就是 `https://api.deepseek.com/anthropic`（`PUBLIC_BASE_URL`），按 `messagesApiRoot()` 请求的是 `https://api.deepseek.com/anthropic/v1/messages`，即 DeepSeek 官方的 Anthropic 兼容入口。`model` 用官方模型名（ACP profile 的默认值是 `deepseek-v4-flash`，此时 `acp` 行可省略）。
+  - 私有 HOME **按“项目 UUID + 后端”各一份**：`homes\<项目 UUID>\deepseek`。换一个项目要在那个项目的私有 HOME 里再放一份 `.env` 和 `cordis.patch.yml`；Codex、pi 的配置互不共用。
+  - **会话要先绑定项目才能发消息**（Windows 实测）：私有 HOME 按项目 UUID 定位，未绑定项目的外部会话发不出消息。先把会话绑定到项目（项目文件夹），再发第一句。
 - `%ProgramData%\Fox\sandbox` 由“启用沙箱”创建。没启用过沙箱的机器，完全访问会以 `sandbox_runtime_not_installed` 拒绝启动（与沙箱模式相同），需先启用一次沙箱。
 
 **Linux 上已核对的数量**（`--lib` 过滤结果）：
@@ -955,7 +995,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - 完全访问 env：`sandbox::tests::full_access_env_points_home_at_the_private_home_without_srt`（`HOME`，Windows 规划下 `USERPROFILE`、`APPDATA`、`LOCALAPPDATA` 等于私有 HOME 下的路径；程序与参数未被 srt 包装；没有 srt 设置文件）、`sandbox::tests::full_access_private_env_is_the_sandbox_env_minus_srt_only_variables`。
    - 拒绝文案：`loopback` 组中的两条 `external_launch` 用例和 `capability_view::tests::deepseek_cancel_is_request_only_and_observability_unverified`。
    - `external_runtime` 用例：诊断尾部含 `request headers {"authorization":"Bearer <redacted>","x-api-key":"<redacted>"}`，没有 `]]` 也没有 `[redacted`，长行与中文行完整，5 个 mock 密钥原文都搜不到。
-2. 完全访问 + Magpie（Host 设 `FOX_EXTERNAL_FULL_ACCESS=1`、`FOX_EXTERNAL_BACKENDS=deepseek`；上面私有 HOME 的 `.dsh\cordis.patch.yml` 里 baseURL 指向 `http://127.0.0.1:3425/anthropic`，key 写在私有 HOME 的 `.dsh\.env`）：
+2. 完全访问 + Magpie（Host 设 `FOX_EXTERNAL_FULL_ACCESS=1`、`FOX_EXTERNAL_BACKENDS=deepseek`；会话已绑定项目；该项目私有 HOME 的 `.dsh\cordis.patch.yml` 按上面“经 Magpie”示例写，baseURL 是 `http://127.0.0.1:3425/v1`（不是 `/anthropic`），`acp` 行 `provider: deepseek-official`、`model: opendesign/deepseek-v4.1-flash`；`.dsh\.env` 里有 `MAGPIE_GATEWAY_KEY` 和占位 `DEEPSEEK_API_KEY=magpie`）：
    - 发一句话，拿到模型回复，`run.completed`；能力 chip 显示“沙箱：无（完全访问）”，详情含“使用 Fox 私有 HOME（与沙箱模式相同的登录与配置）”。
    - dsh 会话日志落在私有 HOME 的 `.dsh\sessions\...` 下；真实 HOME（`%USERPROFILE%\.dsh`）里没有本次新增的会话文件。
    - 进程连的是 `127.0.0.1:3425`，不是 api.deepseek.com（例如用 `Get-NetTCPConnection -OwningProcess <dsh 的 node PID>` 或 Resource Monitor 看远端地址；Magpie 一侧也应看到请求）。
@@ -964,7 +1004,29 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - “查看错误详情”里没有残余括号（没有 `]]`、没有 `[redacted]`），JSON 片段的 `"}` 完整，占位符是 `<redacted>`。
    - 长行自动换行显示，详情块超过约 20rem 高时出现纵向滚动条，不出现横向滚动。
    - 在详情里搜 API key 和 Bearer 值的原文，搜不到。
+   - **注（979313c 收尾批补）**：真实 dsh 遇到连接错误时只经 JSON-RPC 报错（`session/prompt` 返回 `-32603`，`message` 为 “Internal error: turn failed: DeepSeek Messages transport failed”，没有 `data`），**不写 stderr**。所以这一项在真实 dsh 上“查看错误详情”没有尾部、甚至没有详情块是正常的，不算失败。尾部的渲染（括号、`<redacted>`、长行换行与滚动、搜不到密钥）用 mock fixture 的副本（`tests/fixtures/mock-acp-session-agent.mjs` 的 `stderr-fail` / `stderr-crash` 场景）验证，见第 1 项的 `external_runtime` 用例与 `bun test tests/run-failure.test.ts`。详见 13.13。
 4. 沙箱模式（去掉 `FOX_EXTERNAL_FULL_ACCESS`）下同一配置：应立即以 `agent_backend_loopback_requires_full_access` 失败，提示含“需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com”，不再出现“请切换到“完全访问””；能力 chip 的限制说明也是新文案。
 5. 不需要跑全量，也不需要重跑 13.9 – 13.11 的其余条目。
 
 Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用例 `real_external_runtime_dsh_full_access_uses_the_private_home`（`FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_AGENT_RUNTIME_ROOT=<含 backends/dsh 的运行时> -- --include-ignored`），真实 dsh 0.2.1-rc.2、完全访问、dsh 配置只写在私有 HOME 并指向本机假网关：网关收到请求，dsh 的 `sessions`、`profiles` 写在私有 HOME 的 `.dsh` 下，真实 HOME 的 `.dsh`、`.config`、`.cache`、`.local/*` 没有新增文件。假网关不讲 Anthropic 协议，所以该轮以 `agent_backend_prompt_failed`（SSE event type mismatch）结束，这是预期的。
+
+### 13.13 979313c 收尾批（2026-10-21）
+
+只改文档，没有代码改动。**不新增 Windows 复测项**，本节内容随下一大批一起验证。
+
+- **13.12 的配置示例按 Windows 实测更正**：经 Magpie 时 baseURL 写 `http://127.0.0.1:3425/v1`（不是 `/anthropic`）；官方 api.deepseek.com 单独一份示例，保留 `https://api.deepseek.com/anthropic`；补了 provider 是 `deepseek-official`、model 写全名（如 `opendesign/deepseek-v4.1-flash`）、`.env` 里的占位 `DEEPSEEK_API_KEY=magpie`、私有 HOME 按“项目 UUID + 后端”各一份、会话要先绑定项目。依据是已安装 dsh 0.2.1-rc.2 的源码：
+  - `@deepseek-ai/dsh-llm-deepseek/lib/index.js`：`messagesApiRoot(baseURL)` 去掉末尾 `/` 后，路径以 `/v1` 结尾就原样用，否则补 `/v1`；请求发到 `${messagesApiRoot(baseURL)}/messages`。默认值 `PUBLIC_BASE_URL = "https://api.deepseek.com/anthropic"`。
+  - `@deepseek-ai/dsh-llm-deepseek-api-key/lib/index.js`：`PROVIDER = "deepseek-official"`，`apiKeyEnv` 默认 `DEEPSEEK_API_KEY`，取不到就抛 `MISSING_CREDENTIAL`。
+  - `@deepseek-ai/dsh-base/cordis.patch.yml`：`- id: llm-deepseek` 行加载的就是 `dsh-llm-deepseek-api-key`；`@deepseek-ai/dsh-acp-app/cordis.patch.yml` 的 `acp` 行默认 `provider: deepseek-official`、`model: deepseek-v4-flash`。
+- **13.12 第 3 项补注**：真实 dsh 的连接错误不写 stderr，尾部为空是正常的；尾部渲染用 fixture 副本验证。
+- **JSON-RPC `error.data` 调查（Linux 实测，结论：没有可用的 data，不改代码）**
+  - 做法：Linux（aarch64）上直接起真实 dsh 0.2.1-rc.2（`dsh --profile acp --patch <runtime>/dsh-patches/workspace-write-noweb.yml`），不套 srt，环境变量按完全访问的私有 HOME 设（`HOME`、`DSH_HOME`、`XDG_*`、`TMPDIR`）；私有 HOME 的 `.dsh/cordis.patch.yml` 把 `llm-deepseek` 的 baseURL 指向一个没人监听的本机端口（`http://127.0.0.1:<空端口>/v1`），`.env` 里放假 key。用一个原始 ACP 探针逐行记录 stdin/stdout 的 JSON-RPC。
+  - 结果：冷启动约 145 s 后 `initialize`、`session/new` 正常；`session/prompt` 约 15 s 后失败（dsh 自己按 `TRANSPORT` 重试 5 次，退避 0.5–7.4 s），stderr **0 字节**。错误对象原文（不含秘密，无需脱敏）：
+
+    ```json
+    {"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"Internal error: turn failed: DeepSeek Messages transport failed"}}
+    ```
+
+    没有 `data` 字段，`message` 里也没有目标 URL、`ECONNREFUSED` 或 cause。dsh 自己的会话日志（私有 HOME 的 `.dsh/sessions/.../session.v4.jsonl.zstd`）里每次尝试也只有 `{"failure":{"message":"DeepSeek Messages transport failed","code":"TRANSPORT"}}`，同样没有底层原因。
+  - 因此“stderr 为空时用 `error.data` 补充诊断”对这个场景没有内容可补，本批不加代码。Fox 现在把 ACP 错误按 `agent_client_protocol::Error` 的 `Display` 写进 `run.failed.message`（`message`，有 `data` 时追加 `: <data 的 pretty JSON>`），所以 dsh 这条错误在界面上就是 “prompt failed: Internal error: turn failed: DeepSeek Messages transport failed”。
+  - 附带发现（未改，留作待办）：`Display` 会把 `data` 原样拼进 `run.failed.message`，这条路径**不经脱敏**。dsh 目前不带 `data`，其他后端（如 Codex、pi）若在 `data` 里放请求头或 key，会原样进入 message。以后要在这里接 `redact_diagnostic_tail`，或把 `data` 拆出来作为 `source: "rpc_error_data"` 的诊断。
