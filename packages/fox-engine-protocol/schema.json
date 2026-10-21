@@ -1784,6 +1784,7 @@
           "additionalProperties": false,
           "properties": {
             "approvalWaitMs": {
+              "description": "Nominal approval window, kept in frozen records for compatibility (and\nstill validated). It is NOT a deadline any more: a human approval waits\nuntil the user answers, cancels the turn, closes the conversation or\nexits Fox, or a grant is revoked. Hosts use it only as the wait's anchor.",
               "format": "int64",
               "type": "integer"
             },
