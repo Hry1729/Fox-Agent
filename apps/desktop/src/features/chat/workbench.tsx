@@ -1,5 +1,7 @@
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { AgentBackendBar } from './components/AgentBackendBar'
+import { AgentBackendCredentialCard } from './components/AgentBackendCredentialCard'
+import type { AgentBackendPermissionStatus, CredentialProbe } from '@/features/conversations/model/agent-backend-onboarding'
 import { AGENT_BACKEND_REFUSED, agentBackendInputLockedReason, conversationAgentBackend, refreshesAgentBackendCapabilities, type AgentBackendCapabilities } from '@/features/conversations/model/agent-backend'
 import { type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { expertErrorMessage, expertInteractionLocked, latestExpertToolAvailability } from './components/expert-binding-ui'
@@ -1463,6 +1465,52 @@ export function Workbench() {
       .catch(() => { if (!cancelled) setAgentBackendCapabilities(null) })
     return () => { cancelled = true }
   }, [desktopConversation.enabled, shownExternalBackend, lockedAgentBackend, openConversationId, agentBackendSessionTick])
+  // UX batch ①②: permission mode / lock / FORBIDDEN, and the login probe of
+  // the open external conversation (refreshed with the capability chips and
+  // after an import or a revocation).
+  const draftExternalPermissionMode = desktopConversation.draftExternalPermissionMode
+  const setDraftExternalPermissionMode = desktopConversation.setDraftExternalPermissionMode
+  const [agentBackendPermission, setAgentBackendPermission] = useState<AgentBackendPermissionStatus | null>(null)
+  const [agentBackendCredentials, setAgentBackendCredentials] = useState<CredentialProbe | null>(null)
+  const [agentBackendOnboardingTick, setAgentBackendOnboardingTick] = useState(0)
+  useEffect(() => {
+    if (!desktopConversation.enabled || shownExternalBackend === 'fox') {
+      setAgentBackendPermission(null)
+      setAgentBackendCredentials(null)
+      return
+    }
+    let cancelled = false
+    desktopClient.agentBackendPermissionStatus(capabilityConversationId)
+      .then((status) => { if (!cancelled) setAgentBackendPermission(status) })
+      .catch(() => { if (!cancelled) setAgentBackendPermission(null) })
+    if (capabilityConversationId) {
+      desktopClient.agentBackendCredentials(capabilityConversationId)
+        .then((probe) => { if (!cancelled) setAgentBackendCredentials(probe) })
+        .catch(() => { if (!cancelled) setAgentBackendCredentials(null) })
+    } else {
+      setAgentBackendCredentials(null)
+    }
+    return () => { cancelled = true }
+  }, [desktopConversation.enabled, shownExternalBackend, capabilityConversationId, agentBackendSessionTick, agentBackendOnboardingTick])
+  const handleRevokeFullAccess = useCallback(() => {
+    if (!capabilityConversationId) return
+    desktopClient.agentBackendRevokeFullAccess(capabilityConversationId)
+      .catch(() => {})
+      .finally(() => { setAgentBackendOnboardingTick((tick) => tick + 1); setAgentBackendSessionTick((tick) => tick + 1) })
+  }, [capabilityConversationId])
+  const agentBackendCredentialCard = useMemo(() => capabilityConversationId && agentBackendCredentials ? (
+    <AgentBackendCredentialCard
+      probe={agentBackendCredentials}
+      permission={agentBackendPermission}
+      onOpenFolder={() => desktopClient.agentBackendOpenPrivateHome(capabilityConversationId)}
+      onLoadCandidates={() => desktopClient.agentBackendImportCandidates(capabilityConversationId)}
+      onImport={async (selected, allProjects) => {
+        const report = await desktopClient.agentBackendImportCredentials(capabilityConversationId, selected, allProjects)
+        setAgentBackendOnboardingTick((tick) => tick + 1)
+        return report
+      }}
+    />
+  ) : null, [capabilityConversationId, agentBackendCredentials, agentBackendPermission])
   const agentBackendBar = useMemo(() => desktopConversation.enabled ? (
     <AgentBackendBar
       status={agentBackendStatus}
@@ -1471,8 +1519,13 @@ export function Workbench() {
       onDraftBackendChange={setDraftAgentBackend}
       refusal={visibleAgentBackendRefusal}
       capabilities={agentBackendCapabilities}
+      permission={agentBackendPermission}
+      draftPermissionMode={draftExternalPermissionMode}
+      onDraftPermissionModeChange={setDraftExternalPermissionMode}
+      onRevokeFullAccess={handleRevokeFullAccess}
+      credentialCard={agentBackendCredentialCard}
     />
-  ) : null, [desktopConversation.enabled, agentBackendStatus, lockedAgentBackend, draftAgentBackend, setDraftAgentBackend, visibleAgentBackendRefusal, agentBackendCapabilities])
+  ) : null, [desktopConversation.enabled, agentBackendStatus, lockedAgentBackend, draftAgentBackend, setDraftAgentBackend, visibleAgentBackendRefusal, agentBackendCapabilities, agentBackendPermission, draftExternalPermissionMode, setDraftExternalPermissionMode, handleRevokeFullAccess, agentBackendCredentialCard])
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
     <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
