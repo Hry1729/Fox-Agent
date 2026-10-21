@@ -206,7 +206,7 @@ function toFoxThreadMessage(args: {
   // messages never change keys, so the converter keeps reusing their objects.
   const version = runVersion(events, message.runId)
   const artifactVersion = JSON.stringify(message.runId ? artifactsByRun.get(message.runId) ?? [] : [])
-  const key = `${message.id}:${message.updatedAt}:${message.status}:${version}:${isActiveRun ? 1 : 0}:${failure ? `${failure.code}/${failure.stderrTail?.length ?? 0}` : ''}:${cancelled ? 1 : 0}:${message.content}:${artifactVersion}`
+  const key = `${message.id}:${message.updatedAt}:${message.status}:${version}:${isActiveRun ? 1 : 0}:${failure ? `${failure.code}/${failure.stderrTail?.length ?? 0}/${failure.rpcErrorData?.length ?? 0}` : ''}:${cancelled ? 1 : 0}:${message.content}:${artifactVersion}`
   const cached = cache.get(message.id)
   if (cached && cached.key === key) return cached.message
   const attachments = (attachmentsByMessage.get(message.id) ?? []).map(attachmentToFoxAttachment)
