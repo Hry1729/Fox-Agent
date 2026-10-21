@@ -37,6 +37,18 @@ use serde_json::Value;
 /// developer preview with breaking changes between release candidates, so the
 /// adapter runs only against this exact version.
 pub const PINNED_VERSION: &str = "0.2.1-rc.2";
+
+/// Whether the pinned dsh can send loopback requests through the srt proxy.
+/// `false` for 0.2.1-rc.2: `@deepseek-ai/dsh-http-proxy`'s `proxyForUrl`
+/// returns `undefined` (direct) for every loopback host, whatever `NO_PROXY`
+/// says, and srt 0.0.80 cannot allow a direct loopback port. So a sandboxed
+/// session whose base URL is loopback is refused before launch
+/// (`agent_backend_loopback_requires_full_access`). Set to `true` only with a
+/// dsh that has an upstream "loopback through the proxy" switch, enabled for
+/// the session: the Host then allows exactly the derived gateway port again
+/// (`crate::loopback`) instead of refusing. Draft upstream issue:
+/// docs/sandbox.md 13.11.
+pub const LOOPBACK_VIA_PROXY_SUPPORTED: bool = false;
 /// npm package the pin refers to.
 pub const NPM_PACKAGE: &str = "@deepseek-ai/dsh";
 /// `agentInfo.name` dsh reports in `initialize` [M1].
