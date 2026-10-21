@@ -21,6 +21,15 @@
 //! * two different loopback endpoints are ambiguous: nothing is added, with a
 //!   diagnostic.
 //!
+//! Status (after the f2bf567 Windows re-test): DeepSeek does NOT use the
+//! port allowance any more. dsh always dials loopback directly (below), so a
+//! sandboxed DeepSeek session whose base URL is loopback is refused before
+//! launch (`agent_backend_loopback_requires_full_access`,
+//! [`crate::external_launch::HostLaunchConfig::loopback_refusal`]); the
+//! derivation here is kept for that check, for the declaration's diagnostics,
+//! and for the day dsh gains a "loopback through the proxy" switch
+//! ([`crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED`]).
+//!
 //! What this does NOT do: make a client use the proxy. A client that always
 //! connects to loopback directly (dsh's `@deepseek-ai/dsh-http-proxy`
 //! `proxyForUrl` returns `undefined` for every loopback host) never reaches
@@ -188,6 +197,29 @@ pub fn derive_loopback_gateway(candidates: &[BaseUrlCandidate]) -> LoopbackDeriv
     out
 }
 
+/// Whether a base URL value names this machine's loopback, including values
+/// whose port cannot be determined (`http://127.0.0.1:${PORT}`): what the
+/// sandboxed-launch refusal for a loopback gateway looks at
+/// ([`crate::external_launch::HostLaunchConfig::loopback_refusal`]).
+pub fn names_loopback(value: &str) -> bool {
+    match classify_base_url(value) {
+        BaseUrlKind::Loopback { .. } => true,
+        BaseUrlKind::Remote => false,
+        BaseUrlKind::Undetermined(_) => {
+            let lower = value.trim().to_ascii_lowercase();
+            let Some((_, rest)) = lower.split_once("://") else { return false };
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+            let host = if let Some(bracketed) = authority.strip_prefix('[') {
+                bracketed.split(']').next().unwrap_or_default()
+            } else {
+                authority.split(':').next().unwrap_or_default()
+            };
+            !host.is_empty() && is_loopback_host(host)
+        }
+    }
+}
+
 /// Strip one level of matching quotes and a trailing ` #` comment.
 fn scalar(value: &str) -> String {
     let value = value.trim();
@@ -268,6 +300,16 @@ mod tests {
         let unknown = derive_loopback_gateway(&[candidate("http://127.0.0.1:3425"), candidate("!!js process.env.GW")]);
         assert!(unknown.gateway.is_none(), "fail closed when any base URL is undetermined");
         assert!(unknown.diagnostics.iter().any(|line| line.contains("无法确定端口")), "{:?}", unknown.diagnostics);
+    }
+
+    #[test]
+    fn names_loopback_includes_undetermined_ports() {
+        assert!(names_loopback("http://127.0.0.1:3425/anthropic"));
+        assert!(names_loopback("http://localhost:${PORT}/v1"));
+        assert!(names_loopback("http://[::1]:x"));
+        assert!(!names_loopback("https://api.deepseek.com/anthropic"));
+        assert!(!names_loopback("!!js process.env.GW"));
+        assert!(!names_loopback("http://${HOST}:3425"));
     }
 
     #[test]
