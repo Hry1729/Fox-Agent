@@ -467,6 +467,62 @@ async fn closing_a_conversation_ends_its_pending_permission() {
     assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending);
 }
 
+/// A JSON-RPC error with `data` (979313c closeout): `run.failed.message`
+/// keeps only `code` + `message`; the `data` is redacted once into a
+/// `source: "rpc_error_data"` diagnostic (≤ 4 KiB), next to the stderr tail
+/// when there is one; no secret from `data` appears anywhere in the event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_json_rpc_error_with_data_is_split_out_and_redacted() {
+    if !node_available() {
+        return;
+    }
+    let secrets = ["mock-data-bearer-0001", "mock-data-header-key", "sk-mockdata-abcdef0123456789", "mock-data-apikey-value"];
+    let check_common = |terminal: &Value| -> Value {
+        assert_eq!(terminal["type"], "run.failed", "{terminal}");
+        assert_eq!(terminal["code"], "agent_backend_prompt_failed", "{terminal}");
+        let message = terminal["message"].as_str().expect("message");
+        assert_eq!(message, "prompt failed: Authentication required (JSON-RPC -32000)", "{terminal}");
+        assert!(!message.contains("upstream rejected") && !message.contains("api.example.test"), "data leaked into message: {message}");
+        let whole = terminal.to_string();
+        for secret in secrets {
+            assert!(!whole.contains(secret), "{secret} leaked: {whole}");
+        }
+        let diagnostics = terminal["diagnostics"].as_array().expect("diagnostics array").clone();
+        let data = diagnostics.iter().find(|item| item["source"] == "rpc_error_data").expect("rpc_error_data diagnostic").clone();
+        assert_eq!(data["kind"], "rpc_error_data");
+        assert_eq!(data["redacted"], true);
+        assert_eq!(data["maxBytes"], 4096);
+        let text = data["text"].as_str().expect("text");
+        assert!(text.len() <= 4096);
+        assert!(text.contains("upstream rejected the credential"), "{text}");
+        assert!(text.contains("https://api.example.test/v1/messages"), "{text}");
+        assert!(text.contains("Bearer <redacted>"), "{text}");
+        assert!(text.contains("OPENAI_API_KEY=<redacted>"), "{text}");
+        Value::Array(diagnostics)
+    };
+
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    // data only, nothing on stderr: the single legacy `diagnostic` is the data.
+    runtime.start_turn(turn("c-data", "r-data-1", "data-fail", AgentBackend::Codex, None)).unwrap();
+    let terminal = sink.terminal("r-data-1").await;
+    let diagnostics = check_common(&terminal);
+    assert_eq!(diagnostics.as_array().unwrap().len(), 1, "{terminal}");
+    assert_eq!(terminal["diagnostic"]["source"], "rpc_error_data", "{terminal}");
+
+    // stderr tail AND data: both kept, stderr first (legacy `diagnostic`).
+    runtime.start_turn(turn("c-data", "r-data-2", "data-stderr-fail", AgentBackend::Codex, None)).unwrap();
+    let terminal = sink.terminal("r-data-2").await;
+    let diagnostics = check_common(&terminal);
+    let diagnostics = diagnostics.as_array().unwrap();
+    assert_eq!(diagnostics.len(), 2, "{terminal}");
+    assert_eq!(diagnostics[0]["kind"], "stderr_tail");
+    assert_eq!(diagnostics[0]["source"], "prompt_failed");
+    assert!(diagnostics[0]["stderrTail"].as_str().unwrap().contains("upstream said 401"));
+    assert_eq!(diagnostics[1]["source"], "rpc_error_data");
+    assert_eq!(terminal["diagnostic"]["kind"], "stderr_tail", "{terminal}");
+    runtime.shutdown().await;
+}
+
 /// A failed prompt (JSON-RPC error, process alive) and a backend that exits
 /// mid-turn both persist the redacted stderr tail in `run.failed.diagnostic`.
 #[tokio::test(flavor = "multi_thread")]
