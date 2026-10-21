@@ -796,12 +796,14 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - Fox 会话的发送、审批、取消与改动前一致。
    - 13.5 中仍需要的：旧库启动生成迁移前备份（`<data>/backups/`，最多 5 份；备份失败不迁移）；真实 ACP 测试按 13.5 第 2 项的入口顺序跑并贴出 stderr 的入口行；dsh 真实 prompt 无模型时预期 FAILED（13.5 第 3 项）。
 4. **一次全量** `cargo test -p fox-desktop`：与 `c058c2f` 的 64 项既有失败基线逐项对比。
-   - 基线名单里的改名项：`runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal`（旧名）在 `097a933` 之后改名为 `...::f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal`（新名），是同一项基线失败（`requests=0`，环境问题：真实 Node 提案未发出请求），比对时按同一项计，不算新增。
+   - 基线名单里的改名项：`runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal`（旧名）在 `097a933` 之后改名为 `...::f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal`（新名），是同一项基线失败（`requests=0`，环境问题：真实 Node 提案未发出请求），比对时按同一项计，不算新增。**做 diff 时**：基线名单里的旧名（基线 64 项中的第 27 项）与本次结果里的新名互相抵消，既不算“已恢复”，也不算“新增失败”。另：f2bf567 的 Windows 复测中，新名单跑 5/5 通过，全量时可能偶发 `requests=0` 失败，属负载敏感（见 13.10）。
    - Graph 那 37 项（规范 JSON 回退）应全部恢复，从失败名单中消失。
    - 单独列出：`runtime_host::kernel_coordinator::tests::kernel_gateway_catalogue_size_is_pinned`（目录数 72）；第 4 项两个测试（`kernel_work_tool_missing_field_is_refused_before_execution_as_data`、`kernel_goal_propose_in_conversation_is_answered_by_the_gate`），写明通过与否。
    - 其余任何新增失败都算回退。
 
 ### 13.10 a5e2c9d 复测后续批：最小 Windows 复测清单（2026-10-21）
+
+> **13.11 更新**：下面写的 DeepSeek 回环端口放行已撤回。dsh 对回环地址直连、不经 srt 代理，放行端口没有作用。现在的做法是：沙箱模式下 DeepSeek 的 base URL 若指向回环地址，启动前直接拒绝（`agent_backend_loopback_requires_full_access`）。第 4 项冒烟以 13.11 为准。
 
 在本批最终 HEAD 上跑。**不需要跑全量** `cargo test -p fox-desktop`：a5e2c9d 的全量已复测（64 项，与基线持平，Graph 37 项已恢复），本批只改下列测试与 DeepSeek 回环端口推导。
 
@@ -810,7 +812,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
 - 审批不再过期后，两条测试的预期跟着改（只改测试）：
   - `real_eval_driver_keeps_unanswered_approval_pending_until_cancel`：终态为 `cancelled`（不是 `approval_expired`）；监视器已排过一次取消，测试末尾的重复取消命中幂等分支返回 `Ok(false)`，视为成功（终态 Run 的 `Err` 也接受，只有 `Ok(true)` 即对已取消 Run 新入队才算错）。
   - `f1_cropped_read_expired_confirmation_cannot_write` 改名为 `f1_cropped_read_unanswered_confirmation_stays_pending_and_cancel_cannot_write`：时钟推进 86,000,000 ms 后 Run 仍 `waiting_approval`、审批仍 `pending`、专门替换授权仍 `pending`、不落盘；取消后 Run 与审批为 `cancelled`，重复取消 `Ok(false)`，迟到的“允许一次”入队失败，授权不是 `approved`/`consumed`，目标文件不变。
-  - `f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal` 不改：它是基线项改名（13.9 第 4 项），`requests=0` 是环境问题。
+  - `f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal` 不改：单跑通过（Windows 5/5）；全量时可能偶发 `requests=0` 失败，属负载敏感。它是基线项改名（13.9 第 4 项；diff 时与旧名 `f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal`，即基线第 27/64 项，互相抵消）。
 - `tests/bridge_pipe_windows.rs` 的 owner-control 断言：读到 `\n` 为止，断言以 `OK ` 开头、后面是合法 JSON、含 `cwd`（等于测试设的目录）与 `env`（含测试设的 `FOX_PIPE_PROBE`）。全仓库 grep 同类断言（Rust 与 Node）：`src/bridge.rs` 单元测试里的 `b"OK\n"` 是直接调用 `server_handshake` 时由测试自己传入的 answer，不是过期断言；`windows_pipe_is_first_instance_single_client` 与 Unix 版断言的 `OK {"env":{}}` 与当前实现一致；`bridge.test.mjs` 的 `'OK\n'` 测的是 bridge 对旧式纯 `OK` 的兼容（`parseAnswer('OK')`），保留；`scripts/windows/diag-srt-stdio.ps1` 作为假 Host 回 `OK\n`，bridge 仍接受，保留。`src/bridge.rs` 模块注释里的握手描述已更正为 `OK {"cwd":..,"env":{..}}\n`。
 - DeepSeek 回环网关端口（`src/loopback.rs`、`backends::deepseek::base_url_candidates`、`HostLaunchConfig::sandbox_policy`）：
   - 复用第六轮脚本模型的做法：把 `127.0.0.1:<端口>`（IP 字面量）写进 srt `network.allowedDomains`，srt 代理对允许列表里的 IP 字面量不做回环拒绝。只加这一个端口。
@@ -824,7 +826,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
 1. 三条定向测试（桌面 crate；全路径由模块声明推断，Linux 上桌面测试二进制列不出来，**未经 `cargo test -- --list` 核对**）：
    - `cargo test -p fox-desktop runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_driver_keeps_unanswered_approval_pending_until_cancel -- --exact`：通过。
    - `cargo test -p fox-desktop runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_cropped_read_unanswered_confirmation_stays_pending_and_cancel_cannot_write -- --exact`：通过；旧名 `...::f1_cropped_read_expired_confirmation_cannot_write` 不再存在。
-   - `cargo test -p fox-desktop runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal -- --exact`：预期仍失败（`requests=0`，基线项，环境问题），只确认失败原因没变。
+   - `cargo test -p fox-desktop runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal -- --exact`：单跑通过（Windows 5/5）；全量时可能偶发 `requests=0` 失败，属负载敏感。
    - 若 `--exact` 匹配不到，先 `cargo test -p fox-desktop -- --list | findstr /i "real_eval_driver_keeps f1_cropped_read_unanswered f3_fixed_clock_card"` 取实际全名。
 2. bridge 管道（Windows 真机，按 9.1 的方式由 `diag-srt-stdio.ps1 -Variants pipe-other-user` 驱动）：
    - `set FOX_TEST_PIPE_SERVE=1& cargo test -p fox-agent-backend --features acp --test bridge_pipe_windows -- --ignored --nocapture`，测试名 `bridge_pipe_serve_for_other_user_probe`：另一账户打不开（Win32 5），`FOX_PIPE_CONTROL=owner-connected`，owner 握手答复为 `OK {"cwd":…,"env":{"FOX_PIPE_PROBE":"owner-control"}}`。
@@ -843,3 +845,55 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - 再做一次审批：dsh 在 Host 补丁下不发审批（13.9），因此这一步在 DeepSeek 会话里应看不到可答的审批卡；如需验证审批链路，在同一构建的 Fox 会话里做一次“允许一次”，确认正常。
 5. 不需要跑全量 `cargo test -p fox-desktop`，也不需要重跑 13.9 的其余条目。
 
+### 13.11 f2bf567 复测后续批：最小 Windows 复测清单（2026-10-21）
+
+在本批最终 HEAD 上跑。**不需要跑全量** `cargo test -p fox-desktop`：f2bf567 在 Windows 上已全部复测通过。本批只改了下面几处。
+
+本批内容：
+
+- **prompt 失败时持久化 stderr 尾部**（`src/acp.rs`、`src/external.rs`）
+  - 以下几种失败，`run.failed` 都会带上 `diagnostic`，格式为 `{"kind":"stderr_tail","source":…,"redacted":true,"maxBytes":4096,"stderrTail":"…"}`：
+    - prompt 失败（`agent_backend_prompt_failed`，`source=prompt_failed`）
+    - 对话中途后端退出（`agent_backend_exited`，`source=backend_exited`）
+    - 会话打开失败（`agent_backend_session_failed`，或 initialize 未先到达；`source=session_failed`）
+    - 启动失败：原来已有的 `InitializeFailure`，`source=initialize`
+  - 尾部取进程 stderr 环形缓冲（8 KiB）的最后 4 KiB，按行切。写入前再脱敏一次（`acp::redact_diagnostic_tail`）。遮掉的内容：
+    - `sk-…` 令牌
+    - 名字里含 key / token / secret / password / passwd / credential / authorization / cookie（或正好是 `auth`）的赋值的值。名字保留，例如 `DEEPSEEK_API_KEY=[redacted]`、`"api_key":"[redacted]"`
+    - `Authorization: Bearer <x>`、`x-api-key: <x>`、`token: <x>` 这类头部写法的值
+    - `Bearer` / `Basic` 后面的词
+    - 32 位以上的不透明串
+    - URL 里的用户名和密码
+    - 路径（含用户名的路径）保留。
+  - 前端：`RunFailure` 新增 `stderrTail` / `stderrTailSource`，只取自终态事件。即使持久化的 run 行覆盖了 code 和 message，尾部也保留。“查看错误详情”展开后显示 `code: message`，再加“后端 stderr 尾部（已脱敏，最多 4 KiB；…）”。
+- **DeepSeek 回环网关只允许完全访问**（`src/external_launch.rs`、`src/loopback.rs`、`src/backends/deepseek.rs`、`src/capability_view.rs`）
+  - 拒绝条件：沙箱模式下启动 DeepSeek 会话前，读私有 HOME 里 dsh 的 `cordis.patch.yml`（两份，同 13.10）。只要有一个 `baseURL` 指向回环地址，就拒绝启动，不起任何进程。这里的回环地址包括端口无法确定的写法，例如 `http://localhost:${PORT}`。
+  - 错误码 `agent_backend_loopback_requires_full_access`。提示为“本机网关在沙箱模式下不可达：…dsh 对回环地址总是直连、不经沙箱代理（请切换到“完全访问”，或改用官方 api.deepseek.com）”。
+  - 不受影响的情况：完全访问模式；非回环的 base URL；其他后端。
+  - 能力视图：DeepSeek 在沙箱模式下，沙箱详情会写出这个限制。
+  - f2bf567 新增的“只放行这一个回环端口”逻辑不再生效，放行列表里不再有 `127.0.0.1:<端口>`：
+    - 原因：dsh 的 `proxyForUrl` 对回环地址写死直连，根本不经 srt 代理，放行没有作用。
+    - pi 等其他场景也用不上：pi 的本机网关走的是第六轮的 `FOX_EXTERNAL_EXTRA_DOMAINS` 加清空 `NO_PROXY`，与这套按 base URL 推导的逻辑无关；而按 base URL 推导本来就只给 DeepSeek 用。
+    - 函数保留：`derive_loopback_gateway`、`classify_base_url`，以及新增的 `names_loopback`。用途是做上面的拒绝判断、写声明诊断，以及等 dsh 上游加了开关以后重新启用（`deepseek::LOOPBACK_VIA_PROXY_SUPPORTED`，目前为 `false`）。
+  - 真实用例 `real_srt_external_runtime_dsh_loopback_gateway`：
+    - 现在断言沙箱模式下明确拒绝：`run.failed`、新错误码、10 s 内结束、没有 `agent_backend.session`、网关 0 个请求。Linux 实测约 0.1 s 拒绝。
+    - 等 `LOOPBACK_VIA_PROXY_SUPPORTED = true` 以后，同一个用例就是“上游加开关后的验收用例”：放行这一个端口，并且请求能到达网关。
+  - 给 dsh 上游的 issue 草稿（未提交），要点：`proxyForUrl` 对回环返回 `undefined`，`withLoopback` 强制把回环并入 `NO_PROXY`。请求增加一个默认关闭的“回环也走代理”选项（环境变量或配置），用于沙箱里唯一出口是宿主机代理的场景。
+
+最小复测清单（Windows，本批 HEAD）：
+
+1. stderr 尾部的新测试（需要 PATH 里有 `node`，mock 后端是 Node 脚本）：
+   - `cargo test -p fox-agent-backend --features acp --test external_runtime a_failed_prompt_or_exit_persists_the_redacted_stderr_tail`：通过。prompt 失败和中途退出两种情况，`run.failed.diagnostic.stderrTail` 都含最后一行 `Connection error (last line)` 和 `DEEPSEEK_API_KEY=[redacted]`，整个事件里不出现 mock 写入的任何密钥原文。
+   - `cargo test -p fox-agent-backend --features acp --lib -- redaction`：恰好 3 项，全部通过。
+   - `cargo test -p fox-agent-backend --features acp --lib -- loopback`：恰好 9 项，全部通过。包括 `external_launch::tests::host_launcher_refuses_a_sandboxed_deepseek_loopback_gateway_before_starting` 和 `external_launch::tests::deepseek_loopback_gateway_is_refused_in_the_sandbox_and_never_allowed`。
+   - 前端：`bun test tests/run-failure.test.ts`（在 `apps/desktop` 下）：11 项全部通过，其中新增 3 项在 `run failure stderr diagnostic` 组。
+2. DeepSeek 经 Magpie，沙箱模式（`FOX_EXTERNAL_BACKENDS=deepseek`；私有 HOME 的 `.dsh/cordis.patch.yml` 里 `baseURL` 指向 Magpie 的 `127.0.0.1:<端口>`）：
+   - 发一句话，应**立即**（几秒内，不等模型）失败，错误码为 `agent_backend_loopback_requires_full_access`，提示含“本机网关在沙箱模式下不可达”“请切换到“完全访问”，或改用官方 api.deepseek.com”。
+   - 不应出现 dsh 进程，也不应出现 `Connection error`。
+   - 能力 chip 的沙箱详情写有“限制：DeepSeek 的 base URL 若指向本机回环网关…”。
+3. 同一会话切到“完全访问”，再跑一轮真实对话：能拿到模型回复，`run.completed`。
+4. 制造一次 prompt 失败，例如完全访问模式下把 Magpie 停掉，或者把 `baseURL` 改成一个没有监听的回环端口，再发一句话：
+   - 本轮以 `agent_backend_prompt_failed`（或 `agent_backend_exited`）结束。
+   - 点“查看错误详情”，能看到“后端 stderr 尾部（已脱敏，最多 4 KiB；本轮请求失败）”和 dsh 的 stderr。
+   - 其中不应出现 API key、`Bearer` 值等原文。有密钥原文漏出来的话，请贴出脱敏前的样式（自己先遮掉）。
+5. 不需要跑全量 `cargo test -p fox-desktop`，也不需要重跑 13.9 / 13.10 的其余条目。
