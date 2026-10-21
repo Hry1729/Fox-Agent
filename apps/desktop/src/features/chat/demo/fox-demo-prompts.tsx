@@ -140,9 +140,9 @@ function errorPresentation(error?: string | null, details?: DesktopErrorDetails 
   }
 }
 
-export function ErrorPrompt({ onRetry, error, errorDetails }: { onRetry?: () => void; error?: string | null; errorDetails?: DesktopErrorDetails | null }) {
+export function ErrorPrompt({ onRetry, error, errorDetails, diagnostic }: { onRetry?: () => void; error?: string | null; errorDetails?: DesktopErrorDetails | null; /** Full "查看错误详情" text (e.g. with the backend stderr tail); replaces the bare message there. */ diagnostic?: string }) {
   const presentation = errorPresentation(error, errorDetails)
-  return <ErrorState title={presentation.title} detail={presentation.description} diagnostic={presentation.detail} onRetry={presentation.retryable === false ? undefined : onRetry} retryLabel={presentation.retryLabel} />
+  return <ErrorState title={presentation.title} detail={presentation.description} diagnostic={diagnostic || presentation.detail} onRetry={presentation.retryable === false ? undefined : onRetry} retryLabel={presentation.retryLabel} />
 }
 
 const clarificationOptions = [
