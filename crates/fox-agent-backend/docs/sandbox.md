@@ -796,6 +796,50 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - Fox 会话的发送、审批、取消与改动前一致。
    - 13.5 中仍需要的：旧库启动生成迁移前备份（`<data>/backups/`，最多 5 份；备份失败不迁移）；真实 ACP 测试按 13.5 第 2 项的入口顺序跑并贴出 stderr 的入口行；dsh 真实 prompt 无模型时预期 FAILED（13.5 第 3 项）。
 4. **一次全量** `cargo test -p fox-desktop`：与 `c058c2f` 的 64 项既有失败基线逐项对比。
+   - 基线名单里的改名项：`runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal`（旧名）在 `097a933` 之后改名为 `...::f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal`（新名），是同一项基线失败（`requests=0`，环境问题：真实 Node 提案未发出请求），比对时按同一项计，不算新增。
    - Graph 那 37 项（规范 JSON 回退）应全部恢复，从失败名单中消失。
    - 单独列出：`runtime_host::kernel_coordinator::tests::kernel_gateway_catalogue_size_is_pinned`（目录数 72）；第 4 项两个测试（`kernel_work_tool_missing_field_is_refused_before_execution_as_data`、`kernel_goal_propose_in_conversation_is_answered_by_the_gate`），写明通过与否。
    - 其余任何新增失败都算回退。
+
+### 13.10 a5e2c9d 复测后续批：最小 Windows 复测清单（2026-10-21）
+
+在本批最终 HEAD 上跑。**不需要跑全量** `cargo test -p fox-desktop`：a5e2c9d 的全量已复测（64 项，与基线持平，Graph 37 项已恢复），本批只改下列测试与 DeepSeek 回环端口推导。
+
+本批内容：
+
+- 审批不再过期后，两条测试的预期跟着改（只改测试）：
+  - `real_eval_driver_keeps_unanswered_approval_pending_until_cancel`：终态为 `cancelled`（不是 `approval_expired`）；监视器已排过一次取消，测试末尾的重复取消命中幂等分支返回 `Ok(false)`，视为成功（终态 Run 的 `Err` 也接受，只有 `Ok(true)` 即对已取消 Run 新入队才算错）。
+  - `f1_cropped_read_expired_confirmation_cannot_write` 改名为 `f1_cropped_read_unanswered_confirmation_stays_pending_and_cancel_cannot_write`：时钟推进 86,000,000 ms 后 Run 仍 `waiting_approval`、审批仍 `pending`、专门替换授权仍 `pending`、不落盘；取消后 Run 与审批为 `cancelled`，重复取消 `Ok(false)`，迟到的“允许一次”入队失败，授权不是 `approved`/`consumed`，目标文件不变。
+  - `f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal` 不改：它是基线项改名（13.9 第 4 项），`requests=0` 是环境问题。
+- `tests/bridge_pipe_windows.rs` 的 owner-control 断言：读到 `\n` 为止，断言以 `OK ` 开头、后面是合法 JSON、含 `cwd`（等于测试设的目录）与 `env`（含测试设的 `FOX_PIPE_PROBE`）。全仓库 grep 同类断言（Rust 与 Node）：`src/bridge.rs` 单元测试里的 `b"OK\n"` 是直接调用 `server_handshake` 时由测试自己传入的 answer，不是过期断言；`windows_pipe_is_first_instance_single_client` 与 Unix 版断言的 `OK {"env":{}}` 与当前实现一致；`bridge.test.mjs` 的 `'OK\n'` 测的是 bridge 对旧式纯 `OK` 的兼容（`parseAnswer('OK')`），保留；`scripts/windows/diag-srt-stdio.ps1` 作为假 Host 回 `OK\n`，bridge 仍接受，保留。`src/bridge.rs` 模块注释里的握手描述已更正为 `OK {"cwd":..,"env":{..}}\n`。
+- DeepSeek 回环网关端口（`src/loopback.rs`、`backends::deepseek::base_url_candidates`、`HostLaunchConfig::sandbox_policy`）：
+  - 复用第六轮脚本模型的做法：把 `127.0.0.1:<端口>`（IP 字面量）写进 srt `network.allowedDomains`，srt 代理对允许列表里的 IP 字面量不做回环拒绝。只加这一个端口。
+  - 端口来源：私有 HOME 里 dsh 自己的配置 `<私有 HOME>/.dsh/cordis.patch.yml` 与 `<私有 HOME>/.dsh/profiles/acp/cordis.patch.yml` 中每个 `baseURL:`（`llm-deepseek` 行，或 `magpie` 这类自定义 provider）。**不读 `.env`**：Linux 实测 dsh 0.2.1-rc.2 在项目 `.env` 或 `$DSH_HOME/.env` 设了 `DEEPSEEK_BASE_URL` 时直接拒绝启动（“only the launching environment may set it”），而沙箱会话的启动环境里不会有这个变量（不在子进程环境白名单里；Windows 上 Host 变量过不了 srt）。
+  - 规则：只看主机是回环的 base URL（`127.0.0.0/8`、`localhost`、`*.localhost`、`::1`）；端口取显式端口，否则取协议默认（http 80、https 443）；非回环 base URL 不加；值不是字面 URL（`!!js`、块标量、`${VAR}`/`$VAR`、非 http(s)、端口非法、带 userinfo）视为端口无法确定，**不放行任何回环端口**并给诊断；出现两个不同的回环端点视为不确定，同样不放行并给诊断。
+  - 声明：`SandboxPolicy` / `SandboxDeclaration` 新增 `loopback_gateway`（`host`、`port`、`entry`、`source`）与 `loopback_diagnostics`；能力视图沙箱维度的详情写“放行本机回环端口：127.0.0.1:3425（仅此一个，来自 …）”，或“未放行本机回环端口：<诊断>”。
+  - **已知不足（Linux 实测）**：只放行端口**不能**让 dsh 的请求到达网关。dsh 的 `@deepseek-ai/dsh-http-proxy` 对回环主机写死直连（`proxyForUrl` 中 `isLoopbackHost` → `undefined`，与 `NO_PROXY` 无关），根本不经过 srt 代理，允许列表管不到它。Linux：bwrap 网络命名空间里的 `127.0.0.1` 是沙箱自己的回环，实测 `real_srt_external_runtime_dsh_loopback_gateway` 端口已推导并写入 `allowedDomains`（`["api.deepseek.com","127.0.0.1:<端口>"]`），但网关收到 0 个请求，本轮以 `DeepSeek Messages transport failed` 失败。Windows：WFP 只放行 srt 代理端口段（默认 60080–60089）的回环连接，srt 0.0.80 没有按端口放行直连回环的配置，结论相同（推断，待 Windows 复测确认）。不给 dsh 打补丁的前提下，要真正打通需另做决定（见本批报告的风险一节）。
+
+最小复测清单（Windows，本批 HEAD）：
+
+1. 三条定向测试（桌面 crate；全路径由模块声明推断，Linux 上桌面测试二进制列不出来，**未经 `cargo test -- --list` 核对**）：
+   - `cargo test -p fox-desktop runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_driver_keeps_unanswered_approval_pending_until_cancel -- --exact`：通过。
+   - `cargo test -p fox-desktop runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_cropped_read_unanswered_confirmation_stays_pending_and_cancel_cannot_write -- --exact`：通过；旧名 `...::f1_cropped_read_expired_confirmation_cannot_write` 不再存在。
+   - `cargo test -p fox-desktop runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_fixed_clock_card_past_nominal_window_is_still_accepted_after_real_node_proposal -- --exact`：预期仍失败（`requests=0`，基线项，环境问题），只确认失败原因没变。
+   - 若 `--exact` 匹配不到，先 `cargo test -p fox-desktop -- --list | findstr /i "real_eval_driver_keeps f1_cropped_read_unanswered f3_fixed_clock_card"` 取实际全名。
+2. bridge 管道（Windows 真机，按 9.1 的方式由 `diag-srt-stdio.ps1 -Variants pipe-other-user` 驱动）：
+   - `set FOX_TEST_PIPE_SERVE=1& cargo test -p fox-agent-backend --features acp --test bridge_pipe_windows -- --ignored --nocapture`，测试名 `bridge_pipe_serve_for_other_user_probe`：另一账户打不开（Win32 5），`FOX_PIPE_CONTROL=owner-connected`，owner 握手答复为 `OK {"cwd":…,"env":{"FOX_PIPE_PROBE":"owner-control"}}`。
+   - 另跑 `cargo test -p fox-agent-backend --features acp --lib bridge::`（含 `bridge::tests::windows_pipe_is_first_instance_single_client`）。
+3. 第 3 项新单测（Linux 已过，Windows 上再跑一次）：`cargo test -p fox-agent-backend --features acp --lib -- loopback`，应恰好执行这 7 项且全部通过：
+   - `loopback::tests::loopback_base_urls_give_their_port`
+   - `loopback::tests::remote_and_undetermined_base_urls`
+   - `loopback::tests::exactly_one_loopback_port_is_allowed`
+   - `loopback::tests::ambiguous_or_undetermined_allows_nothing_with_a_diagnostic`
+   - `loopback::tests::yaml_base_urls_are_read`
+   - `backends::deepseek::tests::loopback_gateway_port_comes_from_the_private_home_dsh_config`
+   - `external_launch::tests::deepseek_loopback_gateway_port_is_allowed_from_its_base_url_only`
+4. 一轮 DeepSeek 真实 UI 冒烟（`FOX_EXTERNAL_BACKENDS=deepseek`，沙箱模式，会话绑定项目文件夹；私有 HOME 的 `.dsh/cordis.patch.yml` 有 `- id: acp` 行与 Magpie 的 `baseURL`）：
+   - 能力 chip 的沙箱详情写出“放行本机回环端口：127.0.0.1:3425（仅此一个，来自 …cordis.patch.yml baseURL）”；若写的是“未放行本机回环端口：…”，贴出诊断。
+   - 发一句话能拿到模型回复。**按 Linux 实测，经 Magpie（回环）预计仍失败**（dsh 直连回环被 WFP 拦截），请贴出本轮错误与 dsh stderr；若成功，请注明，这会推翻上面的推断。
+   - 再做一次审批：dsh 在 Host 补丁下不发审批（13.9），因此这一步在 DeepSeek 会话里应看不到可答的审批卡；如需验证审批链路，在同一构建的 Fox 会话里做一次“允许一次”，确认正常。
+5. 不需要跑全量 `cargo test -p fox-desktop`，也不需要重跑 13.9 的其余条目。
+
