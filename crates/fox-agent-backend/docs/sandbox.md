@@ -109,6 +109,7 @@ srt 的读权限默认全放行（deny-then-allow，`allowRead` 优先于 `denyR
 - `SandboxPolicy` 携带 `private_home_root`；`validate` 拒绝：私有 HOME 不在该根下；任一授权目录等于、包含或位于私有 HOME 根之下（即不可能把其他项目 / 其他后端的私有 HOME 授权进来）；任一授权目录与本会话临时目录重叠。沙箱内只 bind 本项目本后端那一份 HOME，同根下的其他 HOME 不可见。
 - 临时目录（`TMPDIR` 等）按会话分开：`<tmp_root>/<session_id>`（默认 `tmp_root = state_root/sandbox-tmp`，可用 `SrtLauncher::with_tmp_root` 改），会话结束随 `SandboxSession` 删除。
 - **Windows 布局不同**（第五轮，见 7.5）：私有 HOME 与会话临时目录在 `%ProgramData%\Fox\sandbox\<用户 SID>\{homes\<项目 UUID>\<后端>, tmp\<会话>}`（`WindowsPrivateLayout::homes_root()` / `tmp_root()`），Fox state 仍在 `%LOCALAPPDATA%\Fox\state`。Linux / macOS 保持 `<fox_data>/sandbox-homes/...` 不变。
+- **完全访问也用这份私有 HOME**（5f2 后续批起）：完全访问只取消隔离（不包 srt、不写 settings、不承诺目录边界），`HOME`、`XDG_*`、`TMPDIR/TMP/TEMP`、Windows 的 `USERPROFILE/APPDATA/LOCALAPPDATA`、`CODEX_HOME` / `DSH_HOME` 与沙箱模式取值完全相同（`sandbox::private_home_env`，单测核对与 `sandbox_env` 一致），只是不设 srt 相关的 `CLAUDE_CODE_TMPDIR`、`NODE_USE_ENV_PROXY`、`NODE_OPTIONS`，`PATH` 照环境白名单继承。私有 HOME 与会话临时目录不存在就创建（Windows 走与沙箱相同的 `prepare_windows_private_root`）。见 13.12。
 - 认证：尊重各后端原生登录方式，不做统一认证，不复制用户真实 HOME，也不复制其中的原生凭据（6.5）。沙箱模式下用户在该项目该后端的私有 HOME 内按后端原生方式登录（如 codex `codex login` 写入私有 `CODEX_HOME`），或使用环境白名单内的凭据变量。私有 HOME 位于沙箱可读写范围内，后端进程（及其执行的命令）能读到其中保存的登录凭据；**不得宣称“Agent 接触不到密钥”，也不得宣称“一次登录到处用”**——换项目或换后端需要再次登录。
 
 ## 4 网络白名单
@@ -845,7 +846,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - 再做一次审批：dsh 在 Host 补丁下不发审批（13.9），因此这一步在 DeepSeek 会话里应看不到可答的审批卡；如需验证审批链路，在同一构建的 Fox 会话里做一次“允许一次”，确认正常。
 5. 不需要跑全量 `cargo test -p fox-desktop`，也不需要重跑 13.9 的其余条目。
 
-### 13.11 f2bf567 复测后续批：最小 Windows 复测清单（2026-10-21）
+### 13.11 f2bf567 复测后续批：最小 Windows 复测清单（2026-10-21；**已被 13.12 取代**）
 
 在本批最终 HEAD 上跑。**不需要跑全量** `cargo test -p fox-desktop`：f2bf567 在 Windows 上已全部复测通过。本批只改了下面几处。
 
@@ -892,8 +893,78 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - 不应出现 dsh 进程，也不应出现 `Connection error`。
    - 能力 chip 的沙箱详情写有“限制：DeepSeek 的 base URL 若指向本机回环网关…”。
 3. 同一会话切到“完全访问”，再跑一轮真实对话：能拿到模型回复，`run.completed`。
+   - **注（5f2f2d8 复测后补）**：这一项在 5f2f2d8 上实际走的是工程师**真实 HOME** 里的 dsh 配置和官方 api.deepseek.com（进程连的是 3.173.21.63:443，会话日志也写进了真实 HOME），并没有经过 Magpie，也没有用私有 HOME。完全访问的 HOME 已在 5f2 后续批改为私有 HOME，本项**已由 13.12 第 2 项取代**。
 4. 制造一次 prompt 失败，例如完全访问模式下把 Magpie 停掉，或者把 `baseURL` 改成一个没有监听的回环端口，再发一句话：
    - 本轮以 `agent_backend_prompt_failed`（或 `agent_backend_exited`）结束。
    - 点“查看错误详情”，能看到“后端 stderr 尾部（已脱敏，最多 4 KiB；本轮请求失败）”和 dsh 的 stderr。
    - 其中不应出现 API key、`Bearer` 值等原文。有密钥原文漏出来的话，请贴出脱敏前的样式（自己先遮掉）。
 5. 不需要跑全量 `cargo test -p fox-desktop`，也不需要重跑 13.9 / 13.10 的其余条目。
+
+### 13.12 5f2f2d8 复测后续批：最小 Windows 复测清单（2026-10-21；取代 13.11）
+
+在本批最终 HEAD 上跑。**不跑全量**：13.11 的四项已在 5f2f2d8 上通过，本批只改了下面几处。
+
+本批内容：
+
+- **完全访问也使用 Fox 私有 HOME**（`src/sandbox.rs` 的 `private_home_env` / `prepare_full_access`，`src/external_launch.rs` 的 `full_access_private`，`src/capability_view.rs`）
+  - 问题：5f2f2d8 的完全访问原样启动后端，不设 HOME。dsh 读的是用户真实 HOME 的配置，直连了官方 api.deepseek.com，会话日志也写进真实 HOME；而回环拒绝检查读的是私有 HOME，两边对不上。
+  - 现在：完全访问只取消隔离（不包 srt），环境变量与沙箱模式一样指向本项目本后端的私有 HOME：`HOME`、`XDG_CONFIG_HOME/CACHE_HOME/DATA_HOME/STATE_HOME`、`TMPDIR/TMP/TEMP`（本会话临时目录），Windows 另有 `USERPROFILE`、`APPDATA`、`LOCALAPPDATA`；Codex 另有 `CODEX_HOME=<私有 HOME>\.codex`，DeepSeek 另有 `DSH_HOME=<私有 HOME>\.dsh`；pi 没有专用变量，它的配置在 `HOME` 下，同样跟着走。三个外部后端在沙箱模式下本来都改 HOME，没有例外。
+  - 不设的：srt 和它的代理才需要的 `CLAUDE_CODE_TMPDIR`、`NODE_USE_ENV_PROXY`、`NODE_OPTIONS`；`PATH` 按环境白名单继承（与 5f2f2d8 的完全访问相同）。
+  - 私有 HOME 与会话临时目录不存在就创建；会话结束时删除会话临时目录，私有 HOME 保留。Windows 上与沙箱模式一样走 `prepare_windows_private_root`（创建并校验 `%ProgramData%\Fox\sandbox\<SID>` 的 DACL）。
+  - 能力 chip：完全访问的沙箱详情写明“完全访问模式：不套沙箱，不承诺目录边界；使用 Fox 私有 HOME（与沙箱模式相同的登录与配置）”。
+- **回环拒绝文案**：remedy 改为“需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com”；能力 chip 里的 DeepSeek 限制说明同步改。
+- **脱敏只做一次、幂等**（`src/acp.rs`、`src/external.rs`）
+  - 问题：同一段 stderr 在采集、取尾部、写诊断三处各脱敏一次，出现 `DEEPSEEK_API_KEY=[redacted]]]`，`{"authorization":"Bearer [redacted]` 丢了收尾的 `"}`。
+  - 现在：采集和取尾部只按行切、截取；只在最终出口脱敏一次：`run.failed.diagnostic`（`external::stderr_diagnostic`）、启动失败报告（`InitializeFailure::attach_tails`，其诊断不再二次脱敏）、调试用的 `AcpConnection::stderr_tail()`。
+  - 占位符改为 `<redacted>`（不含 `[` `]`、引号、逗号、大括号），`redact(redact(x)) == redact(x)`。
+  - `Bearer` / 头部写法后面的凭据只遮到第一个 JSON 边界（`"` `'` `,` `}` `]` `)` `;`），后面的结构保留并继续按规则处理，例如 `{"authorization":"Bearer <redacted>","x-api-key":"<redacted>"}`。
+- **长行显示**：mock 的 `stderr-fail` / `stderr-crash` 场景新增一条约 1960 字节、不含空格的长行和一条中文行。前端“查看错误详情”的 `<pre>` 改为 `white-space: pre-wrap; overflow-wrap: anywhere`，最大高度 20rem，超出纵向滚动（内联样式加 `aui-error-diagnostic` 类，样式表未加载时也生效）。时间线、thread 错误卡片、助手消息三处都经同一个 `ErrorState` 渲染，一处改动三处生效。
+
+**完全访问怎么开**：目前只能由 Host 环境变量 `FOX_EXTERNAL_FULL_ACCESS` 开启（`1` / `all` 表示所有会话，或 `conversation:<会话 id>` 只开指定会话），**界面上没有开关**。
+
+**真实 HOME 里的 dsh 登录此后在 Fox 里不再生效**：完全访问与沙箱模式都只读私有 HOME。需要在私有 HOME 里配置：
+
+- 路径规则（Windows）：`%ProgramData%\Fox\sandbox\<你的用户 SID>\homes\<项目 UUID>\deepseek`，dsh 的配置目录是其下的 `.dsh`（即 `DSH_HOME`）。Codex 是 `...\homes\<项目 UUID>\codex\.codex`，pi 是 `...\homes\<项目 UUID>\pi`（配置在其下 `.pi`）。用户 SID 可用 `whoami /user` 查；项目 UUID 是 Fox 数据库里项目的稳定 UUID（小写 8-4-4-4-12），一个项目一份、一个后端一份，换项目或换后端要重新配置。
+- 路径规则（Linux / macOS）：`<Fox 数据目录>/sandbox-homes/<项目 UUID>/<后端>`。
+- dsh 需要的文件：`.dsh\.env` 里写 `DEEPSEEK_API_KEY=...`；Magpie 的 baseURL 写在 `.dsh\cordis.patch.yml`（或 `.dsh\profiles\acp\cordis.patch.yml`）的 `llm-deepseek` 行，例如：
+
+  ```yaml
+  - id: llm-deepseek
+    config:
+      baseURL: http://127.0.0.1:3425/anthropic
+  ```
+
+  dsh 不接受在 `.env` 里写 `DEEPSEEK_BASE_URL`（只认启动环境），所以 baseURL 必须写在 patch 里。
+- `%ProgramData%\Fox\sandbox` 由“启用沙箱”创建。没启用过沙箱的机器，完全访问会以 `sandbox_runtime_not_installed` 拒绝启动（与沙箱模式相同），需先启用一次沙箱。
+
+**Linux 上已核对的数量**（`--lib` 过滤结果）：
+
+| 命令 | Linux | Windows 预期 |
+|---|---|---|
+| `cargo test -p fox-agent-backend --features acp --lib -- redaction` | 4 | 4 |
+| `cargo test -p fox-agent-backend --features acp --lib -- full_access` | 6 | 5（`external_launch::tests::host_launcher_full_access_runs_unwrapped_with_the_private_home` 只在 Unix 编译） |
+| `cargo test -p fox-agent-backend --features acp --lib -- loopback` | 9 | 9 |
+| `cargo test -p fox-agent-backend --features acp --lib -- capability_view` | 4 | 4 |
+| `cargo test -p fox-agent-backend --features acp --test external_runtime a_failed_prompt_or_exit_persists_the_redacted_stderr_tail` | 1 | 1（需要 PATH 里有 `node`） |
+| `bun test tests/run-failure.test.ts`（在 `apps/desktop` 下） | 14 | 14 |
+
+最小复测清单（Windows，本批 HEAD）：
+
+1. 定向测试：跑上表 6 条命令，数量与“Windows 预期”一致且全部通过。重点：
+   - 脱敏幂等：`acp::tests::redaction_is_idempotent_and_keeps_json_structure`（同一输入连续脱敏三次与一次相同；JSON 的 `{` `}` `"` 数量不变且仍能解析）。
+   - 完全访问 env：`sandbox::tests::full_access_env_points_home_at_the_private_home_without_srt`（`HOME`，Windows 规划下 `USERPROFILE`、`APPDATA`、`LOCALAPPDATA` 等于私有 HOME 下的路径；程序与参数未被 srt 包装；没有 srt 设置文件）、`sandbox::tests::full_access_private_env_is_the_sandbox_env_minus_srt_only_variables`。
+   - 拒绝文案：`loopback` 组中的两条 `external_launch` 用例和 `capability_view::tests::deepseek_cancel_is_request_only_and_observability_unverified`。
+   - `external_runtime` 用例：诊断尾部含 `request headers {"authorization":"Bearer <redacted>","x-api-key":"<redacted>"}`，没有 `]]` 也没有 `[redacted`，长行与中文行完整，5 个 mock 密钥原文都搜不到。
+2. 完全访问 + Magpie（Host 设 `FOX_EXTERNAL_FULL_ACCESS=1`、`FOX_EXTERNAL_BACKENDS=deepseek`；上面私有 HOME 的 `.dsh\cordis.patch.yml` 里 baseURL 指向 `http://127.0.0.1:3425/anthropic`，key 写在私有 HOME 的 `.dsh\.env`）：
+   - 发一句话，拿到模型回复，`run.completed`；能力 chip 显示“沙箱：无（完全访问）”，详情含“使用 Fox 私有 HOME（与沙箱模式相同的登录与配置）”。
+   - dsh 会话日志落在私有 HOME 的 `.dsh\sessions\...` 下；真实 HOME（`%USERPROFILE%\.dsh`）里没有本次新增的会话文件。
+   - 进程连的是 `127.0.0.1:3425`，不是 api.deepseek.com（例如用 `Get-NetTCPConnection -OwningProcess <dsh 的 node PID>` 或 Resource Monitor 看远端地址；Magpie 一侧也应看到请求）。
+3. 仍在完全访问下，停掉 Magpie，再发一句话，制造一次 prompt 失败：
+   - 本轮以 `agent_backend_prompt_failed`（或 `agent_backend_exited`）结束。
+   - “查看错误详情”里没有残余括号（没有 `]]`、没有 `[redacted]`），JSON 片段的 `"}` 完整，占位符是 `<redacted>`。
+   - 长行自动换行显示，详情块超过约 20rem 高时出现纵向滚动条，不出现横向滚动。
+   - 在详情里搜 API key 和 Bearer 值的原文，搜不到。
+4. 沙箱模式（去掉 `FOX_EXTERNAL_FULL_ACCESS`）下同一配置：应立即以 `agent_backend_loopback_requires_full_access` 失败，提示含“需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com”，不再出现“请切换到“完全访问””；能力 chip 的限制说明也是新文案。
+5. 不需要跑全量，也不需要重跑 13.9 – 13.11 的其余条目。
+
+Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用例 `real_external_runtime_dsh_full_access_uses_the_private_home`（`FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_AGENT_RUNTIME_ROOT=<含 backends/dsh 的运行时> -- --include-ignored`），真实 dsh 0.2.1-rc.2、完全访问、dsh 配置只写在私有 HOME 并指向本机假网关：网关收到请求，dsh 的 `sessions`、`profiles` 写在私有 HOME 的 `.dsh` 下，真实 HOME 的 `.dsh`、`.config`、`.cache`、`.local/*` 没有新增文件。假网关不讲 Anthropic 协议，所以该轮以 `agent_backend_prompt_failed`（SSE event type mismatch）结束，这是预期的。
