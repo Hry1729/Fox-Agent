@@ -1639,7 +1639,10 @@ mod external_real {
             std::fs::write(&patch, deepseek::policy_patch(&host_policy).patch_yaml).unwrap();
         }
         // The user's own dsh configuration in the private HOME: a fake key and
-        // the loopback base URL (what the Windows engineer has for Magpie).
+        // a loopback base URL. The fake gateway answers any path, so the
+        // `/anthropic` suffix here is not Magpie's form: a real Magpie needs
+        // `http://127.0.0.1:3425/v1` (dsh's messagesApiRoot() appends `/v1`
+        // only when the path does not already end in it; sandbox_md 13.12).
         let private_home = PrivateHomes::new(fox_data.join("sandbox-homes")).home_for(PROJECT_UUID, AgentBackend::Deepseek).unwrap().path;
         std::fs::create_dir_all(private_home.join(".dsh")).unwrap();
         // dsh takes DEEPSEEK_API_KEY from `$DSH_HOME/.env` but refuses
