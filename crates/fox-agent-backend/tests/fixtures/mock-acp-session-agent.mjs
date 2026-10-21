@@ -9,6 +9,9 @@
 //   hang        -> text, then never answers (ignores session/cancel)
 //   crash       -> text, then exits with code 3
 //   maxtokens   -> text, stop max_tokens
+//   stderr-fail -> writes secret-bearing lines to stderr, then answers the
+//                  prompt with a JSON-RPC error (process stays alive)
+//   stderr-crash -> writes secret-bearing lines to stderr, then exits 4
 // session/load replays one user and one agent chunk ("replayed-old") before
 // answering, as the ACP spec describes. A session id containing "longreplay"
 // replays a long history (text, thoughts, tool calls) and sends more old
@@ -83,6 +86,17 @@ rl.on('line', line => {
     } else if (prompt === 'crash') {
       text(sessionId, 'about to crash')
       setTimeout(() => process.exit(3), 50)
+    } else if (prompt === 'stderr-fail' || prompt === 'stderr-crash') {
+      process.stderr.write('mock: connecting to http://127.0.0.1:3425/v1 with DEEPSEEK_API_KEY=sk-mock-0123456789abcdef\n')
+      process.stderr.write('mock: request headers {"authorization":"Bearer mock-bearer-value","x-api-key":"mock-header-key"}\n')
+      process.stderr.write('mock: Authorization: Bearer mock-plain-bearer token: mock-token-value\n')
+      process.stderr.write('mock: Error: Connection error (last line)\n')
+      if (prompt === 'stderr-crash') {
+        setTimeout(() => process.exit(4), 150)
+      } else {
+        prompts.delete(sessionId)
+        setTimeout(() => send({ id: msg.id, error: { code: -32603, message: 'Internal error: DeepSeek Messages transport failed' } }), 150)
+      }
     } else if (prompt === 'maxtokens') {
       text(sessionId, 'partial')
       finish(sessionId, 'max_tokens')
