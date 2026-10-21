@@ -485,8 +485,15 @@ async fn a_failed_prompt_or_exit_persists_the_redacted_stderr_tail() {
         let tail = diagnostic["stderrTail"].as_str().expect("stderrTail");
         assert!(tail.len() <= 4096, "{}", tail.len());
         assert!(tail.contains("Connection error (last line)"), "{tail}");
-        assert!(tail.contains("DEEPSEEK_API_KEY=[redacted]"), "{tail}");
-        assert!(tail.contains("[redacted]"), "{tail}");
+        assert!(tail.contains("DEEPSEEK_API_KEY=<redacted>\n"), "{tail}");
+        // Redacted once: no leftover brackets, JSON braces and quotes intact.
+        assert!(tail.contains(r#"request headers {"authorization":"Bearer <redacted>","x-api-key":"<redacted>"}"#), "{tail}");
+        assert!(tail.contains("Authorization: Bearer <redacted> token: <redacted>"), "{tail}");
+        assert!(!tail.contains("]]") && !tail.contains("[redacted"), "{tail}");
+        // Long and CJK lines arrive whole.
+        let long = tail.lines().find(|line| line.starts_with("mock: long /segment-0000")).expect("long line");
+        assert!(long.len() > 1900 && long.ends_with("/segment-0149 end-of-long-line"), "{}", long.len());
+        assert!(tail.contains("mock: 错误：无法连接本机网关（127.0.0.1:3425），请检查 Magpie 是否在运行；路径 C:\\Users\\张三\\.dsh"), "{tail}");
         let whole = terminal.to_string();
         for secret in secrets {
             assert!(!whole.contains(secret), "{secret} leaked: {whole}");
