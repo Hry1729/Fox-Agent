@@ -347,25 +347,178 @@ impl std::fmt::Display for InitializeFailure {
 
 impl std::error::Error for InitializeFailure {}
 
-/// Mask secret-shaped tokens in one diagnostic line: `sk-...`, `KEY=` /
-/// `TOKEN=` / `SECRET=` / `PASSWORD=` assignments, long opaque strings (the
-/// bridge token included), and the user-info part of URLs
-/// (`http://user:pass@host` -> `http://[redacted]@host`, the srt proxy
+/// Mask secret-shaped tokens in one diagnostic line. Masked: `sk-...`
+/// tokens (anywhere in a word); the value of a sensitive assignment
+/// (`OPENAI_API_KEY=...`, `token: ...`, `"api_key":"..."`, `password=...`;
+/// names containing key / token / secret / password / passwd / credential /
+/// authorization / cookie, or exactly `auth`), the name kept; the word(s)
+/// after a sensitive header name that ends the word (`Authorization: Bearer
+/// <x>`, `x-api-key: <x>`) and after `Bearer` / `Basic`;
+/// long opaque strings (the bridge token included); and the user-info part of
+/// URLs (`http://user:pass@host` -> `http://[redacted]@host`, the srt proxy
 /// credentials). Paths, user names in paths included, are kept.
-fn redact_line(line: &str) -> String {
-    line.split_whitespace()
-        .map(|word| {
-            let upper = word.to_ascii_uppercase();
-            let secretish = word.starts_with("sk-")
-                || ["KEY=", "TOKEN=", "SECRET=", "PASSWORD=", "PROXY-AUTHORIZATION"].iter().any(|marker| upper.contains(marker))
-                || (word.len() >= 32 && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
-            if secretish {
-                return "[redacted]".to_owned();
+pub(crate) fn redact_line(line: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    // How many following words to mask (header form / auth scheme).
+    let mut mask_next = 0usize;
+    for word in line.split_whitespace() {
+        if mask_next > 0 {
+            mask_next -= 1;
+            let bare = word.trim_matches(|c: char| c == '"' || c == '\'' || c == ',');
+            if is_auth_scheme(bare) {
+                // `Authorization: Bearer x`: keep the scheme, mask what follows.
+                out.push(word.to_owned());
+                mask_next = 1;
+            } else {
+                out.push(REDACTED.to_owned());
             }
-            redact_url_userinfo(word)
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            continue;
+        }
+        let bare = word.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '{' || c == '(');
+        if is_auth_scheme(bare) {
+            out.push(word.to_owned());
+            mask_next = 1;
+            continue;
+        }
+        if word.len() >= 32 && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            out.push(REDACTED.to_owned());
+            continue;
+        }
+        let (masked, dangling) = redact_assignments(word);
+        if dangling {
+            mask_next = 1;
+        }
+        out.push(redact_sk_tokens(&redact_url_userinfo(&masked)));
+    }
+    out.join(" ")
+}
+
+const REDACTED: &str = "[redacted]";
+
+fn is_auth_scheme(word: &str) -> bool {
+    ["bearer", "basic"].iter().any(|scheme| word.eq_ignore_ascii_case(scheme))
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    let lower = name.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    lower == "auth"
+        || ["key", "token", "secret", "password", "passwd", "credential", "authorization", "cookie", "proxy-authorization"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+}
+
+/// Mask the value of every `name=value` / `name: value` / `"name":"value"`
+/// in `word` whose name is sensitive. Returns the masked word and whether it
+/// ended with a sensitive name and an empty value (header form: the value is
+/// the next word).
+fn redact_assignments(word: &str) -> (String, bool) {
+    let bytes = word.as_bytes();
+    let mut out = String::with_capacity(word.len());
+    let mut copied = 0usize;
+    let mut i = 0usize;
+    let mut dangling = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'=' || c == b':' {
+            // `://` is a URL scheme, never an assignment.
+            if c == b':' && word[i..].starts_with("://") {
+                i += 3;
+                continue;
+            }
+            // The name: identifier characters right before the separator,
+            // skipping one closing quote.
+            let mut name_end = i;
+            if name_end > 0 && (bytes[name_end - 1] == b'"' || bytes[name_end - 1] == b'\'') {
+                name_end -= 1;
+            }
+            let mut name_start = name_end;
+            while name_start > 0 {
+                let b = bytes[name_start - 1];
+                if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' {
+                    name_start -= 1;
+                } else {
+                    break;
+                }
+            }
+            let name = &word[name_start..name_end];
+            if is_sensitive_name(name) {
+                // The value: after the separator (and an opening quote), up
+                // to a closing quote or a structural delimiter.
+                let mut value_start = i + 1;
+                while value_start < bytes.len() && (bytes[value_start] == b'"' || bytes[value_start] == b'\'') {
+                    value_start += 1;
+                }
+                let mut value_end = value_start;
+                while value_end < bytes.len() && !matches!(bytes[value_end], b'"' | b'\'' | b',' | b'}' | b')' | b'&' | b';' | b']') {
+                    value_end += 1;
+                }
+                if value_end == value_start {
+                    if value_end >= bytes.len() {
+                        dangling = true;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if is_auth_scheme(&word[value_start..value_end]) {
+                    // `"authorization":"Bearer <x>"`: the credential is the
+                    // next word when the scheme ends this one.
+                    if value_end >= bytes.len() {
+                        dangling = true;
+                    }
+                    i = value_end;
+                    continue;
+                }
+                out.push_str(&word[copied..value_start]);
+                out.push_str(REDACTED);
+                copied = value_end;
+                i = value_end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&word[copied..]);
+    (out, dangling)
+}
+
+/// Mask `sk-<token>` (OpenAI / DeepSeek / Anthropic style keys) anywhere in a
+/// word; `sk-` must start the word or follow a non-alphanumeric character
+/// (so `task-runner` and `risk-free` are kept) and be followed by at least
+/// six token characters.
+fn redact_sk_tokens(word: &str) -> String {
+    let bytes = word.as_bytes();
+    let mut out = String::with_capacity(word.len());
+    let mut copied = 0usize;
+    let mut i = 0usize;
+    while i + 3 <= bytes.len() {
+        if &bytes[i..i + 3] == b"sk-" && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric()) {
+            let mut end = i + 3;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-' || bytes[end] == b'_') {
+                end += 1;
+            }
+            if end - (i + 3) >= 6 {
+                out.push_str(&word[copied..i]);
+                out.push_str(REDACTED);
+                copied = end;
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&word[copied..]);
+    out
+}
+
+/// Redact a multi-line diagnostic text line by line ([`redact_line`]) and keep
+/// its last [`FAILURE_TAIL_BYTES`]. Used before a stderr tail is persisted in
+/// a run's terminal event.
+pub fn redact_diagnostic_tail(text: &str) -> String {
+    let redacted = text.lines().map(redact_line).collect::<Vec<_>>().join("\n");
+    limit_tail(&redacted, FAILURE_TAIL_BYTES)
 }
 
 /// `scheme://user:pass@host...` -> `scheme://[redacted]@host...` (every URL
@@ -1194,6 +1347,21 @@ impl AcpConnection {
         self.pending.lock().map(|registry| registry.stopping).unwrap_or(true)
     }
 
+    /// The stderr tail as persisted in a failed run's diagnostic: redacted
+    /// again ([`redact_diagnostic_tail`]) and at most [`FAILURE_TAIL_BYTES`].
+    pub fn diagnostic_stderr_tail(&self) -> String {
+        redact_diagnostic_tail(&tail_text(&self.stderr_tail))
+    }
+
+    /// [`Self::close_with_report`], then the diagnostic stderr tail as it
+    /// stands after the process ended (what it wrote while dying included).
+    pub async fn close_with_report_and_tail(self) -> (TerminateReport, String) {
+        let tail = Arc::clone(&self.stderr_tail);
+        let report = self.close_with_report().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        (report, redact_diagnostic_tail(&tail_text(&tail)))
+    }
+
     /// Last lines of the backend's stderr, secret-shaped tokens masked.
     pub fn stderr_tail(&self) -> String {
         self.stderr_tail
@@ -1376,6 +1544,31 @@ mod tests {
         assert!(line.contains(r"C:\Users\张三\x.js"), "user-name paths kept: {line}");
         assert!(!line.contains("0123456789abcdef0123456789abcdef"));
         assert_eq!(redact_url_userinfo("see https://u:p@h.example/x?y and http://plain/z"), "see https://[redacted]@h.example/x?y and http://plain/z");
+    }
+
+    #[test]
+    fn redaction_masks_headers_assignments_and_json_values() {
+        let cases = [
+            ("DEEPSEEK_API_KEY=sk-live-0123456789 started", "DEEPSEEK_API_KEY=[redacted] started"),
+            ("MAGPIE_API_KEY=plainvalue", "MAGPIE_API_KEY=[redacted]"),
+            ("Authorization: Bearer abc.def.ghi next", "Authorization: Bearer [redacted] next"),
+            ("authorization=Basic dXNlcjpwYXNz", "authorization=Basic [redacted]"),
+            ("x-api-key: k-123 ok", "x-api-key: [redacted] ok"),
+            ("token: t0ps3cret ok", "token: [redacted] ok"),
+            (r#"{"api_key":"abc123","model":"deepseek-chat"}"#, r#"{"api_key":"[redacted]","model":"deepseek-chat"}"#),
+            (r#"{"authorization":"Bearer zzz"}"#, r#"{"authorization":"Bearer [redacted]"#),
+            ("request failed key=sk-abcdef123456&x=1", "request failed key=[redacted]&x=1"),
+            ("got \"sk-proj-abcdefgh\" back", "got \"[redacted]\" back"),
+            ("task-runner risk-free sk-x ok", "task-runner risk-free sk-x ok"),
+            (r"open C:\Users\张三\.dsh\cordis.patch.yml https://api.deepseek.com/v1", r"open C:\Users\张三\.dsh\cordis.patch.yml https://api.deepseek.com/v1"),
+        ];
+        for (input, expected) in cases {
+            let got = redact_line(input);
+            assert!(got.starts_with(expected), "{input} -> {got}");
+        }
+        let tail = redact_diagnostic_tail(&format!("{}\nError: 401 DEEPSEEK_API_KEY=sk-zzzzzzzz", "x ".repeat(5000)));
+        assert!(tail.len() <= FAILURE_TAIL_BYTES);
+        assert!(tail.ends_with("Error: 401 DEEPSEEK_API_KEY=[redacted]"), "{tail}");
     }
 
     #[test]
