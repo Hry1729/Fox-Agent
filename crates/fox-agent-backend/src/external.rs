@@ -116,17 +116,27 @@ pub struct LaunchFailure {
     /// repeated inside the serialized `launch` object).
     #[serde(skip)]
     pub diagnostic: Option<Value>,
+    /// The JSON-RPC error's `data`, redacted ([`rpc_error_data_diagnostic`]);
+    /// written next to the stderr tail (`diagnostics`), never into `message`.
+    #[serde(skip)]
+    pub rpc_error_data: Option<Value>,
 }
 
 impl LaunchFailure {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), remedy: None, detail: Value::Null, diagnostic: None }
+        Self { code: code.into(), message: message.into(), remedy: None, detail: Value::Null, diagnostic: None, rpc_error_data: None }
     }
 
     /// Attach the redacted stderr tail as the run diagnostic (nothing when
     /// the tail is empty).
     pub fn with_stderr_tail(mut self, tail: &str, source: &str) -> Self {
         self.diagnostic = stderr_diagnostic(tail, source);
+        self
+    }
+
+    /// Attach the JSON-RPC error `data` (unredacted text; redacted here).
+    pub fn with_rpc_error_data(mut self, data: Option<&str>) -> Self {
+        self.rpc_error_data = data.and_then(rpc_error_data_diagnostic);
         self
     }
 
@@ -172,7 +182,9 @@ impl From<crate::acp::InitializeFailure> for LaunchFailure {
         }
         // Already redacted once (InitializeFailure::attach_tails); not again.
         let diagnostic = diagnostic_value(&crate::acp::limit_failure_tail(&failure.stderr_tail), "initialize");
-        let mut launch = Self::new(failure.code.as_str(), message).detail(serde_json::to_value(&failure).unwrap_or(Value::Null));
+        let mut launch = Self::new(failure.code.as_str(), message)
+            .detail(serde_json::to_value(&failure).unwrap_or(Value::Null))
+            .with_rpc_error_data(failure.rpc_error_data.as_deref());
         launch.diagnostic = diagnostic;
         launch
     }
@@ -206,10 +218,39 @@ fn diagnostic_value(tail: &str, source: &str) -> Option<Value> {
     }))
 }
 
-/// `extra` for a terminal event with the diagnostic (when there is one).
-fn with_diagnostic(mut extra: Value, diagnostic: Option<Value>) -> Value {
-    if let (Some(diagnostic), Value::Object(map)) = (diagnostic, &mut extra) {
-        map.insert("diagnostic".into(), diagnostic);
+/// Source of the JSON-RPC error `data` diagnostic.
+pub const RPC_ERROR_DATA_SOURCE: &str = "rpc_error_data";
+
+/// The diagnostic for a JSON-RPC error's `data` (serialized by
+/// [`crate::acp::rpc_error_data_text`]): redacted once with
+/// [`crate::acp::redact_diagnostic_tail`] and limited to
+/// [`crate::acp::FAILURE_TAIL_BYTES`] (4 KiB). `None` when empty. The error's
+/// `message` keeps only `code` and `message` ([`crate::acp::rpc_error_summary`]).
+pub fn rpc_error_data_diagnostic(data: &str) -> Option<Value> {
+    let text = crate::acp::redact_diagnostic_tail(data);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(json!({
+        "kind": RPC_ERROR_DATA_SOURCE,
+        "source": RPC_ERROR_DATA_SOURCE,
+        "redacted": true,
+        "maxBytes": crate::acp::FAILURE_TAIL_BYTES,
+        "text": text,
+    }))
+}
+
+/// `extra` for a terminal event with its diagnostics. Shape (both optional,
+/// present only when there is something):
+/// - `diagnostic`: ONE object, kept for older UIs: the stderr tail when there
+///   is one (`kind: "stderr_tail"`, `stderrTail`), else the JSON-RPC `data`
+///   (`kind: "rpc_error_data"`, `text`);
+/// - `diagnostics`: every diagnostic, stderr tail first, then the `data`.
+fn with_diagnostics(mut extra: Value, stderr: Option<Value>, rpc_error_data: Option<Value>) -> Value {
+    let all: Vec<Value> = stderr.into_iter().chain(rpc_error_data).collect();
+    if let (Some(first), Value::Object(map)) = (all.first(), &mut extra) {
+        map.insert("diagnostic".into(), first.clone());
+        map.insert("diagnostics".into(), Value::Array(all.clone()));
     }
     extra
 }
@@ -321,6 +362,8 @@ struct Turn {
     /// `session/prompt` failed; settled as a prompt failure unless the
     /// connection closes within [`PROMPT_FAILURE_SETTLE`] (then an exit).
     prompt_error: Option<String>,
+    /// JSON-RPC `data` of the failed prompt (unredacted until the diagnostic).
+    prompt_error_data: Option<String>,
 }
 
 impl Turn {
@@ -334,6 +377,7 @@ impl Turn {
             prompt_sent: false,
             prompt_fence_seen: false,
             prompt_error: None,
+            prompt_error_data: None,
         }
     }
 }
@@ -509,8 +553,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             } else {
                 TurnTerminal::Failed { code: failure.code.clone(), message: failure.user_message() }
             };
-            let diagnostic = if cancelled { None } else { failure.diagnostic.clone() };
-            self.finish_turn(&session, &mut state, &run_id, terminal, with_diagnostic(json!({ "launch": failure }), diagnostic));
+            let (diagnostic, rpc_error_data) = if cancelled { (None, None) } else { (failure.diagnostic.clone(), failure.rpc_error_data.clone()) };
+            self.finish_turn(&session, &mut state, &run_id, terminal, with_diagnostics(json!({ "launch": failure }), diagnostic, rpc_error_data));
             return;
         }
         let (connection, native) = {
@@ -545,7 +589,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 &mut state,
                 &run_id,
                 TurnTerminal::Failed { code: "agent_backend_prompt_failed".into(), message: error },
-                with_diagnostic(json!({}), diagnostic),
+                with_diagnostics(json!({}), diagnostic, None),
             );
         }
     }
@@ -653,11 +697,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let native = match native {
             Ok(native) => native,
             Err(error) => {
+                let data = connection.take_rpc_error_data();
                 let (_report, tail) = connection.close_with_report_and_tail().await;
                 if let Some(callback) = on_closed {
                     callback();
                 }
-                return Err(LaunchFailure::new("agent_backend_session_failed", format!("外部后端无法打开会话：{error}")).with_stderr_tail(&tail, "session_failed"));
+                return Err(LaunchFailure::new("agent_backend_session_failed", format!("外部后端无法打开会话：{error}"))
+                    .with_stderr_tail(&tail, "session_failed")
+                    .with_rpc_error_data(data.as_deref()));
             }
         };
         let connection = Arc::new(connection);
@@ -804,7 +851,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let terminal = crate::projection::terminal_for_stop_reason(&stop_reason);
                 self.finish_turn(session, &mut state, &run_id, terminal, json!({ "stopReason": stop_reason }));
             }
-            BackendEvent::TurnFailed { error, .. } => {
+            BackendEvent::TurnFailed { error, data, .. } => {
                 let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent) else {
                     return;
                 };
@@ -812,6 +859,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 // as an exit: wait briefly for the stream to close before
                 // calling it a protocol failure.
                 turn.prompt_error = Some(error);
+                turn.prompt_error_data = data;
                 let run_id = turn.run_id.clone();
                 let runtime = self.clone();
                 let session = Arc::clone(session);
@@ -821,7 +869,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     if state.generation != generation {
                         return;
                     }
-                    let Some(error) = state.turn.as_ref().filter(|turn| turn.run_id == run_id).and_then(|turn| turn.prompt_error.clone()) else {
+                    let Some((error, data)) = state
+                        .turn
+                        .as_ref()
+                        .filter(|turn| turn.run_id == run_id)
+                        .and_then(|turn| turn.prompt_error.clone().map(|error| (error, turn.prompt_error_data.clone())))
+                    else {
                         return;
                     };
                     let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
@@ -830,7 +883,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         &mut state,
                         &run_id,
                         TurnTerminal::Failed { code: "agent_backend_prompt_failed".into(), message: error },
-                        with_diagnostic(json!({}), stderr_diagnostic(&tail, "prompt_failed")),
+                        with_diagnostics(json!({}), stderr_diagnostic(&tail, "prompt_failed"), data.as_deref().and_then(rpc_error_data_diagnostic)),
                     );
                 });
             }
@@ -853,7 +906,9 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             state.native_session_open = false;
             let on_closed = state.on_closed.take();
             if !state.closing {
-                if let Some((run_id, prompt_error)) = state.turn.as_ref().map(|turn| (turn.run_id.clone(), turn.prompt_error.clone())) {
+                if let Some((run_id, prompt_error, prompt_error_data)) =
+                    state.turn.as_ref().map(|turn| (turn.run_id.clone(), turn.prompt_error.clone(), turn.prompt_error_data.clone()))
+                {
                     let tail = connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
                     let message = if tail.trim().is_empty() {
                         "外部后端进程意外退出".to_owned()
@@ -865,7 +920,11 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         &mut state,
                         &run_id,
                         TurnTerminal::Failed { code: "agent_backend_exited".into(), message },
-                        with_diagnostic(json!({ "outcome": "unknown", "promptError": prompt_error }), stderr_diagnostic(&tail, "backend_exited")),
+                        with_diagnostics(
+                            json!({ "outcome": "unknown", "promptError": prompt_error }),
+                            stderr_diagnostic(&tail, "backend_exited"),
+                            prompt_error_data.as_deref().and_then(rpc_error_data_diagnostic),
+                        ),
                     );
                 }
             }
