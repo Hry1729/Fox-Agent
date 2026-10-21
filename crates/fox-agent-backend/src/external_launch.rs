@@ -372,9 +372,32 @@ impl HostLaunchConfig {
         // same IP-literal allowlist entry the round-6 scripted model uses.
         // Remote base URLs add nothing; an undeterminable port allows nothing
         // (diagnostic in the declaration).
+        //
+        // Since the f2bf567 re-test the port is NOT allowed: dsh dials
+        // loopback directly, never through the srt proxy, so the entry would
+        // open nothing that works; a loopback base URL is refused before
+        // launch instead ([`Self::loopback_refusal`]). The derivation is kept
+        // for the declaration's diagnostics and for a dsh with an upstream
+        // "loopback through the proxy" switch
+        // ([`crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED`]).
         let derivation = match request.backend {
             AgentBackend::Deepseek => {
-                crate::loopback::derive_loopback_gateway(&crate::backends::deepseek::base_url_candidates(&home.path, &request.project_root))
+                let derived = crate::loopback::derive_loopback_gateway(&crate::backends::deepseek::base_url_candidates(&home.path, &request.project_root));
+                if crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
+                    derived
+                } else {
+                    let mut diagnostics = derived.diagnostics;
+                    if let Some(gateway) = derived.gateway {
+                        diagnostics.insert(
+                            0,
+                            format!(
+                                "{} 指向本机回环 {}；dsh 对回环地址直连、不经 srt 代理，放行端口无效，因此不放行（沙箱模式下此类会话在启动前即被拒绝）",
+                                gateway.source, gateway.entry
+                            ),
+                        );
+                    }
+                    crate::loopback::LoopbackDerivation { gateway: None, diagnostics }
+                }
             }
             _ => crate::loopback::LoopbackDerivation::default(),
         };
@@ -386,6 +409,57 @@ impl HostLaunchConfig {
             self.os,
         )
         .with_loopback_derivation(derivation))
+    }
+}
+
+/// Error code: a sandboxed DeepSeek session whose base URL is a loopback
+/// gateway (e.g. Magpie on 127.0.0.1), refused before launch.
+pub const LOOPBACK_REQUIRES_FULL_ACCESS: &str = "agent_backend_loopback_requires_full_access";
+
+impl HostLaunchConfig {
+    /// Root of the private HOMEs a sandboxed launch on this OS uses (Windows:
+    /// the per-user private root; elsewhere `<fox data>/sandbox-homes`).
+    /// Reads only; nothing is created.
+    fn sandbox_homes_root(&self) -> Option<PathBuf> {
+        if self.os == HostOs::Windows {
+            crate::winruntime::WindowsPrivateLayout::for_current_user(&crate::winacl::RealWindowsAcl).ok().map(|layout| layout.homes_root())
+        } else {
+            Some(self.fox_data.join("sandbox-homes"))
+        }
+    }
+
+    /// Refuse a sandboxed DeepSeek launch whose base URL (the private HOME's
+    /// dsh config, [`crate::backends::deepseek::base_url_candidates`]) names a
+    /// loopback address. dsh's proxy layer always connects to loopback
+    /// directly and srt 0.0.80 cannot allow a direct loopback port, so such a
+    /// session would only fail later with "Connection error". Full access and
+    /// remote base URLs are not affected; other backends are never refused.
+    pub fn loopback_refusal(&self, request: &LaunchRequest, mode: PermissionMode, homes_root: PathBuf) -> Option<LaunchFailure> {
+        if request.backend != AgentBackend::Deepseek || mode != PermissionMode::Sandboxed || crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
+            return None;
+        }
+        let project_uuid = request.project_uuid.clone().unwrap_or_default();
+        let home = PrivateHomes::new(homes_root).home_for(&project_uuid, request.backend).ok()?;
+        let loopback: Vec<crate::loopback::BaseUrlCandidate> = crate::backends::deepseek::base_url_candidates(&home.path, &request.project_root)
+            .into_iter()
+            .filter(|candidate| crate::loopback::names_loopback(&candidate.value))
+            .collect();
+        if loopback.is_empty() {
+            return None;
+        }
+        let named = loopback.iter().map(|candidate| format!("{}（来自 {}）", candidate.value, candidate.source)).collect::<Vec<_>>().join("；");
+        Some(
+            LaunchFailure::new(
+                LOOPBACK_REQUIRES_FULL_ACCESS,
+                format!("本机网关在沙箱模式下不可达：DeepSeek 的 base URL 指向本机回环地址 {named}，dsh 对回环地址总是直连、不经沙箱代理"),
+            )
+            .remedy("请切换到“完全访问”，或改用官方 api.deepseek.com")
+            .detail(serde_json::json!({
+                "reason": "dsh_proxy_bypasses_loopback",
+                "mode": mode.as_str(),
+                "baseUrls": loopback.iter().map(|candidate| serde_json::json!({ "value": candidate.value, "source": candidate.source })).collect::<Vec<_>>(),
+            })),
+        )
     }
 }
 
@@ -415,6 +489,11 @@ impl HostLauncher {
     async fn launch_now(config: HostLaunchConfig, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
         let mode = config.permission_mode(&request);
         let (spec, pi_launch) = config.launch_spec(request.backend, mode, &request.project_root)?;
+        // DeepSeek + loopback gateway + sandbox: refuse now, not after the
+        // first prompt fails with "Connection error".
+        if let Some(refusal) = config.sandbox_homes_root().and_then(|homes| config.loopback_refusal(&request, mode, homes)) {
+            return Err(refusal);
+        }
         let os = config.os;
         // Windows sandboxed: private layout + srt registry + ancestor ACEs.
         let mut windows: Option<WindowsSandboxContext> = None;
@@ -687,6 +766,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The production launcher refuses a sandboxed DeepSeek session with a
+    /// loopback base URL before preflight / srt (here no srt is installed:
+    /// without the refusal the error would be `sandbox_dependency_missing`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_launcher_refuses_a_sandboxed_deepseek_loopback_gateway_before_starting() {
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-dsh-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = config(&root);
+        let dsh = root.join("runtime").join("backends").join("dsh").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&dsh).unwrap();
+        std::fs::write(dsh.join("dsh"), "").unwrap();
+        let patch_policy = crate::backends::deepseek::HostPolicy { workspace_write: true, network: false };
+        let patch = crate::backends::deepseek::default_patch_path(&config.runtime_root, &patch_policy);
+        std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+        std::fs::write(&patch, crate::backends::deepseek::policy_patch(&patch_policy).patch_yaml).unwrap();
+        let request = request(AgentBackend::Deepseek, &root);
+        std::fs::create_dir_all(&request.project_root).unwrap();
+        let home = PrivateHomes::new(config.fox_data.join("sandbox-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Deepseek).unwrap();
+        std::fs::create_dir_all(home.path.join(".dsh")).unwrap();
+        let launcher = HostLauncher::new(config.clone());
+        // Remote base URL: gets past the refusal (and then fails on the missing srt).
+        std::fs::write(home.path.join(".dsh").join("cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: https://api.deepseek.com/anthropic\n").unwrap();
+        let error = launcher.launch(request.clone()).await.err().expect("no srt here");
+        assert_ne!(error.code, LOOPBACK_REQUIRES_FULL_ACCESS);
+        // Loopback base URL: refused with the dedicated code.
+        std::fs::write(home.path.join(".dsh").join("cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:3425/anthropic\n").unwrap();
+        let error = launcher.launch(request.clone()).await.err().expect("refused");
+        assert_eq!(error.code, LOOPBACK_REQUIRES_FULL_ACCESS, "{error:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn sandbox_policy_keys_the_private_home_by_project_uuid_and_backend() {
         let root = std::env::temp_dir().join("fox-ext-launch-policy");
@@ -706,11 +816,12 @@ mod tests {
         assert_eq!(config.sandbox_policy(&bad, root.join("homes")).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
     }
 
-    /// DeepSeek with a loopback model gateway in its own base URL: exactly
-    /// that port is allowed (srt `allowedDomains` + declaration + capability
-    /// view); remote / undeterminable base URLs allow no loopback port.
+    /// DeepSeek with a loopback model gateway in its own base URL: since the
+    /// f2bf567 re-test no loopback port is allowed (dsh dials loopback
+    /// directly), the declaration says why, and a sandboxed launch is refused
+    /// before it starts; full access and remote base URLs are not refused.
     #[test]
-    fn deepseek_loopback_gateway_port_is_allowed_from_its_base_url_only() {
+    fn deepseek_loopback_gateway_is_refused_in_the_sandbox_and_never_allowed() {
         use crate::sandbox::SandboxDeclaration;
         let root = std::env::temp_dir().join(format!("fox-ext-launch-dsh-loopback-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -727,21 +838,34 @@ mod tests {
         let dsh_home = policy.private_home.join(".dsh");
         std::fs::create_dir_all(&dsh_home).unwrap();
         let write_base_url = |url: &str| std::fs::write(dsh_home.join("cordis.patch.yml"), format!("- id: llm-deepseek\n  config:\n    baseURL: {url}\n")).unwrap();
+        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_none(), "no base URL: launches");
         write_base_url("http://127.0.0.1:3425/anthropic");
         let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
-        assert_eq!(policy.allowed_domains, ["api.deepseek.com", "127.0.0.1:3425"], "exactly the one gateway port");
-        assert_eq!(policy.loopback_gateway.as_ref().map(|gateway| gateway.port), Some(3425));
+        assert_eq!(policy.allowed_domains, ["api.deepseek.com"], "the gateway port is no longer allowed");
+        assert!(policy.loopback_gateway.is_none());
+        assert!(policy.loopback_diagnostics[0].contains("127.0.0.1:3425") && policy.loopback_diagnostics[0].contains("直连"), "{:?}", policy.loopback_diagnostics);
         let settings = policy.to_srt_settings();
-        assert_eq!(settings["network"]["allowedDomains"], serde_json::json!(["api.deepseek.com", "127.0.0.1:3425"]));
+        assert_eq!(settings["network"]["allowedDomains"], serde_json::json!(["api.deepseek.com"]));
         let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
-        assert_eq!(declaration.loopback_gateway.as_ref().map(|gateway| gateway.entry.as_str()), Some("127.0.0.1:3425"));
         let view = crate::capability_view::capability_view(
             AgentBackend::Deepseek,
             Some(&serde_json::json!({"agentInfo": {"name": "deepseek-harness-acp"}})),
             &declaration,
             crate::capability_view::PiLaunch::Stock,
         );
-        assert!(view.sandbox.detail.contains("放行本机回环端口：127.0.0.1:3425"), "{}", view.sandbox.detail);
+        assert!(view.sandbox.detail.contains("未放行本机回环端口"), "{}", view.sandbox.detail);
+        assert!(view.sandbox.detail.contains("完全访问"), "{}", view.sandbox.detail);
+        // Sandboxed launch: refused before anything starts, with the new code.
+        let refusal = config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).expect("refused in the sandbox");
+        assert_eq!(refusal.code, LOOPBACK_REQUIRES_FULL_ACCESS);
+        assert!(refusal.message.contains("本机网关在沙箱模式下不可达") && refusal.message.contains("http://127.0.0.1:3425/anthropic"), "{}", refusal.message);
+        assert_eq!(refusal.remedy.as_deref(), Some("请切换到“完全访问”，或改用官方 api.deepseek.com"));
+        assert_eq!(refusal.detail["reason"], "dsh_proxy_bypasses_loopback");
+        // Full access: not refused.
+        assert!(config.loopback_refusal(&request, PermissionMode::FullAccess, homes.clone()).is_none());
+        // A loopback base URL whose port is computed is refused as well.
+        write_base_url("http://localhost:${MAGPIE_PORT}/anthropic");
+        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_some());
         // Port cannot be determined: nothing allowed, diagnostic declared.
         write_base_url("!!js process.env.GW");
         let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
@@ -750,15 +874,18 @@ mod tests {
         assert!(!policy.loopback_diagnostics.is_empty());
         let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
         assert!(!declaration.loopback_diagnostics.is_empty());
-        // A remote base URL: no loopback port, no diagnostic.
+        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_none(), "not loopback: not refused");
+        // A remote base URL: no loopback port, no diagnostic, not refused.
         write_base_url("https://llm.example.com/anthropic");
         let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
         assert_eq!(policy.allowed_domains, ["api.deepseek.com"]);
         assert!(policy.loopback_gateway.is_none() && policy.loopback_diagnostics.is_empty());
-        // Other backends never read dsh configuration.
+        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_none());
+        // Other backends never read dsh configuration and are never refused.
         write_base_url("http://127.0.0.1:3425");
-        let pi = config.sandbox_policy(&request_for(AgentBackend::Pi, &root), homes).unwrap();
+        let pi = config.sandbox_policy(&request_for(AgentBackend::Pi, &root), homes.clone()).unwrap();
         assert!(!pi.allowed_domains.iter().any(|domain| domain.starts_with("127.0.0.1")));
+        assert!(config.loopback_refusal(&request_for(AgentBackend::Pi, &root), PermissionMode::Sandboxed, homes).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
