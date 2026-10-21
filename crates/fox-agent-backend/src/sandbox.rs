@@ -1432,6 +1432,11 @@ impl SandboxSession {
     /// Remove the session directories now (drop does the same).
     pub fn cleanup(self) {}
 
+    /// Full access: only the session temp directory (no srt settings).
+    pub(crate) fn temp_only(tmp: PathBuf) -> Self {
+        Self { settings_path: tmp.join("no-srt-settings"), dir: tmp.clone(), tmp: Some(tmp) }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(dir: PathBuf) -> Self {
         Self { settings_path: dir.join("srt-settings.json"), dir, tmp: None }
@@ -1899,6 +1904,87 @@ impl SrtLauncher {
     }
 }
 
+/// The private-HOME variables a backend gets in BOTH modes: HOME, XDG_*,
+/// TMPDIR / TMP / TEMP, on Windows USERPROFILE / APPDATA / LOCALAPPDATA, and
+/// the backend's own home (CODEX_HOME, DSH_HOME; pi keeps its config under
+/// HOME). Same names and values as [`SrtLauncher::sandbox_env`] (checked by a
+/// test), without anything that only concerns srt or its proxy
+/// (CLAUDE_CODE_TMPDIR, NODE_USE_ENV_PROXY, NODE_OPTIONS) and without PATH.
+/// Full access uses exactly this, so the backend reads the same login and
+/// configuration as in the sandbox (5f2f2d8 re-test: dsh in full access read
+/// the real HOME, dialled api.deepseek.com and wrote its logs there).
+pub fn private_home_env(backend: AgentBackend, private_home: &Path, tmp: &Path, os: HostOs) -> Vec<(String, String)> {
+    let home = private_home.to_string_lossy().into_owned();
+    let sub = |name: &str| private_home.join(name).to_string_lossy().into_owned();
+    let tmp = tmp.to_string_lossy().into_owned();
+    let mut env = vec![
+        ("HOME".to_owned(), home.clone()),
+        ("XDG_CONFIG_HOME".to_owned(), sub(".config")),
+        ("XDG_CACHE_HOME".to_owned(), sub(".cache")),
+        ("XDG_DATA_HOME".to_owned(), sub(".local/share")),
+        ("XDG_STATE_HOME".to_owned(), sub(".local/state")),
+        ("TMPDIR".to_owned(), tmp.clone()),
+        ("TMP".to_owned(), tmp.clone()),
+        ("TEMP".to_owned(), tmp),
+    ];
+    if os == HostOs::Windows {
+        env.push(("USERPROFILE".to_owned(), home));
+        env.push(("APPDATA".to_owned(), sub(r"AppData\Roaming")));
+        env.push(("LOCALAPPDATA".to_owned(), sub(r"AppData\Local")));
+    }
+    match backend {
+        AgentBackend::Codex => env.push(("CODEX_HOME".to_owned(), sub(".codex"))),
+        AgentBackend::Deepseek => env.push(("DSH_HOME".to_owned(), sub(".dsh"))),
+        AgentBackend::Pi | AgentBackend::Fox => {}
+    }
+    env
+}
+
+/// Where a full-access launch keeps its private HOME and session temp: the
+/// same places a sandboxed launch of the same project x backend uses
+/// ([`PrivateHomes::home_for`], the launcher's temp root).
+#[derive(Debug, Clone)]
+pub struct FullAccessPrivate {
+    pub private_home: PathBuf,
+    pub tmp_root: PathBuf,
+}
+
+/// Full access: no srt, no policy, no boundary claimed, but the backend's
+/// HOME (Windows USERPROFILE ...) and temp are the private ones
+/// ([`private_home_env`]); both are created when missing, as in the sandbox.
+/// The session temp is removed when the connection ends.
+pub fn prepare_full_access(mut spec: LaunchSpec, session_id: &str, private: &FullAccessPrivate, os: HostOs) -> Result<PreparedLaunch, SandboxError> {
+    use SandboxErrorCode::*;
+    if !valid_session_id(session_id) {
+        return Err(SandboxError::new(SandboxPolicyInvalid, "session id must be [A-Za-z0-9_-]{1,128}"));
+    }
+    // Created on this host, so absolute for this host.
+    if !private.private_home.is_absolute() || !private.tmp_root.is_absolute() {
+        return Err(SandboxError::new(SandboxPolicyInvalid, format!("private HOME {} and temp root {} must be absolute", private.private_home.display(), private.tmp_root.display())));
+    }
+    let io = |error: std::io::Error| SandboxError::new(SandboxUnavailable, format!("cannot prepare the private HOME: {error}"));
+    let session_tmp = private.tmp_root.join(session_id);
+    std::fs::create_dir_all(&private.private_home).map_err(io)?;
+    let _ = std::fs::remove_dir_all(&session_tmp);
+    std::fs::create_dir_all(&session_tmp).map_err(io)?;
+    let backend_env = private_home_env(spec.backend, &private.private_home, &session_tmp, os);
+    for (key, value) in &backend_env {
+        spec.session_env.retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
+        spec.session_env.push((key.clone(), value.clone()));
+    }
+    Ok(PreparedLaunch {
+        mode: PermissionMode::FullAccess,
+        spec,
+        sandbox: Some(SandboxSession::temp_only(session_tmp)),
+        effective_policy: None,
+        declaration: SandboxDeclaration::declare(PermissionMode::FullAccess, None, os),
+        windows_ancestor_aces: Vec::new(),
+        backend_env,
+        acp_bridge: None,
+        stray_srt_state: Vec::new(),
+    })
+}
+
 fn valid_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
@@ -2296,8 +2382,9 @@ pub struct PreparedLaunch {
     /// attribute-read ACE on, inside the global srt transition, before
     /// spawning (docs/sandbox.md 7.6). Empty otherwise.
     pub windows_ancestor_aces: Vec<PathBuf>,
-    /// Sandboxed: the backend's own variables (see
-    /// [`SandboxedLaunch::backend_env`]). Empty in full access.
+    /// The backend's own variables: sandboxed, see
+    /// [`SandboxedLaunch::backend_env`]; full access, [`private_home_env`]
+    /// (already merged into `spec.session_env`).
     pub backend_env: Vec<(String, String)>,
     /// Windows sandboxed: ACP runs over this bridge endpoint, not stdio.
     pub acp_bridge: Option<crate::launch::BridgeEndpoint>,
@@ -2309,7 +2396,9 @@ pub struct PreparedLaunch {
 /// Turn a backend launch spec into what actually runs.
 ///
 /// * `FullAccess`: unchanged spec, no sandbox, declaration says so. Sandbox
-///   problems are irrelevant and ignored.
+///   problems are irrelevant and ignored. The Host does not use this branch:
+///   it calls [`prepare_full_access`], which also points HOME at the private
+///   HOME.
 /// * `Sandboxed`: wrapped in srt; any problem is returned as the refusal.
 ///   There is no fallback.
 pub fn prepare_launch(
@@ -3080,6 +3169,92 @@ mod tests {
             assert!(windows_command_line(r"C:\p.exe", &[], &[("X".into(), bad.into())]).is_err());
         }
         assert!(windows_command_line(r"C:\p.exe", &[], &[("BAD NAME".into(), "v".into())]).is_err());
+    }
+
+    /// Full access lifts the isolation, not the private HOME: HOME (Windows
+    /// USERPROFILE / APPDATA / LOCALAPPDATA), XDG_*, temp and the backend's
+    /// own home are the private ones; no srt wrapper, no srt-only variables.
+    #[test]
+    fn full_access_env_points_home_at_the_private_home_without_srt() {
+        let base = temp("full-access-env");
+        for os in [HostOs::Linux, HostOs::Windows] {
+            for backend in [AgentBackend::Codex, AgentBackend::Pi, AgentBackend::Deepseek] {
+                let private = FullAccessPrivate { private_home: base.join(format!("homes/p/{}-{}", os_name(os), backend.as_str())), tmp_root: base.join("sandbox-tmp") };
+                let mut original = spec("/opt/x/backend");
+                original.backend = backend;
+                let prepared = prepare_full_access(original.clone(), "s-full", &private, os).unwrap();
+                let home = private.private_home.to_string_lossy().into_owned();
+                let tmp = private.tmp_root.join("s-full");
+                let get = |name: &str| prepared.spec.session_env.iter().filter(|(k, _)| k == name).map(|(_, v)| v.clone()).collect::<Vec<_>>();
+                assert_eq!(prepared.mode, PermissionMode::FullAccess);
+                // Not wrapped: the backend program itself, its own arguments.
+                assert_eq!(prepared.spec.program, original.program);
+                assert_eq!(prepared.spec.args, original.args);
+                assert!(prepared.effective_policy.is_none() && prepared.acp_bridge.is_none());
+                assert!(!prepared.sandbox.as_ref().unwrap().settings_path().exists(), "no srt settings in full access");
+                // The spec's own HOME=/home/u is replaced, exactly once.
+                assert_eq!(get("HOME"), vec![home.clone()], "{os:?} {backend:?}");
+                assert_eq!(get("TMPDIR"), vec![tmp.to_string_lossy().into_owned()]);
+                assert_eq!(get("XDG_CONFIG_HOME"), vec![private.private_home.join(".config").to_string_lossy().into_owned()]);
+                if os == HostOs::Windows {
+                    assert_eq!(get("USERPROFILE"), vec![home.clone()]);
+                    assert_eq!(get("LOCALAPPDATA"), vec![private.private_home.join(r"AppData\Local").to_string_lossy().into_owned()]);
+                    assert_eq!(get("APPDATA").len(), 1);
+                } else {
+                    assert!(get("USERPROFILE").is_empty());
+                }
+                match backend {
+                    AgentBackend::Deepseek => assert_eq!(get("DSH_HOME"), vec![private.private_home.join(".dsh").to_string_lossy().into_owned()]),
+                    AgentBackend::Codex => assert_eq!(get("CODEX_HOME"), vec![private.private_home.join(".codex").to_string_lossy().into_owned()]),
+                    _ => {}
+                }
+                for srt_only in ["NODE_USE_ENV_PROXY", "CLAUDE_CODE_TMPDIR", "NODE_OPTIONS", "HTTP_PROXY", "HTTPS_PROXY", "PATH"] {
+                    assert!(get(srt_only).is_empty(), "{srt_only} is not set in full access");
+                }
+                assert!(prepared.spec.session_env.contains(&("INITIAL_AGENT_MODE".into(), "read-only".into())), "the spec's own variables stay");
+                // Created when missing, like the sandbox; temp removed with the session.
+                assert!(private.private_home.is_dir() && tmp.is_dir());
+                drop(prepared);
+                assert!(!tmp.exists() && private.private_home.is_dir(), "session temp goes, private HOME stays");
+            }
+        }
+        assert_eq!(prepare_full_access(spec("/x"), "bad id", &FullAccessPrivate { private_home: base.join("h"), tmp_root: base.join("t") }, HostOs::Linux).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn os_name(os: HostOs) -> &'static str {
+        if os == HostOs::Windows { "win" } else { "unix" }
+    }
+
+    /// Both modes give the backend the same private-HOME variables.
+    #[test]
+    fn full_access_private_env_is_the_sandbox_env_minus_srt_only_variables() {
+        let (win, _) = windows_launcher(r"C:\Program Files\Fox\sandbox-runtime\0.1.0\node\node.exe", &srt_prefix(), FakeAcl::default());
+        let mut win_policy = effective_windows(&win);
+        win_policy.session_tmp = Some(win.session_tmp("s1"));
+        let linux = launcher("/state".into());
+        let mut linux_policy = linux_policy();
+        linux_policy.session_tmp = Some(linux.session_tmp("s1"));
+        for (launcher, policy, os) in [(&win, &win_policy, HostOs::Windows), (&linux, &linux_policy, HostOs::Linux)] {
+            for backend in [AgentBackend::Codex, AgentBackend::Pi, AgentBackend::Deepseek] {
+                let mut s = spec("/opt/x/backend");
+                s.backend = backend;
+                let sandboxed = launcher.sandbox_env(&s, policy);
+                let private = private_home_env(backend, &policy.private_home, policy.session_tmp.as_ref().unwrap(), os);
+                for (key, value) in &private {
+                    assert!(sandboxed.contains(&(key.clone(), value.clone())), "{os:?} {backend:?}: {key}={value} differs from the sandbox env {sandboxed:?}");
+                }
+                let rest: Vec<&str> = sandboxed.iter().map(|(k, _)| k.as_str()).filter(|k| !private.iter().any(|(p, _)| p == k)).collect();
+                let mut expected = vec!["CLAUDE_CODE_TMPDIR", "NODE_USE_ENV_PROXY", "PATH"];
+                if os == HostOs::Windows {
+                    expected.push("NODE_OPTIONS");
+                }
+                let mut rest_sorted = rest.clone();
+                rest_sorted.sort();
+                expected.sort();
+                assert_eq!(rest_sorted, expected, "{os:?} {backend:?}");
+            }
+        }
     }
 
     #[test]
