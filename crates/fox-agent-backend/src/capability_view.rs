@@ -122,7 +122,11 @@ fn approval_dimension(declared: &CapabilityDeclaration) -> Dimension {
 /// DeepSeek in sandboxed mode: a loopback model gateway cannot be reached
 /// (dsh dials loopback directly, never through the srt proxy), so such a
 /// session is refused before launch.
-pub const DEEPSEEK_LOOPBACK_LIMIT: &str = "限制：DeepSeek 的 base URL 若指向本机回环网关（如 Magpie 的 127.0.0.1:端口），沙箱模式下不可达（dsh 对回环地址总是直连、不经 srt 代理，srt 也无法按端口放行回环直连），Fox 会在启动前拒绝（agent_backend_loopback_requires_full_access）；请切换到“完全访问”，或改用官方 api.deepseek.com";
+pub const DEEPSEEK_LOOPBACK_LIMIT: &str = "限制：DeepSeek 的 base URL 若指向本机回环网关（如 Magpie 的 127.0.0.1:端口），沙箱模式下不可达（dsh 对回环地址总是直连、不经 srt 代理，srt 也无法按端口放行回环直连），Fox 会在启动前拒绝（agent_backend_loopback_requires_full_access）；需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com";
+
+/// Sandbox detail in full access: isolation is lifted, the private HOME is
+/// not (see [`crate::sandbox::prepare_full_access`]).
+pub const FULL_ACCESS_DETAIL: &str = "完全访问模式：不套沙箱，不承诺目录边界；使用 Fox 私有 HOME（与沙箱模式相同的登录与配置）";
 
 fn sandbox_dimension(backend: AgentBackend, declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
     let mut dimension = sandbox_dimension_base(declared, declaration, launched);
@@ -137,7 +141,7 @@ fn sandbox_dimension_base(declared: &CapabilityDeclaration, declaration: &Sandbo
     match declaration.mode {
         PermissionMode::FullAccess => Dimension {
             summary: "沙箱：无（完全访问）".to_owned(),
-            detail: "完全访问模式：不套沙箱，不承诺目录边界".to_owned(),
+            detail: FULL_ACCESS_DETAIL.to_owned(),
         },
         PermissionMode::Sandboxed if !launched => Dimension {
             summary: "沙箱：srt（启动后确认）".to_owned(),
@@ -251,6 +255,7 @@ mod tests {
         let view = capability_view(AgentBackend::Codex, Some(&serde_json::json!({})), &full, PiLaunch::Stock);
         assert_eq!(view.mode, "full_access");
         assert_eq!(view.sandbox.summary, "沙箱：无（完全访问）");
+        assert!(view.sandbox.detail.contains("使用 Fox 私有 HOME（与沙箱模式相同的登录与配置）"), "{}", view.sandbox.detail);
         assert_eq!(view.source, "live");
     }
 
@@ -261,7 +266,8 @@ mod tests {
         assert_eq!(view.cancel.summary, "取消：仅发送请求");
         assert_eq!(view.observability.summary, "可观测：未验证");
         assert!(view.cancel.detail.contains("未知"));
-        assert!(view.sandbox.detail.contains("本机回环网关") && view.sandbox.detail.contains("完全访问"), "{}", view.sandbox.detail);
+        assert!(view.sandbox.detail.contains("本机回环网关") && view.sandbox.detail.contains("需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启）"), "{}", view.sandbox.detail);
+        assert!(!view.sandbox.detail.contains("请切换到"), "{}", view.sandbox.detail);
         let full = SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::Linux);
         let view = capability_view(AgentBackend::Deepseek, None, &full, PiLaunch::Stock);
         assert!(!view.sandbox.detail.contains("本机回环网关"), "full access is not limited: {}", view.sandbox.detail);
