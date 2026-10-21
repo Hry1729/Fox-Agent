@@ -10,6 +10,49 @@ export interface RunFailure {
   kind: RunFailureKind
   code: string
   message: string
+  /**
+   * Backend stderr tail persisted with an external backend's `run.failed`
+   * (`diagnostic.stderrTail`; redacted by the Host before it was written, at
+   * most 4 KiB). Present only when the terminal event carried one.
+   */
+  stderrTail?: string
+  /** Which failure the tail belongs to (`prompt_failed`, `backend_exited`, ...). */
+  stderrTailSource?: string
+}
+
+/** Shape of `run.failed.diagnostic` written by the external backend Host. */
+interface RunFailureDiagnostic {
+  kind?: string
+  source?: string
+  stderrTail?: string
+}
+
+function diagnosticOf(payload: unknown): { stderrTail: string; source?: string } | null {
+  const diagnostic = (payload as { diagnostic?: RunFailureDiagnostic } | null)?.diagnostic
+  if (!diagnostic || typeof diagnostic !== 'object') return null
+  const tail = typeof diagnostic.stderrTail === 'string' ? diagnostic.stderrTail : ''
+  if (!tail.trim()) return null
+  return { stderrTail: tail, source: typeof diagnostic.source === 'string' ? diagnostic.source : undefined }
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  prompt_failed: '本轮请求失败',
+  backend_exited: '后端中途退出',
+  session_failed: '会话打开失败',
+  initialize: '后端启动失败',
+}
+
+/**
+ * Text for "查看错误详情": the failure message, then the backend stderr tail
+ * (already redacted by the Host) when the run carried one.
+ */
+export function runFailureDetailText(failure: Pick<RunFailure, 'code' | 'message' | 'stderrTail' | 'stderrTailSource'>): string {
+  const lines = [`${failure.code}: ${failure.message}`]
+  if (failure.stderrTail && failure.stderrTail.trim()) {
+    const label = failure.stderrTailSource ? SOURCE_LABELS[failure.stderrTailSource] ?? failure.stderrTailSource : ''
+    lines.push('', `后端 stderr 尾部（已脱敏，最多 4 KiB${label ? `；${label}` : ''}）：`, failure.stderrTail)
+  }
+  return lines.join('\n')
 }
 
 export interface RunFailureInput {
@@ -48,6 +91,13 @@ function failureFor(
   }
 }
 
+function withDiagnostic(failure: RunFailure, diagnostic: { stderrTail: string; source?: string } | null): RunFailure {
+  if (!diagnostic) return failure
+  return diagnostic.source
+    ? { ...failure, stderrTail: diagnostic.stderrTail, stderrTailSource: diagnostic.source }
+    : { ...failure, stderrTail: diagnostic.stderrTail }
+}
+
 function kindForStatus(status: string | null | undefined): RunFailureKind | null {
   const normalized = normalize(status)
   if (normalized === 'failed') return 'failed'
@@ -74,6 +124,9 @@ function kindForEvent(eventType: string): RunFailureKind | null {
 export function deriveRunTerminalStates(input: RunFailureInput): RunTerminalStates {
   const failures = new Map<string, RunFailure>()
   const cancelled = new Set<string>()
+  // The stderr tail lives only in the terminal event payload; the persisted
+  // run row (which wins for code / message) never carries it.
+  const diagnostics = new Map<string, { stderrTail: string; source?: string }>()
 
   // Realtime events first: they are the only source for a failure that is not
   // (yet) reflected by a persisted run snapshot.
@@ -88,7 +141,10 @@ export function deriveRunTerminalStates(input: RunFailureInput): RunTerminalStat
     }
     if (failures.has(event.runId)) continue
     const payload = (event.event ?? {}) as { code?: string; message?: string }
-    failures.set(event.runId, failureFor(kind, payload.code, payload.message))
+    const failure = failureFor(kind, payload.code, payload.message)
+    const diagnostic = diagnosticOf(payload)
+    if (diagnostic) diagnostics.set(event.runId, diagnostic)
+    failures.set(event.runId, withDiagnostic(failure, diagnostic))
   }
 
   // Persisted terminal runs override whatever the event stream suggested.
@@ -96,7 +152,7 @@ export function deriveRunTerminalStates(input: RunFailureInput): RunTerminalStat
     const kind = kindForStatus(run.status)
     if (kind) {
       cancelled.delete(run.id)
-      failures.set(run.id, failureFor(kind, run.errorCode, run.errorMessage))
+      failures.set(run.id, withDiagnostic(failureFor(kind, run.errorCode, run.errorMessage), diagnostics.get(run.id) ?? null))
       continue
     }
     const status = normalize(run.status)
