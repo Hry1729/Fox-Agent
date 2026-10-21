@@ -42,6 +42,7 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install dependencies
+        id: install
         run: pnpm install --frozen-lockfile
 
       # A frozen install must not rewrite dependency declarations. If it does,
@@ -73,10 +74,16 @@ jobs:
       - name: Test desktop
         run: bun test ./apps/desktop/tests --path-ignore-patterns "**/a0-performance.test.tsx"
 
+      # The steps below run even when an earlier test step failed (a failed step
+      # still fails the job), so one red suite does not hide typecheck, build or
+      # profile-isolation results. They are skipped only when the run is
+      # cancelled or dependencies never installed.
       - name: Test desktop performance baseline in isolation
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: bun test ./apps/desktop/tests/a0-performance.test.tsx --max-concurrency=1
 
       - name: Build desktop and run typecheck
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: pnpm build
 
       # Profile build must compile with react-dom/profiling and pass the
@@ -84,6 +91,7 @@ jobs:
       # entry and profiling renderer all present). Browser perf smoke stays a
       # manual/periodic task (see apps/desktop/scripts/prof-smoke.mjs).
       - name: Build profile variant and verify isolation
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: pnpm --dir apps/desktop build:profile
 
   # Agent Runtime runs in its own job: the node --test suite is long (~40min on
@@ -149,6 +157,7 @@ jobs:
           workspaces: apps/desktop/src-tauri
 
       - name: Install dependencies
+        id: install
         run: pnpm install --frozen-lockfile
 
       - name: Test Kernel core and shared protocol
@@ -162,11 +171,15 @@ jobs:
           pnpm protocol:test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Rust Host tests still run when the generated-protocol check fails (the
+      # job stays failed), so a stale schema does not hide Host test results.
       - name: Test Rust Host without optional Zvec
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/test-desktop-rust.ps1 -Mode Suite -TimeoutSeconds 1800
 
       - name: Test Rust Host performance baseline in isolation
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/test-desktop-rust.ps1 -Mode Performance -TimeoutSeconds 300
 
