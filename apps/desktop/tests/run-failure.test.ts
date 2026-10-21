@@ -9,6 +9,8 @@ import {
 import {
   deriveRunCancellations,
   deriveRunFailures,
+  diagnosticTitle,
+  hasRunFailureDiagnostic,
   runFailureDetailText,
   type RunFailureInput,
 } from '../src/features/conversations/model/run-failure'
@@ -251,8 +253,60 @@ describe('error detail rendering of long stderr tails', () => {
     expect(errorState).toContain('<pre className={ERROR_DIAGNOSTIC_CLASS} style={ERROR_DIAGNOSTIC_STYLE}')
     expect(errorState.match(/<pre\b/g)?.length).toBe(1)
     expect(src('src/features/chat/demo/fox-demo-prompts.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{diagnostic \|\| presentation\.detail\}/)
-    expect(src('src/features/chat/thread/parts/fox-error.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{failure\.stderrTail \? runFailureDetailText\(failure\)/)
-    expect(src('src/features/chat/thread/fox-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{foxMessage\.failure\.stderrTail \? runFailureDetailText/)
-    expect(src('src/features/chat/timeline/fox-runtime-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{failureReason\.stderrTail \? runFailureDetailText/)
+    expect(src('src/features/chat/thread/parts/fox-error.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{hasRunFailureDiagnostic\(failure\) \? runFailureDetailText\(failure\)/)
+    expect(src('src/features/chat/thread/fox-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{hasRunFailureDiagnostic\(foxMessage\.failure\) \? runFailureDetailText/)
+    expect(src('src/features/chat/timeline/fox-runtime-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{hasRunFailureDiagnostic\(failureReason\) \? runFailureDetailText/)
+  })
+})
+
+describe('run failure JSON-RPC error data diagnostic', () => {
+  const dataText = '{\n"request": {\n"headers": {\n"authorization": "Bearer <redacted>",\n"x-api-key": "<redacted>"\n}\n},\n"env": "OPENAI_API_KEY=<redacted>",\n"hint": "upstream rejected the credential"\n}'
+  const tail = 'mock: upstream said 401 (stderr line)'
+  const failed = (event: Record<string, unknown>) => deriveRunFailures({
+    persistedRuns: [],
+    events: [{ runId: 'run-data', eventType: 'run.failed', event: { type: 'run.failed', code: 'agent_backend_prompt_failed', message: 'prompt failed: Authentication required (JSON-RPC -32000)', ...event } }],
+  }).get('run-data')!
+
+  test('data only (new Host: diagnostics array + legacy diagnostic = the data)', () => {
+    const entry = { kind: 'rpc_error_data', source: 'rpc_error_data', redacted: true, maxBytes: 4096, text: dataText }
+    const failure = failed({ diagnostic: entry, diagnostics: [entry] })
+    expect(failure.rpcErrorData).toBe(dataText)
+    expect('stderrTail' in failure).toBe(false)
+    expect(hasRunFailureDiagnostic(failure)).toBe(true)
+    const text = runFailureDetailText(failure)
+    expect(text).toContain('后端错误数据（已脱敏，最多 4 KiB）：')
+    expect(text).not.toContain('stderr 尾部')
+    expect(text.endsWith('"hint": "upstream rejected the credential"\n}')).toBe(true)
+  })
+
+  test('stderr tail and data are both kept, each under its own title', () => {
+    const stderr = { kind: 'stderr_tail', source: 'prompt_failed', redacted: true, maxBytes: 4096, stderrTail: tail }
+    const data = { kind: 'rpc_error_data', source: 'rpc_error_data', redacted: true, maxBytes: 4096, text: dataText }
+    const failure = failed({ diagnostic: stderr, diagnostics: [stderr, data] })
+    expect(failure.stderrTail).toBe(tail)
+    expect(failure.stderrTailSource).toBe('prompt_failed')
+    expect(failure.rpcErrorData).toBe(dataText)
+    const text = runFailureDetailText(failure)
+    const stderrAt = text.indexOf('后端 stderr 尾部（已脱敏，最多 4 KiB；本轮请求失败）：')
+    const dataAt = text.indexOf('后端错误数据（已脱敏，最多 4 KiB）：')
+    expect(stderrAt).toBeGreaterThan(0)
+    expect(dataAt).toBeGreaterThan(stderrAt)
+    expect(text.split('\n')[0]).toBe('agent_backend_prompt_failed: prompt failed: Authentication required (JSON-RPC -32000)')
+  })
+
+  test('an old Host event (single stderr diagnostic, no diagnostics array) still works', () => {
+    const failure = failed({ diagnostic: { source: 'backend_exited', stderrTail: tail } })
+    expect(failure).toEqual({ kind: 'failed', code: 'agent_backend_prompt_failed', message: 'prompt failed: Authentication required (JSON-RPC -32000)', stderrTail: tail, stderrTailSource: 'backend_exited' })
+  })
+
+  test('the persisted run row keeps the data from the event; empty entries are ignored', () => {
+    const failures = deriveRunFailures({
+      persistedRuns: [persistedRun({ id: 'run-data', status: 'failed', errorCode: 'agent_backend_session_failed', errorMessage: '外部后端无法打开会话' })],
+      events: [{ runId: 'run-data', eventType: 'run.failed', event: { type: 'run.failed', diagnostics: [{ kind: 'stderr_tail', stderrTail: '  ' }, { source: 'rpc_error_data', text: dataText }] } }],
+    })
+    expect(failures.get('run-data')).toEqual({ kind: 'failed', code: 'agent_backend_session_failed', message: '外部后端无法打开会话', rpcErrorData: dataText })
+    expect(hasRunFailureDiagnostic({ rpcErrorData: '  ' })).toBe(false)
+    expect(diagnosticTitle('rpc_error_data')).toBe('后端错误数据（已脱敏，最多 4 KiB）：')
+    expect(diagnosticTitle('session_failed')).toBe('后端 stderr 尾部（已脱敏，最多 4 KiB；会话打开失败）：')
   })
 })
