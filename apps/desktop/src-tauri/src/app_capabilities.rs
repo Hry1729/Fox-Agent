@@ -528,7 +528,7 @@ pub fn digital_colleague_run_detail(
 }
 
 #[cfg(target_os = "windows")]
-fn open_folder(path: &Path) -> Result<(), String> {
+pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
     std::process::Command::new("explorer.exe")
         .arg(path)
         .spawn()
@@ -536,7 +536,7 @@ fn open_folder(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 #[cfg(target_os = "macos")]
-fn open_folder(path: &Path) -> Result<(), String> {
+pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
     std::process::Command::new("open")
         .arg(path)
         .spawn()
@@ -544,7 +544,7 @@ fn open_folder(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 #[cfg(all(unix, not(target_os = "macos")))]
-fn open_folder(path: &Path) -> Result<(), String> {
+pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
     std::process::Command::new("xdg-open")
         .arg(path)
         .spawn()
