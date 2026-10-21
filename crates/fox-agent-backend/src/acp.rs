@@ -78,7 +78,13 @@ pub enum BackendEvent {
     TurnEnded { session_id: String, stop_reason: Value },
     /// `session/prompt` itself failed (JSON-RPC error, transport closed while
     /// the turn ran). The turn is over; the connection may still be alive.
-    TurnFailed { session_id: String, error: String },
+    ///
+    /// `error` carries only the JSON-RPC `code` and `message`
+    /// ([`rpc_error_summary`]); the error's `data` (which may echo request
+    /// headers or keys) is kept apart, unredacted, in `data`
+    /// ([`rpc_error_data_text`]) and redacted where it leaves the process
+    /// ([`crate::external::rpc_error_data_diagnostic`]).
+    TurnFailed { session_id: String, error: String, data: Option<String> },
     /// The connection failed (not tied to one turn).
     Failed(String),
     Closed,
@@ -120,6 +126,32 @@ type PendingPermissions = Arc<Mutex<PermissionRegistry>>;
 /// Error text for work refused while the connection is stopping.
 pub const STOPPING_REFUSAL: &str = "backend connection is stopping (full access revoked); no new tasks are accepted";
 
+/// The user-facing text of a JSON-RPC error: its `message` and `code`, never
+/// its `data`. `agent_client_protocol::Error`'s `Display` appends `data` as
+/// pretty JSON, unredacted (979313c closeout); this replaces it everywhere a
+/// backend error becomes a run / session failure message.
+pub fn rpc_error_summary(error: &agent_client_protocol::Error) -> String {
+    let code = i32::from(error.code);
+    if error.message.trim().is_empty() {
+        format!("JSON-RPC error {code}")
+    } else {
+        format!("{} (JSON-RPC {code})", error.message)
+    }
+}
+
+fn lock_data(slot: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String>> {
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The JSON-RPC error's `data`, serialized (pretty, so each field is on its
+/// own line for line-based redaction), UNREDACTED. `None` when absent or
+/// `null`. Redact before it leaves the process
+/// ([`crate::external::rpc_error_data_diagnostic`]).
+pub fn rpc_error_data_text(error: &agent_client_protocol::Error) -> Option<String> {
+    let data = error.data.as_ref().filter(|data| !data.is_null())?;
+    Some(serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string()))
+}
+
 pub struct AcpConnection {
     commands: mpsc::UnboundedSender<Command>,
     pub events: mpsc::UnboundedReceiver<BackendEvent>,
@@ -129,6 +161,9 @@ pub struct AcpConnection {
     /// Windows: the Job Object holding the backend tree (`None` elsewhere).
     job: ProcessJob,
     stderr_tail: Tail,
+    /// `data` of the last failed `session/new` / `session/load` reply
+    /// (unredacted; [`Self::take_rpc_error_data`]).
+    rpc_error_data: Arc<Mutex<Option<String>>>,
     /// Per-session srt state (settings file), removed when the connection
     /// goes away. `None` in full-access mode.
     sandbox: Option<crate::sandbox::SandboxSession>,
@@ -293,6 +328,11 @@ pub struct InitializeFailure {
     pub backend_stderr_tail: String,
     /// Bridge mode: stdout of the process (not used for ACP there).
     pub stdout_tail: String,
+    /// `data` of the `initialize` JSON-RPC error, unredacted; never
+    /// serialized (it is redacted into the run diagnostic,
+    /// `source: "rpc_error_data"`).
+    #[serde(skip)]
+    pub rpc_error_data: Option<String>,
 }
 
 impl InitializeFailure {
@@ -306,6 +346,7 @@ impl InitializeFailure {
             srt_stderr_tail: String::new(),
             backend_stderr_tail: String::new(),
             stdout_tail: String::new(),
+            rpc_error_data: None,
         }
     }
 
@@ -1030,13 +1071,15 @@ impl AcpConnection {
         let (event_tx, events) = mpsc::unbounded_channel();
         let (commands, mut command_rx) = mpsc::unbounded_channel::<Command>();
         let pending: PendingPermissions = Arc::default();
-        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), (String, Option<String>)>>();
 
         let notify_tx = event_tx.clone();
         let permission_tx = event_tx.clone();
         let permission_pending = Arc::clone(&pending);
         let main_tx = event_tx.clone();
         let next_request = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rpc_error_data: Arc<Mutex<Option<String>>> = Arc::default();
+        let session_error_data = Arc::clone(&rpc_error_data);
 
         tokio::spawn(async move {
             let result = Client
@@ -1097,7 +1140,7 @@ impl AcpConnection {
                     let init = match init {
                         Ok(init) => init,
                         Err(error) => {
-                            let _ = ready_tx.send(Err(format!("initialize failed: {error}")));
+                            let _ = ready_tx.send(Err((format!("initialize failed: {}", rpc_error_summary(&error)), rpc_error_data_text(&error))));
                             return Ok(());
                         }
                     };
@@ -1116,7 +1159,10 @@ impl AcpConnection {
                                     .block_task()
                                     .await
                                     .map(|response| response.session_id.to_string())
-                                    .map_err(|error| error.to_string());
+                                    .map_err(|error| {
+                                        *lock_data(&session_error_data) = rpc_error_data_text(&error);
+                                        rpc_error_summary(&error)
+                                    });
                                 let _ = reply.send(created);
                             }
                             Command::LoadSession { session_id, cwd, reply } => {
@@ -1127,7 +1173,10 @@ impl AcpConnection {
                                     .block_task()
                                     .await
                                     .map(|_| ())
-                                    .map_err(|error| error.to_string());
+                                    .map_err(|error| {
+                                        *lock_data(&session_error_data) = rpc_error_data_text(&error);
+                                        rpc_error_summary(&error)
+                                    });
                                 let _ = main_tx.send(BackendEvent::LoadSettled { session_id: fence_session });
                                 let _ = reply.send(loaded);
                             }
@@ -1155,7 +1204,8 @@ impl AcpConnection {
                                         },
                                         Err(error) => BackendEvent::TurnFailed {
                                             session_id,
-                                            error: format!("prompt failed: {error}"),
+                                            error: format!("prompt failed: {}", rpc_error_summary(&error)),
+                                            data: rpc_error_data_text(&error),
                                         },
                                     });
                                 });
@@ -1178,7 +1228,7 @@ impl AcpConnection {
         // code 0 included) is a failure; so is a transport error, which is
         // reported as an exit when the process is gone shortly after.
         enum Init {
-            Ready(Result<Result<(), String>, oneshot::error::RecvError>),
+            Ready(Result<Result<(), (String, Option<String>)>, oneshot::error::RecvError>),
             Exited(std::io::Result<std::process::ExitStatus>),
             TimedOut,
         }
@@ -1192,24 +1242,26 @@ impl AcpConnection {
         let failure = match outcome {
             Init::Ready(Ok(Ok(()))) => None,
             Init::Ready(other) => {
-                let error = match other {
+                let (error, rpc_error_data) = match other {
                     Ok(Err(error)) => error,
-                    _ => "backend connection closed before initialize completed".to_owned(),
+                    _ => ("backend connection closed before initialize completed".to_owned(), None),
                 };
-                match tokio::time::timeout(EXIT_SETTLE, child.wait()).await {
+                let (mut failure, status) = match tokio::time::timeout(EXIT_SETTLE, child.wait()).await {
                     Ok(status) => {
                         let status = status.ok();
-                        Some((
+                        (
                             InitializeFailure::new(
                                 Code::BackendExitedBeforeInitialize,
                                 format!("backend process exited ({}) before initialize completed ({error})", describe_exit(status)),
                             )
                             .stage("initialize"),
                             status,
-                        ))
+                        )
                     }
-                    Err(_) => Some((InitializeFailure::new(Code::InitializeFailed, error).stage("initialize"), None)),
-                }
+                    Err(_) => (InitializeFailure::new(Code::InitializeFailed, error).stage("initialize"), None),
+                };
+                failure.rpc_error_data = rpc_error_data;
+                Some((failure, status))
             }
             Init::Exited(status) => {
                 let status = status.ok();
@@ -1239,6 +1291,7 @@ impl AcpConnection {
             child: Arc::new(tokio::sync::Mutex::new(child)),
             job,
             stderr_tail,
+            rpc_error_data,
             sandbox: None,
             permission_mode: crate::sandbox::PermissionMode::FullAccess,
         })
@@ -1300,6 +1353,13 @@ impl AcpConnection {
             .send(Command::LoadSession { session_id: session_id.to_owned(), cwd, reply })
             .map_err(|_| "backend connection closed".to_string())?;
         response.await.map_err(|_| "backend connection closed".to_string())?
+    }
+
+    /// `data` of the last failed `session/new` / `session/load` JSON-RPC
+    /// reply (unredacted), taken once. The error text those calls return
+    /// carries only `code` and `message` ([`rpc_error_summary`]).
+    pub fn take_rpc_error_data(&self) -> Option<String> {
+        lock_data(&self.rpc_error_data).take()
     }
 
     /// Move the event stream out of the connection, for a Host task that
@@ -1624,6 +1684,36 @@ mod tests {
     /// `DEEPSEEK_API_KEY=[redacted]]]` and lost the closing `}` of
     /// `{"authorization":"Bearer [redacted]`. Redaction is idempotent and keeps
     /// JSON structure.
+    #[test]
+    fn rpc_error_text_keeps_code_and_message_and_splits_data_out() {
+        let data = serde_json::json!({ "headers": { "authorization": "Bearer unit-secret-bearer" }, "apiKey": "unit-secret-key", "env": "OPENAI_API_KEY=sk-unitsecret0123456789" });
+        let error = agent_client_protocol::Error::new(-32603, "Internal error").data(data);
+        // Display (what Fox used before) appends the data verbatim.
+        assert!(error.to_string().contains("unit-secret-bearer"));
+        let summary = rpc_error_summary(&error);
+        assert_eq!(summary, "Internal error (JSON-RPC -32603)");
+        let text = rpc_error_data_text(&error).expect("data");
+        assert!(text.contains("unit-secret-key"), "unredacted until the diagnostic");
+        let diagnostic = crate::external::rpc_error_data_diagnostic(&text).expect("diagnostic");
+        assert_eq!(diagnostic["source"], "rpc_error_data");
+        let redacted = diagnostic["text"].as_str().unwrap();
+        for secret in ["unit-secret-bearer", "unit-secret-key", "sk-unitsecret0123456789"] {
+            assert!(!redacted.contains(secret), "{secret} in {redacted}");
+            assert!(!diagnostic.to_string().contains(secret));
+        }
+        assert!(redacted.contains("Bearer <redacted>") && redacted.contains("OPENAI_API_KEY=<redacted>"), "{redacted}");
+        // No data / null data: nothing; an empty message falls back to the code.
+        assert_eq!(rpc_error_data_text(&agent_client_protocol::Error::new(-32000, "x")), None);
+        assert_eq!(rpc_error_data_text(&agent_client_protocol::Error::new(-32000, "x").data(Value::Null)), None);
+        assert_eq!(rpc_error_summary(&agent_client_protocol::Error::new(-32000, "")), "JSON-RPC error -32000");
+        // Large data is limited to 4 KiB after redaction.
+        let big = agent_client_protocol::Error::new(1, "big").data(serde_json::json!({ "lines": (0..400).map(|i| format!("line {i} token=unit-secret-{i}")).collect::<Vec<_>>() }));
+        let diagnostic = crate::external::rpc_error_data_diagnostic(&rpc_error_data_text(&big).unwrap()).unwrap();
+        let redacted = diagnostic["text"].as_str().unwrap();
+        assert!(redacted.len() <= FAILURE_TAIL_BYTES, "{}", redacted.len());
+        assert!(!redacted.contains("unit-secret-"), "{redacted}");
+    }
+
     #[test]
     fn redaction_is_idempotent_and_keeps_json_structure() {
         let inputs = [
