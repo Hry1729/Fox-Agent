@@ -147,6 +147,17 @@ fn f1_run_state(db: &Database, run: &str) -> String {
     .expect("kernel run state")
 }
 
+fn f1_approval_state(db: &Database, run: &str, call: &str) -> String {
+    db.with_connection(|c| {
+        c.query_row(
+            "SELECT state FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",
+            rusqlite::params![run, call],
+            |r| r.get::<_, String>(0),
+        )
+    })
+    .expect("kernel approval state")
+}
+
 /// 真实 Host 执行缝：每个待派发工具都经 `execute_claimed_dispatch`（它做准入、
 /// 认领并原子消费专门替换授权）与共享的受管文件提交缝执行，与
 /// `kernel_host::drive` 的 `DispatchTool` 分支是同一条路径。
@@ -1041,28 +1052,51 @@ fn f1_cropped_read_denial_cannot_write_or_revive_the_request() {
     ).is_err(), "terminal denial cannot be revived");
 }
 
+/// fb3269c 之后审批不再过期：把时钟推进远超名义窗口后，专门替换确认仍在等待；
+/// 用户取消后 Run 结束为 cancelled，迟到的批准不再可入队，目标文件不被写入。
 #[test]
-fn f1_cropped_read_expired_confirmation_cannot_write() {
+fn f1_cropped_read_unanswered_confirmation_stays_pending_and_cancel_cannot_write() {
     let body = f1_big_body();
-    let run = build_f1_run("expire-cropped", "allow", &body, "late candidate");
+    let run = build_f1_run("unanswered-cropped", "allow", &body, "late candidate");
     let approval_id = run.db.kernel_approval_identity(&run.run_id, "write-1")
         .expect("approval identity");
-    assert!(run.db.queue_kernel_host_approval(&approval_id, "allow_once")
-        .expect("queue before expiration"));
-    let command = run.db.pending_kernel_host_commands(&run.run_id)
-        .expect("pending commands").into_iter().find(|command| command.kind == "approval")
-        .expect("approval command");
     run.clock.advance(86_000_000);
     let cancellation = CancellationRegistry::default();
     let coordinator = KernelCoordinator::reopen(&run.db, &run.clock, &run.run_id, &cancellation)
-        .expect("reopen after deadline");
-    coordinator.tick().expect("expire the durable approval");
-    run.db.complete_kernel_host_command(&run.run_id, command.seq)
-        .expect("acknowledge the expired command without granting");
-    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("expired"));
+        .expect("reopen past the nominal window");
+    coordinator.tick().expect("tick past the nominal window");
+    // 1) 远超名义窗口后仍在等待：不过期、不授予、不落盘。
+    assert_eq!(f1_run_state(&run.db, &run.run_id), "waiting_approval",
+        "未答审批不得因过了名义窗口而结束");
+    assert_eq!(f1_approval_state(&run.db, &run.run_id, "write-1"), "pending");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("pending"));
     assert!(execute_pending_dispatches(
         &run.db, &run.root, &run.scope, &run.run_id, &run.clock,
-    ).expect("expired Host drive").is_empty());
+    ).expect("waiting Host drive").is_empty());
+    assert_eq!(target_disk_bytes(&run), body.as_bytes());
+
+    // 2) 用户取消：Run 结束为 cancelled，审批记为 cancelled。
+    assert!(run.db.queue_kernel_host_command(&run.run_id, None).expect("queue cancel"));
+    coordinator.cancel().expect("request cancellation");
+    coordinator.settle_cancellation().expect("settle cancellation");
+    let cancel = run.db.pending_kernel_host_commands(&run.run_id)
+        .expect("pending commands").into_iter().find(|command| command.kind == "cancel")
+        .expect("cancel command");
+    run.db.complete_kernel_host_command(&run.run_id, cancel.seq)
+        .expect("acknowledge the cancel command");
+    assert_eq!(f1_run_state(&run.db, &run.run_id), "cancelled");
+    assert_eq!(f1_approval_state(&run.db, &run.run_id, "write-1"), "cancelled");
+    // 重复取消命中幂等分支：Ok(false) 视为成功，不再入队。
+    assert_eq!(run.db.queue_kernel_host_command(&run.run_id, None), Ok(false));
+
+    // 3) 取消后不能写：迟到的批准被拒，专门替换授权未被确认或消费。
+    assert!(run.db.queue_kernel_host_approval(&approval_id, "allow_once").is_err(),
+        "取消后的迟到批准不得入队");
+    assert!(!matches!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(),
+        Some("approved") | Some("consumed")), "取消后专门替换授权不得生效");
+    assert!(execute_pending_dispatches(
+        &run.db, &run.root, &run.scope, &run.run_id, &run.clock,
+    ).expect("cancelled Host drive").is_empty());
     assert_eq!(target_disk_bytes(&run), body.as_bytes());
     assert_eq!(version_row_count(&run), 0);
 }
