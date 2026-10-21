@@ -4,6 +4,7 @@ import type { ComponentProps } from "react";
 import { CircleAlertIcon, RefreshCwIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ShimmerLabel } from "./surfaces";
+import { ERROR_DIAGNOSTIC_CLASS, ERROR_DIAGNOSTIC_STYLE } from "../../elements/error-diagnostic";
 
 export interface ErrorStateProps extends Omit<
   ComponentProps<"div">,
@@ -61,12 +62,12 @@ export function ErrorState({
       {...props}
     >
       <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-red-500/80" />
-      <div>
+      <div className="min-w-0 flex-1">
         <p className="font-medium text-red-600 dark:text-red-400">{title}</p>
         <p className="mt-0.5 text-[13px] leading-snug text-red-600/60 dark:text-red-400/60">
           {detail}
         </p>
-        {diagnostic && <details><summary>查看错误详情</summary><pre>{diagnostic}</pre></details>}
+        {diagnostic && <details><summary>查看错误详情</summary><pre className={ERROR_DIAGNOSTIC_CLASS} style={ERROR_DIAGNOSTIC_STYLE} tabIndex={0}>{diagnostic}</pre></details>}
       </div>
       {onRetry && <button
         type="button"
