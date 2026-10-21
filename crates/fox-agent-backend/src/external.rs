@@ -111,11 +111,23 @@ pub struct LaunchFailure {
     pub message: String,
     pub remedy: Option<String>,
     pub detail: Value,
+    /// Redacted stderr tail for the run's diagnostic ([`stderr_diagnostic`]);
+    /// written once, at the top level of `run.failed` as `diagnostic` (not
+    /// repeated inside the serialized `launch` object).
+    #[serde(skip)]
+    pub diagnostic: Option<Value>,
 }
 
 impl LaunchFailure {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), remedy: None, detail: Value::Null }
+        Self { code: code.into(), message: message.into(), remedy: None, detail: Value::Null, diagnostic: None }
+    }
+
+    /// Attach the redacted stderr tail as the run diagnostic (nothing when
+    /// the tail is empty).
+    pub fn with_stderr_tail(mut self, tail: &str, source: &str) -> Self {
+        self.diagnostic = stderr_diagnostic(tail, source);
+        self
     }
 
     pub fn remedy(mut self, remedy: impl Into<String>) -> Self {
@@ -158,8 +170,40 @@ impl From<crate::acp::InitializeFailure> for LaunchFailure {
         if !failure.backend_stderr_tail.is_empty() {
             message.push_str(&format!("；后端输出（已脱敏）：{}", tail_chars(&failure.backend_stderr_tail, 600)));
         }
-        Self::new(failure.code.as_str(), message).detail(serde_json::to_value(&failure).unwrap_or(Value::Null))
+        let tail = failure.stderr_tail.clone();
+        Self::new(failure.code.as_str(), message)
+            .detail(serde_json::to_value(&failure).unwrap_or(Value::Null))
+            .with_stderr_tail(&tail, "initialize")
     }
+}
+
+/// The `diagnostic` field of a failed run's terminal event: the backend's
+/// stderr tail, redacted again before it is persisted
+/// ([`crate::acp::redact_diagnostic_tail`]: keys, tokens, `Authorization` /
+/// `Bearer` values, `*_API_KEY=` values, proxy credentials) and limited to the
+/// last [`crate::acp::FAILURE_TAIL_BYTES`] (4 KiB). `None` when there is no
+/// output. `source` says which failure it belongs to: `prompt_failed`,
+/// `backend_exited`, `session_failed`, `initialize`.
+pub fn stderr_diagnostic(tail: &str, source: &str) -> Option<Value> {
+    let tail = crate::acp::redact_diagnostic_tail(tail);
+    if tail.trim().is_empty() {
+        return None;
+    }
+    Some(json!({
+        "kind": "stderr_tail",
+        "source": source,
+        "redacted": true,
+        "maxBytes": crate::acp::FAILURE_TAIL_BYTES,
+        "stderrTail": tail,
+    }))
+}
+
+/// `extra` for a terminal event with the diagnostic (when there is one).
+fn with_diagnostic(mut extra: Value, diagnostic: Option<Value>) -> Value {
+    if let (Some(diagnostic), Value::Object(map)) = (diagnostic, &mut extra) {
+        map.insert("diagnostic".into(), diagnostic);
+    }
+    extra
 }
 
 fn tail_chars(text: &str, max: usize) -> String {
@@ -457,7 +501,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             } else {
                 TurnTerminal::Failed { code: failure.code.clone(), message: failure.user_message() }
             };
-            self.finish_turn(&session, &mut state, &run_id, terminal, json!({ "launch": failure }));
+            let diagnostic = if cancelled { None } else { failure.diagnostic.clone() };
+            self.finish_turn(&session, &mut state, &run_id, terminal, with_diagnostic(json!({ "launch": failure }), diagnostic));
             return;
         }
         let (connection, native) = {
@@ -485,13 +530,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             return;
         };
         if let Err(error) = connection.prompt(&native, &request.prompt) {
+            let diagnostic = stderr_diagnostic(&connection.diagnostic_stderr_tail(), "prompt_failed");
             let mut state = lock(&session.state);
             self.finish_turn(
                 &session,
                 &mut state,
                 &run_id,
                 TurnTerminal::Failed { code: "agent_backend_prompt_failed".into(), message: error },
-                Value::Null,
+                with_diagnostic(json!({}), diagnostic),
             );
         }
     }
@@ -529,11 +575,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let initialize_response = match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
             Ok(Some(BackendEvent::Initialized { initialize_response, .. })) => initialize_response,
             other => {
-                let _ = connection.close_with_report().await;
+                let (_, tail) = connection.close_with_report_and_tail().await;
                 if let Some(callback) = on_closed {
                     callback();
                 }
-                return Err(LaunchFailure::new("initialize_failed", format!("backend did not report initialize first: {other:?}")));
+                return Err(LaunchFailure::new("initialize_failed", format!("backend did not report initialize first: {other:?}"))
+                    .with_stderr_tail(&tail, "session_failed"));
             }
         };
         let capabilities = crate::capability_view::backend_declaration(session.backend, &initialize_response, pi_launch);
@@ -598,12 +645,11 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let native = match native {
             Ok(native) => native,
             Err(error) => {
-                let report = connection.close_with_report().await;
+                let (_report, tail) = connection.close_with_report_and_tail().await;
                 if let Some(callback) = on_closed {
                     callback();
                 }
-                let _ = report;
-                return Err(LaunchFailure::new("agent_backend_session_failed", format!("外部后端无法打开会话：{error}")));
+                return Err(LaunchFailure::new("agent_backend_session_failed", format!("外部后端无法打开会话：{error}")).with_stderr_tail(&tail, "session_failed"));
             }
         };
         let connection = Arc::new(connection);
@@ -770,12 +816,13 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     let Some(error) = state.turn.as_ref().filter(|turn| turn.run_id == run_id).and_then(|turn| turn.prompt_error.clone()) else {
                         return;
                     };
+                    let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
                     runtime.finish_turn(
                         &session,
                         &mut state,
                         &run_id,
                         TurnTerminal::Failed { code: "agent_backend_prompt_failed".into(), message: error },
-                        Value::Null,
+                        with_diagnostic(json!({}), stderr_diagnostic(&tail, "prompt_failed")),
                     );
                 });
             }
@@ -799,7 +846,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let on_closed = state.on_closed.take();
             if !state.closing {
                 if let Some((run_id, prompt_error)) = state.turn.as_ref().map(|turn| (turn.run_id.clone(), turn.prompt_error.clone())) {
-                    let tail = connection.as_ref().map(|connection| connection.stderr_tail()).unwrap_or_default();
+                    let tail = connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
                     let message = if tail.trim().is_empty() {
                         "外部后端进程意外退出".to_owned()
                     } else {
@@ -810,7 +857,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         &mut state,
                         &run_id,
                         TurnTerminal::Failed { code: "agent_backend_exited".into(), message },
-                        json!({ "outcome": "unknown", "promptError": prompt_error }),
+                        with_diagnostic(json!({ "outcome": "unknown", "promptError": prompt_error }), stderr_diagnostic(&tail, "backend_exited")),
                     );
                 }
             }
