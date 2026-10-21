@@ -43,7 +43,12 @@ async fn bridge_pipe_serve_for_other_user_probe() {
         .or_else(|| read_srt_sandbox_sid(&RealProbe))
         .expect("srt sandbox SID (HKLM\\SOFTWARE\\sandbox-runtime SandboxUserSid or FOX_TEST_PIPE_SANDBOX_SID)");
     let seconds = std::env::var("FOX_TEST_PIPE_SERVE_SECONDS").ok().and_then(|value| value.parse().ok()).unwrap_or(120u64);
-    let endpoint = BridgeEndpoint::new_local(Some(sid.clone())).unwrap();
+    let mut endpoint = BridgeEndpoint::new_local(Some(sid.clone())).unwrap();
+    // As in a real launch: the handshake answer carries the backend's cwd and
+    // environment (`OK {"cwd":..,"env":{..}}\n`, since eeea84e).
+    let probe_cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    endpoint.child_cwd = Some(probe_cwd.clone());
+    endpoint.child_env = vec![("FOX_PIPE_PROBE".into(), "owner-control".into())];
     let listener = BridgeListener::bind(&endpoint).unwrap_or_else(|error| panic!("bind: {error}"));
     println!("FOX_PIPE_NAME={}", endpoint.address);
     println!("FOX_PIPE_SANDBOX_SID={sid}");
@@ -75,13 +80,30 @@ async fn bridge_pipe_serve_for_other_user_probe() {
     let client = async move {
         let mut client = ClientOptions::new().open(&address).map_err(|error| format!("owner open: {error}"))?;
         client.write_all(format!("FOX-ACP-BRIDGE/1 {token}\n").as_bytes()).await.map_err(|error| error.to_string())?;
-        let mut answer = [0u8; 3];
-        client.read_exact(&mut answer).await.map_err(|error| error.to_string())?;
+        // Read the whole answer line (up to and excluding '\n'), byte by byte,
+        // never past the newline.
+        let mut answer = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            client.read_exact(&mut byte).await.map_err(|error| error.to_string())?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            answer.push(byte[0]);
+            if answer.len() > 64 * 1024 {
+                return Err("handshake answer has no newline within 64 KiB".to_owned());
+            }
+        }
         Ok::<_, String>(answer)
     };
     let (accepted, answer) = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(accept, client) }).await.expect("owner control within 10 s");
     let answer = answer.unwrap_or_else(|error| panic!("owner control failed: {error}"));
-    assert_eq!(&answer, b"OK\n");
+    let line = String::from_utf8(answer).expect("handshake answer is UTF-8");
+    let json = line.strip_prefix("OK ").unwrap_or_else(|| panic!("handshake answer must start with \"OK \", got {line:?}"));
+    let payload: serde_json::Value = serde_json::from_str(json).unwrap_or_else(|error| panic!("handshake answer after \"OK \" is not JSON ({error}): {json:?}"));
+    assert_eq!(payload["cwd"], serde_json::Value::String(probe_cwd), "handshake carries the backend cwd");
+    assert!(payload["env"].is_object(), "handshake carries the backend env object: {payload}");
+    assert_eq!(payload["env"]["FOX_PIPE_PROBE"], "owner-control");
     assert!(accepted.is_ok(), "owner handshake");
     println!("FOX_PIPE_CONTROL=owner-connected");
     std::io::stdout().flush().unwrap();
