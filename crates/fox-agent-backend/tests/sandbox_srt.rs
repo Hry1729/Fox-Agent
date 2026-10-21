@@ -1656,6 +1656,30 @@ mod external_real {
         let rt = ExternalRuntime::new(sink.clone(), HostLauncher::new(config), tokio::runtime::Handle::current());
         rt.start_turn(turn("ext-dshgw", "g1", "Reply with the single word: pong", AgentBackend::Deepseek, &project)).unwrap();
         let started = std::time::Instant::now();
+        if !deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
+            // Pinned dsh dials loopback directly: the sandboxed launch must be
+            // refused before anything starts, with the dedicated code.
+            let terminal = sink.terminal_within("g1", 60).await;
+            let elapsed = started.elapsed();
+            let hits = gateway.requests() - control_hits;
+            let info = rt.session_info("ext-dshgw");
+            eprintln!("MEASURE g1 refused after {elapsed:?}\nterminal {terminal}\ntypes {:?}", sink.types("g1"));
+            let _ = rt.close_conversation("ext-dshgw", "test done").await;
+            let _ = std::fs::remove_dir_all(&base);
+            assert_eq!(terminal["type"], "run.failed", "{terminal}");
+            assert_eq!(terminal["code"], fox_agent_backend::external_launch::LOOPBACK_REQUIRES_FULL_ACCESS, "{terminal}");
+            let message = terminal["message"].as_str().unwrap_or_default();
+            assert!(message.contains("本机网关在沙箱模式下不可达") && message.contains("完全访问") && message.contains("api.deepseek.com"), "{message}");
+            assert!(elapsed < Duration::from_secs(10), "refused before launch, not after a prompt: {elapsed:?}");
+            assert!(!sink.types("g1").iter().any(|kind| kind == "agent_backend.session"), "no backend session was opened");
+            assert!(info.and_then(|info| info.declaration).is_none(), "nothing was launched");
+            assert_eq!(hits, 0, "nothing reached the gateway");
+            return;
+        }
+        // Acceptance once dsh has an upstream "loopback through the proxy"
+        // switch (LOOPBACK_VIA_PROXY_SUPPORTED = true, switch enabled for the
+        // session): exactly the derived port is allowed and a request from
+        // dsh inside srt reaches the gateway.
         let terminal = sink.terminal_within("g1", 600).await;
         let info = rt.session_info("ext-dshgw");
         let declaration = info.as_ref().and_then(|info| info.declaration.clone());
@@ -1707,10 +1731,16 @@ async fn real_srt_external_runtime_dsh_session() {
     external_real::dsh_session().await;
 }
 
-/// DeepSeek through `ExternalRuntime` + `HostLauncher` inside real srt
-/// (Linux) with a loopback model gateway named by the private HOME's dsh
-/// patch (docs/sandbox.md 13.10): the Host must allow exactly that port, and
-/// a request from dsh must reach the gateway outside the sandbox.
+/// DeepSeek through `ExternalRuntime` + `HostLauncher` (Linux, sandboxed)
+/// with a loopback model gateway named by the private HOME's dsh patch
+/// (docs/sandbox.md 13.10 / 13.11). With the pinned dsh
+/// (`deepseek::LOOPBACK_VIA_PROXY_SUPPORTED = false`) the launch must be
+/// refused before anything starts: `run.failed` with
+/// `agent_backend_loopback_requires_full_access` and the Chinese hint, within
+/// seconds, no backend session, no request at the gateway. Once dsh has an
+/// upstream "loopback through the proxy" switch (flag `true`), the same test
+/// is the acceptance case: exactly that port allowed and a request from dsh
+/// inside srt reaching the gateway.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "real srt + dsh through ExternalRuntime; FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_DSH_BIN=<abs> ... -- --include-ignored"]
