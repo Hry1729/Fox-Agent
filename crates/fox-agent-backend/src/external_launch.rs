@@ -37,7 +37,7 @@ use crate::external::{ExternalLauncher, LaunchFailure, LaunchRequest, Launched};
 use crate::launch::LaunchSpec;
 use crate::port::AgentBackend;
 use crate::sandbox::{
-    effective_permission_mode, prepare_launch, preflight, resolve_allowed_domains, AuthorizedDir, HostOs, PermissionMode, PrivateHomes,
+    effective_permission_mode, prepare_full_access, prepare_launch, FullAccessPrivate, preflight, resolve_allowed_domains, AuthorizedDir, HostOs, PermissionMode, PrivateHomes,
     RealProbe, SandboxError, SandboxErrorCode, SandboxPolicy, SandboxSetup, SrtInstall, SrtLauncher, SETTING_PERMISSION_MODE,
 };
 use futures::future::BoxFuture;
@@ -416,7 +416,33 @@ impl HostLaunchConfig {
 /// gateway (e.g. Magpie on 127.0.0.1), refused before launch.
 pub const LOOPBACK_REQUIRES_FULL_ACCESS: &str = "agent_backend_loopback_requires_full_access";
 
+/// Remedy of [`LOOPBACK_REQUIRES_FULL_ACCESS`]. There is no full-access
+/// switch in the UI yet: the Host enables it with [`FULL_ACCESS_ENV`].
+pub const LOOPBACK_REFUSAL_REMEDY: &str = "需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com";
+
 impl HostLaunchConfig {
+    /// Full access: the private HOME and session temp root a sandboxed launch
+    /// of the same request would use. Linux / macOS:
+    /// `<fox data>/sandbox-homes/<project uuid>/<backend>` and
+    /// `<state>/sandbox-tmp`. Windows: the per-user private root
+    /// (`%ProgramData%\Fox\sandbox\<SID>\{homes,tmp}`), created and
+    /// verified exactly as for the sandbox (its base comes from "启用沙箱").
+    pub fn full_access_private(&self, request: &LaunchRequest) -> Result<FullAccessPrivate, LaunchFailure> {
+        let project_uuid = request.project_uuid.clone().unwrap_or_default();
+        let (homes_root, tmp_root) = if self.os == HostOs::Windows {
+            use crate::winacl::RealWindowsAcl;
+            use crate::winruntime::{known_srt_sids, prepare_windows_private_root, WindowsPrivateLayout};
+            let layout = WindowsPrivateLayout::for_current_user(&RealWindowsAcl)?;
+            let known = known_srt_sids(&self.state_root)?;
+            prepare_windows_private_root(&layout, &RealWindowsAcl, &RealWindowsAcl, &known)?;
+            (layout.homes_root(), layout.tmp_root())
+        } else {
+            (self.fox_data.join("sandbox-homes"), self.state_root.join("sandbox-tmp"))
+        };
+        let home = PrivateHomes::new(homes_root).home_for(&project_uuid, request.backend)?;
+        Ok(FullAccessPrivate { private_home: home.path, tmp_root })
+    }
+
     /// Root of the private HOMEs a sandboxed launch on this OS uses (Windows:
     /// the per-user private root; elsewhere `<fox data>/sandbox-homes`).
     /// Reads only; nothing is created.
@@ -453,7 +479,7 @@ impl HostLaunchConfig {
                 LOOPBACK_REQUIRES_FULL_ACCESS,
                 format!("本机网关在沙箱模式下不可达：DeepSeek 的 base URL 指向本机回环地址 {named}，dsh 对回环地址总是直连、不经沙箱代理"),
             )
-            .remedy("请切换到“完全访问”，或改用官方 api.deepseek.com")
+            .remedy(LOOPBACK_REFUSAL_REMEDY)
             .detail(serde_json::json!({
                 "reason": "dsh_proxy_bypasses_loopback",
                 "mode": mode.as_str(),
@@ -498,7 +524,14 @@ impl HostLauncher {
         // Windows sandboxed: private layout + srt registry + ancestor ACEs.
         let mut windows: Option<WindowsSandboxContext> = None;
         let prepared = match mode {
-            PermissionMode::FullAccess => prepare_launch(mode, spec, &request.session_key, SandboxSetup::Unavailable(SandboxError::new(SandboxErrorCode::SandboxUnavailable, "unused")), os)?,
+            // Full access lifts the isolation only: HOME (Windows
+            // USERPROFILE / APPDATA / LOCALAPPDATA), XDG_*, temp and the
+            // backend's own home still point at the private HOME of this
+            // project x backend, the one the sandbox uses.
+            PermissionMode::FullAccess => {
+                let private = config.full_access_private(&request)?;
+                prepare_full_access(spec, &request.session_key, &private, os)?
+            }
             PermissionMode::Sandboxed => {
                 let install = config.srt_install().ok_or_else(|| {
                     LaunchFailure::from(
@@ -797,6 +830,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Full access through the production launcher: the backend program runs
+    /// itself (no srt / node cli.js in front of it) and sees HOME, XDG_* and
+    /// TMPDIR in the private HOME of this project x backend, which is created
+    /// on the way. A mock `pi-acp` script records what it got under its HOME
+    /// and exits (the launch then fails initialize; only the env matters).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_launcher_full_access_runs_unwrapped_with_the_private_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-full-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut config = config(&root);
+        config.full_access = FullAccessSwitch::All;
+        let bin = root.join("runtime").join("backends").join("pi").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("pi-acp");
+        std::fs::write(&script, "#!/bin/sh\nprintf 'argv0=%s\\nHOME=%s\\nTMPDIR=%s\\nXDG_CONFIG_HOME=%s\\nPROXY=%s%s\\n' \"$0\" \"$HOME\" \"$TMPDIR\" \"$XDG_CONFIG_HOME\" \"$NODE_USE_ENV_PROXY\" \"$CLAUDE_CODE_TMPDIR\" > \"$HOME/fox-env.txt\"\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let request = request(AgentBackend::Pi, &root);
+        std::fs::create_dir_all(&request.project_root).unwrap();
+        assert_eq!(config.permission_mode(&request), PermissionMode::FullAccess);
+        let home = PrivateHomes::new(config.fox_data.join("sandbox-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Pi).unwrap().path;
+        assert!(!home.exists());
+        let _ = HostLauncher::new(config.clone()).launch(request.clone()).await;
+        let recorded = std::fs::read_to_string(home.join("fox-env.txt")).expect("the backend wrote under the private HOME");
+        let tmp = config.state_root.join("sandbox-tmp").join("s1");
+        assert!(recorded.contains(&format!("argv0={}\n", script.display())), "not wrapped: {recorded}");
+        assert!(recorded.contains(&format!("HOME={}\n", home.display())), "{recorded}");
+        assert!(recorded.contains(&format!("TMPDIR={}\n", tmp.display())), "{recorded}");
+        assert!(recorded.contains(&format!("XDG_CONFIG_HOME={}\n", home.join(".config").display())), "{recorded}");
+        assert!(recorded.contains("PROXY=\n"), "no srt-only variables: {recorded}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn sandbox_policy_keys_the_private_home_by_project_uuid_and_backend() {
         let root = std::env::temp_dir().join("fox-ext-launch-policy");
@@ -859,7 +926,8 @@ mod tests {
         let refusal = config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).expect("refused in the sandbox");
         assert_eq!(refusal.code, LOOPBACK_REQUIRES_FULL_ACCESS);
         assert!(refusal.message.contains("本机网关在沙箱模式下不可达") && refusal.message.contains("http://127.0.0.1:3425/anthropic"), "{}", refusal.message);
-        assert_eq!(refusal.remedy.as_deref(), Some("请切换到“完全访问”，或改用官方 api.deepseek.com"));
+        assert_eq!(refusal.remedy.as_deref(), Some("需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com"));
+        assert!(!refusal.remedy.as_deref().unwrap().contains("请切换到"));
         assert_eq!(refusal.detail["reason"], "dsh_proxy_bypasses_loopback");
         // Full access: not refused.
         assert!(config.loopback_refusal(&request, PermissionMode::FullAccess, homes.clone()).is_none());
