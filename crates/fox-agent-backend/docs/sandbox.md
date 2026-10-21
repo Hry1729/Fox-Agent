@@ -1030,3 +1030,57 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
     没有 `data` 字段，`message` 里也没有目标 URL、`ECONNREFUSED` 或 cause。dsh 自己的会话日志（私有 HOME 的 `.dsh/sessions/.../session.v4.jsonl.zstd`）里每次尝试也只有 `{"failure":{"message":"DeepSeek Messages transport failed","code":"TRANSPORT"}}`，同样没有底层原因。
   - 因此“stderr 为空时用 `error.data` 补充诊断”对这个场景没有内容可补，本批不加代码。Fox 现在把 ACP 错误按 `agent_client_protocol::Error` 的 `Display` 写进 `run.failed.message`（`message`，有 `data` 时追加 `: <data 的 pretty JSON>`），所以 dsh 这条错误在界面上就是 “prompt failed: Internal error: turn failed: DeepSeek Messages transport failed”。
   - 附带发现（未改，留作待办）：`Display` 会把 `data` 原样拼进 `run.failed.message`，这条路径**不经脱敏**。dsh 目前不带 `data`，其他后端（如 Codex、pi）若在 `data` 里放请求头或 key，会原样进入 message。以后要在这里接 `redact_diagnostic_tail`，或把 `data` 拆出来作为 `source: "rpc_error_data"` 的诊断。
+
+### 13.14 UX 批（①登录引导 + ②完全访问界面）：下一轮 Windows 复测清单（2026-10-21）
+
+在本批最终 HEAD 上跑。本批内容：
+
+- **① 登录引导**（`src/onboarding.rs`，`external_launch` 的 `credential_probe` / `import_credentials` / `private_home_path`）：探测私有 HOME 的登录状态，分三类：`ready`、`missing_credentials`、`loopback_requires_full_access`。只看文件名和 key 名，不读值。dsh 看 `.dsh/.env` 与 `cordis.patch.yml`，Codex 看 `.codex/auth.json` 或 `OPENAI_API_KEY`，pi 看 `.pi/agent/{auth,models,settings}.json`。
+  - 从真实 HOME 导入：按白名单复制，拒绝符号链接；`.env` 按 key 合并；文件 0600、目录 0700；可“套用到我所有项目”。Windows 在复制前后各跑一次 `prepare_windows_private_root`。审计只记名字。
+  - 桌面新增 6 个 Tauri 命令：`agent_backend_credentials`、`agent_backend_import_candidates`、`agent_backend_import_credentials`、`agent_backend_open_private_home`、`agent_backend_permission_status`、`agent_backend_revoke_full_access`。
+  - 前端：`AgentBackendCredentialCard`，缺登录和回环网关是两张不同的卡片。
+- **② 完全访问界面**（语义 A）：只能在新建会话时选择，和后端一起锁定；会话中只能撤销，不能再开启。
+  - 迁移 v96 新增两张表：`agent_backend_full_access_grants`（每个会话最多一条授权，随会话删除）和 `agent_backend_audit_log`。SQL 在 `host_routing::FULL_ACCESS_MIGRATION_SQL`。
+  - 设了 `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时，`decide_new_conversation_mode` 直接拒绝，返回 `agent_backend_full_access_forbidden`，不会静默降级。
+  - `LaunchRequest.full_access_granted`（界面授权）与 `FOX_EXTERNAL_FULL_ACCESS`（工程开关）取“或”，FORBIDDEN 优先于两者。
+  - 撤销：先删授权，再走 `RestartSandboxed`。本轮以 `agent_backend_full_access_revoked` 结束，不重放。
+  - 13.12 里写的“界面上没有开关”自本批起不再成立。
+
+**Linux 上已核对的定向测试数量**（本批 HEAD，`--features acp`；`--lib` 用的是过滤名）：
+
+| 命令 | Linux | Windows 预期 |
+|---|---|---|
+| `cargo test -p fox-agent-backend --features acp --lib -- onboarding` | 4 | 4 |
+| `cargo test -p fox-agent-backend --features acp --lib -- forbidden` | 4 | 4 |
+| `cargo test -p fox-agent-backend --features acp --lib -- new_conversation_mode` | 1 | 1 |
+| `cargo test -p fox-agent-backend --features acp --lib -- credential_probe` | 1 | 0（`external_launch::tests::credential_probe_and_import_use_the_launch_private_homes` 只在 Unix 编译） |
+| `cargo test -p fox-agent-backend --features acp --lib -- full_access` | 7 | 6（`host_launcher_full_access_runs_unwrapped_with_the_private_home` 只在 Unix 编译） |
+| `cargo test -p fox-agent-backend --features acp --test external_runtime revoking_full_access_restarts_in_the_sandbox_without_replay` | 1 | 1（需要 PATH 里有 `node`） |
+| `cargo test -p fox-agent-backend --features acp,sqlite-tests --test host_routing_sqlite` | 5（新增 `v96_full_access_grant_is_per_conversation_and_only_removable`） | 5 |
+| `cargo test -p fox-desktop --lib grant_is_persisted_per_conversation_and_only_removable` | 不能跑（Linux 沙箱没有 GTK/WebKit，桌面 crate 只做了 windows-gnu `cargo check --lib --tests`） | 1 |
+| `bun test tests/agent-backend-onboarding.test.ts`（在 `apps/desktop` 下） | 14 | 14 |
+
+**最小复测清单**（Windows，本批 HEAD）：
+
+1. **定向测试**：跑上表命令，数量与“Windows 预期”一致，并且全部通过。桌面那一条是这个用例第一次真正执行。
+2. **三个后端在当前 HEAD 上各跑一次真实对话**（会话先绑定项目）：
+   - Codex，沙箱模式：拿到回复，`run.completed`。
+   - pi，沙箱模式：拿到回复，`run.completed`。
+   - DeepSeek，**新建会话时选“完全访问”** + Magpie（私有 HOME 配置按 13.12“经 Magpie”示例，baseURL `http://127.0.0.1:3425/v1`）：拿到回复；本轮不设 `FOX_EXTERNAL_FULL_ACCESS` 环境变量，靠界面授权启动。
+3. **凭据卡片**：
+   - 三类状态都要看到：
+     - 已登录：不显示卡片。
+     - 缺登录：卡片有私有 HOME 路径、“打开文件夹”、需要的 key 名或文件名、模板、“从真实 HOME 导入…”。
+     - 沙箱 + 回环网关：卡片是“本机网关在沙箱模式下不可用”，建议新建会话选完全访问，或改用官方 `https://api.deepseek.com/anthropic`，没有导入按钮。
+   - “打开文件夹”能在资源管理器里打开 `%ProgramData%\Fox\sandbox\<SID>\homes\<项目 UUID>\<后端>`。
+   - “导入”：确认列表只显示文件名或 key 名（如 `DEEPSEEK_API_KEY（.dsh/.env 中的一行）`），任何地方都不显示值。复制后显示回执。
+   - “套用到我所有项目”：勾选后回执写“N 个项目的私有 HOME”，抽查另一个项目的私有 HOME 里也有这些文件。
+   - 导入后 ACL：用 `icacls` 看导入的文件和 `.dsh` / `.codex` / `.pi` 目录。结果应与 7.5 的私有目录 ACL、`verify_private_root` 校验的一致：只有当前用户、srt 沙箱用户（如需要）、SYSTEM、Administrators，没有 Users、Everyone 或 Authenticated Users 的读权限。复制后重新跑一次 `prepare_windows_private_root` 不报错。
+   - 审计：`agent_backend_audit_log` 里有一条 `agent_backend.credentials_imported`，`details_json` 只有名字，搜不到 key 的值。
+4. **新建会话时选完全访问**：
+   - 选择“完全访问”后先弹出风险确认，内容包括三点（不套 srt；不承诺目录边界；能读写当前用户能访问的任何文件）和“登录和配置仍放在 Fox 私有 HOME 里…”这一句。点“取消”会回到沙箱。
+   - 确认后创建会话，顶部 chip 显示“权限：完全访问（已锁定）”，会话中没有开启入口。
+   - Host 设 `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 后重启 Fox：完全访问选项变灰，带“（已禁止）”并显示原因。另外直接用 IPC 发 `externalPermissionMode: "full_access"`，应得到 `agent_backend_full_access_forbidden`，会话不会被创建。
+   - 会话中撤销：点“撤销完全访问”后先出现提示（取消本轮、结清审批、在沙箱中重新启动、不重放），确认后：正在跑的一轮以 `agent_backend_full_access_revoked` 结束，chip 变成“权限：沙箱（已锁定）”，下一句在沙箱里启动（Magpie 回环配置此时应以 `agent_backend_loopback_requires_full_access` 拒绝）。审计里有一条 `agent_backend.full_access_revoked`。
+5. **迁移 v96 前自动备份**：用 v95 的旧数据库启动本批构建，迁移前在 `<data>/backups/` 生成一份 v95 备份（`VACUUM INTO`，机制同 13.7）。迁移后 `schema_migrations` 最大值为 96，两张新表存在，旧会话和旧 run 没有变化。
+6. **一次全量测试**：`cargo test -p fox-agent-backend --features acp` 加桌面全量，对照 64 项基线，不能有新增失败。Linux 上本批后端全量是 219 通过 / 0 失败 / 6 忽略。
