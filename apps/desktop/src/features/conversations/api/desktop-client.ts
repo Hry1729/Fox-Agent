@@ -4,6 +4,7 @@ import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
 import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
 import type { AgentBackendCapabilities, AgentBackendId, AgentBackendStatus } from '../model/agent-backend'
+import type { AgentBackendPermissionStatus, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
 import type {
   AgentRecord,
   ApiResponse,
@@ -678,7 +679,9 @@ export const desktopClient = {
   deleteProject: (projectId: string) => command<boolean>('project_delete', { projectId }),
   // `agentBackend` is frozen at creation (absent = fox); the Host refuses a
   // non-Fox value while FOX_EXTERNAL_BACKENDS keeps it off.
-  createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode']; agentBackend?: AgentBackendId }) =>
+  // `externalPermissionMode` (UX batch ②): external backends only, chosen once
+  // and locked; `full_access` is refused when the Host forbids it.
+  createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode']; agentBackend?: AgentBackendId; externalPermissionMode?: ExternalPermissionMode }) =>
     command<ConversationSummary>('conversation_create', request),
   loadConversation: async (conversationId: string) => {
     const detail = await command<ConversationDetail>('conversation_load', { conversationId })
@@ -751,6 +754,23 @@ export const desktopClient = {
   /** Effective capability dimensions of an external backend (live after the first launch). */
   agentBackendCapabilities: (backend: AgentBackendId, conversationId?: string | null) =>
     command<AgentBackendCapabilities>('agent_backend_capabilities', conversationId ? { backend, conversationId } : { backend }),
+  /** UX batch ①: login probe of the conversation's private HOME (names only). */
+  agentBackendCredentials: (conversationId: string) =>
+    command<CredentialProbe>('agent_backend_credentials', { conversationId }),
+  /** Whitelisted login files / key names in the real HOME (no values). */
+  agentBackendImportCandidates: (conversationId: string) =>
+    command<ImportItem[]>('agent_backend_import_candidates', { conversationId }),
+  /** Copy the confirmed items into the private HOME (or every project's). */
+  agentBackendImportCredentials: (conversationId: string, selected: string[], allProjects: boolean) =>
+    command<ImportReport>('agent_backend_import_credentials', { conversationId, selected, allProjects }),
+  agentBackendOpenPrivateHome: (conversationId: string) =>
+    command<string>('agent_backend_open_private_home', { conversationId }),
+  /** UX batch ②: permission mode / lock / FORBIDDEN. */
+  agentBackendPermissionStatus: (conversationId?: string | null) =>
+    command<AgentBackendPermissionStatus>('agent_backend_permission_status', conversationId ? { conversationId } : {}),
+  /** Revoke full access mid-session (the backend restarts in the sandbox). */
+  agentBackendRevokeFullAccess: (conversationId: string) =>
+    command<{ outcome: string; stopConfirmed: boolean }>('agent_backend_revoke_full_access', { conversationId }),
   // Durably accept a supplementary request for the conversation's active
   // authoritative Run. Re-submitting an existing messageId is idempotent.
   // `lane: 'current'` delivers at the Run's next dispatch boundary;
