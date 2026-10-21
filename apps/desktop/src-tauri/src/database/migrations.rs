@@ -7285,6 +7285,12 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // touched. The SQL text is owned by `fox_agent_backend::host_routing` so it
     // is exercised against a real SQLite in that crate's tests.
     apply_migration(&transaction, AGENT_BACKEND_SCHEMA_VERSION, MIGRATION_95, now)?;
+    // v96 (UX batch ①②): per-conversation full-access grant chosen at
+    // creation + external-backend audit log. Additive (two new tables, one
+    // index); no existing row is read or rewritten. The pre-migration
+    // backup (migration_backup.rs) runs before this like for every version
+    // bump. SQL owned by `fox_agent_backend::host_routing`.
+    apply_migration(&transaction, FULL_ACCESS_SCHEMA_VERSION, MIGRATION_96, now)?;
     finish_transaction(transaction)
 }
 
@@ -15324,6 +15330,8 @@ const AGENT_BACKEND_SCHEMA_VERSION: i64 =
     fox_agent_backend::host_routing::AGENT_BACKEND_SCHEMA_VERSION;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= AGENT_BACKEND_SCHEMA_VERSION);
 const MIGRATION_95: &str = fox_agent_backend::host_routing::AGENT_BACKEND_MIGRATION_SQL;
+const MIGRATION_96: &str = fox_agent_backend::host_routing::FULL_ACCESS_MIGRATION_SQL;
+const FULL_ACCESS_SCHEMA_VERSION: i64 = fox_agent_backend::host_routing::FULL_ACCESS_SCHEMA_VERSION;
 
 const MIGRATION_94: &str = r#"
 ALTER TABLE artifacts ADD COLUMN turn_call_id TEXT;
@@ -15452,8 +15460,9 @@ mod delivery_acceptance_migration_tests {
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
             .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
-        // v95 (agent_backend) is the only migration after v94.
-        assert_eq!(DATABASE_SCHEMA_VERSION, 95);
+        // v95 (agent_backend) and v96 (full-access grants + audit log) are the
+        // only migrations after v94.
+        assert_eq!(DATABASE_SCHEMA_VERSION, 96);
 
         // The old rows are untouched.
         let title: String = connection
