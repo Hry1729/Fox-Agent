@@ -12,7 +12,9 @@ test('final file references select tool records without granting publication or 
   const { prompt } = composeFoxPrompt({ systemPrompt: 'Fox', context: { permissionMode: 'read_only' } })
   assert.match(prompt, /\[filename\]\(#fox-artifact=ARTIFACT_ID\)/)
   assert.match(prompt, /exact artifact id returned by a successful tool result in this run/)
-  assert.match(prompt, /do not publish files, grant write permission, satisfy delivery gates, or imply verification/)
+  assert.match(prompt, /do not publish files, grant write permission, declare deliverables, or imply verification/)
+  assert.match(prompt, /Declare the final files with present_files/)
+  assert.doesNotMatch(prompt, /delivery gates/)
 })
 
 test('uses the Host frozen delivery targets verbatim for prompt placement', () => {
