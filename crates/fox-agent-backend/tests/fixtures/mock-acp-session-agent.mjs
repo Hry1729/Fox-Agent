@@ -13,6 +13,9 @@
 //                  a CJK line) to stderr, then answers the
 //                  prompt with a JSON-RPC error (process stays alive)
 //   stderr-crash -> writes secret-bearing lines to stderr, then exits 4
+//   data-fail   -> answers the prompt with a JSON-RPC error whose `data`
+//                  carries keys and a Bearer token; writes NOTHING to stderr
+//   data-stderr-fail -> one stderr line, then the same error with `data`
 // session/load replays one user and one agent chunk ("replayed-old") before
 // answering, as the ACP spec describes. A session id containing "longreplay"
 // replays a long history (text, thoughts, tool calls) and sends more old
@@ -102,6 +105,16 @@ rl.on('line', line => {
         prompts.delete(sessionId)
         setTimeout(() => send({ id: msg.id, error: { code: -32603, message: 'Internal error: DeepSeek Messages transport failed' } }), 150)
       }
+    } else if (prompt === 'data-fail' || prompt === 'data-stderr-fail') {
+      if (prompt === 'data-stderr-fail') process.stderr.write('mock: upstream said 401 (stderr line)\n')
+      prompts.delete(sessionId)
+      const data = {
+        request: { url: 'https://api.example.test/v1/messages', headers: { authorization: 'Bearer mock-data-bearer-0001', 'x-api-key': 'mock-data-header-key' } },
+        env: 'OPENAI_API_KEY=sk-mockdata-abcdef0123456789',
+        apiKey: 'mock-data-apikey-value',
+        hint: 'upstream rejected the credential',
+      }
+      setTimeout(() => send({ id: msg.id, error: { code: -32000, message: 'Authentication required', data } }), 100)
     } else if (prompt === 'maxtokens') {
       text(sessionId, 'partial')
       finish(sessionId, 'max_tokens')
