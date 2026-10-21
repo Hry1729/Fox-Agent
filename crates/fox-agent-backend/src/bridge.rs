@@ -13,9 +13,10 @@
 //! So ACP runs over a one-shot local endpoint instead: Fox listens first, srt
 //! starts `node bridge.mjs -- <backend>` inside the sandbox, the bridge
 //! connects back, sends `FOX-ACP-BRIDGE/1 <token>\n`, Fox compares the token
-//! in constant time and answers `OK\n` (or `DENIED\n` and drops the
-//! connection), and only then does the bridge start the backend and relay
-//! bytes both ways.
+//! in constant time and answers `OK {"cwd":..,"env":{..}}\n` (one line of
+//! compact JSON; see [`crate::launch::BridgeEndpoint::handshake_answer`]) or
+//! `DENIED\n` and drops the connection, and only then does the bridge start
+//! the backend (in that cwd, with that env) and relay bytes both ways.
 //!
 //! * Windows: named pipe `\\.\pipe\fox-acp-<128-bit hex>`, protected DACL
 //!   granting only the current user (full) and the recorded srt sandbox SID
