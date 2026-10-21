@@ -1,4 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import {
+  ERROR_DIAGNOSTIC_CLASS,
+  ERROR_DIAGNOSTIC_MAX_HEIGHT,
+  ERROR_DIAGNOSTIC_STYLE,
+} from '../src/components/assistant-ui/elements/error-diagnostic'
 import {
   deriveRunCancellations,
   deriveRunFailures,
@@ -158,7 +165,7 @@ describe('deriveRunFailures', () => {
 })
 
 describe('run failure stderr diagnostic', () => {
-  const tail = 'mock: DEEPSEEK_API_KEY=[redacted]\nmock: Authorization: Bearer [redacted]\nmock: Error: Connection error (last line)'
+  const tail = 'mock: DEEPSEEK_API_KEY=<redacted>\nmock: request headers {"authorization":"Bearer <redacted>","x-api-key":"<redacted>"}\nmock: Authorization: Bearer <redacted>\nmock: Error: Connection error (last line)'
 
   test('a failed run event carries the redacted stderr tail into the failure', () => {
     const failures = deriveRunFailures({
@@ -211,5 +218,41 @@ describe('run failure stderr diagnostic', () => {
     expect(failure).toEqual({ kind: 'failed', code: 'kernel.x', message: 'boom' })
     expect('stderrTail' in failure).toBe(false)
     expect(runFailureDetailText(failure)).toBe('kernel.x: boom')
+  })
+})
+
+describe('error detail rendering of long stderr tails', () => {
+  const longLine = 'mock: long ' + Array.from({ length: 150 }, (_, i) => `/segment-${String(i).padStart(4, '0')}`).join('') + ' end-of-long-line'
+  const cjkLine = 'mock: 错误：无法连接本机网关（127.0.0.1:3425），请检查 Magpie 是否在运行；路径 C:\\Users\\张三\\.dsh'
+  const src = (path: string) => readFileSync(join(import.meta.dir, '..', path), 'utf8')
+
+  test('the detail text keeps a ~2000-byte line and a CJK line whole', () => {
+    const text = runFailureDetailText({ code: 'agent_backend_prompt_failed', message: 'x', stderrTail: `${longLine}\n${cjkLine}`, stderrTailSource: 'prompt_failed' })
+    expect(longLine.length).toBeGreaterThan(1900)
+    expect(text.split('\n')).toContain(longLine)
+    expect(text.split('\n')).toContain(cjkLine)
+    expect(text).not.toContain('[redacted]')
+  })
+
+  test('the diagnostic block wraps anywhere and scrolls past a maximum height', () => {
+    expect(ERROR_DIAGNOSTIC_STYLE.whiteSpace).toBe('pre-wrap')
+    expect(ERROR_DIAGNOSTIC_STYLE.overflowWrap).toBe('anywhere')
+    expect(ERROR_DIAGNOSTIC_STYLE.maxHeight).toBe(ERROR_DIAGNOSTIC_MAX_HEIGHT)
+    expect(ERROR_DIAGNOSTIC_STYLE.overflowY).toBe('auto')
+    const css = src('src/components/assistant-ui/elements/fox-elements.css')
+    const rule = css.split('\n').find((line) => line.includes(`.${ERROR_DIAGNOSTIC_CLASS}`)) ?? ''
+    for (const declaration of ['white-space: pre-wrap', 'overflow-wrap: anywhere', `max-height: ${ERROR_DIAGNOSTIC_MAX_HEIGHT}`, 'overflow-y: auto']) {
+      expect(rule).toContain(declaration)
+    }
+  })
+
+  test('timeline, thread error card and assistant message all render the tail through the wrapping block', () => {
+    const errorState = src('src/components/assistant-ui/upstream/elements/error-state.tsx')
+    expect(errorState).toContain('<pre className={ERROR_DIAGNOSTIC_CLASS} style={ERROR_DIAGNOSTIC_STYLE}')
+    expect(errorState.match(/<pre\b/g)?.length).toBe(1)
+    expect(src('src/features/chat/demo/fox-demo-prompts.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{diagnostic \|\| presentation\.detail\}/)
+    expect(src('src/features/chat/thread/parts/fox-error.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{failure\.stderrTail \? runFailureDetailText\(failure\)/)
+    expect(src('src/features/chat/thread/fox-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{foxMessage\.failure\.stderrTail \? runFailureDetailText/)
+    expect(src('src/features/chat/timeline/fox-runtime-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{failureReason\.stderrTail \? runFailureDetailText/)
   })
 })
