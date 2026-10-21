@@ -177,14 +177,19 @@ pub const FAILURE_TAIL_BYTES: usize = 4 * 1024;
 
 type Tail = Arc<Mutex<std::collections::VecDeque<String>>>;
 
-/// Keep the last bytes of a stream for diagnostics, redacted line by line.
+/// Keep the last bytes of a stream for diagnostics, split into lines. NOT
+/// redacted here: a text is redacted exactly once, where it leaves the
+/// process ([`InitializeFailure::attach_tails`],
+/// [`crate::external::stderr_diagnostic`], [`AcpConnection::stderr_tail`]);
+/// redacting at every stage left `[redacted]]]` and ate JSON braces (5f2f2d8
+/// re-test).
 fn collect_tail<R: tokio::io::AsyncRead + Unpin + Send + 'static>(stream: R, tail: Tail) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use tokio::io::AsyncBufReadExt;
         let mut lines = tokio::io::BufReader::new(stream).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Ok(mut tail) = tail.lock() {
-                tail.push_back(redact_line(&line));
+                tail.push_back(line);
                 while tail.iter().map(String::len).sum::<usize>() > STDERR_TAIL_BYTES {
                     tail.pop_front();
                 }
@@ -320,7 +325,11 @@ impl InitializeFailure {
         Self::new(code, error.message).stage("bridge_not_connected")
     }
 
+    /// `stderr` / `stdout` arrive unredacted; this is where they are redacted
+    /// (once) for the report.
     fn attach_tails(&mut self, stderr: &str, stdout: &str) {
+        let stderr = &redact_text(stderr);
+        let stdout = &redact_text(stdout);
         let (sandbox, backend): (Vec<&str>, Vec<&str>) = stderr.lines().partition(|line| is_sandbox_stderr_line(line));
         self.stderr_tail = limit_tail(stderr, FAILURE_TAIL_BYTES);
         self.srt_stderr_tail = limit_tail(&sandbox.join("\n"), FAILURE_TAIL_BYTES);
@@ -355,7 +364,7 @@ impl std::error::Error for InitializeFailure {}
 /// after a sensitive header name that ends the word (`Authorization: Bearer
 /// <x>`, `x-api-key: <x>`) and after `Bearer` / `Basic`;
 /// long opaque strings (the bridge token included); and the user-info part of
-/// URLs (`http://user:pass@host` -> `http://[redacted]@host`, the srt proxy
+/// URLs (`http://user:pass@host` -> `http://<redacted>@host`, the srt proxy
 /// credentials). Paths, user names in paths included, are kept.
 pub(crate) fn redact_line(line: &str) -> String {
     let mut out: Vec<String> = Vec::new();
@@ -370,7 +379,11 @@ pub(crate) fn redact_line(line: &str) -> String {
                 out.push(word.to_owned());
                 mask_next = 1;
             } else {
-                out.push(REDACTED.to_owned());
+                let (masked, dangling) = mask_word(word);
+                if dangling {
+                    mask_next = 1;
+                }
+                out.push(masked);
             }
             continue;
         }
@@ -393,7 +406,30 @@ pub(crate) fn redact_line(line: &str) -> String {
     out.join(" ")
 }
 
-const REDACTED: &str = "[redacted]";
+/// The mask. Chosen so a second pass finds nothing in it: no `[` `]` (a
+/// value stops at `]`, so `KEY=[redacted]` grew a `]` per pass), no quote,
+/// comma or brace, not an auth scheme, shorter than the opaque-string rule.
+/// [`redact_line`] is idempotent: `redact(redact(x)) == redact(x)`.
+pub const REDACTED: &str = "<redacted>";
+
+/// Mask the credential in one word that follows `Bearer` / a header name.
+/// The credential runs from after any leading quotes / brackets to the first
+/// JSON / quoting boundary (`"` `'` `,` `}` `]` `)` `;`); everything after it
+/// is kept and redacted like any other text (so `zzz"}` -> `<redacted>"}` and
+/// `v","x-api-key":"k"}` -> `<redacted>","x-api-key":"<redacted>"}`). An
+/// already masked credential is left alone. Returns the word and whether it
+/// ends with a sensitive name whose value is the next word.
+fn mask_word(word: &str) -> (String, bool) {
+    let is_lead = |c: char| matches!(c, '"' | '\'' | '(' | '[' | '{');
+    let is_boundary = |c: char| matches!(c, '"' | '\'' | ',' | '}' | ']' | ')' | ';');
+    let core_start = word.char_indices().find(|(_, c)| !is_lead(*c)).map_or(word.len(), |(i, _)| i);
+    let core_end = word[core_start..].char_indices().find(|(_, c)| is_boundary(*c)).map_or(word.len(), |(i, _)| core_start + i);
+    let core = &word[core_start..core_end];
+    let (rest, dangling) = redact_assignments(&word[core_end..]);
+    let rest = redact_sk_tokens(&redact_url_userinfo(&rest));
+    let core = if core.is_empty() { "" } else { REDACTED };
+    (format!("{}{core}{rest}", &word[..core_start]), dangling)
+}
 
 fn is_auth_scheme(word: &str) -> bool {
     ["bearer", "basic"].iter().any(|scheme| word.eq_ignore_ascii_case(scheme))
@@ -454,6 +490,10 @@ fn redact_assignments(word: &str) -> (String, bool) {
                 let mut value_end = value_start;
                 while value_end < bytes.len() && !matches!(bytes[value_end], b'"' | b'\'' | b',' | b'}' | b')' | b'&' | b';' | b']') {
                     value_end += 1;
+                }
+                if &word[value_start..value_end] == REDACTED {
+                    i = value_end;
+                    continue;
                 }
                 if value_end == value_start {
                     if value_end >= bytes.len() {
@@ -517,11 +557,20 @@ fn redact_sk_tokens(word: &str) -> String {
 /// its last [`FAILURE_TAIL_BYTES`]. Used before a stderr tail is persisted in
 /// a run's terminal event.
 pub fn redact_diagnostic_tail(text: &str) -> String {
-    let redacted = text.lines().map(redact_line).collect::<Vec<_>>().join("\n");
-    limit_tail(&redacted, FAILURE_TAIL_BYTES)
+    limit_tail(&redact_text(text), FAILURE_TAIL_BYTES)
 }
 
-/// `scheme://user:pass@host...` -> `scheme://[redacted]@host...` (every URL
+/// The last [`FAILURE_TAIL_BYTES`] of `text`, cut at a line boundary.
+pub fn limit_failure_tail(text: &str) -> String {
+    limit_tail(text, FAILURE_TAIL_BYTES)
+}
+
+/// [`redact_line`] on every line of `text`.
+pub fn redact_text(text: &str) -> String {
+    text.lines().map(redact_line).collect::<Vec<_>>().join("\n")
+}
+
+/// `scheme://user:pass@host...` -> `scheme://<redacted>@host...` (every URL
 /// in the word).
 fn redact_url_userinfo(word: &str) -> String {
     let mut out = String::with_capacity(word.len());
@@ -533,7 +582,7 @@ fn redact_url_userinfo(word: &str) -> String {
         let authority = &tail[..authority_end];
         match authority.rfind('@') {
             Some(at) => {
-                out.push_str("[redacted]");
+                out.push_str(REDACTED);
                 out.push_str(&authority[at..]);
             }
             None => out.push_str(authority),
@@ -1347,27 +1396,27 @@ impl AcpConnection {
         self.pending.lock().map(|registry| registry.stopping).unwrap_or(true)
     }
 
-    /// The stderr tail as persisted in a failed run's diagnostic: redacted
-    /// again ([`redact_diagnostic_tail`]) and at most [`FAILURE_TAIL_BYTES`].
+    /// The stderr tail for a failed run's diagnostic, UNREDACTED (lines
+    /// only, at most the ring buffer). [`crate::external::stderr_diagnostic`]
+    /// redacts it once and cuts it to [`FAILURE_TAIL_BYTES`] when it is
+    /// written into `run.failed`; never persist this text any other way.
     pub fn diagnostic_stderr_tail(&self) -> String {
-        redact_diagnostic_tail(&tail_text(&self.stderr_tail))
+        tail_text(&self.stderr_tail)
     }
 
     /// [`Self::close_with_report`], then the diagnostic stderr tail as it
     /// stands after the process ended (what it wrote while dying included).
+    /// Unredacted, like [`Self::diagnostic_stderr_tail`].
     pub async fn close_with_report_and_tail(self) -> (TerminateReport, String) {
         let tail = Arc::clone(&self.stderr_tail);
         let report = self.close_with_report().await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        (report, redact_diagnostic_tail(&tail_text(&tail)))
+        (report, tail_text(&tail))
     }
 
     /// Last lines of the backend's stderr, secret-shaped tokens masked.
     pub fn stderr_tail(&self) -> String {
-        self.stderr_tail
-            .lock()
-            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
-            .unwrap_or_default()
+        redact_text(&tail_text(&self.stderr_tail))
     }
 
     /// Terminate the backend process tree: SIGTERM to the group, a grace
@@ -1540,35 +1589,83 @@ mod tests {
     fn redaction_masks_proxy_credentials_and_keeps_paths() {
         let line = redact_line(r"HTTPS_PROXY=http://srt:abc123@127.0.0.1:60080 failed at C:\Users\张三\x.js fox-acp-bridge: 0123456789abcdef0123456789abcdef");
         assert!(!line.contains("abc123"), "{line}");
-        assert!(line.contains("http://[redacted]@127.0.0.1:60080") || line.contains("[redacted]"), "{line}");
+        assert!(line.contains("http://<redacted>@127.0.0.1:60080") || line.contains("<redacted>"), "{line}");
         assert!(line.contains(r"C:\Users\张三\x.js"), "user-name paths kept: {line}");
         assert!(!line.contains("0123456789abcdef0123456789abcdef"));
-        assert_eq!(redact_url_userinfo("see https://u:p@h.example/x?y and http://plain/z"), "see https://[redacted]@h.example/x?y and http://plain/z");
+        assert_eq!(redact_url_userinfo("see https://u:p@h.example/x?y and http://plain/z"), "see https://<redacted>@h.example/x?y and http://plain/z");
     }
 
     #[test]
     fn redaction_masks_headers_assignments_and_json_values() {
         let cases = [
-            ("DEEPSEEK_API_KEY=sk-live-0123456789 started", "DEEPSEEK_API_KEY=[redacted] started"),
-            ("MAGPIE_API_KEY=plainvalue", "MAGPIE_API_KEY=[redacted]"),
-            ("Authorization: Bearer abc.def.ghi next", "Authorization: Bearer [redacted] next"),
-            ("authorization=Basic dXNlcjpwYXNz", "authorization=Basic [redacted]"),
-            ("x-api-key: k-123 ok", "x-api-key: [redacted] ok"),
-            ("token: t0ps3cret ok", "token: [redacted] ok"),
-            (r#"{"api_key":"abc123","model":"deepseek-chat"}"#, r#"{"api_key":"[redacted]","model":"deepseek-chat"}"#),
-            (r#"{"authorization":"Bearer zzz"}"#, r#"{"authorization":"Bearer [redacted]"#),
-            ("request failed key=sk-abcdef123456&x=1", "request failed key=[redacted]&x=1"),
-            ("got \"sk-proj-abcdefgh\" back", "got \"[redacted]\" back"),
+            ("DEEPSEEK_API_KEY=sk-live-0123456789 started", "DEEPSEEK_API_KEY=<redacted> started"),
+            ("MAGPIE_API_KEY=plainvalue", "MAGPIE_API_KEY=<redacted>"),
+            ("Authorization: Bearer abc.def.ghi next", "Authorization: Bearer <redacted> next"),
+            ("authorization=Basic dXNlcjpwYXNz", "authorization=Basic <redacted>"),
+            ("x-api-key: k-123 ok", "x-api-key: <redacted> ok"),
+            ("token: t0ps3cret ok", "token: <redacted> ok"),
+            (r#"{"api_key":"abc123","model":"deepseek-chat"}"#, r#"{"api_key":"<redacted>","model":"deepseek-chat"}"#),
+            (r#"{"authorization":"Bearer zzz"}"#, r#"{"authorization":"Bearer <redacted>"}"#),
+            ("request failed key=sk-abcdef123456&x=1", "request failed key=<redacted>&x=1"),
+            ("got \"sk-proj-abcdefgh\" back", "got \"<redacted>\" back"),
             ("task-runner risk-free sk-x ok", "task-runner risk-free sk-x ok"),
             (r"open C:\Users\张三\.dsh\cordis.patch.yml https://api.deepseek.com/v1", r"open C:\Users\张三\.dsh\cordis.patch.yml https://api.deepseek.com/v1"),
         ];
         for (input, expected) in cases {
             let got = redact_line(input);
-            assert!(got.starts_with(expected), "{input} -> {got}");
+            assert_eq!(got, expected, "{input}");
         }
         let tail = redact_diagnostic_tail(&format!("{}\nError: 401 DEEPSEEK_API_KEY=sk-zzzzzzzz", "x ".repeat(5000)));
         assert!(tail.len() <= FAILURE_TAIL_BYTES);
-        assert!(tail.ends_with("Error: 401 DEEPSEEK_API_KEY=[redacted]"), "{tail}");
+        assert!(tail.ends_with("Error: 401 DEEPSEEK_API_KEY=<redacted>"), "{tail}");
+    }
+
+    /// 5f2f2d8 re-test: the same text redacted at three stages gave
+    /// `DEEPSEEK_API_KEY=[redacted]]]` and lost the closing `}` of
+    /// `{"authorization":"Bearer [redacted]`. Redaction is idempotent and keeps
+    /// JSON structure.
+    #[test]
+    fn redaction_is_idempotent_and_keeps_json_structure() {
+        let inputs = [
+            "Error: 401 DEEPSEEK_API_KEY=sk-live-0123456789abcdef",
+            "MAGPIE_API_KEY=plainvalue, next",
+            r#"request headers {"authorization":"Bearer zzz.yyy.xxx"}"#,
+            r#"{"headers":{"Authorization":"Bearer abc"},"api_key":"k1","model":"deepseek-chat"}"#,
+            r#"{"x-api-key":"abc","token":"t"} [{"password":"p"}]"#,
+            "Authorization: Bearer abc.def.ghi next",
+            "x-api-key: k-123, ok",
+            "token: t0ps3cret ok",
+            "HTTPS_PROXY=http://srt:abc123@127.0.0.1:60080 failed",
+            "got \"sk-proj-abcdefgh\" back key=sk-abcdef123456&x=1",
+            "opaque 0123456789abcdef0123456789abcdef0123 done",
+            "already DEEPSEEK_API_KEY=<redacted> and Bearer <redacted> and http://<redacted>@h",
+            "长行 中文 密钥 DEEPSEEK_API_KEY=sk-中文-not-a-key-0123456789 结束",
+        ];
+        for input in inputs {
+            let once = redact_line(input);
+            let twice = redact_line(&once);
+            let thrice = redact_line(&twice);
+            assert_eq!(twice, once, "second pass changed {input:?}");
+            assert_eq!(thrice, once, "third pass changed {input:?}");
+            assert!(!once.contains("]]") && !once.contains("[redacted]"), "{once}");
+        }
+        assert_eq!(redact_line(r#"request headers {"authorization":"Bearer zzz.yyy.xxx"}"#), r#"request headers {"authorization":"Bearer <redacted>"}"#);
+        assert_eq!(
+            redact_line(r#"{"headers":{"Authorization":"Bearer abc"},"api_key":"k1","model":"deepseek-chat"}"#),
+            r#"{"headers":{"Authorization":"Bearer <redacted>"},"api_key":"<redacted>","model":"deepseek-chat"}"#
+        );
+        assert_eq!(redact_line(r#"{"x-api-key":"abc","token":"t"} [{"password":"p"}]"#), r#"{"x-api-key":"<redacted>","token":"<redacted>"} [{"password":"<redacted>"}]"#);
+        assert_eq!(redact_line("x-api-key: k-123, ok"), "x-api-key: <redacted>, ok");
+        // Braces / brackets / quotes balance after redaction, every pass.
+        let json = r#"{"error":{"message":"bad key","headers":{"authorization":"Bearer sk-live-0123456789"}},"DEEPSEEK_API_KEY":"sk-zzzzzzzzzz"}"#;
+        let once = redact_line(json);
+        let count = |text: &str, c: char| text.chars().filter(|x| *x == c).count();
+        for c in ['{', '}', '"', '[', ']'] {
+            assert_eq!(count(&once, c), count(json, c), "{c} in {once}");
+        }
+        assert!(serde_json::from_str::<serde_json::Value>(&once).is_ok(), "still JSON: {once}");
+        let text = "a DEEPSEEK_API_KEY=sk-1234567890\nb {\"authorization\":\"Bearer q\"}";
+        assert_eq!(redact_diagnostic_tail(&redact_diagnostic_tail(&redact_diagnostic_tail(text))), redact_diagnostic_tail(text));
     }
 
     #[test]
