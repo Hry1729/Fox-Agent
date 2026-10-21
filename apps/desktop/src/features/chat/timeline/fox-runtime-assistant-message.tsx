@@ -1,4 +1,4 @@
-import { type RunFailure } from '../../conversations/model/run-failure'
+import { runFailureDetailText, type RunFailure } from '../../conversations/model/run-failure'
 import { useProcessDisplayMode } from '../process-display-mode'
 import { runPhaseTiming, runPhaseTitle } from '../run-phase'
 import { activeModelWaiting, compactionFailurePresentation, modelWaitingTitle } from '../run-status-facts'
@@ -178,7 +178,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
             {presentation.label}
           </div>)}
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
-          {failureReason && !hideFooter && <ErrorPrompt error={failureReason.message} onRetry={onRetry} />}
+          {failureReason && !hideFooter && <ErrorPrompt error={failureReason.message} diagnostic={failureReason.stderrTail ? runFailureDetailText(failureReason) : undefined} onRetry={onRetry} />}
           {cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
         </MessageContent>
