@@ -88,6 +88,11 @@ pub struct LaunchRequest {
     pub project_root: PathBuf,
     /// Per-launch sandbox session id (`[A-Za-z0-9_-]{1,128}`).
     pub session_key: String,
+    /// Full access granted to this conversation by the user when it was
+    /// created (persisted per conversation, UX batch ②). OR-ed with the
+    /// engineering switch `FOX_EXTERNAL_FULL_ACCESS`; both lose to
+    /// `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`.
+    pub full_access_granted: bool,
 }
 
 /// An initialized backend handed back by the launcher.
@@ -306,6 +311,20 @@ impl StartError {
     }
 }
 
+/// Result of [`ExternalRuntime::revoke_full_access`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    /// No live process for the conversation: the next launch reads the
+    /// (already withdrawn) grant and starts in the sandbox.
+    NotRunning,
+    /// The live process already runs sandboxed.
+    Unchanged,
+    /// The full-access process was stopped; the next turn starts in the
+    /// sandbox. `confirmed: false`: the stop was not confirmed and no
+    /// relaunch will happen.
+    RestartSandboxed { confirmed: bool },
+}
+
 /// Result of [`ExternalRuntime::cancel`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelOutcome {
@@ -396,6 +415,9 @@ struct SessionState {
     turn: Option<Turn>,
     closing: bool,
     on_closed: Option<Box<dyn FnOnce() + Send>>,
+    /// A full-access process stopped for revocation was not confirmed gone:
+    /// no relaunch (in the sandbox or otherwise) until Fox restarts.
+    stop_unconfirmed: bool,
 }
 
 struct Session {
@@ -598,6 +620,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     /// as needed.
     async fn ensure_ready(&self, session: &Arc<Session>, request: &TurnRequest) -> Result<(), LaunchFailure> {
         let desired = self.inner.launcher.desired_mode(&request.launch);
+        if lock(&session.state).stop_unconfirmed {
+            return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "撤销完全访问时，原进程未确认全部结束，不会在沙箱中重建")
+                .remedy(STOP_UNCONFIRMED_REMEDY));
+        }
         let (live, running_mode) = {
             let state = lock(&session.state);
             (state.connection.is_some() && state.native_session_open, state.mode)
@@ -1038,6 +1064,70 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
         audit_stop(session, reason, &report);
         Some(report)
+    }
+
+    /// Revoke full access mid-session (UX batch ②, semantics A): the Host has
+    /// already withdrawn the grant, so [`ExternalLauncher::desired_mode`]
+    /// now answers sandboxed. Uses [`crate::sandbox::recheck_permission_mode`]:
+    /// on `RestartSandboxed` the running turn is cancelled (ended
+    /// `interrupted`, pending approvals settled `cancelled` by the stopping
+    /// connection), the full-access process tree is stopped and confirmed,
+    /// and the next turn launches fail-closed in the sandbox (a sandbox that
+    /// cannot start refuses; nothing is replayed). An unconfirmed stop blocks
+    /// any relaunch. `Unchanged` when nothing runs in full access.
+    pub async fn revoke_full_access(&self, request: &LaunchRequest) -> RevokeOutcome {
+        let conversation_id = request.conversation_id.as_str();
+        let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
+            return RevokeOutcome::NotRunning;
+        };
+        let running = lock(&session.state).mode;
+        let Some(running) = running.filter(|_| lock(&session.state).connection.is_some()) else {
+            return RevokeOutcome::NotRunning;
+        };
+        // The mode the Host wants now, as a policy + snapshot for the shared
+        // recheck (a still-granted conversation keeps full access).
+        let desired = self.inner.launcher.desired_mode(request);
+        let mut policy = crate::config::HostPolicy::default();
+        if desired == PermissionMode::FullAccess {
+            policy.full_access_grants.insert(crate::sandbox::FullAccessGrant::Conversation(conversation_id.to_owned()).key());
+        }
+        let snapshot = crate::config::SessionSnapshot {
+            backend: request.backend,
+            project_root: request.project_root.to_string_lossy().into_owned(),
+            egress_allowed: false,
+            settings: std::collections::BTreeMap::from([(crate::sandbox::SETTING_PERMISSION_MODE.to_owned(), desired.as_str().to_owned())]),
+        };
+        match crate::sandbox::recheck_permission_mode(&policy, &snapshot, conversation_id, running) {
+            crate::sandbox::ModeRecheck::RestartSandboxed(reason) => {
+                {
+                    let mut state = lock(&session.state);
+                    if let Some(run_id) = state.turn.as_ref().map(|turn| turn.run_id.clone()) {
+                        if let Some(turn) = state.turn.as_mut() {
+                            turn.cancel_requested = true;
+                            turn.arbiter.request_cancel();
+                            turn.approvals.clear();
+                        }
+                        self.finish_turn(
+                            &session,
+                            &mut state,
+                            &run_id,
+                            TurnTerminal::Interrupted {
+                                code: "agent_backend_full_access_revoked".into(),
+                                message: "已撤销完全访问：本轮已取消，外部后端将在沙箱中重新启动（不重放本轮）".into(),
+                            },
+                            json!({ "outcome": "unknown" }),
+                        );
+                    }
+                }
+                let report = self.stop_connection(&session, &reason).await;
+                let confirmed = report.as_ref().is_none_or(|report| report.confirmation.is_confirmed());
+                if !confirmed {
+                    lock(&session.state).stop_unconfirmed = true;
+                }
+                RevokeOutcome::RestartSandboxed { confirmed }
+            }
+            _ => RevokeOutcome::Unchanged,
+        }
     }
 
     /// Close a conversation's backend (conversation deleted / archived): a
