@@ -182,7 +182,10 @@ test('pins stable_v1 Runtime prefix bytes and the knowledge-routing instruction 
   // 2026-10-04: the runtime rules gained the user-facing language contract
   // (Simplified Chinese by default; code, commands, paths and identifiers keep
   // their original form), so the pinned prefix hash moved again.
-  assert.equal(composed.stablePromptHash, 'f03293074bc03c6e')
+  // 2026-10-09: r16 delivery-target rules (0df9162) moved the hash; 2026-10-22:
+  // the delivery wording now describes present_files declaration instead of
+  // the removed checklist/repair flow (4b54e68), so the hash moved again.
+  assert.equal(composed.stablePromptHash, '3af3e500efff61d8')
 })
 
 test('separates stable-prefix and dynamic-tail cache identities', () => {
