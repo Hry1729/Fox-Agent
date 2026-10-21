@@ -129,7 +129,7 @@
 .aui-error-state p { margin: 4px 0; color: var(--fox-muted); }
 .aui-error-state small { color: var(--fox-muted); }
 .aui-error-state details { margin-top: 6px; color: var(--fox-muted); font-size: 12px; }
-.aui-error-state pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
+.aui-error-state pre, .aui-error-diagnostic { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 20rem; overflow-x: hidden; overflow-y: auto; margin: 6px 0 0; }
 .aui-error-state > button { flex: 0 0 auto; }
 .aui-stopped-run { display: flex; align-items: center; gap: 6px; color: var(--fox-muted); font-size: 12px; margin-top: 8px; }
 .aui-message-actions > button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border-radius: var(--fox-radius-control); color: var(--fox-muted); }
