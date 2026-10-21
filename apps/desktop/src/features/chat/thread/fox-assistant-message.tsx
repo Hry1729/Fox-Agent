@@ -15,7 +15,7 @@ import { FoxMessageActions } from './fox-message-actions'
 import { FeedbackDialog as FeedbackDialogSurface } from '@/components/assistant-ui/elements/feedback-dialog'
 import { StoppedRun } from '@/components/assistant-ui/elements/error-state'
 import { ErrorPrompt } from '../demo/fox-demo-prompts'
-import { runFailureDetailText } from '../../conversations/model/run-failure'
+import { hasRunFailureDiagnostic, runFailureDetailText } from '../../conversations/model/run-failure'
 
 const FOX_PART_COMPONENTS = {
   Text: FoxTextPart,
@@ -85,7 +85,7 @@ export function FoxAssistantMessage() {
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
       <MessagePrimitive.Root className="fox-thread-msg is-assistant">
         {foxMessage?.source ? <FoxRunActivityBody message={foxMessage} /> : <MessagePrimitive.Parts components={FOX_PART_COMPONENTS} />}
-        {foxMessage?.source && foxMessage.failure && <ErrorPrompt error={foxMessage.failure.message} diagnostic={foxMessage.failure.stderrTail ? runFailureDetailText(foxMessage.failure) : undefined} onRetry={isLast ? () => aui.message.reload() : undefined} />}
+        {foxMessage?.source && foxMessage.failure && <ErrorPrompt error={foxMessage.failure.message} diagnostic={hasRunFailureDiagnostic(foxMessage.failure) ? runFailureDetailText(foxMessage.failure) : undefined} onRetry={isLast ? () => aui.message.reload() : undefined} />}
         {!foxMessage?.source && cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
         {!messageRunning && <div className="fox-message-footer">
           <ActionBarPrimitive.Root autohide="never" className="fox-thread-actionbar">
