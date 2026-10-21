@@ -1669,7 +1669,8 @@ mod external_real {
             assert_eq!(terminal["type"], "run.failed", "{terminal}");
             assert_eq!(terminal["code"], fox_agent_backend::external_launch::LOOPBACK_REQUIRES_FULL_ACCESS, "{terminal}");
             let message = terminal["message"].as_str().unwrap_or_default();
-            assert!(message.contains("本机网关在沙箱模式下不可达") && message.contains("完全访问") && message.contains("api.deepseek.com"), "{message}");
+            assert!(message.contains("本机网关在沙箱模式下不可达") && message.contains("需要完全访问权限") && message.contains("FOX_EXTERNAL_FULL_ACCESS") && message.contains("api.deepseek.com"), "{message}");
+            assert!(!message.contains("请切换到"), "{message}");
             assert!(elapsed < Duration::from_secs(10), "refused before launch, not after a prompt: {elapsed:?}");
             assert!(!sink.types("g1").iter().any(|kind| kind == "agent_backend.session"), "no backend session was opened");
             assert!(info.and_then(|info| info.declaration).is_none(), "nothing was launched");
@@ -1701,6 +1702,89 @@ mod external_real {
         assert_eq!(declaration.loopback_gateway.as_ref().map(|g| g.port), Some(gateway.port), "derived gateway port");
         assert!(declaration.allowed_domains.contains(&gateway.allow_entry()), "{:?}", declaration.allowed_domains);
         assert!(hits >= 1, "no request from dsh inside srt reached the loopback gateway; terminal {terminal}");
+    }
+
+    /// Entries of `dir` (recursively), for before/after comparisons.
+    fn tree(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&next) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path.clone());
+                }
+                out.push(path);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// DeepSeek in FULL ACCESS with a loopback gateway (5f2f2d8 re-test:
+    /// full access used the real HOME and dialled api.deepseek.com). The dsh
+    /// configuration lives only in the private HOME and points at a local
+    /// fake gateway; full access must start dsh without srt but with HOME /
+    /// DSH_HOME in the private HOME, so the request reaches the gateway and
+    /// dsh writes its state there, not under the real HOME.
+    pub(super) async fn dsh_full_access_private_home_gateway_session() {
+        use fox_agent_backend::backends::deepseek;
+        let pid = std::process::id();
+        let real_home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        let base = real_home.join(format!(".fox-ext-dshfull-{pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("proj");
+        let fox_data = base.join("fox-data");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&fox_data).unwrap();
+        let gateway = ScriptedModel::start();
+        let runtime = runtime_root(true);
+        let host_policy = deepseek::HostPolicy { workspace_write: true, network: false };
+        let patch = deepseek::default_patch_path(&runtime, &host_policy);
+        if deepseek::verify_installed_patch(&patch, &host_policy).is_err() {
+            std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+            std::fs::write(&patch, deepseek::policy_patch(&host_policy).patch_yaml).unwrap();
+        }
+        let private_home = PrivateHomes::new(fox_data.join("sandbox-homes")).home_for(PROJECT_UUID, AgentBackend::Deepseek).unwrap().path;
+        std::fs::create_dir_all(private_home.join(".dsh")).unwrap();
+        std::fs::write(private_home.join(".dsh").join(".env"), "DEEPSEEK_API_KEY=sk-fox-full-access-test\n").unwrap();
+        std::fs::write(
+            private_home.join(".dsh").join("cordis.patch.yml"),
+            format!("- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:{}/anthropic\n", gateway.port),
+        )
+        .unwrap();
+        let seeded = tree(&private_home);
+        let real_before: Vec<PathBuf> = [".dsh", ".config", ".cache", ".local/share", ".local/state"].iter().flat_map(|dir| tree(&real_home.join(dir))).collect();
+        let mut config = config(runtime, &fox_data, BTreeMap::new());
+        config.full_access = FullAccessSwitch::All;
+        let sink = Sink::default();
+        let rt = ExternalRuntime::new(sink.clone(), HostLauncher::new(config), tokio::runtime::Handle::current());
+        rt.start_turn(turn("ext-dshfull", "f1", "Reply with the single word: pong", AgentBackend::Deepseek, &project)).unwrap();
+        let started = std::time::Instant::now();
+        // Wait for the request (the fake gateway does not speak the Anthropic
+        // API, so the turn itself may fail afterwards).
+        while gateway.requests() == 0 && sink.terminal_now("f1").is_none() && started.elapsed() < Duration::from_secs(180) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let terminal = sink.terminal_within("f1", 120).await;
+        let hits = gateway.requests();
+        let info = rt.session_info("ext-dshfull");
+        let mode = info.as_ref().and_then(|info| info.mode);
+        eprintln!("MEASURE f1 after {:?}: gateway requests {hits}; mode {mode:?}\ntypes {:?}\nterminal {terminal}", started.elapsed(), sink.types("f1"));
+        let report = rt.close_conversation("ext-dshfull", "test done").await;
+        eprintln!("MEASURE dsh close {report:?}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let written: Vec<PathBuf> = tree(&private_home).into_iter().filter(|path| !seeded.contains(path)).collect();
+        let real_after: Vec<PathBuf> = [".dsh", ".config", ".cache", ".local/share", ".local/state"].iter().flat_map(|dir| tree(&real_home.join(dir))).collect();
+        let real_new: Vec<&PathBuf> = real_after.iter().filter(|path| !real_before.contains(path)).collect();
+        eprintln!("MEASURE written under the private HOME: {written:?}");
+        eprintln!("MEASURE new under the real HOME config dirs: {real_new:?}");
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(mode, Some(fox_agent_backend::sandbox::PermissionMode::FullAccess), "{terminal}");
+        assert!(hits >= 1, "no request from dsh in full access reached the gateway named only in the private HOME; terminal {terminal}");
+        assert!(written.iter().any(|path| path.starts_with(private_home.join(".dsh"))), "dsh wrote nothing under the private DSH_HOME: {written:?}");
+        assert!(real_new.is_empty(), "dsh wrote under the real HOME: {real_new:?}");
     }
 }
 
@@ -1747,4 +1831,17 @@ async fn real_srt_external_runtime_dsh_session() {
 async fn real_srt_external_runtime_dsh_loopback_gateway() {
     external_real::require_real_acp("real_srt_external_runtime_dsh_loopback_gateway");
     external_real::dsh_loopback_gateway_session().await;
+}
+
+/// DeepSeek in full access through `ExternalRuntime` + `HostLauncher`
+/// (Linux, no srt involved): the dsh configuration exists only in the
+/// private HOME and points at a local fake gateway; the request must reach
+/// it and dsh must write under the private HOME, nothing under the real one.
+/// Needs no API key (the gateway only counts requests).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real dsh through ExternalRuntime in full access; FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_AGENT_RUNTIME_ROOT=<runtime with backends/dsh> ... -- --include-ignored"]
+async fn real_external_runtime_dsh_full_access_uses_the_private_home() {
+    external_real::require_real_acp("real_external_runtime_dsh_full_access_uses_the_private_home");
+    external_real::dsh_full_access_private_home_gateway_session().await;
 }
