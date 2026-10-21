@@ -1605,6 +1605,79 @@ mod external_real {
         assert!(left.is_empty(), "processes left after close: {left:?}");
         check();
     }
+
+    /// DeepSeek with a loopback model gateway (Magpie-style, sandbox_md 13.10):
+    /// the base URL lives in the private HOME's dsh patch, the Host derives
+    /// its one port and puts `127.0.0.1:<port>` on the srt allowlist, and the
+    /// gateway is a local HTTP server outside the sandbox. Passes only when a
+    /// request from dsh inside srt reaches the gateway.
+    pub(super) async fn dsh_loopback_gateway_session() {
+        use fox_agent_backend::backends::deepseek;
+        let pid = std::process::id();
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        let base = home.join(format!(".fox-ext-dshgw-{pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let project = base.join("proj");
+        let fox_data = base.join("fox-data");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&fox_data).unwrap();
+        let gateway = ScriptedModel::start();
+        // Control: the gateway answers from outside the sandbox.
+        {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", gateway.port)).unwrap();
+            write!(stream, "GET /control HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+            let mut answer = String::new();
+            let _ = stream.read_to_string(&mut answer);
+            assert!(answer.starts_with("HTTP/1.1"), "gateway control: {answer:?}");
+        }
+        let control_hits = gateway.requests();
+        let runtime = runtime_root(true);
+        let host_policy = deepseek::HostPolicy { workspace_write: true, network: false };
+        let patch = deepseek::default_patch_path(&runtime, &host_policy);
+        if deepseek::verify_installed_patch(&patch, &host_policy).is_err() {
+            std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+            std::fs::write(&patch, deepseek::policy_patch(&host_policy).patch_yaml).unwrap();
+        }
+        // The user's own dsh configuration in the private HOME: a fake key and
+        // the loopback base URL (what the Windows engineer has for Magpie).
+        let private_home = PrivateHomes::new(fox_data.join("sandbox-homes")).home_for(PROJECT_UUID, AgentBackend::Deepseek).unwrap().path;
+        std::fs::create_dir_all(private_home.join(".dsh")).unwrap();
+        // dsh takes DEEPSEEK_API_KEY from `$DSH_HOME/.env` but refuses
+        // DEEPSEEK_BASE_URL there (launch environment only), so the base URL
+        // is the `llm-deepseek` row of the private HOME's own patch.
+        std::fs::write(private_home.join(".dsh").join(".env"), "DEEPSEEK_API_KEY=sk-fox-loopback-test\n").unwrap();
+        std::fs::write(
+            private_home.join(".dsh").join("cordis.patch.yml"),
+            format!("- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:{}/anthropic\n", gateway.port),
+        )
+        .unwrap();
+        let config = config(runtime, &fox_data, BTreeMap::new());
+        let sink = Sink::default();
+        let rt = ExternalRuntime::new(sink.clone(), HostLauncher::new(config), tokio::runtime::Handle::current());
+        rt.start_turn(turn("ext-dshgw", "g1", "Reply with the single word: pong", AgentBackend::Deepseek, &project)).unwrap();
+        let started = std::time::Instant::now();
+        let terminal = sink.terminal_within("g1", 600).await;
+        let info = rt.session_info("ext-dshgw");
+        let declaration = info.as_ref().and_then(|info| info.declaration.clone());
+        let hits = gateway.requests() - control_hits;
+        eprintln!("MEASURE g1 settled after {:?}", started.elapsed());
+        eprintln!("MEASURE g1 types {:?}\nterminal {terminal}", sink.types("g1"));
+        eprintln!(
+            "MEASURE declaration allowed_domains {:?} loopback_gateway {:?} diagnostics {:?}",
+            declaration.as_ref().map(|d| d.allowed_domains.clone()),
+            declaration.as_ref().map(|d| d.loopback_gateway.clone()),
+            declaration.as_ref().map(|d| d.loopback_diagnostics.clone())
+        );
+        eprintln!("MEASURE gateway requests from inside the sandbox: {hits}");
+        let report = rt.close_conversation("ext-dshgw", "test done").await;
+        eprintln!("MEASURE dsh close {report:?}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ = std::fs::remove_dir_all(&base);
+        let declaration = declaration.expect("a launched dsh session has a declaration");
+        assert_eq!(declaration.loopback_gateway.as_ref().map(|g| g.port), Some(gateway.port), "derived gateway port");
+        assert!(declaration.allowed_domains.contains(&gateway.allow_entry()), "{:?}", declaration.allowed_domains);
+        assert!(hits >= 1, "no request from dsh inside srt reached the loopback gateway; terminal {terminal}");
+    }
 }
 
 /// Whole external session through `ExternalRuntime` + `HostLauncher`, real
@@ -1632,4 +1705,16 @@ async fn real_srt_external_runtime_pi_session() {
 async fn real_srt_external_runtime_dsh_session() {
     external_real::require_real_acp("real_srt_external_runtime_dsh_session");
     external_real::dsh_session().await;
+}
+
+/// DeepSeek through `ExternalRuntime` + `HostLauncher` inside real srt
+/// (Linux) with a loopback model gateway named by the private HOME's dsh
+/// patch (docs/sandbox.md 13.10): the Host must allow exactly that port, and
+/// a request from dsh must reach the gateway outside the sandbox.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "real srt + dsh through ExternalRuntime; FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_DSH_BIN=<abs> ... -- --include-ignored"]
+async fn real_srt_external_runtime_dsh_loopback_gateway() {
+    external_real::require_real_acp("real_srt_external_runtime_dsh_loopback_gateway");
+    external_real::dsh_loopback_gateway_session().await;
 }
