@@ -367,13 +367,25 @@ impl HostLaunchConfig {
             extra.push(node);
         }
         extra.dedup();
+        // DeepSeek: allow exactly the loopback port of the model gateway its
+        // own base URL names (dsh config in the private HOME), the
+        // same IP-literal allowlist entry the round-6 scripted model uses.
+        // Remote base URLs add nothing; an undeterminable port allows nothing
+        // (diagnostic in the declaration).
+        let derivation = match request.backend {
+            AgentBackend::Deepseek => {
+                crate::loopback::derive_loopback_gateway(&crate::backends::deepseek::base_url_candidates(&home.path, &request.project_root))
+            }
+            _ => crate::loopback::LoopbackDerivation::default(),
+        };
         Ok(SandboxPolicy::new(
             vec![AuthorizedDir { path: request.project_root.clone(), writable: true }],
             home,
             extra,
             domains.domains,
             self.os,
-        ))
+        )
+        .with_loopback_derivation(derivation))
     }
 }
 
@@ -692,5 +704,61 @@ mod tests {
         let mut bad = request(AgentBackend::Pi, &root);
         bad.project_uuid = None;
         assert_eq!(config.sandbox_policy(&bad, root.join("homes")).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
+    }
+
+    /// DeepSeek with a loopback model gateway in its own base URL: exactly
+    /// that port is allowed (srt `allowedDomains` + declaration + capability
+    /// view); remote / undeterminable base URLs allow no loopback port.
+    #[test]
+    fn deepseek_loopback_gateway_port_is_allowed_from_its_base_url_only() {
+        use crate::sandbox::SandboxDeclaration;
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-dsh-loopback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = config(&root);
+        let homes = root.join("homes");
+        let request_for = request;
+        let request = request_for(AgentBackend::Deepseek, &root);
+        std::fs::create_dir_all(&request.project_root).unwrap();
+        // No base URL configured: only the default domain, no loopback.
+        let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
+        assert_eq!(policy.allowed_domains, ["api.deepseek.com"]);
+        assert!(policy.loopback_gateway.is_none() && policy.loopback_diagnostics.is_empty());
+        // The private HOME's dsh config names the Magpie gateway.
+        let dsh_home = policy.private_home.join(".dsh");
+        std::fs::create_dir_all(&dsh_home).unwrap();
+        let write_base_url = |url: &str| std::fs::write(dsh_home.join("cordis.patch.yml"), format!("- id: llm-deepseek\n  config:\n    baseURL: {url}\n")).unwrap();
+        write_base_url("http://127.0.0.1:3425/anthropic");
+        let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
+        assert_eq!(policy.allowed_domains, ["api.deepseek.com", "127.0.0.1:3425"], "exactly the one gateway port");
+        assert_eq!(policy.loopback_gateway.as_ref().map(|gateway| gateway.port), Some(3425));
+        let settings = policy.to_srt_settings();
+        assert_eq!(settings["network"]["allowedDomains"], serde_json::json!(["api.deepseek.com", "127.0.0.1:3425"]));
+        let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
+        assert_eq!(declaration.loopback_gateway.as_ref().map(|gateway| gateway.entry.as_str()), Some("127.0.0.1:3425"));
+        let view = crate::capability_view::capability_view(
+            AgentBackend::Deepseek,
+            Some(&serde_json::json!({"agentInfo": {"name": "deepseek-harness-acp"}})),
+            &declaration,
+            crate::capability_view::PiLaunch::Stock,
+        );
+        assert!(view.sandbox.detail.contains("放行本机回环端口：127.0.0.1:3425"), "{}", view.sandbox.detail);
+        // Port cannot be determined: nothing allowed, diagnostic declared.
+        write_base_url("!!js process.env.GW");
+        let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
+        assert_eq!(policy.allowed_domains, ["api.deepseek.com"]);
+        assert!(policy.loopback_gateway.is_none());
+        assert!(!policy.loopback_diagnostics.is_empty());
+        let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
+        assert!(!declaration.loopback_diagnostics.is_empty());
+        // A remote base URL: no loopback port, no diagnostic.
+        write_base_url("https://llm.example.com/anthropic");
+        let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
+        assert_eq!(policy.allowed_domains, ["api.deepseek.com"]);
+        assert!(policy.loopback_gateway.is_none() && policy.loopback_diagnostics.is_empty());
+        // Other backends never read dsh configuration.
+        write_base_url("http://127.0.0.1:3425");
+        let pi = config.sandbox_policy(&request_for(AgentBackend::Pi, &root), homes).unwrap();
+        assert!(!pi.allowed_domains.iter().any(|domain| domain.starts_with("127.0.0.1")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
