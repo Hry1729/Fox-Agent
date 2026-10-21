@@ -178,6 +178,32 @@ jobs:
           path: .test-target/rust-host-runs/**
           if-no-files-found: ignore
 
+  # External agent backends (ACP): fox-agent-backend with the acp feature.
+  # Real-backend tests stay gated off (FOX_TEST_REAL_ACP / FOX_TEST_REAL_SRT unset).
+  agent-backend:
+    name: Agent backend (ACP) tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          key: agent-backend-acp
+
+      - name: Test fox-agent-backend (acp)
+        run: cargo test -p fox-agent-backend --features acp --no-fail-fast
+
   vector-runtime-smoke:
     name: Zvec offline smoke (resource-gated)
     runs-on: windows-latest
