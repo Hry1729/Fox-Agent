@@ -9,7 +9,7 @@
 use fox_agent_backend::acp::AcpConnection;
 use fox_agent_backend::capability_view::PiLaunch;
 use fox_agent_backend::external::{
-    AnswerOutcome, CancelOutcome, ExternalLauncher, ExternalRuntime, ExternalSink, LaunchFailure, LaunchRequest, Launched, StartError, TurnRequest,
+    AnswerOutcome, CancelOutcome, ExternalLauncher, ExternalRuntime, ExternalSink, LaunchFailure, LaunchRequest, Launched, RevokeOutcome, StartError, TurnRequest,
 };
 use fox_agent_backend::launch::LaunchSpec;
 use fox_agent_backend::port::{AgentBackend, StopConfirmation};
@@ -17,7 +17,7 @@ use fox_agent_backend::projection::PermissionCard;
 use fox_agent_backend::sandbox::{HostOs, PermissionMode, SandboxDeclaration};
 use futures::future::BoxFuture;
 use serde_json::Value;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -100,16 +100,21 @@ impl Sink {
 struct MockLauncher {
     launches: Arc<AtomicUsize>,
     fail: bool,
+    /// Full access withdrawn: desired / launched mode is sandboxed.
+    revoked: Arc<AtomicBool>,
+    modes: Arc<Mutex<Vec<PermissionMode>>>,
 }
 
 impl ExternalLauncher for MockLauncher {
     fn desired_mode(&self, _request: &LaunchRequest) -> PermissionMode {
-        PermissionMode::FullAccess
+        if self.revoked.load(Ordering::SeqCst) { PermissionMode::Sandboxed } else { PermissionMode::FullAccess }
     }
 
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
         let launches = Arc::clone(&self.launches);
         let fail = self.fail;
+        let mode = self.desired_mode(&request);
+        self.modes.lock().unwrap().push(mode);
         Box::pin(async move {
             launches.fetch_add(1, Ordering::SeqCst);
             if fail {
@@ -128,8 +133,8 @@ impl ExternalLauncher for MockLauncher {
             let connection = AcpConnection::spawn_detailed(&spec, &request.project_root, None).await.map_err(LaunchFailure::from)?;
             Ok(Launched {
                 connection,
-                mode: PermissionMode::FullAccess,
-                declaration: SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::current()),
+                mode,
+                declaration: SandboxDeclaration::declare(mode, None, HostOs::current()),
                 pi_launch: PiLaunch::Stock,
                 on_closed: None,
             })
@@ -162,6 +167,7 @@ fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, stor
             project_uuid: Some("8f14e45f-ceea-467a-9a36-dedd4bea2543".into()),
             project_root: std::env::temp_dir(),
             session_key: format!("k-{run}"),
+            full_access_granted: false,
         },
     }
 }
@@ -465,6 +471,44 @@ async fn closing_a_conversation_ends_its_pending_permission() {
     assert_eq!(terminal["code"], "agent_backend_session_closed");
     assert!(!runtime.approval_pending(&approval));
     assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending);
+}
+
+/// Revoking full access mid-session (UX batch ②): `recheck_permission_mode`
+/// -> RestartSandboxed. The running turn ends `interrupted`
+/// (`agent_backend_full_access_revoked`), its pending approval is settled (a
+/// late answer is never written), the process is stopped, and the next turn
+/// launches in the sandbox without replaying the cancelled one.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_full_access_restarts_in_the_sandbox_without_replay() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    let revoked = Arc::clone(&launcher.revoked);
+    let modes = Arc::clone(&launcher.modes);
+    let launches = Arc::clone(&launcher.launches);
+    let (runtime, sink) = new_runtime(launcher);
+    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::NotRunning);
+    runtime.start_turn(turn("c-rev", "r-rev-1", "hello", AgentBackend::Codex, None)).unwrap();
+    let (_, approval, _) = sink.wait_approval(1).await;
+    // The Host withdraws the grant first, then asks the runtime to restart.
+    revoked.store(true, Ordering::SeqCst);
+    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::RestartSandboxed { confirmed: true });
+    let terminal = sink.terminal("r-rev-1").await;
+    assert_eq!(terminal["type"], "run.interrupted", "{terminal}");
+    assert_eq!(terminal["code"], "agent_backend_full_access_revoked", "{terminal}");
+    assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending, "a pending approval is settled, never written late");
+    // Next turn: relaunched sandboxed; only the new prompt runs.
+    runtime.start_turn(turn("c-rev", "r-rev-2", "simple", AgentBackend::Codex, None)).unwrap();
+    assert_eq!(sink.terminal("r-rev-2").await["type"], "run.completed");
+    let launching = sink.wait_for("r-rev-2", "agent_backend.launching").await;
+    assert_eq!(launching["mode"], "sandboxed", "{launching}");
+    assert_eq!(*modes.lock().unwrap(), [PermissionMode::FullAccess, PermissionMode::Sandboxed]);
+    assert_eq!(launches.load(Ordering::SeqCst), 2);
+    assert!(!sink.text("r-rev-2").contains("permission:"), "the cancelled turn is not replayed");
+    // Already sandboxed: nothing to restart.
+    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::Unchanged);
+    runtime.shutdown().await;
 }
 
 /// A JSON-RPC error with `data` (979313c closeout): `run.failed.message`
