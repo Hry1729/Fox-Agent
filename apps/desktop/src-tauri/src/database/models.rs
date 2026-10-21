@@ -1970,6 +1970,11 @@ pub struct CreateConversationRequest {
     /// differs from the conversation's frozen backend is refused as misrouted.
     #[serde(default)]
     pub agent_backend: Option<String>,
+    /// External backends only (UX batch ②): `sandboxed` (default) or
+    /// `full_access`, chosen once at creation and locked with the backend.
+    /// `full_access` is refused when `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`.
+    #[serde(default)]
+    pub external_permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
