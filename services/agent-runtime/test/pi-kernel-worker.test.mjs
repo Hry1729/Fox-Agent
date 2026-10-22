@@ -821,6 +821,49 @@ test('R1 real worker separates finish evidence, strict proposals and usage succe
   }
 })
 
+test('a stalled tool-argument stream is a model timeout, while real truncation without a timeout stays truncated_tool_proposal', { timeout: 60000 }, async t => {
+  // The AGV failure shape: the provider streams a partial tool-call argument and then goes
+  // silent with the connection open. Only the idle bound can classify that, and the worker's
+  // timeout evidence must outrank the response-admission tag the aborted, half-built proposal
+  // would otherwise earn, so the Host schedules a bounded retry instead of failing the run.
+  // A stream that really ends truncated (finish_reason length, no timeout) keeps its
+  // truncated_tool_proposal classification.
+  const cases = [
+    { name: 'stalled', stall: true, response: 'kernel.model_failure', category: 'model_timeout' },
+    { name: 'truncated', finish: 'length', response: 'request_failed', category: 'truncated_tool_proposal' },
+  ]
+  for (const loop of [false, true]) for (const item of cases) {
+    let requests = 0
+    const server = createServer(async (req, res) => {
+      for await (const _ of req) {}
+      requests++
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ id: 'stall', object: 'chat.completion.chunk', created: 1, model: 'stall-local',
+        choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'write-excel', type: 'function',
+          function: { name: 'read', arguments: '{"path":"proof.t' } }] }, ...(item.finish ? { finish_reason: item.finish } : {}) }] })}\n\n`)
+      if (!item.stall) res.end('data: [DONE]\n\n')
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    t.after(() => { server.closeAllConnections(); server.close() })
+    const child = await worker(t, ['--kernel-worker'], loop ? { onRoundOutput: () => ({ schemaVersion: 1, kind: 'final' }) } : {})
+    await child.request('kernel.initialize', initialization({ responseDiagnostics: 1, modelService: {
+      apiType: 'openai-completions', modelId: 'stall-local', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-only' } }))
+    const payload = resumePayload()
+    payload.controlBinding.budgets = { ...payload.controlBinding.budgets, modelRequestMs: 15000, modelFirstResponseMs: 5000, modelIdleMs: 400 }
+    const response = await child.request('kernel.resume_batch', payload)
+    assert.equal(response.type, item.response, `${item.name} loop=${loop}`)
+    assert.equal(requests, 1, 'the worker never replays the failed round itself')
+    assert.equal(child.roundOutputs.length, 0, 'a half-built proposal never reaches Host execution')
+    if (item.category === 'model_timeout') {
+      assert.equal(response.payload.category, 'model_timeout', `${item.name} loop=${loop}`)
+      assert.ok(response.payload.telemetry.toolParamBytes > 0, 'tool-parameter progress was observed before the stall')
+      assert.ok(response.payload.telemetry.idleElapsedMs >= 400)
+    } else {
+      assert.equal(response.payload.responseDiagnostic.category, item.category, `${item.name} loop=${loop}`)
+    }
+  }
+})
+
 test('R1 real worker accepts SDK-compatible SSE framing and complete large proposals', { timeout: 60000 }, async t => {
   for (const framing of ['multiline', 'cr', 'wrong-content-type', 'after-done', 'large']) {
     let requests = 0
