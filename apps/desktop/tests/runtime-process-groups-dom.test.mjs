@@ -85,11 +85,10 @@ test('a started run reports the model wait and the generation stage separately',
   })
   const view = render(queuedFirst)
   await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /等待回复/))
-  // The length of the wait is the run's single timer beside the avatar, not part of
-  // the status line (run-phase.ts: the elapsed time is *not* glued onto the label
-  // because the header already renders the run's one timer). run.started is 36s old,
-  // so the model wait is that elapsed 36s.
-  await waitFor(() => assert.match(view.container.querySelector('.fox-process-turn-elapsed')?.textContent ?? '', /已用时 3[0-9]秒/))
+  // cbb60d6 removed the run's elapsed timer beside the avatar, so the model wait is shown only
+  // as the status label above; no "已用时" counter is rendered anywhere in the turn.
+  assert.equal(view.container.querySelector('.fox-process-turn-elapsed'), null)
+  assert.doesNotMatch(view.container.textContent ?? '', /已用时/)
 
   await React.act(async () => {
     view.rerender(timeline([started, event(2, 'reasoning.delta', { delta: '先分析' })], {
