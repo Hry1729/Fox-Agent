@@ -242,6 +242,14 @@ mod tests {
                     SWP_NOACTIVATE | SWP_NOZORDER,
                 )
                 .unwrap();
+                // Windows clamps a window to the screen's tracking limits (the CI runner
+                // has a 1024x768 desktop), so the requested size is not necessarily the
+                // size the window got. The gesture keeps the ratio of the window as it
+                // actually is when the size-move loop starts.
+                let mut actual = RECT::default();
+                GetWindowRect(hwnd, &mut actual).unwrap();
+                let (width, height) = (actual.right - actual.left, actual.bottom - actual.top);
+                assert!(width > 0 && height > 0);
                 SendMessageW(hwnd, WM_ENTERSIZEMOVE, None, None);
                 let mut rect = RECT {
                     left: 100,
@@ -255,11 +263,16 @@ mod tests {
                     Some(WPARAM(WMSZ_BOTTOMRIGHT as usize)),
                     Some(LPARAM(&mut rect as *mut _ as isize)),
                 );
+                let expected = width as f64 / height as f64;
+                let resized_height = (rect.bottom - rect.top) as f64;
+                let ratio = (rect.right - rect.left) as f64 / resized_height;
+                // Both sides are rounded to whole pixels; allow that rounding, with the
+                // original 0.002 as the floor.
+                let tolerance = 0.002f64.max((1.0 + expected) / resized_height);
                 assert!(
-                    ((rect.right - rect.left) as f64 / (rect.bottom - rect.top) as f64
-                        - width as f64 / height as f64)
-                        .abs()
-                        < 0.002
+                    (ratio - expected).abs() < tolerance,
+                    "ratio {ratio} vs window {width}x{height} ({expected}), rect {:?}",
+                    (rect.left, rect.top, rect.right, rect.bottom)
                 );
                 SendMessageW(hwnd, WM_EXITSIZEMOVE, None, None);
                 let mut unchanged = RECT {
