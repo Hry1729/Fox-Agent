@@ -8672,6 +8672,43 @@ mod tests {
     /// Record a managed-write receipt exactly as the production write path does
     /// (`managed_files::record_after` registers the same row), so a test can
     /// stand for "this Run really committed these bytes".
+    /// Freeze the Run's control binding on the conversation's own project folder.
+    ///
+    /// Since 0df9162 the production gate resolves statistics sources through
+    /// `attachment_compute::authorized_delivery_root`, which requires a frozen
+    /// `RunControlBinding` whose project root matches the conversation's current
+    /// project access (the shape the R3 `Fixture::in_project` freezes).
+    fn freeze_project_binding(db: &Database, root: &Path, run_id: &str) {
+        let conversation: String = db
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1",
+                    [run_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let permission = fox_engine_protocol::FrozenPermission {
+            mode: fox_engine_protocol::PermissionMode::ReadOnly,
+            project_root: Some(root.to_string_lossy().into_owned()),
+            grants: vec![],
+            approval_epoch: None,
+        };
+        let binding = fox_engine_protocol::RunControlBinding {
+            schema_version: 1,
+            run_id: run_id.to_owned(),
+            conversation_id: conversation,
+            engine_id: "pi".into(),
+            execution_profile_id: "legacy".into(),
+            authority: fox_engine_protocol::ExecutionAuthority::Authoritative,
+            read_only_executor: fox_engine_protocol::ResourceExecutor::Rust,
+            permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+            permission,
+            budgets: fox_engine_protocol::TimeBudgets::default(),
+        };
+        db.freeze_run_control(&binding).unwrap();
+    }
+
     fn record_write_receipt(db: &Database, root: &Path, run_id: &str, relative: &str, tool: &str) {
         let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
         let bytes = std::fs::read(&path).unwrap();
@@ -9781,22 +9818,26 @@ mod tests {
             .expect("a wrong share must fail");
         assert!(failure.contains("占比"), "{failure}");
 
-        // The source record changes: an artifact still carrying the old numbers
-        // must now fail, because the expectation is recomputed from the source.
+        // The source record changes after the hash was frozen. Since 0df9162 the
+        // gate no longer recomputes against the drifted bytes: whichever numbers
+        // the artifact carries, old or recomputed, the statistic is reported
+        // unverified because the source left its frozen hash.
         let (replaced, _) = source_workbook("任务类型", &["卸船", "装船", "装船", "装船"]);
         std::fs::write(&source, &replaced).unwrap();
-        let failure = verdict("总计 4 条\n卸船 3 条，占比 75.0%\n装船 1 条，占比 25.0%")
-            .reason()
-            .expect("stale numbers must fail after the source changed");
-        assert!(failure.contains("源数据"), "{failure}");
-        assert!(
-            failure.contains("已变化"),
-            "the report must state the source drift: {failure}"
-        );
-        // …and the recomputed numbers pass.
-        match verdict("总计 4 条\n卸船 1 条，占比 25.0%\n装船 3 条，占比 75.0%") {
-            RequirementVerdict::Met => {}
-            other => panic!("the recomputed numbers must pass, got {other:?}"),
+        for body in [
+            "总计 4 条\n卸船 3 条，占比 75.0%\n装船 1 条，占比 25.0%",
+            "总计 4 条\n卸船 1 条，占比 25.0%\n装船 3 条，占比 75.0%",
+        ] {
+            match verdict(body) {
+                RequirementVerdict::Unverified(reason) => {
+                    assert!(reason.contains("源数据"), "{reason}");
+                    assert!(
+                        reason.contains("已偏离冻结哈希"),
+                        "the report must state the source drift: {reason}"
+                    );
+                }
+                other => panic!("a drifted source must leave the statistic unverified, got {other:?}"),
+            }
         }
 
         // A statistics demand the task does not make bindable is reported
@@ -9884,6 +9925,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let (db, run_id) = conversation_run(&root);
+        // The gate reads the statistics source only through the Run's frozen,
+        // still-authorized project folder.
+        freeze_project_binding(&db, &root, &run_id);
         // The source workbook the task names, plus a deliverable that states the
         // distribution as the source implies it (3/1 of 4 records).
         let (source_bytes, _sheet) = source_workbook("任务类型", &["卸船", "装船", "装船", "装船"]);
@@ -9933,8 +9977,9 @@ mod tests {
             "the recomputed numbers must pass: {entries:?}"
         );
 
-        // The source record changes; the artifact still states the old numbers,
-        // so the gate must now fail the item with a reason naming the source.
+        // The source record changes after its hash was frozen. Since 0df9162 the
+        // gate does not recompute against drifted bytes: the statistic is reported
+        // unverified with a reason naming the source and the drift.
         let (changed, _) = source_workbook("任务类型", &["卸船", "卸船", "卸船", "装船"]);
         std::fs::write(root.join("AGV源数据.xlsx"), &changed).unwrap();
         std::fs::write(
@@ -9950,17 +9995,16 @@ mod tests {
         record_write_receipt(&db, &root, &run_id, "统计分布.xlsx", "write_file");
         let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
         let item = &stop.items()[0];
-        assert!(!item.passed, "stale numbers must fail the gate");
         let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
         let entries = finding["requirements"].as_array().cloned().unwrap_or_default();
         let source_entry = entries
             .iter()
             .find(|entry| entry["check"] == json!("source_distribution"))
             .expect("the statistic must be reported");
-        assert_eq!(source_entry["state"], json!("failed"));
+        assert_eq!(source_entry["state"], json!("unverified"), "{entries:?}");
         let reason = source_entry["reason"].as_str().unwrap_or_default();
         assert!(reason.contains("源数据"), "{reason}");
-        assert!(reason.contains("已变化"), "the drift must be stated: {reason}");
+        assert!(reason.contains("已偏离冻结哈希"), "the drift must be stated: {reason}");
 
         // A statistics demand the task does not make bindable is reported
         // unverified: visible, and never counted as a pass.
