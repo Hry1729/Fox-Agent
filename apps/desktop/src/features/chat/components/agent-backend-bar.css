@@ -101,3 +101,31 @@
   white-space: nowrap;
   cursor: help;
 }
+
+/* Import receipt (80b1622 acceptance): kept on the bar after the login card
+   disappears; wraps inside the composer width, names only. */
+.fox-agent-backend-receipt {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fox-agent-backend-receipt > span {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.fox-agent-backend-receipt > button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 0 6px;
+  opacity: 0.85;
+  cursor: pointer;
+}
