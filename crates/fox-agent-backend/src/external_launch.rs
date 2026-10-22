@@ -430,6 +430,14 @@ impl HostLaunchConfig {
 /// gateway (e.g. Magpie on 127.0.0.1), refused before launch.
 pub const LOOPBACK_REQUIRES_FULL_ACCESS: &str = "agent_backend_loopback_requires_full_access";
 
+/// Error code: the backend's private HOME has no login it reads
+/// ([`crate::onboarding::launch_blocked_by_missing_login`]); refused before
+/// the backend starts so the UI shows the login card, not a raw backend error.
+pub const MISSING_CREDENTIALS: &str = "agent_backend_missing_credentials";
+
+/// Remedy of [`MISSING_CREDENTIALS`].
+pub const MISSING_CREDENTIALS_REMEDY: &str = "在输入框上方的登录卡片里打开私有 HOME 放入登录文件，或从真实 HOME 导入";
+
 /// Remedy of [`LOOPBACK_REQUIRES_FULL_ACCESS`]: full access is chosen when a
 /// conversation is created (it cannot be turned on mid-session).
 pub const LOOPBACK_REFUSAL_REMEDY: &str = "需要完全访问权限：新建会话时选择“完全访问”（会话中不能开启），或改用官方 api.deepseek.com";
@@ -484,19 +492,48 @@ impl HostLaunchConfig {
         Ok(crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env))
     }
 
+    /// [`MISSING_CREDENTIALS`] when the probe of this request says the
+    /// backend has no login ([`crate::onboarding::launch_blocked_by_missing_login`]);
+    /// `None` otherwise, and when the probe itself cannot run (the launch then
+    /// reports its own error). Names only in the detail.
+    pub fn missing_login_refusal(&self, request: &LaunchRequest) -> Option<LaunchFailure> {
+        let probe = self.credential_probe(request).ok()?;
+        if !crate::onboarding::launch_blocked_by_missing_login(&probe) {
+            return None;
+        }
+        Some(
+            LaunchFailure::new(
+                MISSING_CREDENTIALS,
+                format!("外部后端「{}」还没有登录：Fox 为本项目准备的私有 HOME 里没有它读取的登录（{}）", request.backend.as_str(), probe.required_files.join("、")),
+            )
+            .remedy(MISSING_CREDENTIALS_REMEDY)
+            .detail(serde_json::json!({
+                "state": probe.state.as_str(),
+                "mode": probe.mode,
+                "privateHome": probe.private_home,
+                "requiredKeys": probe.required_keys,
+                "requiredFiles": probe.required_files,
+                "presentFiles": probe.present_files,
+            })),
+        )
+    }
+
     /// Copy the confirmed login items from the real HOME into the private
-    /// HOME of `backend` in every project of `project_uuids` (UX batch ①).
+    /// HOME of `backend` in every project of `projects` (`(uuid, label)`; UX
+    /// batch ①). A login already there is kept unless `overwrite`, in which
+    /// case it is backed up first ([`crate::onboarding::import_into`]).
     /// Windows: the private root is created / verified before and its DACL
     /// re-applied after the copy (the same [`prepare_windows_private_root`]
     /// the launch uses); Unix: files 0600, directories 0700.
     pub fn import_credentials(
         &self,
         backend: AgentBackend,
-        project_uuids: &[String],
+        projects: &[(String, String)],
         real: &crate::onboarding::RealHome,
         selected: &[String],
+        overwrite: bool,
     ) -> Result<crate::onboarding::ImportReport, LaunchFailure> {
-        if backend == AgentBackend::Fox || project_uuids.is_empty() {
+        if backend == AgentBackend::Fox || projects.is_empty() {
             return Err(LaunchFailure::new("agent_backend_import_invalid", "没有可导入的外部后端或项目"));
         }
         let prepare_windows = || -> Result<PathBuf, LaunchFailure> {
@@ -509,11 +546,18 @@ impl HostLaunchConfig {
         };
         let homes_root = if self.os == HostOs::Windows { prepare_windows()? } else { self.fox_data.join("sandbox-homes") };
         let homes = PrivateHomes::new(homes_root);
-        let paths = project_uuids
+        let targets = projects
             .iter()
-            .map(|uuid| homes.home_for(uuid, backend).map(|home| home.path).map_err(LaunchFailure::from))
+            .map(|(uuid, label)| {
+                homes
+                    .home_for(uuid, backend)
+                    .map(|home| crate::onboarding::ImportTarget { project: uuid.clone(), label: label.clone(), home: home.path })
+                    .map_err(LaunchFailure::from)
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        let report = crate::onboarding::import_into(backend, real, selected, &paths).map_err(|error| LaunchFailure::new("agent_backend_import_failed", error))?;
+        let stamp = crate::onboarding::backup_stamp(std::time::SystemTime::now());
+        let options = crate::onboarding::ImportOptions { overwrite, backup_stamp: &stamp };
+        let report = crate::onboarding::import_into(backend, real, selected, &targets, options).map_err(|error| LaunchFailure::new("agent_backend_import_failed", error))?;
         if self.os == HostOs::Windows {
             prepare_windows()?;
         }
@@ -595,6 +639,12 @@ impl HostLauncher {
         // DeepSeek + loopback gateway + sandbox: refuse now, not after the
         // first prompt fails with "Connection error".
         if let Some(refusal) = config.sandbox_homes_root().and_then(|homes| config.loopback_refusal(&request, mode, homes)) {
+            return Err(refusal);
+        }
+        // No login at all: refuse before anything starts, so the first run of
+        // a new project shows the login card instead of the backend's own
+        // error (80b1622 acceptance: codex-acp exited before initialize).
+        if let Some(refusal) = config.missing_login_refusal(&request) {
             return Err(refusal);
         }
         let os = config.os;
@@ -834,10 +884,22 @@ mod tests {
 ").unwrap();
         std::fs::write(real.join(".dsh/profiles/acp/cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:3425/v1\n").unwrap();
         let real = crate::onboarding::RealHome { home: real, codex_home: None };
-        let projects = vec!["8f14e45f-ceea-467a-9a36-dedd4bea2543".to_owned(), "c9f0f895-fb98-4b91-a5c3-2b5f3e3a7a11".to_owned()];
+        let projects = vec![
+            ("8f14e45f-ceea-467a-9a36-dedd4bea2543".to_owned(), "主项目".to_owned()),
+            ("c9f0f895-fb98-4b91-a5c3-2b5f3e3a7a11".to_owned(), "c9f0f895-fb98-4b91-a5c3-2b5f3e3a7a11".to_owned()),
+        ];
         let selected = vec!["env:.dsh/.env#DEEPSEEK_API_KEY".to_owned(), "file:.dsh/profiles/acp/cordis.patch.yml".to_owned()];
-        let report = config.import_credentials(AgentBackend::Deepseek, &projects, &real, &selected).unwrap();
+        let report = config.import_credentials(AgentBackend::Deepseek, &projects, &real, &selected, false).unwrap();
         assert_eq!(report.homes, 2);
+        assert_eq!(report.homes_written, 2);
+        // Again: both projects already have both items; kept, nothing written.
+        let again = config.import_credentials(AgentBackend::Deepseek, &projects, &real, &selected, false).unwrap();
+        assert_eq!(again.homes_written, 0);
+        assert_eq!(again.skipped_existing.iter().map(|skip| skip.label.as_str()).collect::<Vec<_>>(), ["主项目", projects[1].0.as_str()]);
+        // Overwrite: backed up under each private HOME.
+        let over = config.import_credentials(AgentBackend::Deepseek, &projects[..1], &real, &selected[1..], true).unwrap();
+        assert_eq!(over.backups.len(), 1);
+        assert!(over.backups[0].directory.starts_with(root.join("data/sandbox-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek").join(crate::onboarding::BACKUP_DIR)));
         assert!(!report.audit_event().to_string().contains("sk-glue-secret-1"));
         // Sandboxed + loopback base URL: refused category; full access: ready.
         let probe = config.credential_probe(&req).unwrap();
@@ -845,10 +907,10 @@ mod tests {
         req.full_access_granted = true;
         assert_eq!(config.credential_probe(&req).unwrap().state, crate::onboarding::CredentialState::Ready);
         let mut second = request(AgentBackend::Deepseek, &root);
-        second.project_uuid = Some(projects[1].clone());
+        second.project_uuid = Some(projects[1].0.clone());
         second.full_access_granted = true;
         assert_eq!(config.credential_probe(&second).unwrap().state, crate::onboarding::CredentialState::Ready, "applied to every project");
-        assert!(config.import_credentials(AgentBackend::Deepseek, &[], &real, &selected).is_err());
+        assert!(config.import_credentials(AgentBackend::Deepseek, &[], &real, &selected, false).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -966,6 +1028,44 @@ mod tests {
         std::fs::write(home.path.join(".dsh").join("cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:3425/anthropic\n").unwrap();
         let error = launcher.launch(request.clone()).await.err().expect("refused");
         assert_eq!(error.code, LOOPBACK_REQUIRES_FULL_ACCESS, "{error:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 80b1622 acceptance: a new project's first Codex run must not reach
+    /// codex-acp without a login (it exited before initialize with a raw
+    /// CODEX_HOME path error). The probe runs first and refuses with
+    /// `agent_backend_missing_credentials`; with a login the launch gets past
+    /// the refusal (and here fails on the missing srt).
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_launcher_refuses_a_codex_launch_without_login_before_starting() {
+        if std::env::var_os("OPENAI_API_KEY").is_some_and(|value| !value.is_empty()) {
+            eprintln!("skipped: OPENAI_API_KEY is set in this environment (it counts as a login)");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-codex-login-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = config(&root);
+        let codex = root.join("runtime").join("backends").join("codex").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("codex-acp"), "").unwrap();
+        let request = request(AgentBackend::Codex, &root);
+        std::fs::create_dir_all(&request.project_root).unwrap();
+        let launcher = HostLauncher::new(config.clone());
+        let error = launcher.launch(request.clone()).await.err().expect("refused");
+        assert_eq!(error.code, MISSING_CREDENTIALS, "{error:?}");
+        assert_eq!(error.remedy.as_deref(), Some(MISSING_CREDENTIALS_REMEDY));
+        let detail = serde_json::to_string(&error.detail).unwrap();
+        assert!(detail.contains(".codex/auth.json") && detail.contains("missing_credentials"), "{detail}");
+        // A login in the private HOME: past the refusal.
+        let home = PrivateHomes::new(config.fox_data.join("sandbox-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Codex).unwrap().path;
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex").join("auth.json"), r#"{"OPENAI_API_KEY":"sk-fox-test-not-real"}"#).unwrap();
+        let error = launcher.launch(request.clone()).await.err().expect("no srt here");
+        assert_ne!(error.code, MISSING_CREDENTIALS, "{error:?}");
+        assert!(!format!("{error:?}").contains("sk-fox-test-not-real"), "never a value");
+        // pi is never blocked by the probe (keys may come from elsewhere).
+        let probe = crate::onboarding::probe(AgentBackend::Pi, &root.join("nothing"), PermissionMode::Sandboxed, HostOs::Linux, &|_| false);
+        assert!(!crate::onboarding::launch_blocked_by_missing_login(&probe));
         let _ = std::fs::remove_dir_all(&root);
     }
 
