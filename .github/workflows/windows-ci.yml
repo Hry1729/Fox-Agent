@@ -7,6 +7,21 @@ on:
       - master
   pull_request:
   workflow_dispatch:
+    inputs:
+      # Narrow manual re-check. Off (and absent on push / pull_request) means the
+      # full workflow, unchanged. On: only the filtered Rust Host suite and the
+      # Agent Runtime standalone build + packaged Kernel worker test run; desktop
+      # bun, agent backend (ACP), Zvec / ONNX smoke, Kernel core cargo tests, the
+      # protocol check, the full Agent Runtime suite and the Host performance
+      # baseline are skipped.
+      targeted:
+        description: Targeted run (filtered Rust Host + Runtime package only)
+        type: boolean
+        default: false
+      rust_test_filter:
+        description: Targeted only. Space-separated libtest name filters (substring, any match); empty = whole Host suite
+        type: string
+        default: 'runtime_host::delivery window_resize'
 
 permissions:
   contents: read
@@ -16,6 +31,7 @@ jobs:
   # can never push this job past its (much smaller) time budget.
   desktop-build:
     name: Desktop build + profile isolation
+    if: ${{ !inputs.targeted }}
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -128,10 +144,17 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # build:sidecar compiles the standalone Runtime with `bun build --compile`.
+      - name: Configure Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Test Agent Runtime
+        if: ${{ !inputs.targeted }}
         shell: bash
         run: |
           mkdir -p .test-target
@@ -182,9 +205,11 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Test Kernel core and shared protocol
+        if: ${{ !inputs.targeted }}
         run: cargo test -p fox-agent-kernel -p fox-engine-protocol
 
       - name: Check generated protocol and JavaScript contract
+        if: ${{ !inputs.targeted }}
         shell: pwsh
         run: |
           pnpm protocol:check
@@ -197,10 +222,15 @@ jobs:
       - name: Test Rust Host without optional Zvec
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: pwsh
-        run: ./scripts/test-desktop-rust.ps1 -Mode Suite -TimeoutSeconds 1800
+        env:
+          RUST_TEST_FILTER: ${{ inputs.targeted && inputs.rust_test_filter || '' }}
+        run: |
+          $filters = @("$env:RUST_TEST_FILTER" -split '\s+' | Where-Object { $_ })
+          if ($filters.Count -gt 0) { Write-Host "Targeted Rust Host filters: $($filters -join ', ')" }
+          ./scripts/test-desktop-rust.ps1 -Mode Suite -TestFilter $filters -TimeoutSeconds 1800
 
       - name: Test Rust Host performance baseline in isolation
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && !inputs.targeted }}
         shell: pwsh
         run: ./scripts/test-desktop-rust.ps1 -Mode Performance -TimeoutSeconds 300
 
@@ -223,6 +253,7 @@ jobs:
   # Real-backend tests stay gated off (FOX_TEST_REAL_ACP / FOX_TEST_REAL_SRT unset).
   agent-backend:
     name: Agent backend (ACP) tests
+    if: ${{ !inputs.targeted }}
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -247,6 +278,7 @@ jobs:
 
   vector-runtime-smoke:
     name: Zvec offline smoke (resource-gated)
+    if: ${{ !inputs.targeted }}
     runs-on: windows-latest
     timeout-minutes: 10
     env:
@@ -283,6 +315,7 @@ jobs:
 
   onnx-runtime-smoke:
     name: ONNX Runtime offline smoke (resource-gated)
+    if: ${{ !inputs.targeted }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
