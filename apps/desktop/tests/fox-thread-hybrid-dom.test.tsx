@@ -105,19 +105,18 @@ describe('the assistant-ui thread with the hybrid rollback', () => {
       if (index === 0) expect(view.container.textContent).not.toContain('现在到达第二段')
     }
   })
-  test('empty conversations show the CLASSIC empty state (mascot + suggestions)', async () => {
+  test('empty conversations show the CLASSIC empty state (mascot, no suggestions)', async () => {
+    // Since 59c31ff ConversationEmptyPrompt no longer renders starter suggestions, and the
+    // current UI (heading only, no suggestion buttons) was accepted as intended on 2026-10-22.
+    // The assertion is inverted accordingly: the empty state must not offer suggestions, and
+    // nothing in it may start a conversation on its own.
     const started: string[] = []
     mount([], (suggestion) => started.push(suggestion))
     await flush()
     expect(document.querySelector('.fox-empty-conversation .fox-empty-heading')).not.toBeNull()
     expect(document.querySelector('.fox-empty-conversation h2')?.textContent).toBe('今天想做什么？')
-    const suggestions = [...document.querySelectorAll('.fox-starter-suggestions button')]
-    expect(suggestions.length).toBeGreaterThanOrEqual(1)
-    // Clicking a suggestion goes through the classic `onStart` (fills the
-    // legacy composer draft), not through the runtime's send adapter.
-    suggestions[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await flush()
-    expect(started).toEqual(['整理这个项目中的文档'])
+    expect(document.querySelectorAll('.fox-starter-suggestions button')).toHaveLength(0)
+    expect(started).toEqual([])
     expect(document.querySelector('.fox-thread-composer-form')).toBeNull()
   })
 
