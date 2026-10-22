@@ -328,6 +328,29 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
     }
 }
 
+/// Whether a launch should be refused BEFORE the backend starts because the
+/// probe found no login (`agent_backend_missing_credentials`), so the user
+/// gets the login card instead of the backend's own raw error.
+///
+/// Only where the probe is authoritative:
+/// * DeepSeek: dsh needs `DEEPSEEK_API_KEY` (private `.dsh/.env`, or the Host
+///   environment where it reaches the backend);
+/// * Codex: no usable `auth.json`, no `OPENAI_API_KEY` reaching the backend
+///   AND no `config.toml` (a config may name another provider / key the probe
+///   does not model, so its presence lets Codex start and decide);
+/// * pi: never (pi reads provider keys from many places, e.g. the Host
+///   environment; the card still shows, but the launch is not blocked).
+pub fn launch_blocked_by_missing_login(probe: &CredentialProbe) -> bool {
+    if probe.state != CredentialState::MissingCredentials {
+        return false;
+    }
+    match probe.backend.as_str() {
+        "deepseek" => true,
+        "codex" => !probe.present_files.iter().any(|file| file == CODEX_CONFIG),
+        _ => false,
+    }
+}
+
 /// Where the user's real login lives.
 #[derive(Debug, Clone)]
 pub struct RealHome {
@@ -408,29 +431,101 @@ pub fn import_candidates(backend: AgentBackend, real: &RealHome) -> Vec<ImportIt
     items
 }
 
+/// One private HOME an import writes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportTarget {
+    /// Project UUID.
+    pub project: String,
+    /// What the user calls the project (its name; the UUID when unknown).
+    pub label: String,
+    pub home: PathBuf,
+}
+
+/// How an import treats a login that is already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportOptions<'a> {
+    /// "覆盖已有登录" (off by default): replace a file / key the private HOME
+    /// already has, after backing it up. Off: keep it and report the skip.
+    pub overwrite: bool,
+    /// Name of the backup directory under [`BACKUP_DIR`] (`[A-Za-z0-9_-]`,
+    /// e.g. `20261022-084512`); used only when something is overwritten.
+    pub backup_stamp: &'a str,
+}
+
+impl Default for ImportOptions<'_> {
+    fn default() -> Self {
+        Self { overwrite: false, backup_stamp: "backup" }
+    }
+}
+
+/// Directory of the private HOME that holds overwritten logins
+/// (`<private HOME>/.fox-credential-backups/<stamp>/<relative path>`).
+pub const BACKUP_DIR: &str = ".fox-credential-backups";
+
+/// A project whose private HOME already had some of the items: kept, not
+/// copied (names only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSkip {
+    pub project: String,
+    pub label: String,
+    /// File destinations (`.codex/auth.json`) and key names (`DEEPSEEK_API_KEY`).
+    pub items: Vec<String>,
+}
+
+/// Where the overwritten items of one project were backed up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBackup {
+    pub project: String,
+    pub label: String,
+    /// Absolute backup directory (shown to the user; not in the audit).
+    pub directory: PathBuf,
+    /// Files backed up, relative to the private HOME.
+    pub items: Vec<String>,
+}
+
 /// Audit record of one import: names only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportReport {
     pub backend: String,
-    /// Private HOMEs written.
+    /// Private HOMEs targeted.
     pub homes: usize,
+    /// Private HOMEs where at least one item was written.
+    pub homes_written: usize,
+    /// Whether "覆盖已有登录" was chosen.
+    pub overwrite: bool,
+    /// Files / keys written to at least one private HOME.
     pub files: Vec<String>,
     pub keys: Vec<String>,
     /// Ids the user confirmed that are not (or no longer) in the whitelist.
     pub skipped: Vec<String>,
+    /// Projects that already had some items (kept, not copied).
+    pub skipped_existing: Vec<ImportSkip>,
+    /// Backups made before overwriting (overwrite only).
+    pub backups: Vec<ImportBackup>,
 }
 
 impl ImportReport {
-    /// The audit event (`agent_backend.credentials_imported`).
+    /// The audit event (`agent_backend.credentials_imported`): names only,
+    /// backup directories relative to the private HOME.
     pub fn audit_event(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "agent_backend.credentials_imported",
             "agentBackend": self.backend,
             "homes": self.homes,
+            "homesWritten": self.homes_written,
+            "overwrite": self.overwrite,
             "files": self.files,
             "keys": self.keys,
             "skipped": self.skipped,
+            "skippedExisting": self.skipped_existing.iter().map(|skip| serde_json::json!({ "project": skip.project, "items": skip.items })).collect::<Vec<_>>(),
+            "backups": self.backups.iter().map(|backup| serde_json::json!({
+                "project": backup.project,
+                "items": backup.items,
+                "directory": backup.directory.file_name().map(|name| format!("{BACKUP_DIR}/{}", name.to_string_lossy())),
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -505,19 +600,110 @@ fn merge_env_lines(dest: &str, source: &str, keys: &[&str]) -> String {
     text
 }
 
+/// Backup directory name for `now`, UTC: `YYYYMMDD-HHMMSS`.
+pub fn backup_stamp(now: std::time::SystemTime) -> String {
+    let secs = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}{month:02}{day:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+fn valid_stamp(stamp: &str) -> bool {
+    !stamp.is_empty() && stamp.len() <= 64 && stamp.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Per-home backup of the files about to be overwritten.
+struct Backup<'a> {
+    home: &'a Path,
+    stamp: &'a str,
+    directory: Option<PathBuf>,
+    items: Vec<String>,
+}
+
+impl Backup<'_> {
+    /// Copy `<home>/<relative>` into the backup directory (created on first
+    /// use, private; a fresh `-2`, `-3` ... suffix if the stamp is taken).
+    fn save(&mut self, relative: &str) -> Result<(), String> {
+        let source = rel(self.home, relative);
+        let bytes = std::fs::read(&source).map_err(|error| format!("cannot back up {relative}: {error}"))?;
+        if self.directory.is_none() {
+            let root = self.home.join(BACKUP_DIR);
+            ensure_private_dir(self.home, &root).map_err(|error| format!("cannot create {BACKUP_DIR}: {error}"))?;
+            let mut n = 1;
+            let directory = loop {
+                let name = if n == 1 { self.stamp.to_owned() } else { format!("{}-{n}", self.stamp) };
+                let candidate = root.join(&name);
+                match std::fs::create_dir(&candidate) {
+                    Ok(()) => break candidate,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
+                    Err(error) => return Err(format!("cannot create the backup directory: {error}")),
+                }
+            };
+            set_mode(&directory, 0o700).map_err(|error| format!("cannot protect the backup directory: {error}"))?;
+            self.directory = Some(directory);
+        }
+        let directory = self.directory.clone().expect("created above");
+        let dest = rel(&directory, relative);
+        ensure_private_dir(self.home, dest.parent().unwrap_or(&directory)).map_err(|error| format!("cannot create the backup of {relative}: {error}"))?;
+        write_private(&dest, &bytes).map_err(|error| format!("cannot back up {relative}: {error}"))?;
+        self.items.push(relative.to_owned());
+        Ok(())
+    }
+}
+
 /// Copy the items with ids in `selected` (re-checked against
-/// [`import_candidates`]; anything else is skipped) into every private HOME
-/// in `homes`. A copy, never a link; regular files only.
-pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], homes: &[PathBuf]) -> Result<ImportReport, String> {
+/// [`import_candidates`]; anything else is skipped) into every target's
+/// private HOME. A copy, never a link; regular files only.
+///
+/// A login already there is KEPT by default: a file the private HOME has, or
+/// a `.env` key it already assigns, is not touched and the project is listed
+/// in [`ImportReport::skipped_existing`] (Windows acceptance of 80b1622:
+/// "套用到我所有项目" silently replaced the main project's Codex
+/// `auth.json`). With [`ImportOptions::overwrite`] it is replaced after the
+/// old file is copied to `<home>/.fox-credential-backups/<stamp>/`. Other
+/// `.env` lines are always kept.
+pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], targets: &[ImportTarget], options: ImportOptions<'_>) -> Result<ImportReport, String> {
+    if options.overwrite && !valid_stamp(options.backup_stamp) {
+        return Err(format!("invalid backup name {:?}", options.backup_stamp));
+    }
     let candidates = import_candidates(backend, real);
     let chosen: Vec<&ImportItem> = candidates.iter().filter(|item| selected.contains(&item.id)).collect();
     let skipped: Vec<String> = selected.iter().filter(|id| !candidates.iter().any(|item| &item.id == *id)).cloned().collect();
     let mut files: Vec<String> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
-    for home in homes {
+    let mut skipped_existing: Vec<ImportSkip> = Vec::new();
+    let mut backups: Vec<ImportBackup> = Vec::new();
+    let mut homes_written = 0;
+    for target in targets {
+        let home = target.home.as_path();
         ensure_private_dir(home, home).map_err(|error| format!("cannot create the private HOME: {error}"))?;
+        let mut kept: Vec<String> = Vec::new();
+        let mut backup = Backup { home, stamp: options.backup_stamp, directory: None, items: Vec::new() };
+        let mut wrote = false;
         // Whole files.
         for item in chosen.iter().filter(|item| item.kind == ImportKind::File) {
+            let dest = rel(home, &item.destination);
+            let exists = std::fs::symlink_metadata(&dest).is_ok();
+            if exists && !options.overwrite {
+                kept.push(item.destination.clone());
+                continue;
+            }
+            if is_link(&dest) || (exists && !dest.is_file()) {
+                return Err(format!("{} in the private HOME is not a regular file; refusing to overwrite it", item.destination));
+            }
             let bytes = read_small(&item.source)
                 .map(String::into_bytes)
                 .or_else(|| {
@@ -525,9 +711,12 @@ pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], 
                     (meta.is_file() && meta.len() <= MAX_IMPORT_FILE_BYTES).then(|| std::fs::read(&item.source).ok()).flatten()
                 })
                 .ok_or_else(|| format!("{} is not a regular file of at most 1 MiB", item.name))?;
-            let dest = rel(home, &item.destination);
+            if exists {
+                backup.save(&item.destination)?;
+            }
             ensure_private_dir(home, dest.parent().unwrap_or(home)).map_err(|error| format!("cannot create {}: {error}", item.destination))?;
             write_private(&dest, &bytes).map_err(|error| format!("cannot write {}: {error}", item.destination))?;
+            wrote = true;
             if !files.contains(&item.destination) {
                 files.push(item.destination.clone());
             }
@@ -539,22 +728,64 @@ pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], 
             let group: Vec<&&ImportItem> = chosen.iter().filter(|item| item.kind == ImportKind::EnvKey && item.destination == destination).collect();
             let source = read_small(&group[0].source).ok_or_else(|| format!("{destination} is not a regular file of at most 1 MiB"))?;
             let dest = rel(home, destination);
-            let existing = if std::fs::symlink_metadata(&dest).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            if is_link(&dest) {
                 return Err(format!("{destination} in the private HOME is a link; refusing to write through it"));
+            }
+            let existing = if std::fs::symlink_metadata(&dest).is_ok() {
+                read_small(&dest).ok_or_else(|| format!("{destination} in the private HOME is not a regular text file of at most 1 MiB; refusing to rewrite it"))?
             } else {
-                read_small(&dest).unwrap_or_default()
+                String::new()
             };
-            let names: Vec<&str> = group.iter().map(|item| item.name.as_str()).collect();
+            let present = dotenv_key_names(&existing);
+            let mut names: Vec<&str> = Vec::new();
+            let mut replaced = false;
+            for item in &group {
+                let name = item.name.as_str();
+                if present.iter().any(|known| known == name) {
+                    if !options.overwrite {
+                        kept.push(name.to_owned());
+                        continue;
+                    }
+                    replaced = true;
+                }
+                names.push(name);
+            }
+            if names.is_empty() {
+                continue;
+            }
+            if replaced {
+                backup.save(destination)?;
+            }
             ensure_private_dir(home, dest.parent().unwrap_or(home)).map_err(|error| format!("cannot create {destination}: {error}"))?;
             write_private(&dest, merge_env_lines(&existing, &source, &names).as_bytes()).map_err(|error| format!("cannot write {destination}: {error}"))?;
+            wrote = true;
             for name in names {
                 if !keys.iter().any(|known| known == name) {
                     keys.push(name.to_owned());
                 }
             }
         }
+        if wrote {
+            homes_written += 1;
+        }
+        if !kept.is_empty() {
+            skipped_existing.push(ImportSkip { project: target.project.clone(), label: target.label.clone(), items: kept });
+        }
+        if let Some(directory) = backup.directory {
+            backups.push(ImportBackup { project: target.project.clone(), label: target.label.clone(), directory, items: backup.items });
+        }
     }
-    Ok(ImportReport { backend: backend.as_str().to_owned(), homes: homes.len(), files, keys, skipped })
+    Ok(ImportReport {
+        backend: backend.as_str().to_owned(),
+        homes: targets.len(),
+        homes_written,
+        overwrite: options.overwrite,
+        files,
+        keys,
+        skipped,
+        skipped_existing,
+        backups,
+    })
 }
 
 #[cfg(test)]
@@ -574,6 +805,17 @@ mod tests {
         let path = rel(home, relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    /// Targets named after the `homes/<project>/<backend>` layout of the tests.
+    fn targets(homes: &[PathBuf]) -> Vec<ImportTarget> {
+        homes
+            .iter()
+            .map(|home| {
+                let project = home.parent().and_then(Path::file_name).unwrap().to_string_lossy().into_owned();
+                ImportTarget { label: format!("Project {project}"), project, home: home.clone() }
+            })
+            .collect()
     }
 
     fn no_env(_: &str) -> bool {
@@ -682,7 +924,7 @@ mod tests {
         assert!(!serde_json::to_string(&candidates).unwrap().contains(&real.home.display().to_string()), "source paths are not serialized");
 
         let homes = vec![root.join("homes/p1/deepseek"), root.join("homes/p2/deepseek")];
-        // An existing private .env keeps its other lines; the imported key replaces its own.
+        // An existing private .env keeps its other lines AND its own key (kept by default).
         write(&homes[0], DSH_ENV, "DEEPSEEK_API_KEY=old\nOTHER=1\n");
         let selected = vec![
             "env:.dsh/.env#DEEPSEEK_API_KEY".to_owned(),
@@ -690,15 +932,18 @@ mod tests {
             "file:.ssh/id_ed25519".to_owned(),
             "env:.dsh/.env#UNRELATED_TOKEN".to_owned(),
         ];
-        let report = import_into(AgentBackend::Deepseek, &real, &selected, &homes).unwrap();
+        let report = import_into(AgentBackend::Deepseek, &real, &selected, &targets(&homes), ImportOptions::default()).unwrap();
         assert_eq!(report.homes, 2);
+        assert_eq!(report.homes_written, 2);
+        assert_eq!(report.skipped_existing, [ImportSkip { project: "p1".into(), label: "Project p1".into(), items: vec!["DEEPSEEK_API_KEY".into()] }]);
+        assert!(report.backups.is_empty() && !rel(&homes[0], BACKUP_DIR).exists());
         assert_eq!(report.files, [DSH_PATCH_ACP]);
         assert_eq!(report.keys, ["DEEPSEEK_API_KEY"]);
         assert_eq!(report.skipped, ["file:.ssh/id_ed25519", "env:.dsh/.env#UNRELATED_TOKEN"]);
         assert_no_secret(&report);
         assert_no_secret(&report.audit_event());
         let first = std::fs::read_to_string(rel(&homes[0], DSH_ENV)).unwrap();
-        assert_eq!(first, "OTHER=1\nDEEPSEEK_API_KEY=sk-real-deepseek-0001\n");
+        assert_eq!(first, "DEEPSEEK_API_KEY=old\nOTHER=1\n", "the existing key is kept");
         let second = std::fs::read_to_string(rel(&homes[1], DSH_ENV)).unwrap();
         assert_eq!(second, "DEEPSEEK_API_KEY=sk-real-deepseek-0001\n");
         for home in &homes {
@@ -710,7 +955,9 @@ mod tests {
                 use std::os::unix::fs::PermissionsExt;
                 let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
                 assert_eq!(mode(&patch), 0o600);
-                assert_eq!(mode(&rel(home, DSH_ENV)), 0o600);
+                if home == &homes[1] {
+                    assert_eq!(mode(&rel(home, DSH_ENV)), 0o600, "written by the import");
+                }
                 assert_eq!(mode(&rel(home, ".dsh")), 0o700);
                 assert_eq!(mode(&rel(home, ".dsh/profiles/acp")), 0o700);
                 assert_eq!(mode(home), 0o700);
@@ -742,7 +989,7 @@ mod tests {
         let items = import_candidates(AgentBackend::Codex, &custom);
         assert_eq!(items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["auth.json"]);
         let home = root.join("homes/p1/codex");
-        let report = import_into(AgentBackend::Codex, &custom, &["file:.codex/auth.json".to_owned()], std::slice::from_ref(&home)).unwrap();
+        let report = import_into(AgentBackend::Codex, &custom, &["file:.codex/auth.json".to_owned()], &targets(std::slice::from_ref(&home)), ImportOptions::default()).unwrap();
         assert_eq!(report.files, [CODEX_AUTH]);
         assert_no_secret(&report.audit_event());
         assert_eq!(probe(AgentBackend::Codex, &home, PermissionMode::Sandboxed, HostOs::Linux, &no_env).state, CredentialState::Ready);
@@ -751,6 +998,117 @@ mod tests {
         write(&real, ".pi/agent/sessions/a.jsonl", "x");
         let pi: Vec<String> = import_candidates(AgentBackend::Pi, &real_home).into_iter().map(|item| item.destination).collect();
         assert_eq!(pi, [PI_AUTH]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 80b1622 acceptance: "套用到我所有项目" replaced the main project's Codex
+    /// auth.json (3886 B -> 3948 B). Default: an existing file / key is kept
+    /// and reported by project; "覆盖已有登录" backs it up first and says where.
+    /// The current project follows the same rule. The audit has names only.
+    #[test]
+    fn import_keeps_existing_logins_unless_overwrite_and_backs_them_up() {
+        let root = scratch("import-keep");
+        let real = root.join("real");
+        write(&real, CODEX_AUTH, r#"{"OPENAI_API_KEY":"sk-openai-real-0003"}"#);
+        write(&real, CODEX_CONFIG, "model = \"o4\"\n");
+        write(&real, DSH_ENV, "DEEPSEEK_API_KEY=sk-real-deepseek-0001\nMAGPIE_GATEWAY_KEY=magpie-real-0002\n");
+        let real = RealHome { home: real, codex_home: None };
+        let homes = vec![root.join("homes/main/codex"), root.join("homes/fresh/codex")];
+        let main_auth = r#"{"tokens":{"refresh_token":"chatgpt-refresh-0004"}}"#;
+        write(&homes[0], CODEX_AUTH, main_auth);
+        let selected = vec![format!("file:{CODEX_AUTH}"), format!("file:{CODEX_CONFIG}")];
+
+        // Default: main keeps its auth.json (gets the missing config.toml), fresh gets both.
+        let report = import_into(AgentBackend::Codex, &real, &selected, &targets(&homes), ImportOptions::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(rel(&homes[0], CODEX_AUTH)).unwrap(), main_auth, "never silently replaced");
+        assert!(rel(&homes[0], CODEX_CONFIG).is_file());
+        assert!(std::fs::read_to_string(rel(&homes[1], CODEX_AUTH)).unwrap().contains("sk-openai-real-0003"));
+        assert_eq!(report.homes_written, 2);
+        assert!(!report.overwrite);
+        assert_eq!(report.skipped_existing, [ImportSkip { project: "main".into(), label: "Project main".into(), items: vec![CODEX_AUTH.into()] }]);
+        assert!(report.backups.is_empty());
+        assert!(!rel(&homes[0], BACKUP_DIR).exists());
+        assert_no_secret(&report);
+        assert_no_secret(&report.audit_event());
+
+        // Again, default: everything already there, nothing written anywhere.
+        let again = import_into(AgentBackend::Codex, &real, &selected, &targets(&homes), ImportOptions::default()).unwrap();
+        assert_eq!(again.homes_written, 0);
+        assert!(again.files.is_empty());
+        assert_eq!(again.skipped_existing.len(), 2);
+        assert_eq!(again.skipped_existing[1].items, [CODEX_AUTH, CODEX_CONFIG]);
+
+        // Overwrite: backed up under the private HOME with the stamp, then replaced.
+        let report = import_into(AgentBackend::Codex, &real, &selected[..1], &targets(&homes[..1]), ImportOptions { overwrite: true, backup_stamp: "20261022-084512" }).unwrap();
+        assert!(report.overwrite && report.skipped_existing.is_empty());
+        assert_eq!(report.backups.len(), 1);
+        let backup = &report.backups[0];
+        assert_eq!(backup.directory, homes[0].join(BACKUP_DIR).join("20261022-084512"));
+        assert_eq!(backup.items, [CODEX_AUTH]);
+        assert_eq!(std::fs::read_to_string(rel(&backup.directory, CODEX_AUTH)).unwrap(), main_auth);
+        assert!(std::fs::read_to_string(rel(&homes[0], CODEX_AUTH)).unwrap().contains("sk-openai-real-0003"));
+        let audit = report.audit_event();
+        assert_eq!(audit["backups"][0]["directory"], format!("{BACKUP_DIR}/20261022-084512"));
+        assert!(!serde_json::to_string(&audit).unwrap().contains(&root.display().to_string()), "no absolute path in the audit");
+        assert_no_secret(&audit);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&homes[0].join(BACKUP_DIR)), 0o700);
+            assert_eq!(mode(&backup.directory), 0o700);
+            assert_eq!(mode(&rel(&backup.directory, CODEX_AUTH)), 0o600);
+        }
+        // Same stamp again: a fresh directory, the first backup untouched.
+        let second = import_into(AgentBackend::Codex, &real, &selected[..1], &targets(&homes[..1]), ImportOptions { overwrite: true, backup_stamp: "20261022-084512" }).unwrap();
+        assert_eq!(second.backups[0].directory, homes[0].join(BACKUP_DIR).join("20261022-084512-2"));
+        assert_eq!(std::fs::read_to_string(rel(&backup.directory, CODEX_AUTH)).unwrap(), main_auth);
+        assert!(import_into(AgentBackend::Codex, &real, &selected, &targets(&homes), ImportOptions { overwrite: true, backup_stamp: "../x" }).is_err());
+
+        // .env merge by key: existing keys kept by default, missing ones added.
+        let ds = vec![root.join("homes/main/deepseek")];
+        write(&ds[0], DSH_ENV, "DEEPSEEK_API_KEY=mine\nOTHER=1\n");
+        let keys = vec![format!("env:{DSH_ENV}#DEEPSEEK_API_KEY"), format!("env:{DSH_ENV}#MAGPIE_GATEWAY_KEY")];
+        let report = import_into(AgentBackend::Deepseek, &real, &keys, &targets(&ds), ImportOptions::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(rel(&ds[0], DSH_ENV)).unwrap(), "DEEPSEEK_API_KEY=mine\nOTHER=1\nMAGPIE_GATEWAY_KEY=magpie-real-0002\n");
+        assert_eq!(report.keys, ["MAGPIE_GATEWAY_KEY"]);
+        assert_eq!(report.skipped_existing[0].items, ["DEEPSEEK_API_KEY"]);
+        assert_no_secret(&report.audit_event());
+        // Overwrite: the whole .env is backed up first, other lines kept.
+        let report = import_into(AgentBackend::Deepseek, &real, &keys[..1], &targets(&ds), ImportOptions { overwrite: true, backup_stamp: "s1" }).unwrap();
+        assert_eq!(std::fs::read_to_string(rel(&ds[0], DSH_ENV)).unwrap(), "OTHER=1\nMAGPIE_GATEWAY_KEY=magpie-real-0002\nDEEPSEEK_API_KEY=sk-real-deepseek-0001\n");
+        assert_eq!(std::fs::read_to_string(rel(&report.backups[0].directory, DSH_ENV)).unwrap(), "DEEPSEEK_API_KEY=mine\nOTHER=1\nMAGPIE_GATEWAY_KEY=magpie-real-0002\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backup_stamp_is_utc_and_path_safe() {
+        let at = |secs: u64| backup_stamp(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        assert_eq!(at(0), "19700101-000000");
+        assert_eq!(at(1_792_658_712), "20261022-084512");
+        assert_eq!(at(951_782_400), "20000229-000000");
+        assert!(valid_stamp(&at(1_792_658_712)));
+    }
+
+    /// The pre-launch refusal only where the probe is authoritative.
+    #[test]
+    fn launch_is_blocked_only_for_a_missing_deepseek_or_codex_login() {
+        let root = scratch("launch-blocked");
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let blocked = |backend| launch_blocked_by_missing_login(&probe(backend, &empty, PermissionMode::Sandboxed, HostOs::Windows, &no_env));
+        assert!(blocked(AgentBackend::Codex));
+        assert!(blocked(AgentBackend::Deepseek));
+        assert!(!blocked(AgentBackend::Pi), "pi may read keys the probe does not see");
+        assert!(!blocked(AgentBackend::Fox));
+        // Codex with a config.toml (may name another provider): let it start.
+        let configured = root.join("configured");
+        write(&configured, CODEX_CONFIG, "model_provider = \"azure\"\n");
+        assert!(!launch_blocked_by_missing_login(&probe(AgentBackend::Codex, &configured, PermissionMode::Sandboxed, HostOs::Windows, &no_env)));
+        // A login present: never blocked.
+        let ready = root.join("ready");
+        write(&ready, CODEX_AUTH, r#"{"OPENAI_API_KEY":"sk-openai-real-0003"}"#);
+        assert!(!launch_blocked_by_missing_login(&probe(AgentBackend::Codex, &ready, PermissionMode::Sandboxed, HostOs::Windows, &no_env)));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
