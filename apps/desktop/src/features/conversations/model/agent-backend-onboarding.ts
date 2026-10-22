@@ -36,14 +36,73 @@ export interface ImportItem {
   destination: string
 }
 
-/** Audit record returned by `agent_backend_import_credentials`. */
+/** A project whose private HOME already had some items (kept, not copied). */
+export interface ImportSkip { project: string; label: string; items: string[] }
+
+/** Where the overwritten items of one project were backed up. */
+export interface ImportBackup { project: string; label: string; directory: string; items: string[] }
+
+/** Audit record returned by `agent_backend_import_credentials` (names only). */
 export interface ImportReport {
   backend: string
+  /** Private HOMEs targeted. */
   homes: number
+  /** Private HOMEs where something was written (older Hosts: absent). */
+  homesWritten?: number
+  /** "覆盖已有登录" was chosen. */
+  overwrite?: boolean
   files: string[]
   keys: string[]
   skipped: string[]
+  skippedExisting?: ImportSkip[]
+  backups?: ImportBackup[]
 }
+
+/**
+ * Which private HOME the probe / import / "打开文件夹" is about: an existing
+ * conversation, or a NEW conversation (backend + project) before its first
+ * message, so the login card shows before the user can fail once.
+ */
+export type AgentBackendTarget =
+  | { conversationId: string }
+  | { backend: string; projectId?: string; projectRoot?: string; fullAccess?: boolean }
+
+/**
+ * The probe target of the shown backend: the open conversation when it is
+ * locked to an external backend; else, for a new conversation with an
+ * external backend picked, its project (id or root) and draft mode; null for
+ * Fox, or a draft with no project yet (the Host keys private HOMEs by project).
+ */
+export function credentialProbeTarget(input: {
+  lockedBackend: string | null
+  conversationId: string | null
+  draftBackend: string
+  draftProjectId?: string | null
+  draftProjectRoot?: string | null
+  draftFullAccess?: boolean
+}): AgentBackendTarget | null {
+  if (input.lockedBackend) {
+    return input.lockedBackend !== 'fox' && input.conversationId ? { conversationId: input.conversationId } : null
+  }
+  if (input.draftBackend === 'fox') return null
+  const projectId = input.draftProjectId || undefined
+  const projectRoot = input.draftProjectRoot || undefined
+  if (!projectId && !projectRoot) return null
+  return {
+    backend: input.draftBackend,
+    ...(projectId ? { projectId } : {}),
+    ...(projectRoot ? { projectRoot } : {}),
+    fullAccess: Boolean(input.draftFullAccess),
+  }
+}
+
+/** Stable key of a target (effect dependency). */
+export function credentialProbeTargetKey(target: AgentBackendTarget | null): string {
+  return target ? JSON.stringify(target) : ''
+}
+
+/** How long the import receipt stays on the bar after the card is gone. */
+export const IMPORT_RECEIPT_VISIBLE_MS = 30_000
 
 /** `agent_backend_permission_status`. */
 export interface AgentBackendPermissionStatus {
@@ -168,10 +227,35 @@ export function importConfirmationRows(items: readonly ImportItem[]): { id: stri
   }))
 }
 
+const baseName = (path: string) => path.split('/').pop() ?? path
+
+/**
+ * Receipt lines after an import (names only, no value). Shown OUTSIDE the
+ * card: a successful import turns the probe ready and the card disappears.
+ */
+export function importReceiptLines(report: ImportReport): string[] {
+  const names = [...report.files.map(baseName), ...report.keys]
+  const written = report.homesWritten ?? (names.length ? report.homes : 0)
+  const lines: string[] = []
+  if (names.length && written > 0) {
+    const where = report.homes > 1 ? ` ${written} 个项目的私有 HOME` : '本项目的私有 HOME'
+    lines.push(`已复制到${where}：${names.join('、')}`)
+  } else {
+    lines.push('没有复制任何内容')
+  }
+  const kept = report.skippedExisting ?? []
+  if (kept.length) {
+    const projects = kept.map((skip) => `${skip.label}（${skip.items.map(baseName).join('、')}）`)
+    lines.push(`已有登录，未覆盖 ${kept.length} 个项目：${projects.join('、')}`)
+  }
+  for (const backup of report.backups ?? []) {
+    lines.push(`已覆盖 ${backup.label} 的 ${backup.items.map(baseName).join('、')}，原文件备份在 ${backup.directory}`)
+  }
+  if (report.skipped.length) lines.push(`${report.skipped.length} 项已不在可导入列表中，未复制`)
+  return lines
+}
+
 /** One-line receipt after an import (names only). */
 export function importReceipt(report: ImportReport): string {
-  const names = [...report.files.map((file) => file.split('/').pop() ?? file), ...report.keys]
-  const where = report.homes > 1 ? `${report.homes} 个项目的私有 HOME` : '本项目的私有 HOME'
-  const skipped = report.skipped.length ? `；${report.skipped.length} 项已不在可导入列表中，未复制` : ''
-  return names.length ? `已复制到${where}：${names.join('、')}${skipped}` : `没有复制任何内容${skipped}`
+  return importReceiptLines(report).join('；')
 }
