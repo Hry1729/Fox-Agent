@@ -216,7 +216,10 @@ def main():
 
 if __name__ == "__main__":
     try:
+        # Windows runners default stdout to the ANSI code page; test names and
+        # messages are often Chinese, and the runner reads workflow commands as UTF-8.
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         main()
     except Exception as exc:  # diagnostics must never fail the job
-        print(f"ci_failure_summary: parser error ignored: {exc!r}")
+        print("ci_failure_summary: parser error ignored: " + ascii(exc))
     sys.exit(0)
