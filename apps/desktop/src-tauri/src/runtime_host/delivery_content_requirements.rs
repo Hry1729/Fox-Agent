@@ -1180,7 +1180,10 @@ mod tests {
     fn explicit_sheet_and_multiple_source_remain_ambiguous() {
         assert!(source_sheet_from_task("按字段统计 Sheet 'Alpha' 和 Sheet 'Beta'。").is_err());
         assert_eq!(source_sheet_from_task("以 Detailed Ledger 为事实明细，按 Segment Group 列统计。").unwrap(),Some("Detailed Ledger".into()));
-        let requirement=source_statistics_demand("读取 FIRST.XLSX 和 SECOND.XLSX，按 Segment Group 列统计，生成 report.md。").unwrap();
+        // asks_for_statistics deliberately stays narrow (a computed word must follow
+        // 统计), so the demand names what is counted; the two named sources are what
+        // must keep it unbound.
+        let requirement=source_statistics_demand("读取 FIRST.XLSX 和 SECOND.XLSX，按 Segment Group 列统计数量，生成 report.md。").unwrap();
         assert!(matches!(requirement.kind,RequirementKind::SourceStatsUnbound{..}));
     }
 
