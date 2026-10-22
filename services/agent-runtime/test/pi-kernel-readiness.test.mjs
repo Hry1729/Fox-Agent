@@ -316,10 +316,14 @@ async function closeServer(server) {
 
 async function runOpenAIProviderRetryProbe(maxRetries) {
   let requestCount = 0
-  const server = createServer((request, response) => {
+  const server = createServer()
+  // Count on the server's 'request' event, i.e. as soon as the request line and headers
+  // arrive. Counting on the body's 'end' raced the client's idle timer on Windows CI and
+  // reported 0 requests although the provider had sent one (#263).
+  server.on('request', () => { requestCount += 1 })
+  server.on('request', (request, response) => {
     request.resume()
     request.on('end', () => {
-      requestCount += 1
       response.writeHead(429, {
         'content-type': 'application/json',
         connection: 'close',
@@ -347,6 +351,10 @@ async function runOpenAIProviderRetryProbe(maxRetries) {
   const modelRuntime = await createFoxModelRuntime({ model, apiKey: 'test-key',
     usage: { runId: 'provider-retry-probe', onRecord: record => usageRecords.push(record) } })
   const settingsManager = SettingsManager.inMemory(baseSettings({
+    // baseSettings' 20 ms idle timeout is meant for the faux provider. The OpenAI SDK also
+    // applies it as the per-request timeout, so on a slow runner the probe request was aborted
+    // before it reached this local server (#263). Give the real HTTP probe a realistic budget.
+    httpIdleTimeoutMs: 5000,
     retry: {
       enabled: false,
       maxRetries: 0,
