@@ -5,6 +5,11 @@
 // and a loopback gateway refused in the sandbox (full access at creation, or
 // the official endpoint). The import confirmation lists file and key NAMES
 // only; the Host never sends a value to the UI.
+//
+// An import never silently replaces a login: a file / key the target already
+// has is kept unless "覆盖已有登录" (off by default) is ticked, in which case
+// the Host backs it up first. The receipt is shown by the caller OUTSIDE this
+// card (a successful import makes the probe ready and the card disappears).
 import { useState } from 'react'
 import {
   credentialCardModel,
@@ -21,13 +26,14 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
   permission?: AgentBackendPermissionStatus | null
   onOpenFolder: () => Promise<unknown>
   onLoadCandidates: () => Promise<ImportItem[]>
-  /** Copy the confirmed ids; `allProjects` = "套用到我所有项目". */
-  onImport: (selected: string[], allProjects: boolean) => Promise<ImportReport>
+  /** Copy the confirmed ids; `allProjects` = "套用到我所有项目"; `overwrite` = "覆盖已有登录". */
+  onImport: (selected: string[], allProjects: boolean, overwrite: boolean) => Promise<ImportReport>
 }) {
   const card = credentialCardModel(probe, permission)
   const [candidates, setCandidates] = useState<ImportItem[] | null>(null)
   const [selected, setSelected] = useState<string[]>([])
   const [allProjects, setAllProjects] = useState(false)
+  const [overwrite, setOverwrite] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   if (!card) return null
@@ -76,7 +82,12 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
                 <input type="checkbox" checked={allProjects} onChange={(event) => setAllProjects(event.target.checked)} />
                 套用到我所有项目
               </label>
-              <button type="button" disabled={busy || selected.length === 0} onClick={() => run(async () => { setMessage(importReceipt(await onImport(selected, allProjects))) })}>复制选中的项目</button>
+              <label title="不勾选时，已有同名文件或已有该 key 的项目会被跳过，并在回执里列出">
+                <input type="checkbox" checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} />
+                覆盖已有登录（先备份到私有 HOME 下的带时间戳目录）
+              </label>
+              <p>默认跳过已经有这些文件或 key 的项目（包括本项目），不会覆盖。</p>
+              <button type="button" disabled={busy || selected.length === 0} onClick={() => run(async () => { setMessage(importReceipt(await onImport(selected, allProjects, overwrite))) })}>复制选中的项目</button>
             </fieldset>
           ))}
       {message && <p role="status">{message}</p>}
