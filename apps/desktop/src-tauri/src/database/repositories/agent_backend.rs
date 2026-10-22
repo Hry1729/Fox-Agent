@@ -165,12 +165,34 @@ impl Database {
         })
     }
 
-    /// Every project id the Host knows (private HOME keys for "套用到我所有项目").
-    pub(crate) fn known_project_ids(&self) -> Result<Vec<String>, String> {
+    /// Every project the Host knows, `(id, name)` ordered by id (private HOME
+    /// keys and receipt labels for "套用到我所有项目").
+    pub(crate) fn known_projects(&self) -> Result<Vec<(String, String)>, String> {
         self.with_connection(|connection| {
-            let mut statement = connection.prepare("SELECT id FROM projects ORDER BY id")?;
-            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<String>>>()
+            let mut statement = connection.prepare("SELECT id, name FROM projects ORDER BY id")?;
+            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
+        })
+    }
+
+    /// A project by id, else by root path: `(id, root_path)`. Used by the
+    /// login probe of a NEW conversation (no conversation row yet).
+    pub(crate) fn project_by_id_or_root(&self, project_id: Option<&str>, project_root: Option<&str>) -> Result<Option<(String, String)>, String> {
+        self.with_connection(|connection| {
+            if let Some(id) = project_id.filter(|id| !id.is_empty()) {
+                let found = connection
+                    .query_row("SELECT id, root_path FROM projects WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .optional()?;
+                if found.is_some() {
+                    return Ok(found);
+                }
+            }
+            match project_root.filter(|root| !root.is_empty()) {
+                Some(root) => connection
+                    .query_row("SELECT id, root_path FROM projects WHERE root_path = ?1", [root], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .optional(),
+                None => Ok(None),
+            }
         })
     }
 
