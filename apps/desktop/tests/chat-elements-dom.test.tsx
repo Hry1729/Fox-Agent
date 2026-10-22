@@ -50,7 +50,7 @@ test('中文增量只使新增字符着色，既有段落保留DOM，结束不�
   const spans = [...oldParagraph.querySelectorAll<HTMLElement>('[data-sd-animate]')]
   expect(oldParagraph.querySelector('[data-sd-animate]')).toBe(firstCharacter)
   expect(spans.slice(0, 4).every(span => span.style.getPropertyValue('--sd-duration') === '0ms')).toBe(true)
-  expect(spans.slice(4).every(span => span.style.getPropertyValue('--sd-duration') === '500ms')).toBe(true)
+  expect(spans.slice(4).every(span => span.style.getPropertyValue('--sd-duration') === '160ms')).toBe(true)
   expect(firstCharacter.getAttribute('data-slot')).toBe('streaming-text')
   expect(firstCharacter.querySelector('span')?.classList.contains('animate-in')).toBe(false)
   expect(spans.slice(4).every(span => span.querySelector('span')?.classList.contains('animate-in'))).toBe(true)
@@ -77,9 +77,9 @@ test('Models打开后键盘选择关闭弹窗并将焦点归还触发器', async
     return <Models value={value} onValueChange={setValue} options={[{ id: 'fox', name: 'Fox' }, { id: 'colleague', name: '数字同事' }]} />
   }
   const view = render(<Harness />)
-  const trigger = view.getByRole('button', { name: '选择助手和模型' })
+  const trigger = view.getByRole('button', { name: '选择模型' })
   fireEvent.click(trigger)
-  await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('助手与模型列表'))
+  await waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe('模型列表'))
   fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' })
   fireEvent.keyDown(document.activeElement!, { key: 'Enter' })
   await waitFor(() => expect(trigger.textContent).toContain('数字同事'))
@@ -113,7 +113,9 @@ test('真实Composer恢复Fox原附件结构，移除保留项目资料库和原
   URL.createObjectURL=()=> 'blob:attachment-preview'
   URL.revokeObjectURL=url=>{revoked.push(url)}
   let controller: ReturnType<typeof usePromptInputController>
-  let projectClicks=0,knowledgeClicks=0
+  // The project chip moved out of the attachment row into ComposerProjectBar (59c31ff); it is
+  // covered by its own test below, so this test keeps only the attachment and knowledge steps.
+  let knowledgeClicks=0
   function Seed() {
     controller=usePromptInputController()
     const seeded=React.useRef(false)
@@ -122,7 +124,7 @@ test('真实Composer恢复Fox原附件结构，移除保留项目资料库和原
   }
   function Harness() {
     const [draft,setDraft]=React.useState('')
-    return <TooltipProvider><PromptInputProvider><Seed/><ComposerRuntimeContext.Provider value={{knowledgeBindings:[],knowledgeReferences:[{source:'local',id:'kb'}],localKnowledgeBases:[{id:'kb',name:'项目资料库'} as any]}}><MemoizedComposer resetKey={0} draft={draft} setDraft={setDraft} chatState="idle" runtimeControlled projectRoot="D:/projects/aipath-main" onProject={()=>projectClicks++} onKnowledge={()=>knowledgeClicks++}/></ComposerRuntimeContext.Provider></PromptInputProvider></TooltipProvider>
+    return <TooltipProvider><PromptInputProvider><Seed/><ComposerRuntimeContext.Provider value={{knowledgeBindings:[],knowledgeReferences:[{source:'local',id:'kb'}],localKnowledgeBases:[{id:'kb',name:'项目资料库'} as any]}}><MemoizedComposer resetKey={0} draft={draft} setDraft={setDraft} chatState="idle" runtimeControlled projectRoot="D:/projects/aipath-main" onKnowledge={()=>knowledgeClicks++}/></ComposerRuntimeContext.Provider></PromptInputProvider></TooltipProvider>
   }
   const view=render(<Harness />)
   try {
@@ -130,15 +132,12 @@ test('真实Composer恢复Fox原附件结构，移除保留项目资料库和原
     expect(view.container.querySelector('[data-slot="composer-attachment"]')).toBeNull()
     expect(controller!.attachments.files[0].file).toBe(sample)
     const id=controller!.attachments.files[0].id
-    fireEvent.click(view.getByRole('button',{name:'aipath-main'}))
     fireEvent.click(view.getByRole('button',{name:'项目资料库'}))
-    expect(projectClicks).toBe(1)
     expect(knowledgeClicks).toBe(1)
     expect(controller!.attachments.files[0].id).toBe(id)
     fireEvent.click(view.getByRole('button',{name:'移除附件'}))
     expect(controller!.attachments.files).toHaveLength(0)
     expect(view.queryByText('输入附件示例.txt')).toBeNull()
-    expect(view.getByRole('button',{name:'aipath-main'})).toBeDefined()
     expect(view.getByRole('button',{name:'项目资料库'})).toBeDefined()
     expect(revoked).toContain('blob:attachment-preview')
   } finally {
@@ -146,6 +145,16 @@ test('真实Composer恢复Fox原附件结构，移除保留项目资料库和原
     URL.createObjectURL=createURL
     URL.revokeObjectURL=revokeURL
   }
+})
+
+test('ComposerProjectBar shows the current project folder name and offers adding a project', async () => {
+  const { ComposerProjectBar }=await import('../src/features/chat/composer/composer-project-bar')
+  let added=0
+  const view=render(<ComposerProjectBar projectRoot="D:/projects/aipath-main" projects={[]} onSelect={()=>{}} onAdd={()=>added++} />)
+  fireEvent.click(view.getByRole('button',{name:'aipath-main'}))
+  await waitFor(()=>expect(view.getByRole('button',{name:'添加项目'})).toBeDefined())
+  fireEvent.click(view.getByRole('button',{name:'添加项目'}))
+  expect(added).toBe(1)
 })
 
 test('真实AUI适配器保留Kernel中途回复与最终回复，并只显示一份工具调用', async () => {
