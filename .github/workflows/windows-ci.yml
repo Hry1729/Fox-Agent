@@ -71,8 +71,20 @@ jobs:
       - name: Test contract fixture validator
         run: pnpm contract-fixtures:test
 
+      # Output is also kept in .test-target so the summary step below can list
+      # failures without the log download (GitHub bash shell runs with pipefail).
       - name: Test desktop
-        run: bun test ./apps/desktop/tests --path-ignore-patterns "**/a0-performance.test.tsx"
+        shell: bash
+        run: |
+          mkdir -p .test-target
+          bun test ./apps/desktop/tests --path-ignore-patterns "**/a0-performance.test.tsx" 2>&1 | tee .test-target/desktop-bun.log
+
+      # Diagnostics only: lists failing tests in the job summary and as
+      # annotations. It never changes the job result.
+      - name: Summarize desktop test failures
+        if: ${{ always() }}
+        continue-on-error: true
+        run: python .github/scripts/ci_failure_summary.py bun "desktop-build (bun)" ".test-target/desktop-bun.log"
 
       # The steps below run even when an earlier test step failed (a failed step
       # still fails the job), so one red suite does not hide typecheck, build or
@@ -120,7 +132,16 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Test Agent Runtime
-        run: pnpm runtime:test
+        shell: bash
+        run: |
+          mkdir -p .test-target
+          pnpm runtime:test 2>&1 | tee .test-target/agent-runtime-test.log
+
+      # Diagnostics only; never changes the job result.
+      - name: Summarize Agent Runtime test failures
+        if: ${{ always() }}
+        continue-on-error: true
+        run: python .github/scripts/ci_failure_summary.py tap "agent-runtime" ".test-target/agent-runtime-test.log"
 
       - name: Build standalone Runtime
         run: pnpm runtime:build
@@ -182,6 +203,13 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/test-desktop-rust.ps1 -Mode Performance -TimeoutSeconds 300
+
+      # Diagnostics only: the Host failure names otherwise sit in the log
+      # artifact, which needs a login. Never changes the job result.
+      - name: Summarize Rust Host test failures
+        if: ${{ always() }}
+        continue-on-error: true
+        run: python .github/scripts/ci_failure_summary.py cargo "rust-host" ".test-target/rust-host-runs/*/test.stdout.log"
 
       - name: Upload Rust Host test logs
         if: always()
