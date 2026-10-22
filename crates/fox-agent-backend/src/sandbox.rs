@@ -1940,6 +1940,60 @@ pub fn private_home_env(backend: AgentBackend, private_home: &Path, tmp: &Path, 
     env
 }
 
+/// Subdirectories of the private HOME a backend requires to EXIST before it
+/// starts, `/`-separated and relative to the private HOME:
+/// * Codex: `CODEX_HOME=<home>/.codex` ([`private_home_env`]); codex-acp
+///   refuses to start when it is missing ("CODEX_HOME points to ..., but that
+///   path does not exist", Windows acceptance of 80b1622);
+/// * DeepSeek: `DSH_HOME=<home>/.dsh` (created up front so dsh never depends
+///   on creating its own home);
+/// * pi: `<home>/.pi/agent` (pi-coding-agent `getAgentDir()`).
+pub fn backend_home_subdirs(backend: AgentBackend) -> &'static [&'static str] {
+    match backend {
+        AgentBackend::Codex => &[".codex"],
+        AgentBackend::Deepseek => &[".dsh"],
+        AgentBackend::Pi => &[".pi/agent"],
+        AgentBackend::Fox => &[],
+    }
+}
+
+/// Create the private HOME and [`backend_home_subdirs`] when missing. Unix:
+/// every directory from the private HOME down is 0700. Windows: they inherit
+/// the protected DACL of the per-user private root, which the caller has
+/// created and verified first (`prepare_windows_private_root` /
+/// `verify_private_root`); nothing here widens it.
+pub fn ensure_backend_home_dirs(backend: AgentBackend, private_home: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(private_home)?;
+    set_private_dir_mode(private_home)?;
+    for sub in backend_home_subdirs(backend) {
+        let mut dir = private_home.to_path_buf();
+        for part in sub.split('/') {
+            dir.push(part);
+            if std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(std::io::Error::other(format!("{} is a link; refusing to use it as the backend home", dir.display())));
+            }
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+                Err(error) => return Err(error),
+            }
+            set_private_dir_mode(&dir)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_dir_mode(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_mode(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Where a full-access launch keeps its private HOME and session temp: the
 /// same places a sandboxed launch of the same project x backend uses
 /// ([`PrivateHomes::home_for`], the launcher's temp root).
@@ -1964,7 +2018,7 @@ pub fn prepare_full_access(mut spec: LaunchSpec, session_id: &str, private: &Ful
     }
     let io = |error: std::io::Error| SandboxError::new(SandboxUnavailable, format!("cannot prepare the private HOME: {error}"));
     let session_tmp = private.tmp_root.join(session_id);
-    std::fs::create_dir_all(&private.private_home).map_err(io)?;
+    ensure_backend_home_dirs(spec.backend, &private.private_home).map_err(io)?;
     let _ = std::fs::remove_dir_all(&session_tmp);
     std::fs::create_dir_all(&session_tmp).map_err(io)?;
     let backend_env = private_home_env(spec.backend, &private.private_home, &session_tmp, os);
@@ -2078,7 +2132,7 @@ impl SrtLauncher {
         let _ = std::fs::remove_dir_all(&session_tmp);
         std::fs::create_dir_all(&session_tmp).map_err(io)?;
         let session = SandboxSession { settings_path: dir.join("srt-settings.json"), dir, tmp: Some(session_tmp) };
-        std::fs::create_dir_all(&policy.private_home).map_err(io)?;
+        ensure_backend_home_dirs(spec.backend, &policy.private_home).map_err(io)?;
         let settings = serde_json::to_vec_pretty(&policy.to_srt_settings()).expect("settings serialize");
         write_private(&session.settings_path, &settings).map_err(io)?;
 
@@ -3214,11 +3268,61 @@ mod tests {
                 assert!(prepared.spec.session_env.contains(&("INITIAL_AGENT_MODE".into(), "read-only".into())), "the spec's own variables stay");
                 // Created when missing, like the sandbox; temp removed with the session.
                 assert!(private.private_home.is_dir() && tmp.is_dir());
+                // The backend's own home exists before it starts (CODEX_HOME
+                // must exist or codex-acp exits before initialize).
+                for sub in backend_home_subdirs(backend) {
+                    assert!(sub.split('/').fold(private.private_home.clone(), |p, part| p.join(part)).is_dir(), "{os:?} {backend:?} {sub}");
+                }
                 drop(prepared);
                 assert!(!tmp.exists() && private.private_home.is_dir(), "session temp goes, private HOME stays");
             }
         }
         assert_eq!(prepare_full_access(spec("/x"), "bad id", &FullAccessPrivate { private_home: base.join("h"), tmp_root: base.join("t") }, HostOs::Linux).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 80b1622 Windows acceptance: a new project's first Codex run exited
+    /// before initialize because `<home>\codex\.codex` did not exist. Every
+    /// backend's required home subdirectory is created up front, private
+    /// (0700 on Unix), idempotently, and never through a link.
+    #[test]
+    fn backend_home_subdirs_are_created_private_and_never_through_a_link() {
+        let base = temp("backend-home-subdirs");
+        assert_eq!(backend_home_subdirs(AgentBackend::Codex), &[".codex"]);
+        assert_eq!(backend_home_subdirs(AgentBackend::Deepseek), &[".dsh"]);
+        assert_eq!(backend_home_subdirs(AgentBackend::Pi), &[".pi/agent"]);
+        assert!(backend_home_subdirs(AgentBackend::Fox).is_empty());
+        for backend in [AgentBackend::Codex, AgentBackend::Deepseek, AgentBackend::Pi] {
+            let home = base.join("homes/p").join(backend.as_str());
+            ensure_backend_home_dirs(backend, &home).unwrap();
+            ensure_backend_home_dirs(backend, &home).unwrap(); // idempotent
+            for sub in backend_home_subdirs(backend) {
+                let mut dir = home.clone();
+                for part in sub.split('/') {
+                    dir.push(part);
+                    assert!(dir.is_dir(), "{backend:?} {}", dir.display());
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
+                    }
+                }
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(&home).unwrap().permissions().mode() & 0o777, 0o700);
+            }
+        }
+        #[cfg(unix)]
+        {
+            let elsewhere = base.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            let home = base.join("homes/q/codex");
+            std::fs::create_dir_all(&home).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, home.join(".codex")).unwrap();
+            assert!(ensure_backend_home_dirs(AgentBackend::Codex, &home).is_err(), "a linked .codex is refused");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3683,6 +3787,7 @@ mod tests {
         );
         let launcher = launcher(state.clone());
         let wrapped = launcher.wrap(&spec("/opt/fox/backends/codex/bin/codex-acp"), &policy, "sess-1").unwrap();
+        assert!(home.join(".codex").is_dir(), "CODEX_HOME exists before codex-acp starts (80b1622 acceptance)");
         assert_eq!(wrapped.spec.program, "/opt/fox/node/bin/node");
         let settings_path = wrapped.session.settings_path().to_path_buf();
         assert_eq!(
@@ -3796,6 +3901,7 @@ mod tests {
         std::fs::create_dir_all(bridge.parent().unwrap()).unwrap();
         std::fs::write(&bridge, crate::launch::BRIDGE_SCRIPT).unwrap();
         let wrapped = launcher.wrap(&spec(&program.display().to_string()), &policy, "sess-1").unwrap();
+        assert!(home.join(".codex").is_dir(), "CODEX_HOME exists before codex-acp starts (80b1622 acceptance)");
         assert_eq!(wrapped.spec.program, node.display().to_string());
         let endpoint = wrapped.acp_bridge.clone().expect("Windows sandboxed ACP goes through the bridge");
         assert!(endpoint.address.starts_with(r"\\.\pipe\fox-acp-"));
