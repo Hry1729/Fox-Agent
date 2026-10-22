@@ -128,6 +128,27 @@ fn retype<T: serde::Serialize>(refusal: ApiResponse<()>) -> ApiResponse<T> {
     }
 }
 
+/// Which private HOME a login probe / import / "打开文件夹" is about: an
+/// existing conversation (`conversationId`), or a NEW conversation that has
+/// not been created yet (`backend` + `projectId` / `projectRoot`, plus the
+/// draft's full-access choice), so the login card can show before the first
+/// message (Windows acceptance of 80b1622).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendTarget {
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    /// Draft only: the user chose "完全访问" for the new conversation.
+    #[serde(default)]
+    pub full_access: bool,
+}
+
 impl ExternalBackendHost {
     pub fn new(app: AppHandle, database: Database, fox_data: &std::path::Path) -> Self {
         let config = HostLaunchConfig::from_env(fox_data);
@@ -342,9 +363,40 @@ impl ExternalBackendHost {
         })
     }
 
-    /// Login probe (UX batch ①): names only, never a value.
-    pub fn credential_probe(&self, conversation_id: &str) -> ApiResponse<fox_agent_backend::onboarding::CredentialProbe> {
-        let request = match self.planned_request(conversation_id) {
+    /// The launch request of a NEW conversation of `backend` in a project
+    /// (no conversation row yet): what its first turn would use.
+    fn draft_request(&self, target: &AgentBackendTarget) -> Result<LaunchRequest, ApiResponse<()>> {
+        let backend = match target.backend.as_deref().and_then(AgentBackend::parse) {
+            Some(AgentBackend::Fox) | None => return Err(failure("agent_backend_invalid", "只有外部 Agent 后端需要登录", false)),
+            Some(backend) => backend,
+        };
+        let project = match self.database.project_by_id_or_root(target.project_id.as_deref(), target.project_root.as_deref()) {
+            Ok(Some(project)) => project,
+            Ok(None) => return Err(failure("agent_backend_project_required", "外部 Agent 后端的会话需要先绑定项目（私有 HOME 按项目区分）", false)),
+            Err(error) => return Err(failure("storage.operation_failed", error, true)),
+        };
+        Ok(LaunchRequest {
+            conversation_id: "draft".to_owned(),
+            backend,
+            project_uuid: Some(project.0),
+            project_root: std::path::PathBuf::from(project.1),
+            session_key: "planned".into(),
+            full_access_granted: target.full_access,
+        })
+    }
+
+    /// An existing conversation's request, else a draft's.
+    fn target_request(&self, target: &AgentBackendTarget) -> Result<LaunchRequest, ApiResponse<()>> {
+        match target.conversation_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => self.planned_request(id),
+            None => self.draft_request(target),
+        }
+    }
+
+    /// Login probe (UX batch ①): names only, never a value. Works before
+    /// the first message of a new conversation (draft target).
+    pub fn credential_probe(&self, target: &AgentBackendTarget) -> ApiResponse<fox_agent_backend::onboarding::CredentialProbe> {
+        let request = match self.target_request(target) {
             Ok(request) => request,
             Err(refusal) => return retype(refusal),
         };
@@ -361,8 +413,8 @@ impl ExternalBackendHost {
     }
 
     /// What the real HOME has for this backend (file / key names only).
-    pub fn import_candidates(&self, conversation_id: &str) -> ApiResponse<Vec<fox_agent_backend::onboarding::ImportItem>> {
-        let request = match self.planned_request(conversation_id) {
+    pub fn import_candidates(&self, target: &AgentBackendTarget) -> ApiResponse<Vec<fox_agent_backend::onboarding::ImportItem>> {
+        let request = match self.target_request(target) {
             Ok(request) => request,
             Err(refusal) => return retype(refusal),
         };
@@ -373,28 +425,40 @@ impl ExternalBackendHost {
     }
 
     /// Copy the confirmed items into this project's private HOME, or every
-    /// known project's ("套用到我所有项目"); one audit event, names only.
-    pub fn import_credentials(&self, conversation_id: &str, selected: &[String], all_projects: bool) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
-        let request = match self.planned_request(conversation_id) {
+    /// known project's ("套用到我所有项目"); one audit event, names only. A
+    /// login already there (this project included) is kept unless
+    /// `overwrite` ("覆盖已有登录"), which backs it up first.
+    pub fn import_credentials(&self, target: &AgentBackendTarget, selected: &[String], all_projects: bool, overwrite: bool) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
+        let request = match self.target_request(target) {
             Ok(request) => request,
             Err(refusal) => return retype(refusal),
         };
         let Some(real) = Self::real_home() else {
             return failure("agent_backend_import_failed", "找不到当前用户的 HOME 目录", false);
         };
-        let projects = if all_projects {
-            match self.database.known_project_ids() {
-                Ok(ids) => ids,
-                Err(error) => return failure("storage.operation_failed", error, true),
-            }
-        } else {
-            request.project_uuid.clone().into_iter().collect()
+        let known = match self.database.known_projects() {
+            Ok(known) => known,
+            Err(error) => return failure("storage.operation_failed", error, true),
         };
-        match self.runtime.launcher().config.import_credentials(request.backend, &projects, &real, selected) {
+        let projects: Vec<(String, String)> = if all_projects {
+            known
+        } else {
+            request
+                .project_uuid
+                .clone()
+                .into_iter()
+                .map(|id| {
+                    let label = known.iter().find(|(known_id, _)| known_id == &id).map(|(_, name)| name.clone()).unwrap_or_else(|| id.clone());
+                    (id, label)
+                })
+                .collect()
+        };
+        match self.runtime.launcher().config.import_credentials(request.backend, &projects, &real, selected, overwrite) {
             Ok(report) => {
                 let mut details = report.audit_event();
                 details["allProjects"] = json!(all_projects);
-                let _ = self.database.append_agent_backend_audit(Some(conversation_id), request.backend.as_str(), "agent_backend.credentials_imported", &details);
+                let conversation = target.conversation_id.as_deref().filter(|id| !id.is_empty());
+                let _ = self.database.append_agent_backend_audit(conversation, request.backend.as_str(), "agent_backend.credentials_imported", &details);
                 ApiResponse::success(report)
             }
             Err(error) => failure(&error.code, error.message, false),
@@ -402,9 +466,10 @@ impl ExternalBackendHost {
     }
 
     /// Open the private HOME in the system file manager (created when
-    /// missing; Windows through the same private-root preparation as a launch).
-    pub fn open_private_home(&self, conversation_id: &str) -> ApiResponse<String> {
-        let request = match self.planned_request(conversation_id) {
+    /// missing with the backend's own home inside, e.g. `.codex`; Windows
+    /// through the same private-root preparation as a launch).
+    pub fn open_private_home(&self, target: &AgentBackendTarget) -> ApiResponse<String> {
+        let request = match self.target_request(target) {
             Ok(request) => request,
             Err(refusal) => return retype(refusal),
         };
@@ -412,13 +477,8 @@ impl ExternalBackendHost {
             Ok(private) => private,
             Err(error) => return failure(&error.code, error.message, false),
         };
-        if let Err(error) = std::fs::create_dir_all(&private.private_home) {
+        if let Err(error) = fox_agent_backend::sandbox::ensure_backend_home_dirs(request.backend, &private.private_home) {
             return failure("agent_backend_open_failed", format!("无法创建私有 HOME：{error}"), false);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&private.private_home, std::fs::Permissions::from_mode(0o700));
         }
         match crate::app_capabilities::open_folder(&private.private_home) {
             Ok(()) => ApiResponse::success(private.private_home.to_string_lossy().into_owned()),
