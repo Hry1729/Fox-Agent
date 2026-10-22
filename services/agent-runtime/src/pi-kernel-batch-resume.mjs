@@ -322,6 +322,11 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
       if (!allowProposals) return
       if (event.type !== 'message_end' || event.message?.role !== 'assistant'
           || event.message.stopReason !== 'toolUse' && !event.message.content?.some?.(block => block?.type === 'toolCall')) return
+      // A round the idle / first-response / total bound aborted is a model timeout. The
+      // half-streamed tool call the abort leaves behind is not a proposal to admit or
+      // classify: judging it here tagged a stalled argument stream as
+      // truncated_tool_proposal, which the Host does not retry.
+      if (timedOut) return
       try {
         assertProposal?.(event.message)
         proposed = prepareKernelModelResponse(event.message, prepared)
@@ -338,7 +343,9 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
     // Pi 0.84's documented public state setter copies the message array.
     session.agent.state.messages = prepared.messages
     await session.agent.continue()
-    if (proposalFailure) throw proposalFailure
+    // Timeout evidence outranks a proposal admission failure: the bound fired first and
+    // its abort is what left the proposal incomplete.
+    if (proposalFailure && !timedOut) throw proposalFailure
     if (aborting) await aborting
     if (abortError) fail(`engine cancellation failed: ${abortError.message ?? String(abortError)}`)
     if (timedOut) {
