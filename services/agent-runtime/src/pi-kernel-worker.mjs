@@ -16,6 +16,9 @@ import { CODEX_KERNEL_ADAPTER, runCodexKernelModel } from './codex-kernel-adapte
 import { completionRequired, completionPreview, KernelIncompleteResponseError, incompleteResponseReason, modelFailureDiagnostic } from './kernel-completion.mjs'
 import { createResponseDiagnosticObserver, responseAdmissionTag } from './pi-kernel-response-diagnostic.mjs'
 
+// Structured evidence that the model round breached its frozen time bound.
+const isModelTimeoutEvidence = error => error?.evidence?.category === 'model_timeout'
+
 const nonempty = value => typeof value === 'string' && value.trim().length > 0
 
 // A separate process mode, not another command on a shared Legacy worker.
@@ -217,7 +220,10 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
       // only proves a cancellation happened — never why. Treating that internal
       // abort as a user cancellation is what hid a settled model timeout from the
       // Host and cost a Run; only an abort WITHOUT evidence is a cancellation.
-      if (responseAdmissionTag(error)) throw error
+      // Idle / first-response / total timeout evidence also outranks a response
+      // admission tag: a stalled tool-argument stream is a retryable model timeout,
+      // not a truncated proposal.
+      if (responseAdmissionTag(error) && !isModelTimeoutEvidence(error)) throw error
       if (error?.evidence) {
         throw Object.assign(new Error('Kernel model round failed'), {
           evidence: {
@@ -323,8 +329,14 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
             // The error's own structured evidence wins over the abort flag: an
             // internal budget abort still produced a settled model failure, and the
             // Host needs it to settle the attempt and admit a bounded retry.
-            if (responseAdmissionTag(error)) throw error
-            const observationFailure = responseObservation.admissionFailure()
+            // Timeout evidence (the round's own idle / first-response / total bound)
+            // outranks response admission: a stalled tool-argument stream must reach
+            // the Host as model_timeout so it admits a bounded retry, not as a
+            // truncated_tool_proposal. Real truncation carries no timeout evidence
+            // and keeps its admission classification.
+            const timedOut = isModelTimeoutEvidence(error)
+            if (responseAdmissionTag(error) && !timedOut) throw error
+            const observationFailure = timedOut ? null : responseObservation.admissionFailure()
             if (observationFailure && !abort.signal.aborted) throw observationFailure
             const evidence = error?.evidence
               ?? (abort.signal.aborted ? null : error instanceof KernelIncompleteResponseError
