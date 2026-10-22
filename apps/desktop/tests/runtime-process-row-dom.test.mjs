@@ -268,7 +268,9 @@ test('a narrow row keeps the action name out of the clipped region', async () =>
   assert.ok(pathSlot.compareDocumentPosition(tail) & Node.DOCUMENT_POSITION_FOLLOWING)
 })
 
-test('the whole-run elapsed time stays in the summary header without an avatar', async () => {
+test('the turn header carries no clock and no avatar after cbb60d6', async () => {
+  // cbb60d6 removed the clock from the turn header (the run's duration now lives in
+  // FoxRunStatusBar), so neither the header nor any step row renders a timer.
   const view = render(timeline('', {
     events: [
       event(1, 'run.started'),
@@ -279,11 +281,7 @@ test('the whole-run elapsed time stays in the summary header without an avatar',
   }))
   await waitFor(() => assert.ok(view.container.querySelector('.fox-process-turn-header')))
   const header = view.container.querySelector('.fox-process-turn-header')
-  const timers = view.container.querySelectorAll('[role="timer"]')
-  assert.equal(timers.length, 1)
-  assert.ok(header.contains(timers[0]))
-  assert.equal(timers[0].closest('.fox-runtime-step-row'), null)
-  const avatar = header.querySelector('.fox-assistant-avatar')
-  assert.equal(avatar, null)
-  assert.equal(timers[0].parentElement.closest('.fox-runtime-step-row'), null)
+  assert.equal(header.querySelector('[role="timer"]'), null)
+  assert.equal(view.container.querySelector('.fox-runtime-step-row [role="timer"]'), null)
+  assert.equal(header.querySelector('.fox-assistant-avatar'), null)
 })
