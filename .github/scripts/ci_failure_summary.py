@@ -7,8 +7,10 @@ usage: python .github/scripts/ci_failure_summary.py <format> <label> <glob> [<gl
   format: cargo | tap | bun
 
 Writes a markdown table to $GITHUB_STEP_SUMMARY and emits ::error annotations.
-GitHub keeps at most 10 error annotations per step, so the first one is an
-aggregate listing every failure (capped), followed by up to 8 individual ones.
+GitHub keeps at most 10 error and 10 warning annotations per step, so the
+first error is an aggregate listing every failure (capped), followed by up to
+15 individual ones: the first 9 as errors, the rest as warnings so they are not
+dropped by the per-step error cap.
 """
 import glob
 import os
@@ -16,7 +18,11 @@ import re
 import sys
 
 MAX_FAILURES = 30
-MAX_INDIVIDUAL = 8
+MAX_INDIVIDUAL = 15
+# One error slot goes to the aggregate; individual annotations past this many
+# are emitted as warnings, which have their own 10-per-step budget.
+MAX_INDIVIDUAL_ERRORS = 9
+MESSAGE_LIMIT = 800
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # Actions timestamps are not in the files we read, but tolerate a leading BOM.
 
@@ -25,7 +31,7 @@ def clean(line):
     return ANSI.sub("", line).rstrip("\r\n").lstrip("\ufeff")
 
 
-def short(text, limit=300):
+def short(text, limit=MESSAGE_LIMIT):
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
@@ -210,8 +216,9 @@ def main():
     if failures:
         agg = "\n".join(f"{k}. {n} -- {m[:160]}" for k, (n, m) in enumerate(shown, 1))
         print(f"::error title={esc_prop(f'{label}: {total} failing test(s)')}::{esc_data(agg)}")
-        for n, m in shown[:MAX_INDIVIDUAL]:
-            print(f"::error title={esc_prop(f'{label} FAIL {n}'[:200])}::{esc_data(m)}")
+        for k, (n, m) in enumerate(shown[:MAX_INDIVIDUAL]):
+            level = "error" if k < MAX_INDIVIDUAL_ERRORS else "warning"
+            print(f"::{level} title={esc_prop(f'{label} FAIL {n}'[:200])}::{esc_data(m)}")
 
 
 if __name__ == "__main__":
