@@ -1084,3 +1084,28 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
    - 会话中撤销：点“撤销完全访问”后先出现提示（取消本轮、结清审批、在沙箱中重新启动、不重放），确认后：正在跑的一轮以 `agent_backend_full_access_revoked` 结束，chip 变成“权限：沙箱（已锁定）”，下一句在沙箱里启动（Magpie 回环配置此时应以 `agent_backend_loopback_requires_full_access` 拒绝）。审计里有一条 `agent_backend.full_access_revoked`。
 5. **迁移 v96 前自动备份**：用 v95 的旧数据库启动本批构建，迁移前在 `<data>/backups/` 生成一份 v95 备份（`VACUUM INTO`，机制同 13.7）。迁移后 `schema_migrations` 最大值为 96，两张新表存在，旧会话和旧 run 没有变化。
 6. **一次全量测试**：`cargo test -p fox-agent-backend --features acp` 加桌面全量，对照 64 项基线，不能有新增失败。Linux 上本批后端全量是 219 通过 / 0 失败 / 6 忽略。
+
+### 13.15 80b1622 复测修复批：最小 Windows 复测清单（2026-10-22）
+
+本批修的是工程师在 Windows 上对 80b1622 人工验证发现的问题：新项目首次跑 Codex 报 `CODEX_HOME … does not exist`；「套用到我所有项目」会覆盖已有登录；导入回执随卡片消失；回执缺空格；新会话发第一句前不显示凭据卡片。
+
+改动：
+- 启动前为每个后端预建 HOME 子目录：Codex `.codex`、DeepSeek `.dsh`、pi `.pi/agent`（`sandbox::ensure_backend_home_dirs`，两种模式都建）。Windows 上继承已校验的私有根目录 DACL，Unix 上 0700。
+- 启动前先做凭据探测：DeepSeek 缺 key，或 Codex 既没有 `auth.json`、没有 `OPENAI_API_KEY`、也没有 `config.toml` 时，直接拒绝，返回 `agent_backend_missing_credentials`，不再启动后端。pi 不拦。
+- 导入默认跳过已有的文件或 key（当前项目也一样），回执列出跳过的项目和文件。新增「覆盖已有登录」选项，默认不勾；勾选时先把原文件备份到 `<私有 HOME>\.fox-credential-backups\<UTC 时间戳>\`。
+- 回执显示在 AgentBackendBar 上，不放在卡片里，保留 30 秒，也可以手动关闭。
+- 新会话选好外部后端、绑定项目后就做探测，并显示卡片（IPC 参数用 后端 + 项目）。
+
+**最小复测**（Windows，本批 HEAD）：
+
+1. **新项目首次跑 Codex**：新建一个项目（私有 HOME 还不存在），选 Codex。
+   - 没有登录时：发第一句前卡片就出现；如果直接发送，得到的是 `agent_backend_missing_credentials` 和中文提示，不再是 `backend_exited_before_initialize` 或原始路径错误。
+   - 放好 `auth.json`（或导入）后再发：拿到回复，`run.completed`。`homes\<项目 UUID>\codex\.codex` 已存在，`icacls` 结果与 13.14 第 3 点一致。
+2. **卡片**：
+   - 草稿态（还没发第一句）选 Codex / DeepSeek / pi，缺登录时都显示卡片；切回 Fox 后卡片消失。
+   - 导入成功后卡片消失，回执仍留在输入框上方的后端栏里，约 30 秒后自动消失，点「知道了」可立即关闭。
+   - 回执文案有空格：「已复制到 15 个项目的私有 HOME：…」。
+   - 在草稿态点「打开文件夹」，打开的私有 HOME 里已经有对应的子目录（`.codex`、`.dsh` 或 `.pi\agent`）。
+3. **套用到所有项目：跳过与覆盖**：
+   - 主项目已有 Codex `auth.json`。不勾「覆盖已有登录」，勾「套用到我所有项目」后导入：主项目的 `auth.json` 字节数不变，回执写「已有登录，未覆盖 N 个项目：主项目（auth.json）…」。DeepSeek `.env` 里已有的 key 也保留。
+   - 勾「覆盖已有登录」再导入一次：主项目 `auth.json` 被替换，回执写出备份目录 `…\.fox-credential-backups\<时间戳>`，备份里的文件与原来的字节数相同。`agent_backend_audit_log` 的这条记录只有名字和相对的备份目录，没有值，也没有绝对路径。
