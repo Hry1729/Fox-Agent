@@ -25,6 +25,9 @@ param(
     [string[]]$ExecutableArguments = @(),
     [string]$TargetDirectory,
     [string]$ScratchRoot,
+    # Suite only: libtest name filters (substring match, any of them), e.g. 'runtime_host::delivery'.
+    # Empty keeps the full suite.
+    [string[]]$TestFilter = @(),
     [ValidateRange(1, 86400)]
     [int]$TimeoutSeconds = 1800
 )
@@ -32,6 +35,9 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($Mode -eq 'Executable' -and -not $ExecutablePath) {
     throw 'Executable mode requires -ExecutablePath.'
+}
+if ($TestFilter.Count -gt 0 -and $Mode -ne 'Suite') {
+    throw '-TestFilter is only valid in Suite mode.'
 }
 if ($NoZvec -and $Mode -ne 'Executable') {
     throw '-NoZvec is only valid in Executable mode.'
@@ -277,7 +283,7 @@ namespace FoxTest {
             $env:PATH = "$zvecDirectory;$($savedEnvironment['PATH'])"
         }
         if ($Mode -eq 'Suite') {
-            $cargoArguments += @('--', '--skip', 'a0_snapshot_and_state_update_p95_stay_within_budget')
+            $cargoArguments += @('--') + @($TestFilter | Where-Object { $_ }) + @('--skip', 'a0_snapshot_and_state_update_p95_stay_within_budget')
         } else {
             $cargoArguments += @('a0_snapshot_and_state_update_p95_stay_within_budget', '--', '--test-threads=1')
         }
