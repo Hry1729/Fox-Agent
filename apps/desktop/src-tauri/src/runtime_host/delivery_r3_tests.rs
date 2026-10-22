@@ -368,13 +368,18 @@ fn r3_date_metric_old_text_export_is_rejected_and_real_metrics_recomputed() {
 #[test]
 fn r3_structured_projection_and_overall_chart_use_real_compute_publish_identity() {
     for (output,code) in [("copy.csv",r#"const a=attachments[0];saveTable('copy.csv',{columns:['Category','Units'],rows:a.sheets[0].rows.slice(1),keyColumns:['Category'],source:{inputId:a.id,sheet:a.sheets[0].name,columnMapping:[{outputColumn:'Category',inputColumn:'Category'},{outputColumn:'Units',inputColumn:'Units'}]}});return 1;"#),
-        ("share.svg",r#"const a=attachments[0];return {files:[{name:'share.svg',format:'chart',content:{type:'pie',title:'Synthetic share',labels:['B'],series:[{name:'Units',values:[4]}],shareBasis:{scope:'overall',total:7,source:{inputId:a.id,sheet:a.sheets[0].name,totalColumn:'Units',labelColumn:'Category'}}}}]};"#)] {
+        // A generated file exists only through the save helpers (saveFile/saveTable/
+        // saveChart/savePdf); a returned `{files:[...]}` value is just the script result.
+        ("share.svg",r#"const a=attachments[0];saveChart('share.svg',{type:'pie',title:'Synthetic share',labels:['B'],series:[{name:'Units',values:[4]}],shareBasis:{scope:'overall',total:7,source:{inputId:a.id,sheet:a.sheets[0].name,totalColumn:'Units',labelColumn:'Category'}}});return 1;"#)] {
         // Worded so the narrow asks_for_statistics recognizes it (统计 followed by
         // 合计) while freezing the same headers and the same Units sum metric.
         let task=format!("读取 source.csv，按 Category 统计合计，Units 合计。生成 {output}，不得修改输入。");
         let f=Fixture::new(&task);fs::create_dir_all(f.root.join("storage")).unwrap();fs::write(f.root.join("source.csv"),"Category,Units\nA,3\nB,4\n").unwrap();f.freeze(&task);
-        f.call("compute","attachment_compute",json!({"projectPaths":["source.csv"],"code":code})).unwrap();
-        let artifact=f.db.load_conversation(&f.policy.binding.conversation_id).unwrap().artifacts.into_iter().find(|a|a.display_name==output).unwrap();
+        let computed=f.call("compute","attachment_compute",json!({"projectPaths":["source.csv"],"code":code})).unwrap();
+        assert!(computed["details"]["files"].as_array().is_some_and(|files|files.iter().any(|file|file["displayName"]==output)),"{output} was not generated: {computed}");
+        let artifacts=f.db.load_conversation(&f.policy.binding.conversation_id).unwrap().artifacts;
+        let names=artifacts.iter().map(|a|a.display_name.clone()).collect::<Vec<_>>();
+        let artifact=artifacts.into_iter().find(|a|a.display_name==output).unwrap_or_else(||panic!("{output} not projected; artifacts: {names:?}"));
         f.call("publish","write_file",json!({"path":output,"artifactId":artifact.id})).unwrap();f.assert_committed_write("publish",output);
         let stop=f.stop();let finding:Value=serde_json::from_str(&stop.items()[0].finding_json).unwrap();
         let state=if output=="copy.csv"{"unverified"}else{"passed"};
