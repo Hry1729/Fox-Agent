@@ -4,7 +4,7 @@ import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
 import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
 import type { AgentBackendCapabilities, AgentBackendId, AgentBackendStatus } from '../model/agent-backend'
-import type { AgentBackendPermissionStatus, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
+import type { AgentBackendPermissionStatus, AgentBackendTarget, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
 import type {
   AgentRecord,
   ApiResponse,
@@ -754,17 +754,17 @@ export const desktopClient = {
   /** Effective capability dimensions of an external backend (live after the first launch). */
   agentBackendCapabilities: (backend: AgentBackendId, conversationId?: string | null) =>
     command<AgentBackendCapabilities>('agent_backend_capabilities', conversationId ? { backend, conversationId } : { backend }),
-  /** UX batch ①: login probe of the conversation's private HOME (names only). */
-  agentBackendCredentials: (conversationId: string) =>
-    command<CredentialProbe>('agent_backend_credentials', { conversationId }),
+  /** UX batch ①: login probe of the private HOME (names only): a conversation, or a new conversation's backend + project. */
+  agentBackendCredentials: (target: AgentBackendTarget) =>
+    command<CredentialProbe>('agent_backend_credentials', target),
   /** Whitelisted login files / key names in the real HOME (no values). */
-  agentBackendImportCandidates: (conversationId: string) =>
-    command<ImportItem[]>('agent_backend_import_candidates', { conversationId }),
-  /** Copy the confirmed items into the private HOME (or every project's). */
-  agentBackendImportCredentials: (conversationId: string, selected: string[], allProjects: boolean) =>
-    command<ImportReport>('agent_backend_import_credentials', { conversationId, selected, allProjects }),
-  agentBackendOpenPrivateHome: (conversationId: string) =>
-    command<string>('agent_backend_open_private_home', { conversationId }),
+  agentBackendImportCandidates: (target: AgentBackendTarget) =>
+    command<ImportItem[]>('agent_backend_import_candidates', target),
+  /** Copy the confirmed items into the private HOME (or every project's); existing logins are kept unless `overwrite`. */
+  agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite = false) =>
+    command<ImportReport>('agent_backend_import_credentials', { ...target, selected, allProjects, overwrite }),
+  agentBackendOpenPrivateHome: (target: AgentBackendTarget) =>
+    command<string>('agent_backend_open_private_home', target),
   /** UX batch ②: permission mode / lock / FORBIDDEN. */
   agentBackendPermissionStatus: (conversationId?: string | null) =>
     command<AgentBackendPermissionStatus>('agent_backend_permission_status', conversationId ? { conversationId } : {}),
