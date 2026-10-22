@@ -1407,7 +1407,11 @@ mod tests {
             "ruleId": "content:concat",
             "checkerVersion": CHECKER_VERSION_V2,
             "policy": serde_json::to_value(&policy).unwrap(),
+            // Since 77bb2a0 an unmarked record means the historical SeparatorV1;
+            // `RuleEnvelope::v2` builds the current rule, so the spec names it.
+            "mergeRule": "separator-v2",
         });
+        assert_eq!(merge_rule::KEY, "mergeRule");
         let read = RuleEnvelope::from_spec(&spec).expect("v2 spec must be readable");
         assert_eq!(read, envelope);
         assert!(!read.is_v1());
