@@ -121,7 +121,22 @@ function LockedPermission({ permission, onRevoke }: { permission: AgentBackendPe
   )
 }
 
-export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBackendChange, refusal = null, capabilities = null, permission = null, draftPermissionMode = 'sandboxed', onDraftPermissionModeChange, onRevokeFullAccess, credentialCard = null }: {
+/**
+ * The last import receipt, kept on the bar after the login card is gone (a
+ * successful import turns the probe ready and the card disappears with its
+ * own message). Names only; dismissible; the caller clears it after a while.
+ */
+function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; onDismiss?: () => void }) {
+  if (lines.length === 0) return null
+  return (
+    <div className="fox-agent-backend-receipt" role="status" aria-label="导入回执">
+      {lines.map((line) => <span key={line}>{line}</span>)}
+      {onDismiss && <button type="button" onClick={onDismiss} aria-label="关闭导入回执">知道了</button>}
+    </div>
+  )
+}
+
+export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBackendChange, refusal = null, capabilities = null, permission = null, draftPermissionMode = 'sandboxed', onDraftPermissionModeChange, onRevokeFullAccess, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
@@ -140,9 +155,15 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
   draftPermissionMode?: ExternalPermissionMode
   onDraftPermissionModeChange?: (mode: ExternalPermissionMode) => void
   onRevokeFullAccess?: () => void
-  /** UX batch ①: login guidance card of the open external conversation. */
+  /** UX batch ①: login guidance card of the shown external backend (open conversation, or a new one before its first message). */
   credentialCard?: ReactNode
+  /** Last import receipt lines, shown independently of the card. */
+  importReceipt?: readonly string[] | null
+  onDismissImportReceipt?: () => void
 }) {
+  const receiptNotice = importReceipt && importReceipt.length > 0
+    ? <ImportReceiptNotice lines={importReceipt} onDismiss={onDismissImportReceipt} />
+    : null
   const refusalNotice = refusal
     ? <span className="fox-agent-backend-notice fox-agent-backend-refusal" role="alert">{refusal}</span>
     : null
@@ -161,6 +182,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
         {refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)}
         {access === 'runnable' && <CapabilityChips capabilities={capabilities} />}
         {access === 'runnable' && credentialCard}
+        {receiptNotice}
       </div>
     )
   }
@@ -202,6 +224,10 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
         {value !== 'fox' && onDraftPermissionModeChange && <DraftPermissionPicker permission={permission} mode={draftPermissionMode} onChange={onDraftPermissionModeChange} />}
         {value !== 'fox' && <CapabilityChips capabilities={capabilities} />}
       </>}
+      {/* Same rule as a locked conversation: the login card shows as soon as an
+          external backend is picked, before the first message (80b1622). */}
+      {value !== 'fox' && credentialCard}
+      {receiptNotice}
     </div>
   )
 }
