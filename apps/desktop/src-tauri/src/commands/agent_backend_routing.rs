@@ -246,12 +246,17 @@ pub struct AgentBackendConversationRequest {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBackendImportRequest {
-    pub conversation_id: String,
+    /// The conversation, or a new conversation's backend + project.
+    #[serde(flatten)]
+    pub target: crate::external_backend::AgentBackendTarget,
     /// Ids from `agent_backend_import_candidates` the user confirmed.
     pub selected: Vec<String>,
     /// "套用到我所有项目".
     #[serde(default)]
     pub all_projects: bool,
+    /// "覆盖已有登录" (off by default: an existing login is kept and listed).
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -261,22 +266,23 @@ pub struct AgentBackendPermissionStatusRequest {
     pub conversation_id: Option<String>,
 }
 
-/// Login probe of the conversation's private HOME (names only).
+/// Login probe of the private HOME (names only): an existing conversation,
+/// or a new conversation's backend + project before its first message.
 #[tauri::command]
 pub fn agent_backend_credentials(
     external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
-    request: AgentBackendConversationRequest,
+    request: crate::external_backend::AgentBackendTarget,
 ) -> ApiResponse<fox_agent_backend::onboarding::CredentialProbe> {
-    external.credential_probe(&request.conversation_id)
+    external.credential_probe(&request)
 }
 
 /// Whitelisted login files / key names found in the real HOME (no values).
 #[tauri::command]
 pub fn agent_backend_import_candidates(
     external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
-    request: AgentBackendConversationRequest,
+    request: crate::external_backend::AgentBackendTarget,
 ) -> ApiResponse<Vec<fox_agent_backend::onboarding::ImportItem>> {
-    external.import_candidates(&request.conversation_id)
+    external.import_candidates(&request)
 }
 
 /// Copy the confirmed items into the private HOME(s); audited by name.
@@ -285,16 +291,16 @@ pub fn agent_backend_import_credentials(
     external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
     request: AgentBackendImportRequest,
 ) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
-    external.import_credentials(&request.conversation_id, &request.selected, request.all_projects)
+    external.import_credentials(&request.target, &request.selected, request.all_projects, request.overwrite)
 }
 
 /// Open the private HOME in the system file manager.
 #[tauri::command]
 pub fn agent_backend_open_private_home(
     external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
-    request: AgentBackendConversationRequest,
+    request: crate::external_backend::AgentBackendTarget,
 ) -> ApiResponse<String> {
-    external.open_private_home(&request.conversation_id)
+    external.open_private_home(&request)
 }
 
 /// Permission mode / lock / FORBIDDEN for the picker and the chip.
@@ -378,5 +384,42 @@ mod tests {
         };
         let fox: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
         assert!(fox.is_ok());
+    }
+
+    /// 80b1622 acceptance: the login card must show for a NEW conversation
+    /// (no row yet), and "覆盖已有登录" must be an explicit, default-off choice.
+    #[test]
+    fn credential_requests_accept_a_draft_target_and_overwrite_defaults_off() {
+        let old: AgentBackendImportRequest = serde_json::from_value(serde_json::json!({ "conversationId": "c1", "selected": ["file:.codex/auth.json"], "allProjects": true })).unwrap();
+        assert_eq!(old.target.conversation_id.as_deref(), Some("c1"));
+        assert!(old.all_projects && !old.overwrite, "overwrite is off unless asked");
+        let draft: AgentBackendImportRequest = serde_json::from_value(serde_json::json!({ "backend": "codex", "projectId": "p1", "projectRoot": "D:/proj", "fullAccess": true, "selected": [], "overwrite": true })).unwrap();
+        assert!(draft.target.conversation_id.is_none());
+        assert_eq!(draft.target.backend.as_deref(), Some("codex"));
+        assert_eq!(draft.target.project_id.as_deref(), Some("p1"));
+        assert!(draft.target.full_access && draft.overwrite && !draft.all_projects);
+        let probe: crate::external_backend::AgentBackendTarget = serde_json::from_value(serde_json::json!({ "backend": "deepseek", "projectRoot": "D:/proj" })).unwrap();
+        assert_eq!(probe.project_root.as_deref(), Some("D:/proj"));
+        assert!(!probe.full_access);
+        let conversation: crate::external_backend::AgentBackendTarget = serde_json::from_value(serde_json::json!({ "conversationId": "c2" })).unwrap();
+        assert_eq!(conversation.conversation_id.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn agent_backend_draft_probe_finds_the_project_by_id_or_root_and_labels_projects_by_name() {
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        database
+            .with_connection(|connection| {
+                connection.execute("INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at) VALUES ('p2','第二个项目','D:/two','read_only','active',1,1)", [])?;
+                connection.execute("INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at) VALUES ('p1','主项目','D:/main','read_only','active',1,1)", [])
+            })
+            .expect("projects");
+        assert_eq!(database.known_projects().unwrap(), vec![("p1".to_owned(), "主项目".to_owned()), ("p2".to_owned(), "第二个项目".to_owned())]);
+        let by_id = database.project_by_id_or_root(Some("p2"), Some("D:/main")).unwrap();
+        assert_eq!(by_id, Some(("p2".to_owned(), "D:/two".to_owned())), "the id wins");
+        let by_root = database.project_by_id_or_root(Some("gone"), Some("D:/main")).unwrap();
+        assert_eq!(by_root, Some(("p1".to_owned(), "D:/main".to_owned())));
+        assert_eq!(database.project_by_id_or_root(None, None).unwrap(), None);
+        assert_eq!(database.project_by_id_or_root(Some(""), Some("D:/nowhere")).unwrap(), None);
     }
 }
