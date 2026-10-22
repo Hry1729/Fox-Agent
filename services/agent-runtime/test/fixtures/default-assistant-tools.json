@@ -11,6 +11,7 @@
   "compute_job_result",
   "read_tool_result",
   "skill_load",
+  "present_files",
   "write_file",
   "edit_file",
   "run_command",
