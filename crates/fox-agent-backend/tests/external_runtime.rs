@@ -25,6 +25,7 @@ use std::time::Duration;
 struct Recorded {
     events: Vec<(String, Value)>,
     approvals: Vec<(String, String, PermissionCard)>,
+    audits: Vec<(String, String, Value)>,
 }
 
 #[derive(Clone, Default)]
@@ -42,6 +43,10 @@ impl ExternalSink for Sink {
         assert!(key.starts_with("acp-permission:"), "{key}");
         recorded.approvals.push((run_id.to_owned(), id.clone(), card.clone()));
         Ok(id)
+    }
+
+    fn audit(&self, conversation_id: &str, _backend: AgentBackend, event: &str, details: &Value) {
+        self.0.lock().unwrap().audits.push((conversation_id.to_owned(), event.to_owned(), details.clone()));
     }
 }
 
@@ -168,7 +173,9 @@ fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, stor
             project_root: std::env::temp_dir(),
             session_key: format!("k-{run}"),
             full_access_granted: false,
+            unified_login: None,
         },
+        execution: fox_agent_backend::projection::ExecutionMode::Ask,
     }
 }
 
@@ -608,5 +615,48 @@ async fn a_failed_prompt_or_exit_persists_the_redacted_stderr_tail() {
     runtime.start_turn(turn("c-diag", "r-diag-2", "stderr-crash", AgentBackend::Deepseek, None)).unwrap();
     let terminal = sink.terminal("r-diag-2").await;
     check(&terminal, "agent_backend_exited", "backend_exited");
+    runtime.shutdown().await;
+}
+
+/// Settings batch, item 7: Fox's execution mode applies to the backend's
+/// `session/request_permission`. 自动 writes the native `allow_once` itself
+/// (no card) and records it; 只读 rejects the mock's `execute` request (no
+/// card); 询问 is covered by the tests above (card).
+#[tokio::test(flavor = "multi_thread")]
+async fn execution_mode_allow_and_read_only_answer_without_a_card_and_are_audited() {
+    if !node_available() {
+        return;
+    }
+    use fox_agent_backend::projection::ExecutionMode;
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    let mut allow = turn("c-exec-allow", "r-exec-allow", "hello", AgentBackend::Codex, None);
+    allow.execution = ExecutionMode::Allow;
+    runtime.start_turn(allow).unwrap();
+    let terminal = sink.terminal("r-exec-allow").await;
+    assert_eq!(terminal["type"], "run.completed");
+    assert!(sink.approvals().is_empty(), "自动: no approval card");
+    assert_eq!(sink.text("r-exec-allow"), "Running tests permission:allow", "allow_once was written, not allow_always");
+    let answered = sink.events("r-exec-allow").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("recorded");
+    assert_eq!(answered["executionMode"], "allow");
+    assert_eq!(answered["decision"], "allow_once");
+    assert_eq!(answered["toolKind"], "execute");
+    assert_eq!(answered["nativeAnswer"], "response_written");
+
+    let mut read_only = turn("c-exec-ro", "r-exec-ro", "hello", AgentBackend::Pi, None);
+    read_only.execution = ExecutionMode::ReadOnly;
+    runtime.start_turn(read_only).unwrap();
+    let terminal = sink.terminal("r-exec-ro").await;
+    assert_eq!(terminal["type"], "run.completed");
+    assert!(sink.approvals().is_empty(), "只读: no approval card");
+    assert!(sink.text("r-exec-ro").ends_with("permission:reject"), "the execute request was rejected");
+    let answered = sink.events("r-exec-ro").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("recorded");
+    assert_eq!(answered["executionMode"], "read_only");
+    assert_eq!(answered["decision"], "reject");
+
+    let audits = sink.0.lock().unwrap().audits.clone();
+    assert_eq!(audits.len(), 2);
+    assert!(audits.iter().all(|(_, event, details)| event == "agent_backend.permission_auto_answered" && details.get("input").is_none()), "names and kinds only, no tool input");
+    assert_eq!(audits[0].0, "c-exec-allow");
+    assert_eq!(audits[1].0, "c-exec-ro");
     runtime.shutdown().await;
 }
