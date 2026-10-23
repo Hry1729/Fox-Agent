@@ -454,6 +454,8 @@ pub fn run() {
             commands::agent_backend_routing::agent_backend_open_private_home,
             commands::agent_backend_routing::agent_backend_permission_status,
             commands::agent_backend_routing::agent_backend_revoke_full_access,
+            commands::agent_backend_routing::agent_backend_native_permissions,
+            commands::agent_backend_routing::agent_backend_native_permission_set,
             commands::agent_backend_routing::agent_backend_preferences_get,
             commands::agent_backend_routing::agent_backend_preferences_save,
             commands::agent_backend_routing::agent_backend_probe_codex_responses,
