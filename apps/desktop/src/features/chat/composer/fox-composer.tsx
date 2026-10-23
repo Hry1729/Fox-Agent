@@ -1,5 +1,6 @@
 import { ExpertBindingChip } from '../components/ExpertBindingChip'
 import { ComposerProjectBar } from './composer-project-bar'
+import { ComposerAgentPicker } from './composer-agent-picker'
 import { ComposerEntryContext } from './composer-entry-context'
 import { ComposerModelPicker } from './composer-model-picker'
 import { GoalProgress } from '../components/GoalProgress'
@@ -548,7 +549,7 @@ function Composer({ topSlot, inputLockedReason = null, initialAttachments, onIni
 
   const sendControls = sendButton
 
-  const expertControl = displayExpert && onChangeExpert && <ExpertBindingChip expert={displayExpert} defaultLabel={!activeExpert} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={activeExpert ? onViewExpert ?? (() => {}) : entry.onViewDefaultExpert ?? (() => {})} onChange={onChangeExpert} />
+  const expertControl = !(newConversation && entry.draftAgentBackend && entry.draftAgentBackend !== 'fox') && displayExpert && onChangeExpert && <ExpertBindingChip expert={displayExpert} defaultLabel={!activeExpert} directSelection={newConversation} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={activeExpert ? onViewExpert ?? (() => {}) : entry.onViewDefaultExpert ?? (() => {})} onChange={onChangeExpert} />
   const modelControl = isYuxiAgent ? <Models value={model} disabled={!supportsDynamicModelSwitch || chatState === 'running'} onValueChange={setModel} options={modelOptions.map(item => ({ id: item.spec, name: item.displayName || item.modelId, meta: item.providerDisplayName }))} fallbackLabel={defaultModel} /> : <ComposerModelPicker service={modelService} disabled={!runtimeControlled || chatState === 'running' || runtimeInitializing} onOpenSettings={entry.onOpenModelSettings} />
 
   return (
@@ -787,7 +788,10 @@ function Composer({ topSlot, inputLockedReason = null, initialAttachments, onIni
         </PromptInputFooter>
         </PromptInput>
         </ComposerBorderBeam>}
-        {!decisionPending && newConversation && runtimeControlled && entry.onSelectProject && entry.onAddProject && <ComposerProjectBar projectRoot={projectRoot} projects={entry.projects} onSelect={entry.onSelectProject} onAdd={entry.onAddProject} />}
+        {!decisionPending && newConversation && runtimeControlled && <div className="fox-composer-draft-footer">
+          {entry.onSelectProject && entry.onAddProject && <ComposerProjectBar projectRoot={projectRoot} projects={entry.projects} onSelect={entry.onSelectProject} onAdd={entry.onAddProject} />}
+          {entry.onSelectAgentBackend && <ComposerAgentPicker value={entry.draftAgentBackend ?? 'fox'} status={entry.agentBackendStatus ?? null} disabled={runtimeInitializing || chatState === 'running'} onSelect={entry.onSelectAgentBackend} />}
+        </div>}
       </div>
     </div>
   )

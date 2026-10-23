@@ -20,7 +20,7 @@ function ExpertIcon({ icon, name }: { icon?: string | null; name: string }) {
 }
 
 // Removal stays optional for callers that allow an unbound expert state.
-export function ExpertBindingChip({ expert, readOnly, onView, onChange, onRemove, defaultLabel = false }: {
+export function ExpertBindingChip({ expert, readOnly, onView, onChange, onRemove, defaultLabel = false, directSelection = false }: {
   expert: AgentRecord
   readOnly: boolean
   toolAvailability?: ExpertToolAvailability
@@ -28,7 +28,12 @@ export function ExpertBindingChip({ expert, readOnly, onView, onChange, onRemove
   onChange: () => void
   onRemove?: () => void | Promise<void>
   defaultLabel?: boolean
+  directSelection?: boolean
 }) {
+  if (directSelection) return <button type="button" className="fox-expert-chip" disabled={readOnly} onClick={onChange} title={`选择专家，当前：${expert.name}`}>
+    <ExpertIcon icon={expert.icon || (defaultLabel ? FOX_ASSISTANT_AVATAR : undefined)} name={expert.name} />
+    <span>专家</span>
+  </button>
   return (
     <DropdownMenu>
       <DropdownMenuTrigger className="fox-expert-chip" data-default-expert={defaultLabel || undefined} title={`当前专家：${expert.name}`}>

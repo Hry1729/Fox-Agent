@@ -1,7 +1,6 @@
 // Four-agent plan v0.3.1, Host wiring (P6 minimal UI), settings batch:
-// * the backend of a NEW conversation is chosen in 设置 →「新会话使用的
-//   Agent」(and full access in「新外部会话使用完全访问」); the bar only shows
-//   it, with no control to change it here;
+// * the new conversation's backend follows its draft selection; full access
+//   still comes from「新外部会话使用完全访问」. This bar only displays both.
 // * an existing conversation shows its frozen backend as locked, and a
 //   read-only notice when the Host would refuse to start its runtime;
 // * status, capability chips, the missing-login card, the import receipt
@@ -84,13 +83,13 @@ function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; o
 }
 
 /** Where the backend of a new conversation is chosen. */
-export const NEW_CONVERSATION_BACKEND_HINT = '新会话使用的 Agent 在“设置 → 助手设置”中选择，创建后不可更换'
+export const NEW_CONVERSATION_BACKEND_HINT = '在输入区右下角选择本次新对话的 Agent，创建后不可更换'
 
 export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker = null, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
-  /** Backend a new conversation will use (from the settings, after the administrator's switch). */
+  /** Backend selected for this new conversation. */
   draftBackend: AgentBackendId
   /** Whether a new external conversation gets full access (from the settings, after FORBIDDEN). */
   draftFullAccess?: boolean
@@ -142,7 +141,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
     )
   }
 
-  // New conversation: the backend comes from the settings. Fox keeps
+  // New conversation: display the selected draft backend. Fox keeps
   // today's composer (no row) unless a refusal has to be shown.
   const value: AgentBackendId = canPickAgentBackend(draftBackend, status) ? draftBackend : 'fox'
   if (value === 'fox') {

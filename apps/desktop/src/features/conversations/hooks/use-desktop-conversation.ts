@@ -247,7 +247,9 @@ export function useDesktopConversation(): DesktopConversationState {
   // snapshot so no existing draft path changes behaviour.
   const [draftAgentBackend, setDraftAgentBackendState] = useState<AgentBackendId>('fox')
   const draftAgentBackendRef = useRef<AgentBackendId>('fox')
+  const explicitDraftBackendRef = useRef<AgentBackendId | null>(null)
   const setDraftAgentBackend = useCallback((backend: AgentBackendId) => {
+    explicitDraftBackendRef.current = backend
     draftAgentBackendRef.current = backend
     setDraftAgentBackendState(backend)
   }, [])
@@ -265,9 +267,13 @@ export function useDesktopConversation(): DesktopConversationState {
   const [agentBackendPreferences, setAgentBackendPreferences] = useState<AgentBackendPreferences | null>(null)
   const applyAgentBackendPreferences = useCallback((preferences: AgentBackendPreferences | null) => {
     setAgentBackendPreferences(preferences)
-    setDraftAgentBackend(newConversationBackend(preferences))
+    if (explicitDraftBackendRef.current === null) {
+      const backend = newConversationBackend(preferences)
+      draftAgentBackendRef.current = backend
+      setDraftAgentBackendState(backend)
+    }
     setDraftExternalPermissionMode(preferences?.effectiveFullAccess ? 'full_access' : 'sandboxed')
-  }, [setDraftAgentBackend, setDraftExternalPermissionMode])
+  }, [setDraftExternalPermissionMode])
   const agentBackendStatusRef = useRef<AgentBackendStatus | null>(null)
   agentBackendStatusRef.current = agentBackendStatus
   const [agentBackendRefusal, setAgentBackendRefusal] = useState<AgentBackendRefusal | null>(null)
@@ -299,14 +305,20 @@ export function useDesktopConversation(): DesktopConversationState {
       return next && next.conversation.id !== activeConversationIdRef.current ? current : next
     })
   }, [])
-  const clearSelection = useCallback(() => {
+  const clearSelection = useCallback((preserveDraftBackend = false) => {
     selectionVersionRef.current += 1
     activeConversationIdRef.current = null
     activeRunIdRef.current = null
     setSelectedConversationId(null)
     setDetail(null)
     setAgentBackendRefusal(null)
-  }, [setDetail])
+    if (!preserveDraftBackend) {
+      explicitDraftBackendRef.current = null
+      const backend = newConversationBackend(agentBackendPreferences)
+      draftAgentBackendRef.current = backend
+      setDraftAgentBackendState(backend)
+    }
+  }, [agentBackendPreferences, setDetail])
 
   const applyDraft = useCallback((nextDraft: typeof draftRef.current) => {
     draftRef.current = nextDraft
@@ -339,12 +351,12 @@ export function useDesktopConversation(): DesktopConversationState {
   const selectProject = useCallback((projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => {
     const draft = currentDraft()
     applyDraft({ ...draft, agentId: draft.agentId ?? defaultAgentId, projectRoot, permissionMode })
-    clearSelection()
+    clearSelection(detail === null)
     // A new draft starts clean. A stale error or approval from the conversation the
     // user just left must not follow them into an empty composer.
     setError(null)
     setErrorDetails(null)
-  }, [applyDraft, clearSelection, currentDraft, defaultAgentId])
+  }, [applyDraft, clearSelection, currentDraft, defaultAgentId, detail])
 
   const initializeRuntime = useCallback(() => {
     if (runtimeInitializationRef.current) return runtimeInitializationRef.current
@@ -1076,16 +1088,14 @@ export function useDesktopConversation(): DesktopConversationState {
           setDefaultAgentId(agentId)
           applyDraft({ ...draft, agentId })
         }
-        // Settings batch, item 4: read the setting at creation time (a change
-        // in another window is never missed); an unreadable setting falls
-        // back to what the draft showed.
-        const backend: AgentBackendId = await Promise.resolve()
+        // An explicit choice belongs to this draft; otherwise refresh the saved default.
+        const backend: AgentBackendId = explicitDraftBackendRef.current ?? await Promise.resolve()
           .then(() => desktopClient.agentBackendPreferences())
           .then((preferences) => newConversationBackend(preferences))
           .catch(() => draftAgentBackendRef.current)
         const conversation = await desktopClient.createConversation({
           agentId,
-          expertId: draft.expertId ?? draftExpertId ?? undefined,
+          expertId: backend === 'fox' ? draft.expertId ?? draftExpertId ?? undefined : undefined,
           projectRoot: draft.projectRoot ?? draftProjectRoot ?? undefined,
           permissionMode: draft.permissionMode ?? draftPermissionMode ?? undefined,
           // Absent for Fox so an older Host sees exactly the old request.

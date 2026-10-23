@@ -440,9 +440,9 @@
   width: min(48rem, calc(100% - clamp(2rem, 12vw, 10rem)));
   position: absolute;
   left: 50%;
-  top: calc(50% + (var(--fox-empty-heading-height, 88px) - 12px - var(--fox-empty-composer-height, 160px)) / 2);
+  top: var(--fox-empty-group-top);
   bottom: auto;
   height: auto;
   padding: 0;
-  transform: translate(-50%, -100%);
+  transform: translateX(-50%);
 }

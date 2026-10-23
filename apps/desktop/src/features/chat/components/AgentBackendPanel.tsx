@@ -2,8 +2,8 @@
 // composer's top slot shows for the outer Agent backend, with its own data
 // loading, so the rules can be tested without the workbench.
 //
-// * The backend of a NEW conversation comes from 设置 →「新会话使用的 Agent」
-//   (`draftBackend`), never from a control here; an open conversation shows
+// * A new conversation uses the composer's selection (`draftBackend`);
+//   an open conversation shows
 //   its frozen backend (`lockedBackend`).
 // * Every async result (capability chips, permission status, login probe) is
 //   stored WITH the key of the target it was asked for and only shown while
@@ -98,7 +98,7 @@ export function AgentBackendPanel({
   /** The open conversation's frozen backend; null for a new conversation. */
   lockedBackend: AgentBackendId | null
   conversationId: string | null
-  /** Backend of a new conversation (设置 →「新会话使用的 Agent」, after the administrator's switch). */
+  /** Backend selected in the new-conversation composer. */
   draftBackend: AgentBackendId
   draftProjectId?: string | null
   draftProjectRoot?: string | null

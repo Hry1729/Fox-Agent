@@ -2632,6 +2632,9 @@ button.fox-chat-project-row:disabled {
 
 .fox-chat-stage.is-empty {
   --fox-empty-vertical-offset: clamp(18px, 3vh, 30px);
+  --fox-empty-group-top: max(16px, calc((100% - var(--fox-empty-heading-height, 88px) - 12px - var(--fox-empty-composer-height, 160px)) / 2));
+  overflow-y: auto;
+  scroll-padding-block: 16px;
 }
 
 .fox-chat-stage { --fox-chat-column-width: min(58rem, calc(100cqw - clamp(96px, 8vw, 112px))); }
@@ -4705,8 +4708,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-composer-wrap.is-empty {
-  /* Match the empty prompt's 50% centre so the gap stays steady as the stage grows. */
-  top: calc(50% + (var(--fox-empty-heading-height, 88px) + 12px - var(--fox-empty-composer-height, 160px)) / 2);
+  top: calc(var(--fox-empty-group-top) + var(--fox-empty-heading-height, 88px) + 12px);
   bottom: auto;
   width: min(48rem, calc(100% - clamp(2rem, 12vw, 10rem)));
   transform: translateX(-50%);
@@ -4813,6 +4815,51 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-prompt-shell {
   position: relative;
 }
+
+.fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) {
+  padding: var(--fox-space-s);
+  border: 1px solid var(--fox-accent-border-soft);
+  border-radius: 18px;
+  background: var(--fox-accent-surface);
+}
+
+.fox-composer-draft-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fox-space-m);
+  min-height: 36px;
+  padding: var(--fox-space-xs) var(--fox-space-xs) 0;
+}
+
+.fox-composer-draft-footer .fox-composer-project-bar {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.fox-composer-agent-trigger {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--fox-space-xs);
+  margin-left: auto;
+  min-height: 30px;
+  padding: var(--fox-space-xs) var(--fox-space-s);
+  border-radius: var(--fox-radius-control);
+  font-size: var(--fox-type-control);
+  color: var(--fox-text);
+}
+.fox-composer-agent-trigger:hover { background: var(--fox-hover); }
+.fox-composer-agent-trigger:focus-visible { outline: 2px solid var(--fox-focus-ring); outline-offset: 2px; }
+.fox-composer-agent-trigger:disabled { opacity: .5; cursor: not-allowed; }
+.fox-composer-agent-menu { width: 260px; max-width: calc(100vw - 32px); }
+.fox-composer-agent-option { display: grid; gap: var(--fox-space-xs); flex: 1; min-width: 0; }
+.fox-composer-agent-option > span { display: flex; align-items: center; gap: var(--fox-space-s); }
+.fox-composer-agent-option small { font-size: var(--fox-type-caption); color: var(--fox-muted); white-space: normal; }
 
 .fox-message-code-block {
   min-height: 0 !important;

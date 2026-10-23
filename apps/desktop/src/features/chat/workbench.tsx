@@ -1414,7 +1414,7 @@ export function Workbench() {
   // legacy composer talks to `useDesktopConversation()` directly, and the
   // assistant-ui thread subscribes to the same store, so sends from this one
   // instance stream into whichever message list is mounted.
-  const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings])
+  const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings, draftAgentBackend: desktopConversation.draftAgentBackend, agentBackendStatus: desktopConversation.agentBackendStatus, onSelectAgentBackend: desktopConversation.setDraftAgentBackend }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings, desktopConversation.draftAgentBackend, desktopConversation.agentBackendStatus, desktopConversation.setDraftAgentBackend])
   // Plan v0.3.1 5.4 / 6.6: pick the backend for a new conversation, or show the
   // open conversation's frozen backend as locked. Only in the desktop runtime.
   // Fix 1 (Windows acceptance of 3a82f5d): the bar is rendered INSIDE the
@@ -1431,8 +1431,7 @@ export function Workbench() {
   const composerInputLockedReason = desktopConversation.enabled && lockedAgentBackend
     ? agentBackendInputLockedReason(lockedAgentBackend, agentBackendStatus)
     : null
-  // Settings batch: the backend of a new conversation comes from 设置 →
-  // 「新会话使用的 Agent」(the bar has no picker any more); the panel owns the
+  // The draft picker can override the saved default for this conversation; the panel owns the
   // capability chips, permission, login probe, card and receipt, each keyed
   // by its target so a change of backend / project never shows stale data.
   const draftAgentBackend = desktopConversation.draftAgentBackend
