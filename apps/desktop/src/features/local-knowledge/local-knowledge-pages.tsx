@@ -1,5 +1,5 @@
 import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
-import { AlertCircle, ArrowLeft, ArrowRight, ArrowUpDown, BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, ChevronsUpDown, Clock3, Copy, Cpu, CornerDownLeft, Database, Download, ExternalLink, Eye, FileQuestion, FileStack, FileText, FlaskConical, Folder, FolderInput, FolderOpen, FolderPlus, Gauge, HardDrive, History, Info, Layers3, ListFilter, ListTodo, LoaderCircle, MessageCircle, MoreHorizontal, PackageOpen, Pause, Pencil, Plus, Quote, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Star, Trash2, Upload, WandSparkles, XCircle } from 'lucide-react'
+import { AlertCircle, ArrowLeft, ArrowRight, ArrowUpDown, BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, ChevronsUpDown, Clock3, Copy, Cpu, CornerDownLeft, Database, Download, ExternalLink, Eye, FileQuestion, FileStack, FileText, FlaskConical, Folder, FolderInput, FolderOpen, FolderPlus, Gauge, HardDrive, History, Info, Layers3, ListFilter, ListTodo, LoaderCircle, MessageCircle, MoreHorizontal, PackageOpen, Pause, Pencil, Plus, Quote, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Star, Trash2, Upload, WandSparkles, X, XCircle } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ExpandingSearch } from '@/components/arc/expanding-search/expanding-search'
 import { FileDropzone, type FileDropzoneItem } from '@/components/arc/file-dropzone/file-dropzone'
@@ -10,7 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from '@/components/ui/breadcrumb'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -1044,13 +1044,14 @@ function LocalFilePreviewDialog({ file, gateway, open, onOpenChange }: { file: L
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="fox-local-files-preview-dialog">
+      <DialogContent className="fox-local-files-preview-dialog" showCloseButton={false}>
         <header className="fox-file-preview-toolbar">
           <DialogTitle className="fox-file-preview-title" title={file?.absolutePath}>{file?.name ?? '本机文件预览'}</DialogTitle>
           {file && <div className="fox-file-preview-meta" title={`${file.extension.toUpperCase()} · ${formatBytes(file.sizeBytes)} · ${formatDate(file.modifiedAt)}`}>{file.extension.toUpperCase()} · {formatBytes(file.sizeBytes)} · {formatDate(file.modifiedAt)}</div>}
           <div className="fox-file-preview-actions">
             <Button variant="ghost" size="icon" aria-label="打开所在文件夹" title="打开所在文件夹" onClick={() => void revealInFolder()}><FolderOpen /></Button>
             <Button variant="ghost" size="icon" aria-label="系统打开" title="系统打开" onClick={() => void openWithSystem()}><ExternalLink /></Button>
+            <DialogClose asChild><Button variant="ghost" size="icon" aria-label="关闭弹窗" title="关闭预览"><X /></Button></DialogClose>
           </div>
         </header>
         <DialogDescription className="sr-only">{file?.absolutePath}</DialogDescription>

@@ -10,7 +10,6 @@ import type { KnowledgeSourceLocator } from '@/features/workspace/types'
 import { codeLanguage, formatJsonPreview, parseDelimitedPreview, parsePresentationSlides, previewKind, TABLE_ROW_HEIGHT, virtualRowWindow, type PreviewKind } from './knowledge-preview-model'
 import { binaryValue, openKnowledgeCachedPreviewSource } from './knowledge-preview-source'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
-import { KnowledgeDocumentActivityToolbar } from './knowledge-document-activity-toolbar'
 import { compatibleReadingState, type DocumentViewPosition } from './document-activity-model'
 import { useDocumentActivity } from './use-document-activity'
 
@@ -224,7 +223,6 @@ export function KnowledgeFileViewer({
         {state.truncated && <div className="fox-file-preview-notice"><FileText /><span><b>已展示前 {formatBytes(MAX_TEXT_PREVIEW_BYTES)}</b><small>为保持页面流畅，较长文件不会一次加载到界面中。</small></span></div>}
         {state.kind === 'image' && state.objectUrl && <ImagePreview filename={document.name} objectUrl={state.objectUrl} zoom={imageZoom} fit={imageFit} onFit={() => { setImageFit(true); setImageZoom(1) }} onZoom={(next) => { setImageFit(false); setImageZoom(Math.min(MAX_IMAGE_ZOOM, Math.max(MIN_IMAGE_ZOOM, next))) }} />}
         {sourceLocator && <SourceLocatorNotice locator={sourceLocator} />}
-        <KnowledgeDocumentActivityToolbar activity={activity.activity} sourceRevision={state.metadata?.sourceRevision ?? null} position={viewPosition} loading={activity.loading} error={activity.error} onNavigate={updatePosition} onAddBookmark={(position) => activity.addBookmark(position)} onRemoveBookmark={async (id) => { const item = activity.activity.bookmarks.find((bookmark) => bookmark.id === id); if (item) await activity.removeBookmark(item) }} onAddAnnotation={(position, note) => activity.addAnnotation(position, note)} onRemoveAnnotation={async (id) => { const item = activity.activity.annotations.find((annotation) => annotation.id === id); if (item) await activity.removeAnnotation(item) }} />
         {state.kind === 'pdf' && state.metadata && <Suspense fallback={<PreviewModuleLoading label="正在加载 PDF 查看器" />}><KnowledgePdfViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={state.metadata} sourceLocator={sourceLocator} requestedPosition={viewPosition} onPositionChange={updatePosition} onFailure={handleRendererFailure} /></Suspense>}
         {state.kind === 'docx' && state.metadata && <Suspense fallback={<PreviewModuleLoading label="正在加载 Word 查看器" />}><KnowledgeDocxViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={state.metadata} sourceLocator={sourceLocator} requestedPosition={viewPosition} onPositionChange={updatePosition} onFailure={handleRendererFailure} /></Suspense>}
         {state.kind === 'spreadsheet' && state.metadata && <Suspense fallback={<PreviewModuleLoading label="正在加载电子表格查看器" />}><KnowledgeSpreadsheetViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={state.metadata} onFailure={handleRendererFailure} /></Suspense>}

@@ -4838,7 +4838,7 @@
 
 /* Arc's lane grows left of the activity clock; the collapsed control takes only 32px. */
 .fox-kb-search-control-slot { position: relative; flex: 0 0 var(--fox-action-height); width: var(--fox-action-height); height: var(--fox-action-height); }
-.fox-kb-search-control-slot .fox-kb-expanding-search { position: absolute; z-index: 10; top: 0; right: 0; width: min(360px, calc(100vw - 180px)); }
+.fox-kb-search-control-slot .fox-kb-expanding-search:not([data-reserve-space]) { position: absolute; z-index: 10; top: 0; right: 0; width: min(360px, calc(100vw - 180px)); }
 .fox-kb-file-dropzone { min-width: 0; }
 .fox-kb-dropzone-folder { margin-top: var(--fox-space-m); }
 .fox-kb-dropzone-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--fox-space-m); margin-top: var(--fox-space-s); color: var(--fox-muted); font-size: var(--fox-type-caption); }
@@ -4846,7 +4846,7 @@
   .fox-kb-hub-head { flex-wrap: wrap; }
   .fox-kb-hub-title { flex-basis: calc(100% - 48px); }
   .fox-kb-hub-actions { flex-basis: 100%; justify-content: flex-end; }
-  .fox-kb-search-control-slot .fox-kb-expanding-search { width: min(360px, calc(100vw - 180px)); }
+  .fox-kb-search-control-slot .fox-kb-expanding-search:not([data-reserve-space]) { width: min(360px, calc(100vw - 180px)); }
 }
 
 /* 原型 .search：36px 输入条；首页的 .omni 是 44px、大圆角、带投影 */
