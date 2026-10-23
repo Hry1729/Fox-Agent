@@ -18,7 +18,7 @@ use fox_agent_backend::capability_view::{capability_view, CapabilityView};
 use fox_agent_backend::external::{AnswerOutcome, CancelOutcome, ExternalRuntime, ExternalSink, LaunchRequest, RevokeOutcome, TurnRequest};
 use fox_agent_backend::external_launch::{HostLaunchConfig, HostLauncher};
 use fox_agent_backend::port::AgentBackend;
-use fox_agent_backend::projection::{ExecutionMode, PermissionCard};
+use fox_agent_backend::projection::PermissionCard;
 use fox_agent_backend::sandbox::{HostOs, SandboxDeclaration};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -233,11 +233,10 @@ impl ExternalBackendHost {
                 // Fail-closed: a grant that cannot be read is no grant.
                 full_access_granted: self.database.conversation_full_access_granted(&request.conversation_id).unwrap_or(false),
                 unified_login: self.unified_login(backend),
+                // The conversation's choice in its Agent's own permission
+                // list; replaces Fox's 询问 / 自动 / 只读 for external backends.
+                native_permission: crate::commands::agent_backend_routing::stored_conversation_native_mode(&self.database, &request.conversation_id),
             },
-            // Settings batch, item 7: Fox's execution mode (询问 / 自动 / 只读,
-            // the same value the Fox runtime reads) decides how the backend's
-            // permission requests are answered. Unreadable = 询问.
-            execution: ExecutionMode::parse(&self.database.conversation_permission_mode(&request.conversation_id).unwrap_or_else(|_| "ask".to_owned())),
         };
         if let Err(error) = self.runtime.start_turn(turn) {
             let _ = self.database.mark_run_failed(&started.run.id, error.code(), &error.message());
@@ -343,6 +342,7 @@ impl ExternalBackendHost {
             session_key: "planned".into(),
             full_access_granted: conversation_id.is_some_and(|id| self.database.conversation_full_access_granted(id).unwrap_or(false)),
             unified_login: None,
+            native_permission: None,
         });
         let pi_launch = launcher.config.pi_launch();
         let mut view = capability_view(backend, None, &SandboxDeclaration::declare(mode, None, HostOs::current()), pi_launch);
@@ -372,14 +372,49 @@ impl ExternalBackendHost {
         Ok((request.backend, fox_agent_backend::unified_login::user_login_present(request.backend, &home, host_login)))
     }
 
-    pub(crate) fn clear_managed_model_files(&self) -> Result<(), String> {
-        for (id, _) in self.database.known_projects()? {
+    /// The user changed the conversation's native permission mode: the live
+    /// session follows as far as its Agent allows (Codex at once, dsh at the
+    /// next turn, pi at the next request).
+    pub(crate) async fn apply_native_mode(&self, conversation_id: &str, mode: &str) -> fox_agent_backend::external::NativeModeOutcome {
+        self.runtime.apply_native_mode(conversation_id, mode).await
+    }
+
+    /// Record a Host-level warning (no conversation) in the external-backend
+    /// audit log. Names and counts only.
+    pub(crate) fn audit_warning(&self, event: &str, details: &Value) {
+        let _ = self.database.append_agent_backend_audit(None, "-", event, details);
+    }
+
+    /// Remove the Fox-managed login files of every project x backend (the
+    /// default provider changed or lost its key). Never stops at the first
+    /// problem: projects without a canonical UUID (e.g. `legacy-<hex>` ids
+    /// of old conversations) have no private HOME and are skipped; every
+    /// other failure is collected per project / backend and returned, so the
+    /// caller can report it as a warning after its own work is done.
+    pub(crate) fn clear_managed_model_files(&self) -> Vec<String> {
+        let projects = match self.database.known_projects() {
+            Ok(projects) => projects,
+            Err(error) => return vec![format!("无法列出项目：{error}")],
+        };
+        let mut errors = Vec::new();
+        for (id, _) in projects {
+            if fox_agent_backend::sandbox::canonical_project_uuid(&id).is_none() {
+                continue;
+            }
             for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
-                let home = self.runtime.launcher().config.private_home_path(&id, backend).map_err(|e| e.message)?;
-                fox_agent_backend::unified_login::remove_managed(backend, &home)?;
+                let result = self
+                    .runtime
+                    .launcher()
+                    .config
+                    .private_home_path(&id, backend)
+                    .map_err(|e| e.message)
+                    .and_then(|home| fox_agent_backend::unified_login::remove_managed(backend, &home).map(|_| ()));
+                if let Err(error) = result {
+                    errors.push(format!("项目 {id} / {}：{error}", backend.as_str()));
+                }
             }
         }
-        Ok(())
+        errors
     }
 
     pub(crate) fn prepare_model_login(&self, target: &AgentBackendTarget) -> Result<(), String> {
@@ -415,6 +450,7 @@ impl ExternalBackendHost {
             session_key: "planned".into(),
             full_access_granted: self.database.conversation_full_access_granted(conversation_id).unwrap_or(false),
             unified_login: self.unified_login(backend),
+            native_permission: crate::commands::agent_backend_routing::stored_conversation_native_mode(&self.database, conversation_id),
         })
     }
 
@@ -438,6 +474,7 @@ impl ExternalBackendHost {
             session_key: "planned".into(),
             full_access_granted: target.full_access,
             unified_login: self.unified_login(backend),
+            native_permission: crate::commands::agent_backend_routing::stored_last_native_mode(&self.database, backend),
         })
     }
 
