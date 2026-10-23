@@ -69,6 +69,8 @@ pub struct NativePermissionOption {
 #[serde(rename_all = "camelCase")]
 pub struct NativePermissionCatalog {
     pub backend: &'static str,
+    /// The Agent's display name in UI text ([`display_name`]).
+    pub display_name: &'static str,
     pub options: Vec<NativePermissionOption>,
     /// The sandboxed option a new session starts in when nothing was chosen.
     pub default_mode: &'static str,
@@ -80,14 +82,18 @@ pub struct NativePermissionCatalog {
 /// What the catalog depends on besides the Agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CatalogContext {
-    /// Base URL of the provider the Agent uses through Fox's unified login
-    /// (`None`: the user's own login in the private HOME, provider unknown).
+    /// Base URL of the provider the Agent uses through Fox's unified login:
+    /// the protocol address bound for this Agent, else the provider's own
+    /// base URL (13.19 fix ④). `None` (or a URL without a host): the provider
+    /// cannot be determined, and Codex「帮我批准」is greyed fail-closed
+    /// ([`CODEX_AUTO_REVIEW_UNKNOWN_REASON`]).
     pub provider_base_url: Option<String>,
     /// `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN`: the full-access option is greyed.
     pub full_access_forbidden: bool,
 }
 
 pub const CODEX_AUTO_REVIEW_REASON: &str = "「帮我批准」由 Codex 调用 OpenAI 的 codex-auto-review 模型自动审查；当前供应商不是 OpenAI，会被拒绝";
+pub const CODEX_AUTO_REVIEW_UNKNOWN_REASON: &str = "「帮我批准」由 Codex 调用 OpenAI 的 codex-auto-review 模型自动审查；无法确定当前供应商的地址（模型服务未设默认供应商，或供应商没有填写地址），按安全默认不可用";
 pub const FULL_ACCESS_FORBIDDEN_NOTE: &str = "管理员已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN）";
 
 /// Whether `base_url` is an OpenAI API endpoint (`api.openai.com` or another
@@ -108,6 +114,17 @@ pub fn host_of(url: &str) -> Option<String> {
     };
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     (!host.is_empty()).then_some(host)
+}
+
+/// The Agent's name in UI text (the same names as the picker / backend bar:
+/// Codex, DeepSeek, pi; Fox for Fox).
+pub fn display_name(backend: AgentBackend) -> &'static str {
+    match backend {
+        AgentBackend::Codex => "Codex",
+        AgentBackend::Deepseek => "DeepSeek",
+        AgentBackend::Pi => "pi",
+        AgentBackend::Fox => "Fox",
+    }
 }
 
 fn option(id: &'static str, label: &'static str, description: &'static str, native: &'static str, full_access: bool) -> NativePermissionOption {
@@ -167,14 +184,15 @@ pub fn catalog(backend: AgentBackend, context: &CatalogContext) -> NativePermiss
             option.disabled_reason = Some(FULL_ACCESS_FORBIDDEN_NOTE.to_owned());
         }
         if backend == AgentBackend::Codex && option.id == CODEX_AUTO_REVIEW {
-            if let Some(url) = context.provider_base_url.as_deref() {
-                if !provider_is_openai(url) {
-                    option.disabled_reason = Some(CODEX_AUTO_REVIEW_REASON.to_owned());
-                }
+            // Fail-closed: only a provider known to be OpenAI keeps it.
+            match context.provider_base_url.as_deref().and_then(host_of) {
+                Some(host) if host == "openai.com" || host.ends_with(".openai.com") => {}
+                Some(_) => option.disabled_reason = Some(CODEX_AUTO_REVIEW_REASON.to_owned()),
+                None => option.disabled_reason = Some(CODEX_AUTO_REVIEW_UNKNOWN_REASON.to_owned()),
             }
         }
     }
-    NativePermissionCatalog { backend: backend.as_str(), options, default_mode, switch_timing, switch_note }
+    NativePermissionCatalog { backend: backend.as_str(), display_name: display_name(backend), options, default_mode, switch_timing, switch_note }
 }
 
 /// The full-access option of `backend`.
@@ -292,6 +310,11 @@ mod tests {
         assert_eq!(catalog(AgentBackend::Codex, &context).switch_timing, SwitchTiming::Live);
         assert_eq!(catalog(AgentBackend::Deepseek, &context).switch_timing, SwitchTiming::NextTurnRestart);
         assert!(catalog(AgentBackend::Deepseek, &context).switch_note.contains("下一轮"));
+        // Display names used in UI text (13.19 fix ①: no hard-coded "dsh").
+        let names = [AgentBackend::Codex, AgentBackend::Deepseek, AgentBackend::Pi].map(|backend| catalog(backend, &context).display_name);
+        assert_eq!(names, ["Codex", "DeepSeek", "pi"]);
+        let json = serde_json::to_value(catalog(AgentBackend::Pi, &context)).unwrap();
+        assert_eq!(json["displayName"], "pi");
     }
 
     #[test]
@@ -302,8 +325,19 @@ mod tests {
         assert!(auto.disabled_reason.as_deref().unwrap().contains("codex-auto-review"));
         let openai = CatalogContext { provider_base_url: Some("https://api.openai.com/v1".into()), ..Default::default() };
         assert!(catalog(AgentBackend::Codex, &openai).options.iter().all(|option| option.disabled_reason.is_none()));
-        // The user's own login: provider unknown, not greyed.
-        assert!(catalog(AgentBackend::Codex, &CatalogContext::default()).options.iter().all(|option| option.disabled_reason.is_none()));
+        // 13.19 fix ④: provider unknown (no default provider, no address,
+        // no host) = fail-closed, greyed with its own reason; the other two
+        // options stay available.
+        for unknown in [None, Some(String::new()), Some("not a url".to_owned())] {
+            let context = CatalogContext { provider_base_url: unknown.clone(), ..Default::default() };
+            let codex = catalog(AgentBackend::Codex, &context);
+            let reasons = codex.options.iter().map(|option| option.disabled_reason.as_deref()).collect::<Vec<_>>();
+            assert_eq!(reasons, [None, Some(CODEX_AUTO_REVIEW_UNKNOWN_REASON), None], "{unknown:?}");
+            assert_eq!(effective_mode(AgentBackend::Codex, Some("agent"), false, &context), "workspace-write", "{unknown:?}");
+        }
+        // dsh / pi lists do not depend on the provider.
+        assert!(catalog(AgentBackend::Deepseek, &CatalogContext::default()).options.iter().all(|option| option.disabled_reason.is_none()));
+        assert!(catalog(AgentBackend::Pi, &CatalogContext::default()).options.iter().all(|option| option.disabled_reason.is_none()));
         // A greyed stored choice falls back to the default.
         assert_eq!(effective_mode(AgentBackend::Codex, Some("agent"), false, &deepseek), "workspace-write");
         assert_eq!(effective_mode(AgentBackend::Codex, Some("agent"), false, &openai), "agent");
