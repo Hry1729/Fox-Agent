@@ -23,6 +23,7 @@ import type {
   ProjectRecord,
 } from '@/features/conversations/model/types'
 import { remoteKnowledgeReference } from './expert-knowledge'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 
 interface Props {
   open: boolean
@@ -241,7 +242,7 @@ export function DigitalColleagueManager({ open, onOpenChange, experts }: Props) 
                 <small>专家 {experts.find((item) => item.id === selected.expertId)?.name ?? selected.expertId} · SHA-256 {selected.packageHash.slice(0, 12)}… · {selected.maxRunsPerDay} 次/日 · {selected.maxTokensPerDay.toLocaleString()} tokens/日</small>
                 <div className="fox-agent-editor-actions">
                   {selected.status !== 'revoked' && <Button variant="outline" size="sm" disabled={busy} onClick={() => void runAction(() => desktopClient.setDigitalColleaguePaused(selected.id, selected.status === 'active'), selected.status === 'active' ? '数字同事已暂停；定时执行已停用' : '数字同事已恢复')}>{selected.status === 'active' ? <Pause /> : <Play />}{selected.status === 'active' ? '暂停' : '恢复'}</Button>}
-                  {selected.status !== 'revoked' && <Button variant="destructive" size="sm" disabled={busy} onClick={() => { if (window.confirm(`撤销“${selected.name}”及其全部外部入口？此操作不可恢复。`)) void runAction(() => desktopClient.revokeDigitalColleague(selected.id, 'revoked by user'), '数字同事与外部入口已撤销') }}>撤销</Button>}
+                  {selected.status !== 'revoked' && <Button variant="destructive" size="sm" disabled={busy} onClick={() => { const target = selected; void confirmDialog({ title: '撤销数字同事', description: `撤销“${target.name}”及其全部外部入口？此操作不可恢复。`, confirmLabel: '撤销', destructive: true }).then((ok) => { if (ok) void runAction(() => desktopClient.revokeDigitalColleague(target.id, 'revoked by user'), '数字同事与外部入口已撤销') }) }}>撤销</Button>}
                 </div>
               </Card>
               <section><header><span><Send />立即执行</span><b>外部数据按低权限上下文处理</b></header><Textarea value={manualPayload} onChange={(event) => setManualPayload(event.target.value)} /><Button size="sm" disabled={busy || selected.status !== 'active'} onClick={() => void triggerManual()}><Send />立即执行</Button></section>
