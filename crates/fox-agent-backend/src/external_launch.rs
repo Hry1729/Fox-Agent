@@ -440,7 +440,7 @@ pub const MISSING_CREDENTIALS_REMEDY: &str = "在输入框上方的登录卡片�
 
 /// Remedy of [`LOOPBACK_REQUIRES_FULL_ACCESS`]: full access is chosen when a
 /// conversation is created (it cannot be turned on mid-session).
-pub const LOOPBACK_REFUSAL_REMEDY: &str = "需要完全访问权限：新建会话时选择“完全访问”（会话中不能开启），或改用官方 api.deepseek.com";
+pub const LOOPBACK_REFUSAL_REMEDY: &str = "需要完全访问权限：在设置中打开“新外部会话使用完全访问”后新建会话（会话中不能开启），或改用官方 api.deepseek.com";
 
 /// [`LOOPBACK_REFUSAL_REMEDY`] when [`FULL_ACCESS_FORBIDDEN_ENV`] is set.
 pub const LOOPBACK_REFUSAL_REMEDY_FORBIDDEN: &str = "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），请改用官方 api.deepseek.com";
@@ -489,7 +489,68 @@ impl HostLaunchConfig {
         let home = self.private_home_path(&project_uuid, request.backend)?;
         let mode = self.permission_mode(request);
         let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-        Ok(crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env))
+        let mut probe = crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env);
+        if let Some(login) = &request.unified_login {
+            let plan = crate::unified_login::plan(request.backend, &home, login, host_login_reaches(&probe));
+            if matches!(plan.outcome, crate::unified_login::Outcome::Generated | crate::unified_login::Outcome::Unchanged) {
+                // The launch will generate (or already generated) a login
+                // from 模型服务: ready, unless DeepSeek's generated base URL
+                // is a loopback gateway in the sandbox (same refusal code).
+                probe.credentials_present = true;
+                let loopback = request.backend == AgentBackend::Deepseek
+                    && mode == PermissionMode::Sandboxed
+                    && !crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED
+                    && crate::unified_login::deepseek_base_url(login).is_ok_and(|base| crate::loopback::names_loopback(&base));
+                probe.loopback_blocked = probe.loopback_blocked || loopback;
+                probe.state = if probe.loopback_blocked { crate::onboarding::CredentialState::LoopbackRequiresFullAccess } else { crate::onboarding::CredentialState::Ready };
+            }
+            probe.unified_login = Some(plan);
+        }
+        Ok(probe)
+    }
+
+    /// Settings batch, item 6: generate the backend's config from Fox「模型
+    /// 服务」 in the private HOME the launch uses (the user's own login and
+    /// files are never touched), or remove Fox-managed files when 模型服务
+    /// has no usable default provider. Windows: the private root is prepared
+    /// before and its DACL re-applied after, as for an import.
+    pub fn apply_unified_login(&self, request: &LaunchRequest) -> Result<Option<crate::unified_login::UnifiedReport>, LaunchFailure> {
+        if request.backend == AgentBackend::Fox {
+            return Ok(None);
+        }
+        let private = self.full_access_private(request)?;
+        let home = private.private_home;
+        crate::sandbox::ensure_backend_home_dirs(request.backend, &home)
+            .map_err(|error| LaunchFailure::new("agent_backend_unified_login_failed", format!("无法创建私有 HOME：{error}")))?;
+        let report = match &request.unified_login {
+            Some(login) => {
+                let mode = self.permission_mode(request);
+                let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+                let probe = crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env);
+                let report = crate::unified_login::apply(request.backend, &home, login, host_login_reaches(&probe))
+                    .map_err(|error| LaunchFailure::new("agent_backend_unified_login_failed", format!("无法按模型服务生成登录配置：{error}")))?;
+                eprintln!(
+                    "fox.external unified_login agent_backend={} outcome={:?} files={:?} user_files={:?}",
+                    request.backend.as_str(),
+                    report.outcome,
+                    report.files,
+                    report.user_files
+                );
+                Some(report)
+            }
+            None => {
+                let removed = crate::unified_login::remove_managed(request.backend, &home)
+                    .map_err(|error| LaunchFailure::new("agent_backend_unified_login_failed", error))?;
+                if !removed.is_empty() {
+                    eprintln!("fox.external unified_login agent_backend={} removed={removed:?}", request.backend.as_str());
+                }
+                None
+            }
+        };
+        if self.os == HostOs::Windows {
+            self.full_access_private(request)?;
+        }
+        Ok(report)
     }
 
     /// [`MISSING_CREDENTIALS`] when the probe of this request says the
@@ -610,6 +671,12 @@ impl HostLaunchConfig {
     }
 }
 
+/// Whether a login variable of the Host environment reaches the backend
+/// (the probe lists it as `NAME（Host 环境）`).
+fn host_login_reaches(probe: &crate::onboarding::CredentialProbe) -> bool {
+    probe.present_keys.iter().any(|key| key.ends_with("（Host 环境）"))
+}
+
 /// The production [`ExternalLauncher`].
 #[derive(Clone)]
 pub struct HostLauncher {
@@ -635,7 +702,16 @@ impl HostLauncher {
 
     async fn launch_now(config: HostLaunchConfig, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
         let mode = config.permission_mode(&request);
-        let (spec, pi_launch) = config.launch_spec(request.backend, mode, &request.project_root)?;
+        let (mut spec, pi_launch) = config.launch_spec(request.backend, mode, &request.project_root)?;
+        // Unified login (settings batch, item 6) first, so the loopback and
+        // missing-login checks below see the generated files. The Codex key
+        // goes into the backend's environment only (never config.toml).
+        if let Some(report) = config.apply_unified_login(&request)? {
+            for (name, value) in &report.env {
+                spec.session_env.retain(|(key, _)| key != name);
+                spec.session_env.push((name.clone(), value.expose().to_owned()));
+            }
+        }
         // DeepSeek + loopback gateway + sandbox: refuse now, not after the
         // first prompt fails with "Connection error".
         if let Some(refusal) = config.sandbox_homes_root().and_then(|homes| config.loopback_refusal(&request, mode, homes)) {
@@ -845,6 +921,7 @@ mod tests {
             project_root: root.join("proj"),
             session_key: "s1".into(),
             full_access_granted: false,
+            unified_login: None,
         }
     }
 
@@ -1166,7 +1243,7 @@ mod tests {
         assert_eq!(refusal.code, LOOPBACK_REQUIRES_FULL_ACCESS);
         assert!(refusal.message.contains("本机网关在沙箱模式下不可达") && refusal.message.contains("http://127.0.0.1:3425/anthropic"), "{}", refusal.message);
         assert_eq!(refusal.remedy.as_deref(), Some(LOOPBACK_REFUSAL_REMEDY));
-        assert!(refusal.remedy.as_deref().unwrap().contains("新建会话时选择“完全访问”"));
+        assert!(refusal.remedy.as_deref().unwrap().contains("在设置中打开“新外部会话使用完全访问”后新建会话"));
         assert!(!refusal.remedy.as_deref().unwrap().contains("请切换到") && !refusal.remedy.as_deref().unwrap().contains("FOX_EXTERNAL_FULL_ACCESS"));
         // Forbidden on this machine: the remedy no longer offers full access.
         let mut forbidden = config.clone();
