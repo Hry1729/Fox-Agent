@@ -43,6 +43,7 @@
 
 .fox-settings-layout .fox-settings-section-head {
   min-height: var(--fox-control-md);
+  align-items: flex-start !important;
   gap: 12px;
   margin-bottom: 8px;
 }
