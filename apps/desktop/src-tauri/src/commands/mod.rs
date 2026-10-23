@@ -9,7 +9,6 @@ pub use kernel_reconciliation::*;
 use crate::canonical_json::CanonicalJson;
 use crate::model_service::{
     api_key_configured, clear_api_key, get_api_key, normalize_model_base_url, normalize_model_id,
-    set_api_key,
 };
 use crate::yuxi::{
     access_token_configured, clear_access_token, get_access_token, normalize_base_url,
@@ -5869,24 +5868,25 @@ pub fn model_provider_save(
             model.is_default = true;
         }
     }
-    // Clearing the key happens after the record is saved (below), so a
-    // failed save never leaves a provider whose key is already gone.
-    if !request.clear_api_key {
-        if let Some(api_key) = request
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if let Err(error) = set_api_key(&base_url, api_key) {
-                return ApiResponse::failure("model.credential_save_failed", error, true);
-            }
-        }
+    // Keys: written before the record and put back if the save fails;
+    // clearing the key happens only after the record is saved
+    // (fox_agent_backend::credential_save, H.3).
+    let mut key_plan = fox_agent_backend::credential_save::KeyPlan::default();
+    if request.clear_api_key {
+        key_plan.after_record.push(base_url.clone());
+    } else if let Some(api_key) = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        key_plan.before_record.push((base_url.clone(), Some(api_key.to_owned())));
     }
     for (profile_id, key) in &request.protocol_keys {
         let credential = fox_agent_backend::provider_protocol::credential_id(&provider_id, profile_id);
-        let result = if key.is_empty() { clear_api_key(&credential) } else { set_api_key(&credential, key.trim()) };
-        if let Err(error) = result { return ApiResponse::failure("model.credential_save_failed", error, true); }
+        key_plan
+            .before_record
+            .push((credential, (!key.is_empty()).then(|| key.trim().to_owned())));
     }
     let provider = ModelProviderRecord {
         protocol_profiles,
@@ -5906,15 +5906,14 @@ pub fn model_provider_save(
         created_at: 0,
         updated_at: 0,
     };
-    let saved = match state.database.save_model_provider(&provider) {
+    let saved = match fox_agent_backend::credential_save::save_with_keys(
+        &mut crate::model_service::KeyringStore,
+        &key_plan,
+        || state.database.save_model_provider(&provider),
+    ) {
         Ok(saved) => saved,
-        Err(error) => return storage_error(error),
+        Err(error) => return credential_save_error(error),
     };
-    if request.clear_api_key {
-        if let Err(error) = clear_api_key(&base_url) {
-            return ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但 Key 删除失败：{error}"), true);
-        }
-    }
     for old in &old_profiles {
         if old.separate_credential && !saved.protocol_profiles.iter().any(|p| p.id == old.id && p.separate_credential) {
             if let Err(error) = clear_api_key(&fox_agent_backend::provider_protocol::credential_id(&saved.id, &old.id)) {
@@ -6050,22 +6049,20 @@ pub fn model_service_save(
     if let Err(error) = state.runtime_host.reload_configuration() {
         return ApiResponse::failure("model.runtime_busy", error, true);
     }
-    // Clearing the key: the record is saved first, then the key is deleted
-    // (below), so a failed save never leaves the key gone and the old
-    // record in place.
-    if !request.clear_api_key {
-        if let Some(api_key) = request
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if let Err(error) = set_api_key(&base_url, api_key) {
-                return ApiResponse::failure("model.credential_save_failed", error, true);
-            }
-        }
+    // Keys: written before the record and put back if the save fails;
+    // clearing the key happens only after the record is saved
+    // (fox_agent_backend::credential_save, H.3).
+    let mut key_plan = fox_agent_backend::credential_save::KeyPlan::default();
+    if request.clear_api_key {
+        key_plan.after_record.push(base_url.clone());
+    } else if let Some(api_key) = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        key_plan.before_record.push((base_url.clone(), Some(api_key.to_owned())));
     }
-    let clear_key_url = request.clear_api_key.then(|| base_url.clone());
     let record = ModelServiceRecord {
         name: name.to_owned(),
         base_url,
@@ -6083,18 +6080,37 @@ pub fn model_service_save(
         created_at: 0,
         updated_at: 0,
     };
-    match state.database.save_model_service(&record) {
+    match fox_agent_backend::credential_save::save_with_keys(
+        &mut crate::model_service::KeyringStore,
+        &key_plan,
+        || state.database.save_model_service(&record),
+    ) {
         Ok(mut service) => {
-            if let Some(url) = clear_key_url {
-                if let Err(error) = clear_api_key(&url) {
-                    return ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但 Key 删除失败：{error}"), true);
-                }
+            if request.clear_api_key {
                 warn_managed_model_cleanup(&external, "model_service_save");
             }
             service.credential_configured = api_key_configured(&service.base_url);
             ApiResponse::success(service)
         }
-        Err(error) => storage_error(error),
+        Err(error) => credential_save_error(error),
+    }
+}
+
+/// Map a provider save failure to the codes the settings page already shows.
+fn credential_save_error<T: serde::Serialize>(
+    error: fox_agent_backend::credential_save::SaveError<String>,
+) -> ApiResponse<T> {
+    use fox_agent_backend::credential_save::SaveError;
+    let rollback = error.rollback_failures().to_vec();
+    if !rollback.is_empty() {
+        eprintln!("fox.model key_rollback_failed failures={}", rollback.len());
+    }
+    let suffix = if rollback.is_empty() { String::new() } else { format!("（Key 恢复失败：{}）", rollback.join("；")) };
+    match error {
+        SaveError::KeySnapshot { error, .. } => ApiResponse::failure("model.credential_save_failed", format!("无法读取已保存的 Key，未做任何修改：{error}"), true),
+        SaveError::KeyWrite { error, .. } => ApiResponse::failure("model.credential_save_failed", format!("{error}{suffix}"), true),
+        SaveError::Record { error, .. } => storage_error(format!("{error}{suffix}")),
+        SaveError::KeyDeleteAfterSave { error, .. } => ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但 Key 删除失败：{error}"), true),
     }
 }
 
