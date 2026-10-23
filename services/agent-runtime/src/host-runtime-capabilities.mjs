@@ -31,3 +31,20 @@ export function hostRuntimeCapabilitiesPrompt(value, identity) {
   if (!facts) return ''
   return `Host runtime availability for this frozen manifest/profile:\n${JSON.stringify(facts)}\nTool schemas describe contracts and do not prove environment availability. Do not call an unavailable action or repeat it to seek approval; approval cannot supply a missing backend. Use the available in-process tools. Command status/output/cancel are control-plane actions and do not prove command start is available. Report an unavailable required capability clearly. Capabilities can change; Host rechecks before approval and before execution.`
 }
+
+// Tools the model must not see when the Host reports them unavailable:
+// `run_command` needs an external execution backend (sandbox); without one
+// every call is refused, so offering it only invites failing calls. Unknown
+// (legacy payload, stale identity) keeps the tool: Host still rechecks.
+export const HOST_RUNTIME_HIDDEN_WHEN_UNAVAILABLE = Object.freeze(['run_command'])
+
+export function selectToolsForHostRuntime(tools, value, identity) {
+  const facts = hostRuntimeCapabilities(value, identity)
+  const hidden = new Set(HOST_RUNTIME_HIDDEN_WHEN_UNAVAILABLE
+    .filter(name => facts?.tools?.[name]?.availability === 'unavailable'))
+  return {
+    tools: tools.filter(({ name }) => !hidden.has(name)),
+    excludedTools: tools.filter(({ name }) => hidden.has(name))
+      .map(({ name }) => ({ name, reason: 'host_runtime_unavailable', reasonCode: facts.tools[name].reasonCode ?? null })),
+  }
+}
