@@ -24,6 +24,25 @@ export interface CredentialProbe {
   requiredKeys: string[]
   requiredFiles: string[]
   templates: ConfigTemplate[]
+  /** Settings batch, item 6: what the unified login (Fox「模型服务」) does at the next launch; absent / null without a usable default provider. */
+  unifiedLogin?: UnifiedLoginReport | null
+}
+
+/** `fox_agent_backend::unified_login::UnifiedReport` (names only). */
+export interface UnifiedLoginReport {
+  backend: string
+  outcome: 'generated' | 'unchanged' | 'existing_login' | 'unsupported'
+  provider: string
+  files: string[]
+  userFiles: string[]
+  reason: string | null
+}
+
+/** Why 模型服务 could not log this backend in, for the missing-login card (null when it can, or is not configured). */
+export function unifiedLoginNote(probe: CredentialProbe | null | undefined): string | null {
+  const unified = probe?.unifiedLogin
+  if (!unified || unified.outcome !== 'unsupported') return null
+  return `没能用“模型服务”的默认 provider「${unified.provider}」自动登录：${unified.reason ?? '原因未知'}`
 }
 
 /** One whitelisted item of the real HOME (`agent_backend_import_candidates`). */
@@ -39,8 +58,32 @@ export interface ImportItem {
 /** A project whose private HOME already had some items (kept, not copied). */
 export interface ImportSkip { project: string; label: string; items: string[] }
 
-/** Where the overwritten items of one project were backed up. */
+/**
+ * Where the overwritten items of one project were backed up. `directory` is
+ * relative to the private HOME (`.fox-credential-backups/<stamp>`), the same
+ * form as the audit; the Host never sends the absolute path (it contains the
+ * user's SID / profile).
+ */
 export interface ImportBackup { project: string; label: string; directory: string; items: string[] }
+
+/** Folder (under the private HOME) that holds overwritten logins. */
+export const CREDENTIAL_BACKUP_DIR = '.fox-credential-backups'
+
+function hostIsWindows(): boolean {
+  return typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '')
+}
+
+/**
+ * The backup location as the receipt shows it: relative to the private HOME
+ * (`.fox-credential-backups\<时间戳>` on Windows), never an absolute path
+ * even if an older Host sent one.
+ */
+export function backupDirectoryLabel(directory: string, windows = hostIsWindows()): string {
+  const normalized = directory.replace(/\\/g, '/')
+  const at = normalized.lastIndexOf(`${CREDENTIAL_BACKUP_DIR}/`)
+  const relative = at >= 0 ? normalized.slice(at) : `${CREDENTIAL_BACKUP_DIR}/${normalized.split('/').filter(Boolean).pop() ?? ''}`
+  return windows ? relative.replace(/\//g, '\\') : relative
+}
 
 /** Audit record returned by `agent_backend_import_credentials` (names only). */
 export interface ImportReport {
@@ -196,7 +239,7 @@ export function credentialCardModel(probe: CredentialProbe | null | undefined, p
       title: '本机网关在沙箱模式下不可用',
       description: forbidden
         ? 'DeepSeek 的 base URL 指向本机回环地址（如 Magpie），沙箱模式会在启动前拒绝。本机已禁止完全访问，请把 base URL 改成官方 https://api.deepseek.com/anthropic。'
-        : 'DeepSeek 的 base URL 指向本机回环地址（如 Magpie），沙箱模式会在启动前拒绝。请新建会话并选择“完全访问”，或把 base URL 改成官方 https://api.deepseek.com/anthropic。',
+        : 'DeepSeek 的 base URL 指向本机回环地址（如 Magpie），沙箱模式会在启动前拒绝。请在“设置 → 助手设置”中打开“新外部会话使用完全访问”后新建会话，或把 base URL 改成官方 https://api.deepseek.com/anthropic。',
       privateHome: probe.privateHome,
       requiredKeys: [],
       requiredFiles: probe.presentFiles,
@@ -205,10 +248,11 @@ export function credentialCardModel(probe: CredentialProbe | null | undefined, p
       offerImport: false,
     }
   }
+  const note = unifiedLoginNote(probe)
   return {
     kind: 'missing',
     title: '这个后端还没有登录',
-    description: '外部后端只读取 Fox 为本项目准备的私有 HOME，你真实 HOME 里的登录在这里用不上。把需要的文件放进下面的文件夹，或从真实 HOME 导入。',
+    description: `${note ? `${note}。` : '在“设置 → 模型服务”配置默认 provider 后，Fox 会在启动前自动生成登录；也可以手动登录：'}外部后端只读取 Fox 为本项目准备的私有 HOME，你真实 HOME 里的登录在这里用不上。把需要的文件放进下面的文件夹，或从真实 HOME 导入。`,
     privateHome: probe.privateHome,
     requiredKeys: probe.requiredKeys,
     requiredFiles: probe.requiredFiles,
@@ -233,7 +277,7 @@ const baseName = (path: string) => path.split('/').pop() ?? path
  * Receipt lines after an import (names only, no value). Shown OUTSIDE the
  * card: a successful import turns the probe ready and the card disappears.
  */
-export function importReceiptLines(report: ImportReport): string[] {
+export function importReceiptLines(report: ImportReport, options: { windows?: boolean } = {}): string[] {
   const names = [...report.files.map(baseName), ...report.keys]
   const written = report.homesWritten ?? (names.length ? report.homes : 0)
   const lines: string[] = []
@@ -249,13 +293,13 @@ export function importReceiptLines(report: ImportReport): string[] {
     lines.push(`已有登录，未覆盖 ${kept.length} 个项目：${projects.join('、')}`)
   }
   for (const backup of report.backups ?? []) {
-    lines.push(`已覆盖 ${backup.label} 的 ${backup.items.map(baseName).join('、')}，原文件备份在 ${backup.directory}`)
+    lines.push(`已覆盖 ${backup.label} 的 ${backup.items.map(baseName).join('、')}，原文件备份在私有 HOME 下的 ${backupDirectoryLabel(backup.directory, options.windows)}`)
   }
   if (report.skipped.length) lines.push(`${report.skipped.length} 项已不在可导入列表中，未复制`)
   return lines
 }
 
 /** One-line receipt after an import (names only). */
-export function importReceipt(report: ImportReport): string {
-  return importReceiptLines(report).join('；')
+export function importReceipt(report: ImportReport, options: { windows?: boolean } = {}): string {
+  return importReceiptLines(report, options).join('；')
 }
