@@ -223,7 +223,7 @@ pub fn deepseek_templates() -> Vec<ConfigTemplate> {
             files: vec![
                 TemplateFile {
                     path: DSH_PATCH_ACP,
-                    content: "- id: llm-deepseek\n  config:\n    baseURL: https://api.deepseek.com/anthropic\n- id: acp\n  config:\n    provider: deepseek-official\n    model: deepseek-v4-flash\n",
+                    content: "- id: llm-deepseek\n  config:\n    baseURL: https://api.deepseek.com/anthropic\n- id: acp\n  config:\n    provider: deepseek-official\n    model: deepseek-flash\n",
                 },
                 TemplateFile { path: DSH_ENV, content: "DEEPSEEK_API_KEY=<DeepSeek 平台的 key>\n" },
             ],
