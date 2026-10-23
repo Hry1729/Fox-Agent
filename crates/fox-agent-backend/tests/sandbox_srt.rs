@@ -1425,7 +1425,9 @@ mod external_real {
                 project_root: project.to_path_buf(),
                 session_key: format!("ext-{run}"),
                 full_access_granted: false,
+                unified_login: None,
             },
+            execution: fox_agent_backend::projection::ExecutionMode::Ask,
         }
     }
 
@@ -1673,7 +1675,7 @@ mod external_real {
             assert_eq!(terminal["type"], "run.failed", "{terminal}");
             assert_eq!(terminal["code"], fox_agent_backend::external_launch::LOOPBACK_REQUIRES_FULL_ACCESS, "{terminal}");
             let message = terminal["message"].as_str().unwrap_or_default();
-            assert!(message.contains("本机网关在沙箱模式下不可达") && message.contains("需要完全访问权限") && message.contains("新建会话时选择“完全访问”") && message.contains("api.deepseek.com"), "{message}");
+            assert!(message.contains("本机网关在沙箱模式下不可达") && message.contains("需要完全访问权限") && message.contains("在设置中打开“新外部会话使用完全访问”后新建会话") && message.contains("api.deepseek.com"), "{message}");
             assert!(!message.contains("请切换到"), "{message}");
             assert!(elapsed < Duration::from_secs(10), "refused before launch, not after a prompt: {elapsed:?}");
             assert!(!sink.types("g1").iter().any(|kind| kind == "agent_backend.session"), "no backend session was opened");
