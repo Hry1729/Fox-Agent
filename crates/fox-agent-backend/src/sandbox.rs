@@ -2188,6 +2188,13 @@ impl SrtLauncher {
                 if key.is_empty() || key.contains('=') {
                     return Err(SandboxError::new(SandboxPolicyInvalid, format!("invalid environment variable name {key:?}")));
                 }
+                // A secret (the unified-login Codex key) never goes on the
+                // command line (visible in the process list): it reaches the
+                // backend through srt's own environment instead
+                // ([`broker_session_env`]).
+                if SECRET_SESSION_ENV.contains(&key.as_str()) {
+                    continue;
+                }
                 args.push(format!("{key}={value}"));
             }
             args.push(spec.program.clone());
@@ -2252,9 +2259,20 @@ impl SrtLauncher {
 pub fn broker_session_env(os: HostOs, backend_env: &[(String, String)]) -> Vec<(String, String)> {
     match os {
         HostOs::Windows => Vec::new(),
-        _ => backend_env.iter().filter(|(key, _)| matches!(key.as_str(), "TMPDIR" | "CLAUDE_CODE_TMPDIR")).cloned().collect(),
+        _ => backend_env
+            .iter()
+            .filter(|(key, _)| matches!(key.as_str(), "TMPDIR" | "CLAUDE_CODE_TMPDIR") || SECRET_SESSION_ENV.contains(&key.as_str()))
+            .cloned()
+            .collect(),
     }
 }
+
+/// Backend variables that carry a secret (settings batch, item 6: the Codex
+/// key of the unified login). Linux / macOS sandboxed: passed through srt's
+/// environment (which the sandboxed child inherits), never as `env K=V` on
+/// the command line. Windows: through the bridge handshake like every other
+/// backend variable. Full access: the process environment.
+pub const SECRET_SESSION_ENV: [&str; 1] = [crate::unified_login::CODEX_KEY_ENV];
 
 /// Linux / macOS: the program that sets the backend's variables inside the
 /// sandbox (`/usr` is in the system read-only set on both).
@@ -3766,6 +3784,30 @@ mod tests {
     fn launcher(state_root: PathBuf) -> SrtLauncher {
         let ready = preflight(&install(), &FakeProbe::linux_ok()).unwrap();
         SrtLauncher::new(ready, state_root)
+    }
+
+    /// Settings batch, item 6: the unified-login Codex key reaches the
+    /// sandboxed backend through srt's environment, never on the command line.
+    #[cfg(not(windows))]
+    #[test]
+    fn srt_wrap_keeps_the_unified_login_key_off_the_command_line() {
+        let root = temp("wrap-secret");
+        std::fs::create_dir_all(root.join("home/u/proj")).unwrap();
+        let homes = PrivateHomes::new(root.join("fox/sandbox-homes"));
+        let policy = SandboxPolicy::new(
+            vec![AuthorizedDir { path: root.join("home/u/proj"), writable: true }],
+            homes.home_for(PROJECT, AgentBackend::Codex).unwrap(),
+            vec!["/opt/fox/backends/codex".into()],
+            vec!["api.deepseek.com".into()],
+            HostOs::Linux,
+        );
+        let mut spec = spec("/opt/fox/backends/codex/bin/codex-acp");
+        spec.session_env.push((crate::unified_login::CODEX_KEY_ENV.into(), "sk-secret-on-no-line".into()));
+        let wrapped = launcher(root.join("state")).wrap(&spec, &policy, "sess-secret").unwrap();
+        assert!(!wrapped.spec.args.iter().any(|arg| arg.contains("sk-secret-on-no-line")), "{:?}", wrapped.spec.args);
+        assert!(wrapped.spec.session_env.iter().any(|(k, v)| k == crate::unified_login::CODEX_KEY_ENV && v == "sk-secret-on-no-line"), "via srt's environment");
+        assert!(wrapped.spec.args.iter().any(|arg| arg == "INITIAL_AGENT_MODE=read-only"), "other variables still ride on env K=V");
+        assert!(broker_session_env(HostOs::Windows, &[(crate::unified_login::CODEX_KEY_ENV.into(), "x".into())]).is_empty(), "Windows: the bridge carries it");
     }
 
     // The Linux FakeProbe needs `/`-rooted paths; on a Windows host the temp
