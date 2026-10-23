@@ -39,21 +39,31 @@
 use crate::port::AgentBackend;
 use std::collections::BTreeSet;
 
-/// Environment variable that enables non-Fox backends.
+/// Administrator switch for the non-Fox backends (settings batch, item 4:
+/// "管理员强制关闭").
 ///
-/// Chosen over a settings row (see `docs/sandbox.md`, "Host 接线第一批"): the
-/// external runtime is not wired yet, so the switch is an engineering /
-/// enterprise control, not a user preference. An environment variable cannot
-/// be flipped from the UI by accident, is trivially absent on every existing
-/// install (so the default is "off" with no migration), sits in the Host
-/// policy layer of plan 6.5 (highest precedence, can only tighten), and
-/// mirrors the existing `FOX_KERNEL_MODE` switch.
+/// Since the settings batch the user picks the backend of new conversations
+/// in 设置 →「新会话使用的 Agent」(default Fox), and this variable only
+/// NARROWS that choice. Precedence: this variable (Host policy layer, plan
+/// 6.5, can only tighten) > the user's setting > the default (Fox). An
+/// external backend is only ever used when the user picked it.
 ///
-/// Accepted values: unset / empty / `0` / `off` / `false` / `none` → all
-/// external backends off; `all` / `1` / `on` / `true` → all on; otherwise a
-/// comma- or whitespace-separated list of backend ids (`pi,codex`). `fox` in
-/// the list is ignored (Fox is always available). Unknown ids are ignored and
-/// reported by [`BackendSwitch::unknown_entries`], never treated as "all".
+/// Accepted values:
+/// * unset / empty, or `all` / `1` / `on` / `true` / `yes`: every external
+///   backend may be picked (nothing is forced off; new conversations still
+///   use Fox until the user picks another backend);
+/// * `0` / `off` / `false` / `none` / `no`: forced off: only Fox can be
+///   picked, new conversations use Fox, and conversations already bound to
+///   an external backend are read-only;
+/// * a comma- or whitespace-separated list of backend ids (`pi,codex`):
+///   only those may be picked. `fox` in the list is ignored (Fox is always
+///   available); unknown ids are ignored and reported by
+///   [`BackendSwitch::unknown_entries`], never treated as "all", so a list
+///   with no known id forces every external backend off.
+///
+/// Before the settings batch an unset variable meant "off" (an engineering
+/// opt-in); it is still an environment variable so the UI can never flip
+/// it.
 pub const EXTERNAL_BACKENDS_ENV: &str = "FOX_EXTERNAL_BACKENDS";
 
 /// Additive migration for the conversation-level identity field.
@@ -175,28 +185,29 @@ pub struct BackendSwitch {
 }
 
 impl BackendSwitch {
-    /// Everything external off (the default).
+    /// Everything external forced off (`FOX_EXTERNAL_BACKENDS=0`).
     pub fn all_off() -> Self {
         Self::default()
     }
 
-    /// Parse the raw value of [`EXTERNAL_BACKENDS_ENV`].
+    /// Every external backend may be picked (nothing forced off).
+    pub fn all_on() -> Self {
+        Self {
+            enabled: AgentBackend::ALL.into_iter().filter(|backend| *backend != AgentBackend::Fox).collect(),
+            unknown: Vec::new(),
+        }
+    }
+
+    /// Parse the raw value of [`EXTERNAL_BACKENDS_ENV`] (unset = nothing
+    /// forced off; see the constant's docs).
     pub fn from_env_value(value: Option<&str>) -> Self {
         let Some(raw) = value.map(str::trim).filter(|raw| !raw.is_empty()) else {
-            return Self::all_off();
+            return Self::all_on();
         };
         let lowered = raw.to_ascii_lowercase();
         match lowered.as_str() {
             "0" | "off" | "false" | "none" | "no" => return Self::all_off(),
-            "1" | "on" | "true" | "all" | "yes" => {
-                return Self {
-                    enabled: AgentBackend::ALL
-                        .into_iter()
-                        .filter(|backend| *backend != AgentBackend::Fox)
-                        .collect(),
-                    unknown: Vec::new(),
-                }
-            }
+            "1" | "on" | "true" | "all" | "yes" => return Self::all_on(),
             _ => {}
         }
         let mut switch = Self::all_off();
@@ -307,14 +318,14 @@ impl RouteError {
                 backend,
                 existing_conversation: false,
             } => format!(
-                "外部 Agent 后端「{}」未启用（由 {EXTERNAL_BACKENDS_ENV} 控制，默认关闭），只能新建 Fox 会话",
+                "外部 Agent 后端「{}」已被管理员关闭（环境变量 {EXTERNAL_BACKENDS_ENV}），只能新建 Fox 会话",
                 backend.as_str()
             ),
             Self::Disabled {
                 backend,
                 existing_conversation: true,
             } => format!(
-                "此会话绑定外部 Agent 后端「{}」，该后端当前未启用（{EXTERNAL_BACKENDS_ENV}），会话只读，不会启动运行时",
+                "此会话绑定外部 Agent 后端「{}」，该后端已被管理员关闭（{EXTERNAL_BACKENDS_ENV}），会话只读，不会启动运行时",
                 backend.as_str()
             ),
             Self::Misrouted {
@@ -524,9 +535,7 @@ pub fn backend_options(switch: &BackendSwitch) -> Vec<BackendOption> {
             let enabled = switch.is_enabled(backend);
             let wired = true;
             let reason = if !enabled {
-                Some(format!(
-                    "默认关闭；需由管理员设置环境变量 {EXTERNAL_BACKENDS_ENV} 后重启 Fox"
-                ))
+                Some(format!("已被管理员关闭（环境变量 {EXTERNAL_BACKENDS_ENV}）"))
             } else {
                 None
             };
@@ -594,19 +603,24 @@ mod tests {
         BackendSwitch::from_env_value(Some("all"))
     }
 
+    /// Settings batch, item 4: the variable is an administrator kill switch.
+    /// Unset forces nothing off (the user's setting decides, default Fox);
+    /// `0` / `off` / ... force every external backend off.
     #[test]
-    fn switch_defaults_off_and_parses_lists() {
-        for value in [None, Some(""), Some("  "), Some("0"), Some("off"), Some("FALSE"), Some("none")] {
+    fn switch_only_forces_off_when_set_and_parses_lists() {
+        for value in [Some("0"), Some("off"), Some("FALSE"), Some("none"), Some("no")] {
             let switch = BackendSwitch::from_env_value(value);
             assert!(switch.is_enabled(AgentBackend::Fox));
             for backend in EXTERNAL {
-                assert!(!switch.is_enabled(backend), "{value:?} must keep {backend:?} off");
+                assert!(!switch.is_enabled(backend), "{value:?} must force {backend:?} off");
             }
+            assert!(!switch.any_external());
         }
-        for value in ["1", "on", "ALL", "true"] {
-            let switch = BackendSwitch::from_env_value(Some(value));
-            assert!(EXTERNAL.iter().all(|backend| switch.is_enabled(*backend)));
+        for value in [None, Some(""), Some("  "), Some("1"), Some("on"), Some("ALL"), Some("true")] {
+            let switch = BackendSwitch::from_env_value(value);
+            assert!(EXTERNAL.iter().all(|backend| switch.is_enabled(*backend)), "{value:?} forces nothing off");
         }
+        assert_eq!(BackendSwitch::from_env_value(None), BackendSwitch::all_on());
         let switch = BackendSwitch::from_env_value(Some("pi, Codex fox"));
         assert!(switch.is_enabled(AgentBackend::Pi));
         assert!(switch.is_enabled(AgentBackend::Codex));
