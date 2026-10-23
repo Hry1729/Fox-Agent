@@ -307,7 +307,7 @@ describe('source assertions', () => {
 describe('unified login in the login card', () => {
   test('a provider that cannot drive the backend says why on the card; names only', () => {
     const unsupported = probe({ unifiedLogin: { backend: 'deepseek', outcome: 'unsupported', provider: 'DashScope', files: [], userFiles: [], reason: 'DeepSeek 后端（dsh）只支持 Anthropic Messages 协议' } })
-    expect(unifiedLoginNote(unsupported)).toBe('没能用“模型服务”的默认 provider「DashScope」自动登录：DeepSeek 后端（dsh）只支持 Anthropic Messages 协议')
+    expect(unifiedLoginNote(unsupported)).toBe('没能用“模型服务”的供应商「DashScope」自动登录：DeepSeek 后端（dsh）只支持 Anthropic Messages 协议')
     const card = credentialCardModel(unsupported, allowed)!
     expect(card.description).toContain('DashScope')
     noValue(card)
