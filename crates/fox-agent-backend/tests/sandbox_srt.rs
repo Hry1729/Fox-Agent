@@ -1426,8 +1426,8 @@ mod external_real {
                 session_key: format!("ext-{run}"),
                 full_access_granted: false,
                 unified_login: None,
+                native_permission: None,
             },
-            execution: fox_agent_backend::projection::ExecutionMode::Ask,
         }
     }
 
