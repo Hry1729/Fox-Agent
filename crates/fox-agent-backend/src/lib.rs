@@ -42,6 +42,9 @@
 //!   pipe, token handshake.
 //! * [`projection`]: ACP `session/update` / `request_permission` -> the Fox
 //!   runtime events and approval card the desktop already renders.
+//! * [`native_permission`]: per-agent native permission list (Codex modes,
+//!   dsh presets, pi gate modes), the mode a session really runs in and the
+//!   Host's fail-closed answer to a permission request.
 //! * [`capability_view`]: the four capability dimensions as UI text, from the
 //!   backend's measured declaration and the session's sandbox declaration.
 //! * `external` (feature `acp`): the Host's external backend runtime (one
@@ -61,6 +64,7 @@ pub mod launch;
 pub mod legacy;
 pub mod limits;
 pub mod loopback;
+pub mod native_permission;
 pub mod onboarding;
 pub mod port;
 pub mod proctree;
