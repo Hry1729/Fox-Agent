@@ -21,10 +21,13 @@ export interface KnowledgeGraphCanvasHandle {
   getZoom: () => number
 }
 
+export type KnowledgeGraphNodeShape = 'rect' | 'circle'
+
 interface KnowledgeGraphCanvasProps {
   nodes: KnowledgeGraphCanvasNode[]
   edges: KnowledgeGraphCanvasEdge[]
   selectedId: string | null
+  nodeShape?: KnowledgeGraphNodeShape
   onSelect: (id: string | null) => void
   onExpand: (node: KnowledgeGraphCanvasNode) => void
   onZoomChange?: (zoom: number) => void
@@ -37,11 +40,13 @@ type G6PointerEvent = { target?: { id?: string | number } }
 const MIN_ZOOM = 0.18
 const MAX_ZOOM = 2
 
-export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, KnowledgeGraphCanvasProps>(function KnowledgeGraphCanvas({ nodes, edges, selectedId, onSelect, onExpand, onZoomChange }, ref) {
+export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, KnowledgeGraphCanvasProps>(function KnowledgeGraphCanvas({ nodes, edges, selectedId, nodeShape = 'rect', onSelect, onExpand, onZoomChange }, ref) {
   const containerRef = useRef<HTMLDivElement>(null)
   const graphRef = useRef<G6Graph | null>(null)
   const nodesRef = useRef(nodes)
   const selectedRef = useRef(selectedId)
+  const nodeShapeRef = useRef(nodeShape)
+  const appliedNodeShapeRef = useRef(nodeShape)
   const onSelectRef = useRef(onSelect)
   const onExpandRef = useRef(onExpand)
   const onZoomChangeRef = useRef(onZoomChange)
@@ -49,6 +54,7 @@ export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, Knowl
 
   nodesRef.current = nodes
   selectedRef.current = selectedId
+  nodeShapeRef.current = nodeShape
   onSelectRef.current = onSelect
   onExpandRef.current = onExpand
   onZoomChangeRef.current = onZoomChange
@@ -56,18 +62,18 @@ export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, Knowl
   useImperativeHandle(ref, () => ({
     fitView: async () => {
       const graph = graphRef.current
-      if (!graph || nodesRef.current.length === 0) return
+      if (!graph?.rendered || nodesRef.current.length === 0) return
       await graph.fitView({ when: 'always', direction: 'both' }, { duration: 220 })
       onZoomChangeRef.current?.(graph.getZoom())
     },
     zoomBy: async (delta) => {
       const graph = graphRef.current
-      if (!graph) return
+      if (!graph?.rendered) return
       const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, graph.getZoom() + delta))
       await graph.zoomTo(zoom, { duration: 160 })
       onZoomChangeRef.current?.(graph.getZoom())
     },
-    getZoom: () => graphRef.current?.getZoom() ?? 1,
+    getZoom: () => graphRef.current?.rendered ? graphRef.current.getZoom() : 1,
   }), [])
 
   useEffect(() => {
@@ -98,62 +104,7 @@ export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, Knowl
           },
           collide: { radius: 108, strength: 1, iterations: 5 },
         },
-        node: {
-          // Native canvas shapes stay sharp at fractional zoom levels in WebView2.
-          type: 'rect',
-          style: {
-            size: (datum: G6Datum) => [graphNodeWidth(String(datum.data?.label ?? '')), 58],
-            radius: 8,
-            fill: colors.card,
-            stroke: colors.nodeBorder,
-            lineWidth: 1.25,
-            shadowColor: colors.shadow,
-            shadowBlur: 10,
-            shadowOffsetY: 3,
-            cursor: 'pointer',
-            icon: false,
-            port: false,
-            labelText: (datum: G6Datum) => String(datum.data?.label ?? ''),
-            labelPlacement: 'center',
-            labelOffsetY: -9,
-            labelFill: colors.text,
-            labelFontFamily: 'system-ui, sans-serif',
-            labelFontSize: 14,
-            labelLineHeight: 18,
-            labelFontWeight: 600,
-            labelMaxWidth: (datum: G6Datum) => graphNodeWidth(String(datum.data?.label ?? '')) - 28,
-            labelWordWrap: true,
-            labelMaxLines: 1,
-            labelTextOverflow: '...',
-            badges: (datum: G6Datum) => [{
-              text: String(datum.data?.type ?? 'Entity'),
-              placement: 'bottom',
-              offsetY: -10,
-              fill: colors.muted,
-              fontFamily: 'system-ui, sans-serif',
-              fontSize: 12,
-              lineHeight: 14,
-              fontWeight: 400,
-              maxLines: 1,
-              wordWrap: true,
-              wordWrapWidth: graphNodeWidth(String(datum.data?.label ?? '')) - 28,
-              textOverflow: '...',
-              background: false,
-            }],
-          },
-          state: {
-            selected: {
-              opacity: 1,
-              zIndex: 20,
-              stroke: colors.accent,
-              lineWidth: 1.75,
-              shadowColor: colors.accentShadow,
-              shadowBlur: 12,
-            },
-            neighbor: { opacity: 1, zIndex: 10, stroke: colors.neighbor },
-            inactive: { opacity: 0.16 },
-          },
-        },
+        node: graphNodeOptions(nodeShapeRef.current, colors),
         edge: {
           type: 'quadratic',
           style: {
@@ -176,6 +127,7 @@ export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, Knowl
       })
 
       graphRef.current = graph
+      appliedNodeShapeRef.current = nodeShapeRef.current
       graph.on('node:click', (event) => {
         const id = String((event as G6PointerEvent).target?.id ?? '')
         if (id) onSelectRef.current(id)
@@ -186,18 +138,23 @@ export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, Knowl
         if (node) onExpandRef.current(node)
       })
       graph.on('canvas:click', () => onSelectRef.current(null))
-      graph.on('aftertransform', () => onZoomChangeRef.current?.(graph.getZoom()))
+      graph.on('aftertransform', () => {
+        if (!disposed && graphRef.current === graph && graph.rendered) onZoomChangeRef.current?.(graph.getZoom())
+      })
 
       void graph.render().then(async () => {
         if (disposed || graphRef.current !== graph) return
         if (nodesRef.current.length > 0) await graph.fitView({ when: 'always', direction: 'both' }, false)
+        if (disposed || graphRef.current !== graph) return
         onZoomChangeRef.current?.(graph.getZoom())
         setReady(true)
       })
 
       resizeObserver = new ResizeObserver(() => {
-        if (disposed || graphRef.current !== graph || nodesRef.current.length === 0) return
-        void graph.fitView({ when: 'overflow', direction: 'both' }, { duration: 160 }).then(() => onZoomChangeRef.current?.(graph.getZoom()))
+        if (disposed || graphRef.current !== graph || !graph.rendered || nodesRef.current.length === 0) return
+        void graph.fitView({ when: 'overflow', direction: 'both' }, { duration: 160 }).then(() => {
+          if (!disposed && graphRef.current === graph) onZoomChangeRef.current?.(graph.getZoom())
+        })
       })
       resizeObserver.observe(container)
     })
@@ -220,6 +177,7 @@ export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, Knowl
     void graph.render().then(async () => {
       if (graphRef.current !== graph) return
       if (nodes.length > 0) await graph.fitView({ when: 'always', direction: 'both' }, { duration: 220 })
+      if (graphRef.current !== graph) return
       onZoomChangeRef.current?.(graph.getZoom())
       await applyGraphFocus(graph, nodes, edges, selectedRef.current)
     })
@@ -232,8 +190,78 @@ export const KnowledgeGraphCanvas = forwardRef<KnowledgeGraphCanvasHandle, Knowl
     void applyGraphFocus(graph, nodes, edges, selectedId)
   }, [edges, nodes, ready, selectedId])
 
+  useEffect(() => {
+    const graph = graphRef.current
+    if (!ready || !graph || appliedNodeShapeRef.current === nodeShape) return
+    graph.setNode(graphNodeOptions(nodeShape, graphColors()))
+    appliedNodeShapeRef.current = nodeShape
+    // Drawing preserves the user's dragged positions and current viewport.
+    void graph.draw().then(() => {
+      if (graphRef.current === graph) return applyGraphFocus(graph, nodes, edges, selectedRef.current)
+    })
+  }, [nodeShape, ready])
+
   return <div ref={containerRef} className="fox-g6-canvas" aria-label="知识图谱关系画布" />
 })
+
+function graphNodeOptions(shape: KnowledgeGraphNodeShape, colors: ReturnType<typeof graphColors>): import('@antv/g6').NodeOptions {
+  return {
+    // Native canvas shapes stay sharp at fractional zoom levels in WebView2.
+    type: shape,
+    style: {
+      size: (datum: G6Datum) => shape === 'circle' ? 108 : [graphNodeWidth(String(datum.data?.label ?? '')), 58],
+      radius: 8,
+      fill: colors.card,
+      stroke: colors.nodeBorder,
+      lineWidth: 1.25,
+      shadowColor: colors.shadow,
+      shadowBlur: 10,
+      shadowOffsetY: 3,
+      cursor: 'pointer',
+      icon: false,
+      port: false,
+      labelText: (datum: G6Datum) => String(datum.data?.label ?? ''),
+      labelPlacement: 'center',
+      labelOffsetY: -9,
+      labelFill: colors.text,
+      labelFontFamily: 'system-ui, sans-serif',
+      labelFontSize: 14,
+      labelLineHeight: 18,
+      labelFontWeight: 600,
+      labelMaxWidth: (datum: G6Datum) => shape === 'circle' ? 82 : graphNodeWidth(String(datum.data?.label ?? '')) - 28,
+      labelWordWrap: true,
+      labelMaxLines: shape === 'circle' ? 2 : 1,
+      labelTextOverflow: '...',
+      badges: (datum: G6Datum) => [{
+        text: String(datum.data?.type ?? 'Entity'),
+        placement: 'bottom',
+        offsetY: shape === 'circle' ? -20 : -10,
+        fill: colors.muted,
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: 12,
+        lineHeight: 14,
+        fontWeight: 400,
+        maxLines: 1,
+        wordWrap: true,
+        wordWrapWidth: shape === 'circle' ? 76 : graphNodeWidth(String(datum.data?.label ?? '')) - 28,
+        textOverflow: '...',
+        background: false,
+      }],
+    },
+    state: {
+      selected: {
+        opacity: 1,
+        zIndex: 20,
+        stroke: colors.accent,
+        lineWidth: 1.75,
+        shadowColor: colors.accentShadow,
+        shadowBlur: 12,
+      },
+      neighbor: { opacity: 1, zIndex: 10, stroke: colors.neighbor },
+      inactive: { opacity: 0.16 },
+    },
+  }
+}
 
 function graphData(nodes: KnowledgeGraphCanvasNode[], edges: KnowledgeGraphCanvasEdge[]) {
   const ids = new Set(nodes.map((node) => node.id))

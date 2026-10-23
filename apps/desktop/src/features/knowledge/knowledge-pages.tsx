@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, LogIn, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RefreshCw, RotateCcw, Search, Server, Sparkles, X } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -22,7 +22,7 @@ import { KnowledgeFileViewer } from './knowledge-file-viewer'
 import { formatKnowledgeDocumentInfo } from './knowledge-preview-model'
 import { knowledgeDocumentIcon } from './knowledge-resource-explorer'
 import { openKnowledgeCachedPreviewSource } from './knowledge-preview-source'
-import { KnowledgeGraphCanvas, type KnowledgeGraphCanvasHandle } from './knowledge-graph-canvas'
+import { KnowledgeGraphCanvas, type KnowledgeGraphCanvasHandle, type KnowledgeGraphNodeShape } from './knowledge-graph-canvas'
 import { YUXI_LOGIN_RETURN_KEY, YUXI_SERVICE_RETURN_KEY } from './knowledge-navigation'
 import { LibraryFileManager, LibraryViewSwitch } from '@/features/local-knowledge/library-file-manager'
 import { remoteLibraryFiles, type LibraryFile } from '@/features/local-knowledge/library-file-model'
@@ -226,6 +226,9 @@ export function KnowledgeGraphPage({ sidebarCollapsed, onSidebar, navigate, know
   const [depth, setDepth] = useState(2)
   const [maxNodes, setMaxNodes] = useState(100)
   const [zoom, setZoom] = useState(1)
+  const [nodeShape, setNodeShape] = useState<KnowledgeGraphNodeShape>('rect')
+  const [inspectorOpen, setInspectorOpen] = useState(true)
+  const inspectorId = useId()
   useEffect(() => { void resource.loadGraph(); void resource.loadGraphMetadata() }, [resource.loadGraph, resource.loadGraphMetadata])
   const rawGraph = useMemo(() => normalizeGraph(resource.graph), [resource.graph])
   const labels = useMemo(() => normalizeGraphLabels(resource.graphLabels, rawGraph.nodes), [rawGraph.nodes, resource.graphLabels])
@@ -251,17 +254,19 @@ export function KnowledgeGraphPage({ sidebarCollapsed, onSidebar, navigate, know
           <Select value={String(maxNodes)} onValueChange={(value) => setMaxNodes(Number(value))}><SelectTrigger aria-label="节点显示上限" title="本次查询最多显示的节点数"><SelectValue /></SelectTrigger><SelectContent>{[50, 100, 200].map((value) => <SelectItem key={value} value={String(value)}>节点 {value}</SelectItem>)}</SelectContent></Select>
           <Button size="sm" onClick={() => load()} disabled={resource.graphLoading}><Search />查询</Button>
           <Button variant="ghost" size="icon" aria-label={resource.graphLoading ? '正在刷新图谱' : '刷新图谱'} title="刷新图谱" disabled={resource.graphLoading} onClick={() => load()}><RotateCcw size={14} /></Button>
+          <Select value={nodeShape} onValueChange={(value) => setNodeShape(value as KnowledgeGraphNodeShape)}><SelectTrigger aria-label="节点形状"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="rect">矩形节点</SelectItem><SelectItem value="circle">圆形节点</SelectItem></SelectContent></Select>
+          <Button size="sm" variant="outline" aria-expanded={inspectorOpen} aria-controls={inspectorId} onClick={() => setInspectorOpen((open) => !open)}>{inspectorOpen ? '收起详情' : '显示详情'}</Button>
         </header>
-        <div className="fox-graph-workspace">
+        <div className={`fox-graph-workspace ${inspectorOpen ? '' : 'is-inspector-collapsed'}`}>
         <main className="fox-graph-canvas">
           <div className="fox-graph-canvas-head"><div className="fox-graph-canvas-heading"><span><Sparkles />关系画布</span><div className="fox-graph-toolbar-stats" aria-label="当前画布统计"><span><b>{graph.nodes.length}</b> 条目</span><span><b>{graph.edges.length}</b> 关系</span></div></div><small>{selected ? `已选择 ${selected.label}` : '单击查看详情，双击展开关联'}</small></div>
           <div className="fox-graph-tools"><Button size="icon" variant="secondary" title="缩小" onClick={() => void canvasRef.current?.zoomBy(-.12)}><Minus /></Button><span>{Math.round(zoom * 100)}%</span><Button size="icon" variant="secondary" title="放大" onClick={() => void canvasRef.current?.zoomBy(.12)}><Plus /></Button><Button size="icon" variant="secondary" title="显示全图" onClick={() => void canvasRef.current?.fitView()}><Maximize2 /></Button></div>
-          <KnowledgeGraphCanvas ref={canvasRef} nodes={graph.nodes} edges={graph.edges} selectedId={selectedId} onSelect={setSelectedId} onExpand={(node) => { setQuery(node.label); load(node.label) }} onZoomChange={setZoom} />
+          <KnowledgeGraphCanvas ref={canvasRef} nodes={graph.nodes} edges={graph.edges} selectedId={selectedId} nodeShape={nodeShape} onSelect={(id) => { setSelectedId(id); if (id) setInspectorOpen(true) }} onExpand={(node) => { setQuery(node.label); load(node.label) }} onZoomChange={setZoom} />
           {graph.nodes.length === 0 && (resource.graphLoading
             ? <SkeletonContent className="fox-graph-empty-state" label="正在加载关系图…" lines={4} />
             : <FoxEmptyState className="fox-graph-empty-state" variant={resource.error ? 'error' : query.trim() || selectedType !== '全部' ? 'search' : 'empty'} title={resource.error ? '关系图加载失败' : query.trim() || selectedType !== '全部' ? '没有匹配的关系图条目' : '资料库暂无可浏览图谱'} description={resource.error ?? '调整查询条件，或等待图谱服务完成构建。'} action={<Button variant="outline" size="sm" onClick={() => load()}>重新查询</Button>} />)}
         </main>
-        <aside className="fox-graph-inspector">
+        <aside id={inspectorId} className="fox-graph-inspector" hidden={!inspectorOpen} aria-label="节点详情">
           <div><span className="fox-document-icon">{selected?.type === 'Chunk' ? <FileText /> : <Bot />}</span><p><small>{selected ? selected.type : '关系图'}</small><b>{selected?.label ?? resource.detail?.database.name}</b></p></div>
           <p>{selected ? '查看条目属性、关联关系与来源文档。' : resource.detail?.database.description || '从画布选择一个条目，开始探索资料之间的联系。'}</p>
           {selected ? <><dl>{Object.entries(selected.properties).slice(0, 8).map(([key, value]) => <div key={key}><dt>{key}</dt><dd title={String(value)}>{formatGraphProperty(value)}</dd></div>)}</dl><section className="fox-graph-relations"><header><b>关联关系</b><span>{selectedRelations.length}</span></header>{selectedRelations.slice(0, 6).map((edge) => { const neighborId = edge.source === selected.id ? edge.target : edge.source; const neighbor = graph.nodes.find((node) => node.id === neighborId); return <button key={edge.id} onClick={() => setSelectedId(neighborId)}><Link2 /><span><b>{edge.label || '关联'}</b><small>{neighbor?.label ?? neighborId}</small></span><ChevronRight /></button> })}{selectedRelations.length === 0 && <small>当前子图中暂无关系</small>}</section><div className="fox-graph-inspector-actions"><Button size="sm" variant="outline" onClick={() => { setQuery(selected.label); load(selected.label) }}><Network />展开关联</Button>{sourceDocumentId && <Button size="sm" onClick={() => navigate('knowledge-detail', knowledgeId ?? undefined, { documentId: sourceDocumentId })}><FileText />查看来源</Button>}</div></> : <><div className="fox-graph-overview"><span><Network /><b>{stats.nodes}</b><small>全部节点</small></span><span><Link2 /><b>{stats.edges}</b><small>全部关系</small></span><span><ListTree /><b>{labels.length}</b><small>类别</small></span></div><section className="fox-graph-guide"><b>如何探索</b><p>搜索关键词加载相关子图，单击节点查看详情，双击节点继续展开上下游关系。</p></section></>}

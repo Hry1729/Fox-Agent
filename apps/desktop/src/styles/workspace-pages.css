@@ -2604,6 +2604,9 @@
   background: color-mix(in oklch, var(--fox-sidebar) 84%, var(--fox-card));
 }
 
+.fox-graph-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr); }
+.fox-graph-inspector[hidden] { display: none; }
+
 @media(max-width:1080px) {
   .fox-library-layout { grid-template-columns: 210px minmax(0, 1fr); }
   .fox-graph-workspace { grid-template-columns: minmax(0, 1fr) 240px; }
@@ -2613,8 +2616,9 @@
   .fox-library-layout { grid-template-columns: 190px minmax(0, 1fr); }
   .fox-file-browser { display: flex; }
   .fox-document-meta-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .fox-graph-workspace { grid-template-columns: 1fr; }
-  .fox-graph-inspector { display: none; }
+  .fox-graph-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(220px, 1fr) minmax(140px, 35%); }
+  .fox-graph-workspace.is-inspector-collapsed { grid-template-rows: minmax(0, 1fr); }
+  .fox-graph-inspector:not([hidden]) { display: block; border-left: 0; border-top: 1px solid var(--fox-border); }
   .fox-graph-toolbar > label { width: auto; flex: 1; }
 }
 
