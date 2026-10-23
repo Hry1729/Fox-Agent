@@ -28,17 +28,20 @@ describe('capability chips refresh on the backend handshake (item 7)', () => {
     expect(refreshesAgentBackendCapabilities(null, 'c-1')).toBe(false)
   })
 
-  test('workbench reloads capabilities on the session event, not on lastRun status', () => {
-    const source = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
-    const start = source.indexOf('const [agentBackendCapabilities, setAgentBackendCapabilities]')
-    const end = source.indexOf('const agentBackendBar = useMemo')
+  // Settings batch: the logic moved from the workbench into AgentBackendPanel.
+  test('the panel reloads capabilities on the session event, not on lastRun status', () => {
+    const source = readFileSync(new URL('../src/features/chat/components/AgentBackendPanel.tsx', import.meta.url), 'utf8')
+    const start = source.indexOf('// Refresh the chips as soon as the backend')
+    const end = source.indexOf('const permissionKey')
     expect(start).toBeGreaterThan(0)
     expect(end).toBeGreaterThan(start)
     const block = source.slice(start, end)
-    expect(block).toContain('desktopClient.listenRuntimeEvents(')
+    expect(block).toContain('client.listenRuntimeEvents(')
     expect(block).toContain('refreshesAgentBackendCapabilities(notification, capabilityConversationId)')
-    expect(block).toContain('agentBackendSessionTick])')
+    expect(block).toContain('sessionTick + eventTick')
     expect(block).not.toContain('lastRunStatus')
-    expect(source).not.toContain('lastRun?.status ?? null\n  const [agentBackendCapabilities')
+    const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
+    expect(workbench).toContain('<AgentBackendPanel')
+    expect(workbench).not.toContain('lastRun?.status ?? null\n  const [agentBackendCapabilities')
   })
 })
