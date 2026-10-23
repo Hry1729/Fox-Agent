@@ -20,7 +20,12 @@ fn desktop_embedding_smoke_worker_does_not_start_the_app_window() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(status) = child.try_wait().expect("worker status should be readable") {
-            assert_eq!(status.code(), Some(1));
+            // With `local-embedding` the worker reports the missing package (1);
+            // the CI Suite builds with --no-default-features, where the worker
+            // exits immediately with "local embedding is not enabled" (2).
+            // Either way it must exit instead of starting the app window.
+            let expected = if cfg!(feature = "local-embedding") { 1 } else { 2 };
+            assert_eq!(status.code(), Some(expected));
             return;
         }
         if Instant::now() >= deadline {
