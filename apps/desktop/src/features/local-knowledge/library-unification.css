@@ -94,7 +94,13 @@
 .fox-library-files.is-cards .fox-library-file-open > span { width: 100%; }
 .fox-library-files.is-cards .fox-library-file-type, .fox-library-files.is-cards .fox-library-file-time, .fox-library-files.is-cards .fox-library-checkbox-space { display: none; }
 .fox-library-files.is-cards .fox-library-file-size { margin-right: auto; }
-.fox-library-files.is-compact .fox-library-file { min-height: 43px; }
+.fox-library-files.is-compact .fox-library-file { min-height: 38px; padding-block: 4px; }
+.fox-library-files.is-compact .fox-library-file-open { gap: 8px; }
+.fox-library-files.is-compact .fox-library-file-open > svg,
+.fox-library-files.is-compact .fox-library-file-open > .fox-local-file-type-icon,
+.fox-library-files.is-compact .fox-library-file-open > .fox-local-files-file-icon { width: 18px; height: 20px; }
+.fox-library-files.is-list:not(.is-compact) .fox-library-file { min-height: 64px; }
+.fox-library-files.is-list:not(.is-compact) .fox-library-file-open b { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; line-height: 20px; overflow-wrap: anywhere; }
 .fox-library-files.is-compact .fox-library-file-type { display: none; }
 .fox-library-files.is-compact .fox-library-file { grid-template-columns: 15px minmax(130px, 1fr) 65px 90px 65px 28px; }
 .fox-library-drop-hint { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 18px; color: var(--muted-foreground); font-size: 11px; }
