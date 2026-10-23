@@ -65,6 +65,44 @@ pub struct AcpProjector {
     message_started: bool,
     message_completed: bool,
     tools: BTreeMap<String, ToolState>,
+    /// Backend status lines taken out of the answer ([`backend_notice_kind`]).
+    notices: Vec<Value>,
+}
+
+/// Kind of a backend status line that is not part of the answer, or `None`.
+///
+/// * `model_metadata_missing`: Codex's "Model metadata for `<model>` not
+///   found. Defaulting to fallback metadata; ..." (a model outside its
+///   built-in catalog, i.e. any non-OpenAI provider);
+/// * `network_reconnecting`: Codex's "Reconnecting... <n>/<max>" /
+///   "waiting for network" retry notice (the stream cannot reach the model
+///   host; inside srt that is usually the network allowlist).
+pub fn backend_notice_kind(line: &str) -> Option<&'static str> {
+    let line = line.trim();
+    if line.contains("Model metadata for") && line.contains("not found") {
+        Some("model_metadata_missing")
+    } else if line.contains("Reconnecting...") || line.contains("waiting for network") || line.contains("stream connection failed; waiting to retry") {
+        Some("network_reconnecting")
+    } else {
+        None
+    }
+}
+
+/// Split `text` into (answer text, backend notice lines). Only whole lines
+/// that are notices are taken out; everything else stays byte-for-byte.
+pub fn split_backend_notices(text: &str) -> (String, Vec<(&'static str, String)>) {
+    if backend_notice_kind(text).is_none() {
+        return (text.to_owned(), Vec::new());
+    }
+    let mut kept = String::new();
+    let mut notices = Vec::new();
+    for line in text.split_inclusive('\n') {
+        match backend_notice_kind(line) {
+            Some(kind) => notices.push((kind, line.trim().to_owned())),
+            None => kept.push_str(line),
+        }
+    }
+    (kept, notices)
 }
 
 /// What a finished turn means for the Run.
@@ -272,12 +310,16 @@ impl AcpProjector {
         match kind {
             "agent_message_chunk" => {
                 if let Some(text) = update.get("content").and_then(text_of_content) {
+                    let text = self.take_notices(&text, &mut out);
                     self.message_delta(&text, &mut out);
                 }
             }
             "agent_thought_chunk" => {
                 if let Some(text) = update.get("content").and_then(text_of_content).filter(|text| !text.is_empty()) {
-                    out.push(json!({ "type": "reasoning.delta", "delta": text, "source": "agent_backend" }));
+                    let text = self.take_notices(&text, &mut out);
+                    if !text.is_empty() {
+                        out.push(json!({ "type": "reasoning.delta", "delta": text, "source": "agent_backend" }));
+                    }
                 }
             }
             "tool_call" => self.tool(update, true, &mut out),
@@ -289,6 +331,26 @@ impl AcpProjector {
             other => out.push(json!({ "type": "agent_backend.update", "kind": other, "update": update })),
         }
         out
+    }
+
+    /// Move backend status lines out of `text` into diagnostics: an
+    /// `agent_backend.diagnostic` event each (never `message.delta`), kept
+    /// for the terminal's `diagnostics`. Returns the rest of the text.
+    fn take_notices(&mut self, text: &str, out: &mut Vec<Value>) -> String {
+        let (kept, notices) = split_backend_notices(text);
+        for (kind, line) in notices {
+            let notice = json!({ "kind": kind, "text": line });
+            out.push(json!({ "type": "agent_backend.diagnostic", "kind": kind, "text": line, "source": "agent_backend" }));
+            if !self.notices.contains(&notice) {
+                self.notices.push(notice);
+            }
+        }
+        kept
+    }
+
+    /// Backend status lines taken out of this turn's answer, in order.
+    pub fn notices(&self) -> &[Value] {
+        &self.notices
     }
 
     /// Events that close the turn before its terminal: the assistant message
@@ -491,6 +553,24 @@ mod tests {
 
     fn types(events: &[Value]) -> Vec<&str> {
         events.iter().map(|event| event["type"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn backend_warnings_go_to_diagnostics_not_the_answer() {
+        let mut projector = AcpProjector::new();
+        let warning = "Model metadata for `deepseek-chat` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.\n";
+        let events = projector.project(&chunk("agent_message_chunk", warning));
+        assert_eq!(types(&events), ["agent_backend.diagnostic"]);
+        assert_eq!(events[0]["kind"], "model_metadata_missing");
+        assert!(!projector.message_started(), "the warning never starts the answer");
+        let events = projector.project(&chunk("agent_message_chunk", "⚠ Reconnecting... 2/5\nHello"));
+        assert_eq!(types(&events), ["agent_backend.diagnostic", "message.started", "message.delta"]);
+        assert_eq!(events[2]["delta"], "Hello");
+        assert_eq!(projector.notices().len(), 2);
+        // Ordinary text that merely mentions a model is untouched.
+        let events = projector.project(&chunk("agent_message_chunk", "metadata for the model was found"));
+        assert_eq!(events[0]["delta"], "metadata for the model was found");
+        assert_eq!(backend_notice_kind("Reconnecting... waiting for network"), Some("network_reconnecting"));
     }
 
     #[test]
