@@ -690,3 +690,24 @@
     flex-basis: 120px;
   }
 }
+
+/* Settings batch: 外部 Agent (新会话使用的 Agent / 新外部会话使用完全访问). */
+.fox-agent-backend-settings select {
+  min-width: 10rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  color: inherit;
+}
+.fox-agent-backend-settings-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.fox-agent-backend-settings-note li { list-style: disc inside; }
+.fox-agent-backend-settings-error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--destructive);
+}
