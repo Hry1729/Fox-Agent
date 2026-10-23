@@ -145,6 +145,14 @@ const { ManagedFilesPanel } = await import(
 const { RuntimeApprovalPrompt } = await import(
   '../src/features/chat/components/RuntimeApprovalPrompt'
 )
+// The forced restore asks through the in-app confirmation; the stub answers it.
+const { setConfirmDialogPresenter } = await import('../src/components/ui/confirm-dialog')
+let confirmAnswer = true
+const confirmTitles: string[] = []
+setConfirmDialogPresenter(async (options) => {
+  confirmTitles.push(options.title)
+  return confirmAnswer
+})
 
 afterEach(() => {
   cleanup()
@@ -155,12 +163,13 @@ afterEach(() => {
     versionRow({ id: 'v2', versionNo: 2, createdAt: 2, currentHash: 'hash-2' }),
     versionRow({ id: 'v1', versionNo: 1, createdAt: 1 }),
   ]
-  ;(globalThis as any).window.confirm = () => true
+  confirmAnswer = true
+  confirmTitles.length = 0
 })
 
 /** Mount the real panel and expand its real header button. */
 async function mountPanel() {
-  ;(globalThis as any).window.confirm = () => true
+  confirmAnswer = true
   render(React.createElement(ManagedFilesPanel, { conversationId: 'conv-1' }))
   const header = await screen.findByRole('button', { name: /文件版本/ })
   fireEvent.click(header)
@@ -249,6 +258,24 @@ describe('ManagedFilesPanel restore button (real DOM clicks)', () => {
 
     expect(restoreCalls[0].requestId).not.toBe(restoreCalls[1].requestId)
     expect(restoreCalls.every((call) => call.force === false)).toBe(true)
+  })
+
+  test('a cancelled force confirmation sends no request', async () => {
+    restoreImpl = async () => {
+      throw new Error('a.txt changed outside the recorded task history')
+    }
+    await mountPanel()
+    fireEvent.click(restoreButton())
+    await waitFor(() => expect(restoreCalls).toHaveLength(1))
+    const forceButton = await screen.findByRole('button', { name: /强制恢复/ })
+
+    confirmAnswer = false
+    fireEvent.click(forceButton)
+    await waitFor(() => expect(confirmTitles).toEqual(['强制恢复文件']))
+    // Give the awaited confirmation a chance to settle.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(restoreCalls).toHaveLength(1)
+    expect(screen.getByRole('button', { name: /强制恢复/ }).hasAttribute('disabled')).toBe(false)
   })
 
   test('turning a normal restore into a forced one never reuses the identity', async () => {
