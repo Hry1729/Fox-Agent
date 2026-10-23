@@ -2,7 +2,8 @@
 //
 // * Lists ONLY what the shown Agent supports, in its own names (Codex:
 //  「请求审批 / 帮我批准 / 完全访问权限」; dsh / pi their own lists); a row the
-//   Host greys (Codex「帮我批准」off OpenAI, FORBIDDEN) shows its reason.
+//   Host greys (Codex「帮我批准」off OpenAI, FORBIDDEN, full access
+//   mid-session) shows its reason inline next to the picker.
 // * dsh: a mid-session change is marked「下一轮重启生效」.
 // * Picking full access in a new conversation goes through the existing risk
 //   confirmation; mid-session full access is never offered (only revoke,
@@ -107,7 +108,8 @@ export function AgentNativePermissionPicker({ client, conversationId, backend, t
         ))}
       </select>
       {badge && <span className="fox-agent-backend-notice" data-native-badge="next_turn">{badge}</span>}
-      {rows.filter((row) => row.disabled && row.reason && !row.fullAccess).map((row) => (
+      {/* Every greyed option says why, inline (the full-access lock mid-session too, 13.19 fix ③). */}
+      {rows.filter((row) => row.disabled && row.reason).map((row) => (
         <span key={row.value} className="fox-agent-backend-notice" role="note" data-disabled-option={row.value}>{row.label}：{row.reason}</span>
       ))}
       {shownPending?.change.kind === 'confirm_full_access' && (
