@@ -30,6 +30,7 @@ import {
 import { stablePromptHash, buildFilePlacement } from './prompt-composer.mjs'
 import { plannerHandoff, runPlanner, shouldUsePlanner } from './planner-runtime.mjs'
 import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from './expert-package.mjs'
+import { selectToolsForHostRuntime } from './host-runtime-capabilities.mjs'
 import { adaptFoxToolsToPi } from './tool-adapter.mjs'
 import { runOfflineEvals } from './offline-evaluator.mjs'
 import {
@@ -578,14 +579,22 @@ async function executePrompt(request) {
     [...toolDiagnostics.tools, ...continuationTools],
     activeExecutionProfile,
   )
-  const projectToolSelection = selectToolsForProjectContext(
+  const projectSelection = selectToolsForProjectContext(
     profileToolSelection.tools, request.payload?.projectContext,
   )
+  // No external execution backend: run_command is hidden from the model.
+  const hostRuntimeSelection = selectToolsForHostRuntime(
+    projectSelection.tools,
+    request.payload?.hostRuntimeCapabilities,
+    { capabilityManifestHash: request.payload?.controlBinding?.capabilityManifestHash },
+  )
+  const projectToolSelection = { tools: hostRuntimeSelection.tools }
   const effectiveToolNames = projectToolSelection.tools.map(({ name }) => name)
   const excludedTools = [
     ...toolDiagnostics.excludedTools.filter(({ name }) => name !== CONTINUATION_PROPOSAL_TOOL_NAME),
     ...profileToolSelection.excludedTools,
-    ...projectToolSelection.excludedTools,
+    ...projectSelection.excludedTools,
+    ...hostRuntimeSelection.excludedTools,
   ]
   const tools = budgetedTools(
     adaptFoxToolsToPi(projectToolSelection.tools, { runId: request.runId, storageFor: hostToolResultStorage }),
