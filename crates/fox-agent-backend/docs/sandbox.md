@@ -1109,3 +1109,53 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 3. **套用到所有项目：跳过与覆盖**：
    - 主项目已有 Codex `auth.json`。不勾「覆盖已有登录」，勾「套用到我所有项目」后导入：主项目的 `auth.json` 字节数不变，回执写「已有登录，未覆盖 N 个项目：主项目（auth.json）…」。DeepSeek `.env` 里已有的 key 也保留。
    - 勾「覆盖已有登录」再导入一次：主项目 `auth.json` 被替换，回执写出备份目录 `…\.fox-credential-backups\<时间戳>`，备份里的文件与原来的字节数相同。`agent_backend_audit_log` 的这条记录只有名字和相对的备份目录，没有值，也没有绝对路径。
+
+### 13.16 设置批：修 13.15 复测失败项 + 新会话 Agent / 完全访问挪到设置 + 统一登录 + 统一权限（2026-10-23）
+
+**修 13.15 复测的失败项**
+
+- 草稿凭据探测按「后端 + 项目」失效：新组件 `AgentBackendPanel`（`apps/desktop/src/features/chat/components/AgentBackendPanel.tsx`）接管原来 workbench 里的探测、能力 chip、权限状态、卡片和回执。每个异步结果都带着发请求时的 target key 存，只有 key 仍是当前的才显示；目标一变，旧结果在同一次渲染里就不再显示；迟到的旧响应按请求序号丢弃。卡片按 target key 重建（React `key`），不带上一个后端的本地 message 和候选列表。能力 chip 同样处理。
+- 回执只显示一份：根因已用测试复现（旧代码点「知道了」后，`AgentBackendCredentialCard` 自己的 `<p role=status>` 仍显示同一句回执，且没有计时）。现在卡片在导入成功时不再写 message，只有导入失败的错误留在卡片里（`role=alert`）；成功回执只在后端栏显示，点「知道了」或满 30 秒整条消失，而且回执也按 target key 绑定，换目标即清掉。
+- 回执里的备份位置改成相对路径：Host 不再把绝对路径发给界面（`ImportBackup.directory` 改为 `.fox-credential-backups/<时间戳>`，绝对路径只留在 Host 内部），界面在 Windows 上显示 `私有 HOME 下的 .fox-credential-backups\<时间戳>`，与审计写法一致（审计用 `/`）。
+
+**新会话使用的 Agent（设置 → 助手设置 →「外部 Agent」）**
+
+- 选项 Fox / Codex / pi / DeepSeek，默认 Fox，存在 `app_settings`（`agent_backend.default_backend`）。所有新建的普通会话都用它（发送时 Host 现读一次设置）；已有会话保持原来的后端。专家会话、按智能体新建的会话仍是 Fox（会话专家只能用于 Fox）。
+- 后端栏不再有后端选择框和权限选择框，只显示：新会话将用的后端（「新会话：pi」）、权限（「权限：沙箱/完全访问（来自设置）」）、能力 chip、缺登录卡片、回执；已有会话显示锁定的后端、状态、撤销完全访问。
+- 改了设置后会广播 `fox:agent-backend-preferences-changed`，当前草稿立刻按新目标重新探测。
+- **`FOX_EXTERNAL_BACKENDS` 的新语义：管理员强制关闭。** 优先级：环境变量（管理员，只能收紧）> 设置（用户）> 默认 Fox。
+  - 没设置或为空，或 `1` / `on` / `true` / `all` / `yes`：不强制关闭任何外部后端，用户可在设置里选；没选之前新会话仍用 Fox。**这与以前不同：以前不设置等于关闭。**
+  - `0` / `off` / `false` / `none` / `no`：全部强制关闭。设置里只能选 Fox，其他三项置灰并写明原因；新会话一律 Fox；已绑定外部后端的会话只读。
+  - 列表（如 `pi,codex`）：只允许列出的后端；只写了未知 id 的列表等于全部关闭。
+  - 不设置时，一次后端读取失败（数据库错误）不再回退到 Fox 路径，而是拒绝（`agent_backend_lookup_failed`），避免外部会话误跑在 Fox 运行时上。
+- **完全访问挪到设置**：「新外部会话使用完全访问」，默认关（`agent_backend.new_external_full_access`）。Host 在新建外部会话时读它，按现有逻辑写 grant 和 `agent_backend.full_access_granted` 审计（`source: "settings"`）。`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时开关置灰，Host 也忽略该设置（按沙箱建会话，不报错）。会话中途的「撤销完全访问」仍在后端栏。DeepSeek 回环 baseURL 在沙箱下仍拒绝，拒绝码 `agent_backend_loopback_requires_full_access` 不变，提示改为「在设置中打开“新外部会话使用完全访问”后新建会话」。
+
+**统一登录（`src/unified_login.rs`）**
+
+- 启动外部后端前（`HostLauncher::launch_now` 在回环检查和缺登录检查之前），用「模型服务」的默认 provider（baseUrl、apiType、key、默认模型）在项目私有 HOME 里生成配置：
+  - pi：`.pi/agent/models.json`（provider `fox`，`api` 用 Fox 的 apiType，`apiKey` 写字面量并转义 `!` / `$`）和 `.pi/agent/settings.json`（`defaultProvider: fox`、`defaultModel`）。格式按 pi 0.84.2 自带的 `docs/models.md`、`docs/settings.md`。
+  - DeepSeek：`.dsh/profiles/acp/cordis.patch.yml`（`llm-deepseek` 的 baseURL + `acp` 行 `provider: deepseek-official`、默认模型）和 `.dsh/.env`（`DEEPSEEK_API_KEY`）。dsh 只说 Anthropic Messages：`anthropic-messages` 的 provider 原样用（dsh 与 Fox 拼 `/v1/messages` 的规则一致）；`api.deepseek.com` 上的 OpenAI 兼容 provider 映射到官方 `https://api.deepseek.com/anthropic`；其他 OpenAI 兼容厂商不生成，卡片写明原因。
+  - Codex：`.codex/config.toml`：`model`、`model_provider = "fox"`、`[model_providers.fox]` 的 `base_url`、`wire_api = "responses"`、`env_key = "FOX_CODEX_API_KEY"`。key 不写文件，启动时注入环境变量；Linux/macOS 沙箱里经 srt 自己的环境传给后端，不出现在 `env K=V` 命令行上（`sandbox::SECRET_SESSION_ENV`）；Windows 沙箱经 bridge 握手；完全访问是进程环境。
+  - Codex 是否可用按 URL 判断：设置页打开时 Host 探测 `POST {base}/responses`（空 JSON body，不跑模型），404 / 405 = 不支持，2xx / 400 / 422 = 支持，其他（401、429、5xx、网络错误）= 不确定、不缓存。结果缓存在 `app_settings`（`agent_backend.codex_responses_probe`，按 baseUrl）。不支持时设置里 Codex 置灰并写明原因。
+- 与已有登录的关系：私有 HOME 里已有用户自己的登录（Codex `auth.json` / `config.toml`、`.dsh/.env` 里的 key、pi `auth.json` / 带 key 的 `models.json`，或能传到后端的 Host 环境变量）时什么都不生成。Fox 生成的文件记在私有 HOME 根的 `.fox-managed.json`（文件名 + 内容指纹）；只有指纹仍一致的文件才算 Fox 管理，模型服务改了会重写，模型服务清空会删除；用户改过的文件从此归用户，Fox 不再动。持有 key 的文件（pi `models.json`、dsh `.env`、Codex `config.toml`）若是用户的，就不生成，卡片写明原因。
+- 文件 0600、目录 0700；Windows 先准备私有根，写完再套一次 DACL（同导入）。key 不进日志、审计、回执，探测结果只带文件名（`CredentialProbe.unifiedLogin`）。模型服务没配或没有 key 时，缺登录卡片照旧兜底（卡片首句提示去「设置 → 模型服务」配置）。
+
+**统一权限（`projection::ExecutionMode` / `auto_permission`）**
+
+- Fox 的执行方式（会话的 `permissionMode`，与 Fox 运行时读的同一个值）作用在 ACP `session/request_permission` 上：
+  - 询问（ask）：照旧弹审批卡。
+  - 自动（allow）：Fox 自己写原生 `allow_once`，不弹卡；没有 `allow_once` 选项时仍弹卡（绝不选 `allow_always`）。
+  - 只读（read_only）：只有 tool kind 为 `read` / `search` / `think` 的请求自动允许一次；`edit` / `delete` / `move` / `execute`、`fetch`、`switch_mode`、`other`、未知或缺失的 kind 一律自动拒绝（`reject_once`，没有就 `cancelled`）。
+  - 自动答复都记一条运行事件 `agent_backend.permission_auto_answered` 和一条 `agent_backend_audit_log`（模式、决定、kind、标题，不含工具输入）。
+- 「自动」不等于完全访问，沙箱照常生效。DeepSeek 仍按 Host 补丁一律拒绝（不受模式影响）。
+
+**定向 / 全量测试**交给 CI（Linux 本地已跑，见报告）。
+
+**最小 Windows 人工复测**（本批 HEAD；只列必须由人在 Windows 上做的。定向测试、全量测试、`FOX_EXTERNAL_BACKENDS` 各取值、已有用户登录不被改动、DACL 等交给 CI 和自动测试）：
+
+1. **设置里切换 Agent**：设置 → 助手设置 →「外部 Agent」，依次选 Fox / Codex / pi / DeepSeek，每次新建一个会话，确认新会话用的是所选后端，已有会话不变。
+2. **完全访问开关**：打开「新外部会话使用完全访问」后新建外部会话，后端栏显示完全访问，「撤销完全访问」可用；关掉后新建的会话是沙箱。
+3. **统一登录下三个后端各一次真实对话**（「模型服务」默认 provider 配为 DeepSeek 官方 `https://api.deepseek.com` + key；用一个没有任何登录的新项目）：pi、DeepSeek、Codex 各发一句话并拿到回复（Codex 需在设置里可选，即 Responses 探测通过）。
+4. **三种执行方式**：在 pi 会话里让它写一个文件，项目执行方式分别设为「只读」（不弹卡、写入被拒）、「自动」（不弹卡、写入成功，仍在沙箱内）、「询问」（弹审批卡）。
+5. **回执关闭**：在缺登录卡片里导入成功，回执只在后端栏出现一份；点「知道了」后整条消失，不点则约 30 秒后消失。
+6. **草稿里改设置后重新探测**：开一个新会话草稿并选好项目，在设置里依次切 DeepSeek → pi → Fox → Codex，每次回到草稿：卡片和能力 chip 都是当前后端的，切换瞬间没有上一个后端的内容；切到 Fox 后后端栏消失。
