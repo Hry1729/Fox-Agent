@@ -7,6 +7,7 @@
 // the Host's view into picker rows and decides which confirmation a pick
 // needs; the Host refuses anything the UI should not have offered.
 import { FULL_ACCESS_LOCK_NOTE, FULL_ACCESS_RISK_POINTS, REVOKE_FULL_ACCESS_NOTICE } from './agent-backend-onboarding'
+import { AGENT_BACKEND_LABELS, type AgentBackendId } from './agent-backend'
 
 export type NativeSwitchTiming = 'live' | 'next_turn_restart' | 'host_answered'
 
@@ -23,6 +24,8 @@ export interface NativePermissionOption {
 
 export interface NativePermissionCatalog {
   backend: string
+  /** The Agent's display name (Host `native_permission::display_name`: Codex / DeepSeek / pi). */
+  displayName?: string
   options: NativePermissionOption[]
   defaultMode: string
   switchTiming: NativeSwitchTiming
@@ -123,11 +126,21 @@ export function nativePermissionChange(view: NativePermissionView | null | undef
   return { kind: 'apply' }
 }
 
+/**
+ * The Agent's name in UI text: the Host's `displayName`, else the backend
+ * bar's label for the id (older Hosts), else the id itself.
+ */
+export function nativeBackendName(view: NativePermissionView | null | undefined): string {
+  const catalog = view?.catalog
+  if (!catalog) return ''
+  return catalog.displayName?.trim() || AGENT_BACKEND_LABELS[catalog.backend as AgentBackendId] || catalog.backend
+}
+
 /** One line after a mid-session switch. */
 export function nativeAppliedNotice(view: NativePermissionView | null | undefined): string | null {
   switch (view?.applied) {
     case 'applied': return '已切换，当前会话立即生效'
-    case 'next_turn': return '已保存，下一轮开始时重启 dsh 生效'
+    case 'next_turn': return `已保存，下一轮开始时重启 ${nativeBackendName(view)} 生效`
     case 'failed': return `切换未生效，下一轮会重试${view.appliedError ? `：${view.appliedError}` : ''}`
     default: return null
   }
