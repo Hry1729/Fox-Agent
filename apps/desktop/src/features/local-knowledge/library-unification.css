@@ -85,15 +85,23 @@
 .fox-library-bulk > span { color: var(--muted-foreground); }
 .fox-library-bulk button { height: 28px; font-size: 11px; }
 .fox-library-spacer { flex: 1; }
-.fox-library-files.is-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 12px; padding: 17px; }
-.fox-library-files.is-cards .fox-library-file { position: relative; display: flex; flex-wrap: wrap; gap: 9px; padding: 17px; border: 1px solid var(--border); border-radius: 8px; min-height: 155px; }
+.fox-library-files.is-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 14px; padding: 17px; }
+.fox-library-files.is-cards .fox-library-file { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: start; gap: 12px; padding: 48px 16px 16px; border: 1px solid var(--border); border-radius: 12px; min-height: 190px; background: var(--card); }
+.fox-library-files.is-cards .fox-library-file:hover { background: var(--accent); }
+.fox-library-files.is-cards .fox-library-file.is-selected { background: var(--fox-accent-soft); border-color: var(--fox-accent); }
 .fox-library-files.is-cards .fox-library-file > input { position: absolute; top: 12px; left: 12px; }
-.fox-library-files.is-cards .fox-library-file > button:last-child { position: absolute; top: 5px; right: 5px; }
-.fox-library-files.is-cards .fox-library-file-open { width: 100%; display: flex; flex-direction: column; align-items: flex-start; margin-top: 10px; gap: 13px; }
-.fox-library-files.is-cards .fox-library-file-open > svg, .fox-library-files.is-cards .fox-library-file-open > .fox-local-file-type-icon { width: 32px; height: 36px; }
+.fox-library-files.is-cards .fox-library-file-open { grid-column: 1 / -1; width: 100%; display: flex; flex-direction: column; align-items: flex-start; min-height: 70px; margin: 0; gap: 10px; }
+.fox-library-files.is-cards .fox-library-file-open > svg,
+.fox-library-files.is-cards .fox-library-file-open > .fox-local-file-type-icon,
+.fox-library-files.is-cards .fox-library-file-open > .fox-local-files-file-icon { display: flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 32px; }
+.fox-library-files.is-cards .fox-local-files-file-icon > svg { width: 23px; height: 27px; }
 .fox-library-files.is-cards .fox-library-file-open > span { width: 100%; }
-.fox-library-files.is-cards .fox-library-file-type, .fox-library-files.is-cards .fox-library-file-time, .fox-library-files.is-cards .fox-library-checkbox-space { display: none; }
-.fox-library-files.is-cards .fox-library-file-size { margin-right: auto; }
+.fox-library-files.is-cards .fox-library-file-open b { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; font-size: 13px; line-height: 20px; font-weight: 500; }
+.fox-library-files.is-cards .fox-library-file-type, .fox-library-files.is-cards .fox-library-checkbox-space { display: none; }
+.fox-library-files.is-cards .fox-library-file-processing { grid-column: 1 / -1; grid-row: 2; }
+.fox-library-files.is-cards .fox-library-file-status { white-space: normal; }
+.fox-library-files.is-cards .fox-library-file-size { display: block; grid-column: 1; grid-row: 3; text-align: left; }
+.fox-library-files.is-cards .fox-library-file-time { display: block; grid-column: 2; grid-row: 3; }
 .fox-library-files.is-compact .fox-library-file { min-height: 38px; padding-block: 4px; }
 .fox-library-files.is-compact .fox-library-file-open { gap: 8px; }
 .fox-library-files.is-compact .fox-library-file-open > svg,
@@ -213,7 +221,7 @@
 .fox-library-row-actions svg { width: 15px; height: 15px; }
 .fox-library-file[tabindex] { cursor: pointer; }
 .fox-library-file:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-.fox-library-files.is-cards .fox-library-row-actions { margin-left: auto; }
+.fox-library-files.is-cards .fox-library-row-actions { position: absolute; top: 8px; right: 10px; margin: 0; }
 .fox-library-manager:has(.fox-library-files.is-cards) .fox-library-sortbar { display: flex; }
 .fox-library-manager:has(.fox-library-files.is-cards) .fox-library-sortbar .fox-library-col-type,
 .fox-library-manager:has(.fox-library-files.is-cards) .fox-library-sortbar .fox-library-col-status,
