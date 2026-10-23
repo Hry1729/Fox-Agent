@@ -28,7 +28,7 @@ use crate::reverse::WriteOutcome;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, TextContent,
+    SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
@@ -109,6 +109,12 @@ enum Command {
     Cancel {
         session_id: String,
     },
+    /// `session/set_mode` (Codex permission modes, mid-session).
+    SetMode {
+        session_id: String,
+        mode_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Pending permission requests plus the stopping flag, under ONE lock: the
@@ -122,6 +128,9 @@ struct PermissionRegistry {
 }
 
 type PendingPermissions = Arc<Mutex<PermissionRegistry>>;
+
+/// How long [`AcpConnection::set_mode`] waits for the agent's reply.
+pub const SET_MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Error text for work refused while the connection is stopping.
 pub const STOPPING_REFUSAL: &str = "backend connection is stopping (full access revoked); no new tasks are accepted";
@@ -1213,6 +1222,24 @@ impl AcpConnection {
                             Command::Cancel { session_id } => {
                                 let _ = connection.send_notification(CancelNotification::new(session_id));
                             }
+                            Command::SetMode { session_id, mode_id, reply } => {
+                                // Its own task: a mode switch during a turn
+                                // must not block cancel / permission answers.
+                                let connection = connection.clone();
+                                let session_error_data = session_error_data.clone();
+                                tokio::spawn(async move {
+                                    let switched = connection
+                                        .send_request(SetSessionModeRequest::new(session_id, mode_id))
+                                        .block_task()
+                                        .await
+                                        .map(|_| ())
+                                        .map_err(|error| {
+                                            *lock_data(&session_error_data) = rpc_error_data_text(&error);
+                                            rpc_error_summary(&error)
+                                        });
+                                    let _ = reply.send(switched);
+                                });
+                            }
                         }
                     }
                     Ok(())
@@ -1353,6 +1380,23 @@ impl AcpConnection {
             .send(Command::LoadSession { session_id: session_id.to_owned(), cwd, reply })
             .map_err(|_| "backend connection closed".to_string())?;
         response.await.map_err(|_| "backend connection closed".to_string())?
+    }
+
+    /// Switch the session's mode (`session/set_mode`); Codex permission
+    /// modes. `Err` carries the JSON-RPC error summary.
+    pub async fn set_mode(&self, session_id: &str, mode_id: &str) -> Result<(), String> {
+        if self.is_stopping() {
+            return Err(STOPPING_REFUSAL.to_owned());
+        }
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(Command::SetMode { session_id: session_id.to_owned(), mode_id: mode_id.to_owned(), reply })
+            .map_err(|_| "backend connection closed".to_string())?;
+        // A backend that never answers must not hang the turn.
+        match tokio::time::timeout(SET_MODE_TIMEOUT, response).await {
+            Ok(result) => result.map_err(|_| "backend connection closed".to_string())?,
+            Err(_) => Err(format!("session/set_mode not answered within {} s", SET_MODE_TIMEOUT.as_secs())),
+        }
     }
 
     /// `data` of the last failed `session/new` / `session/load` JSON-RPC
