@@ -90,13 +90,102 @@ export function agentBackendLockNotice(backend: AgentBackendId, access: AgentBac
   return null
 }
 
-/** Why the new-conversation picker is disabled; null when something besides Fox can be picked. */
+/** Why only Fox can be picked; null when an external backend can be picked. */
 export function agentBackendPickerDisabledReason(status: AgentBackendStatus | null | undefined): string | null {
   if (!status) return '正在读取可用的 Agent 后端…'
   if (!status.anyExternalEnabled) {
-    return `外部 Agent 后端（pi / Codex / DeepSeek）默认关闭，需由管理员设置环境变量 ${status.switchEnv} 后重启 Fox；新会话使用 Fox。`
+    return `外部 Agent 后端（pi / Codex / DeepSeek）已被管理员关闭（环境变量 ${status.switchEnv}）；新会话使用 Fox。`
   }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Settings batch, items 4 / 5: 设置 →「新会话使用的 Agent」and
+// 「新外部会话使用完全访问」(Host: `agent_backend_preferences_get/save`).
+// Precedence: FOX_EXTERNAL_BACKENDS (administrator, can only force off) >
+// this setting > Fox (default). Existing conversations keep their backend.
+
+export interface AgentBackendPreferenceOption {
+  backend: AgentBackendId
+  enabled: boolean
+  experimental: boolean
+  reason: string | null
+}
+
+export interface CodexResponsesProbe {
+  baseUrl: string
+  supported: boolean | null
+  status: number | null
+  checkedAt: number
+}
+
+export interface AgentBackendPreferences {
+  /** What the user saved. */
+  defaultBackend: AgentBackendId
+  /** What a new conversation uses now (Fox when the administrator forced the saved one off). */
+  effectiveBackend: AgentBackendId
+  newExternalFullAccess: boolean
+  effectiveFullAccess: boolean
+  fullAccessForbidden: boolean
+  forbiddenReason: string | null
+  switchEnv: string
+  forcedOff: boolean
+  options: AgentBackendPreferenceOption[]
+  unifiedLoginProvider: string | null
+  codexResponses: CodexResponsesProbe | null
+}
+
+/** Window event fired after the settings change (detail: the new preferences). */
+export const AGENT_BACKEND_PREFERENCES_EVENT = 'fox:agent-backend-preferences-changed'
+
+/** Before the Host answered: Fox, nothing else. */
+export const DEFAULT_AGENT_BACKEND_PREFERENCES: AgentBackendPreferences = {
+  defaultBackend: 'fox',
+  effectiveBackend: 'fox',
+  newExternalFullAccess: false,
+  effectiveFullAccess: false,
+  fullAccessForbidden: false,
+  forbiddenReason: null,
+  switchEnv: 'FOX_EXTERNAL_BACKENDS',
+  forcedOff: false,
+  options: [],
+  unifiedLoginProvider: null,
+  codexResponses: null,
+}
+
+/** The backend a NEW conversation uses (never an id the Host would refuse). */
+export function newConversationBackend(preferences: AgentBackendPreferences | null | undefined): AgentBackendId {
+  const value = preferences?.effectiveBackend
+  return isAgentBackendId(value) ? value : 'fox'
+}
+
+/** Rows of the「新会话使用的 Agent」select: unavailable choices greyed with their reason. */
+export function agentBackendSettingRows(preferences: AgentBackendPreferences | null | undefined): { value: AgentBackendId; label: string; disabled: boolean; reason: string | null }[] {
+  return AGENT_BACKEND_IDS.map((backend) => {
+    if (backend === 'fox') return { value: backend, label: AGENT_BACKEND_LABELS.fox, disabled: false, reason: null }
+    const option = preferences?.options.find((item) => item.backend === backend)
+    const disabled = !option?.enabled
+    return {
+      value: backend,
+      label: `${AGENT_BACKEND_LABELS[backend]}${option?.experimental ? '（实验）' : ''}`,
+      disabled,
+      reason: disabled ? (option?.reason ?? '正在读取…') : null,
+    }
+  })
+}
+
+/** Explanation under the select when the administrator forced every external backend off. */
+export function agentBackendForcedOffNotice(preferences: AgentBackendPreferences | null | undefined): string | null {
+  if (!preferences?.forcedOff) return null
+  return `管理员已通过环境变量 ${preferences.switchEnv} 关闭外部 Agent 后端，新会话一律使用 Fox。`
+}
+
+/** State of the「新外部会话使用完全访问」switch. */
+export function fullAccessSettingState(preferences: AgentBackendPreferences | null | undefined): { checked: boolean; disabled: boolean; reason: string | null } {
+  if (!preferences) return { checked: false, disabled: true, reason: '正在读取…' }
+  if (preferences.fullAccessForbidden) return { checked: false, disabled: true, reason: preferences.forbiddenReason || '本机已禁止完全访问' }
+  if (preferences.forcedOff) return { checked: preferences.newExternalFullAccess, disabled: true, reason: agentBackendForcedOffNotice(preferences) }
+  return { checked: preferences.newExternalFullAccess, disabled: false, reason: null }
 }
 
 /** Whether a picked value can be used for a new conversation. */
