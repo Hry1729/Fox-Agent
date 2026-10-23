@@ -390,6 +390,97 @@ pub fn reject_option(options: &[PermissionOption]) -> Option<&PermissionOption> 
         .or_else(|| options.iter().find(|option| option.kind == "reject_always"))
 }
 
+/// Fox's execution mode (the project / conversation `permissionMode`: 询问 /
+/// 自动 / 只读) applied to an external backend's `session/request_permission`
+/// (settings batch, item 7). It only decides how a native permission request
+/// is answered; the sandbox and the permission mode of the session
+/// (sandboxed / full access) are untouched: "自动" is not full access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutionMode {
+    /// `ask`: every request becomes an approval card (unchanged behaviour).
+    #[default]
+    Ask,
+    /// `allow`: Fox answers the native one-shot allow (`allow_once`) itself
+    /// and records it; no card. Never widened to `allow_always`.
+    Allow,
+    /// `read_only`: read-only kinds are allowed once; anything that may
+    /// modify (and anything Fox cannot classify) is rejected.
+    ReadOnly,
+}
+
+impl ExecutionMode {
+    /// Parse Fox's stored value (`ask` / `allow` / `read_only`). Anything
+    /// else is `Ask`: an unreadable mode never auto-allows.
+    pub fn parse(value: &str) -> Self {
+        match value.trim() {
+            "allow" => Self::Allow,
+            "read_only" => Self::ReadOnly,
+            _ => Self::Ask,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Allow => "allow",
+            Self::ReadOnly => "read_only",
+        }
+    }
+}
+
+/// ACP tool kinds `read_only` lets through. Deliberately short: `fetch`
+/// (network egress), `switch_mode`, `other`, a missing kind and every kind
+/// added to ACP later are treated as possibly modifying and rejected.
+pub const READ_ONLY_TOOL_KINDS: [&str; 3] = ["read", "search", "think"];
+
+/// How Fox answers one native permission request under an [`ExecutionMode`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoPermission {
+    /// Show the approval card.
+    Ask,
+    /// Answer this native option (an `allow_once`) without a card.
+    Allow { option_id: String },
+    /// Reject without a card: this native option (`reject_once`, else
+    /// `reject_always`), or `None` = answer `cancelled`.
+    Reject { option_id: Option<String> },
+}
+
+impl AutoPermission {
+    pub fn decision(&self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Allow { .. } => "allow_once",
+            Self::Reject { .. } => "reject",
+        }
+    }
+}
+
+/// The ACP tool kind of a permission request (`toolCall.kind`), if given.
+pub fn permission_tool_kind(request: &Value) -> Option<&str> {
+    request.get("toolCall").and_then(|call| call.get("kind")).and_then(Value::as_str).map(str::trim).filter(|kind| !kind.is_empty())
+}
+
+/// Decide a native permission request under `mode` (conservative: a request
+/// Fox cannot classify is treated as modifying).
+///
+/// * `Ask`: always the card.
+/// * `Allow`: the native `allow_once`; with no `allow_once` option the card
+///   is shown (Fox never picks `allow_always`).
+/// * `ReadOnly`: kinds in [`READ_ONLY_TOOL_KINDS`] are allowed once (the card
+///   when no `allow_once` exists); `edit` / `delete` / `move` / `execute`,
+///   any other kind and a missing kind are rejected.
+pub fn auto_permission(mode: ExecutionMode, request: &Value, options: &[PermissionOption]) -> AutoPermission {
+    let allow = || allow_option(options).map(|option| AutoPermission::Allow { option_id: option.option_id.clone() }).unwrap_or(AutoPermission::Ask);
+    match mode {
+        ExecutionMode::Ask => AutoPermission::Ask,
+        ExecutionMode::Allow => allow(),
+        ExecutionMode::ReadOnly => match permission_tool_kind(request) {
+            Some(kind) if READ_ONLY_TOOL_KINDS.contains(&kind) => allow(),
+            _ => AutoPermission::Reject { option_id: reject_option(options).map(|option| option.option_id.clone()) },
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +598,68 @@ mod tests {
         assert_eq!(reject_only.available_decisions, ["deny"]);
         assert_eq!(reject_option(&reject_only.options).unwrap().option_id, "r");
         assert!(reject_option(&[]).is_none());
+    }
+
+    fn perm_request(kind: Option<&str>, options: Value) -> (Value, Vec<PermissionOption>) {
+        let mut call = json!({ "toolCallId": "t1", "title": "x" });
+        if let Some(kind) = kind {
+            call["kind"] = json!(kind);
+        }
+        let request = json!({ "sessionId": "s", "toolCall": call, "options": options });
+        let options = permission_card(&request).options;
+        (request, options)
+    }
+
+    fn full_options() -> Value {
+        json!([
+            { "optionId": "always", "name": "Always", "kind": "allow_always" },
+            { "optionId": "once", "name": "Once", "kind": "allow_once" },
+            { "optionId": "no", "name": "No", "kind": "reject_once" }
+        ])
+    }
+
+    #[test]
+    fn execution_mode_parses_fox_values_and_defaults_to_ask() {
+        assert_eq!(ExecutionMode::parse("ask"), ExecutionMode::Ask);
+        assert_eq!(ExecutionMode::parse("allow"), ExecutionMode::Allow);
+        assert_eq!(ExecutionMode::parse("read_only"), ExecutionMode::ReadOnly);
+        for junk in ["", "full_access", "ALLOW", "readonly"] {
+            assert_eq!(ExecutionMode::parse(junk), ExecutionMode::Ask, "{junk:?} never auto-allows");
+        }
+        assert_eq!(ExecutionMode::ReadOnly.as_str(), "read_only");
+    }
+
+    #[test]
+    fn ask_mode_always_shows_the_card() {
+        for kind in [Some("read"), Some("execute"), None] {
+            let (request, options) = perm_request(kind, full_options());
+            assert_eq!(auto_permission(ExecutionMode::Ask, &request, &options), AutoPermission::Ask);
+        }
+    }
+
+    #[test]
+    fn allow_mode_answers_allow_once_and_never_allow_always() {
+        for kind in [Some("execute"), Some("edit"), Some("read"), None] {
+            let (request, options) = perm_request(kind, full_options());
+            assert_eq!(auto_permission(ExecutionMode::Allow, &request, &options), AutoPermission::Allow { option_id: "once".into() });
+        }
+        let (request, options) = perm_request(Some("execute"), json!([{ "optionId": "always", "name": "A", "kind": "allow_always" }, { "optionId": "no", "name": "N", "kind": "reject_once" }]));
+        assert_eq!(auto_permission(ExecutionMode::Allow, &request, &options), AutoPermission::Ask, "no allow_once: the card, not allow_always");
+    }
+
+    #[test]
+    fn read_only_mode_rejects_modifying_and_unknown_kinds_and_allows_reads() {
+        for kind in ["read", "search", "think"] {
+            let (request, options) = perm_request(Some(kind), full_options());
+            assert_eq!(auto_permission(ExecutionMode::ReadOnly, &request, &options), AutoPermission::Allow { option_id: "once".into() }, "{kind}");
+        }
+        for kind in [Some("edit"), Some("delete"), Some("move"), Some("execute"), Some("fetch"), Some("switch_mode"), Some("other"), Some("brand_new_kind"), Some("  "), None] {
+            let (request, options) = perm_request(kind, full_options());
+            assert_eq!(auto_permission(ExecutionMode::ReadOnly, &request, &options), AutoPermission::Reject { option_id: Some("no".into()) }, "{kind:?}");
+        }
+        let (request, options) = perm_request(Some("edit"), json!([{ "optionId": "once", "name": "O", "kind": "allow_once" }]));
+        assert_eq!(auto_permission(ExecutionMode::ReadOnly, &request, &options), AutoPermission::Reject { option_id: None }, "no reject option: cancelled");
+        let (request, options) = perm_request(Some("read"), json!([{ "optionId": "no", "name": "N", "kind": "reject_once" }]));
+        assert_eq!(auto_permission(ExecutionMode::ReadOnly, &request, &options), AutoPermission::Ask, "a read with no allow_once falls back to the card");
     }
 }
