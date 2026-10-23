@@ -1,9 +1,11 @@
-// Four-agent plan v0.3.1, Host wiring first batch (P6 minimal UI):
-// * a new conversation can pick its outer Agent backend; while the Host switch
-//   (FOX_EXTERNAL_BACKENDS) keeps external backends off, the picker is disabled
-//   and says why;
+// Four-agent plan v0.3.1, Host wiring (P6 minimal UI), settings batch:
+// * the backend of a NEW conversation is chosen in 设置 →「新会话使用的
+//   Agent」(and full access in「新外部会话使用完全访问」); the bar only shows
+//   it, with no control to change it here;
 // * an existing conversation shows its frozen backend as locked, and a
-//   read-only notice when the Host would refuse to start its runtime.
+//   read-only notice when the Host would refuse to start its runtime;
+// * status, capability chips, the missing-login card, the import receipt
+//   and the mid-session "撤销完全访问" stay on the bar.
 //
 // Display only: every rule is enforced by the Host (`host_routing`), so a
 // stale or tampered UI can never widen what runs.
@@ -11,23 +13,16 @@ import { Lock } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import {
   canRevokeFullAccess,
-  externalPermissionModeOptions,
   FULL_ACCESS_LOCK_NOTE,
-  FULL_ACCESS_PRIVATE_HOME_NOTE,
-  FULL_ACCESS_RISK_POINTS,
   permissionChipLabel,
   REVOKE_FULL_ACCESS_NOTICE,
   type AgentBackendPermissionStatus,
-  type ExternalPermissionMode,
 } from '@/features/conversations/model/agent-backend-onboarding'
 import {
-  AGENT_BACKEND_IDS,
   AGENT_BACKEND_LABELS,
   agentBackendAccess,
   agentBackendLockNotice,
-  agentBackendPickerDisabledReason,
   canPickAgentBackend,
-  isAgentBackendId,
   agentBackendCapabilityChips,
   type AgentBackendCapabilities,
   type AgentBackendId,
@@ -46,54 +41,6 @@ function CapabilityChips({ capabilities }: { capabilities: AgentBackendCapabilit
       ))}
       {capabilities?.warning && <span className="fox-agent-backend-notice" role="note">{capabilities.warning}</span>}
     </span>
-  )
-}
-
-/** UX batch ②: the permission mode of a NEW external conversation (sandbox by default; full access after an explicit risk confirmation; disabled and explained when forbidden). */
-function DraftPermissionPicker({ permission, mode, onChange }: {
-  permission: AgentBackendPermissionStatus | null
-  mode: ExternalPermissionMode
-  onChange: (mode: ExternalPermissionMode) => void
-}) {
-  const [confirming, setConfirming] = useState(false)
-  const options = externalPermissionModeOptions(permission)
-  const forbidden = options.find((option) => option.value === 'full_access')?.reason ?? null
-  return (
-    <>
-      <label className="fox-agent-backend-picker" title={forbidden ?? FULL_ACCESS_LOCK_NOTE}>
-        <span>权限</span>
-        <select
-          aria-label="新会话的权限模式"
-          value={forbidden ? 'sandboxed' : mode}
-          onChange={(event) => {
-            const next = event.target.value as ExternalPermissionMode
-            if (next === 'full_access') {
-              if (!forbidden) setConfirming(true)
-              return
-            }
-            setConfirming(false)
-            onChange('sandboxed')
-          }}
-        >
-          {options.map((option) => (
-            <option key={option.value} value={option.value} disabled={option.disabled} title={option.reason ?? undefined}>
-              {option.label}{option.disabled ? '（已禁止）' : ''}
-            </option>
-          ))}
-        </select>
-      </label>
-      {forbidden && <span className="fox-agent-backend-notice">{forbidden}</span>}
-      {confirming && (
-        <div className="fox-agent-backend-risk" role="alertdialog" aria-label="完全访问风险确认">
-          <strong>使用完全访问？</strong>
-          <ul>{FULL_ACCESS_RISK_POINTS.map((point) => <li key={point}>{point}</li>)}</ul>
-          <p>{FULL_ACCESS_PRIVATE_HOME_NOTE}</p>
-          <p>{FULL_ACCESS_LOCK_NOTE}</p>
-          <button type="button" onClick={() => { setConfirming(false); onChange('full_access') }}>我已了解，使用完全访问</button>
-          <button type="button" onClick={() => { setConfirming(false); onChange('sandboxed') }}>取消</button>
-        </div>
-      )}
-    </>
   )
 }
 
@@ -136,28 +83,31 @@ function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; o
   )
 }
 
-export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBackendChange, refusal = null, capabilities = null, permission = null, draftPermissionMode = 'sandboxed', onDraftPermissionModeChange, onRevokeFullAccess, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
+/** Where the backend of a new conversation is chosen. */
+export const NEW_CONVERSATION_BACKEND_HINT = '新会话使用的 Agent 在“设置 → 助手设置”中选择，创建后不可更换'
+
+export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, capabilities = null, permission = null, onRevokeFullAccess, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
+  /** Backend a new conversation will use (from the settings, after the administrator's switch). */
   draftBackend: AgentBackendId
-  onDraftBackendChange: (backend: AgentBackendId) => void
+  /** Whether a new external conversation gets full access (from the settings, after FORBIDDEN). */
+  draftFullAccess?: boolean
   /**
    * The Host's refusal of the last send in this view (`agent_backend_*`).
-   * Shown as the ONE notice of the bar, replacing the generic lock / picker
-   * notice, so a refused send never produces two messages.
+   * Shown as the ONE notice of the bar, replacing the generic lock notice,
+   * so a refused send never produces two messages.
    */
   refusal?: string | null
-  /** Effective capabilities of the shown external backend (locked or picked); null for Fox. */
+  /** Effective capabilities of the shown external backend; null for Fox. */
   capabilities?: AgentBackendCapabilities | null
-  /** UX batch ②: permission mode / lock / FORBIDDEN from the Host. */
+  /** Permission mode / lock / FORBIDDEN from the Host. */
   permission?: AgentBackendPermissionStatus | null
-  draftPermissionMode?: ExternalPermissionMode
-  onDraftPermissionModeChange?: (mode: ExternalPermissionMode) => void
   onRevokeFullAccess?: () => void
-  /** UX batch ①: login guidance card of the shown external backend (open conversation, or a new one before its first message). */
+  /** Login guidance card of the shown external backend (open conversation, or a new one before its first message). */
   credentialCard?: ReactNode
-  /** Last import receipt lines, shown independently of the card. */
+  /** Last successful import receipt, shown once, here. */
   importReceipt?: readonly string[] | null
   onDismissImportReceipt?: () => void
 }) {
@@ -187,46 +137,25 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, onDraftBa
     )
   }
 
-  const disabledReason = agentBackendPickerDisabledReason(status)
-  const value = canPickAgentBackend(draftBackend, status) ? draftBackend : 'fox'
-  const option = status?.options.find((item) => item.backend === value)
-  const pickedNotice = value !== 'fox' && option && !option.wired ? option.reason : null
-  // With the switch off the control stays visible but disabled, with the
-  // reason next to it (plan 6.5: unsupported settings are disabled and
-  // explained, never silently hidden or swapped).
+  // New conversation: the backend comes from the settings. Fox keeps
+  // today's composer (no row) unless a refusal has to be shown.
+  const value: AgentBackendId = canPickAgentBackend(draftBackend, status) ? draftBackend : 'fox'
+  if (value === 'fox') {
+    return refusalNotice ? <div className="fox-agent-backend-bar" data-access="draft">{refusalNotice}</div> : null
+  }
+  const fullAccess = draftFullAccess && !permission?.fullAccessForbidden
   return (
-    <div className="fox-agent-backend-bar" data-access="draft">
-      <label className="fox-agent-backend-picker" title={disabledReason ?? '新会话使用的 Agent 后端，创建后不可更换'}>
-        <span>Agent 后端</span>
-        <select
-          aria-label="新会话的 Agent 后端"
-          value={value}
-          disabled={Boolean(disabledReason)}
-          onChange={(event) => {
-            const next = event.target.value
-            if (isAgentBackendId(next) && canPickAgentBackend(next, status)) onDraftBackendChange(next)
-          }}
-        >
-          {AGENT_BACKEND_IDS.map((backend) => {
-            const entry = status?.options.find((item) => item.backend === backend)
-            const enabled = backend === 'fox' || Boolean(entry?.enabled)
-            return (
-              <option key={backend} value={backend} disabled={!enabled} title={entry?.reason ?? undefined}>
-                {AGENT_BACKEND_LABELS[backend]}{entry?.experimental ? '（实验）' : ''}{enabled ? '' : '（未启用）'}
-              </option>
-            )
-          })}
-        </select>
-      </label>
-      {refusalNotice ?? <>
-        {disabledReason && <span className="fox-agent-backend-notice">{disabledReason}</span>}
-        {pickedNotice && <span className="fox-agent-backend-notice">{pickedNotice}</span>}
-        {value !== 'fox' && onDraftPermissionModeChange && <DraftPermissionPicker permission={permission} mode={draftPermissionMode} onChange={onDraftPermissionModeChange} />}
-        {value !== 'fox' && <CapabilityChips capabilities={capabilities} />}
-      </>}
-      {/* Same rule as a locked conversation: the login card shows as soon as an
-          external backend is picked, before the first message (80b1622). */}
-      {value !== 'fox' && credentialCard}
+    <div className="fox-agent-backend-bar" data-access="draft" aria-label="新会话的 Agent 后端">
+      <span className="fox-agent-backend-chip" data-draft-backend={value} title={NEW_CONVERSATION_BACKEND_HINT}>
+        新会话：{AGENT_BACKEND_LABELS[value]}
+      </span>
+      <span className="fox-agent-backend-chip" data-permission={fullAccess ? 'full_access' : 'sandboxed'} title={FULL_ACCESS_LOCK_NOTE}>
+        权限：{fullAccess ? '完全访问' : '沙箱'}（来自设置）
+      </span>
+      {refusalNotice ?? <CapabilityChips capabilities={capabilities} />}
+      {/* Same rule as a locked conversation: the login card shows before the
+          first message (80b1622). */}
+      {credentialCard}
       {receiptNotice}
     </div>
   )
