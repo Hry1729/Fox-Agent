@@ -8,13 +8,14 @@
 //
 // An import never silently replaces a login: a file / key the target already
 // has is kept unless "覆盖已有登录" (off by default) is ticked, in which case
-// the Host backs it up first. The receipt is shown by the caller OUTSIDE this
-// card (a successful import makes the probe ready and the card disappears).
+// the Host backs it up first. A successful import's receipt is shown ONCE, by
+// the caller on the bar (settings batch, fix ②: the card used to echo it in
+// its own status line, which stayed after "知道了" and never timed out);
+// only an import ERROR is shown here.
 import { useState } from 'react'
 import {
   credentialCardModel,
   importConfirmationRows,
-  importReceipt,
   type AgentBackendPermissionStatus,
   type CredentialProbe,
   type ImportItem,
@@ -87,10 +88,10 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
                 覆盖已有登录（先备份到私有 HOME 下的带时间戳目录）
               </label>
               <p>默认跳过已经有这些文件或 key 的项目（包括本项目），不会覆盖。</p>
-              <button type="button" disabled={busy || selected.length === 0} onClick={() => run(async () => { setMessage(importReceipt(await onImport(selected, allProjects, overwrite))) })}>复制选中的项目</button>
+              <button type="button" disabled={busy || selected.length === 0} onClick={() => run(async () => { setMessage(null); await onImport(selected, allProjects, overwrite) })}>复制选中的项目</button>
             </fieldset>
           ))}
-      {message && <p role="status">{message}</p>}
+      {message && <p role="alert" className="fox-agent-backend-credential-error">{message}</p>}
     </section>
   )
 }
