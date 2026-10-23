@@ -4822,10 +4822,10 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) {
   --fox-composer-inset: 4px;
-  --fox-composer-radius: 12px;
+  --fox-composer-radius: 20px;
   padding: var(--fox-composer-inset);
   border: 0;
-  border-radius: calc(var(--fox-composer-radius) + var(--fox-composer-inset));
+  border-radius: var(--fox-composer-radius);
   background: var(--fox-accent-surface);
 }
 
