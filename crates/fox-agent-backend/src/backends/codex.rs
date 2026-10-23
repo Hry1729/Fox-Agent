@@ -149,12 +149,19 @@ pub fn mode_for_policy(policy: &HostPolicy) -> Result<CodexMode, PortError> {
 /// The shared launch path does not inject extra variables yet; see the
 /// change request in `docs/codex.md`.
 pub fn session_env(policy: &HostPolicy) -> Result<Vec<(String, String)>, PortError> {
-    let mode = mode_for_policy(policy)?;
-    Ok(vec![
+    Ok(session_env_for_mode(mode_for_policy(policy)?))
+}
+
+/// [`session_env`] for a mode the user picked in the per-agent permission
+/// list (`workspace-write` / `agent` / `agent-full-access`). The mode is
+/// re-applied with `session/set_mode` after the session is opened or loaded
+/// and whenever the user changes it mid-session.
+pub fn session_env_for_mode(mode: CodexMode) -> Vec<(String, String)> {
+    vec![
         ("INITIAL_AGENT_MODE".into(), mode.id().into()),
         ("NO_BROWSER".into(), "1".into()),
         ("CODEX_CONFIG".into(), json!({ "web_search": "disabled" }).to_string()),
-    ])
+    ]
 }
 
 /// `session/set_mode` params to (re)apply the Host's mode, e.g. when a
