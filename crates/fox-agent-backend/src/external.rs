@@ -48,7 +48,7 @@
 use crate::acp::{AcpConnection, BackendEvent, TerminateReport};
 use crate::capability_view::PiLaunch;
 use crate::port::{AgentBackend, CapabilityDeclaration, StopConfirmation, STOP_UNCONFIRMED_REMEDY};
-use crate::projection::{allow_option, auto_permission, permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, ExecutionMode, PermissionCard, PermissionOption, TurnTerminal};
+use crate::projection::{allow_option, permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, PermissionCard, PermissionOption, TurnTerminal};
 use crate::reverse::WriteOutcome;
 use crate::sandbox::{PermissionMode, SandboxDeclaration};
 use crate::settlement::{RunTerminal, TerminalArbiter};
@@ -100,6 +100,26 @@ pub struct LaunchRequest {
     /// provider; Fox-managed files are removed and the login card is the
     /// fallback. `Debug` never shows the key.
     pub unified_login: Option<crate::unified_login::UnifiedLogin>,
+    /// The conversation's choice in its Agent's own permission list
+    /// ([`crate::native_permission`]), as stored. `None` / unknown / greyed:
+    /// the Agent's default. The full-access option is used exactly when the
+    /// session runs without srt, whatever is stored.
+    pub native_permission: Option<String>,
+}
+
+impl LaunchRequest {
+    /// What the native permission list depends on for this launch.
+    pub fn native_context(&self) -> crate::native_permission::CatalogContext {
+        crate::native_permission::CatalogContext {
+            provider_base_url: self.unified_login.as_ref().map(|login| login.base_url.clone()),
+            full_access_forbidden: false,
+        }
+    }
+
+    /// The native mode a session of this request runs in under `mode`.
+    pub fn native_mode(&self, mode: PermissionMode) -> &'static str {
+        crate::native_permission::effective_mode(self.backend, self.native_permission.as_deref(), mode == PermissionMode::FullAccess, &self.native_context())
+    }
 }
 
 /// An initialized backend handed back by the launcher.
@@ -267,6 +287,57 @@ fn with_diagnostics(mut extra: Value, stderr: Option<Value>, rpc_error_data: Opt
     extra
 }
 
+/// Number of Codex network-retry lines in a stderr tail.
+fn network_stall_lines(tail: &str) -> usize {
+    tail.lines().filter(|line| crate::projection::backend_notice_kind(line) == Some("network_reconnecting")).count()
+}
+
+/// Host srt reported as blocked in its own log (`Connection blocked to
+/// host:port`, `HTTP request blocked to host:port`, `Connection to host
+/// blocked`), the last one in the tail.
+pub fn srt_blocked_host(tail: &str) -> Option<String> {
+    let mut found = None;
+    for line in tail.lines() {
+        let candidate = if let Some((_, rest)) = line.split_once("blocked to ") {
+            rest.split_whitespace().next().map(|target| target.trim_end_matches([',', '.', ';']).to_owned())
+        } else if let Some((_, rest)) = line.split_once("Connection to ") {
+            rest.split_once(" blocked").map(|(host, _)| host.trim().to_owned())
+        } else {
+            None
+        };
+        if let Some(target) = candidate.filter(|target| !target.is_empty()) {
+            let host = target.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit())).map_or(target.as_str(), |(host, _)| host);
+            found = Some(host.to_ascii_lowercase());
+        }
+    }
+    found
+}
+
+/// The `diagnostic` object of `agent_backend_network_blocked`.
+pub fn network_stall_diagnostic(tail: &str, model_host: Option<&str>, allowed: &[String], evidence: &str) -> Value {
+    let allowlist = if allowed.is_empty() { "（空：不放行任何主机）".to_owned() } else { allowed.join("、") };
+    let in_allowlist = |host: &str| allowed.iter().any(|entry| {
+        let entry = entry.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit())).map_or(entry.as_str(), |(host, _)| host);
+        entry.eq_ignore_ascii_case(host) || entry.strip_prefix("*.").is_some_and(|suffix| host.to_ascii_lowercase().ends_with(&format!(".{}", suffix.to_ascii_lowercase())))
+    });
+    let blocked = srt_blocked_host(tail);
+    let (host, text) = match (&blocked, model_host) {
+        (Some(host), _) => (Some(host.clone()), format!("沙箱网络拦截了主机 {host}（srt 日志）；Codex 一直在“Reconnecting… waiting for network”，已提前结束本轮。当前白名单：{allowlist}")),
+        (None, Some(host)) if !in_allowlist(host) => (Some(host.to_owned()), format!("沙箱网络拦截了模型主机 {host}：它不在本会话的白名单里（白名单：{allowlist}）；Codex 一直在“Reconnecting… waiting for network”，已提前结束本轮")),
+        (None, Some(host)) => (None, format!("模型主机 {host} 已在白名单内，但 Codex 仍在“Reconnecting… waiting for network”：被沙箱拦截的是白名单之外的其它主机（srt 未报告具体主机名）。白名单：{allowlist}；已提前结束本轮")),
+        (None, None) => (None, format!("沙箱网络拦截了 Codex 要连接的主机（未使用 Fox 统一登录，srt 未报告具体主机名）；Codex 一直在“Reconnecting… waiting for network”，已提前结束本轮。白名单：{allowlist}")),
+    };
+    json!({
+        "kind": "sandbox_network_blocked",
+        "source": "codex_reconnecting",
+        "blockedHost": host,
+        "modelHost": model_host,
+        "allowedDomains": allowed,
+        "evidence": evidence,
+        "text": text,
+    })
+}
+
 fn tail_chars(text: &str, max: usize) -> String {
     let count = text.chars().count();
     text.chars().skip(count.saturating_sub(max)).collect()
@@ -336,6 +407,30 @@ pub enum RevokeOutcome {
     RestartSandboxed { confirmed: bool },
 }
 
+/// Result of [`ExternalRuntime::apply_native_mode`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeModeOutcome {
+    /// No live process: the next launch starts in the new mode.
+    NotRunning,
+    /// The live session runs in the new mode now.
+    Applied,
+    /// Takes effect when the backend restarts at the next turn.
+    NextTurn,
+    /// The live switch was refused (the next turn retries it).
+    Failed(String),
+}
+
+impl NativeModeOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRunning => "not_running",
+            Self::Applied => "applied",
+            Self::NextTurn => "next_turn",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
 /// Result of [`ExternalRuntime::cancel`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelOutcome {
@@ -379,7 +474,12 @@ struct PendingApproval {
 
 struct Turn {
     run_id: String,
-    execution: ExecutionMode,
+    /// The Agent's own permission mode this turn runs in
+    /// ([`crate::native_permission`]); decides the Host's fail-closed answer.
+    native_mode: String,
+    /// "Reconnecting" lines in the stderr tail when the prompt was sent
+    /// (only new ones count as this turn's network stall).
+    stall_baseline: usize,
     projector: AcpProjector,
     arbiter: TerminalArbiter,
     approvals: HashMap<String, PendingApproval>,
@@ -398,10 +498,11 @@ struct Turn {
 }
 
 impl Turn {
-    fn new(run_id: &str, execution: ExecutionMode) -> Self {
+    fn new(run_id: &str, native_mode: &str) -> Self {
         Self {
             run_id: run_id.to_owned(),
-            execution,
+            native_mode: native_mode.to_owned(),
+            stall_baseline: 0,
             projector: AcpProjector::new(),
             arbiter: TerminalArbiter::default(),
             approvals: HashMap::new(),
@@ -423,6 +524,11 @@ struct SessionState {
     initialize_response: Option<Value>,
     capabilities: Option<CapabilityDeclaration>,
     mode: Option<PermissionMode>,
+    /// The native permission mode the live process was started in or last
+    /// switched to.
+    native_mode: Option<String>,
+    /// Host of the model base URL of Fox's unified login (diagnostics).
+    model_host: Option<String>,
     declaration: Option<SandboxDeclaration>,
     pi_launch: Option<PiLaunch>,
     turn: Option<Turn>,
@@ -467,9 +573,6 @@ pub struct TurnRequest {
     /// `agent_backend.session` event), used to reopen it after a restart.
     pub stored_native_session: Option<String>,
     pub launch: LaunchRequest,
-    /// Fox's execution mode for this turn (询问 / 自动 / 只读), applied to
-    /// the backend's `session/request_permission` ([`auto_permission`]).
-    pub execution: ExecutionMode,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -515,6 +618,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     pub fn start_turn(&self, request: TurnRequest) -> Result<(), StartError> {
         let backend = request.launch.backend;
         let session = self.session(&request.launch.conversation_id, backend);
+        let native_mode = request.launch.native_mode(self.inner.launcher.desired_mode(&request.launch));
         {
             let mut state = lock(&session.state);
             if state.closing {
@@ -523,7 +627,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             if state.turn.is_some() {
                 return Err(StartError::TurnBusy);
             }
-            state.turn = Some(Turn::new(&request.run_id, request.execution));
+            state.turn = Some(Turn::new(&request.run_id, native_mode));
         }
         let started = json!({ "type": "run.started", "agentBackend": backend.as_str() });
         if let Err(error) = self.inner.sink.emit(&request.run_id, &session.conversation_id, started) {
@@ -569,6 +673,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             _ => serde_json::Map::new(),
         };
         extra.insert("agentBackend".into(), json!(session.backend.as_str()));
+        if !turn.projector.notices().is_empty() {
+            // Backend warnings taken out of the answer (diagnostics area).
+            extra.insert("backendNotices".into(), Value::Array(turn.projector.notices().to_vec()));
+        }
         if turn.cancel_requested && terminal == TurnTerminal::Completed {
             // Plan 6.4 rule 3: the turn finished first; shown as completed
             // with the cancel request kept on record.
@@ -606,6 +714,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 return;
             }
             turn.prompt_sent = true;
+            let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
+            if let Some(turn) = state.turn.as_mut() {
+                turn.stall_baseline = network_stall_lines(&tail);
+            }
             (state.connection.clone(), state.native_session_id.clone())
         };
         let (Some(connection), Some(native)) = (connection, native) else {
@@ -640,9 +752,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "撤销完全访问时，原进程未确认全部结束，不会在沙箱中重建")
                 .remedy(STOP_UNCONFIRMED_REMEDY));
         }
-        let (live, running_mode) = {
+        let wanted_native = request.launch.native_mode(desired);
+        let (live, running_mode, running_native) = {
             let state = lock(&session.state);
-            (state.connection.is_some() && state.native_session_open, state.mode)
+            (state.connection.is_some() && state.native_session_open, state.mode, state.native_mode.clone())
         };
         if live {
             // Tightening applies before the next continue (plan 6.5): a
@@ -657,8 +770,39 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                             .detail(json!({ "reasons": report.confirmation.reasons() })));
                     }
                 }
-            } else {
+            } else if running_native.as_deref() == Some(wanted_native) {
                 return Ok(());
+            } else {
+                // The user picked another mode in the Agent's own list.
+                match session.backend {
+                    // Codex: switched in the live session (`session/set_mode`).
+                    AgentBackend::Codex => {
+                        self.switch_codex_mode(session, &request.run_id, wanted_native).await?;
+                        return Ok(());
+                    }
+                    // dsh reads its preset only at start (no set_mode):
+                    // restart it for this turn.
+                    AgentBackend::Deepseek => {
+                        let report = self.stop_connection(session, "dsh permission preset changed").await;
+                        if let Some(report) = report {
+                            if !report.confirmation.is_confirmed() {
+                                return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "切换 DeepSeek 权限时原进程未确认全部结束，不会以新权限重建")
+                                    .remedy(STOP_UNCONFIRMED_REMEDY)
+                                    .detail(json!({ "reasons": report.confirmation.reasons() })));
+                            }
+                        }
+                        self.emit(
+                            session,
+                            &request.run_id,
+                            json!({ "type": "agent_backend.permission_mode_restart", "agentBackend": session.backend.as_str(), "from": running_native, "to": wanted_native }),
+                        );
+                    }
+                    // pi / Fox: the Host answers; nothing to restart.
+                    _ => {
+                        lock(&session.state).native_mode = Some(wanted_native.to_owned());
+                        return Ok(());
+                    }
+                }
             }
         }
         let run_id = request.run_id.clone();
@@ -759,6 +903,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             state.initialize_response = Some(initialize_response.clone());
             state.capabilities = Some(capabilities);
             state.mode = Some(mode);
+            state.native_mode = Some(request.launch.native_mode(mode).to_owned());
+            state.model_host = request.launch.unified_login.as_ref().and_then(|login| crate::native_permission::host_of(&login.base_url));
             state.declaration = Some(declaration.clone());
             state.pi_launch = Some(pi_launch);
             state.on_closed = on_closed;
@@ -774,6 +920,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 "reopened": reopened,
                 "loadError": load_error,
                 "mode": mode.as_str(),
+                "permissionMode": request.launch.native_mode(mode),
                 "generation": generation,
                 "declaration": declaration,
                 "agentInfo": initialize_response.get("agentInfo").cloned().unwrap_or(Value::Null),
@@ -784,7 +931,83 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         self.inner.handle.spawn(async move {
             runtime.pump(pump_session, generation, events).await;
         });
+        // A reopened Codex session keeps the mode it was saved in; apply the
+        // one this turn runs in (a new session got it from
+        // INITIAL_AGENT_MODE).
+        if session.backend == AgentBackend::Codex && reopened == "load" {
+            lock(&session.state).native_mode = None;
+            self.switch_codex_mode(session, &run_id, request.launch.native_mode(mode)).await?;
+        }
         Ok(())
+    }
+
+    /// `session/set_mode` on the live Codex session. Fail-closed: when the
+    /// switch is refused the turn does not run in the old mode.
+    async fn switch_codex_mode(&self, session: &Arc<Session>, run_id: &str, wanted: &str) -> Result<(), LaunchFailure> {
+        let (connection, native, from) = {
+            let state = lock(&session.state);
+            (state.connection.clone(), state.native_session_id.clone(), state.native_mode.clone())
+        };
+        let (Some(connection), Some(native)) = (connection, native) else {
+            return Err(LaunchFailure::new("agent_backend_exited", "外部后端在切换权限之前退出"));
+        };
+        let mode = crate::native_permission::codex_mode(wanted);
+        match connection.set_mode(&native, mode.id()).await {
+            Ok(()) => {
+                lock(&session.state).native_mode = Some(wanted.to_owned());
+                let details = json!({ "from": from, "to": wanted, "method": "session/set_mode" });
+                let mut event = details.clone();
+                event["type"] = json!("agent_backend.permission_mode_switched");
+                event["agentBackend"] = json!(session.backend.as_str());
+                self.emit(session, run_id, event);
+                self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.permission_mode_switched", &details);
+                Ok(())
+            }
+            Err(error) => Err(LaunchFailure::new("agent_backend_set_mode_failed", format!("Codex 拒绝切换到权限「{wanted}」：{error}"))
+                .remedy("本轮未执行；可改回原来的权限后重试")
+                .with_rpc_error_data(connection.take_rpc_error_data().as_deref())),
+        }
+    }
+
+    /// The user changed the conversation's native permission mode. The
+    /// active turn answers later permission requests by the new mode at
+    /// once; a live Codex session is switched now (`session/set_mode`);
+    /// dsh restarts at the next turn; pi needs nothing else.
+    pub async fn apply_native_mode(&self, conversation_id: &str, wanted: &str) -> NativeModeOutcome {
+        let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
+            return NativeModeOutcome::NotRunning;
+        };
+        let (live, run_id, running) = {
+            let mut state = lock(&session.state);
+            let full = state.mode == Some(PermissionMode::FullAccess);
+            let wanted_full = crate::native_permission::is_full_access(session.backend, wanted);
+            if full != wanted_full {
+                // Full access on / off is a different process (grant /
+                // revoke path), never a mode switch.
+                return NativeModeOutcome::NextTurn;
+            }
+            if let Some(turn) = state.turn.as_mut() {
+                turn.native_mode = wanted.to_owned();
+            }
+            (state.connection.is_some() && state.native_session_open, state.turn.as_ref().map(|turn| turn.run_id.clone()), state.native_mode.clone())
+        };
+        if !live {
+            return NativeModeOutcome::NotRunning;
+        }
+        if running.as_deref() == Some(wanted) {
+            return NativeModeOutcome::Applied;
+        }
+        match session.backend {
+            AgentBackend::Codex => match self.switch_codex_mode(&session, run_id.as_deref().unwrap_or("-"), wanted).await {
+                Ok(()) => NativeModeOutcome::Applied,
+                Err(failure) => NativeModeOutcome::Failed(failure.message),
+            },
+            AgentBackend::Deepseek => NativeModeOutcome::NextTurn,
+            _ => {
+                lock(&session.state).native_mode = Some(wanted.to_owned());
+                NativeModeOutcome::Applied
+            }
+        }
     }
 
     async fn pump(&self, session: Arc<Session>, generation: u64, mut events: UnboundedReceiver<BackendEvent>) {
@@ -803,6 +1026,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     if !current {
                         break;
                     }
+                    self.check_stderr_network_stall(&session, generation);
                     if connection.and_then(|connection| connection.has_exited()) == Some(true) {
                         // Deliver what the process wrote before it died.
                         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -844,23 +1068,22 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     return;
                 };
                 let run_id = turn.run_id.clone();
-                for event in turn.projector.project(&update) {
+                let events = turn.projector.project(&update);
+                let stalled = events
+                    .iter()
+                    .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_backend.diagnostic"))
+                    .find(|event| event.get("kind").and_then(Value::as_str) == Some("network_reconnecting"))
+                    .and_then(|event| event.get("text").and_then(Value::as_str).map(str::to_owned));
+                for event in events {
                     self.emit(session, &run_id, event);
+                }
+                if let Some(evidence) = stalled {
+                    self.fail_network_stall(session, &mut state, &run_id, &evidence);
                 }
             }
             BackendEvent::PermissionRequested { native_request_id, option_ids, request, .. } => {
                 let Some(connection) = connection else { return };
-                if session.backend == AgentBackend::Deepseek {
-                    // Host patch: approval policy `never`; anything that still
-                    // asks is an escalation the Host never grants.
-                    let answer = crate::backends::deepseek::host_permission_answer(&option_ids);
-                    let _ = connection.answer_permission(&native_request_id, answer);
-                    if let Some(turn) = state.turn.as_ref() {
-                        let run_id = turn.run_id.clone();
-                        self.emit(session, &run_id, json!({ "type": "agent_backend.permission_auto_rejected", "request": request, "answer": answer }));
-                    }
-                    return;
-                }
+                let _ = &option_ids;
                 let Some(turn) = state.turn.as_mut().filter(|turn| !turn.cancel_requested) else {
                     // No turn to attach it to, or a cancel is under way.
                     let _ = connection.answer_permission(&native_request_id, None);
@@ -869,10 +1092,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let card = permission_card(&request);
                 let key = format!("acp-permission:{generation}:{native_request_id}");
                 let run_id = turn.run_id.clone();
-                // Fox's execution mode (settings batch, item 7): 自动 answers
-                // the one-shot allow itself, 只读 rejects anything that may
-                // modify; both are recorded. 询问 shows the card as before.
-                let decision = auto_permission(turn.execution, &request, &card.options);
+                // The Agent's own permission mode decides (per-agent list):
+                // a mode that asks shows the card; a mode in which nothing
+                // should ask rejects what still arrives (fail-closed); only
+                // pi's Fox gate answers 自动 / 只读 itself. Fox's own
+                // 询问 / 自动 / 只读 is never translated for Codex or dsh.
+                let decision = crate::native_permission::answer(session.backend, &turn.native_mode, &request, &card.options);
                 if decision != AutoPermission::Ask {
                     let option = match &decision {
                         AutoPermission::Allow { option_id } => Some(option_id.as_str()),
@@ -885,7 +1110,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         Err(_) => "not_pending",
                     };
                     let details = json!({
-                        "executionMode": turn.execution.as_str(),
+                        "permissionMode": turn.native_mode,
                         "decision": decision.decision(),
                         "toolKind": permission_tool_kind(&request),
                         "title": card.title,
@@ -964,6 +1189,59 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             }
             BackendEvent::Initialized { .. } | BackendEvent::Closed => {}
         }
+    }
+
+    /// Codex on stderr: a "Reconnecting... / waiting for network" line that
+    /// appeared after this turn's prompt ends the turn at once
+    /// ([`Self::fail_network_stall`]).
+    fn check_stderr_network_stall(&self, session: &Arc<Session>, generation: u64) {
+        if session.backend != AgentBackend::Codex {
+            return;
+        }
+        let mut state = lock(&session.state);
+        if state.generation != generation || state.mode != Some(PermissionMode::Sandboxed) {
+            return;
+        }
+        let Some((run_id, baseline)) = state.turn.as_ref().filter(|turn| turn.prompt_sent && !turn.cancel_requested).map(|turn| (turn.run_id.clone(), turn.stall_baseline)) else {
+            return;
+        };
+        let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
+        if network_stall_lines(&tail) > baseline {
+            let evidence = tail.lines().rev().find(|line| crate::projection::backend_notice_kind(line) == Some("network_reconnecting")).unwrap_or("Reconnecting...").trim().to_owned();
+            self.fail_network_stall(session, &mut state, &run_id, &evidence);
+        }
+    }
+
+    /// Codex keeps retrying "Reconnecting... waiting for network" for minutes
+    /// when srt's proxy refuses its model host. Inside the sandbox the first
+    /// such notice ends the turn (`agent_backend_network_blocked`) instead of
+    /// spinning: the turn is cancelled natively, and the diagnostic names the
+    /// host srt blocked (from srt's own log line when it printed one, else
+    /// the model host of Fox's unified login) and the session's allowlist.
+    fn fail_network_stall(&self, session: &Arc<Session>, state: &mut SessionState, run_id: &str, evidence: &str) {
+        if session.backend != AgentBackend::Codex || state.mode != Some(PermissionMode::Sandboxed) {
+            return;
+        }
+        if !state.turn.as_ref().is_some_and(|turn| turn.run_id == run_id && !turn.cancel_requested) {
+            return;
+        }
+        let allowed = state.declaration.as_ref().map(|declaration| declaration.allowed_domains.clone()).unwrap_or_default();
+        let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
+        let diagnostic = network_stall_diagnostic(&tail, state.model_host.as_deref(), &allowed, evidence);
+        if let (Some(connection), Some(native)) = (state.connection.clone(), state.native_session_id.clone()) {
+            let _ = connection.cancel(&native);
+        }
+        if let Some(turn) = state.turn.as_mut() {
+            turn.approvals.clear();
+        }
+        let message = diagnostic.get("text").and_then(Value::as_str).unwrap_or("沙箱网络拦截了 Codex 的模型请求").to_owned();
+        self.finish_turn(
+            session,
+            state,
+            run_id,
+            TurnTerminal::Failed { code: "agent_backend_network_blocked".into(), message },
+            with_diagnostics(json!({ "outcome": "unknown" }), Some(diagnostic), None),
+        );
     }
 
     /// The event stream of `generation` ended: the process exited or the
@@ -1275,4 +1553,29 @@ async fn close_shared(mut connection: Arc<AcpConnection>) -> TerminateReport {
         reasons: vec!["connection still in use by another task; process killed when it is released".into()],
     };
     report
+}
+
+#[cfg(test)]
+mod network_stall_tests {
+    use super::{network_stall_diagnostic, srt_blocked_host};
+
+    #[test]
+    fn the_diagnostic_names_the_blocked_host() {
+        let allowed = vec!["api.openai.com".to_owned(), "chatgpt.com".to_owned()];
+        // srt's own log names the host.
+        let tail = "[SandboxDebug] Connection blocked to api.deepseek.com:443\nReconnecting... 1/5";
+        assert_eq!(srt_blocked_host(tail).as_deref(), Some("api.deepseek.com"));
+        let diagnostic = network_stall_diagnostic(tail, None, &allowed, "Reconnecting... 1/5");
+        assert_eq!(diagnostic["blockedHost"], "api.deepseek.com");
+        assert!(diagnostic["text"].as_str().unwrap().contains("api.deepseek.com"));
+        // No srt line: the unified login's model host, not on the allowlist.
+        let diagnostic = network_stall_diagnostic("Reconnecting... 2/5", Some("api.deepseek.com"), &allowed, "x");
+        assert_eq!(diagnostic["blockedHost"], "api.deepseek.com");
+        assert!(diagnostic["text"].as_str().unwrap().contains("不在本会话的白名单"));
+        // Model host allowed: another host was blocked; no host is invented.
+        let diagnostic = network_stall_diagnostic("", Some("chatgpt.com"), &allowed, "x");
+        assert!(diagnostic["blockedHost"].is_null());
+        assert!(diagnostic["text"].as_str().unwrap().contains("已在白名单内"));
+        assert_eq!(srt_blocked_host("Connection to evil.example blocked: not allowed").as_deref(), Some("evil.example"));
+    }
 }
