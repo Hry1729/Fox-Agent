@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtocolProfile {
+    #[serde(default)]
+    pub preset_id: Option<String>,
     pub id: String,
     pub api_type: String,
     pub base_url: String,
@@ -30,14 +32,6 @@ pub fn credential_id(provider_id: &str, profile_id: &str) -> String {
     format!("fox-protocol:{provider_id}:{profile_id}")
 }
 
-pub fn select_protocol(backend: &str, profiles: &[(bool, &ProtocolProfile)]) -> Result<Option<usize>, String> {
-    let matches: Vec<_> = profiles.iter().enumerate().filter(|(_, (_, p))| p.backends.iter().any(|b| b == backend) && supports(&p.api_type, backend)).collect();
-    let preferred: Vec<_> = matches.iter().filter(|(_, (is_default, _))| *is_default).collect();
-    if preferred.len() == 1 { return Ok(Some(preferred[0].0)); }
-    if preferred.len() > 1 || matches.len() > 1 { return Err(format!("多个供应商为 {backend} 指定了协议，请设定默认供应商或取消多余指定")); }
-    Ok(matches.first().map(|(index, _)| *index))
-}
-
 pub fn validate(profiles: &[ProtocolProfile]) -> Result<(), String> {
     let mut ids = std::collections::HashSet::new();
     let mut backends = std::collections::HashSet::new();
@@ -45,8 +39,8 @@ pub fn validate(profiles: &[ProtocolProfile]) -> Result<(), String> {
         if profile.id.is_empty() || !profile.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') || !ids.insert(&profile.id) {
             return Err("协议配置 ID 无效或重复".into());
         }
-        if !supports(&profile.api_type, "pi") || profile.model_id.trim().is_empty() || profile.base_url.trim().is_empty() {
-            return Err("请选择支持的协议，并填写地址和模型 ID".into());
+        if !supports(&profile.api_type, "pi") || profile.base_url.trim().is_empty() {
+            return Err("请选择支持的协议，并填写地址".into());
         }
         for backend in &profile.backends {
             if backend == "fox" || !supports(&profile.api_type, backend) {
@@ -64,7 +58,7 @@ pub fn validate(profiles: &[ProtocolProfile]) -> Result<(), String> {
 mod tests {
     use super::*;
     fn profile(id: &str, api: &str, backends: &[&str]) -> ProtocolProfile {
-        ProtocolProfile { id: id.into(), api_type: api.into(), base_url: "https://example.com/v1".into(), model_id: "model".into(), separate_credential: false, backends: backends.iter().map(|v| (*v).into()).collect(), credential_configured: false }
+        ProtocolProfile { preset_id: None, id: id.into(), api_type: api.into(), base_url: "https://example.com/v1".into(), model_id: "model".into(), separate_credential: false, backends: backends.iter().map(|v| (*v).into()).collect(), credential_configured: false }
     }
     #[test]
     fn two_explicit_protocols_cover_external_agents() {
@@ -84,13 +78,4 @@ mod tests {
         assert_ne!(credential_id("one", "a"), credential_id("one", "b"));
     }
 
-    #[test]
-    fn default_provider_wins_and_ambiguous_fallback_is_rejected() {
-        let a = profile("a", "openai-responses", &["codex"]);
-        let b = profile("b", "openai-responses", &["codex"]);
-        assert_eq!(select_protocol("codex", &[(false, &a), (true, &b)]), Ok(Some(1)));
-        assert!(select_protocol("codex", &[(false, &a), (false, &b)]).is_err());
-        assert_eq!(select_protocol("codex", &[(false, &a)]), Ok(Some(0)));
-        assert_eq!(select_protocol("deepseek", &[(true, &a)]), Ok(None));
-    }
 }

@@ -1017,6 +1017,7 @@ export interface ProviderModelRecord {
 }
 
 export interface ProtocolProfile {
+  presetId?: string | null
   id: string
   apiType: 'openai-completions' | 'anthropic-messages' | 'openai-responses'
   baseUrl: string

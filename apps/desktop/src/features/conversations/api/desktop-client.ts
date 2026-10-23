@@ -1012,6 +1012,7 @@ export const desktopClient = {
   saveModelProvider: (request: { protocolProfiles?: import('../model/types').ProtocolProfile[]; protocolKeys?: Record<string, string>; id?: string; name: string; icon?: string | null; baseUrl: string; apiType: 'openai-completions' | 'anthropic-messages'; isDefault: boolean; models: Array<{ id?: string; modelId: string; displayName: string; contextWindow: number; maxOutputTokens: number; supportsImageInput: boolean; isDefault: boolean }>; apiKey?: string; clearApiKey?: boolean }) =>
     command<ModelProviderRecord>('model_provider_save', request),
   deleteModelProvider: (providerId: string) => command<boolean>('model_provider_delete', { providerId }),
+  agentBackendModelConnection: (request: import('@/features/chat/components/AgentModelConnectionCard').AgentModelConnectionRequest) => command<import('@/features/chat/components/AgentModelConnectionCard').AgentModelConnection>('agent_backend_model_connection', request),
   listenRuntimeEvents: (handler: (event: RuntimeEventNotification) => void): Promise<UnlistenFn> =>
     listen<RuntimeEventNotification>('fox://runtime-event', ({ payload }) => handler(payload)),
   listenKernelStateInvalidations: (handler: (event: KernelStateInvalidation) => void): Promise<UnlistenFn> =>

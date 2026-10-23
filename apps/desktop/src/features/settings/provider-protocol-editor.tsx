@@ -30,7 +30,7 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
     setTesting(profile.id)
     try {
       const key = profile.separateCredential ? form.protocolKeys?.[profile.id] : form.apiKey
-      const result = await desktopClient.testModelService(profile.baseUrl, key || undefined, profile.apiType, profile.modelId, form.id, profile.separateCredential ? profile.id : undefined)
+      const result = await desktopClient.testModelService(profile.baseUrl, key || undefined, profile.apiType, profile.modelId || form.models.find(m => m.isDefault)?.modelId || form.models[0]?.modelId || '', form.id, profile.separateCredential ? profile.id : undefined)
       setResults(previous => ({ ...previous, [profile.id]: { identity: captured, text: `连接验证通过 · ${result.latencyMs} ms。尚未验证 Agent 的流式输出和工具调用。` } }))
     } catch (error) {
       setResults(previous => ({ ...previous, [profile.id]: { identity: captured, text: `连接验证失败：${error instanceof Error ? error.message : String(error)}` } }))
@@ -41,7 +41,7 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
       <div><h3>外部 Agent 协议</h3><p>按需添加协议。默认复用供应商 Key，地址和模型分别配置。</p></div>
       <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onChange({ ...form, protocolProfiles: [...profiles, { id: crypto.randomUUID(), apiType: 'openai-responses', baseUrl: '', modelId: '', separateCredential: false, backends: [] }] })}>添加协议</Button>
     </div>
-    <p>Fox 使用上方连接。未指定协议时，pi 和 DeepSeek 可沿用兼容的 Fox 默认连接；Codex 需要 Responses 配置。优先使用默认供应商的指定配置，其他供应商只有唯一匹配时才自动采用。</p>
+    <p>Fox 使用上方连接。各 Agent 自动使用当前供应商中匹配的入口；同一协议有多个地址时，首次使用会提示选择。</p>
     {profiles.map((profile, index) => <fieldset key={profile.id} disabled={disabled || testing !== null} className="fox-protocol-fields">
       <legend>协议配置 {index + 1}</legend>
       <div className="fox-provider-form-grid">
@@ -49,7 +49,7 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
           const apiType = value as ProtocolProfile['apiType']
           update(profile.id, { apiType, backends: profile.backends.filter(b => protocolAgents[apiType].includes(b)) })
         }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(labels).map(([value, label]) => <SelectItem key={value} value={value}>{label} · {protocolAgents[value as ProtocolProfile['apiType']].map(b => names[b]).join(' / ')}</SelectItem>)}</SelectContent></Select></label>
-        <label>模型 ID<Input value={profile.modelId} onChange={event => update(profile.id, { modelId: event.target.value })} /></label>
+        <label>模型 ID<Input value={profile.modelId} placeholder="留空使用供应商默认模型" onChange={event => update(profile.id, { modelId: event.target.value })} /></label>
         <label className="is-wide">API 地址<Input value={profile.baseUrl} placeholder="填写供应商提供的此协议地址" onChange={event => update(profile.id, { baseUrl: event.target.value })} /></label>
       </div>
       <p>协议适用于：{protocolAgents[profile.apiType].map(b => names[b]).join('、')}。协议匹配不代表连接已验证。</p>
@@ -66,7 +66,7 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
         onChange({ ...form, protocolKeys })
       }} /></label>}
       <div className="fox-protocol-actions">
-        <Button type="button" variant="outline" size="sm" disabled={!profile.baseUrl.trim() || !profile.modelId.trim() || (profile.separateCredential && !profile.credentialConfigured && !form.protocolKeys?.[profile.id])} onClick={() => void test(profile)}>{testing === profile.id ? '正在验证…' : '验证此协议'}</Button>
+        <Button type="button" variant="outline" size="sm" disabled={!profile.baseUrl.trim() || !(profile.modelId.trim() || form.models.some(m => m.modelId.trim())) || (profile.separateCredential && !profile.credentialConfigured && !form.protocolKeys?.[profile.id])} onClick={() => void test(profile)}>{testing === profile.id ? '正在验证…' : '验证此协议'}</Button>
         <Button type="button" variant="ghost" size="sm" onClick={() => {
           const protocolKeys = { ...form.protocolKeys }; delete protocolKeys[profile.id]
           onChange({ ...form, protocolKeys, protocolProfiles: profiles.filter(p => p.id !== profile.id) })

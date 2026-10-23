@@ -5746,6 +5746,7 @@ pub fn model_providers_list(state: State<'_, AppState>) -> ApiResponse<Vec<Model
 #[tauri::command]
 pub fn model_provider_save(
     state: State<'_, AppState>,
+    external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: SaveModelProviderRequest,
 ) -> ApiResponse<ModelProviderRecord> {
     let name = request.name.trim();
@@ -5896,6 +5897,11 @@ pub fn model_provider_save(
             }
         }
     }
+    if request.clear_api_key || saved.is_default {
+        if let Err(error) = external.clear_managed_model_files() {
+            return ApiResponse::failure("model.cleanup_failed", format!("配置已保存，但生成的登录文件清理失败：{error}"), true);
+        }
+    }
     if saved.is_default {
         if let Some(model) = saved
             .models
@@ -5936,6 +5942,7 @@ pub fn model_provider_save(
 #[tauri::command]
 pub fn model_provider_delete(
     state: State<'_, AppState>,
+    external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: ModelProviderIdRequest,
 ) -> ApiResponse<bool> {
     let provider = state
@@ -5951,11 +5958,9 @@ pub fn model_provider_delete(
         return ApiResponse::success(false);
     };
     if provider.is_default {
-        return ApiResponse::failure(
-            "model.default_provider",
-            "请先将其他供应商设为默认，再删除当前供应商",
-            false,
-        );
+        if let Err(error) = external.clear_managed_model_files() {
+            return ApiResponse::failure("model.cleanup_failed", error, true);
+        }
     }
     for profile in &provider.protocol_profiles {
         if profile.separate_credential {
@@ -5965,7 +5970,12 @@ pub fn model_provider_delete(
         }
     }
     match state.database.delete_model_provider(&request.provider_id) {
-        Ok(deleted) => ApiResponse::success(deleted),
+        Ok(deleted) => {
+            if deleted && provider.is_default {
+                if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", error, true); }
+            }
+            ApiResponse::success(deleted)
+        }
         Err(error) => storage_error(error),
     }
 }
@@ -5973,6 +5983,7 @@ pub fn model_provider_delete(
 #[tauri::command]
 pub fn model_service_save(
     state: State<'_, AppState>,
+    external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: SaveModelServiceRequest,
 ) -> ApiResponse<ModelServiceRecord> {
     let name = request.name.trim();
@@ -6006,6 +6017,9 @@ pub fn model_service_save(
     if request.clear_api_key {
         if let Err(error) = clear_api_key(&base_url) {
             return ApiResponse::failure("model.credential_delete_failed", error, true);
+        }
+        if let Err(error) = external.clear_managed_model_files() {
+            return ApiResponse::failure("model.cleanup_failed", error, true);
         }
     } else if let Some(api_key) = request
         .api_key
@@ -6095,11 +6109,15 @@ pub async fn model_service_test(
             Err(error) => return Ok(storage_error(error)),
         },
     };
-    match state
-        .model_service_client
-        .test(&base_url, api_key.as_deref(), &api_type, &model_id)
-        .await
-    {
+    let result = if is_profile_test {
+        let started = std::time::Instant::now();
+        state.model_service_client.test_output(&base_url, api_key.as_deref(), &api_type, &model_id).await.map(|()| ModelConnectionTest {
+            ok: true, base_url: base_url.clone(), connection_type: "external".into(), status: "connected".into(), latency_ms: started.elapsed().as_millis() as i64, models: vec![model_id.clone()],
+        })
+    } else {
+        state.model_service_client.test(&base_url, api_key.as_deref(), &api_type, &model_id).await
+    };
+    match result {
         Ok(result) => {
             if !is_profile_test { let _ = state.database.record_model_connection_test(&result); }
             Ok(ApiResponse::success(result))

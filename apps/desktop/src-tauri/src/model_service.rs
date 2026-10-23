@@ -43,6 +43,27 @@ struct AnthropicProbeResponse {
 }
 
 impl ModelServiceClient {
+    pub async fn test_output(&self, base_url: &str, api_key: Option<&str>, api_type: &str, model: &str) -> Result<(), String> {
+        let base = normalize_model_base_url(base_url)?;
+        if model.trim().is_empty() { return Err("请先设置供应商的默认模型".into()); }
+        let (endpoint, body) = match api_type {
+            "openai-responses" => (format!("{base}/responses"), serde_json::json!({"model": model, "input": "Reply only OK", "max_output_tokens": 1024, "store": false})),
+            "anthropic-messages" => (anthropic_messages_url(&base)?.to_string(), serde_json::json!({"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": "Reply only OK"}]})),
+            "openai-completions" => (format!("{base}/chat/completions"), serde_json::json!({"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": "Reply only OK"}]})),
+            _ => return Err("不支持此 API 协议".into()),
+        };
+        let mut request = self.http.post(endpoint).timeout(Duration::from_secs(90)).json(&body);
+        if api_type == "anthropic-messages" {
+            request = request.header("anthropic-version", "2023-06-01");
+            if let Some(key) = api_key { request = request.header("x-api-key", key); }
+        } else if let Some(key) = api_key { request = request.bearer_auth(key); }
+        let response = request.send().await.map_err(|e| connection_error(&e))?;
+        if !response.status().is_success() { return Err(format!("模型服务返回 HTTP {}", response.status())); }
+        let value: serde_json::Value = response.json().await.map_err(|_| "模型服务没有返回有效 JSON")?;
+        if !completed_output(api_type, &value) { return Err("请求未返回完整的模型输出，入口尚未通过验证".into()); }
+        Ok(())
+    }
+
     pub fn new() -> Result<Self, String> {
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -113,9 +134,7 @@ impl ModelServiceClient {
         }
         let models = if api_type == "openai-responses" {
             let value: serde_json::Value = response.json().await.map_err(|_| "响应不是有效的 Responses JSON".to_owned())?;
-            if value.get("object").and_then(|v| v.as_str()) != Some("response")
-                || value.get("status").and_then(|v| v.as_str()) != Some("completed")
-                || !value.get("output").is_some_and(|v| v.is_array() && !v.as_array().unwrap().is_empty()) {
+            if !completed_output("openai-responses", &value) {
                 return Err("Responses 请求未返回完成的模型输出".into());
             }
             vec![requested_model_id.clone()]
@@ -167,6 +186,18 @@ impl ModelServiceClient {
             latency_ms,
             models,
         })
+    }
+}
+
+fn completed_output(api: &str, value: &serde_json::Value) -> bool {
+    let text = |v: &serde_json::Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+    match api {
+        "openai-responses" => value["object"] == "response" && value["status"] == "completed"
+            && value["output"].as_array().is_some_and(|items| items.iter().any(|item| item["type"] == "message" && item["content"].as_array().is_some_and(|parts| parts.iter().any(|part| part["type"] == "output_text" && text(&part["text"]))))),
+        "anthropic-messages" => value["type"] == "message" && value["stop_reason"] == "end_turn"
+            && value["content"].as_array().is_some_and(|parts| parts.iter().any(|part| part["type"] == "text" && text(&part["text"]))),
+        "openai-completions" => value["choices"].as_array().is_some_and(|choices| choices.iter().any(|choice| choice["finish_reason"] == "stop" && text(&choice["message"]["content"]))),
+        _ => false,
     }
 }
 
@@ -473,6 +504,8 @@ mod tests {
         for (status, body, success) in [
             ("200 OK", r#"{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}"#, true),
             ("200 OK", r#"{"object":"response","status":"failed","output":[]}"#, false),
+            ("200 OK", r#"{"object":"response","status":"completed","output":[{"type":"reasoning","summary":[] }]}"#, false),
+            ("200 OK", r#"{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":""}]}]}"#, false),
             ("200 OK", r#"{"data":[{"id":"test-model"}]}"#, false),
             ("422 Unprocessable Entity", r#"{"error":"unsupported"}"#, false),
             ("401 Unauthorized", r#"{"error":"auth"}"#, false),
@@ -505,30 +538,58 @@ mod tests {
             server.join().unwrap();
         }
     }
+
+    #[test]
+    fn protocol_output_requires_terminal_success_and_nonempty_text() {
+        let message = serde_json::json!({"type":"message", "stop_reason":"end_turn", "content":[{"type":"text", "text":"OK"}]});
+        assert!(completed_output("anthropic-messages", &message));
+        let mut truncated = message.clone(); truncated["stop_reason"] = serde_json::json!("max_tokens");
+        assert!(!completed_output("anthropic-messages", &truncated));
+        assert!(!completed_output("anthropic-messages", &serde_json::json!({"model":"some-model"})));
+        let chat = serde_json::json!({"choices":[{"finish_reason":"stop", "message":{"content":"OK"}}]});
+        assert!(completed_output("openai-completions", &chat));
+        let mut truncated = chat.clone(); truncated["choices"][0]["finish_reason"] = serde_json::json!("length");
+        assert!(!completed_output("openai-completions", &truncated));
+        assert!(!completed_output("openai-completions", &serde_json::json!({"data":[{"id":"some-model"}]})));
+    }
+
+    #[test]
+    fn first_use_validation_posts_to_each_protocol_and_rejects_partial_output() {
+        for (api, endpoint, body, success) in [
+            ("openai-completions", "/v1/chat/completions", r#"{"choices":[{"finish_reason":"stop","message":{"content":"OK"}}]}"#, true),
+            ("openai-completions", "/v1/chat/completions", r#"{"choices":[{"finish_reason":"length","message":{"content":"OK"}}]}"#, false),
+            ("anthropic-messages", "/v1/messages", r#"{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"OK"}]}"#, true),
+            ("anthropic-messages", "/v1/messages", r#"{"type":"message","stop_reason":"max_tokens","content":[{"type":"text","text":"OK"}]}"#, false),
+            ("openai-responses", "/v1/responses", r#"{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}"#, true),
+            ("openai-responses", "/v1/responses", r#"{"object":"response","status":"incomplete","output":[]}"#, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap(); assert!(n > 0); bytes.extend_from_slice(&chunk[..n]);
+                    let request = String::from_utf8_lossy(&bytes);
+                    if let Some((headers, content)) = request.split_once("\r\n\r\n") {
+                        let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_owned)).unwrap().trim().parse().unwrap();
+                        if content.len() >= length { break; }
+                    }
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                assert!(request.starts_with(&format!("POST {endpoint} HTTP/1.1")));
+                assert!(request.to_ascii_lowercase().contains(if api == "anthropic-messages" { "x-api-key: test-key" } else { "authorization: bearer test-key" }));
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let result = tauri::async_runtime::block_on(ModelServiceClient::new().unwrap().test_output(&format!("http://{address}/v1"), Some("test-key"), api, "model"));
+            assert_eq!(result.is_ok(), success, "{api}: {result:?}");
+            server.join().unwrap();
+        }
+    }
 }
 
-/// Resolve explicit protocol assignments before the legacy Fox default.
-/// Multiple non-default providers claiming the same agent are ambiguous.
 pub(crate) fn external_login(database: &crate::database::Database, backend: fox_agent_backend::port::AgentBackend) -> Option<fox_agent_backend::unified_login::UnifiedLogin> {
-    use fox_agent_backend::{provider_protocol, unified_login::{Secret, UnifiedLogin}};
-    let providers = database.list_model_providers().ok()?;
-    let candidates: Vec<_> = providers.iter().filter(|p| p.enabled).flat_map(|provider| {
-        provider.protocol_profiles.iter().filter(move |profile| profile.backends.iter().any(|b| b == backend.as_str()) && provider_protocol::supports(&profile.api_type, backend.as_str())).map(move |profile| (provider, profile))
-    }).collect();
-    let options: Vec<_> = candidates.iter().map(|(p, profile)| (p.is_default, *profile)).collect();
-    let selected = provider_protocol::select_protocol(backend.as_str(), &options).ok()?.map(|index| candidates[index]);
-    if let Some((provider, profile)) = selected {
-        let credential = if profile.separate_credential { provider_protocol::credential_id(&provider.id, &profile.id) } else { provider.base_url.clone() };
-        return Some(UnifiedLogin {
-            provider_name: provider.name.clone(), base_url: profile.base_url.clone(), api_type: profile.api_type.clone(), model: profile.model_id.clone(),
-            api_key: Secret::new(get_api_key(&credential)?), responses_supported: None,
-        });
-    }
-    if !candidates.is_empty() { return None; }
-    let service = database.get_model_service().ok().flatten()?;
-    if !service.enabled || service.model_id.trim().is_empty() || !provider_protocol::supports(&service.api_type, backend.as_str()) { return None; }
-    Some(UnifiedLogin {
-        provider_name: service.name, base_url: service.base_url.clone(), api_type: service.api_type, model: service.model_id,
-        api_key: Secret::new(get_api_key(&service.base_url)?), responses_supported: None,
-    })
+    crate::external_model::external_login(database, backend)
 }

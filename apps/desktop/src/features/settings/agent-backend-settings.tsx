@@ -74,7 +74,7 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
     <Card className="fox-settings-section fox-agent-backend-settings" aria-label="外部 Agent 设置">
       <div className="fox-settings-section-head"><div><h2>外部 Agent</h2><p>新会话由哪个 Agent 执行。只影响之后新建的会话，已有会话保持原来的后端。</p></div></div>
       <div className="fox-setting-row fox-setting-row-bordered">
-        <span><b>新会话使用的 Agent</b><small>默认 Fox。选择外部 Agent 后，登录会按“模型服务”中为该 Agent 选择的协议自动生成；你在项目私有 HOME 里自己的登录优先。</small></span>
+        <span><b>新会话使用的 Agent</b><small>默认 Fox。外部 Agent 自动使用当前供应商；缺少地址时会在后端栏提示补充。已有登录优先。</small></span>
         <select
           aria-label="新会话使用的 Agent"
           value={selected}

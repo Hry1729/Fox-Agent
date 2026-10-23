@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AgentBackendBar } from './AgentBackendBar'
 import { AgentBackendCredentialCard } from './AgentBackendCredentialCard'
+import { AgentModelConnectionCard, type AgentModelConnection, type AgentModelConnectionRequest } from './AgentModelConnectionCard'
 import {
   credentialProbeTarget,
   credentialProbeTargetKey,
@@ -33,6 +34,7 @@ import { refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type 
 
 /** The Host calls the panel needs (a subset of `desktopClient`). */
 export interface AgentBackendPanelClient {
+  agentBackendModelConnection?: (request: AgentModelConnectionRequest) => Promise<AgentModelConnection>
   agentBackendCapabilities: (backend: AgentBackendId, conversationId?: string | null) => Promise<AgentBackendCapabilities>
   agentBackendPermissionStatus: (conversationId?: string | null) => Promise<AgentBackendPermissionStatus>
   agentBackendCredentials: (target: AgentBackendTarget) => Promise<CredentialProbe>
@@ -147,7 +149,11 @@ export function AgentBackendPanel({
     draftFullAccess,
   })
   const targetKey = credentialProbeTargetKey(target)
-  const probe = useKeyedResource(targetKey, sessionTick + onboardingTick, useCallback((key: string) => client.agentBackendCredentials(JSON.parse(key) as AgentBackendTarget), [client]))
+  const modelTick = sessionTick + onboardingTick
+  const [connectionOverride, setConnectionOverride] = useState<(Keyed<AgentModelConnection> & { tick: number }) | null>(null)
+  const loadedConnection = useKeyedResource(client.agentBackendModelConnection ? targetKey : '', modelTick, useCallback((key: string) => client.agentBackendModelConnection!({ target: JSON.parse(key) as AgentBackendTarget }).catch((error): AgentModelConnection => ({ status: 'verification_failed', providerId: null, providerName: null, apiType: '', candidates: [], message: error instanceof Error ? error.message : String(error) })), [client]))
+  const modelConnection = connectionOverride?.key === targetKey && connectionOverride.tick === modelTick ? connectionOverride.value : loadedConnection
+  const probe = useKeyedResource(targetKey, sessionTick + onboardingTick + (modelConnection?.status === 'ready' ? 1 : 0), useCallback((key: string) => client.agentBackendCredentials(JSON.parse(key) as AgentBackendTarget), [client]))
 
   const [receipt, setReceipt] = useState<Keyed<string[]> | null>(null)
   useEffect(() => {
@@ -170,7 +176,7 @@ export function AgentBackendPanel({
   const card = useMemo(() => {
     if (!targetKey || !probe) return null
     const current: AgentBackendTarget = JSON.parse(targetKey)
-    return (
+    const credentialCard = (
       <AgentBackendCredentialCard
         key={targetKey}
         probe={probe}
@@ -185,7 +191,15 @@ export function AgentBackendPanel({
         }}
       />
     )
-  }, [client, targetKey, probe, permission])
+    if (targetKey && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login') {
+      return <><AgentModelConnectionCard key={`${targetKey}:${modelConnection.providerId}`} backend={shownBackend} connection={modelConnection} onSave={async choice => {
+        const value = await client.agentBackendModelConnection!({ target: JSON.parse(targetKey), providerId: modelConnection.providerId ?? undefined, ...choice })
+        setConnectionOverride({ key: targetKey, tick: modelTick, value })
+        if (value.status === 'ready' || value.status === 'existing_login') window.dispatchEvent(new Event('fox:model-service-changed'))
+      }} /><details><summary>使用已有 Agent 登录</summary>{credentialCard}</details></>
+    }
+    return credentialCard
+  }, [client, targetKey, probe, permission, modelConnection, shownBackend, modelTick])
 
   return (
     <AgentBackendBar

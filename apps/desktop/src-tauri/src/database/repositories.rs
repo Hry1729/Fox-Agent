@@ -6420,7 +6420,11 @@ impl Database {
 
     pub fn delete_model_provider(&self, provider_id: &str) -> Result<bool, String> {
         self.with_connection(|connection| {
-            Ok(connection.execute("DELETE FROM model_providers WHERE id = ?1", [provider_id])? > 0)
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute("DELETE FROM model_service WHERE EXISTS (SELECT 1 FROM model_providers WHERE id = ?1 AND is_default = 1)", [provider_id])?;
+            let deleted = transaction.execute("DELETE FROM model_providers WHERE id = ?1", [provider_id])? > 0;
+            transaction.commit()?;
+            Ok(deleted)
         })
     }
 
@@ -9335,7 +9339,7 @@ mod tests {
             enabled: true, is_default: true, credential_configured: false, connection_type: "remote".into(),
             last_status: "unknown".into(), last_latency_ms: None, last_checked_at: None, created_at: 0, updated_at: 0,
             models: vec![ProviderModelRecord { id: "model-test".into(), model_id: "native-model".into(), display_name: "Native".into(), context_window: 128000, max_output_tokens: 8192, supports_image_input: false, is_default: true }],
-            protocol_profiles: vec![ProtocolProfile { id: "responses".into(), api_type: "openai-responses".into(), base_url: "https://example.com/responses-api/v1".into(), model_id: "codex-model".into(), separate_credential: true, backends: vec!["codex".into()], credential_configured: false }],
+            protocol_profiles: vec![ProtocolProfile { preset_id: None, id: "responses".into(), api_type: "openai-responses".into(), base_url: "https://example.com/responses-api/v1".into(), model_id: "codex-model".into(), separate_credential: true, backends: vec!["codex".into()], credential_configured: false }],
         };
         let saved = database.save_model_provider(&provider).unwrap();
         assert_eq!(saved.protocol_profiles, provider.protocol_profiles);

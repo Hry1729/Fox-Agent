@@ -1161,7 +1161,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 6. **草稿里改设置后重新探测**：开一个新会话草稿并选好项目，在设置里依次切 DeepSeek → pi → Fox → Codex，每次回到草稿：卡片和能力 chip 都是当前后端的，切换瞬间没有上一个后端的内容；切到 Fox 后后端栏消失。
 
 
-### 13.17 同一供应商的多协议配置（2026-10-23）
+### 13.17 同一供应商的多协议配置（2026-10-23，选择流程由 13.18 取代）
 
 本节替代 13.16 中“所有外部后端读取同一个 apiType”以及按空请求 HTTP 状态判断 Codex 可用的规则。13.16 的权限、回执、项目私有 HOME 规则继续有效。
 
@@ -1186,3 +1186,17 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 7. 在新版本上重做 13.16 的执行方式、完全访问撤销、回执唯一性与自动消失测试。
 
 自动化入口：`provider_protocol`、`unified_login`（fox-agent-backend）；`provider_protocol_profiles_survive_save_and_v96_upgrade`、`responses_probe_requires_completed_output_and_rejects_http_errors`（fox-desktop）；`node apps/desktop/scripts/provider-protocol-browser-check.mjs`（独立浏览器，使用模拟连接响应）。
+
+
+### 13.18 供应商优先的模型连接（2026-10-23）
+
+- 常规界面只显示供应商、主连接和模型。Fox 连接协议、外部入口列表、独立 Key 和 Agent 指定项放在供应商的「高级」中。
+- DeepSeek 官方预设包含 Chat Completions 主连接、`https://api.deepseek.com/anthropic` 和 `https://api.deepseek.com` Responses 入口。OpenAI 预设包含 Chat Completions 与 Responses。预设来源标记保存在 v97 JSON 中，Host 只有在标记和内置地址都匹配时才直接信任。
+- 外部 Agent 优先保留项目私有 HOME 内的用户登录及实际可达的 Host 登录环境。否则只匹配当前默认供应商；不再回退到其他供应商。Codex 只匹配 Responses，dsh 只匹配 Messages，pi 支持三种协议，未指定时优先使用主连接。
+- 缺少入口时，后端栏提示补一个 URL，默认复用供应商 Key 和默认模型。多个同协议候选时要求选择，结果存入该供应商入口的 Agent 指定项。已有登录的导入入口保留在折叠区。
+- 手填入口首次使用时由 Host 发出小请求。Chat Completions 要求 `finish_reason=stop` 与非空文本，Messages 要求 `stop_reason=end_turn` 与非空文本，Responses 要求 `object=response`、`status=completed` 与非空输出文本。HTTP 成功、模型列表或截断响应均不足以通过。
+- 成功记录按供应商、协议和入口保存，记录包含地址、模型和供应商修订号；模型、地址或凭据配置变化后失效。并发首次检查串行复用成功记录。通过验证后立即生成配置，启动入口也拒绝尚未验证的手填配置。
+- 清除供应商 Key 或删除当前供应商时，立即清理本数据库已知项目的 Fox 生成文件。仍按 ledger 指纹判断归属；用户自行修改的文件保留。无法读取或损坏的 ledger 会报告清理失败。删除当前供应商同时移除 Fox 的主模型记录。
+- 本地验证覆盖类型检查、HTTP 夹具、供应商选择与缓存、v97 迁移、生成文件归属和浏览器夹具。它们不等于真实桌面完整验收；全量 CI 等权限分支完成后统一运行。
+
+真实 ACP 权限探测独立存放于 `output/provider-protocol-20261023`，不修改后端权限实现。codex-acp 2.2.2 / CLI 0.160.1 在本机 workspace-write 的三次成功写入样本中均发出了审批请求；agent 模式触发自动审查，但官方 DeepSeek 不支持审查器所用的 codex-auto-review 模型，写入被拒。dsh 0.2.1-rc.2 的策略只有 ask / never；workspace-write + ask 的实际写入未发 request_permission。dsh 的 session/set_mode 返回 -32601；set_config_option 只支持模型和推理选项，权限选项返回 -32602。这些是本机版本的样本结果，不将 on-request 描述为每次写入审批保证。

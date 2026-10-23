@@ -11,6 +11,7 @@ mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod external_backend;
+mod external_model;
 mod kernel;
 mod kernel_compaction;
 mod kernel_reconciliation;
@@ -441,6 +442,7 @@ pub fn run() {
             commands::model_providers_list,
             commands::model_provider_save,
             commands::model_provider_delete,
+            external_model::agent_backend_model_connection,
             // Four-agent plan v0.3.1, Host wiring first batch: backend picker state.
             commands::agent_backend_routing::agent_backends_status,
             // External backend wiring batch: effective capability dimensions.

@@ -398,6 +398,13 @@ fn run(backend: AgentBackend, home: &Path, login: &UnifiedLogin, host_login: boo
 /// provider any more), so the missing-login card shows again. Files the
 /// user changed are kept. Returns the removed names.
 pub fn remove_managed(backend: AgentBackend, home: &Path) -> Result<Vec<String>, String> {
+    if home.join(MANAGED_LEDGER).exists() {
+        let text = read_small(&home.join(MANAGED_LEDGER)).ok_or("无法读取 Fox 生成文件清单，未执行清理")?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| "Fox 生成文件清单无效，未执行清理")?;
+        if serde_json::from_value::<BTreeMap<String, String>>(value.get("files").cloned().unwrap_or_default()).is_err() {
+            return Err("Fox 生成文件清单无效，未执行清理".into());
+        }
+    }
     let mut ledger = read_ledger(home);
     let mut removed = Vec::new();
     for relative in managed_candidates(backend) {
@@ -421,6 +428,15 @@ mod tests {
     use crate::sandbox::{HostOs, PermissionMode};
 
     const KEY: &str = "sk-unified-0123456789abcdef";
+
+    #[test]
+    fn corrupted_ownership_ledger_reports_cleanup_failure() {
+        let home = temp_home("corrupt-ledger");
+        std::fs::write(home.join(MANAGED_LEDGER), "not-json").unwrap();
+        assert!(remove_managed(AgentBackend::Pi, &home).is_err());
+        assert_eq!(std::fs::read_to_string(home.join(MANAGED_LEDGER)).unwrap(), "not-json");
+        let _ = std::fs::remove_dir_all(home);
+    }
 
     fn temp_home(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("fox-unified-{name}-{}", std::process::id()));

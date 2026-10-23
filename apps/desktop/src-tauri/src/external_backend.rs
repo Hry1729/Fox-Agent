@@ -209,6 +209,12 @@ impl ExternalBackendHost {
                 )
             }
         };
+        let target = AgentBackendTarget { conversation_id: Some(request.conversation_id.clone()), backend: None, project_id: None, project_root: None, full_access: false };
+        match self.model_login_context(&target) {
+            Ok((_, false)) if self.unified_login(backend).is_none() => return failure("model.connection_required", "请先在后端栏补充或验证当前供应商的模型连接", true),
+            Err(error) => return failure("model.connection_failed", error, true),
+            _ => {}
+        }
         let started = match self.database.create_run(&request.conversation_id, &request.text, request.model.as_deref()) {
             Ok(started) => started,
             Err(error) => return failure("run.create_failed", error, false),
@@ -352,7 +358,34 @@ impl ExternalBackendHost {
     /// card stays the fallback). The key never leaves this value except into
     /// the backend's own config / environment.
     fn unified_login(&self, backend: AgentBackend) -> Option<fox_agent_backend::unified_login::UnifiedLogin> {
-        crate::model_service::external_login(&self.database, backend)
+        crate::external_model::external_login(&self.database, backend)
+    }
+
+    pub(crate) fn model_login_context(&self, target: &AgentBackendTarget) -> Result<(AgentBackend, bool), String> {
+        let mut request = self.target_request(target).map_err(|r| r.error.map(|e| e.message).unwrap_or_else(|| "无法读取会话配置".into()))?;
+        request.unified_login = None;
+        let launcher = self.runtime.launcher();
+        let config = &launcher.config;
+        let home = config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend).map_err(|e| e.message)?;
+        let probe = config.credential_probe(&request).map_err(|e| e.message)?;
+        let host_login = probe.present_keys.iter().any(|key| key.ends_with("（Host 环境）"));
+        Ok((request.backend, fox_agent_backend::unified_login::user_login_present(request.backend, &home, host_login)))
+    }
+
+    pub(crate) fn clear_managed_model_files(&self) -> Result<(), String> {
+        for (id, _) in self.database.known_projects()? {
+            for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+                let home = self.runtime.launcher().config.private_home_path(&id, backend).map_err(|e| e.message)?;
+                fox_agent_backend::unified_login::remove_managed(backend, &home)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_model_login(&self, target: &AgentBackendTarget) -> Result<(), String> {
+        let request = self.target_request(target).map_err(|r| r.error.map(|e| e.message).unwrap_or_else(|| "无法读取会话配置".into()))?;
+        self.runtime.launcher().config.apply_unified_login(&request).map_err(|e| e.message)?;
+        Ok(())
     }
 
     /// The launch request a turn of `conversation_id` would use (backend,
