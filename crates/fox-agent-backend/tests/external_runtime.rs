@@ -9,7 +9,8 @@
 use fox_agent_backend::acp::AcpConnection;
 use fox_agent_backend::capability_view::PiLaunch;
 use fox_agent_backend::external::{
-    AnswerOutcome, CancelOutcome, ExternalLauncher, ExternalRuntime, ExternalSink, LaunchFailure, LaunchRequest, Launched, RevokeOutcome, StartError, TurnRequest,
+    AnswerOutcome, CancelOutcome, ExternalLauncher, ExternalRuntime, ExternalSink, LaunchFailure, LaunchRequest, Launched, NativeModeOutcome, RevokeOutcome, StartError,
+    TurnRequest,
 };
 use fox_agent_backend::launch::LaunchSpec;
 use fox_agent_backend::port::{AgentBackend, StopConfirmation};
@@ -424,6 +425,57 @@ async fn deepseek_permission_requests_are_rejected_by_the_host_never_shown() {
     runtime.shutdown().await;
 }
 
+/// 13.19 D.5 (unit-level replacement of the Windows scenario): in a
+/// full-access session (Codex `agent-full-access`, dsh `danger-full-access`)
+/// a permission request that still arrives is shown as the approval card and
+/// stays pending until the user answers; the Host never auto-allows (nor
+/// auto-answers) it on Codex's or dsh's behalf. Contrast: pi's 完全访问 is
+/// answered by Fox's own gate (automatic allow_once).
+#[tokio::test(flavor = "multi_thread")]
+async fn full_access_codex_and_dsh_requests_still_show_the_card_never_auto_allowed() {
+    if !node_available() {
+        return;
+    }
+    // MockLauncher default: the Host wants (and launches) full access.
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    for (index, (backend, full_mode, deny)) in [(AgentBackend::Codex, "agent-full-access", false), (AgentBackend::Deepseek, "danger-full-access", true)].into_iter().enumerate() {
+        let conversation = format!("c-d5-{}", backend.as_str());
+        let run = format!("r-d5-{}", backend.as_str());
+        // Even a stored sandboxed choice is overridden by full access.
+        let mut request = turn(&conversation, &run, "hello", backend, None);
+        request.launch.native_permission = Some("workspace-write".into());
+        runtime.start_turn(request).unwrap();
+        let session = sink.wait_for(&run, "agent_backend.session").await;
+        assert_eq!(session["mode"], "full_access", "{session}");
+        assert_eq!(session["permissionMode"], full_mode, "{session}");
+        let (card_run, approval, card) = sink.wait_approval(index + 1).await;
+        assert_eq!(card_run, run);
+        assert_eq!(card.title, "npm test");
+        assert_eq!(card.available_decisions, ["allow_once", "deny"]);
+        // Nothing answers it behind the user's back.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(runtime.approval_pending(&approval), "{backend:?}: the card is still waiting for the user");
+        let types = sink.types(&run);
+        assert!(!types.iter().any(|kind| kind == "agent_backend.permission_auto_answered"), "{backend:?}: auto-answered in full access: {types:?}");
+        assert!(!types.iter().any(|kind| matches!(kind.as_str(), "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted")), "{backend:?}: the turn did not move on without an answer: {types:?}");
+        assert!(!sink.text(&run).contains("permission:"), "{backend:?}: no native answer was written");
+        // The user's answer is what reaches the Agent.
+        assert_eq!(runtime.answer(&approval, !deny), AnswerOutcome::Written);
+        assert_eq!(sink.terminal(&run).await["type"], "run.completed");
+        assert!(sink.text(&run).ends_with(if deny { "permission:reject" } else { "permission:allow" }), "{backend:?}: {}", sink.text(&run));
+    }
+    assert!(sink.0.lock().unwrap().audits.iter().all(|(_, event, _)| event != "agent_backend.permission_auto_answered"));
+
+    // pi 完全访问: Fox's gate answers (自动), no card.
+    runtime.start_turn(turn("c-d5-pi", "r-d5-pi", "hello", AgentBackend::Pi, None)).unwrap();
+    assert_eq!(sink.terminal("r-d5-pi").await["type"], "run.completed");
+    assert_eq!(sink.approvals().len(), 2, "no card for pi in full access");
+    let answered = sink.events("r-d5-pi").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("pi gate answered");
+    assert_eq!(answered["permissionMode"], "full_access");
+    assert_eq!(answered["decision"], "allow_once");
+    runtime.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_conversation_interrupts_its_turn_and_confirms_the_stop() {
     if !node_available() {
@@ -512,6 +564,14 @@ async fn revoking_full_access_restarts_in_the_sandbox_without_replay() {
     // The Host withdraws the grant first, then asks the runtime to restart.
     revoked.store(true, Ordering::SeqCst);
     assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::RestartSandboxed { confirmed: true });
+    // 13.19 fix ②: the stopped full-access process no longer reports its
+    // declaration / handshake (the capability chip falls back to the planned,
+    // sandboxed view); leaving full access still reads "next turn".
+    let info = runtime.session_info("c-rev").expect("session kept");
+    assert!(!info.live);
+    assert!(info.declaration.is_none(), "stale full-access declaration: {:?}", info.declaration);
+    assert!(info.initialize_response.is_none() && info.capabilities.is_none());
+    assert_eq!(runtime.apply_native_mode("c-rev", "workspace-write").await, NativeModeOutcome::NextTurn);
     let terminal = sink.terminal("r-rev-1").await;
     assert_eq!(terminal["type"], "run.interrupted", "{terminal}");
     assert_eq!(terminal["code"], "agent_backend_full_access_revoked", "{terminal}");
@@ -524,6 +584,9 @@ async fn revoking_full_access_restarts_in_the_sandbox_without_replay() {
     assert_eq!(*modes.lock().unwrap(), [PermissionMode::FullAccess, PermissionMode::Sandboxed]);
     assert_eq!(launches.load(Ordering::SeqCst), 2);
     assert!(!sink.text("r-rev-2").contains("permission:"), "the cancelled turn is not replayed");
+    // The sandboxed relaunch reports its own declaration again.
+    let relaunched = runtime.session_info("c-rev").expect("session").declaration.expect("declaration after relaunch");
+    assert_eq!(relaunched.mode, PermissionMode::Sandboxed);
     // Already sandboxed: nothing to restart.
     assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::Unchanged);
     runtime.shutdown().await;
