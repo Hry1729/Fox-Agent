@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AgentBackendBar } from './AgentBackendBar'
 import { AgentBackendCredentialCard } from './AgentBackendCredentialCard'
+import { AgentNativePermissionPicker } from './AgentNativePermissionPicker'
 import { AgentModelConnectionCard, type AgentModelConnection, type AgentModelConnectionRequest } from './AgentModelConnectionCard'
 import {
   credentialProbeTarget,
@@ -30,6 +31,7 @@ import {
   type ImportItem,
   type ImportReport,
 } from '@/features/conversations/model/agent-backend-onboarding'
+import type { NativePermissionRequest, NativePermissionView } from '@/features/conversations/model/agent-native-permission'
 import { refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
 
 /** The Host calls the panel needs (a subset of `desktopClient`). */
@@ -42,6 +44,9 @@ export interface AgentBackendPanelClient {
   agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite?: boolean) => Promise<ImportReport>
   agentBackendOpenPrivateHome: (target: AgentBackendTarget) => Promise<unknown>
   agentBackendRevokeFullAccess: (conversationId: string) => Promise<unknown>
+  /** Per-agent native permission list; absent = the old sandbox / full-access chip. */
+  agentBackendNativePermissions?: (request: NativePermissionRequest) => Promise<NativePermissionView>
+  agentBackendNativePermissionSet?: (request: NativePermissionRequest & { mode: string }) => Promise<NativePermissionView>
   listenRuntimeEvents: (handler: (event: { conversationId: string; event: { type: string } }) => void) => Promise<() => void>
 }
 
@@ -201,6 +206,22 @@ export function AgentBackendPanel({
     return credentialCard
   }, [client, targetKey, probe, permission, modelConnection, shownBackend, modelTick])
 
+  // Native permission list (its own loading; the cards above are untouched).
+  const nativeList = client.agentBackendNativePermissions
+  const nativeSet = client.agentBackendNativePermissionSet
+  const nativeClient = useMemo(() => (nativeList && nativeSet ? { agentBackendNativePermissions: nativeList, agentBackendNativePermissionSet: nativeSet } : null), [nativeList, nativeSet])
+  const permissionPicker = nativeClient && external
+    ? (
+      <AgentNativePermissionPicker
+        client={nativeClient}
+        conversationId={capabilityConversationId}
+        backend={shownBackend}
+        tick={sessionTick + onboardingTick}
+        onChanged={() => setOnboardingTick((tick) => tick + 1)}
+      />
+    )
+    : null
+
   return (
     <AgentBackendBar
       status={status}
@@ -211,6 +232,7 @@ export function AgentBackendPanel({
       capabilities={capabilities}
       permission={permission}
       onRevokeFullAccess={handleRevoke}
+      permissionPicker={permissionPicker}
       credentialCard={card}
       importReceipt={visibleReceipt}
       onDismissImportReceipt={dismissReceipt}
