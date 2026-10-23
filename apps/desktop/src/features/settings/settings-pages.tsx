@@ -39,6 +39,7 @@ import { Stepper } from '@/components/arc/stepper/stepper'
 import { ShortcutRecorder, formatShortcut, usePlatform } from '@/components/arc/shortcut-recorder/shortcut-recorder'
 import { SHORTCUT_ACTIONS, type ShortcutActionId } from './shortcut-model'
 import { useShortcutPreferences } from './use-shortcuts'
+import { AgentBackendSettingsSection } from './agent-backend-settings'
 import { persistProcessDisplayMode, useProcessDisplayMode, type ProcessDisplayMode } from '@/features/chat/process-display-mode'
 import { defaultLocalKnowledgeGateway } from '@/features/local-knowledge/tauri-gateway'
 import { defaultPluginGateway } from '@/features/plugins/tauri-gateway'
@@ -489,6 +490,7 @@ export function AiSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { side
         </Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>模型偏好</h2></div></div><PreferenceRow title="默认模型" description={selected ? `${selected.provider.name} · ${selected.item.displayName}` : '尚未配置可用模型'}>{providers.items.length ? <Select value={selected ? `${selected.provider.id}::${selected.item.modelId}` : undefined} onValueChange={(value) => void selectModel(value)}><SelectTrigger className="fox-settings-select fox-model-select-adaptive"><SelectValue placeholder="选择默认模型" /></SelectTrigger><SelectContent>{providers.items.flatMap((provider) => provider.models.map((item) => <SelectItem key={`${provider.id}:${item.id}`} value={`${provider.id}::${item.modelId}`}>{provider.name} · {item.displayName}</SelectItem>))}</SelectContent></Select> : <Button variant="outline" size="sm" onClick={() => navigate('settings-models')}>编辑服务</Button>}</PreferenceRow></Card>
         {model.service && <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>当前模型</h2></div><Badge variant="secondary">{serviceStatusLabel(model.service.lastStatus)}</Badge></div><div className="fox-property-list fox-current-model-properties"><div><span>供应商</span><b>{model.service.name}</b></div><div><span>协议</span><b>{model.service.apiType === 'anthropic-messages' ? 'Anthropic Messages' : 'OpenAI-compatible'}</b></div><div><span>上下文</span><b>{model.service.contextWindow.toLocaleString()} tokens</b></div><div><span>多模态</span><b>{model.service.supportsImageInput ? '支持图片' : '仅文本'}</b></div></div></Card>}
+        {desktopRuntimeAvailable && <AgentBackendSettingsSection client={desktopClient} />}
       </SettingsScaffold>
       <Dialog open={assistantEditorOpen} onOpenChange={setAssistantEditorOpen}>
         <DialogContent className="fox-assistant-settings-dialog">
