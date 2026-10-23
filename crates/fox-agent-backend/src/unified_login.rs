@@ -295,7 +295,7 @@ fn generated_files(backend: AgentBackend, login: &UnifiedLogin) -> Result<(Vec<(
                 return Err(reason);
             }
             let config = format!(
-                "{MANAGED_HEADER}\n# key 不写进本文件：Fox 启动 Codex 时通过环境变量 {CODEX_KEY_ENV} 注入。\nmodel = {}\nmodel_provider = \"{FOX_PROVIDER_ID}\"\n\n[model_providers.{FOX_PROVIDER_ID}]\nname = {}\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"{CODEX_KEY_ENV}\"\n",
+                "{MANAGED_HEADER}\n# key 不写进本文件：Fox 启动 Codex 时通过环境变量 {CODEX_KEY_ENV} 注入。\nmodel = {}\nmodel_provider = \"{FOX_PROVIDER_ID}\"\n\n[model_providers.{FOX_PROVIDER_ID}]\nname = {}\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"{CODEX_KEY_ENV}\"\n# 网络不通时不长时间重试（Reconnecting…）：Fox 在沙箱里会立即结束本轮并给出被拦截的主机。\nrequest_max_retries = 2\nstream_max_retries = 2\n",
                 toml_string(&login.model),
                 toml_string(&format!("Fox 模型服务：{}", login.provider_name)),
                 toml_string(login.base_url.trim_end_matches('/')),
