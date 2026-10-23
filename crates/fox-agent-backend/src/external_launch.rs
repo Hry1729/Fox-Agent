@@ -37,7 +37,7 @@ use crate::external::{ExternalLauncher, LaunchFailure, LaunchRequest, Launched};
 use crate::launch::LaunchSpec;
 use crate::port::AgentBackend;
 use crate::sandbox::{
-    effective_permission_mode, prepare_full_access, prepare_launch, FullAccessPrivate, preflight, resolve_allowed_domains, AuthorizedDir, HostOs, PermissionMode, PrivateHomes,
+    effective_permission_mode, prepare_full_access, prepare_launch, FullAccessPrivate, preflight, AuthorizedDir, HostOs, PermissionMode, PrivateHomes,
     RealProbe, SandboxError, SandboxErrorCode, SandboxPolicy, SandboxSetup, SrtInstall, SrtLauncher, SETTING_PERMISSION_MODE,
 };
 use futures::future::BoxFuture;
@@ -273,6 +273,16 @@ impl HostLaunchConfig {
     /// (`agent_backend_not_installed`) in every mode. Production never
     /// launches through `npx`.
     pub fn launch_spec(&self, backend: AgentBackend, mode: PermissionMode, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
+        let native = crate::native_permission::effective_mode(backend, None, mode == PermissionMode::FullAccess, &Default::default());
+        self.launch_spec_with(backend, mode, native, project_root)
+    }
+
+    /// [`Self::launch_spec`] in the Agent's own permission mode `native`
+    /// ([`crate::native_permission`], already normalised against `mode`):
+    /// Codex starts in that codex-acp mode (`INITIAL_AGENT_MODE`), dsh with
+    /// the `--patch` of that preset (approval written per preset), pi
+    /// unchanged (the Host answers its gate).
+    pub fn launch_spec_with(&self, backend: AgentBackend, mode: PermissionMode, native: &str, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
         if backend == AgentBackend::Fox {
             return Err(LaunchFailure::new("agent_backend_invalid", "Fox 不经外部运行时启动"));
         }
@@ -288,22 +298,30 @@ impl HostLaunchConfig {
         let mut pi_launch = PiLaunch::Stock;
         let mut spec = match backend {
             AgentBackend::Deepseek => {
-                let patch_policy = crate::backends::deepseek::HostPolicy { workspace_write: true, network: false };
-                let managed_patch = crate::backends::deepseek::default_patch_path(&self.runtime_root, &patch_policy);
+                use crate::backends::deepseek::{default_preset_patch_path, preset_file_name, preset_patch, verify_installed_preset_patch, DshPreset};
+                // The preset the user picked; full access is dsh's own
+                // danger-full-access exactly when srt is off.
+                let preset = if mode == PermissionMode::FullAccess { DshPreset::DangerFullAccess } else { crate::native_permission::dsh_preset(native) };
+                let preset = if mode == PermissionMode::Sandboxed && preset == DshPreset::DangerFullAccess { DshPreset::WorkspaceWriteNever } else { preset };
+                let network = mode == PermissionMode::FullAccess;
+                let managed_patch = default_preset_patch_path(&self.runtime_root, preset, network);
                 let patch = if managed_patch.is_file() || mode == PermissionMode::Sandboxed {
                     managed_patch
                 } else {
                     // Full access with a program outside the runtime package
                     // (override): the Host patch is written to Fox state.
                     let dir = self.state_root.join(crate::backends::deepseek::PATCH_DIR);
-                    let patch = dir.join(crate::backends::deepseek::patch_file_name(&patch_policy));
+                    let patch = dir.join(preset_file_name(preset, network));
                     std::fs::create_dir_all(&dir)
-                        .and_then(|_| std::fs::write(&patch, crate::backends::deepseek::policy_patch(&patch_policy).patch_yaml))
+                        .and_then(|_| std::fs::write(&patch, preset_patch(preset, network).patch_yaml))
                         .map_err(|error| LaunchFailure::new("agent_backend_launch_invalid", format!("cannot write the dsh patch: {error}")))?;
                     patch
                 };
-                crate::backends::deepseek::verify_installed_patch(&patch, &patch_policy)
-                    .map_err(|error| LaunchFailure::new("agent_backend_not_installed", error.to_string()).remedy("重新安装 Fox 的外部后端运行时"))?;
+                verify_installed_preset_patch(&patch, preset, network).map_err(|error| {
+                    LaunchFailure::new("agent_backend_not_installed", error.to_string())
+                        .remedy("重新安装（重新启用）Fox 的外部后端运行时以带上这个权限的 dsh 补丁；或先改用「工作区可写（不询问）」")
+                        .detail(serde_json::json!({ "preset": preset.id(), "patch": preset_file_name(preset, network) }))
+                })?;
                 crate::backends::deepseek::launch_spec(&program_text, &patch)
                     .map_err(|error| LaunchFailure::new("agent_backend_launch_invalid", error.to_string()))?
             }
@@ -316,9 +334,14 @@ impl HostLaunchConfig {
         };
         match backend {
             AgentBackend::Codex => {
-                let policy = crate::backends::codex::HostPolicy { cwd: crate::launch::backend_visible_path(project_root), writable: true, network: false };
-                spec.session_env = crate::backends::codex::session_env(&policy)
-                    .map_err(|error| LaunchFailure::new("agent_backend_launch_invalid", error.to_string()))?;
+                let _ = project_root;
+                // The codex-acp mode the user picked; agent-full-access only
+                // without srt (Fox full access), never inside the sandbox.
+                let codex_mode = match crate::native_permission::codex_mode(native) {
+                    crate::backends::codex::CodexMode::FullAccess if mode == PermissionMode::Sandboxed => crate::backends::codex::CodexMode::WorkspaceWrite,
+                    other => other,
+                };
+                spec.session_env = crate::backends::codex::session_env_for_mode(codex_mode);
             }
             AgentBackend::Pi => {
                 let gate = self.pi_gate_script();
@@ -357,6 +380,22 @@ impl HostLaunchConfig {
         Ok((spec, pi_launch))
     }
 
+    /// The host of the unified login's base URL when the Fox-managed login
+    /// is (or will be) what the backend reads in `home`; `None` for the
+    /// user's own login, no 模型服务 provider, or a loopback / malformed URL.
+    pub fn unified_login_host(&self, request: &LaunchRequest, home: &Path) -> Option<String> {
+        let login = request.unified_login.as_ref()?;
+        let plan = crate::unified_login::plan(request.backend, home, login, false);
+        if !matches!(plan.outcome, crate::unified_login::Outcome::Generated | crate::unified_login::Outcome::Unchanged) {
+            return None;
+        }
+        let base = match request.backend {
+            AgentBackend::Deepseek => crate::unified_login::deepseek_base_url(login).ok()?,
+            _ => login.base_url.clone(),
+        };
+        crate::native_permission::host_of(&base).filter(|host| !crate::loopback::names_loopback(&base) && host.contains('.'))
+    }
+
     /// Whether the Host allowlist for `backend` names a loopback endpoint.
     pub fn allows_loopback(&self, backend: AgentBackend) -> bool {
         self.extra_domains.get(&backend).is_some_and(|domains| {
@@ -375,7 +414,12 @@ impl HostLaunchConfig {
         let home = PrivateHomes::new(homes_root).home_for(&project_uuid, request.backend)?;
         let policy = self.host_policy(&request.conversation_id, &request.project_root);
         let providers: Vec<&str> = self.pi_providers.iter().map(String::as_str).collect();
-        let domains = resolve_allowed_domains(request.backend, &providers, &policy, &[]);
+        // The model host of Fox's unified login (settings batch, item 6), when
+        // the Fox-managed config is what the backend reads: exactly that one
+        // host, no wildcard, the same rule for all three backends; it
+        // replaces the backend's built-in defaults (OpenAI / DeepSeek hosts).
+        let login_host = self.unified_login_host(request, &home.path);
+        let domains = crate::sandbox::resolve_allowed_domains_with_login(request.backend, &providers, &policy, &[], login_host.as_deref());
         let mut extra = vec![self.runtime_root.clone()];
         if let Some(node) = self.managed_node().and_then(|node| node.parent().map(Path::to_path_buf)) {
             extra.push(node);
@@ -702,7 +746,7 @@ impl HostLauncher {
 
     async fn launch_now(config: HostLaunchConfig, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
         let mode = config.permission_mode(&request);
-        let (mut spec, pi_launch) = config.launch_spec(request.backend, mode, &request.project_root)?;
+        let (mut spec, pi_launch) = config.launch_spec_with(request.backend, mode, request.native_mode(mode), &request.project_root)?;
         // Unified login (settings batch, item 6) first, so the loopback and
         // missing-login checks below see the generated files. The Codex key
         // goes into the backend's environment only (never config.toml).
@@ -922,6 +966,7 @@ mod tests {
             session_key: "s1".into(),
             full_access_granted: false,
             unified_login: None,
+            native_permission: None,
         }
     }
 
@@ -1051,9 +1096,14 @@ mod tests {
         std::fs::write(codex.join("codex-acp"), "").unwrap();
         config.env_passthrough = vec!["PATH".into()];
         let (spec, _) = config.launch_spec(AgentBackend::Codex, PermissionMode::FullAccess, &root).unwrap();
-        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"));
+        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "agent-full-access"), "full access is Codex's own agent-full-access");
         assert!(spec.session_env.iter().any(|(key, _)| key == "PATH"), "passthrough in full access");
         let (spec, _) = config.launch_spec(AgentBackend::Codex, PermissionMode::Sandboxed, &root).unwrap();
+        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"));
+        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::Sandboxed, "agent", &root).unwrap();
+        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "agent"));
+        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::Sandboxed, "agent-full-access", &root).unwrap();
+        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"), "never full access inside srt");
         assert!(!spec.session_env.iter().any(|(key, _)| key == "PATH"), "never in sandboxed mode");
         // DeepSeek managed (runtime package 0.1.1 layout: `backends/dsh`): the
         // installed patch must match byte for byte.
@@ -1069,6 +1119,17 @@ mod tests {
         let (spec, _) = config.launch_spec(AgentBackend::Deepseek, PermissionMode::Sandboxed, &root).unwrap();
         assert!(spec.args.iter().any(|arg| Path::new(arg) == patch));
         assert_eq!(Path::new(&spec.program), dsh.join("dsh"));
+        // The ask preset needs its own installed variant (approval: ask).
+        let error = config.launch_spec_with(AgentBackend::Deepseek, PermissionMode::Sandboxed, "workspace-write", &root).unwrap_err();
+        assert_eq!(error.code, "agent_backend_not_installed");
+        let ask = crate::backends::deepseek::default_preset_patch_path(&config.runtime_root, crate::backends::deepseek::DshPreset::WorkspaceWriteAsk, false);
+        std::fs::write(&ask, crate::backends::deepseek::preset_patch(crate::backends::deepseek::DshPreset::WorkspaceWriteAsk, false).patch_yaml).unwrap();
+        let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, PermissionMode::Sandboxed, "workspace-write", &root).unwrap();
+        assert!(spec.args.iter().any(|arg| Path::new(arg) == ask));
+        assert!(std::fs::read_to_string(&ask).unwrap().contains("policy: ask"));
+        // Full access: dsh's own danger-full-access preset (written to Fox state when not installed).
+        let (spec, _) = config.launch_spec(AgentBackend::Deepseek, PermissionMode::FullAccess, &root).unwrap();
+        assert!(spec.args.iter().any(|arg| arg.ends_with("danger-full-access.yml")), "{:?}", spec.args);
         // A local gateway on the pi allowlist clears NO_PROXY for the backend (Linux / macOS).
         config.extra_domains = parse_extra_domains(Some("pi=127.0.0.1:3425"));
         assert!(config.allows_loopback(AgentBackend::Pi));
@@ -1177,6 +1238,44 @@ mod tests {
         assert!(recorded.contains(&format!("TMPDIR={}\n", tmp.display())), "{recorded}");
         assert!(recorded.contains(&format!("XDG_CONFIG_HOME={}\n", home.join(".config").display())), "{recorded}");
         assert!(recorded.contains("PROXY=\n"), "no srt-only variables: {recorded}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sandbox_policy_allows_exactly_the_unified_login_host_for_every_backend() {
+        use crate::unified_login::{Secret, UnifiedLogin};
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-login-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = config(&root);
+        let login = |api_type: &str, base: &str| UnifiedLogin {
+            provider_name: "Example".into(),
+            base_url: base.into(),
+            api_type: api_type.into(),
+            model: "m".into(),
+            api_key: Secret::new("sk-test-0123456789"),
+            responses_supported: None,
+        };
+        for (backend, api_type, base, host) in [
+            (AgentBackend::Codex, "openai-responses", "https://api.deepseek.com", "api.deepseek.com"),
+            (AgentBackend::Deepseek, "anthropic-messages", "https://gw.example-llm.com/anthropic", "gw.example-llm.com"),
+            // pi through the unified login: provider id `fox` (unknown to the
+            // provider table), reachable through the login host.
+            (AgentBackend::Pi, "openai-completions", "https://llm.example.org:8443/v1", "llm.example.org"),
+        ] {
+            let mut request = request(backend, &root);
+            request.unified_login = Some(login(api_type, base));
+            let policy = config.sandbox_policy(&request, root.join("homes")).unwrap();
+            assert_eq!(policy.allowed_domains, vec![host.to_owned()], "{backend:?}: exactly one host, no wildcard, no OpenAI defaults");
+        }
+        // The user's own Codex config in the private HOME: the login is not
+        // Fox's, the defaults stay.
+        let mut request = request(AgentBackend::Codex, &root);
+        request.unified_login = Some(login("openai-responses", "https://api.deepseek.com"));
+        let home = root.join("homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/codex/.codex");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "model = \"o3\"\n").unwrap();
+        let policy = config.sandbox_policy(&request, root.join("homes")).unwrap();
+        assert!(policy.allowed_domains.contains(&"api.openai.com".to_owned()) && !policy.allowed_domains.contains(&"api.deepseek.com".to_owned()));
         let _ = std::fs::remove_dir_all(&root);
     }
 
