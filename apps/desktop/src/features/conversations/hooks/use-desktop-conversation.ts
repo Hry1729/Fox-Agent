@@ -1593,7 +1593,7 @@ export function useDesktopConversation(): DesktopConversationState {
 
   // Derived once per list/overlay change: each conversation is marked by its own
   // Run, so the sidebar no longer needs to know which conversation is selected.
-  const { runIndicators, acknowledgeCompletion } = useConversationCompletionNotices(conversations, runOverlay, runOverlaySnapshotAt)
+  const { runIndicators, acknowledgeCompletion } = useConversationCompletionNotices(conversations, runOverlay, runOverlaySnapshotAt, undefined, true)
 
   return useMemo(() => ({
     captureDraft: currentDraft,

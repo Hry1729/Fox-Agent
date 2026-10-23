@@ -187,7 +187,7 @@
 .fox-library-view-switch > button { width: 30px; height: 28px; min-height: 0; border-radius: 0; margin: 0; box-shadow: none; }
 .fox-library-view-switch > button + button { border-left: 1px solid var(--border); }
 .fox-library-view-switch > button[aria-pressed=true] { background: var(--accent); box-shadow: none; }
-.fox-library-detail-topbar .fox-kb-search-control-slot { flex: 0 0 28px; width: 28px; height: 28px; }
+.fox-library-detail-topbar .fox-kb-search-control-slot { flex: 0 0 var(--fox-action-height); width: var(--fox-action-height); height: var(--fox-action-height); }
 .fox-library-detail-topbar .fox-kb-expanding-search { left: auto; right: 0; }
 .fox-library-detail-topbar > .fox-library-view-switch { flex-shrink: 0; }
 .fox-library-preview-dialog .fox-local-kb-document-reader-meta { max-width: min(40%, 320px); }
@@ -251,9 +251,7 @@
 .fox-library-file-menu { width: max-content; min-width: 208px; max-width: calc(100vw - 24px); }
 .fox-library-file-menu [role=menuitem] { white-space: nowrap; }
 
-.fox-library-detail-topbar .fox-kb-expanding-search { --control-height-md: 28px; }
 .fox-library-detail-topbar .fox-kb-expanding-search > div:not([data-expanded]):first-child { border-color: transparent; border-radius: var(--fox-radius-control); background: transparent; box-shadow: none; }
-.fox-library-detail-topbar .fox-kb-expanding-search > div:first-child > svg { width: 15px; height: 15px; top: calc(50% - 7.5px); left: 5.5px; }
 .fox-library-add-menu { min-width: 168px; }
 
 .fox-library-sidebar-tree :is([data-slot=folder-trigger], .fox-animate-file-trigger) { display: block; width: fit-content; max-width: 100%; }
@@ -290,8 +288,8 @@
 .fox-library-unified .fox-kb-cover-card:has([data-state=open]) .fox-kb-cover-menu { opacity:1; }
 @media(hover:none){.fox-library-unified .fox-kb-cover-menu{opacity:1}}
 
-.fox-library-list-search { position:relative; width:32px; height:32px; flex:0 0 32px; z-index:3; }
-.fox-library-list-search .fox-kb-expanding-search { position:absolute; right:0; left:auto; width:min(320px,calc(100vw - 300px)); --control-height-md:32px; }
+.fox-library-list-search { position:relative; width:var(--fox-action-height); height:var(--fox-action-height); flex:0 0 var(--fox-action-height); z-index:3; }
+.fox-library-list-search .fox-kb-expanding-search { position:absolute; right:0; left:auto; width:min(320px,calc(100vw - 300px)); }
 
 .fox-library-list-search .fox-kb-expanding-search > div:not([data-expanded]):first-child { border-color:transparent; border-radius:var(--fox-radius-control); background:transparent; box-shadow:none; }
 
