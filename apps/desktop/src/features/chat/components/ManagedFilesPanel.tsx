@@ -24,6 +24,7 @@ import {
 } from '@/features/conversations/api/desktop-client'
 import { managedFileVersionPresentation } from './managed-file-presentation'
 import { RestoreRequestIdentities, restoreActionKey } from './restore-request-identity'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 
 const KIND_COPY: Record<string, string> = {
   created: '新建',
@@ -143,13 +144,17 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
     async (version: ManagedFileVersion, force: boolean) => {
       const id = conversationIdRef.current
       if (!id || busyId) return
-      if (
-        force &&
-        !window.confirm(
-          `文件 ${version.displayName} 在任务之外被修改过。\n强制恢复会先把当前内容备份，再覆盖为所选版本。是否继续？`,
-        )
-      ) {
-        return
+      // Only the forced restore asks first. The normal restore stays fully
+      // synchronous up to setBusyId so a double click is still one request.
+      if (force) {
+        const confirmed = await confirmDialog({
+          title: '强制恢复文件',
+          description: `文件 ${version.displayName} 在任务之外被修改过。\n强制恢复会先把当前内容备份，再覆盖为所选版本。是否继续？`,
+          confirmLabel: '强制恢复',
+          destructive: true,
+        })
+        // The panel may have switched conversation while the dialog was open.
+        if (!confirmed || conversationIdRef.current !== id) return
       }
       setBusyId(version.id)
       setError(null)
