@@ -1404,6 +1404,16 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
             return RevokeOutcome::NotRunning;
         };
+        let outcome = self.revoke_running(&session, request).await;
+        // 13.19 fix ②: a stopped process must not keep reporting its old
+        // (full-access) declaration; the UI then shows the planned, sandboxed
+        // view until the next launch reports its own.
+        forget_stopped_launch(&session);
+        outcome
+    }
+
+    async fn revoke_running(&self, session: &Arc<Session>, request: &LaunchRequest) -> RevokeOutcome {
+        let conversation_id = request.conversation_id.as_str();
         let running = lock(&session.state).mode;
         let Some(running) = running.filter(|_| lock(&session.state).connection.is_some()) else {
             return RevokeOutcome::NotRunning;
@@ -1443,7 +1453,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         );
                     }
                 }
-                let report = self.stop_connection(&session, &reason).await;
+                let report = self.stop_connection(session, &reason).await;
                 let confirmed = report.as_ref().is_none_or(|report| report.confirmation.is_confirmed());
                 if !confirmed {
                     lock(&session.state).stop_unconfirmed = true;
@@ -1516,6 +1526,20 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         lock(&self.inner.sessions)
             .values()
             .any(|session| lock(&session.state).turn.as_ref().is_some_and(|turn| turn.approvals.contains_key(approval_id)))
+    }
+}
+
+/// Drop what a session reported about a process that no longer runs (its
+/// sandbox declaration and handshake), so capability views fall back to the
+/// planned launch. `mode` is kept: [`ExternalRuntime::apply_native_mode`]
+/// still answers `NextTurn` for leaving full access (the sandboxed relaunch
+/// happens at the next turn). No-op while a connection is open.
+fn forget_stopped_launch(session: &Session) {
+    let mut state = lock(&session.state);
+    if state.connection.is_none() {
+        state.declaration = None;
+        state.initialize_response = None;
+        state.capabilities = None;
     }
 }
 
