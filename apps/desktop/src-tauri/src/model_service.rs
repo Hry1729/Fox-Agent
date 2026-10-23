@@ -282,6 +282,26 @@ pub fn clear_api_key(base_url: &str) -> Result<(), String> {
     }
 }
 
+/// The OS credential store behind `fox_agent_backend::credential_save`, so a
+/// provider save snapshots, writes and undoes Keys in the tested order.
+pub struct KeyringStore;
+
+impl fox_agent_backend::credential_save::KeyStore for KeyringStore {
+    fn read(&mut self, id: &str) -> Result<Option<String>, String> {
+        match credential_entry(id)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+    fn write(&mut self, id: &str, key: &str) -> Result<(), String> {
+        set_api_key(id, key)
+    }
+    fn delete(&mut self, id: &str) -> Result<(), String> {
+        clear_api_key(id)
+    }
+}
+
 pub fn api_key_configured(base_url: &str) -> bool {
     get_api_key(base_url).is_some()
 }
