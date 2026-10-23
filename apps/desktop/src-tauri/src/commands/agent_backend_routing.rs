@@ -321,6 +321,258 @@ pub async fn agent_backend_revoke_full_access(
     Ok(external.revoke_full_access(&request.conversation_id).await)
 }
 
+// ---------------------------------------------------------------------------
+// Settings batch, items 4 / 5 / 6: 设置 →「新会话使用的 Agent」and
+// 「新外部会话使用完全访问」, persisted like the other app settings
+// (`app_settings`), plus the cached Responses probe that decides whether
+// Codex can use 模型服务's default provider.
+//
+// Precedence of the backend of a NEW conversation: FOX_EXTERNAL_BACKENDS
+// (administrator, can only force off) > this setting (user) > Fox
+// (default). Existing conversations keep their frozen backend.
+
+/// `app_settings` key: backend id of new conversations (`fox` when unset).
+pub(crate) const DEFAULT_BACKEND_KEY: &str = "agent_backend.default_backend";
+/// `app_settings` key: `1` = new external conversations get full access.
+pub(crate) const NEW_EXTERNAL_FULL_ACCESS_KEY: &str = "agent_backend.new_external_full_access";
+/// `app_settings` key: last Responses probe of 模型服务's base URL (JSON).
+pub(crate) const CODEX_RESPONSES_PROBE_KEY: &str = "agent_backend.codex_responses_probe";
+
+/// Result of probing `POST {base}/responses` (no key, no body content).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResponsesProbe {
+    pub base_url: String,
+    /// `Some(false)`: 404 / 405 (no Responses API); `Some(true)`: the route
+    /// exists; `None`: undetermined (auth, rate limit, server, network).
+    pub supported: Option<bool>,
+    pub status: Option<u16>,
+    pub checked_at: i64,
+}
+
+/// What an HTTP status of `POST {base}/responses` (empty JSON body) says.
+pub(crate) fn responses_support_from_status(status: u16) -> Option<bool> {
+    match status {
+        404 | 405 => Some(false),
+        200..=299 | 400 | 422 => Some(true),
+        _ => None,
+    }
+}
+
+/// The cached probe, when it is about `base_url`.
+pub(crate) fn cached_codex_probe(database: &crate::database::Database, base_url: &str) -> Option<CodexResponsesProbe> {
+    database
+        .app_setting(CODEX_RESPONSES_PROBE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|text| serde_json::from_str::<CodexResponsesProbe>(&text).ok())
+        .filter(|probe| probe.base_url == base_url)
+}
+
+/// One choice of「新会话使用的 Agent」.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendPreferenceOption {
+    pub backend: String,
+    pub enabled: bool,
+    pub experimental: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendPreferences {
+    /// What the user saved (`fox` when never set or unreadable).
+    pub default_backend: String,
+    /// What a new conversation uses now: the saved backend unless the
+    /// administrator forced it off, then Fox.
+    pub effective_backend: String,
+    pub new_external_full_access: bool,
+    /// The saved full-access choice unless FORBIDDEN.
+    pub effective_full_access: bool,
+    pub full_access_forbidden: bool,
+    pub forbidden_reason: Option<String>,
+    pub switch_env: String,
+    /// Every external backend is forced off by the administrator.
+    pub forced_off: bool,
+    pub options: Vec<AgentBackendPreferenceOption>,
+    /// Name of 模型服务's default provider used for the unified login.
+    pub unified_login_provider: Option<String>,
+    pub codex_responses: Option<CodexResponsesProbe>,
+}
+
+/// The saved backend (`fox` for unset / garbage).
+pub(crate) fn stored_default_backend(database: &crate::database::Database) -> AgentBackend {
+    database
+        .app_setting(DEFAULT_BACKEND_KEY)
+        .ok()
+        .flatten()
+        .and_then(|value| AgentBackend::parse(value.trim()))
+        .unwrap_or(AgentBackend::Fox)
+}
+
+/// The saved full-access choice (`false` for unset / garbage).
+pub(crate) fn stored_new_external_full_access(database: &crate::database::Database) -> bool {
+    database.app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY).ok().flatten().is_some_and(|value| value.trim() == "1")
+}
+
+/// Build the preferences view (pure: no environment, no keyring).
+pub(crate) fn preferences_view(
+    stored: AgentBackend,
+    full_access: bool,
+    switch: &BackendSwitch,
+    forbidden: bool,
+    provider: Option<String>,
+    codex: Option<CodexResponsesProbe>,
+) -> AgentBackendPreferences {
+    let options: Vec<AgentBackendPreferenceOption> = host_routing::backend_options(switch)
+        .into_iter()
+        .map(|option| {
+            let codex_unsupported = option.backend == AgentBackend::Codex && option.enabled && codex.as_ref().is_some_and(|probe| probe.supported == Some(false));
+            AgentBackendPreferenceOption {
+                backend: option.backend.as_str().to_owned(),
+                enabled: option.enabled && !codex_unsupported,
+                experimental: option.experimental,
+                reason: if codex_unsupported {
+                    Some(format!(
+                        "模型服务的默认 provider「{}」的地址不支持 Responses 接口（POST /responses 返回 404 / 405），Codex 无法用它登录",
+                        provider.as_deref().unwrap_or("-")
+                    ))
+                } else {
+                    option.reason
+                },
+            }
+        })
+        .collect();
+    // The administrator's switch wins; a Codex whose provider lacks the
+    // Responses API stays effective if it was saved (the user may have their
+    // own Codex login in the private HOME), it just cannot be newly picked.
+    let effective = if switch.is_enabled(stored) { stored } else { AgentBackend::Fox };
+    AgentBackendPreferences {
+        default_backend: stored.as_str().to_owned(),
+        effective_backend: effective.as_str().to_owned(),
+        new_external_full_access: full_access,
+        effective_full_access: full_access && !forbidden,
+        full_access_forbidden: forbidden,
+        forbidden_reason: forbidden.then(|| fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON.to_owned()),
+        switch_env: host_routing::EXTERNAL_BACKENDS_ENV.to_owned(),
+        forced_off: !switch.any_external(),
+        options,
+        unified_login_provider: provider,
+        codex_responses: codex,
+    }
+}
+
+fn current_preferences(state: &AppState) -> AgentBackendPreferences {
+    let service = state.database.get_model_service().ok().flatten();
+    let provider = service.as_ref().map(|service| service.name.clone());
+    let codex = service.as_ref().and_then(|service| cached_codex_probe(&state.database, &service.base_url));
+    preferences_view(
+        stored_default_backend(&state.database),
+        stored_new_external_full_access(&state.database),
+        &BackendSwitch::from_env(),
+        fox_agent_backend::external_launch::full_access_forbidden_from_env(),
+        provider,
+        codex,
+    )
+}
+
+#[tauri::command]
+pub fn agent_backend_preferences_get(state: State<'_, AppState>) -> ApiResponse<AgentBackendPreferences> {
+    ApiResponse::success(current_preferences(&state))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendPreferencesRequest {
+    #[serde(default)]
+    pub default_backend: Option<String>,
+    #[serde(default)]
+    pub new_external_full_access: Option<bool>,
+}
+
+/// Validate a change of the two settings against the administrator's
+/// switches (`Err` = refusal code + message). Pure.
+pub(crate) fn validate_preferences_change(
+    request: &AgentBackendPreferencesRequest,
+    current: &AgentBackendPreferences,
+) -> Result<(Option<AgentBackend>, Option<bool>), (&'static str, String)> {
+    let backend = match request.default_backend.as_deref() {
+        None => None,
+        Some(raw) => {
+            let backend = AgentBackend::parse(raw.trim()).ok_or_else(|| (RouteError::CODE_INVALID, format!("不支持的 Agent 后端「{raw}」")))?;
+            let option = current.options.iter().find(|option| option.backend == backend.as_str());
+            if backend != AgentBackend::Fox && !option.is_some_and(|option| option.enabled) {
+                let reason = option.and_then(|option| option.reason.clone()).unwrap_or_default();
+                return Err((RouteError::CODE_DISABLED, format!("不能选择「{}」：{reason}", backend.as_str())));
+            }
+            Some(backend)
+        }
+    };
+    let full_access = match request.new_external_full_access {
+        Some(true) if current.full_access_forbidden => {
+            return Err((host_routing::CODE_FULL_ACCESS_FORBIDDEN, fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON.to_owned()))
+        }
+        other => other,
+    };
+    Ok((backend, full_access))
+}
+
+#[tauri::command]
+pub fn agent_backend_preferences_save(state: State<'_, AppState>, request: AgentBackendPreferencesRequest) -> ApiResponse<AgentBackendPreferences> {
+    let current = current_preferences(&state);
+    let (backend, full_access) = match validate_preferences_change(&request, &current) {
+        Ok(change) => change,
+        Err((code, message)) => return ApiResponse::failure(code, message, false),
+    };
+    if let Some(backend) = backend {
+        if let Err(error) = state.database.set_app_setting(DEFAULT_BACKEND_KEY, backend.as_str()) {
+            return storage_error(error);
+        }
+    }
+    if let Some(full_access) = full_access {
+        if let Err(error) = state.database.set_app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY, if full_access { "1" } else { "0" }) {
+            return storage_error(error);
+        }
+    }
+    ApiResponse::success(current_preferences(&state))
+}
+
+/// Probe whether 模型服务's default provider answers the Responses API
+/// (`POST {base}/responses` with an empty JSON body: an existing route
+/// answers 400 / 422 without running a model; 404 / 405 = not supported),
+/// and cache the result for the settings page and the Codex unified login.
+/// The key is sent as a bearer token and never logged or returned.
+#[tauri::command]
+pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> Result<ApiResponse<Option<CodexResponsesProbe>>, ()> {
+    let Some(service) = state.database.get_model_service().ok().flatten() else {
+        return Ok(ApiResponse::success(None));
+    };
+    let base = service.base_url.trim_end_matches('/').to_owned();
+    let key = crate::model_service::get_api_key(&service.base_url);
+    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
+        Ok(client) => client,
+        Err(_) => return Ok(ApiResponse::success(None)),
+    };
+    let mut request = client.post(format!("{base}/responses")).json(&serde_json::json!({}));
+    if let Some(key) = key.as_deref() {
+        request = request.bearer_auth(key);
+    }
+    let status = request.send().await.ok().map(|response| response.status().as_u16());
+    let probe = CodexResponsesProbe {
+        base_url: service.base_url.clone(),
+        supported: status.and_then(responses_support_from_status),
+        status,
+        checked_at: chrono::Utc::now().timestamp_millis(),
+    };
+    if probe.supported.is_some() {
+        if let Ok(text) = serde_json::to_string(&probe) {
+            let _ = state.database.set_app_setting(CODEX_RESPONSES_PROBE_KEY, &text);
+        }
+    }
+    Ok(ApiResponse::success(Some(probe)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,12 +600,17 @@ mod tests {
             gate_conversation(&database, HostEntry::Start, "missing", None, None);
         assert!(gated.is_ok(), "unknown conversation is left to the existing path");
 
+        // Settings batch: with FOX_EXTERNAL_BACKENDS unset nothing is forced
+        // off, so a lookup that fails is refused (an external conversation
+        // must never fall back to Fox); only a forced-off switch keeps the
+        // old fallback.
+        let fallback = !BackendSwitch::from_env().any_external();
         let storage_error: Result<Route, ApiResponse<()>> =
             gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), None);
-        assert!(storage_error.is_ok(), "storage errors never change the existing path");
+        assert_eq!(storage_error.is_ok(), fallback);
         let missing_column: Result<Route, ApiResponse<()>> =
             gate_run_identity(HostEntry::Approve, Err("no such column: c.agent_backend".to_owned()), None);
-        assert!(missing_column.is_ok());
+        assert_eq!(missing_column.is_ok(), fallback);
         let unknown: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(None), None);
         // A request that names an external backend is refused when the read fails.
         let named: Result<Route, ApiResponse<()>> =
@@ -370,12 +627,15 @@ mod tests {
             .expect("pi conversation");
         let gated: Result<Route, ApiResponse<()>> =
             gate_conversation(&database, HostEntry::Start, &pi.id, None, None);
-        let failure = gated.expect_err("pi is refused before any runtime");
-        let code = failure.error.as_ref().map(|error| error.code.clone());
-        assert!(
-            matches!(code.as_deref(), Some("agent_backend_disabled")),
-            "{code:?}"
-        );
+        if BackendSwitch::from_env().is_enabled(AgentBackend::Pi) {
+            // FOX_EXTERNAL_BACKENDS unset (settings batch): pi is routed to
+            // its external runtime, never to Fox.
+            assert!(matches!(gated, Ok(Route::External(AgentBackend::Pi))));
+        } else {
+            let failure = gated.expect_err("pi is refused before any runtime");
+            let code = failure.error.as_ref().map(|error| error.code.clone());
+            assert!(matches!(code.as_deref(), Some("agent_backend_disabled")), "{code:?}");
+        }
         let identity = crate::database::RunBackendIdentity {
             conversation_id: "c".to_owned(),
             run_id: "r".to_owned(),
@@ -421,5 +681,59 @@ mod tests {
         assert_eq!(by_root, Some(("p1".to_owned(), "D:/main".to_owned())));
         assert_eq!(database.project_by_id_or_root(None, None).unwrap(), None);
         assert_eq!(database.project_by_id_or_root(Some(""), Some("D:/nowhere")).unwrap(), None);
+    }
+
+    /// Settings batch, item 4: FOX_EXTERNAL_BACKENDS only forces off; the
+    /// setting decides otherwise; Fox is the default and the fallback.
+    #[test]
+    fn agent_backend_preferences_follow_the_setting_under_the_administrator_switch() {
+        let on = BackendSwitch::from_env_value(None);
+        let view = preferences_view(AgentBackend::Pi, false, &on, false, Some("DeepSeek".into()), None);
+        assert_eq!(view.default_backend, "pi");
+        assert_eq!(view.effective_backend, "pi");
+        assert!(!view.forced_off && view.options.iter().all(|option| option.enabled));
+        let off = BackendSwitch::from_env_value(Some("0"));
+        let forced = preferences_view(AgentBackend::Pi, true, &off, false, None, None);
+        assert_eq!(forced.effective_backend, "fox", "forced off: new conversations use Fox");
+        assert!(forced.forced_off);
+        assert!(forced.options.iter().filter(|option| option.backend != "fox").all(|option| !option.enabled && option.reason.as_deref().unwrap().contains("FOX_EXTERNAL_BACKENDS")));
+        let only_codex = BackendSwitch::from_env_value(Some("codex"));
+        assert_eq!(preferences_view(AgentBackend::Deepseek, false, &only_codex, false, None, None).effective_backend, "fox");
+        // Default when nothing was saved: Fox.
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        assert_eq!(stored_default_backend(&database), AgentBackend::Fox);
+        assert!(!stored_new_external_full_access(&database));
+        database.set_app_setting(DEFAULT_BACKEND_KEY, "codex").unwrap();
+        database.set_app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY, "1").unwrap();
+        assert_eq!(stored_default_backend(&database), AgentBackend::Codex);
+        assert!(stored_new_external_full_access(&database));
+        database.set_app_setting(DEFAULT_BACKEND_KEY, "deepseek_harness").unwrap();
+        assert_eq!(stored_default_backend(&database), AgentBackend::Fox, "garbage reads as Fox");
+    }
+
+    /// Settings batch, items 4 / 5: a forced-off backend and full access under
+    /// FORBIDDEN cannot be saved; Codex without the Responses API is greyed.
+    #[test]
+    fn agent_backend_preference_changes_are_validated_against_the_switches() {
+        let off = preferences_view(AgentBackend::Fox, false, &BackendSwitch::from_env_value(Some("off")), true, None, None);
+        let request = |backend: Option<&str>, full: Option<bool>| AgentBackendPreferencesRequest { default_backend: backend.map(str::to_owned), new_external_full_access: full };
+        assert_eq!(validate_preferences_change(&request(Some("pi"), None), &off).unwrap_err().0, "agent_backend_disabled");
+        assert_eq!(validate_preferences_change(&request(Some("fox"), None), &off).unwrap(), (Some(AgentBackend::Fox), None));
+        assert_eq!(validate_preferences_change(&request(None, Some(true)), &off).unwrap_err().0, "agent_backend_full_access_forbidden");
+        assert_eq!(validate_preferences_change(&request(None, Some(false)), &off).unwrap(), (None, Some(false)));
+        assert_eq!(validate_preferences_change(&request(Some("claude"), None), &off).unwrap_err().0, "agent_backend_invalid");
+        assert!(off.forbidden_reason.is_some() && !off.effective_full_access);
+        let probe = CodexResponsesProbe { base_url: "https://api.example.com/v1".into(), supported: Some(false), status: Some(404), checked_at: 1 };
+        let on = preferences_view(AgentBackend::Fox, true, &BackendSwitch::from_env_value(None), false, Some("Example".into()), Some(probe));
+        let codex = on.options.iter().find(|option| option.backend == "codex").unwrap();
+        assert!(!codex.enabled && codex.reason.as_deref().unwrap().contains("Responses"));
+        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &on).unwrap_err().0, "agent_backend_disabled");
+        assert!(on.effective_full_access);
+        assert_eq!(responses_support_from_status(404), Some(false));
+        assert_eq!(responses_support_from_status(405), Some(false));
+        assert_eq!(responses_support_from_status(400), Some(true));
+        assert_eq!(responses_support_from_status(200), Some(true));
+        assert_eq!(responses_support_from_status(401), None);
+        assert_eq!(responses_support_from_status(503), None);
     }
 }
