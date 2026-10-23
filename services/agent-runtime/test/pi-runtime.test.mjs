@@ -1150,3 +1150,43 @@ test('streams OpenAI-compatible reasoning_content separately from the final answ
   assert.equal(usage.payload.record.stage, 'agent')
   assert.doesNotMatch(JSON.stringify(usage.payload.record), /test-key|正式回答|检查项目文件/)
 })
+
+// 13.19 I: with no usable external execution backend the Host reports
+// run_command unavailable; the Fox session's tool list then leaves it out and
+// excludedTools records {name: run_command, reason: host_runtime_unavailable}.
+// Available, unknown (legacy payload) or a stale identity keep it.
+test('run_command follows the Host runtime availability in the real request snapshot', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-host-runtime-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const cases = [
+    ['unavailable', { availability: 'unavailable', reasonCode: 'sandbox_unavailable', reason: 'no verified backend', actions: { start: 'unavailable', status: 'available' } }, false],
+    ['available', { availability: 'available', actions: { start: 'available' } }, true],
+    ['unknown', { availability: 'unknown' }, true],
+    ['absent', null, true],
+  ]
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    fauxResponses: cases.map(([name]) => `done ${name}`),
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'host-runtime-c', runtimeSessionId: 'host-runtime-s' }
+  const create = runtime.send('create_session', { ...identity, payload: { sessionPath: join(directory, 'session.json') } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  for (const [name, runCommand, expected] of cases) {
+    const runId = `host-runtime-${name}`
+    const hostRuntimeCapabilities = runCommand && { schemaVersion: 1, capabilityManifestHash: 'sha256:m', executionProfileId: 'legacy', tools: { run_command: runCommand } }
+    runtime.send('prompt', { ...identity, runId, payload: {
+      text: 'list files', projectContext: { projectRoot: directory },
+      ...(hostRuntimeCapabilities ? { hostRuntimeCapabilities } : {}),
+    } })
+    const snapshot = await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.request_snapshot')
+    assert.equal(snapshot.payload.effectiveToolNames.includes('run_command'), expected, name)
+    const excluded = snapshot.payload.excludedTools.filter(tool => tool.name === 'run_command')
+    if (expected) assert.deepEqual(excluded, [], name)
+    else assert.deepEqual(excluded, [{ name: 'run_command', reason: 'host_runtime_unavailable', reasonCode: 'sandbox_unavailable' }], name)
+    // Only run_command depends on it: read tools stay.
+    assert.ok(snapshot.payload.effectiveToolNames.includes('read'), name)
+    await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.completed')
+  }
+})
