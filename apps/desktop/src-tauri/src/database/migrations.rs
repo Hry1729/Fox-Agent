@@ -7291,7 +7291,9 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // backup (migration_backup.rs) runs before this like for every version
     // bump. SQL owned by `fox_agent_backend::host_routing`.
     apply_migration(&transaction, FULL_ACCESS_SCHEMA_VERSION, MIGRATION_96, now)?;
-    apply_migration(&transaction, 97, "ALTER TABLE model_providers ADD COLUMN protocol_profiles TEXT NOT NULL DEFAULT '[]';", now)?;
+    // v97 (provider protocol profiles): per-provider protocol entries as a
+    // JSON column, default `[]` (existing providers keep their connection).
+    apply_migration(&transaction, PROVIDER_PROTOCOL_SCHEMA_VERSION, "ALTER TABLE model_providers ADD COLUMN protocol_profiles TEXT NOT NULL DEFAULT '[]';", now)?;
     finish_transaction(transaction)
 }
 
@@ -15333,6 +15335,9 @@ const _: () = assert!(DATABASE_SCHEMA_VERSION >= AGENT_BACKEND_SCHEMA_VERSION);
 const MIGRATION_95: &str = fox_agent_backend::host_routing::AGENT_BACKEND_MIGRATION_SQL;
 const MIGRATION_96: &str = fox_agent_backend::host_routing::FULL_ACCESS_MIGRATION_SQL;
 const FULL_ACCESS_SCHEMA_VERSION: i64 = fox_agent_backend::host_routing::FULL_ACCESS_SCHEMA_VERSION;
+/// v97: `model_providers.protocol_profiles` (per-provider protocol entries).
+pub(crate) const PROVIDER_PROTOCOL_SCHEMA_VERSION: i64 = 97;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= PROVIDER_PROTOCOL_SCHEMA_VERSION);
 
 const MIGRATION_94: &str = r#"
 ALTER TABLE artifacts ADD COLUMN turn_call_id TEXT;
@@ -15461,9 +15466,11 @@ mod delivery_acceptance_migration_tests {
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
             .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
-        // v95 (agent_backend) and v96 (full-access grants + audit log) are the
-        // only migrations after v94.
-        assert_eq!(DATABASE_SCHEMA_VERSION, 96);
+        // v95 (agent_backend), v96 (full-access grants + audit log) and v97
+        // (model_providers.protocol_profiles) are the only migrations after
+        // v94.
+        assert_eq!(DATABASE_SCHEMA_VERSION, PROVIDER_PROTOCOL_SCHEMA_VERSION);
+        assert_eq!(PROVIDER_PROTOCOL_SCHEMA_VERSION, 97);
 
         // The old rows are untouched.
         let title: String = connection
