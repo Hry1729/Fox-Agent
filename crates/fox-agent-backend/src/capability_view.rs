@@ -122,7 +122,7 @@ fn approval_dimension(declared: &CapabilityDeclaration) -> Dimension {
 /// DeepSeek in sandboxed mode: a loopback model gateway cannot be reached
 /// (dsh dials loopback directly, never through the srt proxy), so such a
 /// session is refused before launch.
-pub const DEEPSEEK_LOOPBACK_LIMIT: &str = "限制：DeepSeek 的 base URL 若指向本机回环网关（如 Magpie 的 127.0.0.1:端口），沙箱模式下不可达（dsh 对回环地址总是直连、不经 srt 代理，srt 也无法按端口放行回环直连），Fox 会在启动前拒绝（agent_backend_loopback_requires_full_access）；需要完全访问权限（新建会话时选择“完全访问”；会话中不能开启），或改用官方 api.deepseek.com";
+pub const DEEPSEEK_LOOPBACK_LIMIT: &str = "限制：DeepSeek 的 base URL 若指向本机回环网关（如 Magpie 的 127.0.0.1:端口），沙箱模式下不可达（dsh 对回环地址总是直连、不经 srt 代理，srt 也无法按端口放行回环直连），Fox 会在启动前拒绝（agent_backend_loopback_requires_full_access）；需要完全访问权限（在设置中打开“新外部会话使用完全访问”后新建会话；会话中不能开启），或改用官方 api.deepseek.com";
 
 /// [`DEEPSEEK_LOOPBACK_LIMIT`] when full access is forbidden on this machine
 /// (`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`): the full-access remedy is gone.
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(view.cancel.summary, "取消：仅发送请求");
         assert_eq!(view.observability.summary, "可观测：未验证");
         assert!(view.cancel.detail.contains("未知"));
-        assert!(view.sandbox.detail.contains("本机回环网关") && view.sandbox.detail.contains("需要完全访问权限（新建会话时选择“完全访问”；会话中不能开启）") && !view.sandbox.detail.contains("FOX_EXTERNAL_FULL_ACCESS"), "{}", view.sandbox.detail);
+        assert!(view.sandbox.detail.contains("本机回环网关") && view.sandbox.detail.contains("需要完全访问权限（在设置中打开“新外部会话使用完全访问”后新建会话；会话中不能开启）") && !view.sandbox.detail.contains("FOX_EXTERNAL_FULL_ACCESS"), "{}", view.sandbox.detail);
         assert!(!view.sandbox.detail.contains("请切换到"), "{}", view.sandbox.detail);
         let full = SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::Linux);
         let view = capability_view(AgentBackend::Deepseek, None, &full, PiLaunch::Stock);
