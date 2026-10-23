@@ -240,19 +240,21 @@ export function KnowledgeGraphPage({ sidebarCollapsed, onSidebar, navigate, know
     void resource.loadGraphMetadata()
   }
   return (
-    <WorkspacePage className="fox-knowledge-graph-page" title="关系图" subtitle={`${resource.detail?.database.name ?? '关系图'} · 探索实体与文档之间的关系`} sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('knowledge-detail', knowledgeId ?? undefined)} actions={<Button variant="outline" size="sm" disabled={resource.graphLoading} onClick={() => load()}><RotateCcw size={14} />{resource.graphLoading ? '加载中' : '刷新图谱'}</Button>}>
+    <WorkspacePage className="fox-knowledge-graph-page" title="关系图" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
       <div className="fox-graph-layout">
-        <div className="fox-graph-toolbar">
-          <label><Search size={14} /><Input aria-label="搜索条目" placeholder="搜索实体、概念或文档" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') load() }} /></label>
+        <header className="fox-graph-toolbar">
+          <Button variant="ghost" size="icon" aria-label="返回资料库" title="返回资料库" onClick={() => navigate('knowledge-detail', knowledgeId ?? undefined)}><ArrowLeft /></Button>
+          <h1>关系图</h1>
+          <label><Search size={14} /><Input aria-label="搜索条目" placeholder="搜索实体、概念或文档" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) load() }} /></label>
           <Select value={selectedType} onValueChange={(value) => { setSelectedType(value); setSelectedId(null) }}><SelectTrigger aria-label="类别"><SelectValue /></SelectTrigger><SelectContent>{['全部', ...labels].map((label) => <SelectItem key={label} value={label}>{label}</SelectItem>)}</SelectContent></Select>
           <Select value={String(depth)} onValueChange={(value) => setDepth(Number(value))}><SelectTrigger aria-label="查询深度"><SelectValue /></SelectTrigger><SelectContent>{[1, 2, 3].map((value) => <SelectItem key={value} value={String(value)}>深度 {value}</SelectItem>)}</SelectContent></Select>
-          <Select value={String(maxNodes)} onValueChange={(value) => setMaxNodes(Number(value))}><SelectTrigger aria-label="条目上限"><SelectValue /></SelectTrigger><SelectContent>{[50, 100, 200].map((value) => <SelectItem key={value} value={String(value)}>最多 {value} 个节点</SelectItem>)}</SelectContent></Select>
+          <Select value={String(maxNodes)} onValueChange={(value) => setMaxNodes(Number(value))}><SelectTrigger aria-label="节点显示上限" title="本次查询最多显示的节点数"><SelectValue /></SelectTrigger><SelectContent>{[50, 100, 200].map((value) => <SelectItem key={value} value={String(value)}>节点 {value}</SelectItem>)}</SelectContent></Select>
           <Button size="sm" onClick={() => load()} disabled={resource.graphLoading}><Search />查询</Button>
-          <div className="fox-graph-toolbar-stats"><span><b>{graph.nodes.length}</b> 条目</span><span><b>{graph.edges.length}</b> 关系</span></div>
-        </div>
+          <Button variant="ghost" size="icon" aria-label={resource.graphLoading ? '正在刷新图谱' : '刷新图谱'} title="刷新图谱" disabled={resource.graphLoading} onClick={() => load()}><RotateCcw size={14} /></Button>
+        </header>
         <div className="fox-graph-workspace">
         <main className="fox-graph-canvas">
-          <div className="fox-graph-canvas-head"><span><Sparkles />关系画布</span><small>{selected ? `已选择 ${selected.label}` : '单击查看详情，双击展开关联'}</small></div>
+          <div className="fox-graph-canvas-head"><div className="fox-graph-canvas-heading"><span><Sparkles />关系画布</span><div className="fox-graph-toolbar-stats" aria-label="当前画布统计"><span><b>{graph.nodes.length}</b> 条目</span><span><b>{graph.edges.length}</b> 关系</span></div></div><small>{selected ? `已选择 ${selected.label}` : '单击查看详情，双击展开关联'}</small></div>
           <div className="fox-graph-tools"><Button size="icon" variant="secondary" title="缩小" onClick={() => void canvasRef.current?.zoomBy(-.12)}><Minus /></Button><span>{Math.round(zoom * 100)}%</span><Button size="icon" variant="secondary" title="放大" onClick={() => void canvasRef.current?.zoomBy(.12)}><Plus /></Button><Button size="icon" variant="secondary" title="显示全图" onClick={() => void canvasRef.current?.fitView()}><Maximize2 /></Button></div>
           <KnowledgeGraphCanvas ref={canvasRef} nodes={graph.nodes} edges={graph.edges} selectedId={selectedId} onSelect={setSelectedId} onExpand={(node) => { setQuery(node.label); load(node.label) }} onZoomChange={setZoom} />
           {graph.nodes.length === 0 && (resource.graphLoading
