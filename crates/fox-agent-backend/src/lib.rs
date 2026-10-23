@@ -69,6 +69,7 @@ pub mod reverse;
 pub mod sandbox;
 pub mod settlement;
 pub mod statefile;
+pub mod unified_login;
 pub mod winacl;
 pub mod winancestor;
 pub mod winowner;
