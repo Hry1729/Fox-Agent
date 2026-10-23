@@ -5271,17 +5271,16 @@
    工具条贴住内容区左右与顶部，跳出 .fox-local-kb-content 的 32/24 内边距。 */
 .fox-local-kb-detail-content:has(.fox-kb-reader) { width: min(1048px, 100%); }
 .fox-kb-reader { margin: calc(-1 * var(--fox-space-4xl)) calc(-1 * var(--fox-space-3xl)) 0; }
-.fox-kb-reader-bar { min-height: 52px; height: 52px; padding: 0 var(--fox-space-xl); margin-bottom: 0; border-bottom: 1px solid var(--fox-border); }
+.fox-kb-reader-bar { min-height: 52px; padding: var(--fox-space-s) var(--fox-space-xl); margin-bottom: 0; border-bottom: 1px solid var(--fox-border); }
 .fox-local-kb-document-reader { min-height: 0; }
 .fox-local-kb-document-reader-meta {
   display: flex;
   align-items: center;
   gap: var(--fox-space-m);
-  width: fit-content;
-  max-width: calc(100% - 96px);
-  margin: 0 0 12px 96px;
-  padding: var(--fox-space-5xl) 0 0;
-  color: var(--fox-faint);
+  min-width: 0;
+  flex: 0 1 auto;
+  margin: 0;
+  color: var(--fox-muted);
   font-size: var(--fox-type-caption);
 }
 .fox-local-kb-document-reader-meta .fox-local-files-file-icon { flex: none; width: 14px; height: 14px; background: transparent; box-shadow: none; color: var(--fox-faint); }
@@ -5389,7 +5388,10 @@
   .fox-local-kb-document-reader-body > .fox-preview-surface,
   .fox-local-kb-document-reader-body > .fox-local-files-markdown-preview,
   .fox-local-kb-document-reader-body > .fox-local-files-text-preview { width: calc(100% - 32px); max-width: calc(100% - 32px); margin-left: 16px; }
-  .fox-local-kb-document-reader-meta { max-width: calc(100% - 32px); margin-left: 16px; }
+  .fox-kb-reader-bar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--fox-space-s); }
+  .fox-kb-reader-crumb { grid-column: 2 / -1; }
+  .fox-local-kb-document-reader-meta { grid-column: 1 / 3; }
+  .fox-kb-reader-actions { grid-column: 3; }
   .fox-local-files-list { overflow-x: auto; }
   .fox-local-files-list-head,
   .fox-local-files-row { min-width: 660px; }

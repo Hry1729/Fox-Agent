@@ -1204,6 +1204,7 @@ function LocalKnowledgeDocumentReader({ knowledgeBaseId, knowledgeBaseName, docu
           {document.relativePath.split('/').slice(0, -1).map((part) => <span key={part}><ChevronRight aria-hidden="true" />{part}</span>)}
           <ChevronRight aria-hidden="true" /><b title={document.name}>{document.name}</b>
         </nav>
+        <div className="fox-local-kb-document-reader-meta" title={`${formatBytes(document.sizeBytes)} · ${formatDate(document.updatedAt)} 更新 · ${documentStatusLabel(document.status)}`}><LocalFileTypeIcon extension={document.extension} /><span>{formatBytes(document.sizeBytes)} · {formatDate(document.updatedAt)} 更新</span>{document.status !== 'indexed' && <span className="fox-kb-reader-state"><i className={cn('fox-status-dot', document.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{documentStatusLabel(document.status)}</span>}</div>
         <div className="fox-kb-reader-actions">
           <Button variant="ghost" size="icon" aria-label="问问这份资料" title="问问这份资料" disabled={!onAskDocument} onClick={() => onAskDocument?.({ knowledgeBaseId, knowledgeBaseName: knowledgeBaseName ?? knowledgeBaseId, documentId: document.id, documentName: document.name, relativePath: document.relativePath, mimeType: document.mimeType, sizeBytes: document.sizeBytes })}><MessageCircle /></Button>
           <Button variant="ghost" size="icon" aria-label="系统打开" title="系统打开" onClick={() => void openWithSystem()}><ExternalLink /></Button>
@@ -1211,7 +1212,6 @@ function LocalKnowledgeDocumentReader({ knowledgeBaseId, knowledgeBaseName, docu
           {readerMenu}
         </div>
       </div>
-      <div className="fox-local-kb-document-reader-meta"><LocalFileTypeIcon extension={document.extension} /><span>{formatBytes(document.sizeBytes)} · {formatDate(document.updatedAt)} 更新</span>{document.status !== 'indexed' && <span className="fox-kb-reader-state"><i className={cn('fox-status-dot', document.status === 'error' ? 'is-error' : 'is-empty')} aria-hidden="true" />{documentStatusLabel(document.status)}</span>}</div>
       <div className="fox-local-kb-document-reader-body">
         {loading && <div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在准备预览</b></div>}
         {!loading && !error && !unsupported && <Suspense fallback={<div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在加载查看器</b></div>}>{preview}</Suspense>}

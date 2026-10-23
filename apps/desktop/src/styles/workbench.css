@@ -1213,14 +1213,23 @@
   box-shadow: none;
 }
 
-.fox-shell .fox-sidebar-command span,
-.fox-shell .fox-project-row strong {
+.fox-shell .fox-sidebar-command span {
   min-width: 0;
   flex: 1;
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;
   white-space: normal;
+  font-size: inherit !important;
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-shell .fox-project-row strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: inherit !important;
   font-weight: var(--fox-weight-medium);
 }

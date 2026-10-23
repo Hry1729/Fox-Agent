@@ -322,7 +322,7 @@ export function Sidebar({
                         conversation being active must not light up its project
                         as well, or the sidebar shows two selections at once. */}
                     <SidebarMotionItem><div className="fox-project-row">
-                      <button type="button" className="fox-project-row-main" title={project.root} aria-expanded={open} onClick={() => setProjectOpen((current) => ({ ...current, [project.key]: !open }))}>
+                      <button type="button" className="fox-project-row-main" title={`${project.name}\n${project.root}`} aria-expanded={open} onClick={() => setProjectOpen((current) => ({ ...current, [project.key]: !open }))}>
                         {open ? <FolderOpen size={15} /> : <Folder size={15} />}
                         <strong>{project.name}</strong>
                         {project.pinned && <Pin size={11} aria-label="已置顶项目" />}
