@@ -174,8 +174,8 @@ fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, stor
             session_key: format!("k-{run}"),
             full_access_granted: false,
             unified_login: None,
+            native_permission: None,
         },
-        execution: fox_agent_backend::projection::ExecutionMode::Ask,
     }
 }
 
@@ -231,7 +231,10 @@ async fn reject_writes_the_native_reject_option() {
     if !node_available() {
         return;
     }
-    let (runtime, sink) = new_runtime(MockLauncher::default());
+    // Sandboxed pi in 询问 (its default): the card. (Full access would be 自动.)
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher);
     runtime.start_turn(turn("c2", "r2", "hello", AgentBackend::Pi, None)).unwrap();
     let (_, approval, _) = sink.wait_approval(1).await;
     assert_eq!(runtime.answer(&approval, false), AnswerOutcome::Written);
@@ -406,13 +409,18 @@ async fn deepseek_permission_requests_are_rejected_by_the_host_never_shown() {
     if !node_available() {
         return;
     }
-    let (runtime, sink) = new_runtime(MockLauncher::default());
+    // Sandboxed: the default preset (approval never). In full access dsh's
+    // danger-full-access would show the card instead.
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher);
     runtime.start_turn(turn("c9", "r12", "hello", AgentBackend::Deepseek, None)).unwrap();
     let terminal = sink.terminal("r12").await;
-    assert!(sink.approvals().is_empty(), "no approval card for DeepSeek");
-    assert!(sink.types("r12").iter().any(|kind| kind == "agent_backend.permission_auto_rejected"));
-    // The mock offers no `reject-once`, so the Host answered `cancelled`.
-    assert_eq!(terminal["type"], "run.cancelled");
+    assert!(sink.approvals().is_empty(), "no approval card for DeepSeek in its default preset (approval never)");
+    assert!(sink.types("r12").iter().any(|kind| kind == "agent_backend.permission_auto_answered"));
+    // Fail-closed: the native one-shot reject option was written.
+    assert!(sink.text("r12").ends_with("permission:reject"));
+    assert_eq!(terminal["type"], "run.completed");
     runtime.shutdown().await;
 }
 
@@ -444,7 +452,10 @@ async fn an_unanswered_permission_waits_without_a_deadline_until_the_turn_is_can
     if !node_available() {
         return;
     }
-    let (runtime, sink) = new_runtime(MockLauncher::default());
+    // Sandboxed pi in 询问 (its default): the card. (Full access would be 自动.)
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher);
     runtime.start_turn(turn("c20", "r20", "hello", AgentBackend::Pi, None)).unwrap();
     let (_, approval, _) = sink.wait_approval(1).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -618,45 +629,121 @@ async fn a_failed_prompt_or_exit_persists_the_redacted_stderr_tail() {
     runtime.shutdown().await;
 }
 
-/// Settings batch, item 7: Fox's execution mode applies to the backend's
-/// `session/request_permission`. 自动 writes the native `allow_once` itself
-/// (no card) and records it; 只读 rejects the mock's `execute` request (no
-/// card); 询问 is covered by the tests above (card).
+/// Per-agent native permission list: the Host answers a permission request
+/// itself only as pi's Fox gate (自动 writes the native `allow_once`, 只读
+/// rejects the mock's `execute`), or fail-closed for a dsh preset whose
+/// approval is `never` (rejected, no card). Codex / dsh are never
+/// auto-allowed; 询问-type modes are covered by the tests above (card).
 #[tokio::test(flavor = "multi_thread")]
-async fn execution_mode_allow_and_read_only_answer_without_a_card_and_are_audited() {
+async fn native_modes_answer_without_a_card_only_where_the_mode_says_so_and_are_audited() {
     if !node_available() {
         return;
     }
-    use fox_agent_backend::projection::ExecutionMode;
-    let (runtime, sink) = new_runtime(MockLauncher::default());
-    let mut allow = turn("c-exec-allow", "r-exec-allow", "hello", AgentBackend::Codex, None);
-    allow.execution = ExecutionMode::Allow;
+    // Sandboxed sessions: the stored choice is the mode (full access would
+    // override it with the Agent's full-access option).
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher);
+    let mut allow = turn("c-exec-allow", "r-exec-allow", "hello", AgentBackend::Pi, None);
+    allow.launch.native_permission = Some("allow".into());
     runtime.start_turn(allow).unwrap();
     let terminal = sink.terminal("r-exec-allow").await;
     assert_eq!(terminal["type"], "run.completed");
     assert!(sink.approvals().is_empty(), "自动: no approval card");
     assert_eq!(sink.text("r-exec-allow"), "Running tests permission:allow", "allow_once was written, not allow_always");
     let answered = sink.events("r-exec-allow").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("recorded");
-    assert_eq!(answered["executionMode"], "allow");
+    assert_eq!(answered["permissionMode"], "allow");
     assert_eq!(answered["decision"], "allow_once");
     assert_eq!(answered["toolKind"], "execute");
     assert_eq!(answered["nativeAnswer"], "response_written");
 
     let mut read_only = turn("c-exec-ro", "r-exec-ro", "hello", AgentBackend::Pi, None);
-    read_only.execution = ExecutionMode::ReadOnly;
+    read_only.launch.native_permission = Some("read_only".into());
     runtime.start_turn(read_only).unwrap();
     let terminal = sink.terminal("r-exec-ro").await;
     assert_eq!(terminal["type"], "run.completed");
     assert!(sink.approvals().is_empty(), "只读: no approval card");
     assert!(sink.text("r-exec-ro").ends_with("permission:reject"), "the execute request was rejected");
     let answered = sink.events("r-exec-ro").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("recorded");
-    assert_eq!(answered["executionMode"], "read_only");
+    assert_eq!(answered["permissionMode"], "read_only");
+    assert_eq!(answered["decision"], "reject");
+
+    let mut never = turn("c-exec-dsh", "r-exec-dsh", "hello", AgentBackend::Deepseek, None);
+    never.launch.native_permission = Some("workspace-write-never".into());
+    runtime.start_turn(never).unwrap();
+    let terminal = sink.terminal("r-exec-dsh").await;
+    assert_eq!(terminal["type"], "run.completed");
+    assert!(sink.approvals().is_empty(), "approval never: fail-closed reject, no card");
+    assert!(sink.text("r-exec-dsh").ends_with("permission:reject"));
+    let answered = sink.events("r-exec-dsh").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("recorded");
+    assert_eq!(answered["permissionMode"], "workspace-write-never");
     assert_eq!(answered["decision"], "reject");
 
     let audits = sink.0.lock().unwrap().audits.clone();
-    assert_eq!(audits.len(), 2);
+    assert_eq!(audits.len(), 3);
     assert!(audits.iter().all(|(_, event, details)| event == "agent_backend.permission_auto_answered" && details.get("input").is_none()), "names and kinds only, no tool input");
     assert_eq!(audits[0].0, "c-exec-allow");
     assert_eq!(audits[1].0, "c-exec-ro");
+    assert_eq!(audits[2].0, "c-exec-dsh");
+    runtime.shutdown().await;
+}
+
+/// Per-agent permission list: a Codex mode change reaches the live session
+/// at once (`session/set_mode`), a dsh preset change restarts dsh at the
+/// next turn, and the turn's later permission requests use the new mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_mode_changes_switch_codex_live_and_restart_dsh_next_turn() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher.clone());
+    runtime.start_turn(turn("c-mode", "r-mode-1", "simple", AgentBackend::Codex, None)).unwrap();
+    sink.terminal("r-mode-1").await;
+    assert_eq!(runtime.apply_native_mode("c-mode", "agent").await, fox_agent_backend::external::NativeModeOutcome::Applied);
+    let mut next = turn("c-mode", "r-mode-2", "simple", AgentBackend::Codex, None);
+    next.launch.native_permission = Some("agent".into());
+    runtime.start_turn(next).unwrap();
+    sink.terminal("r-mode-2").await;
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 1, "Codex: no restart for a mode change");
+    let audits = sink.0.lock().unwrap().audits.clone();
+    assert!(audits.iter().any(|(conversation, event, details)| conversation == "c-mode" && event == "agent_backend.permission_mode_switched" && details["to"] == "agent"));
+
+    runtime.start_turn(turn("c-dsh-mode", "r-dsh-1", "simple", AgentBackend::Deepseek, None)).unwrap();
+    sink.terminal("r-dsh-1").await;
+    assert_eq!(runtime.apply_native_mode("c-dsh-mode", "read-only").await, fox_agent_backend::external::NativeModeOutcome::NextTurn);
+    let mut next = turn("c-dsh-mode", "r-dsh-2", "simple", AgentBackend::Deepseek, None);
+    next.launch.native_permission = Some("read-only".into());
+    runtime.start_turn(next).unwrap();
+    sink.terminal("r-dsh-2").await;
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 3, "dsh restarted for the new preset");
+    assert!(sink.types("r-dsh-2").iter().any(|kind| kind == "agent_backend.permission_mode_restart"));
+    runtime.shutdown().await;
+}
+
+/// Codex "Reconnecting... waiting for network" inside the sandbox ends the
+/// turn at once with the blocked host in the diagnostic; the model-metadata
+/// warning never reaches the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_reconnecting_in_the_sandbox_fails_fast_with_the_host() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher);
+    let started = std::time::Instant::now();
+    runtime.start_turn(turn("c-net", "r-net", "reconnect", AgentBackend::Codex, None)).unwrap();
+    let terminal = sink.terminal("r-net").await;
+    assert!(started.elapsed() < Duration::from_secs(8), "no minutes of spinning");
+    assert_eq!(terminal["type"], "run.failed");
+    assert_eq!(terminal["code"], "agent_backend_network_blocked");
+    assert_eq!(terminal["diagnostic"]["kind"], "sandbox_network_blocked");
+    assert!(terminal["diagnostic"]["text"].as_str().unwrap().contains("Reconnecting"));
+    assert!(sink.text("r-net").is_empty(), "neither warning is part of the answer: {:?}", sink.text("r-net"));
+    let kinds: Vec<String> = sink.events("r-net").iter().filter(|event| event["type"] == "agent_backend.diagnostic").map(|event| event["kind"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(kinds, ["model_metadata_missing", "network_reconnecting"]);
+    assert_eq!(terminal["backendNotices"].as_array().unwrap().len(), 2);
     runtime.shutdown().await;
 }
