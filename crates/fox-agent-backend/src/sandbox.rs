@@ -314,6 +314,22 @@ pub fn resolve_allowed_domains(
     policy: &HostPolicy,
     layers: &[&BTreeMap<String, String>],
 ) -> DomainResolution {
+    resolve_allowed_domains_with_login(backend, pi_providers, policy, layers, None)
+}
+
+/// [`resolve_allowed_domains`] for a session whose backend reads the
+/// Fox-managed unified login (`login_host` = the host of its base URL): the
+/// backend's built-in model hosts ([`default_allowed_domains`]: OpenAI for
+/// Codex, `api.deepseek.com` for dsh) are replaced by exactly that host, no
+/// wildcard, for all three backends alike; pi's Host-configured providers
+/// stay. A malformed host adds nothing (recorded in `rejected`).
+pub fn resolve_allowed_domains_with_login(
+    backend: AgentBackend,
+    pi_providers: &[&str],
+    policy: &HostPolicy,
+    layers: &[&BTreeMap<String, String>],
+    login_host: Option<&str>,
+) -> DomainResolution {
     let mut resolution = DomainResolution::default();
     if backend == AgentBackend::Pi {
         resolution.unknown_providers = pi_providers
@@ -322,7 +338,20 @@ pub fn resolve_allowed_domains(
             .map(|provider| (*provider).to_owned())
             .collect();
     }
-    let mut current: Vec<String> = default_allowed_domains(backend, pi_providers);
+    let mut current: Vec<String> = match login_host.map(str::trim).filter(|host| !host.is_empty()) {
+        Some(host) if valid_domain(host) && !host.starts_with("*.") => {
+            let mut domains = if backend == AgentBackend::Pi { default_allowed_domains(backend, pi_providers) } else { Vec::new() };
+            if !domains.iter().any(|domain| domain.eq_ignore_ascii_case(host)) {
+                domains.push(host.to_ascii_lowercase());
+            }
+            domains
+        }
+        Some(host) => {
+            resolution.rejected.push(format!("unified login: malformed model host {host:?}"));
+            default_allowed_domains(backend, pi_providers)
+        }
+        None => default_allowed_domains(backend, pi_providers),
+    };
     if let Some(extra) = policy.sandbox_extra_domains.get(&backend) {
         for entry in extra {
             if valid_domain(entry) {
@@ -3658,6 +3687,23 @@ mod tests {
         // Host locked key narrows too, and an empty value means no network.
         policy.locked_keys.insert(SETTING_ALLOWED_DOMAINS.into(), String::new());
         assert!(resolve_allowed_domains(AgentBackend::Codex, &[], &policy, &[]).domains.is_empty());
+    }
+
+    #[test]
+    fn unified_login_host_replaces_built_in_model_hosts() {
+        let policy = HostPolicy::default();
+        for backend in [AgentBackend::Codex, AgentBackend::Deepseek] {
+            let resolved = resolve_allowed_domains_with_login(backend, &[], &policy, &[], Some("api.example-llm.com"));
+            assert_eq!(resolved.domains, ["api.example-llm.com"], "{backend:?}: exactly the one host, no OpenAI / DeepSeek defaults");
+        }
+        let resolved = resolve_allowed_domains_with_login(AgentBackend::Pi, &["anthropic"], &policy, &[], Some("API.Example-LLM.com"));
+        assert_eq!(resolved.domains, ["api.anthropic.com", "api.example-llm.com"]);
+        // No wildcard is ever produced from a login host.
+        let resolved = resolve_allowed_domains_with_login(AgentBackend::Codex, &[], &policy, &[], Some("*.example.com"));
+        assert_eq!(resolved.domains, ["api.openai.com", "auth.openai.com", "chatgpt.com"]);
+        assert_eq!(resolved.rejected.len(), 1);
+        // The user's own login: unchanged defaults.
+        assert_eq!(resolve_allowed_domains_with_login(AgentBackend::Codex, &[], &policy, &[], None).domains, ["api.openai.com", "auth.openai.com", "chatgpt.com"]);
     }
 
     struct FakeProbe {
