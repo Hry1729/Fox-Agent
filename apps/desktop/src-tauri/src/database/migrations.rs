@@ -7291,6 +7291,7 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // backup (migration_backup.rs) runs before this like for every version
     // bump. SQL owned by `fox_agent_backend::host_routing`.
     apply_migration(&transaction, FULL_ACCESS_SCHEMA_VERSION, MIGRATION_96, now)?;
+    apply_migration(&transaction, 97, "ALTER TABLE model_providers ADD COLUMN protocol_profiles TEXT NOT NULL DEFAULT '[]';", now)?;
     finish_transaction(transaction)
 }
 

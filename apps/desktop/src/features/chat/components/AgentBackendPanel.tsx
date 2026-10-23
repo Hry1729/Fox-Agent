@@ -54,7 +54,7 @@ interface Keyed<T> {
  * current one. An empty key means "nothing to load".
  */
 export function useKeyedResource<T>(key: string, tick: number, fetch: (key: string) => Promise<T>): T | null {
-  const [state, setState] = useState<Keyed<T> | null>(null)
+  const [state, setState] = useState<(Keyed<T> & { tick: number }) | null>(null)
   const sequence = useRef(0)
   const fetchRef = useRef(fetch)
   fetchRef.current = fetch
@@ -68,10 +68,10 @@ export function useKeyedResource<T>(key: string, tick: number, fetch: (key: stri
     // same target keeps the current value until the new one arrives).
     setState((current) => (current && current.key === key ? current : null))
     fetchRef.current(key)
-      .then((value) => { if (request === sequence.current) setState({ key, value }) })
+      .then((value) => { if (request === sequence.current) setState({ key, tick, value }) })
       .catch(() => { if (request === sequence.current) setState(null) })
   }, [key, tick])
-  return state && state.key === key ? state.value : null
+  return state && state.key === key && state.tick === tick ? state.value : null
 }
 
 export function AgentBackendPanel({
@@ -105,6 +105,12 @@ export function AgentBackendPanel({
   const capabilityConversationId = lockedBackend ? conversationId : null
   const [eventTick, setEventTick] = useState(0)
   const [onboardingTick, setOnboardingTick] = useState(0)
+  useEffect(() => {
+    const refresh = () => setOnboardingTick(tick => tick + 1)
+    window.addEventListener('fox:model-service-changed', refresh)
+    return () => window.removeEventListener('fox:model-service-changed', refresh)
+  }, [])
+
 
   // Refresh the chips as soon as the backend's handshake settles.
   useEffect(() => {

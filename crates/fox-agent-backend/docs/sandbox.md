@@ -1159,3 +1159,30 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 4. **三种执行方式**：在 pi 会话里让它写一个文件，项目执行方式分别设为「只读」（不弹卡、写入被拒）、「自动」（不弹卡、写入成功，仍在沙箱内）、「询问」（弹审批卡）。
 5. **回执关闭**：在缺登录卡片里导入成功，回执只在后端栏出现一份；点「知道了」后整条消失，不点则约 30 秒后消失。
 6. **草稿里改设置后重新探测**：开一个新会话草稿并选好项目，在设置里依次切 DeepSeek → pi → Fox → Codex，每次回到草稿：卡片和能力 chip 都是当前后端的，切换瞬间没有上一个后端的内容；切到 Fox 后后端栏消失。
+
+
+### 13.17 同一供应商的多协议配置（2026-10-23）
+
+本节替代 13.16 中“所有外部后端读取同一个 apiType”以及按空请求 HTTP 状态判断 Codex 可用的规则。13.16 的权限、回执、项目私有 HOME 规则继续有效。
+
+- 模型服务保留现有 Fox 连接和模型；供应商内部可添加外部 Agent 协议配置，每份有独立地址、模型 ID 和 Agent 指定项。
+- Chat Completions 适用于 Fox / pi；Anthropic Messages 适用于 Fox / pi / DeepSeek；Responses 适用于 pi / Codex。这里表示当前适配器的协议匹配范围，不承诺供应商、模型、流式响应、工具调用全部可用。
+- 外部协议配置默认复用供应商 Key，也可使用独立 Key。独立 Key 按供应商 ID 和协议配置 ID 保存在系统凭证库；SQLite 不保存 Key。切回共享 Key 或删除配置后清理对应独立凭据。
+- 同一供应商对一个外部 Agent 只能指定一份协议。跨供应商时优先采用默认供应商的指定项；无默认指定时只接受唯一候选，存在多个候选时不猜选。未指定配置时，pi / DeepSeek 可沿用协议匹配的 Fox 默认连接；Codex 必须显式配置 Responses。
+- 原来按 api.deepseek.com 自动切到 Anthropic 地址的特例已删除。需要在界面显式填写 Anthropic 协议地址。
+- 独立协议验证只显示该配置的结果，不更新 Fox 主连接状态。修改地址、模型、协议或凭据后，旧结果失效。关闭编辑器后不保留验证结果。
+- Responses 验证会发送小型模型请求，只有成功响应、`object=response`、`status=completed` 且有输出才通过。401 / 400 / 422 不算成功。此检查仍不能替代真实 Agent 多轮和工具测试。
+- 供应商保存后，打开的草稿会重新探测登录。设置页不再自动发送空 Responses 请求，不再用该探测禁用 Codex；用户已有的项目私有登录继续优先。
+- SQLite v97 增加 `model_providers.protocol_profiles` JSON 列，旧记录默认空数组，原连接和模型保留。旧版程序不应使用升级后的测试数据目录；继续沿用启动前备份机制。
+
+新版本人工验证（在独立数据目录执行，不混用 3fd2e37 的验收结果）：
+
+1. 供应商配置 Anthropic 主连接，再添加 Responses 配置并指定 Codex；检查协议选项中的 Agent 范围。
+2. 新建三个外部会话，分别确认 pi / DeepSeek 沿用 Anthropic，Codex 使用指定 Responses 地址与模型；每个执行真实流式对话、一次工具调用和多轮续接。
+3. 给同一供应商再加第二份相同协议，将同一 Agent 改绑；检查只保留一个指定项、Fox 原生模型不变。
+4. 验证共享 Key、独立 Key、Key 轮换、切回共享 Key和删除配置。日志、返回数据、SQLite 和 Codex TOML 中不得出现 Key。
+5. 保存后重新打开编辑器，确认配置持久化；从 v96 数据副本启动，确认原供应商、模型、默认值保留。
+6. 修改协议配置后返回草稿，检查新探测结果；已有会话的 Agent 类型不变。
+7. 在新版本上重做 13.16 的执行方式、完全访问撤销、回执唯一性与自动消失测试。
+
+自动化入口：`provider_protocol`、`unified_login`（fox-agent-backend）；`provider_protocol_profiles_survive_save_and_v96_upgrade`、`responses_probe_requires_completed_output_and_rejects_http_errors`（fox-desktop）；`node apps/desktop/scripts/provider-protocol-browser-check.mjs`（独立浏览器，使用模拟连接响应）。

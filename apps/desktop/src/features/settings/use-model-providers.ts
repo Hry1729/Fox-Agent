@@ -3,6 +3,8 @@ import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations
 import type { ModelProviderRecord } from '@/features/conversations/model/types'
 
 export type SaveModelProviderInput = {
+  protocolProfiles?: import('@/features/conversations/model/types').ProtocolProfile[]
+  protocolKeys?: Record<string, string>
   id?: string
   name: string
   icon?: string | null

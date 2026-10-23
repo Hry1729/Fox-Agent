@@ -2645,6 +2645,8 @@ pub struct SaveModelServiceRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestModelServiceRequest {
+    pub credential_provider_id: Option<String>,
+    pub credential_profile_id: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub api_type: Option<String>,
@@ -2677,6 +2679,7 @@ pub struct ProviderModelRecord {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelProviderRecord {
+    pub protocol_profiles: Vec<fox_agent_backend::provider_protocol::ProtocolProfile>,
     pub id: String,
     pub name: String,
     pub icon: Option<String>,
@@ -2711,6 +2714,9 @@ pub struct SaveProviderModelRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveModelProviderRequest {
+    pub protocol_profiles: Option<Vec<fox_agent_backend::provider_protocol::ProtocolProfile>>,
+    #[serde(default)]
+    pub protocol_keys: std::collections::HashMap<String, String>,
     pub id: Option<String>,
     pub name: String,
     pub icon: Option<String>,

@@ -72,6 +72,13 @@ impl ModelServiceClient {
                 }
                 request.send().await
             }
+            "openai-responses" => {
+                if requested_model_id.is_empty() { return Err("Responses 连接测试需要模型 ID".into()); }
+                let mut request = self.http.post(format!("{normalized}/responses"))
+                    .json(&serde_json::json!({"model": requested_model_id, "input": "Reply OK", "max_output_tokens": 32, "store": false}));
+                if let Some(key) = api_key.filter(|v| !v.trim().is_empty()) { request = request.bearer_auth(key); }
+                request.send().await
+            }
             "anthropic-messages" => {
                 let model_id = requested_model_id.as_str();
                 if model_id.is_empty() {
@@ -104,7 +111,15 @@ impl ModelServiceClient {
         if !status.is_success() {
             return Err(format!("模型服务返回 HTTP {status}"));
         }
-        let models = if api_type == "anthropic-messages" {
+        let models = if api_type == "openai-responses" {
+            let value: serde_json::Value = response.json().await.map_err(|_| "响应不是有效的 Responses JSON".to_owned())?;
+            if value.get("object").and_then(|v| v.as_str()) != Some("response")
+                || value.get("status").and_then(|v| v.as_str()) != Some("completed")
+                || !value.get("output").is_some_and(|v| v.is_array() && !v.as_array().unwrap().is_empty()) {
+                return Err("Responses 请求未返回完成的模型输出".into());
+            }
+            vec![requested_model_id.clone()]
+        } else if api_type == "anthropic-messages" {
             let returned_model = response
                 .json::<AnthropicProbeResponse>()
                 .await
@@ -452,4 +467,68 @@ mod tests {
         assert_eq!(result.models, vec!["MiniMax-M3"]);
         server.join().expect("join server");
     }
+
+    #[test]
+    fn responses_probe_requires_completed_output_and_rejects_http_errors() {
+        for (status, body, success) in [
+            ("200 OK", r#"{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}"#, true),
+            ("200 OK", r#"{"object":"response","status":"failed","output":[]}"#, false),
+            ("200 OK", r#"{"data":[{"id":"test-model"}]}"#, false),
+            ("422 Unprocessable Entity", r#"{"error":"unsupported"}"#, false),
+            ("401 Unauthorized", r#"{"error":"auth"}"#, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&chunk[..n]);
+                    let request = String::from_utf8_lossy(&bytes);
+                    if let Some((headers, content)) = request.split_once("\r\n\r\n") {
+                        let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_owned)).unwrap().trim().parse().unwrap();
+                        if content.len() >= length { break; }
+                    }
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                assert!(request.starts_with("POST /v1/responses HTTP/1.1"));
+                assert!(request.to_ascii_lowercase().contains("authorization: bearer test-key"));
+                assert!(request.contains("\"model\":\"test-model\""));
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let result = tauri::async_runtime::block_on(ModelServiceClient::new().unwrap().test(&format!("http://{address}/v1"), Some("test-key"), "openai-responses", "test-model"));
+            assert_eq!(result.is_ok(), success, "{status}: {result:?}");
+            server.join().unwrap();
+        }
+    }
+}
+
+/// Resolve explicit protocol assignments before the legacy Fox default.
+/// Multiple non-default providers claiming the same agent are ambiguous.
+pub(crate) fn external_login(database: &crate::database::Database, backend: fox_agent_backend::port::AgentBackend) -> Option<fox_agent_backend::unified_login::UnifiedLogin> {
+    use fox_agent_backend::{provider_protocol, unified_login::{Secret, UnifiedLogin}};
+    let providers = database.list_model_providers().ok()?;
+    let candidates: Vec<_> = providers.iter().filter(|p| p.enabled).flat_map(|provider| {
+        provider.protocol_profiles.iter().filter(move |profile| profile.backends.iter().any(|b| b == backend.as_str()) && provider_protocol::supports(&profile.api_type, backend.as_str())).map(move |profile| (provider, profile))
+    }).collect();
+    let options: Vec<_> = candidates.iter().map(|(p, profile)| (p.is_default, *profile)).collect();
+    let selected = provider_protocol::select_protocol(backend.as_str(), &options).ok()?.map(|index| candidates[index]);
+    if let Some((provider, profile)) = selected {
+        let credential = if profile.separate_credential { provider_protocol::credential_id(&provider.id, &profile.id) } else { provider.base_url.clone() };
+        return Some(UnifiedLogin {
+            provider_name: provider.name.clone(), base_url: profile.base_url.clone(), api_type: profile.api_type.clone(), model: profile.model_id.clone(),
+            api_key: Secret::new(get_api_key(&credential)?), responses_supported: None,
+        });
+    }
+    if !candidates.is_empty() { return None; }
+    let service = database.get_model_service().ok().flatten()?;
+    if !service.enabled || service.model_id.trim().is_empty() || !provider_protocol::supports(&service.api_type, backend.as_str()) { return None; }
+    Some(UnifiedLogin {
+        provider_name: service.name, base_url: service.base_url.clone(), api_type: service.api_type, model: service.model_id,
+        api_key: Secret::new(get_api_key(&service.base_url)?), responses_supported: None,
+    })
 }

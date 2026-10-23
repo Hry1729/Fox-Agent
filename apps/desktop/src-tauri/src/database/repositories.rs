@@ -6322,7 +6322,7 @@ impl Database {
         self.with_connection(|connection| {
             let mut provider_statement = connection.prepare(
                 "SELECT id, name, icon, base_url, api_type, enabled, is_default, last_status,
-                        last_latency_ms, last_checked_at, created_at, updated_at
+                        last_latency_ms, last_checked_at, created_at, updated_at, protocol_profiles
                  FROM model_providers ORDER BY is_default DESC, created_at ASC",
             )?;
             let providers = provider_statement
@@ -6349,6 +6349,7 @@ impl Database {
                         })?
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(ModelProviderRecord {
+                        protocol_profiles: serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error)))?,
                         id,
                         name: row.get(1)?,
                         icon: row.get(2)?,
@@ -6395,6 +6396,7 @@ impl Database {
                     updated_at = excluded.updated_at",
                 params![provider.id, provider.name, provider.icon, provider.base_url, provider.api_type, provider.is_default as i64, now],
             )?;
+            transaction.execute("UPDATE model_providers SET protocol_profiles = ?1 WHERE id = ?2", params![serde_json::to_string(&provider.protocol_profiles).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?, provider.id])?;
             transaction.execute("DELETE FROM provider_models WHERE provider_id = ?1", [&provider.id])?;
             for model in &provider.models {
                 transaction.execute(
@@ -9322,6 +9324,36 @@ fn connection_type(base_url: &str) -> String {
 mod tests {
     use super::*;
     use crate::database::{GoalStatus, HostToolCallDisposition};
+
+    #[test]
+    fn provider_protocol_profiles_survive_save_and_v96_upgrade() {
+        use fox_agent_backend::provider_protocol::ProtocolProfile;
+        let (database, path) = test_database();
+        let provider = ModelProviderRecord {
+            id: "protocol-test".into(), name: "Protocol test".into(), icon: None,
+            base_url: "https://example.com/v1".into(), api_type: "openai-completions".into(),
+            enabled: true, is_default: true, credential_configured: false, connection_type: "remote".into(),
+            last_status: "unknown".into(), last_latency_ms: None, last_checked_at: None, created_at: 0, updated_at: 0,
+            models: vec![ProviderModelRecord { id: "model-test".into(), model_id: "native-model".into(), display_name: "Native".into(), context_window: 128000, max_output_tokens: 8192, supports_image_input: false, is_default: true }],
+            protocol_profiles: vec![ProtocolProfile { id: "responses".into(), api_type: "openai-responses".into(), base_url: "https://example.com/responses-api/v1".into(), model_id: "codex-model".into(), separate_credential: true, backends: vec!["codex".into()], credential_configured: false }],
+        };
+        let saved = database.save_model_provider(&provider).unwrap();
+        assert_eq!(saved.protocol_profiles, provider.protocol_profiles);
+        assert_eq!(saved.models[0].model_id, "native-model");
+        drop(database);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("ALTER TABLE model_providers DROP COLUMN protocol_profiles; DELETE FROM schema_migrations WHERE version = 97;").unwrap();
+        drop(connection);
+        let reopened = Database::open(path.clone()).unwrap();
+        let providers = reopened.list_model_providers().unwrap();
+        let migrated = providers.iter().find(|p| p.id == provider.id).unwrap();
+        assert!(migrated.protocol_profiles.is_empty());
+        assert_eq!(migrated.models[0].model_id, "native-model");
+        assert_eq!(migrated.api_type, "openai-completions");
+        assert_eq!(reopened.schema_version().unwrap(), 97);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
 
     fn test_database() -> (Database, PathBuf) {
         let path = std::env::temp_dir().join(format!("fox-test-{}.db", Uuid::new_v4()));

@@ -1006,10 +1006,10 @@ export const desktopClient = {
   getModelService: () => command<ModelServiceRecord | null>('model_service_get'),
   saveModelService: (request: { name: string; baseUrl: string; modelId: string; apiType: 'openai-completions' | 'anthropic-messages'; contextWindow: number; maxOutputTokens: number; supportsImageInput: boolean; apiKey?: string; clearApiKey?: boolean }) =>
     command<ModelServiceRecord>('model_service_save', request),
-  testModelService: (baseUrl?: string, apiKey?: string, apiType?: 'openai-completions' | 'anthropic-messages', modelId?: string) =>
-    command<ModelConnectionTest>('model_service_test', { baseUrl, apiKey, apiType, modelId }),
+  testModelService: (baseUrl?: string, apiKey?: string, apiType?: 'openai-completions' | 'anthropic-messages' | 'openai-responses', modelId?: string, credentialProviderId?: string, credentialProfileId?: string) =>
+    command<ModelConnectionTest>('model_service_test', { baseUrl, apiKey, apiType, modelId, credentialProviderId, credentialProfileId }),
   listModelProviders: () => command<ModelProviderRecord[]>('model_providers_list'),
-  saveModelProvider: (request: { id?: string; name: string; icon?: string | null; baseUrl: string; apiType: 'openai-completions' | 'anthropic-messages'; isDefault: boolean; models: Array<{ id?: string; modelId: string; displayName: string; contextWindow: number; maxOutputTokens: number; supportsImageInput: boolean; isDefault: boolean }>; apiKey?: string; clearApiKey?: boolean }) =>
+  saveModelProvider: (request: { protocolProfiles?: import('../model/types').ProtocolProfile[]; protocolKeys?: Record<string, string>; id?: string; name: string; icon?: string | null; baseUrl: string; apiType: 'openai-completions' | 'anthropic-messages'; isDefault: boolean; models: Array<{ id?: string; modelId: string; displayName: string; contextWindow: number; maxOutputTokens: number; supportsImageInput: boolean; isDefault: boolean }>; apiKey?: string; clearApiKey?: boolean }) =>
     command<ModelProviderRecord>('model_provider_save', request),
   deleteModelProvider: (providerId: string) => command<boolean>('model_provider_delete', { providerId }),
   listenRuntimeEvents: (handler: (event: RuntimeEventNotification) => void): Promise<UnlistenFn> =>

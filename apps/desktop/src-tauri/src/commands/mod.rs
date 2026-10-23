@@ -5730,6 +5730,11 @@ pub fn model_providers_list(state: State<'_, AppState>) -> ApiResponse<Vec<Model
                 .into_iter()
                 .map(|mut provider| {
                     provider.credential_configured = api_key_configured(&provider.base_url);
+                    for profile in &mut provider.protocol_profiles {
+                        profile.credential_configured = if profile.separate_credential {
+                            api_key_configured(&fox_agent_backend::provider_protocol::credential_id(&provider.id, &profile.id))
+                        } else { provider.credential_configured };
+                    }
                     provider
                 })
                 .collect(),
@@ -5789,6 +5794,28 @@ pub fn model_provider_save(
         return ApiResponse::failure("model.invalid_provider_icon", "不支持此供应商图标", false);
     }
     let provider_id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let old_profiles = match state.database.list_model_providers() {
+        Ok(providers) => providers.into_iter().find(|p| p.id == provider_id).map(|p| p.protocol_profiles).unwrap_or_default(),
+        Err(error) => return storage_error(error),
+    };
+    let mut protocol_profiles = match request.protocol_profiles {
+        Some(profiles) => profiles,
+        None => old_profiles.clone(),
+    };
+    for profile in &mut protocol_profiles {
+        profile.base_url = match normalize_model_base_url(&profile.base_url) {
+            Ok(url) => url,
+            Err(error) => return ApiResponse::failure("model.invalid_url", error, false),
+        };
+        profile.model_id = normalize_model_id(&profile.base_url, &profile.model_id);
+        profile.credential_configured = false;
+    }
+    if let Err(error) = fox_agent_backend::provider_protocol::validate(&protocol_profiles) {
+        return ApiResponse::failure("model.invalid_protocol", error, false);
+    }
+    if request.protocol_keys.keys().any(|id| !protocol_profiles.iter().any(|p| &p.id == id && p.separate_credential)) {
+        return ApiResponse::failure("model.invalid_protocol", "凭据必须属于当前独立凭据协议配置", false);
+    }
     let mut models = Vec::new();
     for (index, model) in request.models.into_iter().enumerate() {
         let model_id = normalize_model_id(&base_url, &model.model_id);
@@ -5835,7 +5862,13 @@ pub fn model_provider_save(
             return ApiResponse::failure("model.credential_save_failed", error, true);
         }
     }
+    for (profile_id, key) in &request.protocol_keys {
+        let credential = fox_agent_backend::provider_protocol::credential_id(&provider_id, profile_id);
+        let result = if key.is_empty() { clear_api_key(&credential) } else { set_api_key(&credential, key.trim()) };
+        if let Err(error) = result { return ApiResponse::failure("model.credential_save_failed", error, true); }
+    }
     let provider = ModelProviderRecord {
+        protocol_profiles,
         id: provider_id,
         name: name.to_owned(),
         icon,
@@ -5856,6 +5889,13 @@ pub fn model_provider_save(
         Ok(saved) => saved,
         Err(error) => return storage_error(error),
     };
+    for old in &old_profiles {
+        if old.separate_credential && !saved.protocol_profiles.iter().any(|p| p.id == old.id && p.separate_credential) {
+            if let Err(error) = clear_api_key(&fox_agent_backend::provider_protocol::credential_id(&saved.id, &old.id)) {
+                return ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但旧协议凭据清理失败：{error}"), true);
+            }
+        }
+    }
     if saved.is_default {
         if let Some(model) = saved
             .models
@@ -5916,6 +5956,13 @@ pub fn model_provider_delete(
             "请先将其他供应商设为默认，再删除当前供应商",
             false,
         );
+    }
+    for profile in &provider.protocol_profiles {
+        if profile.separate_credential {
+            if let Err(error) = clear_api_key(&fox_agent_backend::provider_protocol::credential_id(&provider.id, &profile.id)) {
+                return ApiResponse::failure("model.credential_delete_failed", error, true);
+            }
+        }
     }
     match state.database.delete_model_provider(&request.provider_id) {
         Ok(deleted) => ApiResponse::success(deleted),
@@ -6001,6 +6048,18 @@ pub async fn model_service_test(
     state: State<'_, AppState>,
     request: TestModelServiceRequest,
 ) -> Result<ApiResponse<ModelConnectionTest>, String> {
+    let is_profile_test = request.credential_provider_id.is_some() || request.api_type.as_deref() == Some("openai-responses");
+    let profile_credential = request.credential_provider_id.as_ref().and_then(|id| {
+        let provider = state.database.list_model_providers().ok()?.into_iter().find(|p| &p.id == id)?;
+        let credential = match request.credential_profile_id.as_ref() {
+            Some(profile_id) => {
+                provider.protocol_profiles.iter().find(|p| &p.id == profile_id)?;
+                fox_agent_backend::provider_protocol::credential_id(id, profile_id)
+            }
+            None => provider.base_url,
+        };
+        get_api_key(&credential)
+    });
     let (base_url, api_key, api_type, model_id) = match request.base_url {
         Some(base_url) => {
             let normalized = match normalize_model_base_url(&base_url) {
@@ -6010,7 +6069,8 @@ pub async fn model_service_test(
             let key = request
                 .api_key
                 .filter(|value| !value.trim().is_empty())
-                .or_else(|| get_api_key(&normalized));
+                .or(profile_credential)
+                .or_else(|| if request.credential_provider_id.is_none() && request.credential_profile_id.is_none() { get_api_key(&normalized) } else { None });
             (
                 normalized,
                 key,
@@ -6041,11 +6101,11 @@ pub async fn model_service_test(
         .await
     {
         Ok(result) => {
-            let _ = state.database.record_model_connection_test(&result);
+            if !is_profile_test { let _ = state.database.record_model_connection_test(&result); }
             Ok(ApiResponse::success(result))
         }
         Err(error) => {
-            let _ = state.database.record_model_connection_failure(&base_url);
+            if !is_profile_test { let _ = state.database.record_model_connection_failure(&base_url); }
             Ok(ApiResponse::failure("model.connection_failed", error, true))
         }
     }

@@ -42,7 +42,7 @@ export interface UnifiedLoginReport {
 export function unifiedLoginNote(probe: CredentialProbe | null | undefined): string | null {
   const unified = probe?.unifiedLogin
   if (!unified || unified.outcome !== 'unsupported') return null
-  return `没能用“模型服务”的默认 provider「${unified.provider}」自动登录：${unified.reason ?? '原因未知'}`
+  return `没能用“模型服务”的供应商「${unified.provider}」自动登录：${unified.reason ?? '原因未知'}`
 }
 
 /** One whitelisted item of the real HOME (`agent_backend_import_candidates`). */
@@ -249,10 +249,11 @@ export function credentialCardModel(probe: CredentialProbe | null | undefined, p
     }
   }
   const note = unifiedLoginNote(probe)
+  const protocol = probe.backend === 'codex' ? 'OpenAI Responses' : probe.backend === 'deepseek' ? 'Anthropic Messages' : '兼容协议'
   return {
     kind: 'missing',
     title: '这个后端还没有登录',
-    description: `${note ? `${note}。` : '在“设置 → 模型服务”配置默认 provider 后，Fox 会在启动前自动生成登录；也可以手动登录：'}外部后端只读取 Fox 为本项目准备的私有 HOME，你真实 HOME 里的登录在这里用不上。把需要的文件放进下面的文件夹，或从真实 HOME 导入。`,
+    description: `${note ? `${note}。` : `请在“设置 → 模型服务”添加 ${protocol} 配置并指定给此 Agent，保存 Key 后重试；也可以手动登录：`}外部后端只读取 Fox 为本项目准备的私有 HOME，你真实 HOME 里的登录在这里用不上。把需要的文件放进下面的文件夹，或从真实 HOME 导入。`,
     privateHome: probe.privateHome,
     requiredKeys: probe.requiredKeys,
     requiredFiles: probe.requiredFiles,

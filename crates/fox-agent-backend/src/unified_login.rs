@@ -1,6 +1,6 @@
 //! Unified login (settings batch, item 6): before an external backend starts,
 //! Fox writes the backend's own config files into the project's private HOME
-//! from the default provider of Fox「模型服务」(base URL, API type, key,
+//! from the selected protocol profile of Fox「模型服务」(base URL, API type, key,
 //! default model), so pi / DeepSeek / Codex work without a separate login.
 //!
 //! Rules:
@@ -33,16 +33,12 @@
 //! * DeepSeek (dsh 0.2.1-rc.2): `.dsh/profiles/acp/cordis.patch.yml` with the
 //!   `llm-deepseek` base URL and the `acp` row (`provider: deepseek-official`,
 //!   the default model), `.dsh/.env` with `DEEPSEEK_API_KEY`. dsh speaks
-//!   Anthropic Messages: an `anthropic-messages` provider is used as is (dsh
-//!   and Fox build `<base>[/v1]/messages` the same way); an OpenAI-compatible
-//!   provider on `api.deepseek.com` maps to the official Anthropic entry
-//!   `https://api.deepseek.com/anthropic`; any other provider is not
-//!   generated (reason in the report).
+//!   Anthropic Messages. The selected profile is used as is; Fox never guesses
+//!   an alternate vendor endpoint from a Chat Completions address.
 //! * Codex (codex-acp): `.codex/config.toml` with `model`, `model_provider =
 //!   "fox"` and `[model_providers.fox]` (`base_url`, `wire_api = "responses"`,
-//!   `env_key = "FOX_CODEX_API_KEY"`). Only when the provider's URL answers
-//!   the Responses API ([`UnifiedLogin::responses_supported`], probed by the
-//!   Host), whatever the vendor.
+//!   `env_key = "FOX_CODEX_API_KEY"`). Requires an explicitly selected
+//!   `openai-responses` profile. Protocol matching is not a successful model run.
 
 use crate::onboarding::{
     codex_auth_present, dotenv_key_names, ensure_private_dir, is_present_file, json_has_api_key, pi_auth_providers, read_small, rel, write_private, CODEX_AUTH,
@@ -60,7 +56,7 @@ pub const CODEX_KEY_ENV: &str = "FOX_CODEX_API_KEY";
 /// Provider id Fox registers in pi and Codex.
 pub const FOX_PROVIDER_ID: &str = "fox";
 /// First line of every generated text file that allows comments.
-pub const MANAGED_HEADER: &str = "# Fox 管理：由 Fox「模型服务」的默认 provider 自动生成，模型服务改动后会重新生成。改动本文件后 Fox 不再管理它。";
+pub const MANAGED_HEADER: &str = "# Fox 管理：由 Fox「模型服务」的协议配置自动生成，模型服务改动后会重新生成。改动本文件后 Fox 不再管理它。";
 
 /// A secret value. `Debug` never shows it; read it with [`Secret::expose`].
 #[derive(Clone, PartialEq, Eq)]
@@ -241,25 +237,16 @@ pub fn pi_literal(value: &str) -> String {
 /// The dsh base URL for this provider, or why there is none.
 pub fn deepseek_base_url(login: &UnifiedLogin) -> Result<String, String> {
     let base = login.base_url.trim_end_matches('/');
-    match login.api_type.as_str() {
-        "anthropic-messages" => Ok(base.to_owned()),
-        _ => {
-            let host = base.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("").to_ascii_lowercase();
-            if host == "api.deepseek.com" {
-                Ok("https://api.deepseek.com/anthropic".to_owned())
-            } else {
-                Err(format!("DeepSeek 后端（dsh）只支持 Anthropic Messages 协议；模型服务的默认 provider「{}」是 {}，无法自动生成", login.provider_name, login.api_type))
-            }
-        }
+    if login.api_type == "anthropic-messages" {
+        Ok(base.to_owned())
+    } else {
+        Err("请在模型服务中为 DeepSeek 配置 Anthropic Messages 协议".to_owned())
     }
 }
 
-/// Why Codex cannot use this provider, if it cannot.
+/// Protocol compatibility is separate from connection verification.
 pub fn codex_unsupported_reason(login: &UnifiedLogin) -> Option<String> {
-    match login.responses_supported {
-        Some(false) => Some(format!("模型服务的默认 provider「{}」的地址不支持 Responses 接口（POST {}/responses 返回 404 / 405），Codex 无法使用", login.provider_name, login.base_url.trim_end_matches('/'))),
-        _ => None,
-    }
+    (login.api_type != "openai-responses").then(|| "请在模型服务中为 Codex 配置 OpenAI Responses 协议".to_owned())
 }
 
 /// The files to generate for `backend` from `login` (content includes the
@@ -463,10 +450,11 @@ mod tests {
 
     #[test]
     fn secret_and_reports_never_show_the_key() {
-        let login = login("openai-completions", "https://api.deepseek.com", Some(true));
+        let mut login = login("openai-completions", "https://api.deepseek.com", Some(true));
         assert!(!format!("{login:?}").contains(KEY));
         let home = temp_home("report");
         for backend in [AgentBackend::Pi, AgentBackend::Deepseek, AgentBackend::Codex] {
+            login.api_type = match backend { AgentBackend::Codex => "openai-responses", AgentBackend::Deepseek => "anthropic-messages", _ => "openai-completions" }.into();
             let report = apply(backend, &home, &login, false).unwrap();
             assert_eq!(report.outcome, Outcome::Generated, "{backend:?}");
             let text = serde_json::to_string(&report).unwrap();
@@ -504,7 +492,7 @@ mod tests {
     #[test]
     fn deepseek_gets_the_anthropic_entry_and_a_dotenv_key() {
         let home = temp_home("dsh");
-        let report = apply(AgentBackend::Deepseek, &home, &login("openai-completions", "https://api.deepseek.com", None), false).unwrap();
+        let report = apply(AgentBackend::Deepseek, &home, &login("anthropic-messages", "https://api.deepseek.com/anthropic", None), false).unwrap();
         assert_eq!(report.outcome, Outcome::Generated);
         let patch = std::fs::read_to_string(rel(&home, DSH_PATCH_ACP)).unwrap();
         assert!(patch.starts_with("# Fox 管理"));
@@ -528,7 +516,7 @@ mod tests {
     #[test]
     fn codex_config_names_the_provider_and_keeps_the_key_in_the_environment() {
         let home = temp_home("codex");
-        let report = apply(AgentBackend::Codex, &home, &login("openai-completions", "https://api.deepseek.com", Some(true)), false).unwrap();
+        let report = apply(AgentBackend::Codex, &home, &login("openai-responses", "https://api.deepseek.com", Some(true)), false).unwrap();
         assert_eq!(report.outcome, Outcome::Generated);
         let config = std::fs::read_to_string(rel(&home, CODEX_CONFIG)).unwrap();
         assert!(config.contains("model_provider = \"fox\"") && config.contains("[model_providers.fox]"), "{config}");

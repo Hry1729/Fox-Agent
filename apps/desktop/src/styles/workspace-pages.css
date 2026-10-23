@@ -7085,3 +7085,12 @@
 .fox-chat-pane :where(.fox-runtime-process-summary, .fox-runtime-detail-panel, .fox-process-turn-elapsed, .fox-process-turn-separator) { color: var(--fox-process-muted); }
 .fox-chat-pane :where(.fox-process-turn-toggle:not(.has-failed-tools), .fox-element-tool-trigger, .fox-element-timeline-trigger, .fox-runtime-step-trigger, .fox-chain-of-thought-header):not(:hover):not(:focus-visible) { color: var(--fox-process-muted); }
 .fox-chat-pane :where(.fox-runtime-group-icon, .fox-runtime-step-icon-glyph, .fox-tool-disclosure-chevron, .fox-process-turn-disclosure-icon) { color: color-mix(in oklch, var(--fox-muted) 84%, var(--fox-card)); }
+
+.fox-protocol-editor { margin-top: 24px; border-top: 1px solid var(--fox-border); padding-top: 16px; }
+.fox-protocol-editor p, .fox-protocol-note { font-size: 12px; line-height: 1.6; color: var(--muted-foreground); }
+.fox-protocol-note { grid-column: 1 / -1; margin: 0; }
+.fox-protocol-fields { min-width: 0; border: 0; border-top: 1px solid var(--fox-border); margin: 20px 0 0; padding: 16px 0 0; }
+.fox-protocol-fields legend { font-size: 13px; font-weight: 600; padding-right: 8px; }
+.fox-protocol-assignments, .fox-protocol-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.fox-protocol-assignments label, .fox-protocol-key { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.fox-protocol-key { margin: 12px 0; }

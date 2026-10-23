@@ -70,6 +70,7 @@ pub mod sandbox;
 pub mod settlement;
 pub mod statefile;
 pub mod unified_login;
+pub mod provider_protocol;
 pub mod winacl;
 pub mod winancestor;
 pub mod winowner;

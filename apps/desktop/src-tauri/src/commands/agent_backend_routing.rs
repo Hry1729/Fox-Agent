@@ -354,7 +354,7 @@ pub struct CodexResponsesProbe {
 pub(crate) fn responses_support_from_status(status: u16) -> Option<bool> {
     match status {
         404 | 405 => Some(false),
-        200..=299 | 400 | 422 => Some(true),
+        200..=299 => Some(true),
         _ => None,
     }
 }
@@ -466,7 +466,7 @@ pub(crate) fn preferences_view(
 fn current_preferences(state: &AppState) -> AgentBackendPreferences {
     let service = state.database.get_model_service().ok().flatten();
     let provider = service.as_ref().map(|service| service.name.clone());
-    let codex = service.as_ref().and_then(|service| cached_codex_probe(&state.database, &service.base_url));
+    let codex = None; // Protocol selection replaces URL-based enablement guesses.
     preferences_view(
         stored_default_backend(&state.database),
         stored_new_external_full_access(&state.database),
@@ -538,39 +538,20 @@ pub fn agent_backend_preferences_save(state: State<'_, AppState>, request: Agent
     ApiResponse::success(current_preferences(&state))
 }
 
-/// Probe whether 模型服务's default provider answers the Responses API
-/// (`POST {base}/responses` with an empty JSON body: an existing route
-/// answers 400 / 422 without running a model; 404 / 405 = not supported),
-/// and cache the result for the settings page and the Codex unified login.
-/// The key is sent as a bearer token and never logged or returned.
+/// Explicit connection check for the selected Codex protocol. Settings no
+/// longer run this automatically or use a failed HTTP request as support proof.
 #[tauri::command]
 pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> Result<ApiResponse<Option<CodexResponsesProbe>>, ()> {
-    let Some(service) = state.database.get_model_service().ok().flatten() else {
+    let Some(service) = crate::model_service::external_login(&state.database, AgentBackend::Codex) else {
         return Ok(ApiResponse::success(None));
     };
-    let base = service.base_url.trim_end_matches('/').to_owned();
-    let key = crate::model_service::get_api_key(&service.base_url);
-    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
-        Ok(client) => client,
-        Err(_) => return Ok(ApiResponse::success(None)),
-    };
-    let mut request = client.post(format!("{base}/responses")).json(&serde_json::json!({}));
-    if let Some(key) = key.as_deref() {
-        request = request.bearer_auth(key);
-    }
-    let status = request.send().await.ok().map(|response| response.status().as_u16());
-    let probe = CodexResponsesProbe {
-        base_url: service.base_url.clone(),
-        supported: status.and_then(responses_support_from_status),
-        status,
+    let result = state.model_service_client.test(&service.base_url, Some(service.api_key.expose()), &service.api_type, &service.model).await;
+    Ok(ApiResponse::success(Some(CodexResponsesProbe {
+        base_url: service.base_url,
+        supported: result.is_ok().then_some(true),
+        status: None,
         checked_at: chrono::Utc::now().timestamp_millis(),
-    };
-    if probe.supported.is_some() {
-        if let Ok(text) = serde_json::to_string(&probe) {
-            let _ = state.database.set_app_setting(CODEX_RESPONSES_PROBE_KEY, &text);
-        }
-    }
-    Ok(ApiResponse::success(Some(probe)))
+    })))
 }
 
 #[cfg(test)]
@@ -731,7 +712,8 @@ mod tests {
         assert!(on.effective_full_access);
         assert_eq!(responses_support_from_status(404), Some(false));
         assert_eq!(responses_support_from_status(405), Some(false));
-        assert_eq!(responses_support_from_status(400), Some(true));
+        assert_eq!(responses_support_from_status(400), None);
+        assert_eq!(responses_support_from_status(422), None);
         assert_eq!(responses_support_from_status(200), Some(true));
         assert_eq!(responses_support_from_status(401), None);
         assert_eq!(responses_support_from_status(503), None);

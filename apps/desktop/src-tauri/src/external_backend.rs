@@ -226,7 +226,7 @@ impl ExternalBackendHost {
                 session_key: started.run.id.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'), "_"),
                 // Fail-closed: a grant that cannot be read is no grant.
                 full_access_granted: self.database.conversation_full_access_granted(&request.conversation_id).unwrap_or(false),
-                unified_login: self.unified_login(),
+                unified_login: self.unified_login(backend),
             },
             // Settings batch, item 7: Fox's execution mode (询问 / 自动 / 只读,
             // the same value the Fox runtime reads) decides how the backend's
@@ -351,21 +351,8 @@ impl ExternalBackendHost {
     /// login; `None` when it is missing, disabled or has no key (the login
     /// card stays the fallback). The key never leaves this value except into
     /// the backend's own config / environment.
-    fn unified_login(&self) -> Option<fox_agent_backend::unified_login::UnifiedLogin> {
-        let service = self.database.get_model_service().ok().flatten()?;
-        if !service.enabled || service.model_id.trim().is_empty() {
-            return None;
-        }
-        let key = crate::model_service::get_api_key(&service.base_url)?;
-        let responses_supported = crate::commands::agent_backend_routing::cached_codex_probe(&self.database, &service.base_url).and_then(|probe| probe.supported);
-        Some(fox_agent_backend::unified_login::UnifiedLogin {
-            provider_name: service.name.clone(),
-            base_url: service.base_url.trim_end_matches('/').to_owned(),
-            api_type: service.api_type.clone(),
-            model: service.model_id.clone(),
-            api_key: fox_agent_backend::unified_login::Secret::new(key),
-            responses_supported,
-        })
+    fn unified_login(&self, backend: AgentBackend) -> Option<fox_agent_backend::unified_login::UnifiedLogin> {
+        crate::model_service::external_login(&self.database, backend)
     }
 
     /// The launch request a turn of `conversation_id` would use (backend,
@@ -394,7 +381,7 @@ impl ExternalBackendHost {
             project_root: context.project_root.map(std::path::PathBuf::from).unwrap_or_default(),
             session_key: "planned".into(),
             full_access_granted: self.database.conversation_full_access_granted(conversation_id).unwrap_or(false),
-            unified_login: self.unified_login(),
+            unified_login: self.unified_login(backend),
         })
     }
 
@@ -417,7 +404,7 @@ impl ExternalBackendHost {
             project_root: std::path::PathBuf::from(project.1),
             session_key: "planned".into(),
             full_access_granted: target.full_access,
-            unified_login: self.unified_login(),
+            unified_login: self.unified_login(backend),
         })
     }
 

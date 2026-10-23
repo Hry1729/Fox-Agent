@@ -1016,7 +1016,18 @@ export interface ProviderModelRecord {
   isDefault: boolean
 }
 
+export interface ProtocolProfile {
+  id: string
+  apiType: 'openai-completions' | 'anthropic-messages' | 'openai-responses'
+  baseUrl: string
+  modelId: string
+  separateCredential: boolean
+  backends: string[]
+  credentialConfigured?: boolean
+}
+
 export interface ModelProviderRecord {
+  protocolProfiles?: ProtocolProfile[]
   id: string
   name: string
   icon: string | null
