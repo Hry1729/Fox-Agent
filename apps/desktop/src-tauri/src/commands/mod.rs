@@ -1550,13 +1550,25 @@ pub async fn conversation_create(
     // Under FORBIDDEN the setting is ignored (sandboxed), never a refusal; an
     // explicit `full_access` request is still refused there.
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
+    // Per-agent permission list: an explicit pick in the new conversation's
+    // list (the Agent's full-access option, or any sandboxed option) wins
+    // over the setting; read once here and cleared after creation.
+    let draft_full = if external_backend && request.external_permission_mode.is_none() {
+        agent_backend_routing::draft_full_access_choice(&state.database, agent_backend)
+    } else {
+        None
+    };
+    let picker_mode = draft_full.map(|full| {
+        if full { fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS } else { fox_agent_backend::host_routing::NEW_MODE_SANDBOXED }
+    });
     let setting_mode = (external_backend
         && !forbidden
         && request.external_permission_mode.is_none()
+        && picker_mode.is_none()
         && agent_backend_routing::stored_new_external_full_access(&state.database))
     .then_some(fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS);
     let grant_full_access = match fox_agent_backend::host_routing::decide_new_conversation_mode(
-        request.external_permission_mode.as_deref().or(setting_mode),
+        request.external_permission_mode.as_deref().or(picker_mode).or(setting_mode),
         agent_backend,
         forbidden,
     ) {
@@ -1666,8 +1678,16 @@ pub async fn conversation_create(
             Some(&conversation.id),
             agent_backend.as_str(),
             "agent_backend.full_access_granted",
-            &serde_json::json!({ "grant": "conversation", "source": if setting_mode.is_some() { "settings" } else { "new_conversation" } }),
+            &serde_json::json!({ "grant": "conversation", "source": if picker_mode.is_some() { "permission_list" } else if setting_mode.is_some() { "settings" } else { "new_conversation" } }),
         );
+    }
+    if external_backend {
+        // The Agent's last sandboxed choice becomes this conversation's mode
+        // (the full-access option follows the grant above).
+        agent_backend_routing::seed_conversation_native_mode(&state.database, &conversation.id, agent_backend);
+        if draft_full.is_some() {
+            agent_backend_routing::clear_draft_full_access_choice(&state.database, agent_backend);
+        }
     }
     if let Some(expert_id) = request.expert_id.as_deref() {
         if let Err(error) = state.database.bind_conversation_expert(
@@ -5849,18 +5869,18 @@ pub fn model_provider_save(
             model.is_default = true;
         }
     }
-    if request.clear_api_key {
-        if let Err(error) = clear_api_key(&base_url) {
-            return ApiResponse::failure("model.credential_delete_failed", error, true);
-        }
-    } else if let Some(api_key) = request
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if let Err(error) = set_api_key(&base_url, api_key) {
-            return ApiResponse::failure("model.credential_save_failed", error, true);
+    // Clearing the key happens after the record is saved (below), so a
+    // failed save never leaves a provider whose key is already gone.
+    if !request.clear_api_key {
+        if let Some(api_key) = request
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Err(error) = set_api_key(&base_url, api_key) {
+                return ApiResponse::failure("model.credential_save_failed", error, true);
+            }
         }
     }
     for (profile_id, key) in &request.protocol_keys {
@@ -5890,6 +5910,11 @@ pub fn model_provider_save(
         Ok(saved) => saved,
         Err(error) => return storage_error(error),
     };
+    if request.clear_api_key {
+        if let Err(error) = clear_api_key(&base_url) {
+            return ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但 Key 删除失败：{error}"), true);
+        }
+    }
     for old in &old_profiles {
         if old.separate_credential && !saved.protocol_profiles.iter().any(|p| p.id == old.id && p.separate_credential) {
             if let Err(error) = clear_api_key(&fox_agent_backend::provider_protocol::credential_id(&saved.id, &old.id)) {
@@ -5897,11 +5922,7 @@ pub fn model_provider_save(
             }
         }
     }
-    if request.clear_api_key || saved.is_default {
-        if let Err(error) = external.clear_managed_model_files() {
-            return ApiResponse::failure("model.cleanup_failed", format!("配置已保存，但生成的登录文件清理失败：{error}"), true);
-        }
-    }
+    let cleanup = request.clear_api_key || saved.is_default;
     if saved.is_default {
         if let Some(model) = saved
             .models
@@ -5934,9 +5955,28 @@ pub fn model_provider_save(
             }
         }
     }
+    // After the Fox model sync: a cleanup problem is only a warning.
+    if cleanup {
+        warn_managed_model_cleanup(&external, "model_provider_save");
+    }
     let mut saved = saved;
     saved.credential_configured = api_key_configured(&saved.base_url);
     ApiResponse::success(saved)
+}
+
+/// Remove Fox-generated login files of every project (best effort). Failures
+/// never undo or block the save / delete that asked for it: they are logged
+/// and recorded in the external-backend audit log as a warning.
+fn warn_managed_model_cleanup(external: &crate::external_backend::ExternalBackendHost, source: &str) {
+    let errors = external.clear_managed_model_files();
+    if errors.is_empty() {
+        return;
+    }
+    eprintln!("fox.model cleanup_warning source={source} failures={}", errors.len());
+    for error in &errors {
+        eprintln!("fox.model cleanup_warning source={source} detail={error:?}");
+    }
+    external.audit_warning("model.cleanup_failed", &serde_json::json!({ "source": source, "failures": errors.len() }));
 }
 
 #[tauri::command]
@@ -5957,11 +5997,6 @@ pub fn model_provider_delete(
     let Some(provider) = provider else {
         return ApiResponse::success(false);
     };
-    if provider.is_default {
-        if let Err(error) = external.clear_managed_model_files() {
-            return ApiResponse::failure("model.cleanup_failed", error, true);
-        }
-    }
     for profile in &provider.protocol_profiles {
         if profile.separate_credential {
             if let Err(error) = clear_api_key(&fox_agent_backend::provider_protocol::credential_id(&provider.id, &profile.id)) {
@@ -5973,6 +6008,7 @@ pub fn model_provider_delete(
         Ok(deleted) => {
             if deleted && provider.is_default {
                 if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", error, true); }
+                warn_managed_model_cleanup(&external, "model_provider_delete");
             }
             ApiResponse::success(deleted)
         }
@@ -6014,23 +6050,22 @@ pub fn model_service_save(
     if let Err(error) = state.runtime_host.reload_configuration() {
         return ApiResponse::failure("model.runtime_busy", error, true);
     }
-    if request.clear_api_key {
-        if let Err(error) = clear_api_key(&base_url) {
-            return ApiResponse::failure("model.credential_delete_failed", error, true);
-        }
-        if let Err(error) = external.clear_managed_model_files() {
-            return ApiResponse::failure("model.cleanup_failed", error, true);
-        }
-    } else if let Some(api_key) = request
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if let Err(error) = set_api_key(&base_url, api_key) {
-            return ApiResponse::failure("model.credential_save_failed", error, true);
+    // Clearing the key: the record is saved first, then the key is deleted
+    // (below), so a failed save never leaves the key gone and the old
+    // record in place.
+    if !request.clear_api_key {
+        if let Some(api_key) = request
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Err(error) = set_api_key(&base_url, api_key) {
+                return ApiResponse::failure("model.credential_save_failed", error, true);
+            }
         }
     }
+    let clear_key_url = request.clear_api_key.then(|| base_url.clone());
     let record = ModelServiceRecord {
         name: name.to_owned(),
         base_url,
@@ -6050,6 +6085,12 @@ pub fn model_service_save(
     };
     match state.database.save_model_service(&record) {
         Ok(mut service) => {
+            if let Some(url) = clear_key_url {
+                if let Err(error) = clear_api_key(&url) {
+                    return ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但 Key 删除失败：{error}"), true);
+                }
+                warn_managed_model_cleanup(&external, "model_service_save");
+            }
             service.credential_configured = api_key_configured(&service.base_url);
             ApiResponse::success(service)
         }
