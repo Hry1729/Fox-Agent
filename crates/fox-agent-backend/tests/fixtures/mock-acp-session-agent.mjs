@@ -6,6 +6,8 @@
 //                  allow -> tool completed + "permission:allow", end_turn;
 //                  reject -> tool failed, end_turn; cancelled -> stop cancelled
 //   slow        -> text, then waits; session/cancel -> stop cancelled
+//   reconnect   -> Codex warning + "Reconnecting..." notices, then waits
+//   (session/set_mode is accepted unless modeId is "refuse")
 //   hang        -> text, then never answers (ignores session/cancel)
 //   crash       -> text, then exits with code 3
 //   maxtokens   -> text, stop max_tokens
@@ -84,6 +86,11 @@ rl.on('line', line => {
       const id = nextId++
       waiting.set(id, sessionId)
       send({ id, method: 'session/request_permission', params: { sessionId, toolCall: { toolCallId: 't1', title: 'npm test', kind: 'execute', rawInput: { command: 'npm test' } }, options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'always', name: 'Always', kind: 'allow_always' }, { optionId: 'reject', name: 'Reject', kind: 'reject_once' }] } })
+    } else if (prompt === 'reconnect') {
+      // Codex's network retry notice, then a model-metadata warning; the
+      // turn waits (like slow) until cancelled.
+      text(sessionId, 'Model metadata for `deepseek-flash` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.\n')
+      text(sessionId, 'Reconnecting... 1/5 (stream disconnected before completion)\n')
     } else if (prompt === 'slow' || prompt === 'hang') {
       text(sessionId, `working:${prompt}`)
       if (prompt === 'hang') prompts.set(sessionId, 'hang')
@@ -122,6 +129,10 @@ rl.on('line', line => {
       text(sessionId, `echo:${prompt}`)
       finish(sessionId, 'end_turn')
     }
+  } else if (msg.method === 'session/set_mode') {
+    // Codex permission modes: accepted, except the id "refuse".
+    if (msg.params.modeId === 'refuse') send({ id: msg.id, error: { code: -32602, message: 'unknown mode' } })
+    else send({ id: msg.id, result: {} })
   } else if (msg.method === 'session/cancel') {
     const sessionId = msg.params.sessionId
     // A pending permission was already answered `cancelled` by the client;
