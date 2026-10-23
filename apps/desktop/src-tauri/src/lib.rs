@@ -201,8 +201,8 @@ pub fn run() {
             );
             yuxi_runtime.recover_pending_runs_detached();
             // External Agent backends (pi / Codex / DeepSeek over ACP). Built
-            // whatever FOX_EXTERNAL_BACKENDS says: with the switch off no
-            // route ever reaches it; startup only interrupts runs a previous
+            // whatever FOX_EXTERNAL_BACKENDS says: with the administrator's
+            // switch forcing them off no route ever reaches it; startup only interrupts runs a previous
             // process left active and recovers Windows ancestor ACEs.
             app.manage(external_backend::ExternalBackendHost::new(
                 app.handle().clone(),
@@ -452,6 +452,9 @@ pub fn run() {
             commands::agent_backend_routing::agent_backend_open_private_home,
             commands::agent_backend_routing::agent_backend_permission_status,
             commands::agent_backend_routing::agent_backend_revoke_full_access,
+            commands::agent_backend_routing::agent_backend_preferences_get,
+            commands::agent_backend_routing::agent_backend_preferences_save,
+            commands::agent_backend_routing::agent_backend_probe_codex_responses,
             commands::plugin_center::plugin_catalog_list,
             commands::plugin_center::plugin_installations_list,
             commands::plugin_center::plugin_set_activation,
