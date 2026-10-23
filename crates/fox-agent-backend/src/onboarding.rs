@@ -105,22 +105,26 @@ pub struct CredentialProbe {
     /// Files the backend reads its login / config from, relative.
     pub required_files: Vec<String>,
     pub templates: Vec<ConfigTemplate>,
+    /// Settings batch, item 6: what the unified login (Fox「模型服务」) does
+    /// for this backend at the next launch; `None` when 模型服务 has no
+    /// usable default provider. Names only.
+    pub unified_login: Option<crate::unified_login::UnifiedReport>,
 }
 
 /// Names of Host environment variables that are set (non-empty). Values are
 /// never looked at beyond emptiness.
 pub type EnvPresence<'a> = &'a dyn Fn(&str) -> bool;
 
-const DSH_ENV: &str = ".dsh/.env";
-const DSH_PATCH_ACP: &str = ".dsh/profiles/acp/cordis.patch.yml";
-const DSH_PATCH: &str = ".dsh/cordis.patch.yml";
-const CODEX_AUTH: &str = ".codex/auth.json";
-const CODEX_CONFIG: &str = ".codex/config.toml";
-const PI_AUTH: &str = ".pi/agent/auth.json";
-const PI_MODELS: &str = ".pi/agent/models.json";
-const PI_SETTINGS: &str = ".pi/agent/settings.json";
+pub(crate) const DSH_ENV: &str = ".dsh/.env";
+pub(crate) const DSH_PATCH_ACP: &str = ".dsh/profiles/acp/cordis.patch.yml";
+pub(crate) const DSH_PATCH: &str = ".dsh/cordis.patch.yml";
+pub(crate) const CODEX_AUTH: &str = ".codex/auth.json";
+pub(crate) const CODEX_CONFIG: &str = ".codex/config.toml";
+pub(crate) const PI_AUTH: &str = ".pi/agent/auth.json";
+pub(crate) const PI_MODELS: &str = ".pi/agent/models.json";
+pub(crate) const PI_SETTINGS: &str = ".pi/agent/settings.json";
 
-fn rel(home: &Path, relative: &str) -> PathBuf {
+pub(crate) fn rel(home: &Path, relative: &str) -> PathBuf {
     relative.split('/').fold(home.to_path_buf(), |path, part| path.join(part))
 }
 
@@ -151,7 +155,7 @@ fn dotenv_assignment(line: &str) -> Option<(&str, &str)> {
     (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some((name, value))
 }
 
-fn read_small(path: &Path) -> Option<String> {
+pub(crate) fn read_small(path: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_IMPORT_FILE_BYTES {
         return None;
@@ -159,13 +163,13 @@ fn read_small(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-fn is_present_file(path: &Path) -> bool {
+pub(crate) fn is_present_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).map(|meta| meta.is_file() && meta.len() > 0).unwrap_or(false)
 }
 
 /// Codex `auth.json` holds a usable login: a non-empty `OPENAI_API_KEY` or a
 /// `tokens` object.
-fn codex_auth_present(text: &str) -> bool {
+pub(crate) fn codex_auth_present(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { return false };
     let key = value.get("OPENAI_API_KEY").and_then(serde_json::Value::as_str).is_some_and(|key| !key.trim().is_empty());
     key || value.get("tokens").is_some_and(serde_json::Value::is_object)
@@ -173,7 +177,7 @@ fn codex_auth_present(text: &str) -> bool {
 
 /// pi `auth.json`: provider names whose entry is an API key with a key, or
 /// an OAuth credential.
-fn pi_auth_providers(text: &str) -> Vec<String> {
+pub(crate) fn pi_auth_providers(text: &str) -> Vec<String> {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
     map.iter()
         .filter(|(_, entry)| match entry.get("type").and_then(serde_json::Value::as_str) {
@@ -186,7 +190,7 @@ fn pi_auth_providers(text: &str) -> Vec<String> {
 }
 
 /// pi `models.json`: whether any provider carries a non-empty `apiKey`.
-fn json_has_api_key(value: &serde_json::Value) -> bool {
+pub(crate) fn json_has_api_key(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
             (key == "apiKey" && value.as_str().is_some_and(|text| !text.trim().is_empty())) || json_has_api_key(value)
@@ -325,6 +329,7 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
         required_keys: required_keys.into_iter().map(str::to_owned).collect(),
         required_files: required_files.into_iter().map(str::to_owned).collect(),
         templates,
+        unified_login: None,
     }
 }
 
@@ -479,8 +484,15 @@ pub struct ImportSkip {
 pub struct ImportBackup {
     pub project: String,
     pub label: String,
-    /// Absolute backup directory (shown to the user; not in the audit).
+    /// Absolute backup directory (Host only: never sent to the UI or the
+    /// audit, it contains the user's SID / profile path).
+    #[serde(skip)]
     pub directory: PathBuf,
+    /// The backup directory relative to the private HOME
+    /// (`.fox-credential-backups/<stamp>`): what the receipt shows and the
+    /// audit records (settings batch, item 3).
+    #[serde(rename = "directory")]
+    pub relative_directory: String,
     /// Files backed up, relative to the private HOME.
     pub items: Vec<String>,
 }
@@ -524,7 +536,7 @@ impl ImportReport {
             "backups": self.backups.iter().map(|backup| serde_json::json!({
                 "project": backup.project,
                 "items": backup.items,
-                "directory": backup.directory.file_name().map(|name| format!("{BACKUP_DIR}/{}", name.to_string_lossy())),
+                "directory": backup.relative_directory,
             })).collect::<Vec<_>>(),
         })
     }
@@ -543,7 +555,7 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 
 /// Create `dir` (and parents up to `home`) and make every directory from
 /// `home` down 0700 on Unix.
-fn ensure_private_dir(home: &Path, dir: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_private_dir(home: &Path, dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut current = Some(dir);
     while let Some(path) = current {
@@ -559,7 +571,7 @@ fn ensure_private_dir(home: &Path, dir: &Path) -> std::io::Result<()> {
 /// Write `bytes` to `path` via a temp file in the same directory: 0600 before
 /// the content lands, then rename (a reader never sees a half file or a
 /// wider mode).
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let tmp = path.with_extension(format!("fox-import-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
@@ -598,6 +610,15 @@ fn merge_env_lines(dest: &str, source: &str, keys: &[&str]) -> String {
     let mut text = out.join("\n");
     text.push('\n');
     text
+}
+
+/// `.fox-credential-backups/<stamp>` for a backup directory: the form the
+/// receipt and the audit use (no absolute path, no SID).
+pub fn relative_backup_directory(directory: &Path) -> String {
+    match directory.file_name() {
+        Some(name) => format!("{BACKUP_DIR}/{}", name.to_string_lossy()),
+        None => BACKUP_DIR.to_owned(),
+    }
 }
 
 /// Backup directory name for `now`, UTC: `YYYYMMDD-HHMMSS`.
@@ -772,7 +793,8 @@ pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], 
             skipped_existing.push(ImportSkip { project: target.project.clone(), label: target.label.clone(), items: kept });
         }
         if let Some(directory) = backup.directory {
-            backups.push(ImportBackup { project: target.project.clone(), label: target.label.clone(), directory, items: backup.items });
+            let relative_directory = relative_backup_directory(&directory);
+            backups.push(ImportBackup { project: target.project.clone(), label: target.label.clone(), directory, relative_directory, items: backup.items });
         }
     }
     Ok(ImportReport {
@@ -1044,6 +1066,12 @@ mod tests {
         assert_eq!(report.backups.len(), 1);
         let backup = &report.backups[0];
         assert_eq!(backup.directory, homes[0].join(BACKUP_DIR).join("20261022-084512"));
+        // Settings batch, item 3: the UI and the audit get the relative form only.
+        assert_eq!(backup.relative_directory, ".fox-credential-backups/20261022-084512");
+        let wire = serde_json::to_value(&report).unwrap();
+        assert_eq!(wire["backups"][0]["directory"], ".fox-credential-backups/20261022-084512");
+        assert!(!wire.to_string().contains(&homes[0].display().to_string()), "no absolute path on the wire");
+        assert_eq!(report.audit_event()["backups"][0]["directory"], ".fox-credential-backups/20261022-084512");
         assert_eq!(backup.items, [CODEX_AUTH]);
         assert_eq!(std::fs::read_to_string(rel(&backup.directory, CODEX_AUTH)).unwrap(), main_auth);
         assert!(std::fs::read_to_string(rel(&homes[0], CODEX_AUTH)).unwrap().contains("sk-openai-real-0003"));
