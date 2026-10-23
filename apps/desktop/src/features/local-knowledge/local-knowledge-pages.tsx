@@ -19,6 +19,7 @@ import { SkeletonContent } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/model/types'
 import type { LocalKnowledgeDocumentAsk } from '@/features/workspace/types'
@@ -759,10 +760,20 @@ function KnowledgeBaseSettingsForm({
     })
   }
 
+  // One discard confirmation at a time; the dialog closes only after the user
+  // confirms (await), exactly as the synchronous check did before.
+  const discardConfirmingRef = useRef(false)
   const requestOpenChange = (nextOpen: boolean) => {
-    if (submitting) return
-    if (!nextOpen && dirty && !window.confirm('放弃尚未保存的资料库修改？')) return
-    onOpenChange(nextOpen)
+    if (submitting || discardConfirmingRef.current) return
+    if (nextOpen || !dirty) {
+      onOpenChange(nextOpen)
+      return
+    }
+    discardConfirmingRef.current = true
+    void confirmDialog({ title: '放弃修改', description: '放弃尚未保存的资料库修改？', confirmLabel: '放弃修改', cancelLabel: '继续编辑', destructive: true }).then((confirmed) => {
+      discardConfirmingRef.current = false
+      if (confirmed) onOpenChange(false)
+    })
   }
 
   return (
@@ -831,9 +842,18 @@ function LocalKnowledgeSettingsDialog({ gateway = defaultLocalKnowledgeGateway, 
   }, [gateway, knowledgeBaseId])
   useEffect(() => { void load() }, [load])
   const returnToList = () => { onBack?.() }
+  const discardConfirmingRef = useRef(false)
   const requestReturnToList = () => {
-    if (saving || (dirty && !window.confirm('放弃尚未保存的资料库修改？'))) return
-    returnToList()
+    if (saving || discardConfirmingRef.current) return
+    if (!dirty) {
+      returnToList()
+      return
+    }
+    discardConfirmingRef.current = true
+    void confirmDialog({ title: '放弃修改', description: '放弃尚未保存的资料库修改？', confirmLabel: '放弃修改', cancelLabel: '继续编辑', destructive: true }).then((confirmed) => {
+      discardConfirmingRef.current = false
+      if (confirmed) returnToList()
+    })
   }
   const save = async (request: LocalKnowledgeBaseCreateRequest) => {
     if (!base) return
