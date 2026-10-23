@@ -617,6 +617,11 @@ pub struct NativePermissionRequest {
     /// The option to switch to (set only).
     #[serde(default)]
     pub mode: Option<String>,
+    /// 设置 → an Agent's default permission: remember the sandboxed choice
+    /// for its next new conversations only, leaving the one-shot draft pick
+    /// (and 「新外部会话使用完全访问」) untouched. Full access is refused here.
+    #[serde(default)]
+    pub default_only: bool,
 }
 
 fn native_context(state: &AppState, backend: AgentBackend, forbidden: bool) -> fox_agent_backend::native_permission::CatalogContext {
@@ -668,10 +673,13 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
         None => stored_last_native_mode(&state.database, backend),
     };
     let current = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), full, &context);
+    // The sandboxed choice behind a full-access session (设置 shows it).
+    let sandboxed = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), false, &context);
     let draft = request.conversation_id.is_none();
     ApiResponse::success(serde_json::json!({
         "catalog": catalog,
         "current": current,
+        "sandboxedMode": sandboxed,
         "fullAccess": full,
         "fullAccessGranted": granted,
         "fullAccessForbidden": forbidden,
@@ -726,6 +734,15 @@ pub async fn agent_backend_native_permission_set(
     let set = |key: String, value: &str| state.database.set_app_setting(&key, value);
     let Some(conversation_id) = request.conversation_id.clone() else {
         // New conversation.
+        if request.default_only {
+            if option.full_access {
+                return Ok(ApiResponse::failure(RouteError::CODE_INVALID, "完全访问由「新外部会话使用完全访问」控制", false));
+            }
+            if let Err(error) = set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode) {
+                return Ok(storage_error(error));
+            }
+            return Ok(native_view(&state, &external, &request));
+        }
         let result = if option.full_access {
             set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "1")
         } else {
