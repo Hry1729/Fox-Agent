@@ -1330,3 +1330,38 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 - **F**（Reconnecting 快速失败诊断）：延后。
 - **B.1 / B.2**（Codex 中途 set_mode 立即生效、按新模式处理越权操作）：延后，需要 OpenAI 供应商环境。
 - **B.4**（set_mode 被拒时的回执）：延后，需要旧版 codex-acp。
+
+### 13.21 应用内确认框 + H.3 保存失败时 Key 不丢（2026-10-24）
+
+> 承接 13.20。两件事：桌面前端的原生确认框（`window.confirm`）全部换成应用内确认框；H.3「保存失败时 Key 不丢」改由单元测试覆盖，并修了保存失败时新 Key 残留的问题。
+
+**一、应用内确认框**
+
+- 原因：Tauri 下原生确认框的标题是页面地址（如 `127.0.0.1:1421`）。
+- 做法：新增 `apps/desktop/src/components/ui/confirm-dialog.tsx`，基于现有 `alert-dialog.tsx`。`confirmDialog({ title, description, confirmLabel, cancelLabel, destructive })` 返回 `Promise<boolean>`；只有点确认按钮才是 `true`，取消、Esc、关闭、没有挂载 Provider 都是 `false`。`<ConfirmDialogProvider />` 挂在 `src/app/App.tsx` 根部；多个请求按顺序一次显示一个。
+- 原来的 12 处全部替换（`src` 下除测试外已无 `window.confirm`）：
+  - 设置：删除服务、删除连接器、删除 Hook、清理预览缓存、恢复数据、清理数据。
+  - 专家：删除专家、恢复专家版本；数字同事：撤销数字同事。
+  - 文件版本：强制恢复文件（只有强制恢复才确认；普通恢复仍同步加锁，双击仍只发一次请求）。
+  - 资料库：放弃修改（设置表单的「取消」和设置对话框的 Esc / 关闭，各一处）。确认之前对话框不关；确认期间重复的关闭请求被忽略；保存中仍不能关闭。
+- 破坏性操作的确认按钮用 destructive 样式；「恢复专家版本」用普通样式。
+- 测试：`apps/desktop/tests/confirm-dialog-dom.test.tsx`（确认 / 取消 / Esc / 无 Provider / 卸载 / 排队、中文标题、destructive 样式）；`apps/desktop/tests/no-native-confirm.test.ts`（防止 `src` 下再出现 `window.confirm`，并核对 12 处调用和资料库脏检查的写法）；`managed-files-panel-dom.test.tsx` 改为通过 `setConfirmDialogPresenter` 作答，并新增「取消强制恢复不发请求」。
+- 未改：设置里「重命名服务」仍用 `window.prompt`，标题同样会显示地址，留作下一批。
+
+**复测**（Windows 桌面构建，每项「通过 / 失败 + 截图」）：
+
+1. 设置 → 模型服务 → 删除供应商：弹出应用内对话框，标题「删除服务」，确认按钮「删除」为红色描边样式；标题和正文都**不出现** `127.0.0.1` 等地址。点「取消」或按 Esc，供应商还在；点「删除」后删除并提示「供应商已删除」。
+2. 设置里的 Hook 列表 → 删除（垃圾桶）：标题「删除 Hook」，其余同上。
+3. 设置里的「预览缓存」卡片 →「清理未使用缓存」：标题「清理预览缓存」；取消不清理，确认后清理。
+4. 资料库设置里改名称（不保存）→ 点「取消」或按 Esc / 点右上角关闭：标题「放弃修改」，按钮「继续编辑」/「放弃修改」。点「继续编辑」后对话框和改动都还在；点「放弃修改」后返回列表。未改动时直接关闭，不弹框。
+5. 顺带看：删除连接器、恢复数据、清理数据、删除专家、恢复专家版本、撤销数字同事、强制恢复文件，标题均为中文、无地址。
+
+**二、H.3 保存失败时 Key 不丢（单元测试覆盖）**
+
+- 新增 `crates/fox-agent-backend/src/credential_save.rs`：`save_with_keys(store, plan, save_record)`。顺序：先读出本次要动的每个 Key（读不出就拒绝，什么都不写）→ 写新 Key → 保存记录 → 记录保存成功后才删除 Key。Key 写入失败或记录保存失败时，已写的 Key 全部恢复到原值，原来没有的 Key 被删除，不留残留；恢复失败会附在错误信息里，不会被吞掉。
+- 桌面 `model_provider_save` / `model_service_save` 改用它（`model_service::KeyringStore` 对接系统凭据库）。修复的问题：以前先写新 Key 再存记录，记录保存失败时新 Key 已覆盖旧 Key，地址变更时新地址下还会残留一份 Key。
+- 单元测试（`cargo test -p fox-agent-backend --lib credential_save`，7 项）：
+  - `record_save_failure_keeps_the_old_key_and_config_without_residue`：替换 Key、改地址、替换协议 Key 后注入数据库写入失败 → 旧 Key 原样、新地址下无 Key、记录不变。
+  - `clearing_the_key_happens_only_after_the_record_is_saved`：清除 Key + 保存失败 → Key 还在，凭据库没被动过。
+  - `key_write_failure_puts_back_the_keys_already_written_and_skips_the_record`、`unreadable_store_refuses_before_anything_is_written`、`explicit_empty_protocol_key_is_restored_when_the_save_fails`、`delete_failure_after_save_reports_the_saved_record_state`、`successful_save_writes_keys_then_record`。
+- 因此 13.20 第一部分第 3 项「H.3：用只读文件或占用制造保存失败」不再需要人工构造；Windows 上只需确认正常保存、清除 Key、删除供应商仍然可用。
