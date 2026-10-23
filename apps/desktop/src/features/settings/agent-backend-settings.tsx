@@ -25,11 +25,89 @@ import {
   type CodexResponsesProbe,
 } from '@/features/conversations/model/agent-backend'
 import { FULL_ACCESS_RISK_POINTS } from '@/features/conversations/model/agent-backend-onboarding'
+import {
+  nativePermissionRows,
+  type NativePermissionRequest,
+  type NativePermissionView,
+} from '@/features/conversations/model/agent-native-permission'
 
 export interface AgentBackendSettingsClient {
   agentBackendPreferences: () => Promise<AgentBackendPreferences>
   saveAgentBackendPreferences: (change: { defaultBackend?: AgentBackendId; newExternalFullAccess?: boolean }) => Promise<AgentBackendPreferences>
   probeCodexResponses: () => Promise<CodexResponsesProbe | null>
+  /** Per-agent native permission list; absent = no「默认权限」rows. */
+  agentBackendNativePermissions?: (request: NativePermissionRequest) => Promise<NativePermissionView>
+  agentBackendNativePermissionSet?: (request: NativePermissionRequest & { mode: string }) => Promise<NativePermissionView>
+}
+
+/** The external Agents that have a native permission list, in settings order. */
+export const NATIVE_PERMISSION_SETTING_BACKENDS: readonly { backend: AgentBackendId; label: string }[] = [
+  { backend: 'codex', label: 'Codex' },
+  { backend: 'deepseek', label: 'DeepSeek' },
+  { backend: 'pi', label: 'pi' },
+]
+
+/**
+ * 设置 → each Agent's default permission for its NEW conversations, in its
+ * own names. Sandboxed options only: full access stays the「新外部会话使用
+ * 完全访问」switch (with its risk text); saved with `defaultOnly`, so the
+ * one-shot pick on the bar is untouched.
+ */
+function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClient }) {
+  const list = client.agentBackendNativePermissions
+  const set = client.agentBackendNativePermissionSet
+  const [views, setViews] = useState<Partial<Record<AgentBackendId, NativePermissionView>>>({})
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!list) return
+    let cancelled = false
+    for (const { backend } of NATIVE_PERMISSION_SETTING_BACKENDS) {
+      list({ backend })
+        .then((view) => { if (!cancelled) setViews((current) => ({ ...current, [backend]: view })) })
+        .catch(() => {})
+    }
+    return () => { cancelled = true }
+  }, [list])
+  if (!list || !set) return null
+  return (
+    <>
+      {NATIVE_PERMISSION_SETTING_BACKENDS.map(({ backend, label }) => {
+        const view = views[backend]
+        const rows = nativePermissionRows(view, { sandboxedOnly: true })
+        if (!view || rows.length === 0) return null
+        const wanted = view.sandboxedMode ?? view.current
+        const current = rows.some((row) => row.value === wanted) ? wanted : view.catalog.defaultMode
+        const greyed = rows.filter((row) => row.disabled && row.reason)
+        return (
+          <div key={backend} className="fox-setting-row fox-setting-row-bordered" data-native-default={backend}>
+            <span>
+              <b>{label} 默认权限</b>
+              <small>{view.catalog.switchNote}{greyed.map((row) => `；${row.label}：${row.reason}`).join('')}</small>
+            </span>
+            <select
+              aria-label={`${label} 默认权限`}
+              value={current}
+              onChange={(event) => {
+                const mode = event.target.value
+                if (rows.find((row) => row.value === mode)?.disabled) return
+                setError(null)
+                set({ backend, mode, defaultOnly: true })
+                  .then((next) => setViews((items) => ({ ...items, [backend]: next })))
+                  .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+              }}
+            >
+              {rows.map((row) => (
+                <option key={row.value} value={row.value} disabled={row.disabled} title={row.title}>
+                  {row.label}{row.disabled ? '（不可用）' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )
+      })}
+      {error && <p className="fox-agent-backend-settings-error" role="alert">{error}</p>}
+    </>
+  )
 }
 
 export function dispatchAgentBackendPreferencesChanged(preferences: AgentBackendPreferences) {
@@ -112,6 +190,7 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
           onCheckedChange={(value) => void save({ newExternalFullAccess: value })}
         />
       </div>
+      <NativePermissionDefaults client={client} />
       {fullAccess.reason && preferences?.fullAccessForbidden && <p className="fox-agent-backend-settings-note" role="note">{fullAccess.reason}</p>}
       {error && <p className="fox-agent-backend-settings-error" role="alert">{error}</p>}
     </Card>
