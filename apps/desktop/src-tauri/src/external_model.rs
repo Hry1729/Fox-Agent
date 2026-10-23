@@ -72,6 +72,27 @@ pub fn external_login(database: &Database, backend: AgentBackend) -> Option<Unif
     login(&provider, &profiles[0])
 }
 
+/// 13.19 fix ④: the provider address an Agent's native permission list is
+/// judged by (Codex「帮我批准」needs OpenAI). Unlike [`external_login`] it
+/// needs no key and no verification, so a new conversation's list is right
+/// before the first login: the protocol address that serves `backend`, else
+/// (no such address bound) the default provider's own base URL. `None` when
+/// there is no default provider or it has no address at all; the catalog then
+/// greys「帮我批准」fail-closed.
+pub fn catalog_provider_base_url(database: &Database, backend: AgentBackend) -> Option<String> {
+    current(database).ok().flatten().and_then(|provider| provider_catalog_base_url(&provider, backend))
+}
+
+fn provider_catalog_base_url(provider: &ModelProviderRecord, backend: AgentBackend) -> Option<String> {
+    let candidates: Vec<String> = profiles(provider, backend).into_iter().map(|p| p.base_url.trim().to_owned()).filter(|url| !url.is_empty()).collect();
+    // Several unbound candidates: any non-OpenAI one decides (fail-closed).
+    if let Some(url) = candidates.iter().find(|url| !fox_agent_backend::native_permission::provider_is_openai(url)).or(candidates.first()) {
+        return Some(url.clone());
+    }
+    let own = provider.base_url.trim();
+    (!own.is_empty()).then(|| own.to_owned())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionRequest {
@@ -162,6 +183,32 @@ mod tests {
         p.protocol_profiles[1].backends = vec!["codex".into()];
         assert_eq!(profiles(&p, AgentBackend::Codex)[0].id, "two");
         assert_eq!(profiles(&p, AgentBackend::Codex).len(), 1);
+    }
+    #[test]
+    fn permission_catalog_falls_back_to_the_provider_address_without_a_login() {
+        use fox_agent_backend::native_permission::{catalog, CatalogContext, CODEX_AUTO_REVIEW_REASON, CODEX_AUTO_REVIEW_UNKNOWN_REASON};
+        let auto_review = |url: Option<String>| catalog(AgentBackend::Codex, &CatalogContext { provider_base_url: url, full_access_forbidden: false })
+            .options.into_iter().find(|option| option.id == "agent").unwrap().disabled_reason;
+        // No protocol address for Codex (Responses): the provider's own URL.
+        let mut p = provider();
+        p.base_url = "https://api.deepseek.com".into();
+        assert!(profiles(&p, AgentBackend::Codex).is_empty());
+        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://api.deepseek.com"));
+        assert_eq!(auto_review(provider_catalog_base_url(&p, AgentBackend::Codex)).as_deref(), Some(CODEX_AUTO_REVIEW_REASON));
+        // A bound Responses address wins over the provider URL.
+        let mut openai = endpoint("responses", "openai-responses");
+        openai.base_url = "https://api.openai.com/v1".into();
+        p.protocol_profiles = vec![openai];
+        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(auto_review(provider_catalog_base_url(&p, AgentBackend::Codex)), None);
+        // Two candidates, one not OpenAI: fail-closed.
+        p.protocol_profiles.push(endpoint("other", "openai-responses"));
+        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://example.com/v1"));
+        // Nothing to judge by: None, and「帮我批准」greyed with the reason.
+        p.protocol_profiles.clear();
+        p.base_url = "  ".into();
+        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex), None);
+        assert_eq!(auto_review(None).as_deref(), Some(CODEX_AUTO_REVIEW_UNKNOWN_REASON));
     }
     #[test]
     fn only_catalog_provenance_and_exact_endpoint_are_trusted() {
