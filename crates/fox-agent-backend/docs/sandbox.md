@@ -1265,3 +1265,68 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 
 1. 没有可用外部执行后端（沙箱不可用，Host 报 `run_command` unavailable）的 Fox 会话：模型拿到的工具列表里没有 `run_command`（请求快照 `effectiveToolNames` 不含它，`excludedTools` 有 `{name: run_command, reason: host_runtime_unavailable}`）；模型不会再尝试调用它。
 2. 执行后端可用、或旧版 Host 没有发能力信息（unknown）时：`run_command` 照常出现。
+
+### 13.20 13.19 补测 + 清单外修复复测（2026-10-24）
+
+> 承接 13.19 的工程师复测。本节分三部分：13.19 中当时没测完、需要补测的项；13.19 复测时在清单外发现的 4 个缺陷，修复后的复测；两项改由单元测试覆盖的场景（Windows 上难构造）。延后项单独列在最后。每一项记录「通过 / 失败 + 截图 + 审计日志行」。
+
+**前置**：Windows 桌面构建，包含本批改动；「模型服务」里 DeepSeek、OpenAI 供应商各有一份可用 Key；另准备一个**没有填写 Codex 协议地址**的供应商（只填了主 base_url），用于 ④。
+
+**一、13.19 补测**
+
+1. **C.2 后半：重装运行时之后**。用管理员权限重新安装 DeepSeek（dsh）运行时：重新运行 `enable-sandbox` 或安装 Fox 的受管运行时包，装到 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`。装完后确认 `backends/dsh` 下有 4 份新补丁：`workspace-write-ask.yml`、`workspace-write-ask-noweb.yml`、`danger-full-access.yml`、`danger-full-access-noweb.yml`。
+   - 新建 dsh 会话，选「工作区可写（询问）」，发一轮：能正常启动，不再出现 `dsh patch … is not installed`。
+   - 补丁内容与 Fox 生成的逐字节一致（`verify_installed_preset_patch`）。可以手动改动其中一份，确认启动被拒；改回后恢复正常。
+2. **C.1：用两个新预设复核重启参数**。
+   - dsh 会话中途从「工作区可写（不询问）」切到「工作区可写（询问）」：下拉旁显示「下一轮重启生效」；回执为「已保存，下一轮开始时重启 DeepSeek 生效」（见 ①）；下一轮 dsh 重启，启动参数 / 诊断里的 `--patch` 指向 `workspace-write-ask*.yml`；越出工作区时弹审批卡片。
+   - 新建 dsh 会话时选「完全访问」并确认风险：启动参数里的 `--patch` 指向 `danger-full-access*.yml`，进程不在 srt 里。
+   - 撤销完全访问后，下一轮回到沙箱，`--patch` 为当前记住的沙箱预设。
+3. **H.3：用复制出来的 FOX_DATA_DIR 测**。先退出 Fox，把数据目录整份复制到一个临时目录，再用 `FOX_DATA_DIR=<副本>` 启动，不要在原数据上测。
+   - 清除默认供应商的 Key，然后删除默认供应商：保存 / 删除成功。清理失败只记一条警告审计，不回滚，也不阻断。
+   - 先保存记录再删 Key：用只读文件或占用来制造保存失败，此时 Key 不丢。
+   - 测完删除副本。
+4. **H.2 补完**。修改默认供应商的地址 / 模型并保存，然后检查：
+   - 各项目×各后端私有 HOME 里，Fox 生成的登录文件被清理，用户自己改过的文件保留。
+   - 老库里 `legacy-<hex>` 项目被跳过：不报错，不阻断保存，审计里没有这个项目的失败条目。
+
+**二、清单外修复复测（13.19 复测时发现）**
+
+- **① 「下一轮重启」回执写的是当前 Agent 的名字**
+  - 现在的回执是「已保存，下一轮开始时重启 {Codex|DeepSeek|pi} 生效」。名字来自 Host 的 `native_permission::display_name`，前端读 catalog 的 `displayName`；旧版 Host 不发这个字段时，用后端栏的名称。
+  - 复测：pi 完全访问会话，撤销完全访问后，回执写「重启 pi」，不再出现「dsh」；dsh 会话中途切换，回执写「重启 DeepSeek」。
+- **② 撤销完全访问后，能力 chip 回到沙箱**
+  - 原因：撤销后 runtime 停掉了完全访问进程，但会话里还留着该进程的沙箱声明和握手信息。`agent_backend_capabilities` 一直读这份旧信息，所以 chip 继续显示「沙箱：无（完全访问）」。另外，前端撤销后只刷新了登录卡片，没有重新拉取能力。
+  - 修复：`ExternalRuntime::revoke_full_access` 结束后，只要进程已经不在，就清掉旧的声明和握手信息。chip 先回到「启动前预估」的沙箱视图，下一轮重新启动后换成实际声明。前端无论走下拉撤销还是走 chip 撤销，都会重新拉取能力和权限状态。
+  - 复测：pi、Codex、dsh 三个完全访问会话分别撤销。撤销后立刻看：chip 变回沙箱，不需要发下一轮；发下一轮后 chip 显示实际的 srt 声明。
+- **③ 会话中途，完全访问项的锁定原因直接显示在下拉旁**
+  - 会话中途，完全访问项旁边直接显示「完全访问权限：完全访问只能在新建会话时选择（会话中只能撤销）」，形式和「帮我批准」不可用原因一样，悬浮提示也保留。
+  - 选项、名称、置灰逻辑都没改。新会话（草稿）里不显示这行。FORBIDDEN 时，完全访问项旁边显示管理员禁止的原因。
+- **④ 草稿阶段「帮我批准」不再依赖已有登录**
+  - Host 判断用哪个地址，按以下顺序：
+    1. 先用该 Agent 的协议地址：已绑定的地址，或唯一能用的地址。这一步不要求 Key，也不要求已验证。
+    2. 没有协议地址时，用供应商自己的 base_url。
+    3. 都没有，即没有默认供应商或地址为空时，fail-closed：把「帮我批准」置为不可用，原因是「无法确定当前供应商的地址……按安全默认不可用」。
+  - 有多个候选地址时，只要其中有一个不是 OpenAI，就按非 OpenAI 处理。
+  - 复测，每一种情况都在**新会话还没登录**时看：
+    - 供应商没有绑定 Codex 协议地址，主 base_url 是 DeepSeek：「帮我批准」置灰，原因是只走 OpenAI。
+    - 主 base_url 是 `https://api.openai.com/v1`：不置灰。
+    - 删除默认供应商：置灰，原因是无法确定地址。
+  - **注意**：用户在私有 HOME 里自己登录 Codex、Fox 没有默认供应商时，现在也按 fail-closed 置灰，运行时会把已存的「帮我批准」降为「请求审批」。
+
+**三、改由单元测试覆盖（本地已跑）**
+
+- **D.5 完全访问下的审批**：`crates/fox-agent-backend/tests/external_runtime.rs::full_access_codex_and_dsh_requests_still_show_the_card_never_auto_allowed`
+  - Codex（`agent-full-access`）和 dsh（`danger-full-access`）的完全访问会话里，审批请求照常弹卡片，并一直等用户作答，不会被自动作答，也不会写入原生应答；用户作答后，写给 Agent 的是用户的选择。
+  - 对照：pi 的完全访问由 Fox 审批门自动放行一次（`allow_once`）。
+  - 撤销后的状态见同文件 `revoking_full_access_restarts_in_the_sandbox_without_replay`（新增断言：撤销后不保留旧声明；`apply_native_mode` 返回 `NextTurn`；重新启动后声明为沙箱）。
+- **I run_command 隐藏**：
+  - `services/agent-runtime/test/pi-runtime.test.mjs` 的「run_command follows the Host runtime availability in the real request snapshot」：真实 runtime 的请求快照。
+    - unavailable 时，`effectiveToolNames` 不含 `run_command`，`excludedTools` 为 `{name: run_command, reason: host_runtime_unavailable, reasonCode}`。
+    - available、unknown、没有发能力信息时照常出现。
+  - 另有 `test/host-runtime-capabilities.test.mjs` 的纯函数和 kernel 描述测试。
+
+**四、延后**
+
+- **F**（Reconnecting 快速失败诊断）：延后。
+- **B.1 / B.2**（Codex 中途 set_mode 立即生效、按新模式处理越权操作）：延后，需要 OpenAI 供应商环境。
+- **B.4**（set_mode 被拒时的回执）：延后，需要旧版 codex-acp。
