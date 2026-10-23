@@ -86,7 +86,7 @@ function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; o
 /** Where the backend of a new conversation is chosen. */
 export const NEW_CONVERSATION_BACKEND_HINT = '新会话使用的 Agent 在“设置 → 助手设置”中选择，创建后不可更换'
 
-export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, capabilities = null, permission = null, onRevokeFullAccess, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
+export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker = null, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
@@ -105,6 +105,11 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
   /** Permission mode / lock / FORBIDDEN from the Host. */
   permission?: AgentBackendPermissionStatus | null
   onRevokeFullAccess?: () => void
+  /**
+   * The Agent's native permission list (when the Host offers it). Replaces
+   * the sandbox / full-access chip; mid-session revoke goes through it.
+   */
+  permissionPicker?: ReactNode
   /** Login guidance card of the shown external backend (open conversation, or a new one before its first message). */
   credentialCard?: ReactNode
   /** Last successful import receipt, shown once, here. */
@@ -128,7 +133,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
           <Lock size={11} aria-hidden="true" />
           后端：{AGENT_BACKEND_LABELS[lockedBackend]}（已锁定）
         </span>
-        {access === 'runnable' && <LockedPermission permission={permission} onRevoke={onRevokeFullAccess} />}
+        {access === 'runnable' && (permissionPicker ?? <LockedPermission permission={permission} onRevoke={onRevokeFullAccess} />)}
         {refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)}
         {access === 'runnable' && <CapabilityChips capabilities={capabilities} />}
         {access === 'runnable' && credentialCard}
@@ -149,9 +154,11 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
       <span className="fox-agent-backend-chip" data-draft-backend={value} title={NEW_CONVERSATION_BACKEND_HINT}>
         新会话：{AGENT_BACKEND_LABELS[value]}
       </span>
-      <span className="fox-agent-backend-chip" data-permission={fullAccess ? 'full_access' : 'sandboxed'} title={FULL_ACCESS_LOCK_NOTE}>
-        权限：{fullAccess ? '完全访问' : '沙箱'}（来自设置）
-      </span>
+      {permissionPicker ?? (
+        <span className="fox-agent-backend-chip" data-permission={fullAccess ? 'full_access' : 'sandboxed'} title={FULL_ACCESS_LOCK_NOTE}>
+          权限：{fullAccess ? '完全访问' : '沙箱'}（来自设置）
+        </span>
+      )}
       {refusalNotice ?? <CapabilityChips capabilities={capabilities} />}
       {/* Same rule as a locked conversation: the login card shows before the
           first message (80b1622). */}
