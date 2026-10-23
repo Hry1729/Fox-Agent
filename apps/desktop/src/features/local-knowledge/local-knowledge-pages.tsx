@@ -1045,16 +1045,20 @@ function LocalFilePreviewDialog({ file, gateway, open, onOpenChange }: { file: L
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="fox-local-files-preview-dialog">
-        <DialogHeader>
-          <DialogTitle>{file?.name ?? '本机文件预览'}</DialogTitle>
-          <DialogDescription title={file?.absolutePath}>{file?.absolutePath}</DialogDescription>
-        </DialogHeader>
+        <header className="fox-file-preview-toolbar">
+          <DialogTitle className="fox-file-preview-title" title={file?.absolutePath}>{file?.name ?? '本机文件预览'}</DialogTitle>
+          {file && <div className="fox-file-preview-meta" title={`${file.extension.toUpperCase()} · ${formatBytes(file.sizeBytes)} · ${formatDate(file.modifiedAt)}`}>{file.extension.toUpperCase()} · {formatBytes(file.sizeBytes)} · {formatDate(file.modifiedAt)}</div>}
+          <div className="fox-file-preview-actions">
+            <Button variant="ghost" size="icon" aria-label="打开所在文件夹" title="打开所在文件夹" onClick={() => void revealInFolder()}><FolderOpen /></Button>
+            <Button variant="ghost" size="icon" aria-label="系统打开" title="系统打开" onClick={() => void openWithSystem()}><ExternalLink /></Button>
+          </div>
+        </header>
+        <DialogDescription className="sr-only">{file?.absolutePath}</DialogDescription>
         <div className="fox-local-files-preview-body">
           {loading && <div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在准备预览</b></div>}
           {!loading && !error && !unsupported && <Suspense fallback={<div className="fox-file-preview-state is-loading"><LoaderCircle className="animate-spin" /><b>正在加载查看器</b></div>}>{preview}</Suspense>}
           {!loading && (unsupported || error) && <div className="fox-file-preview-state"><FileQuestion /><b>{error ? '预览加载失败' : '暂不支持内置预览'}</b><p>{error ?? '当前文件格式暂不支持在 Fox 中直接预览。'}</p><Button onClick={() => void openWithSystem()}><ExternalLink />系统打开</Button></div>}
         </div>
-        <DialogFooter className="fox-local-files-preview-actions"><Button variant="outline" onClick={() => void revealInFolder()}><FolderOpen />打开所在文件夹</Button><Button variant="outline" onClick={() => void openWithSystem()}><ExternalLink />系统打开</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -1578,7 +1582,7 @@ function KnowledgeBaseSearch({ gateway, base, hint, initialQuery = '', omni = fa
   }
 
   return <div className={cn('fox-kb-search-block', omni && 'is-omni')}>
-    {controlContainer !== undefined ? controlContainer && createPortal(<ExpandingSearch anchor="end" label={searchLabel} placeholder="搜索资料内容，或直接问一个问题" items={[]} value={query} onValueChange={(next) => { if (!next.trim()) clearSearch(); else setQuery(next) }} onSearch={(next) => run(next)} showResults={false} keyboardShortcut clearLabel="清空搜索" expandedWidth={360} className="fox-kb-expanding-search" />, controlContainer) : <form className="fox-kb-search" role="search" onSubmit={submit}>
+    {controlContainer !== undefined ? controlContainer && createPortal(<ExpandingSearch reserveSpace anchor="end" label={searchLabel} placeholder="搜索资料内容，或直接问一个问题" items={[]} value={query} onValueChange={(next) => { if (!next.trim()) clearSearch(); else setQuery(next) }} onSearch={(next) => run(next)} showResults={false} keyboardShortcut clearLabel="清空搜索" expandedWidth={360} className="fox-kb-expanding-search" />, controlContainer) : <form className="fox-kb-search" role="search" onSubmit={submit}>
       <Search aria-hidden="true" />
       <input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} aria-label={`在${base.name}里搜索`} placeholder={omni ? '搜索资料内容，或直接问一个问题' : `在「${base.name}」里搜索，或直接提问`} />
       {query && <button type="button" aria-label="清空搜索" onClick={clearSearch}><XCircle /></button>}

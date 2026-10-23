@@ -8,8 +8,14 @@ export function SidebarMotion({ className, children }: { className: string; chil
   const loaded = implementation.useModule()
   const container = useRef<HTMLElement>(null)
   const [active, setActive] = useState<HTMLElement | null>(null)
-  const row = (target: EventTarget) => target instanceof Element ? target.closest<HTMLElement>('[data-sidebar-motion-item]') : null
-  return <aside ref={container} className={className} data-slot="motion-highlight-container" style={{ position: 'relative', zIndex: 1 }} onPointerOver={event => { implementation.preload(); setActive(row(event.target)) }} onPointerOut={event => { setActive(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget) ? row(event.relatedTarget) : null) }} onPointerLeave={() => setActive(null)} onFocusCapture={() => implementation.preload()}>
+  const updateActive = (target: EventTarget | null) => {
+    const element = target instanceof Element ? target : null
+    const next = element?.closest<HTMLElement>('[data-sidebar-motion-item]') ?? null
+    // Keep the moving highlight across the gaps between settings groups.
+    if (!next && element?.closest('[data-sidebar-motion-group]')) return
+    setActive(next)
+  }
+  return <aside ref={container} className={className} data-slot="motion-highlight-container" style={{ position: 'relative', zIndex: 1 }} onPointerOver={event => { implementation.preload(); updateActive(event.target) }} onPointerOut={event => { updateActive(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget) ? event.relatedTarget : null) }} onPointerLeave={() => setActive(null)} onFocusCapture={() => implementation.preload()}>
     {loaded && <loaded.SidebarHighlight container={container} active={active} />}
     {children}
   </aside>

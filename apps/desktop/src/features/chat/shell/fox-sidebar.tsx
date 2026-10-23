@@ -509,7 +509,7 @@ export function Sidebar({
         {conversationList}
         </div>
       )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} hideLibrary={notificationsOpen} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : !notificationsOpen ? <>
-        <div className={`fox-sidebar-primary fox-context-sidebar-nav ${sidebarMode === 'settings' ? 'is-settings' : ''}`}>
+        <div className={`fox-sidebar-primary fox-context-sidebar-nav ${sidebarMode === 'settings' ? 'is-settings' : ''}`} data-sidebar-motion-group={sidebarMode === 'settings' || undefined}>
           {sidebarMode === 'agent'
             ? agentContextItems.map(({ section, label, icon: Icon }) => <SidebarMotionItem key={section}><button className={`fox-sidebar-command ${agentSection === section ? 'is-active' : ''}`} type="button" aria-label={label} aria-current={agentSection === section ? 'page' : undefined} onClick={() => onNavigate('agent-detail', activeEntityId ?? undefined, { documentId: section })}><Icon size={16} /><span>{label}</span></button></SidebarMotionItem>)
             : sidebarMode === 'settings'

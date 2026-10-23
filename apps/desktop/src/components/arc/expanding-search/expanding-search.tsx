@@ -41,6 +41,8 @@ export interface ExpandingSearchProps {
   onExpandedChange?: (expanded: boolean) => void;
   /** The widest the field grows. It never grows past its container. */
   expandedWidth?: number;
+  /** Resize the layout lane with the field instead of covering adjacent content. */
+  reserveSpace?: boolean;
   maxResults?: number;
   /** The edge the button sits on; the field grows away from it. */
   anchor?: "start" | "end";
@@ -192,7 +194,7 @@ function Listbox({ id, label, groups, query, activeIndex, optionId, reduced, key
   </div>;
 }
 
-export function ExpandingSearch({ label, items, suggestions = [], suggestionsLabel = "Recent", placeholder, onSelect, onExpandedChange, expandedWidth = 360, maxResults = 6, anchor = "end", emptyHint = "Try a shorter word or check the spelling.", className, value, onValueChange, onSearch, showResults = true, keyboardShortcut = false, clearLabel = "Clear search" }: ExpandingSearchProps) {
+export function ExpandingSearch({ label, items, suggestions = [], suggestionsLabel = "Recent", placeholder, onSelect, onExpandedChange, expandedWidth = 360, reserveSpace = false, maxResults = 6, anchor = "end", emptyHint = "Try a shorter word or check the spelling.", className, value, onValueChange, onSearch, showResults = true, keyboardShortcut = false, clearLabel = "Clear search" }: ExpandingSearchProps) {
   const id = useId();
   const reduced = useReducedMotion() ?? false;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -222,13 +224,18 @@ export function ExpandingSearch({ label, items, suggestions = [], suggestionsLab
   useLayoutEffect(() => {
     const root = rootRef.current, shell = shellRef.current;
     if (!root || !shell) return;
+    let measured = false;
     const measure = () => {
       const collapsed = shell.offsetHeight || FALLBACK_SIZE;
       const bounds = root.getBoundingClientRect();
       const viewportRoom = anchor === "end" ? bounds.right - 16 : window.innerWidth - bounds.left - 16;
-      const full = Math.max(collapsed, Math.min(expandedWidth, root.clientWidth, viewportRoom));
+      const full = Math.max(collapsed, reserveSpace ? Math.min(expandedWidth, window.innerWidth - 32) : Math.min(expandedWidth, root.clientWidth, viewportRoom));
+      const changed = !measured || size.current.collapsed !== collapsed || size.current.expanded !== full;
+      measured = true;
       size.current = { collapsed, expanded: full };
       root.style.setProperty("--es-width", `${full}px`);
+      // The reserved lane is observed while it animates; do not restart that animation on every frame.
+      if (!changed) return;
       const goal = open.current ? full : collapsed;
       if (width.isAnimating()) animate(width, goal, motionTokens.spring.morph);
       else width.jump(goal);
@@ -238,8 +245,9 @@ export function ExpandingSearch({ label, items, suggestions = [], suggestionsLab
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(root);
-    return () => observer.disconnect();
-  }, [expandedWidth, anchor, width, syncShape]);
+    window.addEventListener("resize", measure);
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
+  }, [expandedWidth, reserveSpace, anchor, width, syncShape]);
 
   // Opening grows on the morph spring with a hint of overshoot; folding back settles without one, so the circle never dips below its own size.
   const morphTo = (goal: number) => { if (reduced) width.jump(goal); else animate(width, goal, goal >= width.get() ? motionTokens.spring.morph : motionTokens.spring.smooth); };
@@ -312,8 +320,8 @@ export function ExpandingSearch({ label, items, suggestions = [], suggestionsLab
 
   const clearHidden = reduced ? { opacity: 0 } : { opacity: 0, scale: .6, filter: `blur(${motionTokens.blur.subtle}px)` };
 
-  return <div ref={rootRef} className={[styles.root, className].filter(Boolean).join(" ")} data-anchor={anchor} data-expanded={expanded || undefined}>
-    <motion.div ref={shellRef} className={styles.shell} data-expanded={expanded || undefined} style={{ width }}>
+  return <motion.div ref={rootRef} className={[styles.root, className].filter(Boolean).join(" ")} data-anchor={anchor} data-expanded={expanded || undefined} data-reserve-space={reserveSpace || undefined} style={reserveSpace ? { width } : undefined}>
+    <motion.div ref={shellRef} className={styles.shell} data-expanded={expanded || undefined} style={{ width: reserveSpace ? "100%" : width }}>
       <button ref={buttonRef} type="button" className={styles.trigger} aria-label={label} hidden={expanded} onClick={expand} />
       <Search className={styles.icon} width={18} height={18} strokeWidth={1.75} aria-hidden="true" />
       {/* The placeholder waits for the shape to start moving, then fades in; on close it leaves first. */}
@@ -359,7 +367,7 @@ export function ExpandingSearch({ label, items, suggestions = [], suggestionsLab
       </Panel>}
     </AnimatePresence>
     <span className={styles.srOnly} role="status" aria-live="polite">{announcement}</span>
-  </div>;
+  </motion.div>;
 }
 
 export default ExpandingSearch;

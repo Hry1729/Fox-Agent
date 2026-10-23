@@ -2637,6 +2637,10 @@ button.fox-chat-project-row:disabled {
   scroll-padding-block: 16px;
 }
 
+.fox-chat-stage.is-empty:has(.fox-composer-wrap.is-new-conversation) {
+  --fox-empty-group-top: max(16px, calc((100% - var(--fox-empty-heading-height, 88px) - 12px - var(--fox-empty-composer-height, 160px)) / 2 - var(--fox-empty-vertical-offset)));
+}
+
 .fox-chat-stage { --fox-chat-column-width: min(58rem, calc(100cqw - clamp(96px, 8vw, 112px))); }
 .fox-composer-wrap:not(.is-empty) { width: var(--fox-chat-column-width); }
 .fox-content-card.has-open-right-panel :is(.fox-turn-rail, .fox-conversation-rail) { display: none; }
@@ -4817,10 +4821,16 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) {
-  padding: var(--fox-space-s);
-  border: 1px solid var(--fox-accent-border-soft);
-  border-radius: 18px;
+  --fox-composer-inset: 4px;
+  --fox-composer-radius: 12px;
+  padding: var(--fox-composer-inset);
+  border: 0;
+  border-radius: calc(var(--fox-composer-radius) + var(--fox-composer-inset));
   background: var(--fox-accent-surface);
+}
+
+.fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-input > [data-slot='input-group'] {
+  border-radius: var(--fox-composer-radius) !important;
 }
 
 .fox-composer-draft-footer {
@@ -4828,8 +4838,8 @@ img[src='/avatars/fox-assistant.png'] {
   align-items: center;
   justify-content: space-between;
   gap: var(--fox-space-m);
-  min-height: 36px;
-  padding: var(--fox-space-xs) var(--fox-space-xs) 0;
+  min-height: 32px;
+  padding: 2px 2px 0;
 }
 
 .fox-composer-draft-footer .fox-composer-project-bar {

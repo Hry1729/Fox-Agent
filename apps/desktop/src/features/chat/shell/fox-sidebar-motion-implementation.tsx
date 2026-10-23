@@ -31,9 +31,10 @@ export function SidebarHighlight({ container, active }: { container: RefObject<H
     return () => { cancelAnimationFrame(frame); observer.disconnect(); mutations.disconnect(); parent.removeEventListener('scroll', schedule, true) }
   }, [active, container])
   if (!bounds) return null
+  const position = { x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height }
   // Preserve the exit rectangle; fresh entries fade at the target without travelling.
   return <motion.div aria-hidden="true" className="fox-sidebar-moving-highlight"
-    style={{ position: 'absolute', zIndex: 0, pointerEvents: 'none' }}
-    initial={{ ...bounds, opacity: 0 }} animate={{ ...bounds, opacity: visible ? 1 : 0 }}
+    style={{ position: 'absolute', top: 0, left: 0, zIndex: 0, pointerEvents: 'none' }}
+    initial={{ ...position, opacity: 0 }} animate={{ ...position, opacity: visible ? 1 : 0 }}
     transition={{ ...(reduced || entering ? { duration: 0 } : { type: 'spring', stiffness: 350, damping: 35 }), opacity: { duration: reduced ? 0 : 0.15 } }} />
 }
