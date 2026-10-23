@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
 import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
-import type { AgentBackendCapabilities, AgentBackendId, AgentBackendStatus } from '../model/agent-backend'
+import type { AgentBackendCapabilities, AgentBackendId, AgentBackendPreferences, AgentBackendStatus, CodexResponsesProbe } from '../model/agent-backend'
 import type { AgentBackendPermissionStatus, AgentBackendTarget, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
 import type {
   AgentRecord,
@@ -768,6 +768,12 @@ export const desktopClient = {
   /** UX batch ②: permission mode / lock / FORBIDDEN. */
   agentBackendPermissionStatus: (conversationId?: string | null) =>
     command<AgentBackendPermissionStatus>('agent_backend_permission_status', conversationId ? { conversationId } : {}),
+  /** Settings batch: 设置 →「新会话使用的 Agent」/「新外部会话使用完全访问」. */
+  agentBackendPreferences: () => command<AgentBackendPreferences>('agent_backend_preferences_get'),
+  saveAgentBackendPreferences: (change: { defaultBackend?: AgentBackendId; newExternalFullAccess?: boolean }) =>
+    command<AgentBackendPreferences>('agent_backend_preferences_save', change),
+  /** Whether 模型服务's default provider answers the Responses API (Codex); cached by the Host. */
+  probeCodexResponses: () => command<CodexResponsesProbe | null>('agent_backend_probe_codex_responses'),
   /** Revoke full access mid-session (the backend restarts in the sandbox). */
   agentBackendRevokeFullAccess: (conversationId: string) =>
     command<{ outcome: string; stopConfirmed: boolean }>('agent_backend_revoke_full_access', { conversationId }),
