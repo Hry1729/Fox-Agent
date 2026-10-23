@@ -16,11 +16,13 @@ import {
   FULL_ACCESS_RISK_POINTS,
   importConfirmationRows,
   importReceipt,
+  backupDirectoryLabel,
   permissionChipLabel,
   REVOKE_FULL_ACCESS_NOTICE,
   type AgentBackendPermissionStatus,
   type CredentialProbe,
   type ImportItem,
+  unifiedLoginNote,
 } from '../src/features/conversations/model/agent-backend-onboarding'
 
 // A value that must never reach the UI model. The Host never sends one; the
@@ -80,7 +82,7 @@ describe('credentialCardModel: three probe states', () => {
     const card = credentialCardModel(p, allowed)!
     expect(card.kind).toBe('loopback')
     expect(card.title).toBe('本机网关在沙箱模式下不可用')
-    expect(card.description).toContain('新建会话并选择“完全访问”')
+    expect(card.description).toContain('打开“新外部会话使用完全访问”后新建会话')
     expect(card.description).toContain('https://api.deepseek.com/anthropic')
     expect(card.offerImport).toBe(false)
     expect(card.requiredKeys).toEqual([])
@@ -92,7 +94,7 @@ describe('credentialCardModel: three probe states', () => {
     const p = probe({ state: 'loopback_requires_full_access', loopbackBlocked: true })
     const card = credentialCardModel(p, forbidden)!
     expect(card.description).toContain('本机已禁止完全访问')
-    expect(card.description).not.toContain('选择“完全访问”')
+    expect(card.description).not.toContain('新外部会话使用完全访问')
   })
 })
 
@@ -146,13 +148,23 @@ describe('import confirmation and receipt: names only', () => {
       .toEqual(['没有复制任何内容', '已有登录，未覆盖 1 个项目：主项目（DEEPSEEK_API_KEY）'])
   })
 
-  test('receipt: overwrite names the backup location', () => {
-    const lines = importReceiptLines({
+  // Settings batch, item 3: the receipt names the backup RELATIVE to the
+  // private HOME (no SID / profile path), the same form as the audit.
+  test('receipt: overwrite names the backup location relative to the private HOME', () => {
+    const report = {
       backend: 'codex', homes: 1, homesWritten: 1, overwrite: true, files: ['.codex/auth.json'], keys: [], skipped: [], skippedExisting: [],
-      backups: [{ project: 'p1', label: '主项目', directory: 'C:\\ProgramData\\Fox\\sandbox\\S-1\\homes\\p1\\codex\\.fox-credential-backups\\20261022-084512', items: ['.codex/auth.json'] }],
-    })
-    expect(lines[1]).toBe('已覆盖 主项目 的 auth.json，原文件备份在 C:\\ProgramData\\Fox\\sandbox\\S-1\\homes\\p1\\codex\\.fox-credential-backups\\20261022-084512')
-    noValue(lines)
+      backups: [{ project: 'p1', label: '主项目', directory: '.fox-credential-backups/20261022-084512', items: ['.codex/auth.json'] }],
+    }
+    expect(importReceiptLines(report, { windows: true })[1]).toBe('已覆盖 主项目 的 auth.json，原文件备份在私有 HOME 下的 .fox-credential-backups\\20261022-084512')
+    expect(importReceiptLines(report, { windows: false })[1]).toBe('已覆盖 主项目 的 auth.json，原文件备份在私有 HOME 下的 .fox-credential-backups/20261022-084512')
+    // An older Host that still sent the absolute path: only the relative tail is shown.
+    const legacy = { ...report, backups: [{ ...report.backups[0], directory: 'C:\\ProgramData\\Fox\\sandbox\\S-1-5-21-1\\homes\\p1\\codex\\.fox-credential-backups\\20261022-084512' }] }
+    const line = importReceiptLines(legacy, { windows: true })[1]
+    expect(line).toBe('已覆盖 主项目 的 auth.json，原文件备份在私有 HOME 下的 .fox-credential-backups\\20261022-084512')
+    expect(line).not.toContain('S-1-5-21')
+    expect(line).not.toContain('ProgramData')
+    expect(backupDirectoryLabel('/home/u/.local/share/fox/sandbox-homes/p1/codex/.fox-credential-backups/20261022-084512-2', false)).toBe('.fox-credential-backups/20261022-084512-2')
+    noValue(importReceiptLines(report))
   })
 })
 
@@ -219,19 +231,16 @@ describe('source assertions', () => {
   const bar = readFileSync(new URL('../src/features/chat/components/AgentBackendBar.tsx', import.meta.url), 'utf8')
   const card = readFileSync(new URL('../src/features/chat/components/AgentBackendCredentialCard.tsx', import.meta.url), 'utf8')
 
-  test('AgentBackendBar risk confirmation renders the three points and the private HOME line before enabling full access', () => {
-    expect(bar).toContain('FULL_ACCESS_RISK_POINTS.map(')
-    expect(bar).toContain('{FULL_ACCESS_PRIVATE_HOME_NOTE}')
-    expect(bar).toContain('role="alertdialog" aria-label="完全访问风险确认"')
-    // Picking full access only opens the confirmation; onChange('full_access') happens on the confirm button.
-    expect(bar).toMatch(/if \(next === 'full_access'\) \{\s*if \(!forbidden\) setConfirming\(true\)\s*return/)
-    expect(bar).toContain(`onClick={() => { setConfirming(false); onChange('full_access') }}>我已了解，使用完全访问`)
-  })
+  const settings = readFileSync(new URL('../src/features/settings/agent-backend-settings.tsx', import.meta.url), 'utf8')
 
-  test('AgentBackendBar greys out full access under FORBIDDEN', () => {
-    expect(bar).toContain('disabled={option.disabled}')
-    expect(bar).toContain("value={forbidden ? 'sandboxed' : mode}")
-    expect(bar).toContain("{option.disabled ? '（已禁止）' : ''}")
+  // Settings batch, item 5: full access is chosen in 设置, not on the bar.
+  test('full access moved to the settings: risk points shown there; the bar has no picker for it', () => {
+    expect(settings).toContain('新外部会话使用完全访问')
+    expect(settings).toContain("FULL_ACCESS_RISK_POINTS.join('')")
+    expect(settings).toContain('disabled={fullAccess.disabled || saving}')
+    expect(bar).not.toContain('function DraftPermissionPicker')
+    expect(bar).not.toContain('aria-label="新会话的权限模式"')
+    expect(bar).toContain('（来自设置）')
   })
 
   test('AgentBackendBar warns that revoking restarts before calling onRevoke', () => {
@@ -244,28 +253,33 @@ describe('source assertions', () => {
   const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
   const client = readFileSync(new URL('../src/features/conversations/api/desktop-client.ts', import.meta.url), 'utf8')
 
+  const panel = readFileSync(new URL('../src/features/chat/components/AgentBackendPanel.tsx', import.meta.url), 'utf8')
+
   test('AgentBackendBar shows the login card in the draft too (same as a locked conversation)', () => {
-    expect(bar).toContain("{value !== 'fox' && credentialCard}")
     expect(bar).toContain("{access === 'runnable' && credentialCard}")
-    // The draft card is not hidden behind the refusal notice fragment.
-    const draft = bar.slice(bar.indexOf('data-access="draft"'))
-    expect(draft.indexOf("{value !== 'fox' && credentialCard}")).toBeGreaterThan(draft.indexOf('</>}'))
+    const draft = bar.slice(bar.indexOf('data-access="draft" aria-label="新会话的 Agent 后端"'))
+    expect(draft).toContain('{credentialCard}')
+    // The draft card is not hidden behind the refusal notice.
+    expect(draft.indexOf('{credentialCard}')).toBeGreaterThan(draft.indexOf('{refusalNotice ??'))
   })
 
-  test('the import receipt is rendered by the bar, outside the card, and outlives it', () => {
+  test('the import receipt is rendered once, by the bar, keyed to its target', () => {
     expect(bar).toContain('function ImportReceiptNotice(')
     expect(bar).toContain('aria-label="导入回执"')
     expect(bar.match(/\{receiptNotice\}/g)?.length).toBe(2)
-    expect(workbench).toContain('setAgentBackendImportReceipt(importReceiptLines(report))')
-    expect(workbench).toContain('importReceipt={agentBackendImportReceipt}')
-    expect(workbench).toContain('IMPORT_RECEIPT_VISIBLE_MS')
+    expect(panel).toContain('setReceipt({ key: targetKey, value: importReceiptLines(report) })')
+    expect(panel).toContain('importReceipt={visibleReceipt}')
+    expect(panel).toContain('IMPORT_RECEIPT_VISIBLE_MS')
+    expect(workbench).toContain('<AgentBackendPanel')
+    // The card no longer echoes a successful import (fix ②).
+    expect(card).not.toContain('importReceipt(')
     expect(IMPORT_RECEIPT_VISIBLE_MS).toBeGreaterThanOrEqual(10_000)
   })
 
-  test('workbench probes a new conversation by backend + project, with no conversation needed', () => {
-    expect(workbench).toContain('credentialProbeTarget({')
-    expect(workbench).toContain('desktopClient.agentBackendCredentials(target)')
-    expect(workbench).not.toContain('desktopClient.agentBackendCredentials(capabilityConversationId)')
+  test('the panel probes a new conversation by backend + project, with no conversation needed', () => {
+    expect(panel).toContain('credentialProbeTarget({')
+    expect(panel).toContain('client.agentBackendCredentials(JSON.parse(key) as AgentBackendTarget)')
+    expect(panel).toContain('key={targetKey}')
     expect(client).toContain("command<CredentialProbe>('agent_backend_credentials', target)")
     expect(client).toContain('{ ...target, selected, allProjects, overwrite }')
   })
@@ -286,5 +300,21 @@ describe('source assertions', () => {
     expect(card).toContain('disabled={busy || selected.length === 0}')
     // No value is ever read or rendered: only names / destinations from the Host.
     expect(card).not.toMatch(/\.value\b(?!s)/)
+  })
+})
+
+// Settings batch, item 6: the unified login (Fox「模型服务」) as the card sees it.
+describe('unified login in the login card', () => {
+  test('a provider that cannot drive the backend says why on the card; names only', () => {
+    const unsupported = probe({ unifiedLogin: { backend: 'deepseek', outcome: 'unsupported', provider: 'DashScope', files: [], userFiles: [], reason: 'DeepSeek 后端（dsh）只支持 Anthropic Messages 协议' } })
+    expect(unifiedLoginNote(unsupported)).toBe('没能用“模型服务”的默认 provider「DashScope」自动登录：DeepSeek 后端（dsh）只支持 Anthropic Messages 协议')
+    const card = credentialCardModel(unsupported, allowed)!
+    expect(card.description).toContain('DashScope')
+    noValue(card)
+    // Generated / unchanged: the Host already reports `ready`, so no card.
+    expect(credentialCardModel(probe({ state: 'ready', credentialsPresent: true, unifiedLogin: { backend: 'pi', outcome: 'generated', provider: 'DeepSeek', files: ['.pi/agent/models.json'], userFiles: [], reason: null } }), allowed)).toBeNull()
+    // No 模型服务: the card points at it as the first fix.
+    expect(credentialCardModel(probe(), allowed)!.description).toContain('设置 → 模型服务')
+    expect(unifiedLoginNote(probe({ unifiedLogin: null }))).toBeNull()
   })
 })
