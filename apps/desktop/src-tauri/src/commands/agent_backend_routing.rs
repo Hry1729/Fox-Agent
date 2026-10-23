@@ -554,6 +554,233 @@ pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> 
     })))
 }
 
+// ---------------------------------------------------------------------------
+// Per-agent native permission list (权限按 Agent 原生列出). The list, the
+// names and the rules live in `fox_agent_backend::native_permission`; this
+// is storage (`app_settings`) and the two commands for the backend bar.
+//
+// * `agent_backend.native_mode.conversation.<id>`: the conversation's current
+//   sandboxed choice (the full-access option comes from the grant).
+// * `agent_backend.native_mode.last.<backend>`: each Agent's last sandboxed
+//   choice, the starting point of its next new conversation.
+// * `agent_backend.native_mode.draft_full.<backend>`: `1` / `0` when the
+//   user picked (or left) the full-access option in a new conversation's
+//   list; read once at creation and cleared. Absent: 设置 →「新外部会话使用
+//   完全访问」is the default.
+
+pub(crate) const NATIVE_MODE_CONVERSATION_PREFIX: &str = "agent_backend.native_mode.conversation.";
+pub(crate) const NATIVE_MODE_LAST_PREFIX: &str = "agent_backend.native_mode.last.";
+pub(crate) const NATIVE_MODE_DRAFT_FULL_PREFIX: &str = "agent_backend.native_mode.draft_full.";
+
+fn non_empty_setting(database: &crate::database::Database, key: &str) -> Option<String> {
+    database.app_setting(key).ok().flatten().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+}
+
+/// The conversation's stored choice; `None` = the Agent's default.
+pub(crate) fn stored_conversation_native_mode(database: &crate::database::Database, conversation_id: &str) -> Option<String> {
+    non_empty_setting(database, &format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"))
+}
+
+/// The Agent's last sandboxed choice.
+pub(crate) fn stored_last_native_mode(database: &crate::database::Database, backend: AgentBackend) -> Option<String> {
+    non_empty_setting(database, &format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()))
+}
+
+/// The new conversation's explicit full-access pick, if any.
+pub(crate) fn draft_full_access_choice(database: &crate::database::Database, backend: AgentBackend) -> Option<bool> {
+    non_empty_setting(database, &format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str())).map(|value| value == "1")
+}
+
+/// Creation consumed the draft pick.
+pub(crate) fn clear_draft_full_access_choice(database: &crate::database::Database, backend: AgentBackend) {
+    let _ = database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "");
+}
+
+/// Record a new conversation's starting mode (the Agent's last sandboxed
+/// choice, when it has one).
+pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend) {
+    if let Some(mode) = stored_last_native_mode(database, backend) {
+        if fox_agent_backend::native_permission::is_known(backend, &mode) && !fox_agent_backend::native_permission::is_full_access(backend, &mode) {
+            let _ = database.set_app_setting(&format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode);
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePermissionRequest {
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// Backend of a new conversation (ignored when `conversation_id` is set).
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// The option to switch to (set only).
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+fn native_context(state: &AppState, backend: AgentBackend, forbidden: bool) -> fox_agent_backend::native_permission::CatalogContext {
+    fox_agent_backend::native_permission::CatalogContext {
+        provider_base_url: crate::external_model::external_login(&state.database, backend).map(|login| login.base_url),
+        full_access_forbidden: forbidden,
+    }
+}
+
+/// Which Agent, whether its session runs in full access, and whether that
+/// comes from a removable grant. `Err` = refusal for the UI.
+fn native_target(
+    state: &AppState,
+    external: &crate::external_backend::ExternalBackendHost,
+    request: &NativePermissionRequest,
+) -> Result<(AgentBackend, bool, bool), ApiResponse<serde_json::Value>> {
+    match request.conversation_id.as_deref() {
+        Some(id) => {
+            let backend = match state.database.conversation_agent_backend(id) {
+                Ok(Some(stored)) => AgentBackend::parse(&stored).unwrap_or(AgentBackend::Fox),
+                Ok(None) => return Err(ApiResponse::failure("conversation.not_found", "会话不存在", false)),
+                Err(error) => return Err(ApiResponse::failure("agent_backend_lookup_failed", error, true)),
+            };
+            let status = external.permission_status(Some(id));
+            let full = status.get("mode").and_then(serde_json::Value::as_str) == Some("full_access");
+            let granted = status.get("granted").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            Ok((backend, full, granted))
+        }
+        None => {
+            let backend = request.backend.as_deref().and_then(AgentBackend::parse).unwrap_or(AgentBackend::Fox);
+            let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
+            let full = !forbidden
+                && draft_full_access_choice(&state.database, backend).unwrap_or_else(|| stored_new_external_full_access(&state.database));
+            Ok((backend, full, full))
+        }
+    }
+}
+
+fn native_view(state: &AppState, external: &crate::external_backend::ExternalBackendHost, request: &NativePermissionRequest) -> ApiResponse<serde_json::Value> {
+    let (backend, full, granted) = match native_target(state, external, request) {
+        Ok(target) => target,
+        Err(refusal) => return refusal,
+    };
+    let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
+    let context = native_context(state, backend, forbidden);
+    let catalog = fox_agent_backend::native_permission::catalog(backend, &context);
+    let stored = match request.conversation_id.as_deref() {
+        Some(id) => stored_conversation_native_mode(&state.database, id),
+        None => stored_last_native_mode(&state.database, backend),
+    };
+    let current = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), full, &context);
+    let draft = request.conversation_id.is_none();
+    ApiResponse::success(serde_json::json!({
+        "catalog": catalog,
+        "current": current,
+        "fullAccess": full,
+        "fullAccessGranted": granted,
+        "fullAccessForbidden": forbidden,
+        "draft": draft,
+        // Full access is granted only when a conversation is created.
+        "fullAccessLockedReason": if draft || full { None } else { Some("完全访问只能在新建会话时选择（会话中只能撤销）") },
+    }))
+}
+
+/// The open conversation's (or a new conversation's) permission list in its
+/// Agent's own names, and the current choice.
+#[tauri::command]
+pub fn agent_backend_native_permissions(
+    state: State<'_, AppState>,
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: NativePermissionRequest,
+) -> ApiResponse<serde_json::Value> {
+    native_view(&state, &external, &request)
+}
+
+/// Switch the mode. A new conversation: remembered for its Agent (the
+/// full-access option is a one-shot pick, granted and audited at creation).
+/// An open conversation: Codex switches live (`session/set_mode`), dsh at
+/// the next turn (restart), pi at the next request; leaving the full-access
+/// option revokes full access through the existing revoke path (audited,
+/// backend restarted in the sandbox); entering it mid-session is refused.
+#[tauri::command]
+pub async fn agent_backend_native_permission_set(
+    state: State<'_, AppState>,
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: NativePermissionRequest,
+) -> Result<ApiResponse<serde_json::Value>, ()> {
+    use fox_agent_backend::native_permission as native;
+    let (backend, full, granted) = match native_target(&state, &external, &request) {
+        Ok(target) => target,
+        Err(refusal) => return Ok(refusal),
+    };
+    if backend == AgentBackend::Fox {
+        return Ok(ApiResponse::failure(RouteError::CODE_INVALID, "Fox 会话沿用原来的执行方式", false));
+    }
+    let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
+    let context = native_context(&state, backend, forbidden);
+    let mode = request.mode.as_deref().map(str::trim).unwrap_or_default().to_owned();
+    let catalog = native::catalog(backend, &context);
+    let Some(option) = catalog.options.iter().find(|option| option.id == mode) else {
+        return Ok(ApiResponse::failure(RouteError::CODE_INVALID, format!("「{}」没有权限选项「{mode}」", backend.as_str()), false));
+    };
+    if let Some(reason) = &option.disabled_reason {
+        let code = if option.full_access { host_routing::CODE_FULL_ACCESS_FORBIDDEN } else { "agent_backend_permission_unavailable" };
+        return Ok(ApiResponse::failure(code, reason.clone(), false));
+    }
+    let set = |key: String, value: &str| state.database.set_app_setting(&key, value);
+    let Some(conversation_id) = request.conversation_id.clone() else {
+        // New conversation.
+        let result = if option.full_access {
+            set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "1")
+        } else {
+            set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode)
+                .and_then(|_| set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "0"))
+        };
+        if let Err(error) = result {
+            return Ok(storage_error(error));
+        }
+        return Ok(native_view(&state, &external, &request));
+    };
+    if option.full_access && !full {
+        return Ok(ApiResponse::failure("agent_backend_full_access_locked", "完全访问只能在新建会话时选择；会话中只能撤销，不能开启", false));
+    }
+    let previous = native::effective_mode(backend, stored_conversation_native_mode(&state.database, &conversation_id).as_deref(), full, &context);
+    let mut revoked = None;
+    if !option.full_access && full {
+        if !granted {
+            return Ok(ApiResponse::failure(
+                "agent_backend_full_access_engineering",
+                "本会话的完全访问来自工程开关（FOX_EXTERNAL_FULL_ACCESS），不能在界面撤销",
+                false,
+            ));
+        }
+        // Leaving full access = the existing revoke (grant removed,
+        // audited, the backend restarts in the sandbox).
+        let response = external.revoke_full_access(&conversation_id).await;
+        if !response.ok {
+            return Ok(response);
+        }
+        revoked = response.data;
+    }
+    if !option.full_access {
+        let stored = set(format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode)
+            .and_then(|_| set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode));
+        if let Err(error) = stored {
+            return Ok(storage_error(error));
+        }
+    }
+    let outcome = external.apply_native_mode(&conversation_id, &mode).await;
+    let details = serde_json::json!({ "from": previous, "to": mode, "applied": outcome.as_str(), "fullAccessRevoked": revoked.is_some() });
+    let _ = state.database.append_agent_backend_audit(Some(&conversation_id), backend.as_str(), "agent_backend.permission_mode_changed", &details);
+    let mut view = native_view(&state, &external, &request);
+    if let Some(data) = view.data.as_mut() {
+        data["applied"] = serde_json::json!(outcome.as_str());
+        if let fox_agent_backend::external::NativeModeOutcome::Failed(message) = &outcome {
+            data["appliedError"] = serde_json::json!(message);
+        }
+        if let Some(revoked) = revoked {
+            data["revoke"] = revoked;
+        }
+    }
+    Ok(view)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
