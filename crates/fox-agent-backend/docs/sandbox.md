@@ -1200,3 +1200,68 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 - 本地验证覆盖类型检查、HTTP 夹具、供应商选择与缓存、v97 迁移、生成文件归属和浏览器夹具。它们不等于真实桌面完整验收；全量 CI 等权限分支完成后统一运行。
 
 真实 ACP 权限探测独立存放于 `output/provider-protocol-20261023`，不修改后端权限实现。codex-acp 2.2.2 / CLI 0.160.1 在本机 workspace-write 的三次成功写入样本中均发出了审批请求；agent 模式触发自动审查，但官方 DeepSeek 不支持审查器所用的 codex-auto-review 模型，写入被拒。dsh 0.2.1-rc.2 的策略只有 ask / never；workspace-write + ask 的实际写入未发 request_permission。dsh 的 session/set_mode 返回 -32601；set_config_option 只支持模型和推理选项，权限选项返回 -32602。这些是本机版本的样本结果，不将 on-request 描述为每次写入审批保证。
+
+### 13.19 权限按 Agent 原生列出 + 白名单 / Reconnecting / 元数据警告 / 默认供应商 / run_command 隐藏：工程师复测清单（2026-10-23）
+
+> 原计划编号 13.18；该编号已被「供应商优先的模型连接」占用，故顺延为 13.19。本节只列复测步骤和期望，实现说明见各文件头注释（`crates/fox-agent-backend/src/native_permission.rs`、`apps/desktop/src-tauri/src/commands/agent_backend_routing.rs`）。
+
+**前置**：Windows 桌面构建（含本批前后端）；「模型服务」里有一个 DeepSeek 供应商和一个 OpenAI 供应商各一份可用 Key；每一项在全新会话里做；每一项记录「通过 / 失败 + 截图 + 审计日志行」。
+
+**A. 每个 Agent 的权限列表和名称**
+
+1. 设置 → 助手设置 →「外部 Agent」：出现「Codex 默认权限」「DeepSeek 默认权限」「pi 默认权限」三行，只列沙箱内选项（完全访问仍由「新外部会话使用完全访问」开关控制）。
+2. 新会话选 Codex：后端栏权限下拉只有「请求审批 / 帮我批准 / 完全访问权限」三项。默认供应商不是 OpenAI 时，「帮我批准」置灰为「（不可用）」，旁边显示原因（codex-auto-review 只走 OpenAI）；换成 OpenAI 供应商后不再置灰。
+3. 新会话选 DeepSeek（dsh）：列表为「只读 / 工作区可写（询问）/ 工作区可写（不询问）/ 完全访问」，未选择过时默认「工作区可写（不询问）」。
+4. 新会话选 pi：列表为「只读 / 询问 / 自动 / 完全访问」，默认「询问」。
+5. Fox 会话：后端栏不出现权限下拉（原样）。
+6. 设置 `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`：三个 Agent 的完全访问项都置灰并写明管理员禁止。
+
+**B. Codex 会话中途 set_mode**
+
+1. Codex 会话发一轮后，把「请求审批」切到另一项（OpenAI 供应商下切到「帮我批准」）：提示「已切换，当前会话立即生效」，不重启进程；审计日志出现 `agent_backend.permission_mode_changed`，`applied: applied`。
+2. 下一次越出沙箱的操作按新模式处理（请求审批 → 弹审批卡片；帮我批准 → 由自动审查作答）。
+3. 进程未启动时切换：`applied: not_running`，下次启动即用新模式。
+4. set_mode 被拒（可用旧版 codex-acp 复现）：栏上显示「切换未生效，下一轮会重试：…」。
+
+**C. dsh 下一轮生效 + 补丁需要重装运行时**
+
+1. dsh 会话中途切换：下拉旁出现「下一轮重启生效」，切换后提示「已保存，下一轮开始时重启 dsh 生效」；本轮不中断。下一轮开始时 dsh 重启并带上对应 `--patch`（看启动参数 / 诊断）。
+2. 本批新增 4 份补丁（`runtime-assets/dsh-patches/workspace-write-ask*.yml`、`danger-full-access*.yml`）。**已安装的 dsh 运行时目录里没有这些文件**：不重装时选到这两个预设，启动被拒并提示 `dsh patch … is not installed`。重装（重新安装 DeepSeek 运行时）后再测一次，应能正常启动；补丁内容须与 Fox 生成的一致（`verify_installed_preset_patch` 逐字节比对）。
+3. 原有两个预设（只读、工作区可写（不询问））不重装也能用。
+
+**D. 完全访问的确认和撤销**
+
+1. 新会话在权限下拉里选「完全访问（权限）」：先出现原有的风险确认（三条风险 + 私有 HOME 说明），「取消」后保持原选项；「确认使用完全访问」后创建会话，审计有 `agent_backend.full_access_granted`。这个选择只用于下一次新建，用后清除；没有在下拉里选过时仍以设置开关为准。
+2. 会话中途（非完全访问）：完全访问项置灰，原因为「完全访问只能在新建会话时选择（会话中只能撤销）」；绕过界面直接调命令也被 Host 拒绝（`agent_backend_full_access_locked`）。
+3. 完全访问会话中途把下拉切回任一沙箱选项：出现原有的撤销确认；确认后走原撤销路径（取消本轮、结清待审批、在沙箱中重启），审计有撤销记录；之后完全访问项置灰。
+4. 完全访问来自工程开关 `FOX_EXTERNAL_FULL_ACCESS` 时，切回沙箱被拒并提示不能在界面撤销。
+5. 完全访问下 Codex / dsh 仍发来审批请求时，照常弹审批卡片（不自动放行）。
+
+**E. 白名单**
+
+1. Codex 接 DeepSeek 供应商（统一登录）、沙箱模式：一轮对话能连通模型，srt 日志无拦截；白名单里包含统一登录的模型主机（`resolve_allowed_domains_with_login`）。
+2. pi 使用 provider `fox`（统一登录生成的自定义供应商）、沙箱模式：能连通，白名单包含该主机。
+3. 把供应商地址改成一个不在默认列表里的主机：仍能连通（主机来自登录，而不是硬编码列表）。
+
+**F. Reconnecting 快速失败诊断**
+
+1. 人为让 Codex 连不上（例如在白名单外的代理地址）：Codex 打出“Reconnecting… waiting for network”后本轮很快结束，不等满超时。
+2. 诊断区说明属于四种情况之一：srt 报告了被拦主机 / 模型主机不在白名单 / 模型主机在白名单但其它主机被拦 / 未用统一登录且 srt 未报主机；都附当前白名单。
+3. 这些 Reconnecting 行不出现在助手正文里。
+
+**G. 元数据警告不再进正文**
+
+1. 使用 Codex 不认识的模型名（触发 “Model metadata for … not found”）：助手正文里没有这行；它出现在诊断 / 提示区。
+2. 正常文本中恰好含有类似字样的整段回答不被截断（只按整行匹配移走）。
+
+**H. 默认供应商的保存和删除（含老库 legacy 项目）**
+
+1. 用一个有 `legacy-<hex>` 项目 id 的老库（v96 升级到 v97）启动：迁移成功，`model_providers.protocol_profiles` 默认 `[]`。
+2. 修改默认供应商的地址 / 模型并保存：Fox 主模型（「当前模型」卡片）同步更新；各项目私有 HOME 里 Fox 生成的登录文件被清理，用户自己改过的文件保留；legacy 项目被跳过，不报错、不阻断保存。
+3. 清除默认供应商的 Key、删除默认供应商：保存 / 删除成功；清理失败只记一条警告审计，不回滚、不阻断。先保存记录再删 Key：保存失败时 Key 不丢。
+4. DeepSeek 预设的模型占位为 `deepseek-flash`。
+
+**I. run_command 隐藏**
+
+1. 没有可用外部执行后端（沙箱不可用，Host 报 `run_command` unavailable）的 Fox 会话：模型拿到的工具列表里没有 `run_command`（请求快照 `effectiveToolNames` 不含它，`excludedTools` 有 `{name: run_command, reason: host_runtime_unavailable}`）；模型不会再尝试调用它。
+2. 执行后端可用、或旧版 Host 没有发能力信息（unknown）时：`run_command` 照常出现。
