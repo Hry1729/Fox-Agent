@@ -626,7 +626,10 @@ pub struct NativePermissionRequest {
 
 fn native_context(state: &AppState, backend: AgentBackend, forbidden: bool) -> fox_agent_backend::native_permission::CatalogContext {
     fox_agent_backend::native_permission::CatalogContext {
-        provider_base_url: crate::external_model::external_login(&state.database, backend).map(|login| login.base_url),
+        // 13.19 fix ④: no login needed (a draft is judged before its first
+        // login); protocol address, else the provider's own URL, else None
+        // = fail-closed in the catalog.
+        provider_base_url: crate::external_model::catalog_provider_base_url(&state.database, backend),
         full_access_forbidden: forbidden,
     }
 }
