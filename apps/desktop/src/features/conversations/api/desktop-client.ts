@@ -5,6 +5,7 @@ import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions }
 import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
 import type { AgentBackendCapabilities, AgentBackendId, AgentBackendPreferences, AgentBackendStatus, CodexResponsesProbe } from '../model/agent-backend'
 import type { AgentBackendPermissionStatus, AgentBackendTarget, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
+import type { NativePermissionRequest, NativePermissionView } from '../model/agent-native-permission'
 import type {
   AgentRecord,
   ApiResponse,
@@ -774,6 +775,12 @@ export const desktopClient = {
     command<AgentBackendPreferences>('agent_backend_preferences_save', change),
   /** Whether 模型服务's default provider answers the Responses API (Codex); cached by the Host. */
   probeCodexResponses: () => command<CodexResponsesProbe | null>('agent_backend_probe_codex_responses'),
+  /** Per-agent native permission list (a conversation, or a new conversation's backend) and the current choice. */
+  agentBackendNativePermissions: (request: NativePermissionRequest) =>
+    command<NativePermissionView>('agent_backend_native_permissions', request),
+  /** Switch the native mode; mid-session full access is refused (only revoke). */
+  agentBackendNativePermissionSet: (request: NativePermissionRequest & { mode: string }) =>
+    command<NativePermissionView>('agent_backend_native_permission_set', request),
   /** Revoke full access mid-session (the backend restarts in the sandbox). */
   agentBackendRevokeFullAccess: (conversationId: string) =>
     command<{ outcome: string; stopConfirmed: boolean }>('agent_backend_revoke_full_access', { conversationId }),
