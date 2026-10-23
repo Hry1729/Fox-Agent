@@ -16,6 +16,8 @@ import {
   conversationAgentBackend,
   isAgentBackendRefusalCode,
   withoutRefusedSend,
+  AGENT_BACKEND_PREFERENCES_EVENT,
+  newConversationBackend,
 } from '../src/features/conversations/model/agent-backend'
 
 // Run the production hook's actions with deterministic state/ref slots. Effects
@@ -97,6 +99,8 @@ function harness() {
     conversationAgentBackend,
     isAgentBackendRefusalCode,
     withoutRefusedSend,
+    AGENT_BACKEND_PREFERENCES_EVENT,
+    newConversationBackend,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
   return {
