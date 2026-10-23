@@ -6396,7 +6396,7 @@ impl Database {
                     updated_at = excluded.updated_at",
                 params![provider.id, provider.name, provider.icon, provider.base_url, provider.api_type, provider.is_default as i64, now],
             )?;
-            transaction.execute("UPDATE model_providers SET protocol_profiles = ?1 WHERE id = ?2", params![serde_json::to_string(&provider.protocol_profiles).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?, provider.id])?;
+            transaction.execute("UPDATE model_providers SET protocol_profiles = ?1 WHERE id = ?2", params![crate::canonical_json::to_string(&provider.protocol_profiles).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?, provider.id])?;
             transaction.execute("DELETE FROM provider_models WHERE provider_id = ?1", [&provider.id])?;
             for model in &provider.models {
                 transaction.execute(
