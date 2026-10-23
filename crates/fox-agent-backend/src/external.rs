@@ -48,7 +48,7 @@
 use crate::acp::{AcpConnection, BackendEvent, TerminateReport};
 use crate::capability_view::PiLaunch;
 use crate::port::{AgentBackend, CapabilityDeclaration, StopConfirmation, STOP_UNCONFIRMED_REMEDY};
-use crate::projection::{allow_option, permission_card, reject_option, AcpProjector, PermissionCard, PermissionOption, TurnTerminal};
+use crate::projection::{allow_option, auto_permission, permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, ExecutionMode, PermissionCard, PermissionOption, TurnTerminal};
 use crate::reverse::WriteOutcome;
 use crate::sandbox::{PermissionMode, SandboxDeclaration};
 use crate::settlement::{RunTerminal, TerminalArbiter};
@@ -93,6 +93,13 @@ pub struct LaunchRequest {
     /// engineering switch `FOX_EXTERNAL_FULL_ACCESS`; both lose to
     /// `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`.
     pub full_access_granted: bool,
+    /// Fox「模型服务」's default provider (settings batch, item 6): before
+    /// the launch, the backend's own config is generated from it in the
+    /// private HOME unless the user's own login is there
+    /// ([`crate::unified_login`]). `None`: 模型服务 has no usable default
+    /// provider; Fox-managed files are removed and the login card is the
+    /// fallback. `Debug` never shows the key.
+    pub unified_login: Option<crate::unified_login::UnifiedLogin>,
 }
 
 /// An initialized backend handed back by the launcher.
@@ -280,6 +287,10 @@ pub trait ExternalSink: Send + Sync + 'static {
     /// Show an approval card; returns the Host approval id. `key` is unique
     /// per native request and connection generation.
     fn request_approval(&self, run_id: &str, conversation_id: &str, key: &str, card: &PermissionCard) -> Result<String, String>;
+    /// Record one Host decision in the external-backend audit log (names
+    /// and kinds only, never tool input). Default: nothing beyond the run
+    /// event the runtime already emitted.
+    fn audit(&self, _conversation_id: &str, _backend: AgentBackend, _event: &str, _details: &Value) {}
 }
 
 /// Why a turn could not start (nothing was emitted).
@@ -368,6 +379,7 @@ struct PendingApproval {
 
 struct Turn {
     run_id: String,
+    execution: ExecutionMode,
     projector: AcpProjector,
     arbiter: TerminalArbiter,
     approvals: HashMap<String, PendingApproval>,
@@ -386,9 +398,10 @@ struct Turn {
 }
 
 impl Turn {
-    fn new(run_id: &str) -> Self {
+    fn new(run_id: &str, execution: ExecutionMode) -> Self {
         Self {
             run_id: run_id.to_owned(),
+            execution,
             projector: AcpProjector::new(),
             arbiter: TerminalArbiter::default(),
             approvals: HashMap::new(),
@@ -454,6 +467,9 @@ pub struct TurnRequest {
     /// `agent_backend.session` event), used to reopen it after a restart.
     pub stored_native_session: Option<String>,
     pub launch: LaunchRequest,
+    /// Fox's execution mode for this turn (询问 / 自动 / 只读), applied to
+    /// the backend's `session/request_permission` ([`auto_permission`]).
+    pub execution: ExecutionMode,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -507,7 +523,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             if state.turn.is_some() {
                 return Err(StartError::TurnBusy);
             }
-            state.turn = Some(Turn::new(&request.run_id));
+            state.turn = Some(Turn::new(&request.run_id, request.execution));
         }
         let started = json!({ "type": "run.started", "agentBackend": backend.as_str() });
         if let Err(error) = self.inner.sink.emit(&request.run_id, &session.conversation_id, started) {
@@ -853,6 +869,36 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let card = permission_card(&request);
                 let key = format!("acp-permission:{generation}:{native_request_id}");
                 let run_id = turn.run_id.clone();
+                // Fox's execution mode (settings batch, item 7): 自动 answers
+                // the one-shot allow itself, 只读 rejects anything that may
+                // modify; both are recorded. 询问 shows the card as before.
+                let decision = auto_permission(turn.execution, &request, &card.options);
+                if decision != AutoPermission::Ask {
+                    let option = match &decision {
+                        AutoPermission::Allow { option_id } => Some(option_id.as_str()),
+                        AutoPermission::Reject { option_id } => option_id.as_deref(),
+                        AutoPermission::Ask => None,
+                    };
+                    let written = match connection.answer_permission(&native_request_id, option) {
+                        Ok(WriteOutcome::Written) => "response_written",
+                        Ok(WriteOutcome::Unconfirmed) => "outcome_unknown",
+                        Err(_) => "not_pending",
+                    };
+                    let details = json!({
+                        "executionMode": turn.execution.as_str(),
+                        "decision": decision.decision(),
+                        "toolKind": permission_tool_kind(&request),
+                        "title": card.title,
+                        "nativeToolCallId": card.native_tool_call_id,
+                        "nativeAnswer": written,
+                        "runId": run_id,
+                    });
+                    let mut event = details.clone();
+                    event["type"] = json!("agent_backend.permission_auto_answered");
+                    self.emit(session, &run_id, event);
+                    self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.permission_auto_answered", &details);
+                    return;
+                }
                 match self.inner.sink.request_approval(&run_id, &session.conversation_id, &key, &card) {
                     Ok(approval_id) => {
                         turn.approvals.insert(approval_id, PendingApproval { native_id: native_request_id, options: card.options.clone() });
