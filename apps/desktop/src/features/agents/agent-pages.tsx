@@ -27,6 +27,7 @@ import { useMcpServers } from '@/features/settings/use-mcp-servers'
 import { useSkills } from '@/features/settings/use-skills'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { knowledgeReferencesFromDeclaration, remoteKnowledgeReference, resolveExpertKnowledgeDeclaration, toPersistedExpertManifest } from './expert-knowledge'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 
 const fallbackAgent: AgentRecord = { id: 'fox-general', name: 'Fox 通用助手', description: 'Fox 默认通用专家', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '', isBuiltin: true, packageVersion: '1.0.0', packageSource: 'builtin', packageId: null, packageHash: null, packageManifest: {}, capabilities: ['files', 'tools', 'reasoning'], resources: { tools: [{ id: 'files', name: '文件读写', description: '读取和处理已授权项目文件' }, { id: 'tools', name: '本机工具', description: '调用 Fox Runtime 提供的本机工具' }, { id: 'reasoning', name: '任务推理', description: '规划并执行多步骤任务' }], knowledges: [], mcps: [], skills: [] }, configurableItems: {}, isDefault: true, available: true }
 
@@ -653,7 +654,7 @@ function useAgentEditor(enabled = true) {
 
   const remove = async () => {
     if (!editing || editing.isBuiltin) return false
-    if (!window.confirm(`确定删除专家“${editing.name}”吗？`)) return false
+    if (!(await confirmDialog({ title: '删除专家', description: `确定删除专家“${editing.name}”吗？`, confirmLabel: '删除', destructive: true }))) return false
     setSaving(true)
     try {
       await desktopClient.deleteAgent(editing.id)
@@ -690,7 +691,7 @@ function useAgentEditor(enabled = true) {
 
   const rollback = async (version: string) => {
     if (!editing || editing.packageSource !== 'imported') return
-    if (!window.confirm(`确定将“${editing.name}”恢复到 v${version} 吗？现有对话仍保留原版本快照。`)) return
+    if (!(await confirmDialog({ title: '恢复专家版本', description: `确定将“${editing.name}”恢复到 v${version} 吗？现有对话仍保留原版本快照。`, confirmLabel: '恢复' }))) return
     setPackageBusy(true)
     try {
       const rolledBack = await desktopClient.rollbackExpertPackage(editing.id, version, editing.packageHash)
