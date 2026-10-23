@@ -212,8 +212,8 @@ const getHighlighter = async (language: string) => {
 
   let loading = languageLoadCache.get(normalized);
   if (!loading) {
-    loading = languageLoaders[normalized]().then((module) => {
-      highlighter.loadLanguage(...module.default);
+    loading = languageLoaders[normalized]().then(async (module) => {
+      await highlighter.loadLanguage(...module.default);
     });
     languageLoadCache.set(normalized, loading);
   }
