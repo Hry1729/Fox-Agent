@@ -1532,8 +1532,9 @@ pub async fn conversation_create(
         ));
     }
     // Plan v0.3.1 5.4 / 6.6: the outer Agent backend is chosen here, once, and
-    // written in the INSERT (absent = fox). Non-Fox backends are refused while
-    // FOX_EXTERNAL_BACKENDS keeps them off.
+    // written in the INSERT (absent = fox). The UI sends the backend of
+    // 设置 →「新会话使用的 Agent」(settings batch); a backend the
+    // administrator forced off (FOX_EXTERNAL_BACKENDS) is refused.
     let agent_backend = match agent_backend_routing::choose_new_conversation_backend(
         request.agent_backend.as_deref(),
     ) {
@@ -1544,10 +1545,20 @@ pub async fn conversation_create(
     // UX batch ② (semantics A): the external permission mode is chosen here,
     // once, and locked with the backend. FORBIDDEN refuses full access
     // outright, whatever the UI sent.
+    // Settings batch, item 5: when the request does not say, a new external
+    // conversation takes 设置 →「新外部会话使用完全访问」(off by default).
+    // Under FORBIDDEN the setting is ignored (sandboxed), never a refusal; an
+    // explicit `full_access` request is still refused there.
+    let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
+    let setting_mode = (external_backend
+        && !forbidden
+        && request.external_permission_mode.is_none()
+        && agent_backend_routing::stored_new_external_full_access(&state.database))
+    .then_some(fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS);
     let grant_full_access = match fox_agent_backend::host_routing::decide_new_conversation_mode(
-        request.external_permission_mode.as_deref(),
+        request.external_permission_mode.as_deref().or(setting_mode),
         agent_backend,
-        fox_agent_backend::external_launch::full_access_forbidden_from_env(),
+        forbidden,
     ) {
         Ok(grant) => grant,
         Err(refusal) => return Ok(ApiResponse::failure(refusal.code, refusal.message, false)),
@@ -1655,7 +1666,7 @@ pub async fn conversation_create(
             Some(&conversation.id),
             agent_backend.as_str(),
             "agent_backend.full_access_granted",
-            &serde_json::json!({ "grant": "conversation", "source": "new_conversation" }),
+            &serde_json::json!({ "grant": "conversation", "source": if setting_mode.is_some() { "settings" } else { "new_conversation" } }),
         );
     }
     if let Some(expert_id) = request.expert_id.as_deref() {
