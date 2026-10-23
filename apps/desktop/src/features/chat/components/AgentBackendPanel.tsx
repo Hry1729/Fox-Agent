@@ -112,6 +112,10 @@ export function AgentBackendPanel({
   const capabilityConversationId = lockedBackend ? conversationId : null
   const [eventTick, setEventTick] = useState(0)
   const [onboardingTick, setOnboardingTick] = useState(0)
+  // Bumped after a permission change / full-access revoke: the capability
+  // chips and the permission status are fetched again (13.19 fix ②: after a
+  // revoke the chip must go back to the sandbox, not keep「完全访问」).
+  const [permissionTick, setPermissionTick] = useState(0)
   useEffect(() => {
     const refresh = () => setOnboardingTick(tick => tick + 1)
     window.addEventListener('fox:model-service-changed', refresh)
@@ -132,13 +136,13 @@ export function AgentBackendPanel({
 
   const external = shownBackend !== 'fox'
   const capabilityKey = external ? JSON.stringify([shownBackend, capabilityConversationId]) : ''
-  const capabilities = useKeyedResource(capabilityKey, sessionTick + eventTick, useCallback((key: string) => {
+  const capabilities = useKeyedResource(capabilityKey, sessionTick + eventTick + permissionTick, useCallback((key: string) => {
     const [backend, id] = JSON.parse(key) as [AgentBackendId, string | null]
     return client.agentBackendCapabilities(backend, id)
   }, [client]))
 
   const permissionKey = external ? JSON.stringify([shownBackend, capabilityConversationId]) : ''
-  const permission = useKeyedResource(permissionKey, sessionTick + eventTick + onboardingTick, useCallback((key: string) => {
+  const permission = useKeyedResource(permissionKey, sessionTick + eventTick + onboardingTick + permissionTick, useCallback((key: string) => {
     const [, id] = JSON.parse(key) as [AgentBackendId, string | null]
     return client.agentBackendPermissionStatus(id)
   }, [client]))
@@ -175,7 +179,10 @@ export function AgentBackendPanel({
     if (!capabilityConversationId) return
     client.agentBackendRevokeFullAccess(capabilityConversationId)
       .catch(() => {})
-      .finally(() => setOnboardingTick((tick) => tick + 1))
+      .finally(() => {
+        setOnboardingTick((tick) => tick + 1)
+        setPermissionTick((tick) => tick + 1)
+      })
   }, [client, capabilityConversationId])
 
   const card = useMemo(() => {
@@ -217,7 +224,10 @@ export function AgentBackendPanel({
         conversationId={capabilityConversationId}
         backend={shownBackend}
         tick={sessionTick + onboardingTick}
-        onChanged={() => setOnboardingTick((tick) => tick + 1)}
+        onChanged={() => {
+          setOnboardingTick((tick) => tick + 1)
+          setPermissionTick((tick) => tick + 1)
+        }}
       />
     )
     : null
