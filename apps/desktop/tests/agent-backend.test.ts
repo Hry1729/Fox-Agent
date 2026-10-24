@@ -21,7 +21,7 @@ function status(enabled: Array<'pi' | 'codex' | 'deepseek'>): AgentBackendStatus
     unknownEntries: [],
     options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
       backend,
-      enabled: backend === 'fox' || enabled.includes(backend as 'pi'),
+      enabled: backend === 'fox' || enabled.includes(backend),
       wired: backend === 'fox',
       experimental: backend === 'deepseek',
       reason: backend === 'fox' ? null : 'reason',
@@ -47,11 +47,17 @@ describe('agent backend presentation (Host wiring first batch)', () => {
 
   test('picker is disabled and explained while the switch is off', () => {
     expect(agentBackendPickerDisabledReason(status([]))).toContain('FOX_EXTERNAL_BACKENDS')
-    expect(agentBackendPickerDisabledReason(status(['codex']))).toBeNull()
+    expect(agentBackendPickerDisabledReason(status(['pi']))).toBeNull()
+    expect(agentBackendPickerDisabledReason(status([]))).not.toContain('Codex')
     expect(canPickAgentBackend('fox', null)).toBe(true)
-    expect(canPickAgentBackend('codex', status([]))).toBe(false)
-    expect(canPickAgentBackend('codex', status(['codex']))).toBe(true)
-    expect(canPickAgentBackend('pi', status(['codex']))).toBe(false)
+    expect(canPickAgentBackend('pi', status([]))).toBe(false)
+    expect(canPickAgentBackend('pi', status(['pi']))).toBe(true)
+    expect(canPickAgentBackend('deepseek', status(['pi']))).toBe(false)
+    // Codex is hidden: never pickable for a new conversation, even when enabled.
+    expect(canPickAgentBackend('codex', status(['codex']))).toBe(false)
+    // ...but an existing Codex conversation keeps its access from the switch.
+    expect(agentBackendAccess('codex', { ...status(['codex']), options: status(['codex']).options.map((option) => ({ ...option, wired: true })) })).toBe('runnable')
+    expect(isAgentBackendRefusalCode('agent_backend_hidden')).toBe(true)
   })
 })
 
