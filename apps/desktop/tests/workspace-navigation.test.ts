@@ -6,6 +6,8 @@ import {
   managementExitRoute,
   managementSection,
   SETTINGS_WORKSPACE_VIEWS,
+  settingsNavigationView,
+  settingsRouteRedirect,
   type ManagementReturnRoutes,
   type WorkspaceReturnRoute,
   workspaceViewForLocalKnowledge,
@@ -63,5 +65,43 @@ describe('workspace navigation', () => {
     const next = captureManagementReturnRoutes(routes(), localKnowledgeRoute, 'settings')
     expect(next.settings).toEqual(localKnowledgeRoute)
     expect(managementExitRoute('settings-ai', next)).toEqual(localKnowledgeRoute)
+  })
+})
+
+describe('settings destinations after the seven-item regrouping', () => {
+  test('old settings ids land on the merged page and name their section', () => {
+    expect(settingsRouteRedirect('settings-shortcuts')).toEqual({ view: 'settings-conversation', section: 'shortcuts' })
+    expect(settingsRouteRedirect('settings-projects')).toEqual({ view: 'settings-ai', section: 'projects' })
+    expect(settingsRouteRedirect('settings-usage')).toEqual({ view: 'settings-data', section: 'usage' })
+    expect(settingsRouteRedirect('maintenance')).toEqual({ view: 'settings-data', section: 'maintenance' })
+    expect(settingsRouteRedirect('settings-about')).toEqual({ view: 'settings-data', section: 'about' })
+  })
+
+  test('current destinations are not redirected', () => {
+    for (const view of ['settings', 'settings-conversation', 'settings-models', 'settings-ai', 'settings-extensions', 'settings-yuxi', 'settings-data'] as const) {
+      expect(settingsRouteRedirect(view)).toBeNull()
+      expect(settingsNavigationView(view)).toBe(view)
+      expect(managementSection(view)).toBe('settings')
+    }
+  })
+
+  test('sub-pages and old ids highlight the destination that hosts them', () => {
+    expect(settingsNavigationView('settings-shortcuts')).toBe('settings-conversation')
+    expect(settingsNavigationView('settings-projects')).toBe('settings-ai')
+    expect(settingsNavigationView('maintenance')).toBe('settings-data')
+    expect(settingsNavigationView('settings-about')).toBe('settings-data')
+    expect(settingsNavigationView('onboarding')).toBe('settings')
+    expect(settingsNavigationView('model-service')).toBe('settings-models')
+    expect(settingsNavigationView('login')).toBe('settings-yuxi')
+    expect(settingsNavigationView('mcp')).toBe('settings-extensions')
+  })
+
+  test('every old id is still a settings view so the return route survives', () => {
+    for (const view of ['settings-shortcuts', 'settings-projects', 'settings-usage', 'maintenance', 'settings-about', 'settings-data'] as const) {
+      expect(SETTINGS_WORKSPACE_VIEWS).toContain(view)
+    }
+    const documentRoute: WorkspaceReturnRoute = { view: 'chat', entityId: 'conversation-1', documentId: null }
+    const entered = captureManagementReturnRoutes(routes(), documentRoute, 'settings-data')
+    expect(managementExitRoute('settings-data', entered)).toEqual(documentRoute)
   })
 })
