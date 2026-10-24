@@ -665,10 +665,15 @@ function ProviderModelDialog({ open, draft, isNew, canDelete, onOpenChange, onSa
 }
 
 /**
- * Provider editor shown in the 480px sheet: 基础连接, 模型 and a collapsed
- * 协议与高级 row, with 删除服务 / 取消 / 保存 in the footer.
+ * Provider form shared by both surfaces.
+ * - `sheet` (editing an existing service, 480px right sheet): 基础连接, 模型 and a
+ *   collapsed 协议与高级 row, with 删除服务 / 取消 / 保存 in the footer.
+ * - `dialog` (添加服务, centred 560px dialog): 服务模板 first, then 基础连接, 模型
+ *   and the collapsed 协议与高级, with 取消 / 添加 in the footer.
+ * Both layouts render the same field fragments, so templates, key storage,
+ * connection testing and protocol profiles keep one implementation.
  */
-export function ProviderEditor({ form, busy, testing = false, connectionStatus, connectionResult, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; testing?: boolean; connectionStatus?: string | null; connectionResult?: ProviderConnectionResult | null; credentialConfigured: boolean; error?: string | null; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
+export function ProviderEditor({ form, busy, layout = 'sheet', testing = false, connectionStatus, connectionResult, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; testing?: boolean; connectionStatus?: string | null; connectionResult?: ProviderConnectionResult | null; credentialConfigured: boolean; error?: string | null; layout?: 'sheet' | 'dialog'; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
   const isNew = !form.id
   const [showKey, setShowKey] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -706,59 +711,89 @@ export function ProviderEditor({ form, busy, testing = false, connectionStatus, 
   const canTest = !busy && Boolean(form.baseUrl.trim()) && Boolean(form.models[0]?.modelId.trim())
   const canSave = !busy && Boolean(form.name.trim()) && Boolean(form.baseUrl.trim()) && form.models.length > 0 && !form.models.some((item) => !item.modelId.trim())
   const result: ProviderConnectionResult | null = testing ? { status: 'testing', text: '正在验证…' } : connectionResult ?? (connectionStatus ? { status: connectionStatus.startsWith('连接失败') ? 'error' : 'testing', text: connectionStatus } as ProviderConnectionResult : null)
-  return <>
-    <div className="fox-settings-sheet-body">
-      {error && <p className="fox-settings-sheet-error" role="alert">{error}</p>}
+  const templateFields = isNew && <>
+    <div className="fox-settings-field"><span>服务模板</span><Select value={presetId} onValueChange={applyPreset}><SelectTrigger aria-label="服务模板"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="custom">自定义服务</SelectItem>{providerPresets.map((preset) => <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>)}</SelectContent></Select></div>
+    <label className="fox-settings-field"><span>服务名称</span><Input value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="例如 MiniMax" /></label>
+  </>
+  const connectionFields = <>
+    <label className="fox-settings-field"><span>服务地址</span><Input value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} /></label>
+    <div className="fox-settings-field">
+      <label htmlFor="fox-provider-api-key">API Key</label>
+      <div className="fox-settings-secret">
+        <Input id="fox-provider-api-key" type={showKey ? 'text' : 'password'} autoComplete="new-password" value={form.apiKey} disabled={form.clearApiKey} onChange={(event) => onChange({ ...form, apiKey: event.target.value, clearApiKey: false })} placeholder={form.clearApiKey ? '保存时将清除已存 Key' : credentialConfigured ? '已安全保存 · 留空保持不变' : '输入服务商 API Key'} />
+        <Button type="button" variant="ghost" size="icon-sm" aria-label={showKey ? '隐藏 API Key' : '显示 API Key'} aria-pressed={showKey} disabled={!form.apiKey} onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff /> : <Eye />}</Button>
+      </div>
+    </div>
+    <div className="fox-settings-test-row">
+      <Button type="button" variant="outline" size="sm" disabled={!canTest} onClick={onTest}>{testing ? <LoaderCircle className="animate-spin" /> : <Zap />}测试连接</Button>
+      {result && <span className={cn('fox-settings-test-result', result.status === 'error' && 'is-error')} role="status">
+        {result.status === 'ok' && <><i className="fox-settings-dot is-ok" aria-hidden="true" /><b>连接正常</b><span>{result.latencyMs} ms<span className="is-separator"> · </span>发现 {result.modelCount} 个模型</span></>}
+        {result.status === 'error' && <><i className="fox-settings-dot is-error" aria-hidden="true" /><b>连接失败</b><span title={result.text}>{result.text.replace(/^连接失败：/, '')}</span></>}
+        {result.status === 'testing' && <span>{result.text}</span>}
+      </span>}
+    </div>
+  </>
+  const modelsSection = <section className="fox-settings-sheet-section" aria-label="模型">
+    <div className="fox-settings-sheet-section-head"><h3>模型</h3><Button type="button" variant="ghost" size="sm" onClick={() => setModelEditor({ index: null, draft: emptyModelDraft(!form.models.some((item) => item.modelId.trim()), defaultModel) })}><Plus />添加模型</Button></div>
+    {visibleModels.length === 0 && <p className="fox-settings-empty">还没有模型，点击「添加模型」填写服务商提供的模型 ID。</p>}
+    {visibleModels.map(({ model, index }) => <div className="fox-settings-model-row" key={model.id ?? `${index}:${model.modelId}`}>
+      <span className="fox-settings-model-name"><b title={model.modelId}>{model.displayName || model.modelId}</b>{model.isDefault && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}<small>{compactTokenCount(model.contextWindow)}{model.supportsImageInput ? ' · 图片' : ''}</small></span>
+      {!model.isDefault && <Button type="button" variant="ghost" size="sm" className="fox-settings-model-default" onClick={() => setDefaultModel(index)}>设为默认</Button>}
+      <Button type="button" variant="ghost" size="icon-sm" aria-label={`编辑 ${model.modelId}`} onClick={() => setModelEditor({ index, draft: { ...model } })}><Pencil /></Button>
+    </div>)}
+  </section>
+  const advancedSection = <section className="fox-settings-sheet-section" aria-label="协议与高级">
+    <button type="button" className="fox-settings-disclosure" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((value) => !value)}>
+      <span><b>协议与高级</b><small>{advancedSummary}</small></span><ChevronRight aria-hidden="true" />
+    </button>
+    {advancedOpen && <div className="fox-settings-advanced">
+      <div className="fox-settings-field"><span>Fox 连接协议</span><Select value={form.apiType} onValueChange={(apiType) => onChange({ ...form, apiType: apiType as ProviderForm['apiType'] })}><SelectTrigger aria-label="Fox 连接协议"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai-completions">Chat Completions · Fox / pi</SelectItem><SelectItem value="anthropic-messages">Anthropic Messages · Fox / pi / DeepSeek</SelectItem></SelectContent></Select></div>
+      <ProviderIconPicker form={form} onChange={onChange} />
+      <label className="fox-settings-switch-row"><span><b>默认服务</b><small>新对话使用此服务中标记为默认的模型</small></span><Switch checked={form.isDefault} onCheckedChange={(isDefault) => onChange({ ...form, isDefault })} aria-label="设为默认服务" /></label>
+      {form.id && credentialConfigured && <label className="fox-settings-switch-row"><span><b>清除已存 API Key</b><small>保存时从系统凭据库删除此服务的 Key</small></span><Switch checked={form.clearApiKey} onCheckedChange={(clearApiKey) => onChange({ ...form, clearApiKey, apiKey: clearApiKey ? '' : form.apiKey })} aria-label="保存时清除已存 API Key" /></label>}
+      <ProviderProtocolEditor form={form} disabled={busy} onChange={(next) => onChange({ ...form, ...next })} />
+    </div>}
+  </section>
+  const errorLine = error && <p className="fox-settings-sheet-error" role="alert">{error}</p>
+  const modelDialog = <ProviderModelDialog open={modelEditor !== null} draft={modelEditor?.draft ?? null} isNew={modelEditor?.index === null} canDelete={form.models.length > 1} onOpenChange={(open) => { if (!open) setModelEditor(null) }} onSave={saveModel} onDelete={deleteModel} />
+  const saveLabel = layout === 'dialog' ? '添加' : '保存'
+  const footActions = <>
+    <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>取消</Button>
+    <Button type="button" disabled={!canSave} onClick={onSave}>{busy && !testing && <LoaderCircle className="animate-spin" />}{saveLabel}</Button>
+  </>
+  if (layout === 'dialog') return <>
+    <div className="fox-provider-dialog-body">
+      {errorLine}
+      {templateFields && <section className="fox-settings-sheet-section" aria-label="服务模板">
+        <div className="fox-settings-dialog-fields">{templateFields}</div>
+      </section>}
       <section className="fox-settings-sheet-section" aria-label="基础连接">
         <div className="fox-settings-sheet-section-head"><h3>基础连接</h3></div>
-        {isNew && <div className="fox-settings-field"><span>服务模板</span><Select value={presetId} onValueChange={applyPreset}><SelectTrigger aria-label="服务模板"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="custom">自定义服务</SelectItem>{providerPresets.map((preset) => <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>)}</SelectContent></Select></div>}
-        {isNew && <label className="fox-settings-field"><span>服务名称</span><Input value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="例如 MiniMax" /></label>}
-        <label className="fox-settings-field"><span>服务地址</span><Input value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} /></label>
-        <div className="fox-settings-field">
-          <label htmlFor="fox-provider-api-key">API Key</label>
-          <div className="fox-settings-secret">
-            <Input id="fox-provider-api-key" type={showKey ? 'text' : 'password'} autoComplete="new-password" value={form.apiKey} disabled={form.clearApiKey} onChange={(event) => onChange({ ...form, apiKey: event.target.value, clearApiKey: false })} placeholder={form.clearApiKey ? '保存时将清除已存 Key' : credentialConfigured ? '已安全保存 · 留空保持不变' : '输入服务商 API Key'} />
-            <Button type="button" variant="ghost" size="icon-sm" aria-label={showKey ? '隐藏 API Key' : '显示 API Key'} aria-pressed={showKey} disabled={!form.apiKey} onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff /> : <Eye />}</Button>
-          </div>
-        </div>
-        <div className="fox-settings-test-row">
-          <Button type="button" variant="outline" size="sm" disabled={!canTest} onClick={onTest}>{testing ? <LoaderCircle className="animate-spin" /> : <Zap />}测试连接</Button>
-          {result && <span className={cn('fox-settings-test-result', result.status === 'error' && 'is-error')} role="status">
-            {result.status === 'ok' && <><i className="fox-settings-dot is-ok" aria-hidden="true" /><b>连接正常</b><span>{result.latencyMs} ms<span className="is-separator"> · </span>发现 {result.modelCount} 个模型</span></>}
-            {result.status === 'error' && <><i className="fox-settings-dot is-error" aria-hidden="true" /><b>连接失败</b><span title={result.text}>{result.text.replace(/^连接失败：/, '')}</span></>}
-            {result.status === 'testing' && <span>{result.text}</span>}
-          </span>}
-        </div>
+        <div className="fox-settings-dialog-fields">{connectionFields}</div>
       </section>
-      <section className="fox-settings-sheet-section" aria-label="模型">
-        <div className="fox-settings-sheet-section-head"><h3>模型</h3><Button type="button" variant="ghost" size="sm" onClick={() => setModelEditor({ index: null, draft: emptyModelDraft(!form.models.some((item) => item.modelId.trim()), defaultModel) })}><Plus />添加模型</Button></div>
-        {visibleModels.length === 0 && <p className="fox-settings-empty">还没有模型，点击「添加模型」填写服务商提供的模型 ID。</p>}
-        {visibleModels.map(({ model, index }) => <div className="fox-settings-model-row" key={model.id ?? `${index}:${model.modelId}`}>
-          <span className="fox-settings-model-name"><b title={model.modelId}>{model.displayName || model.modelId}</b>{model.isDefault && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}<small>{compactTokenCount(model.contextWindow)}{model.supportsImageInput ? ' · 图片' : ''}</small></span>
-          {!model.isDefault && <Button type="button" variant="ghost" size="sm" className="fox-settings-model-default" onClick={() => setDefaultModel(index)}>设为默认</Button>}
-          <Button type="button" variant="ghost" size="icon-sm" aria-label={`编辑 ${model.modelId}`} onClick={() => setModelEditor({ index, draft: { ...model } })}><Pencil /></Button>
-        </div>)}
+      {modelsSection}
+      {advancedSection}
+    </div>
+    <DialogFooter className="fox-provider-dialog-foot">{footActions}</DialogFooter>
+    {modelDialog}
+  </>
+  return <>
+    <div className="fox-settings-sheet-body">
+      {errorLine}
+      <section className="fox-settings-sheet-section" aria-label="基础连接">
+        <div className="fox-settings-sheet-section-head"><h3>基础连接</h3></div>
+        {templateFields}
+        {connectionFields}
       </section>
-      <section className="fox-settings-sheet-section" aria-label="协议与高级">
-        <button type="button" className="fox-settings-disclosure" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((value) => !value)}>
-          <span><b>协议与高级</b><small>{advancedSummary}</small></span><ChevronRight aria-hidden="true" />
-        </button>
-        {advancedOpen && <div className="fox-settings-advanced">
-          <div className="fox-settings-field"><span>Fox 连接协议</span><Select value={form.apiType} onValueChange={(apiType) => onChange({ ...form, apiType: apiType as ProviderForm['apiType'] })}><SelectTrigger aria-label="Fox 连接协议"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai-completions">Chat Completions · Fox / pi</SelectItem><SelectItem value="anthropic-messages">Anthropic Messages · Fox / pi / DeepSeek</SelectItem></SelectContent></Select></div>
-          <ProviderIconPicker form={form} onChange={onChange} />
-          <label className="fox-settings-switch-row"><span><b>默认服务</b><small>新对话使用此服务中标记为默认的模型</small></span><Switch checked={form.isDefault} onCheckedChange={(isDefault) => onChange({ ...form, isDefault })} aria-label="设为默认服务" /></label>
-          {form.id && credentialConfigured && <label className="fox-settings-switch-row"><span><b>清除已存 API Key</b><small>保存时从系统凭据库删除此服务的 Key</small></span><Switch checked={form.clearApiKey} onCheckedChange={(clearApiKey) => onChange({ ...form, clearApiKey, apiKey: clearApiKey ? '' : form.apiKey })} aria-label="保存时清除已存 API Key" /></label>}
-          <ProviderProtocolEditor form={form} disabled={busy} onChange={(next) => onChange({ ...form, ...next })} />
-        </div>}
-      </section>
+      {modelsSection}
+      {advancedSection}
     </div>
     <div className="fox-settings-sheet-foot">
       {onDelete && <Button type="button" variant="ghost" className="fox-settings-danger" disabled={busy} onClick={onDelete}>删除服务</Button>}
       <span className="is-grow" />
-      <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>取消</Button>
-      <Button type="button" disabled={!canSave} onClick={onSave}>{busy && !testing && <LoaderCircle className="animate-spin" />}保存</Button>
+      {footActions}
     </div>
-    <ProviderModelDialog open={modelEditor !== null} draft={modelEditor?.draft ?? null} isNew={modelEditor?.index === null} canDelete={form.models.length > 1} onOpenChange={(open) => { if (!open) setModelEditor(null) }} onSave={saveModel} onDelete={deleteModel} />
+    {modelDialog}
   </>
 }
 
@@ -855,17 +890,23 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
           </div>
         </SettingsGroup>
       </SettingsPageLayout>
-      <Sheet open={editingId !== null && form !== null} onOpenChange={(open) => { if (!open) closeEditor() }}>
+      <Dialog open={editingId === 'new' && form !== null} onOpenChange={(open) => { if (!open) closeEditor() }}>
+        <DialogContent className="fox-settings-dialog fox-provider-add-dialog">
+          <DialogHeader><DialogTitle>添加服务</DialogTitle><DialogDescription>选择模板并配置 API 连接，添加后仍可随时编辑。</DialogDescription></DialogHeader>
+          {form && editingId === 'new' && <ProviderEditor layout="dialog" form={form} busy={testing || resource.busyId === 'new'} credentialConfigured={false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onTest={() => void test()} />}
+        </DialogContent>
+      </Dialog>
+      <Sheet open={editingId !== null && editingId !== 'new' && form !== null} onOpenChange={(open) => { if (!open) closeEditor() }}>
         <SheetContent side="right" className="fox-settings-sheet">
-          {form && <>
+          {form && editingId !== 'new' && <>
             <SheetHeader className="fox-settings-sheet-head">
               <span className="fox-settings-provider-mark is-large">{sheetIcon ? <img src={sheetIcon} alt="" /> : <Server />}</span>
               <div className="fox-settings-sheet-title">
-                <SheetTitle><span>{editingId === 'new' ? (form.name.trim() || '添加服务') : form.name}</span>{form.isDefault && editingId !== 'new' && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}</SheetTitle>
-                <SheetDescription>{editingId === 'new' ? '配置 API 连接和 Fox 可以使用的模型，保存后仍可随时编辑。' : `${providerProtocolLabel(form.apiType)} · ${sheetModelCount} 个模型`}</SheetDescription>
+                <SheetTitle><span>{form.name}</span>{form.isDefault && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}</SheetTitle>
+                <SheetDescription>{`${providerProtocolLabel(form.apiType)} · ${sheetModelCount} 个模型`}</SheetDescription>
               </div>
             </SheetHeader>
-            <ProviderEditor form={form} busy={testing || resource.busyId === (editingId === 'new' ? 'new' : editingId)} credentialConfigured={editingProvider?.credentialConfigured ?? false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onDelete={editingProvider ? () => void remove(editingProvider) : undefined} onTest={() => void test()} />
+            <ProviderEditor form={form} busy={testing || resource.busyId === editingId} credentialConfigured={editingProvider?.credentialConfigured ?? false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onDelete={editingProvider ? () => void remove(editingProvider) : undefined} onTest={() => void test()} />
           </>}
         </SheetContent>
       </Sheet>
