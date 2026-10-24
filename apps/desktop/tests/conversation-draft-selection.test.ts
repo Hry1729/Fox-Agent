@@ -18,6 +18,7 @@ import {
   withoutRefusedSend,
   AGENT_BACKEND_PREFERENCES_EVENT,
   newConversationBackend,
+  isAgentBackendHidden,
 } from '../src/features/conversations/model/agent-backend'
 
 // Run the production hook's actions with deterministic state/ref slots. Effects
@@ -101,6 +102,7 @@ function harness() {
     withoutRefusedSend,
     AGENT_BACKEND_PREFERENCES_EVENT,
     newConversationBackend,
+    isAgentBackendHidden,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
   return {
