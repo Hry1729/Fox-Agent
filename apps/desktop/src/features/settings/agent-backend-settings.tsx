@@ -1,10 +1,11 @@
 // Settings batch, items 4 / 5: 设置 → 助手设置 →「外部 Agent」.
 //
-// *「新会话使用的 Agent」: Fox / Codex / pi / DeepSeek (default Fox). Every
-//   NEW conversation uses it; existing conversations keep the backend they
-//   were created with. A backend the administrator forced off
-//   (FOX_EXTERNAL_BACKENDS), or Codex when 模型服务's provider has no
-//   Responses API, is greyed with the reason.
+// *「新会话使用的 Agent」: Fox / pi / DeepSeek (default Fox); hidden backends
+//   (`HIDDEN_AGENT_BACKENDS`, Codex since 2026-10-24) are not listed, and a
+//   saved hidden choice shows as Fox with a note. Every NEW conversation uses
+//   it; existing conversations keep the backend they were created with. A
+//   backend the administrator forced off (FOX_EXTERNAL_BACKENDS) is greyed
+//   with the reason.
 // *「新外部会话使用完全访问」: off by default; read by the Host when it
 //   creates an external conversation (grant + audit as before); greyed under
 //   FORBIDDEN. Revoking mid-session stays on the bar above the input.
@@ -18,7 +19,10 @@ import {
   AGENT_BACKEND_PREFERENCES_EVENT,
   agentBackendForcedOffNotice,
   agentBackendSettingRows,
+  agentBackendSettingValue,
+  AGENT_BACKEND_LABELS,
   fullAccessSettingState,
+  isAgentBackendHidden,
   isAgentBackendId,
   type AgentBackendId,
   type AgentBackendPreferences,
@@ -40,12 +44,12 @@ export interface AgentBackendSettingsClient {
   agentBackendNativePermissionSet?: (request: NativePermissionRequest & { mode: string }) => Promise<NativePermissionView>
 }
 
-/** The external Agents that have a native permission list, in settings order. */
-export const NATIVE_PERMISSION_SETTING_BACKENDS: readonly { backend: AgentBackendId; label: string }[] = [
+/** The external Agents that have a native permission list, in settings order (hidden backends left out). */
+export const NATIVE_PERMISSION_SETTING_BACKENDS: readonly { backend: AgentBackendId; label: string }[] = ([
   { backend: 'codex', label: 'Codex' },
   { backend: 'deepseek', label: 'DeepSeek' },
   { backend: 'pi', label: 'pi' },
-]
+] as const).filter(({ backend }) => !isAgentBackendHidden(backend))
 
 /**
  * 设置 → each Agent's default permission for its NEW conversations, in its
@@ -145,8 +149,11 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
   const rows = agentBackendSettingRows(preferences)
   const forcedOff = agentBackendForcedOffNotice(preferences)
   const fullAccess = fullAccessSettingState(preferences)
-  const selected = preferences?.defaultBackend ?? 'fox'
+  const selected = agentBackendSettingValue(preferences)
   const effective = preferences?.effectiveBackend ?? 'fox'
+  const savedHidden = preferences && isAgentBackendId(preferences.defaultBackend) && isAgentBackendHidden(preferences.defaultBackend)
+    ? AGENT_BACKEND_LABELS[preferences.defaultBackend]
+    : null
   const unavailableReasons = rows.filter((row) => row.disabled && row.reason)
   return (
     <Card className="fox-settings-section fox-agent-backend-settings" aria-label="外部 Agent 设置">
@@ -175,7 +182,10 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
           {unavailableReasons.map((row) => <li key={row.value}>{row.label}：{row.reason}</li>)}
         </ul>
       )}
-      {preferences && selected !== effective && (
+      {savedHidden && (
+        <p className="fox-agent-backend-settings-note" role="note">之前保存的 {savedHidden} 暂未开放，新会话使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}；已有的 {savedHidden} 会话不受影响。</p>
+      )}
+      {preferences && !savedHidden && selected !== effective && (
         <p className="fox-agent-backend-settings-note" role="note">已保存的选择当前不可用，新会话暂时使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}。</p>
       )}
       <div className="fox-setting-row fox-setting-row-bordered">
