@@ -1365,3 +1365,49 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
   - `clearing_the_key_happens_only_after_the_record_is_saved`：清除 Key + 保存失败 → Key 还在，凭据库没被动过。
   - `key_write_failure_puts_back_the_keys_already_written_and_skips_the_record`、`unreadable_store_refuses_before_anything_is_written`、`explicit_empty_protocol_key_is_restored_when_the_save_fails`、`delete_failure_after_save_reports_the_saved_record_state`、`successful_save_writes_keys_then_record`。
 - 因此 13.20 第一部分第 3 项「H.3：用只读文件或占用制造保存失败」不再需要人工构造；Windows 上只需确认正常保存、清除 Key、删除供应商仍然可用。
+
+### 13.22 插件中心「策略」tab + 删除供应商回收 Key + Windows CI 旧失败（2026-10-24）
+
+> 承接 13.21。三件事：插件中心加第四个 tab「策略」管理声明式 Hooks；删除供应商时一并删掉它在系统凭据库里的 Key 并写审计；修 `harness_process_jobs` 里一直红的 `a_naturally_exited_shell_closes_its_job_before_waiting_for_pipe_eof`。
+
+**一、插件中心「策略」tab（声明式 Hooks）**
+
+- 以前声明式 Hooks 只在「设置 → 连接器」页面底部，插件中心没有入口。
+- 新增共享组件 `apps/desktop/src/features/settings/lifecycle-hooks-section.tsx`（`LifecycleHooksSection`）：Hook 列表、添加 / 编辑表单、启用开关、删除。数据仍走 `use-lifecycle-hooks.ts`，删除仍走应用内 `confirmDialog`（标题「删除 Hook」，确认按钮「删除」为 destructive 样式）。
+- 插件中心（`plugin-center-page.tsx`）在「内置工具 / 技能 / 连接器」之后加第四个 tab「策略」，内容就是这个组件；`initialTab="policy"` 可直接打开该 tab。「策略」只是页面 tab，不会作为插件类型发给插件网关。
+- 「设置 → 连接器」页面的 Hooks 区块改为复用同一个组件（保留原入口，行为不变），两处不再各有一份代码。
+- 测试：`apps/desktop/tests/plugin-center-policy-dom.test.tsx`（第四个 tab 是「策略」、能列出 Hook 和启用开关、`initialTab="policy"`、删除时取消不删 / 确认才删）。
+
+**复测**（Windows 桌面构建，每项「通过 / 失败 + 截图」）：
+
+1. 打开插件中心：tab 依次是「内置工具」「技能」「连接器」「策略」。点「策略」：搜索框隐藏，显示「声明式 Hooks」说明、「添加 Hook」表单和已有 Hook 列表。
+2. 在「策略」里添加一条 Hook（例如名称「测试 Hook」、匹配器 `run_command`、动作「附加说明」）→ 保存后出现在列表里；点名称进入编辑，改说明后保存，列表更新。
+3. 切换这条 Hook 的启用开关 → 切到「设置 → 连接器」页面底部，同一条 Hook 的开关状态一致（两处读同一份数据）。
+4. **删除 Hook 的确认框复测**：在「策略」里点这条 Hook 的垃圾桶 → 弹出应用内对话框，标题「删除 Hook」，正文含 Hook 名称，确认按钮「删除」为红色描边样式，标题和正文**不出现** `127.0.0.1` 等地址。点「取消」或按 Esc，Hook 还在；再点垃圾桶并点「删除」，Hook 消失并提示「Hook 已删除」。在「设置 → 连接器」里删除 Hook，确认框相同。
+
+**二、删除供应商时回收 Key**
+
+- 问题：删除供应商只删数据库记录，系统凭据库里以该供应商 `base_url` 为名的 Key 还在，成了孤儿，审计里也没有记录。
+- 决定（用户）：Fox 是个人 Agent，删除供应商就把它的 Key 一起删掉，**不检查**有没有别的条目在用同一个地址。
+- 新增 `crates/fox-agent-backend/src/credential_delete.rs`：
+  - `provider_key_ids(provider_id, base_url, profile_ids)`：要删的 Key = `base_url` Key + 每个协议配置的 `fox-protocol:<provider>:<profile>` Key（去重；不存在的 Key 删除算成功）。
+  - `delete_with_keys(store, key_ids, delete_record)`：**先删记录**；记录删除失败或记录不存在时一个 Key 都不动；记录删掉后再逐个删 Key，某个 Key 删除失败**不回滚记录**，也不中断后面的 Key。
+  - `DeleteOutcome::audit(provider_id)`：成功写一条 `model.provider_deleted`（`providerId`、`keysDeleted`）；有 Key 没删掉时写一条警告 `model.provider_key_delete_failed`（`providerId`、`recordDeleted`、`keysLeft`、`leftIds`、`errors`）。审计只带凭据 id 和数量，不带 Key 本身。
+- 桌面 `model_provider_delete` 只做调用：`KeyringStore` 对接系统凭据库，审计写入外部后端审计表（`agent_backend_audit_log`，`agent_backend = '-'`；成功用 `audit_host`，警告用 `audit_warning`）。以前协议 Key 是在删记录**之前**删的，现在统一改为记录删除成功之后。
+- 单元测试（`cargo test -p fox-agent-backend --lib credential_delete`，7 项）：先删记录后删 Key 的顺序、记录删除失败不动 Key、记录不存在不动 Key 也不写审计、Key 删除失败不回滚记录并继续删其余 Key 且写警告、成功写审计且不含 Key 值、共享地址照删、Key id 去重。
+
+**复测**：
+
+5. 在**测试供应商**上（见下方提醒）：添加供应商并保存 Key → 删除供应商（确认框同 13.21 第 1 项）→ 在 Windows「凭据管理器 → Windows 凭据」里，该供应商的条目**不再存在**（keyring 的条目名是「凭据 id + `.com.fox.agent.model`」，例如 `https://api.test-provider.example/v1.com.fox.agent.model`）；如果配置过单独 Key 的协议，`fox-protocol:<供应商 id>:<协议 id>.com.fox.agent.model` 条目也不在。
+6. 查看审计：`agent_backend_audit_log` 里有一条 `model.provider_deleted`，`providerId` 是刚删的供应商。（Key 删除失败的警告分支由单测覆盖，不需要人工构造。）
+
+> **提醒：凭据库按 `base_url` 在系统里全局共享，跟 `FOX_DATA_DIR` 无关。** 系统凭据库里的条目只由供应商的 `base_url` 和固定服务名 `com.fox.agent.model` 决定，不包含数据目录。用 `FOX_DATA_DIR` 开一份副本测试时，副本和主环境看到的是**同一个** Key：在副本里删除一个和主环境地址相同的供应商，会把主环境的 Key 一起删掉。在副本上测凭据，一定要用一个**地址和主环境不同**的测试供应商（例如在地址里加一个不会用到的路径或端口）。
+
+**三、Windows CI 旧失败：`a_naturally_exited_shell_closes_its_job_before_waiting_for_pipe_eof`**
+
+- 现象（全量 run 40027655533，artifact `rust-host-test-logs`）：job 20 秒内没结束。状态里 `owner_status: Alive`、stdout / stderr 都是 0 字节、事件只有 `Started`——**被启动的 `powershell.exe` 自己一直没退出**，Job 关闭 / 管道 EOF 那段逻辑根本没走到。以前的全量运行都因为更早的测试二进制失败而停下，这个测试一直没跑到，所以是「旧失败」第一次露出来。
+- 判断：测试夹具的问题，不是 `process_jobs` 的缺陷。
+  - 旧夹具用 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File launch-descendant.ps1`，里面 `Start-Process cmd.exe …`。Windows PowerShell 5.1 的 `Start-Process`（不带 `-NoNewWindow`）走 ShellExecuteEx，还要自动加载 `Microsoft.PowerShell.Management`；子进程是 `CREATE_NO_WINDOW` 加精简过的环境（没有 `PSModulePath`、`SystemDrive`），在 CI 的服务会话里启动又慢又依赖环境，和要测的行为无关。具体卡在哪一步，日志里看不到（推断）。
+  - 而且 ShellExecuteEx 不继承标准句柄，后代进程根本没拿到管道，旧夹具即使跑通，也没测到「先关 Job、再等管道 EOF」。
+  - 产品路径本身是对的：`SystemChild::try_wait` 观察到父进程退出后立即 `TerminateJobObject` 并关闭 Job（`KILL_ON_JOB_CLOSE`），之后才等读线程。
+- 修复（只改测试，没有 ignore）：启动器改成 `launch-descendant.cmd`，用 `start "" /B cmd /D /C natural-waiter.cmd` 直接 CreateProcess 并继承句柄，后代真正持有 stdout / stderr 管道；父 shell 输出 `launcher-exited` 后自然退出。断言加强为：`Succeeded`、退出码 0、没有 stop 请求、`readers_orphaned == false`、事件里有 `ReadersJoined`、stdout 读到 `launcher-exited`、打开门闩 3 秒后后代没有写出哨兵文件；并挂上 `JobReclaimer`，断言失败时也会打开门闩回收后代。
