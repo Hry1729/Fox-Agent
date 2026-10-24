@@ -382,6 +382,13 @@ impl ExternalBackendHost {
     /// Record a Host-level warning (no conversation) in the external-backend
     /// audit log. Names and counts only.
     pub(crate) fn audit_warning(&self, event: &str, details: &Value) {
+        self.audit_host(event, details);
+    }
+
+    /// Record a Host-level event (no conversation) that is not a warning,
+    /// e.g. a provider deleted together with its Keys (sandbox.md 13.22).
+    /// Same log and shape as [`Self::audit_warning`]; names and counts only.
+    pub(crate) fn audit_host(&self, event: &str, details: &Value) {
         let _ = self.database.append_agent_backend_audit(None, "-", event, details);
     }
 
