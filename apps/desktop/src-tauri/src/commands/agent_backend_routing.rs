@@ -174,6 +174,10 @@ pub struct AgentBackendOption {
     pub enabled: bool,
     pub wired: bool,
     pub experimental: bool,
+    /// Hidden from every picker (`AgentBackend::HIDDEN`). The option stays in
+    /// the list so the UI can still tell whether an existing conversation of
+    /// that backend is runnable (`enabled`).
+    pub hidden: bool,
     pub reason: Option<String>,
 }
 
@@ -200,12 +204,15 @@ pub fn agent_backends_status() -> ApiResponse<AgentBackendStatus> {
             enabled: option.enabled,
             wired: option.wired,
             experimental: option.experimental,
+            hidden: option.hidden,
             reason: option.reason,
         })
         .collect();
     ApiResponse::success(AgentBackendStatus {
         switch_env: host_routing::EXTERNAL_BACKENDS_ENV.to_owned(),
-        any_external_enabled: options.iter().any(|option| option.backend != "fox" && option.enabled),
+        // "Can an external backend be picked for a new conversation": a
+        // hidden one does not count.
+        any_external_enabled: options.iter().any(|option| option.backend != "fox" && option.enabled && !option.hidden),
         options,
         unknown_entries: switch.unknown_entries().to_vec(),
     })
@@ -382,10 +389,13 @@ pub struct AgentBackendPreferenceOption {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBackendPreferences {
-    /// What the user saved (`fox` when never set or unreadable).
+    /// What the user saved (`fox` when never set or unreadable). May name a
+    /// hidden backend saved before it was hidden; `effective_backend` is
+    /// then Fox.
     pub default_backend: String,
-    /// What a new conversation uses now: the saved backend unless the
-    /// administrator forced it off, then Fox.
+    /// What a new conversation uses now: the saved backend unless it is
+    /// hidden (`AgentBackend::HIDDEN`) or the administrator forced it off,
+    /// then Fox.
     pub effective_backend: String,
     pub new_external_full_access: bool,
     /// The saved full-access choice unless FORBIDDEN.
@@ -395,6 +405,7 @@ pub struct AgentBackendPreferences {
     pub switch_env: String,
     /// Every external backend is forced off by the administrator.
     pub forced_off: bool,
+    /// The choices of「新会话使用的 Agent」; hidden backends are left out.
     pub options: Vec<AgentBackendPreferenceOption>,
     /// Name of 模型服务's default provider used for the unified login.
     pub unified_login_provider: Option<String>,
@@ -427,6 +438,7 @@ pub(crate) fn preferences_view(
 ) -> AgentBackendPreferences {
     let options: Vec<AgentBackendPreferenceOption> = host_routing::backend_options(switch)
         .into_iter()
+        .filter(|option| !option.hidden)
         .map(|option| {
             let codex_unsupported = option.backend == AgentBackend::Codex && option.enabled && codex.as_ref().is_some_and(|probe| probe.supported == Some(false));
             AgentBackendPreferenceOption {
@@ -447,7 +459,8 @@ pub(crate) fn preferences_view(
     // The administrator's switch wins; a Codex whose provider lacks the
     // Responses API stays effective if it was saved (the user may have their
     // own Codex login in the private HOME), it just cannot be newly picked.
-    let effective = if switch.is_enabled(stored) { stored } else { AgentBackend::Fox };
+    // A backend saved before it was hidden falls back to Fox too.
+    let effective = if switch.is_enabled(stored) && !stored.hidden() { stored } else { AgentBackend::Fox };
     AgentBackendPreferences {
         default_backend: stored.as_str().to_owned(),
         effective_backend: effective.as_str().to_owned(),
@@ -501,6 +514,10 @@ pub(crate) fn validate_preferences_change(
         None => None,
         Some(raw) => {
             let backend = AgentBackend::parse(raw.trim()).ok_or_else(|| (RouteError::CODE_INVALID, format!("不支持的 Agent 后端「{raw}」")))?;
+            if backend.hidden() {
+                let refusal = RouteError::Hidden(backend);
+                return Err((RouteError::CODE_HIDDEN, refusal.message()));
+            }
             let option = current.options.iter().find(|option| option.backend == backend.as_str());
             if backend != AgentBackend::Fox && !option.is_some_and(|option| option.enabled) {
                 let reason = option.and_then(|option| option.reason.clone()).unwrap_or_default();
@@ -655,6 +672,12 @@ fn native_target(
         }
         None => {
             let backend = request.backend.as_deref().and_then(AgentBackend::parse).unwrap_or(AgentBackend::Fox);
+            // A new conversation cannot use a hidden backend, so it has no
+            // draft permission list either.
+            if backend.hidden() {
+                let refusal = RouteError::Hidden(backend);
+                return Err(ApiResponse::failure(refusal.code(), refusal.message(), false));
+            }
             let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
             let full = !forbidden
                 && draft_full_access_choice(&state.database, backend).unwrap_or_else(|| stored_new_external_full_access(&state.database));
@@ -953,9 +976,11 @@ mod tests {
         assert!(off.forbidden_reason.is_some() && !off.effective_full_access);
         let probe = CodexResponsesProbe { base_url: "https://api.example.com/v1".into(), supported: Some(false), status: Some(404), checked_at: 1 };
         let on = preferences_view(AgentBackend::Fox, true, &BackendSwitch::from_env_value(None), false, Some("Example".into()), Some(probe));
-        let codex = on.options.iter().find(|option| option.backend == "codex").unwrap();
-        assert!(!codex.enabled && codex.reason.as_deref().unwrap().contains("Responses"));
-        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &on).unwrap_err().0, "agent_backend_disabled");
+        // Codex is hidden (2026-10-24): not a choice at all, and refused by
+        // its own code whatever the probe says.
+        assert!(on.options.iter().all(|option| option.backend != "codex"));
+        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &on).unwrap_err().0, "agent_backend_hidden");
+        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &off).unwrap_err().0, "agent_backend_hidden");
         assert!(on.effective_full_access);
         assert_eq!(responses_support_from_status(404), Some(false));
         assert_eq!(responses_support_from_status(405), Some(false));
@@ -964,5 +989,54 @@ mod tests {
         assert_eq!(responses_support_from_status(200), Some(true));
         assert_eq!(responses_support_from_status(401), None);
         assert_eq!(responses_support_from_status(503), None);
+    }
+
+    /// 2026-10-24: Codex is hidden from users (`AgentBackend::HIDDEN`). A
+    /// saved `codex` preference falls back to Fox, it is never offered, a new
+    /// conversation cannot be created with it, and an existing Codex
+    /// conversation still opens and routes to its own runtime.
+    #[test]
+    fn agent_backend_routing_hides_codex_and_falls_back_saved_codex_to_fox() {
+        let on = BackendSwitch::from_env_value(None);
+        let view = preferences_view(AgentBackend::Codex, false, &on, false, None, None);
+        assert_eq!(view.default_backend, "codex", "what was saved is reported as saved");
+        assert_eq!(view.effective_backend, "fox", "a saved hidden backend falls back to Fox");
+        assert!(view.options.iter().all(|option| option.backend != "codex"));
+        assert!(view.options.iter().any(|option| option.backend == "pi") && view.options.iter().any(|option| option.backend == "deepseek"));
+        let only_codex = BackendSwitch::from_env_value(Some("codex"));
+        assert_eq!(preferences_view(AgentBackend::Codex, false, &only_codex, false, None, None).effective_backend, "fox");
+
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        database.set_app_setting(DEFAULT_BACKEND_KEY, "codex").unwrap();
+        assert_eq!(stored_default_backend(&database), AgentBackend::Codex);
+        let refused: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("codex"));
+        assert_eq!(refused.unwrap_err().error.unwrap().code, "agent_backend_hidden");
+        let fox: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(None);
+        assert_eq!(fox.ok(), Some(AgentBackend::Fox));
+
+        // An existing Codex conversation (created before the hide) keeps its
+        // backend: it opens, and its entries route to the Codex runtime
+        // unless the administrator forced Codex off (then read-only, as for
+        // any external backend).
+        let old = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("旧 Codex 会话"), None, None, "codex")
+            .expect("codex conversation");
+        assert_eq!(database.conversation_agent_backend(&old.id).unwrap().as_deref(), Some("codex"));
+        for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve] {
+            let gated: Result<Route, ApiResponse<()>> = gate_conversation(&database, entry, &old.id, None, None);
+            if BackendSwitch::from_env().is_enabled(AgentBackend::Codex) {
+                assert!(matches!(gated, Ok(Route::External(AgentBackend::Codex))), "{entry:?}");
+            } else {
+                assert_eq!(gated.unwrap_err().error.unwrap().code, "agent_backend_disabled");
+            }
+        }
+        let identity = crate::database::RunBackendIdentity {
+            conversation_id: old.id.clone(),
+            run_id: "r".to_owned(),
+            agent_backend: "codex".to_owned(),
+            engine_id: None,
+        };
+        let cancel: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
+        assert!(!matches!(cancel, Ok(Route::Fox)), "never silently moved to Fox");
     }
 }
