@@ -5,8 +5,10 @@ import {
   insertPromptNewline,
   normalizePromptSendShortcut,
   promptEnterIsComposing,
+  PROMPT_SEND_SHORTCUT_EVENT,
   readPromptSendShortcut,
   resolvePromptEnterAction,
+  writePromptSendShortcut,
 } from '../src/components/ai-elements/prompt-send-shortcut'
 
 describe('send shortcut preference', () => {
@@ -15,8 +17,39 @@ describe('send shortcut preference', () => {
     expect(DEFAULT_PROMPT_SEND_SHORTCUT).toBe('enter')
   })
 
-  test('a stored legacy shortcut cannot override the main composer keys', () => {
-    expect(readPromptSendShortcut({ getItem: () => 'mod-enter' })).toBe('enter')
+  test('a stored Ctrl/Cmd + Enter preference is read back', () => {
+    expect(readPromptSendShortcut({ getItem: () => 'mod-enter' })).toBe('mod-enter')
+    expect(readPromptSendShortcut({ getItem: () => 'enter' })).toBe('enter')
+  })
+
+  test('the preference persists through storage and round-trips', () => {
+    const store = new Map<string, string>()
+    const storage = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value) } }
+    expect(writePromptSendShortcut('mod-enter', storage)).toBe('mod-enter')
+    expect(store.get(PROMPT_SEND_SHORTCUT_KEY)).toBe('mod-enter')
+    expect(readPromptSendShortcut(storage)).toBe('mod-enter')
+    expect(writePromptSendShortcut('enter', storage)).toBe('enter')
+    expect(readPromptSendShortcut(storage)).toBe('enter')
+  })
+
+  test('writing to window storage notifies open views', () => {
+    if (typeof window === 'undefined') return
+    const seen: unknown[] = []
+    const listener = (event: Event) => seen.push((event as CustomEvent).detail)
+    window.addEventListener(PROMPT_SEND_SHORTCUT_EVENT, listener)
+    try {
+      writePromptSendShortcut('mod-enter')
+      expect(window.localStorage.getItem(PROMPT_SEND_SHORTCUT_KEY)).toBe('mod-enter')
+      expect(readPromptSendShortcut()).toBe('mod-enter')
+      expect(seen).toEqual(['mod-enter'])
+    } finally {
+      window.removeEventListener(PROMPT_SEND_SHORTCUT_EVENT, listener)
+      window.localStorage.removeItem(PROMPT_SEND_SHORTCUT_KEY)
+    }
+  })
+
+  test('a storage that refuses writes does not throw', () => {
+    expect(writePromptSendShortcut('mod-enter', { setItem: () => { throw new Error('quota') } })).toBe('mod-enter')
   })
 
   test('normalizes unknown, empty and malformed values to Enter sending', () => {
@@ -32,7 +65,7 @@ describe('send shortcut preference', () => {
     expect(readPromptSendShortcut(null)).toBe('enter')
   })
 
-  test('recognizes the legacy preference key for migration', () => {
+  test('keeps the existing preference key', () => {
     expect(PROMPT_SEND_SHORTCUT_KEY).toBe('fox.preferences.sendKey')
   })
 })
@@ -44,10 +77,10 @@ describe('enter resolution', () => {
     expect(resolvePromptEnterAction({ key: 'Enter', metaKey: true }, 'enter')).toBe('newline')
   })
 
-  test('the legacy preference still uses Enter to send and Ctrl/Cmd to break the line', () => {
-    expect(resolvePromptEnterAction({ key: 'Enter' }, 'mod-enter')).toBe('send')
-    expect(resolvePromptEnterAction({ key: 'Enter', ctrlKey: true }, 'mod-enter')).toBe('newline')
-    expect(resolvePromptEnterAction({ key: 'Enter', metaKey: true }, 'mod-enter')).toBe('newline')
+  test('Ctrl/Cmd + Enter mode: the modifier sends and plain Enter breaks the line', () => {
+    expect(resolvePromptEnterAction({ key: 'Enter' }, 'mod-enter')).toBe('newline')
+    expect(resolvePromptEnterAction({ key: 'Enter', ctrlKey: true }, 'mod-enter')).toBe('send')
+    expect(resolvePromptEnterAction({ key: 'Enter', metaKey: true }, 'mod-enter')).toBe('send')
   })
 
   test('Shift + Enter always breaks the line, in both modes', () => {
@@ -61,14 +94,19 @@ describe('enter resolution', () => {
     expect(promptEnterIsComposing({ key: 'Enter', isComposing: true })).toBe(true)
     expect(promptEnterIsComposing({ key: 'Enter', keyCode: 229 })).toBe(true)
     expect(promptEnterIsComposing({ key: 'Enter', keyCode: 13 })).toBe(false)
-    expect(resolvePromptEnterAction({ key: 'Enter', isComposing: true }, 'enter')).toBe('default')
-    expect(resolvePromptEnterAction({ key: 'Enter', keyCode: 229 }, 'enter')).toBe('default')
+    for (const shortcut of ['enter', 'mod-enter'] as const) {
+      expect(resolvePromptEnterAction({ key: 'Enter', isComposing: true }, shortcut)).toBe('default')
+      expect(resolvePromptEnterAction({ key: 'Enter', keyCode: 229 }, shortcut)).toBe('default')
+      expect(resolvePromptEnterAction({ key: 'Enter', isComposing: true, ctrlKey: true }, shortcut)).toBe('default')
+      expect(resolvePromptEnterAction({ key: 'Enter', keyCode: 229, metaKey: true }, shortcut)).toBe('default')
+    }
   })
 
   test('non-Enter keys and Alt + Enter stay with the browser', () => {
     expect(resolvePromptEnterAction({ key: 'a' }, 'enter')).toBe('default')
     expect(resolvePromptEnterAction({ key: 'Escape' }, 'enter')).toBe('default')
     expect(resolvePromptEnterAction({ key: 'Enter', altKey: true }, 'enter')).toBe('default')
+    expect(resolvePromptEnterAction({ key: 'Enter', altKey: true }, 'mod-enter')).toBe('default')
   })
 })
 
