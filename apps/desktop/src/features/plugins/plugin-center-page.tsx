@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  ShieldCheck,
   Terminal,
   WandSparkles,
   Wrench,
@@ -31,6 +32,7 @@ import { FoxEmptyState } from '@/components/fox-ui/empty-state'
 import { SkeletonContent } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import '@/styles/plugin-center.css'
+import { LifecycleHooksSection } from '@/features/settings/lifecycle-hooks-section'
 import { defaultPluginGateway } from './tauri-gateway'
 import type { PluginAgentScopeDTO, PluginCardView, PluginGateway, PluginKind } from './model'
 import {
@@ -68,9 +70,21 @@ const kindIcons: Record<PluginKind, LucideIcon> = {
 
 const kindOrder: PluginKind[] = ['tool', 'skill', 'mcp']
 
+/**
+ * The plugin center tabs: the three plugin kinds plus「策略」, the declarative
+ * lifecycle Hooks (sandbox.md 13.22). 'policy' is a page tab only; it is never
+ * sent to the plugin gateway as a kind.
+ */
+export type PluginCenterTab = PluginKind | 'policy'
+const POLICY_TAB = 'policy' as const
+const POLICY_TAB_LABEL = '策略'
+const isPluginKind = (value: string): value is PluginKind => kindOrder.includes(value as PluginKind)
+
 export interface PluginCenterPageProps {
   gateway?: PluginGateway
   initialKind?: PluginKind
+  /** Open on a given tab; 'policy' opens「策略」(lifecycle Hooks). */
+  initialTab?: PluginCenterTab
   onAddPlugin?: () => void
   onConfigureAgent?: (plugin: PluginCardView) => void
   className?: string
@@ -199,9 +213,10 @@ function EmptyState({ title, search = false }: { title: string; search?: boolean
   return <FoxEmptyState variant={search ? 'search' : 'empty'} icon={<PackagePlus />} title={title} description={search ? '调整关键词或分类后再试。' : '安装插件后，可以在这里管理启用状态和使用范围。'} />
 }
 
-export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddPlugin, onConfigureAgent, className }: PluginCenterPageProps) {
+export function PluginCenterPage({ gateway: providedGateway, initialKind, initialTab, onAddPlugin, onConfigureAgent, className }: PluginCenterPageProps) {
   const gateway = providedGateway ?? defaultPluginGateway
-  const [kind, setKind] = useState<PluginKind>(initialKind && kindOrder.includes(initialKind) ? initialKind : 'tool')
+  const [kind, setKind] = useState<PluginKind>(initialKind && kindOrder.includes(initialKind) ? initialKind : initialTab && isPluginKind(initialTab) ? initialTab : 'tool')
+  const [policyOpen, setPolicyOpen] = useState(initialTab === POLICY_TAB)
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState<string | undefined>()
   const [catalog, setCatalog] = useState<PluginCardView[]>([])
@@ -222,8 +237,20 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
     if (initialKind && kindOrder.includes(initialKind)) {
       setKind(initialKind)
       setCategory(undefined)
+      setPolicyOpen(false)
     }
   }, [initialKind])
+
+  useEffect(() => {
+    if (initialTab === POLICY_TAB) setPolicyOpen(true)
+    else if (initialTab && isPluginKind(initialTab)) { setKind(initialTab); setCategory(undefined); setPolicyOpen(false) }
+  }, [initialTab])
+
+  const activeTab: PluginCenterTab = policyOpen ? POLICY_TAB : kind
+  const selectTab = (value: string) => {
+    if (value === POLICY_TAB) { setPolicyOpen(true); return }
+    if (isPluginKind(value)) { setKind(value); setCategory(undefined); setPolicyOpen(false) }
+  }
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -337,12 +364,15 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
         <header className="fox-plugin-installed-page-header">
           <div className="fox-plugin-page-intro">
             <h1>插件</h1>
-            <label className="fox-plugin-search" htmlFor="fox-plugin-installed-search-input"><Search /><Input id="fox-plugin-installed-search-input" value={installedSearch} onChange={(event) => setInstalledSearch(event.target.value)} placeholder={`搜索${pluginKindLabel(kind)}`} /></label>
+            {!policyOpen && <label className="fox-plugin-search" htmlFor="fox-plugin-installed-search-input"><Search /><Input id="fox-plugin-installed-search-input" value={installedSearch} onChange={(event) => setInstalledSearch(event.target.value)} placeholder={`搜索${pluginKindLabel(kind)}`} /></label>}
           </div>
-          <Tabs value={kind} onValueChange={(value) => { if (kindOrder.includes(value as PluginKind)) { setKind(value as PluginKind); setCategory(undefined) } }}>
-            <TabsList className="fox-plugin-kind-tabs">{kindOrder.map((item) => <TabsTrigger key={item} value={item}><KindIcon kind={item} />{pluginKindLabel(item)}</TabsTrigger>)}</TabsList>
+          <Tabs value={activeTab} onValueChange={selectTab}>
+            <TabsList className="fox-plugin-kind-tabs">{kindOrder.map((item) => <TabsTrigger key={item} value={item}><KindIcon kind={item} />{pluginKindLabel(item)}</TabsTrigger>)}<TabsTrigger value={POLICY_TAB}><ShieldCheck aria-hidden="true" />{POLICY_TAB_LABEL}</TabsTrigger></TabsList>
           </Tabs>
         </header>
+        {policyOpen
+          ? <div className="fox-settings-layout fox-plugin-policy"><main><LifecycleHooksSection /></main></div>
+          : <>
         {error && <FoxEmptyState variant="error" icon={<CircleAlert />} title="插件加载失败" description={error} action={<Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button>} />}
         <main className="fox-plugin-installed-content">
           {loading && !installed.length
@@ -351,6 +381,7 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddP
               ? !error && <EmptyState search={Boolean(installedSearch.trim())} title={installedSearch.trim() ? `没有匹配的${pluginKindLabel(kind)}。` : `暂无已安装${pluginKindLabel(kind)}。`} />
               : <div className="fox-plugin-installed-grid">{installedCards.map((card) => <InstalledPluginCard key={card.id} card={card} busy={activationBusy.has(card.id)} onToggle={(enabled) => void handleToggle(card, enabled)} onConfigure={() => void handleConfigure(card)} />)}</div>}
         </main>
+          </>}
         {scopePlugin && <ScopeDialog plugin={scopePlugin} scope={scope} loading={scopeLoading} error={scopeError} onClose={() => setScopePlugin(null)} onToggle={(agent) => void handleScopeToggle(agent)} />}
       </div>
     )
