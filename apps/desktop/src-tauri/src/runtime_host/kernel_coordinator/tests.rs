@@ -1783,12 +1783,25 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
     config.model_service = json!({"apiType":"openai-completions","modelId":"agv-stall","baseUrl":format!("http://{address}/v1")});
     let clock = TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
+    // Only the idle bound is under test, so the first-response bound must not
+    // be able to preempt it. The worker arms its round timer BEFORE the
+    // provider request leaves (lazy provider import, connect, request write and
+    // the fixture's accept poll all count), and on a loaded CI runner that cold
+    // path alone exceeded a 1s first-response bound: the round was then aborted
+    // as first_response before the stall chunk was parsed, with honest telemetry
+    // firstResponseMs=null / toolParamBytes=0. Collapsing the first-response
+    // bound into the whole-round bound (first == request, the largest value the
+    // controller admits) leaves idle — armed only after observed progress — as
+    // the one bound that can fire once the stalled chunk arrives; the idle
+    // budget and every assertion below are unchanged.
     let budgets = TimeBudgets {
         model_request_ms: 15_000,
-        model_first_response_ms: 1_000,
+        model_first_response_ms: 15_000,
         model_idle_ms: 1_500,
         ..TimeBudgets::default()
     };
+    assert_eq!(budgets.model_first_response_ms, budgets.model_request_ms,
+        "the first-response bound must not compete with the idle bound in this fixture");
     let idle_budget_ms = budgets.model_idle_ms;
     let (db, root, run_id) = fixture_with_budgets_opt(&clock, &config.hash().unwrap(), Some(&config), false, false, (0, 1), true, budgets);
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
@@ -1806,6 +1819,11 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
     let rejected: Value = serde_json::from_str(&rejected).unwrap();
     assert_eq!(rejected["failure"]["category"], "model_timeout");
     let telemetry = &rejected["failure"]["telemetry"];
+    // The stall chunk was observed before the bound fired (idle path, not
+    // first_response): a recurrence names the breached bound instead of only
+    // tripping the byte-count assertion.
+    assert!(telemetry["firstResponseMs"].as_i64().is_some(),
+        "the round must have observed the partial tool-call chunk before timing out: {telemetry}");
     assert!(telemetry["toolParamBytes"].as_u64().unwrap() > 0);
     assert!(telemetry["idleElapsedMs"].as_i64().unwrap() >= idle_budget_ms);
     drop(connection);
