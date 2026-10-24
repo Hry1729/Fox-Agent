@@ -32,7 +32,7 @@ import {
   type ImportReport,
 } from '@/features/conversations/model/agent-backend-onboarding'
 import type { NativePermissionRequest, NativePermissionView } from '@/features/conversations/model/agent-native-permission'
-import { refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
+import { isAgentBackendHidden, refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
 
 /** The Host calls the panel needs (a subset of `desktopClient`). */
 export interface AgentBackendPanelClient {
@@ -86,7 +86,7 @@ export function AgentBackendPanel({
   status,
   lockedBackend,
   conversationId,
-  draftBackend,
+  draftBackend: pickedDraftBackend,
   draftProjectId = null,
   draftProjectRoot = null,
   draftFullAccess = false,
@@ -108,6 +108,10 @@ export function AgentBackendPanel({
   /** Bumped by the caller to refresh everything (e.g. after a run). */
   sessionTick?: number
 }) {
+  // A hidden backend (HIDDEN_AGENT_BACKENDS) is never a draft's backend: the
+  // draft is shown, probed and created as Fox. Locked (existing)
+  // conversations keep theirs.
+  const draftBackend: AgentBackendId = isAgentBackendHidden(pickedDraftBackend, status) ? 'fox' : pickedDraftBackend
   const shownBackend: AgentBackendId = lockedBackend ?? draftBackend
   const capabilityConversationId = lockedBackend ? conversationId : null
   const [eventTick, setEventTick] = useState(0)
