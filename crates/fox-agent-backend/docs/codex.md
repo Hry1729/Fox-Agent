@@ -1,5 +1,18 @@
 # CodexBackend（codex-acp）阶段 0 证据与能力声明
 
+## 当前状态（2026-10-24）
+
+> 本节是当前事实；下文第 1 节起是 2026-10-19 的阶段 0 证据原文，未改动。
+
+- **已实现，暂时隐藏**。产品内置的 Agent 是 Fox、DeepSeek Harness（dsh）和 pi；Codex 以后与其他 ACP Agent 一起通过「自定义 ACP Agent」通用入口由用户自行安装接入（**待办 / 规划中**）。
+- 隐藏开关集中在一处：`AgentBackend::HIDDEN`（`src/port.rs`），前端镜像 `HIDDEN_AGENT_BACKENDS`（`apps/desktop/src/features/conversations/model/agent-backend.ts`）。删掉这两处的 `codex` 即可恢复。
+- 隐藏期间：设置 →「新会话使用的 Agent」、新会话 Agent 选择器、各 Agent 默认权限、供应商协议的“适用于”列表都不列出 Codex；新建 `codex` 会话被拒绝（`agent_backend_hidden`）；之前保存的默认 Agent 为 `codex` 时有效值回退 Fox。
+- 已有的 Codex 会话照常打开、查看历史，并按原有路由继续运行（仍受 `FOX_EXTERNAL_BACKENDS` 约束），不会被换成其他后端。
+- 代码与测试保留：`src/backends/codex.rs`、`tests/codex_backend.rs`；`capabilities_for`、原生权限（请求审批 / 帮我批准 / 完全访问权限）和 Responses 协议探测都在。
+- 桌面 Host 从 Fox 管理的运行时 `<runtime>/backends/codex/` 启动 `codex-acp`（锁定 `2.2.2`），不经 `npx`；`npx` 入口只用于开发和真实二进制测试。
+
+完整的路由、隐藏开关、权限和凭据说明见 `docs/02-架构/Agent运行时架构.md` 的「外层 Agent 后端（四 Agent）」一节；人工复测记录见本目录 `sandbox.md`。
+
 分支：Codex（方案 v0.3.1 第 7 节）。代码：`src/backends/codex.rs`；测试：`tests/codex_backend.rs`。
 记录日期：2026-10-19。结论只写有证据的部分；没有证据的写“待验证”。
 
