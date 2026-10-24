@@ -1,5 +1,17 @@
 # DeepSeekBackend（实验）— 阶段 0 实测与接入说明
 
+## 当前状态（2026-10-24）
+
+> 本节是当前事实；下文是 2026-10-19 的阶段 0 实测原文，未改动。下文“T04 不满足 → 不得默认开启、不对用户开放”是阶段 0 的结论，之后 Host 在 dsh 进程外加了 srt 沙箱（见 `sandbox.md` 第 13 节），dsh 作为实验后端内置。
+
+- DeepSeek Harness（dsh）是**内置 Agent** 之一，标记为实验（`AgentBackend::experimental`）。另两个内置 Agent 是 Fox 和 pi；Codex 已实现但暂时隐藏。四 Agent 改造已完成并合入 `main`。
+- 桌面 Host 从 Fox 管理的运行时 `<runtime>/backends/dsh/` 启动 `dsh --profile acp`（锁定 `0.2.1-rc.2`），并应用 `<runtime>/dsh-patches/` 下逐字节校验过的 Host 补丁；不经 `npx`。见 `src/external_launch.rs`。
+- 默认在 srt 沙箱里运行；进程只继承白名单环境变量；登录信息放在 Fox 管理的私有 HOME。
+- 权限按 dsh 的原生选项显示（`src/native_permission.rs`）：只读、工作区可写（询问）、工作区可写（不询问，默认）、完全访问。dsh 不支持会话中途切换，下一轮开始时重启 dsh 生效。完全访问是独立开关，只在创建会话时授予，会话中只能撤销。
+- 模型默认来自「模型服务」供应商的 Anthropic Messages 协议；API Key 按 base URL 在系统凭据库全局共享。
+
+完整的路由、隐藏开关、权限和凭据说明见 `docs/02-架构/Agent运行时架构.md` 的「外层 Agent 后端（四 Agent）」一节；人工复测记录见本目录 `sandbox.md`。
+
 - 后端：DeepSeek Harness 原生 ACP 入口 `dsh --profile acp`（npm `@deepseek-ai/dsh`）。
 - 上游状态：developer preview，未做安全审计，会有破坏性变更（官方 README）。
 - 本分支代码：`src/backends/deepseek.rs`；测试：`tests/deepseek_backend.rs`。
