@@ -937,3 +937,15 @@
   padding-inline: var(--fox-space-m);
   font-size: var(--fox-type-caption);
 }
+
+/* 「策略」tab (sandbox.md 13.22): the shared lifecycle Hooks section keeps the
+   settings card styles; only the outer spacing follows the plugin page. */
+.fox-plugin-center .fox-plugin-policy {
+  width: min(var(--fox-content-max), 100%);
+  margin-inline: auto;
+}
+
+.fox-plugin-center .fox-plugin-policy > main {
+  width: 100% !important;
+  padding-top: 0 !important;
+}
