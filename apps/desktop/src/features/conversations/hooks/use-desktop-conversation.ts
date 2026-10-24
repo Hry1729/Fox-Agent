@@ -13,6 +13,7 @@ import {
   AGENT_BACKEND_REFUSED,
   agentBackendInputLockedReason,
   newConversationBackend,
+  isAgentBackendHidden,
   conversationAgentBackend,
   isAgentBackendRefusalCode,
   withoutRefusedSend,
@@ -248,7 +249,9 @@ export function useDesktopConversation(): DesktopConversationState {
   const [draftAgentBackend, setDraftAgentBackendState] = useState<AgentBackendId>('fox')
   const draftAgentBackendRef = useRef<AgentBackendId>('fox')
   const explicitDraftBackendRef = useRef<AgentBackendId | null>(null)
-  const setDraftAgentBackend = useCallback((backend: AgentBackendId) => {
+  const setDraftAgentBackend = useCallback((picked: AgentBackendId) => {
+    // A hidden backend (HIDDEN_AGENT_BACKENDS) is never a new conversation's backend.
+    const backend: AgentBackendId = isAgentBackendHidden(picked) ? 'fox' : picked
     explicitDraftBackendRef.current = backend
     draftAgentBackendRef.current = backend
     setDraftAgentBackendState(backend)
