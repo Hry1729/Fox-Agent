@@ -67,7 +67,10 @@ describe('no native confirm box in app code', () => {
   test('the 12 former call sites use confirmDialog with Chinese titles', () => {
     const read = (path: string) => readFileSync(join(SRC, path), 'utf8')
     const sites: Array<[string, string[]]> = [
-      ['features/settings/settings-pages.tsx', ['删除服务', '删除连接器', '删除 Hook', '清理预览缓存', '恢复数据', '清理数据']],
+      ['features/settings/settings-pages.tsx', ['删除服务', '删除连接器', '清理预览缓存', '恢复数据', '清理数据']],
+      // 13.22: the Hook list moved into the shared section used by the
+      // connector settings page and the plugin center「策略」tab.
+      ['features/settings/lifecycle-hooks-section.tsx', ['删除 Hook']],
       ['features/agents/agent-pages.tsx', ['删除专家', '恢复专家版本']],
       ['features/agents/digital-colleague-manager.tsx', ['撤销数字同事']],
       ['features/chat/components/ManagedFilesPanel.tsx', ['强制恢复文件']],
@@ -83,9 +86,13 @@ describe('no native confirm box in app code', () => {
     }
     expect(total).toBe(12)
     // Destructive actions use the destructive confirm button.
-    for (const title of ['删除服务', '删除 Hook', '清理预览缓存']) {
+    for (const title of ['删除服务', '清理预览缓存']) {
       expect(read('features/settings/settings-pages.tsx')).toMatch(new RegExp(`title: '${title}'[^)]*destructive: true`))
     }
+    expect(read('features/settings/lifecycle-hooks-section.tsx')).toMatch(/title: '删除 Hook'[^)]*destructive: true/)
+    // Both entry points render that one section, so the confirmation cannot drift.
+    expect(read('features/settings/settings-pages.tsx')).toContain('<LifecycleHooksSection />')
+    expect(read('features/plugins/plugin-center-page.tsx')).toContain('<LifecycleHooksSection />')
     expect(read('features/local-knowledge/local-knowledge-pages.tsx')).toMatch(/title: '放弃修改'[^)]*destructive: true/)
   })
 
