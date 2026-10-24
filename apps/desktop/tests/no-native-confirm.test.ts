@@ -1,4 +1,4 @@
-// Guard: the native confirm box must not come back. Under Tauri its title is the
+// Guard: the native confirm / prompt / alert boxes must not come back. Under Tauri its title is the
 // dev server address (127.0.0.1:1421), so every confirmation goes through the
 // in-app `confirmDialog` from `src/components/ui/confirm-dialog.tsx` instead.
 // Test files may still mention it (stubs, this guard); app code under src may not.
@@ -19,6 +19,17 @@ const NATIVE_CONFIRM = [
   /(?<![\w$.])confirm\s*\(/,
 ]
 
+// 13.23: the native prompt and alert boxes carry the same dev-server title, so
+// they are banned too. Text input goes through `promptDialog`
+// (`src/components/ui/prompt-dialog.tsx`), notices through the toast helper.
+// Only the explicit global forms are matched: a bare `prompt(` / `alert(` is
+// too common as a local name (e.g. an Agent `prompt`) to flag safely.
+const NATIVE_PROMPT_ALERT = [
+  /\b(?:window|globalThis|self|top|parent)\s*\.\s*(?:prompt|alert)\b/,
+  /\b(?:window|globalThis|self)\s*\[\s*['"`](?:prompt|alert)['"`]\s*\]/,
+]
+const NATIVE_DIALOG = [...NATIVE_CONFIRM, ...NATIVE_PROMPT_ALERT]
+
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     if (name === 'node_modules') continue
@@ -34,12 +45,12 @@ function stripComments(source: string): string {
 }
 
 describe('no native confirm box in app code', () => {
-  test('src contains no window.confirm (test files excepted)', () => {
+  test('src contains no window.confirm / window.prompt / window.alert (test files excepted)', () => {
     const offenders: string[] = []
     for (const file of walk(SRC)) {
       const lines = stripComments(readFileSync(file, 'utf8')).split('\n')
       lines.forEach((line, index) => {
-        if (NATIVE_CONFIRM.some((pattern) => pattern.test(line))) {
+        if (NATIVE_DIALOG.some((pattern) => pattern.test(line))) {
           offenders.push(`${relative(SRC, file)}:${index + 1}: ${line.trim().slice(0, 120)}`)
         }
       })
@@ -56,6 +67,27 @@ describe('no native confirm box in app code', () => {
     expect(hit("await confirmDialog({ title: '删除服务' })")).toBe(false)
     expect(hit("dialog.confirm()")).toBe(false)
     expect(hit("onConfirm={() => confirmFullAccess()}")).toBe(false)
+  })
+
+  test('the guard also catches native prompt and alert', () => {
+    const hit = (line: string) => NATIVE_DIALOG.some((pattern) => pattern.test(line))
+    expect(hit("const name = window.prompt('服务名称', provider.name)?.trim()")).toBe(true)
+    expect(hit("window.alert('保存失败')")).toBe(true)
+    expect(hit("globalThis.prompt('x')")).toBe(true)
+    expect(hit("window['alert']('x')")).toBe(true)
+    expect(hit("self.alert('x')")).toBe(true)
+    expect(hit("await promptDialog({ title: '重命名服务' })")).toBe(false)
+    expect(hit("systemPrompt: draft.prompt")).toBe(false)
+    expect(hit("<Alert variant='destructive'>")).toBe(false)
+    expect(hit("toast.error('保存失败')")).toBe(false)
+  })
+
+  test('the in-app prompt provider is mounted at the app root and rename uses it', () => {
+    const app = readFileSync(join(SRC, 'app', 'App.tsx'), 'utf8')
+    expect(app).toContain("from '@/components/ui/prompt-dialog'")
+    expect(app).toContain('<PromptDialogProvider />')
+    const settings = readFileSync(join(SRC, 'features/settings/settings-pages.tsx'), 'utf8')
+    expect(settings).toContain("title: '重命名服务'")
   })
 
   test('the in-app confirmation provider is mounted at the app root', () => {
