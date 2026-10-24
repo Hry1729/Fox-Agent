@@ -72,6 +72,7 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'settings-usage',
   'settings-extensions',
   'settings-about',
+  'settings-data',
   'model-service',
   'service',
   'skills',
@@ -79,6 +80,46 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'maintenance',
   'login',
 ]
+
+/**
+ * The settings sidebar has seven destinations. Older view ids (deep links,
+ * command palette entries, history entries, other pages' "go to" buttons) stay
+ * valid and land on the page that now hosts their content, scrolled to the
+ * matching section.
+ */
+export type SettingsSectionAnchor = 'shortcuts' | 'projects' | 'usage' | 'maintenance' | 'about'
+
+export interface SettingsRouteRedirect {
+  view: WorkspaceView
+  section: SettingsSectionAnchor
+}
+
+const legacySettingsRedirects: Partial<Record<WorkspaceView, SettingsRouteRedirect>> = {
+  'settings-shortcuts': { view: 'settings-conversation', section: 'shortcuts' },
+  'settings-projects': { view: 'settings-ai', section: 'projects' },
+  'settings-usage': { view: 'settings-data', section: 'usage' },
+  maintenance: { view: 'settings-data', section: 'maintenance' },
+  'settings-about': { view: 'settings-data', section: 'about' },
+}
+
+export function settingsRouteRedirect(view: WorkspaceView): SettingsRouteRedirect | null {
+  return legacySettingsRedirects[view] ?? null
+}
+
+/** The sidebar destination that hosts a settings view (sub-pages included). */
+export function settingsNavigationView(view: WorkspaceView): WorkspaceView {
+  const redirect = settingsRouteRedirect(view)
+  if (redirect) return redirect.view
+  if (view === 'onboarding') return 'settings'
+  if (view === 'model-service') return 'settings-models'
+  if (view === 'service' || view === 'login') return 'settings-yuxi'
+  if (view === 'skills' || view === 'mcp') return 'settings-extensions'
+  return view
+}
+
+export function isSettingsSectionAnchor(value: unknown): value is SettingsSectionAnchor {
+  return value === 'shortcuts' || value === 'projects' || value === 'usage' || value === 'maintenance' || value === 'about'
+}
 
 export function managementSection(view: WorkspaceView): 'settings' | 'knowledge' | null {
   if (SETTINGS_WORKSPACE_VIEWS.includes(view)) return 'settings'
