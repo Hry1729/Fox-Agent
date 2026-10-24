@@ -19,11 +19,11 @@ import { type ConversationSummary, type GlobalSearchRecord, type ProjectRecord, 
 import { LocalKnowledgeSidebarNavigation } from '@/features/local-knowledge/local-knowledge-sidebar'
 import { notify as toast } from '@/features/notifications'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
-import { remoteKnowledgeBackRoute, SETTINGS_WORKSPACE_VIEWS } from '@/features/workspace/management-navigation'
+import { remoteKnowledgeBackRoute, settingsNavigationView, SETTINGS_WORKSPACE_VIEWS } from '@/features/workspace/management-navigation'
 import { detectShortcutPlatform, formatShortcut, matchesShortcutAction, shortcutTokens, type ShortcutActionId } from '@/features/settings/shortcut-model'
 import { useShortcutPreferences } from '@/features/settings/use-shortcuts'
 import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
-import { Activity, AlertTriangle, Archive, ArrowLeft, BookOpen, Bot, Brain, Cable, ChevronDown, ChevronRight, CircleHelp, ClipboardList, Database, FileEdit, Folder, FolderOpen, Globe2, House, Keyboard, LoaderCircle, MessageCircleMore, MoreHorizontal, Pin, PinOff, Plus, RotateCcw, Server, ShieldCheck, Trash2, UserRound, WandSparkles, Wrench, X } from 'lucide-react'
+import { AlertTriangle, Archive, ArrowLeft, Blocks as BlocksIcon, BookOpen, Bot, Boxes, Brain, Cable, ChevronDown, ChevronRight, ClipboardList, Database, FileEdit, Folder, FolderOpen, Globe2, House, LibraryBig, LoaderCircle, MessageCircleMore, MoreHorizontal, Pin, PinOff, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, UserRound, WandSparkles, Wrench, X } from 'lucide-react'
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type AssistantMode, IconButton, globalSearchKindLabel } from '../fox-shared'
 import { NotificationCenter } from './fox-notification-center'
@@ -262,45 +262,28 @@ export function Sidebar({
     { section: 'conversations', label: '工作记录', icon: ClipboardList },
     { section: 'memory', label: '记忆', icon: Brain },
   ]
-  const activeSettingsView: WorkspaceView = activeView === 'onboarding'
-    ? 'settings'
-    : activeView === 'model-service'
-    ? 'settings-models'
-    : activeView === 'service' || activeView === 'login'
-      ? 'settings-yuxi'
-      : activeView === 'skills' || activeView === 'mcp'
-        ? 'settings-extensions'
-        : activeView
+  const activeSettingsView: WorkspaceView = settingsNavigationView(activeView)
   const settingsContextGroups = [
     {
-      label: '通用',
+      label: '偏好',
       items: [
-        { view: 'settings' as const, label: '外观设置', icon: Settings },
-        { view: 'settings-conversation' as const, label: '对话设置', icon: MessageCircleMore },
-        { view: 'settings-shortcuts' as const, label: '快捷键', icon: Keyboard },
+        { view: 'settings' as const, label: '通用', icon: SlidersHorizontal },
+        { view: 'settings-conversation' as const, label: '对话', icon: MessageCircleMore },
       ],
     },
     {
-      label: '模型与知识',
+      label: '能力',
       items: [
-        { view: 'settings-models' as const, label: '模型服务', icon: Server },
-        { view: 'settings-ai' as const, label: '助手设置', icon: Bot },
-        { view: 'settings-yuxi' as const, label: '资料库服务', icon: Globe2 },
+        { view: 'settings-models' as const, label: '模型', icon: Boxes },
+        { view: 'settings-ai' as const, label: 'Agent', icon: Bot },
+        { view: 'settings-extensions' as const, label: '插件', icon: BlocksIcon },
+        { view: 'settings-yuxi' as const, label: '资料库', icon: LibraryBig },
       ],
     },
     {
-      label: '权限与数据',
+      label: '系统',
       items: [
-        { view: 'settings-projects' as const, label: '项目权限', icon: ShieldCheck },
-        { view: 'settings-extensions' as const, label: '插件', icon: Wrench },
-        { view: 'settings-usage' as const, label: '使用情况', icon: Activity },
-        { view: 'maintenance' as const, label: '数据维护', icon: ShieldCheck },
-      ],
-    },
-    {
-      label: '关于',
-      items: [
-        { view: 'settings-about' as const, label: '关于 Fox', icon: CircleHelp },
+        { view: 'settings-data' as const, label: '数据与关于', icon: Database },
       ],
     },
   ]
@@ -513,7 +496,7 @@ export function Sidebar({
           {sidebarMode === 'agent'
             ? agentContextItems.map(({ section, label, icon: Icon }) => <SidebarMotionItem key={section}><button className={`fox-sidebar-command ${agentSection === section ? 'is-active' : ''}`} type="button" aria-label={label} aria-current={agentSection === section ? 'page' : undefined} onClick={() => onNavigate('agent-detail', activeEntityId ?? undefined, { documentId: section })}><Icon size={16} /><span>{label}</span></button></SidebarMotionItem>)
             : sidebarMode === 'settings'
-              ? settingsContextGroups.map((group) => <section className="fox-context-sidebar-group" key={group.label}>{!collapsed && <span className="fox-context-sidebar-group-label">{group.label}</span>}{group.items.map(({ view, label, icon: Icon }) => <SidebarMotionItem key={view}><button className={`fox-sidebar-command ${activeSettingsView === view ? 'is-active' : ''}`} type="button" aria-label={label} aria-current={activeSettingsView === view ? 'page' : undefined} onClick={() => onNavigate(view)}><Icon size={18} /><span>{label}</span></button></SidebarMotionItem>)}</section>)
+              ? [!collapsed && <div className="fox-settings-sidebar-brand" key="brand"><img src="/avatars/fox-assistant.png" alt="" /><b>设置</b></div>, ...settingsContextGroups.map((group) => <section className="fox-context-sidebar-group" key={group.label}>{!collapsed && <span className="fox-context-sidebar-group-label">{group.label}</span>}{group.items.map(({ view, label, icon: Icon }) => <SidebarMotionItem key={view}><button className={`fox-sidebar-command ${activeSettingsView === view ? 'is-active' : ''}`} type="button" aria-label={label} aria-current={activeSettingsView === view ? 'page' : undefined} onClick={() => onNavigate(view)}><Icon size={18} /><span>{label}</span></button></SidebarMotionItem>)}</section>)]
               : contextItems.map(({ view, label, icon: Icon }) => <SidebarMotionItem key={view}><button className={`fox-sidebar-command ${activeView === view ? 'is-active' : ''}`} type="button" aria-label={label} aria-current={activeView === view ? 'page' : undefined} onClick={() => onNavigate(view, activeEntityId ?? undefined)}><Icon size={18} /><span>{label}</span></button></SidebarMotionItem>)}
         </div>
         {!collapsed && sidebarMode === 'knowledge' && (
