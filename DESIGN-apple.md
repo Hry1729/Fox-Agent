@@ -1,4 +1,5 @@
 ---
+history_note: "历史文档，内容截至 2026-10-11，现状见 docs/02-架构/架构文档导航.md 与当前代码（本文不再维护）"
 version: alpha
 name: Apple-design-analysis
 description: A photography-first interface that turns marketing into a museum gallery. Edge-to-edge product tiles alternate light and dark canvases, framed by SF Pro Display headlines with negative letter-spacing and a single Action Blue (#0066cc) interactive color. UI chrome recedes so the product can speak — no decorative gradients, no shadows on chrome, only the one signature drop-shadow under product imagery resting on a surface.
@@ -272,6 +273,8 @@ components:
     typography: "{typography.fine-print}"
     padding: 64px
 ---
+
+> 历史文档，内容截至 2026-10-11，现状见 [docs/02-架构/架构文档导航.md](docs/02-架构/架构文档导航.md) 与当前代码（本文不再维护）。
 
 ## Overview
 
