@@ -1,9 +1,13 @@
 /**
  * Enter-key resolution for the chat prompt textarea.
  *
- * Enter sends; Ctrl/Cmd+Enter and Shift+Enter insert a newline. The old
- * `mod-enter` preference is accepted as stored data but no longer changes the
- * main chat composer. This keeps the shortcut consistent across conversations.
+ * Two user-selectable modes (Settings → 对话 → 发送方式), persisted under
+ * `fox.preferences.sendKey`:
+ *  - `enter`     Enter sends; Shift+Enter and Ctrl/Cmd+Enter insert a newline.
+ *  - `mod-enter` Ctrl/Cmd+Enter sends; Enter and Shift+Enter insert a newline.
+ * In both modes an Enter that an IME composition still owns (isComposing or
+ * keyCode 229) never sends. Composers read the preference at keydown time, so
+ * a change applies to every open conversation immediately.
  */
 
 export const PROMPT_SEND_SHORTCUT_KEY = 'fox.preferences.sendKey'
@@ -20,8 +24,29 @@ export function isPromptSendShortcut(value: unknown): value is PromptSendShortcu
 }
 
 /** Unknown, missing and malformed stored values fall back to the default. */
-export function normalizePromptSendShortcut(_value: unknown): PromptSendShortcut {
-  return DEFAULT_PROMPT_SEND_SHORTCUT
+export function normalizePromptSendShortcut(value: unknown): PromptSendShortcut {
+  return isPromptSendShortcut(value) ? value : DEFAULT_PROMPT_SEND_SHORTCUT
+}
+
+/** Window event fired after the preference changes, so open views can re-read it. */
+export const PROMPT_SEND_SHORTCUT_EVENT = 'fox:send-shortcut-changed'
+
+/** Persists the preference; returns the normalized value that was stored. */
+export function writePromptSendShortcut(
+  value: PromptSendShortcut,
+  storage?: { setItem: (key: string, value: string) => void } | null,
+): PromptSendShortcut {
+  const next = normalizePromptSendShortcut(value)
+  const store = storage ?? (typeof window === 'undefined' ? null : window.localStorage)
+  try {
+    store?.setItem(PROMPT_SEND_SHORTCUT_KEY, next)
+  } catch {
+    // A storage that refuses writes keeps the in-memory choice for this session.
+  }
+  if (typeof window !== 'undefined' && !storage) {
+    window.dispatchEvent(new CustomEvent(PROMPT_SEND_SHORTCUT_EVENT, { detail: next }))
+  }
+  return next
 }
 
 export function readPromptSendShortcut(
@@ -62,12 +87,13 @@ export function promptEnterIsComposing(event: PromptEnterKeyEvent) {
  */
 export function resolvePromptEnterAction(
   event: PromptEnterKeyEvent,
-  _shortcut: PromptSendShortcut,
+  shortcut: PromptSendShortcut,
 ): PromptEnterAction {
   if (event.key !== 'Enter' || event.altKey) return 'default'
   if (promptEnterIsComposing(event)) return 'default'
   if (event.shiftKey) return 'newline'
   const modifier = event.ctrlKey === true || event.metaKey === true
+  if (normalizePromptSendShortcut(shortcut) === 'mod-enter') return modifier ? 'send' : 'newline'
   return modifier ? 'newline' : 'send'
 }
 
