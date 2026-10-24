@@ -55,6 +55,7 @@ import {
 } from '@/features/notifications'
 import './settings-pages.css'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
+import { promptDialog } from '@/components/ui/prompt-dialog'
 
 function serviceStatusLabel(status?: string) {
   if (status === 'connected') return '已连接'
@@ -667,7 +668,7 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
     if (await resource.remove(provider.id)) { setEditingId(null); setForm(null); toast.success('供应商已删除') }
   }
   const rename = async (provider: ModelProviderRecord) => {
-    const name = window.prompt('服务名称', provider.name)?.trim()
+    const name = await promptDialog({ title: '重命名服务', label: '服务名称', defaultValue: provider.name, confirmLabel: '保存' })
     if (!name || name === provider.name) return
     const saved = await resource.save({ id: provider.id, name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: provider.isDefault, models: provider.models })
     if (saved) toast.success('供应商已重命名')
