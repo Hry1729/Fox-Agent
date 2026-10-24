@@ -35,6 +35,24 @@ impl AgentBackend {
     pub fn experimental(self) -> bool {
         matches!(self, Self::Deepseek)
     }
+
+    /// Backends that are implemented but hidden from every user-facing
+    /// choice (settings, new-conversation pickers, permission defaults), and
+    /// that a NEW conversation cannot be frozen to. Existing conversations of
+    /// a hidden backend keep their binding and run as before.
+    ///
+    /// The single switch for the product decision "built-in Agents are Fox,
+    /// dsh and pi; Codex will come back through the custom ACP Agent entry"
+    /// (2026-10-24). Remove an entry here (and from `HIDDEN_AGENT_BACKENDS`
+    /// in `apps/desktop/src/features/conversations/model/agent-backend.ts`)
+    /// to show it again. Independent of `FOX_EXTERNAL_BACKENDS`, which can
+    /// still only force a backend off.
+    pub const HIDDEN: [AgentBackend; 1] = [Self::Codex];
+
+    /// Whether this backend is hidden from user-facing choices ([`Self::HIDDEN`]).
+    pub fn hidden(self) -> bool {
+        Self::HIDDEN.contains(&self)
+    }
 }
 
 /// How a tool category is gated before it runs.
