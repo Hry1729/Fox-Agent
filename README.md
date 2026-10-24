@@ -4,6 +4,24 @@ Fox 是一个面向个人和小型技术团队的桌面智能体工作台。它�
 
 Fox 不把 Agent 理解为“会调用几个工具的聊天机器人”。一次需要执行的工作会形成可追踪的 `Goal → Plan → Task → Attempt → Evidence → Review → Acceptance` 闭环：模型负责理解和决策，Host 负责权限、状态和执行，数据库保存可恢复事实，独立 Reviewer 复核高风险结果。
 
+## 内置 Agent
+
+四 Agent 改造已完成并合入 `main`。每个会话在创建时选定一个 Agent，之后不能更换：
+
+| Agent | 状态 | 说明 |
+| --- | --- | --- |
+| Fox | 内置，默认 | Fox 自己的 Kernel（FoxBackend）。默认执行路径是 Kernel / Authoritative；`FOX_KERNEL_MODE=legacy` 只用于调试和兼容旧 Run |
+| DeepSeek Harness（dsh） | 内置，实验 | 经 ACP 接入，在沙箱中运行 |
+| pi | 内置 | 经 ACP（pi-acp）接入，在沙箱中运行 |
+| Codex | 已实现，暂时隐藏 | 后端代码和测试保留；新会话不能选，已有 Codex 会话照常可用 |
+
+- 新会话默认用 Fox，可在 设置 →「新会话使用的 Agent」修改。管理员可用环境变量 `FOX_EXTERNAL_BACKENDS` 强制关闭外部 Agent（只能关，不能开）。
+- 外部 Agent 的权限按各自的原生选项显示（如 pi 的只读 / 询问 / 自动，dsh 的只读 / 工作区可写）；完全访问是独立开关，只能在新建会话时授予，会话中只能撤销。
+- 模型 API Key 存在系统凭据库，按供应商 base URL 在本机全局共享。
+- 「自定义 ACP Agent」入口（用户自己安装其他 ACP Agent、填启动命令接入，包括以后的 Codex）：**待办 / 规划中**。
+
+详见 [Agent Runtime 架构 · 外层 Agent 后端](docs/02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+
 ## 核心能力
 
 ### 可执行、可恢复的 Agent
@@ -34,7 +52,7 @@ Fox 不把 Agent 理解为“会调用几个工具的聊天机器人”。一次
 - 连接外部知识库服务，支持查询、知识图谱、引用定位、原文件预览和下载。
 - 独立的本地知识工作区支持文件导入、解析、分块、引用和资源管理；ONNX Runtime 在纯 CPU 上生成向量，Zvec 负责向量索引与检索，并可与关键词检索进行 RRF 混合召回。
 - 支持 PDF、DOCX、PPTX、XLSX、Markdown、文本、代码和常见图片预览。
-- 通过 Skills、MCP、OpenAPI 与声明式 Lifecycle Hook 扩展能力；凭据由系统 Keyring 管理。
+- 通过 Skills、MCP、OpenAPI 与声明式 Lifecycle Hook 扩展能力；声明式 Hooks 在插件中心的「策略」tab 管理；凭据由系统 Keyring 管理。
 
 ### 专家、团队与数字同事
 
@@ -46,10 +64,13 @@ Fox 不把 Agent 理解为“会调用几个工具的聊天机器人”。一次
 ### 桌面工作台
 
 - 提供会话搜索、重命名、归档恢复、回收站、Fork、附件、引用、工具过程和产物记录。
-- 管理项目权限、模型供应商、知识库、专家、Skills、MCP/OpenAPI、插件和诊断信息。
+- 管理项目权限、模型供应商（同一供应商可配多个协议）、知识库、专家、Skills、MCP/OpenAPI、插件和诊断信息。
+- 需要确认或输入的地方都使用应用内对话框，不使用系统原生弹窗。
 - 通过实时事件与 SQLite 快照双通道归并状态，应用刷新或重启后仍能恢复会话与运行事实。
 
 ## 安全与可信执行
+
+以下描述 Fox 会话；外部 Agent 会话的边界（ACP、白名单环境、srt 沙箱、原生权限、完全访问授予）见[安全架构](docs/02-架构/安全架构.md#外部-agent-会话)。
 
 模型不能直接访问操作系统。它只能提出结构化工具请求，请求必须依次通过工具白名单、Execution Profile、项目路径、参数约束、审批策略和 Host 状态校验，才会由 Tauri Host 执行。
 
@@ -71,16 +92,18 @@ Fox 的安全不是只靠“限制工具数量”，而是多层约束：
 React 工作台
     ↓ Tauri Command / Event
 Rust Host ── SQLite 产品事实
-    ↓ JSONL Runtime 协议
-Node Agent Runtime ── 模型供应商
-    ↓ Host Tool 请求
-Rust Host ── 项目文件 / 命令 / 知识库 / MCP / OpenAPI / Keyring
+    ├─ Fox 会话：Kernel（Authoritative）→ JSONL Runtime 协议 → Node Agent Runtime ── 模型供应商
+    │                                       ↓ Host Tool 请求
+    │            Rust Host ── 项目文件 / 命令 / 知识库 / MCP / OpenAPI / Keyring
+    └─ 外部 Agent 会话：ACP v1 → dsh / pi（srt 沙箱；Codex 已实现但隐藏）── 模型供应商
 ```
 
 | 模块 | 职责 |
 | --- | --- |
 | `apps/desktop` | React 前端、Tauri Host、SQLite Repository、权限和系统集成 |
 | `services/agent-runtime` | 模型循环、Prompt、Typed Context、Execution Profile、工具协议和离线 Eval |
+| `crates/fox-agent-backend` | 外层 Agent 后端：路由、ACP 客户端、外部 Agent 启动与沙箱、原生权限、凭据保存 / 删除规则 |
+| `crates/fox-agent-kernel`、`crates/fox-engine-protocol` | Kernel 与引擎协议 |
 | `scripts` | 跨模块契约、Fixture、知识预览校验和构建辅助 |
 | `docs` | 产品介绍、架构、协议、开发指南、运维与路线图 |
 
@@ -104,6 +127,7 @@ pnpm desktop:test
 pnpm runtime:test
 pnpm runtime:eval
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --offline
+cargo test -p fox-agent-backend --features acp
 ```
 
 生产构建与 Sidecar 打包见[构建与发布](docs/06-运维指南/构建与发布.md)。
@@ -118,6 +142,8 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --offline
 - [Agent 运行时架构](docs/02-架构/Agent运行时架构.md)：Agent 循环、Profile、Prompt 和工作闭环。
 - [App 产品能力完善清单](docs/07-路线图/App产品能力完善清单.md)：页面、文件体验和 UI 的完善顺序。
 - [完整文档导航](docs/README.md)：按角色和工作内容查找全部文档。
+
+仓库根目录下的 `ASSISTANT-UI-MIGRATION.md`、`AUI-PENDING.md`、`STEP6-HANDOFF.md`、`UI-CHANGES-*.md`、`UI-PLAN.md`、`PAGE-REDESIGN.md`、`design-qa.md`、`COMPONENT-REUSE.md`、`DESIGN-apple.md` 是 UI 改造期间的历史文档，不再维护，清单见[架构文档导航 · 根目录历史文档](docs/02-架构/架构文档导航.md#根目录历史文档)。
 
 项目仍有明确边界，包括 Agent 产物打开链路、部分页面占位、导航历史、跨平台验收、CSP 和进程级隔离等，详见[已知限制](docs/07-路线图/已知限制.md)。
 
