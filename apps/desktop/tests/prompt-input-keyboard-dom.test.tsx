@@ -121,30 +121,54 @@ describe('prompt textarea keyboard behaviour', () => {
     await waitFor(() => expect(sent).toEqual(['你好']))
   })
 
-  test('the legacy preference cannot make Ctrl + Enter send', async () => {
+  test('Ctrl/Cmd + Enter mode: Ctrl + Enter sends and Enter breaks the line', async () => {
     window.localStorage.setItem(PROMPT_SEND_SHORTCUT_KEY, 'mod-enter')
     const { sent, textarea, draft } = mount('hello')
-    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
     expect(draft()).toBe('hello\n')
     await settled()
     expect(sent).toEqual([])
-    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
     await waitFor(() => expect(sent).toEqual(['hello\n']))
   })
 
-  test('changing the old preference during typing does not change the keys', async () => {
+  test('Ctrl/Cmd + Enter mode: Cmd + Enter sends too', async () => {
+    window.localStorage.setItem(PROMPT_SEND_SHORTCUT_KEY, 'mod-enter')
+    const { sent, textarea } = mount('hi')
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(sent).toEqual(['hi']))
+  })
+
+  test('Ctrl/Cmd + Enter mode: an IME confirmation never sends, with or without the modifier', async () => {
+    window.localStorage.setItem(PROMPT_SEND_SHORTCUT_KEY, 'mod-enter')
+    const { sent, textarea, draft } = mount('')
+    fireEvent.compositionStart(textarea)
+    fireEvent.change(textarea, { target: { value: '你好' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, isComposing: true })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, keyCode: 229 })
+    fireEvent.compositionEnd(textarea, { data: '你好' })
+    await settled()
+    expect(sent).toEqual([])
+    expect(draft()).toBe('你好')
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
+    await waitFor(() => expect(sent).toEqual(['你好']))
+  })
+
+  test('changing the preference while typing applies to the next key', async () => {
     const { sent, textarea, draft } = mount('hello')
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
     expect(draft()).toBe('hello\n')
     await settled()
     expect(sent).toEqual([])
     window.localStorage.setItem(PROMPT_SEND_SHORTCUT_KEY, 'mod-enter')
-    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
     expect(draft()).toBe('hello\n\n')
     await settled()
     expect(sent).toEqual([])
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
     await waitFor(() => expect(sent).toEqual(['hello\n\n']))
   })
 
