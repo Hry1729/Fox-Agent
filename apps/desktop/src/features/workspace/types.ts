@@ -33,6 +33,7 @@ export type WorkspaceView =
   | 'settings-usage'
   | 'settings-extensions'
   | 'settings-about'
+  | 'settings-data'
 
 export interface WorkspaceNavigationContext {
   documentId?: string
