@@ -1,3 +1,5 @@
+> 历史文档，内容截至 2026-10-11，现状见 [docs/02-架构/架构文档导航.md](docs/02-架构/架构文档导航.md) 与当前代码（本文不再维护）。
+
 # Knowledge picker — option 2
 
 final result: passed
