@@ -33,7 +33,7 @@ import { matchesShortcutAction } from '@/features/settings/shortcut-model'
 import { useYuxiModels } from '@/features/settings/use-yuxi-models'
 import { useYuxiService } from '@/features/settings/use-yuxi-service'
 import { useYuxiUser } from '@/features/settings/use-yuxi-user'
-import { type ManagementReturnRoutes, captureManagementReturnRoutes, managementExitRoute } from '@/features/workspace/management-navigation'
+import { type ManagementReturnRoutes, captureManagementReturnRoutes, managementExitRoute, settingsRouteRedirect } from '@/features/workspace/management-navigation'
 import { type KnowledgeSourceLocator, type LocalKnowledgeDocumentAsk, type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
@@ -1010,8 +1010,13 @@ export function Workbench() {
     }
     return true
   })
-  const navigate: NavigateWorkspace = (view, entityId, context) => {
+  const navigate: NavigateWorkspace = (requestedView, entityId, requestedContext) => {
     cancelDocumentAsk()
+    // Old settings ids (快捷键, 项目权限, 使用情况, 数据维护, 关于) now live inside
+    // merged pages; land there and scroll to the matching section.
+    const settingsRedirect = settingsRouteRedirect(requestedView)
+    const view = settingsRedirect?.view ?? requestedView
+    const context = settingsRedirect ? { ...requestedContext, documentId: requestedContext?.documentId ?? settingsRedirect.section } : requestedContext
     if (view === 'onboarding' && activeView !== 'onboarding') {
       onboardingReturnRoute.current = { view: activeView, entityId: activeEntityId, documentId: activeDocumentId }
     }
