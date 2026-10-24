@@ -228,23 +228,16 @@
 .fox-settings-sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  min-height: 24px;
   margin: 2px 0 14px;
   padding: 0 var(--fox-space-l);
-}
-
-.fox-settings-sidebar-brand img {
-  width: 24px;
-  height: 24px;
-  flex: none;
-  border-radius: 7px;
-  filter: drop-shadow(0 1px 2px color-mix(in oklch, var(--fox-text) 12%, transparent));
 }
 
 .fox-settings-sidebar-brand b {
   color: var(--fox-text);
   font-size: var(--fox-type-title);
   font-weight: var(--fox-weight-semibold);
+  line-height: 24px;
   letter-spacing: 0.01em;
 }
 
