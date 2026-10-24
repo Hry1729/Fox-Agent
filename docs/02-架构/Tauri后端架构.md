@@ -5,6 +5,8 @@
 > 维护范围：Tauri Command、AppState、Repository、Host Service 和系统资源<br>
 > 最后更新：2026-08-24
 
+> 四 Agent 补充（2026-10-24）：外层 Agent 后端的 Host 胶水在 `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs`（路由、偏好、原生权限命令）和 `external_backend.rs`（`ExternalBackendHost`，外部 Agent 的启动、会话、凭据探测与导入）；决策和规则在独立 crate `crates/fox-agent-backend`。见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。本次只补充这条说明，正文未复核。
+
 ## 定位
 
 Tauri 后端是 Fox 的可信 Host：它连接 WebView、SQLite、文件系统、系统凭据库、Pi Sidecar、知识库服务和 MCP。所有具有本地副作用的能力必须经过此层。
