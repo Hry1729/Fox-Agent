@@ -3,7 +3,7 @@ import type { KnowledgeBaseRecord } from '@/features/conversations/model/types'
 import type { LocalKnowledgeGateway, LocalKnowledgeView } from '@/features/local-knowledge'
 import type { PluginCardView, PluginGateway } from '@/features/plugins'
 import type { KnowledgeSourceLocator, LocalKnowledgeDocumentAsk, NavigateWorkspace, WorkspaceView } from './types'
-import { localKnowledgeBackRoute, localKnowledgeViewForWorkspace, workspaceViewForLocalKnowledge } from './management-navigation'
+import { isSettingsSectionAnchor, localKnowledgeBackRoute, localKnowledgeViewForWorkspace, settingsRouteRedirect, workspaceViewForLocalKnowledge } from './management-navigation'
 
 const AgentListPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentListPage })))
 const AgentDetailPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentDetailPage })))
@@ -13,15 +13,12 @@ const SettingsPage = lazy(() => import('@/features/settings/settings-pages').the
 const AiSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.AiSettingsPage })))
 const ModelProvidersPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ModelProvidersPage })))
 const YuxiSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.YuxiSettingsPage })))
-const ProjectPermissionsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ProjectPermissionsPage })))
+const AgentSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.AgentSettingsPage })))
 const ConversationSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ConversationSettingsPage })))
-const ShortcutSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ShortcutSettingsPage })))
-const UsageStatisticsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.UsageStatisticsPage })))
+const DataAboutSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.DataAboutSettingsPage })))
 const ExtensionsSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ExtensionsSettingsPage })))
-const AboutSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.AboutSettingsPage })))
 const SkillsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.SkillsPage })))
 const McpPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.McpPage })))
-const MaintenancePage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.MaintenancePage })))
 const ServicePage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ServicePage })))
 const ModelServicePage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ModelServicePage })))
 const LoginPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.LoginPage })))
@@ -78,6 +75,11 @@ export function WorkspaceShell({
     navigate(target.view, target.entityId)
   }
   const pageProps = { sidebarCollapsed, onSidebar, navigate }
+  // Legacy settings ids (restored history entries, external callers) render the
+  // merged page that now hosts them, scrolled to their section.
+  const settingsRedirect = settingsRouteRedirect(activeView)
+  const settingsView = settingsRedirect?.view ?? activeView
+  const settingsSection = settingsRedirect?.section ?? (isSettingsSectionAnchor(activeDocumentId) ? activeDocumentId : undefined)
   const initialPluginKind = activeEntityId === 'tool' || activeEntityId === 'skill' || activeEntityId === 'mcp'
     ? activeEntityId
     : undefined
@@ -112,30 +114,22 @@ export function WorkspaceShell({
     rawWorkspacePage = <KnowledgeGraphPage {...pageProps} knowledgeId={activeEntityId} />
   } else if (activeView === 'settings') {
     rawWorkspacePage = <SettingsPage {...pageProps} dark={dark} onDark={onDark} />
-  } else if (activeView === 'settings-ai') {
-    rawWorkspacePage = <AiSettingsPage {...pageProps} />
+  } else if (settingsView === 'settings-ai') {
+    rawWorkspacePage = <AgentSettingsPage {...pageProps} section={settingsSection} />
   } else if (activeView === 'settings-models') {
     rawWorkspacePage = <ModelProvidersPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'settings-yuxi') {
     rawWorkspacePage = <YuxiSettingsPage {...pageProps} />
-  } else if (activeView === 'settings-projects') {
-    rawWorkspacePage = <ProjectPermissionsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
-  } else if (activeView === 'settings-conversation') {
-    rawWorkspacePage = <ConversationSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
-  } else if (activeView === 'settings-shortcuts') {
-    rawWorkspacePage = <ShortcutSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
-  } else if (activeView === 'settings-usage') {
-    rawWorkspacePage = <UsageStatisticsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
+  } else if (settingsView === 'settings-conversation') {
+    rawWorkspacePage = <ConversationSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} section={settingsSection} />
+  } else if (settingsView === 'settings-data') {
+    rawWorkspacePage = <DataAboutSettingsPage {...pageProps} section={settingsSection} />
   } else if (activeView === 'settings-extensions') {
     rawWorkspacePage = <ExtensionsSettingsPage {...pageProps} />
-  } else if (activeView === 'settings-about') {
-    rawWorkspacePage = <AboutSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'skills') {
     rawWorkspacePage = <SkillsPage {...pageProps} />
   } else if (activeView === 'mcp') {
     rawWorkspacePage = <McpPage {...pageProps} />
-  } else if (activeView === 'maintenance') {
-    rawWorkspacePage = <MaintenancePage {...pageProps} />
   } else if (activeView === 'service') {
     rawWorkspacePage = <ServicePage {...pageProps} />
   } else if (activeView === 'model-service') {
