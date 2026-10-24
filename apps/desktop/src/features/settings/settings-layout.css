@@ -914,3 +914,54 @@
 .fox-settings-dialog .fox-settings-field-row {
   margin-top: 0;
 }
+
+/* ---------- Add service dialog (centred, 560px, body scrolls) ---------- */
+.fox-provider-add-dialog[data-slot='dialog-content'] {
+  width: min(560px, calc(100vw - 32px));
+  max-width: min(560px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 64px));
+  display: flex;
+  flex-direction: column;
+}
+
+.fox-provider-add-dialog .fox-provider-dialog-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 -16px;
+  padding: 0 16px;
+  font-size: var(--fox-type-chrome);
+  line-height: 1.5;
+}
+
+.fox-provider-add-dialog .fox-settings-sheet-section {
+  padding: 14px 0;
+}
+
+.fox-provider-add-dialog .fox-settings-empty {
+  padding: 4px 0 8px;
+}
+
+.fox-provider-add-dialog .fox-settings-sheet-section:first-child {
+  padding-top: 4px;
+}
+
+.fox-provider-add-dialog .fox-settings-sheet-section:last-child {
+  padding-bottom: 4px;
+}
+
+.fox-provider-add-dialog .fox-settings-dialog-fields {
+  display: grid;
+  gap: 14px;
+}
+
+.fox-provider-add-dialog .fox-settings-dialog-fields > .fox-settings-test-row {
+  margin-top: 2px;
+}
+
+.fox-provider-add-dialog .fox-provider-dialog-foot {
+  flex: none;
+  margin: 0 -16px -16px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
