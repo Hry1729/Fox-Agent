@@ -1,6 +1,6 @@
 import { ProviderProtocolEditor } from './provider-protocol-editor'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Activity, Archive, BellRing, Bot, Cable, Check, ChevronDown, ChevronRight, Copy, Download, ExternalLink, FileText, FileWarning, FolderOpen, HardDrive, Info, Keyboard, LoaderCircle, LogIn, MessageSquare, Minus, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Server, Shield, ShieldCheck, Sparkles, Trash2, Volume2, Wrench, Zap } from 'lucide-react'
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Activity, Archive, BellRing, Bot, Cable, Check, ChevronDown, ChevronRight, Copy, Download, ExternalLink, Eye, EyeOff, FileText, FileWarning, FolderOpen, HardDrive, Info, LoaderCircle, LogIn, MessageSquare, Minus, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Server, Shield, ShieldCheck, Sparkles, Star, Trash2, Volume2, Wrench, Zap } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { cn } from '@/lib/utils'
 import { AnimatePresence, motion } from 'motion/react'
@@ -15,6 +15,8 @@ import { Separator } from '@/components/ui/separator'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { WorkspacePage } from '@/features/workspace/page-shell'
@@ -38,7 +40,7 @@ import { persistColorTheme, readColorTheme, type ColorTheme } from './color-them
 import { AppearanceThemeControls } from './appearance-theme'
 import { ElasticSlider } from '@/components/arc/elastic-slider/elastic-slider'
 import { Stepper } from '@/components/arc/stepper/stepper'
-import { ShortcutRecorder, formatShortcut, usePlatform } from '@/components/arc/shortcut-recorder/shortcut-recorder'
+import { ShortcutRecorder, usePlatform } from '@/components/arc/shortcut-recorder/shortcut-recorder'
 import { SHORTCUT_ACTIONS, type ShortcutActionId } from './shortcut-model'
 import { useShortcutPreferences } from './use-shortcuts'
 import { AgentBackendSettingsSection } from './agent-backend-settings'
@@ -54,6 +56,9 @@ import {
   playNotificationSound,
 } from '@/features/notifications'
 import './settings-pages.css'
+import { SettingsGroup, SettingsPageLayout, SettingsRow, settingsSectionId, useScrollToSettingsSection } from './settings-layout'
+import { PROMPT_SEND_SHORTCUT_EVENT, readPromptSendShortcut, writePromptSendShortcut, type PromptSendShortcut } from '@/components/ai-elements/prompt-send-shortcut'
+import type { SettingsSectionAnchor } from '@/features/workspace/management-navigation'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { promptDialog } from '@/components/ui/prompt-dialog'
 
@@ -90,9 +95,33 @@ function useStoredPreference<T extends string | boolean>(key: string, fallback: 
   return [value, update] as const
 }
 
-function SettingsScaffold({ title, kicker, description, children }: { title: string; kicker: string; description: string; children: ReactNode }) {
+/**
+ * Merged settings destinations (Agent, 数据与关于) host several older pages one
+ * after another. Inside that host a page drops its own frame and renders as a
+ * titled section instead.
+ */
+const SettingsEmbedContext = createContext(false)
+
+function SettingsWorkspacePage({ children, ...props }: Parameters<typeof WorkspacePage>[0]) {
+  if (useContext(SettingsEmbedContext)) return <>{children}</>
+  return <WorkspacePage {...props}>{children}</WorkspacePage>
+}
+
+function SettingsScaffold({ title, kicker, description, section, children }: { title: string; kicker: string; description: string; section?: SettingsSectionAnchor; children: ReactNode }) {
   void kicker
+  const embedded = useContext(SettingsEmbedContext)
+  if (embedded) return <section id={section ? settingsSectionId(section) : undefined} className="fox-settings-embedded" aria-label={title}><h2 className="fox-settings-embedded-title">{title}</h2>{children}</section>
   return <div className="fox-settings-layout"><main><header><h1>{title}</h1><p>{description}</p></header>{children}</main></div>
+}
+
+/** Host for pages merged into one destination; only joins them, no redesign yet. */
+function MergedSettingsPage({ title, description, sidebarCollapsed, onSidebar, section, children }: { title: string; description: string; sidebarCollapsed: boolean; onSidebar: () => void; section?: SettingsSectionAnchor; children: ReactNode }) {
+  useScrollToSettingsSection(section)
+  return <WorkspacePage title={title} sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <div className="fox-settings-layout fox-settings-merged"><main><header><h1>{title}</h1><p>{description}</p></header>
+      <SettingsEmbedContext.Provider value>{children}</SettingsEmbedContext.Provider>
+    </main></div>
+  </WorkspacePage>
 }
 
 function PreferenceRow({ title, description, children }: { title: string; description: string; children: ReactNode }) {
@@ -201,8 +230,8 @@ export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDa
   }
 
   return (
-    <WorkspacePage title="设置" subtitle="外观设置" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
-      <SettingsScaffold kicker="桌面偏好" title="应用" description="调整 Fox 在这台设备上的显示和界面密度。">
+    <WorkspacePage title="通用" subtitle="外观设置" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+      <SettingsScaffold kicker="桌面偏好" title="通用" description="调整个人资料、外观和通知方式。">
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>个人资料</h2><p>设置 Fox 在这台设备上显示的头像与用户名。</p></div><div className="fox-profile-setting-actions"><Button variant="outline" size="sm" onClick={() => setProfileDialogOpen(true)}><Pencil />编辑信息</Button>{!yuxiUser.user && <Button variant="outline" size="sm" onClick={() => navigate('login')}>登录账户</Button>}</div></div><div className="fox-profile-setting"><Avatar><AvatarImage src={profile.avatar} alt="" /><AvatarFallback>{profileFallback}</AvatarFallback></Avatar><span><b>{profileName}</b><small>{yuxiUser.user?.uid ?? 'fox-local'}</small><em>{profileDetail}</em></span></div></Card>
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>外观</h2><p>保持 Fox 的主题、字体和界面密度一致。</p></div></div><AppearanceThemeControls dark={dark} onDarkChange={(next) => { if (next !== dark) onDark() }} colorTheme={colorTheme} onColorThemeChange={changeColorTheme} /><PreferenceRow title="文字大小" description="调整 Fox 各界面的文字显示比例"><div className="fox-text-scale-control"><span className="fox-text-scale-a is-small" aria-hidden="true">A</span><ElasticSlider className="fox-settings-text-slider" label="文字大小" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} largeStep={5} marks={[100]} value={textScale} showValue={false} format={(value) => `${value}%`} onValueChange={changeTextScale} /><span className="fox-text-scale-a is-large" aria-hidden="true">A</span><div className="fox-text-scale-stepper"><Button type="button" variant="ghost" size="icon" aria-label="缩小文字" onClick={() => changeTextScale(textScale - 5)}><Minus /></Button><label><input type="number" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} value={textScale} aria-label="文字大小百分比" onChange={(event) => changeTextScale(Number(event.target.value))} /><span>%</span></label><Button type="button" variant="ghost" size="icon" aria-label="放大文字" onClick={() => changeTextScale(textScale + 5)}><Plus /></Button></div></div></PreferenceRow><PreferenceRow title="过程详情" description="选择希望看到多少工具调用细节"><Select value={processDisplayMode} onValueChange={(value) => persistProcessDisplayMode(value as ProcessDisplayMode)}><SelectTrigger className="fox-settings-select" aria-label="过程详情"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="compact">简洁</SelectItem><SelectItem value="standard">标准</SelectItem><SelectItem value="detailed">详细</SelectItem><SelectItem value="verbose">详细</SelectItem></SelectContent></Select></PreferenceRow></Card>
           <NotificationSettingsSection />
@@ -213,61 +242,9 @@ export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDa
   )
 }
 
+/** Former 快捷键 page; its content now lives in the 对话 page. */
 export function ShortcutSettingsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
-  const { preferences, setBinding, restoreDefaults } = useShortcutPreferences()
-  const platform = usePlatform()
-  const [error, setError] = useState<string | null>(null)
-  const [resetOpen, setResetOpen] = useState(false)
-  const customized = SHORTCUT_ACTIONS.some((action) => preferences[action.id] !== action.defaultShortcut)
-
-  const saveBinding = (actionId: ShortcutActionId, shortcut: string | null, replaceConflicts: boolean) => {
-    try {
-      setBinding(actionId, shortcut, replaceConflicts)
-      setError(null)
-      return true
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '快捷键保存失败，请重试')
-      return false
-    }
-  }
-  const reset = () => {
-    try {
-      restoreDefaults()
-      setError(null)
-      setResetOpen(false)
-      toast.success('快捷键已恢复默认')
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '恢复默认失败，请重试')
-      setResetOpen(false)
-    }
-  }
-
-  return <WorkspacePage title="快捷键" subtitle="键盘操作" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
-    <SettingsScaffold kicker="键盘偏好" title="快捷键" description="点击快捷键并按下新的组合键，修改后立即保存。">
-      <Card className="fox-settings-section fox-shortcut-settings">
-        <div className="fox-settings-section-head"><div><h2>工作台</h2><p>支持 Ctrl / Cmd 或 Alt 组合键与功能键；清除后停用该动作的快捷键。</p></div><Button type="button" variant="outline" size="sm" disabled={!customized} onClick={() => setResetOpen(true)}><RotateCcw />恢复默认</Button></div>
-        {SHORTCUT_ACTIONS.map((action) => <PreferenceRow key={action.id} title={action.label} description={action.description}>
-          <ShortcutRecorder
-            className="fox-settings-shortcut-recorder"
-            label={`${action.label}快捷键`}
-            hideLabel
-            platform={platform}
-            value={preferences[action.id]}
-            resetValue={action.defaultShortcut}
-            placeholder="未设置，点击录制"
-            description={`默认 ${formatShortcut(action.defaultShortcut, platform).text}`}
-            bindings={SHORTCUT_ACTIONS.filter((item) => item.id !== action.id && preferences[item.id]).map((item) => ({ shortcut: preferences[item.id]!, label: item.label }))}
-            onValueChange={(value, details) => saveBinding(action.id, value, Boolean(details.replaced))}
-          />
-        </PreferenceRow>)}
-        {error && <p className="fox-setting-error" role="alert">{error}</p>}
-      </Card>
-      <p className="fox-shortcut-help">录制时按 Esc 取消，按 Backspace 清除。遇到冲突可替换原快捷键，原动作将停用该组合键。输入法选字期间不会触发快捷键。</p>
-      <Dialog open={resetOpen} onOpenChange={setResetOpen}>
-        <DialogContent><DialogHeader><DialogTitle>恢复默认快捷键</DialogTitle><DialogDescription>所有快捷键将恢复为 Fox 默认组合键，已清除的快捷键也会重新启用。</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={() => setResetOpen(false)}>取消</Button><Button type="button" onClick={reset}>恢复默认</Button></DialogFooter></DialogContent>
-      </Dialog>
-    </SettingsScaffold>
-  </WorkspacePage>
+  return <ConversationSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} section="shortcuts" />
 }
 
 export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: NavigateWorkspace; onExit: (status: 'completed' | 'skipped') => void; dark?: boolean }) {
@@ -479,7 +456,7 @@ export function AiSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { side
   }
 
   return (
-    <WorkspacePage title="助手设置" subtitle="Fox Runtime" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <SettingsWorkspacePage title="助手设置" subtitle="Fox Runtime" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
       <SettingsScaffold kicker="运行默认值" title="助手设置" description="配置 Fox 通用助手的基础行为与新对话默认模型。">
         <Card className="fox-settings-section">
           <div className="fox-settings-section-head"><div><h2>Fox 通用助手</h2></div><Button variant="outline" size="sm" disabled={!assistant || assistantLoading} onClick={openAssistantEditor}><Pencil />编辑助手</Button></div>
@@ -503,7 +480,7 @@ export function AiSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { side
           <DialogFooter><Button variant="outline" disabled={assistantSaving} onClick={() => setAssistantEditorOpen(false)}>取消</Button><Button disabled={assistantSaving || !assistantDraft?.name.trim() || !assistantDraft?.systemPrompt.trim()} onClick={() => void saveAssistant()}>{assistantSaving && <LoaderCircle className="animate-spin" />}保存</Button></DialogFooter>
         </DialogContent>
       </Dialog>
-    </WorkspacePage>
+    </SettingsWorkspacePage>
   )
 }
 
@@ -633,20 +610,177 @@ function ProviderIconPicker({ form, onChange }: { form: ProviderForm; onChange: 
   )
 }
 
-export function ProviderEditor({ form, busy, testing = false, connectionStatus, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; testing?: boolean; connectionStatus?: string | null; credentialConfigured: boolean; error?: string | null; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
-  const updateModel = (index: number, patch: Partial<ProviderForm['models'][number]>) => onChange({ ...form, models: form.models.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : patch.isDefault ? { ...item, isDefault: false } : item) })
-  return <div className="fox-provider-editor"><div className="fox-provider-form-grid"><label>服务名称<Input value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="例如 MiniMax" /></label><ProviderIconPicker form={form} onChange={onChange} /><label className="is-wide">API 地址<Input value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} /></label><label className="is-wide">API Key<Input type="password" value={form.apiKey} onChange={(event) => onChange({ ...form, apiKey: event.target.value, clearApiKey: false })} placeholder={credentialConfigured ? '已安全保存，留空保持不变' : '输入供应商 API Key'} /></label></div><label className="fox-provider-default-toggle"><span><b>设为默认</b><small>新对话默认使用此供应商中标记为默认的模型</small></span><Switch checked={form.isDefault} onCheckedChange={(isDefault) => onChange({ ...form, isDefault })} /></label><div className="fox-provider-models-head"><div><h3>模型</h3><p>一个供应商可以配置多个模型，并为每个模型设置独立能力。</p></div><Button variant="outline" size="sm" onClick={() => onChange({ ...form, models: [...form.models, { modelId: '', displayName: '', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false, isDefault: false }] })}><Plus />添加模型</Button></div><div className="fox-provider-model-list">{form.models.map((model, index) => <div className="fox-provider-model-row" key={model.id ?? index}><label>模型 ID<Input value={model.modelId} onChange={(event) => updateModel(index, { modelId: event.target.value })} placeholder="例如 MiniMax-M3" /></label><label>显示名称<Input value={model.displayName} onChange={(event) => updateModel(index, { displayName: event.target.value })} placeholder="留空则使用模型 ID" /></label><label>上下文<Input inputMode="numeric" value={model.contextWindow} onChange={(event) => updateModel(index, { contextWindow: Number(event.target.value) || 0 })} /></label><label>最大输出<Input inputMode="numeric" value={model.maxOutputTokens} onChange={(event) => updateModel(index, { maxOutputTokens: Number(event.target.value) || 0 })} /></label><label className="fox-provider-model-toggle"><span>多模态</span><Switch checked={model.supportsImageInput} onCheckedChange={(supportsImageInput) => updateModel(index, { supportsImageInput })} /></label><label className="fox-provider-model-toggle"><span>默认</span><Switch checked={model.isDefault} onCheckedChange={(isDefault) => updateModel(index, { isDefault })} /></label><Button variant="ghost" size="icon-sm" disabled={form.models.length === 1} title="删除模型" onClick={() => onChange({ ...form, models: form.models.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 /></Button></div>)}</div><details className="fox-provider-advanced"><summary>高级</summary><label>Fox 连接协议<Select value={form.apiType} onValueChange={(apiType) => onChange({ ...form, apiType: apiType as ProviderForm['apiType'] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai-completions">Chat Completions · Fox / pi</SelectItem><SelectItem value="anthropic-messages">Anthropic Messages · Fox / pi / DeepSeek</SelectItem></SelectContent></Select></label><ProviderProtocolEditor form={form} disabled={busy} onChange={(next) => onChange({ ...form, ...next })} /></details>{form.id && credentialConfigured && <label className="fox-provider-clear-key"><Switch checked={form.clearApiKey} onCheckedChange={(clearApiKey) => onChange({ ...form, clearApiKey, apiKey: clearApiKey ? '' : form.apiKey })} /><span>保存时清除已存 API Key</span></label>}{error && <p className="fox-setting-error" role="alert">{error}</p>}{connectionStatus && <p className="fox-provider-test-status" role="status">{connectionStatus}</p>}<div className="fox-provider-editor-actions">{onDelete && <Button variant="ghost" className="is-danger" disabled={busy} onClick={onDelete}><Trash2 />删除服务</Button>}<span /><Button variant="outline" disabled={busy} onClick={onCancel}>取消</Button><Button variant="outline" disabled={busy || !form.baseUrl.trim() || !form.models[0]?.modelId.trim()} onClick={onTest}>{testing ? <LoaderCircle className="animate-spin" /> : <Zap />}{testing ? '正在验证…' : '测试连接'}</Button><Button disabled={busy || !form.name.trim() || !form.baseUrl.trim() || form.models.some((item) => !item.modelId.trim())} onClick={onSave}>{busy && <LoaderCircle className="animate-spin" />}保存</Button></div></div>
+type ProviderModelDraft = ProviderForm['models'][number]
+
+type ProviderConnectionResult =
+  | { status: 'testing'; text: string }
+  | { status: 'ok'; text: string; latencyMs: number; modelCount: number }
+  | { status: 'error'; text: string }
+
+function compactTokenCount(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '—'
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`
+  if (value >= 1000) return `${Math.round(value / 1000)}K`
+  return String(value)
+}
+
+function providerProtocolLabel(apiType: ProviderForm['apiType']) {
+  return apiType === 'anthropic-messages' ? 'Anthropic Messages' : 'OpenAI-compatible'
+}
+
+function providerHostLabel(baseUrl: string) {
+  try { return new URL(baseUrl).host || baseUrl } catch { return baseUrl }
+}
+
+function emptyModelDraft(isDefault: boolean, template?: ProviderModelDraft): ProviderModelDraft {
+  return { modelId: '', displayName: '', contextWindow: template?.contextWindow ?? 128000, maxOutputTokens: template?.maxOutputTokens ?? 8192, supportsImageInput: false, isDefault }
+}
+
+/** 添加模型 / 编辑模型: an in-app dialog over the provider sheet, same fields as before. */
+function ProviderModelDialog({ open, draft, isNew, canDelete, onOpenChange, onSave, onDelete }: { open: boolean; draft: ProviderModelDraft | null; isNew: boolean; canDelete: boolean; onOpenChange: (open: boolean) => void; onSave: (model: ProviderModelDraft) => void; onDelete: () => void }) {
+  const [value, setValue] = useState<ProviderModelDraft | null>(draft)
+  useEffect(() => { if (open) setValue(draft) }, [draft, open])
+  const patch = (next: Partial<ProviderModelDraft>) => setValue((current) => current ? { ...current, ...next } : current)
+  const valid = Boolean(value?.modelId.trim())
+  return <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent className="fox-settings-dialog">
+      <DialogHeader><DialogTitle>{isNew ? '添加模型' : '编辑模型'}</DialogTitle><DialogDescription>填写服务商提供的模型 ID；上下文和最大输出决定 Fox 如何裁剪对话。</DialogDescription></DialogHeader>
+      {value && <form className="fox-settings-dialog-body" onSubmit={(event) => { event.preventDefault(); if (valid) onSave({ ...value, modelId: value.modelId.trim(), displayName: value.displayName.trim() }) }}>
+        <label className="fox-settings-field"><span>模型 ID</span><Input autoFocus value={value.modelId} onChange={(event) => patch({ modelId: event.target.value })} placeholder="例如 deepseek-chat" /></label>
+        <label className="fox-settings-field"><span>显示名称</span><Input value={value.displayName} onChange={(event) => patch({ displayName: event.target.value })} placeholder="留空则使用模型 ID" /></label>
+        <div className="fox-settings-field-row">
+          <label className="fox-settings-field"><span>上下文长度</span><Input inputMode="numeric" value={value.contextWindow} onChange={(event) => patch({ contextWindow: Number(event.target.value) || 0 })} /></label>
+          <label className="fox-settings-field"><span>最大输出</span><Input inputMode="numeric" value={value.maxOutputTokens} onChange={(event) => patch({ maxOutputTokens: Number(event.target.value) || 0 })} /></label>
+        </div>
+        <label className="fox-settings-switch-row"><span><b>图片输入</b><small>模型支持多模态时开启</small></span><Switch checked={value.supportsImageInput} onCheckedChange={(supportsImageInput) => patch({ supportsImageInput })} aria-label="图片输入" /></label>
+        <label className="fox-settings-switch-row"><span><b>设为默认</b><small>新对话默认使用此模型</small></span><Switch checked={value.isDefault} onCheckedChange={(isDefault) => patch({ isDefault })} aria-label="设为默认模型" /></label>
+        <DialogFooter>
+          {!isNew && <Button type="button" variant="ghost" className="fox-settings-danger-text" disabled={!canDelete} title={canDelete ? undefined : '服务至少保留一个模型'} onClick={onDelete}><Trash2 />删除模型</Button>}
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button type="submit" disabled={!valid}>{isNew ? '添加' : '完成'}</Button>
+        </DialogFooter>
+      </form>}
+    </DialogContent>
+  </Dialog>
+}
+
+/**
+ * Provider editor shown in the 480px sheet: 基础连接, 模型 and a collapsed
+ * 协议与高级 row, with 删除服务 / 取消 / 保存 in the footer.
+ */
+export function ProviderEditor({ form, busy, testing = false, connectionStatus, connectionResult, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; testing?: boolean; connectionStatus?: string | null; connectionResult?: ProviderConnectionResult | null; credentialConfigured: boolean; error?: string | null; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
+  const isNew = !form.id
+  const [showKey, setShowKey] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [presetId, setPresetId] = useState<string>('custom')
+  const [modelEditor, setModelEditor] = useState<{ index: number | null; draft: ProviderModelDraft } | null>(null)
+  const setDefaultModel = (index: number) => onChange({ ...form, models: form.models.map((item, itemIndex) => ({ ...item, isDefault: itemIndex === index })) })
+  const saveModel = (model: ProviderModelDraft) => {
+    if (!modelEditor) return
+    // A new service starts with one blank placeholder row; the first added model takes its place.
+    const placeholder = form.models.length === 1 && !form.models[0].modelId.trim()
+    const index = modelEditor.index ?? (placeholder ? 0 : null)
+    let models = index === null ? [...form.models, model] : form.models.map((item, itemIndex) => itemIndex === index ? { ...item, ...model } : item)
+    const target = index === null ? models.length - 1 : index
+    if (model.isDefault) models = models.map((item, itemIndex) => ({ ...item, isDefault: itemIndex === target }))
+    else if (!models.some((item) => item.isDefault)) models = models.map((item, itemIndex) => ({ ...item, isDefault: itemIndex === 0 }))
+    onChange({ ...form, models })
+    setModelEditor(null)
+  }
+  const deleteModel = () => {
+    if (!modelEditor || modelEditor.index === null || form.models.length <= 1) return
+    const removed = modelEditor.index
+    let models = form.models.filter((_, itemIndex) => itemIndex !== removed)
+    if (!models.some((item) => item.isDefault)) models = models.map((item, itemIndex) => ({ ...item, isDefault: itemIndex === 0 }))
+    onChange({ ...form, models })
+    setModelEditor(null)
+  }
+  const applyPreset = (id: string) => {
+    setPresetId(id)
+    const preset = providerPresets.find((item) => item.id === id)
+    if (preset) onChange({ ...providerPresetForm(preset, form.isDefault), models: form.models.some((item) => item.modelId.trim()) ? form.models : providerPresetForm(preset, form.isDefault).models })
+  }
+  const visibleModels = form.models.map((model, index) => ({ model, index })).filter(({ model }) => model.modelId.trim())
+  const defaultModel = form.models.find((item) => item.isDefault) ?? form.models[0]
+  const advancedSummary = [providerProtocolLabel(form.apiType), defaultModel ? `上下文 ${compactTokenCount(defaultModel.contextWindow)}` : null, defaultModel ? `最大输出 ${compactTokenCount(defaultModel.maxOutputTokens)}` : null, (form.protocolProfiles?.length ?? 0) > 0 ? `${form.protocolProfiles!.length} 个外部协议` : null].filter(Boolean).join(' · ')
+  const canTest = !busy && Boolean(form.baseUrl.trim()) && Boolean(form.models[0]?.modelId.trim())
+  const canSave = !busy && Boolean(form.name.trim()) && Boolean(form.baseUrl.trim()) && form.models.length > 0 && !form.models.some((item) => !item.modelId.trim())
+  const result: ProviderConnectionResult | null = testing ? { status: 'testing', text: '正在验证…' } : connectionResult ?? (connectionStatus ? { status: connectionStatus.startsWith('连接失败') ? 'error' : 'testing', text: connectionStatus } as ProviderConnectionResult : null)
+  return <>
+    <div className="fox-settings-sheet-body">
+      {error && <p className="fox-settings-sheet-error" role="alert">{error}</p>}
+      <section className="fox-settings-sheet-section" aria-label="基础连接">
+        <div className="fox-settings-sheet-section-head"><h3>基础连接</h3></div>
+        {isNew && <div className="fox-settings-field"><span>服务模板</span><Select value={presetId} onValueChange={applyPreset}><SelectTrigger aria-label="服务模板"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="custom">自定义服务</SelectItem>{providerPresets.map((preset) => <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>)}</SelectContent></Select></div>}
+        {isNew && <label className="fox-settings-field"><span>服务名称</span><Input value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="例如 MiniMax" /></label>}
+        <label className="fox-settings-field"><span>服务地址</span><Input value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} /></label>
+        <div className="fox-settings-field">
+          <label htmlFor="fox-provider-api-key">API Key</label>
+          <div className="fox-settings-secret">
+            <Input id="fox-provider-api-key" type={showKey ? 'text' : 'password'} autoComplete="new-password" value={form.apiKey} disabled={form.clearApiKey} onChange={(event) => onChange({ ...form, apiKey: event.target.value, clearApiKey: false })} placeholder={form.clearApiKey ? '保存时将清除已存 Key' : credentialConfigured ? '已安全保存 · 留空保持不变' : '输入服务商 API Key'} />
+            <Button type="button" variant="ghost" size="icon-sm" aria-label={showKey ? '隐藏 API Key' : '显示 API Key'} aria-pressed={showKey} disabled={!form.apiKey} onClick={() => setShowKey((value) => !value)}>{showKey ? <EyeOff /> : <Eye />}</Button>
+          </div>
+        </div>
+        <div className="fox-settings-test-row">
+          <Button type="button" variant="outline" size="sm" disabled={!canTest} onClick={onTest}>{testing ? <LoaderCircle className="animate-spin" /> : <Zap />}测试连接</Button>
+          {result && <span className={cn('fox-settings-test-result', result.status === 'error' && 'is-error')} role="status">
+            {result.status === 'ok' && <><i className="fox-settings-dot is-ok" aria-hidden="true" /><b>连接正常</b><span>{result.latencyMs} ms<span className="is-separator"> · </span>发现 {result.modelCount} 个模型</span></>}
+            {result.status === 'error' && <><i className="fox-settings-dot is-error" aria-hidden="true" /><b>连接失败</b><span title={result.text}>{result.text.replace(/^连接失败：/, '')}</span></>}
+            {result.status === 'testing' && <span>{result.text}</span>}
+          </span>}
+        </div>
+      </section>
+      <section className="fox-settings-sheet-section" aria-label="模型">
+        <div className="fox-settings-sheet-section-head"><h3>模型</h3><Button type="button" variant="ghost" size="sm" onClick={() => setModelEditor({ index: null, draft: emptyModelDraft(!form.models.some((item) => item.modelId.trim()), defaultModel) })}><Plus />添加模型</Button></div>
+        {visibleModels.length === 0 && <p className="fox-settings-empty">还没有模型，点击「添加模型」填写服务商提供的模型 ID。</p>}
+        {visibleModels.map(({ model, index }) => <div className="fox-settings-model-row" key={model.id ?? `${index}:${model.modelId}`}>
+          <span className="fox-settings-model-name"><b title={model.modelId}>{model.displayName || model.modelId}</b>{model.isDefault && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}<small>{compactTokenCount(model.contextWindow)}{model.supportsImageInput ? ' · 图片' : ''}</small></span>
+          {!model.isDefault && <Button type="button" variant="ghost" size="sm" className="fox-settings-model-default" onClick={() => setDefaultModel(index)}>设为默认</Button>}
+          <Button type="button" variant="ghost" size="icon-sm" aria-label={`编辑 ${model.modelId}`} onClick={() => setModelEditor({ index, draft: { ...model } })}><Pencil /></Button>
+        </div>)}
+      </section>
+      <section className="fox-settings-sheet-section" aria-label="协议与高级">
+        <button type="button" className="fox-settings-disclosure" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((value) => !value)}>
+          <span><b>协议与高级</b><small>{advancedSummary}</small></span><ChevronRight aria-hidden="true" />
+        </button>
+        {advancedOpen && <div className="fox-settings-advanced">
+          <div className="fox-settings-field"><span>Fox 连接协议</span><Select value={form.apiType} onValueChange={(apiType) => onChange({ ...form, apiType: apiType as ProviderForm['apiType'] })}><SelectTrigger aria-label="Fox 连接协议"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai-completions">Chat Completions · Fox / pi</SelectItem><SelectItem value="anthropic-messages">Anthropic Messages · Fox / pi / DeepSeek</SelectItem></SelectContent></Select></div>
+          <ProviderIconPicker form={form} onChange={onChange} />
+          <label className="fox-settings-switch-row"><span><b>默认服务</b><small>新对话使用此服务中标记为默认的模型</small></span><Switch checked={form.isDefault} onCheckedChange={(isDefault) => onChange({ ...form, isDefault })} aria-label="设为默认服务" /></label>
+          {form.id && credentialConfigured && <label className="fox-settings-switch-row"><span><b>清除已存 API Key</b><small>保存时从系统凭据库删除此服务的 Key</small></span><Switch checked={form.clearApiKey} onCheckedChange={(clearApiKey) => onChange({ ...form, clearApiKey, apiKey: clearApiKey ? '' : form.apiKey })} aria-label="保存时清除已存 API Key" /></label>}
+          <ProviderProtocolEditor form={form} disabled={busy} onChange={(next) => onChange({ ...form, ...next })} />
+        </div>}
+      </section>
+    </div>
+    <div className="fox-settings-sheet-foot">
+      {onDelete && <Button type="button" variant="ghost" className="fox-settings-danger" disabled={busy} onClick={onDelete}>删除服务</Button>}
+      <span className="is-grow" />
+      <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>取消</Button>
+      <Button type="button" disabled={!canSave} onClick={onSave}>{busy && !testing && <LoaderCircle className="animate-spin" />}保存</Button>
+    </div>
+    <ProviderModelDialog open={modelEditor !== null} draft={modelEditor?.draft ?? null} isNew={modelEditor?.index === null} canDelete={form.models.length > 1} onOpenChange={(open) => { if (!open) setModelEditor(null) }} onSave={saveModel} onDelete={deleteModel} />
+  </>
+}
+
+function providerStatus(provider: ModelProviderRecord) {
+  if (!provider.credentialConfigured && provider.lastStatus !== 'connected') return { tone: 'is-empty', label: '未连接', detail: null }
+  if (provider.lastStatus === 'connected') return { tone: 'is-ok', label: '已连接', detail: provider.lastLatencyMs != null ? `${provider.lastLatencyMs} ms` : '未检测' }
+  if (provider.lastStatus === 'unavailable') return { tone: 'is-error', label: '不可用', detail: provider.lastLatencyMs != null ? `${provider.lastLatencyMs} ms` : null }
+  return { tone: '', label: '未检测', detail: null }
 }
 
 export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
   const resource = useModelProviders()
+  const modelService = useModelService()
   const [testing, setTesting] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState<string | null>(null)
+  const [connectionResult, setConnectionResult] = useState<ProviderConnectionResult | null>(null)
   const [editingId, setEditingId] = useState<string | 'new' | null>(null)
   const [form, setForm] = useState<ProviderForm | null>(null)
-  const openEditor = (provider?: ModelProviderRecord) => { setConnectionStatus(null); const next = providerForm(provider); if (!provider) next.isDefault = resource.items.length === 0; setEditingId(provider?.id ?? 'new'); setForm(next) }
-  const openPreset = (preset: ProviderPreset) => { setConnectionStatus(null); setEditingId('new'); setForm(providerPresetForm(preset, resource.items.length === 0)) }
-  const unconfiguredPresets = providerPresets.filter((preset) => !resource.items.some((provider) => provider.baseUrl.replace(/\/$/, '') === preset.baseUrl.replace(/\/$/, '')))
+  const editingProvider = editingId && editingId !== 'new' ? resource.items.find((item) => item.id === editingId) ?? null : null
+  const closeEditor = () => { setEditingId(null); setForm(null); setConnectionResult(null) }
+  const openEditor = (provider?: ModelProviderRecord) => { setConnectionResult(null); const next = providerForm(provider); if (!provider) next.isDefault = resource.items.length === 0; setEditingId(provider?.id ?? 'new'); setForm(next) }
+  const defaultSelection = resource.items.flatMap((provider) => provider.models.map((item) => ({ provider, item }))).find(({ provider, item }) => provider.isDefault && item.isDefault)
+  const connectedCount = resource.items.filter((item) => item.lastStatus === 'connected').length
   const save = async () => {
     if (!form) return
     const saved = await resource.save({ ...form, apiKey: form.apiKey || undefined })
@@ -656,11 +790,12 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
     if (!form || testing) return
     const model = form.models.find((item) => item.isDefault) ?? form.models[0]
     setTesting(true)
-    setConnectionStatus('正在验证连接…')
+    setConnectionResult({ status: 'testing', text: '正在验证连接…' })
     try {
       const result = await desktopClient.testModelService(form.baseUrl, form.apiKey || undefined, form.apiType, model?.modelId)
-      setConnectionStatus(`连接成功，发现 ${result.models.length} 个模型`)
-    } catch (cause) { setConnectionStatus(`连接失败：${desktopErrorDetails(cause).message}`) }
+      setConnectionResult({ status: 'ok', text: `连接成功，发现 ${result.models.length} 个模型`, latencyMs: result.latencyMs, modelCount: result.models.length })
+      void resource.refresh()
+    } catch (cause) { setConnectionResult({ status: 'error', text: `连接失败：${desktopErrorDetails(cause).message}` }) }
     finally { setTesting(false) }
   }
   const remove = async (provider: ModelProviderRecord) => {
@@ -673,49 +808,67 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
     const saved = await resource.save({ id: provider.id, name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: provider.isDefault, models: provider.models })
     if (saved) toast.success('供应商已重命名')
   }
+  const makeDefault = async (provider: ModelProviderRecord) => {
+    if (provider.isDefault) return
+    const saved = await resource.save({ id: provider.id, name: provider.name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: true, models: provider.models })
+    if (saved) { await modelService.refresh(); toast.success(`已将 ${provider.name} 设为默认服务`) }
+  }
+  const testProvider = (provider: ModelProviderRecord) => void desktopClient.testModelService(provider.baseUrl, undefined, provider.apiType, provider.models.find((item) => item.isDefault)?.modelId ?? provider.models[0]?.modelId).then((result) => { void resource.refresh(); toast.success(`连接成功，发现 ${result.models.length} 个模型`) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)))
+  const selectDefaultModel = async (value: string) => {
+    const [providerId, modelId] = value.split('::')
+    const provider = resource.items.find((item) => item.id === providerId)
+    if (!provider) return
+    const saved = await resource.save({ id: provider.id, name: provider.name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: true, models: provider.models.map((item) => ({ ...item, isDefault: item.modelId === modelId })) })
+    if (saved) { await modelService.refresh(); toast.success('默认模型已更新') }
+  }
+  const sheetIcon = form ? providerIcon(form.name, form.baseUrl, form.icon) : null
+  const sheetModelCount = form ? form.models.filter((item) => item.modelId.trim()).length : 0
   return (
-    <WorkspacePage title="模型服务" subtitle="API 与模型连接" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
-      <SettingsScaffold kicker="模型连接" title="模型服务" description="管理供应商凭据、模型和各 Agent 使用的协议。">
-        <Dialog open={editingId === 'new'} onOpenChange={(open) => { if (!open) { setEditingId(null); setForm(null) } }}>
-          <DialogContent className="fox-provider-dialog">
-            <DialogHeader><DialogTitle>添加服务</DialogTitle><DialogDescription>配置 API 连接和 Fox 可以使用的模型。保存后仍可随时编辑。</DialogDescription></DialogHeader>
-            {editingId === 'new' && form && <ProviderEditor form={form} busy={testing || resource.busyId === 'new'} credentialConfigured={false} testing={testing} connectionStatus={connectionStatus} error={resource.error} onChange={(next) => { setConnectionStatus(null); setForm(next) }} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onTest={() => void test()} />}
-          </DialogContent>
-        </Dialog>
-        {resource.loading && <Card className="fox-settings-section"><LoaderCircle className="animate-spin" />正在读取供应商…</Card>}
-        {!resource.loading && <div className="fox-provider-groups">
-          <section className="fox-provider-group">
-            <h3>已配置</h3>
-            {resource.items.length === 0 && <p className="fox-provider-group-empty">添加一个供应商开始使用。</p>}
-            <div className="fox-provider-compact-list">
-              {resource.items.map((provider) => {
-                const icon = providerIcon(provider.name, provider.baseUrl, provider.icon)
-                return <div className="fox-provider-entry" key={provider.id}>
-                  <div className={cn('fox-provider-row', editingId === provider.id && 'is-open')}>
-                    <button type="button" className="fox-provider-row-main" onClick={() => openEditor(provider)} aria-expanded={editingId === provider.id}>
-                      <span className="fox-provider-mark">{icon ? <img src={icon} alt="" /> : <Server />}</span>
-                      <span className="fox-provider-row-name"><strong>{provider.name}</strong><small>{provider.models.length} 个模型{provider.isDefault ? ' · 默认' : ''}</small></span>
-                      <span className="fox-provider-row-status"><i className={cn('fox-status-dot', provider.lastStatus === 'connected' ? 'is-ok' : 'is-empty')} aria-hidden="true" />{serviceStatusLabel(provider.lastStatus)}{provider.lastLatencyMs != null ? ` · ${provider.lastLatencyMs} ms` : ''}</span>
-                    </button>
-                    <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal size={18} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void rename(provider)}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => openEditor(provider)}><Wrench />编辑</DropdownMenuItem><DropdownMenuItem onSelect={() => void desktopClient.testModelService(provider.baseUrl, undefined, provider.apiType, provider.models.find((item) => item.isDefault)?.modelId ?? provider.models[0]?.modelId).then((result) => { void resource.refresh(); toast.success(`连接成功，发现 ${result.models.length} 个模型`) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)))}><Zap />测试连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => void remove(provider)}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
-                  </div>
-                  {editingId === provider.id && form && <ProviderEditor form={form} busy={testing || resource.busyId === provider.id} credentialConfigured={provider.credentialConfigured} testing={testing} connectionStatus={connectionStatus} error={resource.error} onChange={(next) => { setConnectionStatus(null); setForm(next) }} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onDelete={() => void remove(provider)} onTest={() => void test()} />}
-                </div>
-              })}
-            </div>
-          </section>
-          {unconfiguredPresets.length > 0 && <section className="fox-provider-group">
-            <h3>可添加</h3>
-            <div className="fox-provider-compact-list">
-              {unconfiguredPresets.map((preset) => <button type="button" key={preset.id} className="fox-provider-row" onClick={() => openPreset(preset)}>
-                <span className="fox-provider-mark"><img src={`/providers/${preset.icon}`} alt="" /></span>
-                <span className="fox-provider-row-name"><strong>{preset.name}</strong></span>
-                <Plus className="fox-provider-row-add" aria-hidden="true" />
-              </button>)}
-            </div>
-          </section>}
-        </div>}
-      </SettingsScaffold>
+    <WorkspacePage title="模型" subtitle="模型服务" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+      <SettingsPageLayout title="模型" description="管理模型服务和 Fox 默认使用的模型。" actions={<Button type="button" onClick={() => openEditor()}><Plus />添加服务</Button>}>
+        <SettingsGroup title="默认">
+          <SettingsRow title="默认模型" description="新对话和 Agent 未指定模型时使用">
+            {resource.items.some((provider) => provider.models.length) ? <Select value={defaultSelection ? `${defaultSelection.provider.id}::${defaultSelection.item.modelId}` : undefined} disabled={resource.busyId !== null} onValueChange={(value) => void selectDefaultModel(value)}>
+              <SelectTrigger className="fox-settings-default-model" aria-label="默认模型"><SelectValue placeholder="选择默认模型" /></SelectTrigger>
+              <SelectContent>{resource.items.flatMap((provider) => provider.models.map((item) => <SelectItem key={`${provider.id}:${item.id}`} value={`${provider.id}::${item.modelId}`}>{provider.name} · {item.displayName || item.modelId}</SelectItem>))}</SelectContent>
+            </Select> : <span className="fox-settings-hint">添加服务后可选择</span>}
+          </SettingsRow>
+        </SettingsGroup>
+        <SettingsGroup title="服务" aside={resource.items.length ? `${resource.items.length} 个服务，${connectedCount} 个已连接` : undefined}>
+          {resource.loading && !resource.items.length && <p className="fox-settings-empty"><LoaderCircle className="animate-spin" /> 正在读取服务…</p>}
+          {!resource.loading && resource.items.length === 0 && <p className="fox-settings-empty">还没有模型服务，点击右上角「添加服务」开始。</p>}
+          {resource.error && !editingId && <p className="fox-settings-error" role="alert">{resource.error}</p>}
+          <div className="fox-settings-providers">
+            {resource.items.map((provider) => {
+              const icon = providerIcon(provider.name, provider.baseUrl, provider.icon)
+              const status = providerStatus(provider)
+              const detail = !provider.credentialConfigured && provider.lastStatus !== 'connected' ? '未填写 API Key' : `${provider.models.length} 个模型 · ${providerHostLabel(provider.baseUrl)}`
+              return <div className={cn('fox-settings-provider', editingId === provider.id && 'is-open')} key={provider.id}>
+                <button type="button" className="fox-settings-provider-main" onClick={() => openEditor(provider)} aria-haspopup="dialog" aria-label={`编辑 ${provider.name}`}>
+                  <span className="fox-settings-provider-mark">{icon ? <img src={icon} alt="" /> : <Server />}</span>
+                  <span className="fox-settings-provider-text"><span className="fox-settings-provider-name"><b>{provider.name}</b>{provider.isDefault && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}</span><small title={provider.baseUrl}>{detail}</small></span>
+                  <span className="fox-settings-provider-status"><i className={cn('fox-settings-dot', status.tone)} aria-hidden="true" /><b>{status.label}</b>{status.detail && <><span className="is-separator">·</span><span>{status.detail}</span></>}</span>
+                </button>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="fox-settings-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void rename(provider)}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem disabled={provider.isDefault} onSelect={() => void makeDefault(provider)}><Star />设为默认</DropdownMenuItem><DropdownMenuItem onSelect={() => testProvider(provider)}><Zap />测试连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => void remove(provider)}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+              </div>
+            })}
+          </div>
+        </SettingsGroup>
+      </SettingsPageLayout>
+      <Sheet open={editingId !== null && form !== null} onOpenChange={(open) => { if (!open) closeEditor() }}>
+        <SheetContent side="right" className="fox-settings-sheet">
+          {form && <>
+            <SheetHeader className="fox-settings-sheet-head">
+              <span className="fox-settings-provider-mark is-large">{sheetIcon ? <img src={sheetIcon} alt="" /> : <Server />}</span>
+              <div className="fox-settings-sheet-title">
+                <SheetTitle><span>{editingId === 'new' ? (form.name.trim() || '添加服务') : form.name}</span>{form.isDefault && editingId !== 'new' && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}</SheetTitle>
+                <SheetDescription>{editingId === 'new' ? '配置 API 连接和 Fox 可以使用的模型，保存后仍可随时编辑。' : `${providerProtocolLabel(form.apiType)} · ${sheetModelCount} 个模型`}</SheetDescription>
+              </div>
+            </SheetHeader>
+            <ProviderEditor form={form} busy={testing || resource.busyId === (editingId === 'new' ? 'new' : editingId)} credentialConfigured={editingProvider?.credentialConfigured ?? false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onDelete={editingProvider ? () => void remove(editingProvider) : undefined} onTest={() => void test()} />
+          </>}
+        </SheetContent>
+      </Sheet>
     </WorkspacePage>
   )
 }
@@ -731,7 +884,7 @@ export function YuxiSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { si
     window.sessionStorage.setItem(YUXI_LOGIN_RETURN_KEY, 'settings-yuxi')
     navigate('login')
   }
-  return <WorkspacePage title="资料库服务" subtitle="知识与远程专家" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="服务连接" title="资料库服务" description="管理 Fox 使用的唯一资料库服务和账户身份。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><div className="fox-settings-section-title"><h2>服务连接</h2><Badge variant="secondary">{yuxi.service ? serviceStatusLabel(yuxi.service.lastStatus) : '未配置'}</Badge></div><p>支持本机、局域网和远程 HTTPS 地址。</p></div><div className="fox-settings-section-actions"><Button variant="outline" size="sm" disabled={!yuxi.service || yuxi.testing} onClick={() => void yuxi.test()}>{yuxi.testing && <LoaderCircle className="animate-spin" />}测试连接</Button><Button size="sm" onClick={openService}>{yuxi.service ? '修改地址' : '开始设置'}</Button></div></div><button className="fox-service-card" onClick={openService}><span><Server /></span><p><b>{yuxi.service ? knowledgeServiceName(yuxi.service.name) : '配置资料库服务'}</b><small>{yuxi.service?.baseUrl ?? '专家、资料库和知识图谱能力的来源'}</small></p><em><b className={yuxi.service?.lastLatencyMs != null ? undefined : 'is-empty'}>{yuxi.service?.lastLatencyMs != null ? `${yuxi.service.lastLatencyMs} ms` : yuxi.service ? '未检测' : '未设置'}</b><small>{connectionTypeLabel(yuxi.service?.connectionType)}</small></em><ChevronRight /></button></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><div className="fox-settings-section-title"><h2>账户</h2>{user.user ? <Badge variant="secondary">已登录</Badge> : <Badge variant="outline">未登录</Badge>}</div><p>Fox 与浏览器中的资料库登录态相互独立。</p></div>{!user.user && <Button variant="outline" size="sm" onClick={openLogin}><LogIn />登录账户</Button>}</div>{user.user && <div className="fox-profile-setting"><Avatar>{user.user.avatar && <AvatarImage src={user.user.avatar} alt="" />}<AvatarFallback>{user.user.username.charAt(0).toUpperCase()}</AvatarFallback></Avatar><span><b>{user.user.username}</b><small>{user.user.uid}</small><em>{[user.user.departmentName, user.user.role].filter(Boolean).join(' · ')}</em></span></div>}</Card></SettingsScaffold></WorkspacePage>
+  return <WorkspacePage title="资料库服务" subtitle="知识与远程专家" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="服务连接" title="资料库" description="管理 Fox 使用的资料库服务和账户身份。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><div className="fox-settings-section-title"><h2>服务连接</h2><Badge variant="secondary">{yuxi.service ? serviceStatusLabel(yuxi.service.lastStatus) : '未配置'}</Badge></div><p>支持本机、局域网和远程 HTTPS 地址。</p></div><div className="fox-settings-section-actions"><Button variant="outline" size="sm" disabled={!yuxi.service || yuxi.testing} onClick={() => void yuxi.test()}>{yuxi.testing && <LoaderCircle className="animate-spin" />}测试连接</Button><Button size="sm" onClick={openService}>{yuxi.service ? '修改地址' : '开始设置'}</Button></div></div><button className="fox-service-card" onClick={openService}><span><Server /></span><p><b>{yuxi.service ? knowledgeServiceName(yuxi.service.name) : '配置资料库服务'}</b><small>{yuxi.service?.baseUrl ?? '专家、资料库和知识图谱能力的来源'}</small></p><em><b className={yuxi.service?.lastLatencyMs != null ? undefined : 'is-empty'}>{yuxi.service?.lastLatencyMs != null ? `${yuxi.service.lastLatencyMs} ms` : yuxi.service ? '未检测' : '未设置'}</b><small>{connectionTypeLabel(yuxi.service?.connectionType)}</small></em><ChevronRight /></button></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><div className="fox-settings-section-title"><h2>账户</h2>{user.user ? <Badge variant="secondary">已登录</Badge> : <Badge variant="outline">未登录</Badge>}</div><p>Fox 与浏览器中的资料库登录态相互独立。</p></div>{!user.user && <Button variant="outline" size="sm" onClick={openLogin}><LogIn />登录账户</Button>}</div>{user.user && <div className="fox-profile-setting"><Avatar>{user.user.avatar && <AvatarImage src={user.user.avatar} alt="" />}<AvatarFallback>{user.user.username.charAt(0).toUpperCase()}</AvatarFallback></Avatar><span><b>{user.user.username}</b><small>{user.user.uid}</small><em>{[user.user.departmentName, user.user.role].filter(Boolean).join(' · ')}</em></span></div>}</Card></SettingsScaffold></WorkspacePage>
 }
 
 function projectStorageLabel(bytes: number | null) {
@@ -834,17 +987,127 @@ export function ProjectPermissionsPage({ sidebarCollapsed, onSidebar }: { sideba
         </>}
     </footer>
   </article>
-  return <WorkspacePage title="项目权限" subtitle="文件范围" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="安全边界" title="项目权限" description="管理已授权文件夹、运行边界与项目生命周期。">
+  return <SettingsWorkspacePage title="项目权限" subtitle="文件范围" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="安全边界" title="项目权限" section="projects" description="管理已授权文件夹、运行边界与项目生命周期。">
     <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>默认执行方式</h2><p>只影响之后加入的新项目；已有项目保持各自设置。</p></div><ShieldCheck /></div><PreferenceRow title="新项目权限" description="建议使用“询问”，在写入或运行命令前确认"><Select value={defaultPermission} onValueChange={setDefaultPermission}><SelectTrigger className="fox-settings-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="read_only">只读</SelectItem><SelectItem value="ask">询问</SelectItem><SelectItem value="allow">允许</SelectItem></SelectContent></Select></PreferenceRow></Card>
     <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>项目</h2><p>状态、路径与统计信息均来自本机运行时。</p></div><Button variant="outline" size="sm" disabled={loading} onClick={() => void loadProjects()}>{loading ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}刷新</Button></div>{error ? <div className="fox-managed-project-state is-error"><FileWarning /><span><b>暂时无法读取项目列表</b><small title={error}>请稍后重试</small></span><Button variant="outline" size="sm" onClick={() => void loadProjects()}>重试</Button></div> : loading ? <div className="fox-managed-project-state"><LoaderCircle className="animate-spin" /><span><b>正在读取项目</b><small>正在检查目录、Git 状态与占用空间</small></span></div> : activeProjects.length ? <div className="fox-managed-project-grid">{activeProjects.map(renderProject)}</div> : <div className="fox-managed-project-state"><FolderOpen /><span><b>还没有项目</b><small>可从主界面的“添加项目”选择一个本机文件夹。</small></span></div>}</Card>
     {archivedProjects.length > 0 && <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>已归档</h2><p>归档项目不会出现在日常项目列表中，可以随时恢复。</p></div><Archive /></div><div className="fox-managed-project-grid">{archivedProjects.map(renderProject)}</div></Card>}
     <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>高风险操作</h2><p>命令、连接器工具和项目外写入仍然需要单独审批。</p></div><Shield /></div><PreferenceRow title="命令执行" description="当前阶段始终询问，后续再提供自动审批规则"><SettingValue>每次询问</SettingValue></PreferenceRow><PreferenceRow title="资料库内容注入" description="知识检索结果不能绕过工具权限和项目边界"><SettingValue>受保护</SettingValue></PreferenceRow></Card>
-  </SettingsScaffold></WorkspacePage>
+  </SettingsScaffold></SettingsWorkspacePage>
 }
 
-export function ConversationSettingsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
+function usePromptSendShortcutPreference() {
+  const [value, setValue] = useState<PromptSendShortcut>(() => readPromptSendShortcut())
+  useEffect(() => {
+    const sync = () => setValue(readPromptSendShortcut())
+    window.addEventListener(PROMPT_SEND_SHORTCUT_EVENT, sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener(PROMPT_SEND_SHORTCUT_EVENT, sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
+  const update = (next: PromptSendShortcut) => setValue(writePromptSendShortcut(next))
+  return [value, update] as const
+}
+
+function SendShortcutHint({ mode }: { mode: PromptSendShortcut }) {
+  return <span className="fox-settings-hint" data-testid="send-shortcut-hint">换行改用
+    {mode === 'enter'
+      ? <KbdGroup><Kbd>Shift</Kbd><Kbd>Enter</Kbd></KbdGroup>
+      : <Kbd>Enter</Kbd>}
+  </span>
+}
+
+/** 快捷键 group shared by the 对话 page; same recorder, conflict and reset logic as before. */
+function ShortcutSettingsGroup() {
+  const { preferences, setBinding, restoreDefaults } = useShortcutPreferences()
+  const platform = usePlatform()
+  const [error, setError] = useState<string | null>(null)
+  const [resetOpen, setResetOpen] = useState(false)
+  const customized = SHORTCUT_ACTIONS.some((action) => preferences[action.id] !== action.defaultShortcut)
+  const saveBinding = (actionId: ShortcutActionId, shortcut: string | null, replaceConflicts: boolean) => {
+    try {
+      setBinding(actionId, shortcut, replaceConflicts)
+      setError(null)
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '快捷键保存失败，请重试')
+      return false
+    }
+  }
+  const reset = () => {
+    try {
+      restoreDefaults()
+      setError(null)
+      setResetOpen(false)
+      toast.success('快捷键已恢复默认')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '恢复默认失败，请重试')
+      setResetOpen(false)
+    }
+  }
+  return <SettingsGroup id={settingsSectionId('shortcuts')} title="快捷键" aside={<Button type="button" variant="ghost" size="sm" disabled={!customized} onClick={() => setResetOpen(true)}><RotateCcw />恢复默认</Button>}>
+    {SHORTCUT_ACTIONS.map((action) => <SettingsRow key={action.id} title={action.label} description={action.description}>
+      <ShortcutRecorder
+        className="fox-settings-shortcut"
+        label={`${action.label}快捷键`}
+        hideLabel
+        platform={platform}
+        value={preferences[action.id]}
+        resetValue={action.defaultShortcut}
+        placeholder="未设置，点击录制"
+        bindings={SHORTCUT_ACTIONS.filter((item) => item.id !== action.id && preferences[item.id]).map((item) => ({ shortcut: preferences[item.id]!, label: item.label }))}
+        onValueChange={(value, details) => saveBinding(action.id, value, Boolean(details.replaced))}
+      />
+    </SettingsRow>)}
+    {error && <p className="fox-settings-error" role="alert">{error}</p>}
+    <p className="fox-settings-footnote">点击快捷键后按下新的组合键即可修改，录制时按 Esc 取消、Backspace 清除；单项恢复默认在悬停时出现。输入法选字期间不会触发快捷键。</p>
+    <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+      <DialogContent><DialogHeader><DialogTitle>恢复默认快捷键</DialogTitle><DialogDescription>所有快捷键将恢复为 Fox 默认组合键，已清除的快捷键也会重新启用。</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={() => setResetOpen(false)}>取消</Button><Button type="button" onClick={reset}>恢复默认</Button></DialogFooter></DialogContent>
+    </Dialog>
+  </SettingsGroup>
+}
+
+export function ConversationSettingsPage({ sidebarCollapsed, onSidebar, section }: { sidebarCollapsed: boolean; onSidebar: () => void; section?: SettingsSectionAnchor }) {
   const [spellcheck, setSpellcheck] = useStoredPreference('fox.preferences.spellcheck', true)
-  return <WorkspacePage title="对话设置" subtitle="消息与历史记录" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="交互偏好" title="对话设置" description="调整发送消息与附件行为。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>消息输入</h2><p>统一键盘输入行为。</p></div><Keyboard /></div><PreferenceRow title="发送方式" description="Enter 发送；中文输入法选字时 Enter 只确认候选字"><Kbd>Enter</Kbd></PreferenceRow><PreferenceRow title="换行" description="Ctrl / Cmd + Enter 或 Shift + Enter 换行"><KbdGroup className="fox-setting-kbd-group"><Kbd>Ctrl</Kbd><span>/</span><Kbd>Cmd</Kbd><span>+</span><Kbd>Enter</Kbd></KbdGroup></PreferenceRow><PreferenceRow title="拼写检查" description="使用系统 WebView 的拼写检查能力"><Switch checked={spellcheck} onCheckedChange={setSpellcheck} /></PreferenceRow></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>对话与附件</h2><p>新对话只在首次发送消息后写入历史记录。</p></div><MessageSquare /></div><PreferenceRow title="文件附件" description="文本与文档附件已支持；图片理解取决于当前模型"><SettingValue>已启用</SettingValue></PreferenceRow><PreferenceRow title="消息导航" description="在对话左侧显示当前对话的消息缩略导航"><SettingValue>已启用</SettingValue></PreferenceRow></Card></SettingsScaffold></WorkspacePage>
+  const [sendShortcut, setSendShortcut] = usePromptSendShortcutPreference()
+  useScrollToSettingsSection(section)
+  // 「消息导航」 has no backing state in the chat view yet, so it is not offered
+  // as a switch; 「文件附件」 was a read-only label and is gone.
+  return <WorkspacePage title="对话" subtitle="消息输入与快捷键" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <SettingsPageLayout title="对话" description="调整消息输入方式和常用快捷键。">
+      <SettingsGroup title="消息输入">
+        <SettingsRow title="发送方式" description="中文输入法选字时，Enter 只确认候选字">
+          <Tabs className="fox-settings-segmented" value={sendShortcut} onValueChange={(value) => { if (value === 'enter' || value === 'mod-enter') setSendShortcut(value) }}>
+            <TabsList aria-label="发送方式">
+              <TabsTrigger value="enter">Enter 发送</TabsTrigger>
+              <TabsTrigger value="mod-enter">Ctrl/Cmd + Enter 发送</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <SendShortcutHint mode={sendShortcut} />
+        </SettingsRow>
+        <SettingsRow title="拼写检查" description="使用系统 WebView 的拼写检查能力">
+          <Switch checked={spellcheck} onCheckedChange={setSpellcheck} aria-label="拼写检查" />
+        </SettingsRow>
+      </SettingsGroup>
+      <ShortcutSettingsGroup />
+    </SettingsPageLayout>
+  </WorkspacePage>
+}
+
+export function AgentSettingsPage({ sidebarCollapsed, onSidebar, navigate, section }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; section?: SettingsSectionAnchor }) {
+  return <MergedSettingsPage title="Agent" description="配置 Fox 通用助手、新对话默认模型和项目权限。" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} section={section}>
+    <AiSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} navigate={navigate} />
+    <ProjectPermissionsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
+  </MergedSettingsPage>
+}
+
+export function DataAboutSettingsPage({ sidebarCollapsed, onSidebar, navigate, section }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; section?: SettingsSectionAnchor }) {
+  return <MergedSettingsPage title="数据与关于" description="查看使用情况、维护本机数据，以及 Fox 的版本信息。" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} section={section}>
+    <UsageStatisticsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
+    <MaintenancePage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} navigate={navigate} />
+    <AboutSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
+  </MergedSettingsPage>
 }
 
 function formatUsageNumber(value: number) {
@@ -902,7 +1165,7 @@ export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCo
   const cacheHitRate = cacheEligibleTokens ? Math.round((statistics?.cacheReadTokens ?? 0) / cacheEligibleTokens * 100) : 0
   const latestEvaluation = observability?.evaluationHistory[0] ?? null
   const operationLabels: Record<string, string> = { plan: '规划', inference: '模型', execute_tool: '工具', host_prepare: '准备', finalize: '收尾', ui_render: '界面' }
-  return <WorkspacePage title="使用情况" subtitle="活动、Trace 与评测" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="本机统计" title="使用情况" description="查看 Fox 在这台设备上的使用、分段延迟、Trace 覆盖与固定离线回归；不包含费用估算。">
+  return <SettingsWorkspacePage title="使用情况" subtitle="活动、Trace 与评测" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="本机统计" title="使用情况" section="usage" description="查看 Fox 在这台设备上的使用、分段延迟、Trace 覆盖与固定离线回归；不包含费用估算。">
     {error && <SettingsLoadError message="暂时无法读取用量数据" detail={error} onRetry={refresh} />}
     {!statistics && loading ? <Card className="fox-settings-section fox-usage-loading"><LoaderCircle className="animate-spin" /><span>正在汇总使用记录</span></Card> : statistics && <>
       <Card className="fox-agent-work-card fox-usage-record-card">
@@ -944,7 +1207,7 @@ export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCo
         </Card>
       </>}
     </>}
-  </SettingsScaffold></WorkspacePage>
+  </SettingsScaffold></SettingsWorkspacePage>
 }
 
 export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
@@ -954,7 +1217,7 @@ export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate }
 }
 
 export function AboutSettingsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
-  return <WorkspacePage title="关于" subtitle="Fox Desktop" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="应用信息" title="关于" description="查看 Fox 版本、技术栈与许可证。"><Card className="fox-settings-section fox-about-product"><img src="/mascot/fox/status/fox_sayhi.png" alt="" /><div><h2>Fox</h2><p>轻量、高效、可连接资料库服务的桌面专家工作台。</p><Badge className="fox-settings-version" variant="outline">0.1.0</Badge></div></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>版本</h2><p>当前使用 Tauri 2、React、shadcn/ui、AI Elements 与 Fox Runtime。</p></div><Info /></div><PreferenceRow title="当前版本" description="开发预览版本"><Badge className="fox-settings-version" variant="outline">0.1.0</Badge></PreferenceRow></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>开源与许可</h2><p>Fox 自身许可将在正式发布前确定；第三方依赖遵循各自许可证。</p></div><Archive /></div><PreferenceRow title="架构文档" description="项目 docs 目录包含三个阶段的设计与实施记录"><SettingValue>本机文档</SettingValue></PreferenceRow></Card></SettingsScaffold></WorkspacePage>
+  return <SettingsWorkspacePage title="关于" subtitle="Fox Desktop" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="应用信息" title="关于" section="about" description="查看 Fox 版本、技术栈与许可证。"><Card className="fox-settings-section fox-about-product"><img src="/mascot/fox/status/fox_sayhi.png" alt="" /><div><h2>Fox</h2><p>轻量、高效、可连接资料库服务的桌面专家工作台。</p><Badge className="fox-settings-version" variant="outline">0.1.0</Badge></div></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>版本</h2><p>当前使用 Tauri 2、React、shadcn/ui、AI Elements 与 Fox Runtime。</p></div><Info /></div><PreferenceRow title="当前版本" description="开发预览版本"><Badge className="fox-settings-version" variant="outline">0.1.0</Badge></PreferenceRow></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>开源与许可</h2><p>Fox 自身许可将在正式发布前确定；第三方依赖遵循各自许可证。</p></div><Archive /></div><PreferenceRow title="架构文档" description="项目 docs 目录包含三个阶段的设计与实施记录"><SettingValue>本机文档</SettingValue></PreferenceRow></Card></SettingsScaffold></SettingsWorkspacePage>
 }
 
 export function SkillsPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
@@ -1166,9 +1429,8 @@ export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sid
   const okChecks = diagnosticChecks.filter((item) => item.status === 'ok')
   const cacheRatio = previewCache?.limitBytes ? Math.min(1, previewCache.totalBytes / previewCache.limitBytes) : 0
   const clearableBytes = Math.max(0, (previewCache?.totalBytes ?? 0) - (previewCache?.activeBytes ?? 0))
-  return <WorkspacePage title="数据维护" subtitle="备份、恢复与维护" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('settings')}>
-    <div className="fox-settings-layout">
-      <main><header><span>系统维护</span><h1>数据维护</h1><p>管理 Fox 本机数据。备份不包含 API Key、Token 或其他系统凭证库内容。</p></header>
+  return <SettingsWorkspacePage title="数据维护" subtitle="备份、恢复与维护" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('settings')}>
+    <SettingsScaffold kicker="系统维护" title="数据维护" section="maintenance" description="管理 Fox 本机数据。备份不包含 API Key、Token 或其他系统凭证库内容。">
         {error && <SettingsLoadError message="操作没有完成，请稍后再试" detail={error} />}
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>全面检查</h2><p>检查 Runtime、模型、资料库、向量、插件与系统路径；摘要不包含凭证、正文或文件内容。</p></div><Button variant="outline" size="sm" disabled={diagnosticsLoading || busy != null} onClick={() => void runFullDiagnostics()}><RotateCcw className={diagnosticsLoading ? 'animate-spin' : undefined} />重新诊断</Button></div><div className="fox-diagnostic-summary" aria-live="polite">{diagnosticsLoading && diagnosticChecks.length === 0 ? <span className="fox-diagnostic-loading"><LoaderCircle className="animate-spin" />正在逐项运行自检</span> : problemChecks.length > 0 ? <><i className={cn('fox-status-dot', problemChecks.some((item) => item.status === 'error') ? 'is-error' : 'is-warning')} aria-hidden="true" /><b>{problemChecks.length} 项需要处理</b></> : <><i className="fox-status-dot is-ok" aria-hidden="true" /><b>全部正常</b></>}</div>{problemChecks.length > 0 && <div className="fox-diagnostic-checks" aria-live="polite">{problemChecks.map((item) => <div key={item.id} className={`is-${item.status}`}><i className={cn('fox-status-dot', item.status === 'error' ? 'is-error' : 'is-warning')} aria-hidden="true" /><p><b>{item.label}</b><small>{item.summary}</small></p>{item.route && <Button variant="ghost" size="sm" onClick={() => navigate(item.route!)}>{item.actionLabel ?? '查看'}<ChevronRight /></Button>}</div>)}</div>}{okChecks.length > 0 && <><button type="button" className="fox-diagnostic-ok-toggle" aria-expanded={showOkChecks} onClick={() => setShowOkChecks((open) => !open)}><ChevronDown />{okChecks.length} 项正常</button>{showOkChecks && <div className="fox-diagnostic-checks is-ok-items">{okChecks.map((item) => <div key={item.id} className="is-ok"><i className="fox-status-dot is-ok" aria-hidden="true" /><p><b>{item.label}</b><small>{item.summary}</small></p></div>)}</div>}</>}<div className="fox-maintenance-stats"><span><b>{diagnostics?.runtime ?? '--'}</b><small>Runtime</small></span><span><b>v{diagnostics?.protocolVersion ?? '--'}</b><small>协议</small></span><span><b>{diagnostics?.sessionFileCount ?? '--'}</b><small>Session</small></span><span><b>{diagnostics?.recoveryAttempts ?? 0}</b><small>恢复尝试</small></span></div><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={!diagnosticChecks.length} onClick={() => void copyDiagnosticSummary()}><Copy />复制摘要</Button><Button size="sm" disabled={busy != null} onClick={() => void run('diagnostics', desktopClient.exportDiagnostics)}>{busy === 'diagnostics' ? <LoaderCircle className="animate-spin" /> : <Download />}导出诊断包</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>预览缓存</h2><p>Fox 缓存资料库原文件以加快再次预览，达到上限后会自动按最近使用时间清理。</p></div><Badge variant="secondary">{previewCache ? `${Math.round(cacheRatio * 100)}%` : '读取中'}</Badge></div><div className="fox-preview-cache-meter" aria-label="预览缓存占用"><i style={{ width: `${cacheRatio * 100}%` }} /></div><div className="fox-maintenance-stats"><span><b>{previewCache ? formatStorageSize(previewCache.totalBytes) : '--'}</b><small>已使用</small></span><span><b>{previewCache ? formatStorageSize(clearableBytes) : '--'}</b><small>可清理</small></span><span><b>{previewCache?.activeFiles ?? '--'}</b><small>使用中</small></span><span><b>{previewCache ? formatStorageSize(previewCache.limitBytes) : '--'}</b><small>缓存上限</small></span></div><PreferenceRow title="缓存上限" description="调小后会立即淘汰未使用的旧文件，正在打开的预览会保留"><Select value={previewCache ? String(previewCache.limitBytes) : undefined} disabled={busy != null || !previewCache} onValueChange={(value) => void updatePreviewCacheLimit(value)}><SelectTrigger className="fox-settings-select"><SelectValue placeholder="选择上限" /></SelectTrigger><SelectContent><SelectItem value={String(250 * 1024 * 1024)}>250 MB</SelectItem><SelectItem value={String(500 * 1024 * 1024)}>500 MB</SelectItem><SelectItem value={String(1024 * 1024 * 1024)}>1 GB</SelectItem><SelectItem value={String(2 * 1024 * 1024 * 1024)}>2 GB</SelectItem><SelectItem value={String(5 * 1024 * 1024 * 1024)}>5 GB</SelectItem></SelectContent></Select></PreferenceRow><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={busy != null} onClick={() => void refreshPreviewCache()}><RotateCcw />刷新用量</Button><Button variant="outline" size="sm" disabled={busy != null || !previewCache || clearableBytes === 0} onClick={() => { void confirmDialog({ title: '清理预览缓存', description: '清理所有未使用的资料库预览缓存？正在打开的文件会保留。', confirmLabel: '清理', destructive: true }).then((confirmed) => { if (confirmed) void clearPreviewCache() }) }}>{busy === 'preview-cache' ? <LoaderCircle className="animate-spin" /> : <Trash2 />}清理未使用缓存</Button></div></Card>
@@ -1176,9 +1438,8 @@ export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sid
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>恢复数据</h2><p>先验证清单、哈希、路径与数据库完整性，下次启动 Fox 时应用。</p></div><FileWarning /></div><label className="fox-maintenance-field">备份位置<Input value={restorePath} onChange={(event) => setRestorePath(event.target.value)} placeholder="D:\\Backups\\fox-backup-....foxbackup" /></label><div className="fox-setting-actions"><Button variant="outline" disabled={busy != null || !restorePath.trim()} onClick={() => { const path = restorePath.trim(); void confirmDialog({ title: '恢复数据', description: '恢复会在下次启动时替换当前 Fox 核心数据，是否继续？', confirmLabel: '继续恢复', destructive: true }).then((confirmed) => { if (confirmed) void run('restore', () => desktopClient.restoreBackup(path)) }) }}>{busy === 'restore' ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}验证并安排恢复</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>清理数据</h2><p>清理超过保留期的孤立 Runtime Session、孤立附件和失败记录，不触碰项目目录中的已导出文件。</p></div><Trash2 /></div><label className="fox-maintenance-field">孤立 Session 保留天数<Input inputMode="numeric" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} /></label><div className="fox-setting-actions"><Button variant="outline" disabled={busy != null} onClick={() => { const days = Math.max(1, Number(retentionDays) || 30); void confirmDialog({ title: '清理数据', description: '开始清理 Fox 内部的孤立文件？', confirmLabel: '开始清理', destructive: true }).then((confirmed) => { if (confirmed) void run('cleanup', () => desktopClient.cleanupData(days)) }) }}>{busy === 'cleanup' ? <LoaderCircle className="animate-spin" /> : <Trash2 />}开始清理</Button></div></Card>
         {lastPath && <Card className="fox-maintenance-result"><Check /><div><b>操作完成</b><p title={lastPath}>{lastPath}</p></div></Card>}
-      </main>
-    </div>
-  </WorkspacePage>
+    </SettingsScaffold>
+  </SettingsWorkspacePage>
 }
 
 function formatStorageSize(bytes: number) {
