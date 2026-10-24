@@ -289,8 +289,6 @@ describe('settings', () => {
       },
     }
     render(<AgentBackendSettingsSection client={client} />)
-    const codex = await screen.findByLabelText('Codex 默认权限') as HTMLSelectElement
-    expect(Array.from(codex.options).map((option) => option.textContent)).toEqual(['请求审批', '帮我批准（不可用）'])
     const dsh = await screen.findByLabelText('DeepSeek 默认权限') as HTMLSelectElement
     // Full access from the switch: the remembered sandboxed choice is shown.
     expect(dsh.value).toBe('read-only')
@@ -298,5 +296,7 @@ describe('settings', () => {
     const pi = await screen.findByLabelText('pi 默认权限') as HTMLSelectElement
     fireEvent.change(pi, { target: { value: 'allow' } })
     await waitFor(() => expect(calls).toEqual([{ backend: 'pi', mode: 'allow', defaultOnly: true }]))
+    // Codex is hidden (HIDDEN_AGENT_BACKENDS): no default-permission row.
+    expect(screen.queryByLabelText('Codex 默认权限')).toBeNull()
   })
 })
