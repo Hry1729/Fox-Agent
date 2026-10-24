@@ -284,6 +284,10 @@ pub enum RouteError {
         entry: HostEntry,
         detail: String,
     },
+    /// A new conversation asked for a backend that is hidden from users
+    /// ([`AgentBackend::HIDDEN`]). Existing conversations are never refused
+    /// for this reason.
+    Hidden(AgentBackend),
 }
 
 impl RouteError {
@@ -293,6 +297,7 @@ impl RouteError {
     pub const CODE_NOT_YET_WIRED: &'static str = "agent_backend_not_yet_wired";
     pub const CODE_ENTRY_UNSUPPORTED: &'static str = "agent_backend_entry_unsupported";
     pub const CODE_LOOKUP_FAILED: &'static str = "agent_backend_lookup_failed";
+    pub const CODE_HIDDEN: &'static str = "agent_backend_hidden";
 
     pub fn code(&self) -> &'static str {
         match self {
@@ -302,6 +307,7 @@ impl RouteError {
             Self::NotYetWired { .. } => Self::CODE_NOT_YET_WIRED,
             Self::EntryUnsupported { .. } => Self::CODE_ENTRY_UNSUPPORTED,
             Self::LookupFailed { .. } => Self::CODE_LOOKUP_FAILED,
+            Self::Hidden(_) => Self::CODE_HIDDEN,
         }
     }
 
@@ -352,6 +358,10 @@ impl RouteError {
                 "无法读取会话绑定的 Agent 后端（{}），为避免把外部会话交给错误的运行时，已拒绝本次操作，请稍后重试：{detail}",
                 entry.as_str()
             ),
+            Self::Hidden(backend) => format!(
+                "Agent「{}」暂未开放，不能用于新会话；已有会话不受影响",
+                backend.as_str()
+            ),
         }
     }
 
@@ -394,12 +404,16 @@ pub fn bound_backend(stored: Option<&str>) -> Result<AgentBackend, RouteError> {
     }
 }
 
-/// Decide the backend a new conversation is frozen to. Absent → `fox`.
+/// Decide the backend a new conversation is frozen to. Absent → `fox`. A
+/// hidden backend ([`AgentBackend::HIDDEN`]) is refused before the switch.
 pub fn choose_for_new_conversation(
     requested: Option<&str>,
     switch: &BackendSwitch,
 ) -> Result<AgentBackend, RouteError> {
     let backend = parse_requested(requested)?.unwrap_or(AgentBackend::Fox);
+    if backend.hidden() {
+        return Err(RouteError::Hidden(backend));
+    }
     if !switch.is_enabled(backend) {
         return Err(RouteError::Disabled {
             backend,
@@ -524,6 +538,9 @@ pub struct BackendOption {
     /// wiring batch).
     pub wired: bool,
     pub experimental: bool,
+    /// Hidden from user-facing choices ([`AgentBackend::HIDDEN`]); `enabled`
+    /// still says whether its existing conversations may run.
+    pub hidden: bool,
     /// Why it cannot be picked / used, for the UI tooltip.
     pub reason: Option<String>,
 }
@@ -544,6 +561,7 @@ pub fn backend_options(switch: &BackendSwitch) -> Vec<BackendOption> {
                 enabled,
                 wired,
                 experimental: backend.experimental(),
+                hidden: backend.hidden(),
                 reason,
             }
         })
@@ -642,13 +660,18 @@ mod tests {
         assert_eq!(choose_for_new_conversation(Some("fox"), &BackendSwitch::all_off()), Ok(AgentBackend::Fox));
         for backend in EXTERNAL {
             let error = choose_for_new_conversation(Some(backend.as_str()), &BackendSwitch::all_off()).unwrap_err();
-            assert_eq!(error.code(), "agent_backend_disabled");
-            assert_eq!(choose_for_new_conversation(Some(backend.as_str()), &on()), Ok(backend));
+            if backend.hidden() {
+                assert_eq!(error.code(), "agent_backend_hidden");
+                assert_eq!(choose_for_new_conversation(Some(backend.as_str()), &on()), Err(RouteError::Hidden(backend)));
+            } else {
+                assert_eq!(error.code(), "agent_backend_disabled");
+                assert_eq!(choose_for_new_conversation(Some(backend.as_str()), &on()), Ok(backend));
+            }
         }
         // Only the selected backend is opened by a list.
         let only_pi = BackendSwitch::from_env_value(Some("pi"));
         assert_eq!(choose_for_new_conversation(Some("pi"), &only_pi), Ok(AgentBackend::Pi));
-        assert_eq!(choose_for_new_conversation(Some("codex"), &only_pi).unwrap_err().code(), "agent_backend_disabled");
+        assert_eq!(choose_for_new_conversation(Some("deepseek"), &only_pi).unwrap_err().code(), "agent_backend_disabled");
         // `engine_id` values are not backend ids.
         let error = choose_for_new_conversation(Some("deepseek_harness"), &on()).unwrap_err();
         assert_eq!(error, RouteError::InvalidBackend("deepseek_harness".into()));
@@ -804,6 +827,34 @@ mod tests {
             assert!(option.reason.is_none());
         }
         assert!(all.iter().find(|option| option.backend == AgentBackend::Deepseek).unwrap().experimental);
+        // Codex is hidden from users but still enabled, so its existing
+        // conversations stay runnable.
+        let codex = all.iter().find(|option| option.backend == AgentBackend::Codex).unwrap();
+        assert!(codex.hidden && codex.enabled);
+        assert!(all.iter().filter(|option| option.backend != AgentBackend::Codex).all(|option| !option.hidden));
+    }
+
+    /// 2026-10-24: Codex is hidden (one switch, `AgentBackend::HIDDEN`). A new
+    /// conversation cannot pick it whatever the switch says; an existing Codex
+    /// conversation keeps routing to its runtime, and the administrator
+    /// switch still only forces off.
+    #[test]
+    fn hidden_codex_refuses_new_conversations_but_keeps_existing_ones() {
+        assert_eq!(AgentBackend::HIDDEN, [AgentBackend::Codex]);
+        assert!(AgentBackend::Codex.hidden());
+        assert!(!AgentBackend::Fox.hidden() && !AgentBackend::Pi.hidden() && !AgentBackend::Deepseek.hidden());
+        for switch in [on(), BackendSwitch::from_env_value(Some("codex")), BackendSwitch::all_off()] {
+            let error = choose_for_new_conversation(Some("codex"), &switch).unwrap_err();
+            assert_eq!(error.code(), RouteError::CODE_HIDDEN);
+            assert!(!error.retryable());
+            assert!(error.message().contains("已有会话不受影响"));
+        }
+        for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve] {
+            assert_eq!(route_stored(entry, Some("codex"), None, &on()), Ok((AgentBackend::Codex, Route::External(AgentBackend::Codex))));
+            assert_eq!(route_stored(entry, Some("codex"), Some("codex"), &on()), Ok((AgentBackend::Codex, Route::External(AgentBackend::Codex))));
+        }
+        assert_eq!(session_access(AgentBackend::Codex, &on()), SessionAccess::Runnable);
+        assert_eq!(session_access(AgentBackend::Codex, &BackendSwitch::all_off()), SessionAccess::ReadOnlyDisabled);
     }
 
     #[test]
