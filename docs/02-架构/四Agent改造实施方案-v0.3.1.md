@@ -4,6 +4,18 @@ subtitle: v0.3 ＋ 开工备注三条 ＋ 复用优先（ACP）调整
 date: 2026 年 10 月 19 日
 ---
 
+# 实施状态（2026-10-24）
+
+> 本节是后加的状态说明；从“0 v0.3.1 变更说明”起是方案原文，未改动。当前架构以 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent) 为准。
+
+- **已完成并合入 `main`**：阶段 0（三个外部后端的协议原型与证据，见 `crates/fox-agent-backend/docs/pi.md`、`deepseek.md`、`codex.md`）、阶段 1（共享 Host 加固）、阶段 2（Fox + 公共基础：会话级 `agent_backend` 冻结、Host 路由、ACP 端口）、阶段 3（pi、DeepSeek Harness、Codex 三个后端经 ACP 接通，含沙箱、审批、取消、能力声明）。逐批复测记录见 `crates/fox-agent-backend/docs/sandbox.md` 第 12、13 节。
+- **产品定位调整**：内置 Agent 为 Fox（Kernel，即 FoxBackend）、DeepSeek Harness（dsh，实验）和 pi。**Codex 已实现但暂时隐藏**：新会话不能选，已有 Codex 会话照常可用，代码和测试保留；隐藏开关为 `AgentBackend::HIDDEN`。
+- **待办 / 规划中**：「自定义 ACP Agent」通用接入入口（用户自行安装其他 ACP Agent、填写启动命令，Codex 以后也走这里）。
+- **与方案原文不同的落地点**：`FOX_EXTERNAL_BACKENDS` 最终是管理员“只能强制关闭”的开关，未设置时由用户在 设置 →「新会话使用的 Agent」中选择（默认 Fox）；权限按各 Agent 的原生选项显示，完全访问是独立开关，只在创建会话时授予；模型 API Key 按 base URL 在系统凭据库全局共享。
+- **Fox 自身执行路径**：Kernel / Authoritative 是默认路径；Legacy（`FOX_KERNEL_MODE=legacy`）只用于调试和兼容旧 Run。
+- **阶段 4（收敛）仍待做**：Legacy 路径和 Shadow 观察路径的清理尚未开始。
+
+
 # 0 v0.3.1 变更说明（开工备注）
 
 1. **实验开关不豁免安全底线**（第 8 节）：实验后端可暂不满足完整功能和稳定性要求，但权限隔离、审批不重放、凭据保护必须满足，手动开启也一样。
