@@ -1,3 +1,5 @@
+> 历史文档，内容截至 2026-10-11，现状见 [docs/02-架构/架构文档导航.md](docs/02-架构/架构文档导航.md) 与当前代码（本文不再维护）。
+
 # UI 改进计划
 
 工作目录：`D:\python\projects\Fox\worktrees\ui-improvements-20261009`（分支 `ui/improvements-20261009`）
