@@ -223,3 +223,67 @@
   line-height: 1.4;
   white-space: nowrap;
 }
+
+/* ---------- Settings navigation ---------- */
+.fox-settings-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 14px;
+  padding: 0 var(--fox-space-l);
+}
+
+.fox-settings-sidebar-brand img {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 7px;
+  filter: drop-shadow(0 1px 2px color-mix(in oklch, var(--fox-text) 12%, transparent));
+}
+
+.fox-settings-sidebar-brand b {
+  color: var(--fox-text);
+  font-size: var(--fox-type-title);
+  font-weight: var(--fox-weight-semibold);
+  letter-spacing: 0.01em;
+}
+
+.fox-context-sidebar-nav.is-settings .fox-context-sidebar-group {
+  gap: 2px;
+}
+
+.fox-context-sidebar-nav.is-settings .fox-context-sidebar-group + .fox-context-sidebar-group {
+  margin-top: 18px;
+}
+
+.fox-context-sidebar-nav.is-settings .fox-context-sidebar-group-label {
+  padding: 0 var(--fox-space-l) 6px;
+  color: var(--fox-faint);
+  font-size: var(--fox-type-caption) !important;
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-context-sidebar-nav.is-settings .fox-sidebar-command {
+  color: var(--fox-muted);
+}
+
+.fox-context-sidebar-nav.is-settings .fox-sidebar-command:hover {
+  color: var(--fox-text);
+}
+
+/* Selected settings destination: a raised white row with a hairline; dark mode
+   uses the sidebar accent instead of a shadow. */
+.fox-shell .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active,
+.fox-shell .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active:hover,
+.fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active {
+  background: var(--background);
+  color: var(--fox-text);
+  box-shadow: var(--fox-shadow-sm), 0 0 0 1px color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.dark .fox-shell .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active,
+.fox-shell .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active:hover,
+.fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active {
+  background: var(--sidebar-accent);
+  box-shadow: none;
+}
