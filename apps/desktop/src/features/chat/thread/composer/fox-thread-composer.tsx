@@ -8,7 +8,7 @@ import { useRunSteering } from '../../hooks/use-run-steering'
 import { localKnowledgePickerState } from '../../knowledge-picker-state'
 import { ComposerRuntimeContext, IconButton } from '../../fox-shared'
 import { type SlashCommand, slashCommandRuntimeText, slashCommands } from '../../composer/fox-slash-commands'
-import { insertPromptNewline, resolvePromptEnterAction } from '@/components/ai-elements/prompt-send-shortcut'
+import { insertPromptNewline, readPromptSendShortcut, resolvePromptEnterAction } from '@/components/ai-elements/prompt-send-shortcut'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -26,9 +26,9 @@ import { FoxDecisionCard, FOX_PERMISSION_MODES } from './fox-decision-card'
  * `ComposerPrimitive.Root/Input/Send/Cancel`; the runtime owns the text, the
  * attachments and the send path (onNew → conversation.send), while Fox owns the
  * slash commands, the permission mode, the decision cards, the steering lanes
- * and the draft. Keyboard rules come from `prompt-send-shortcut.ts`: Enter
- * sends (never while an IME composition owns the key), Shift+Enter and
- * Ctrl/Cmd+Enter break the line.
+ * and the draft. Keyboard rules come from `prompt-send-shortcut.ts` and follow
+ * the 发送方式 preference: Enter sends (Shift/Ctrl/Cmd+Enter break the line), or
+ * Ctrl/Cmd+Enter sends (Enter breaks the line). An IME-owned Enter never sends.
  */
 export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = false, projectRoot, projectPermissionMode, expertReadOnly = false, expertToolAvailability, activeExpert, supportsImageInput = false, draft, setDraft, resetKey, steeringConversationId, steeringActive = false, questionRequest, onSubmitQuestion, runtimeApprovals, onResolveApproval, goalProgressData, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onProject, onPermissionModeChange, onKnowledge, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onCancel }: {
   runtimeControlled: boolean
@@ -226,7 +226,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
   }
 
   const onInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    const action = resolvePromptEnterAction(event.nativeEvent, 'enter')
+    const action = resolvePromptEnterAction(event.nativeEvent, readPromptSendShortcut())
     if (action === 'send' && steeringMode) {
       // While a task runs and accepts steering, the form's default is the
       // current-task supplement; the primitive's internal Enter submit must
