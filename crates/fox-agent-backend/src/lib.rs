@@ -37,6 +37,8 @@
 //! * [`statefile`]: locked, atomically written JSON state files.
 //! * [`credential_save`]: provider save order with Key persistence (snapshot,
 //!   Keys before the record, undo on failure, deletions after the record).
+//! * [`credential_delete`]: provider delete reclaims its Keys (record first,
+//!   then Keys; a failed Key delete never restores the record, it is audited).
 //! * `acp` (feature `acp`): the Host-side ACP v1 client built on the official
 //!   `agent-client-protocol` crate.
 //! * `bridge` (feature `acp`): Host side of the ACP bridge used on Windows in
@@ -61,6 +63,7 @@
 
 pub mod capability_view;
 pub mod config;
+pub mod credential_delete;
 pub mod credential_save;
 pub mod host_routing;
 pub mod launch;
