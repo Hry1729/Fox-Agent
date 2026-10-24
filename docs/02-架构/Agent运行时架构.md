@@ -2,12 +2,12 @@
 
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
-> 维护范围：`services/agent-runtime`、`apps/desktop/src-tauri/src/runtime_host`、Runtime Adapter 契约<br>
-> 最后更新：2026-08-27
+> 维护范围：`services/agent-runtime`、`apps/desktop/src-tauri/src/runtime_host`、`crates/fox-agent-backend`、Runtime Adapter 契约<br>
+> 最后更新：2026-10-24
 
 ## 目标与边界
 
-Fox 把 Agent Runtime 定义为可替换的模型执行适配层，而不是产品状态中心。当前本地实现基于 Pi Coding Agent SDK，但对话、消息、Run、Goal、Task、Evidence、项目授权和审批都属于 Fox Host；替换 Pi 或增加其他 Agent 框架时，不应重写这些产品模型。
+Fox 把 Agent Runtime 定义为可替换的模型执行适配层，而不是产品状态中心。会话先按外层 Agent 后端分流（Fox / DeepSeek Harness / pi，Codex 已实现但暂时隐藏，见[外层 Agent 后端](#外层-agent-后端四-agent)）；本文其余部分描述 Fox 自己的执行路径。Fox 的本地实现基于 Pi Coding Agent SDK，但对话、消息、Run、Goal、Task、Evidence、项目授权和审批都属于 Fox Host；替换 Pi 或增加其他 Agent 框架时，不应重写这些产品模型。
 
 稳定边界如下：
 
@@ -37,7 +37,7 @@ flowchart LR
     HOST -->|"统一 Runtime Event"| UI
 ```
 
-`Agent.runtime_type` 是当前路由键：
+在外层 Agent 后端为 `fox` 的会话里，`Agent.runtime_type` 是路由键（外部后端的会话不经过这张表）：
 
 | 值 | 当前实现 | 进程位置 | 会话载体 |
 | --- | --- | --- | --- |
@@ -45,6 +45,86 @@ flowchart LR
 | `yuxi` | `YuxiRuntimeHost` | Tauri Host 内异步任务 + 远端服务 | 远端 Thread/Run + 本地游标 |
 
 Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增加 LangGraph、自研 Runtime 或其他 SDK 时，应新增适配器并复用 Host 契约，而不是在前端增加一套对话状态。
+
+## 外层 Agent 后端（四 Agent）
+
+> 本节是“会话由哪个 Agent 执行”的唯一维护点。其他架构文档只引用本节。核对基线：`feat/four-agent-phase0-1`（与 `main` 同步），2026-10-24。
+
+四 Agent 改造（[实施方案 v0.3.1](四Agent改造实施方案-v0.3.1.md)）的阶段 0–3 已完成并合入 `main`。每个会话在创建时绑定一个**外层 Agent 后端**（`conversations.agent_backend`，migration v95），之后不能更换。
+
+| `agent_backend` | 产品名 | 状态 | 执行路径 | 接入方式 |
+| --- | --- | --- | --- | --- |
+| `fox` | Fox | 内置，默认 | 现有 Fox 路径：Kernel / Authoritative（默认）或 Legacy（仅调试和旧 Run） | 进程内 Kernel（FoxBackend） |
+| `deepseek` | DeepSeek Harness（dsh） | 内置，实验 | `crate::external_backend` → `fox_agent_backend::external` | ACP v1：`dsh --profile acp`（锁定 `0.2.1-rc.2`） |
+| `pi` | pi | 内置 | 同上 | ACP v1：`pi-acp`（锁定 `0.0.34`）启动 pi `0.84.2` |
+| `codex` | Codex | **已实现，暂时隐藏** | 同上 | ACP v1：`codex-acp`（锁定 `2.2.2`） |
+
+`agent_backend` 与 Kernel 的 `engine_id`（`pi | codex | deepseek_harness`）不是同一个字段：`engine_id` 是 Fox 会话内部 Kernel 使用的模型引擎，保持历史语义；用过 Kernel Codex 引擎的旧会话仍是 `fox` 会话。
+
+### 路由
+
+- 决策全部在 `crates/fox-agent-backend/src/host_routing.rs`（有单元测试）；Tauri 侧只有薄胶水 `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs`。
+- 四个 Host 入口 start / cancel / approve / resume 都先读会话冻结的后端再路由：`fox` 走现有路径；外部后端走 `Route::External`。请求里的后端与冻结值不一致时拒绝（`agent_backend_misrouted`）；外部会话不支持 resume（`agent_backend_entry_unsupported`）。
+- 读取冻结值失败时，只有在所有外部后端都被强制关闭、且请求没有点名外部后端时才回退 Fox 路径（审计 `routed=fox_fallback`），否则拒绝（`agent_backend_lookup_failed`），外部会话不会因为读库失败被交给 Fox。
+- 稳定错误码：`agent_backend_invalid`、`agent_backend_disabled`、`agent_backend_misrouted`、`agent_backend_entry_unsupported`、`agent_backend_lookup_failed`、`agent_backend_hidden`；前端镜像在 `apps/desktop/src/features/conversations/model/agent-backend.ts`。
+
+### 新会话用哪个后端
+
+优先级：`FOX_EXTERNAL_BACKENDS`（管理员，只能强制关闭）> 设置 →「新会话使用的 Agent」（用户，存 `app_settings` 的 `agent_backend.default_backend`）> Fox（默认）。已有会话保持创建时的后端。
+
+`FOX_EXTERNAL_BACKENDS` 只能用来强制关闭，不能打开默认没有的东西：
+
+| 取值 | 效果 |
+| --- | --- |
+| 未设置、空、`1` / `on` / `true` / `all` / `yes` | 不强制关闭任何后端，由用户设置决定 |
+| `0` / `off` / `false` / `none` / `no` | 关闭所有外部后端，新会话只能是 Fox；已有外部会话只读 |
+| 逗号或空格分隔的列表，如 `pi,deepseek` | 只保留列出的外部后端，其余关闭；无法识别的项被忽略并上报 |
+
+### Codex 暂时隐藏
+
+产品定位是内置 Fox、dsh、pi 三个 Agent；Codex 以及其他 ACP Agent 以后通过通用的「自定义 ACP Agent」入口由用户自己安装、填写启动命令接入（**待办 / 规划中**，本版本没有这个入口）。在此之前：
+
+- 隐藏开关集中在一处：Host `AgentBackend::HIDDEN`（`crates/fox-agent-backend/src/port.rs`），前端镜像 `HIDDEN_AGENT_BACKENDS`（`agent-backend.ts`）。恢复显示时删掉这两处的条目即可。
+- 设置 →「新会话使用的 Agent」、新会话的 Agent 选择器、各 Agent 的默认权限、供应商协议的“适用于”列表都不列出 Codex。
+- 新建会话请求 `codex` 会被拒绝（`agent_backend_hidden`）；之前保存的 `default_backend = codex` 仍按原值保存，但有效值回退为 Fox，设置页给出说明。
+- 已有的 Codex 会话照常打开、查看历史，并按原有路由继续运行（仍受 `FOX_EXTERNAL_BACKENDS` 约束），不会被换成其他后端。
+- Codex 后端代码、能力声明和测试全部保留（`crates/fox-agent-backend/src/backends/codex.rs`、`tests/codex_backend.rs`）。
+- 这个隐藏开关独立于 `FOX_EXTERNAL_BACKENDS`，后者的语义不变。
+
+### 外部后端的进程与沙箱
+
+- Host 侧 ACP 客户端使用官方 Rust 库 `agent-client-protocol`（`crates/fox-agent-backend/src/acp.rs`）。
+- 桌面 Host 只从 Fox 管理的运行时目录启动外部后端（`<runtime>/backends/<pi|codex|dsh>/...`，见 `crates/fox-agent-backend/src/external_launch.rs`），或开发用的 `FOX_PI_ACP_PROGRAM` / `FOX_CODEX_ACP_PROGRAM` / `FOX_DSH_PROGRAM`；**不会**通过 `npx` 启动，未安装时返回 `agent_backend_not_installed`。`npx` 入口只用于开发和真实二进制测试。
+- 进程只继承白名单环境变量；默认在沙箱（srt；Windows 另有私有目录布局、ACP bridge 和祖先 ACE）里运行，模式为 `sandboxed`。
+- 每个后端的登录信息放在 Fox 管理的私有 HOME 里，可以从真实 HOME 按白名单导入（只复制用户确认过的文件，按名字审计）。
+- 能力按“审批覆盖 / 沙箱范围 / 取消能力 / 可观测性”四个维度声明并在后端栏显示（`agent_backend_capabilities`）。各后端实测证据见 `crates/fox-agent-backend/docs/pi.md`、`deepseek.md`、`codex.md`，人工复测记录见 `crates/fox-agent-backend/docs/sandbox.md`。
+
+### 权限：按各 Agent 的原生选项显示
+
+外部会话的权限列表直接用该 Agent 自己的选项和名字（`crates/fox-agent-backend/src/native_permission.rs`），不再套一层统一的“只读 / 询问 / 允许”：
+
+| Agent | 选项（默认加粗） | 会话中切换 |
+| --- | --- | --- |
+| DeepSeek | 只读、工作区可写（询问）、**工作区可写（不询问）**、完全访问 | 下一轮开始时重启 dsh 生效 |
+| pi | 只读、**询问**、自动、完全访问 | 由 Fox 作答，从下一次工具调用起生效 |
+| Codex（隐藏） | **请求审批**、帮我批准（只有 OpenAI 供应商可用）、完全访问权限 | 立即生效（`session/set_mode`） |
+
+- **完全访问是独立开关**：设置 →「新外部会话使用完全访问」（默认关闭）决定新外部会话是否默认完全访问；新会话的权限列表里也可以一次性选择该 Agent 的完全访问项。完全访问只在创建会话时授予并审计，会话中途只能撤销（撤销后后端在沙箱里重启），不能开启。
+- `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时完全访问不可选；`FOX_EXTERNAL_FULL_ACCESS` 是工程开关，它授予的完全访问不能在界面撤销。
+- 设置页的「默认权限」只记各 Agent 的沙箱内选项，供之后的新会话使用。
+- Fox 会话不用这张表，沿用项目权限模式（只读 / 询问 / 允许）和 Kernel 的审批，见[项目与权限架构](项目与权限架构.md)。
+
+### 模型与凭据
+
+- 外部 Agent 默认使用「模型服务」里的供应商（统一登录）。一个供应商可以配多个协议（OpenAI Chat Completions、Anthropic Messages、OpenAI Responses），并为每个 Agent 指定默认协议：Completions 给 pi，Messages 给 pi / DeepSeek，Responses 给 pi /（隐藏的）Codex。后端里已有的 Agent 登录优先。
+- API Key 存在系统凭据库（Keyring，服务名 `com.fox.agent.model`），**以 base URL 为键在本机全局共享**：同一个 base URL 的供应商、Fox 和各外部 Agent 读到的是同一把 Key。协议单独配置的 Key 用 `fox-protocol:<provider>:<profile>` 作键。保存时先写 Key 再写记录，失败回滚（`crates/fox-agent-backend/src/credential_save.rs`）；删除供应商时先删记录，再删除它的 base URL Key 和全部协议 Key，删除失败只写审计警告（`credential_delete.rs`）。因为 Key 按 base URL 共享，删除一个供应商也会删掉同地址其他条目在用的 Key，这是有意的设计（不检查是否还有其他条目使用同一地址）。
+- 数据库只记录“是否已配置”，前端拿不到明文 Key。
+
+### 待办
+
+- 「自定义 ACP Agent」通用接入入口：**待办 / 规划中**。
+- 阶段 4 收敛：Legacy 路径与 Shadow 观察路径的清理尚未开始。
+
 
 ## Runtime Adapter Contract
 
@@ -497,7 +577,9 @@ Provider 原生 reasoning 优先映射到 `reasoning.delta`。对把 `<think>` �
 
 ## Fox Agent Kernel（决策核心）
 
-> 状态：决策核心与持久化读模型已在现有 Tauri crate 内落地并通过纯 Rust 测试；线上 Run 仍由既有 Host/Pi 链路实际执行，Kernel 尚未成为权威决策源（未进入 `authoritative`）。本节描述当前真实边界，不把目标设计写成已完成事实。
+> 状态（2026-10-24 核对）：Kernel / Authoritative 是 Fox 会话的**默认执行路径**。`FOX_KERNEL_MODE` 未设置时新建 Run 使用 `authoritative`（`apps/desktop/src-tauri/src/runtime_host/kernel_authority.rs`，含单元测试）；只有显式设置 `FOX_KERNEL_MODE=legacy` 才走 Legacy，Legacy 只用于调试和兼容旧 Run。已有 Run 的执行权在创建时冻结，不会被新的默认值改写。Kernel 的模型引擎由 `FOX_KERNEL_ENGINE` 选择（默认 `pi`，可选 `codex`、`deepseek_harness`，见 `kernel_model_config.rs`），这与外层 Agent 后端无关。Legacy Run 仍挂着 Shadow 观察（启动时 `recover_shadow_observations`）；Legacy 与 Shadow 路径的清理属于四 Agent 方案阶段 4，尚未开始。
+>
+> 下文“尚未完成”清单写于 Kernel 默认化之前（2026-08-27），保留作历史记录，其中“当前是否 authoritative：否”已不成立；其余条目未逐条复核。
 
 Kernel 是状态机、权限、审批、重试、预算、取消、恢复、终态与完成判断的**唯一决策源**目标形态；Runtime Host 只管理引擎进程、通信、事件转换与取消信号传递，Resource Gateway 执行资源操作并在落地前再做最终安全校验，Engine Adapter 适配 Pi/DeepSeek/Codex，React 只读 Run Snapshot。
 
@@ -516,12 +598,12 @@ Kernel 是状态机、权限、审批、重试、预算、取消、恢复、终�
 - 身份裁决（v49/v50 与 Repository 共同强制）：`batch_id` 全局唯一（`kernel_tool_batches` 主键，跨 Run 复用即拒绝）；tool call 按 `(run_id, tool_call_id)` 复合键并冻结 tool/input/source order；outbox 按 `(run_id, effect_key)` 主键并带 Run 内唯一 `idempotency_key`。
 - 合成决策语料（`kernel/corpus.rs`）以纯脚本（无真实用户数据/路径/密钥）覆盖自动执行与强制审批、批次乱序完成、取消竞态、重复与冲突事件、Provider/Turn 重试分离、审批时钟与执行预算分离、compaction 与 retry 状态区别。
 
-尚未完成、因此 Kernel **不能**宣告 authoritative（当前是否 authoritative：**否**）：
+历史记录（2026-08-27，Kernel 默认化之前；未逐条复核）：
 
 - Shadow 已在生产 Run 启动点接线（per-run 注册表 `shadow_contexts`），Host 事件循环在**工具预检点、工具结果点、取消点、终态点、runtime crash 点**逐事件喂入：`shadow_feed_preflight`（含 Host deny 早期拒绝）、`shadow_feed_tool_settled`（消费 runtime `tool.completed/tool.failed` 的真实 toolCallId/结果，驱动 kernel `tool_settled`，使 run.completed 合法）、`shadow_feed_terminal`（取消前先 `on_cancel`→`request_cancel`+`settle_cancellation`）、crash 路径也喂 `failed` 终态并清 context。终态比较两侧统一用**状态名**（completed/failed/cancelled），kernel 侧由 controller 自行执行终态转换（已终态时回读当前状态，不伪造 Match）；legacy 与 kernel 的工具事实分别独立累计（`legacy_tools` / `kernel_tools`）。端到端测试覆盖正常序列（allow→settle→completed=Match）、取消序列（cancel→cancelled=Match）、未结算工具不得 completed 的反例。冻结身份哈希基于规范化合同**内容**（capability manifest JSON、permission mode/scope、profile/prompt），改权限/prompt/能力集会改变哈希。但这仍是只读**观察/比较闭环**：Kernel 决策不驱动真实 Run；`kernel_effect_outbox` 无生产执行器（仅测试 Harness、非默认）；Shadow 在线差异尚未设定/通过“零安全差异、状态与工具批次差异达门槛”的退出判据，也未聚合为阶段门信号。
 - Shadow 的 kernel 策略（`ShadowPolicyAdapter`）当前是独立默认策略（读工具允许、变更类工具要求审批），尚未从 Kernel 冻结权限快照完整推导；preflight 仍按逐工具单批次喂入（source_order 基于实际工具顺序的跨批次聚合待完善）；跨重启的 shadow controller 目前只恢复 cursor，工具语义历史的 rehydrate 待补齐。
 - 当前 crash/reopen 测试证明关闭路径与 shadow 物理隔离的 SQLite 事务、重启租约扫描和恢复计划；Pi→Node→JSONL→Rust→React 的真实进程崩溃、Effect 执行及 UI 续跑端到端验收仍属后续阶段。
-- 7A 决策权切换、7B Resource Gateway 迁移、React 改读统一 Snapshot、DeepSeek Harness/Codex 接入均未开始。
+- （历史）7A 决策权切换、7B Resource Gateway 迁移、React 改读统一 Snapshot、DeepSeek Harness/Codex 接入均未开始。其中 DeepSeek Harness / pi / Codex 已作为外层 Agent 后端经 ACP 接入，见[外层 Agent 后端](#外层-agent-后端四-agent)。
 - Pi 侧已先行修复两项 P0：Host 预检期取消现在终止为 `run.cancelled`（不再误记 `provider.request_failed`），且取消按 `runId` 隔离、不再全局清理其它 Run 的在途 Host 请求；Provider HTTP 重试与 Turn 重试已解耦为独立可配置策略。
 
 ## 取消、异常与恢复
@@ -547,6 +629,8 @@ Kernel 是状态机、权限、审批、重试、预算、取消、恢复、终�
 Host 首先修复数据库中断状态，再按 Runtime 类型恢复。Pi 使用 Session 文件或历史重建；Yuxi 使用远端 Thread/Run。恢复失败必须落为明确状态，不能让界面永久“处理中”。
 
 ## 增加新的 Runtime
+
+本节针对 Fox 会话内部的 Runtime Adapter。新的**外部 Agent** 应走 ACP 接入外层 Agent 后端（`crates/fox-agent-backend`），不新增 Fox Runtime Adapter；由用户自行安装、填启动命令的「自定义 ACP Agent」通用入口是**待办 / 规划中**。
 
 新增适配器时按以下顺序实施：
 
@@ -588,7 +672,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml runtime_host
 
 - Legacy Primary Run 仍按单 Worker FIFO 调度；Kernel 不设独立会话及 Child Run 的数量闸门。设备资源不足或模型服务限流会按原有错误和有界重试路径呈现。
 - 混合文本 reasoning 的拆分存在模型特异性，需要持续回归。
-- `openai-responses` 尚未作为完整 UI/Host 配置能力发布。
+- 「模型服务」的供应商协议配置已支持 `openai-responses`（设置里可选，当前只用于外部 Agent 的协议分配）；Fox 自身 Kernel 是否完整支持该协议未在本次核对范围内。
 - Planner 仍是单轮建议器；持久化 PlanRevision、独立 Reviewer 与 Acceptance 由 Host-owned A1 工作闭环承接。
 - `ContinuationDecision` 的 Runtime Schema/提议载体、Host 确定性校验、幂等追加和启动补偿已实现；自动状态转换、续跑调度和完整故障注入尚未实现。
 - `durable_v2` 在 Expert Workflow 统一接入 Task Attempt/Repair/Acceptance 前不暴露 Legacy Workflow mutator；`workflow_snapshot_get` 仍可读取，Legacy Profile 保持兼容。
@@ -638,6 +722,10 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml runtime_host
 - `services/agent-runtime/src/planner-runtime.mjs`
 - `services/agent-runtime/src/fox-planning-extension.mjs`
 - `apps/desktop/src-tauri/src/runtime_host/`
+- `apps/desktop/src-tauri/src/runtime_host/kernel_authority.rs`（Authoritative / Legacy 选择）
+- `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs`、`apps/desktop/src-tauri/src/external_backend.rs`（外层 Agent 后端 Host 胶水）
+- `crates/fox-agent-backend/src/`（`host_routing.rs`、`port.rs`、`external.rs`、`external_launch.rs`、`native_permission.rs`、`acp.rs`）
+- [四 Agent 改造实施方案 v0.3.1](四Agent改造实施方案-v0.3.1.md)
 - [总体架构](总体架构.md)
 - [对话系统架构](对话系统架构.md)
 - [项目与权限架构](项目与权限架构.md)
