@@ -1411,3 +1411,37 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
   - 而且 ShellExecuteEx 不继承标准句柄，后代进程根本没拿到管道，旧夹具即使跑通，也没测到「先关 Job、再等管道 EOF」。
   - 产品路径本身是对的：`SystemChild::try_wait` 观察到父进程退出后立即 `TerminateJobObject` 并关闭 Job（`KILL_ON_JOB_CLOSE`），之后才等读线程。
 - 修复（只改测试，没有 ignore）：启动器改成 `launch-descendant.cmd`，用 `start "" /B cmd /D /C natural-waiter.cmd` 直接 CreateProcess 并继承句柄，后代真正持有 stdout / stderr 管道；父 shell 输出 `launcher-exited` 后自然退出。断言加强为：`Succeeded`、退出码 0、没有 stop 请求、`readers_orphaned == false`、事件里有 `ReadersJoined`、stdout 读到 `launcher-exited`、打开门闩 3 秒后后代没有写出哨兵文件；并挂上 `JobReclaimer`，断言失败时也会打开门闩回收后代。
+
+### 13.23 重命名服务改用应用内输入框 + 桌面 bun 旧失败（2026-10-24）
+
+> 承接 13.21 / 13.22。「设置 → 模型服务」里的「重命名」是前端最后一处原生输入框（`window.prompt`），Tauri 下它的标题是开发服务器地址（如 `127.0.0.1:1421`）。本批把它换成应用内对话框，并修掉桌面 bun 的 5 个旧失败。只改前端，不涉及 Rust。
+
+**一、应用内输入框 `promptDialog`**
+
+- 新增 `apps/desktop/src/components/ui/prompt-dialog.tsx`，形状与 `confirm-dialog.tsx` 相同：`promptDialog(options)` 返回 `Promise<string | null>`，`<PromptDialogProvider />` 挂在 `App.tsx` 根部（紧挨 `ConfirmDialogProvider`）。
+  - 确认（按「保存」或在输入框按 Enter）返回去掉首尾空格的文字；取消、Esc、右上角关闭、点遮罩、没有挂 Provider、Provider 卸载都返回 `null`。
+  - 输入为空或只有空格时，确认按钮置灰，按 Enter 也不会提交。
+  - 中文输入法用 Enter 上屏候选字时（`isComposing` / `keyCode 229`）不会误提交。
+  - 打开时输入框自动聚焦并全选预填内容；多个请求按顺序一个一个显示。
+- 「重命名」改为 `promptDialog({ title: '重命名服务', label: '服务名称', defaultValue: provider.name, confirmLabel: '保存' })`。返回 `null` 或名称没变就什么都不做；名称变了走 `resource.save`，保存后会重新读取供应商列表并广播 `fox:model-service-changed`，所以列表和其他用到服务名称的地方会同步。
+- 守卫测试 `apps/desktop/tests/no-native-confirm.test.ts` 扩展到 `window.prompt` / `window.alert`（含 `globalThis.` / `self.` / `window['…']` 写法）：`src` 下的应用代码不能再出现。裸的 `prompt(` / `alert(` 不在扫描范围内，因为 `prompt` 常作为普通变量名使用。
+- DOM 测试 `apps/desktop/tests/prompt-dialog-dom.test.tsx`：标题「重命名服务」且不含 `127.0.0.1`、预填当前名称、Enter 确认、输入法上屏的 Enter 不确认、「保存」确认、Esc / 取消返回 `null`、空名称和纯空格不能确认、多个请求依次显示、卸载时未答的请求返回 `null`。
+
+**复测**（Windows 桌面构建，每项「通过 / 失败 + 截图」）：
+
+1. 「设置 → 模型服务」，在某个已配置供应商的「…」菜单里点「重命名」→ 弹出应用内对话框，标题是「重命名服务」，**标题和正文都不出现** `127.0.0.1` 或其他地址；输入框里预填当前名称，并已全选。
+2. 改成一个新名称，**直接按 Enter** → 对话框关闭，提示「供应商已重命名」，列表里该供应商立即显示新名称。
+3. 再次打开「重命名」，随便改几个字后**按 Esc** → 对话框关闭，名称不变，没有提示。再打开一次，点「取消」→ 同样不变。
+4. 打开「重命名」，把输入框清空 → 「保存」按钮置灰，按 Enter 没有反应，对话框保持打开；再输入几个空格 → 仍然不能保存。点「取消」关闭，名称不变。
+5. 用中文输入法输入新名称，用 Enter 选候选字时对话框**不应**提交；上屏后再按一次 Enter 才保存。
+6. 改名后：切到新会话的模型选择、或重新打开「设置 → 模型服务」，看到的都是新名称（列表同步）。重启应用后名称仍是新名称。
+
+**二、桌面 bun 旧失败（5 项）**
+
+- `chat-elements-dom.test.tsx` 的 2 项（「中文增量只使新增字符着色…」「已完成历史初次加载没有流式动画节点」）：
+  - 根因：`StreamingText` → `MarkdownResponse` 通过 `React.lazy(import('message-response'))` 加载 Streamdown（带 KaTeX、Mermaid 等）。bun 下冷启动导入这一串模块要好几秒（本地实测冷启动约 21 秒、热缓存约 2 秒），超过单个测试 5 秒的预算，断言时页面上还是 Suspense 的占位（`.fox-markdown-loading`）。第一项超时后，第二项在 1 秒的 `waitFor` 内也等不到表格。
+  - 判断：测试与懒加载的时序问题，不是产品缺陷（懒加载是有意的分包，占位里显示原文）。
+  - 修复：测试文件在模块求值阶段先 `await import('../src/components/ai-elements/message-response')` 预热，测试里的 `React.lazy` 直接命中模块缓存。没有放宽断言，也没有 skip。
+- `managed-file-restore-identity.test.ts` 的 3 项：
+  - 根因：只在沙箱里失败。沙箱跑法用了一个额外的 `--preload` 桩（把 `@tauri-apps/api/core` 的 `invoke` 换成直接抛 `invoke stub`），它盖过了测试文件自己的 `mock.module`。CI 的跑法（仓库根目录 `bun test ./apps/desktop/tests`，只用 `bunfig.toml` 里的 `preload-happy-dom.ts`）下 3 项本来就通过。
+  - 处理：不改测试和产品代码；沙箱验证改用与 CI 相同的命令，不再加这个桩。
