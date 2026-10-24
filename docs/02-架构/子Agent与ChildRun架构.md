@@ -5,6 +5,8 @@
 > 最后更新：2026-09-22
 > 基线与成熟度口径见[当前状态与核验基线](../01-项目概览/当前状态与核验基线.md)
 
+> 适用范围说明（2026-10-24）：本文描述外层 Agent 后端为 `fox` 的会话。DeepSeek Harness、pi（以及已实现但暂时隐藏的 Codex）会话由外部 Agent 经 ACP 执行，见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。本次只补充这条说明，正文未复核。
+
 ## 目标与边界
 
 A5 为本地 Pi Runtime 提供 Host-owned Child Run。父 Agent 可以把相互独立的调查、审查或实现子问题交给不同本地 Agent，并在父 Run 继续工作时并行执行。Child Run 不是 Prompt 中的角色扮演，也不是第二套任务事实源：身份、运行时长、状态、结果、审批和取消都由 Tauri Host 与 SQLite 管理。
