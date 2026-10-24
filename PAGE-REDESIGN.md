@@ -1,3 +1,5 @@
+> 历史文档，内容截至 2026-10-11，现状见 [docs/02-架构/架构文档导航.md](docs/02-架构/架构文档导航.md) 与当前代码（本文不再维护）。
+
 # 页面重设计建议（苹果设计视角）
 
 依据：第 4 步之后的截图（`output/ui-audit/step4/*/after/`、`output/ui-audit/step4/margins/shots/`），以及知识库详情页代码 `apps/desktop/src/features/local-knowledge/local-knowledge-pages.tsx:1680-1906`。
