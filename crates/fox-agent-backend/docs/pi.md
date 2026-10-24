@@ -1,5 +1,17 @@
 # PiBackend（pi-acp）阶段 0 实测与接入说明
 
+## 当前状态（2026-10-24）
+
+> 本节是当前事实；下文是 2026-10-19 的阶段 0 实测原文，未改动。
+
+- pi 是**内置 Agent** 之一（另两个是 Fox 和 DeepSeek Harness；Codex 已实现但暂时隐藏）。四 Agent 改造已完成并合入 `main`。
+- 桌面 Host 从 Fox 管理的运行时 `<runtime>/backends/pi/` 启动 `pi-acp`（锁定 `0.0.34`），pi 本体为 `0.84.2`；不经 `npx`（`npx` 入口只用于开发和真实二进制测试）。运行时带 `<runtime>/pi-gate/` 时用 Fox 审批拦截扩展启动 pi（门控），否则按原样启动（没有 Host 审批）。见 `src/external_launch.rs`。
+- 默认在 srt 沙箱里运行；进程只继承白名单环境变量；登录信息放在 Fox 管理的私有 HOME。
+- 权限按 pi 的原生选项显示（`src/native_permission.rs`）：只读、询问（默认）、自动、完全访问。由 Fox 作答，切换后从下一次工具调用起生效。完全访问是独立开关，只在创建会话时授予，会话中只能撤销。
+- 模型默认来自「模型服务」供应商：pi 可用 OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 三种协议；API Key 按 base URL 在系统凭据库全局共享。
+
+完整的路由、隐藏开关、权限和凭据说明见 `docs/02-架构/Agent运行时架构.md` 的「外层 Agent 后端（四 Agent）」一节；人工复测记录见本目录 `sandbox.md`。
+
 分支：pi（阶段 3）｜实测日期：2026-10-19｜实测平台：Linux x86_64（沙箱），Node v22.23.3｜Windows / macOS：未实测
 
 相关文件：
