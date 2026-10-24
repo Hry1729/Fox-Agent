@@ -5,13 +5,18 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import type { ProtocolProfile } from '@/features/conversations/model/types'
+import { isAgentBackendHidden } from '@/features/conversations/model/agent-backend'
 import type { SaveModelProviderInput } from './use-model-providers'
 
-export const protocolAgents: Record<ProtocolProfile['apiType'], string[]> = {
+// Which Agents can use each protocol; hidden backends (`HIDDEN_AGENT_BACKENDS`) are left out.
+const allProtocolAgents: Record<ProtocolProfile['apiType'], string[]> = {
   'openai-completions': ['pi'],
   'anthropic-messages': ['pi', 'deepseek'],
   'openai-responses': ['pi', 'codex'],
 }
+export const protocolAgents = Object.fromEntries(
+  Object.entries(allProtocolAgents).map(([apiType, agents]) => [apiType, agents.filter(agent => !isAgentBackendHidden(agent))]),
+) as Record<ProtocolProfile['apiType'], string[]>
 const names: Record<string, string> = { pi: 'pi', deepseek: 'DeepSeek', codex: 'Codex' }
 const labels = { 'openai-completions': 'OpenAI Chat Completions', 'anthropic-messages': 'Anthropic Messages', 'openai-responses': 'OpenAI Responses' }
 
@@ -47,7 +52,7 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
       <div className="fox-provider-form-grid">
         <label>API 协议<Select value={profile.apiType} onValueChange={(value) => {
           const apiType = value as ProtocolProfile['apiType']
-          update(profile.id, { apiType, backends: profile.backends.filter(b => protocolAgents[apiType].includes(b)) })
+          update(profile.id, { apiType, backends: profile.backends.filter(b => allProtocolAgents[apiType].includes(b)) })
         }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(labels).map(([value, label]) => <SelectItem key={value} value={value}>{label} · {protocolAgents[value as ProtocolProfile['apiType']].map(b => names[b]).join(' / ')}</SelectItem>)}</SelectContent></Select></label>
         <label>模型 ID<Input value={profile.modelId} placeholder="留空使用供应商默认模型" onChange={event => update(profile.id, { modelId: event.target.value })} /></label>
         <label className="is-wide">API 地址<Input value={profile.baseUrl} placeholder="填写供应商提供的此协议地址" onChange={event => update(profile.id, { baseUrl: event.target.value })} /></label>
