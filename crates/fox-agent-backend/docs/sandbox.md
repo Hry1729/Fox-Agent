@@ -1445,3 +1445,37 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 - `managed-file-restore-identity.test.ts` 的 3 项：
   - 根因：只在沙箱里失败。沙箱跑法用了一个额外的 `--preload` 桩（把 `@tauri-apps/api/core` 的 `invoke` 换成直接抛 `invoke stub`），它盖过了测试文件自己的 `mock.module`。CI 的跑法（仓库根目录 `bun test ./apps/desktop/tests`，只用 `bunfig.toml` 里的 `preload-happy-dom.ts`）下 3 项本来就通过。
   - 处理：不改测试和产品代码；沙箱验证改用与 CI 相同的命令，不再加这个桩。
+
+### 13.24 界面隐藏 Codex（2026-10-24）
+
+> 产品定位：内置 Fox、DeepSeek Harness（dsh）、pi 三个 Agent；Codex 以后通过「自定义 ACP Agent」通用入口（待办 / 规划中，本批不做）由用户自己安装接入。本批只在界面和新会话上隐藏 Codex，不删 Codex 后端代码和测试，`FOX_EXTERNAL_BACKENDS` 语义不变（仍然只能强制关闭）。
+
+**一、集中开关**
+
+- Host：`AgentBackend::HIDDEN = [Codex]`（`src/port.rs`），`AgentBackend::hidden()`。前端镜像：`HIDDEN_AGENT_BACKENDS = ['codex']` 和 `SELECTABLE_AGENT_BACKEND_IDS`（`apps/desktop/src/features/conversations/model/agent-backend.ts`），`isAgentBackendHidden(backend, status?)` 同时认 Host 下发的 `hidden` 标记。恢复显示时删掉这两处的条目。
+- `host_routing::choose_for_new_conversation`：请求隐藏后端时先于开关检查拒绝，新错误码 `agent_backend_hidden`（`RouteError::Hidden`，不可重试），前端已列入路由拒绝码，按“没有启动任何东西”处理。
+- `backend_options` 每项新增 `hidden`；`agent_backends_status` 仍返回 Codex（带 `hidden: true`、`enabled` 照旧），这样已有 Codex 会话的可运行判断不变；`anyExternalEnabled` 不再把隐藏后端算进去。
+- `agent_backend_preferences_get/save`（`commands/agent_backend_routing.rs`）：选项里去掉 Codex；保存 `codex` 被拒（`agent_backend_hidden`）；之前保存的 `default_backend = codex` 原样返回，但 `effective_backend` 回退为 `fox`。
+- 新会话（草稿）的原生权限查询 / 设置对隐藏后端拒绝（`agent_backend_hidden`）；已有会话按会话 id 查询，不受影响。
+- 前端：设置 →「新会话使用的 Agent」只列 Fox / pi / DeepSeek，保存过 Codex 时下拉显示 Fox 并提示「之前保存的 Codex 暂未开放，新会话使用 Fox；已有的 Codex 会话不受影响」；输入框的 Agent 菜单不列 Codex；设置里的「默认权限」不再有 Codex 行；供应商协议「适用于」列表不列 Codex（切换协议时不会因此删掉已有的 `codex` 协议分配）；草稿后端被设成 Codex 时一律按 Fox 处理（不探测、不建 Codex 会话）。
+
+**二、已有 Codex 会话：选择“按现有逻辑继续”**
+
+不改成只读。已有 Codex 会话照常打开、显示「后端：Codex（已锁定）」、查看历史；start / cancel / approve 仍路由到 Codex 运行时（`Route::External(Codex)`），权限列表、能力 chips、登录卡片照旧；`FOX_EXTERNAL_BACKENDS` 关闭 Codex 时和其他外部后端一样变只读。不会偷偷换成其他后端。理由：路由和运行时代码都没动，继续的成本为零；改只读反而要新增一条拒绝路径。
+
+**三、测试**
+
+- `host_routing::tests::hidden_codex_refuses_new_conversations_but_keeps_existing_ones`（新增）、`new_conversation_defaults_to_fox_and_respects_the_switch` / `picker_options_explain_disabled_backends`（更新）。
+- `commands::agent_backend_routing::tests::agent_backend_routing_hides_codex_and_falls_back_saved_codex_to_fox`（新增：保存的 codex 回退 Fox、选项无 Codex、新建 codex 被拒、旧 Codex 会话的 start / cancel / approve 仍走 Codex）、`agent_backend_preference_changes_are_validated_against_the_switches`（更新）。
+- 桌面 bun：`agent-backend-settings-batch.test.tsx` 新增「Codex hidden from user-facing choices」4 项；`agent-backend.test.ts`、`agent-native-permission.test.tsx`、`agent-backend-send.test.ts`、`conversation-draft-selection.test.ts` 更新；`src/features/chat/composer/composer-agent-picker.test.mjs`（不在 CI 目录内）同步更新。
+
+**复测**（Windows 桌面构建，每项「通过 / 失败 + 截图」）：
+
+1. 升级前用旧版建一个 Codex 会话（发过至少一条消息），并在 设置 →「新会话使用的 Agent」选 Codex。升级到本批。
+2. 打开 设置 → 助手设置 →「外部 Agent」：「新会话使用的 Agent」下拉只有 Fox / pi / DeepSeek，当前显示 **Fox**，下方提示「之前保存的 Codex 暂未开放，新会话使用 Fox；已有的 Codex 会话不受影响」。「默认权限」只有 DeepSeek 和 pi 两行。
+3. 点「新对话」：输入框的 Agent 菜单只有 Fox / pi / DeepSeek，没有 Codex；不选任何 Agent 直接发消息 → 新会话是 Fox（输入框上方没有外部后端栏）。
+4. 在下拉里选 pi 保存，再改回 Fox 保存 → 提示消失，之后再也看不到 Codex 选项。
+5. 设置 → 模型服务 → 某个供应商的协议设置：选 OpenAI Responses 时「协议适用于」只写 pi，开关里没有「用作 Codex 默认协议」。之前已经分配给 Codex 的协议保存后仍在（可在数据库 `model_providers.protocol_profiles` 里看到 `"codex"`）。
+6. 打开第 1 步的旧 Codex 会话：历史正常显示，后端栏显示「后端：Codex（已锁定）」，权限选择器、能力 chips 正常；发一条新消息 → 由 Codex 回复（不是 Fox、不是其他后端）；取消一次运行、批准一次审批都正常，应用不崩溃。
+7. 关闭应用，设置 `FOX_EXTERNAL_BACKENDS=pi,deepseek` 后启动：第 6 步的 Codex 会话只读（输入框锁定，提示后端未启用），pi / DeepSeek 新会话仍可建。去掉该变量重启，Codex 会话恢复可继续。
+8. （可选，开发者工具）直接调用 Tauri 命令 `conversation_create`（或前端 `desktopClient.createConversation`）并传 `agentBackend: 'codex'` → 返回失败，错误码 `agent_backend_hidden`，会话列表里没有新增会话。
