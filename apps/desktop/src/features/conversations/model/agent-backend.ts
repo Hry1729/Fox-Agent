@@ -18,6 +18,30 @@ export const AGENT_BACKEND_LABELS: Record<AgentBackendId, string> = {
   deepseek: 'DeepSeek',
 }
 
+/**
+ * Backends that are implemented but hidden from every user-facing choice
+ * (设置 →「新会话使用的 Agent」, the new-conversation / draft picker, the
+ * per-Agent default permissions, the protocol editor's "used by" list).
+ * Mirrors the Host's single switch `AgentBackend::HIDDEN`
+ * (`crates/fox-agent-backend/src/port.rs`), which also refuses a new
+ * conversation with it (`agent_backend_hidden`). Existing conversations of a
+ * hidden backend still open, show their backend and run as before.
+ *
+ * Product decision 2026-10-24: built-in Agents are Fox, dsh and pi; Codex
+ * returns through the planned custom ACP Agent entry. Remove the entry here
+ * and in the Host to show it again.
+ */
+export const HIDDEN_AGENT_BACKENDS: readonly AgentBackendId[] = ['codex']
+
+/** Whether a backend is hidden from user-facing choices (local list or the Host's `hidden` flag). */
+export function isAgentBackendHidden(backend: string, status?: { options: { backend: string; hidden?: boolean }[] } | null): boolean {
+  if ((HIDDEN_AGENT_BACKENDS as readonly string[]).includes(backend)) return true
+  return Boolean(status?.options.find((item) => item.backend === backend)?.hidden)
+}
+
+/** The backends a user can choose for a NEW conversation, in display order. */
+export const SELECTABLE_AGENT_BACKEND_IDS: readonly AgentBackendId[] = AGENT_BACKEND_IDS.filter((backend) => !isAgentBackendHidden(backend))
+
 /** Stable error codes the Host returns for routing refusals. */
 export const AGENT_BACKEND_ERROR_CODES = {
   invalid: 'agent_backend_invalid',
@@ -27,6 +51,8 @@ export const AGENT_BACKEND_ERROR_CODES = {
   notYetWired: 'agent_backend_not_yet_wired',
   entryUnsupported: 'agent_backend_entry_unsupported',
   lookupFailed: 'agent_backend_lookup_failed',
+  /** A new conversation asked for a hidden backend (`HIDDEN_AGENT_BACKENDS`). */
+  hidden: 'agent_backend_hidden',
   // Refusals of an external send before anything ran (external backend wiring batch).
   turnBusy: 'agent_backend_turn_busy',
   attachmentsUnsupported: 'agent_backend_attachments_unsupported',
@@ -39,6 +65,8 @@ export interface AgentBackendOption {
   /** Runtime wired in this build (every backend since the external backend wiring batch). */
   wired: boolean
   experimental: boolean
+  /** Hidden from pickers (Host `AgentBackend::HIDDEN`); absent from older Hosts. */
+  hidden?: boolean
   reason: string | null
 }
 
@@ -94,7 +122,8 @@ export function agentBackendLockNotice(backend: AgentBackendId, access: AgentBac
 export function agentBackendPickerDisabledReason(status: AgentBackendStatus | null | undefined): string | null {
   if (!status) return '正在读取可用的 Agent 后端…'
   if (!status.anyExternalEnabled) {
-    return `外部 Agent 后端（pi / Codex / DeepSeek）已被管理员关闭（环境变量 ${status.switchEnv}）；新会话使用 Fox。`
+    const names = SELECTABLE_AGENT_BACKEND_IDS.filter((backend) => backend !== 'fox').map((backend) => AGENT_BACKEND_LABELS[backend]).join(' / ')
+    return `外部 Agent 后端（${names}）已被管理员关闭（环境变量 ${status.switchEnv}）；新会话使用 Fox。`
   }
   return null
 }
@@ -153,15 +182,22 @@ export const DEFAULT_AGENT_BACKEND_PREFERENCES: AgentBackendPreferences = {
   codexResponses: null,
 }
 
-/** The backend a NEW conversation uses (never an id the Host would refuse). */
+/** The backend a NEW conversation uses (never an id the Host would refuse, never a hidden one). */
 export function newConversationBackend(preferences: AgentBackendPreferences | null | undefined): AgentBackendId {
   const value = preferences?.effectiveBackend
-  return isAgentBackendId(value) ? value : 'fox'
+  return isAgentBackendId(value) && !isAgentBackendHidden(value) ? value : 'fox'
+}
+
+/** The value the「新会话使用的 Agent」select shows: a saved hidden backend shows as what is effective (Fox). */
+export function agentBackendSettingValue(preferences: AgentBackendPreferences | null | undefined): AgentBackendId {
+  const saved = preferences?.defaultBackend
+  if (isAgentBackendId(saved) && !isAgentBackendHidden(saved)) return saved
+  return newConversationBackend(preferences)
 }
 
 /** Rows of the「新会话使用的 Agent」select: unavailable choices greyed with their reason. */
 export function agentBackendSettingRows(preferences: AgentBackendPreferences | null | undefined): { value: AgentBackendId; label: string; disabled: boolean; reason: string | null }[] {
-  return AGENT_BACKEND_IDS.map((backend) => {
+  return SELECTABLE_AGENT_BACKEND_IDS.map((backend) => {
     if (backend === 'fox') return { value: backend, label: AGENT_BACKEND_LABELS.fox, disabled: false, reason: null }
     const option = preferences?.options.find((item) => item.backend === backend)
     const disabled = !option?.enabled
@@ -191,6 +227,7 @@ export function fullAccessSettingState(preferences: AgentBackendPreferences | nu
 /** Whether a picked value can be used for a new conversation. */
 export function canPickAgentBackend(backend: AgentBackendId, status: AgentBackendStatus | null | undefined): boolean {
   if (backend === 'fox') return true
+  if (isAgentBackendHidden(backend, status)) return false
   return Boolean(status?.options.find((item) => item.backend === backend)?.enabled)
 }
 
