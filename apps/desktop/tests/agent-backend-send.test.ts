@@ -18,6 +18,7 @@ import {
   withoutRefusedSend,
   AGENT_BACKEND_PREFERENCES_EVENT,
   newConversationBackend,
+  isAgentBackendHidden,
 } from '../src/features/conversations/model/agent-backend'
 
 // Host wiring fix 1 (Windows acceptance of 3a82f5d): a send refused by backend
@@ -95,6 +96,7 @@ function harness(startRun: (request: any) => Promise<any>) {
     withoutRefusedSend,
     AGENT_BACKEND_PREFERENCES_EVENT,
     newConversationBackend,
+    isAgentBackendHidden,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
   return {
