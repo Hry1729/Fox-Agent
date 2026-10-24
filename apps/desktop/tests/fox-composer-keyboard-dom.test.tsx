@@ -151,16 +151,28 @@ describe('the assistant-ui composer keyboard behaviour', () => {
     expect(sent).toEqual([])
   })
 
-  test('the legacy preference cannot make Ctrl + Enter send', async () => {
+  test('Ctrl/Cmd + Enter mode: Enter breaks the line and Ctrl + Enter sends', async () => {
     window.localStorage.setItem('fox.preferences.sendKey', 'mod-enter')
     const { sent, textarea, draft } = mount('hello')
     await waitFor(() => expect(textarea.value).toBe('hello'))
-    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
     await waitFor(() => expect(draft()).toBe('hello\n'))
     await settled()
     expect(sent).toEqual([])
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
     await waitFor(() => expect(sent).toEqual(['hello\n']))
+  })
+
+  test('Ctrl/Cmd + Enter mode: an IME confirmation never sends', async () => {
+    window.localStorage.setItem('fox.preferences.sendKey', 'mod-enter')
+    const { sent, textarea } = mount('你好')
+    await waitFor(() => expect(textarea.value).toBe('你好'))
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, isComposing: true })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, keyCode: 229 })
+    fireEvent.keyDown(textarea, { key: 'Enter', keyCode: 229 })
+    await settled()
+    expect(sent).toEqual([])
   })
 
   test('Alt + Enter is left to the browser and does not send', async () => {
