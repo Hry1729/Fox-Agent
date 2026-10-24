@@ -1,0 +1,916 @@
+/*
+ * Settings page frame (settings-layout.tsx). Everything resolves to the Fox
+ * theme tokens in themes.css / globals.css, so every colour theme and dark mode
+ * follow without overrides. Selectors are anchored on `.fox-settings-page` so
+ * the older `.fox-settings-layout` card rules never reach these pages.
+ */
+
+.fox-settings-page {
+  --fox-settings-hairline: color-mix(in oklch, var(--border) 70%, transparent);
+  width: min(760px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 48px 0 64px;
+  color: var(--foreground);
+}
+
+/* ---------- Page header ---------- */
+.fox-settings-page .fox-settings-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.fox-settings-page .fox-settings-page-head > div:first-child {
+  min-width: 0;
+}
+
+.fox-shell .fox-settings-page .fox-settings-page-head h1,
+.fox-settings-page .fox-settings-page-head h1 {
+  margin: 0 0 4px;
+  font-size: var(--fox-type-page);
+  font-weight: var(--fox-weight-semibold);
+  line-height: 1.33;
+  letter-spacing: 0;
+}
+
+.fox-settings-page .fox-settings-page-head p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome);
+  line-height: 1.5;
+}
+
+.fox-settings-page .fox-settings-page-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- Groups ---------- */
+.fox-settings-page .fox-settings-group + .fox-settings-group {
+  margin-top: 32px;
+}
+
+.fox-settings-page .fox-settings-group {
+  scroll-margin-top: 24px;
+}
+
+.fox-settings-page .fox-settings-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fox-shell .fox-settings-page .fox-settings-group-head h2,
+.fox-settings-page .fox-settings-group-head h2 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-semibold);
+  line-height: 1.5;
+}
+
+.fox-settings-page .fox-settings-group-aside {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.fox-settings-page .fox-settings-group-aside [data-slot='button'] {
+  margin-right: -8px;
+}
+
+/* ---------- Rows ---------- */
+.fox-settings-page .fox-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 60px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--fox-settings-hairline);
+}
+
+.fox-settings-page .fox-settings-row.is-start {
+  align-items: flex-start;
+}
+
+.fox-settings-page .fox-settings-row:last-child {
+  border-bottom: 0;
+}
+
+.fox-settings-page .fox-settings-row-text {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-page .fox-settings-row-text b {
+  font-size: var(--fox-type-body);
+  font-weight: var(--fox-weight-medium);
+  line-height: 1.43;
+}
+
+.fox-settings-page .fox-settings-row-text small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-page .fox-settings-row-control {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.fox-settings-page .fox-settings-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fox-faint);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-page .fox-settings-hint [data-slot='kbd-group'] {
+  gap: 4px;
+}
+
+/* Controls share one height. */
+.fox-settings-page [data-slot='select-trigger'],
+.fox-settings-page [data-slot='input'],
+.fox-settings-sheet [data-slot='input'],
+.fox-settings-sheet [data-slot='select-trigger'],
+.fox-settings-dialog [data-slot='input'],
+.fox-settings-dialog [data-slot='select-trigger'] {
+  height: var(--fox-control-md);
+  min-height: var(--fox-control-md);
+}
+
+/* ---------- Segmented control (Tabs list) ---------- */
+.fox-settings-page .fox-settings-segmented {
+  gap: 0;
+}
+
+.fox-settings-page .fox-settings-segmented [data-slot='tabs-list'] {
+  height: var(--fox-control-md);
+  padding: 3px;
+  border-radius: var(--radius);
+  background: var(--muted);
+}
+
+.fox-settings-page .fox-settings-segmented [data-slot='tabs-trigger'] {
+  height: 100%;
+  flex: none;
+  padding: 0 12px;
+  border-radius: calc(var(--radius) - 2px);
+  font-size: var(--fox-type-meta);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-page .fox-settings-segmented [data-slot='tabs-trigger'][data-state='active'] {
+  box-shadow: var(--fox-shadow-sm);
+}
+
+/* ---------- Shortcut rows: the recorder sits as a quiet key-cap button ---------- */
+.fox-settings-page .fox-settings-shortcut {
+  width: auto;
+  min-width: 0;
+  justify-items: end;
+}
+
+.fox-settings-page .fox-settings-shortcut > div:first-of-type {
+  min-height: var(--fox-control-md);
+  border-color: transparent;
+  background: transparent;
+}
+
+.fox-settings-page .fox-settings-shortcut > div:first-of-type:hover,
+.fox-settings-page .fox-settings-shortcut[data-recording] > div:first-of-type,
+.fox-settings-page .fox-settings-shortcut > div:first-of-type:has(button:focus-visible) {
+  border-color: var(--border);
+  background: var(--card);
+}
+
+.fox-settings-page .fox-settings-shortcut[data-recording] > div:first-of-type {
+  border-color: var(--primary);
+}
+
+.fox-settings-page .fox-settings-shortcut > div:first-of-type > button:first-child {
+  justify-content: flex-end;
+  padding: 0 4px;
+}
+
+.fox-settings-page .fox-settings-shortcut kbd {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-bottom-width: 1px;
+  color: var(--muted-foreground);
+}
+
+/* Per-item reset / clear float to the left of the caps on hover or focus, so
+   the caps stay flush with the row's right edge. */
+.fox-settings-page .fox-settings-shortcut > div:first-of-type > span:last-child {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 4px);
+  padding: 0;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--fox-transition-fast);
+}
+
+.fox-settings-page .fox-settings-row:hover .fox-settings-shortcut > div:first-of-type > span:last-child,
+.fox-settings-page .fox-settings-row:focus-within .fox-settings-shortcut > div:first-of-type > span:last-child {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.fox-settings-page .fox-settings-error {
+  margin: 8px 0 0;
+  color: var(--destructive);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-page .fox-settings-footnote {
+  margin: 12px 0 0;
+  color: var(--fox-faint);
+  font-size: var(--fox-type-caption);
+  line-height: 1.6;
+}
+
+/* ---------- Model providers ---------- */
+.fox-settings-page .fox-settings-default-model {
+  width: 280px;
+  max-width: 100%;
+}
+
+.fox-settings-page .fox-settings-default-model [data-slot='select-value'] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-providers {
+  display: grid;
+}
+
+.fox-settings-provider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 60px;
+  margin: 0 -8px;
+  padding: 0 8px 0 0;
+  border-radius: var(--fox-radius-card);
+  transition: background-color var(--fox-transition-fast);
+}
+
+.fox-settings-provider + .fox-settings-provider::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 8px;
+  left: 8px;
+  height: 1px;
+  background: var(--fox-settings-hairline, var(--border));
+}
+
+.fox-settings-provider:hover,
+.fox-settings-provider.is-open {
+  background: var(--fox-hover);
+}
+
+.fox-settings-provider:hover::before,
+.fox-settings-provider:hover + .fox-settings-provider::before,
+.fox-settings-provider.is-open::before,
+.fox-settings-provider.is-open + .fox-settings-provider::before {
+  opacity: 0;
+}
+
+.fox-settings-provider-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  align-self: stretch;
+  padding: 10px 0 10px 8px;
+  border: 0;
+  border-radius: var(--fox-radius-card);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fox-settings-provider-main:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.fox-settings-provider-mark {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-control);
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+
+.fox-settings-provider-mark img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.fox-settings-provider-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
+.fox-settings-provider-mark.is-large {
+  width: 36px;
+  height: 36px;
+}
+
+.fox-settings-provider-mark.is-large img {
+  width: 20px;
+  height: 20px;
+}
+
+.dark .fox-settings-provider-mark img[src$='openai.svg'],
+.dark .fox-settings-provider-mark img[src$='opencode.svg'],
+.dark .fox-settings-provider-mark img[src$='openrouter.svg'],
+.dark .fox-settings-provider-mark img[src$='zai.svg'],
+.dark .fox-settings-provider-mark img[src$='xiaomi.svg'] {
+  filter: invert(1);
+}
+
+.fox-settings-provider-text {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-provider-name {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-settings-provider-name b {
+  overflow: hidden;
+  font-size: var(--fox-type-body);
+  font-weight: var(--fox-weight-medium);
+  line-height: 1.43;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-provider-text small {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-pill[data-slot='badge'] {
+  height: var(--fox-badge-height);
+  padding: 0 8px;
+  border-radius: var(--fox-radius-pill);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-provider-status {
+  flex: none;
+  min-width: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-right: 4px;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.fox-settings-provider-status b {
+  color: var(--foreground);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-provider-status .is-separator,
+.fox-settings-test-result .is-separator {
+  color: var(--fox-faint);
+}
+
+.fox-settings-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  display: inline-block;
+  border-radius: var(--fox-radius-pill);
+  background: var(--fox-muted);
+}
+
+.fox-settings-dot.is-ok {
+  background: var(--success);
+}
+
+.fox-settings-dot.is-error {
+  background: var(--destructive);
+}
+
+.fox-settings-dot.is-empty {
+  border: 1px solid var(--fox-muted);
+  background: transparent;
+}
+
+.fox-settings-provider-more[data-slot='button'] {
+  flex: none;
+  color: var(--muted-foreground);
+}
+
+.fox-settings-empty {
+  margin: 0;
+  padding: 20px 0;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-chrome);
+}
+
+/* ---------- Provider sheet (Sheet, 480px) ---------- */
+.fox-settings-sheet[data-slot='sheet-content'] {
+  width: 480px;
+  max-width: 100vw;
+  gap: 0;
+  padding: 0;
+  font-size: var(--fox-type-chrome);
+  line-height: 1.5;
+}
+
+.fox-settings-sheet[data-slot='sheet-content'][data-side='right'] {
+  max-width: min(480px, 100vw);
+}
+
+.fox-settings-sheet > [data-slot='sheet-close'] {
+  top: 16px;
+  right: 16px;
+}
+
+.fox-settings-sheet .fox-settings-sheet-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 56px 20px 24px;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.fox-settings-sheet .fox-settings-sheet-title {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-sheet [data-slot='sheet-title'] {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fox-type-title);
+  font-weight: var(--fox-weight-semibold);
+  line-height: 1.5;
+}
+
+.fox-settings-sheet [data-slot='sheet-title'] > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-sheet [data-slot='sheet-description'] {
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-sheet-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 24px 24px;
+  scrollbar-gutter: stable;
+}
+
+.fox-settings-sheet-section {
+  padding: 20px 0;
+}
+
+.fox-settings-sheet-section + .fox-settings-sheet-section {
+  border-top: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.fox-settings-sheet-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  margin-bottom: 12px;
+}
+
+.fox-settings-sheet-section-head h3 {
+  margin: 0;
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-semibold);
+}
+
+.fox-settings-sheet-section-head [data-slot='button'] {
+  margin-right: -8px;
+}
+
+.fox-settings-field {
+  display: grid;
+  gap: 6px;
+}
+
+.fox-settings-field + .fox-settings-field {
+  margin-top: 14px;
+}
+
+.fox-settings-field > label,
+.fox-settings-field > span:first-child {
+  color: var(--foreground);
+  font-size: var(--fox-type-meta);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.fox-settings-field-row > .fox-settings-field + .fox-settings-field {
+  margin-top: 0;
+}
+
+.fox-settings-field-row + .fox-settings-field,
+.fox-settings-field + .fox-settings-field-row {
+  margin-top: 14px;
+}
+
+.fox-settings-secret {
+  position: relative;
+}
+
+.fox-settings-secret [data-slot='input'] {
+  padding-right: 36px;
+}
+
+.fox-settings-secret > [data-slot='button'] {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  transform: translateY(-50%);
+  color: var(--muted-foreground);
+}
+
+.fox-settings-test-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.fox-settings-test-result {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.fox-settings-test-result b {
+  flex: none;
+  color: var(--foreground);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-test-result span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-test-result.is-error b {
+  color: var(--destructive);
+}
+
+.fox-settings-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.fox-settings-model-row:last-child {
+  border-bottom: 0;
+}
+
+.fox-settings-model-name {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-settings-model-name b {
+  overflow: hidden;
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-medium);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-model-name small {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-model-row .fox-settings-model-default[data-slot='button'] {
+  color: var(--muted-foreground);
+  font-weight: var(--fox-weight-regular);
+}
+
+.fox-settings-disclosure {
+  width: calc(100% + 16px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  margin: 0 -8px;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--fox-radius-card);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fox-settings-disclosure:hover {
+  background: var(--fox-hover);
+}
+
+.fox-settings-disclosure:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.fox-settings-disclosure > span {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-disclosure b {
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-semibold);
+}
+
+.fox-settings-disclosure small {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-disclosure > svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--muted-foreground);
+  transition: transform var(--fox-transition-base);
+}
+
+.fox-settings-disclosure[aria-expanded='true'] > svg {
+  transform: rotate(90deg);
+}
+
+.fox-settings-advanced {
+  display: grid;
+  gap: 14px;
+  padding-top: 12px;
+}
+
+.fox-settings-advanced .fox-settings-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.fox-settings-switch-row > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-switch-row b {
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-switch-row small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+/* The protocol editor keeps its own markup; give it the sheet's rhythm. */
+.fox-settings-advanced .fox-protocol-editor {
+  margin: 0;
+  padding: 14px 0 0;
+  border-top: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.fox-settings-advanced .fox-provider-form-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+
+.fox-settings-sheet-error {
+  margin: 0 0 12px;
+  color: var(--destructive);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-sheet-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border);
+}
+
+.fox-settings-sheet-foot > .is-grow {
+  flex: 1;
+}
+
+.fox-settings-sheet-foot .fox-settings-danger[data-slot='button'] {
+  margin-left: -10px;
+  color: var(--destructive);
+}
+
+.fox-settings-sheet-foot .fox-settings-danger[data-slot='button']:hover {
+  background: color-mix(in oklch, var(--destructive) 8%, transparent);
+  color: var(--destructive);
+}
+
+/* ---------- Add / edit model dialog ---------- */
+.fox-settings-dialog[data-slot='dialog-content'] {
+  width: min(440px, calc(100vw - 32px));
+  max-width: min(440px, calc(100vw - 32px));
+}
+
+.fox-settings-dialog .fox-settings-dialog-body {
+  display: grid;
+  gap: 14px;
+}
+
+.fox-settings-dialog .fox-settings-field + .fox-settings-field {
+  margin-top: 0;
+}
+
+.fox-settings-dialog .fox-settings-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: var(--fox-control-md);
+}
+
+@media (max-width: 720px) {
+  .fox-settings-page {
+    width: calc(100% - 32px);
+    padding-top: 32px;
+  }
+
+  .fox-settings-page .fox-settings-row {
+    flex-wrap: wrap;
+  }
+
+  .fox-settings-provider-status {
+    min-width: 0;
+  }
+}
+
+.fox-settings-dialog .fox-settings-danger-text[data-slot='button'] {
+  margin-right: auto;
+  color: var(--destructive);
+}
+
+/* ---------- Merged destinations (Agent, 数据与关于): older pages as sections ---------- */
+.fox-settings-merged .fox-settings-embedded {
+  scroll-margin-top: 24px;
+}
+
+.fox-settings-merged .fox-settings-embedded + .fox-settings-embedded {
+  margin-top: 32px;
+}
+
+.fox-shell .fox-settings-merged .fox-settings-embedded-title,
+.fox-settings-merged .fox-settings-embedded-title {
+  margin: 0 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
+  font-size: var(--fox-type-chrome) !important;
+  font-weight: var(--fox-weight-semibold);
+  line-height: 1.5;
+}
+
+/* Older settings pages share the new header position and rhythm (title 24px,
+   one line of description, 48px from the top). */
+.fox-page-shell .fox-settings-layout > main {
+  padding-top: 48px !important;
+}
+
+.fox-page-shell .fox-settings-layout > main > header {
+  margin-bottom: 28px !important;
+}
+
+.fox-page-shell .fox-settings-layout > main > header h1 {
+  margin: 0 0 4px !important;
+  line-height: 1.33 !important;
+}
+
+/* Sheet starts under the window title bar, whose controls stay on top. */
+.fox-settings-sheet[data-slot='sheet-content'][data-side='right'] {
+  top: 30px;
+  height: auto;
+  bottom: 0;
+  border-top-left-radius: 12px;
+  overflow: hidden;
+}
+
+.fox-settings-sheet [data-slot='select-trigger'],
+.fox-settings-dialog [data-slot='select-trigger'] {
+  width: 100%;
+}
+
+.fox-settings-advanced .fox-provider-icon-select {
+  display: grid !important;
+  gap: 6px;
+}
+
+.fox-settings-advanced .fox-provider-icon-select > span:first-child {
+  color: var(--foreground);
+  font-size: var(--fox-type-meta) !important;
+  font-weight: var(--fox-weight-medium);
+  white-space: nowrap;
+}
+
+.fox-settings-advanced .fox-provider-icon-trigger {
+  height: var(--fox-control-md);
+  font-size: var(--fox-type-control);
+}
+
+.fox-settings-dialog .fox-settings-field-row {
+  margin-top: 0;
+}
