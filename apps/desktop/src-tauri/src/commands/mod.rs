@@ -5996,23 +5996,35 @@ pub fn model_provider_delete(
     let Some(provider) = provider else {
         return ApiResponse::success(false);
     };
-    for profile in &provider.protocol_profiles {
-        if profile.separate_credential {
-            if let Err(error) = clear_api_key(&fox_agent_backend::provider_protocol::credential_id(&provider.id, &profile.id)) {
-                return ApiResponse::failure("model.credential_delete_failed", error, true);
-            }
+    // Record first, then its Keys (base_url + protocol Keys); a failed Key
+    // delete never restores the record and is audited as a warning
+    // (fox_agent_backend::credential_delete, sandbox.md 13.22).
+    let key_ids = fox_agent_backend::credential_delete::provider_key_ids(
+        &provider.id,
+        &provider.base_url,
+        provider.protocol_profiles.iter().map(|profile| profile.id.as_str()),
+    );
+    let outcome = match fox_agent_backend::credential_delete::delete_with_keys(
+        &mut crate::model_service::KeyringStore,
+        &key_ids,
+        || state.database.delete_model_provider(&request.provider_id),
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => return storage_error(error),
+    };
+    if let Some(audit) = outcome.audit(&provider.id) {
+        if audit.warning {
+            eprintln!("fox.model provider_key_delete_failed keys_left={}", outcome.key_failures.len());
+            external.audit_warning(audit.event, &audit.details);
+        } else {
+            external.audit_host(audit.event, &audit.details);
         }
     }
-    match state.database.delete_model_provider(&request.provider_id) {
-        Ok(deleted) => {
-            if deleted && provider.is_default {
-                if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", error, true); }
-                warn_managed_model_cleanup(&external, "model_provider_delete");
-            }
-            ApiResponse::success(deleted)
-        }
-        Err(error) => storage_error(error),
+    if outcome.record_deleted && provider.is_default {
+        if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", error, true); }
+        warn_managed_model_cleanup(&external, "model_provider_delete");
     }
+    ApiResponse::success(outcome.record_deleted)
 }
 
 #[tauri::command]
