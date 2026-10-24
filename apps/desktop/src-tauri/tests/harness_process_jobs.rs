@@ -609,6 +609,33 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
 #[cfg(windows)]
 #[test]
 fn a_naturally_exited_shell_closes_its_job_before_waiting_for_pipe_eof() {
+    // What this proves: the shell we started exits *by itself* while a
+    // descendant it launched still holds the shell's stdout/stderr pipes. The
+    // pipes therefore never reach EOF on their own. Supervision must notice the
+    // natural exit, close the Job (KILL_ON_JOB_CLOSE + TerminateJobObject in
+    // `SystemChild::try_wait`), and only then drain the readers — so the readers
+    // join normally instead of being orphaned after `reader_grace`, and the
+    // descendant can never act afterwards.
+    //
+    // Fixture history (Windows CI run 40027655533): the launcher used to be
+    // `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File`
+    // with `Start-Process cmd.exe ...`. On the runner that powershell parent
+    // itself never exited within 20 s (owner_status Alive, 0 bytes on both
+    // streams, no exit observed), so the Job/pipe-EOF path under test was never
+    // even reached. Two fixture problems, neither in `process_jobs`:
+    //
+    // * Windows PowerShell 5.1 `Start-Process` (no -NoNewWindow) goes through
+    //   ShellExecuteEx plus a module auto-load of Microsoft.PowerShell.Management,
+    //   started here under CREATE_NO_WINDOW with the sanitized child environment
+    //   (no PSModulePath / SystemDrive). That is a slow and environment-sensitive
+    //   start-up path that has nothing to do with the behaviour being tested.
+    // * ShellExecuteEx does not hand the shell's std handles to the new process,
+    //   so even when it worked the descendant did not hold the pipes and the
+    //   test did not exercise "before waiting for pipe EOF" at all.
+    //
+    // `cmd`'s `start "" /B` calls CreateProcess directly with handle inheritance,
+    // in the same hidden console: the descendant really inherits both pipes, and
+    // there is no PowerShell start-up cost to race a 20 s deadline.
     let dir = fixture("natural-descendant");
     let gate = dir.join("gate.txt");
     let sentinel = dir.join("natural-descendant-survived.txt");
@@ -625,35 +652,47 @@ fn a_naturally_exited_shell_closes_its_job_before_waiting_for_pipe_eof() {
     .expect("write natural-exit waiter");
 
     std::fs::write(
-        dir.join("launch-descendant.ps1"),
-        "Start-Process -FilePath 'cmd.exe' -ArgumentList '/D','/S','/C','natural-waiter.cmd'\n",
+        dir.join("launch-descendant.cmd"),
+        "@echo off\r\n\
+         start \"\" /B cmd /D /C natural-waiter.cmd\r\n\
+         echo launcher-exited\r\n\
+         exit /b 0\r\n",
     )
     .expect("write natural-exit launcher");
     let manager = manager(ManagerConfig::default());
-    let spec = SpawnSpec {
-        program: "powershell.exe".to_owned(),
-        args: vec![
-            "-NoProfile".to_owned(),
-            "-NonInteractive".to_owned(),
-            "-ExecutionPolicy".to_owned(),
-            "Bypass".to_owned(),
-            "-File".to_owned(),
-            "launch-descendant.ps1".to_owned(),
-        ],
-        cwd: dir.to_string_lossy().into_owned(),
-        env: EnvMode::Inherit,
-    };
+    // If an assertion below unwinds while the waiter is somehow still alive,
+    // the guard opens the gate so the fixture leaves by itself instead of
+    // polling for the rest of the session.
+    let mut reclaimer = JobReclaimer::new(Arc::clone(&manager));
+    reclaimer.arm_gate(gate.clone());
+    let spec = SpawnSpec::shell("launch-descendant.cmd", &dir.to_string_lossy());
     let job = manager
         .start(start_request("natural-descendant", spec, Duration::from_secs(30)))
         .expect("start");
     let job_id = job.view().job_id.clone();
+    reclaimer.track(&job_id);
     let view = wait_terminal(&manager, &job_id, Duration::from_secs(20));
 
     assert_eq!(view.state, JobRunState::Succeeded, "{view:?}");
+    assert_eq!(view.exit_code, Some(0), "{view:?}");
+    assert!(
+        view.stop_requested.is_none(),
+        "the shell must have exited by itself, not been stopped: {view:?}"
+    );
     assert!(
         !view.readers_orphaned,
         "natural parent exit must close the Job before pipe draining: {view:?}"
     );
+    assert!(
+        view.events.iter().any(|event| event.kind == process_jobs::JobEventKind::ReadersJoined),
+        "the readers must reach EOF once the Job is closed: {view:?}"
+    );
+    let stdout = read_all(&manager, &job_id, Stream::Stdout);
+    assert!(
+        stdout.contains("launcher-exited"),
+        "the launcher's own output must survive the Job close: {stdout:?}"
+    );
+
     std::fs::write(&gate, b"go").expect("open descendant gate");
     thread::sleep(Duration::from_secs(3));
     assert!(
