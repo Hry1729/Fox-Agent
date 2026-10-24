@@ -26,8 +26,9 @@ import { useYuxiUser } from './use-yuxi-user'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 import { useSkills } from './use-skills'
 import { useMcpServers, type SaveMcpServerInput } from './use-mcp-servers'
-import { useLifecycleHooks } from './use-lifecycle-hooks'
-import type { AgentRecord, KnowledgePreviewCacheStatistics, LifecycleHookRecord, McpServerRecord, ModelProviderRecord, NotificationPreferencesRecord, ObservabilityStatistics, ProjectManagementRecord, ProjectRecord, UsageStatistics } from '@/features/conversations/model/types'
+import { LifecycleHooksSection } from './lifecycle-hooks-section'
+import { SettingsLoadError } from './settings-load-error'
+import type { AgentRecord, KnowledgePreviewCacheStatistics, McpServerRecord, ModelProviderRecord, NotificationPreferencesRecord, ObservabilityStatistics, ProjectManagementRecord, ProjectRecord, UsageStatistics } from '@/features/conversations/model/types'
 import { Grainient } from '@/components/effects/grainient'
 import { BorderBeam } from '@/components/effects/border-beam'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
@@ -99,10 +100,6 @@ function PreferenceRow({ title, description, children }: { title: string; descri
 
 function SettingValue({ children }: { children: ReactNode }) {
   return <span className="fox-setting-value">{children}</span>
-}
-
-function SettingsLoadError({ message, detail, onRetry }: { message: string; detail: string; onRetry?: () => void }) {
-  return <div role="status" className="my-3 flex items-center gap-3 rounded-lg border border-border px-4 py-3 text-muted-foreground"><FileWarning className="size-4 shrink-0" aria-hidden="true" /><span className="flex min-w-0 flex-1 flex-col gap-0.5"><span className="text-sm text-foreground">{message}</span><small className="truncate text-xs" title={detail}>{detail}</small></span>{onRetry && <Button type="button" variant="outline" size="sm" onClick={onRetry}>重试</Button>}</div>
 }
 
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferencesRecord = {
@@ -985,18 +982,6 @@ interface McpFormState {
 
 const emptyMcpForm: McpFormState = { name: '', command: '', argsText: '', transport: 'stdio', endpointUrl: '', definition: '', environmentText: '', clearEnvironment: false }
 
-interface HookFormState {
-  id?: string
-  name: string
-  event: LifecycleHookRecord['event']
-  matcher: string
-  action: LifecycleHookRecord['action']
-  reason: string
-  priority: number
-}
-
-const emptyHookForm: HookFormState = { name: '', event: 'before_tool', matcher: '*', action: 'annotate', reason: '', priority: 100 }
-
 function extensionTransportLabel(transport: McpServerRecord['transport']) {
   if (transport === 'streamable_http') return 'HTTP MCP'
   if (transport === 'openapi') return 'OpenAPI'
@@ -1024,9 +1009,7 @@ function parseEnvironment(value: string) {
 
 export function McpPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
   const resource = useMcpServers()
-  const hooks = useLifecycleHooks()
   const [form, setForm] = useState<McpFormState | null>(null)
-  const [hookForm, setHookForm] = useState<HookFormState>({ ...emptyHookForm })
   const [expanded, setExpanded] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const openEdit = (server: McpServerRecord) => setForm({ id: server.id, name: server.name, command: server.command, argsText: server.args.join('\n'), transport: server.transport, endpointUrl: server.endpointUrl ?? '', definition: server.definition ?? '', environmentText: '', clearEnvironment: false })
@@ -1041,12 +1024,6 @@ export function McpPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarColl
       setForm(null); setFormError(null); toast.success(form.id ? 'MCP Server 已更新' : 'MCP Server 已添加')
     } catch (cause) { setFormError(cause instanceof Error ? cause.message : String(cause)) }
   }
-  const saveHook = async () => {
-    const saved = await hooks.save({ ...hookForm, name: hookForm.name.trim(), matcher: hookForm.matcher.trim(), reason: hookForm.reason.trim(), enabled: true })
-    if (!saved) return
-    setHookForm({ ...emptyHookForm })
-    toast.success(hookForm.id ? '生命周期 Hook 已更新' : '生命周期 Hook 已添加')
-  }
   return (
     <WorkspacePage title="连接器" subtitle="CLI、MCP、OpenAPI 与策略" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('settings')} actions={<Button size="sm" onClick={() => { setForm({ ...emptyMcpForm }); setFormError(null) }}><Plus />添加连接器</Button>}>
       <div className="fox-settings-layout">
@@ -1054,10 +1031,7 @@ export function McpPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarColl
           {resource.error && <SettingsLoadError message="暂时无法读取连接器列表" detail={resource.error} onRetry={() => void resource.refresh()} />}
           {!resource.loading && resource.items.length === 0 && <Card className="fox-settings-section fox-skill-empty"><Cable /><div><h2>暂无连接器</h2><p>添加本机 MCP、HTTP MCP 或 OpenAPI 定义后，先运行健康测试，再由 Fox Runtime 按需调用。</p></div></Card>}
           <div className="fox-mcp-list">{resource.items.map((server) => { const test = resource.tests[server.id]; const isExpanded = expanded === server.id; const target = server.transport === 'stdio' ? `${server.command}${server.args.length ? ` · ${server.args.join(' ')}` : ''}` : server.endpointUrl ?? ''; return <Card key={server.id} className="fox-settings-section fox-mcp-card"><div className="fox-mcp-card-head"><span><Cable /></span><button className="fox-skill-summary" onClick={() => setExpanded(isExpanded ? null : server.id)}><h2>{server.name}</h2><p title={target}>{server.id === 'fox-office' ? '内置 CLI' : extensionTransportLabel(server.transport)} · {target}</p></button><Badge variant={server.status === 'unavailable' ? 'destructive' : 'secondary'}>{mcpStatusLabel(server)}</Badge><Switch checked={server.enabled} disabled={resource.busyId === server.id} onCheckedChange={(enabled) => void resource.setEnabled(server.id, enabled)} /></div><Separator /><div className="fox-mcp-meta"><span><Zap />{test ? `${test.toolCount} 个工具 · ${test.latencyMs} ms` : server.toolCount != null ? `${server.toolCount} 个工具${server.lastLatencyMs != null ? ` · ${server.lastLatencyMs} ms` : ''}` : '等待健康测试'}</span><span>{server.credentialConfigured ? (server.transport === 'stdio' ? '环境变量已安全保存' : '请求 Header 已安全保存') : '未保存凭证'}</span><div><Button variant="ghost" size="sm" disabled={!server.enabled || resource.busyId === server.id} onClick={() => void resource.test(server.id).then((result) => result && toast.success(`健康检查通过，发现 ${result.toolCount} 个工具`))}>{resource.busyId === server.id ? <LoaderCircle className="animate-spin" /> : <Zap />}健康检查</Button><Button variant="ghost" size="icon-sm" title="编辑" disabled={server.id === 'fox-office'} onClick={() => openEdit(server)}><Pencil /></Button><Button variant="ghost" size="icon-sm" title="删除" disabled={server.id === 'fox-office'} onClick={() => { void confirmDialog({ title: '删除连接器', description: `删除连接器“${server.name}”？已保存的凭证也会被清除。`, confirmLabel: '删除', destructive: true }).then((confirmed) => { if (confirmed) void resource.remove(server.id).then((ok) => ok && toast.success('连接器已删除')) }) }}><Trash2 /></Button><button className="fox-mcp-expand" aria-label={isExpanded ? '收起工具' : '展开工具'} onClick={() => setExpanded(isExpanded ? null : server.id)}><ChevronDown className={isExpanded ? 'is-open' : ''} /></button></div></div>{server.lastError && <p className="fox-setting-error">{server.lastError}</p>}{isExpanded && <div className="fox-mcp-tools">{test?.tools.length ? test.tools.map((tool) => <div key={tool.name}><b>{tool.name}</b><p>{tool.description || '此工具没有提供说明。'}</p></div>) : <p>点击“健康检查”读取并校验工具目录。Fox 每个连接器最多接收 200 个工具。</p>}</div>}</Card> })}</div>
-          <header><span>受限策略生命周期</span><h1>声明式 Hooks</h1><p>Hook 不执行脚本，只能按工具名匹配并阻止、要求审批或向模型附加说明；每次命中都会写入审计记录。</p></header>
-          {hooks.error && <SettingsLoadError message="暂时无法读取 Hook 列表" detail={hooks.error} onRetry={() => void hooks.refresh()} />}
-          <Card className="fox-settings-section fox-service-form"><div className="fox-settings-section-head"><div><h2>{hookForm.id ? '编辑 Hook' : '添加 Hook'}</h2><p>匹配器支持精确名称、逗号分组，以及前后缀通配符，例如 call_*。</p></div><ShieldCheck /></div><div className="fox-settings-form-grid"><label>名称<Input value={hookForm.name} onChange={(event) => setHookForm({ ...hookForm, name: event.target.value })} placeholder="例如 高风险工具审批" /></label><label>事件<Select value={hookForm.event} onValueChange={(event: LifecycleHookRecord['event']) => setHookForm({ ...hookForm, event, action: event === 'before_tool' ? hookForm.action : 'annotate' })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="before_tool">工具调用前</SelectItem><SelectItem value="after_tool">工具调用后</SelectItem><SelectItem value="before_run">Run 开始前</SelectItem><SelectItem value="after_run">Run 结束后</SelectItem></SelectContent></Select></label><label>匹配器<Input value={hookForm.matcher} onChange={(event) => setHookForm({ ...hookForm, matcher: event.target.value })} placeholder="run_command, call_*" /></label><label>动作<Select value={hookForm.action} onValueChange={(action: LifecycleHookRecord['action']) => setHookForm({ ...hookForm, action })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{hookForm.event === 'before_tool' && <SelectItem value="block">阻止</SelectItem>}{hookForm.event === 'before_tool' && <SelectItem value="require_approval">要求审批</SelectItem>}<SelectItem value="annotate">附加说明</SelectItem></SelectContent></Select></label><label>原因 / 说明<Textarea value={hookForm.reason} onChange={(event) => setHookForm({ ...hookForm, reason: event.target.value })} placeholder="会展示在审批或模型上下文中" /></label></div><div className="fox-setting-actions">{hookForm.id && <Button variant="outline" onClick={() => setHookForm({ ...emptyHookForm })}>取消编辑</Button>}<Button disabled={!hookForm.name.trim() || !hookForm.matcher.trim() || hooks.busyId != null} onClick={() => void saveHook()}>{hooks.busyId && <LoaderCircle className="animate-spin" />}保存 Hook</Button></div></Card>
-          <div className="fox-mcp-list">{hooks.items.map((hook) => <Card key={hook.id} className="fox-settings-section fox-mcp-card"><div className="fox-mcp-card-head"><span><Shield /></span><button className="fox-skill-summary" onClick={() => setHookForm({ id: hook.id, name: hook.name, event: hook.event, matcher: hook.matcher, action: hook.action, reason: hook.reason, priority: hook.priority })}><h2>{hook.name}</h2><p>{hook.event} · {hook.matcher} · {hook.action}</p></button><Badge variant={hook.action === 'block' ? 'destructive' : 'secondary'}>{hook.action}</Badge><Switch checked={hook.enabled} disabled={hooks.busyId === hook.id} onCheckedChange={(enabled) => void hooks.setEnabled(hook.id, enabled)} /></div><Separator /><div className="fox-mcp-meta"><span>{hook.reason || '未填写说明'}</span><div><Button variant="ghost" size="icon-sm" title="编辑" onClick={() => setHookForm({ id: hook.id, name: hook.name, event: hook.event, matcher: hook.matcher, action: hook.action, reason: hook.reason, priority: hook.priority })}><Pencil /></Button><Button variant="ghost" size="icon-sm" title="删除" onClick={() => { void confirmDialog({ title: '删除 Hook', description: `删除 Hook“${hook.name}”？`, confirmLabel: '删除', destructive: true }).then((confirmed) => { if (confirmed) void hooks.remove(hook.id).then((ok) => ok && toast.success('Hook 已删除')) }) }}><Trash2 /></Button></div></div></Card>)}</div>
+          <LifecycleHooksSection />
         </main>
       </div>
       <Dialog open={Boolean(form)} onOpenChange={(open) => { if (!open) setForm(null) }}><DialogContent className="fox-mcp-dialog"><DialogHeader><DialogTitle>{form?.id ? '编辑连接器' : '添加连接器'}</DialogTitle><DialogDescription>远程凭证只存入系统凭证库；HTTP MCP 和 OpenAPI 禁止自动重定向，超时 15 秒，响应上限 10 MB。</DialogDescription></DialogHeader>{form && <div className="fox-mcp-form"><label>名称<Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如 Filesystem 或 Pet API" /></label><label>扩展类型<Select value={form.transport} onValueChange={(transport: McpServerRecord['transport']) => setForm({ ...form, transport })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stdio">stdio MCP</SelectItem><SelectItem value="streamable_http">Streamable HTTP MCP</SelectItem><SelectItem value="openapi">OpenAPI 3.x Connector</SelectItem></SelectContent></Select></label>{form.transport === 'stdio' ? <><label>命令<Input value={form.command} onChange={(event) => setForm({ ...form, command: event.target.value })} placeholder="例如 npx.cmd 或 MCP Server 可执行文件路径" /></label><label>参数（每行一项）<Textarea value={form.argsText} onChange={(event) => setForm({ ...form, argsText: event.target.value })} placeholder={'-y\n@modelcontextprotocol/server-filesystem\nD:\\projects'} /></label></> : <label>端点 URL{form.transport === 'openapi' ? '（可选，覆盖 servers[0].url）' : ''}<Input value={form.endpointUrl} onChange={(event) => setForm({ ...form, endpointUrl: event.target.value })} placeholder={form.transport === 'openapi' ? '可留空使用定义中的 servers[0].url' : 'https://mcp.example.com/mcp'} /></label>}{form.transport === 'openapi' && <label>OpenAPI JSON / YAML<Textarea value={form.definition} onChange={(event) => setForm({ ...form, definition: event.target.value })} placeholder={'openapi: 3.0.3\ninfo: ...\npaths: ...'} /></label>}<label>{form.transport === 'stdio' ? '环境变量' : '请求 Header'}（每行 KEY=VALUE）<Textarea value={form.environmentText} onChange={(event) => setForm({ ...form, environmentText: event.target.value, clearEnvironment: false })} placeholder={form.id ? '已保存的值不会回显；留空保持不变' : form.transport === 'stdio' ? 'API_KEY=...' : 'Authorization=Bearer ...'} /></label>{form.id && <div className="fox-setting-row"><span><b>清除登录信息</b><small>保存时同时从系统凭证库删除</small></span><Switch checked={form.clearEnvironment} onCheckedChange={(clearEnvironment) => setForm({ ...form, clearEnvironment, environmentText: clearEnvironment ? '' : form.environmentText })} /></div>}{formError && <p className="fox-setting-error">{formError}</p>}</div>}<DialogFooter><Button variant="outline" onClick={() => setForm(null)}>取消</Button><Button disabled={!form?.name.trim() || (form.transport === 'stdio' && !form.command.trim()) || (form.transport === 'streamable_http' && !form.endpointUrl.trim()) || (form.transport === 'openapi' && !form.definition.trim()) || resource.busyId != null} onClick={() => void save()}>{resource.busyId && <LoaderCircle className="animate-spin" />}保存</Button></DialogFooter></DialogContent></Dialog>
