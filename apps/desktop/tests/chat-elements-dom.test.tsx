@@ -11,6 +11,12 @@ const { useFoxRuntime } = await import('../src/features/chat/thread/use-fox-runt
 const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
 const { default: FoxThread } = await import('../src/features/chat/thread/fox-thread')
 const groupHelpers = await import('../src/features/chat/runtime-process-groups')
+// MarkdownResponse renders through React.lazy(import('message-response')), which pulls in
+// Streamdown, KaTeX and Mermaid. A cold import of that graph takes several seconds under bun,
+// longer than a test's 5 s budget, so the Suspense fallback (.fox-markdown-loading) was still
+// on screen when the StreamingText assertions ran. Warm the module here, at file evaluation
+// time, so the lazy import resolves from the module cache inside the tests.
+await import('../src/components/ai-elements/message-response')
 afterEach(cleanup)
 
 test('输入流光仅新建页挂载，已有页即使centered、聚焦或运行也没有beam节点', async () => {
