@@ -18,17 +18,19 @@ impl KernelRunLock {
             return Err("invalid Kernel Run lock identity".into());
         }
         let directory = sessions_dir.join("kernel-run-locks");
-        std::fs::create_dir_all(&directory)
-            .map_err(|error| format!("Kernel lock directory: {error}"))?;
+        // The path (and "应为目录但是文件") is part of the error: a lock
+        // directory replaced by a file used to fail without saying where.
+        crate::data_paths::ensure_directory(&directory, "Kernel lock directory")?;
         // Never use a run id as a path component.
         let filename = format!("{}.lock", hex::encode(Sha256::digest(run_id.as_bytes())));
+        let lock_path = directory.join(filename);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(directory.join(filename))
-            .map_err(|error| format!("Kernel lock file: {error}"))?;
+            .open(&lock_path)
+            .map_err(|error| format!("Kernel lock file {}: {error}", lock_path.display()))?;
         file.try_lock().map_err(|error| match error {
             std::fs::TryLockError::WouldBlock => KERNEL_RUN_ALREADY_OWNED.to_owned(),
             other => format!("Kernel Run cannot be locked: {other}"),
@@ -60,5 +62,17 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn lock_directory_that_is_a_file_is_named_in_the_error() {
+        let directory =
+            std::env::temp_dir().join(format!("fox-kernel-lock-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let locks = directory.join("kernel-run-locks");
+        std::fs::write(&locks, b"x").unwrap();
+        let error = KernelRunLock::acquire(&directory, "run-1").err().unwrap();
+        assert!(error.contains(&format!("{} 应为目录但是文件", locks.display())), "{error}");
+        let _ = std::fs::remove_dir_all(directory);
     }
 }
