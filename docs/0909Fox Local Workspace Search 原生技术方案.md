@@ -1,3 +1,5 @@
+> 状态（2026-10-25 核对 `main@c8a42a9`）：**未实现的方案，仅供追溯**。代码中没有方案里的 `search_local_workspace` 工具、`WorkspaceSearchProvider` / `NativeWorkspaceSearch`、`RetrievalHit` 或 Workspace 索引管理（检索范围：`apps/desktop/src`、`apps/desktop/src-tauri/src`、`services/agent-runtime/src`、`crates`、`packages`）。已实现的相近能力是本机资料库的关键词 + 向量 RRF 混合检索（`apps/desktop/src-tauri/src/local_knowledge_vector.rs`），它针对导入资料库的文件，不是对项目工作区的直接搜索。方案原文未改动。
+
 - # Fox Local Workspace Search 原生技术方案
 
   ## —— 参考 zvec-grep 思路，基于 Fox 现有能力原生实现
