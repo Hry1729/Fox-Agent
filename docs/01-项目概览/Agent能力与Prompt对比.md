@@ -1,13 +1,26 @@
 # Fox 与主流 Agent 能力及 Prompt 对比
 
-> 状态：维护中<br>
+> 状态：维护中（对比分析是 2026-08 的快照，2026-10-25 只更新了 Fox 的事实部分）<br>
 > 适用版本：Fox `0.1.x`<br>
 > 维护范围：Fox、Maka、Kun、DeepSeek-Reasonix 与 OpenAI Codex 的能力、Prompt 架构和可借鉴方向<br>
-> 最后更新：2026-08-26
+> 分析时点：2026-08-24（Fox `7f9d668`）至 2026-08-26<br>
+> 最后更新：2026-10-25
 
 本文回答三个问题：Fox 当前相对同类 Agent 的优势和缺口是什么；各项目如何组织具体 Prompt；Fox 下一阶段最值得学习什么。能力结论来自本次对比快照中的代码、配置、测试和维护文档，不把宣传语或尚未实现的路线图当成现有能力。
 
 如果希望先理解“循环、状态、工具、验证、Prompt、安全、规划、记忆和多 Agent 分别是什么”，以及五个项目在这些基础能力上各有什么优点，请先阅读[基础 Agent 核心能力对比](基础Agent核心能力对比.md)。
+
+## 分析时点与 Fox 现状（2026-10-25 更新）
+
+**本文的对比、排名和建议是 2026-08-24 至 2026-08-26 基于固定源码快照做的分析（见「对比基准」），之后没有重新分析，也没有重新核对 Maka、Kun、DeepSeek-Reasonix 和 OpenAI Codex 的新版本。** 2026-10-25 只按 `main` 当前代码更新了文中关于 Fox 的事实。与分析时相比，Fox 的主要变化：
+
+- **外层 Agent**：分析时 Fox 没有外层 Agent 选择。现在每个会话创建时选定一个外层 Agent：Fox（默认，Kernel / Authoritative）、DeepSeek Harness（dsh，实验）、pi；Codex 已作为外部 Agent 实现但暂时隐藏。外部 Agent 都经 ACP v1 接入，在 srt 沙箱中运行，权限按各自原生选项显示。本文对比的 “Codex” 指 OpenAI Codex 项目本身，不是 Fox 里的 Codex 外部 Agent。见 [Agent Runtime 架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+- **执行路径**：Fox 会话默认由 Kernel / Authoritative 执行；`FOX_KERNEL_MODE=legacy` 只用于调试和兼容旧 Run。
+- **Child Run**：深度仍为 1；Kernel 路径**不再**单独限制 Child Run 的数量和同时运行数，单个时长默认 5 分钟、最长 15 分钟（见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md)）。下文“并发限制”“深度与并发较保守”等说法已按此修正。
+- **数据库**：`fox.db` schema v97。
+- **Prompt 组装**：`services/agent-runtime/src/prompt-composer.mjs::composeFoxPrompt` 仍是系统提示的组装入口，Legacy 路径（`pi-runtime.mjs`）和 Kernel 路径（`pi-kernel-description.mjs`）都通过 `runtime-instructions.mjs::composeRuntimePrompt` 调用它；Kernel 路径的 Host 还会在系统提示末尾追加当前冻结清单下的运行时可用性说明（`apps/desktop/src-tauri/src/runtime_host/kernel_model_worker.rs`）。片段优先级已变化，见下文「分层 Prompt 组装器」。
+- **Prompt Registry**：`services/agent-runtime/src/prompt-registry.mjs` 已有 `PROMPT_REGISTRY_SCHEMA_VERSION = 1`、`createPromptExperiment`、`evaluatePromptExperiment`、`buildPromptCacheIdentity` 等代码。是否已形成下文 P0 建议中的完整实验产品面（事实表、报告、晋升门禁），本次**没有核实**，因此 P0 建议保持原文，不标为已完成。
+- 文中提到的其余 Fox 能力（工作闭环、记忆治理、专家包 / 工作流 / 团队 / 数字同事、有界只读 Graph Lead）在当前代码中仍然存在；本次没有逐条复核其细节，当前事实以[能力矩阵](能力矩阵.md)和[当前状态与核验基线](当前状态与核验基线.md)为准。
 
 ## 一页结论
 
@@ -25,7 +38,7 @@
 
 | 项目 | 本次对比版本 | 说明 |
 | --- | --- | --- |
-| Fox | `7f9d668d8d5e7b3d489e1a48fde1dfdbab90abb3` | 2026-08-24 提交，当前能力改造后的基线 |
+| Fox | `7f9d668d8d5e7b3d489e1a48fde1dfdbab90abb3` | 2026-08-24 提交，分析时的基线；之后的变化见「分析时点与 Fox 现状」 |
 | Maka | npm/package 版本 `0.1.5` | 本地源码快照没有 Git 元数据，因此结论只对应本次快照 |
 | Kun | `d86d44455a554b217a1ea03d62c37517b849dee7` | 2026-08-03 快照；对比时忽略其工作区内与本次研究无关的未提交改动 |
 | DeepSeek-Reasonix | `44f749eae0679c485fb7f5c568cc92e2ece1e7ed` | 2026-08-06 快照 |
@@ -41,7 +54,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 核心执行闭环 | 对话、工具、审批、恢复，加上结构化 Goal/Task/Evidence/Review/Acceptance | 事件驱动 Run/Turn/Tool 生命周期，强调耐久 TaskRun | 多工作台内统一执行，Graph Lead 负责完整交付 | Executor/Planner 双模式，配置驱动、终端优先 | 面向真实代码库的持续执行、验证和交付 |
 | 工作治理 | **最强项**。目标、计划修订、证据、发现、验收和审批均可持久化 | 有 TaskRun、Ledger 和 Graph 记录，治理重点偏执行耐久性 | Graph 节点、状态和 Review 形成监督闭环 | 结构较轻，主要依赖指令、工具策略和会话状态 | Goal、Plan、Approval、Sandbox 和会话状态较成熟，但不是 Fox 式业务工作对象模型 |
-| 多 Agent | Child Run 有预算、权限交集、并发限制、取消传播和结果聚合；当前深度与并发较保守 | 动态 Graph 子节点、耐久记录和隔离 Worktree 思路完整 | **最强项之一**。Lead 建图、派发、监督、审查、修复、集成和验证 | 子 Agent 通过 Skills 隔离调用，轻量且聚焦 | Fork/Spawn、角色配置、Awaiter；子 Agent 不能扩大父 Agent 权限 |
+| 多 Agent | Child Run 有预算、权限交集、取消传播和结果聚合；深度 1，Kernel 路径不单独限制数量与并发（2026-10-25 修正） | 动态 Graph 子节点、耐久记录和隔离 Worktree 思路完整 | **最强项之一**。Lead 建图、派发、监督、审查、修复、集成和验证 | 子 Agent 通过 Skills 隔离调用，轻量且聚焦 | Fork/Spawn、角色配置、Awaiter；子 Agent 不能扩大父 Agent 权限 |
 | 长期记忆 | **最强项**。candidate/confirmed/conflict、作用域、召回和审计 | Workspace Memory 注入与更新，和会话上下文分离 | 有 Memory 与上下文能力，更多服务于工作台连续性 | 可组合会话/配置，长期记忆治理不是核心卖点 | 支持 Memory 与上下文续接，治理粒度取决于宿主配置 |
 | 专家化 | **最强项**。`.foxexpert` 不可变版本、Hash、升级/回滚、工作流、团队、数字同事 | Skills、Bot/平台上下文和运行图组合灵活 | Code/Write/Design/Research 场景 Prompt 深、界面完整 | Skills 按需加载，内置 Explore/Review/Test 方法论清晰 | Skills、Plugins、Apps、MCP 和自定义角色组合成熟 |
 | 耐久与恢复 | Run/Event、工作对象、会话恢复、Fork/lineage | **最强项之一**。事件溯源、TaskRun、历史与上下文分离 | Graph 和会话可持续，但核心优势偏监督与多工作台 | 简洁会话恢复，机制轻 | Compaction、Resume、Goal continuation 与会话 Fork 成熟 |
@@ -58,10 +71,10 @@ Fox 当前最强的是“治理深度”，而不是单次回答的技巧：
 - 工作对象不是聊天记录的附属信息。Goal、Task、Evidence、Plan Revision、Reviewer、Finding 和 Acceptance 构成可查询、可恢复的事实链。
 - 长期记忆不是把历史文本直接塞回 Prompt，而是经过候选、确认、冲突、作用域和审计治理。
 - 专家能力有可部署生命周期：`.foxexpert` 包、不可变版本、Hash、升级和回滚；其上还有持久工作流、专家团队和数字同事。
-- 子 Agent 继承的是权限交集，并受深度、并发、预算和取消传播约束，符合“能力可委派，权限不可放大”的原则。
+- 子 Agent 继承的是权限交集，并受深度、时长预算和取消传播约束，符合“能力可委派，权限不可放大”的原则。
 - MCP、OpenAPI、Hooks、知识库和本地工具仍经过 Host 权限与审计边界，不让扩展绕开产品治理。
 
-当前明显边界也要保留在判断里：Child Run 只支持有限深度和并发，尚未自动创建隔离 Worktree；专家团队首版以串行 Supervisor 为主；Prompt 虽有 Hash 和分层组装，但还没有 Maka 那样完整的 Prompt 版本实验、A/B 和回放产品面。详见[能力矩阵](能力矩阵.md)与[已知限制](../07-路线图/已知限制.md)。
+当前明显边界也要保留在判断里：Child Run 深度只有 1，尚未自动创建隔离 Worktree；专家团队首版以串行 Supervisor 为主；Prompt 虽有 Hash 和分层组装，但还没有 Maka 那样完整的 Prompt 版本实验、A/B 和回放产品面。详见[能力矩阵](能力矩阵.md)与[已知限制](../07-路线图/已知限制.md)。
 
 ### Maka：长处
 
@@ -154,22 +167,28 @@ Codex 最值得 Fox 学习的是“类型化上下文片段”：不要用一个
 
 核心函数：`composeFoxPrompt`
 
-当前组装顺序和相对权威度：
+当前片段与优先级（2026-10-25 按代码更新；数字越大，预算紧张时越优先保留）：
 
-| 片段 | 权威度/优先级 | 用途 |
+| 片段 id | 优先级 | 用途 |
 | --- | ---: | --- |
-| Runtime / Model instructions | 稳定最高层 | 行为和模型基本契约 |
-| Approval demo | 100 | 明确审批场景 |
-| Runtime metadata | 90 | 当前运行事实 |
-| Persona | 80 | 助手身份与表达 |
-| Expert package | 70 | 只可叠加专业能力，不得削弱稳定契约 |
-| Confirmed memory | 65 | 作为事实，不作为高优先级指令 |
-| Expert binding | 60 | 当前专家版本和绑定信息 |
-| Turn tail | 50 | 当前轮次状态 |
-| Planner handoff | 45 | 规划器向执行器的结构化移交 |
-| Workspace | 40 | 项目与目录上下文 |
+| Runtime / Model instructions | 稳定前缀 | 行为和模型基本契约（不参与优先级裁剪） |
+| `host_runtime_availability` | 100 | 当前环境中哪些 Host 能力可用 |
+| `approval_demo` | 100 | 仅审批演示轮次 |
+| `work_snapshot` | 95 | 工作图快照 |
+| `runtime` | 90 | 当前运行事实 |
+| `delegation_contract` | 85 | Child / 专家咨询实例的委派契约 |
+| `assistant_persona` | 80 | 助手身份与表达 |
+| `skills` | 75 | 已启用 Skills |
+| `expert_package` | 70 | 只可叠加专业能力，资源声明不授予权限 |
+| `confirmed_memory` | 65 | 作为事实，不作为高优先级指令 |
+| `expert_binding` | 60 | 当前专家版本和绑定信息 |
+| `turn_tail` | 50 | 当前轮次状态 |
+| `planner_handoff` | 45 | 规划器向执行器的结构化移交 |
+| `workspace` | 40 | 项目与目录上下文 |
 
-组装器还负责预算、截断、稳定前缀 Hash 和上下文 Hash。这个结构已经接近 Codex 的片段化方式，下一步应把片段从“带优先级的字符串”继续提升为可追踪的类型化对象。
+分析时（2026-08）的表没有 `host_runtime_availability`、`work_snapshot`、`delegation_contract`、`skills` 四项；各片段现在都以 `id / kind / authority / priority / minimumChars / maxChars` 的类型化片段形式组装。
+
+组装器还负责预算、截断、稳定前缀 Hash 和上下文 Hash。（分析时的建议是把片段从“带优先级的字符串”提升为可追踪的类型化对象；2026-10-25 的代码中片段已带 `kind`、`authority` 和预算字段，`typed-context.mjs` 提供 `TYPED_CONTEXT_SCHEMA_VERSION = 1` 和片段校验。下文 P1「类型化上下文」建议中的 `trust`、`volatility`、`redaction_policy` 等字段是否齐全，本次未逐项核对。）
 
 #### 3. 只读 Planner
 
@@ -194,7 +213,7 @@ Codex 最值得 Fox 学习的是“类型化上下文片段”：不要用一个
 
 位置：[`apps/desktop/src-tauri/src/database/repositories.rs`](../../apps/desktop/src-tauri/src/database/repositories.rs)
 
-这里维护默认助手、调试、前端、审查、安全和架构等内建 Agent Prompt。可学习点：这些人格目前适合做默认模板，但不应承载 Workflow、权限或工具事实；后者仍应由运行时片段注入。
+这里的 `BUILTIN_AGENTS` 与 `seed_builtin_agents` 维护内建 Agent 记录与 Prompt，每次打开数据库时以 `INSERT OR IGNORE` 写入；其中 `fox-frontend`、`fox-reviewer`、`fox-architect` 已改由随包的版本化专家库提供（2026-10-25 按代码更新）。可学习点：这些人格目前适合做默认模板，但不应承载 Workflow、权限或工具事实；后者仍应由运行时片段注入。
 
 ### Maka Prompt：位置与关键原文
 
@@ -553,6 +572,8 @@ Specialized Workbenches
 - [`services/agent-runtime/src/prompt-composer.mjs`](../../services/agent-runtime/src/prompt-composer.mjs)
 - [`services/agent-runtime/src/planner-runtime.mjs`](../../services/agent-runtime/src/planner-runtime.mjs)
 - [`apps/desktop/src-tauri/src/database/repositories.rs`](../../apps/desktop/src-tauri/src/database/repositories.rs)
+- [`services/agent-runtime/src/prompt-registry.mjs`](../../services/agent-runtime/src/prompt-registry.mjs)、[`typed-context.mjs`](../../services/agent-runtime/src/typed-context.mjs)
+- [`services/agent-runtime/src/pi-kernel-description.mjs`](../../services/agent-runtime/src/pi-kernel-description.mjs)（Kernel 路径的系统提示）
 - [能力矩阵](能力矩阵.md)
 - [Agent 能力路线图](../07-路线图/Agent能力路线图.md)
 - [Agent 能力测试基准](../05-开发指南/Agent能力测试基准.md)
@@ -608,7 +629,8 @@ Specialized Workbenches
 
 ## 维护规则
 
-- Fox 能力事实变化时，同步核对[能力矩阵](能力矩阵.md)；竞品变化只更新本页的版本基准和相关结论。
+- Fox 能力事实变化时，同步核对[能力矩阵](能力矩阵.md)，并更新「分析时点与 Fox 现状」；竞品变化只在重新分析时更新版本基准和相关结论。
+- 没有重新分析时，不改动对比结论和排名，只修正 Fox 的事实错误并注明日期。
 - 所有“建议”在真正进入代码、迁移、用户入口和回归测试前，都不能写成“已实现”。
 - 比较 Prompt 时必须区分基础模板、运行时片段、专用模式和最终渲染结果，不能只比较文件长度。
 - 引用 Codex 时必须注明开源快照范围，不推断未公开的服务端隐藏指令。
