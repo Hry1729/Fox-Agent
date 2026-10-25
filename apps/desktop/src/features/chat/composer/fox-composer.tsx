@@ -21,7 +21,7 @@ import { ComposerCommandItem, ComposerPersonItem, useMentionMatches, applyMentio
 import { CommandItem as CommandPrimitiveItem } from 'cmdk'
 import { Attachment, AttachmentInfo, AttachmentPreview, AttachmentRemove, Attachments } from '@/components/ai-elements/attachments'
 import { Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle } from '@/components/ai-elements/confirmation'
-import { PromptInput, PromptInputActionAddAttachments, PromptInputActionMenu, PromptInputActionMenuContent, PromptInputActionMenuItem, PromptInputActionMenuTrigger, PromptInputBody, PromptInputFooter, PromptInputSelect, PromptInputSelectContent, PromptInputSelectItem, PromptInputSelectTrigger, PromptInputSelectValue, PromptInputSubmit, PromptInputTextarea, PromptInputTools, usePromptInputAttachments } from '@/components/ai-elements/prompt-input'
+import { PromptInput, SEND_NOT_STARTED_MESSAGE, PromptInputActionAddAttachments, PromptInputActionMenu, PromptInputActionMenuContent, PromptInputActionMenuItem, PromptInputActionMenuTrigger, PromptInputBody, PromptInputFooter, PromptInputSelect, PromptInputSelectContent, PromptInputSelectItem, PromptInputSelectTrigger, PromptInputSelectValue, PromptInputSubmit, PromptInputTextarea, PromptInputTools, usePromptInputAttachments } from '@/components/ai-elements/prompt-input'
 import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
 import { BorderBeam } from '@/components/effects/border-beam'
 import { Button } from '@/components/ui/button'
@@ -33,6 +33,7 @@ import { type RunSteeringLane, knowledgeReferenceFromLegacyBinding, knowledgeRef
 import { type RuntimeQuestion, type RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
 import { type AgentRecord, type ApprovalDecision, type ApprovalRecord, type KnowledgeBindingRecord, type KnowledgeReference, type ModelServiceRecord, type ProjectRecord, type TaskEvidenceRecord, type ToolCallRecord, type YuxiModelRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
+import { SendNotStartedNotice } from './send-not-started-notice'
 import { ArrowUp, Eye, Play, Check, ChevronDown, CircleHelp, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, X } from 'lucide-react'
 import { type ChangeEvent, type ComponentProps, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction, Suspense, lazy, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
@@ -128,7 +129,7 @@ export function readStoredSeenChanges() {
   }
 }
 
-function Composer({ topSlot, inputLockedReason = null, initialAttachments, onInitialAttachmentsConsumed, resetKey, draft, setDraft, chatState, centered = false, newConversation, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { /** Row rendered inside the composer container, directly above the input box (Agent backend bar). */ topSlot?: ReactNode; /** When set, the conversation is read-only: input and send are disabled with this reason. */ inputLockedReason?: string | null; initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
+function Composer({ topSlot, inputLockedReason = null, initialAttachments, onInitialAttachmentsConsumed, resetKey, draft, setDraft, chatState, centered = false, newConversation, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel, sendFailureReason }: { /** Row rendered inside the composer container, directly above the input box (Agent backend bar). */ topSlot?: ReactNode; /** When set, the conversation is read-only: input and send are disabled with this reason. */ inputLockedReason?: string | null; initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void>; /** Why the last send did not start (Host error), read right after onSubmitPrompt returns 'error'. */ sendFailureReason?: () => string | null | undefined }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const entry = useContext(ComposerEntryContext)
   const displayExpert = activeExpert ?? entry.defaultExpert
@@ -151,6 +152,8 @@ function Composer({ topSlot, inputLockedReason = null, initialAttachments, onIni
   }))
   const openKnowledge = onKnowledge ?? runtimeContext.onKnowledge
   const [status, setStatus] = useState<'ready' | 'streaming'>('ready')
+  // 「发送未开始」 with the Host's reason, shown above the input until the next send.
+  const [sendNotStarted, setSendNotStarted] = useState<{ message: string; detail?: string } | null>(null)
   const [focused, setFocused] = useState(false)
   const spellcheckEnabled = typeof window === 'undefined' || window.localStorage.getItem('fox.preferences.spellcheck') !== '0'
   const allowYuxiModelOverride = yuxiModelOverrideAllowed(activeAgent)
@@ -641,19 +644,21 @@ function Composer({ topSlot, inputLockedReason = null, initialAttachments, onIni
           </p>
         )}
         {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} />}
+        {sendNotStarted && <SendNotStartedNotice message={sendNotStarted.message} detail={sendNotStarted.detail} onDismiss={() => setSendNotStarted(null)} />}
         <PromptInput
           accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv'}
           multiple
           maxFiles={8}
           maxFileSize={MAX_COMPOSER_ATTACHMENT_BYTES}
-          onError={({ code, message }) => {
+          onError={({ code, message, detail }) => {
             if (code === 'max_file_size') toast.error('单个附件不能超过 5 MB')
             else if (code === 'max_files') toast.error('一次最多添加 8 个附件')
             else if (code === 'attachment_read_failed') toast.error('附件读取失败，草稿与附件已保留：请删除该附件后重新选择再发送')
-            else if (code === 'attachment_send_failed') toast.error('发送失败，草稿和附件已保留，请重试', { description: message })
+            else if (code === 'attachment_send_failed') { toast.error('发送失败，草稿和附件已保留，请重试', { description: message }); setSendNotStarted({ message: message === SEND_NOT_STARTED_MESSAGE ? '发送未开始' : message, detail }) }
             else toast.error('支持 PDF、TXT、MD、DOCX、XLSX、PPTX、CSV、TSV；旧版 DOC、XLS、PPT 请先转换格式')
           }}
           onSubmitStart={({ text, files }) => {
+            setSendNotStarted(null)
             if (runtimeInitializing || inputLockedReason) return
             // A supplementary request is not a new turn: it never adds an
             // optimistic user message to the timeline. Its only receipt is the
@@ -729,11 +734,12 @@ function Composer({ topSlot, inputLockedReason = null, initialAttachments, onIni
           }
           if (outcome === 'error') {
             // The send did not start (for example the attachment could not be
-            // saved). Report failure so the composer keeps draft + attachments.
+            // saved). Report failure so the composer keeps draft + attachments,
+            // with the Host's reason when there is one.
             restoreDraft()
             setStatus('ready')
             onStatusChange?.('ready')
-            return false
+            return { sent: false as const, reason: sendFailureReason?.() ?? null }
           }
           if (outcome === 'question' || outcome === 'approval') {
             // The message was consumed into a question/approval state.
