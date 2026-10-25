@@ -13,6 +13,7 @@
 // Saved by the Host (`agent_backend_preferences_save`, `app_settings`); a
 // change is broadcast so the open draft re-probes its login at once.
 import { useCallback, useEffect, useState } from 'react'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { SettingsGroup, SettingsRow } from './settings-layout'
 import {
@@ -84,13 +85,9 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
         const greyed = rows.filter((row) => row.disabled && row.reason)
         return (
           <SettingsRow key={backend} className="fox-agent-native-default" title={`${label} 默认权限`} description={`${view.catalog.switchNote}${greyed.map((row) => `；${row.label}：${row.reason}`).join('')}`}>
-            <select
-              className="fox-settings-native-select"
-              data-native-default={backend}
-              aria-label={`${label} 默认权限`}
+            <Select
               value={current}
-              onChange={(event) => {
-                const mode = event.target.value
+              onValueChange={(mode) => {
                 if (rows.find((row) => row.value === mode)?.disabled) return
                 setError(null)
                 set({ backend, mode, defaultOnly: true })
@@ -98,12 +95,15 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
                   .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
               }}
             >
-              {rows.map((row) => (
-                <option key={row.value} value={row.value} disabled={row.disabled} title={row.title}>
-                  {row.label}{row.disabled ? '（不可用）' : ''}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger className="fox-settings-agent-select" data-native-default={backend} aria-label={`${label} 默认权限`}><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {rows.map((row) => (
+                  <SelectItem key={row.value} value={row.value} data-value={row.value} disabled={row.disabled} title={row.title}>
+                    {row.label}{row.disabled ? '（不可用）' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </SettingsRow>
         )
       })}
@@ -156,22 +156,22 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
   return (
     <SettingsGroup title="外部 Agent" className="fox-agent-backend-settings" aside={<span>只影响之后新建的会话</span>}>
       <SettingsRow title="新会话使用的 Agent" description="默认 Fox。外部 Agent 自动使用当前供应商；缺少地址时会在后端栏提示补充。已有登录优先。">
-        <select
-          className="fox-settings-native-select"
-          aria-label="新会话使用的 Agent"
+        <Select
           value={selected}
           disabled={!preferences || saving}
-          onChange={(event) => {
-            const next = event.target.value
+          onValueChange={(next) => {
             if (isAgentBackendId(next) && !rows.find((row) => row.value === next)?.disabled) void save({ defaultBackend: next })
           }}
         >
-          {rows.map((row) => (
-            <option key={row.value} value={row.value} disabled={row.disabled} title={row.reason ?? undefined}>
-              {row.label}{row.disabled ? '（不可用）' : ''}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger className="fox-settings-agent-select" aria-label="新会话使用的 Agent"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {rows.map((row) => (
+              <SelectItem key={row.value} value={row.value} data-value={row.value} disabled={row.disabled} title={row.reason ?? undefined}>
+                {row.label}{row.disabled ? '（不可用）' : ''}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </SettingsRow>
       {forcedOff && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">{forcedOff}</p>}
       {!forcedOff && unavailableReasons.length > 0 && (
