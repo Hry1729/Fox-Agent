@@ -1,5 +1,7 @@
 # Fox F1–F5 修复报告（第二轮复审后，2026-09-15 接续）
 
+> 历史记录，截至 2026-09-15，现状见 [docs/README.md](../../../README.md)
+
 > 依据：第二次复审的 F1–F5（`output/claude-design-re-review-20260915/report.md`）。
 > 本轮**未提交、未推送**；未改长期记忆或技能；未覆盖原始 Excel、旧成果与审查证据。
 > 承接 N1–N7 报告：`output/claude-design-repair-20260915/report.md`（同一输出目录，本轮日志追加在 `logs/`）。
