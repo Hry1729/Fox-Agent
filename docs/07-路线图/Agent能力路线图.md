@@ -3,9 +3,29 @@
 > 状态：维护中<br>
 > 适用版本：Fox `0.1.x` 及后续版本<br>
 > 维护范围：已完成能力的依赖关系、下一阶段目标与决策门<br>
-> 最后更新：2026-08-27
+> 最后更新：2026-10-25（新增「当前状态」一节，按 `main` 代码核对；「当前基线」以下保留 2026-08-27 原文）
 
-## 当前基线
+## 当前状态（2026-10-25）
+
+| 方向 | 状态 | 说明 |
+| --- | --- | --- |
+| A0–A6、E1–E4 | 已完成 | 工程实现与离线回归，见[能力矩阵](../01-项目概览/能力矩阵.md) |
+| Kernel 统一控制（Fox 自身执行路径） | 已完成，默认启用 | Kernel / Authoritative 是默认；Legacy 只用于调试和旧 Run。进度和余项见 [Kernel 改造进度](Kernel-改造进度.md) |
+| 外层 Agent（四 Agent，经 ACP） | 阶段 0–3 已完成 | 内置 Fox、DeepSeek Harness（实验）、pi；Codex 已实现但界面隐藏。见 [Agent 运行时架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent) |
+| 「自定义 ACP Agent」入口 | **待办** | 让用户自行安装其他 ACP Agent、填写启动命令；Codex 以后也走这里 |
+| 共享 Host 加固（四 Agent 阶段 1） | 部分完成 | 第 2 项（测试授权语义）未关闭；第 4 项只在 Windows 上关闭；其余已关闭或撤回 |
+| Legacy / Shadow 清理（四 Agent 阶段 4） | **未开始** | |
+| Kernel Issue [#24](https://github.com/Hry1729/Fox-Agent/issues/24)（自我验证证据）、[#25](https://github.com/Hry1729/Fox-Agent/issues/25)（Host 生成 attemptId） | 未开始（open） | |
+| P0 真实任务质量与发布门禁 | 部分完成 | Windows CI 已覆盖前端、Runtime、桌面 Host、Kernel / 协议、外部 Agent 后端和契约 Fixture，并支持定向模式；Markdown 链接、Sidecar Smoke、安装包、离线 Eval 不在 CI；没有版本化在线 Smoke Runner，没有接入官方评测集 |
+| P1 子 Agent 与团队隔离 | 部分完成 | Child Run 已走 Kernel（`kernel_delegation.rs`），深度 1；共享写任务的 Git worktree 隔离、并行 Team、mailbox 都没有做 |
+| P1 扩展源安全与治理 | 未开始 | MCP 已支持 `stdio` 和 `streamable_http` 传输；OAuth、证书固定、操作级限流、插件签名与回滚都没有做 |
+| P2 本地知识质量 | 部分完成 | 检索测试入口有关键词、向量和 RRF 混合检索；聊天检索仍只用关键词；BM25 方案未实施。仓库里没有官方 Zvec DLL 和完整 ONNX 模型包，CI 的两个 Smoke 一直是跳过状态 |
+| A7 模型路由 / A9 远程 Fox Runtime | 未开始 | |
+| A8 通用自动化 | 部分基础存在 | 数字同事 Schedule / Channel |
+
+离线 Eval 的完整清单已从 121 扩到 129 个 case，新基线没有重跑，见 [Agent 能力测试基准](../05-开发指南/Agent能力测试基准.md)。
+
+## 当前基线（2026-08-27 原文）
 
 A0-A6 与 E1-E4 已完成工程实现和离线回归。当前功能、边界和事实源统一见[Fox 能力矩阵](../01-项目概览/能力矩阵.md)；测试结果见[Agent 能力测试基准](../05-开发指南/Agent能力测试基准.md)；尚未解决的问题见[已知限制](已知限制.md)。
 
