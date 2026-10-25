@@ -1022,27 +1022,15 @@
   width: 100%;
 }
 
-.fox-settings-native-select {
-  height: var(--fox-control-md, 32px);
-  min-width: 132px;
-  max-width: 220px;
-  padding: 0 28px 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--fox-radius-control);
-  background-color: transparent;
-  color: var(--foreground);
-  font: inherit;
-  font-size: var(--fox-type-control, 13px);
+.fox-settings-agent-select[data-slot='select-trigger'] {
+  width: 160px;
+  max-width: 100%;
 }
 
-.fox-settings-native-select:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
-}
-
-.fox-settings-native-select option {
-  background: var(--popover);
-  color: var(--popover-foreground);
+.fox-settings-agent-select [data-slot='select-value'] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fox-settings-page .fox-settings-footnote ul,
