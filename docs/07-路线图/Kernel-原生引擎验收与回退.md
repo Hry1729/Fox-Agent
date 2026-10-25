@@ -1,5 +1,10 @@
 # Kernel 原生引擎验收与回退
 
+> **现状（2026-10-25 按代码核对）：选择与冻结机制已实现并仍有效；“发布前应取得的证据”没有全部取得。**
+> - 已核对：`FOX_KERNEL_MODE` 未设置即 Authoritative，`legacy` 需显式设置（`runtime_host/kernel_authority.rs`）；`FOX_KERNEL_ENGINE` 接受 `pi`（默认）、`codex`、`deepseek_harness`，`FOX_KERNEL_CODEX_BINARY` 仍是 Codex 引擎的必填项（`kernel_model_config.rs`）；每个 Run 的 `authority` 和 `engine_id` 冻结在 `run_control_bindings`。
+> - 发布证据：远端 Windows CI 已存在并在运行（含 Kernel、协议、打包 worker 检查）；安装包隔离验收、云模型长会话、企业连接器验收没有找到新的记录。
+> - 注意区分：本文的 Codex / DeepSeek Harness 是 **Fox 会话内部的 Kernel 模型引擎**；作为外层 Agent 经 ACP 接入的 Codex / dsh 是另一条路线，见 [Agent 运行时架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+
 更新：2026-09-10。本文件描述已实现的控制方式和待完成的发布条件，不代表已发布或已切换默认模式。
 
 ## 已实现的选择与冻结
