@@ -60,19 +60,55 @@ pub(crate) fn default_storage_root(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("local-knowledge")
 }
 
-pub(crate) fn resolve_startup_root(app_data_dir: &Path, configured_path: Option<&str>) -> PathBuf {
-    let default_root = default_storage_root(app_data_dir);
-    let Some(configured_path) = configured_path.map(str::trim) else {
-        return default_root;
+/// Where the local knowledge store opens at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartupRoot {
+    pub(crate) path: PathBuf,
+    /// Set when a configured custom path cannot be resolved (e.g. the
+    /// directory exists but write access is denied, so canonicalize fails).
+    /// Startup must then open the store degraded at `path` with
+    /// 「知识库路径不可写：<路径>」, never silently switch to the default root.
+    pub(crate) unusable: Option<String>,
+}
+
+/// The default root is used only when no custom path is configured. A
+/// configured path that cannot be resolved is returned as unusable (with the
+/// configured path), so the store starts degraded and the user sees why.
+pub(crate) fn resolve_startup_root(app_data_dir: &Path, configured_path: Option<&str>) -> StartupRoot {
+    resolve_startup_root_with(app_data_dir, configured_path, |path| {
+        normalize_storage_path(path, None).map(|_| ())
+    })
+}
+
+pub(crate) fn resolve_startup_root_with(
+    app_data_dir: &Path,
+    configured_path: Option<&str>,
+    check: impl FnOnce(&Path) -> Result<(), StorageMigrationError>,
+) -> StartupRoot {
+    let configured_path = configured_path.map(str::trim).filter(|value| !value.is_empty());
+    let Some(configured_path) = configured_path else {
+        return StartupRoot {
+            path: default_storage_root(app_data_dir),
+            unusable: None,
+        };
     };
-    if configured_path.is_empty() {
-        return default_root;
-    }
     let configured = PathBuf::from(configured_path);
-    if normalize_storage_path(&configured, None).is_ok() {
-        configured
-    } else {
-        default_root
+    match check(&configured) {
+        Ok(()) => StartupRoot {
+            path: configured,
+            unusable: None,
+        },
+        Err(error) => {
+            eprintln!(
+                "fox.local_knowledge warn configured_storage_unresolvable path={} error={}",
+                configured.display(),
+                error.message
+            );
+            StartupRoot {
+                path: configured,
+                unusable: Some(error.message),
+            }
+        }
     }
 }
 
@@ -727,7 +763,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn startup_uses_valid_configured_path_and_falls_back_for_invalid_path() {
+    fn startup_uses_configured_path_and_never_falls_back_when_it_is_configured() {
         let app_data = PathBuf::from(if cfg!(windows) {
             r"C:\fox-data"
         } else {
@@ -740,12 +776,57 @@ mod tests {
         };
         assert_eq!(
             resolve_startup_root(&app_data, Some(configured)),
-            PathBuf::from(configured)
+            StartupRoot { path: PathBuf::from(configured), unusable: None }
         );
-        assert_eq!(
-            resolve_startup_root(&app_data, Some("relative/path")),
-            default_storage_root(&app_data)
-        );
+        // No custom path: the default root (the only allowed fallback).
+        for none in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                resolve_startup_root(&app_data, none),
+                StartupRoot { path: default_storage_root(&app_data), unusable: None }
+            );
+        }
+        // An invalid configured path stays the configured path, unusable.
+        let relative = resolve_startup_root(&app_data, Some("relative/path"));
+        assert_eq!(relative.path, PathBuf::from("relative/path"));
+        assert!(relative.unusable.is_some());
+    }
+
+    #[test]
+    fn startup_root_keeps_configured_path_when_resolving_it_fails() {
+        // Injected failure: what Windows reports for a directory with
+        // `icacls /deny user:(OI)(CI)(W)` (canonicalize fails).
+        let app_data = std::env::temp_dir().join(format!("fox-startup-root-{}", Uuid::new_v4()));
+        let configured = app_data.join("custom-knowledge");
+        let root = resolve_startup_root_with(&app_data, configured.to_str(), |_| {
+            Err(StorageMigrationError::new(
+                "local_knowledge.storage_migration_invalid_destination",
+                "无法解析存储路径：拒绝访问。 (os error 5)",
+                false,
+            ))
+        });
+        assert_eq!(root.path, configured);
+        assert_ne!(root.path, default_storage_root(&app_data));
+        assert_eq!(root.unusable.as_deref(), Some("无法解析存储路径：拒绝访问。 (os error 5)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_root_keeps_configured_path_when_permission_is_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("fox-startup-root-perm-{}", Uuid::new_v4()));
+        let locked = base.join("locked");
+        let configured = locked.join("knowledge");
+        fs::create_dir_all(&configured).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let root = resolve_startup_root(&base.join("app-data"), configured.to_str());
+        // Never the default root, whether or not the account can bypass the
+        // permission (root can; then the path simply resolves).
+        assert_eq!(root.path, configured);
+        if fs::metadata(&configured).is_err() {
+            assert!(root.unusable.is_some(), "{root:?}");
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
