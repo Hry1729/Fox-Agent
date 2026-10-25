@@ -580,7 +580,20 @@ impl LocalKnowledgeStore {
     pub fn open_for_startup(root: impl AsRef<Path>, resource_dir: Option<&Path>) -> Self {
         let root = root.as_ref();
         match Self::open_internal(root, resource_dir) {
-            Ok(store) => store,
+            // The directory may open (an existing database falls back to
+            // read-only inside SQLite) while new files cannot be created
+            // in it, e.g. write access denied by ACL: prove it is writable.
+            Ok(store) => match probe_writable_directory(root) {
+                Ok(()) => store,
+                Err(error) => {
+                    drop(store);
+                    eprintln!(
+                        "fox.local_knowledge warn startup_storage_unwritable path={} error={error}",
+                        root.display()
+                    );
+                    Self::open_degraded(root, resource_dir, error.to_string())
+                }
+            },
             Err(error) => {
                 eprintln!(
                     "fox.local_knowledge warn startup_storage_unwritable path={} error={}",
@@ -592,9 +605,26 @@ impl LocalKnowledgeStore {
         }
     }
 
+    /// Startup entry point for the resolved storage root. A configured path
+    /// that could not be resolved opens degraded at that configured path
+    /// (「知识库路径不可写：<配置路径>」), never at the default root.
+    pub(crate) fn open_for_startup_root(
+        root: &crate::local_knowledge_storage::StartupRoot,
+        resource_dir: Option<&Path>,
+    ) -> Self {
+        match &root.unusable {
+            None => Self::open_for_startup(&root.path, resource_dir),
+            Some(cause) => Self::open_degraded(&root.path, resource_dir, cause.clone()),
+        }
+    }
+
     fn open_degraded(root: &Path, zvec_resource_dir: Option<&Path>, cause: String) -> Self {
         let database_path = root.join("knowledge.db");
-        let read_only = Self::open_read_only_connection(&database_path);
+        // A relative (invalid) configured path is never read from the cwd.
+        let read_only = root
+            .is_absolute()
+            .then(|| Self::open_read_only_connection(&database_path))
+            .flatten();
         let (connection, read_only) = match read_only {
             Some(connection) => (connection, true),
             None => {
@@ -4346,6 +4376,70 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         let _ = std::fs::set_permissions(&database, permissions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_degrades_at_configured_path_when_it_cannot_be_resolved() {
+        // Windows `icacls /deny user:(OI)(CI)(W)`: canonicalize of the
+        // configured directory fails. The store must start degraded at the
+        // configured path (never the default root) with the path in the reason.
+        let base = std::env::temp_dir().join(format!("fox-local-knowledge-unresolved-{}", Uuid::new_v4()));
+        let configured = base.join("custom-knowledge");
+        std::fs::create_dir_all(&configured).unwrap();
+        let root = crate::local_knowledge_storage::resolve_startup_root_with(
+            &base.join("app-data"),
+            configured.to_str(),
+            |_| {
+                Err(crate::local_knowledge_storage::StorageMigrationError::new(
+                    "local_knowledge.storage_migration_invalid_destination",
+                    "无法解析存储路径：拒绝访问。 (os error 5)",
+                    false,
+                ))
+            },
+        );
+        let store = LocalKnowledgeStore::open_for_startup_root(&root, None);
+        let issue = store.startup_issue().expect("degraded");
+        assert_eq!(issue.root, configured);
+        assert_eq!(issue.message, format!("知识库路径不可写：{}", configured.display()));
+        assert!(issue.cause.contains("拒绝访问"));
+        let status = store.storage_status().unwrap();
+        assert!(!status.writable);
+        assert_eq!(status.root_path, configured.to_string_lossy());
+        assert_eq!(status.degraded_reason.as_deref(), Some(issue.message.as_str()));
+        assert!(store.ensure_default_fox_guide().is_err());
+        assert!(!base.join("app-data").join("local-knowledge").exists());
+        drop(store);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_degrades_when_configured_directory_denies_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let (store, root) = test_store();
+        store.ensure_default_fox_guide().unwrap();
+        drop(store);
+        for side in ["knowledge.db-wal", "knowledge.db-shm"] {
+            let _ = std::fs::remove_file(root.join(side));
+        }
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let startup = crate::local_knowledge_storage::resolve_startup_root(
+            &root.with_extension("app-data"),
+            root.to_str(),
+        );
+        assert_eq!(startup.path, root);
+        let store = LocalKnowledgeStore::open_for_startup_root(&startup, None);
+        // Elevated accounts bypass the permission; then the store opens normally.
+        if std::fs::write(root.join(".fox-perm-check"), b"x").is_err() {
+            let issue = store.startup_issue().expect("degraded");
+            assert_eq!(issue.message, format!("知识库路径不可写：{}", root.display()));
+            let status = store.storage_status().unwrap();
+            assert!(!status.writable);
+            assert_eq!(status.degraded_reason.as_deref(), Some(issue.message.as_str()));
+        }
+        drop(store);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 
