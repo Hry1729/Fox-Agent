@@ -83,7 +83,12 @@ impl Database {
                     params![r.package_id,r.version],|row|row.get(0),
                 )?;
                 // Preserve user rollbacks and enabled-skill choices on every restart.
-                if installed { refresh_compute_bindings(&tx,&r.expert_id,&r.version,now)?; continue; }
+                // A bundled expert whose `agents` row is gone (removed outside Fox)
+                // but whose package history remains is restored below instead of
+                // being skipped forever (which left conversations, bindings and
+                // the expert library pointing at a missing row).
+                let missing=current.is_none();
+                if installed && !missing { refresh_compute_bindings(&tx,&r.expert_id,&r.version,now)?; continue; }
                 tx.execute(
                     "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at,
                        icon,category,opening_suggestions_json,is_builtin,package_version,package_manifest_json,
@@ -98,12 +103,20 @@ impl Database {
                     params![r.expert_id,r.name,r.description,r.system_prompt,now,r.icon,r.category,
                         json!(r.opening_suggestions).canonical_string(),r.version,r.package_manifest.canonical_string(),r.package_id,r.package_hash],
                 )?;
+                if installed {
+                    // Row restored from the shipped catalog: keep the existing
+                    // package history and make the shipped version the active one.
+                    eprintln!("fox.database warn bundled_expert_restored id={} version={}",r.expert_id,r.version);
+                    tx.execute("UPDATE expert_package_versions SET status='historical' WHERE expert_id=?1 AND status='active' AND NOT (package_id=?2 AND version=?3)",params![r.expert_id,r.package_id,r.version])?;
+                    tx.execute("UPDATE expert_package_versions SET status='active',activated_at=?3 WHERE package_id=?1 AND version=?2 AND status<>'active'",params![r.package_id,r.version,now])?;
+                } else {
                 tx.execute("UPDATE expert_package_versions SET status='historical' WHERE expert_id=?1 AND status='active'",[&r.expert_id])?;
                 tx.execute(
                     "INSERT INTO expert_package_versions(id,expert_id,package_id,version,package_hash,package_json,source,status,created_at,activated_at)
                      VALUES (?1,?2,?3,?4,?5,?6,'builtin','active',?7,?7)",
                     params![format!("expert-package-version-{}",Uuid::new_v4().simple()),r.expert_id,r.package_id,r.version,r.package_hash,r.package.canonical_string(),now],
                 )?;
+                }
                 tx.execute(
                     "INSERT INTO agent_runtime_config(agent_id,scope_type,scope_id,config_key,value_json,source,created_at,updated_at)
                      VALUES (?1,'agent',?1,'skills.enabled',?2,'package',?3,?3)
@@ -256,5 +269,190 @@ mod compute_upgrade_tests {
         }).unwrap();
         db.seed_bundled_experts().unwrap();
         assert_eq!(db.current_conversation_expert_binding(&idle.id).unwrap().unwrap().id,idle_after.id);
+    }
+}
+
+/// Windows retest 13.28: an `agents` row removed outside Fox (sqlite3 shell,
+/// foreign keys off) used to abort startup with `Query is not read-only`
+/// (`rusqlite::Error::InvalidQuery` from the migration FK gate).
+#[cfg(test)]
+mod missing_agent_row_tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-missing-agent-{tag}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The same open path the setup hook uses.
+    fn startup_open(root: &std::path::Path) -> Result<Database, String> {
+        Database::open_with_migration_backup(root.join("fox.db"), &root.join("backups"))
+    }
+
+    fn create_local_expert(db: &Database) -> String {
+        db.save_agent(&SaveAgentRequest {
+            id: None,
+            name: "本机测试专家".to_owned(),
+            description: "用于缺行回归".to_owned(),
+            icon: None,
+            category: "engineering".to_owned(),
+            system_prompt: "Answer briefly.".to_owned(),
+            default_model: "configured-model".to_owned(),
+            opening_suggestions: vec![],
+            package_manifest: json!({"skills": ["project-review"], "allowedTools": ["read"]}),
+        })
+        .unwrap()
+        .id
+    }
+
+    /// Mirrors `sqlite3 fox.db "delete from agents where id='…'"`.
+    fn delete_agent_row_outside_fox(db: &Database, id: &str) {
+        db.with_connection(|c| {
+            c.pragma_update(None, "foreign_keys", "OFF")?;
+            let deleted = c.execute("DELETE FROM agents WHERE id=?1", [id])?;
+            c.pragma_update(None, "foreign_keys", "ON")?;
+            assert_eq!(deleted, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn agent_fk_violations(db: &Database) -> i64 {
+        db.query_count_raw(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check WHERE \"table\" IN
+               ('conversations','agent_runtime_config','expert_package_versions')",
+            &[],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn startup_tolerates_deleted_local_expert_row() {
+        let root = temp_root("plain");
+        let db = startup_open(&root).unwrap();
+        let expert = create_local_expert(&db);
+        assert!(db.query_count_raw("SELECT COUNT(*) FROM agent_runtime_config WHERE agent_id=?1", &[&expert as &dyn rusqlite::ToSql]).unwrap() > 0);
+        let agents_before = db.list_agents().unwrap().len();
+        delete_agent_row_outside_fox(&db, &expert);
+        drop(db);
+
+        let db = startup_open(&root).expect("startup must not fail on a missing local expert row");
+        assert!(db.get_agent(&expert).unwrap().is_none(), "a deleted local expert is not resurrected");
+        assert_eq!(db.list_agents().unwrap().len(), agents_before - 1);
+        assert_eq!(agent_fk_violations(&db), 0);
+        assert!(db.get_agent(DEFAULT_AGENT_ID).unwrap().is_some());
+        drop(db);
+        // A second restart is a no-op.
+        let db = startup_open(&root).unwrap();
+        assert!(db.repair_missing_agent_references().unwrap().missing_agent_ids.is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn startup_repairs_conversations_and_bindings_of_deleted_local_expert() {
+        let root = temp_root("bound");
+        let db = startup_open(&root).unwrap();
+        let expert = create_local_expert(&db);
+        // A local primary agent (chat-selector assistant) used directly as a
+        // conversation's agent …
+        let assistant = create_local_expert(&db);
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE agents SET agent_kind='assistant',invocation_mode='primary',visibility='chat_selector' WHERE id=?1",
+                [&assistant],
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+        let direct = db.create_conversation(&assistant, Some("直接对话"), None, None).unwrap();
+        // … and a general-assistant conversation with the local expert bound.
+        let bound = db.create_conversation(DEFAULT_AGENT_ID, Some("绑定对话"), None, None).unwrap();
+        let binding = db.bind_conversation_expert(&bound.id, &expert, "test").unwrap();
+        delete_agent_row_outside_fox(&db, &assistant);
+        delete_agent_row_outside_fox(&db, &expert);
+        drop(db);
+
+        let db = startup_open(&root).expect("startup must not fail when conversations still reference the expert");
+        let repaired_direct = db.load_conversation(&direct.id).expect("conversation that used the expert opens");
+        assert_eq!(repaired_direct.conversation.agent_id, DEFAULT_AGENT_ID);
+        let repaired_bound = db.load_conversation(&bound.id).expect("bound conversation opens");
+        assert_eq!(repaired_bound.conversation.agent_id, DEFAULT_AGENT_ID);
+        assert!(db.current_conversation_expert_binding(&bound.id).unwrap().is_none(), "the dangling binding is no longer active");
+        assert_eq!(
+            db.query_count_raw("SELECT COUNT(*) FROM conversation_expert_bindings WHERE id=?1 AND state='removed' AND deactivated_at IS NOT NULL", &[&binding.id as &dyn rusqlite::ToSql]).unwrap(),
+            1,
+            "the binding row and its snapshot are kept as history"
+        );
+        let listed = db.list_conversations().unwrap();
+        assert!(listed.iter().any(|c| c.id == direct.id) && listed.iter().any(|c| c.id == bound.id), "both conversations stay in the sidebar");
+        assert_eq!(agent_fk_violations(&db), 0);
+        // The conversation can take a new expert again.
+        db.bind_conversation_expert(&bound.id, "fox-reviewer", "test").unwrap();
+        drop(db);
+        let db = startup_open(&root).unwrap();
+        assert_eq!(db.current_conversation_expert_binding(&bound.id).unwrap().unwrap().expert_id, "fox-reviewer");
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn startup_reseeds_deleted_bundled_expert_row() {
+        let root = temp_root("bundled");
+        let db = startup_open(&root).unwrap();
+        let before = db.get_agent("fox-reviewer").unwrap().unwrap();
+        let conversation = db.create_conversation(DEFAULT_AGENT_ID, None, None, None).unwrap();
+        db.bind_conversation_expert(&conversation.id, "fox-reviewer", "test").unwrap();
+        delete_agent_row_outside_fox(&db, "fox-reviewer");
+        // A built-in (is_builtin=1) agent too.
+        delete_agent_row_outside_fox(&db, "fox-debugger");
+        drop(db);
+
+        let db = startup_open(&root).expect("startup must re-seed missing built-in/bundled experts");
+        let after = db.get_agent("fox-reviewer").unwrap().expect("bundled expert re-seeded");
+        assert_eq!(after.package_hash, before.package_hash);
+        assert_eq!(after.package_version, before.package_version);
+        assert!(db.get_agent("fox-debugger").unwrap().is_some(), "built-in agent re-seeded");
+        assert_eq!(
+            db.query_count_raw("SELECT COUNT(*) FROM expert_package_versions WHERE expert_id='fox-reviewer' AND status='active'", &[]).unwrap(),
+            1
+        );
+        assert_eq!(
+            db.current_conversation_expert_binding(&conversation.id).unwrap().unwrap().expert_id,
+            "fox-reviewer",
+            "a binding to a re-seeded expert stays active"
+        );
+        assert_eq!(agent_fk_violations(&db), 0);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn non_agent_foreign_key_violation_fails_with_readable_message() {
+        let root = temp_root("fk");
+        let db = startup_open(&root).unwrap();
+        db.with_connection(|c| {
+            c.pragma_update(None, "foreign_keys", "OFF")?;
+            c.execute(
+                "INSERT INTO conversation_expert_bindings(id,conversation_id,expert_id,state,activation_source,
+                   expert_version,package_hash,display_snapshot_json,activated_at,deactivated_at)
+                 VALUES ('orphan-binding','missing-conversation','fox-reviewer','removed','test','1','h','{}',1,1)",
+                [],
+            )?;
+            c.pragma_update(None, "foreign_keys", "ON")
+        })
+        .unwrap();
+        drop(db);
+        let error = match startup_open(&root) {
+            Ok(_) => panic!("an unrelated FK violation still stops the migration"),
+            Err(error) => error,
+        };
+        assert!(!error.contains("Query is not read-only"), "{error}");
+        assert!(error.contains("外键完整性检查失败"), "{error}");
+        assert!(error.contains("conversation_expert_bindings → conversations"), "{error}");
+        let message = crate::startup_failure::database_open_message(&root.join("fox.db"), &root.join("backups"), &error);
+        assert!(message.contains(&root.join("fox.db").display().to_string()), "{message}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
