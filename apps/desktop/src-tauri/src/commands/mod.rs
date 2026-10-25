@@ -4911,7 +4911,12 @@ pub async fn knowledge_preview_cache_acquire(
         ));
     }
     let cache_dir = knowledge_preview_cache_dir(&state);
-    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    // Created and validated on use: a file at cache/knowledge-preview fails
+    // this preview with 「预览缓存目录：<路径> 应为目录但是文件」 instead of
+    // aborting startup.
+    if let Err(error) = crate::data_paths::ensure_directory(&cache_dir, "预览缓存目录") {
+        return Ok(ApiResponse::failure("knowledge.preview_cache_dir_invalid", error, false));
+    }
     let final_path =
         knowledge_preview_cache_path(&cache_dir, &cache_key, request.filename.as_deref());
 
