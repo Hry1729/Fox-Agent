@@ -1,5 +1,7 @@
 # Kernel Office 修复包构建（2026-09-10）
 
+> 历史记录，截至 2026-09-10，现状见 [docs/README.md](../../README.md)
+
 Windows x64 NSIS 安装器已成功构建，源码提交 `0d5d9007049c0854dd8f98865d39b7aa56b91403`。包含两轮用户反馈修复；具体范围见 [Office 附件与知识库修复](Kernel-Office附件与知识库修复-2026-09-10.md)。
 
 - ZIP：`output/kernel-office-20260910/Fox-NewKernel-Preview-0d5d900-windows-x64.zip`，115,255,334 字节。
