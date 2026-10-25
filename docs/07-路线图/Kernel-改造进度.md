@@ -1,72 +1,55 @@
 # Kernel 改造进度
 
-> **状态：历史记录（阶段基线 `2759ac1`，文中「更新：2026-09-12」）**<br>
-> 当前仓库基线为 `main` @ `b6cd463`，数据库 schema 79，admission/policy 已随 `b6cd463` 提交（不再是未提交工作区改动）。<br>
-> 当前事实、成熟度口径与待验证清单以[当前状态与核验基线](../01-项目概览/当前状态与核验基线.md)为准；本文的测试数字、「未推送」「默认方式」等描述只对应各自阶段，不代表当前状态。<br>
-> 本文保留原文，不追改历史结论。
+> 状态：维护中<br>
+> 适用版本：Fox 0.1.x<br>
+> 维护范围：Fox 自身执行路径（Kernel / Legacy / Shadow）的改造进度与待办<br>
+> 最后更新：2026-10-25（按 `main` 代码核对）
 
-更新：2026-09-12
+本文只写 Kernel 改造**现在到了哪一步、还剩什么**。Kernel 的设计和组件细节见 [Agent 运行时架构 · Kernel](../02-架构/Agent运行时架构.md)；外层 Agent（pi、DeepSeek Harness、Codex 经 ACP 接入）见同文「外层 Agent 后端」一节。
 
-## 接手先读：已完成内容与当前起点
+2026-09-12 及更早的逐轮进度、测试数字和验收包说明已从本文移除，可在 Git 历史（`763a019` 之前的本文件）和 [实施记录](实施记录/) 目录里查到。
 
-当前应用代码基线为 **`2759ac1`，已合入并推送 `main`**，包含 `931c5ca` 的 Pi 执行循环改造、`2a40f22` 的首轮审查修复、`0c6bf8f` 的专家页面 UI 改动，以及第二轮复审修复。继续工作应从此基线检查具体问题，不要重新从零实施下列已完成内容。
+## 结论
 
-### 已实现的基础能力
+- **Kernel / Authoritative 是 Fox 会话的默认执行路径。** 新 Run 在未设置 `FOX_KERNEL_MODE` 时由 Kernel 驱动真实执行；这一默认值从 2026-09-29 起对普通开发、普通构建和验收包统一生效（`apps/desktop/src-tauri/src/runtime_host/kernel_authority.rs`）。
+- **Legacy 只用于调试和兼容旧 Run**：需要显式设置 `FOX_KERNEL_MODE=legacy`。已有 Run 始终按 `run_control_bindings` 里冻结的 `authority` 执行，不跟着新的环境设置变化。
+- **Shadow 只观察 Legacy Run**，零副作用；它的退出判据已实现（`kernelShadowGate`）。
+- `kernel-default` 构建特性只为兼容旧构建命令保留，不再改变行为。
+- **还没做**：Legacy 和 Shadow 路径的清理（四 Agent 方案阶段 4）没有开始；Issue #24、#25 未关闭；共享 Host 加固（四 Agent 方案阶段 1）第 2 项未关闭、第 4 项只在 Windows 上关闭。
 
-- Kernel 与 Rust Host 的模型请求、权限审批、真实工具执行、取消、持久化和桌面状态接线。
-- 上下文压缩的输入/结果持久化、工具历史保留、取消及重启恢复；不确定执行结果的对账与受限恢复。
-- 无项目附件计算、会话内计算产物保存和再次读取。
-- Codex App Server、DeepSeek Harness 的统一单轮模型适配及 Host 审批/执行/恢复接入；它们的完整原生多轮循环尚未纳入本轮。
+## 各项状态
 
-### 本轮已完成的升级与修复
+| 项目 | 状态 | 依据 |
+| --- | --- | --- |
+| Kernel 决策核（独立 crate） | 已完成 | `crates/fox-agent-kernel`；`apps/desktop/src-tauri/src/kernel/mod.rs` 只是兼容入口 |
+| Kernel 驱动真实 Run（7A 决策权切换） | 已完成，默认 | `runtime_host/kernel_authority.rs`（含单元测试） |
+| Durable outbox 生产执行器 | 已完成 | `KernelCoordinator::dispatch_tool` 经 `kernel_outbox_lease_effect` 领取，核对工具名和 canonical input 后才执行 |
+| 模型请求超时的 begin / settle 接线 | 已完成（Authoritative 路径） | `runtime_host/kernel_coordinator.rs` |
+| Kernel 模型引擎 | 已完成：`pi`（默认）、`codex`、`deepseek_harness` | `kernel_model_config.rs`（`FOX_KERNEL_ENGINE`）、`services/agent-runtime/src/*-kernel-adapter.mjs` |
+| 启动恢复 | 已完成 | 生产使用 `runtime_host/kernel_host.rs::recover_kernel_runs_detached`；`crates/fox-agent-kernel/src/recovery.rs::plan_recovery` 只在测试中调用 |
+| Shadow 观察与退出判据 | 已完成 | `runtime_host/shadow_reconcile.rs`、`database/repositories/kernel.rs` 的 `kernel_shadow_exit_gate` / `kernel_shadow_recent_exit_gate` |
+| 7B Resource Gateway | 部分完成 | `resource_gateway.rs` 已实现四个项目读取器；其他资源类别是否全部迁入**未逐项确认** |
+| React 改读统一 Snapshot | 部分完成 | 前端有 `kernel-snapshot.ts`，Host 发 `fox://kernel-state-invalidated`；是否所有界面都只读快照**未逐个确认** |
+| 子 Agent（Child Run）走 Kernel | 已完成 | `kernel_delegation.rs`，Host Action `StartChild`，见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md) |
+| 真实进程崩溃后 UI 续跑的端到端验收 | **无法确认** | 只有 CI 的打包 Kernel worker 测试和人工脚本 `scripts/kernel-isolated-desktop.ps1`；没找到 Pi → Node → JSONL → Rust → React 真实崩溃续跑的自动化测试或验收记录 |
+| Legacy / Shadow 路径清理（阶段 4） | **未开始** | 四 Agent 实施方案第 9 节 |
 
-1. **Pi 原生多轮循环**：同一 worker 内连续处理模型、工具反馈和续答，工具的权限、审批、真实执行与保存仍由 Host 负责；保留重试/重启/压缩切换需要的按轮传输。
-2. **停止与续答**：新任务不再强制使用 `<fox-final/>` 完成标记；Host 按条件执行最多两次有界续答检查，旧冻结提示保持兼容。
-3. **时间与预算**：首次响应头等待计入模型超时；Host 按剩余预算计算等待期限，审批等待不消耗执行预算。
-4. **流式与最终结果**：续答预览、最终响应和最终确认使用同一 cursor；按上一轮持久响应精确替代旧开场白，正文、思考和用量正确落库，重开数据库后不重复显示。
-5. **终态与协议**：终态提交取消 Run 后，Final 写入和确认仍可在同一固定期限内完成，期间不再接收新工作；复用现有 `HostResponse` 构造器，严格核对回包身份、关联请求与协议。
-6. **UI 与提交**：用户并行完成的专家资源页面、侧栏和样式已一并合入；Git 卡锁问题已处理，构建临时目录保持忽略。
+## 待办
 
-本轮最终本地验证：Runtime **281 通过 / 2 跳过**，Desktop Kernel **95 通过 / 2 忽略**，核心 Kernel **51 通过**，共享协议 **7 通过**。UI 在此前同轮检查中通过 TypeScript 和 **226 项**前端测试。首次高并发 Runtime 回归出现 9 个短超时，降低测试并发后全套通过，未放宽断言。详细复审记录：`output/loop-review-20260912/follow-up-resolution.md`。
+| 事项 | 状态 | 说明 |
+| --- | --- | --- |
+| [Issue #25](https://github.com/Hry1729/Fox-Agent/issues/25)：`attemptId` 由 Host 生成 | 未开始（Issue open） | `runtime_host/work_tools.rs` 仍用 `required_string(input, "attemptId")`。重名冲突目前作为可纠正错误返回模型，但会消耗连续拒绝预算 |
+| [Issue #24](https://github.com/Hry1729/Fox-Agent/issues/24)：模型自我验证证据 | 未开始（Issue open，方案待产品拍板） | `work_graph.rs` 的 `EVIDENCE_REFERENCE_PAIRS` 没有新增配对 |
+| 阶段 1 第 2 项：测试授权语义 | **未关闭** | `test_run` 的授权范围键仍是输入参数的哈希，审批卡可选「本会话允许」，没有绑定工作区修订或脚本内容。见[四 Agent 实施方案 · 阶段 1 逐项核对](../02-架构/四Agent改造实施方案-v0.3.1.md) |
+| 阶段 1 第 4 项：子进程收尾 | Windows 已关闭；非 Windows 残余 | Windows 用 Job Object 终止整棵进程树；非 Windows 只杀直接子进程 |
+| 阶段 4：Legacy / Shadow 清理 | 未开始 | 前置：确认没有需要 Legacy 兼容的旧 Run，以及 FoxBackend 的长期定位 |
+| 真实崩溃续跑端到端验收 | 待补 | 见上表 |
+| 7B Resource Gateway 全覆盖、React 全面只读快照 | 待核实 | 见上表 |
 
-**更新验收包已生成**：应用代码 `2759ac1`，默认启用新 Kernel；实际打包 worker **32 通过 / 1 跳过**，启动检查通过，37 个安装文件及转移 ZIP 的逐文件校验通过。包位置、校验值和边界见 [本轮复审与验收包记录](实施记录/Kernel-执行循环复审与验收包-2026-09-12.md)。
+## 相关文档
 
-### 当前下一步与暂缓范围
-
-- **当前下一步**：用户安装本次 Fox Kernel Preview，在另一台电脑新建任务，使用原指令和原附件复测；重点检查持续执行、最终回答、产物、取消及重新打开后的显示。安装与操作入口见 [新 Kernel 默认验收包](Kernel-新内核默认验收包.md)。
-- **仍待用户复测**：本次修复对应的真实模型、原始业务附件和另一台电脑安装/界面表现。本地 HTTP/faux 夹具、worker 和数据库测试不能替代这些验收。
-- **用户已要求暂缓**：Codex/DeepSeek 完整原生循环、其他扩展改造及全面发布验收。不要因下方旧清单而重新启动这些工作。
-
-下方保留此前实施历史；其中“未推送”“默认方式”和测试数字描述的是当时的阶段状态，当前起点及本轮已完成项以上述说明为准。
-
-## 历史记录（截至 2026-09-10）
-
-- 新 Kernel 验收包的用户反馈修复：供应商弹窗、向导第三步、模型名称刷新、取消时保留流式内容、思考与工具步骤/动画、HTML 文件卡片和内置预览。源码与本机合成服务回归及独立组件界面验证通过，异机实装复测仍待用户执行。见 [验收问题修复](实施记录/Kernel-验收问题修复-2026-09-10.md)。
-- 后续三项反馈已完成本地修复与回归：Office 附件选择及文字读取、关键词知识库可选状态与帮助说明、新 Kernel 省略目录路径的默认值和读取错误原因。见 [Office 附件与知识库修复](实施记录/Kernel-Office附件与知识库修复-2026-09-10.md)。
-
-- 按用户最新要求，新建 **Fox Kernel Preview** 验收包，默认直接使用新 Kernel，无需启动脚本；普通版本默认切换待用户在新电脑确认通过后执行。验收版独立数据目录不带入旧测试任务，见 [新 Kernel 默认验收包](Kernel-新内核默认验收包.md)。
-- 本地 Windows 安装验收包已生成（应用提交 `2dfc6d1`），补入 C++ 运行库并核对 37 个打包文件；隔离程序初始化与数据库回退绑定通过。一小时 Pi 打包 worker 合成负载 1,268 组全部通过，默认 Legacy 未切换。异机安装和真实界面对账/审批仍未通过，后者等待桌面工具应用授权。见 [安装与稳定性验收](实施记录/Kernel-安装与稳定性验收-2026-09-10.md)。
-- 本轮补齐 Codex App Server 与 DeepSeek Harness 的真实原生模型适配，复用 Host 的审批、执行、恢复及上下文压缩；新增重新审批恢复方式和 Office 输出文件对账。默认 Legacy 未切换。
-- 最新本地验证：Rust 默认特性全量 709 项通过（另 4 项忽略，其中本轮原生 Codex 专项已单独执行通过）；随后新增 Office 对账专项通过。Runtime 全量 268 项、打包 worker 18 项、前端 208 项、协议 4 项及正式构建通过。原生引擎使用实际 SDK/本机 Codex 程序和本机合成模型服务，不能替代供应商云调用验收。
-
-- Pi／Kernel 主执行链路已完成：模型请求、工具调用、权限审批、取消、持久化恢复及桌面状态接线。
-- 普通对话、文件读取、审批写入、流式取消、父子任务和参数纠错已通过真实云模型样本验收。
-- 压缩开发后回归：Rust 默认特性库测试 693 项通过（另 3 项原有忽略），Runtime 257 项、打包 worker 16 项、前端 205 项及 JavaScript 协议 4 项通过；尚未开展真实云模型长会话压缩验收。
-- 接手阶段回归：Rust 默认特性工作区库测试 678 项通过（桌面 625、Kernel 47、协议 6），3 项原有忽略；Runtime 单并发 253 项、打包 worker 13 项、前端 205 项及 JavaScript 协议 4 项通过，正式构建与相关检查通过。
-- 默认仍为 Legacy，Kernel 仅显式启用；近期界面、执行凭据及参数纠错修改已核对、回归并本地提交（3858ae9），未推送。
-
-- 上下文压缩实现与测试已本地提交 `a49dd7d`，未推送。
-- 上下文压缩已实现：压缩视图与原始历史分离，单次模型投递最多 4 轮；无法压至预算内明确停止。重启可恢复未派发输入、复用已提交结果，已派发但结果未提交时不重复请求。
-
-## 此前任务清单（以文首最新状态为准）
-
-- [x] 当前修改的完整回归与定向提交。（3858ae9；本地回归范围见上文，远端 CI 与发布验收另列）
-- [x] 上下文压缩工程闭环：Host 触发、输入与结果持久化、工具历史完整性、取消与重启恢复。（用户已确认开发；仅压缩旧纯文本，工具事实原样保留；本地隔离测试通过，真实长会话验收另列）
-- [ ] 长会话、压力、多模型及真实企业连接器兼容性验收。（部分通过：本机 Pi 打包 worker 已完成 4 组并行、一小时 1,268 组压缩/新 worker 续答；云供应商、其他引擎小时级表现和企业业务兼容性尚未验收，不能称为生产容量通过）
-- [x] 不确定执行结果的对账与恢复工程改造：原目标文件/Office 输出独立读回、受限连接器查询、持久人工确认、只读或重新审批的新任务；后者已验证审批前不执行、批准后只写入一次。通用命令和缺少只读查询能力的业务系统保留人工核对，不承诺自动判定副作用。
-- [ ] 对账与恢复的真实企业系统、桌面实装业务验收。
-- [ ] 远端 CI、安装包、默认切权、分批启用和回退验收。（安装包及数据库级回退检查已完成；异机安装、真实任务切换和生产放量仍待验收）
-- [x] 其他 Engine 的统一适配工程：Codex 原生 App Server、DeepSeek Harness 公开单次 LLM API；冻结引擎身份、原始工具标识和结果、审批、重启续答与 Host 压缩均进入共同链路。支持范围及原生版本约束见实施记录。
-- [ ] 原生引擎云供应商、多模态及企业业务兼容性验收。
-
-发布准备：CI 已补入 Kernel/共享协议与打包 worker 检查；尚未推送或触发远端 CI。分批启用与回退方式见 [Kernel 原生引擎验收与回退](Kernel-原生引擎验收与回退.md)。本轮云模型复测被自动审批审查拒绝，原因是四个提供商的凭据使用与具体复测范围需明确授权；未绕过拒绝或发出云请求。
+- [Agent 运行时架构](../02-架构/Agent运行时架构.md)（Kernel 当前状态表、外层 Agent 后端）
+- [四 Agent 改造实施方案 v0.3.1](../02-架构/四Agent改造实施方案-v0.3.1.md)
+- [Kernel 原生引擎验收与回退](Kernel-原生引擎验收与回退.md)
+- [Fox Agent Kernel 统一控制架构改造方案](Fox%20Agent%20Kernel统一控制架构改造方案.md)（设计原文）
+- [已知限制](已知限制.md)
