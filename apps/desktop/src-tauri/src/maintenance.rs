@@ -31,9 +31,29 @@ pub fn configured_knowledge_preview_cache_limit(
         ))
 }
 
-pub fn recover_knowledge_preview_cache(state: &AppState) -> Result<(usize, u64), String> {
-    state.database.reset_knowledge_preview_cache_leases()?;
-    cleanup_knowledge_preview_cache(state)
+/// Startup recovery of the knowledge preview cache. Never fatal: a broken
+/// `cache/knowledge-preview` (e.g. a 1-byte file in place of the directory)
+/// must not abort the Tauri setup hook. The problem is logged as a warning
+/// and returned; it surfaces with its path (「预览缓存目录：<路径> 应为目录但是文件」)
+/// only when a preview actually uses the cache, like `kernel-run-locks`.
+pub fn recover_knowledge_preview_cache_at_startup(state: &AppState) -> Option<String> {
+    recover_knowledge_preview_cache_at_startup_at(&state.database, &state.data_dir)
+}
+
+fn recover_knowledge_preview_cache_at_startup_at(
+    database: &crate::database::Database,
+    data_dir: &Path,
+) -> Option<String> {
+    let result = database
+        .reset_knowledge_preview_cache_leases()
+        .and_then(|_| cleanup_knowledge_preview_cache_at(database, data_dir));
+    match result {
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("fox.knowledge_preview warn startup_recovery_deferred error={error}");
+            Some(error)
+        }
+    }
 }
 
 pub fn cleanup_knowledge_preview_cache(state: &AppState) -> Result<(usize, u64), String> {
@@ -858,6 +878,39 @@ mod tests {
             now + std::time::Duration::from_secs(60),
             now
         ));
+    }
+
+    #[test]
+    fn preview_cache_file_in_place_of_directory_does_not_fail_startup() {
+        let root = std::env::temp_dir().join(format!("fox-cache-startup-file-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("cache")).unwrap();
+        let preview = root.join("cache").join("knowledge-preview");
+        fs::write(&preview, b"x").unwrap();
+        let database = crate::database::Database::open(root.join("fox.db")).unwrap();
+
+        // Startup: deferred warning (with path), not an error that aborts setup.
+        let warning = recover_knowledge_preview_cache_at_startup_at(&database, &root)
+            .expect("broken cache directory is reported as a warning");
+        assert_eq!(
+            warning,
+            format!("预览缓存目录：{} 应为目录但是文件", preview.display())
+        );
+        // The file is left untouched; nothing was deleted or replaced.
+        assert!(preview.is_file());
+
+        // Use: cleanup and manual clear fail with the path in the error.
+        let error = cleanup_knowledge_preview_cache_at(&database, &root).unwrap_err();
+        assert!(error.contains(&format!("{} 应为目录但是文件", preview.display())), "{error}");
+        let error = clear_unused_knowledge_preview_cache_at(&database, &root).unwrap_err();
+        assert!(error.contains("预览缓存目录："), "{error}");
+        assert!(error.contains(&format!("{} 应为目录但是文件", preview.display())), "{error}");
+
+        // A healthy (or missing) cache directory recovers silently.
+        fs::remove_file(&preview).unwrap();
+        assert!(recover_knowledge_preview_cache_at_startup_at(&database, &root).is_none());
+        assert!(preview.is_dir());
+        drop(database);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
