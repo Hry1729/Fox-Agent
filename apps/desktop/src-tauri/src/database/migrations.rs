@@ -7298,12 +7298,47 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
 }
 
 fn finish_transaction(transaction: rusqlite::Transaction<'_>) -> Result<()> {
-    let violations: i64 = transaction.query_row(
-        "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
-    if violations != 0 {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
+    check_foreign_keys_after_migration(&transaction)?;
     transaction.commit()
+}
+
+/// Foreign-key integrity gate run before the migration transaction commits.
+///
+/// Rows whose missing parent is an `agents` row are not a migration defect:
+/// they appear when an agent/expert row was removed outside Fox (e.g. the
+/// `sqlite3` shell, where `foreign_keys` is off by default, so neither the
+/// `ON DELETE CASCADE` children nor the conversations/bindings that still
+/// reference it were handled). `Database::open` re-seeds built-in/bundled
+/// rows and repairs the remaining references right after migrations
+/// (`repair_missing_agent_references`), so they are tolerated here instead of
+/// aborting startup. Any other violation still stops the migration, now with
+/// a message naming the tables instead of rusqlite's `Query is not read-only`
+/// (`Error::InvalidQuery`, which this function used to return).
+pub(crate) fn check_foreign_keys_after_migration(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT \"table\", parent, COUNT(*) FROM pragma_foreign_key_check
+         WHERE parent <> 'agents' GROUP BY \"table\", parent ORDER BY \"table\", parent",
+    )?;
+    let violations = statement
+        .query_map([], |row| {
+            Ok(format!(
+                "{} → {}（{} 行）",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?
+            ))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+        Some(format!(
+            "数据库外键完整性检查失败，以下记录引用了不存在的数据：{}",
+            violations.join("；")
+        )),
+    ))
 }
 
 fn apply_conversation_tool_permission_migration(
