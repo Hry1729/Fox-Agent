@@ -228,8 +228,11 @@ pub fn run() {
             // (read-only or empty), a warning is logged, and the library page
             // and data-maintenance diagnostics show 「知识库路径不可写：<路径>」
             // with a way to choose another path.
-            let local_knowledge = LocalKnowledgeStore::open_for_startup(
-                local_knowledge_root,
+            // A configured path that cannot be resolved (e.g. write access
+            // denied) also starts degraded at that path; only an unset
+            // path uses the default root.
+            let local_knowledge = LocalKnowledgeStore::open_for_startup_root(
+                &local_knowledge_root,
                 Some(app.path().resource_dir()?.as_path()),
             );
             if local_knowledge.startup_issue().is_none() {
@@ -247,7 +250,10 @@ pub fn run() {
                 app_data_dir,
                 skills_dir,
             ));
-            maintenance::recover_knowledge_preview_cache(&app.state::<AppState>())?;
+            // Not fatal: a broken preview cache directory (e.g. a file at
+            // cache/knowledge-preview) is logged here and reported with its
+            // path only when a preview uses the cache.
+            let _ = maintenance::recover_knowledge_preview_cache_at_startup(&app.state::<AppState>());
             app.state::<AppState>().runtime_host.recover_kernel_runs_detached()?;
             if let Some(windows) = &isolated_windows {
                 for config in windows {
