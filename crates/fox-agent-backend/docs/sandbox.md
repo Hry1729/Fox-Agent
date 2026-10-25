@@ -1541,3 +1541,59 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
    - 添加服务弹窗内容长时内部滚动：把窗口高度拖到约 600px，点「添加服务」，展开「协议与高级」，再添加 3～4 个模型。预期：弹窗不超出窗口，也不盖住标题栏；中间内容区域出现滚动条并能滚动，标题和底部「取消 / 添加」固定可见。
    - 有真实 Key 时：在「添加服务」里选一个模板，填真实 Key，点「测试连接」，显示「连接成功，发现 N 个模型」后再点「添加」。预期：服务出现在列表里、状态为已连接；再次打开编辑 Sheet，Key 显示「已安全保存」。
 7. 第 6 项已在 13.25 结论中用 Medium 环境补测通过，本轮不再测。
+
+### 13.27 13.26 复测结论 + 两处修复 + 定向复测清单（2026-10-25）
+
+> 承接 13.26。按工程师对 13.26 清单的复测报告记录结论，并修复其中两个失败项。只改 Rust（桌面 crate），前端没有改动。
+
+**一、13.26 复测结论**
+
+- 除下面两项外，其余各项均通过：
+  - `cache\knowledge-preview` 被换成 1 字节文件后，应用在 Tauri setup 阶段崩溃：「Failed to setup app: error encountered during setup hook: 预览缓存目录：<路径> 应为目录但是文件」。本批已修复。
+  - 本机知识库存储目录存在、但当前用户被拒绝写入（`icacls /deny 用户:(OI)(CI)(W)`）时，启动后悄悄改用默认目录，没有任何提示。本批已修复。只读 `knowledge.db`、路径是文件这两种情况原本就正确进入降级状态。
+- 行菜单「删除」弹出的 AlertDialog 确认框点遮罩不会关闭：这是有意设计（破坏性操作必须明确点「取消」或「删除」），记为通过。
+- 「使用此位置」（需要系统原生文件夹选择框）和用真实 Key 点「测试连接」，留给用户手动测试，本轮不计入。
+
+**二、改动摘要**
+
+1. 预览缓存目录是文件时启动崩溃
+   - 根因：setup 钩子里调用 `maintenance::recover_knowledge_preview_cache(...)?`，其中的 `cleanup_knowledge_preview_cache_at` 会先 `ensure_directory(cache/knowledge-preview, "预览缓存目录")`；目录是文件时返回 Err，`?` 让整个 setup 失败，应用直接退出。
+   - 修法：改为 `maintenance::recover_knowledge_preview_cache_at_startup`，不会返回错误：先重置租约，再清理；失败时只记 warn（`fox.knowledge_preview warn startup_recovery_deferred error=预览缓存目录：<路径> 应为目录但是文件`），启动继续。错误推迟到真正使用预览缓存时出现，和 `runtime-sessions\kernel-run-locks` 的处理方式一致：
+     - 打开远程知识库文件预览（`knowledge_preview_cache_prepare`）：原来是 `fs::create_dir_all`（错误不带路径），改为 `ensure_directory`，失败返回 `knowledge.preview_cache_dir_invalid`「预览缓存目录：<路径> 应为目录但是文件」；
+     - 修改缓存上限、清理未使用缓存、预览释放后的自动清理：沿用 `ensure_directory`，错误同样带路径。
+   - 不会删除或替换那个文件，用户恢复目录后即可正常使用。
+2. 配置的知识库目录被拒绝写入时悄悄改用默认目录
+   - 根因：`resolve_startup_root` 用 `normalize_storage_path` 检查配置路径，其中 `canonicalize_existing_prefix` 对目录调用 `canonicalize`。Windows 上 `(W)` 拒绝项包含 SYNCHRONIZE 等权限，打开目录句柄失败（拒绝访问），检查失败后函数直接返回默认目录 `<数据目录>\local-knowledge`，没有日志，也没有降级提示。
+   - 修法：
+     - `resolve_startup_root` 改为返回 `StartupRoot { path, unusable }`。只有没配置自定义路径（未设置或空白）时才用默认目录；配置了路径但解析失败时，`path` 仍是配置的路径，`unusable` 记录原因，并记 warn（`fox.local_knowledge warn configured_storage_unresolvable path=… error=…`）。
+     - 新增 `LocalKnowledgeStore::open_for_startup_root`：`unusable` 有值时直接以配置路径进入降级状态（与只读库 / 路径是文件相同：`writable=false`、`degradedReason`「知识库路径不可写：<配置路径>」，资料库页显示提示和「修改存储位置」）。降级时只在绝对路径下尝试只读打开已有 `knowledge.db`，不会从当前工作目录读相对路径。
+     - `open_for_startup` 在正常打开成功后再做一次写入探测（创建并删除 `.fox-write-probe`）：目录能打开但不能新建文件（例如已有数据库被 SQLite 自动降为只读打开）时，同样进入降级状态，不会表面正常、写入时才失败。
+
+**三、测试**
+
+- Rust（桌面 crate，定向 CI 运行）：
+  - `maintenance::tests::preview_cache_file_in_place_of_directory_does_not_fail_startup`：预览缓存目录是 1 字节文件时，启动恢复只返回带路径的 warn，文件保持不动；清理 / 手动清空都失败且错误带「预览缓存目录：<路径> 应为目录但是文件」；删掉文件后启动恢复正常并重建目录。
+  - `local_knowledge_storage::tests::startup_uses_configured_path_and_never_falls_back_when_it_is_configured`（取代原 `startup_uses_valid_configured_path_and_falls_back_for_invalid_path`）、`startup_root_keeps_configured_path_when_resolving_it_fails`（注入解析失败，模拟 Windows 拒绝访问）。
+  - `local_knowledge::tests::startup_degrades_at_configured_path_when_it_cannot_be_resolved`：注入解析失败后，以配置路径降级，`writable=false`、`degradedReason` 带配置路径，默认目录未被创建。
+  - 仅 unix（权限模拟，非 root 时断言）：`startup_root_keeps_configured_path_when_permission_is_denied`、`startup_degrades_when_configured_directory_denies_write`。
+  - 回归：`startup_open_degrades_instead_of_failing_when_root_is_a_file`、`startup_open_falls_back_to_read_only_when_database_is_readonly`、`degraded_store_can_point_storage_at_another_directory`、`data_paths_name_a_lock_directory_that_is_a_file`、`lock_directory_that_is_a_file_is_named_in_the_error`。
+
+**四、定向复测清单 13.27**（Windows 桌面构建，每项「通过 / 失败 + 截图 / 日志」）
+
+> 请从普通目录（Medium 完整性）运行 exe，例如 `D:\fox-test\`，不要从带 Low 完整性标签的目录（部分下载 / 解压目录）运行，否则会出现与本批无关的「拒绝访问」。
+
+1. 预览缓存目录是文件时，应用正常启动，使用时才报错并带路径
+   - 步骤：关闭 Fox。在数据目录里把 `cache\knowledge-preview` 目录改名备份，再新建一个同名的 1 字节文件。启动 Fox。
+   - 预期：应用正常启动，不出现「Failed to setup app」；启动日志里有 `fox.knowledge_preview warn startup_recovery_deferred`，内容带该路径。
+   - 步骤：设置 → 数据与关于 →「预览缓存」，把「缓存上限」改成另一个值；如有可用的远程知识库，再打开其中一个文件的预览。
+   - 预期：操作失败，错误信息包含「预览缓存目录：<数据目录>\cache\knowledge-preview 应为目录但是文件」；应用不崩溃，其他功能（发消息、资料库）正常。
+   - 收尾：关闭 Fox，删掉该文件、恢复原目录，重启后修改上限 / 打开预览都成功。
+2. 配置的知识库目录被拒绝写入时，进入降级状态，不改用默认目录
+   - 步骤：关闭 Fox。新建 `D:\fox-kb-deny`，把现有知识库目录的内容复制进去。用 SQLite 工具把主库 `fox.db` 的 `app_settings` 里 `local_knowledge_storage_path` 改为 `D:\fox-kb-deny`。在普通（非管理员）命令行执行：`icacls D:\fox-kb-deny /deny "%USERNAME%:(OI)(CI)(W)"`。启动 Fox。
+   - 预期：应用正常启动；资料库页顶部显示「知识库路径不可写：D:\fox-kb-deny」和「修改存储位置」按钮；资料库没有切换成默认目录（`<数据目录>\local-knowledge`）的内容，新建 / 导入资料库会报错但不崩溃；设置 → 数据与关于 →「重新诊断」，「本机资料库」显示为需要处理，摘要是同一条提示；启动日志里有 `configured_storage_unresolvable` 或 `startup_storage_unwritable`，且带 `D:\fox-kb-deny`。
+   - 步骤：点「修改存储位置」→「恢复默认位置」，重启 Fox。
+   - 预期：提示消失，资料库回到默认目录。
+   - 收尾：执行 `icacls D:\fox-kb-deny /remove:d "%USERNAME%"` 撤销拒绝项，再删除测试目录。
+3. 未配置自定义路径时仍使用默认目录（回归）
+   - 步骤：确认 `local_knowledge_storage_path` 为空（或删除该行），启动 Fox。
+   - 预期：资料库正常使用默认目录，没有「知识库路径不可写」提示。
