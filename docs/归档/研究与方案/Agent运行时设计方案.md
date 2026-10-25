@@ -1,5 +1,7 @@
 # Fox Agent Runtime 简要设计计划
 
+> 历史记录，截至 2026-10-11，现状见 [docs/README.md](../../README.md)
+
 > 状态：已归档；当前实现见 Agent 运行时架构和 Runtime 协议。
 
 ## 1. 方案结论
