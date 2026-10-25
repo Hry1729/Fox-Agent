@@ -1,5 +1,7 @@
 # B：compute_job 自动交接接口约定（冻结设计，2026-09-24）
 
+> 历史记录，截至 2026-09-24，现状见 [docs/README.md](../README.md)
+
 **范围与门槛。** 本文是已审冻结的接口设计，不代表实现或验收通过。仅权威 Kernel Run；`compute_job_start` 的 started/toolCall 正式结果只写一次，保留 `status/result/cancel`。Run 创建时冻结实验开关 `experimentalComputeJobNotice`，默认关；不换 Pi、不改默认并行。先交 **B1 原子通知/身份负例**，审过再交 **B2 等待/交付**。以下 Rust 短路径以 `apps/desktop/src-tauri/src/` 为根。
 
 **B1：终态事实。** `kernel_job_execution.rs::{kernel_job_complete_attempt,kernel_job_settle_attempt,kernel_job_request_cancel}` 沿现有 attempt/进程 CAS，在同一 `IMMEDIATE` 事务写成功结果 blob、Job 终态及唯一 `kernel_job_notices` 行：`dataRootId,conversationId,runId,jobId,attempt,terminalState,finishedAt,resultRef/sha/bytes,errorCode,deliveryState,boundDispatchKey,boundInputHash`。`jobId` 唯一，同值重报无操作，冲突拒绝；现有 `kernel_job_resume` 只接受 paused，终态不可再认领。排队态取消、过期 queued/paused 的新 `kernel_job_expire_unowned` 同事务落通知。用窄表是因为现有 `kernel_effect_outbox` 的 CHECK/枚举与 `recovery.rs::plan_recovery` 将待办/leased 当执行 effect；被动通知不进入其派发与不确定队列，模型派发继续复用原 outbox。`dataRootId` 由 `app_settings` 一次性 DB UUID＋规范化数据根路径取 hash；备份复制到别的路径隔离旧通知，需显式恢复；只在当前 DB 连接联查本地 Run/Job，拒绝外部引用跨库消费。
