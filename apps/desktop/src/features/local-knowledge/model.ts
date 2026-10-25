@@ -54,6 +54,8 @@ export interface LocalKnowledgeStorageStatus {
   pendingRootPath: string | null
   restartRequired: boolean
   migrationId?: string | null
+  /** 「知识库路径不可写：<路径>」 when startup degraded the knowledge store (read-only or unavailable). */
+  degradedReason?: string | null
 }
 
 export type StorageMigrationStatus = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
@@ -380,6 +382,8 @@ export interface LocalKnowledgeGateway {
   retryJob(jobId: string): Promise<OperationAccepted>
   getStorageStatus(): Promise<LocalKnowledgeStorageStatus>
   pickStorageDirectory(): Promise<string | null>
+  /** Only while degraded: use another storage directory (null = default) after restart. */
+  resetStoragePath?(path: string | null): Promise<LocalKnowledgeStorageStatus>
   startStorageMigration(destinationPath: string): Promise<OperationAccepted>
   getStorageMigration(migrationId: string): Promise<LocalKnowledgeStorageMigration>
   listEmbeddingModels(): Promise<LocalEmbeddingModel[]>
