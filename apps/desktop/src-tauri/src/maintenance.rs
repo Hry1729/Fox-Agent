@@ -45,7 +45,7 @@ fn cleanup_knowledge_preview_cache_at(
     data_dir: &Path,
 ) -> Result<(usize, u64), String> {
     let cache_dir = data_dir.join("cache").join("knowledge-preview");
-    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    crate::data_paths::ensure_directory(&cache_dir, "预览缓存目录")?;
     let canonical_cache_dir = cache_dir
         .canonicalize()
         .map_err(|error| error.to_string())?;
@@ -130,7 +130,7 @@ fn clear_unused_knowledge_preview_cache_at(
     data_dir: &Path,
 ) -> Result<MaintenanceResult, String> {
     let cache_dir = data_dir.join("cache").join("knowledge-preview");
-    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    crate::data_paths::ensure_directory(&cache_dir, "预览缓存目录")?;
     let canonical_cache_dir = cache_dir
         .canonicalize()
         .map_err(|error| error.to_string())?;
