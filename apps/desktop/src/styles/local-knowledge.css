@@ -5401,3 +5401,32 @@
   .fox-kb-settings-panel .fox-kb-settings-form > div:not(.fox-kb-settings-foot):not(.fox-kb-settings-advanced) { grid-template-columns: 1fr; gap: var(--fox-space-s); }
   .fox-kb-model-section-bar { flex-wrap: wrap; gap: var(--fox-space-xs); }
 }
+
+/* Knowledge storage could not be opened for writing at startup (sandbox.md 13.26). */
+.fox-local-kb-storage-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
+  border-radius: var(--fox-radius-control, 8px);
+  background: color-mix(in oklch, var(--destructive) 6%, transparent);
+  font-size: var(--fox-type-chrome, 13px);
+}
+.fox-local-kb-storage-banner > svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--destructive);
+}
+.fox-local-kb-storage-banner > span {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+.fox-local-kb-storage-banner small {
+  color: var(--muted-foreground);
+}
