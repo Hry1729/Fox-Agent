@@ -1,5 +1,11 @@
 # Fox Agent Kernel 统一控制架构改造方案
 
+> **现状（2026-10-25 按代码核对）：主体已实施；本文是设计原文，下方“状态”行写于 2026-08 至 09 月，已过时。**
+> - Kernel 决策核在 `crates/fox-agent-kernel`；Authoritative 是 Fox 会话的默认路径（2026-09-29 起），Legacy 只用于调试和旧 Run；Durable outbox 生产执行器、模型请求超时接线、Shadow 退出判据都已实现。
+> - Pi、Codex、DeepSeek Harness 都能作为 Kernel 模型引擎（`FOX_KERNEL_ENGINE`）；另外三者也能作为外层 Agent 经 ACP 接入，那条路线不经过 Kernel，见 [Agent 运行时架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+> - 部分完成或未确认：Resource Gateway 只确认了四个项目读取器；React 是否全部只读 Kernel 快照未逐个确认；真实崩溃续跑端到端验收没找到记录。
+> - 未开始：Legacy / Shadow 清理。逐项状态见 [Kernel 改造进度](Kernel-改造进度.md)。
+
 > 状态：设计与实验基线已确认；Kernel 决策核与持久化骨架已实现，生产接线、Shadow 对比和权威切换尚未完成。  
 > 适用范围：Fox 对话循环、工具、权限、审批、重试、取消、上下文压缩、Skill、专家、子 Agent，以及 Pi、DeepSeek Harness、Codex 等执行引擎的接入。  
 > 阅读说明：本文中的“目标结构”表示待实施设计；只有“当前事实”和“实验结果”表示已经过代码或测试确认的现状。
