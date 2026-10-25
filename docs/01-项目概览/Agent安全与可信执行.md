@@ -3,23 +3,32 @@
 > 状态：生效<br>
 > 适用版本：Fox `0.1.x`<br>
 > 维护范围：面向用户、评审与工程师解释 Fox 如何限制 Agent 权限<br>
-> 最后更新：2026-08-27
+> 最后更新：2026-10-25
 
 ## 核心结论
 
-Fox 不把模型当作可信程序，也不让模型直接接触操作系统。模型只能生成文字或提出结构化工具请求；真正的文件、命令、数据库、知识库和 MCP 操作由 Tauri Host 掌握。Host 根据当前用户授权、项目范围、Execution Profile、工具协议、参数、审批和任务状态决定是否执行。
+Fox 不把模型当作可信程序。会话分两类，安全边界不同：
 
-因此，限制工具只是第一层。Fox 还通过路径隔离、权限交集、审批绑定、资源预算、状态机、Evidence、独立 Reviewer、持久审计和 fail-closed 恢复共同约束 Agent。
+- **Fox 会话**（默认）：模型只能生成文字或提出结构化工具请求；文件、程序、数据库、知识库和 MCP 操作都由 Tauri Host 执行。Host 根据用户授权、项目范围、Execution Profile、工具协议、参数、审批和任务状态决定是否执行。生产构建中没有经过验证的命令后端，任意 Shell 保持拒绝。
+- **外部 Agent 会话**（dsh / pi；Codex 已实现但隐藏）：Agent 自己执行模型循环和工具，但由 Host 从 Fox 管理的运行时目录启动，只继承白名单环境变量，在 srt 沙箱里运行，必须绑定项目。审批请求经 ACP 回到 Fox 由用户作答；完全访问只能在创建会话时授予，中途只能撤销。会话记录由 Host 写入 Fox 数据库，Fox 不向外部 Agent 提供访问数据库的接口。
+
+限制工具只是第一层。Fox 会话还通过路径隔离、权限交集、审批绑定、资源预算、状态机、Evidence、独立 Reviewer、持久审计和 fail-closed 恢复共同约束 Agent。
+
+已知未闭合的边界见本页末「已知安全边界」，其中包括：Fox Host 命令路径没有操作系统级隔离；`test_run` 的授权没有绑定工作区修订或脚本内容。
 
 ## 答辩时可以直接这样回答
 
 > 我们首先把模型和系统权限分开。模型本身不能直接读写文件、运行命令或访问密钥，只能申请调用系统提供的工具。工具请求到达 Rust Host 后，还要经过工具白名单、Agent 执行 Profile、项目路径、参数范围和用户审批的多重校验。高风险任务不是模型说完成就完成，还必须提交可验证证据，并由独立只读 Reviewer 复核，最后由 Host 状态机验收。所有调用、审批和状态变化都会持久化，未知情况默认拒绝。所以我们的安全边界不依赖模型自觉，而是由模型无法绕过的 Host 和数据库规则强制执行。
 
+如果被问到外部 Agent（如 pi、DeepSeek），可以补充：
+
+> 外部 Agent 自己执行工具，但它运行在 Fox 启动的沙箱里，只拿到白名单环境变量和绑定项目的工作区；需要审批的操作通过协议回到 Fox 由用户决定。完全访问必须在创建会话时单独授予并留审计，会话中途只能收回，不能打开。
+
 如果评委继续追问，可以补充一句：
 
 > 我们不能承诺任何复杂桌面软件绝对没有漏洞，但可以保证模型没有一条“只靠提示词就扩大权限”的正常执行路径。安全控制在模型之外，即使模型受到提示注入，也仍然要经过同样的 Host 校验。
 
-## 一次操作怎样通过安全边界
+## 一次操作怎样通过安全边界（Fox 会话）
 
 ```mermaid
 flowchart LR
@@ -37,11 +46,15 @@ flowchart LR
 
 模型能决定“想做什么”，但不能决定“自己有没有权限”，也不能自己宣布数据库里的任务已经通过验收。
 
-## 安全控制分层
+## 安全控制分层（Fox 会话）
+
+以下 1–10 描述 Fox 会话。外部 Agent 会话见下一节。
 
 ### 1. 模型没有直接系统权限
 
 Agent Runtime 负责模型循环、上下文和工具请求，不直接持有 Fox 数据库写权限。写文件、执行进程、读取附件、调用知识库和 MCP 等系统能力由 Rust Host 提供。
+
+Host 自己执行程序时也有限制：任意 Shell（`run_command`）在生产构建中保持拒绝，因为没有经过验证的隔离后端（`process_jobs::HostVerifiedBackend` 固定不可用，返回 `tool.sandbox_unavailable`）。`git_read`、`test_run`、`code_check`、`format_code` 这类固定能力工具由 Host 生成固定的程序和参数（不经 Shell），启动时清空环境变量、只传白名单，在 Windows 上放进 Job Object 以便整树回收，并限制输出和时长。这只是进程管理，不是文件或网络隔离。
 
 即使模型输出一段命令或伪造“系统已批准”的文字，这些文字也不会自动成为系统操作。
 
@@ -75,16 +88,21 @@ Host 会对项目根与目标路径进行 canonicalize，再判断目标是否�
 
 ### 4. 高风险操作需要审批
 
-`run_command`、MCP 调用和敏感写入不会因为模型请求就自动执行。审批绑定具体 Tool Call、参数、目标和会话：
+程序执行、MCP 调用和敏感写入不会因为模型请求就自动执行。审批绑定具体 Tool Call、参数、目标和会话：
 
 - “允许一次”只对当前调用有效；
 - “本次会话允许”也不能绕过项目路径、工具白名单和参数校验；
 - 批准后 Runtime 不能把命令或路径替换成另一份参数；
-- 拒绝、取消、超时和应用恢复冲突都视为没有批准。
+- 拒绝、取消、超时和应用恢复冲突都视为没有批准；
+- 续做（continuation）时按会话当前权限重新核对，只能等于或窄于原任务，读不到当前状态时拒绝。
+
+例外要说清楚：`test_run` 的审批类别是 `always`，但授权范围键是输入参数的哈希，审批卡可以选「本会话允许」。授权没有绑定工作区修订或测试脚本内容，同一会话里脚本被改过后仍可能沿用之前的授权。这是四 Agent 方案阶段 1 第 2 项，**尚未关闭**。
 
 ### 5. 密钥留在 Host 和系统 Keyring
 
-模型 API Key、知识库 Token、MCP 环境变量和扩展 Header 使用系统 Keyring。SQLite 保存引用或是否已配置，前端与普通 Runtime 工具不能枚举任意环境变量或读取完整密钥。
+模型 API Key、知识库 Token、MCP 环境变量和扩展 Header 使用系统 Keyring。SQLite 保存引用或是否已配置，前端与普通 Runtime 工具不能枚举任意环境变量或读取完整密钥。Host 启动的子进程先清空环境变量再只传白名单，显式传入的名字像 TOKEN、SECRET、PASSWORD、API_KEY 的变量会被拒绝（`apps/desktop/src-tauri/src/command_environment.rs`）。
+
+模型 API Key 按供应商 base URL 在本机全局共享：同一地址的供应商、Fox 和外部 Agent 读到同一把 Key；删除供应商会删掉该地址的 Key。
 
 ### 6. 外部内容按不可信数据处理
 
@@ -94,7 +112,7 @@ Prompt 会明确告诉模型外部内容不能修改系统规则，但真正的�
 
 ### 7. 执行受到资源和拓扑限制
 
-Child Run 与 Reviewer 有独立生命周期、工具范围和预算。只读 Graph Lead 限制节点数、深度、并发、工具调用次数、Token 和超时；失败分支不能无限派生任务。
+Child Run 与 Reviewer 有独立生命周期、工具范围和预算：Child Run 深度为 1，单个时长默认 5 分钟、最长 15 分钟且不超过父 Run 剩余上限；Kernel 路径不单独限制 Child Run 的数量和同时运行数。只读 Graph Lead 最多 3 个节点、深度 1，并限制工具调用次数、Token 和超时；失败分支不能无限派生任务。
 
 隐藏 Reviewer 固定只允许 `read/ls/find/grep`，不能写文件、执行命令、审批、继续委派或修改 Work 状态。
 
@@ -121,6 +139,25 @@ SQLite 保存 Run、ToolCall、Approval、Attempt、Evidence、Reviewer decision
 
 未知工具、未知 Profile、Schema 不匹配、权限模式异常、项目缺失、路径失效、知识库未绑定、审批超时、过期版本和恢复冲突全部 fail closed。Fox 不会在安全检查失败时自动改走更宽松的执行路径。
 
+## 外部 Agent 会话的边界
+
+外部 Agent（dsh、pi；隐藏的 Codex 同样适用）的模型循环和工具执行不在 Fox Host 里，所以上面 1–10 的大部分控制不适用。Fox 用下面这些控制约束它们：
+
+| 控制 | 做法 | 代码 |
+| --- | --- | --- |
+| 启动来源 | 只从 Fox 管理的运行时目录启动，不用 `npx`；未安装时报 `agent_backend_not_installed` | `crates/fox-agent-backend/src/external_launch.rs` |
+| 环境变量 | 只继承白名单 | 同上 |
+| 沙箱 | 默认整个外部 Agent 进程在每会话一个 srt 沙箱里运行：只能读写授权目录、私有 HOME 和运行必需的系统目录，出站网络限于该 Agent 的模型 API 域名；Windows 另有私有目录布局、ACP bridge 和祖先 ACE。沙箱起不来时拒绝启动，绝不回退到完全访问 | `crates/fox-agent-backend/src/sandbox.rs`、`win*.rs` |
+| 项目 | 外部会话必须绑定项目才能开始运行 | `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs` |
+| 登录信息 | 放在 Fox 管理的私有 HOME；从真实 HOME 导入时只复制用户确认过的文件，并按名字审计 | `crates/fox-agent-backend/src/onboarding.rs` |
+| 审批 | Agent 的审批请求经 ACP `session/request_permission` 由 Host 作答 | `crates/fox-agent-backend/src/external.rs`、`native_permission.rs` |
+| 权限 | 按该 Agent 自己的原生选项（如 pi 只读 / 询问 / 自动；dsh 只读 / 工作区可写） | `crates/fox-agent-backend/src/native_permission.rs` |
+| 完全访问 | 独立开关；只在创建会话时授予并写审计，会话中只能撤销（撤销后在沙箱里重启）；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时不可选 | 同上 |
+| 路由 | 会话后端创建时冻结；请求与冻结值不一致时拒绝；读库失败时不会把外部会话交给 Fox | `crates/fox-agent-backend/src/host_routing.rs` |
+| 关闭 | 管理员可用 `FOX_EXTERNAL_BACKENDS` 强制关闭，被关闭的已有外部会话只读 | 同上 |
+
+外部 Agent 在沙箱内能做什么，取决于它自己的工具和所选权限；Fox 不审查它每一步工具调用的参数，也不对它的输出建立 Evidence / Acceptance。能力按“审批覆盖 / 沙箱范围 / 取消能力 / 可观测性”四个维度声明并显示。详见[安全架构 · 外部 Agent 会话](../02-架构/安全架构.md#外部-agent-会话)。
+
 ## 常见追问
 
 ### “既然模型只能调用工具，是不是限制工具就够了？”
@@ -133,7 +170,7 @@ Prompt 隔离可以降低模型被诱导的概率，但不是最终安全边界�
 
 ### “用户批准一次后，Agent 会不会一直执行？”
 
-一次授权只绑定当前 Tool Call；会话级授权也只减少同名工具的重复弹窗，不扩大路径、Agent、Expert、MCP 或参数范围。高风险规则仍可以要求逐次审批。
+一次授权只绑定当前 Tool Call；会话级授权也只减少同名工具的重复弹窗，不扩大路径、Agent、Expert、MCP 或参数范围。高风险规则仍可以要求逐次审批。需要如实说明的例外是 `test_run`：「本会话允许」之后，测试脚本内容变化不会触发重新审批（未关闭项）。
 
 ### “Agent 能不能伪造测试通过或任务完成？”
 
@@ -141,28 +178,36 @@ Prompt 隔离可以降低模型被诱导的概率，但不是最终安全边界�
 
 ### “多 Agent 会不会互相扩大权限？”
 
-Child Run 的权限来自父级与自身 Profile 的交集，不能继承父级没有的权限。Reviewer 更是固定只读。当前 Writer 不采用无界共享调度，避免多个 Agent 同时任意修改同一工作区。
+Child Run 的权限来自父级与自身 Profile 的交集，不能继承父级没有的权限。Reviewer 更是固定只读。当前 Writer 不采用无界共享调度，避免多个 Agent 同时任意修改同一工作区。外部 Agent 会话按方案约定不做多 Agent 协作：会话只绑定一个后端，运行中不切换。
 
 ## 已知安全边界
 
-Fox 采用纵深防御，但仍有需要继续加固的工程边界：
+Fox 采用纵深防御，但下列边界尚未闭合（2026-10-25 对照代码）：
 
-- Runtime 与本地 MCP 进程尚未进入 OS 容器或 Windows AppContainer；没有经过验证的命令后端，任意 Shell 启动保持拒绝；
-- Tauri 已配置 `csp` 与 `devCsp`（不再是 `null`），但缺少浏览器端的策略回归验证；
-- 用户显式配置的 MCP/OpenAPI 地址和本地命令属于高风险受信配置；
-- Office/PDF 等复杂解析器需要持续进行依赖更新和恶意文件测试；
+- **Fox Host 命令路径没有操作系统级隔离**：没有 OS 沙箱、受限用户、ACL 或防火墙规则。因此任意 Shell 保持拒绝；固定能力工具只有进程回收、环境变量白名单和资源上限。
+- **`test_run` 授权没有绑定工作区修订或脚本内容**（四 Agent 方案阶段 1 第 2 项，未关闭）。
+- **非 Windows 平台的子进程收尾**只杀直接子进程，没有进程树终止（阶段 1 第 4 项只在 Windows 上关闭；产品发布目标是 Windows）。
+- Fox 会话的 Runtime 与本地 MCP 进程没有进入 OS 容器或 Windows AppContainer。
+- 外部 Agent 的安全依赖 srt 沙箱和该 Agent 自己的权限实现；完全访问一旦授予，该会话不再有沙箱和目录边界，只保留 Host 侧的环境变量白名单、不下发凭据、取消与进程树清理、记录和原生审批转发（`crates/fox-agent-backend/src/sandbox.rs` 模块说明）。
+- Tauri 已配置 `csp` 与 `devCsp`，但没有浏览器端的策略回归测试。
+- 用户显式配置的 MCP / OpenAPI 地址和本地命令属于高风险受信配置。
+- Office / PDF 等复杂解析器需要持续更新依赖并做恶意文件测试。
 - SQLite 无法防止数据库所有者主动关闭 trigger 或直接修改文件；Repository Hash 与数据库约束主要防止正常产品链路中的越权和误用。
 
-这些限制意味着 Fox 的目标是建立可验证、默认拒绝的产品安全边界，而不是宣称桌面软件可以达到数学意义上的绝对安全。
+这些限制意味着 Fox 的目标是建立可验证、默认拒绝的产品安全边界，而不是宣称桌面软件可以达到绝对安全。当前状态汇总见[当前状态与核验基线](当前状态与核验基线.md)。
 
 ## 实现与测试依据
 
 - `apps/desktop/src-tauri/src/tool_guard.rs`：项目路径和只读工具边界。
-- `apps/desktop/src-tauri/src/tool_host.rs`：文件与命令执行。
+- `apps/desktop/src-tauri/src/tool_host.rs`：文件与程序执行（`run_contained_program`）。
+- `apps/desktop/src-tauri/src/process_jobs.rs`：生产执行证明（`HostVerifiedBackend`）与 Windows Job Object。
+- `apps/desktop/src-tauri/src/command_environment.rs`：子进程环境变量白名单。
+- `apps/desktop/src-tauri/src/runtime_host/capability_tools.rs`：固定能力工具。
 - `apps/desktop/src-tauri/src/runtime_host/protocol.rs`：Host canonical 工具协议。
 - `apps/desktop/src-tauri/src/runtime_host/work_tools.rs`：工作状态、审批和验收工具。
 - `apps/desktop/src-tauri/src/database/repositories/graph_lead.rs`：Graph、Reviewer 与 Acceptance。
 - `services/agent-runtime/src/execution-profile.mjs`：Runtime Profile 与工具裁剪。
 - `services/agent-runtime/src/prompt-registry.mjs`、`typed-context.mjs`：Prompt 和不可信上下文边界。
+- `crates/fox-agent-backend/src/{host_routing,external_launch,sandbox,native_permission,credential_save,credential_delete}.rs`、`apps/desktop/src-tauri/src/external_backend.rs`：外部 Agent 会话。
 
 详细工程设计见[安全架构](../02-架构/安全架构.md)、[项目与权限架构](../02-架构/项目与权限架构.md)、[Agent 运行时架构](../02-架构/Agent运行时架构.md)和[权限参考](../04-技术参考/权限参考.md)。
