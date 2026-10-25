@@ -228,6 +228,22 @@ pub struct LocalKnowledgeStore {
     pub(crate) generation_checks: Arc<Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<(PathBuf, u64, Option<std::time::SystemTime>)>)>>>,
     storage_migration_active: Arc<Mutex<Option<String>>>,
     pending_root_path: Arc<Mutex<Option<PathBuf>>>,
+    /// Set when startup could not open the configured storage for writing
+    /// (see [`LocalKnowledgeStore::open_for_startup`]); the store then runs
+    /// read-only or empty and every write fails instead of crashing setup.
+    startup_issue: Arc<Option<LocalKnowledgeStartupIssue>>,
+}
+
+/// Why the knowledge store started degraded. `message` is user-facing and
+/// names the path (「知识库路径不可写：<路径>」).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalKnowledgeStartupIssue {
+    pub root: PathBuf,
+    /// true: the existing knowledge.db is readable (read-only mode);
+    /// false: nothing could be read (empty, unavailable).
+    pub read_only: bool,
+    pub cause: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -513,6 +529,8 @@ pub struct LocalKnowledgeStorageStatus {
     pub pending_root_path: Option<String>,
     pub restart_required: bool,
     pub migration_id: Option<String>,
+    /// 「知识库路径不可写：<路径>」 when startup degraded the store.
+    pub degraded_reason: Option<String>,
 }
 
 impl LocalKnowledgeStore {
@@ -546,7 +564,138 @@ impl LocalKnowledgeStore {
             generation_checks: Arc::default(),
             storage_migration_active: Arc::new(Mutex::new(None)),
             pending_root_path: Arc::new(Mutex::new(None)),
+            startup_issue: Arc::new(None),
         })
+    }
+
+    /// Startup entry point: never fails. When the configured storage cannot
+    /// be opened for writing (read-only directory or database, path is a
+    /// file, …) it logs a warning and returns a degraded store instead of an
+    /// error, so the app still starts:
+    /// - the existing knowledge.db opened read-only when it can be read;
+    /// - otherwise an empty in-memory store.
+    /// Both are `query_only`, so writes fail with an error rather than
+    /// silently landing somewhere else. The issue is reported through
+    /// [`Self::startup_issue`] and `storage_status().degraded_reason`.
+    pub fn open_for_startup(root: impl AsRef<Path>, resource_dir: Option<&Path>) -> Self {
+        let root = root.as_ref();
+        match Self::open_internal(root, resource_dir) {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!(
+                    "fox.local_knowledge warn startup_storage_unwritable path={} error={}",
+                    root.display(),
+                    error.message
+                );
+                Self::open_degraded(root, resource_dir, error.message)
+            }
+        }
+    }
+
+    fn open_degraded(root: &Path, zvec_resource_dir: Option<&Path>, cause: String) -> Self {
+        let database_path = root.join("knowledge.db");
+        let read_only = Self::open_read_only_connection(&database_path);
+        let (connection, read_only) = match read_only {
+            Some(connection) => (connection, true),
+            None => {
+                let connection = Connection::open_in_memory()
+                    .and_then(|connection| {
+                        initialize_schema(&connection)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        connection.pragma_update(None, "query_only", "ON")?;
+                        Ok(connection)
+                    })
+                    .or_else(|_| Connection::open_in_memory())
+                    .expect("in-memory SQLite connection");
+                (connection, false)
+            }
+        };
+        let issue = LocalKnowledgeStartupIssue {
+            root: root.to_path_buf(),
+            read_only,
+            message: format!("知识库路径不可写：{}", root.display()),
+            cause,
+        };
+        Self {
+            connection: Arc::new(Mutex::new(connection)),
+            root: Arc::new(root.to_path_buf()),
+            zvec_resource_dir: Arc::new(zvec_resource_dir.map(Path::to_path_buf)),
+            database_path: Arc::new(database_path),
+            #[cfg(feature = "zvec")]
+            generation_checks: Arc::default(),
+            storage_migration_active: Arc::new(Mutex::new(None)),
+            pending_root_path: Arc::new(Mutex::new(None)),
+            startup_issue: Arc::new(Some(issue)),
+        }
+    }
+
+    /// The existing database, read-only (plain, then `immutable=1` for a WAL
+    /// database whose -shm cannot be created). None when unreadable.
+    fn open_read_only_connection(database_path: &Path) -> Option<Connection> {
+        if !database_path.is_file() {
+            return None;
+        }
+        let probe = |connection: Connection| -> Option<Connection> {
+            connection
+                .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))
+                .ok()?;
+            connection.pragma_update(None, "query_only", "ON").ok()?;
+            Some(connection)
+        };
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+        if let Some(connection) = Connection::open_with_flags(database_path, flags).ok().and_then(probe) {
+            return Some(connection);
+        }
+        let uri = url::Url::from_file_path(database_path).ok()?;
+        let uri = format!("{uri}?immutable=1");
+        Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI)
+            .ok()
+            .and_then(probe)
+    }
+
+    /// Why startup degraded this store, if it did.
+    pub fn startup_issue(&self) -> Option<&LocalKnowledgeStartupIssue> {
+        self.startup_issue.as_ref().as_ref()
+    }
+
+    /// Choose another storage directory while the store is degraded (the
+    /// normal storage migration cannot run: it writes to the unwritable
+    /// database). `None` returns to the default directory. Only the main
+    /// database setting changes; it applies after restart.
+    pub fn reset_degraded_storage_path(
+        &self,
+        database: &Database,
+        default_root: &Path,
+        path: Option<&str>,
+    ) -> Result<LocalKnowledgeStorageStatus, LocalKnowledgeError> {
+        if self.startup_issue().is_none() {
+            return Err(LocalKnowledgeError::invalid("知识库存储正常，请使用「迁移存储位置」更改路径"));
+        }
+        let target = match path.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => crate::local_knowledge_storage::normalize_storage_path(Path::new(value), None)
+                .map_err(LocalKnowledgeError::storage_migration)?,
+            None => default_root.to_path_buf(),
+        };
+        if let Err(error) = probe_writable_directory(&target) {
+            return Err(LocalKnowledgeError {
+                code: "local_knowledge.storage_path_unwritable",
+                message: format!("知识库路径不可写：{}（{error}）", target.display()),
+                retryable: false,
+            });
+        }
+        let value = if path.map(str::trim).filter(|value| !value.is_empty()).is_some() {
+            target.to_string_lossy().into_owned()
+        } else {
+            String::new()
+        };
+        database
+            .set_app_setting(crate::local_knowledge_storage::LOCAL_KNOWLEDGE_STORAGE_PATH_KEY, &value)
+            .map_err(LocalKnowledgeError::storage)?;
+        *self
+            .pending_root_path
+            .lock()
+            .map_err(|_| LocalKnowledgeError::storage("storage migration lock is poisoned"))? = Some(target);
+        self.storage_status()
     }
 
     fn open_internal(
@@ -572,6 +721,7 @@ impl LocalKnowledgeStore {
             generation_checks: Arc::default(),
             storage_migration_active: Arc::new(Mutex::new(None)),
             pending_root_path: Arc::new(Mutex::new(None)),
+            startup_issue: Arc::new(None),
         };
         store.reconcile_storage_migration_on_open()?;
         store.recover_startup_jobs()?;
@@ -2822,9 +2972,10 @@ impl LocalKnowledgeStore {
 
     pub fn storage_status(&self) -> Result<LocalKnowledgeStorageStatus, LocalKnowledgeError> {
         let probe_path = self.root.join(".fox-write-probe");
-        let writable = std::fs::write(&probe_path, b"fox")
-            .and_then(|_| std::fs::remove_file(&probe_path))
-            .is_ok();
+        let writable = self.startup_issue().is_none()
+            && std::fs::write(&probe_path, b"fox")
+                .and_then(|_| std::fs::remove_file(&probe_path))
+                .is_ok();
         let connection = self.connection()?;
         let schema_version =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -2860,6 +3011,7 @@ impl LocalKnowledgeStore {
             restart_required: pending_root.is_some(),
             pending_root_path: pending_root,
             migration_id,
+            degraded_reason: self.startup_issue().map(|issue| issue.message.clone()),
         })
     }
 
@@ -2915,6 +3067,14 @@ fn collect_knowledge_folder_paths(
         collect_knowledge_folder_paths(root, &path, paths)?;
     }
     Ok(())
+}
+
+/// Create `path` if needed and prove a file can be written in it.
+fn probe_writable_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    let probe = path.join(".fox-write-probe");
+    std::fs::write(&probe, b"fox")?;
+    std::fs::remove_file(&probe)
 }
 
 fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError> {
@@ -3945,6 +4105,27 @@ pub fn local_knowledge_storage_status(
     local_response(state.local_knowledge.storage_status())
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoragePathResetRequest {
+    /// New storage directory; null / empty returns to the default directory.
+    pub path: Option<String>,
+}
+
+/// Only while the store started degraded (「知识库路径不可写」): point the
+/// storage setting at another writable directory; applies after restart.
+#[tauri::command]
+pub fn local_knowledge_storage_path_reset(
+    state: State<'_, AppState>,
+    request: StoragePathResetRequest,
+) -> ApiResponse<LocalKnowledgeStorageStatus> {
+    local_response(state.local_knowledge.reset_degraded_storage_path(
+        &state.database,
+        &crate::local_knowledge_storage::default_storage_root(&state.data_dir),
+        request.path.as_deref(),
+    ))
+}
+
 #[tauri::command]
 pub fn local_knowledge_storage_migrate_start(
     state: State<'_, AppState>,
@@ -4112,6 +4293,92 @@ mod tests {
         drop(connection);
         drop(store);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_open_degrades_instead_of_failing_when_root_is_a_file() {
+        // The configured storage path exists but is a file: create_dir_all
+        // fails. Startup must still get a store (empty, query-only) plus a
+        // readable issue naming the path, never an Err.
+        let base = std::env::temp_dir().join(format!("fox-local-knowledge-file-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let root = base.join("not-a-directory");
+        std::fs::write(&root, b"x").unwrap();
+        let store = LocalKnowledgeStore::open_for_startup(&root, None);
+        let issue = store.startup_issue().expect("degraded");
+        assert!(!issue.read_only);
+        assert_eq!(issue.message, format!("知识库路径不可写：{}", root.display()));
+        let status = store.storage_status().unwrap();
+        assert!(!status.writable);
+        assert_eq!(status.degraded_reason.as_deref(), Some(issue.message.as_str()));
+        assert!(store.list_bases().unwrap().is_empty());
+        // Writes fail with an error instead of landing in memory.
+        assert!(store.ensure_default_fox_guide().is_err());
+        drop(store);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn startup_open_falls_back_to_read_only_when_database_is_readonly() {
+        // Existing knowledge.db with the read-only attribute: the normal open
+        // fails with "attempt to write a readonly database" (the reported
+        // startup crash). Startup keeps the data readable instead.
+        let (store, root) = test_store();
+        store.ensure_default_fox_guide().unwrap();
+        drop(store);
+        let database = root.join("knowledge.db");
+        for side in ["knowledge.db-wal", "knowledge.db-shm"] {
+            let _ = std::fs::remove_file(root.join(side));
+        }
+        let mut permissions = std::fs::metadata(&database).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&database, permissions.clone()).unwrap();
+        let store = LocalKnowledgeStore::open_for_startup(&root, None);
+        // Elevated accounts (e.g. root on Linux) may still write; then the
+        // store opens normally, which is also not a crash.
+        if let Some(issue) = store.startup_issue() {
+            assert!(issue.read_only, "readable database stays readable: {issue:?}");
+            assert!(issue.message.starts_with("知识库路径不可写："));
+            assert!(!store.list_bases().unwrap().is_empty());
+            assert!(!store.storage_status().unwrap().writable);
+        }
+        drop(store);
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        let _ = std::fs::set_permissions(&database, permissions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn degraded_store_can_point_storage_at_another_directory() {
+        let base = std::env::temp_dir().join(format!("fox-local-knowledge-reset-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let root = base.join("blocked");
+        std::fs::write(&root, b"x").unwrap();
+        let store = LocalKnowledgeStore::open_for_startup(&root, None);
+        let (database, database_path) = test_database();
+        let next = base.join("next");
+        let status = store
+            .reset_degraded_storage_path(&database, &base.join("default"), Some(next.to_str().unwrap()))
+            .unwrap();
+        assert!(status.restart_required);
+        let saved = database
+            .app_setting(crate::local_knowledge_storage::LOCAL_KNOWLEDGE_STORAGE_PATH_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(Path::new(&saved).ends_with("next"));
+        // An unwritable target (a file) is refused with the path in the text.
+        let error = store
+            .reset_degraded_storage_path(&database, &base.join("default"), Some(root.to_str().unwrap()))
+            .unwrap_err();
+        assert!(error.message.contains("知识库路径不可写"));
+        // A healthy store refuses: use the storage migration instead.
+        let (healthy, healthy_root) = test_store();
+        assert!(healthy.reset_degraded_storage_path(&database, &base, None).is_err());
+        drop((store, healthy, database));
+        let _ = std::fs::remove_file(database_path);
+        let _ = std::fs::remove_dir_all(healthy_root);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
