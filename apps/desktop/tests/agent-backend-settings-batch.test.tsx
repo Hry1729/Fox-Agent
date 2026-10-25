@@ -101,6 +101,28 @@ async function settle() {
   await act(async () => { await Promise.resolve(); await Promise.resolve() })
 }
 
+
+// The settings dropdowns are the shared Radix Select: open with the keyboard,
+// read the listed options (value + disabled), pick by clicking an option.
+async function openSettingsSelect(trigger: HTMLElement) {
+  fireEvent.keyDown(trigger, { key: 'Enter' })
+  return await waitFor(() => {
+    const items = screen.getAllByRole('option')
+    expect(items.length).toBeGreaterThan(0)
+    return items.map((item) => ({ item, value: item.getAttribute('data-value') ?? '', label: item.textContent ?? '', disabled: item.getAttribute('aria-disabled') === 'true' || item.hasAttribute('data-disabled') }))
+  })
+}
+async function closeSettingsSelect() {
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+  await waitFor(() => expect(screen.queryAllByRole('option')).toHaveLength(0))
+}
+async function pickSettingsSelect(trigger: HTMLElement, value: string) {
+  const options = await openSettingsSelect(trigger)
+  const option = options.find((entry) => entry.value === value)
+  expect(option).toBeTruthy()
+  fireEvent.click(option!.item)
+}
+
 describe('① draft login probe is keyed by backend + project', () => {
   test('switching backend drops the old card at once and ignores the late answer of the old target', async () => {
     const fake = fakeClient()
@@ -324,10 +346,10 @@ describe('④ backend comes from the settings; no picker on the bar', () => {
     const listener = (event: Event) => heard.push((event as CustomEvent<AgentBackendPreferences>).detail)
     window.addEventListener(AGENT_BACKEND_PREFERENCES_EVENT, listener)
     render(<AgentBackendSettingsSection client={client} />)
-    const select = await waitFor(() => screen.getByLabelText('新会话使用的 Agent') as HTMLSelectElement)
+    const select = await waitFor(() => screen.getByRole('combobox', { name: '新会话使用的 Agent' }) as HTMLButtonElement)
     await waitFor(() => expect(select.disabled).toBe(false))
-    expect(select.value).toBe('fox')
-    fireEvent.change(select, { target: { value: 'pi' } })
+    expect(select.textContent).toBe('Fox')
+    await pickSettingsSelect(select, 'pi')
     await waitFor(() => expect(heard.length).toBe(1))
     expect(changes).toEqual([{ defaultBackend: 'pi' }])
     expect(heard[0].effectiveBackend).toBe('pi')
@@ -352,10 +374,16 @@ describe('④ backend comes from the settings; no picker on the bar', () => {
     })
     const client = { agentBackendPreferences: async () => forced, saveAgentBackendPreferences: async () => forced, probeCodexResponses: async () => null }
     render(<AgentBackendSettingsSection client={client} />)
-    const select = await waitFor(() => screen.getByLabelText('新会话使用的 Agent') as HTMLSelectElement)
+    const select = await waitFor(() => screen.getByRole('combobox', { name: '新会话使用的 Agent' }) as HTMLButtonElement)
     await waitFor(() => expect(text()).toContain('管理员已通过环境变量 FOX_EXTERNAL_BACKENDS 关闭外部 Agent 后端'))
-    const options = Array.from(select.querySelectorAll('option'))
+    await waitFor(() => expect(select.disabled).toBe(false))
+    const options = await openSettingsSelect(select)
     expect(options.filter((option) => !option.disabled).map((option) => option.value)).toEqual(['fox'])
+    // Picking a forced-off backend never reaches the Host.
+    fireEvent.click(options.find((option) => option.value === 'pi')!.item)
+    await settle()
+    expect(select.textContent).toBe('Fox')
+    if (screen.queryAllByRole('option').length) await closeSettingsSelect()
     const toggle = screen.getByRole('switch', { name: '新外部会话使用完全访问' })
     expect(toggle.hasAttribute('disabled') || toggle.getAttribute('data-disabled') !== null).toBe(true)
     expect(text()).toContain('FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1')
@@ -388,10 +416,11 @@ describe('Codex hidden from user-facing choices (2026-10-24)', () => {
     expect(agentBackendSettingValue(saved)).toBe('fox')
     const client = { agentBackendPreferences: async () => saved, saveAgentBackendPreferences: async () => saved, probeCodexResponses: async () => null }
     render(<AgentBackendSettingsSection client={client} />)
-    const select = await waitFor(() => screen.getByLabelText('新会话使用的 Agent') as HTMLSelectElement)
+    const select = await waitFor(() => screen.getByRole('combobox', { name: '新会话使用的 Agent' }) as HTMLButtonElement)
     await waitFor(() => expect(text()).toContain('之前保存的 Codex 暂未开放'))
-    expect(select.value).toBe('fox')
-    expect(Array.from(select.querySelectorAll('option')).map((option) => option.value)).toEqual(['fox', 'pi', 'deepseek'])
+    expect(select.textContent).toBe('Fox')
+    await waitFor(() => expect(select.disabled).toBe(false))
+    expect((await openSettingsSelect(select)).map((option) => option.value)).toEqual(['fox', 'pi', 'deepseek'])
   })
 
   test('the composer picker never lists Codex', async () => {
