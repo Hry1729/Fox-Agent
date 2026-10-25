@@ -1479,3 +1479,64 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 6. 打开第 1 步的旧 Codex 会话：历史正常显示，后端栏显示「后端：Codex（已锁定）」，权限选择器、能力 chips 正常；发一条新消息 → 由 Codex 回复（不是 Fox、不是其他后端）；取消一次运行、批准一次审批都正常，应用不崩溃。
 7. 关闭应用，设置 `FOX_EXTERNAL_BACKENDS=pi,deepseek` 后启动：第 6 步的 Codex 会话只读（输入框锁定，提示后端未启用），pi / DeepSeek 新会话仍可建。去掉该变量重启，Codex 会话恢复可继续。
 8. （可选，开发者工具）直接调用 Tauri 命令 `conversation_create`（或前端 `desktopClient.createConversation`）并传 `agentBackend: 'codex'` → 返回失败，错误码 `agent_backend_hidden`，会话列表里没有新增会话。
+
+### 13.25 设置页 UI 复测结论（2026-10-25）
+
+> 按工程师对设置页 UI 两批改动（模型页编辑 Sheet、添加服务 Dialog、设置侧栏顶部等）的复测报告记录。
+
+- 除第 6、9、14、16 项外，其余各项均已通过。
+- 第 14、16 项在本批（13.26）修复：标题栏被 Sheet / Dialog 遮罩挡住、服务行「⋯」菜单第二次点「删除」不弹确认框。
+- 第 6 项（旧 Codex 会话发消息报 `sandbox_unavailable`）与环境有关，待工程师排查好环境后按 13.26 第 7 项补测。
+- 第 9 项上轮没测到，按 13.26 第 6 项补测。
+
+### 13.26 最终测试问题修复 + 定向复测清单（2026-10-25）
+
+> 承接 13.25。本批修 5 个问题：标题栏被遮罩挡住、行菜单第二次删除不弹确认、重复服务地址显示原始 SQL、知识库路径不可写导致启动崩溃、`run.create_failed` 不带路径。前端和 Rust 都有改动。
+
+**一、改动摘要**
+
+1. 标题栏三个按钮在 Sheet / Dialog 打开时不可点
+   - 根因：共享的 Sheet、Dialog、AlertDialog 遮罩都是 `fixed inset-0`，盖住整个窗口；而且 Radix 模态层打开时会给 `<body>` 加 `pointer-events: none`，标题栏也跟着不可点。`elementFromPoint` 在标题栏位置因此返回遮罩。
+   - 修法（在共享组件层统一处理）：标题栏挂载时在 `<html>` 上发布 `--fox-titlebar-height: 30px`（新文件 `components/ui/window-chrome.ts`）；Sheet、Dialog、AlertDialog 的遮罩改为 `top: var(--fox-titlebar-height, 0px)`，右侧 / 左侧 / 顶部 Sheet 和居中弹窗也从标题栏下方开始；标题栏 CSS 加 `pointer-events: auto`，并带 `data-fox-window-chrome` 标记；Sheet / Dialog 的 `onPointerDownOutside` / `onInteractOutside` / `onFocusOutside` 遇到标题栏时 `preventDefault`，所以点最小化、最大化不会顺带关掉弹窗。没有标题栏的场景（浏览器预览、测试）变量为 0，行为不变。
+2. 服务行「⋯」菜单第二次打开后点「删除」不弹确认
+   - 本地 Chromium（vite + mock）和 happy-dom 都没能复现，包括先 Esc / 点外部关闭菜单、先重命名再取消、先删除再 Esc、先打开编辑 Sheet 等组合。按怀疑的焦点时序冲突做防御性修复：这个菜单改为 `modal={false}`（项目已有用法），「重命名」「删除」改为 `runAfterMenuClose(...)`（新导出于 `components/ui/dropdown-menu.tsx`，`setTimeout 0`），等菜单关闭后再打开应用内输入框 / 确认框。设置页没有其他“菜单打开确认框”的地方；侧栏对话 / 项目菜单本批未改。
+3. 重复服务地址显示原始 SQL
+   - 前端：`ProviderEditor` 新增 `existingServices`，用现有服务列表做规范化比较（去首尾空格、末尾 `/`、大小写），重复时在「服务地址」下方显示「这个服务地址已经添加过了」，「添加 / 保存」按钮禁用。编辑中的服务和自己比较不算重复。
+   - 后端：`model_provider_save` 在写 Key 之前先查重，重复返回 `model.duplicate_base_url`「这个服务地址已经添加过了」（服务地址同时是 Key 的 id，查重放在前面可以保证绝不会动到另一个服务的 Key）；即使走到数据库，`UNIQUE constraint failed: model_providers.base_url` 也会映射成同样的错误码和文案。
+   - 前端兜底：`providerErrorText` 处理模型服务的保存 / 删除 / 读取错误，重复地址显示上面的文案；其他看起来像 SQL 的报错（`constraint failed`、`sqlite`、`readonly database` 等）显示「保存失败，请稍后重试」，不再展示原文。
+4. 知识库存储路径不可写时启动崩溃
+   - 根因：setup 里 `LocalKnowledgeStore::open_with_zvec_resource_dir(...)?` 失败会直接让 `setup` 返回 Err，日志是「Failed to setup app: attempt to write a readonly database」。只读目录里已有 `knowledge.db` 时，SQLite 能打开文件，但改 `journal_mode=WAL` 和建表时会报只读。
+   - 修法：新增 `LocalKnowledgeStore::open_for_startup`，不会返回错误。正常打开失败时记一条 warn（`fox.local_knowledge warn startup_storage_unwritable path=… error=…`），然后进入降级状态：已有数据库能读就只读打开（读不了 `-shm` 时用 `immutable=1` 再试），读不了就用空的内存库；两种情况都设为 `query_only`，写操作会报错，不会悄悄写到别的地方。降级时跳过默认指南资料库的写入；即使不降级，写默认指南失败也只记 warn，不再中止启动。
+   - 提示与入口：`local_knowledge_storage_status` 新增 `degradedReason`「知识库路径不可写：<路径>」，降级时 `writable=false`。资料库页面顶部显示这条提示和「修改存储位置」按钮；「保存位置」弹窗里显示同一条提示，按钮换成「选择文件夹 / 恢复默认位置 / 使用此位置」（新命令 `local_knowledge_storage_path_reset`，只在降级时可用：先验证新目录可写，再写入主库设置，重启后生效，不迁移数据）。设置 → 数据与关于 →「全面检查」的「本机资料库」一项显示为错误，摘要就是这条提示，按钮「修改存储位置」跳到资料库页。
+5. `run.create_failed` 不带路径
+   - 新模块 `src-tauri/src/data_paths.rs`：`ensure_directory` 创建目录失败时带上路径；路径本身或某个上级是文件时提示「<路径> 应为目录但是文件」。用于 Kernel 锁目录（`runtime-sessions/kernel-run-locks`，锁文件打开失败也带路径）和预览缓存目录（`cache/knowledge-preview`）。
+   - Fox 和外部后端创建 run 失败时，`run.create_failed` 的文案改为「无法写入数据库 <数据目录>\fox.db：<原始错误>」；如果 `runtime-sessions`、`runtime-sessions/kernel-run-locks`、`attachments`、`cache`、`cache/knowledge-preview` 中有路径是文件，则先列出「<路径> 应为目录但是文件」，再附上数据库路径和原始错误。只在失败后诊断，不新增发送前检查。
+   - 前端：发送没开始时，输入框上方显示「发送未开始」，下面是一行截断的「原因：<code: message>」（最多 120 字），点开显示全文（最多 4000 字，可滚动）；原来的 toast 保留。原因来自 Host 返回的错误码和文案。
+
+**二、测试**
+
+- 桌面 bun（新增 5 个文件）：`window-titlebar-overlay-dom.test.tsx`（标题栏发布高度、CSS `pointer-events: auto`、三种遮罩 / 内容都从标题栏下方开始且不包含窗口按钮、点三个窗口按钮不会关掉 Sheet / Dialog、点遮罩仍会关闭）、`settings-provider-row-menu-dom.test.tsx`（连续两次打开菜单点删除都弹出确认框，取消不删，确认后调用删除；重命名两次都弹出输入框）、`settings-provider-duplicate-url-dom.test.tsx`、`send-not-started-reason-dom.test.tsx`、`local-knowledge-storage-degraded-dom.test.tsx`。
+- Rust（桌面 crate，定向 CI 运行）：`model_service::tests::duplicate_base_url_owner_ignores_trailing_slash_case_and_self`、`duplicate_base_url_error_matches_only_the_provider_unique_index`；`local_knowledge::tests::startup_open_degrades_instead_of_failing_when_root_is_a_file`、`startup_open_falls_back_to_read_only_when_database_is_readonly`、`degraded_store_can_point_storage_at_another_directory`；`data_paths::tests::data_paths_name_a_lock_directory_that_is_a_file`、`data_paths_run_create_failure_lists_paths_and_database`；`runtime_host::kernel_run_lock::tests::lock_directory_that_is_a_file_is_named_in_the_error`。
+
+**三、定向复测清单 13.26**（Windows 桌面构建，每项「通过 / 失败 + 截图」）
+
+1. 标题栏在 Sheet 和弹窗打开时可点
+   - 步骤：设置 → 模型，点某个服务行打开右侧编辑 Sheet。依次点标题栏右上角「最小化」「最大化 / 还原」「关闭」。对「添加服务」弹窗、编辑 Sheet 里的「添加模型」弹窗、行菜单「删除」弹出的确认框、「重命名」输入框各重复一次（「关闭」放在每组最后测，测完重新打开应用）。
+   - 预期：三个按钮都有悬停效果并能生效；最小化恢复后、最大化 / 还原后，Sheet 或弹窗仍然打开，内容不变；遮罩（灰色和模糊）从标题栏下方开始，标题栏本身不变灰。点标题栏下方的遮罩，Sheet / 弹窗照常关闭。
+2. 行菜单连续两次删除都弹出确认框
+   - 准备：添加一个与主环境地址不同的测试服务（例如 `https://test-provider.example.com/v1`），填一个假的 Key，保存后行上显示「已保存」类状态。
+   - 步骤：点这个服务行的「⋯」→「删除」→ 在确认框点「取消」；再点「⋯」→「删除」→ 点「删除」。再试一次组合：「⋯」→ 按 Esc 关菜单 →「⋯」→「删除」。
+   - 预期：每一次都弹出应用内确认框「删除服务」，标题里不出现 `127.0.0.1`；取消后服务还在；确认后服务从列表消失，提示「供应商已删除」。在 Windows 凭据管理器里看不到这个测试地址的 Key（或重新添加同一地址时 Key 输入框显示「输入服务商 API Key」而不是「已安全保存」）。主环境服务和它的 Key 不受影响。「重命名」也连续测两次，每次都弹出输入框。
+3. 重复地址的提示
+   - 步骤：点「添加服务」，服务地址填一个已有服务的地址，分别试：完全相同、末尾多一个 `/`、主机名改成大写。再打开已有服务的编辑 Sheet，把地址改成另一个已有服务的地址。
+   - 预期：「服务地址」下方立即出现红字「这个服务地址已经添加过了」，「添加 / 保存」按钮置灰；改成不重复的地址后提示消失、按钮恢复。任何情况下界面都不出现 `UNIQUE constraint failed` 或其他 SQL 原文。
+4. 知识库路径改成只读目录后，应用能正常启动并给出提示
+   - 步骤：关闭 Fox。新建 `D:\fox-ro-kb`，先把现有知识库目录（默认 `%APPDATA%\<Fox 数据目录>\local-knowledge`）复制进去，再在属性里把 `knowledge.db` 设为只读（或给目录去掉当前用户的写权限）。用 SQLite 工具把主库 `fox.db` 的 `app_settings` 里 `local_knowledge_storage_path` 改为 `D:\fox-ro-kb`。启动 Fox。另测一种：把 `local_knowledge_storage_path` 指向一个文件（如 `D:\fox-ro-kb.txt`）。
+   - 预期：应用正常启动，不出现「Failed to setup app」。资料库页顶部显示「知识库路径不可写：D:\fox-ro-kb」和「修改存储位置」按钮；只读目录的情况能看到原有资料库（只读），路径是文件的情况资料库为空。新建 / 导入资料库会报错，但不崩溃。设置 → 数据与关于 →「重新诊断」，「本机资料库」显示为需要处理，摘要是同一条提示。点「修改存储位置」→ 弹窗显示该提示 →「选择文件夹」选一个可写目录 →「使用此位置」→ 显示「已记录新位置，重启 Fox 后生效。」；重启后提示消失，资料库使用新目录（为空目录时为空）。再测「恢复默认位置」，重启后回到默认目录。启动日志里有 `fox.local_knowledge warn startup_storage_unwritable`。
+5. kernel-run-locks 换成文件后，报错信息带路径
+   - 步骤：关闭 Fox。在数据目录里把 `runtime-sessions\kernel-run-locks` 目录改名备份，再新建一个同名的 1 字节文件。启动 Fox，在 Fox 会话里发一条消息。再把 `cache\knowledge-preview` 也换成文件重复一次。测完删掉文件、恢复目录。
+   - 预期：发送失败时输入框上方显示「发送未开始」，下面一行「原因：…」（过长时截断），点开能看到完整原因，其中包含「…\runtime-sessions\kernel-run-locks 应为目录但是文件」（或运行失败的错误详情里出现「Kernel lock directory：<路径> 应为目录但是文件」）。如果失败发生在建 run 阶段，原因里还带「数据库 <数据目录>\fox.db：<原始错误>」。草稿保留，恢复目录后重新发送成功。
+6. 补测上轮未测项
+   - 添加服务弹窗内容长时内部滚动：把窗口高度拖到约 600px，点「添加服务」，展开「协议与高级」，再添加 3～4 个模型。预期：弹窗不超出窗口，也不盖住标题栏；中间内容区域出现滚动条并能滚动，标题和底部「取消 / 添加」固定可见。
+   - 有真实 Key 时：在「添加服务」里选一个模板，填真实 Key，点「测试连接」，显示「连接成功，发现 N 个模型」后再点「添加」。预期：服务出现在列表里、状态为已连接；再次打开编辑 Sheet，Key 显示「已安全保存」。
+7. 第 6 项（旧 Codex 会话发消息报 `sandbox_unavailable`）：工程师排查好环境后补测。步骤：打开一个旧 Codex 会话，发一条消息；在运行中点「停止」取消一次；触发一次需要审批的操作并批准。预期：消息由 Codex 回复，不报 `sandbox_unavailable`；取消后运行结束，界面恢复可输入；批准后操作继续执行，应用不崩溃。
