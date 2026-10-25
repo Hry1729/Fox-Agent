@@ -2504,7 +2504,13 @@ pub fn run_start(
         request.model.as_deref(),
     ) {
         Ok(started) => started,
-        Err(error) => return ApiResponse::failure("run.create_failed", error, false),
+        Err(error) => {
+            return ApiResponse::failure(
+                "run.create_failed",
+                crate::data_paths::run_create_failure(&state.data_dir, &error),
+                false,
+            )
+        }
     };
 
     // #6: record the user's explicit budget choice before dispatch, so the frozen
@@ -5814,10 +5820,26 @@ pub fn model_provider_save(
         return ApiResponse::failure("model.invalid_provider_icon", "不支持此供应商图标", false);
     }
     let provider_id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let old_profiles = match state.database.list_model_providers() {
-        Ok(providers) => providers.into_iter().find(|p| p.id == provider_id).map(|p| p.protocol_profiles).unwrap_or_default(),
+    let existing_providers = match state.database.list_model_providers() {
+        Ok(providers) => providers,
         Err(error) => return storage_error(error),
     };
+    // Checked before any Key is written: the base URL is UNIQUE and is also
+    // the Key id, so a duplicate must never touch the other service's Key.
+    if crate::model_service::duplicate_base_url_owner(
+        existing_providers.iter().map(|p| (p.id.as_str(), p.base_url.as_str())),
+        &provider_id,
+        &base_url,
+    )
+    .is_some()
+    {
+        return ApiResponse::failure(
+            crate::model_service::DUPLICATE_BASE_URL_CODE,
+            crate::model_service::DUPLICATE_BASE_URL_MESSAGE,
+            false,
+        );
+    }
+    let old_profiles = existing_providers.into_iter().find(|p| p.id == provider_id).map(|p| p.protocol_profiles).unwrap_or_default();
     let mut protocol_profiles = match request.protocol_profiles {
         Some(profiles) => profiles,
         None => old_profiles.clone(),
@@ -6121,6 +6143,9 @@ fn credential_save_error<T: serde::Serialize>(
     match error {
         SaveError::KeySnapshot { error, .. } => ApiResponse::failure("model.credential_save_failed", format!("无法读取已保存的 Key，未做任何修改：{error}"), true),
         SaveError::KeyWrite { error, .. } => ApiResponse::failure("model.credential_save_failed", format!("{error}{suffix}"), true),
+        SaveError::Record { error, .. } if crate::model_service::is_duplicate_base_url_error(&error) => {
+            ApiResponse::failure(crate::model_service::DUPLICATE_BASE_URL_CODE, format!("{}{suffix}", crate::model_service::DUPLICATE_BASE_URL_MESSAGE), false)
+        }
         SaveError::Record { error, .. } => storage_error(format!("{error}{suffix}")),
         SaveError::KeyDeleteAfterSave { error, .. } => ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但 Key 删除失败：{error}"), true),
     }
