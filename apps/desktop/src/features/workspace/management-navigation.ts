@@ -87,7 +87,7 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
  * valid and land on the page that now hosts their content, scrolled to the
  * matching section.
  */
-export type SettingsSectionAnchor = 'shortcuts' | 'projects' | 'usage' | 'maintenance' | 'about'
+export type SettingsSectionAnchor = 'shortcuts' | 'projects' | 'usage' | 'maintenance' | 'about' | 'skills' | 'mcp'
 
 export interface SettingsRouteRedirect {
   view: WorkspaceView
@@ -100,6 +100,9 @@ const legacySettingsRedirects: Partial<Record<WorkspaceView, SettingsRouteRedire
   'settings-usage': { view: 'settings-data', section: 'usage' },
   maintenance: { view: 'settings-data', section: 'maintenance' },
   'settings-about': { view: 'settings-data', section: 'about' },
+  // 技能 / 连接器 now live on the 插件 page, the single plugin entry in settings.
+  skills: { view: 'settings-extensions', section: 'skills' },
+  mcp: { view: 'settings-extensions', section: 'mcp' },
 }
 
 export function settingsRouteRedirect(view: WorkspaceView): SettingsRouteRedirect | null {
@@ -113,12 +116,11 @@ export function settingsNavigationView(view: WorkspaceView): WorkspaceView {
   if (view === 'onboarding') return 'settings'
   if (view === 'model-service') return 'settings-models'
   if (view === 'service' || view === 'login') return 'settings-yuxi'
-  if (view === 'skills' || view === 'mcp') return 'settings-extensions'
   return view
 }
 
 export function isSettingsSectionAnchor(value: unknown): value is SettingsSectionAnchor {
-  return value === 'shortcuts' || value === 'projects' || value === 'usage' || value === 'maintenance' || value === 'about'
+  return value === 'shortcuts' || value === 'projects' || value === 'usage' || value === 'maintenance' || value === 'about' || value === 'skills' || value === 'mcp'
 }
 
 export function managementSection(view: WorkspaceView): 'settings' | 'knowledge' | null {
