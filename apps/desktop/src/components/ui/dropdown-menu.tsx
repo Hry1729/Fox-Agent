@@ -248,7 +248,19 @@ function DropdownMenuSubContent({
   )
 }
 
+/**
+ * Run `action` after the menu has finished closing. A menu item that opens a
+ * modal (confirm / prompt dialog) must not open it inside `onSelect`: the menu
+ * is still tearing down (focus return to the trigger, body pointer-events
+ * lock), which can race the new dialog's own focus trap and leave it unopened.
+ * Waiting one macrotask lets the menu settle first.
+ */
+function runAfterMenuClose(action: () => void) {
+  setTimeout(action, 0)
+}
+
 export {
+  runAfterMenuClose,
   DropdownMenu,
   DropdownMenuPortal,
   DropdownMenuTrigger,
