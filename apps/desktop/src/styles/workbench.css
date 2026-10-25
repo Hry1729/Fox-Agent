@@ -17,6 +17,9 @@
   position: relative;
   z-index: 80;
   height: 30px;
+  /* Radix sets pointer-events:none on <body> while a modal Sheet/Dialog is open;
+     the window controls must stay clickable (overlays start below this bar). */
+  pointer-events: auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -12599,4 +12602,53 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-faint);
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* 「发送未开始」 with an expandable, truncated Host reason (sandbox.md 13.26). */
+.fox-send-not-started {
+  margin: 0 10px 6px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in oklch, var(--destructive) 28%, transparent);
+  border-radius: var(--fox-radius-control, 8px);
+  background: color-mix(in oklch, var(--destructive) 6%, transparent);
+  color: var(--fox-text);
+  font-size: var(--fox-type-caption, 12px);
+  line-height: 1.45;
+}
+.fox-send-not-started-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fox-send-not-started-head > span {
+  flex: 1;
+  min-width: 0;
+  color: var(--destructive);
+}
+.fox-send-not-started-head > button {
+  display: inline-flex;
+  border: 0;
+  background: transparent;
+  padding: 2px;
+  color: var(--fox-muted);
+  cursor: default;
+}
+.fox-send-not-started-head > button svg {
+  width: 12px;
+  height: 12px;
+}
+.fox-send-not-started-reason > summary {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fox-muted);
+  cursor: default;
+}
+.fox-send-not-started-reason > pre {
+  margin: 4px 0 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--fox-type-caption, 12px);
 }
