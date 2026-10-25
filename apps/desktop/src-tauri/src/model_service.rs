@@ -227,6 +227,34 @@ pub fn normalize_model_base_url(value: &str) -> Result<String, String> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
+/// Error code and user-facing text for a model service whose base URL is
+/// already used by another service (`model_providers.base_url` is UNIQUE).
+pub const DUPLICATE_BASE_URL_CODE: &str = "model.duplicate_base_url";
+pub const DUPLICATE_BASE_URL_MESSAGE: &str = "这个服务地址已经添加过了";
+
+/// Id of another provider (not `own_id`) that already uses `base_url`.
+/// Both sides are compared after trimming whitespace and trailing slashes,
+/// case-insensitively (stored URLs are already normalized).
+pub fn duplicate_base_url_owner<'a>(
+    providers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    own_id: &str,
+    base_url: &str,
+) -> Option<&'a str> {
+    let key = |value: &str| value.trim().trim_end_matches('/').to_ascii_lowercase();
+    let wanted = key(base_url);
+    providers
+        .into_iter()
+        .find(|(id, url)| *id != own_id && key(url) == wanted)
+        .map(|(id, _)| id)
+}
+
+/// True when a storage error is SQLite's UNIQUE violation on the provider
+/// base URL. Callers map it to [`DUPLICATE_BASE_URL_CODE`] so the raw SQL
+/// text never reaches the user.
+pub fn is_duplicate_base_url_error(error: &str) -> bool {
+    error.contains("UNIQUE constraint failed") && error.contains("model_providers.base_url")
+}
+
 /// Preserve provider-defined model IDs, while correcting known cases where a
 /// human-facing SenseNova display name was pasted into the machine ID field.
 pub fn normalize_model_id(base_url: &str, value: &str) -> String {
@@ -385,6 +413,22 @@ mod tests {
         net::TcpListener,
         thread,
     };
+
+    #[test]
+    fn duplicate_base_url_owner_ignores_trailing_slash_case_and_self() {
+        let providers = [("a", "https://api.example.com/v1"), ("b", "https://other.example.com")];
+        assert_eq!(duplicate_base_url_owner(providers, "new", "https://api.example.com/v1/"), Some("a"));
+        assert_eq!(duplicate_base_url_owner(providers, "new", " HTTPS://API.example.com/v1 "), Some("a"));
+        assert_eq!(duplicate_base_url_owner(providers, "a", "https://api.example.com/v1"), None);
+        assert_eq!(duplicate_base_url_owner(providers, "new", "https://api.example.com/v2"), None);
+    }
+
+    #[test]
+    fn duplicate_base_url_error_matches_only_the_provider_unique_index() {
+        assert!(is_duplicate_base_url_error("UNIQUE constraint failed: model_providers.base_url"));
+        assert!(!is_duplicate_base_url_error("UNIQUE constraint failed: provider_models.provider_id, provider_models.model_id"));
+        assert!(!is_duplicate_base_url_error("database is locked"));
+    }
 
     #[test]
     fn validates_local_and_remote_model_urls() {
