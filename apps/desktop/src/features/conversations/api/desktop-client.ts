@@ -262,6 +262,8 @@ export interface LocalKnowledgeStorageStatusDto {
   pendingRootPath: string | null
   restartRequired: boolean
   migrationId?: string | null
+  /** 「知识库路径不可写：<路径>」 when startup degraded the knowledge store. */
+  degradedReason?: string | null
 }
 
 export interface LocalKnowledgeStorageDirectoryDto {
@@ -920,6 +922,9 @@ export const desktopClient = {
     command<LocalKnowledgeJobDto>('local_knowledge_job_retry', { id }),
   getLocalKnowledgeStorageStatus: () =>
     command<LocalKnowledgeStorageStatusDto>('local_knowledge_storage_status'),
+  /** Only while degraded: point storage at another directory (null = default); applies after restart. */
+  resetLocalKnowledgeStoragePath: (path: string | null) =>
+    command<LocalKnowledgeStorageStatusDto>('local_knowledge_storage_path_reset', { path }),
   pickLocalKnowledgeStorageDirectory: () =>
     command<LocalKnowledgeStorageDirectoryDto | string | null>('local_knowledge_storage_directory_pick'),
   startLocalKnowledgeStorageMigration: (destinationPath: string) =>
