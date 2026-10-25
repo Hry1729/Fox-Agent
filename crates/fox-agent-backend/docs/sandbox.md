@@ -1626,3 +1626,57 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
    - 关于：显示的版本号与安装包版本一致。
    - 页面中不再出现「架构文档」「每次询问」「受保护」这几行。
 5. 以上所有项目都从普通 Medium 完整性目录运行 exe 完成。
+
+### 13.29 删除本机专家行后启动崩溃（Query is not read-only）修复 + 定向复测清单（2026-10-25）
+
+> 承接 13.28 复测发现的问题（100% 复现）：用 `sqlite3 fox.db "delete from agents where id='<任一 is_builtin=0 的专家>'"` 删掉一个本机专家后，启动 fox-desktop 在 setup 阶段 panic：`Failed to setup app: error encountered during setup hook: Query is not read-only`，没有窗口，也没有可读提示。
+
+**一、根因**
+
+- `Query is not read-only` 是 rusqlite `Error::InvalidQuery` 的 Display 文本（rusqlite-0.32.1 `src/error.rs:315`）。rusqlite 自身并不产生它；是 Fox 把它当作通用哨兵错误返回。
+- 启动时 `Database::open` → `migrations::run` → `run_transaction`，最后的 `finish_transaction`（`apps/desktop/src-tauri/src/database/migrations.rs` 原 7300–7306 行）每次启动都会执行 `SELECT COUNT(*) FROM pragma_foreign_key_check`，只要不为 0 就 `return Err(rusqlite::Error::InvalidQuery)`。即使没有待执行的迁移，也会执行这项检查。
+- `sqlite3` 命令行默认 `foreign_keys=OFF`，所以删 `agents` 行时不会级联：`agent_runtime_config`、`expert_package_versions`（ON DELETE CASCADE）留下孤立行，引用该专家的 `conversation_expert_bindings`、`conversations` 等也还在。每个本机专家至少有一行 `skills.enabled` 配置，所以外键检查必然不为 0。错误一路经 `?` 传到 setup 钩子，tauri `app.rs:1425` 直接 `panic!`。release 版是 `windows_subsystem = "windows"`，看不到任何输出。
+- 另外：内置专家库（bundled）的专家行被删后，`seed_bundled_experts` 发现包版本已安装就 `continue`，不会重新创建该行。
+
+**二、修法**
+
+1. 迁移外键检查（`migrations.rs` `check_foreign_keys_after_migration`）：父表是 `agents` 的孤立引用不再中止迁移。这类行由迁移之后的修复步骤处理。其他外键问题仍会中止迁移，但错误改为可读的中文：「数据库外键完整性检查失败，以下记录引用了不存在的数据：<表> → <父表>（N 行）」，不再是 `InvalidQuery`。
+2. 内置专家重建（`bundled_capabilities.rs` `seed_bundled_experts`）：内置库专家的 `agents` 行缺失时，按随包目录重新写入。已有的包版本历史保留，并把随包版本设为 active（日志 `fox.database warn bundled_expert_restored`）。`is_builtin=1` 的内置 Agent 原本就由 `INSERT OR IGNORE` 补回。
+3. 缺失本机专家的引用修复（`repositories.rs` `Database::repair_missing_agent_references`，在 `Database::open` 里内置种子之后执行）。被删的本机专家不会恢复，也不会删除用户内容：
+   - 以它为 Agent 的会话改用通用助手 `fox-general`。会话、消息、标题都保留，仍显示在侧栏。
+   - 它的 active 专家绑定改为 `removed`，并填写 `deactivated_at`。绑定行和快照作为历史保留，会话之后可以重新绑定其他专家。
+   - 使用它的 active 数字同事改为 `paused`。
+   - 只删除 Fox 自己删除时也会级联删除的 `agent_runtime_config` / `expert_package_versions` 孤立行，避免重新导入同一包版本时撞上唯一约束。
+   - 历史运行记录（子任务委派、工作流 / 团队运行、图评审）保留原 agent id。
+   - 日志：`fox.database warn missing_agent_references_repaired ids=… conversations=… bindings=… colleagues=… cascaded=…`。再次启动时这一步什么也不做。
+4. 无法恢复的启动错误（`lib.rs` setup 钩子 + 新 `startup_failure.rs`）：setup 里任何错误都不再进入 tauri 的 panic，而是记录 `fox.startup error setup_failed`，在 Windows 上弹出系统对话框「Fox 无法启动」，然后以退出码 1 退出。数据库打不开时，提示内容为：「无法打开 Fox 数据库：<数据目录>\fox.db／原因：…／启动已停止，数据库文件没有被删除。请先复制备份该文件；升级前的自动备份位于：<数据目录>\backups…」。其他错误会附上数据目录。整个应用依赖主库，所以这里没有降级运行的模式；知识库、kernel-run-locks、预览缓存仍按 13.27 的方式降级。
+
+**三、测试**
+
+- Rust（桌面 crate，定向 CI）：
+  - `missing_agent_row_tests::startup_tolerates_deleted_local_expert_row`：用与 setup 相同的 `open_with_migration_backup` 打开，删除本机专家行（外键关闭，模拟 sqlite3）后重启不报错；该专家没有被恢复，三张表没有孤立行，第二次重启时修复步骤什么也不做。
+  - `startup_repairs_conversations_and_bindings_of_deleted_local_expert`：本机主 Agent 的会话和绑定了本机专家的会话，重启后都能 `load_conversation`，Agent 改为 `fox-general`，原绑定变为 `removed` 并保留，侧栏仍列出两个会话，可以重新绑定其他专家，重启后保持。
+  - `startup_reseeds_deleted_bundled_expert_row`：删掉 `fox-reviewer`（内置库专家）和 `fox-debugger`（内置 Agent）后重启，两者都被补回，包哈希 / 版本不变，只有一个 active 版本，原有绑定仍为 active。
+  - `non_agent_foreign_key_violation_fails_with_readable_message`：非 agents 的外键问题仍阻止启动，错误中文可读并带表名，不含 `Query is not read-only`；外层提示带数据库路径。
+  - `startup_failure::tests::unreadable_database_reports_chinese_message_with_path`（无法读取的 8 KB 垃圾文件：提示带路径，文件没有被改动）、`setup_failure_message_names_data_dir_once`。
+- 前端：`apps/desktop/tests/settings-preview-cache-confirm-dom.test.tsx`：预览缓存可清理量不为 0 时，「清理未使用缓存」可以点击；点击后出现应用内 `role="alertdialog"`，没有调用 `window.confirm`；点「取消」不会清理；点「清理」后才清理，且只清理一次，完成后刷新用量，按钮变为禁用。
+
+**四、定向复测清单 13.29**（Windows 桌面构建，每项「通过 / 失败 + 截图 / 日志」）
+
+> 请从普通目录（Medium 完整性）运行 exe，例如 `D:\fox-test\`，不要从带 Low 完整性标签的目录（部分下载 / 解压目录）运行，否则会出现与本批无关的「拒绝访问」。每项开始前先关闭 Fox，并复制备份数据目录里的 `fox.db`。
+
+1. 删除本机专家行后正常启动
+   - 准备：在 Fox 里新建一个本机专家 X。新建一个通用助手会话 A，在 A 里选用专家 X 并发一条消息。关闭 Fox。
+   - 步骤：`sqlite3 fox.db "select id from agents where is_builtin=0 and package_source='local'"` 找到 X 的 id，执行 `sqlite3 fox.db "delete from agents where id='<X 的 id>'"`，然后启动 Fox。
+   - 预期：正常出现窗口，没有 panic，也不出现「Failed to setup app」或「Query is not read-only」。启动日志里有 `fox.database warn missing_agent_references_repaired ids=<X 的 id>`。专家列表里没有 X。
+2. 用过该专家的会话可以正常打开
+   - 步骤：打开会话 A。
+   - 预期：历史消息完整，会话显示为通用助手，当前没有选用专家（X 不再显示为当前专家）；可以继续发消息，也可以选用另一个专家。重启 Fox 后状态保持，第二次启动日志里不再出现 `missing_agent_references_repaired`。
+3. 删除内置库专家行后自动补回（可选）
+   - 步骤：关闭 Fox，执行 `sqlite3 fox.db "delete from agents where id='fox-reviewer'"`，启动 Fox。
+   - 预期：正常启动，日志里有 `bundled_expert_restored id=fox-reviewer`，专家中心里仍有该专家。
+4. 数据库损坏 / 无法读取时显示可读提示
+   - 步骤：关闭 Fox，把 `fox.db` 复制备份，再用任意非 SQLite 文件覆盖 `fox.db`（例如把一个 `.txt` 复制过去并改名为 `fox.db`）。启动 Fox。
+   - 预期：不再是无窗口直接退出。弹出系统对话框「Fox 无法启动」，内容包含「无法打开 Fox 数据库：<数据目录>\fox.db」、原因，以及自动备份目录 `<数据目录>\backups`；点「确定」后进程退出。被覆盖的文件保持原样，没有被删除。
+   - 收尾：关闭对话框，恢复备份的 `fox.db`，重启后一切正常。
+5. 以上各项都从普通 Medium 完整性目录运行 exe 完成。
