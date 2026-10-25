@@ -120,6 +120,8 @@ interface DesktopConversationState {
   errorDetails: DesktopErrorDetails | null
   /** `true` started, `false` failed, `'agent_backend_refused'` refused by backend routing (nothing started). */
   send: (text: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => Promise<boolean | AgentBackendRefusedOutcome>
+  /** "code: message" of the last send that did not start (null after a successful start). */
+  lastSendFailureReason: () => string | null
   rerunFromMessage: (messageId: string, text: string, model?: string) => Promise<boolean>
   resumeQuestion: (parentRunId: string, text: string, answers: Record<string, string | string[]>) => Promise<boolean>
   cancel: () => Promise<boolean>
@@ -286,6 +288,10 @@ export function useDesktopConversation(): DesktopConversationState {
   const draftRef = useRef<ConversationDraftSnapshot>({ agentId: null, expertId: null, projectRoot: null, permissionMode: null, knowledgeBases: [] })
   const [error, setError] = useState<string | null>(null)
   const [errorDetails, setErrorDetails] = useState<DesktopErrorDetails | null>(null)
+  // Why the last send did not start ("code: message"), read synchronously by
+  // the composer right after `send` resolves false (state is not updated yet).
+  const lastSendFailureRef = useRef<string | null>(null)
+  const lastSendFailureReason = useCallback(() => lastSendFailureRef.current, [])
   const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false)
   const activeConversationIdRef = useRef<string | null>(null)
   const activeRunIdRef = useRef<string | null>(null)
@@ -1063,6 +1069,7 @@ export function useDesktopConversation(): DesktopConversationState {
     const cleanText = text.trim()
     const cleanRuntimeText = runtimeText?.trim() || cleanText
     if (!cleanText) return false
+    lastSendFailureRef.current = null
     setError(null)
     setErrorDetails(null)
     setAgentBackendRefusal(null)
@@ -1249,6 +1256,7 @@ export function useDesktopConversation(): DesktopConversationState {
         }
         return AGENT_BACKEND_REFUSED
       }
+      lastSendFailureRef.current = details.code && details.code !== 'unknown' ? `${details.code}: ${details.message}` : details.message
       if (active) await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
       await refreshList().catch(() => undefined)
       if (selectionVersion === selectionVersionRef.current) {
@@ -1654,6 +1662,7 @@ export function useDesktopConversation(): DesktopConversationState {
     error,
     errorDetails,
     send,
+    lastSendFailureReason,
     rerunFromMessage,
     resumeQuestion,
     cancel,
@@ -1684,7 +1693,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [agentBackendStatus, agentBackendPreferences, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, draftExternalPermissionMode, setDraftExternalPermissionMode, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [agentBackendStatus, agentBackendPreferences, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, draftExternalPermissionMode, setDraftExternalPermissionMode, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, lastSendFailureReason, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {
