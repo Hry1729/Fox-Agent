@@ -343,11 +343,33 @@ fn tail_chars(text: &str, max: usize) -> String {
     text.chars().skip(count.saturating_sub(max)).collect()
 }
 
+fn model_error_terminal(data: &str) -> Option<TurnTerminal> {
+    let data: Value = serde_json::from_str(data).ok()?;
+    if data.get("code")?.as_str()? != "agent_backend_model_failed" || data.get("redacted")?.as_bool()? != true { return None; }
+    let (kind, message) = match data.get("failureKind")?.as_str()? {
+        "endpoint_changed" => ("endpoint_changed", "pi 当前会话的模型端点已变化；请重新应用已授权的模型配置后重试"),
+        "network_allowlist" => ("network_allowlist", "模型请求被沙箱网络允许列表阻止"),
+        "network_unreachable" => ("network_unreachable", "沙箱内无法通过受管代理连接模型服务"),
+        "authentication" => ("authentication", "模型服务拒绝了登录凭据"),
+        "rate_limit" => ("rate_limit", "模型服务达到请求限额"),
+        "model_error" => ("request_failed", "模型服务未能完成本轮请求"),
+        _ => return None,
+    };
+    Some(TurnTerminal::Failed { code: format!("agent_backend_model_{kind}"), message: message.into() })
+}
+
 /// Starts a backend process for a conversation.
 pub trait ExternalLauncher: Send + Sync + 'static {
     /// The mode a fresh launch would use now (Host policy may have tightened
     /// since the live process started).
     fn desired_mode(&self, request: &LaunchRequest) -> PermissionMode;
+    /// Local configuration only; never performs a model request. A changed
+    /// key requires a fresh process/policy before the next turn.
+    fn connection_key(&self, _request: &LaunchRequest) -> Result<Option<String>, LaunchFailure> { Ok(None) }
+    fn model_host(&self, request: &LaunchRequest) -> Option<String> {
+        request.unified_login.as_ref().and_then(|login| crate::native_permission::host_of(&login.base_url))
+    }
+    fn selected_model(&self, _request: &LaunchRequest) -> Option<String> { None }
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'static, Result<Launched, LaunchFailure>>;
 }
 
@@ -527,7 +549,8 @@ struct SessionState {
     /// The native permission mode the live process was started in or last
     /// switched to.
     native_mode: Option<String>,
-    /// Host of the model base URL of Fox's unified login (diagnostics).
+    connection_key: Option<String>,
+    /// Actual selected model destination (diagnostics only).
     model_host: Option<String>,
     declaration: Option<SandboxDeclaration>,
     pi_launch: Option<PiLaunch>,
@@ -657,6 +680,11 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let Some(turn) = state.turn.as_mut().filter(|turn| turn.run_id == run_id) else {
             return;
         };
+        let terminal = if terminal == TurnTerminal::Completed && !turn.projector.has_delivery() {
+            if turn.cancel_requested { TurnTerminal::Cancelled } else {
+                TurnTerminal::Failed { code: "agent_backend_empty_output".into(), message: "外部 Agent 已结束本轮，但没有返回有效回答或完成工具交付；请检查模型连接后重试".into() }
+            }
+        } else { terminal };
         let terminal_kind = match &terminal {
             TurnTerminal::Completed => RunTerminal::Completed,
             TurnTerminal::Cancelled => RunTerminal::Cancelled,
@@ -753,6 +781,18 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 .remedy(STOP_UNCONFIRMED_REMEDY));
         }
         let wanted_native = request.launch.native_mode(desired);
+        let wanted_key = self.inner.launcher.connection_key(&request.launch)?;
+        let source_changed = {
+            let state = lock(&session.state);
+            state.connection.is_some() && state.connection_key != wanted_key
+        };
+        if source_changed {
+            if let Some(report) = self.stop_connection(session, "model configuration changed").await {
+                if !report.confirmation.is_confirmed() {
+                    return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "模型配置已变化，但原进程未确认结束，暂不重建连接"));
+                }
+            }
+        }
         let (live, running_mode, running_native) = {
             let state = lock(&session.state);
             (state.connection.is_some() && state.native_session_open, state.mode, state.native_mode.clone())
@@ -809,6 +849,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         self.emit(session, &run_id, json!({ "type": "agent_backend.launching", "agentBackend": session.backend.as_str(), "mode": desired.as_str() }));
         let launched = self.inner.launcher.launch(request.launch.clone()).await?;
         let Launched { mut connection, mode, declaration, pi_launch, on_closed } = launched;
+        let connection_key = match self.inner.launcher.connection_key(&request.launch) {
+            Ok(key) => key,
+            Err(error) => {
+                let _ = connection.close_with_report().await;
+                if let Some(callback) = on_closed { callback(); }
+                return Err(error);
+            }
+        };
         let mut events = connection.take_events();
         let initialize_response = match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
             Ok(Some(BackendEvent::Initialized { initialize_response, .. })) => initialize_response,
@@ -893,6 +941,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     .with_rpc_error_data(data.as_deref()));
             }
         };
+        if let Some(model) = self.inner.launcher.selected_model(&request.launch) {
+            if let Err(error) = connection.set_model(&native, &model).await {
+                let (_, tail) = connection.close_with_report_and_tail().await;
+                if let Some(callback) = on_closed { callback(); }
+                return Err(LaunchFailure::new("agent_backend_model_selection_failed", format!("无法在载入会话后应用当前模型选择：{}", crate::acp::redact_diagnostic_tail(&error)))
+                    .with_stderr_tail(&tail, "session_failed"));
+            }
+        }
         let connection = Arc::new(connection);
         let generation = {
             let mut state = lock(&session.state);
@@ -904,7 +960,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             state.capabilities = Some(capabilities);
             state.mode = Some(mode);
             state.native_mode = Some(request.launch.native_mode(mode).to_owned());
-            state.model_host = request.launch.unified_login.as_ref().and_then(|login| crate::native_permission::host_of(&login.base_url));
+            state.connection_key = connection_key;
+            state.model_host = self.inner.launcher.model_host(&request.launch);
             state.declaration = Some(declaration.clone());
             state.pi_launch = Some(pi_launch);
             state.on_closed = on_closed;
@@ -1155,7 +1212,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 // A prompt that fails because the process died is reported
                 // as an exit: wait briefly for the stream to close before
                 // calling it a protocol failure.
-                turn.prompt_error = Some(error);
+                turn.prompt_error = Some(crate::acp::redact_diagnostic_tail(&error));
                 turn.prompt_error_data = data;
                 let run_id = turn.run_id.clone();
                 let runtime = self.clone();
@@ -1175,11 +1232,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         return;
                     };
                     let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
+                    let terminal = data.as_deref().and_then(model_error_terminal).unwrap_or(TurnTerminal::Failed { code: "agent_backend_prompt_failed".into(), message: error });
                     runtime.finish_turn(
                         &session,
                         &mut state,
                         &run_id,
-                        TurnTerminal::Failed { code: "agent_backend_prompt_failed".into(), message: error },
+                        terminal,
                         with_diagnostics(json!({}), stderr_diagnostic(&tail, "prompt_failed"), data.as_deref().and_then(rpc_error_data_diagnostic)),
                     );
                 });

@@ -1282,8 +1282,11 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-util",
+ "toml 0.8.2",
+ "url",
  "windows-sys 0.61.2",
 ]
 

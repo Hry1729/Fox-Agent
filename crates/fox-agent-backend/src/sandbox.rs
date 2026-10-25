@@ -252,15 +252,23 @@ pub fn default_allowed_domains(backend: AgentBackend, pi_providers: &[&str]) -> 
 }
 
 fn valid_domain(entry: &str) -> bool {
-    let host = entry.rsplit_once(':').map_or(entry, |(host, port)| {
-        if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() { host } else { entry }
-    });
+    if let Some(rest) = entry.strip_prefix('[') {
+        return rest.split_once("]:").is_some_and(|(host, port)| host.parse::<std::net::Ipv6Addr>().is_ok() && port.parse::<u16>().is_ok_and(|port| port != 0));
+    }
+    if let Some(port) = entry.strip_prefix("localhost:") {
+        return port.parse::<u16>().is_ok_and(|port| port != 0);
+    }
+    let host = if let Some((host, port)) = entry.rsplit_once(':') {
+        if !port.parse::<u16>().is_ok_and(|port| port != 0) { return false; }
+        host
+    } else { entry };
     let bare = host.strip_prefix("*.").unwrap_or(host);
     !bare.is_empty()
-        && bare.contains('.')
+        && (bare.contains('.') || host != "localhost" && entry.contains(':'))
         && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
         && !bare.starts_with('.')
         && !bare.ends_with('.')
+        && bare.split('.').all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
 }
 
 fn split_port(entry: &str) -> (&str, Option<&str>) {
@@ -272,7 +280,7 @@ fn split_port(entry: &str) -> (&str, Option<&str>) {
 
 /// Whether ceiling entry `allowed` already permits everything `requested`
 /// permits (so narrowing to `requested` is a tightening).
-fn covers(allowed: &str, requested: &str) -> bool {
+pub fn domain_covers(allowed: &str, requested: &str) -> bool {
     let (allowed_host, allowed_port) = split_port(allowed);
     let (requested_host, requested_port) = split_port(requested);
     if allowed_port.is_some() && allowed_port != requested_port {
@@ -339,13 +347,7 @@ pub fn resolve_allowed_domains_with_login(
             .collect();
     }
     let mut current: Vec<String> = match login_host.map(str::trim).filter(|host| !host.is_empty()) {
-        Some(host) if valid_domain(host) && !host.starts_with("*.") => {
-            let mut domains = if backend == AgentBackend::Pi { default_allowed_domains(backend, pi_providers) } else { Vec::new() };
-            if !domains.iter().any(|domain| domain.eq_ignore_ascii_case(host)) {
-                domains.push(host.to_ascii_lowercase());
-            }
-            domains
-        }
+        Some(host) if valid_domain(host) && !host.starts_with("*.") => vec![host.to_ascii_lowercase()],
         Some(host) => {
             resolution.rejected.push(format!("unified login: malformed model host {host:?}"));
             default_allowed_domains(backend, pi_providers)
@@ -370,7 +372,7 @@ pub fn resolve_allowed_domains_with_login(
         for entry in requested {
             if !valid_domain(&entry) {
                 resolution.rejected.push(format!("malformed domain {entry:?}"));
-            } else if current.iter().any(|allowed| covers(allowed, &entry)) {
+            } else if current.iter().any(|allowed| domain_covers(allowed, &entry)) {
                 next.push(entry);
             } else {
                 resolution.rejected.push(format!("{entry} is not in the allowlist ceiling and cannot be added"));
@@ -3697,13 +3699,26 @@ mod tests {
             assert_eq!(resolved.domains, ["api.example-llm.com"], "{backend:?}: exactly the one host, no OpenAI / DeepSeek defaults");
         }
         let resolved = resolve_allowed_domains_with_login(AgentBackend::Pi, &["anthropic"], &policy, &[], Some("API.Example-LLM.com"));
-        assert_eq!(resolved.domains, ["api.anthropic.com", "api.example-llm.com"]);
+        assert_eq!(resolved.domains, ["api.example-llm.com"]);
         // No wildcard is ever produced from a login host.
         let resolved = resolve_allowed_domains_with_login(AgentBackend::Codex, &[], &policy, &[], Some("*.example.com"));
         assert_eq!(resolved.domains, ["api.openai.com", "auth.openai.com", "chatgpt.com"]);
         assert_eq!(resolved.rejected.len(), 1);
         // The user's own login: unchanged defaults.
         assert_eq!(resolve_allowed_domains_with_login(AgentBackend::Codex, &[], &policy, &[], None).domains, ["api.openai.com", "auth.openai.com", "chatgpt.com"]);
+    }
+
+    #[test]
+    fn model_endpoint_allowlist_keeps_exact_ports_and_accepts_ipv6() {
+        for endpoint in ["127.0.0.1:3425", "localhost:3425", "[::1]:3425", "[::ffff:7f00:1]:3425", "gateway:8443", "api.example.com:443"] {
+            assert!(valid_domain(endpoint), "{endpoint}");
+            let requested = BTreeMap::from([(SETTING_ALLOWED_DOMAINS.into(), endpoint.to_owned())]);
+            let policy = HostPolicy::default();
+            let resolved = resolve_allowed_domains_with_login(AgentBackend::Pi, &["anthropic"], &policy, &[&requested], Some(endpoint));
+            assert_eq!(resolved.domains, [endpoint]);
+            assert!(!domain_covers(endpoint, &endpoint.replace(":3425", ":3426").replace(":443", ":444").replace(":8443", ":8444")));
+        }
+        for invalid in ["localhost", "localhost:0", "localhost:99999", "[::1]:0", "api.example.com:99999"] { assert!(!valid_domain(invalid), "{invalid}"); }
     }
 
     struct FakeProbe {

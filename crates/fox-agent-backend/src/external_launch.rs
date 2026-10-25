@@ -140,6 +140,9 @@ pub fn parse_extra_domains(value: Option<&str>) -> BTreeMap<AgentBackend, Vec<St
 }
 
 impl HostLaunchConfig {
+    pub fn runtime_proxy_adapter_verified(&self, backend: AgentBackend) -> bool {
+        crate::runtime_adapters::verified(&self.runtime_root, backend)
+    }
     /// Read the configuration from the process environment. `fox_data` is the
     /// app data directory.
     pub fn from_env(fox_data: &Path) -> Self {
@@ -393,7 +396,31 @@ impl HostLaunchConfig {
             AgentBackend::Deepseek => crate::unified_login::deepseek_base_url(login).ok()?,
             _ => login.base_url.clone(),
         };
-        crate::native_permission::host_of(&base).filter(|host| !crate::loopback::names_loopback(&base) && host.contains('.'))
+        crate::model_endpoint::Endpoint::parse(&base).ok().map(|endpoint| endpoint.entry)
+    }
+
+    /// Native files select the destination, but never grant network access.
+    /// A Host-selected supplier or an explicitly confirmed import does that.
+    pub fn model_endpoint(&self, request: &LaunchRequest, home: &Path) -> Result<Option<crate::model_endpoint::Endpoint>, LaunchFailure> {
+        let invalid = |message| LaunchFailure::new("agent_backend_model_endpoint_invalid", message)
+            .remedy("在私有模型配置中明确选择静态地址和模型，然后从真实 HOME 重新导入配置");
+        let native = crate::model_endpoint::resolve(request.backend, home, &request.project_root).map_err(invalid)?;
+        let trusted = request.unified_login.as_ref().and_then(|login| {
+            let base = if request.backend == AgentBackend::Deepseek { crate::unified_login::deepseek_base_url(login).ok()? } else { login.base_url.clone() };
+            crate::model_endpoint::Endpoint::parse(&base).ok()
+        });
+        if let Some(endpoint) = native.endpoint.as_ref() {
+            let imported = crate::model_endpoint::import_approved(&self.state_root, request.backend, home, &native).map_err(invalid)?;
+            let explicit = self.extra_domains.get(&request.backend).is_some_and(|entries| entries.iter().any(|entry| entry.eq_ignore_ascii_case(&endpoint.entry) || entry.eq_ignore_ascii_case(&endpoint.host)));
+            let built_in = request.backend == AgentBackend::Deepseek && endpoint.entry == "api.deepseek.com:443";
+            let selected_pi_builtin = request.backend == AgentBackend::Pi && native.provider.as_ref().is_some_and(|provider| self.pi_providers.contains(provider))
+                && crate::sandbox::pi_provider_domains(native.provider.as_deref().unwrap_or_default()).is_some_and(|hosts| hosts.contains(&endpoint.host.as_str())) && endpoint.port == 443;
+            if trusted.as_ref() == Some(endpoint) || imported || explicit || built_in || selected_pi_builtin { return Ok(Some(endpoint.clone())); }
+            return Err(LaunchFailure::new("agent_backend_model_endpoint_unapproved", format!("原生模型配置选择了 {}，但没有匹配的 Host 网络授权，或导入后配置已变化", endpoint.entry))
+                .remedy("保留当前原生配置。在登录卡片中重新导入真实 HOME 的模型和设置文件；已有文件需明确选择覆盖。也可在 Fox 模型服务中选择同一端点")
+                .detail(serde_json::json!({"endpoint":endpoint.entry,"credentialsAreNotReachability":true})));
+        }
+        Ok(self.unified_login_host(request, home).and_then(|_| trusted))
     }
 
     /// Whether the Host allowlist for `backend` names a loopback endpoint.
@@ -418,8 +445,12 @@ impl HostLaunchConfig {
         // the Fox-managed config is what the backend reads: exactly that one
         // host, no wildcard, the same rule for all three backends; it
         // replaces the backend's built-in defaults (OpenAI / DeepSeek hosts).
-        let login_host = self.unified_login_host(request, &home.path);
-        let domains = crate::sandbox::resolve_allowed_domains_with_login(request.backend, &providers, &policy, &[], login_host.as_deref());
+        let endpoint = self.model_endpoint(request, &home.path).map_err(|error| SandboxError::new(crate::sandbox::SandboxErrorCode::SandboxPolicyInvalid, error.message).remedy(error.remedy.unwrap_or_default()))?;
+        let login_host = endpoint.as_ref().map(|endpoint| endpoint.entry.as_str());
+        let domains = crate::sandbox::resolve_allowed_domains_with_login(request.backend, &providers, &policy, &[], login_host);
+        if endpoint.as_ref().is_some_and(|endpoint| !domains.domains.iter().any(|entry| crate::sandbox::domain_covers(entry, &endpoint.entry))) {
+            return Err(SandboxError::new(crate::sandbox::SandboxErrorCode::SandboxPolicyInvalid, "当前 Host 网络策略未允许所选模型端点").remedy("检查并重新应用 Host 网络授权；凭据存在不代表沙箱网络可达"));
+        }
         let mut extra = vec![self.runtime_root.clone()];
         if let Some(node) = self.managed_node().and_then(|node| node.parent().map(Path::to_path_buf)) {
             extra.push(node);
@@ -438,7 +469,13 @@ impl HostLaunchConfig {
         // for the declaration's diagnostics and for a dsh with an upstream
         // "loopback through the proxy" switch
         // ([`crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED`]).
-        let derivation = match request.backend {
+        let derivation = if self.runtime_proxy_adapter_verified(request.backend) {
+            crate::loopback::LoopbackDerivation {
+                gateway: endpoint.as_ref().filter(|endpoint| endpoint.loopback && domains.domains.contains(&endpoint.entry)).map(|endpoint| crate::loopback::LoopbackGateway {
+                    host: endpoint.host.clone(), port: endpoint.port, entry: endpoint.entry.clone(), source: "Host 授权且与原生选择匹配的模型配置".into(),
+                }), diagnostics: Vec::new(),
+            }
+        } else { match request.backend {
             AgentBackend::Deepseek => {
                 let derived = crate::loopback::derive_loopback_gateway(&crate::backends::deepseek::base_url_candidates(&home.path, &request.project_root));
                 if crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
@@ -458,7 +495,7 @@ impl HostLaunchConfig {
                 }
             }
             _ => crate::loopback::LoopbackDerivation::default(),
-        };
+        }};
         Ok(SandboxPolicy::new(
             vec![AuthorizedDir { path: request.project_root.clone(), writable: true }],
             home,
@@ -484,10 +521,10 @@ pub const MISSING_CREDENTIALS_REMEDY: &str = "在输入框上方的登录卡片�
 
 /// Remedy of [`LOOPBACK_REQUIRES_FULL_ACCESS`]: full access is chosen when a
 /// conversation is created (it cannot be turned on mid-session).
-pub const LOOPBACK_REFUSAL_REMEDY: &str = "需要完全访问权限：在设置中打开“新外部会话使用完全访问”后新建会话（会话中不能开启），或改用官方 api.deepseek.com";
+pub const LOOPBACK_REFUSAL_REMEDY: &str = "安装或修复带模型代理适配的 Fox 外部运行时 0.1.3，然后重试当前沙箱会话；权限模式无需更改";
 
 /// [`LOOPBACK_REFUSAL_REMEDY`] when [`FULL_ACCESS_FORBIDDEN_ENV`] is set.
-pub const LOOPBACK_REFUSAL_REMEDY_FORBIDDEN: &str = "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），请改用官方 api.deepseek.com";
+pub const LOOPBACK_REFUSAL_REMEDY_FORBIDDEN: &str = LOOPBACK_REFUSAL_REMEDY;
 
 /// Why the full-access choice is unavailable, for the new-conversation UI
 /// (`None` when it can be chosen).
@@ -543,12 +580,16 @@ impl HostLaunchConfig {
                 probe.credentials_present = true;
                 let loopback = request.backend == AgentBackend::Deepseek
                     && mode == PermissionMode::Sandboxed
-                    && !crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED
+                    && !self.runtime_proxy_adapter_verified(request.backend)
                     && crate::unified_login::deepseek_base_url(login).is_ok_and(|base| crate::loopback::names_loopback(&base));
                 probe.loopback_blocked = probe.loopback_blocked || loopback;
                 probe.state = if probe.loopback_blocked { crate::onboarding::CredentialState::LoopbackRequiresFullAccess } else { crate::onboarding::CredentialState::Ready };
             }
             probe.unified_login = Some(plan);
+        }
+        if request.backend == AgentBackend::Deepseek && self.runtime_proxy_adapter_verified(request.backend) {
+            probe.loopback_blocked = false;
+            if probe.credentials_present { probe.state = crate::onboarding::CredentialState::Ready; }
         }
         Ok(probe)
     }
@@ -662,7 +703,15 @@ impl HostLaunchConfig {
             .collect::<Result<Vec<_>, _>>()?;
         let stamp = crate::onboarding::backup_stamp(std::time::SystemTime::now());
         let options = crate::onboarding::ImportOptions { overwrite, backup_stamp: &stamp };
+        let trusted_import = crate::model_endpoint::confirmed_import_model(backend, real, selected)
+            .map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_import_failed", error))?;
         let report = crate::onboarding::import_into(backend, real, selected, &targets, options).map_err(|error| LaunchFailure::new("agent_backend_import_failed", error))?;
+        for target in &targets {
+            if let Some(native) = &trusted_import {
+                crate::model_endpoint::approve_import_snapshot(&self.state_root, backend, &target.home, native)
+                    .map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_import_failed", format!("文件已导入，但模型端点授权未完成：{error}")))?;
+            }
+        }
         if self.os == HostOs::Windows {
             prepare_windows()?;
         }
@@ -687,7 +736,7 @@ impl HostLaunchConfig {
     /// session would only fail later with "Connection error". Full access and
     /// remote base URLs are not affected; other backends are never refused.
     pub fn loopback_refusal(&self, request: &LaunchRequest, mode: PermissionMode, homes_root: PathBuf) -> Option<LaunchFailure> {
-        if request.backend != AgentBackend::Deepseek || mode != PermissionMode::Sandboxed || crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
+        if request.backend != AgentBackend::Deepseek || mode != PermissionMode::Sandboxed || self.runtime_proxy_adapter_verified(request.backend) {
             return None;
         }
         let project_uuid = request.project_uuid.clone().unwrap_or_default();
@@ -699,7 +748,7 @@ impl HostLaunchConfig {
         if loopback.is_empty() {
             return None;
         }
-        let named = loopback.iter().map(|candidate| format!("{}（来自 {}）", candidate.value, candidate.source)).collect::<Vec<_>>().join("；");
+        let named = loopback.iter().map(|candidate| format!("{}（来自 {}）", crate::model_endpoint::Endpoint::parse(&candidate.value).map(|endpoint| endpoint.entry).unwrap_or_else(|_| "未确定的本机端点".into()), candidate.source)).collect::<Vec<_>>().join("；");
         Some(
             LaunchFailure::new(
                 LOOPBACK_REQUIRES_FULL_ACCESS,
@@ -746,6 +795,10 @@ impl HostLauncher {
 
     async fn launch_now(config: HostLaunchConfig, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
         let mode = config.permission_mode(&request);
+        if request.backend == AgentBackend::Pi && crate::launch::program_override(AgentBackend::Pi).is_none() && !config.runtime_proxy_adapter_verified(AgentBackend::Pi) {
+            return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "pi 运行时缺少已验证的模型错误与沙箱代理适配")
+                .remedy("安装或修复 Fox 外部运行时 0.1.3 后重试；当前会话的权限模式无需更改"));
+        }
         let (mut spec, pi_launch) = config.launch_spec_with(request.backend, mode, request.native_mode(mode), &request.project_root)?;
         // Unified login (settings batch, item 6) first, so the loopback and
         // missing-login checks below see the generated files. The Codex key
@@ -766,6 +819,20 @@ impl HostLauncher {
         // error (80b1622 acceptance: codex-acp exited before initialize).
         if let Some(refusal) = config.missing_login_refusal(&request) {
             return Err(refusal);
+        }
+        if mode == PermissionMode::Sandboxed {
+            let home = config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend)?;
+            if let Some(endpoint) = config.model_endpoint(&request, &home)? {
+                if endpoint.loopback && !config.runtime_proxy_adapter_verified(request.backend) && request.backend == AgentBackend::Deepseek {
+                    return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "当前 DeepSeek 运行时不能通过沙箱代理访问本机模型").remedy("安装带 Fox 模型代理适配的运行时，然后重试当前沙箱会话"));
+                }
+                if endpoint.loopback {
+                    spec.session_env.push(("NO_PROXY".into(), String::new()));
+                    spec.session_env.push(("no_proxy".into(), String::new()));
+                }
+                spec.session_env.push(("FOX_MODEL_ENDPOINT".into(), format!("{}://{}", endpoint.scheme, endpoint.entry)));
+                spec.session_env.push(("FOX_MODEL_PROXY_REQUIRED".into(), "1".into()));
+            }
         }
         let os = config.os;
         // Windows sandboxed: private layout + srt registry + ancestor ACEs.
@@ -856,6 +923,35 @@ impl HostLauncher {
 use crate::acp::AcpConnection;
 
 impl ExternalLauncher for HostLauncher {
+    fn model_host(&self, request: &LaunchRequest) -> Option<String> {
+        let home = self.config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend).ok()?;
+        crate::model_endpoint::resolve(request.backend, &home, &request.project_root).ok()?.endpoint.map(|endpoint| endpoint.entry)
+            .or_else(|| self.config.unified_login_host(request, &home))
+    }
+    fn selected_model(&self, request: &LaunchRequest) -> Option<String> {
+        if request.backend != AgentBackend::Pi { return None; }
+        let home = self.config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend).ok()?;
+        let native = crate::model_endpoint::resolve(request.backend, &home, &request.project_root).ok()?;
+        Some(format!("{}/{}", native.provider?, native.model?))
+    }
+    fn connection_key(&self, request: &LaunchRequest) -> Result<Option<String>, LaunchFailure> {
+        use sha2::{Digest, Sha256};
+        let home = self.config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend)?;
+        let mut hash = Sha256::new();
+        hash.update(crate::model_endpoint::source_fingerprint(request.backend, &home).map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_invalid", error))?);
+        if let Some(login) = &request.unified_login {
+            for part in [&login.base_url, &login.api_type, &login.model] { hash.update((part.len() as u64).to_le_bytes()); hash.update(part.as_bytes()); }
+            hash.update(login.api_key.expose().as_bytes());
+        }
+        hash.update(serde_json::to_vec(&self.config.extra_domains).expect("policy serializes"));
+        hash.update(serde_json::to_vec(&self.config.pi_providers).expect("providers serialize"));
+        // Validate project overrides even when the existing connection is
+        // reusable; such a file can tighten access but cannot grant a route.
+        if self.config.permission_mode(request) == PermissionMode::Sandboxed {
+            crate::model_endpoint::resolve(request.backend, &home, &request.project_root).map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_invalid", error))?;
+        }
+        Ok(Some(format!("{:x}", hash.finalize())))
+    }
     fn desired_mode(&self, request: &LaunchRequest) -> PermissionMode {
         self.config.permission_mode(request)
     }
@@ -1256,11 +1352,11 @@ mod tests {
             responses_supported: None,
         };
         for (backend, api_type, base, host) in [
-            (AgentBackend::Codex, "openai-responses", "https://api.deepseek.com", "api.deepseek.com"),
-            (AgentBackend::Deepseek, "anthropic-messages", "https://gw.example-llm.com/anthropic", "gw.example-llm.com"),
+            (AgentBackend::Codex, "openai-responses", "https://api.deepseek.com", "api.deepseek.com:443"),
+            (AgentBackend::Deepseek, "anthropic-messages", "https://gw.example-llm.com/anthropic", "gw.example-llm.com:443"),
             // pi through the unified login: provider id `fox` (unknown to the
             // provider table), reachable through the login host.
-            (AgentBackend::Pi, "openai-completions", "https://llm.example.org:8443/v1", "llm.example.org"),
+            (AgentBackend::Pi, "openai-completions", "https://llm.example.org:8443/v1", "llm.example.org:8443"),
         ] {
             let mut request = request(backend, &root);
             request.unified_login = Some(login(api_type, base));
@@ -1298,84 +1394,33 @@ mod tests {
         assert_eq!(config.sandbox_policy(&bad, root.join("homes")).unwrap_err().code, SandboxErrorCode::SandboxPolicyInvalid);
     }
 
-    /// DeepSeek with a loopback model gateway in its own base URL: since the
-    /// f2bf567 re-test no loopback port is allowed (dsh dials loopback
-    /// directly), the declaration says why, and a sandboxed launch is refused
-    /// before it starts; full access and remote base URLs are not refused.
     #[test]
-    fn deepseek_loopback_gateway_is_refused_in_the_sandbox_and_never_allowed() {
-        use crate::sandbox::SandboxDeclaration;
-        let root = std::env::temp_dir().join(format!("fox-ext-launch-dsh-loopback-{}", std::process::id()));
+    fn native_pi_endpoint_needs_host_authorization_and_preserves_private_precedence() {
+        use crate::unified_login::{Secret, UnifiedLogin};
+        let root = std::env::temp_dir().join(format!("fox-endpoint-policy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let config = config(&root);
-        let homes = root.join("homes");
-        let request_for = request;
-        let request = request_for(AgentBackend::Deepseek, &root);
-        std::fs::create_dir_all(&request.project_root).unwrap();
-        // No base URL configured: only the default domain, no loopback.
+        let homes = config.fox_data.join("sandbox-homes");
+        let mut request = request(AgentBackend::Pi, &root);
+        request.unified_login = Some(UnifiedLogin { provider_name: "DeepSeek".into(), base_url: "https://api.deepseek.com".into(), api_type: "openai-completions".into(), model: "deepseek-v4-pro".into(), api_key: Secret::new("sk-host-test"), responses_supported: None });
+        let home = PrivateHomes::new(homes.clone()).home_for(request.project_uuid.as_deref().unwrap(), request.backend).unwrap().path;
+        std::fs::create_dir_all(home.join(".pi/agent")).unwrap();
+        let models = home.join(".pi/agent/models.json");
+        let original = r#"{"providers":{"magpie":{"baseUrl":"http://127.0.0.1:3425/v1","apiKey":"private-key","models":[{"id":"m"}]}}}"#;
+        std::fs::write(&models, original).unwrap();
+        std::fs::write(home.join(".pi/agent/settings.json"), r#"{"defaultProvider":"magpie","defaultModel":"m"}"#).unwrap();
+        let launcher = HostLauncher::new(config.clone());
+        assert_eq!(launcher.model_host(&request).as_deref(), Some("127.0.0.1:3425"));
+        assert_eq!(launcher.selected_model(&request).as_deref(), Some("magpie/m"));
+        assert_eq!(config.model_endpoint(&request, &home).unwrap_err().code, "agent_backend_model_endpoint_unapproved");
+        assert!(config.sandbox_policy(&request, homes.clone()).is_err());
+        assert_eq!(std::fs::read_to_string(&models).unwrap(), original, "the supplier default must not overwrite native Magpie");
+        let snapshot = crate::model_endpoint::resolve(request.backend, &home, &request.project_root).unwrap();
+        crate::model_endpoint::approve_import_snapshot(&config.state_root, request.backend, &home, &snapshot).unwrap();
         let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
-        assert_eq!(policy.allowed_domains, ["api.deepseek.com"]);
-        assert!(policy.loopback_gateway.is_none() && policy.loopback_diagnostics.is_empty());
-        // The private HOME's dsh config names the Magpie gateway.
-        let dsh_home = policy.private_home.join(".dsh");
-        std::fs::create_dir_all(&dsh_home).unwrap();
-        let write_base_url = |url: &str| std::fs::write(dsh_home.join("cordis.patch.yml"), format!("- id: llm-deepseek\n  config:\n    baseURL: {url}\n")).unwrap();
-        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_none(), "no base URL: launches");
-        write_base_url("http://127.0.0.1:3425/anthropic");
-        let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
-        assert_eq!(policy.allowed_domains, ["api.deepseek.com"], "the gateway port is no longer allowed");
-        assert!(policy.loopback_gateway.is_none());
-        assert!(policy.loopback_diagnostics[0].contains("127.0.0.1:3425") && policy.loopback_diagnostics[0].contains("直连"), "{:?}", policy.loopback_diagnostics);
-        let settings = policy.to_srt_settings();
-        assert_eq!(settings["network"]["allowedDomains"], serde_json::json!(["api.deepseek.com"]));
-        let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
-        let view = crate::capability_view::capability_view(
-            AgentBackend::Deepseek,
-            Some(&serde_json::json!({"agentInfo": {"name": "deepseek-harness-acp"}})),
-            &declaration,
-            crate::capability_view::PiLaunch::Stock,
-        );
-        assert!(view.sandbox.detail.contains("未放行本机回环端口"), "{}", view.sandbox.detail);
-        assert!(view.sandbox.detail.contains("完全访问"), "{}", view.sandbox.detail);
-        // Sandboxed launch: refused before anything starts, with the new code.
-        let refusal = config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).expect("refused in the sandbox");
-        assert_eq!(refusal.code, LOOPBACK_REQUIRES_FULL_ACCESS);
-        assert!(refusal.message.contains("本机网关在沙箱模式下不可达") && refusal.message.contains("http://127.0.0.1:3425/anthropic"), "{}", refusal.message);
-        assert_eq!(refusal.remedy.as_deref(), Some(LOOPBACK_REFUSAL_REMEDY));
-        assert!(refusal.remedy.as_deref().unwrap().contains("在设置中打开“新外部会话使用完全访问”后新建会话"));
-        assert!(!refusal.remedy.as_deref().unwrap().contains("请切换到") && !refusal.remedy.as_deref().unwrap().contains("FOX_EXTERNAL_FULL_ACCESS"));
-        // Forbidden on this machine: the remedy no longer offers full access.
-        let mut forbidden = config.clone();
-        forbidden.full_access_forbidden = true;
-        let refusal = forbidden.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).expect("refused");
-        assert_eq!(refusal.remedy.as_deref(), Some(LOOPBACK_REFUSAL_REMEDY_FORBIDDEN));
-        assert!(refusal.remedy.as_deref().unwrap().contains("已禁止完全访问") && !refusal.remedy.as_deref().unwrap().contains("新建会话时选择"));
-        assert_eq!(refusal.detail["reason"], "dsh_proxy_bypasses_loopback");
-        // Full access: not refused.
-        assert!(config.loopback_refusal(&request, PermissionMode::FullAccess, homes.clone()).is_none());
-        // A loopback base URL whose port is computed is refused as well.
-        write_base_url("http://localhost:${MAGPIE_PORT}/anthropic");
-        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_some());
-        // Port cannot be determined: nothing allowed, diagnostic declared.
-        write_base_url("!!js process.env.GW");
-        let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
-        assert_eq!(policy.allowed_domains, ["api.deepseek.com"]);
-        assert!(policy.loopback_gateway.is_none());
-        assert!(!policy.loopback_diagnostics.is_empty());
-        let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
-        assert!(!declaration.loopback_diagnostics.is_empty());
-        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_none(), "not loopback: not refused");
-        // A remote base URL: no loopback port, no diagnostic, not refused.
-        write_base_url("https://llm.example.com/anthropic");
-        let policy = config.sandbox_policy(&request, homes.clone()).unwrap();
-        assert_eq!(policy.allowed_domains, ["api.deepseek.com"]);
-        assert!(policy.loopback_gateway.is_none() && policy.loopback_diagnostics.is_empty());
-        assert!(config.loopback_refusal(&request, PermissionMode::Sandboxed, homes.clone()).is_none());
-        // Other backends never read dsh configuration and are never refused.
-        write_base_url("http://127.0.0.1:3425");
-        let pi = config.sandbox_policy(&request_for(AgentBackend::Pi, &root), homes.clone()).unwrap();
-        assert!(!pi.allowed_domains.iter().any(|domain| domain.starts_with("127.0.0.1")));
-        assert!(config.loopback_refusal(&request_for(AgentBackend::Pi, &root), PermissionMode::Sandboxed, homes).is_none());
-        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(policy.allowed_domains, ["127.0.0.1:3425"]);
+        std::fs::write(&models, original.replace(":3425", ":3426")).unwrap();
+        assert_eq!(config.model_endpoint(&request, &home).unwrap_err().code, "agent_backend_model_endpoint_unapproved");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

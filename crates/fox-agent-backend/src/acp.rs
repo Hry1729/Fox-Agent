@@ -28,7 +28,7 @@ use crate::reverse::WriteOutcome;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest, TextContent,
+    SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest, SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
@@ -113,6 +113,11 @@ enum Command {
     SetMode {
         session_id: String,
         mode_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SetModel {
+        session_id: String,
+        model_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
 }
@@ -1240,6 +1245,14 @@ impl AcpConnection {
                                     let _ = reply.send(switched);
                                 });
                             }
+                            Command::SetModel { session_id, model_id, reply } => {
+                                let selected = connection.send_request(SetSessionConfigOptionRequest::new(session_id, "model", model_id.as_str()))
+                                    .block_task().await.map(|_| ()).map_err(|error| {
+                                        *lock_data(&session_error_data) = rpc_error_data_text(&error);
+                                        rpc_error_summary(&error)
+                                    });
+                                let _ = reply.send(selected);
+                            }
                         }
                     }
                     Ok(())
@@ -1365,6 +1378,15 @@ impl AcpConnection {
             .send(Command::NewSession { cwd, reply })
             .map_err(|_| "backend connection closed".to_string())?;
         response.await.map_err(|_| "backend connection closed".to_string())?
+    }
+
+    /// Pinned pi supports the stable ACP model config option. Reapply the
+    /// Host-selected native model after loading history, before prompting.
+    pub async fn set_model(&self, session_id: &str, model_id: &str) -> Result<(), String> {
+        if self.is_stopping() { return Err(STOPPING_REFUSAL.to_owned()); }
+        let (reply, response) = oneshot::channel();
+        self.commands.send(Command::SetModel { session_id: session_id.to_owned(), model_id: model_id.to_owned(), reply }).map_err(|_| "backend connection closed")?;
+        response.await.map_err(|_| "backend connection closed".to_owned())?
     }
 
     /// Reopen an existing native session with history replay

@@ -109,9 +109,21 @@ struct MockLauncher {
     /// Full access withdrawn: desired / launched mode is sandboxed.
     revoked: Arc<AtomicBool>,
     modes: Arc<Mutex<Vec<PermissionMode>>>,
+    config_revision: Arc<AtomicUsize>,
+    selected_model: Arc<Mutex<Option<String>>>,
+    key_reads: Arc<AtomicUsize>,
+    fail_key_after_launch: bool,
+    closed: Arc<AtomicUsize>,
 }
 
 impl ExternalLauncher for MockLauncher {
+    fn connection_key(&self, _request: &LaunchRequest) -> Result<Option<String>, LaunchFailure> {
+        if self.key_reads.fetch_add(1, Ordering::SeqCst) > 0 && self.fail_key_after_launch {
+            return Err(LaunchFailure::new("agent_backend_model_endpoint_invalid", "configuration became unreadable"));
+        }
+        Ok(Some(self.config_revision.load(Ordering::SeqCst).to_string()))
+    }
+    fn selected_model(&self, _request: &LaunchRequest) -> Option<String> { self.selected_model.lock().unwrap().clone() }
     fn desired_mode(&self, _request: &LaunchRequest) -> PermissionMode {
         if self.revoked.load(Ordering::SeqCst) { PermissionMode::Sandboxed } else { PermissionMode::FullAccess }
     }
@@ -120,6 +132,7 @@ impl ExternalLauncher for MockLauncher {
         let launches = Arc::clone(&self.launches);
         let fail = self.fail;
         let mode = self.desired_mode(&request);
+        let closed = Arc::clone(&self.closed);
         self.modes.lock().unwrap().push(mode);
         Box::pin(async move {
             launches.fetch_add(1, Ordering::SeqCst);
@@ -142,7 +155,7 @@ impl ExternalLauncher for MockLauncher {
                 mode,
                 declaration: SandboxDeclaration::declare(mode, None, HostOs::current()),
                 pi_launch: PiLaunch::Stock,
-                on_closed: None,
+                on_closed: Some(Box::new(move || { closed.fetch_add(1, Ordering::SeqCst); })),
             })
         })
     }
@@ -178,6 +191,68 @@ fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, stor
             native_permission: None,
         },
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn model_settlement_requires_delivery_and_preserves_partial_failure() {
+    assert!(node_available(), "this regression requires Node");
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    for (prompt, kind, code) in [
+        ("empty", "run.failed", "agent_backend_empty_output"),
+        ("status-only", "run.failed", "agent_backend_empty_output"),
+        ("reasoning-only", "run.failed", "agent_backend_empty_output"),
+        ("tools-only", "run.completed", ""),
+        ("partial-model-failure", "run.failed", "agent_backend_model_network_allowlist"),
+    ] {
+        runtime.start_turn(turn("settlement", prompt, prompt, AgentBackend::Pi, None)).unwrap();
+        let terminal = sink.terminal(prompt).await;
+        assert_eq!(terminal["type"], kind, "{prompt}: {terminal}");
+        if !code.is_empty() { assert_eq!(terminal["code"], code); }
+        assert_eq!(sink.events(prompt).iter().filter(|event| matches!(event["type"].as_str(), Some("run.completed" | "run.failed"))).count(), 1);
+    }
+    assert!(sink.text("status-only").is_empty());
+    assert_eq!(sink.text("partial-model-failure"), "partial answer");
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn model_source_changes_reopen_history_and_apply_current_selection() {
+    assert!(node_available(), "this regression requires Node");
+    let launcher = MockLauncher::default();
+    *launcher.selected_model.lock().unwrap() = Some("magpie/first".into());
+    let (runtime, sink) = new_runtime(launcher.clone());
+    runtime.start_turn(turn("models", "first", "model-state", AgentBackend::Pi, None)).unwrap();
+    assert_eq!(sink.terminal("first").await["type"], "run.completed");
+    assert_eq!(sink.text("first"), "magpie/first");
+    let original_session = runtime.session_info("models").unwrap().native_session_id;
+    *launcher.selected_model.lock().unwrap() = Some("remote/next".into());
+    launcher.config_revision.fetch_add(1, Ordering::SeqCst);
+    runtime.start_turn(turn("models", "second", "model-state", AgentBackend::Pi, None)).unwrap();
+    assert_eq!(sink.terminal("second").await["type"], "run.completed");
+    assert_eq!(sink.text("second"), "remote/next");
+    assert_eq!(runtime.session_info("models").unwrap().native_session_id, original_session, "history session survives a model change");
+    launcher.config_revision.fetch_add(1, Ordering::SeqCst); // same target, rotated credentials
+    runtime.start_turn(turn("models", "rotated", "model-state", AgentBackend::Pi, None)).unwrap();
+    assert_eq!(sink.terminal("rotated").await["type"], "run.completed");
+    assert_eq!(sink.text("rotated"), "remote/next");
+    assert_eq!(runtime.session_info("models").unwrap().native_session_id, original_session);
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 3);
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_source_after_spawn_closes_the_unpublished_connection() {
+    assert!(node_available(), "this regression requires Node");
+    let launcher = MockLauncher { fail_key_after_launch: true, ..Default::default() };
+    let (runtime, sink) = new_runtime(launcher.clone());
+    runtime.start_turn(turn("source-failed", "source-failed", "simple", AgentBackend::Pi, None)).unwrap();
+    let terminal = sink.terminal("source-failed").await;
+    assert_eq!(terminal["type"], "run.failed");
+    assert_eq!(terminal["code"], "agent_backend_model_endpoint_invalid");
+    assert_eq!(launcher.closed.load(Ordering::SeqCst), 1, "the Windows/private cleanup hook must run");
+    assert!(!runtime.session_info("source-failed").unwrap().live);
+    assert!(!sink.types("source-failed").contains(&"agent_backend.session".to_owned()));
+    runtime.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

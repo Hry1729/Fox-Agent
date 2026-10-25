@@ -67,6 +67,7 @@ pub struct AcpProjector {
     tools: BTreeMap<String, ToolState>,
     /// Backend status lines taken out of the answer ([`backend_notice_kind`]).
     notices: Vec<Value>,
+    delivered: bool,
 }
 
 /// Kind of a backend status line that is not part of the answer, or `None`.
@@ -250,6 +251,8 @@ impl AcpProjector {
         self.message_started
     }
 
+    pub fn has_delivery(&self) -> bool { self.delivered }
+
     fn message_delta(&mut self, text: &str, out: &mut Vec<Value>) {
         if text.is_empty() || self.message_completed {
             return;
@@ -258,6 +261,7 @@ impl AcpProjector {
             self.message_started = true;
             out.push(json!({ "type": "message.started" }));
         }
+        if !text.trim().is_empty() { self.delivered = true; }
         out.push(json!({ "type": "message.delta", "delta": text }));
     }
 
@@ -290,6 +294,7 @@ impl AcpProjector {
         }
         match status {
             Some("completed" | "failed") => {
+                if status == Some("completed") { self.delivered = true; }
                 out.push(json!({
                     "type": "tool.completed",
                     "toolCallId": id,
@@ -307,6 +312,10 @@ impl AcpProjector {
     pub fn project(&mut self, update: &Value) -> Vec<Value> {
         let mut out = Vec::new();
         let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+        if update.pointer("/_meta/fox/kind").and_then(Value::as_str) == Some("backend_status") {
+            out.push(json!({"type":"agent_backend.diagnostic","kind":"backend_status","update":update}));
+            return out;
+        }
         match kind {
             "agent_message_chunk" => {
                 if let Some(text) = update.get("content").and_then(text_of_content) {

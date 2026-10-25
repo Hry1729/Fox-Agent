@@ -32,6 +32,7 @@ let nextSession = 1
 let nextId = 1000
 const waiting = new Map()
 const prompts = new Map()
+const sessions = new Map()
 // Answer a session's open prompt once (a cancel and a cancelled permission
 // may both try).
 const finish = (sessionId, stopReason) => {
@@ -45,9 +46,12 @@ rl.on('line', line => {
   if (msg.method === 'initialize') {
     send({ id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [], agentInfo: { name: 'mock', version: '0' } } })
   } else if (msg.method === 'session/new') {
-    send({ id: msg.id, result: { sessionId: `sess-${process.pid}-${nextSession++}` } })
+    const sessionId = `sess-${process.pid}-${nextSession++}`
+    sessions.set(sessionId, { model: 'stored-old-model' })
+    send({ id: msg.id, result: { sessionId } })
   } else if (msg.method === 'session/load') {
     const sessionId = msg.params.sessionId
+    sessions.set(sessionId, { model: 'stored-old-model' })
     if (sessionId.includes('longreplay')) {
       // A long history: user / agent / thought chunks and finished tool
       // calls, written in one burst right before the reply, then (like
@@ -67,11 +71,30 @@ rl.on('line', line => {
     update(sessionId, { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'old question' } })
     text(sessionId, 'replayed-old')
     send({ id: msg.id, result: {} })
+  } else if (msg.method === 'session/set_config_option') {
+    const session = sessions.get(msg.params.sessionId)
+    if (session && msg.params.configId === 'model') session.model = msg.params.value
+    send({ id: msg.id, result: { configOptions: [] } })
   } else if (msg.method === 'session/prompt') {
     const sessionId = msg.params.sessionId
     const prompt = msg.params.prompt?.[0]?.text ?? ''
     prompts.set(sessionId, msg.id)
-    if (prompt === 'after-load') {
+    if (prompt === 'model-state') {
+      text(sessionId, sessions.get(sessionId)?.model || 'stored-old-model')
+      finish(sessionId, 'end_turn')
+    } else if (prompt === 'empty' || prompt === 'status-only' || prompt === 'reasoning-only') {
+      if (prompt === 'status-only') update(sessionId, { sessionUpdate: 'agent_message_chunk', _meta: { fox: { kind: 'backend_status' } }, content: { type: 'text', text: 'pi startup information' } })
+      if (prompt === 'reasoning-only') update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking' } })
+      update(sessionId, { sessionUpdate: 'usage_update', used: 100, size: 1000 })
+      finish(sessionId, 'end_turn')
+    } else if (prompt === 'tools-only') {
+      update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'delivery', title: 'write file', kind: 'edit', status: 'completed' })
+      finish(sessionId, 'end_turn')
+    } else if (prompt === 'partial-model-failure') {
+      text(sessionId, 'partial answer')
+      prompts.delete(sessionId)
+      send({ id: msg.id, error: { code: -32603, message: '模型请求失败', data: { code: 'agent_backend_model_failed', failureKind: 'network_allowlist', redacted: true } } })
+    } else if (prompt === 'after-load') {
       text(sessionId, 'fresh-after-load')
       update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'new-tool', title: 'new tool', kind: 'read', status: 'completed', rawInput: { path: 'new.txt' } })
       finish(sessionId, 'end_turn')

@@ -17,9 +17,11 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(HERE), "build-runtime-package.py")
+sys.path.insert(0, os.path.dirname(SCRIPT))
 spec = importlib.util.spec_from_file_location("build_runtime_package", SCRIPT)
 brp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(brp)
@@ -113,7 +115,7 @@ class VersionTest(unittest.TestCase):
             match = re.search(r'pub const RUNTIME_PACKAGE_VERSION: &str = "([^"]+)";', handle.read())
         self.assertIsNotNone(match, "RUNTIME_PACKAGE_VERSION not found in src/launch.rs")
         self.assertEqual(brp.DEFAULT_VERSION, match.group(1))
-        self.assertEqual(brp.DEFAULT_VERSION, "0.1.2")
+        self.assertEqual(brp.DEFAULT_VERSION, "0.1.3")
 
 
 class StagePackTest(unittest.TestCase):

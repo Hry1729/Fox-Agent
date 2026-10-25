@@ -50,13 +50,14 @@ import os
 import shutil
 import sys
 import zipfile
+import runtime_patches
 
 CRATE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ASSETS = os.path.join(CRATE, "runtime-assets")
 PI_FIXTURES = os.path.join(CRATE, "fixtures", "pi")
 # Must equal fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION (the
 # directory Fox looks for under the install root); a unit test checks it.
-DEFAULT_VERSION = "0.1.2"
+DEFAULT_VERSION = "0.1.3"
 # Package key -> source file in this crate. Each is copied by `stage` and must
 # be byte-equal (modulo CRLF) in `pack`.
 PI_GATE_FILES = {
@@ -226,6 +227,13 @@ def verify_layout(directory):
                 continue
             if norm_text(read_bytes(child(root, key))) != norm_text(read_bytes(fs_path(os.path.join(ASSETS, "dsh-patches", name)))):
                 problems.append(f"{key} differs from runtime-assets")
+    pins = json.loads(read_bytes(fs_path(os.path.join(ASSETS, "model-adapters", "pins.json"))))["files"]
+    for key, expected in pins.items():
+        # Some build/test packages omit a backend entirely.
+        package = key.split("/node_modules/")[0]
+        if any(name.startswith(package + "/node_modules/pi-acp/") or name.startswith(package + "/node_modules/@deepseek-ai/dsh-http-proxy/") for name in keys):
+            if key not in keys or hashlib.sha256(norm_text(read_bytes(child(root, key)))).hexdigest() != expected:
+                problems.append(f"{key} missing or differs from pinned model adapter")
     return problems
 
 
@@ -281,6 +289,7 @@ def cmd_stage(args):
         target = child(fs_path(out), key)
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copyfile(fs_path(source), target)
+    runtime_patches.apply(fs_path(out))
     print(f"staged {out}")
     return 0
 

@@ -287,7 +287,7 @@ pub fn process_environment_for(windows: bool, spec: &LaunchSpec, parent: impl In
 /// when `FOX_RUNTIME_VERSION` / `FOX_RUNTIME_ROOT` are unset: this version
 /// directory if installed, else the newest installed one. Keep in step with
 /// `scripts/windows/build-runtime-package.py` `DEFAULT_VERSION`.
-pub const RUNTIME_PACKAGE_VERSION: &str = "0.1.2";
+pub const RUNTIME_PACKAGE_VERSION: &str = "0.1.3";
 
 /// Environment variable carrying the bridge pipe name into the sandbox
 /// (Windows sandboxed mode, docs/sandbox.md 7.12).

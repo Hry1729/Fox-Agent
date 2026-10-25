@@ -94,6 +94,9 @@ pub struct CredentialProbe {
     /// Whether a login the backend reads exists (independent of the loopback
     /// problem, so both can be reported).
     pub credentials_present: bool,
+    /// This credential-only probe does not perform a sandbox request. A
+    /// successful Host-side supplier check cannot fill this with "reachable".
+    pub model_connectivity: &'static str,
     /// DeepSeek: a loopback base URL that sandboxed mode refuses.
     pub loopback_blocked: bool,
     /// Key names found (in private files, or the Host environment).
@@ -323,6 +326,7 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
         state,
         private_home: private_home.to_path_buf(),
         credentials_present,
+        model_connectivity: "not_checked",
         loopback_blocked,
         present_keys,
         present_files,
