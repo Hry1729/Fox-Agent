@@ -85,6 +85,7 @@ export type LocalKnowledgeDesktopClient = Pick<
   | 'retryLocalKnowledgeJob'
   | 'getLocalKnowledgeStorageStatus'
   | 'pickLocalKnowledgeStorageDirectory'
+  | 'resetLocalKnowledgeStoragePath'
   | 'startLocalKnowledgeStorageMigration'
   | 'getLocalKnowledgeStorageMigration'
   | 'listLocalEmbeddingModels'
@@ -245,6 +246,7 @@ export function mapLocalKnowledgeStorageStatus(dto: LocalKnowledgeStorageStatusD
     pendingRootPath: dto.pendingRootPath ?? null,
     restartRequired: dto.restartRequired === true,
     migrationId: dto.migrationId ?? null,
+    degradedReason: dto.degradedReason?.trim() || null,
   }
 }
 
@@ -701,6 +703,11 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     },
     async pickStorageDirectory() {
       return mapPickedStorageDirectory(await client.pickLocalKnowledgeStorageDirectory())
+    },
+    async resetStoragePath(path) {
+      const status = mapLocalKnowledgeStorageStatus(await client.resetLocalKnowledgeStoragePath(path?.trim() || null))
+      invalidate()
+      return status
     },
     async startStorageMigration(destinationPath) {
       const normalizedPath = destinationPath.trim()
