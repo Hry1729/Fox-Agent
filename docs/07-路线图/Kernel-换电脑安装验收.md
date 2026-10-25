@@ -1,5 +1,7 @@
 # Kernel 换电脑安装验收
 
+> **现状（2026-10-25）：已过时，保留作 2026-09-10 验收包的操作记录。** 文中“未另设环境变量时默认使用 Legacy”“用 `Start-IsolatedFox.ps1` 设置模式”已不成立：自 2026-09-29 起未设置 `FOX_KERNEL_MODE` 即为 Authoritative（`runtime_host/kernel_authority.rs`）。当前人工复测流程见 `crates/fox-agent-backend/docs/sandbox.md` 第 13 节；Windows 上必须从普通目录（Medium 完整性）运行 exe。
+
 这份流程用于本地验收包，不表示正式发布。安装包版本为 0.1.0，最终文件校验值以交付目录 `SHA256SUMS.txt` 为准。测试包不含本机模型密钥、用户数据库或业务文件。
 
 ## 安装与首次启动
