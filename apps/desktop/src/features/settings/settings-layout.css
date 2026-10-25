@@ -562,6 +562,13 @@
   margin-top: 14px;
 }
 
+/* Inline field error, e.g. 「这个服务地址已经添加过了」 under 服务地址. */
+.fox-settings-field .fox-settings-field-error {
+  color: var(--destructive);
+  font-size: var(--fox-type-caption, 12px);
+  line-height: 1.4;
+}
+
 .fox-settings-field > label,
 .fox-settings-field > span:first-child {
   color: var(--foreground);
@@ -880,9 +887,9 @@
   line-height: 1.33 !important;
 }
 
-/* Sheet starts under the window title bar, whose controls stay on top. */
+/* Sheet starts under the window title bar, whose controls stay clickable. */
 .fox-settings-sheet[data-slot='sheet-content'][data-side='right'] {
-  top: 30px;
+  top: var(--fox-titlebar-height, 0px);
   height: auto;
   bottom: 0;
   border-top-left-radius: 12px;
@@ -919,7 +926,7 @@
 .fox-provider-add-dialog[data-slot='dialog-content'] {
   width: min(560px, calc(100vw - 32px));
   max-width: min(560px, calc(100vw - 32px));
-  max-height: min(720px, calc(100vh - 64px));
+  max-height: min(720px, calc(100vh - 64px - var(--fox-titlebar-height, 0px)));
   display: flex;
   flex-direction: column;
 }
