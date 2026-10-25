@@ -1,4 +1,4 @@
-// Settings batch, items 4 / 5: 设置 → 助手设置 →「外部 Agent」.
+// Settings batch, items 4 / 5: 设置 → Agent →「外部 Agent」 (rows in the unified settings layout).
 //
 // *「新会话使用的 Agent」: Fox / pi / DeepSeek (default Fox); hidden backends
 //   (`HIDDEN_AGENT_BACKENDS`, Codex since 2026-10-24) are not listed, and a
@@ -14,7 +14,7 @@
 // change is broadcast so the open draft re-probes its login at once.
 import { useCallback, useEffect, useState } from 'react'
 import { Switch } from '@/components/ui/switch'
-import { Card } from '@/components/ui/card'
+import { SettingsGroup, SettingsRow } from './settings-layout'
 import {
   AGENT_BACKEND_PREFERENCES_EVENT,
   agentBackendForcedOffNotice,
@@ -83,12 +83,10 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
         const current = rows.some((row) => row.value === wanted) ? wanted : view.catalog.defaultMode
         const greyed = rows.filter((row) => row.disabled && row.reason)
         return (
-          <div key={backend} className="fox-setting-row fox-setting-row-bordered" data-native-default={backend}>
-            <span>
-              <b>{label} 默认权限</b>
-              <small>{view.catalog.switchNote}{greyed.map((row) => `；${row.label}：${row.reason}`).join('')}</small>
-            </span>
+          <SettingsRow key={backend} className="fox-agent-native-default" title={`${label} 默认权限`} description={`${view.catalog.switchNote}${greyed.map((row) => `；${row.label}：${row.reason}`).join('')}`}>
             <select
+              className="fox-settings-native-select"
+              data-native-default={backend}
               aria-label={`${label} 默认权限`}
               value={current}
               onChange={(event) => {
@@ -106,10 +104,10 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
                 </option>
               ))}
             </select>
-          </div>
+          </SettingsRow>
         )
       })}
-      {error && <p className="fox-agent-backend-settings-error" role="alert">{error}</p>}
+      {error && <p className="fox-settings-error fox-agent-backend-settings-error" role="alert">{error}</p>}
     </>
   )
 }
@@ -156,11 +154,10 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
     : null
   const unavailableReasons = rows.filter((row) => row.disabled && row.reason)
   return (
-    <Card className="fox-settings-section fox-agent-backend-settings" aria-label="外部 Agent 设置">
-      <div className="fox-settings-section-head"><div><h2>外部 Agent</h2><p>新会话由哪个 Agent 执行。只影响之后新建的会话，已有会话保持原来的后端。</p></div></div>
-      <div className="fox-setting-row fox-setting-row-bordered">
-        <span><b>新会话使用的 Agent</b><small>默认 Fox。外部 Agent 自动使用当前供应商；缺少地址时会在后端栏提示补充。已有登录优先。</small></span>
+    <SettingsGroup title="外部 Agent" className="fox-agent-backend-settings" aside={<span>只影响之后新建的会话</span>}>
+      <SettingsRow title="新会话使用的 Agent" description="默认 Fox。外部 Agent 自动使用当前供应商；缺少地址时会在后端栏提示补充。已有登录优先。">
         <select
+          className="fox-settings-native-select"
           aria-label="新会话使用的 Agent"
           value={selected}
           disabled={!preferences || saving}
@@ -175,34 +172,30 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
             </option>
           ))}
         </select>
-      </div>
-      {forcedOff && <p className="fox-agent-backend-settings-note" role="note">{forcedOff}</p>}
+      </SettingsRow>
+      {forcedOff && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">{forcedOff}</p>}
       {!forcedOff && unavailableReasons.length > 0 && (
-        <ul className="fox-agent-backend-settings-note" aria-label="不可用的 Agent">
+        <ul className="fox-settings-footnote fox-agent-backend-settings-note" aria-label="不可用的 Agent">
           {unavailableReasons.map((row) => <li key={row.value}>{row.label}：{row.reason}</li>)}
         </ul>
       )}
       {savedHidden && (
-        <p className="fox-agent-backend-settings-note" role="note">之前保存的 {savedHidden} 暂未开放，新会话使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}；已有的 {savedHidden} 会话不受影响。</p>
+        <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">之前保存的 {savedHidden} 暂未开放，新会话使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}；已有的 {savedHidden} 会话不受影响。</p>
       )}
       {preferences && !savedHidden && selected !== effective && (
-        <p className="fox-agent-backend-settings-note" role="note">已保存的选择当前不可用，新会话暂时使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}。</p>
+        <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">已保存的选择当前不可用，新会话暂时使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}。</p>
       )}
-      <div className="fox-setting-row fox-setting-row-bordered">
-        <span>
-          <b>新外部会话使用完全访问</b>
-          <small>默认关闭（沙箱）。开启后新建的外部会话不套沙箱：{FULL_ACCESS_RISK_POINTS.join('')}会话中途只能在输入框上方撤销。</small>
-        </span>
+      <SettingsRow title="新外部会话使用完全访问" description={`默认关闭（沙箱）。开启后新建的外部会话不套沙箱：${FULL_ACCESS_RISK_POINTS.join('')}会话中途只能在输入框上方撤销。`}>
         <Switch
           aria-label="新外部会话使用完全访问"
           checked={fullAccess.checked}
           disabled={fullAccess.disabled || saving}
           onCheckedChange={(value) => void save({ newExternalFullAccess: value })}
         />
-      </div>
+      </SettingsRow>
       <NativePermissionDefaults client={client} />
-      {fullAccess.reason && preferences?.fullAccessForbidden && <p className="fox-agent-backend-settings-note" role="note">{fullAccess.reason}</p>}
-      {error && <p className="fox-agent-backend-settings-error" role="alert">{error}</p>}
-    </Card>
+      {fullAccess.reason && preferences?.fullAccessForbidden && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">{fullAccess.reason}</p>}
+      {error && <p className="fox-settings-error fox-agent-backend-settings-error" role="alert">{error}</p>}
+    </SettingsGroup>
   )
 }
