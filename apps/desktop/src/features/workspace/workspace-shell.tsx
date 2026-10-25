@@ -10,15 +10,12 @@ const AgentDetailPage = lazy(() => import('@/features/agents/agent-pages').then(
 const KnowledgeDetailPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeDetailPage })))
 const KnowledgeGraphPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeGraphPage })))
 const SettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.SettingsPage })))
-const AiSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.AiSettingsPage })))
 const ModelProvidersPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ModelProvidersPage })))
 const YuxiSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.YuxiSettingsPage })))
 const AgentSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.AgentSettingsPage })))
 const ConversationSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ConversationSettingsPage })))
 const DataAboutSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.DataAboutSettingsPage })))
 const ExtensionsSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ExtensionsSettingsPage })))
-const SkillsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.SkillsPage })))
-const McpPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.McpPage })))
 const ServicePage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ServicePage })))
 const ModelServicePage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ModelServicePage })))
 const LoginPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.LoginPage })))
@@ -115,7 +112,7 @@ export function WorkspaceShell({
   } else if (activeView === 'settings') {
     rawWorkspacePage = <SettingsPage {...pageProps} dark={dark} onDark={onDark} />
   } else if (settingsView === 'settings-ai') {
-    rawWorkspacePage = <AgentSettingsPage {...pageProps} section={settingsSection} />
+    rawWorkspacePage = <AgentSettingsPage {...pageProps} section={settingsSection} agentId={activeView === 'settings-ai' ? activeEntityId ?? undefined : undefined} />
   } else if (activeView === 'settings-models') {
     rawWorkspacePage = <ModelProvidersPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'settings-yuxi') {
@@ -124,12 +121,8 @@ export function WorkspaceShell({
     rawWorkspacePage = <ConversationSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} section={settingsSection} />
   } else if (settingsView === 'settings-data') {
     rawWorkspacePage = <DataAboutSettingsPage {...pageProps} section={settingsSection} />
-  } else if (activeView === 'settings-extensions') {
-    rawWorkspacePage = <ExtensionsSettingsPage {...pageProps} />
-  } else if (activeView === 'skills') {
-    rawWorkspacePage = <SkillsPage {...pageProps} />
-  } else if (activeView === 'mcp') {
-    rawWorkspacePage = <McpPage {...pageProps} />
+  } else if (settingsView === 'settings-extensions') {
+    rawWorkspacePage = <ExtensionsSettingsPage {...pageProps} section={settingsSection} />
   } else if (activeView === 'service') {
     rawWorkspacePage = <ServicePage {...pageProps} />
   } else if (activeView === 'model-service') {
