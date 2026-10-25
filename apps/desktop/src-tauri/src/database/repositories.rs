@@ -135,6 +135,16 @@ pub use work_graph::{
 };
 
 const DEFAULT_AGENT_ID: &str = "fox-general";
+
+/// What `Database::repair_missing_agent_references` changed at startup.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct MissingAgentRepair {
+    pub missing_agent_ids: Vec<String>,
+    pub conversations_reassigned: usize,
+    pub bindings_removed: usize,
+    pub colleagues_paused: usize,
+    pub cascaded_rows_removed: usize,
+}
 pub(crate) const TOOL_EXECUTION_APPROVAL_CATEGORY: &str = "tool_execution";
 pub(crate) const TASK_REPAIR_OVERRIDE_APPROVAL_CATEGORY: &str = "task_repair_budget_override";
 const BUILTIN_AGENTS: &[(&str, &str, &str, &str)] = &[
@@ -348,7 +358,88 @@ impl Database {
         database.seed_builtin_agents()?;
         database.seed_bundled_experts()?;
         database.seed_expert_avatars()?;
+        database.repair_missing_agent_references()?;
         Ok(database)
+    }
+
+    /// Startup repair for rows that still reference an `agents` row which no
+    /// longer exists (deleted outside Fox, e.g. with the `sqlite3` shell where
+    /// foreign keys are off by default). Runs after built-in and bundled
+    /// experts were re-seeded, so what is left is a user's local/imported
+    /// agent or expert. Nothing a user created is deleted except the rows
+    /// Fox's own delete would have cascaded:
+    /// * conversations that used it fall back to the general assistant;
+    /// * an active expert binding becomes `removed` (its snapshot and the
+    ///   conversation history stay intact; older bindings are left as history);
+    /// * an active digital colleague using it is paused;
+    /// * its `agent_runtime_config` / `expert_package_versions` rows
+    ///   (`ON DELETE CASCADE` children) are removed, so re-importing the same
+    ///   package version is not blocked by a stale unique row.
+    /// Historical run records (child delegations, workflow/team runs, graph
+    /// reviews) keep their original agent id.
+    pub(crate) fn repair_missing_agent_references(&self) -> Result<MissingAgentRepair, String> {
+        let now = now_ms();
+        let repair = self.with_connection(|connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let missing: Vec<String> = {
+                let mut statement = transaction.prepare(
+                    "SELECT agent_id FROM conversations WHERE agent_id NOT IN (SELECT id FROM agents)
+                     UNION SELECT expert_id FROM conversation_expert_bindings
+                       WHERE state='active' AND expert_id NOT IN (SELECT id FROM agents)
+                     UNION SELECT expert_id FROM digital_colleagues
+                       WHERE status='active' AND expert_id NOT IN (SELECT id FROM agents)
+                     UNION SELECT agent_id FROM agent_runtime_config WHERE agent_id NOT IN (SELECT id FROM agents)
+                     UNION SELECT expert_id FROM expert_package_versions WHERE expert_id NOT IN (SELECT id FROM agents)
+                     ORDER BY 1",
+                )?;
+                let ids = statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ids
+            };
+            if missing.is_empty() {
+                return Ok(MissingAgentRepair::default());
+            }
+            let repair = MissingAgentRepair {
+                conversations_reassigned: transaction.execute(
+                    "UPDATE conversations SET agent_id=?1
+                     WHERE agent_id NOT IN (SELECT id FROM agents)",
+                    [DEFAULT_AGENT_ID],
+                )?,
+                bindings_removed: transaction.execute(
+                    "UPDATE conversation_expert_bindings SET state='removed', deactivated_at=?1
+                     WHERE state='active' AND expert_id NOT IN (SELECT id FROM agents)",
+                    [now],
+                )?,
+                colleagues_paused: transaction.execute(
+                    "UPDATE digital_colleagues SET status='paused', updated_at=?1
+                     WHERE status='active' AND expert_id NOT IN (SELECT id FROM agents)",
+                    [now],
+                )?,
+                cascaded_rows_removed: transaction.execute(
+                    "DELETE FROM agent_runtime_config WHERE agent_id NOT IN (SELECT id FROM agents)",
+                    [],
+                )? + transaction.execute(
+                    "DELETE FROM expert_package_versions WHERE expert_id NOT IN (SELECT id FROM agents)",
+                    [],
+                )?,
+                missing_agent_ids: missing,
+            };
+            transaction.commit()?;
+            Ok(repair)
+        })?;
+        if !repair.missing_agent_ids.is_empty() {
+            eprintln!(
+                "fox.database warn missing_agent_references_repaired ids={} conversations={} bindings={} colleagues={} cascaded={}",
+                repair.missing_agent_ids.join(","),
+                repair.conversations_reassigned,
+                repair.bindings_removed,
+                repair.colleagues_paused,
+                repair.cascaded_rows_removed,
+            );
+        }
+        Ok(repair)
     }
 
     pub(crate) fn subscribe_kernel_changes(&self) -> std::sync::mpsc::Receiver<()> {
