@@ -99,7 +99,11 @@ describe('no native confirm box in app code', () => {
   test('the 12 former call sites use confirmDialog with Chinese titles', () => {
     const read = (path: string) => readFileSync(join(SRC, path), 'utf8')
     const sites: Array<[string, string[]]> = [
-      ['features/settings/settings-pages.tsx', ['删除服务', '删除连接器', '清理预览缓存', '恢复数据', '清理数据']],
+      ['features/settings/settings-pages.tsx', ['删除服务']],
+      // Batch 3: the connector list moved to the 插件 page and the
+      // maintenance actions to the 数据与关于 page.
+      ['features/settings/settings-plugins-page.tsx', ['删除连接器']],
+      ['features/settings/settings-data-page.tsx', ['清理预览缓存', '恢复数据', '清理数据']],
       // 13.22: the Hook list moved into the shared section used by the
       // connector settings page and the plugin center「策略」tab.
       ['features/settings/lifecycle-hooks-section.tsx', ['删除 Hook']],
@@ -118,12 +122,18 @@ describe('no native confirm box in app code', () => {
     }
     expect(total).toBe(12)
     // Destructive actions use the destructive confirm button.
-    for (const title of ['删除服务', '清理预览缓存']) {
-      expect(read('features/settings/settings-pages.tsx')).toMatch(new RegExp(`title: '${title}'[^)]*destructive: true`))
+    const destructive: Array<[string, string]> = [
+      ['features/settings/settings-pages.tsx', '删除服务'],
+      ['features/settings/settings-plugins-page.tsx', '删除连接器'],
+      ['features/settings/settings-data-page.tsx', '清理预览缓存'],
+    ]
+    for (const [path, title] of destructive) {
+      expect(read(path)).toMatch(new RegExp(`title: '${title}'[^)]*destructive: true`))
     }
     expect(read('features/settings/lifecycle-hooks-section.tsx')).toMatch(/title: '删除 Hook'[^)]*destructive: true/)
     // Both entry points render that one section, so the confirmation cannot drift.
-    expect(read('features/settings/settings-pages.tsx')).toContain('<LifecycleHooksSection />')
+    // Batch 3: the settings entry point is the 插件 page's Hook Sheet (its own header).
+    expect(read('features/settings/settings-plugins-page.tsx')).toContain('<LifecycleHooksSection showHeader={false} />')
     expect(read('features/plugins/plugin-center-page.tsx')).toContain('<LifecycleHooksSection />')
     expect(read('features/local-knowledge/local-knowledge-pages.tsx')).toMatch(/title: '放弃修改'[^)]*destructive: true/)
   })
