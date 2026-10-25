@@ -1,5 +1,7 @@
 # Phase 4B：受控权威切换设计草案
 
+> **现状（2026-10-25 按代码核对）：已被实际切换取代。** Kernel 已是 Fox 会话的默认权威（Authoritative，2026-09-29 起），Legacy 只在显式 `FOX_KERNEL_MODE=legacy` 时使用；下方“当前生产链路仍由 Legacy 作为唯一权威”已不成立。第 2 节的执行权不变量仍由代码保证（Shadow Run 不进可执行 outbox，`kernel_mode <> 'shadow'`）。切换是否按第 5 节的灰度阶段逐步完成，没有找到记录（**未核实**）。Legacy / Shadow 清理尚未开始，见 [Kernel 改造进度](Kernel-改造进度.md)。
+
 > 状态：**设计草案，未实施。** 当前生产链路仍由 Legacy Runtime Host 作为唯一权威，Kernel 仅以 Shadow 模式做零副作用对照。本文件只描述切换方案与硬前置条件；在硬前置全部验收通过前，不改变任何运行时权威。
 
 ## 1. 目标与非目标
