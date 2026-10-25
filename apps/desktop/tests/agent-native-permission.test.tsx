@@ -70,6 +70,28 @@ function view(catalog: NativePermissionCatalog, patch: Partial<NativePermissionV
   return { catalog, current: catalog.defaultMode, fullAccess: false, fullAccessGranted: false, fullAccessForbidden: false, draft: false, fullAccessLockedReason: '完全访问只能在新建会话时选择（会话中只能撤销）', ...patch }
 }
 
+
+// The settings dropdowns are the shared Radix Select: open with the keyboard,
+// read the listed options (value + disabled), pick by clicking an option.
+async function openSettingsSelect(trigger: HTMLElement) {
+  fireEvent.keyDown(trigger, { key: 'Enter' })
+  return await waitFor(() => {
+    const items = screen.getAllByRole('option')
+    expect(items.length).toBeGreaterThan(0)
+    return items.map((item) => ({ item, value: item.getAttribute('data-value') ?? '', label: item.textContent ?? '', disabled: item.getAttribute('aria-disabled') === 'true' || item.hasAttribute('data-disabled') }))
+  })
+}
+async function closeSettingsSelect() {
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+  await waitFor(() => expect(screen.queryAllByRole('option')).toHaveLength(0))
+}
+async function pickSettingsSelect(trigger: HTMLElement, value: string) {
+  const options = await openSettingsSelect(trigger)
+  const option = options.find((entry) => entry.value === value)
+  expect(option).toBeTruthy()
+  fireEvent.click(option!.item)
+}
+
 describe('model', () => {
   test('Codex rows use the native names and keep the auto-review reason', () => {
     const rows = nativePermissionRows(view(codexCatalog()))
@@ -289,12 +311,15 @@ describe('settings', () => {
       },
     }
     render(<AgentBackendSettingsSection client={client} />)
-    const dsh = await screen.findByLabelText('DeepSeek 默认权限') as HTMLSelectElement
+    const dsh = await screen.findByRole('combobox', { name: 'DeepSeek 默认权限' })
     // Full access from the switch: the remembered sandboxed choice is shown.
-    expect(dsh.value).toBe('read-only')
-    expect(Array.from(dsh.options).map((option) => option.value)).not.toContain('danger-full-access')
-    const pi = await screen.findByLabelText('pi 默认权限') as HTMLSelectElement
-    fireEvent.change(pi, { target: { value: 'allow' } })
+    expect(dsh.textContent).toBe('只读')
+    const dshOptions = await openSettingsSelect(dsh)
+    expect(dshOptions.find((option) => option.item.getAttribute('aria-selected') === 'true')?.value).toBe('read-only')
+    expect(dshOptions.map((option) => option.value)).not.toContain('danger-full-access')
+    await closeSettingsSelect()
+    const pi = await screen.findByRole('combobox', { name: 'pi 默认权限' })
+    await pickSettingsSelect(pi, 'allow')
     await waitFor(() => expect(calls).toEqual([{ backend: 'pi', mode: 'allow', defaultOnly: true }]))
     // Codex is hidden (HIDDEN_AGENT_BACKENDS): no default-permission row.
     expect(screen.queryByLabelText('Codex 默认权限')).toBeNull()
