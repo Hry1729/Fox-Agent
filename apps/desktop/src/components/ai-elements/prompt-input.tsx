@@ -496,15 +496,23 @@ export type PromptInputProps = Omit<
   onError?: (err: {
     code: "max_files" | "max_file_size" | "accept" | "attachment_read_failed" | "attachment_send_failed";
     message: string;
+    /** Why the send did not start, when the host knows (e.g. the Host error). */
+    detail?: string;
   }) => void;
   onSubmitStart?: (message: PromptInputMessage) => void;
-  // A host that cannot start the send resolves to `false` (or rejects); the
-  // composer then keeps the draft and the attachments so the user can retry.
+  // A host that cannot start the send resolves to `false` or
+  // `{ sent: false, reason }` (or rejects); the composer then keeps the draft
+  // and the attachments so the user can retry.
   onSubmit: (
     message: PromptInputMessage,
     event: FormEvent<HTMLFormElement>
-  ) => void | boolean | Promise<void | boolean>;
+  ) => PromptInputSubmitOutcome | Promise<PromptInputSubmitOutcome>;
 };
+
+export type PromptInputSubmitOutcome = void | boolean | { sent: false; reason?: string | null };
+
+/** Fixed text shown when the host reports the send did not start. */
+export const SEND_NOT_STARTED_MESSAGE = "发送未开始：附件未保存或消息未提交，可重试。";
 
 export const PromptInput = ({
   className,
@@ -880,11 +888,15 @@ export const PromptInput = ({
       onSubmitStart?.({ files: convertedFiles, text });
 
       let sent = true;
+      let notStartedReason: string | undefined;
       try {
         const result = onSubmit({ files: convertedFiles, text }, event);
         const outcome = result instanceof Promise ? await result : result;
         if (outcome === false) {
           sent = false;
+        } else if (outcome && typeof outcome === "object" && outcome.sent === false) {
+          sent = false;
+          notStartedReason = outcome.reason?.trim() || undefined;
         }
       } catch (error) {
         // A backend failure is not a successful send: report it and keep the
@@ -900,7 +912,8 @@ export const PromptInput = ({
         // attachment could not be saved). Keep draft and attachments.
         onError?.({
           code: "attachment_send_failed",
-          message: "发送未开始：附件未保存或消息未提交，可重试。",
+          message: SEND_NOT_STARTED_MESSAGE,
+          ...(notStartedReason ? { detail: notStartedReason } : {}),
         });
         return;
       }
