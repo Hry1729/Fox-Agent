@@ -1,11 +1,11 @@
 # 子 Agent 与 Child Run 架构
 
 > 状态：生效
-> 适用版本：Fox `0.1.x`；当前数据库 schema 79（本主题相关表由更早迁移引入）
-> 最后更新：2026-09-22
+> 适用版本：Fox `0.1.x`；当前数据库 schema v97（本主题相关表由 v27 引入）
+> 最后更新：2026-10-25
 > 基线与成熟度口径见[当前状态与核验基线](../01-项目概览/当前状态与核验基线.md)
 
-> 适用范围说明（2026-10-24）：本文描述外层 Agent 后端为 `fox` 的会话。DeepSeek Harness、pi（以及已实现但暂时隐藏的 Codex）会话由外部 Agent 经 ACP 执行，见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。本次只补充这条说明，正文未复核。
+> 适用范围与复核（2026-10-25）：本文描述外层 Agent 后端为 `fox` 的会话。DeepSeek Harness、pi（以及已实现但暂时隐藏的 Codex）会话由外部 Agent 经 ACP 执行，不提供本文的委派工具，见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。正文已于 2026-10-25 对照 `main`（`c8a42a9`）代码复核。
 
 ## 目标与边界
 
@@ -40,6 +40,15 @@ sequenceDiagram
     H-->>P: childRuns + allTerminal
 ```
 
+### Kernel 路径与 Legacy 路径
+
+委派工具有两套 Host 实现：
+
+- **Kernel 路径（默认）**：`apps/desktop/src-tauri/src/runtime_host/kernel_delegation.rs`。`child_run_start` / `team_member_start` 先在仓储层创建 Child Run（`database/repositories/child_runs.rs::create_child_run`），再把“启动 Child”登记为 Kernel Host Action（`WorkToolPostFinalizeDirective::StartChild`）。当前工具结算后，`runtime_host/kernel_host.rs` 才调用 `start_child_runtime` 启动 Child。取消同样先登记为 Host Action，再传播。参数错误按 `child.invalid_arguments` 作为工具结果返回模型；同一 Run 累计 3 次后返回 `child.correction_limit`。
+- **Legacy 路径**：`runtime_host/mod.rs` 内的同名工具分支，只在 `FOX_KERNEL_MODE=legacy` 时使用。
+
+两条路径共用同一个仓储入口和同一个 `start_child_runtime`。`start_child_runtime` 为 Child 新建独立的 `RuntimeHost`，设置运行时长、工具与 MCP 范围覆盖，并与父 Host 共享待审批表和活动文件写入表。
+
 每个 Child Run 拥有独立隐藏 Conversation、独立 Runtime Session、独立 RuntimeHost 状态和独立 Sidecar 进程。它只接收 `objective`、显式 `context`、选定 Agent 的静态包、Host 允许的项目上下文和受治理 Memory；父会话 transcript 不会复制过去。项目内已存在的源码默认只传相对路径、相关符号和行号范围，由 Child 使用读取工具自行加载；只有未保存文本或无法读取的小段数据才内联。隐藏 Conversation 不进入当前、归档或回收站列表。
 
 ## Host 工具
@@ -48,7 +57,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `child_agent_list` | 分别列出 Assistant/Worker 模板与可咨询 Expert | 返回 `agents` 和 `experts`，模板不是运行实例 |
 | `child_run_start` | 按 `worker` 或 `expert_consultation` 模式异步启动 Child Run | 两种身份字段互斥；咨询不改变主对话专家；同一 tool call 幂等 |
-| `child_run_collect` | 获取 1–8 个直属 Child Run 的状态和有限结果 | 只允许当前父 Run；最多等待 60 秒 |
+| `child_run_collect` | 获取 1–8 个直属 Child Run 的状态和有限结果 | 只允许当前父 Run；最多等待 60 秒，Kernel 路径还受父 Run 剩余工具执行预算限制 |
 | `child_run_cancel` | 取消一个直属 Child Run | 只允许当前父 Run；进程取消与终态持久化同步 |
 
 Runtime 指令要求先批量 `start` 独立工作，再 `collect`，以获得真实并行；共享项目中的写任务不得重叠。模型不能自行提高并发、深度、运行时长或权限。Host 还会为 `child_worker` 与 `expert_consultation` 注入固定的 Runtime-authority `delegation_contract` 片段：隔离实例不是面向用户的 Lead，只处理委派目标，并以包含证据、假设、风险和下一步的自包含报告返回。该片段复用既有 `runtime` Typed Context 类型，不改变稳定 Prompt 版本或上下文 Schema 身份。
@@ -70,7 +79,10 @@ Child Run 与父 Run 共用 Trace ID。Child root span 的 parent 优先指向�
 | 最大深度 | 1 |
 | 每个父 Run 的 Child Run 总数 | 不单独设数量上限 |
 | 每个 root Run 的同时活动 Child Run | 不单独设数量上限 |
-| 单 Child Run 时长 | 1 秒–15 分钟，默认 5 分钟 |
+| 单 Child Run 时长 | 1 秒–15 分钟，默认 5 分钟；父 Run 有执行时长上限时取两者较小值 |
+
+上限来源：`MAX_CHILD_DEPTH = 1`、`MAX_CHILD_DURATION_MS = 900_000`（`database/repositories/child_runs.rs`），默认值和归一化在 `runtime_host/mod.rs::normalized_child_budget`。
+
 模型服务自身仍决定单次响应的上下文窗口和最大输出，这是 Provider 能力边界，不是 Child Run 的累计预算。Host 不再按累计 Token 或工具调用次数终止普通 Child Run；监控线程只检查 wall-clock deadline。深度仍限制为 1，Runtime 仍会阻止相同工具和相同参数的连续重复调用，避免无意义死循环。资源不足或供应商限流按原有错误及有界重试处理，不新增数量队列。
 
 ## 权限、审批与取消
@@ -80,6 +92,12 @@ Child Run 与父 Run 共用 Trace ID。Child root span 的 parent 优先指向�
 - Child Runtime 与父 Runtime 共享 Host 的 pending approval channel。高风险调用仍显示在父会话，由用户决定；批准只写入真实 Child ToolCall/Conversation。
 - 取消父 Run 时，Host 递归查询真实 descendants 并逐个取消。取消一个 Child Run 不会误伤 sibling。
 - 应用退出会停止全部 Child Runtime 进程，并把未终结 Child Run 标记为 `runtime.application_exit` interrupted。
+- 审批没有超时，等待用户答复的时间不计入 Child 的运行时长（与普通 Run 相同，见 `crates/fox-agent-backend/docs/sandbox.md` 13.6）。
+
+## 被委派的 Agent 被删除时
+
+- `child_run_start(mode=worker)` 只接受 `child_agent_list` 当前返回的 Agent；`expert_consultation` 只接受当前可咨询的专家。Agent 不存在时启动失败（`child worker identity is unavailable` / `consultation expert identity is unavailable`），仓储层也会因 `agents` 中查不到该行而拒绝。
+- `agents` 行在 Fox 之外被删除时，`Database::repair_missing_agent_references`（`apps/desktop/src-tauri/src/database/repositories.rs`）不改动 `child_run_delegations` 等历史委派记录，它们保留原 Agent ID；隐藏 Child Conversation 如果以被删 Agent 为 `agent_id`，会和其他会话一样改回 `fox-general`。详见[专家能力包架构 · 专家行缺失时的启动修复](专家能力包架构.md#专家行缺失时的启动修复)。
 
 ## 前端投影
 
@@ -87,4 +105,4 @@ Child Run 与父 Run 共用 Trace ID。Child root span 的 parent 优先指向�
 
 ## 验证
 
-仓储测试覆盖普通模板与专家目录隔离、隐藏会话、幂等启动、Trace 父子关系、终态结果/usage 聚合、超过旧数量阈值的子运行、运行时长、取消只作用于 descendants，以及 Child 审批回投父会话。Runtime 测试覆盖四个委派工具的目录顺序、两种启动模式的 TypeBox 边界、固定隔离角色契约、路径优先上下文和重复同参工具防循环；Host 单元测试覆盖时长规范化和父子工具/MCP 范围交集。
+仓储测试（`database/repositories/child_runs.rs`）覆盖普通模板与专家目录隔离、隐藏会话、幂等启动、Trace 父子关系、终态结果/usage 聚合、超过旧数量阈值的子运行、运行时长、取消只作用于 descendants，以及 Child 审批回投父会话。Runtime 测试覆盖四个委派工具的目录顺序、两种启动模式的 TypeBox 边界、固定隔离角色契约、路径优先上下文和重复同参工具防循环；Host 单元测试覆盖时长规范化和父子工具/MCP 范围交集。
