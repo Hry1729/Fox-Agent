@@ -4,16 +4,35 @@ subtitle: v0.3 ＋ 开工备注三条 ＋ 复用优先（ACP）调整
 date: 2026 年 10 月 19 日
 ---
 
-# 实施状态（2026-10-24）
+# 实施状态（2026-10-24，阶段 1 于 2026-10-25 按代码复核）
 
 > 本节是后加的状态说明；从“0 v0.3.1 变更说明”起是方案原文，未改动。当前架构以 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent) 为准。
 
-- **已完成并合入 `main`**：阶段 0（三个外部后端的协议原型与证据，见 `crates/fox-agent-backend/docs/pi.md`、`deepseek.md`、`codex.md`）、阶段 1（共享 Host 加固）、阶段 2（Fox + 公共基础：会话级 `agent_backend` 冻结、Host 路由、ACP 端口）、阶段 3（pi、DeepSeek Harness、Codex 三个后端经 ACP 接通，含沙箱、审批、取消、能力声明）。逐批复测记录见 `crates/fox-agent-backend/docs/sandbox.md` 第 12、13 节。
+- **已完成并合入 `main`**：阶段 0（三个外部后端的协议原型与证据，见 `crates/fox-agent-backend/docs/pi.md`、`deepseek.md`、`codex.md`）、阶段 2（Fox + 公共基础：会话级 `agent_backend` 冻结、Host 路由、ACP 端口）、阶段 3（pi、DeepSeek Harness、Codex 三个后端经 ACP 接通，含沙箱、审批、取消、能力声明）。逐批复测记录见 `crates/fox-agent-backend/docs/sandbox.md` 第 12、13 节。
 - **产品定位调整**：内置 Agent 为 Fox（Kernel，即 FoxBackend）、DeepSeek Harness（dsh，实验）和 pi。**Codex 已实现但暂时隐藏**：新会话不能选，已有 Codex 会话照常可用，代码和测试保留；隐藏开关为 `AgentBackend::HIDDEN`。
 - **待办 / 规划中**：「自定义 ACP Agent」通用接入入口（用户自行安装其他 ACP Agent、填写启动命令，Codex 以后也走这里）。
 - **与方案原文不同的落地点**：`FOX_EXTERNAL_BACKENDS` 最终是管理员“只能强制关闭”的开关，未设置时由用户在 设置 →「新会话使用的 Agent」中选择（默认 Fox）；权限按各 Agent 的原生选项显示，完全访问是独立开关，只在创建会话时授予；模型 API Key 按 base URL 在系统凭据库全局共享。
 - **Fox 自身执行路径**：Kernel / Authoritative 是默认路径；Legacy（`FOX_KERNEL_MODE=legacy`）只用于调试和兼容旧 Run。
 - **阶段 4（收敛）仍待做**：Legacy 路径和 Shadow 观察路径的清理尚未开始。
+
+## 阶段 1（共享 Host 加固）逐项核对（2026-10-25，`main` `c8a42a9`）
+
+结论：4.1 登记表 10 项中，7 项在代码中已关闭，第 4 项只在 Windows 上关闭，第 2 项（测试授权语义）在代码中**没有看到关闭**，第 10 项原已撤回。所以原先“阶段 1 已完成”的说法不准确，准确的说法是“阶段 1 基本完成，第 2 项未关闭，第 4 项在非 Windows 平台有残余限制”。下表只记录代码事实；对应的回归测试没有逐项核对。
+
+| # | 问题（见 4.1） | 原优先级 | 当前代码 | 状态 |
+|---|---|---|---|---|
+| 1 | `git_read` 经 Git 配置执行外部程序 | 冻结前 | 每次 Git 调用使用固定环境 `GIT_HARDENED_ENV`（`GIT_CONFIG_NOSYSTEM=1`、`GIT_TERMINAL_PROMPT=0`、`GIT_OPTIONAL_LOCKS=0`、`GIT_PAGER=cat`），并以 `-c` 覆盖 `core.fsmonitor=false`、`core.hooksPath=`、`core.pager=cat`、`diff.external=`、`log.showSignature=false`；仓库自己声明的 filter / diff 驱动逐个置空；`git diff` 带 `--no-ext-diff --no-textconv`（`apps/desktop/src-tauri/src/runtime_host/capability_tools.rs`） | 已关闭 |
+| 2 | 测试授权只绑参数，脚本与依赖可变 | 冻结前（先定语义） | `test_run` 只允许 `test` / `test:*` 包脚本，审批类别为 `always`；但授权范围键仍是工具输入的规范化 JSON 哈希（`runtime_host/mod.rs::capability_permission_scope`），审批卡可提供「本会话允许」（`kernel_projection.rs::kernel_approval_available_decisions`）。没有找到绑定工作区修订或脚本内容的代码，也没有找到写明“项目代码执行授权”语义的产品文案 | **未关闭** |
+| 3 | `run_process` 继承全部环境变量 | 外部后端开放前 | `apps/desktop/src-tauri/src/command_environment.rs`：先 `env_clear()`，只传白名单变量；显式传入的变量名含 TOKEN / SECRET / PASSWORD / API_KEY / CREDENTIAL / COOKIE / AUTH 等时拒绝。`tool_host.rs` 和 `process_jobs.rs` 的进程启动都经过它；测试 `parent_environment_excludes_secret_shaped_canaries` | 已关闭 |
+| 4 | 子进程收尾无界 | 冻结前 | Windows：子进程以挂起状态创建，放入 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object 后再恢复，终止整棵进程树用 `TerminateJobObject`；管道读取在进程结束后有 500 ms 的读取宽限（`reader_grace` / `drain_deadline`）（`apps/desktop/src-tauri/src/process_jobs.rs`）。非 Windows：没有进程组或进程树终止，只杀直接子进程，报告中写明 `no tree walker on this platform` | Windows 已关闭；非 Windows 有残余限制（产品发布目标为 Windows） |
+| 5 | Windows UNC 路径先访问后判越界 | 外部后端开放前 | `tool_guard.rs` 在 `canonicalize` 之前调用 `tool_host::reject_network_or_device_path`，拒绝除 `\\?\X:` 本地盘以外的所有 `\\` 开头路径。方案中“仅放行明确授权的网络根目录”未实现（所有网络路径一律拒绝） | 已关闭 |
+| 6 | 运行中补充消息只影响注入当轮 | FoxBackend 回归 | Kernel 路径的 `services/agent-runtime/src/pi-kernel-loop.mjs` 通过 `transformContext` 把补充消息写进 continuation 快照使用的活动数组，后续工具轮仍能看到；Host 侧测试在 `apps/desktop/src-tauri/src/runtime_host/kernel_coordinator/steering_live_tests.rs` | 已关闭（Kernel 路径） |
+| 7 | Host 工具失败在 pi 投影中变成 `isError:false` | FoxBackend 回归 | `services/agent-runtime/src/host-tools.mjs::executeHostTool` 在 Host 返回失败时抛出带诊断信息的 Error，由 pi 记为错误结果；Kernel 路径另有「工具错误是数据」规则（见 [Agent Runtime 架构](Agent运行时架构.md#工具错误是数据kernel-路径)） | 已关闭 |
+| 8 | 取消时未结算 pending Host 请求 | FoxBackend 回归 | `services/agent-runtime/src/pi-runtime.mjs::cancelPendingHostRequests` 按 `runId` 拒绝该 Run 的在途 Host 请求；测试见 `services/agent-runtime/test/pi-kernel-readiness.test.mjs` | 已关闭 |
+| 9 | 续做权限可能比原任务宽 | 冻结前（先定契约） | 契约已定为“只能相等或更窄”：`database/repositories/kernel_continuation.rs::re_verify_continuation_permission` 以会话当前权限重新核对，结果不会比原任务宽，读不到当前状态时 fail-closed，并把核对记录为可审计事实 | 已关闭 |
+| 10 | Cancelling 不结束 / 终态未结算工具 | — | 方案中已撤回 | 撤回 |
+
+4.4 退出条件对照：“冻结前”条目中第 1、9 项已关闭，第 4 项在 Windows 上关闭，第 2 项未关闭；“外部后端开放前”的第 3、5 项已关闭。
 
 
 # 0 v0.3.1 变更说明（开工备注）
