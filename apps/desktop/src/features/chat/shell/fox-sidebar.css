@@ -225,22 +225,6 @@
 }
 
 /* ---------- Settings navigation ---------- */
-.fox-settings-sidebar-brand {
-  display: flex;
-  align-items: center;
-  min-height: 24px;
-  margin: 2px 0 14px;
-  padding: 0 var(--fox-space-l);
-}
-
-.fox-settings-sidebar-brand b {
-  color: var(--fox-text);
-  font-size: var(--fox-type-title);
-  font-weight: var(--fox-weight-semibold);
-  line-height: 24px;
-  letter-spacing: 0.01em;
-}
-
 .fox-context-sidebar-nav.is-settings .fox-context-sidebar-group {
   gap: 2px;
 }
