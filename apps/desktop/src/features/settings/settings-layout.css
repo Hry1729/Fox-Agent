@@ -447,6 +447,10 @@
   background: var(--destructive);
 }
 
+.fox-settings-dot.is-warning {
+  background: var(--warning);
+}
+
 .fox-settings-dot.is-empty {
   border: 1px solid var(--fox-muted);
   background: transparent;
@@ -971,4 +975,554 @@
   margin: 0 -16px -16px;
   padding: 12px 16px;
   border-top: 1px solid var(--border);
+}
+
+/* ---------- Batch 3: Agent / 插件 / 资料库 / 数据与关于 ---------- */
+/* List rows (experts, projects, skills, connectors, libraries) reuse the
+   provider row; these add the avatar mark and inline controls. */
+.fox-settings-provider-mark.is-avatar {
+  overflow: hidden;
+  padding: 0;
+  border-radius: var(--fox-radius-pill);
+}
+
+.fox-settings-provider-mark.is-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.fox-settings-provider-chevron {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--muted-foreground);
+}
+
+.fox-settings-provider-main:disabled {
+  cursor: default;
+}
+
+.fox-settings-provider > .fox-settings-provider-switch,
+.fox-settings-provider > [data-slot='select-trigger'],
+.fox-settings-provider > .fox-settings-provider-action {
+  flex: none;
+  margin-left: 8px;
+}
+
+.fox-settings-provider > .fox-settings-provider-switch:last-child {
+  margin-right: 4px;
+}
+
+.fox-settings-compact-select[data-slot='select-trigger'] {
+  width: 104px;
+}
+
+.fox-settings-compact-select.is-wide[data-slot='select-trigger'] {
+  width: 100%;
+}
+
+.fox-settings-native-select {
+  height: var(--fox-control-md, 32px);
+  min-width: 132px;
+  max-width: 220px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-control);
+  background-color: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--fox-type-control, 13px);
+}
+
+.fox-settings-native-select:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.fox-settings-native-select option {
+  background: var(--popover);
+  color: var(--popover-foreground);
+}
+
+.fox-settings-page .fox-settings-footnote ul,
+.fox-settings-page ul.fox-settings-footnote {
+  padding-left: 18px;
+}
+
+.fox-settings-page .fox-settings-group-lead {
+  margin: 10px 0 12px;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-page .fox-settings-usage-group .fox-settings-section,
+.fox-settings-page .fox-settings-usage-group .fox-agent-work-card {
+  margin-bottom: 12px;
+  box-shadow: none;
+}
+
+.fox-settings-page .fox-settings-inline-alert {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 24px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-card);
+  background: var(--card);
+}
+
+.fox-settings-page .fox-settings-group .fox-settings-inline-alert {
+  margin: 12px 0;
+}
+
+.fox-settings-page .fox-settings-inline-alert.is-error {
+  border-color: color-mix(in oklch, var(--destructive) 40%, var(--border));
+  background: color-mix(in oklch, var(--destructive) 6%, var(--card));
+}
+
+.fox-settings-page .fox-settings-inline-alert > svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--destructive);
+}
+
+.fox-settings-page .fox-settings-inline-alert > span {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-page .fox-settings-inline-alert b {
+  overflow-wrap: anywhere;
+  font-size: var(--fox-type-body);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-page .fox-settings-inline-alert small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  overflow-wrap: anywhere;
+}
+
+.fox-settings-page .fox-settings-inline-alert [data-slot='button'] {
+  flex: none;
+}
+
+.fox-settings-page .fox-settings-path-row .fox-settings-row-text small {
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-page .fox-settings-path-row code {
+  overflow: hidden;
+  color: var(--foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fox-type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-page .fox-settings-account-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 12px 0;
+}
+
+.fox-settings-page .fox-settings-account-row > [data-slot='avatar'],
+.fox-settings-page .fox-settings-account-row > [data-slot='badge'] {
+  flex: none;
+}
+
+.fox-settings-page .fox-settings-account-row > span:not([data-slot]) {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-page .fox-settings-account-row b {
+  font-size: var(--fox-type-body);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-page .fox-settings-account-row small {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-page .fox-settings-diagnostic-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-settings-page .fox-settings-diagnostic-title svg {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+}
+
+.fox-settings-page .fox-settings-diagnostic-title small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-normal, 400);
+}
+
+.fox-settings-page .fox-settings-check .fox-settings-row-text small {
+  padding-left: 14px;
+  overflow-wrap: anywhere;
+}
+
+.fox-settings-page .fox-settings-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-settings-page .fox-settings-ok-toggle {
+  margin-top: 4px;
+}
+
+.fox-settings-page .fox-settings-meter-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fox-settings-meter {
+  width: 96px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--fox-radius-pill);
+  background: var(--fox-hover, var(--muted));
+}
+
+.fox-settings-meter > i {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: var(--foreground);
+  opacity: 0.7;
+}
+
+.fox-settings-page .fox-settings-inline-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-settings-page .fox-settings-inline-form > [data-slot='input'] {
+  width: 240px;
+}
+
+.fox-settings-page .fox-settings-days {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-page .fox-settings-days [data-slot='input'] {
+  width: 64px;
+  text-align: right;
+}
+
+.fox-settings-page .fox-settings-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--fox-radius-card);
+  background: var(--fox-hover, var(--muted));
+}
+
+.fox-settings-page .fox-settings-result > svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--success);
+}
+
+.fox-settings-page .fox-settings-result > span {
+  min-width: 0;
+  display: grid;
+}
+
+.fox-settings-page .fox-settings-result b {
+  font-size: var(--fox-type-body);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-page .fox-settings-result small {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-settings-page .fox-settings-about {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--fox-settings-hairline);
+}
+
+.fox-settings-page .fox-settings-about img {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  object-fit: contain;
+}
+
+.fox-settings-page .fox-settings-about > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-page .fox-settings-about b {
+  font-size: var(--fox-type-title, 16px);
+  font-weight: var(--fox-weight-semibold);
+}
+
+.fox-settings-page .fox-settings-about small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-page .fox-settings-value {
+  color: var(--foreground);
+  font-size: var(--fox-type-body);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Batch 3 sheets ---------- */
+.fox-settings-sheet .fox-settings-sheet-head [data-slot='sheet-description'] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fox-settings-sheet .fox-settings-sheet-tabs {
+  margin: 16px 0 4px;
+}
+
+.fox-settings-sheet .fox-settings-sheet-tabs [data-slot='tabs-list'] {
+  width: 100%;
+}
+
+.fox-settings-sheet .fox-settings-sheet-tabs [data-slot='tabs-trigger'] {
+  flex: 1;
+}
+
+.fox-settings-sheet .fox-settings-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--fox-radius-card);
+  background: var(--fox-hover, var(--muted));
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-sheet .fox-settings-note svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin-top: 2px;
+}
+
+.fox-settings-sheet .fox-settings-sheet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 4px;
+}
+
+.fox-settings-sheet .fox-settings-sheet-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 10px 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-sheet .fox-settings-sheet-hint svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-top: 2px;
+}
+
+.fox-settings-sheet-foot .fox-settings-sheet-link[data-slot='button'] {
+  margin-left: -10px;
+  color: var(--muted-foreground);
+}
+
+.fox-settings-sheet .fox-settings-field-help {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-sheet .fox-settings-textarea[data-slot='textarea'] {
+  min-height: 84px;
+  font-size: var(--fox-type-control, 13px);
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.fox-settings-sheet .fox-settings-textarea.is-tall[data-slot='textarea'] {
+  min-height: 160px;
+}
+
+.fox-settings-sheet .fox-settings-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.fox-settings-facts {
+  display: grid;
+  margin: 0;
+}
+
+.fox-settings-facts > div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.fox-settings-facts > div:last-child {
+  border-bottom: 0;
+}
+
+.fox-settings-facts dt {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--fox-type-chrome);
+}
+
+.fox-settings-facts code,
+.fox-settings-code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-code {
+  max-height: 320px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--fox-radius-card);
+  background: var(--fox-hover, var(--muted));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fox-settings-tool-list {
+  display: grid;
+}
+
+.fox-settings-tool-list > div {
+  display: grid;
+  gap: 2px;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.fox-settings-tool-list > div:last-child {
+  border-bottom: 0;
+}
+
+.fox-settings-tool-list b {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-tool-list small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+/* Expert editor fields (shared with the expert page) in the 480px sheet. */
+.fox-settings-expert-sheet .fox-agent-editor-grid {
+  height: auto;
+  overflow: visible;
+  margin-top: 16px;
+  padding: 0;
+}
+
+.fox-settings-expert-sheet .fox-agent-editor-profile-row,
+.fox-settings-expert-sheet .fox-agent-editor-copy-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.fox-settings-expert-sheet .fox-agent-editor-icon-list {
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  padding: 8px;
+}
+
+.fox-settings-expert-sheet .fox-agent-editor-resources {
+  height: auto;
+  margin-top: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: none;
+  overflow: visible;
+  padding: 0;
+}
+
+.fox-settings-hooks-sheet .fox-settings-sheet-body > .fox-settings-section:first-of-type,
+.fox-settings-hooks-sheet .fox-settings-sheet-body .fox-mcp-list {
+  margin-top: 16px;
+}
+
+.fox-settings-hooks-sheet .fox-settings-form-grid {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+@media (max-width: 720px) {
+  .fox-settings-page .fox-settings-inline-form {
+    flex-wrap: wrap;
+  }
+
+  .fox-settings-page .fox-settings-inline-form > [data-slot='input'] {
+    width: 100%;
+  }
+}
+
+.fox-settings-facts dd code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
