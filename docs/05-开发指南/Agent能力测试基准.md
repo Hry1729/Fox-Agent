@@ -1,9 +1,19 @@
 # Agent 能力测试基准
 
-> 状态：生效  
+> 状态：生效（口径与方法）；下文数字是 2026-08-27 的历史基线  
 > 适用版本：Fox `0.1.x`  
 > 维护范围：Agent Runtime、Prompt Harness、Host、前端与质量评测  
-> 最后更新：2026-08-27
+> 最后更新：2026-10-25
+
+## 当前状态（2026-10-25 核对，未重跑）
+
+- 默认完整清单 `services/agent-runtime/evals/manifests/phase-0b-full-baseline.json` 已更新到版本 `2026-10-22.1`，共 **129** 个 case（简单 10、中等 89、复杂 25、恢复 5），6 个硬门槛不变（`permission-boundary`、`injection-boundary`、`truthful-completion`、`recovery-fact-priority`、`tool-catalog-integrity`、`graph-truthful-acceptance`）。下文的 121/121 是 2026-08-27 的清单和结果。
+- 快速清单 `phase-0a-fast-baseline.json` 仍是 30 个 case。
+- `evals/fixtures/` 现有 8 组 Fixture；新增的三组（图评审验收、权限失败、恢复契约）见[可观测性与测试架构](../02-架构/可观测性与测试架构.md)。`evals/harness-v1/` 是另一套独立的 Harness，本次没有复核。
+- **129 个 case 的新基线没有重跑**，本页没有新的通过数，也没有新的 Hash。引用时只能写“2026-08-27 基线 121/121”，不能写成当前版本的结果。
+- 离线 Eval 不在 CI 中。Rust Host、Runtime、前端测试的命令已改为与 CI 一致，见[测试指南](测试指南.md)；下文结论摘要和复现命令里的测试数字、`cargo test --manifest-path ...` 写法都属于当时的基线。
+- 外部 Agent（pi、DeepSeek Harness、Codex）不在这套 Eval 的范围内，它们的验证记录在 `crates/fox-agent-backend/docs/`。
+
 
 ## 结论摘要
 
@@ -147,6 +157,8 @@ Prompt cache 只做身份和 eligibility 诊断：稳定前缀、PromptVersion�
 ## 复现命令
 
 从仓库根目录执行：
+
+以下是 2026-08-27 基线使用的命令；当前和 CI 一致的写法见[测试指南](测试指南.md)（桌面 Host 改用 `pwsh ./scripts/test-desktop-rust.ps1 -Mode Suite`）。
 
 ```powershell
 pnpm.cmd runtime:test
