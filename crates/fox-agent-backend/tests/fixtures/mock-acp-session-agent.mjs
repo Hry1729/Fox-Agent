@@ -72,6 +72,7 @@ rl.on('line', line => {
     text(sessionId, 'replayed-old')
     send({ id: msg.id, result: {} })
   } else if (msg.method === 'session/set_config_option') {
+    if (msg.params.value === 'fixture/hang-model') return
     const session = sessions.get(msg.params.sessionId)
     if (session && msg.params.configId === 'model') session.model = msg.params.value
     send({ id: msg.id, result: { configOptions: [] } })

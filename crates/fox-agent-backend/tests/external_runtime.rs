@@ -256,6 +256,24 @@ async fn unreadable_source_after_spawn_closes_the_unpublished_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn model_selection_timeout_closes_the_unpublished_connection() {
+    assert!(node_available(), "this regression requires Node");
+    let launcher = MockLauncher::default();
+    *launcher.selected_model.lock().unwrap() = Some("fixture/hang-model".into());
+    let sink = Sink::default();
+    let runtime = ExternalRuntime::with_timeouts(sink.clone(), launcher.clone(), tokio::runtime::Handle::current(), Duration::from_millis(800), Duration::from_millis(200));
+    runtime.start_turn(turn("selection-timeout", "selection-timeout", "simple", AgentBackend::Pi, None)).unwrap();
+    let terminal = sink.terminal("selection-timeout").await;
+    assert_eq!(terminal["type"], "run.failed");
+    assert_eq!(terminal["code"], "agent_backend_model_selection_failed");
+    assert!(terminal["message"].as_str().unwrap().contains("超时"));
+    assert_eq!(launcher.closed.load(Ordering::SeqCst), 1);
+    assert!(!runtime.session_info("selection-timeout").unwrap().live);
+    assert!(!sink.types("selection-timeout").contains(&"agent_backend.session".to_owned()));
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn start_streams_asks_permission_and_completes_on_allow() {
     if !node_available() {
         return;

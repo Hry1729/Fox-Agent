@@ -76,6 +76,9 @@ pub const PROMPT_FAILURE_SETTLE: Duration = Duration::from_millis(800);
 /// [`BackendEvent::LoadSettled`] fence (it is queued right behind the reply,
 /// so this only bounds a connection that died meanwhile).
 pub const LOAD_FENCE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound the initialization control request; prompts retain their normal
+/// long-running lifecycle and cancellation behavior.
+pub const MODEL_SELECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the launcher needs to start one conversation's backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -574,6 +577,7 @@ struct Inner<S: ExternalSink, L: ExternalLauncher> {
     handle: tokio::runtime::Handle,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     cancel_timeout: Duration,
+    model_selection_timeout: Duration,
 }
 
 /// The Host's external backend runtime. Cheap to clone.
@@ -608,8 +612,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     }
 
     pub fn with_cancel_timeout(sink: S, launcher: L, handle: tokio::runtime::Handle, cancel_timeout: Duration) -> Self {
+        Self::with_timeouts(sink, launcher, handle, cancel_timeout, MODEL_SELECTION_TIMEOUT)
+    }
+
+    pub fn with_timeouts(sink: S, launcher: L, handle: tokio::runtime::Handle, cancel_timeout: Duration, model_selection_timeout: Duration) -> Self {
         Self {
-            inner: Arc::new(Inner { sink, launcher, handle, sessions: Mutex::new(HashMap::new()), cancel_timeout }),
+            inner: Arc::new(Inner { sink, launcher, handle, sessions: Mutex::new(HashMap::new()), cancel_timeout, model_selection_timeout }),
         }
     }
 
@@ -942,7 +950,9 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             }
         };
         if let Some(model) = self.inner.launcher.selected_model(&request.launch) {
-            if let Err(error) = connection.set_model(&native, &model).await {
+            let selected = tokio::time::timeout(self.inner.model_selection_timeout, connection.set_model(&native, &model))
+                .await.unwrap_or_else(|_| Err("应用模型选择超时".to_owned()));
+            if let Err(error) = selected {
                 let (_, tail) = connection.close_with_report_and_tail().await;
                 if let Some(callback) = on_closed { callback(); }
                 return Err(LaunchFailure::new("agent_backend_model_selection_failed", format!("无法在载入会话后应用当前模型选择：{}", crate::acp::redact_diagnostic_tail(&error)))
