@@ -17,7 +17,7 @@ import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { WorkspacePage } from '@/features/workspace/page-shell'
 import type { NavigateWorkspace } from '@/features/workspace/types'
@@ -61,6 +61,7 @@ import { PROMPT_SEND_SHORTCUT_EVENT, readPromptSendShortcut, writePromptSendShor
 import type { SettingsSectionAnchor } from '@/features/workspace/management-navigation'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { promptDialog } from '@/components/ui/prompt-dialog'
+import { DUPLICATE_SERVICE_URL_TEXT, findDuplicateServiceUrl } from './provider-errors'
 
 function serviceStatusLabel(status?: string) {
   if (status === 'connected') return '已连接'
@@ -673,7 +674,7 @@ function ProviderModelDialog({ open, draft, isNew, canDelete, onOpenChange, onSa
  * Both layouts render the same field fragments, so templates, key storage,
  * connection testing and protocol profiles keep one implementation.
  */
-export function ProviderEditor({ form, busy, layout = 'sheet', testing = false, connectionStatus, connectionResult, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; testing?: boolean; connectionStatus?: string | null; connectionResult?: ProviderConnectionResult | null; credentialConfigured: boolean; error?: string | null; layout?: 'sheet' | 'dialog'; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
+export function ProviderEditor({ form, busy, layout = 'sheet', testing = false, connectionStatus, connectionResult, credentialConfigured, error, existingServices = [], onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; testing?: boolean; existingServices?: ReadonlyArray<{ id: string; baseUrl: string }>; connectionStatus?: string | null; connectionResult?: ProviderConnectionResult | null; credentialConfigured: boolean; error?: string | null; layout?: 'sheet' | 'dialog'; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
   const isNew = !form.id
   const [showKey, setShowKey] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -709,14 +710,16 @@ export function ProviderEditor({ form, busy, layout = 'sheet', testing = false, 
   const defaultModel = form.models.find((item) => item.isDefault) ?? form.models[0]
   const advancedSummary = [providerProtocolLabel(form.apiType), defaultModel ? `上下文 ${compactTokenCount(defaultModel.contextWindow)}` : null, defaultModel ? `最大输出 ${compactTokenCount(defaultModel.maxOutputTokens)}` : null, (form.protocolProfiles?.length ?? 0) > 0 ? `${form.protocolProfiles!.length} 个外部协议` : null].filter(Boolean).join(' · ')
   const canTest = !busy && Boolean(form.baseUrl.trim()) && Boolean(form.models[0]?.modelId.trim())
-  const canSave = !busy && Boolean(form.name.trim()) && Boolean(form.baseUrl.trim()) && form.models.length > 0 && !form.models.some((item) => !item.modelId.trim())
+  // Same base URL as another service (Host: model_providers.base_url is UNIQUE).
+  const duplicateUrl = findDuplicateServiceUrl(existingServices, form.id, form.baseUrl) !== null
+  const canSave = !busy && !duplicateUrl && Boolean(form.name.trim()) && Boolean(form.baseUrl.trim()) && form.models.length > 0 && !form.models.some((item) => !item.modelId.trim())
   const result: ProviderConnectionResult | null = testing ? { status: 'testing', text: '正在验证…' } : connectionResult ?? (connectionStatus ? { status: connectionStatus.startsWith('连接失败') ? 'error' : 'testing', text: connectionStatus } as ProviderConnectionResult : null)
   const templateFields = isNew && <>
     <div className="fox-settings-field"><span>服务模板</span><Select value={presetId} onValueChange={applyPreset}><SelectTrigger aria-label="服务模板"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="custom">自定义服务</SelectItem>{providerPresets.map((preset) => <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>)}</SelectContent></Select></div>
     <label className="fox-settings-field"><span>服务名称</span><Input value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="例如 MiniMax" /></label>
   </>
   const connectionFields = <>
-    <label className="fox-settings-field"><span>服务地址</span><Input value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} /></label>
+    <label className="fox-settings-field"><span>服务地址</span><Input value={form.baseUrl} aria-invalid={duplicateUrl || undefined} aria-describedby={duplicateUrl ? 'fox-provider-base-url-error' : undefined} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} />{duplicateUrl && <small id="fox-provider-base-url-error" className="fox-settings-field-error" role="alert">{DUPLICATE_SERVICE_URL_TEXT}</small>}</label>
     <div className="fox-settings-field">
       <label htmlFor="fox-provider-api-key">API Key</label>
       <div className="fox-settings-secret">
@@ -754,7 +757,7 @@ export function ProviderEditor({ form, busy, layout = 'sheet', testing = false, 
       <ProviderProtocolEditor form={form} disabled={busy} onChange={(next) => onChange({ ...form, ...next })} />
     </div>}
   </section>
-  const errorLine = error && <p className="fox-settings-sheet-error" role="alert">{error}</p>
+  const errorLine = error && !(duplicateUrl && error === DUPLICATE_SERVICE_URL_TEXT) && <p className="fox-settings-sheet-error" role="alert">{error}</p>
   const modelDialog = <ProviderModelDialog open={modelEditor !== null} draft={modelEditor?.draft ?? null} isNew={modelEditor?.index === null} canDelete={form.models.length > 1} onOpenChange={(open) => { if (!open) setModelEditor(null) }} onSave={saveModel} onDelete={deleteModel} />
   const saveLabel = layout === 'dialog' ? '添加' : '保存'
   const footActions = <>
@@ -884,7 +887,8 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
                   <span className="fox-settings-provider-text"><span className="fox-settings-provider-name"><b>{provider.name}</b>{provider.isDefault && <Badge variant="secondary" className="fox-settings-pill">默认</Badge>}</span><small title={provider.baseUrl}>{detail}</small></span>
                   <span className="fox-settings-provider-status"><i className={cn('fox-settings-dot', status.tone)} aria-hidden="true" /><b>{status.label}</b>{status.detail && <><span className="is-separator">·</span><span>{status.detail}</span></>}</span>
                 </button>
-                <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="fox-settings-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void rename(provider)}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem disabled={provider.isDefault} onSelect={() => void makeDefault(provider)}><Star />设为默认</DropdownMenuItem><DropdownMenuItem onSelect={() => testProvider(provider)}><Zap />测试连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => void remove(provider)}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                {/* Non-modal menu + deferred dialogs: 重命名 / 删除 open their in-app dialog only after the menu has closed. */}
+                <DropdownMenu modal={false}><DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="fox-settings-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => runAfterMenuClose(() => void rename(provider))}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem disabled={provider.isDefault} onSelect={() => void makeDefault(provider)}><Star />设为默认</DropdownMenuItem><DropdownMenuItem onSelect={() => testProvider(provider)}><Zap />测试连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => runAfterMenuClose(() => void remove(provider))}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             })}
           </div>
@@ -893,7 +897,7 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
       <Dialog open={editingId === 'new' && form !== null} onOpenChange={(open) => { if (!open) closeEditor() }}>
         <DialogContent className="fox-settings-dialog fox-provider-add-dialog">
           <DialogHeader><DialogTitle>添加服务</DialogTitle><DialogDescription>选择模板并配置 API 连接，添加后仍可随时编辑。</DialogDescription></DialogHeader>
-          {form && editingId === 'new' && <ProviderEditor layout="dialog" form={form} busy={testing || resource.busyId === 'new'} credentialConfigured={false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onTest={() => void test()} />}
+          {form && editingId === 'new' && <ProviderEditor layout="dialog" existingServices={resource.items} form={form} busy={testing || resource.busyId === 'new'} credentialConfigured={false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onTest={() => void test()} />}
         </DialogContent>
       </Dialog>
       <Sheet open={editingId !== null && editingId !== 'new' && form !== null} onOpenChange={(open) => { if (!open) closeEditor() }}>
@@ -906,7 +910,7 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
                 <SheetDescription>{`${providerProtocolLabel(form.apiType)} · ${sheetModelCount} 个模型`}</SheetDescription>
               </div>
             </SheetHeader>
-            <ProviderEditor form={form} busy={testing || resource.busyId === editingId} credentialConfigured={editingProvider?.credentialConfigured ?? false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onDelete={editingProvider ? () => void remove(editingProvider) : undefined} onTest={() => void test()} />
+            <ProviderEditor existingServices={resource.items} form={form} busy={testing || resource.busyId === editingId} credentialConfigured={editingProvider?.credentialConfigured ?? false} testing={testing} connectionResult={connectionResult} error={resource.error} onChange={(next) => { setConnectionResult(null); setForm(next) }} onCancel={closeEditor} onSave={() => void save()} onDelete={editingProvider ? () => void remove(editingProvider) : undefined} onTest={() => void test()} />
           </>}
         </SheetContent>
       </Sheet>
@@ -1421,7 +1425,10 @@ export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sid
       const healthy = enabled.filter((item) => item.lastStatus === 'connected')
       checks.push({ id: 'models', label: '模型连接', status: enabled.length === 0 ? 'warning' : healthy.length === enabled.length ? 'ok' : 'warning', summary: enabled.length === 0 ? '尚未启用模型供应商' : `${healthy.length} / ${enabled.length} 个已启用供应商连接正常`, route: 'settings-models', actionLabel: '查看模型' })
     } else checks.push({ id: 'models', label: '模型连接', status: 'error', summary: '模型服务状态读取失败', route: 'settings-models', actionLabel: '检查配置' })
-    if (storageResult.status === 'fulfilled') {
+    if (storageResult.status === 'fulfilled' && storageResult.value.degradedReason) {
+      // Startup could not open the storage for writing: name the path and link to the storage-location entry.
+      checks.push({ id: 'knowledge-storage', label: '本机资料库', status: 'error', summary: `${storageResult.value.degradedReason}${storageResult.value.restartRequired ? ' · 新位置重启后生效' : ' · 资料库暂时只读或不可用'}`, route: 'local-knowledge-home', actionLabel: '修改存储位置' })
+    } else if (storageResult.status === 'fulfilled') {
       checks.push({ id: 'knowledge-storage', label: '本机资料库', status: storageResult.value.writable && !storageResult.value.restartRequired ? 'ok' : 'warning', summary: `数据库 v${storageResult.value.schemaVersion} · ${storageResult.value.writable ? '目录可写' : '目录不可写'}${storageResult.value.restartRequired ? ' · 等待重启完成迁移' : ''}`, route: 'local-knowledge-home', actionLabel: '查看存储' })
     } else checks.push({ id: 'knowledge-storage', label: '本机资料库', status: 'error', summary: '无法读取数据库与目录权限', route: 'local-knowledge-home', actionLabel: '查看存储' })
     if (basesResult.status === 'fulfilled' && jobsResult.status === 'fulfilled') {
