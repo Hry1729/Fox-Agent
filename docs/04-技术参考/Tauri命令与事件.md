@@ -2,8 +2,10 @@
 
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
-> 维护者：Fox 前后端工程师<br>
-> 最后更新：2026-08-24
+> 维护范围：`apps/desktop/src-tauri/src/lib.rs` 的命令注册、`fox://` 窗口事件、`desktop-client.ts` 封装<br>
+> 最后更新：2026-10-25
+
+> 复核状态（2026-10-25）：命令表由脚本从 `main@763a019` 的 `lib.rs` `tauri::generate_handler![…]` 生成（253 个命令，全部列出）；事件表由 `app.emit("fox://…")` 调用与 `desktop-client.ts` 的 `listen(…)` 对照得出。命令下方的参数说明沿用原文，只修正了已改名的命令。
 
 ## 调用约定
 
@@ -28,32 +30,46 @@ type ApiResponse<T> =
 
 ## 命令分组
 
-| 分组 | 命令 |
-|---|---|
-| Runtime/诊断 | `runtime_initialize`, `runtime_status`, `runtime_diagnostics`, `diagnostics_export`, `diagnose_work_state`, `export_work_trace` |
-| 维护 | `backup_create`, `backup_restore`, `data_cleanup` |
-| Agent/扩展 | `agents_list`, `skills_list`, `skill_set_enabled`, `mcp_servers_list`, `mcp_server_save/test/set_enabled/delete`, `lifecycle_hooks_list/save/set_enabled/delete` |
-| 专家 | `expert_package_inspect/install/export/versions/rollback`, `expert_workflow_get/start/gate_resolve/cancel`, `expert_team_get/cancel` |
-| 数字同事 | `digital_colleagues_list`, `digital_colleague_create/update/set_paused/revoke`, `digital_colleague_schedules_list/schedule_save`, `digital_colleague_channels_list/channel_create/channel_revoke`, `digital_colleague_trigger_manual/trigger_channel`, `digital_colleague_triggers_list/audit_list` |
-| 用户/统计 | `usage_statistics`, `user_profile_get`, `user_profile_save` |
-| 项目 | `projects_list`, `project_folder_pick`, `project_files_list`, `project_file_read`, `project_permission_update` |
-| 会话 | `conversations_list/search`, `conversation_create/load/history/rename/delete`, `conversation_expert_bind`, `conversation_expert_remove` |
-| Run | `run_start`, `run_resume`, `run_cancel`, `approval_resolve`, `work_mode_confirmation_resolve` |
-| 附件/绑定 | `attachments_save`, `knowledge_bindings_set`（兼容 legacy ID 与 source-aware reference） |
+真实注册清单以 `apps/desktop/src-tauri/src/lib.rs` 为准；前端封装以 `apps/desktop/src/features/conversations/api/desktop-client.ts` 为准。「实现模块」中 `commands/` 指 `commands::*`（`commands/mod.rs` 及其子模块 `agent_backend_routing.rs`、`kernel_reconciliation.rs`、`kernel_continuation.rs`、`kernel_reliability.rs`、`plugin_center.rs`）。
+
+| 分组 | 命令 | 实现模块 |
+| --- | --- | --- |
+| Runtime / 诊断 / 可观测性（10） | `runtime_initialize`、`runtime_status`、`runtime_diagnostics`、`diagnostics_export`、`diagnose_work_state`、`export_work_trace`、`usage_statistics`、`observability_statistics`、`run_ui_metric_record`、`offline_evaluation_run` | `commands/` |
+| 维护与备份（3） | `backup_create`、`backup_restore`、`data_cleanup` | `commands/` |
+| HTML 预览（2） | `html_preview_create`、`html_preview_release` | `html_preview.rs` |
+| 外部 Agent 后端（14） | `agent_backend_model_connection`、`agent_backends_status`、`agent_backend_capabilities`、`agent_backend_credentials`、`agent_backend_import_candidates`、`agent_backend_import_credentials`、`agent_backend_open_private_home`、`agent_backend_permission_status`、`agent_backend_revoke_full_access`、`agent_backend_native_permissions`、`agent_backend_native_permission_set`、`agent_backend_preferences_get`、`agent_backend_preferences_save`、`agent_backend_probe_codex_responses` | `commands::agent_backend_routing.rs`、`external_model.rs` |
+| Agent / 专家能力包（9） | `agents_list`、`agent_save`、`agent_copy`、`agent_delete`、`expert_package_inspect`、`expert_package_install`、`expert_package_export`、`expert_package_versions`、`expert_package_rollback` | `commands/`、`expert_packages.rs` |
+| 专家工作流 / 团队（6） | `expert_workflow_get`、`expert_workflow_start`、`expert_workflow_gate_resolve`、`expert_workflow_cancel`、`expert_team_get`、`expert_team_cancel` | `expert_teams.rs`、`expert_workflows.rs` |
+| 数字同事（15） | `digital_colleagues_list`、`digital_colleague_create`、`digital_colleague_update`、`digital_colleague_set_paused`、`digital_colleague_revoke`、`digital_colleague_schedules_list`、`digital_colleague_schedule_save`、`digital_colleague_channels_list`、`digital_colleague_channel_create`、`digital_colleague_channel_revoke`、`digital_colleague_trigger_manual`、`digital_colleague_trigger_channel`、`digital_colleague_triggers_list`、`digital_colleague_audit_list`、`digital_colleague_run_detail` | `app_capabilities.rs`、`digital_colleagues.rs` |
+| Skills / MCP / Hook / 插件中心（14） | `skills_list`、`skill_set_enabled`、`mcp_servers_list`、`mcp_server_save`、`mcp_server_test`、`mcp_server_set_enabled`、`mcp_server_delete`、`lifecycle_hooks_list`、`lifecycle_hook_save`、`lifecycle_hook_set_enabled`、`lifecycle_hook_delete`、`plugin_catalog_list`、`plugin_installations_list`、`plugin_set_activation` | `commands/`、`commands::plugin_center.rs` |
+| 用户 / 记忆 / 通知 / 搜索 / 反馈（20） | `user_profile_get`、`user_profile_save`、`memories_list`、`memory_create`、`memory_confirm`、`memory_update`、`memory_set_enabled`、`memory_delete`、`memory_conflict_resolve`、`memory_revisions_list`、`memory_recalls_list`、`app_notifications_list`、`app_notification_read`、`app_notification_publish`、`app_notifications_mark_all_read`、`app_notifications_clear_read`、`notification_preferences_get`、`notification_preferences_save`、`message_feedback_save`、`app_global_search` | `app_capabilities.rs`、`commands/` |
+| 项目与文件（16） | `projects_list`、`projects_set_pinned`、`projects_management_list`、`project_path_update`、`project_archive`、`project_root_open`、`project_delete`、`project_folder_pick`、`project_folder_open`、`external_url_open`、`project_files_list`、`project_file_read`、`project_file_action`、`artifact_inspect`、`artifact_action`、`project_permission_update` | `app_capabilities.rs`、`commands/` |
+| 会话（21） | `conversations_list`、`conversations_archived_list`、`conversations_trashed_list`、`conversation_permission_state`、`conversation_permission_update`、`conversation_create`、`conversation_expert_bind`、`conversation_expert_remove`、`conversation_load`、`conversation_history`、`conversations_search`、`conversation_rename`、`conversation_pin`、`conversation_archive`、`conversation_unarchive`、`conversation_restore`、`conversation_fork`、`conversation_delete`、`conversation_purge`、`attachments_save`、`knowledge_bindings_set` | `commands/` |
+| Run / 审批 / Steering / 交付（17） | `run_start`、`run_rewind`、`run_resume`、`run_cancel`、`child_run_cancel_by_user`、`approval_resolve`、`delivery_acceptance_resolve`、`delivery_acceptance_state`、`run_steering_enqueue`、`run_steering_list`、`run_steering_discard`、`managed_file_versions_list`、`managed_file_restore`、`plan_revision_resolve`、`work_mode_confirmation_resolve`、`goal_delete`、`goal_running_set` | `commands/` |
+| Kernel 对账 / 续做 / 后台作业（16） | `kernel_reconciliation_load`、`kernel_reconciliation_options`、`kernel_reconciliation_query`、`kernel_reconciliation_confirm`、`kernel_reconciliation_resume`、`kernel_run_continuable`、`kernel_run_continuable_list`、`kernel_run_continue`、`kernel_reliability_snapshot`、`kernel_job_execute`、`kernel_job_start`、`kernel_job_status`、`kernel_job_list`、`kernel_job_cancel`、`kernel_job_resume`、`kernel_job_reconcile_orphans` | `commands/` |
+| 知识库服务（yuxi）（7） | `yuxi_service_get`、`yuxi_service_save`、`yuxi_service_test`、`yuxi_login`、`yuxi_current_user`、`yuxi_agents_sync`、`yuxi_models_list` | `commands/` |
+| 远程知识内容、预览缓存与下载（28） | `knowledge_preview_cache_statistics`、`knowledge_preview_cache_limit_set`、`knowledge_preview_cache_clear`、`knowledge_preview_cache_operation_register`、`knowledge_preview_cache_operation_finish`、`knowledge_preview_cache_cancel`、`knowledge_bases_list`、`knowledge_detail`、`knowledge_document_content`、`knowledge_document_activity_get`、`knowledge_document_reading_state_save`、`knowledge_document_bookmark_save`、`knowledge_document_bookmark_delete`、`knowledge_document_annotation_save`、`knowledge_document_annotation_delete`、`knowledge_document_source_metadata`、`knowledge_document_range`、`knowledge_preview_cache_acquire`、`knowledge_preview_cache_read`、`knowledge_preview_cache_release`、`knowledge_preview_cache_open`、`knowledge_document_download`、`knowledge_document_download_cancel`、`downloaded_file_open`、`knowledge_query`、`knowledge_graph`、`knowledge_graph_labels`、`knowledge_graph_stats` | `commands/` |
+| 模型服务（6） | `model_service_get`、`model_service_save`、`model_service_test`、`model_providers_list`、`model_provider_save`、`model_provider_delete` | `commands/` |
+| 本机资料库（31） | `local_knowledge_bases_list`、`local_knowledge_file_sources_list`、`local_knowledge_file_source_add`、`local_knowledge_file_source_rescan`、`local_knowledge_file_source_update`、`local_knowledge_file_source_remove`、`local_knowledge_local_files_list`、`local_knowledge_local_file_read`、`local_knowledge_local_file_open`、`local_knowledge_base_get`、`local_knowledge_base_create`、`local_knowledge_base_update`、`local_knowledge_base_delete`、`local_knowledge_documents_list`、`local_knowledge_folders_list`、`local_knowledge_folder_create`、`local_knowledge_document_file_read`、`local_knowledge_document_file_open`、`local_knowledge_documents_import_start`、`local_knowledge_import_files_pick`、`local_knowledge_import_folder_pick`、`local_knowledge_source_folder_pick`、`local_knowledge_jobs_list`、`local_knowledge_job_get`、`local_knowledge_job_cancel`、`local_knowledge_job_retry`、`local_knowledge_storage_status`、`local_knowledge_storage_path_reset`、`local_knowledge_storage_directory_pick`、`local_knowledge_storage_migrate_start`、`local_knowledge_storage_migration_get` | `local_knowledge.rs`、`local_knowledge_picker.rs`、`local_knowledge_storage.rs` |
+| 本机向量与检索（18） | `local_embedding_models_list`、`local_embedding_model_install_start`、`local_embedding_model_download_cancel`、`local_embedding_model_download_retry`、`local_embedding_model_test`、`local_embedding_model_set_default`、`local_embedding_model_delete`、`local_embedding_model_import`、`local_vector_backend_health`、`local_knowledge_index_start`、`local_knowledge_retrieval_test`、`local_knowledge_retrieval_cases_list`、`local_knowledge_retrieval_case_save`、`local_knowledge_retrieval_case_delete`、`local_knowledge_retrieval_cases_export`、`local_knowledge_document_chunks`、`local_knowledge_document_delete`、`local_knowledge_document_reparse` | `local_knowledge_vector.rs` |
+
+相比本文 2026-08-24 版的命令表，新增或改名的主要有：
+
+- 新增外部 Agent 后端命令（`agent_backend_*`，14 个）：后端状态与能力、凭据导入、私有 HOME、完全访问状态与撤销、原生权限列表与切换、「新会话使用的 Agent」偏好读写、Codex Responses 探测、外部模型连接测试（`agent_backend_model_connection`，在 `external_model.rs`）。
+- 项目管理：`projects_set_pinned`、`projects_management_list`、`project_path_update`、`project_archive`、`project_root_open`、`project_delete`、`project_folder_open`、`project_file_action`。
+- 会话：归档 / 回收站列表、置顶、归档 / 取消归档、恢复、分叉、彻底删除，以及会话级权限 `conversation_permission_state` / `conversation_permission_update`。
+- Run：`run_rewind`、`child_run_cancel_by_user`、Steering（`run_steering_*`）、交付验收（`delivery_acceptance_*`）、受管文件版本与恢复、`plan_revision_resolve`、`goal_delete`、`goal_running_set`。
+- Kernel：对账（`kernel_reconciliation_*`）、续做（`kernel_run_continuable*`、`kernel_run_continue`）、可靠性快照、后台作业（`kernel_job_*`）。
+- 记忆、应用内通知、全局搜索、消息反馈、可观测性统计与离线评测。
+- 本机资料库：删除资料库、目录、存储路径重置（`local_knowledge_storage_path_reset`）；本机向量模型与检索测试（`local_embedding_*`、`local_knowledge_index_start`、`local_knowledge_retrieval_*`）。
+- 文档活动命令改名为 `knowledge_document_reading_state_save`、`knowledge_document_bookmark_save/delete`、`knowledge_document_annotation_save/delete`。
+
+`conversation_create` 另接受可选 `agentBackend`（`fox` / `pi` / `deepseek` / `codex`，创建后冻结）和 `externalPermissionMode`（仅外部后端：`sandboxed` 默认或 `full_access`，`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时拒绝 `full_access`）。外部 Agent 会话也使用 `conversation_create`、`run_start`、`run_cancel`、`approval_resolve`：命令层按会话冻结的 `agent_backend` 路由（`commands/agent_backend_routing.rs`），请求指向其他后端会被拒绝（`agent_backend_misrouted`），`run_resume` 对外部会话返回 `agent_backend_entry_unsupported`，新建隐藏后端（Codex）的会话返回 `agent_backend_hidden`。错误码见[错误与状态参考](错误与状态.md#外部-agent-后端)。
 
 `mcp_server_save` 的 `transport` 为 `stdio|streamable_http|openapi`。stdio 使用 `command/args/credentials`；HTTP 使用 `endpointUrl/credentials`；OpenAPI 使用 `definition` 和可选 `endpointUrl` 覆盖。`credentials` 只写入 Keyring，不在读取结果中回传。
 
 `lifecycle_hook_save` 接受 `event/matcher/action/reason/enabled/priority`。事件为 `before_run|before_tool|after_tool|after_run`，动作为 `block|require_approval|annotate`；非 `before_tool` 只能使用 `annotate`。命令层拒绝未知枚举、空 matcher/reason 和超长输入。
-| 插件中心 | `plugin_catalog_list`, `plugin_installations_list`, `plugin_set_activation` |
-| 本地知识 | `local_knowledge_bases_list`, `local_knowledge_base_get/create/update`, `local_knowledge_source_folder_pick`, `local_knowledge_file_sources_list`, `local_knowledge_file_source_add/rescan/remove`, `local_knowledge_local_files_list`, `local_knowledge_local_file_read/open`, `local_knowledge_documents_list`, `local_knowledge_document_file_read/open`, `local_knowledge_import_files_pick`, `local_knowledge_documents_import_start`, `local_knowledge_jobs_list/get/cancel/retry`, `local_knowledge_storage_status`, `local_knowledge_storage_directory_pick`, `local_knowledge_storage_migrate_start`, `local_knowledge_storage_migration_get` |
-| 知识服务 | `yuxi_service_get/save/test`, `yuxi_login/current_user/agents_sync/models_list` |
-| 知识内容 | `knowledge_bases_list`, `knowledge_detail`, `knowledge_document_content`, `knowledge_query` |
-| 文档活动 | `knowledge_document_activity_get`, `reading_state_save`, `bookmark_save/delete`, `annotation_save/delete` |
-| 原文件/缓存 | `knowledge_document_source_metadata`, `knowledge_document_range`, `knowledge_document_download`, `knowledge_document_download_cancel`, `knowledge_preview_cache_statistics`, `knowledge_preview_cache_limit_set`, `knowledge_preview_cache_clear`, `knowledge_preview_cache_operation_register`, `knowledge_preview_cache_operation_finish`, `knowledge_preview_cache_cancel`, `knowledge_preview_cache_acquire`, `knowledge_preview_cache_read`, `knowledge_preview_cache_release`, `knowledge_preview_cache_open`, `downloaded_file_open` |
-| 图谱 | `knowledge_graph`, `knowledge_graph_labels`, `knowledge_graph_stats` |
-| 模型 | `model_service_get/save/test`, `model_providers_list`, `model_provider_save/delete` |
 
-真实注册清单以 `src-tauri/src/lib.rs` 为准；前端封装以 `features/conversations/api/desktop-client.ts` 为准。
 
 `approval_resolve` 接收 `{ approvalId, decision }`，其中 `decision` 为 `deny | allow_once | allow_conversation`。`allow_conversation` 会在同一事务中解决当前审批并写入当前会话的同名工具授权；后续调用仍需通过 Expert/Assistant allowlist、只读模式、路径边界和 Host 参数校验，只跳过该工具的交互式审批。
 
@@ -76,14 +92,22 @@ type ApiResponse<T> =
 
 ## 窗口事件
 
-| 事件 | Payload | 用途 |
-|---|---|---|
-| `fox://runtime-event` | RuntimeEventNotification | 文本、推理、工具、来源和 Run 状态 |
-| `fox://work-event` | WorkEventRecord | Goal、Task 和 Evidence 的实时投影；按 conversation sequence 去重 |
-| `fox://child-run-updated` | ChildRunNotification | 按 `childRunId` 更新隐藏 Child Run 的 queued/running/terminal 状态、预算使用和有限结果 |
-| `fox://approval-requested` | ApprovalRecord | 展示待审批交互 |
-| `fox://approval-resolved` | ApprovalRecord | 同步审批终态 |
-| `fox://knowledge-download-progress` | KnowledgeDownloadProgress | 下载进度与终态 |
+| 事件 | Payload | 用途 | 前端监听 |
+| --- | --- | --- | --- |
+| `fox://runtime-event` | `RuntimeEventNotification` | 文本、推理、工具、来源和 Run 状态。外部 Agent 会话的事件也走这里（`external_backend.rs` 先写库拿到 `seq` 再发） | 是 |
+| `fox://work-event` | `WorkEventRecord` | Goal、Task 和 Evidence 的实时投影；按 conversation sequence 去重 | 是 |
+| `fox://child-run-updated` | `ChildRunNotification` | 按 `childRunId` 更新 Child Run 的 queued/running/terminal 状态、预算使用和有限结果 | 是 |
+| `fox://approval-requested` | `ApprovalRecord` | 展示待审批交互（Fox 与外部 Agent 会话） | 是 |
+| `fox://approval-resolved` | `ApprovalRecord` | 同步审批终态 | 是 |
+| `fox://kernel-state-invalidated` | `KernelStateInvalidation { schemaVersion: 1 }` | Kernel 事实变化后通知前端重新读取 Kernel 快照（`kernel_state_publisher.rs`） | 是 |
+| `fox://kernel-model-preview` | `KernelModelPreview` | Kernel 模型请求的流式预览（`runtime_host/kernel_host.rs`） | 是 |
+| `fox://knowledge-download-progress` | `KnowledgeDownloadProgress` | 下载进度与终态 | 是 |
+| `fox://continuation-decision` | 续做对账决定 | 启动 / 后台续做对账扫描的决定（`runtime_host/mod.rs`） | 否（当前前端未监听） |
+| `fox://continuation-diagnostic` | 续做诊断（含 `code`） | 续做对账失败诊断，如 `runtime.continuation.reconciliation_scan_failed` | 否 |
+| `fox://graph-review-decision` | 节点评审决定 | 只读工作图独立评审结果 | 否 |
+| `fox://graph-acceptance` | Graph 验收结果 | 只读工作图最终验收成功 | 否 |
+
+标「否」的事件当前只由 Host 发出，`apps/desktop/src` 中没有对应 `listen`，界面依赖数据库重新加载获得这些状态。
 
 ## 前端使用规则
 
