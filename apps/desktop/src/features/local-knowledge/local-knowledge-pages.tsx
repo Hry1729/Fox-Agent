@@ -310,7 +310,7 @@ function storageMigrationActive(migration: LocalKnowledgeStorageMigration | null
   return migration != null && ['queued', 'running', 'paused'].includes(migration.status)
 }
 
-function StorageLocationDialog({ gateway, open, onOpenChange }: { gateway: LocalKnowledgeGateway; open: boolean; onOpenChange: (open: boolean) => void }) {
+export function StorageLocationDialog({ gateway, open, onOpenChange }: { gateway: LocalKnowledgeGateway; open: boolean; onOpenChange: (open: boolean) => void }) {
   const [status, setStatus] = useState<LocalKnowledgeStorageStatus | null>(null)
   const [migration, setMigration] = useState<LocalKnowledgeStorageMigration | null>(null)
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
@@ -390,6 +390,24 @@ function StorageLocationDialog({ gateway, open, onOpenChange }: { gateway: Local
     }
   }
 
+  // Degraded at startup (「知识库路径不可写」): the migration cannot run (it
+  // writes to the unwritable database), so the new path is only recorded and
+  // used after restart; nothing is copied.
+  const degraded = Boolean(status?.degradedReason)
+  const resetPath = async (path: string | null) => {
+    if (!gateway.resetStoragePath || starting || loading) return
+    setStarting(true)
+    setError(null)
+    try {
+      setStatus(await gateway.resetStoragePath(path))
+      setSelectedPath(null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setStarting(false)
+    }
+  }
+
   const confirmMigration = async () => {
     if (!selectedPath || busy) return
     setStarting(true)
@@ -413,16 +431,17 @@ function StorageLocationDialog({ gateway, open, onOpenChange }: { gateway: Local
       <DialogContent className="fox-local-kb-storage-dialog" showCloseButton={!migrationBusy && !starting}>
         <DialogHeader>
           <DialogTitle>保存位置</DialogTitle>
-          <DialogDescription>选择新的根目录后，Fox 会自动迁移数据库、文件和本机索引。</DialogDescription>
+          <DialogDescription>{degraded ? '当前位置不可写，资料库暂时只读或不可用。选择一个可写的文件夹，重启 Fox 后使用新位置（原位置的数据不会被移动）。' : '选择新的根目录后，Fox 会自动迁移数据库、文件和本机索引。'}</DialogDescription>
         </DialogHeader>
         <div className="fox-local-kb-storage-body">
           {loading && <div className="fox-local-kb-storage-path is-loading"><LoaderCircle className="animate-spin" /><span>正在读取存储位置...</span></div>}
           {!loading && status && <>
+            {status.degradedReason && <p className="fox-local-kb-storage-error" role="alert" data-testid="fox-kb-storage-degraded"><AlertCircle />{status.degradedReason}</p>}
             <label className="fox-local-kb-storage-label">当前位置</label>
             <div className="fox-local-kb-storage-path"><FolderOpen aria-hidden="true" /><code title={status.rootPath}>{status.rootPath}</code></div>
             {pendingPath && <><label className="fox-local-kb-storage-label">新位置</label><div className="fox-local-kb-storage-pending"><ArrowLeft aria-hidden="true" /><code title={pendingPath}>{pendingPath}</code></div></>}
             {migration && <div className="fox-local-kb-storage-progress" role="status" aria-live="polite"><div className="fox-local-kb-storage-progress-head"><span>{storageMigrationStatusLabel(migration.status)}</span><b>{migration.progress}%</b></div><Progress className="fox-local-kb-progress" value={migration.progress} aria-label="存储迁移进度" /><small>{storageMigrationStageLabel(migration.stage)}</small></div>}
-            {completed && <p className="fox-local-kb-storage-success"><CheckCircle2 />迁移已完成，重启 Fox 后新存储位置才会生效。</p>}
+            {completed && <p className="fox-local-kb-storage-success"><CheckCircle2 />{degraded ? '已记录新位置，重启 Fox 后生效。' : '迁移已完成，重启 Fox 后新存储位置才会生效。'}</p>}
             {(error || migrationError) && <p className="fox-local-kb-storage-error" role="alert"><AlertCircle />{migrationError ?? error}</p>}
           </>}
           {!loading && !status && error && <p className="fox-local-kb-storage-error" role="alert"><AlertCircle />{error}</p>}
@@ -430,7 +449,10 @@ function StorageLocationDialog({ gateway, open, onOpenChange }: { gateway: Local
         <DialogFooter className="fox-local-kb-storage-actions">
           {!loading && !status && error ? <Button type="button" variant="outline" onClick={() => void loadStatus()}>重试</Button> : <>
             <Button type="button" variant="outline" onClick={() => void chooseDirectory()} disabled={busy}>{picking ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}{picking ? '正在选择' : '选择文件夹'}</Button>
-            <Button type="button" onClick={() => void confirmMigration()} disabled={!selectedPath || busy}>{starting ? <LoaderCircle className="animate-spin" /> : <CheckCircle2 />}{starting ? '正在提交' : '确认迁移'}</Button>
+            {degraded && gateway.resetStoragePath ? <>
+              <Button type="button" variant="outline" onClick={() => void resetPath(null)} disabled={busy}>恢复默认位置</Button>
+              <Button type="button" onClick={() => void resetPath(selectedPath)} disabled={!selectedPath || busy}>{starting ? <LoaderCircle className="animate-spin" /> : <CheckCircle2 />}{starting ? '正在提交' : '使用此位置'}</Button>
+            </> : <Button type="button" onClick={() => void confirmMigration()} disabled={!selectedPath || busy}>{starting ? <LoaderCircle className="animate-spin" /> : <CheckCircle2 />}{starting ? '正在提交' : '确认迁移'}</Button>}
           </>}
         </DialogFooter>
       </DialogContent>
@@ -1366,6 +1388,13 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
   const [error, setError] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [storageOpen, setStorageOpen] = useState(false)
+  // 「知识库路径不可写：<路径>」 when startup degraded the knowledge store.
+  const [storageIssue, setStorageIssue] = useState<string | null>(null)
+  useEffect(() => {
+    let disposed = false
+    void gateway.getStorageStatus().then((status) => { if (!disposed) setStorageIssue(status.degradedReason ?? null) }).catch(() => undefined)
+    return () => { disposed = true }
+  }, [gateway, storageOpen])
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [deleteBase, setDeleteBase] = useState<LocalKnowledgeBase | null>(null)
@@ -1480,6 +1509,7 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
           <Button variant="ghost" size="icon" aria-label="存储位置" title="存储位置" onClick={() => setStorageOpen(true)}><HardDrive /></Button>
           <Button onClick={openCreateDialog}><Plus />新建资料库</Button>
         </>} />
+        {storageIssue && <div className="fox-local-kb-storage-banner" role="alert" data-testid="fox-kb-storage-banner"><AlertCircle /><span>{storageIssue}<small>资料库暂时只读或不可用。</small></span><Button variant="outline" size="sm" onClick={() => setStorageOpen(true)}>修改存储位置</Button></div>}
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
         <LocalFolderSection gateway={gateway} query={query} libraryCount={items.length} matchedLibraryCount={filteredItems.length} librariesLoading={loading || Boolean(error)} onOpen={(id) => onNavigate?.('files', id)}>
