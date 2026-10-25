@@ -28,6 +28,7 @@ import { useSkills } from '@/features/settings/use-skills'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { knowledgeReferencesFromDeclaration, remoteKnowledgeReference, resolveExpertKnowledgeDeclaration, toPersistedExpertManifest } from './expert-knowledge'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
+import { rememberPluginReturn } from '@/features/settings/settings-shared'
 
 const fallbackAgent: AgentRecord = { id: 'fox-general', name: 'Fox 通用助手', description: 'Fox 默认通用专家', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '', isBuiltin: true, packageVersion: '1.0.0', packageSource: 'builtin', packageId: null, packageHash: null, packageManifest: {}, capabilities: ['files', 'tools', 'reasoning'], resources: { tools: [{ id: 'files', name: '文件读写', description: '读取和处理已授权项目文件' }, { id: 'tools', name: '本机工具', description: '调用 Fox Runtime 提供的本机工具' }, { id: 'reasoning', name: '任务推理', description: '规划并执行多步骤任务' }], knowledges: [], mcps: [], skills: [] }, configurableItems: {}, isDefault: true, available: true }
 
@@ -489,7 +490,7 @@ function packageSourceText(agent: AgentRecord) {
   return `资料库服务专家 · v${agent.packageVersion}（设置由资料库服务统一管理）`
 }
 
-function useAgentEditor(enabled = true) {
+export function useAgentEditor(enabled = true) {
   const [editing, setEditing] = useState<AgentRecord | null>(null)
   const [draft, setDraft] = useState<SaveAgentInput>(emptyAgentDraft)
   const [saving, setSaving] = useState(false)
@@ -756,9 +757,9 @@ function useAgentEditor(enabled = true) {
   }
 }
 
-type AgentEditor = ReturnType<typeof useAgentEditor>
+export type AgentEditor = ReturnType<typeof useAgentEditor>
 
-function AgentEditorProfileFields({ editor }: { editor: AgentEditor }) {
+export function AgentEditorProfileFields({ editor }: { editor: AgentEditor }) {
   const { draft, setDraft, readOnly, iconOptions, iconLoading } = editor
   return (
     <div className="fox-agent-editor-grid fox-agent-manage-fields">
@@ -777,7 +778,7 @@ function AgentEditorProfileFields({ editor }: { editor: AgentEditor }) {
   )
 }
 
-function AgentEditorResourcesFields({ editor }: { editor: AgentEditor }) {
+export function AgentEditorResourcesFields({ editor }: { editor: AgentEditor }) {
   return (
     <div className="fox-agent-editor-resources fox-agent-manage-resources">
       <section><header><span><Database />资料库</span><b>{editor.selectedResources('knowledge').size} 已选择</b></header><ExpertResourceList items={editor.knowledgeChoices} selected={editor.selectedResources('knowledge')} disabled={editor.readOnly} loading={editor.knowledgeLoading} error={editor.knowledgeError} emptyText="没有可选择的资料库" onToggle={(id, checked) => editor.toggleResource('knowledge', id, checked)} /></section>
@@ -1008,6 +1009,12 @@ function AgentCapabilitySection({ kind, editor, navigate, onCopy }: { kind: Expe
   const normalized = query.trim().toLocaleLowerCase()
   const visible = normalized ? cards.filter((card) => card.name.toLocaleLowerCase().includes(normalized) || card.description.toLocaleLowerCase().includes(normalized)) : cards
   const enabledCount = cards.filter((card) => card.checked).length
+  // 添加技能 / 添加连接器 open the 插件 settings page; it offers a way back to this expert.
+  const openAdd = () => {
+    if (!meta.addView) return
+    if (agent && (kind === 'skills' || kind === 'mcpServers')) rememberPluginReturn({ view: 'agent-detail', entityId: agent.id, documentId: kind === 'skills' ? 'skills' : 'mcp', label: agent.name })
+    navigate(meta.addView)
+  }
   const toggle = async (card: CapabilityCardView, checked: boolean) => {
     if (card.disabled || card.locked || busyId) return
     setBusyId(card.id)
@@ -1020,7 +1027,7 @@ function AgentCapabilitySection({ kind, editor, navigate, onCopy }: { kind: Expe
         <div><h1>{meta.title}</h1><p>{enabledCount} / {cards.length} 已启用</p></div>
         <div className="fox-capability-actions">
           <label className="fox-capability-search"><Search size={14} /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${meta.title}`} /></label>
-          {meta.addView && <Button variant="outline" size="sm" onClick={() => navigate(meta.addView!)}><Plus size={14} />{meta.addLabel}</Button>}
+          {meta.addView && <Button variant="outline" size="sm" onClick={() => openAdd()}><Plus size={14} />{meta.addLabel}</Button>}
         </div>
       </header>
       {editor.editing && (editor.editing.packageSource === 'imported' || editor.editing.runtimeType !== 'pi') && <p className="fox-agent-manage-readonly"><Info size={14} />{editor.editing.runtimeType !== 'pi' ? '资料库服务专家的设置由服务端统一管理。' : '已安装专家包的资源声明只读，复制为本机专家后可自由调整。'}<Button variant="outline" size="sm" onClick={onCopy}>复制专家</Button></p>}
