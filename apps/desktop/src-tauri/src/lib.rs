@@ -34,6 +34,7 @@ mod model_service;
 mod runtime_host;
 mod resource_gateway;
 mod skills;
+mod startup_failure;
 mod tool_guard;
 mod tool_host;
 mod html_preview;
@@ -158,19 +159,34 @@ pub fn run() {
     let app = tauri::Builder::default()
         .register_uri_scheme_protocol("fox-preview", |ctx,request| html_preview::serve(ctx.webview_label(),request))
         .setup(move |app| {
+            // Any setup error used to reach tauri's `panic!("Failed to setup app: …")`:
+            // with the release `windows` subsystem that is an exit with no window
+            // and no visible text. Report it in Chinese (with the data path) and
+            // exit instead.
+            let mut startup_data_dir: Option<std::path::PathBuf> = None;
+            let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let app_data_dir = std::env::var_os("FOX_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
+            startup_data_dir = Some(app_data_dir.clone());
             std::fs::create_dir_all(&app_data_dir)?;
             let isolated_webview_dir = app_data_dir.join("webviews");
             maintenance::apply_pending_restore(&app_data_dir)?;
 
             // A pending schema migration is preceded by an automatic
             // consistent copy in `<data>/backups/` (newest five kept).
+            let database_path = app_data_dir.join("fox.db");
             let database = Database::open_with_migration_backup(
-                app_data_dir.join("fox.db"),
+                database_path.clone(),
                 &app_data_dir.join("backups"),
-            )?;
+            )
+            .map_err(|error| {
+                startup_failure::database_open_message(
+                    &database_path,
+                    &app_data_dir.join("backups"),
+                    &error,
+                )
+            })?;
             database.repair_interrupted_runs()?;
             database.audit_interrupted_tasks()?;
             app.manage(kernel_state_publisher::KernelStatePublisher::start(app.handle().clone(), &database)?);
@@ -264,6 +280,14 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 window_resize::install(&window)?;
+            }
+            Ok(())
+            })();
+            if let Err(error) = result {
+                let message =
+                    startup_failure::setup_failure_message(startup_data_dir.as_deref(), &error.to_string());
+                startup_failure::report(&message);
+                std::process::exit(1);
             }
             Ok(())
         })
