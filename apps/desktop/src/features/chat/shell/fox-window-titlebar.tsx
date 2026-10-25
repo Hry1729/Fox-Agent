@@ -6,6 +6,10 @@ import { AlignLeft, AnimatedIconTrigger, ArrowLeft, ArrowRight, Maximize, Messag
 import { memo, useEffect, useState, type ReactNode } from 'react'
 import { detectShortcutPlatform, formatShortcut, type ShortcutActionId } from '@/features/settings/shortcut-model'
 import { useShortcutPreferences } from '@/features/settings/use-shortcuts'
+import { publishTitlebarHeight, WINDOW_CHROME_ATTR } from '@/components/ui/window-chrome'
+
+/** Keep in sync with `.fox-window-titlebar { height }` and the shell grid row. */
+export const WINDOW_TITLEBAR_HEIGHT_PX = 30
 
 function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onZoom, canGoBack = false, canGoForward = false, onGoBack, onGoForward }: {
   leftSidebarCollapsed: boolean
@@ -29,6 +33,9 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
     const label = formatShortcut(binding, platform)
     return <DropdownMenuShortcut aria-label={label.spoken}>{label.text}</DropdownMenuShortcut>
   }
+
+  // Modal overlays and sheets start below the title bar (see window-chrome.ts).
+  useEffect(() => publishTitlebarHeight(WINDOW_TITLEBAR_HEIGHT_PX), [])
 
   useEffect(() => {
     let disposed = false
@@ -69,7 +76,7 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
   }
 
   return (
-    <header className="fox-window-titlebar" data-tauri-drag-region>
+    <header className="fox-window-titlebar" data-tauri-drag-region {...{ [WINDOW_CHROME_ATTR]: '' }}>
       <div className="fox-window-product" data-tauri-drag-region>
         <img src={FOX_ASSISTANT_AVATAR} alt="" />
         <div className="fox-titlebar-sidebar-controls" aria-label="标题栏控制">
