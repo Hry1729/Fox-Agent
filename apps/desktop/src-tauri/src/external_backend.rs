@@ -120,6 +120,8 @@ pub struct ExternalBackendHost {
     runtime: DesktopRuntime,
     database: Database,
     app: AppHandle,
+    /// Fox data root, named in `run.create_failed` messages.
+    data_dir: std::path::PathBuf,
 }
 
 fn failure<T: serde::Serialize>(code: &str, message: impl Into<String>, retryable: bool) -> ApiResponse<T> {
@@ -163,7 +165,7 @@ impl ExternalBackendHost {
         }
         let sink = DesktopSink { app: app.clone(), database: database.clone(), event_lock: Arc::new(Mutex::new(())) };
         let runtime = ExternalRuntime::new(sink, HostLauncher::new(config), tauri::async_runtime::handle().inner().clone());
-        let host = Self { runtime, database, app };
+        let host = Self { runtime, database, app, data_dir: fox_data.to_path_buf() };
         host.interrupt_runs_left_active();
         host
     }
@@ -217,7 +219,7 @@ impl ExternalBackendHost {
         }
         let started = match self.database.create_run(&request.conversation_id, &request.text, request.model.as_deref()) {
             Ok(started) => started,
-            Err(error) => return failure("run.create_failed", error, false),
+            Err(error) => return failure("run.create_failed", crate::data_paths::run_create_failure(&self.data_dir, &error), false),
         };
         let stored = self.database.latest_native_session(&request.conversation_id).ok().flatten();
         let turn = TurnRequest {
