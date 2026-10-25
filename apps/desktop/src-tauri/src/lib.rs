@@ -4,6 +4,7 @@ mod artifact_gateway;
 mod canonical_json;
 mod commands;
 mod database;
+mod data_paths;
 mod data_compute;
 mod report_pdf;
 mod digital_colleagues;
@@ -221,11 +222,21 @@ pub fn run() {
             // bundled DLL must live in the resource root beside the executable. Keeping
             // this path identical to the bundle destination also makes the later health
             // probe report the same library that Windows loaded during startup.
-            let local_knowledge = LocalKnowledgeStore::open_with_zvec_resource_dir(
+            //
+            // An unwritable storage path (read-only directory or database,
+            // path is a file) must not abort setup: the store starts degraded
+            // (read-only or empty), a warning is logged, and the library page
+            // and data-maintenance diagnostics show 「知识库路径不可写：<路径>」
+            // with a way to choose another path.
+            let local_knowledge = LocalKnowledgeStore::open_for_startup(
                 local_knowledge_root,
-                app.path().resource_dir()?,
-            )?;
-            local_knowledge.ensure_default_fox_guide()?;
+                Some(app.path().resource_dir()?.as_path()),
+            );
+            if local_knowledge.startup_issue().is_none() {
+                if let Err(error) = local_knowledge.ensure_default_fox_guide() {
+                    eprintln!("fox.local_knowledge warn default_guide_failed error={error}");
+                }
+            }
             app.manage(AppState::new(
                 database,
                 runtime_host,
@@ -489,6 +500,7 @@ pub fn run() {
             local_knowledge::local_knowledge_job_cancel,
             local_knowledge::local_knowledge_job_retry,
             local_knowledge::local_knowledge_storage_status,
+            local_knowledge::local_knowledge_storage_path_reset,
             local_knowledge_storage::local_knowledge_storage_directory_pick,
             local_knowledge::local_knowledge_storage_migrate_start,
             local_knowledge::local_knowledge_storage_migration_get,
