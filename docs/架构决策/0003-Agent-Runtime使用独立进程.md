@@ -1,6 +1,6 @@
 # 0003：Agent Runtime 使用独立进程
 
-> 状态：已接受<br>
+> 状态：已接受，部分内容已细化（2026-10-25 对照代码复核）：Runtime 仍是独立 Node 进程（开发态 `pi-runtime.mjs`，发布为 `fox-agent-runtime` EXE，Kernel 路径以 `--kernel-worker` 方式启动），通过 JSONL 与 Host 通信；但状态、权限、审批、重试、取消与终态的决策已移到 Rust 的 Kernel（`crates/fox-agent-kernel`，默认 Authoritative），Runtime 主要负责模型 I/O 与事件转换，见 [Fox Agent Kernel 统一控制架构改造方案](../07-路线图/Fox%20Agent%20Kernel统一控制架构改造方案.md)<br>
 > 决策日期：2026-07-29 之前形成，2026-07-29 补录<br>
 > 影响范围：模型循环、会话恢复、打包和故障隔离
 
