@@ -3,7 +3,7 @@
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：`services/agent-runtime`、`apps/desktop/src-tauri/src/runtime_host`、`crates/fox-agent-backend`、Runtime Adapter 契约<br>
-> 最后更新：2026-10-25
+> 最后更新：2026-10-26（同步阶段状态，修正 Sidecar Smoke 路径）
 
 ## 目标与边界
 
@@ -48,9 +48,9 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 
 ## 外层 Agent 后端（四 Agent）
 
-> 本节是“会话由哪个 Agent 执行”的唯一维护点。其他架构文档只引用本节。核对基线：`feat/four-agent-phase0-1`（与 `main` 同步），2026-10-24。
+> 本节是“会话由哪个 Agent 执行”的唯一维护点。其他架构文档只引用本节。接入事实按 `main@3bb1880` 复核；阶段状态同步至 2026-10-26，逐项说明见实施方案。
 
-四 Agent 改造（[实施方案 v0.3.1](四Agent改造实施方案-v0.3.1.md)）的阶段 0–3 已完成并合入 `main`。每个会话在创建时绑定一个**外层 Agent 后端**（`conversations.agent_backend`，migration v95），之后不能更换。
+四 Agent 改造（[实施方案 v0.3.1](四Agent改造实施方案-v0.3.1.md)）的阶段 0、2、3 已完成并合入 `main`；阶段 1 部分完成，第 2 项测试授权语义未关闭，第 4 项子进程收尾只在 Windows 上关闭；阶段 4 的 Legacy / Shadow 清理尚未开始。每个会话在创建时绑定一个**外层 Agent 后端**（`conversations.agent_backend`，migration v95），之后不能更换。
 
 | `agent_backend` | 产品名 | 状态 | 执行路径 | 接入方式 |
 | --- | --- | --- | --- | --- |
@@ -666,7 +666,7 @@ Host 首先修复数据库中断状态，再按 Runtime 类型恢复。Pi 使用
 | Host 测试 | `apps/desktop/src-tauri/src/runtime_host` | 队列、取消、协议限制、审批、恢复、脱敏 |
 | 前端测试 | `apps/desktop/tests/runtime-event-reducer.test.ts` | 事件乱序、重复、刷新恢复和终态 |
 | 离线评测 | `services/agent-runtime/evals` | 模型画像、BFCL 风格工具契约、AgentDojo 风格注入、Fox 意图回归 |
-| Sidecar Smoke | `scripts/smoke-sidecar.mjs` | 独立可执行文件握手、会话、流式和退出 |
+| Sidecar Smoke | `services/agent-runtime/scripts/smoke-sidecar.mjs` | 独立可执行文件握手、会话、流式和退出 |
 
 常用命令：
 
