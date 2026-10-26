@@ -160,6 +160,20 @@ pub struct AgentBackendTarget {
 impl ExternalBackendHost {
     pub fn new(app: AppHandle, database: Database, fox_data: &std::path::Path) -> Self {
         let config = HostLaunchConfig::from_env(fox_data);
+        #[cfg(windows)]
+        if config.runtime_root.join(fox_agent_backend::winruntime::INSTALLER_RECEIPT_FILE).exists() {
+            let imported = fox_agent_backend::winruntime::read_srt_registry(&fox_agent_backend::sandbox::RealProbe)
+                .and_then(|registry| fox_agent_backend::winruntime::import_installer_receipt(
+                    &config.state_root,
+                    &config.runtime_root,
+                    fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION,
+                    &registry,
+                    &fox_agent_backend::winacl::RealWindowsAcl,
+                ));
+            if let Err(error) = imported {
+                eprintln!("fox.external sandbox_installer_receipt_failed={error}");
+            }
+        }
         if let Err(error) = fox_agent_backend::external_launch::recover_at_startup(&config) {
             eprintln!("fox.external startup_recovery_failed={error:?}");
         }

@@ -1,5 +1,16 @@
 {
+  "build": {
+    "beforeBuildCommand": "node ../../scripts/prepare-sandbox-installer.mjs && node ../../scripts/prepare-officecli.mjs && node ../../scripts/prepare-windows-runtime.mjs && pnpm build"
+  },
   "bundle": {
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "./windows/hooks.nsh",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false
+      }
+    },
     "resources": {
       "resources/windows-runtime/*.dll": ""
     }

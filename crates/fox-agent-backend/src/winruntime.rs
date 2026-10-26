@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 pub const RUNTIME_ROOT_ENV: &str = "FOX_RUNTIME_ROOT";
 
 /// Remedy shown whenever the one-time elevated setup is missing.
-pub const ENABLE_SANDBOX_REMEDY: &str = "需在设置中启用沙箱（一次管理员授权）";
+pub const ENABLE_SANDBOX_REMEDY: &str = "请重新运行 Fox 安装包以安装或修复沙箱（一次管理员授权）";
 
 const INHERIT_ONLY_ACE: u8 = 0x08;
 const SID_EVERYONE: &str = "S-1-1-0";
@@ -380,6 +380,40 @@ pub fn known_srt_sids(state_root: &Path) -> Result<Vec<String>, SandboxError> {
 // ---------------------------------------------------------------------------
 
 pub const SRT_INSTALL_RECORD_FILE: &str = "srt-install.json";
+pub const INSTALLER_RECEIPT_FILE: &str = ".fox-installer-result.json";
+
+/// Import the machine-wide receipt into the current user's state. A different
+/// administrator may have approved UAC, so setup cannot write this state itself.
+pub fn import_installer_receipt(
+    state_root: &Path,
+    runtime_root: &Path,
+    version: &str,
+    registry: &SrtRegistryState,
+    probe: &dyn WindowsAclProbe,
+) -> Result<Option<FoxSrtInstallRecord>, SandboxError> {
+    let receipt = runtime_root.join(INSTALLER_RECEIPT_FILE);
+    if !receipt.exists() {
+        return Ok(None);
+    }
+    let invalid = |message: &str| SandboxError::new(SandboxErrorCode::SandboxRuntimeNotInstalled, message.to_owned()).remedy(ENABLE_SANDBOX_REMEDY);
+    // A writable child must not inherit trust from its parent.
+    check_windows_runtime_root(runtime_root, &windows_user_dirs(), probe)?;
+    check_windows_runtime_root(&receipt, &windows_user_dirs(), probe)?;
+    let bytes = std::fs::read(&receipt).map_err(|error| invalid(&format!("cannot read installer receipt: {error}")))?;
+    let result: EnableScriptResult = serde_json::from_slice(&bytes).map_err(|error| invalid(&format!("invalid installer receipt: {error}")))?;
+    let srt = result.srt.as_ref().ok_or_else(|| invalid("installer receipt has no srt state"))?;
+    if !result.ok
+        || result.version.as_deref() != Some(version)
+        || result.runtime_root.as_deref().map(windows_key) != Some(windows_key(runtime_root))
+        || result.private_base.as_deref().map(windows_key) != Some(windows_key(&windows_private_base()))
+        || srt.marker_version != registry.marker_version
+        || srt.created_at != registry.created_at
+        || !srt.sandbox_user_sid.eq_ignore_ascii_case(&registry.sandbox_user_sid)
+    {
+        return Err(invalid("installer receipt differs from the installed runtime or current srt registry"));
+    }
+    apply_enable_result(state_root, &result).map(Some)
+}
 
 /// The `srt` part of `enable-sandbox.ps1`'s JSON result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -747,6 +781,39 @@ mod tests {
         let failed = EnableScriptResult { ok: false, error: Some("UAC declined".into()), ..result };
         assert_eq!(apply_enable_result(&state_root, &failed).unwrap_err().code, SandboxErrorCode::SandboxNotInstalled);
         let _ = std::fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn installer_receipt_import_checks_acl_registry_and_user_state() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!("fox-installer-receipt-{}", std::process::id()));
+        let runtime = root.join("runtime");
+        let state_root = root.join("user-state");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let registry = parse_srt_registry(REG).unwrap();
+        let probe = program_files_runtime();
+        assert!(import_installer_receipt(&state_root, &runtime, "0.1.3", &registry, &probe).unwrap().is_none());
+        let mut result = EnableScriptResult {
+            ok: true, error: None, version: Some("0.1.3".into()),
+            runtime_root: Some(runtime.clone()), private_base: Some(windows_private_base()), log: None,
+            srt: Some(EnableSrtResult { already_installed: true, package_version: "0.0.80".into(),
+                sandbox_user_sid: registry.sandbox_user_sid.clone(), marker_version: registry.marker_version, created_at: registry.created_at }),
+        };
+        let receipt = runtime.join(INSTALLER_RECEIPT_FILE);
+        std::fs::write(&receipt, serde_json::to_vec(&result).unwrap()).unwrap();
+        assert!(import_installer_receipt(&state_root, &runtime, "0.1.2", &registry, &probe).is_err());
+        let mut foreign = program_files_runtime();
+        foreign.owner = Some(USER);
+        assert!(import_installer_receipt(&state_root, &runtime, "0.1.3", &registry, &foreign).is_err());
+        let changed = SrtRegistryState { created_at: Some(0), ..registry.clone() };
+        assert!(import_installer_receipt(&state_root, &runtime, "0.1.3", &changed, &probe).is_err());
+        assert!(!state_root.exists(), "rejected receipts must not create state");
+        let imported = import_installer_receipt(&state_root, &runtime, "0.1.3", &registry, &probe).unwrap().unwrap();
+        assert!(!imported.installed_by_fox, "an existing shared srt is not owned by Fox");
+        assert_eq!(known_srt_sids(&state_root).unwrap(), [SRT]);
+        result.ok = false;
+        std::fs::write(&receipt, serde_json::to_vec(&result).unwrap()).unwrap();
+        assert!(import_installer_receipt(&state_root, &runtime, "0.1.3", &registry, &probe).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn facts() -> SrtUninstallFacts {
