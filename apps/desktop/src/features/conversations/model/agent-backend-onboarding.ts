@@ -26,6 +26,7 @@ export interface CredentialProbe {
   templates: ConfigTemplate[]
   /** Settings batch, item 6: what the unified login (Fox「模型服务」) does at the next launch; absent / null without a usable default provider. */
   unifiedLogin?: UnifiedLoginReport | null
+  source?: { choiceRequired: boolean; nativeAvailable: boolean; reusable: boolean; sourceChanged: boolean; current: string; provider?: string | null; model?: string | null; modelEndpoint: string | null } | null
 }
 
 /** `fox_agent_backend::unified_login::UnifiedReport` (names only). */
@@ -211,7 +212,7 @@ export function canRevokeFullAccess(status: AgentBackendPermissionStatus | null 
 }
 
 export interface CredentialCardModel {
-  kind: 'missing' | 'loopback'
+  kind: 'missing' | 'loopback' | 'source' | 'ready'
   title: string
   description: string
   privateHome: string
@@ -230,8 +231,19 @@ export interface CredentialCardModel {
  * sandbox needs full access (chosen when creating a conversation) or the
  * official endpoint.
  */
-export function credentialCardModel(probe: CredentialProbe | null | undefined, permission?: AgentBackendPermissionStatus | null): CredentialCardModel | null {
-  if (!probe || probe.state === 'ready') return null
+export function credentialCardModel(probe: CredentialProbe | null | undefined, permission?: AgentBackendPermissionStatus | null, showReady = false): CredentialCardModel | null {
+  if (!probe) return null
+  if (probe.source?.choiceRequired || (showReady && probe.state === 'ready')) {
+    return {
+      kind: probe.source?.choiceRequired ? 'source' : 'ready',
+      title: probe.source?.choiceRequired ? '选择 Pi 配置来源' : 'Agent 配置来源',
+      description: probe.source?.sourceChanged ? '原生 Pi 配置已变化。请重新确认导入，或选择 Fox 模型服务。'
+        : probe.source?.choiceRequired ? '发现本机原生 Pi 配置。确认导入后，当前项目可使用相同的模型和登录。'
+        : probe.source?.current === 'native' || probe.source?.current === 'reused_native' ? '当前使用项目中的原生 Agent 配置。可在这里重新导入。' : '当前配置已就绪。可在这里导入原生 Agent 配置。',
+      privateHome: probe.privateHome, requiredKeys: [], requiredFiles: [], presentFiles: probe.presentFiles, templates: [], offerImport: true,
+    }
+  }
+  if (probe.state === 'ready') return null
   if (probe.state === 'loopback_requires_full_access') {
     const forbidden = Boolean(permission?.fullAccessForbidden)
     return {

@@ -498,6 +498,8 @@ struct PendingApproval {
 }
 
 struct Turn {
+    last_activity: std::time::Instant,
+    active_tools: std::collections::HashSet<String>,
     run_id: String,
     /// The Agent's own permission mode this turn runs in
     /// ([`crate::native_permission`]); decides the Host's fail-closed answer.
@@ -525,6 +527,8 @@ struct Turn {
 impl Turn {
     fn new(run_id: &str, native_mode: &str) -> Self {
         Self {
+            last_activity: std::time::Instant::now(),
+            active_tools: std::collections::HashSet::new(),
             run_id: run_id.to_owned(),
             native_mode: native_mode.to_owned(),
             stall_baseline: 0,
@@ -578,6 +582,7 @@ struct Inner<S: ExternalSink, L: ExternalLauncher> {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     cancel_timeout: Duration,
     model_selection_timeout: Duration,
+    idle_timeout: Duration,
 }
 
 /// The Host's external backend runtime. Cheap to clone.
@@ -616,8 +621,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     }
 
     pub fn with_timeouts(sink: S, launcher: L, handle: tokio::runtime::Handle, cancel_timeout: Duration, model_selection_timeout: Duration) -> Self {
+        Self::with_idle_timeout(sink, launcher, handle, cancel_timeout, model_selection_timeout, Duration::from_secs(120))
+    }
+
+    pub fn with_idle_timeout(sink: S, launcher: L, handle: tokio::runtime::Handle, cancel_timeout: Duration, model_selection_timeout: Duration, idle_timeout: Duration) -> Self {
         Self {
-            inner: Arc::new(Inner { sink, launcher, handle, sessions: Mutex::new(HashMap::new()), cancel_timeout, model_selection_timeout }),
+            inner: Arc::new(Inner { sink, launcher, handle, sessions: Mutex::new(HashMap::new()), cancel_timeout, model_selection_timeout, idle_timeout }),
         }
     }
 
@@ -750,6 +759,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 return;
             }
             turn.prompt_sent = true;
+            turn.last_activity = std::time::Instant::now();
             let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
             if let Some(turn) = state.turn.as_mut() {
                 turn.stall_baseline = network_stall_lines(&tail);
@@ -1086,6 +1096,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     Some(event) => self.handle_event(&session, generation, event),
                 },
                 _ = tick.tick() => {
+                    self.check_stderr_network_stall(&session, generation);
+                    if self.check_idle(&session, generation).await { break; }
                     let (current, connection) = {
                         let state = lock(&session.state);
                         (state.generation == generation, state.connection.clone())
@@ -1093,7 +1105,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     if !current {
                         break;
                     }
-                    self.check_stderr_network_stall(&session, generation);
                     if connection.and_then(|connection| connection.has_exited()) == Some(true) {
                         // Deliver what the process wrote before it died.
                         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1136,6 +1147,16 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 };
                 let run_id = turn.run_id.clone();
                 let events = turn.projector.project(&update);
+                turn.last_activity = std::time::Instant::now();
+                for event in &events {
+                    if let Some(id) = event.get("toolCallId").and_then(Value::as_str) {
+                        match event.get("type").and_then(Value::as_str) {
+                            Some("tool.started") => { turn.active_tools.insert(id.to_owned()); }
+                            Some("tool.completed") => { turn.active_tools.remove(id); }
+                            _ => {}
+                        }
+                    }
+                }
                 let stalled = events
                     .iter()
                     .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_backend.diagnostic"))
@@ -1280,6 +1301,34 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
     }
 
+    async fn check_idle(&self, session: &Arc<Session>, generation: u64) -> bool {
+        let expired = {
+            let mut state = lock(&session.state);
+            if state.generation != generation { return false; }
+            let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent && !turn.cancel_requested) else { return false; };
+            if !turn.approvals.is_empty() {
+                turn.last_activity = std::time::Instant::now();
+                return false;
+            }
+            let timeout = if turn.active_tools.is_empty() { self.inner.idle_timeout } else { Duration::from_secs(600) };
+            if turn.last_activity.elapsed() < timeout { return false; }
+            let run_id = turn.run_id.clone();
+            let phase = if turn.active_tools.is_empty() { "模型响应" } else { "工具执行" };
+            let message = format!("等待{phase}超过 {} 秒，外部 Agent 没有返回进展。请检查配置来源、模型端点或本机网关后重试。", timeout.as_secs());
+            self.finish_turn(session, &mut state, &run_id, TurnTerminal::Failed { code: "agent_backend_response_timeout".into(), message }, json!({ "outcome": "unknown", "phase": phase, "timeoutSeconds": timeout.as_secs() }));
+            // Reserve the session until the timed-out process has been stopped.
+            state.closing = true;
+            true
+        };
+        if expired {
+            let report = self.stop_connection(session, "response timeout").await;
+            let mut state = lock(&session.state);
+            state.stop_unconfirmed = report.is_some_and(|report| !report.confirmation.is_confirmed());
+            state.closing = false;
+        }
+        expired
+    }
+
     /// Codex keeps retrying "Reconnecting... waiting for network" for minutes
     /// when srt's proxy refuses its model host. Inside the sandbox the first
     /// such notice ends the turn (`agent_backend_network_blocked`) instead of
@@ -1419,6 +1468,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let Some(pending) = state.turn.as_mut().and_then(|turn| turn.approvals.remove(approval_id)) else {
                     continue;
                 };
+                if let Some(turn) = state.turn.as_mut() { turn.last_activity = std::time::Instant::now(); }
                 (connection, pending)
             };
             let Some(connection) = connection else {

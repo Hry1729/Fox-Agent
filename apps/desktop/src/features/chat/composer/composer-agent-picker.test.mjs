@@ -52,6 +52,20 @@ test('starting another draft clears its override and reads the saved Agent defau
   expect(requests[0].agentBackend).toBe('deepseek')
 })
 
+test('project selected before switching Agent stays bound through repeated switches and send', async () => {
+  const requests = fakeHost('fox')
+  const { result } = renderHook(() => useDesktopConversation())
+  await act(async () => { await result.current.createConversationForAgent('fox-general') })
+  await act(async () => result.current.selectProject('D:/preview-project', 'ask'))
+  for (const backend of ['pi', 'deepseek', 'fox', 'pi']) {
+    await act(async () => result.current.setDraftAgentBackend(backend))
+    expect(result.current.draftProjectRoot).toBe('D:/preview-project')
+  }
+  await act(async () => { await result.current.send('测试项目绑定') })
+  expect(requests[0].projectRoot).toBe('D:/preview-project')
+  expect(requests[0].agentBackend).toBe('pi')
+})
+
 test('a saved codex default is not used for a new conversation', async () => {
   const requests = fakeHost('codex')
   const { result } = renderHook(() => useDesktopConversation())

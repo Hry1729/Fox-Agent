@@ -281,13 +281,13 @@ describe('source assertions', () => {
     expect(panel).toContain('client.agentBackendCredentials(JSON.parse(key) as AgentBackendTarget)')
     expect(panel).toContain('key={targetKey}')
     expect(client).toContain("command<CredentialProbe>('agent_backend_credentials', target)")
-    expect(client).toContain('{ ...target, selected, allProjects, overwrite }')
+    expect(client).toContain('{ ...target, selected, allProjects, overwrite, reuseForNewProjects }')
   })
 
   test('AgentBackendCredentialCard: 覆盖已有登录 is explicit and off by default', () => {
     expect(card).toContain('const [overwrite, setOverwrite] = useState(false)')
     expect(card).toContain('覆盖已有登录')
-    expect(card).toContain('onImport(selected, allProjects, overwrite)')
+    expect(card).toContain('onImport(selected, allProjects, overwrite, reuseForNewProjects)')
     expect(card).toContain('默认跳过已经有这些文件或 key 的项目（包括本项目），不会覆盖。')
   })
 

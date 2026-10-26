@@ -73,7 +73,7 @@ impl Endpoint {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NativeModel {
     pub endpoint: Option<Endpoint>,
     pub provider: Option<String>,

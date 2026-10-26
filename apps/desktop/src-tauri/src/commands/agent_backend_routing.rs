@@ -264,6 +264,8 @@ pub struct AgentBackendImportRequest {
     /// "覆盖已有登录" (off by default: an existing login is kept and listed).
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default)]
+    pub reuse_for_new_projects: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -298,7 +300,23 @@ pub fn agent_backend_import_credentials(
     external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
     request: AgentBackendImportRequest,
 ) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
-    external.import_credentials(&request.target, &request.selected, request.all_projects, request.overwrite)
+    external.import_credentials(&request.target, &request.selected, request.all_projects, request.overwrite, request.reuse_for_new_projects)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendSourceRequest {
+    pub target: crate::external_backend::AgentBackendTarget,
+    #[serde(default)]
+    pub remember: bool,
+}
+
+#[tauri::command]
+pub fn agent_backend_choose_fox_source(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendSourceRequest,
+) -> ApiResponse<()> {
+    external.choose_fox_source(&request.target, request.remember)
 }
 
 /// Open the private HOME in the system file manager.

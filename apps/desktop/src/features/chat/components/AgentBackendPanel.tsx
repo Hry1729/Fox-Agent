@@ -41,7 +41,8 @@ export interface AgentBackendPanelClient {
   agentBackendPermissionStatus: (conversationId?: string | null) => Promise<AgentBackendPermissionStatus>
   agentBackendCredentials: (target: AgentBackendTarget) => Promise<CredentialProbe>
   agentBackendImportCandidates: (target: AgentBackendTarget) => Promise<ImportItem[]>
-  agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite?: boolean) => Promise<ImportReport>
+  agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite?: boolean, reuseForNewProjects?: boolean) => Promise<ImportReport>
+  agentBackendChooseFoxSource?: (target: AgentBackendTarget, remember: boolean) => Promise<unknown>
   agentBackendOpenPrivateHome: (target: AgentBackendTarget) => Promise<unknown>
   agentBackendRevokeFullAccess: (conversationId: string) => Promise<unknown>
   /** Per-agent native permission list; absent = the old sandbox / full-access chip. */
@@ -199,15 +200,19 @@ export function AgentBackendPanel({
         permission={permission}
         onOpenFolder={() => client.agentBackendOpenPrivateHome(current)}
         onLoadCandidates={() => client.agentBackendImportCandidates(current)}
-        onImport={async (selected, allProjects, overwrite) => {
-          const report = await client.agentBackendImportCredentials(current, selected, allProjects, overwrite)
+        onChooseFox={client.agentBackendChooseFoxSource ? async remember => {
+          await client.agentBackendChooseFoxSource!(current, remember)
+          setOnboardingTick(tick => tick + 1)
+        } : undefined}
+        onImport={async (selected, allProjects, overwrite, reuseForNewProjects) => {
+          const report = await client.agentBackendImportCredentials(current, selected, allProjects, overwrite, reuseForNewProjects)
           setReceipt({ key: targetKey, value: importReceiptLines(report) })
           setOnboardingTick((tick) => tick + 1)
           return report
         }}
       />
     )
-    if (targetKey && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login') {
+    if (!probe.source?.choiceRequired && targetKey && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login') {
       return <><AgentModelConnectionCard key={`${targetKey}:${modelConnection.providerId}`} backend={shownBackend} connection={modelConnection} onSave={async choice => {
         const value = await client.agentBackendModelConnection!({ target: JSON.parse(targetKey), providerId: modelConnection.providerId ?? undefined, ...choice })
         setConnectionOverride({ key: targetKey, tick: modelTick, value })

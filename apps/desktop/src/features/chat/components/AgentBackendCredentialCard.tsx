@@ -22,19 +22,21 @@ import {
   type ImportReport,
 } from '@/features/conversations/model/agent-backend-onboarding'
 
-export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, onLoadCandidates, onImport }: {
+export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, onLoadCandidates, onImport, onChooseFox }: {
   probe: CredentialProbe | null
   permission?: AgentBackendPermissionStatus | null
   onOpenFolder: () => Promise<unknown>
   onLoadCandidates: () => Promise<ImportItem[]>
   /** Copy the confirmed ids; `allProjects` = "套用到我所有项目"; `overwrite` = "覆盖已有登录". */
-  onImport: (selected: string[], allProjects: boolean, overwrite: boolean) => Promise<ImportReport>
+  onImport: (selected: string[], allProjects: boolean, overwrite: boolean, reuseForNewProjects: boolean) => Promise<ImportReport>
+  onChooseFox?: (remember: boolean) => Promise<unknown>
 }) {
-  const card = credentialCardModel(probe, permission)
+  const card = credentialCardModel(probe, permission, true)
   const [candidates, setCandidates] = useState<ImportItem[] | null>(null)
   const [selected, setSelected] = useState<string[]>([])
   const [allProjects, setAllProjects] = useState(false)
   const [overwrite, setOverwrite] = useState(false)
+  const [reuseForNewProjects, setReuseForNewProjects] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   if (!card) return null
@@ -43,10 +45,16 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
     try { await action() } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
   }
   const rows = candidates ? importConfirmationRows(candidates) : []
-  return (
+  const content = (
     <section className="fox-agent-backend-credential-card" data-kind={card.kind} role="note" aria-label={card.title}>
       <strong>{card.title}</strong>
       <p>{card.description}</p>
+      {probe?.source?.model && <p>{probe.source.choiceRequired ? '原生配置模型' : '当前配置模型'}：{probe.source.provider ? `${probe.source.provider} / ` : ''}{probe.source.model}</p>}
+      {probe?.source?.modelEndpoint && <p>模型端点：<code>{probe.source.modelEndpoint}</code></p>}
+      {probe?.source?.choiceRequired && onChooseFox && <>
+        <label><input type="checkbox" checked={reuseForNewProjects} onChange={event => setReuseForNewProjects(event.target.checked)} />新项目沿用本次选择</label>
+        <button type="button" disabled={busy} onClick={() => run(async () => { await onChooseFox(reuseForNewProjects) })}>使用 Fox 模型服务</button>
+      </>}
       <div className="fox-agent-backend-credential-home">
         <span>私有 HOME：</span><code>{card.privateHome}</code>
         <button type="button" disabled={busy} onClick={() => run(async () => { await onOpenFolder() })}>打开文件夹</button>
@@ -63,7 +71,7 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
         </details>
       ))}
       {card.offerImport && (candidates === null
-        ? <button type="button" disabled={busy} onClick={() => run(async () => { const items = await onLoadCandidates(); setCandidates(items); setSelected([]) })}>从真实 HOME 导入…</button>
+        ? <button type="button" disabled={busy} onClick={() => run(async () => { const items = await onLoadCandidates(); setCandidates(items); setSelected(probe?.source?.choiceRequired ? items.map(item => item.id) : []) })}>从真实 HOME 导入…</button>
         : rows.length === 0
           ? <p>真实 HOME 里没有这个后端可导入的登录文件。</p>
           : (
@@ -83,15 +91,21 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
                 <input type="checkbox" checked={allProjects} onChange={(event) => setAllProjects(event.target.checked)} />
                 套用到我所有项目
               </label>
+              {probe?.backend === 'pi' && !probe.source?.choiceRequired && <label>
+                <input type="checkbox" checked={reuseForNewProjects} onChange={event => setReuseForNewProjects(event.target.checked)} />
+                新项目自动复用这些已确认配置（来源变化后重新确认）
+              </label>}
               <label title="不勾选时，已有同名文件或已有该 key 的项目会被跳过，并在回执里列出">
                 <input type="checkbox" checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} />
                 覆盖已有登录（先备份到私有 HOME 下的带时间戳目录）
               </label>
               <p>默认跳过已经有这些文件或 key 的项目（包括本项目），不会覆盖。</p>
-              <button type="button" disabled={busy || selected.length === 0} onClick={() => run(async () => { setMessage(null); await onImport(selected, allProjects, overwrite) })}>复制选中的项目</button>
+              <p>导入模型配置会允许该模型的精确主机和端口通过沙箱代理。</p>
+              <button type="button" disabled={busy || selected.length === 0} onClick={() => run(async () => { setMessage(null); await onImport(selected, allProjects, overwrite, reuseForNewProjects); setCandidates(null) })}>复制选中的项目</button>
             </fieldset>
           ))}
       {message && <p role="alert" className="fox-agent-backend-credential-error">{message}</p>}
     </section>
   )
+  return card.kind === 'ready' ? <details><summary>Agent 配置来源与导入</summary>{content}</details> : content
 }

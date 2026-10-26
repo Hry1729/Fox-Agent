@@ -492,6 +492,7 @@ pub fn run() {
             commands::agent_backend_routing::agent_backend_credentials,
             commands::agent_backend_routing::agent_backend_import_candidates,
             commands::agent_backend_routing::agent_backend_import_credentials,
+            commands::agent_backend_routing::agent_backend_choose_fox_source,
             commands::agent_backend_routing::agent_backend_open_private_home,
             commands::agent_backend_routing::agent_backend_permission_status,
             commands::agent_backend_routing::agent_backend_revoke_full_access,

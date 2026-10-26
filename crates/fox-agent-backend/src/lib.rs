@@ -71,6 +71,7 @@ pub mod legacy;
 pub mod limits;
 pub mod loopback;
 pub mod model_endpoint;
+pub mod login_source;
 pub mod runtime_adapters;
 pub mod native_permission;
 pub mod onboarding;

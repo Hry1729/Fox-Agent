@@ -383,6 +383,11 @@ impl ExternalBackendHost {
         let launcher = self.runtime.launcher();
         let config = &launcher.config;
         let home = config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend).map_err(|e| e.message)?;
+        if request.backend == AgentBackend::Pi {
+            let source = fox_agent_backend::login_source::status(&config.state_root, &home, Self::real_home().as_ref())?;
+            if source.choice_required { return Ok((request.backend, true)); }
+            if source.reusable { config.apply_unified_login(&request).map_err(|e| e.message)?; }
+        }
         let probe = config.credential_probe(&request).map_err(|e| e.message)?;
         let host_login = probe.present_keys.iter().any(|key| key.ends_with("（Host 环境）"));
         Ok((request.backend, fox_agent_backend::unified_login::user_login_present(request.backend, &home, host_login)))
@@ -544,7 +549,7 @@ impl ExternalBackendHost {
     /// known project's ("套用到我所有项目"); one audit event, names only. A
     /// login already there (this project included) is kept unless
     /// `overwrite` ("覆盖已有登录"), which backs it up first.
-    pub fn import_credentials(&self, target: &AgentBackendTarget, selected: &[String], all_projects: bool, overwrite: bool) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
+    pub fn import_credentials(&self, target: &AgentBackendTarget, selected: &[String], all_projects: bool, overwrite: bool, reuse_for_new_projects: bool) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
         let request = match self.target_request(target) {
             Ok(request) => request,
             Err(refusal) => return retype(refusal),
@@ -569,8 +574,24 @@ impl ExternalBackendHost {
                 })
                 .collect()
         };
+        let snapshot = if reuse_for_new_projects && request.backend == AgentBackend::Pi {
+            match fox_agent_backend::login_source::Snapshot::capture(&real, selected) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => return failure("agent_backend_source_failed", error, false),
+            }
+        } else { None };
         match self.runtime.launcher().config.import_credentials(request.backend, &projects, &real, selected, overwrite) {
             Ok(report) => {
+                if let Some(snapshot) = snapshot {
+                    if !snapshot.matches(&real.home) { return failure("agent_backend_source_changed", "配置已导入，但原生来源已变化；新项目复用未启用，请重新确认", true); }
+                    let current_home = self.runtime.launcher().config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend);
+                    if !current_home.is_ok_and(|home| snapshot.matches(&home)) {
+                        return failure("agent_backend_source_not_copied", "已有文件被保留，新项目复用尚未启用。要切换到原生配置，请勾选覆盖已有登录后重新导入；覆盖前会备份。", true);
+                    }
+                    if let Err(error) = snapshot.remember(&self.runtime.launcher().config.state_root) {
+                        return failure("agent_backend_source_failed", error, true);
+                    }
+                }
                 let mut details = report.audit_event();
                 details["allProjects"] = json!(all_projects);
                 let conversation = target.conversation_id.as_deref().filter(|id| !id.is_empty());
@@ -579,6 +600,16 @@ impl ExternalBackendHost {
             }
             Err(error) => failure(&error.code, error.message, false),
         }
+    }
+
+    pub fn choose_fox_source(&self, target: &AgentBackendTarget, remember: bool) -> ApiResponse<()> {
+        let request = match self.target_request(target) { Ok(request) => request, Err(refusal) => return refusal };
+        if request.backend != AgentBackend::Pi { return failure("agent_backend_invalid", "此选择仅用于 Pi", false); }
+        let config = &self.runtime.launcher().config;
+        let result = config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend)
+            .map_err(|e| e.message)
+            .and_then(|home| fox_agent_backend::login_source::choose_fox(&config.state_root, &home, remember));
+        match result { Ok(()) => ApiResponse::success(()), Err(error) => failure("agent_backend_source_failed", error, true) }
     }
 
     /// Open the private HOME in the system file manager (created when

@@ -97,6 +97,40 @@ function Panel({ client, backend, project = 'p1', locked = null, conversationId 
 
 const text = () => document.body.textContent ?? ''
 
+test('Pi source choice stays visible even when Fox login is ready and sends explicit reuse consent', async () => {
+  const fake = fakeClient()
+  let choice: unknown = null
+  let imported: unknown[] = []
+  const client = {
+    ...fake.client,
+    agentBackendChooseFoxSource: async (_target: AgentBackendTarget, remember: boolean) => { choice = remember },
+    agentBackendImportCredentials: async (...args: unknown[]) => {
+      imported = args
+      return { backend: 'pi', homes: 1, files: ['.pi/agent/auth.json'], keys: [], skipped: [] }
+    },
+  }
+  render(<Panel client={client} backend="pi" />)
+  await act(async () => fake.probes[0].reply.resolve({ ...missing('pi'), state: 'ready', source: { choiceRequired: true, nativeAvailable: true, reusable: false, sourceChanged: false, current: 'fox', modelEndpoint: null } }))
+  expect(screen.getByText('选择 Pi 配置来源')).toBeTruthy()
+  fireEvent.click(screen.getByLabelText('新项目沿用本次选择'))
+  fireEvent.click(screen.getByText('从真实 HOME 导入…'))
+  await waitFor(() => expect(screen.getByLabelText('auth.json').checked).toBe(true))
+  fireEvent.click(screen.getByText('复制选中的项目'))
+  await waitFor(() => expect(imported[4]).toBe(true))
+  expect(imported[3]).toBe(false)
+  expect(choice).toBeNull()
+})
+
+test('a ready Agent retains its configuration import entry', async () => {
+  const fake = fakeClient()
+  render(<Panel client={fake.client} backend="pi" />)
+  await act(async () => fake.probes[0].reply.resolve({ ...missing('pi'), state: 'ready' }))
+  const summary = screen.getByText('Agent 配置来源与导入')
+  expect(summary.closest('details')?.hasAttribute('open')).toBe(false)
+  fireEvent.click(summary)
+  expect(screen.getByText('从真实 HOME 导入…')).toBeTruthy()
+})
+
 async function settle() {
   await act(async () => { await Promise.resolve(); await Promise.resolve() })
 }

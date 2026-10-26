@@ -1405,6 +1405,7 @@ mod external_real {
             fox_data: fox_data.to_path_buf(),
             state_root: fox_data.join("agent-state"),
             runtime_root: runtime,
+            native_login_home: None,
             full_access: FullAccessSwitch::Off,
             full_access_forbidden: false,
             pi_providers: vec![],

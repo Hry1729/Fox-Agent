@@ -764,8 +764,10 @@ export const desktopClient = {
   agentBackendImportCandidates: (target: AgentBackendTarget) =>
     command<ImportItem[]>('agent_backend_import_candidates', target),
   /** Copy the confirmed items into the private HOME (or every project's); existing logins are kept unless `overwrite`. */
-  agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite = false) =>
-    command<ImportReport>('agent_backend_import_credentials', { ...target, selected, allProjects, overwrite }),
+  agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite = false, reuseForNewProjects = false) =>
+    command<ImportReport>('agent_backend_import_credentials', { ...target, selected, allProjects, overwrite, reuseForNewProjects }),
+  agentBackendChooseFoxSource: (target: AgentBackendTarget, remember: boolean) =>
+    command<void>('agent_backend_choose_fox_source', { target, remember }),
   agentBackendOpenPrivateHome: (target: AgentBackendTarget) =>
     command<string>('agent_backend_open_private_home', target),
   /** UX batch ②: permission mode / lock / FORBIDDEN. */

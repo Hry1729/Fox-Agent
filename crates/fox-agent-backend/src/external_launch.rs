@@ -94,6 +94,7 @@ pub struct HostLaunchConfig {
     /// readable or writable inside the sandbox.
     pub state_root: PathBuf,
     pub runtime_root: PathBuf,
+    pub native_login_home: Option<crate::onboarding::RealHome>,
     pub full_access: FullAccessSwitch,
     pub full_access_forbidden: bool,
     pub pi_providers: Vec<String>,
@@ -170,6 +171,7 @@ impl HostLaunchConfig {
             fox_data: fox_data.to_path_buf(),
             state_root,
             runtime_root,
+            native_login_home: crate::login_source::real_home(),
             full_access: FullAccessSwitch::parse(env(FULL_ACCESS_ENV).as_deref()),
             full_access_forbidden: full_access_forbidden_from_env(),
             pi_providers: env(PI_PROVIDERS_ENV)
@@ -571,6 +573,20 @@ impl HostLaunchConfig {
         let mode = self.permission_mode(request);
         let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
         let mut probe = crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env);
+        if request.backend == AgentBackend::Pi {
+            let mut source = crate::login_source::status(&self.state_root, &home, self.native_login_home.as_ref())
+                .map_err(|e| LaunchFailure::new("agent_backend_source_failed", e))?;
+            let choice_required = source.choice_required;
+            if !choice_required && source.current == "fox" {
+                if let Some(login) = &request.unified_login {
+                    source.provider = Some(login.provider_name.clone());
+                    source.model = Some(login.model.clone());
+                    source.model_endpoint = crate::model_endpoint::Endpoint::parse(&login.base_url).ok().map(|endpoint| endpoint.entry);
+                }
+            }
+            probe.source = Some(source);
+            if choice_required { return Ok(probe); }
+        }
         if let Some(login) = &request.unified_login {
             let plan = crate::unified_login::plan(request.backend, &home, login, host_login_reaches(&probe));
             if matches!(plan.outcome, crate::unified_login::Outcome::Generated | crate::unified_login::Outcome::Unchanged) {
@@ -607,6 +623,10 @@ impl HostLaunchConfig {
         let home = private.private_home;
         crate::sandbox::ensure_backend_home_dirs(request.backend, &home)
             .map_err(|error| LaunchFailure::new("agent_backend_unified_login_failed", format!("无法创建私有 HOME：{error}")))?;
+        if request.backend == AgentBackend::Pi {
+            crate::login_source::prepare(&self.state_root, &home, self.native_login_home.as_ref())
+                .map_err(|e| LaunchFailure::new("agent_backend_source_required", e))?;
+        }
         let report = match &request.unified_login {
             Some(login) => {
                 let mode = self.permission_mode(request);
@@ -708,6 +728,9 @@ impl HostLaunchConfig {
         let report = crate::onboarding::import_into(backend, real, selected, &targets, options).map_err(|error| LaunchFailure::new("agent_backend_import_failed", error))?;
         for target in &targets {
             if let Some(native) = &trusted_import {
+                let copied = crate::model_endpoint::resolve(backend, &target.home, &target.home.join(".fox-no-project-settings"))
+                    .map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_import_failed", error))?;
+                if copied.fingerprint != native.fingerprint { continue; }
                 crate::model_endpoint::approve_import_snapshot(&self.state_root, backend, &target.home, native)
                     .map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_import_failed", format!("文件已导入，但模型端点授权未完成：{error}")))?;
             }
@@ -1045,6 +1068,7 @@ mod tests {
             fox_data: root.join("data"),
             state_root: root.join("data").join("agent-state"),
             runtime_root: root.join("runtime"),
+            native_login_home: None,
             full_access: FullAccessSwitch::Off,
             full_access_forbidden: false,
             pi_providers: vec![],
@@ -1130,6 +1154,38 @@ mod tests {
         assert_eq!(config.credential_probe(&second).unwrap().state, crate::onboarding::CredentialState::Ready, "applied to every project");
         assert!(config.import_credentials(AgentBackend::Deepseek, &[], &real, &selected, false).is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pi_source_choice_blocks_generation_and_skipped_import_cannot_grant_a_new_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        let real = crate::onboarding::RealHome { home: root.path().join("real"), codex_home: None };
+        let write_pi = |home: &Path, endpoint: &str| {
+            std::fs::create_dir_all(home.join(".pi/agent")).unwrap();
+            std::fs::write(home.join(".pi/agent/settings.json"), r#"{"defaultProvider":"magpie","defaultModel":"m"}"#).unwrap();
+            std::fs::write(home.join(".pi/agent/models.json"), serde_json::json!({"providers":{"magpie":{"baseUrl":endpoint,"apiKey":"test-secret","models":[{"id":"m"}]}}}).to_string()).unwrap();
+        };
+        write_pi(&real.home, "http://127.0.0.1:3425/v1");
+        config.native_login_home = Some(real.clone());
+        let req = request(AgentBackend::Pi, root.path());
+        let probe = config.credential_probe(&req).unwrap();
+        let source = probe.source.unwrap();
+        assert!(source.choice_required);
+        assert_eq!(source.model_endpoint.as_deref(), Some("127.0.0.1:3425"));
+        assert_eq!(config.apply_unified_login(&req).unwrap_err().code, "agent_backend_source_required");
+        let home = config.private_home_path(req.project_uuid.as_deref().unwrap(), AgentBackend::Pi).unwrap();
+        assert!(!home.join(".pi/agent/models.json").exists());
+        write_pi(&home, "https://existing.example/v1");
+        let selected = vec!["file:.pi/agent/models.json".into(), "file:.pi/agent/settings.json".into()];
+        let projects = [(req.project_uuid.unwrap(), "当前项目".into())];
+        let kept = config.import_credentials(AgentBackend::Pi, &projects, &real, &selected, false).unwrap();
+        assert_eq!(kept.homes_written, 0);
+        assert!(!config.state_root.join("model-endpoint-grants.json").exists());
+        let imported = config.import_credentials(AgentBackend::Pi, &projects, &real, &selected, true).unwrap();
+        assert_eq!(imported.backups.len(), 1);
+        let native = crate::model_endpoint::resolve(AgentBackend::Pi, &home, root.path()).unwrap();
+        assert!(crate::model_endpoint::import_approved(&config.state_root, AgentBackend::Pi, &home, &native).unwrap());
     }
 
     /// UX batch ②: the user's per-conversation choice (persisted, carried as

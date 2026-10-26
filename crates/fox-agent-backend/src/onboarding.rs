@@ -112,6 +112,7 @@ pub struct CredentialProbe {
     /// for this backend at the next launch; `None` when 模型服务 has no
     /// usable default provider. Names only.
     pub unified_login: Option<crate::unified_login::UnifiedReport>,
+    pub source: Option<crate::login_source::SourceStatus>,
 }
 
 /// Names of Host environment variables that are set (non-empty). Values are
@@ -334,6 +335,7 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
         required_files: required_files.into_iter().map(str::to_owned).collect(),
         templates,
         unified_login: None,
+        source: None,
     }
 }
 

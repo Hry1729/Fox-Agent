@@ -194,6 +194,40 @@ fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, stor
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn response_timeout_fails_once_stops_process_and_allows_retry() {
+    assert!(node_available(), "this regression requires Node");
+    let sink = Sink::default();
+    let launcher = MockLauncher::default();
+    let runtime = ExternalRuntime::with_idle_timeout(sink.clone(), launcher.clone(), tokio::runtime::Handle::current(), Duration::from_millis(200), Duration::from_secs(2), Duration::from_millis(250));
+    runtime.start_turn(turn("idle", "hung", "hang", AgentBackend::Pi, None)).unwrap();
+    let end = sink.terminal("hung").await;
+    assert_eq!(end["type"], "run.failed");
+    assert_eq!(end["code"], "agent_backend_response_timeout");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(sink.types("hung").iter().filter(|kind| kind.starts_with("run.") && kind.as_str() != "run.started").count(), 1);
+    runtime.start_turn(turn("idle", "retry", "simple", AgentBackend::Pi, None)).unwrap();
+    assert_eq!(sink.terminal("retry").await["type"], "run.completed");
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_timeout_pauses_while_waiting_for_user_approval() {
+    assert!(node_available(), "this regression requires Node");
+    let sink = Sink::default();
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let runtime = ExternalRuntime::with_idle_timeout(sink.clone(), launcher, tokio::runtime::Handle::current(), Duration::from_millis(200), Duration::from_secs(2), Duration::from_millis(250));
+    runtime.start_turn(turn("approval-idle", "approval", "hello", AgentBackend::Pi, None)).unwrap();
+    let (_, id, _) = sink.wait_approval(1).await;
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    assert!(!sink.types("approval").contains(&"run.failed".into()));
+    runtime.answer(&id, true);
+    assert_eq!(sink.terminal("approval").await["type"], "run.completed");
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn model_settlement_requires_delivery_and_preserves_partial_failure() {
     assert!(node_available(), "this regression requires Node");
     let (runtime, sink) = new_runtime(MockLauncher::default());
