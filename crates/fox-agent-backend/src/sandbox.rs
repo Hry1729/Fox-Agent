@@ -63,8 +63,8 @@ pub const SETTING_ALLOWED_DOMAINS: &str = "sandbox.allowed_domains";
 pub const SRT_PACKAGE: &str = "@anthropic-ai/sandbox-runtime";
 /// Version the settings shape (literal path entries) and the Linux
 /// measurement were taken with.
-pub const SRT_VERSION: &str = "0.0.80";
-pub const SRT_MIN_VERSION: (u64, u64, u64) = (0, 0, 80);
+pub const SRT_VERSION: &str = "0.0.81";
+pub const SRT_MIN_VERSION: (u64, u64, u64) = (0, 0, 81);
 /// srt CLI requirement (`engines.node` of the package).
 pub const SRT_MIN_NODE: (u64, u64, u64) = (22, 12, 0);
 
@@ -429,6 +429,8 @@ pub enum SandboxErrorCode {
     /// not deliver stdin to the sandboxed process on Windows, so there is no
     /// stdio fallback (docs/sandbox.md 7.12).
     SandboxBridgeUnavailable,
+    /// The requested read/write boundary is stronger than this backend provides.
+    SandboxDirectoryIsolationUnavailable,
     /// A file the Agent says it delivered is not a readable regular file
     /// inside an authorized writable folder, as seen from outside the sandbox
     /// ([`verify_delivered_file`]).
@@ -447,6 +449,7 @@ impl SandboxErrorCode {
             Self::SandboxPathExposed => "sandbox_path_exposed",
             Self::SandboxRuntimeNotInstalled => "sandbox_runtime_not_installed",
             Self::SandboxBridgeUnavailable => "sandbox_bridge_unavailable",
+            Self::SandboxDirectoryIsolationUnavailable => "sandbox_directory_isolation_unavailable",
             Self::DeliveredFileRejected => "delivered_file_rejected",
         }
     }
@@ -696,6 +699,8 @@ impl From<PathBuf> for PrivateHome {
 /// What one sandboxed session may touch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxPolicy {
+    #[serde(default)]
+    pub require_directory_isolation: bool,
     /// The session's authorized directories (from the Host's authorization
     /// snapshot). Read-only entries are readable but not writable.
     pub authorized: Vec<AuthorizedDir>,
@@ -880,6 +885,7 @@ impl SandboxPolicy {
     ) -> Self {
         let home = private_home.into();
         Self {
+            require_directory_isolation: false,
             authorized,
             private_home: home.path,
             private_home_root: home.root,
@@ -892,6 +898,11 @@ impl SandboxPolicy {
             loopback_gateway: None,
             loopback_diagnostics: Vec::new(),
         }
+    }
+
+    pub fn with_required_directory_isolation(mut self, required: bool) -> Self {
+        self.require_directory_isolation = required;
+        self
     }
 
     /// Allow exactly the loopback gateway port `derivation` found (the same
@@ -1219,6 +1230,11 @@ impl SrtInstall {
     pub fn package_root(&self) -> Option<PathBuf> {
         self.cli_js.parent()?.parent().map(Path::to_path_buf)
     }
+
+    pub fn windows_helper(&self) -> Option<PathBuf> {
+        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+        Some(self.package_root()?.join("vendor").join("srt-win").join(arch).join("srt-win.exe"))
+    }
 }
 
 /// System access used by preflight; faked in tests.
@@ -1317,13 +1333,54 @@ pub fn windows_install_state(probe: &dyn SystemProbe) -> WindowsInstallState {
 /// Command the installer runs the first time the user picks sandboxed mode on
 /// Windows (self-elevates, one UAC prompt; idempotent).
 pub fn windows_install_command(install: &SrtInstall) -> (PathBuf, Vec<String>) {
-    (install.node.clone(), vec![install.cli_js.to_string_lossy().into_owned(), "windows-install".into()])
+    (install.node.clone(), vec![install.cli_js.to_string_lossy().into_owned(), "windows-install".into(), "--skip-profile-grant".into()])
 }
 
 /// Command Fox's uninstaller must run (removes the WFP filters, the
 /// `srt-sandbox` account and its registry key; one UAC prompt).
 pub fn windows_uninstall_command(install: &SrtInstall) -> (PathBuf, Vec<String>) {
     (install.node.clone(), vec![install.cli_js.to_string_lossy().into_owned(), "windows-uninstall".into()])
+}
+
+const WINDOWS_WRITE_CAPABILITIES: &[&str] = &[
+    "profile-deny-expansion", "profile-session-grant-check", "kept-grant-holders", "read-deny-except", "exec-holder",
+];
+
+fn validate_windows_helper_status(text: &str) -> Result<(), SandboxError> {
+    use SandboxErrorCode::*;
+    let status: Value = serde_json::from_str(text).map_err(|_| {
+        SandboxError::new(SandboxUnavailable, "无法读取 Windows 沙箱组件的能力状态")
+    })?;
+    let setup = status["setup_version"].as_u64().filter(|version| *version >= 3);
+    if setup.is_none() || status["marker_version"].as_u64() != setup {
+        return Err(SandboxError::new(SandboxNotInstalled, "Windows 沙箱安装状态与写入隔离组件不匹配")
+            .remedy("请重新运行 Fox 安装包以安装或修复沙箱（一次管理员授权）"));
+    }
+    let capabilities = status["capabilities"].as_array();
+    for required in WINDOWS_WRITE_CAPABILITIES {
+        if !capabilities.is_some_and(|values| values.iter().any(|value| value.as_str() == Some(required))) {
+            return Err(SandboxError::new(SandboxDependencyMissing, "Windows 沙箱组件缺少写入隔离能力")
+                .missing(*required).remedy("安装配套的 Fox 沙箱运行时后重试"));
+        }
+    }
+    let sid = status["marker_user_sid"].as_str().filter(|sid| !sid.is_empty());
+    if status["cred_present"].as_bool() != Some(true)
+        || status["user"]["exists"].as_bool() != Some(true)
+        || status["user"]["group_exists"].as_bool() != Some(true)
+        || status["user"]["in_sandbox_group"].as_bool() != Some(true)
+        || sid.is_none() || sid != status["user"]["sid"].as_str()
+    {
+        return Err(SandboxError::new(SandboxNotInstalled, "Windows 沙箱账户或授权组状态不完整")
+            .remedy("请重新运行 Fox 安装包以安装或修复沙箱（一次管理员授权）"));
+    }
+    if status["seclogon"].as_str() != Some("ok") {
+        return Err(SandboxError::new(SandboxUnavailable, "Windows Secondary Logon 服务不可用"));
+    }
+    if status["profile_grant"]["state"].as_str() != Some("none") {
+        return Err(SandboxError::new(SandboxPathExposed, "Windows 沙箱存在用户主目录读取授权，超出 Fox 项目授权范围")
+            .remedy("先撤销 srt 的用户主目录读取授权，再启动 Fox 沙箱"));
+    }
+    Ok(())
 }
 
 /// Check that srt can run here. Any failure is a refusal for sandboxed mode;
@@ -1425,6 +1482,10 @@ pub fn preflight(install: &SrtInstall, probe: &dyn SystemProbe) -> Result<Sandbo
                 )
                 .remedy("run the one-time sandbox setup (one administrator prompt)"));
             }
+            let status = install.windows_helper().and_then(|helper| probe.run(&helper, &["user", "status"]))
+                .ok_or_else(|| SandboxError::new(SandboxDependencyMissing, "无法运行配套的 Windows 沙箱组件")
+                    .missing("srt-win.exe").remedy("安装或修复 Fox 沙箱运行时后重试"))?;
+            validate_windows_helper_status(&status)?;
         }
         HostOs::Other => unreachable!(),
     }
@@ -2526,6 +2587,11 @@ pub fn prepare_launch(
         PermissionMode::Sandboxed => match setup {
             SandboxSetup::Unavailable(error) => Err(error),
             SandboxSetup::Ready { launcher, policy } => {
+                if policy.require_directory_isolation && policy.read_scope(os) != ReadScope::AuthorizedOnly {
+                    return Err(SandboxError::new(SandboxErrorCode::SandboxDirectoryIsolationUnavailable,
+                        "当前沙箱后端不能保证项目外文件同时不可读、不可写；严格目录隔离要求未满足")
+                        .remedy("当前会话未启动。请使用已通过完整目录隔离验证的后端；不会自动切换为全权限"));
+                }
                 let SandboxedLaunch { spec, session, effective_policy, windows_ancestor_aces, backend_env, acp_bridge, stray_srt_state } = launcher.wrap(&spec, policy, session_id)?;
                 // From the policy that was written, not the one requested:
                 // the session temp, private HOME and runtime directories the
@@ -3141,7 +3207,7 @@ mod tests {
         let error = launcher.windows_ace_plan(&effective_windows(&launcher)).unwrap_err();
         assert_eq!(error.code, SandboxErrorCode::SandboxRuntimeNotInstalled);
         assert_eq!(error.code.as_str(), "sandbox_runtime_not_installed");
-        assert_eq!(error.remedy.as_deref(), Some("需在设置中启用沙箱（一次管理员授权）"));
+        assert_eq!(error.remedy.as_deref(), Some("请重新运行 Fox 安装包以安装或修复沙箱（一次管理员授权）"));
         // An override location the user owns, or one Users may write.
         let acl = FakeAcl { user_owned: vec![r"D:\fox-rt"], ..Default::default() };
         let (launcher, _) = windows_launcher(r"D:\fox-rt\node\node.exe", r"D:\fox-rt\srt", acl);
@@ -3729,6 +3795,7 @@ mod tests {
         srt_version: &'static str,
         userns: bool,
         windows_installed: bool,
+        windows_status: Option<String>,
     }
 
     impl FakeProbe {
@@ -3738,9 +3805,10 @@ mod tests {
                 files: vec![install().cli_js],
                 on_path: vec!["bwrap", "socat", "rg"],
                 node_version: Some("v22.23.3\n"),
-                srt_version: "0.0.80",
+                srt_version: SRT_VERSION,
                 userns: true,
                 windows_installed: false,
+                windows_status: Some(windows_helper_status().to_string()),
             }
         }
     }
@@ -3761,6 +3829,7 @@ mod tests {
                 "node" => self.node_version.map(String::from),
                 "bwrap" => self.userns.then(String::new),
                 "reg" | "reg.exe" => self.windows_installed.then(String::new),
+                "srt-win.exe" => self.windows_status.clone(),
                 _ => None,
             }
         }
@@ -3771,6 +3840,54 @@ mod tests {
 
     fn install() -> SrtInstall {
         SrtInstall::under_prefix("/opt/fox/node/bin/node".into(), Path::new("/opt/fox/srt"))
+    }
+
+    fn windows_helper_status() -> Value {
+        json!({
+            "setup_version": 3, "marker_version": 3, "cred_present": true,
+            "profile_grant": { "state": "none" },
+            "marker_user_sid": WIN_SID, "seclogon": "ok",
+            "user": { "exists": true, "group_exists": true, "in_sandbox_group": true, "sid": WIN_SID },
+            "capabilities": ["profile-deny-expansion", "profile-session-grant-check", "kept-grant-holders", "read-deny-except", "exec-holder"]
+        })
+    }
+
+    #[test]
+    fn windows_write_preflight_rejects_old_setup_and_mismatched_helpers() {
+        let mut probe = FakeProbe::linux_ok();
+        probe.os = HostOs::Windows;
+        probe.windows_installed = true;
+        assert!(preflight(&install(), &probe).is_ok());
+        probe.srt_version = "0.0.80";
+        assert_eq!(preflight(&install(), &probe).unwrap_err().code, SandboxErrorCode::SandboxDependencyMissing);
+        probe.srt_version = SRT_VERSION;
+        for field in ["marker_version", "setup_version"] {
+            let mut status = windows_helper_status();
+            status[field] = json!(2);
+            probe.windows_status = Some(status.to_string());
+            assert_eq!(preflight(&install(), &probe).unwrap_err().code, SandboxErrorCode::SandboxNotInstalled);
+        }
+        let mut status = windows_helper_status();
+        status["capabilities"].as_array_mut().unwrap().pop();
+        probe.windows_status = Some(status.to_string());
+        let error = preflight(&install(), &probe).unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxDependencyMissing);
+        assert_eq!(error.missing, ["exec-holder"]);
+        let mut status = windows_helper_status();
+        status["user"]["sid"] = json!("different-account");
+        probe.windows_status = Some(status.to_string());
+        assert_eq!(preflight(&install(), &probe).unwrap_err().code, SandboxErrorCode::SandboxNotInstalled);
+        for profile_state in [json!("current"), json!("stale"), Value::Null] {
+            let mut status = windows_helper_status();
+            status["profile_grant"]["state"] = profile_state;
+            probe.windows_status = Some(status.to_string());
+            assert_eq!(preflight(&install(), &probe).unwrap_err().code, SandboxErrorCode::SandboxPathExposed);
+        }
+        probe.windows_status = Some("not json".into());
+        assert_eq!(preflight(&install(), &probe).unwrap_err().code, SandboxErrorCode::SandboxUnavailable);
+        probe.windows_status = None;
+        assert_eq!(preflight(&install(), &probe).unwrap_err().code, SandboxErrorCode::SandboxDependencyMissing);
+        assert_eq!(windows_install_command(&install()).1.last().unwrap(), "--skip-profile-grant");
     }
 
     #[test]
@@ -4115,6 +4232,23 @@ mod tests {
         fn wrap(&self, _: &LaunchSpec, _: &SandboxPolicy, _: &str) -> Result<SandboxedLaunch, SandboxError> {
             Err(SandboxError::new(SandboxErrorCode::SandboxUnavailable, "boom"))
         }
+    }
+
+    #[test]
+    fn strict_directory_requirement_rejects_partial_scope_before_wrap() {
+        let mut policy = windows_policy().with_required_directory_isolation(true);
+        let error = prepare_launch(PermissionMode::Sandboxed, spec("/x"), "strict",
+            SandboxSetup::Ready { launcher: &Broken, policy: &policy }, HostOs::Windows).unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxDirectoryIsolationUnavailable);
+        policy.require_directory_isolation = false;
+        let error = prepare_launch(PermissionMode::Sandboxed, spec("/x"), "limited",
+            SandboxSetup::Ready { launcher: &Broken, policy: &policy }, HostOs::Windows).unwrap_err();
+        assert_eq!(error.message, "boom", "the existing limited mode still reaches its launcher");
+        let mut policy = linux_policy().with_required_directory_isolation(true);
+        policy.deny_read_roots.clear();
+        let error = prepare_launch(PermissionMode::Sandboxed, spec("/x"), "strict",
+            SandboxSetup::Ready { launcher: &Broken, policy: &policy }, HostOs::Linux).unwrap_err();
+        assert_eq!(error.code, SandboxErrorCode::SandboxDirectoryIsolationUnavailable);
     }
 
     #[test]

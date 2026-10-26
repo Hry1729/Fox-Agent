@@ -11,7 +11,7 @@
     4. 创建 %ProgramData%\Fox\sandbox 并设 ACL：Administrators / SYSTEM 完全控制；Users 仅
        “创建子文件夹 + 读属性 + 遍历”（只对该目录本身）；CREATOR OWNER 对子项完全控制（仅继承）；
        Users 不能列出或读取他人的目录；
-    5. 运行 srt windows-install --proxy-port-range 60080-60089（srt 自身幂等）；
+    5. 运行 srt windows-install --proxy-port-range 60080-60089 --skip-profile-grant（不授权用户主目录）；
     6. 把结果写成 JSON（-ResultPath），含 srt 沙箱账户 SID，供 Fox 写入 srt-sids 台账与 srt-install 记录；
     7. 可选：-RepairOwnershipList 给出 Fox 非提权扫描输出的所有权修复清单时，以管理员身份逐项修复
        （repair-ownership.ps1，见 docs/sandbox.md 7.8）。
@@ -117,8 +117,19 @@ function Write-Result([hashtable] $Result) {
 
 function Invoke-Native([string] $FilePath, [string[]] $Arguments) {
     Write-FoxLog ("run: " + $FilePath + ' ' + ($Arguments -join ' '))
-    $output = & $FilePath @Arguments 2>&1 | Out-String
-    $code = $LASTEXITCODE
+    Get-Command $FilePath -ErrorAction Stop | Out-Null
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 wraps native stderr as ErrorRecord objects.
+        # Capture diagnostics and use the exit code, including success warnings.
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = $null
+        $output = & $FilePath @Arguments 2>&1 | Out-String
+        $code = $global:LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($null -eq $code) { throw "Failed to start native command: $FilePath" }
     Write-FoxLog ("exit " + $code + ": " + $output.Trim())
     return @{ Code = $code; Output = $output }
 }
@@ -411,12 +422,23 @@ try {
     $alreadyInstalled = [bool] $before
     $node = Join-Path $target 'node\node.exe'
     $cli = Join-Path $target $SrtCliRelative
-    $r = Invoke-Native $node @($cli, 'windows-install', '--proxy-port-range', $ProxyPortRange)
+    $srtPackage = Get-Content -LiteralPath (Join-Path $target $SrtPackageJsonRelative) -Raw | ConvertFrom-Json
+    if ([string] $srtPackage.version -ne '0.0.81') { throw 'Fox requires sandbox-runtime 0.0.81 with its matching Windows helper' }
+    $helper = Join-Path $target 'srt\node_modules\@anthropic-ai\sandbox-runtime\vendor\srt-win\x64\srt-win.exe'
+    $probe = Invoke-Native $helper @('user', 'status')
+    if ($probe.Code -ne 0) { throw 'Cannot inspect the Windows sandbox helper' }
+    $helperStatus = $probe.Output | ConvertFrom-Json
+    if ([int] $helperStatus.setup_version -ne 3) { throw 'Unexpected Windows sandbox setup version' }
+    if ($helperStatus.profile_grant.state -ne 'none') { throw 'Remove the existing srt profile read grant before installing the Fox sandbox' }
+    foreach ($capability in @('profile-deny-expansion', 'profile-session-grant-check', 'kept-grant-holders', 'read-deny-except', 'exec-holder')) {
+        if (-not ($helperStatus.capabilities -contains $capability)) { throw "Windows sandbox helper is missing $capability" }
+    }
+    $r = Invoke-Native $node @($cli, 'windows-install', '--proxy-port-range', $ProxyPortRange, '--skip-profile-grant')
     if ($r.Code -eq 2) { throw 'srt windows-install was cancelled at its UAC prompt' }
     if ($r.Code -ne 0) { throw "srt windows-install failed (exit $($r.Code)): $($r.Output.Trim())" }
     $after = Get-SrtRegistry
     if (-not $after) { throw 'srt windows-install finished but HKLM\SOFTWARE\sandbox-runtime has no MarkerVersion / SandboxUserSid' }
-    $srtPackage = Get-Content -LiteralPath (Join-Path $target $SrtPackageJsonRelative) -Raw | ConvertFrom-Json
+    if ($after.markerVersion -ne $helperStatus.setup_version) { throw 'Windows sandbox installation did not reach the required setup version' }
 
     # 6. Result.
     $result.srt = @{

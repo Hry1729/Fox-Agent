@@ -53,6 +53,8 @@ pub use crate::launch::RUNTIME_PACKAGE_VERSION;
 pub const FULL_ACCESS_ENV: &str = "FOX_EXTERNAL_FULL_ACCESS";
 /// Enterprise switch: no external session may run in full access.
 pub const FULL_ACCESS_FORBIDDEN_ENV: &str = "FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN";
+/// Require a complete file read/write boundary for sandboxed sessions.
+pub const REQUIRE_DIRECTORY_ISOLATION_ENV: &str = "FOX_REQUIRE_DIRECTORY_ISOLATION";
 /// pi providers whose model API domains the sandbox allows (`anthropic,openai`).
 pub const PI_PROVIDERS_ENV: &str = "FOX_PI_PROVIDERS";
 /// Extra sandbox domains per backend (`pi=api.example.com;codex=...`), Host
@@ -97,6 +99,7 @@ pub struct HostLaunchConfig {
     pub native_login_home: Option<crate::onboarding::RealHome>,
     pub full_access: FullAccessSwitch,
     pub full_access_forbidden: bool,
+    pub require_directory_isolation: bool,
     pub pi_providers: Vec<String>,
     pub extra_domains: BTreeMap<AgentBackend, Vec<String>>,
     /// Host variables passed to the backend in full access only
@@ -113,6 +116,10 @@ pub fn full_access_forbidden_from_env() -> bool {
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+pub fn directory_isolation_required(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "off" | "no"))
 }
 
 /// Newest version directory under `parent` (lexicographic), if any.
@@ -174,6 +181,7 @@ impl HostLaunchConfig {
             native_login_home: crate::login_source::real_home(),
             full_access: FullAccessSwitch::parse(env(FULL_ACCESS_ENV).as_deref()),
             full_access_forbidden: full_access_forbidden_from_env(),
+            require_directory_isolation: directory_isolation_required(env(REQUIRE_DIRECTORY_ISOLATION_ENV).as_deref()),
             pi_providers: env(PI_PROVIDERS_ENV)
                 .map(|value| value.split(',').map(str::trim).filter(|item| !item.is_empty()).map(str::to_owned).collect())
                 .unwrap_or_default(),
@@ -505,7 +513,8 @@ impl HostLaunchConfig {
             domains.domains,
             self.os,
         )
-        .with_loopback_derivation(derivation))
+        .with_loopback_derivation(derivation)
+        .with_required_directory_isolation(self.require_directory_isolation))
     }
 }
 
@@ -1073,6 +1082,22 @@ pub fn recover_at_startup(config: &HostLaunchConfig) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn strict_directory_requirement_is_preserved_by_host_policy() {
+        for value in [None, Some("0"), Some("false"), Some(" off "), Some("")] {
+            assert!(!directory_isolation_required(value));
+        }
+        for value in [Some("1"), Some("true"), Some("strict"), Some("typo")] {
+            assert!(directory_isolation_required(value));
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.require_directory_isolation = true;
+        let request = request(AgentBackend::Pi, root.path());
+        let policy = config.sandbox_policy(&request, root.path().join("homes")).unwrap();
+        assert!(policy.require_directory_isolation);
+    }
+
     fn config(root: &Path) -> HostLaunchConfig {
         HostLaunchConfig {
             os: HostOs::Linux,
@@ -1082,6 +1107,7 @@ mod tests {
             native_login_home: None,
             full_access: FullAccessSwitch::Off,
             full_access_forbidden: false,
+            require_directory_isolation: false,
             pi_providers: vec![],
             extra_domains: BTreeMap::new(),
             env_passthrough: vec![],

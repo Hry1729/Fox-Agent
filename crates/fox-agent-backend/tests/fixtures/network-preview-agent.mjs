@@ -57,7 +57,10 @@ if (process.argv[2] === '--server') {
           const canary = path.join(path.dirname(process.argv[1]), '..', 'outside-canary.txt')
           const readable = await fs.readFile(canary, 'utf8').then(() => true).catch(() => false)
           const writable = await fs.writeFile(canary, 'TEST_WRITE').then(() => true).catch(() => false)
-          text(JSON.stringify({ outsideReadBlocked: !readable, outsideWriteBlocked: !writable }))
+          const insideWritable = await fs.writeFile('inside-write.txt', 'PROJECT_WRITE').then(() => true).catch(() => false)
+          const previous = await fs.readFile('previous-project.json', 'utf8').then(JSON.parse).catch(() => null)
+          const previousWritable = previous ? await fs.writeFile(previous.target, 'CROSS_PROJECT_WRITE').then(() => true).catch(() => false) : null
+          text(JSON.stringify({ outsideReadBlocked: !readable, outsideWriteBlocked: !writable, insideWriteSucceeded: insideWritable, previousProjectWriteBlocked: previousWritable === null ? null : !previousWritable }))
         } else if (command === 'install-dependency') {
           await fs.writeFile('package.json', JSON.stringify({ name: 'fox-network-fixture', private: true, version: '1.0.0' }))
           const npm = process.env.FOX_TEST_NPM_CLI || path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')

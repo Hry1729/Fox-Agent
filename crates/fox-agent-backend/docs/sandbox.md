@@ -1,11 +1,11 @@
 # 外部 Agent 后端的权限模式与 srt 沙箱层
 
-运行时 0.1.3 的模型端点授权、精确回环代理和 pi 错误结算见 [受管模型连接](model-connectivity.md)。0.1.4 的动态网络审批、项目预览、npm/npx、Windows 实测边界及 MXC 评估见 [网络审批与预览](network-preview.md)。下文关于 stock dsh 回环直连和完全访问退路的测量记录保留作历史证据，不适用于已验证的 0.1.3 受管补丁。
+运行时 0.1.3 的模型端点授权、精确回环代理和 pi 错误结算见 [受管模型连接](model-connectivity.md)。当前 0.1.5 的动态网络审批、预览、写入受限令牌、严格目录能力检查、Windows 实测边界及 MXC 评估见 [网络审批与预览](network-preview.md)。下文关于 stock dsh 回环直连和完全访问退路的测量记录保留作历史证据，不适用于已验证的受管补丁。
 
 - 代码：`src/sandbox.rs`（模式、策略、路径规范化、预检、启动包装、能力声明、交付文件校验），`src/winacl.rs`（Windows 所有权 / `WRITE_DAC` 预检、暴露面审计、精确 ACE 增删、所有者修改、私有目录创建），`src/winruntime.rs`（Windows 运行时位置与检查、ProgramData 私有目录、srt 注册表状态、SID 台账、安装记录、卸载边界），`src/winancestor.rs`（祖先元数据 ACE 与引用台账），`src/winowner.rs`（所有权修复），`src/statefile.rs`（加锁的 JSON 状态文件），`scripts/windows/enable-sandbox.ps1` / `disable-sandbox.ps1`（一次提权的启用 / 停用脚本），`src/acp.rs` 的 `AcpConnection::spawn_prepared`、停止状态与 Windows Job Object，`src/proctree.rs`（进程树停止确认），`src/port.rs`（撤权停止与重建的状态机）。
 - 实测：`tests/sandbox_srt.rs`。真实测试标 `#[ignore]`，普通 `cargo test` 只把它计入 “ignored”（即跳过数），**cargo 全绿不等于实测通过**；统计口径见第 6.3 节。
 - 决策来源：用户 2026-10-19 拍板；方案文档 `docs/02-架构/四Agent改造实施方案-v0.3.1.md` 末尾“v0.3.2 增补”。
-- srt：`@anthropic-ai/sandbox-runtime`（Apache-2.0），本文按 0.0.80 及其 README 编写。
+- srt：`@anthropic-ai/sandbox-runtime`（Apache-2.0），当前固定 0.0.81。下文保留 0.0.80 的基础机制和历史测量，0.0.81 的差异及验收以[网络审批与预览](network-preview.md)为准。
 
 ## 1 两种模式
 
@@ -56,7 +56,8 @@ sandboxed 模式下，以下任何一项失败都**拒绝启动该后端**并返
 
 | code | 触发 |
 |---|---|
-| `sandbox_dependency_missing` | srt 包不在 Fox 管理目录、srt 版本 < 0.0.80、Node 缺失或 < 22.12、Linux 缺 bwrap / socat / rg、macOS 缺 rg |
+| `sandbox_dependency_missing` | srt 包不在 Fox 管理目录、srt 版本 < 0.0.81、Windows helper 缺失或能力不配套、Node 缺失或 < 22.12、Linux 缺 bwrap / socat / rg、macOS 缺 rg |
+| `sandbox_directory_isolation_unavailable` | Host 要求完整目录隔离，但当前后端不能提供完整读取边界；在启动子进程前拒绝 |
 | `sandbox_not_installed` | Windows 未执行 `windows-install`（查 `HKLM\SOFTWARE\sandbox-runtime`） |
 | `sandbox_unavailable` | 不支持的 OS；Linux 上 bwrap 无法建立 user/net namespace（预检实跑 `bwrap --ro-bind / / --unshare-user --unshare-net -- /bin/true`）；macOS 无 `/usr/bin/sandbox-exec`；准备会话目录失败 |
 | `sandbox_policy_invalid` | 授权目录不存在或无法解析；路径规范化后为 UNC / 设备路径（Windows）；受管路径在缺失部分含 `..`（第 10 节）；无授权目录；无 denyRead 根（Linux/macOS）；Windows 上授权 / deny 目标是盘根或共享根、运行时目录与可写授权目录重叠、会话变量或参数含 `"` `%` 换行；路径非绝对；授权目录 / 私有 HOME / 额外只读路径等于或包含某个 denyRead 根（会把它重新打开，例如授权 `/`）；项目 UUID 为空 / 非法 / 全零；私有 HOME 不在私有 HOME 根下；授权目录与私有 HOME 根或会话临时目录重叠；域名格式错误；会话 ID 非 `[A-Za-z0-9_-]{1,128}`；settings 目录落在沙箱可读或可写范围内；撤权重建拿到的不是 sandboxed 启动 |

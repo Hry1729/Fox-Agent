@@ -57,7 +57,7 @@ ASSETS = os.path.join(CRATE, "runtime-assets")
 PI_FIXTURES = os.path.join(CRATE, "fixtures", "pi")
 # Must equal fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION (the
 # directory Fox looks for under the install root); a unit test checks it.
-DEFAULT_VERSION = "0.1.4"
+DEFAULT_VERSION = "0.1.5"
 # Package key -> source file in this crate. Each is copied by `stage` and must
 # be byte-equal (modulo CRLF) in `pack`.
 PI_GATE_FILES = {
@@ -69,8 +69,11 @@ DEFAULT_INSTALL_ROOT = r"C:\Program Files\Fox\sandbox-runtime"
 STAGING_PREFIX = r"C:\Program Files\Fox\.s00000000\c"
 DEFAULT_BUDGET = 240
 SRT_CLI = "srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
+SRT_VERSION = "0.0.81"
+SRT_PACKAGE = "srt/node_modules/@anthropic-ai/sandbox-runtime/package.json"
+SRT_HELPER = "srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/srt-win/x64/srt-win.exe"
 NPM_FILES = ["node/npm.cmd", "node/npx.cmd", "node/node_modules/npm/package.json", "node/node_modules/npm/bin/npm-cli.js", "node/node_modules/npm/bin/npx-cli.js"]
-REQUIRED = ["node/node.exe", *NPM_FILES, SRT_CLI, "acp-bridge/bridge.mjs", *PI_GATE_FILES]
+REQUIRED = ["node/node.exe", *NPM_FILES, SRT_CLI, SRT_PACKAGE, SRT_HELPER, "acp-bridge/bridge.mjs", *PI_GATE_FILES]
 FIXED_TIME = (2026, 1, 1, 0, 0, 0)
 
 
@@ -214,6 +217,13 @@ def verify_layout(directory):
     root = fs_path(directory)
     keys = set(list_files(directory)) if os.path.isdir(root) else set()
     problems = [f"missing {rel}" for rel in REQUIRED if rel_key(rel) not in keys]
+    if SRT_PACKAGE in keys:
+        try:
+            package = json.loads(read_bytes(child(root, SRT_PACKAGE)))
+            if package.get("version") != SRT_VERSION:
+                problems.append(f"srt must be {SRT_VERSION} with its matching Windows helper")
+        except (ValueError, AttributeError):
+            problems.append(f"invalid {SRT_PACKAGE}")
     if "acp-bridge/bridge.mjs" in keys:
         if norm_text(read_bytes(child(root, "acp-bridge/bridge.mjs"))) != norm_text(read_bytes(fs_path(os.path.join(ASSETS, "acp-bridge", "bridge.mjs")))):
             problems.append("acp-bridge/bridge.mjs differs from runtime-assets/acp-bridge/bridge.mjs (Fox refuses to start)")

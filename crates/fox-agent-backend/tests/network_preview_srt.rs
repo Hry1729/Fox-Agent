@@ -35,7 +35,7 @@ impl ExternalLauncher for Launcher {
                 winancestor::{srt_acl_lock_path, AncestorAceCoordinator},
                 winruntime::*,
             };
-            let state = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
+            let state = std::env::var_os("FOX_TEST_OUTPUT_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA")))
                 .join("FoxSandboxFixtures")
                 .join(format!("network-preview-{}", std::process::id()))
                 .join("state");
@@ -215,10 +215,10 @@ impl Sink {
 #[ignore = "requires installed Windows srt; FOX_TEST_REAL_SRT=1 --include-ignored"]
 async fn real_windows_network_approval_and_preview_lifecycle() {
     assert_eq!(std::env::var("FOX_TEST_REAL_SRT").as_deref(), Ok("1"));
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.test-target")
+    let base = std::env::var_os("FOX_TEST_OUTPUT_ROOT").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.test-target"))
         .join(format!("network-preview-{}", std::process::id()));
-    let root = base.join("project");
+    let root = base.join("项目 with spaces");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("agent.mjs"),
@@ -226,6 +226,15 @@ async fn real_windows_network_approval_and_preview_lifecycle() {
     )
     .unwrap();
     std::fs::write(base.join("outside-canary.txt"), "HOST_CANARY").unwrap();
+    let previous = std::env::var_os("FOX_TEST_PREVIOUS_PROJECT").map(PathBuf::from);
+    if let Some(previous) = &previous {
+        assert_eq!(std::fs::read_to_string(previous.join("inside-write.txt")).unwrap(), "PROJECT_WRITE");
+        std::fs::write(root.join("previous-project.json"), serde_json::to_vec(&json!({ "target": previous.join("inside-write.txt") })).unwrap()).unwrap();
+    }
+    // Reproduce ambient Users-group write permission on this fixture only.
+    let acl = std::process::Command::new("icacls.exe")
+        .arg(&base).args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]).output().unwrap();
+    assert!(acl.status.success(), "{}", String::from_utf8_lossy(&acl.stderr));
     if std::env::var("FOX_TEST_NPM_NETWORK").as_deref() == Ok("1") {
         fn copy_tree(source: &std::path::Path, destination: &std::path::Path) {
             std::fs::create_dir_all(destination).unwrap();
@@ -242,13 +251,13 @@ async fn real_windows_network_approval_and_preview_lifecycle() {
         }
         let source = PathBuf::from(
             std::env::var_os("FOX_TEST_NPM_SOURCE")
-                .expect("FOX_TEST_NPM_SOURCE must name the npm directory staged for runtime 0.1.4"),
+                .expect("FOX_TEST_NPM_SOURCE must name the npm directory staged for the tested runtime"),
         );
         copy_tree(&source, &root.join(".tools/npm"));
     }
     let runtime_root = std::env::var_os("FOX_AGENT_RUNTIME_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:/Program Files/Fox/sandbox-runtime/0.1.3"));
+        .unwrap_or_else(|| PathBuf::from(format!("C:/Program Files/Fox/sandbox-runtime/{}", fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION)));
     let launcher = Launcher {
         runtime: runtime_root,
     };
@@ -360,6 +369,13 @@ async fn real_windows_network_approval_and_preview_lifecycle() {
         .start_turn(request("filesystem", "filesystem-boundary"))
         .unwrap();
     let filesystem: Value = serde_json::from_str(&sink.terminal("filesystem").await).unwrap();
+    assert_eq!(filesystem["outsideWriteBlocked"], true, "{filesystem}");
+    assert_eq!(filesystem["insideWriteSucceeded"], true, "{filesystem}");
+    assert_eq!(std::fs::read_to_string(base.join("outside-canary.txt")).unwrap(), "HOST_CANARY");
+    if let Some(previous) = &previous {
+        assert_eq!(filesystem["previousProjectWriteBlocked"], true, "{filesystem}");
+        assert_eq!(std::fs::read_to_string(previous.join("inside-write.txt")).unwrap(), "PROJECT_WRITE");
+    }
     let hold = std::env::var("FOX_PREVIEW_HOLD_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())

@@ -1408,6 +1408,7 @@ mod external_real {
             native_login_home: None,
             full_access: FullAccessSwitch::Off,
             full_access_forbidden: false,
+            require_directory_isolation: false,
             pi_providers: vec![],
             extra_domains: extra,
             env_passthrough: vec![],

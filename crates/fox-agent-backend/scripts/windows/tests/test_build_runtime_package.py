@@ -115,7 +115,11 @@ class VersionTest(unittest.TestCase):
             match = re.search(r'pub const RUNTIME_PACKAGE_VERSION: &str = "([^"]+)";', handle.read())
         self.assertIsNotNone(match, "RUNTIME_PACKAGE_VERSION not found in src/launch.rs")
         self.assertEqual(brp.DEFAULT_VERSION, match.group(1))
-        self.assertEqual(brp.DEFAULT_VERSION, "0.1.4")
+        self.assertEqual(brp.DEFAULT_VERSION, "0.1.5")
+
+    def test_srt_version_matches_the_rust_constant(self):
+        with open(os.path.join(brp.CRATE, "src", "sandbox.rs"), encoding="utf-8") as handle:
+            self.assertIn(f'pub const SRT_VERSION: &str = "{brp.SRT_VERSION}";', handle.read())
 
 
 class StagePackTest(unittest.TestCase):
@@ -144,6 +148,11 @@ class StagePackTest(unittest.TestCase):
         os.makedirs(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist"))
         with open(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "cli.js"), "w", newline="\n") as handle:
             handle.write("// cli\n")
+        for key, content in [(brp.SRT_PACKAGE, json.dumps({"version": brp.SRT_VERSION})), (brp.SRT_HELPER, "MZ")]:
+            target = os.path.join("in", *key.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as handle:
+                handle.write(content)
         deep_file = make_prefix(os.path.join("in", "pi"))
         self.assertGreater(len(os.path.abspath(deep_file)), 300, "the fixture must be past MAX_PATH")
 
@@ -200,11 +209,21 @@ class StagePackTest(unittest.TestCase):
         problems = brp.verify_layout("pkg")
         self.assertEqual(
             problems,
-            ["missing node/node.exe", *[f"missing {name}" for name in brp.NPM_FILES], f"missing {brp.SRT_CLI}", "missing pi-gate/pi-gated.cmd", "missing pi-gate/fox-approval-gate.ts"],
+            [f"missing {name}" for name in brp.REQUIRED if name != "acp-bridge/bridge.mjs"],
         )
         with open(os.path.join("pkg", "acp-bridge", "bridge.mjs"), "a", newline="\n") as handle:
             handle.write("// edited\n")
         self.assertIn("acp-bridge/bridge.mjs differs", " ".join(brp.verify_layout("pkg")))
+
+    def test_old_or_malformed_srt_and_missing_helper_are_refused(self):
+        target = brp.child(brp.fs_path("pkg"), brp.SRT_PACKAGE)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        for content, expected in [(json.dumps({"version": "0.0.80"}), "srt must be"), ("broken", "invalid")]:
+            with open(target, "w") as handle:
+                handle.write(content)
+            problems = brp.verify_layout("pkg")
+            self.assertTrue(any(problem.startswith(expected) for problem in problems), problems)
+            self.assertIn(f"missing {brp.SRT_HELPER}", problems)
 
     def test_pi_gate_mismatch_is_refused(self):
         os.makedirs(os.path.join("pkg", "pi-gate"))

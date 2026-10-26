@@ -57,6 +57,14 @@ try {
             Assert-Fox ([bool] (Get-Command $name -CommandType Function -ErrorAction SilentlyContinue)) "function $name present"
         }
         $LogPath = Join-Path $work 'enable.log'
+        if ($env:OS -eq 'Windows_NT') {
+            foreach ($exitCode in @(0, 7)) {
+                $native = Invoke-Native $env:ComSpec @('/d', '/c', "echo native-warning 1>&2 & exit /b $exitCode")
+                Assert-Fox ($native.Code -eq $exitCode) "native stderr: preserves exit $exitCode"
+                Assert-Fox ($native.Output.Contains('native-warning')) "native stderr: preserves diagnostics for exit $exitCode"
+            }
+            Assert-Fox ($ErrorActionPreference -eq 'Stop') 'native stderr: restores error policy'
+        }
 
         # 1. Variable unset: injection points do nothing.
         Remove-Item Env:\FOX_SCRIPT_TEST_FAULTS -ErrorAction SilentlyContinue

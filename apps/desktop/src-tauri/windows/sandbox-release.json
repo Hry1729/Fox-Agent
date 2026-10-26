@@ -1,7 +1,7 @@
 {
-  "version": "0.1.4",
+  "version": "0.1.5",
   "architecture": "x64",
-  "sha256": "3e4671ec06fd219a4ed1f2ac559f026033564fe7ca298bb2347204e36561d75c",
+  "sha256": "c8543620fc5e31bd2204833bd31d6a743c958497f8a948ac488bf1e84f690225",
   "bridgeSha256": "b71a8c64bacb23efc292b069acd3e9449e51a098636585100eed9e6581474bad",
   "adapters": {
     "backends/pi/node_modules/pi-acp/dist/index.js": "bb8c9785ce8dd5b88fdcfae4b12521ad8f4e433ba23d907109627018b328f7e3",
