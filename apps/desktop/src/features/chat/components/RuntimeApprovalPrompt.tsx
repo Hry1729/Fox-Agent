@@ -64,12 +64,15 @@ export function RuntimeApprovalPrompt({
       }
     }
   }
-  if (isReadScopeRequest(approval, presentation)) {
+  const networkRequest = approval.toolName === 'agent_permission' && request.hostNetworkRequest === true
+  if (networkRequest || isReadScopeRequest(approval, presentation)) {
     const decisionScopes: Partial<Record<ApprovalDecision, GrantScope>> = { deny: 'denied', allow_once: 'once', allow_conversation: 'conversation' }
     const scopes = (['deny', 'allow_conversation', 'allow_once'] as const).filter(decision => allowedDecisions.includes(decision)).map(decision => decisionScopes[decision]).filter((scope): scope is GrantScope => Boolean(scope))
-    return <PermissionGrant className="aui-permission-grant fox-confirmation fox-runtime-confirmation is-compact max-w-none" capability="读取文件" requester="Fox" reach={[presentation.target]} scope="pending" allowedScopes={scopes} busy={submitting}
+    const networkInput = request.input as { host?: string; port?: number } | undefined
+    const target = networkRequest ? `${networkInput?.host ?? ''}:${networkInput?.port ?? ''}` : presentation.target
+    return <PermissionGrant className="aui-permission-grant fox-confirmation fox-runtime-confirmation is-compact max-w-none" capability={networkRequest ? '连接网络' : '读取文件'} requester="Fox" reach={[target]} scope="pending" allowedScopes={scopes} busy={submitting}
       onGrant={scope => { const decision = scope === 'denied' ? 'deny' : scope === 'once' ? 'allow_once' : scope === 'conversation' ? 'allow_conversation' : null; if (decision) void resolve(decision) }}
-      detailsContent={<>{allowedDecisions.includes('allow_conversation') && <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>查看授权详情</summary><div role="region" aria-label="授权详情"><p>{presentation.summary}</p><p className="fox-approval-scope-note">“本次对话内允许”仅授权当前对话中的该工具和此目标，可随时撤销；权限模式变化后失效，不包含写入或执行命令。</p></div></details>}{error && <p role="alert" className="fox-approval-error">{error}</p>}</>} />
+      detailsContent={<>{allowedDecisions.includes('allow_conversation') && <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>查看授权详情</summary><div role="region" aria-label="授权详情"><p>{presentation.summary}</p><p className="fox-approval-scope-note">{networkRequest ? '允许一次放行此目标当前等待的连接请求；本次对话内允许仅放行此主机和端口。可在 Agent 栏撤销，撤销后新连接需重新确认。已建立的连接在停止 Agent 后关闭。' : '“本次对话内允许”仅授权当前对话中的该工具和此目标，可随时撤销；权限模式变化后失效，不包含写入或执行命令。'}</p></div></details>}{error && <p role="alert" className="fox-approval-error">{error}</p>}</>} />
   }
   const replacement = presentation.wholeFileReplacement
   const title = repairOverride ? '追加修复' : replacement ? replacement.baselineVersion === 'missing' ? '新建文件' : '替换文件'

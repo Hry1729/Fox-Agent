@@ -171,6 +171,7 @@ pub struct AcpConnection {
     pub events: mpsc::UnboundedReceiver<BackendEvent>,
     pending: PendingPermissions,
     child_id: Option<u32>,
+    preview_key: String,
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
     /// Windows: the Job Object holding the backend tree (`None` elsewhere).
     job: ProcessJob,
@@ -684,6 +685,27 @@ pub mod win_job {
     }
 
     impl Job {
+        pub fn process_ids(&self) -> Result<Vec<u32>, String> {
+            use windows_sys::Win32::System::JobObjects::{JobObjectBasicProcessIdList, JOBOBJECT_BASIC_PROCESS_ID_LIST};
+            let mut capacity = 32usize;
+            loop {
+                let size = std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() + capacity * std::mem::size_of::<usize>();
+                let mut buffer = vec![0usize; (size + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>()];
+                let result = unsafe { QueryInformationJobObject(self.0, JobObjectBasicProcessIdList, buffer.as_mut_ptr().cast(), size as u32, std::ptr::null_mut()) };
+                if result != 0 {
+                    let info = buffer.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+                    let count = unsafe { (*info).NumberOfProcessIdsInList } as usize;
+                    if count > capacity { return Err("Job process list exceeded buffer".into()); }
+                    let ids = unsafe { std::slice::from_raw_parts(std::ptr::addr_of!((*info).ProcessIdList).cast::<usize>(), count) };
+                    return Ok(ids.iter().filter_map(|id| u32::try_from(*id).ok()).collect());
+                }
+                let error = last_error();
+                if error != windows_sys::Win32::Foundation::ERROR_MORE_DATA || capacity >= 16384 {
+                    return Err(format!("QueryInformationJobObject(processes) failed: {error}"));
+                }
+                capacity *= 2;
+            }
+        }
         /// Unnamed job, kill-on-close, no breakaway allowed.
         pub fn new() -> Result<Self, String> {
             let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -1328,6 +1350,7 @@ impl AcpConnection {
             events,
             pending,
             child_id,
+            preview_key: crate::launch::random_hex(16).map_err(|error| InitializeFailure::new(Code::SpawnFailed, error))?,
             child: Arc::new(tokio::sync::Mutex::new(child)),
             job,
             stderr_tail,
@@ -1665,6 +1688,27 @@ impl AcpConnection {
     /// OS process id of the backend (the srt broker in sandboxed mode).
     pub fn process_id(&self) -> Option<u32> {
         self.child_id
+    }
+
+    pub fn previews(&self) -> Result<Vec<crate::preview::Preview>, String> {
+        #[cfg(not(windows))]
+        return Ok(Vec::new());
+        #[cfg(windows)]
+        let owned = self.job.as_ref().ok_or("Agent 未处于 Host 的 Job Object 中")?.process_ids()?;
+        #[cfg(windows)]
+        let mut previews = Vec::new();
+        #[cfg(windows)]
+        for (pid, port) in crate::preview::listeners()? {
+            if Some(pid) != self.child_id && owned.contains(&pid) {
+                previews.push(crate::preview::Preview { pid, session_key: self.preview_key.clone(), port, url: format!("http://127.0.0.1:{port}/") });
+            }
+        }
+        #[cfg(windows)]
+        {
+            previews.sort_by_key(|preview| (preview.port, preview.pid));
+            previews.dedup();
+            Ok(previews)
+        }
     }
 
     /// Revocation stop for a live connection: full access was withdrawn while

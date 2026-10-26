@@ -115,7 +115,7 @@ class VersionTest(unittest.TestCase):
             match = re.search(r'pub const RUNTIME_PACKAGE_VERSION: &str = "([^"]+)";', handle.read())
         self.assertIsNotNone(match, "RUNTIME_PACKAGE_VERSION not found in src/launch.rs")
         self.assertEqual(brp.DEFAULT_VERSION, match.group(1))
-        self.assertEqual(brp.DEFAULT_VERSION, "0.1.3")
+        self.assertEqual(brp.DEFAULT_VERSION, "0.1.4")
 
 
 class StagePackTest(unittest.TestCase):
@@ -135,6 +135,11 @@ class StagePackTest(unittest.TestCase):
         os.makedirs(node)
         with open(os.path.join(node, "node.exe"), "wb") as handle:
             handle.write(b"MZ")
+        for relative in brp.NPM_FILES:
+            target = os.path.join("in", relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as handle:
+                handle.write("npm fixture")
         srt = os.path.join("in", "srt")
         os.makedirs(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist"))
         with open(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "cli.js"), "w", newline="\n") as handle:
@@ -195,7 +200,7 @@ class StagePackTest(unittest.TestCase):
         problems = brp.verify_layout("pkg")
         self.assertEqual(
             problems,
-            ["missing node/node.exe", f"missing {brp.SRT_CLI}", "missing pi-gate/pi-gated.cmd", "missing pi-gate/fox-approval-gate.ts"],
+            ["missing node/node.exe", *[f"missing {name}" for name in brp.NPM_FILES], f"missing {brp.SRT_CLI}", "missing pi-gate/pi-gated.cmd", "missing pi-gate/fox-approval-gate.ts"],
         )
         with open(os.path.join("pkg", "acp-bridge", "bridge.mjs"), "a", newline="\n") as handle:
             handle.write("// edited\n")

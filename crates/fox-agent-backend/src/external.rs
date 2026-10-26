@@ -374,6 +374,9 @@ pub trait ExternalLauncher: Send + Sync + 'static {
     }
     fn selected_model(&self, _request: &LaunchRequest) -> Option<String> { None }
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'static, Result<Launched, LaunchFailure>>;
+    fn launch_with_network(&self, request: LaunchRequest, _callback: crate::network::NetworkCallback) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
+        self.launch(request)
+    }
 }
 
 /// Where the runtime's output goes.
@@ -383,6 +386,7 @@ pub trait ExternalSink: Send + Sync + 'static {
     /// Show an approval card; returns the Host approval id. `key` is unique
     /// per native request and connection generation.
     fn request_approval(&self, run_id: &str, conversation_id: &str, key: &str, card: &PermissionCard) -> Result<String, String>;
+    fn network_granted(&self, _conversation_id: &str, _target: &crate::network::NetworkTarget) -> bool { false }
     /// Record one Host decision in the external-backend audit log (names
     /// and kinds only, never tool input). Default: nothing beyond the run
     /// event the runtime already emitted.
@@ -497,6 +501,11 @@ struct PendingApproval {
     options: Vec<PermissionOption>,
 }
 
+struct PendingNetworkApproval {
+    target: crate::network::NetworkTarget,
+    senders: Vec<tokio::sync::oneshot::Sender<bool>>,
+}
+
 struct Turn {
     last_activity: std::time::Instant,
     active_tools: std::collections::HashSet<String>,
@@ -510,6 +519,7 @@ struct Turn {
     projector: AcpProjector,
     arbiter: TerminalArbiter,
     approvals: HashMap<String, PendingApproval>,
+    network_approvals: HashMap<String, PendingNetworkApproval>,
     cancel_requested: bool,
     prompt_sent: bool,
     /// The [`BackendEvent::PromptStarted`] fence of this turn's prompt has
@@ -535,6 +545,7 @@ impl Turn {
             projector: AcpProjector::new(),
             arbiter: TerminalArbiter::default(),
             approvals: HashMap::new(),
+            network_approvals: HashMap::new(),
             cancel_requested: false,
             prompt_sent: false,
             prompt_fence_seen: false,
@@ -546,6 +557,7 @@ impl Turn {
 
 #[derive(Default)]
 struct SessionState {
+    network_epoch: u64,
     generation: u64,
     connection: Option<Arc<AcpConnection>>,
     native_session_id: Option<String>,
@@ -865,7 +877,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
         let run_id = request.run_id.clone();
         self.emit(session, &run_id, json!({ "type": "agent_backend.launching", "agentBackend": session.backend.as_str(), "mode": desired.as_str() }));
-        let launched = self.inner.launcher.launch(request.launch.clone()).await?;
+        let callback = self.network_callback(session);
+        let launched = self.inner.launcher.launch_with_network(request.launch.clone(), callback).await?;
         let Launched { mut connection, mode, declaration, pi_launch, on_closed } = launched;
         let connection_key = match self.inner.launcher.connection_key(&request.launch) {
             Ok(key) => key,
@@ -1306,7 +1319,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let mut state = lock(&session.state);
             if state.generation != generation { return false; }
             let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent && !turn.cancel_requested) else { return false; };
-            if !turn.approvals.is_empty() {
+            if !turn.approvals.is_empty() || !turn.network_approvals.is_empty() {
                 turn.last_activity = std::time::Instant::now();
                 return false;
             }
@@ -1339,7 +1352,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         if session.backend != AgentBackend::Codex || state.mode != Some(PermissionMode::Sandboxed) {
             return;
         }
-        if !state.turn.as_ref().is_some_and(|turn| turn.run_id == run_id && !turn.cancel_requested) {
+        if !state.turn.as_ref().is_some_and(|turn| turn.run_id == run_id && !turn.cancel_requested && turn.network_approvals.is_empty()) {
             return;
         }
         let allowed = state.declaration.as_ref().map(|declaration| declaration.allowed_domains.clone()).unwrap_or_default();
@@ -1424,6 +1437,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             turn.cancel_requested = true;
             turn.arbiter.request_cancel();
             turn.approvals.clear();
+            turn.network_approvals.clear();
             (connection.filter(|_| turn.prompt_sent), native, generation)
         };
         let answered = match (connection, native) {
@@ -1464,6 +1478,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         for session in sessions {
             let (connection, pending) = {
                 let mut state = lock(&session.state);
+                if let Some(turn) = state.turn.as_mut() {
+                    if let Some(pending) = turn.network_approvals.remove(approval_id) {
+                        turn.last_activity = std::time::Instant::now();
+                        let mut written = false;
+                        for sender in pending.senders { written |= sender.send(approved && !turn.cancel_requested).is_ok(); }
+                        return if written { AnswerOutcome::Written } else { AnswerOutcome::NotPending };
+                    }
+                }
                 let connection = state.connection.clone();
                 let Some(pending) = state.turn.as_mut().and_then(|turn| turn.approvals.remove(approval_id)) else {
                     continue;
@@ -1489,6 +1511,68 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         AnswerOutcome::NotPending
     }
 
+    pub fn is_network_approval(&self, approval_id: &str) -> bool {
+        lock(&self.inner.sessions).values().any(|session| lock(&session.state).turn.as_ref().is_some_and(|turn| turn.network_approvals.contains_key(approval_id)))
+    }
+
+    pub fn previews(&self, conversation_id: &str) -> Result<Vec<crate::preview::Preview>, String> {
+        let session = lock(&self.inner.sessions).get(conversation_id).cloned();
+        let connection = session.and_then(|session| lock(&session.state).connection.clone());
+        connection.map(|connection| connection.previews()).unwrap_or(Ok(Vec::new()))
+    }
+
+    pub async fn stop_preview(&self, conversation_id: &str, preview: &crate::preview::Preview) -> Result<(), String> {
+        if !self.previews(conversation_id)?.contains(preview) { return Err("预览已结束或端口归属已变化".into()); }
+        match self.close_conversation(conversation_id, "用户停止预览和当前 Agent").await {
+            Some(report) if report.confirmation.is_confirmed() => Ok(()),
+            _ => Err("当前 Agent 与预览未确认全部结束".into()),
+        }
+    }
+
+    fn network_callback(&self, session: &Arc<Session>) -> crate::network::NetworkCallback {
+        let epoch = {
+            let mut state = lock(&session.state);
+            state.network_epoch += 1;
+            state.network_epoch
+        };
+        let runtime = self.clone();
+        let session = Arc::downgrade(session);
+        Arc::new(move |target| {
+                let deny = || Box::pin(async { false }) as BoxFuture<'static, bool>;
+                let Some(session) = session.upgrade() else { return deny(); };
+                let receiver = {
+                    let mut state = lock(&session.state);
+                    if state.closing || state.network_epoch != epoch { return deny(); }
+                    let owned_preview = matches!(target.host.as_str(), "127.0.0.1" | "localhost")
+                        && state.connection.as_ref().is_some_and(|connection| connection.previews().is_ok_and(|items| items.iter().any(|preview| preview.port == target.port)));
+                    let Some(turn) = state.turn.as_mut().filter(|turn| !turn.cancel_requested) else { return deny(); };
+                    if owned_preview || runtime.inner.sink.network_granted(&session.conversation_id, &target) { return Box::pin(async { true }); }
+                    if let Some(pending) = turn.network_approvals.values_mut().find(|pending| pending.target == target) {
+                        if pending.senders.len() >= 8 { return deny(); }
+                        let (sender, receiver) = tokio::sync::oneshot::channel();
+                        pending.senders.push(sender);
+                        return Box::pin(async move { receiver.await.unwrap_or(false) });
+                    }
+                    if turn.network_approvals.len() >= 8 { return deny(); }
+                    let Ok(token) = crate::launch::random_hex(16) else { return deny(); };
+                    let key = format!("sandbox-network-{epoch}-{token}");
+                    let card = PermissionCard {
+                        title: format!("连接 {}", target.key()),
+                        native_tool_call_id: None,
+                        tool: "sandbox_network",
+                        input: json!({ "hostNetworkRequest": true, "host": target.host, "port": target.port, "permissionScope": format!("sandbox_network:{}", target.key()) }),
+                        options: Vec::new(),
+                        available_decisions: vec!["deny", "allow_once", "allow_conversation"],
+                    };
+                    let Ok(id) = runtime.inner.sink.request_approval(&turn.run_id, &session.conversation_id, &key, &card) else { return deny(); };
+                    let (sender, receiver) = tokio::sync::oneshot::channel();
+                    turn.network_approvals.insert(id, PendingNetworkApproval { target, senders: vec![sender] });
+                    receiver
+                };
+                Box::pin(async move { receiver.await.unwrap_or(false) })
+        })
+    }
+
     /// Stop the live process of a session (keeps the session entry and its
     /// native id for a later reopen). `None` when nothing was running.
     async fn stop_connection(&self, session: &Arc<Session>, reason: &str) -> Option<TerminateReport> {
@@ -1496,6 +1580,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let mut state = lock(&session.state);
             state.generation += 1;
             state.native_session_open = false;
+            state.network_epoch += 1;
+            if let Some(turn) = state.turn.as_mut() { turn.network_approvals.clear(); }
             (state.connection.take(), state.on_closed.take())
         };
         let connection = connection?;

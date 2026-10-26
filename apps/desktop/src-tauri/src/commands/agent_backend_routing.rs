@@ -250,6 +250,48 @@ pub struct AgentBackendConversationRequest {
     pub conversation_id: String,
 }
 
+#[tauri::command]
+pub fn agent_backend_network_status(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: AgentBackendConversationRequest) -> ApiResponse<crate::external_backend::NetworkStatus> {
+    match external.network_status(&request.conversation_id) {
+        Ok(status) => ApiResponse::success(status),
+        Err(error) => ApiResponse::failure("sandbox.network_status_failed", error, true),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewActionRequest {
+    pub conversation_id: String,
+    pub preview: fox_agent_backend::preview::Preview,
+    pub stop: bool,
+}
+
+#[tauri::command]
+pub async fn agent_backend_preview_action(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: PreviewActionRequest) -> Result<ApiResponse<bool>, ()> {
+    Ok(match external.preview_action(&request.conversation_id, &request.preview, request.stop).await {
+        Ok(_) if request.stop => ApiResponse::success(true),
+        Ok(url) => super::external_url_open(super::OpenExternalUrlRequest { url }),
+        Err(error) => ApiResponse::failure("sandbox.preview_failed", error, true),
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkRuleRequest {
+    pub conversation_id: String,
+    pub target: fox_agent_backend::network::NetworkTarget,
+    pub project_scope: bool,
+    pub allowed: bool,
+}
+
+#[tauri::command]
+pub async fn agent_backend_network_rule(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: NetworkRuleRequest) -> Result<ApiResponse<bool>, ()> {
+    Ok(match external.network_rule(&request.conversation_id, request.target, request.project_scope, request.allowed).await {
+        Ok(()) => ApiResponse::success(true),
+        Err(error) => ApiResponse::failure("sandbox.network_rule_failed", error, true),
+    })
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBackendImportRequest {

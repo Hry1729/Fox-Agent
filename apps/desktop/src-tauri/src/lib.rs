@@ -488,6 +488,9 @@ pub fn run() {
             commands::agent_backend_routing::agent_backends_status,
             // External backend wiring batch: effective capability dimensions.
             commands::agent_backend_routing::agent_backend_capabilities,
+            commands::agent_backend_routing::agent_backend_network_status,
+            commands::agent_backend_routing::agent_backend_network_rule,
+            commands::agent_backend_routing::agent_backend_preview_action,
             // UX batch ①②: login guidance / import, permission mode, revocation.
             commands::agent_backend_routing::agent_backend_credentials,
             commands::agent_backend_routing::agent_backend_import_candidates,

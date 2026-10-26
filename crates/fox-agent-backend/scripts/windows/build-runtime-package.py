@@ -57,7 +57,7 @@ ASSETS = os.path.join(CRATE, "runtime-assets")
 PI_FIXTURES = os.path.join(CRATE, "fixtures", "pi")
 # Must equal fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION (the
 # directory Fox looks for under the install root); a unit test checks it.
-DEFAULT_VERSION = "0.1.3"
+DEFAULT_VERSION = "0.1.4"
 # Package key -> source file in this crate. Each is copied by `stage` and must
 # be byte-equal (modulo CRLF) in `pack`.
 PI_GATE_FILES = {
@@ -69,7 +69,8 @@ DEFAULT_INSTALL_ROOT = r"C:\Program Files\Fox\sandbox-runtime"
 STAGING_PREFIX = r"C:\Program Files\Fox\.s00000000\c"
 DEFAULT_BUDGET = 240
 SRT_CLI = "srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
-REQUIRED = ["node/node.exe", SRT_CLI, "acp-bridge/bridge.mjs", *PI_GATE_FILES]
+NPM_FILES = ["node/npm.cmd", "node/npx.cmd", "node/node_modules/npm/package.json", "node/node_modules/npm/bin/npm-cli.js", "node/node_modules/npm/bin/npx-cli.js"]
+REQUIRED = ["node/node.exe", *NPM_FILES, SRT_CLI, "acp-bridge/bridge.mjs", *PI_GATE_FILES]
 FIXED_TIME = (2026, 1, 1, 0, 0, 0)
 
 

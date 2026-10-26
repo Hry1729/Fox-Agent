@@ -97,5 +97,9 @@ pub mod bridge;
 pub mod external;
 #[cfg(feature = "acp")]
 pub mod external_launch;
+#[cfg(feature = "acp")]
+pub mod network;
+#[cfg(feature = "acp")]
+pub mod preview;
 
 pub mod backends;

@@ -1,6 +1,6 @@
 # 外部 Agent 后端的权限模式与 srt 沙箱层
 
-运行时 0.1.3 的模型端点授权、精确回环代理和 pi 错误结算见 [受管模型连接](model-connectivity.md)。下文关于 stock dsh 回环直连和完全访问退路的测量记录保留作历史证据，不适用于已验证的 0.1.3 受管补丁。
+运行时 0.1.3 的模型端点授权、精确回环代理和 pi 错误结算见 [受管模型连接](model-connectivity.md)。0.1.4 的动态网络审批、项目预览、npm/npx、Windows 实测边界及 MXC 评估见 [网络审批与预览](network-preview.md)。下文关于 stock dsh 回环直连和完全访问退路的测量记录保留作历史证据，不适用于已验证的 0.1.3 受管补丁。
 
 - 代码：`src/sandbox.rs`（模式、策略、路径规范化、预检、启动包装、能力声明、交付文件校验），`src/winacl.rs`（Windows 所有权 / `WRITE_DAC` 预检、暴露面审计、精确 ACE 增删、所有者修改、私有目录创建），`src/winruntime.rs`（Windows 运行时位置与检查、ProgramData 私有目录、srt 注册表状态、SID 台账、安装记录、卸载边界），`src/winancestor.rs`（祖先元数据 ACE 与引用台账），`src/winowner.rs`（所有权修复），`src/statefile.rs`（加锁的 JSON 状态文件），`scripts/windows/enable-sandbox.ps1` / `disable-sandbox.ps1`（一次提权的启用 / 停用脚本），`src/acp.rs` 的 `AcpConnection::spawn_prepared`、停止状态与 Windows Job Object，`src/proctree.rs`（进程树停止确认），`src/port.rs`（撤权停止与重建的状态机）。
 - 实测：`tests/sandbox_srt.rs`。真实测试标 `#[ignore]`，普通 `cargo test` 只把它计入 “ignored”（即跳过数），**cargo 全绿不等于实测通过**；统计口径见第 6.3 节。

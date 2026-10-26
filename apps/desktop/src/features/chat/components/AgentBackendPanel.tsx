@@ -17,6 +17,8 @@
 //   error still shows inside the card.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AgentBackendBar } from './AgentBackendBar'
+import { AgentNetworkPanel } from './AgentNetworkPanel'
+import type { AgentNetworkClient } from '@/features/conversations/model/agent-network'
 import { AgentBackendCredentialCard } from './AgentBackendCredentialCard'
 import { AgentNativePermissionPicker } from './AgentNativePermissionPicker'
 import { AgentModelConnectionCard, type AgentModelConnection, type AgentModelConnectionRequest } from './AgentModelConnectionCard'
@@ -35,7 +37,7 @@ import type { NativePermissionRequest, NativePermissionView } from '@/features/c
 import { isAgentBackendHidden, refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
 
 /** The Host calls the panel needs (a subset of `desktopClient`). */
-export interface AgentBackendPanelClient {
+export interface AgentBackendPanelClient extends Partial<AgentNetworkClient> {
   agentBackendModelConnection?: (request: AgentModelConnectionRequest) => Promise<AgentModelConnection>
   agentBackendCapabilities: (backend: AgentBackendId, conversationId?: string | null) => Promise<AgentBackendCapabilities>
   agentBackendPermissionStatus: (conversationId?: string | null) => Promise<AgentBackendPermissionStatus>
@@ -241,6 +243,8 @@ export function AgentBackendPanel({
     )
     : null
 
+  const networkPanel = external && capabilityConversationId && client.agentBackendNetworkStatus && client.agentBackendNetworkRule && client.agentBackendPreviewAction
+    ? <AgentNetworkPanel key={capabilityConversationId} client={client as AgentNetworkClient} conversationId={capabilityConversationId} /> : null
   return (
     <AgentBackendBar
       status={status}
@@ -252,7 +256,7 @@ export function AgentBackendPanel({
       permission={permission}
       onRevokeFullAccess={handleRevoke}
       permissionPicker={permissionPicker}
-      credentialCard={card}
+      credentialCard={networkPanel ? <>{card}{networkPanel}</> : card}
       importReceipt={visibleReceipt}
       onDismissImportReceipt={dismissReceipt}
     />

@@ -41,7 +41,7 @@ impl ExternalSink for Sink {
     fn request_approval(&self, run_id: &str, _conversation_id: &str, key: &str, card: &PermissionCard) -> Result<String, String> {
         let mut recorded = self.0.lock().unwrap();
         let id = format!("appr-{}", recorded.approvals.len() + 1);
-        assert!(key.starts_with("acp-permission:"), "{key}");
+        assert!(key.starts_with("acp-permission:") || key.starts_with("sandbox-network-"), "{key}");
         recorded.approvals.push((run_id.to_owned(), id.clone(), card.clone()));
         Ok(id)
     }
@@ -104,6 +104,7 @@ impl Sink {
 
 #[derive(Clone, Default)]
 struct MockLauncher {
+    network_callback: Arc<Mutex<Option<fox_agent_backend::network::NetworkCallback>>>,
     launches: Arc<AtomicUsize>,
     fail: bool,
     /// Full access withdrawn: desired / launched mode is sandboxed.
@@ -117,6 +118,10 @@ struct MockLauncher {
 }
 
 impl ExternalLauncher for MockLauncher {
+    fn launch_with_network(&self, request: LaunchRequest, callback: fox_agent_backend::network::NetworkCallback) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
+        *self.network_callback.lock().unwrap() = Some(callback);
+        self.launch(request)
+    }
     fn connection_key(&self, _request: &LaunchRequest) -> Result<Option<String>, LaunchFailure> {
         if self.key_reads.fetch_add(1, Ordering::SeqCst) > 0 && self.fail_key_after_launch {
             return Err(LaunchFailure::new("agent_backend_model_endpoint_invalid", "configuration became unreadable"));
@@ -173,6 +178,44 @@ fn new_runtime(launcher: MockLauncher) -> (ExternalRuntime<Sink, MockLauncher>, 
     let sink = Sink::default();
     let runtime = ExternalRuntime::with_cancel_timeout(sink.clone(), launcher, tokio::runtime::Handle::current(), Duration::from_millis(800));
     (runtime, sink)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_network_approval_pauses_idle_and_cancel_denies_pending_connections() {
+    assert!(node_available());
+    let launcher = MockLauncher::default();
+    let sink = Sink::default();
+    let runtime = ExternalRuntime::with_idle_timeout(sink.clone(), launcher.clone(), tokio::runtime::Handle::current(), Duration::from_millis(200), Duration::from_secs(2), Duration::from_millis(350));
+    runtime.start_turn(turn("network", "net1", "slow", AgentBackend::Pi, None)).unwrap();
+    sink.wait_for("net1", "message.delta").await;
+    let callback = launcher.network_callback.lock().unwrap().clone().unwrap();
+    let target = fox_agent_backend::network::NetworkTarget { host: "example.com".into(), port: 443 };
+    let waiting = tokio::spawn(callback(target.clone()));
+    let simultaneous = tokio::spawn(callback(target.clone()));
+    let (_, id, card) = sink.wait_approval(1).await;
+    assert_eq!(card.tool, "sandbox_network");
+    assert_eq!(card.input["permissionScope"], "sandbox_network:example.com:443");
+    assert!(card.available_decisions.contains(&"allow_conversation"));
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(!sink.types("net1").iter().any(|kind| kind == "run.failed"));
+    assert!(runtime.is_network_approval(&id));
+    assert_eq!(sink.approvals().len(), 1, "same-target concurrent requests share the pending card");
+    assert_eq!(runtime.answer(&id, true), AnswerOutcome::Written);
+    assert!(waiting.await.unwrap());
+    assert!(simultaneous.await.unwrap());
+    assert_eq!(runtime.answer(&id, true), AnswerOutcome::NotPending);
+    let waiting = tokio::spawn(callback(target.clone()));
+    let (_, second, _) = sink.wait_approval(2).await;
+    runtime.cancel("net1");
+    assert!(!waiting.await.unwrap());
+    assert_eq!(runtime.answer(&second, true), AnswerOutcome::NotPending);
+    sink.terminal("net1").await;
+    assert!(!callback(target.clone()).await, "idle conversation cannot originate a new grant");
+    runtime.close_conversation("network", "fixture complete").await;
+    runtime.start_turn(turn("network", "net2", "slow", AgentBackend::Pi, None)).unwrap();
+    sink.wait_for("net2", "message.delta").await;
+    assert!(!callback(target).await, "a previous connection cannot use a new turn");
+    runtime.shutdown().await;
 }
 
 fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, stored: Option<&str>) -> TurnRequest {

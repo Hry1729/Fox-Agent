@@ -816,7 +816,7 @@ impl HostLauncher {
         result.map_err(|error| LaunchFailure::new("agent_backend_version_mismatch", error))
     }
 
-    async fn launch_now(config: HostLaunchConfig, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
+    async fn launch_now(config: HostLaunchConfig, request: LaunchRequest, network: Option<crate::network::NetworkCallback>) -> Result<Launched, LaunchFailure> {
         let mode = config.permission_mode(&request);
         if request.backend == AgentBackend::Pi && crate::launch::program_override(AgentBackend::Pi).is_none() && !config.runtime_proxy_adapter_verified(AgentBackend::Pi) {
             return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "pi 运行时缺少已验证的模型错误与沙箱代理适配")
@@ -860,7 +860,7 @@ impl HostLauncher {
         let os = config.os;
         // Windows sandboxed: private layout + srt registry + ancestor ACEs.
         let mut windows: Option<WindowsSandboxContext> = None;
-        let prepared = match mode {
+        let mut prepared = match mode {
             // Full access lifts the isolation only: HOME (Windows
             // USERPROFILE / APPDATA / LOCALAPPDATA), XDG_*, temp and the
             // backend's own home still point at the private HOME of this
@@ -906,12 +906,20 @@ impl HostLauncher {
                 prepare_launch(mode, spec, &request.session_key, setup, os)?
             }
         };
+        let network_broker = if mode == PermissionMode::Sandboxed {
+            network.map(|callback| crate::network::NetworkBroker::attach(&mut prepared, callback))
+                .transpose().map_err(|error| LaunchFailure::new("sandbox_network_broker_failed", error))?
+        } else { None };
         let declaration = prepared.declaration.clone();
         let cwd = request.project_root.clone();
         let (connection, on_closed) = match windows {
             None => (AcpConnection::spawn_prepared_detailed(prepared, &cwd).await?, None),
             Some(context) => context.spawn(prepared, cwd, request.session_key.clone()).await?,
         };
+        let on_closed: Option<Box<dyn FnOnce() + Send>> = Some(Box::new(move || {
+            drop(network_broker);
+            if let Some(callback) = on_closed { callback(); }
+        }));
         let mut connection = connection;
         // Peek at initialize (it is the first queued event) for the version
         // check without consuming it for the runtime.
@@ -981,7 +989,10 @@ impl ExternalLauncher for HostLauncher {
 
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
         let config = self.config.clone();
-        Box::pin(Self::launch_now(config, request))
+        Box::pin(Self::launch_now(config, request, None))
+    }
+    fn launch_with_network(&self, request: LaunchRequest, callback: crate::network::NetworkCallback) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
+        Box::pin(Self::launch_now(self.config.clone(), request, Some(callback)))
     }
 }
 
