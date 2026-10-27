@@ -6855,6 +6855,8 @@ enum MigrationTarget {
     V91,
     #[cfg(test)]
     V94,
+    #[cfg(test)]
+    V98,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7300,6 +7302,15 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // read, rewritten or deleted, so rolling back to the previous build simply
     // ignores the columns.
     apply_migration(&transaction, RUNTIME_SESSION_MAPPING_SCHEMA_VERSION, MIGRATION_98_RUNTIME_SESSION_MAPPING, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V98) {
+        return finish_transaction(transaction);
+    }
+    // v99 (stage two, work package E): the retired-generation ledger. Additive:
+    // one new table plus one index. `runtime_sessions` is not touched, so every
+    // existing row still maps to generation 1 and rolling back simply ignores
+    // the ledger (an older build keeps one generation, as it always did).
+    apply_migration(&transaction, RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, MIGRATION_99_RUNTIME_SESSION_GENERATIONS, now)?;
     finish_transaction(transaction)
 }
 
@@ -7977,7 +7988,10 @@ mod stage_two_runtime_session_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(super::RUNTIME_SESSION_MAPPING_SCHEMA_VERSION, 98);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 98);
+        // 99 only adds the retired-generation ledger; the v98 mapping itself is
+        // unchanged. This test still pins the mapping's version and the
+        // database's current version, so a version bump is never silent.
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 99);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -7997,6 +8011,80 @@ mod stage_two_runtime_session_migration_tests {
     }
 }
 
+
+#[cfg(test)]
+mod runtime_session_generation_migration_tests {
+    use super::*;
+
+    /// v99 is a pure addition: the retired-generation ledger and its index. It
+    /// must not touch the live mapping table — a rollback to the previous build
+    /// (or an interrupted upgrade) must never lose the conversation's current
+    /// session.
+    #[test]
+    fn the_retired_generation_ledger_is_additive() {
+        let upper = MIGRATION_99_RUNTIME_SESSION_GENERATIONS.to_ascii_uppercase();
+        assert!(upper.contains("CREATE TABLE IF NOT EXISTS RUNTIME_SESSION_GENERATIONS"));
+        assert!(
+            upper.contains("PRIMARY KEY(CONVERSATION_ID, RUNTIME_TYPE, CONTEXT_GENERATION)"),
+            "one retired row per generation"
+        );
+        assert!(upper.contains("ON DELETE CASCADE"), "a purged conversation takes its ledger");
+        for forbidden in [
+            "DROP TABLE",
+            "DELETE FROM",
+            "UPDATE RUNTIME_SESSIONS",
+            "INSERT INTO RUNTIME_SESSIONS",
+            "ALTER TABLE",
+            "RENAME",
+        ] {
+            assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
+        }
+        assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 99);
+    }
+
+    /// A v98 database keeps its single live mapping at generation 1 and gains an
+    /// empty ledger: nothing is backfilled, nothing is copied, no row is lost.
+    #[test]
+    fn an_existing_mapping_keeps_generation_one_and_gains_an_empty_ledger() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_with_target(&mut connection, 100, MigrationTarget::V98).expect("create v98 database");
+        connection
+            .execute_batch(
+                "INSERT INTO agents(id, name, description, runtime_type, system_prompt, default_model, created_at, updated_at)
+                 VALUES ('a','A','','pi','','m',1,1);
+                 INSERT INTO conversations(id, agent_id, title, status, created_at, updated_at)
+                 VALUES ('c','a','C','active',1,1);
+                 INSERT INTO runtime_sessions(id, conversation_id, runtime_type, runtime_session_id,
+                                             session_path, status, created_at, updated_at,
+                                             format_version, context_generation)
+                 VALUES ('s','c','pi','s','D:/fox/s.json','ready',1,1,1,1);",
+            )
+            .expect("seed v98 rows");
+
+        run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade to latest");
+
+        let generation: i64 = connection
+            .query_row("SELECT context_generation FROM runtime_sessions WHERE id='s'", [], |row| row.get(0))
+            .expect("the live mapping survives");
+        assert_eq!(generation, 1, "an existing conversation keeps generation 1");
+        let retired: i64 = connection
+            .query_row("SELECT COUNT(*) FROM runtime_session_generations", [], |row| row.get(0))
+            .expect("the ledger exists");
+        assert_eq!(retired, 0, "the migration must not invent retired generations");
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+
+        // Idempotent: a repeat upgrade neither duplicates the version row nor errors.
+        run_with_target(&mut connection, 300, MigrationTarget::Latest).expect("repeat upgrade");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=99", [], |row| row.get(0))
+            .expect("single version record");
+        assert_eq!(count, 1);
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -15426,6 +15514,45 @@ ALTER TABLE runtime_sessions ADD COLUMN format_version INTEGER NOT NULL DEFAULT 
 ALTER TABLE runtime_sessions ADD COLUMN context_generation INTEGER NOT NULL DEFAULT 1;
 "#;
 
+/// v99 (stage two, work package E): retired context generations.
+///
+/// `runtime_sessions` keeps exactly one row per conversation
+/// (`UNIQUE(conversation_id, runtime_type)`), because the current mapping
+/// must stay one unambiguous fact. A context reset therefore cannot keep the
+/// previous generation in that table: it retires the old mapping here, in the
+/// same transaction that installs the new one.
+///
+/// The ledger stores what the row owned at retirement time — the runtime
+/// session id and the exact file — so permanent delete can find every file a
+/// conversation ever owned, and an ownership check can ask whether anything
+/// else still references it.
+///
+/// Additive only: one new table and one index. No existing row is read,
+/// rewritten or deleted, and every pre-existing conversation keeps its single
+/// `runtime_sessions` row at `context_generation = 1`, so nothing has to be
+/// backfilled into the ledger.
+pub(crate) const RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION: i64 = 99;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION);
+const MIGRATION_99_RUNTIME_SESSION_GENERATIONS: &str = r#"
+CREATE TABLE IF NOT EXISTS runtime_session_generations (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    runtime_type TEXT NOT NULL,
+    context_generation INTEGER NOT NULL,
+    runtime_session_id TEXT NOT NULL,
+    runtime_version TEXT,
+    session_path TEXT,
+    native_session_ref TEXT,
+    native_session_path TEXT,
+    format_version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,
+    retired_at INTEGER NOT NULL,
+    PRIMARY KEY(conversation_id, runtime_type, context_generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_session_generations_session
+    ON runtime_session_generations(conversation_id, runtime_session_id);
+"#;
+
 const MIGRATION_94: &str = r#"
 ALTER TABLE artifacts ADD COLUMN turn_call_id TEXT;
 ALTER TABLE artifacts ADD COLUMN declared_at INTEGER;
@@ -15556,8 +15683,9 @@ mod delivery_acceptance_migration_tests {
         // v95 (agent_backend), v96 (full-access grants + audit log) and v97
         // (model_providers.protocol_profiles) are the only migrations after
         // v94.
-        assert_eq!(DATABASE_SCHEMA_VERSION, PROVIDER_PROTOCOL_SCHEMA_VERSION);
         assert_eq!(PROVIDER_PROTOCOL_SCHEMA_VERSION, 97);
+        assert_eq!(DATABASE_SCHEMA_VERSION, RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION);
+        assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
 
         // The old rows are untouched.
         let title: String = connection

@@ -18,7 +18,8 @@ use crate::{
     app_state::AppState,
     database::{
         AgentIdRequest, AgentRecord, ApiResponse, AttachmentRecord, CancelRunRequest,
-        CleanupDataRequest, ConversationDetail, ConversationExpertBindRequest,
+        CleanupDataRequest, ConversationContextReset, ConversationDetail,
+        ConversationExpertBindRequest,
         ConversationExpertBinding, ConversationExpertBindingError, ConversationForkRequest,
         ConversationHistoryPage, ConversationHistoryRequest, ConversationIdRequest,
         ConversationSearchRequest, ConversationSummary, CopyAgentRequest,
@@ -2155,11 +2156,16 @@ pub async fn conversation_purge(
                     }
                 }
             }
-        } else if let Err(error) = state
-            .runtime_host
-            .remove_conversation(&request.conversation_id)
-        {
-            return Ok(ApiResponse::failure("runtime.stop_failed", error, true));
+        } else {
+            // Permanent delete is the only caller that removes session files:
+            // it must clear every generation this conversation owns, and a
+            // refusal deletes nothing at all so the trash entry stays intact.
+            if let Err(refusal) = state
+                .runtime_host
+                .purge_conversation_session_files(&request.conversation_id)
+            {
+                return Ok(ApiResponse::failure(&refusal.code, refusal.message, true));
+            }
         }
     }
     let managed_paths = match state
@@ -2189,6 +2195,36 @@ pub async fn conversation_purge(
         }
         Err(error) => Ok(storage_error(error)),
     }
+}
+
+/// Reset the conversation's model context: the same chat continues in a brand
+/// new Pi session generation. History, expert binding, memory, knowledge
+/// bindings and `agent_backend` are untouched; the old session file stays on
+/// disk (owned, so permanent delete can find it) and is never replayed.
+///
+/// Refused with `session.reset_run_active` while a Run is active.
+///
+/// Async on purpose, like `conversation_purge`: the Host may have to start the
+/// runtime worker and wait (bounded) for the new session, which must not block
+/// the Tauri main thread.
+#[tauri::command]
+pub async fn conversation_reset_context(
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> Result<ApiResponse<ConversationContextReset>, String> {
+    Ok(
+        match state
+            .runtime_host
+            .reset_conversation_context(&request.conversation_id)
+        {
+            Ok(outcome) => ApiResponse::success(ConversationContextReset {
+                conversation_id: request.conversation_id,
+                context_generation: outcome.context_generation,
+                runtime_session_id: outcome.runtime_session_id,
+            }),
+            Err(refusal) => ApiResponse::failure(&refusal.code, refusal.message, false),
+        },
+    )
 }
 
 fn remove_managed_file(data_dir: &std::path::Path, path: &std::path::Path) -> Result<(), String> {

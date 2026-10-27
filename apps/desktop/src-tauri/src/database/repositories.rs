@@ -12,7 +12,8 @@ use super::{
     ModelServiceRecord, PendingWorkModeDispatch, PluginCatalogEntryRecord, PluginInstallStatus,
     PluginInstallationRecord, PluginKind, PluginOrigin, ProviderModelRecord,
     RecoverableExternalRunRecord, RunEventRecord, RunRecord, RuntimePromptMessage,
-    RuntimeSessionRecord, RuntimeSessionStatus, SaveAgentRequest, StartRunResult,
+    RuntimeSessionFileRecord, RuntimeSessionRecord, RuntimeSessionStatus, SaveAgentRequest,
+    StartRunResult,
     ToolCallRecord, ToolResultRange,
     YuxiAgentRecord,
     YuxiConnectionTest, YuxiServiceRecord,
@@ -6113,6 +6114,232 @@ impl Database {
                  WHERE conversation_id = ?1 AND runtime_type = 'pi'",
                 params![conversation_id, now],
             )?;
+            Ok(())
+        })
+    }
+
+    /// Every session file this conversation owns: the live mapping first, then
+    /// each retired generation, newest first.
+    ///
+    /// This is the enumeration a permanent delete works from. It deliberately
+    /// returns the stored rows (id, path, format) instead of deriving a path
+    /// from an id, because a derived path is not proof of ownership.
+    pub fn conversation_runtime_session_files(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<RuntimeSessionFileRecord>, String> {
+        fn map_file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeSessionFileRecord> {
+            Ok(RuntimeSessionFileRecord {
+                conversation_id: row.get(0)?,
+                context_generation: row.get(1)?,
+                runtime_session_id: row.get(2)?,
+                session_path: row.get(3)?,
+                native_session_path: row.get(4)?,
+                format_version: row.get(5)?,
+                status: row.get(6)?,
+                current: false,
+            })
+        }
+        self.with_connection(|connection| {
+            let mut records = Vec::new();
+            let live = connection
+                .query_row(
+                    "SELECT conversation_id, context_generation, runtime_session_id,
+                            session_path, native_session_path, format_version, status
+                     FROM runtime_sessions
+                     WHERE conversation_id = ?1 AND runtime_type = 'pi'",
+                    [conversation_id],
+                    map_file_row,
+                )
+                .optional()?;
+            if let Some(mut record) = live {
+                record.current = true;
+                records.push(record);
+            }
+            let mut statement = connection.prepare(
+                "SELECT conversation_id, context_generation, runtime_session_id,
+                        session_path, native_session_path, format_version, status
+                 FROM runtime_session_generations
+                 WHERE conversation_id = ?1 AND runtime_type = 'pi'
+                 ORDER BY context_generation DESC",
+            )?;
+            let retired = statement.query_map([conversation_id], map_file_row)?;
+            for record in retired {
+                records.push(record?);
+            }
+            Ok(records)
+        })
+    }
+
+    /// Any *other* conversation that still references this session file or
+    /// runtime session id.
+    ///
+    /// A permanent delete must delete nothing while another owner exists, so a
+    /// read failure is reported as an error and the caller refuses (it never
+    /// treats "unknown" as "unreferenced"). Rows of this conversation do not
+    /// count: they are deleted with it.
+    pub fn other_conversation_referencing_session(
+        &self,
+        conversation_id: &str,
+        file_path: &str,
+        runtime_session_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT conversation_id FROM runtime_sessions
+                     WHERE conversation_id <> ?1
+                       AND (native_session_path = ?2 OR session_path = ?2 OR runtime_session_id = ?3)
+                     UNION ALL
+                     SELECT conversation_id FROM runtime_session_generations
+                     WHERE conversation_id <> ?1
+                       AND (native_session_path = ?2 OR session_path = ?2 OR runtime_session_id = ?3)
+                     UNION ALL
+                     SELECT conversation_id FROM runs
+                     WHERE conversation_id <> ?1 AND runtime_session_id = ?3
+                     LIMIT 1",
+                    params![conversation_id, file_path, runtime_session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+    }
+
+    /// Reset the conversation's context: retire the live mapping into the
+    /// generation ledger and install the new generation, in one transaction.
+    ///
+    /// The retired row is copied verbatim (session id, exact file, format,
+    /// status) so the old file keeps an owner for a later permanent delete. A
+    /// failure anywhere rolls the whole thing back: the previous mapping then
+    /// still names the old, untouched session.
+    pub fn reset_native_runtime_session(
+        &self,
+        conversation_id: &str,
+        runtime_session_id: &str,
+        runtime_version: Option<&str>,
+        native_session_path: &str,
+        native_session_ref: Option<&str>,
+        context_generation: i64,
+        status: RuntimeSessionStatus,
+    ) -> Result<(), String> {
+        if context_generation < 1 {
+            return Err("context generation must be >= 1".to_owned());
+        }
+        let live_generation: i64 = self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT COALESCE(MAX(context_generation), 0) FROM runtime_sessions
+                 WHERE conversation_id = ?1 AND runtime_type = 'pi'",
+                [conversation_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })?;
+        if context_generation <= live_generation {
+            return Err(format!(
+                "context generation must increase (current {live_generation}, requested {context_generation})"
+            ));
+        }
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let current = transaction
+                .query_row(
+                    "SELECT context_generation, runtime_session_id, runtime_version, session_path,
+                            native_session_ref, native_session_path, format_version, status
+                     FROM runtime_sessions
+                     WHERE conversation_id = ?1 AND runtime_type = 'pi'",
+                    [conversation_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, String>(7)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((
+                retired_generation,
+                retired_session_id,
+                retired_version,
+                retired_snapshot_path,
+                retired_ref,
+                retired_native_path,
+                retired_format,
+                retired_status,
+            )) = current
+            {
+                transaction.execute(
+                    "INSERT INTO runtime_session_generations(
+                        conversation_id, runtime_type, context_generation, runtime_session_id,
+                        runtime_version, session_path, native_session_ref, native_session_path,
+                        format_version, status, retired_at
+                     ) VALUES (?1, 'pi', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     ON CONFLICT(conversation_id, runtime_type, context_generation) DO UPDATE SET
+                        runtime_session_id = excluded.runtime_session_id,
+                        runtime_version = excluded.runtime_version,
+                        session_path = excluded.session_path,
+                        native_session_ref = excluded.native_session_ref,
+                        native_session_path = excluded.native_session_path,
+                        format_version = excluded.format_version,
+                        status = excluded.status,
+                        retired_at = excluded.retired_at",
+                    params![
+                        conversation_id,
+                        retired_generation,
+                        retired_session_id,
+                        retired_version,
+                        retired_snapshot_path,
+                        retired_ref,
+                        retired_native_path,
+                        retired_format,
+                        retired_status,
+                        now
+                    ],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO runtime_sessions(
+                    id, conversation_id, runtime_type, runtime_session_id, runtime_version,
+                    session_path, status, created_at, updated_at,
+                    native_session_ref, native_session_path, format_version, context_generation
+                 ) VALUES (?1, ?2, 'pi', ?1, ?3, NULL, ?8, ?4, ?4, ?5, ?6, 2, ?7)
+                 ON CONFLICT(conversation_id, runtime_type) DO UPDATE SET
+                    runtime_session_id = excluded.runtime_session_id,
+                    runtime_version = excluded.runtime_version,
+                    session_path = NULL,
+                    status = excluded.status,
+                    native_session_ref = excluded.native_session_ref,
+                    native_session_path = excluded.native_session_path,
+                    format_version = 2,
+                    context_generation = excluded.context_generation,
+                    updated_at = excluded.updated_at",
+                params![
+                    runtime_session_id,
+                    conversation_id,
+                    runtime_version,
+                    now,
+                    native_session_ref,
+                    native_session_path,
+                    context_generation,
+                    status.as_str()
+                ],
+            )?;
+            // Fault injection point: a process death here must leave the old
+            // mapping (and its generation) exactly as it was.
+            #[cfg(test)]
+            if native_session_fault::should_abort() {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            transaction.execute(
+                "UPDATE runs SET runtime_session_id = ?2 WHERE conversation_id = ?1 AND status = 'queued'",
+                params![conversation_id, runtime_session_id],
+            )?;
+            transaction.commit()?;
             Ok(())
         })
     }

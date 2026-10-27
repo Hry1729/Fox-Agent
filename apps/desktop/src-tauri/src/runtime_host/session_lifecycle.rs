@@ -68,6 +68,72 @@ pub(crate) trait SessionRuntimeLink {
     ) -> Result<RuntimeEnvelope, String>;
 }
 
+/// A reset that was refused (or failed) with a stable code the command can
+/// show verbatim. Never a bare string: "a run is active" is a refusal the user
+/// has to act on, not a generic storage error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResetRefusal {
+    pub code: String,
+    pub message: String,
+}
+
+impl ResetRefusal {
+    pub(crate) fn failed(message: impl Into<String>) -> Self {
+        Self::new(RESET_FAILED, message)
+    }
+
+    pub(crate) fn run_active() -> Self {
+        Self::new(RESET_RUN_ACTIVE, "当前对话正在运行，请先停止生成再重置会话上下文")
+    }
+
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        Self { code: code.to_owned(), message: message.into() }
+    }
+
+    fn from_open(error: SessionOpenError) -> Self {
+        Self::new(RESET_FAILED, error.user_message())
+    }
+}
+
+/// The new generation a successful reset installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResetOutcome {
+    pub runtime_session_id: String,
+    pub session_path: PathBuf,
+    pub context_generation: i64,
+}
+
+/// A permanent delete was refused for one of the conversation's session files.
+/// Nothing was deleted: a refusal is all-or-nothing on purpose, so a doubtful
+/// row can never leave the conversation half-cleaned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionFileRefusal {
+    pub code: String,
+    pub message: String,
+}
+
+impl SessionFileRefusal {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        Self { code: code.to_owned(), message: message.into() }
+    }
+}
+
+/// The stable code for "a Run is active, so a reset was refused".
+pub(crate) const RESET_RUN_ACTIVE: &str = "session.reset_run_active";
+/// The stable code for "the reset failed; the previous generation is intact".
+pub(crate) const RESET_FAILED: &str = "session.reset_failed";
+/// A recorded session file did not canonicalize into the Fox session directory.
+pub(crate) const SESSION_FILE_OUTSIDE_DIRECTORY: &str = "session.file_outside_directory";
+/// A recorded session path exists but is not a regular file.
+pub(crate) const SESSION_FILE_NOT_REGULAR: &str = "session.file_not_regular";
+/// Another conversation still references the file or its runtime session id.
+pub(crate) const SESSION_FILE_OTHER_OWNER: &str = "session.file_owned_by_another_conversation";
+/// The ownership of a recorded session file could not be established (the
+/// database read failed). Deleting on an unknown state is never allowed.
+pub(crate) const SESSION_FILE_REFUSED_UNKNOWN: &str = "session.file_ownership_unknown";
+/// The file passed every ownership check but the filesystem refused the delete.
+pub(crate) const SESSION_FILE_DELETE_FAILED: &str = "session.file_delete_failed";
+
 /// What `open` must do with the mapping it found.
 ///
 /// Pure and unit tested: getting this wrong either loses a conversation's
@@ -80,6 +146,28 @@ pub(crate) enum OpenDecision {
     Resume,
     /// Refuse, reporting a recovery problem. Never a fresh context.
     Refuse { code: &'static str, detail: &'static str },
+    /// An `allocated` native session that the live runtime worker still holds.
+    /// Pi has simply not written its JSONL yet, so nothing was lost: the
+    /// recorded session is used as-is, without a runtime request and without
+    /// any context replay. This is what makes a just-reset generation usable on
+    /// the very next Run.
+    ReuseLive,
+}
+
+/// Is this an `allocated` mapping whose session the live runtime worker still
+/// holds?
+///
+/// The evidence has to be exact: the same runtime session id the runtime was
+/// last given. A worker restart clears that id, so a session Pi never wrote
+/// still refuses afterwards (it cannot be restored) instead of silently
+/// becoming a fresh context.
+pub(crate) fn allocated_mapping_is_live(
+    mapping: &RuntimeSessionRecord,
+    live_runtime_session_id: Option<&str>,
+) -> bool {
+    mapping.is_native()
+        && matches!(mapping.status_kind(), Some(RuntimeSessionStatus::Allocated))
+        && live_runtime_session_id.is_some_and(|live| live == mapping.runtime_session_id)
 }
 
 /// The stable code for "the conversation's Pi context could not be restored".
@@ -179,6 +267,22 @@ impl<'a> SessionLifecycle<'a> {
         conversation_id: &str,
         link: &mut dyn SessionRuntimeLink,
     ) -> Result<OpenedSession, SessionOpenError> {
+        self.open_with_live_session(conversation_id, link, None)
+    }
+
+    /// Open (or create) the conversation's Pi session, knowing which runtime
+    /// session the live worker currently holds.
+    ///
+    /// `live_runtime_session_id` is the only extra fact the production Host has
+    /// and the pure decision does not: a just-created (or just-reset) native
+    /// session is `allocated` until Pi appends its first message, and it is
+    /// perfectly usable while the worker that created it is still alive.
+    pub(crate) fn open_with_live_session(
+        &self,
+        conversation_id: &str,
+        link: &mut dyn SessionRuntimeLink,
+        live_runtime_session_id: Option<&str>,
+    ) -> Result<OpenedSession, SessionOpenError> {
         let mapping = self
             .database
             .get_runtime_session(conversation_id)
@@ -191,11 +295,28 @@ impl<'a> SessionLifecycle<'a> {
             }
             _ => false,
         };
-        match open_decision(mapping.as_ref(), persisted) {
+        let decision = match open_decision(mapping.as_ref(), persisted) {
+            OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
+                if mapping.as_ref().is_some_and(|record| {
+                    allocated_mapping_is_live(record, live_runtime_session_id)
+                }) =>
+            {
+                OpenDecision::ReuseLive
+            }
+            other => other,
+        };
+        match decision {
             OpenDecision::Create => self.create(conversation_id, link),
             OpenDecision::Resume => {
                 let record = mapping.expect("a resume decision always comes from a mapping");
                 self.resume(conversation_id, &record, link)
+            }
+            OpenDecision::ReuseLive => {
+                let record = mapping.expect("a reuse decision always comes from a mapping");
+                let path = record.native_path().ok_or_else(|| {
+                    SessionOpenError::Failed("会话映射缺少 Pi 会话文件路径".to_owned())
+                })?;
+                Ok((record.runtime_session_id.clone(), path))
             }
             OpenDecision::Refuse { code, detail } => Err(SessionOpenError::RecoveryProblem {
                 code: code.to_owned(),
@@ -239,6 +360,40 @@ impl<'a> SessionLifecycle<'a> {
         conversation_id: &str,
         link: &mut dyn SessionRuntimeLink,
     ) -> Result<OpenedSession, SessionOpenError> {
+        let (runtime_session_id, file, native_ref, status) =
+            self.allocate(conversation_id, link, 1)?;
+        if let Err(error) = self.database.ensure_native_runtime_session(
+            conversation_id,
+            &runtime_session_id,
+            self.runtime_version.as_deref(),
+            file.to_string_lossy().as_ref(),
+            native_ref.as_deref(),
+            1,
+            status,
+        ) {
+            // The mapping write is all-or-nothing, so a failure means no row
+            // references this file. Prove it before deleting: a row that
+            // survived would point at a file that no longer exists.
+            if !self.mapping_survived(conversation_id, &runtime_session_id, &file) {
+                let _ = std::fs::remove_file(&file);
+            }
+            return Err(SessionOpenError::Failed(error));
+        }
+        Ok((runtime_session_id, file))
+    }
+
+    /// Ask the runtime for a new Pi-native session in `context_generation` and
+    /// validate the file it named.
+    ///
+    /// Nothing is recorded here: the caller owns the mapping transaction, so a
+    /// failed write can compensate by removing exactly the file no row
+    /// references.
+    fn allocate(
+        &self,
+        conversation_id: &str,
+        link: &mut dyn SessionRuntimeLink,
+        context_generation: i64,
+    ) -> Result<(String, PathBuf, Option<String>, RuntimeSessionStatus), SessionOpenError> {
         let runtime_session_id = Uuid::new_v4().to_string();
         std::fs::create_dir_all(self.sessions_dir)
             .map_err(|error| SessionOpenError::Failed(format!("会话目录不可用: {error}")))?;
@@ -249,7 +404,7 @@ impl<'a> SessionLifecycle<'a> {
                 "sessionFormat": "pi-native",
                 "sessionDir": self.sessions_dir.to_string_lossy(),
                 "cwd": self.sessions_dir.to_string_lossy(),
-                "contextGeneration": 1,
+                "contextGeneration": context_generation,
             }));
         let response = link
             .send_session_request(create_request, super::RESPONSE_TIMEOUT)
@@ -270,14 +425,22 @@ impl<'a> SessionLifecycle<'a> {
                 )
             })?;
         let file = self.owned_session_file(reported)?;
+        // The generation is the Host's fact, not the runtime's: a runtime that
+        // renamed it would make the ledger and the file disagree.
+        if let Some(echoed) = payload
+            .and_then(|payload| payload.get("contextGeneration"))
+            .and_then(Value::as_i64)
+        {
+            if echoed != context_generation {
+                return Err(SessionOpenError::Failed(
+                    "运行时返回的上下文代次与请求不一致，已拒绝记录".to_owned(),
+                ));
+            }
+        }
         let native_ref = payload
             .and_then(|payload| payload.get("nativeSessionId"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let generation = payload
-            .and_then(|payload| payload.get("contextGeneration"))
-            .and_then(Value::as_i64)
-            .unwrap_or(1);
         // The honest status: Pi has either persisted the file already or only
         // booked the path. A mapping may not claim `ready` before it is.
         let status = if native_session_file_is_persisted(&file) {
@@ -285,24 +448,65 @@ impl<'a> SessionLifecycle<'a> {
         } else {
             RuntimeSessionStatus::Allocated
         };
-        if let Err(error) = self.database.ensure_native_runtime_session(
+        Ok((runtime_session_id, file, native_ref, status))
+    }
+
+    /// Reset the conversation's model context: keep the chat, start a new Pi
+    /// session in the next generation.
+    ///
+    /// The old file is never touched and never reopened. The previous mapping is
+    /// retired (so permanent delete keeps finding its file) only in the same
+    /// transaction that installs the new generation: if that transaction does
+    /// not commit, the old mapping survives untouched and the old generation
+    /// stays openable.
+    pub(crate) fn reset(
+        &self,
+        conversation_id: &str,
+        link: &mut dyn SessionRuntimeLink,
+    ) -> Result<ResetOutcome, ResetRefusal> {
+        // A reset must never race a live Run: the Run owns the session the
+        // reset would retire. The Host re-checks this under its run transition
+        // lock; the check here keeps the lifecycle honest on its own.
+        let active = self
+            .database
+            .conversation_has_active_run(conversation_id)
+            .map_err(|error| ResetRefusal::new(RESET_FAILED, error))?;
+        if active {
+            return Err(ResetRefusal::run_active());
+        }
+        let current = self
+            .database
+            .get_runtime_session(conversation_id)
+            .map_err(|error| ResetRefusal::new(RESET_FAILED, error))?;
+        let context_generation = current
+            .as_ref()
+            .map(|record| record.context_generation)
+            .unwrap_or(0)
+            + 1;
+        let (runtime_session_id, file, native_ref, status) =
+            self.allocate(conversation_id, link, context_generation)
+                .map_err(ResetRefusal::from_open)?;
+        if let Err(error) = self.database.reset_native_runtime_session(
             conversation_id,
             &runtime_session_id,
             self.runtime_version.as_deref(),
             file.to_string_lossy().as_ref(),
             native_ref.as_deref(),
-            generation,
+            context_generation,
             status,
         ) {
-            // The mapping write is all-or-nothing, so a failure means no row
-            // references this file. Prove it before deleting: a row that
-            // survived would point at a file that no longer exists.
+            // The previous mapping survived (the transaction rolled back), so
+            // only the new, unreferenced file may be removed.
             if !self.mapping_survived(conversation_id, &runtime_session_id, &file) {
                 let _ = std::fs::remove_file(&file);
             }
-            return Err(SessionOpenError::Failed(error));
+            return Err(ResetRefusal::new(RESET_FAILED, error));
         }
-        Ok((runtime_session_id, file))
+        Ok(ResetOutcome {
+            runtime_session_id,
+            session_path: file,
+            context_generation,
+        })
     }
 
     fn resume(
@@ -459,4 +663,131 @@ fn mapping_is_allocated(record: &RuntimeSessionRecord) -> bool {
             record.status_kind(),
             Some(RuntimeSessionStatus::Allocated)
         )
+}
+
+/// Remove every session file this conversation owns — the live generation and
+/// every retired one.
+///
+/// This is a permanent delete, so it has to be provably safe rather than
+/// thorough. Before a single byte disappears, each row is checked:
+///
+/// * the row belongs to this conversation;
+/// * no other conversation still references the file or its runtime session id;
+/// * the path canonicalizes into the Host's session directory (never a symlink
+///   that escapes it, never a sibling directory);
+/// * it is a regular file.
+///
+/// Pi-native rows are all-or-nothing: a refusal deletes nothing at all, because
+/// a half-cleaned conversation is worse than a retryable refusal. Legacy
+/// `format_version` 1 snapshots keep their pre-stage-two behaviour exactly:
+/// delete a regular file that really is inside the directory, silently skip
+/// anything that is not.
+///
+/// A missing file is not a refusal: there is nothing to delete, and a retired
+/// generation Pi never persisted legitimately has no file.
+pub(crate) fn purge_owned_session_files(
+    database: &Database,
+    sessions_dir: &Path,
+    conversation_id: &str,
+) -> Result<Vec<PathBuf>, SessionFileRefusal> {
+    let refused = |code: &str, message: String| SessionFileRefusal::new(code, message);
+    let directory = match std::fs::canonicalize(sessions_dir) {
+        Ok(directory) => directory,
+        // No directory means nothing this conversation owns can exist.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(refused(
+                SESSION_FILE_OUTSIDE_DIRECTORY,
+                format!("无法校验 Fox 会话目录，已拒绝删除任何会话文件：{error}"),
+            ))
+        }
+    };
+    let records = database
+        .conversation_runtime_session_files(conversation_id)
+        .map_err(|error| refused(SESSION_FILE_REFUSED_UNKNOWN, error))?;
+    let mut planned: Vec<PathBuf> = Vec::new();
+    for record in records {
+        // The row identity is re-checked here, not assumed from the query: a
+        // row that names another conversation is never deleted.
+        if record.conversation_id != conversation_id {
+            return Err(refused(
+                SESSION_FILE_OTHER_OWNER,
+                "会话文件记录属于另一个对话，已拒绝删除".to_owned(),
+            ));
+        }
+        let Some(path) = record.file_path() else {
+            continue;
+        };
+        let other_owner = database
+            .other_conversation_referencing_session(
+                conversation_id,
+                path.to_string_lossy().as_ref(),
+                &record.runtime_session_id,
+            )
+            .map_err(|error| refused(SESSION_FILE_REFUSED_UNKNOWN, error))?;
+        if record.is_native() {
+            let canonical = match path.canonicalize() {
+                Ok(canonical) => canonical,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(refused(
+                        SESSION_FILE_OUTSIDE_DIRECTORY,
+                        format!("无法确认会话文件位置，已拒绝删除：{error}"),
+                    ))
+                }
+            };
+            if canonical.parent() != Some(directory.as_path()) {
+                return Err(refused(
+                    SESSION_FILE_OUTSIDE_DIRECTORY,
+                    format!(
+                        "会话文件不在 Fox 会话目录内，已拒绝删除：{}",
+                        canonical.to_string_lossy()
+                    ),
+                ));
+            }
+            if !canonical.is_file() {
+                return Err(refused(
+                    SESSION_FILE_NOT_REGULAR,
+                    format!("会话路径不是普通文件，已拒绝删除：{}", canonical.to_string_lossy()),
+                ));
+            }
+            if let Some(other) = other_owner {
+                return Err(refused(
+                    SESSION_FILE_OTHER_OWNER,
+                    format!("会话文件仍被对话 {other} 引用，已拒绝删除"),
+                ));
+            }
+            if !planned.contains(&canonical) {
+                planned.push(canonical);
+            }
+            continue;
+        }
+        // Legacy snapshot: unchanged pre-stage-two behaviour.
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.parent() != Some(directory.as_path()) || !canonical.is_file() {
+            continue;
+        }
+        if other_owner.is_some() {
+            continue;
+        }
+        if !planned.contains(&canonical) {
+            planned.push(canonical);
+        }
+    }
+    let mut removed = Vec::new();
+    for file in planned {
+        match std::fs::remove_file(&file) {
+            Ok(()) => removed.push(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(refused(
+                    SESSION_FILE_DELETE_FAILED,
+                    format!("删除会话文件失败：{error}"),
+                ))
+            }
+        }
+    }
+    Ok(removed)
 }

@@ -2709,10 +2709,110 @@ impl RuntimeHost {
     /// decisions live in `session_lifecycle`, which knows that a failed native
     /// restore must never become a fresh context.
     fn open_runtime_session(&self, conversation_id: &str) -> Result<(String, PathBuf), String> {
+        // The live worker is the only source of "this allocated session is
+        // still in memory": after a reset Pi has not written the JSONL yet, and
+        // refusing to reuse it would make the new generation unusable.
+        let live_runtime_session_id = self.live_runtime_session_id(conversation_id);
         let mut link = HostSessionLink { host: self };
         self.session_lifecycle()
-            .open(conversation_id, &mut link)
+            .open_with_live_session(
+                conversation_id,
+                &mut link,
+                live_runtime_session_id.as_deref(),
+            )
             .map_err(|error| error.user_message())
+    }
+
+    /// The runtime session the live worker holds for this conversation.
+    ///
+    /// Worker-scoped on purpose: a restarted worker (or another conversation's
+    /// worker) proves nothing about this conversation's session.
+    fn live_runtime_session_id(&self, conversation_id: &str) -> Option<String> {
+        let state = self.state.lock().ok()?;
+        let worker = state.worker.as_ref()?;
+        if worker.current_conversation_id.as_deref() != Some(conversation_id) {
+            return None;
+        }
+        worker.current_runtime_session_id.clone()
+    }
+
+    /// Explicit context reset: keep the conversation (history, expert, memory,
+    /// knowledge bindings, agent backend) and start a new Pi session in the
+    /// next generation.
+    ///
+    /// Refused while a Run is active: the Run owns the session this would
+    /// retire. The run-transition lock makes the check and the reset one step
+    /// with respect to Run start/cancel transitions.
+    pub(crate) fn reset_conversation_context(
+        &self,
+        conversation_id: &str,
+    ) -> Result<session_lifecycle::ResetOutcome, session_lifecycle::ResetRefusal> {
+        // The reset creates the new session through the worker, and the next
+        // Run reuses it there before Pi has written the file.
+        self.ensure_worker(conversation_id)
+            .map_err(session_lifecycle::ResetRefusal::failed)?;
+        let _transition = self
+            .run_transition
+            .lock()
+            .map_err(|_| session_lifecycle::ResetRefusal::failed("运行时状态锁已损坏"))?;
+        let active = self
+            .database
+            .conversation_has_active_run(conversation_id)
+            .map_err(session_lifecycle::ResetRefusal::failed)?;
+        if active {
+            return Err(session_lifecycle::ResetRefusal::run_active());
+        }
+        let outcome = {
+            let mut link = HostSessionLink { host: self };
+            self.session_lifecycle().reset(conversation_id, &mut link)?
+        };
+        // The runtime now holds the new session. Recording it here is what lets
+        // the next Run use the new generation while Pi has not written the file
+        // yet (and it never points at the old session).
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(worker) = state.worker.as_mut() {
+                if worker.current_conversation_id.as_deref() == Some(conversation_id) {
+                    worker.current_runtime_session_id =
+                        Some(outcome.runtime_session_id.clone());
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Permanent delete only: stop the conversation's worker, then remove every
+    /// session file it owns across the live and every retired generation.
+    ///
+    /// Not used by edit/rerun (which keeps its pre-existing behaviour) and not
+    /// used by trash/restore or archive. A refusal deletes nothing at all.
+    pub(crate) fn purge_conversation_session_files(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<PathBuf>, session_lifecycle::SessionFileRefusal> {
+        let should_stop = self
+            .state
+            .lock()
+            .map_err(|_| {
+                session_lifecycle::SessionFileRefusal {
+                    code: session_lifecycle::SESSION_FILE_REFUSED_UNKNOWN.to_owned(),
+                    message: "runtime state lock is poisoned".to_owned(),
+                }
+            })?
+            .worker
+            .as_ref()
+            .and_then(|worker| worker.current_conversation_id.as_deref())
+            == Some(conversation_id);
+        if should_stop {
+            self.stop_worker().map_err(|error| session_lifecycle::SessionFileRefusal {
+                code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(),
+                message: error,
+            })?;
+        }
+        session_lifecycle::purge_owned_session_files(
+            &self.database,
+            &self.sessions_dir,
+            conversation_id,
+        )
     }
 
     fn session_lifecycle(&self) -> session_lifecycle::SessionLifecycle<'_> {
@@ -5057,6 +5157,9 @@ pub(crate) fn resume_plan(
 
 #[cfg(test)]
 mod stage_two_session_lifecycle_tests;
+
+#[cfg(test)]
+mod context_reset_tests;
 
 #[cfg(test)]
 mod stage_two_session_tests {

@@ -408,6 +408,7 @@ pub fn run() {
             commands::conversation_unarchive,
             commands::conversation_restore,
             commands::conversation_fork,
+            commands::conversation_reset_context,
             commands::conversation_delete,
             commands::conversation_purge,
             commands::attachments_save,

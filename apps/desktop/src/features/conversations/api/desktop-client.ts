@@ -13,6 +13,7 @@ import type {
   ConversationExpertBinding,
   ConversationSummary,
   ConversationHistoryPage,
+  ConversationContextReset,
   ChildRunNotification,
   ChildRunRecord,
   RuntimeEventNotification,
@@ -710,6 +711,8 @@ export const desktopClient = {
     command<boolean>('conversation_delete', { conversationId }),
   purgeConversation: (conversationId: string) =>
     command<boolean>('conversation_purge', { conversationId }),
+  resetConversationContext: (conversationId: string) =>
+    command<ConversationContextReset>('conversation_reset_context', { conversationId }),
   renameConversation: (conversationId: string, title: string) =>
     command<ConversationSummary>('conversation_rename', { conversationId, title }),
   setConversationPinned: (conversationId: string, pinned: boolean) =>

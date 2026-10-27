@@ -10,7 +10,7 @@ import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
 import { type ConversationDetail, type ConversationSummary } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { Activity, AlertTriangle, Archive, BookOpen, Bot, ChevronRight, CircleHelp, CircleStop, FileEdit, FileText, Folder, FolderOpen, ListTodo, MoreHorizontal, Pin, PinOff, Settings, ShieldCheck, Terminal } from 'lucide-react'
+import { Activity, AlertTriangle, Archive, BookOpen, Bot, ChevronRight, CircleHelp, CircleStop, FileEdit, FileText, Folder, FolderOpen, ListTodo, MoreHorizontal, Pin, PinOff, RotateCcw, Settings, ShieldCheck, Terminal } from 'lucide-react'
 import { type ReactNode, useId, useRef, useState } from 'react'
 import { type ChatState, type RightMode } from '../fox-shared'
 import { runtimeProcess } from '../timeline/fox-runtime-process-model'
@@ -80,7 +80,7 @@ function ConversationSummaryPopover({ detail, modelName, onOpenRightMode }: { de
   )
 }
 
-export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
+export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onResetContext, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onResetContext: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
   const waiting = detail && detail.conversation.id === conversation?.id
     ? activeModelWaiting(detail.runtimeEvents, { runId: detail.lastRun?.id, runState: conversationRunState(detail) }) : null
@@ -118,6 +118,8 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRigh
               <DropdownMenuLabel>当前对话</DropdownMenuLabel>
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onPinConversation(conversation)}>{conversation?.pinned ? <PinOff /> : <Pin />}{conversation?.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名</DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onResetContext(conversation)}><RotateCcw />重置上下文</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onArchiveConversation(conversation)}><Archive />归档对话</DropdownMenuItem>
             </DropdownMenuContent>

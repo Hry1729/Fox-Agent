@@ -27,6 +27,7 @@ import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '@/features/conv
 import { type ApprovalDecision, type ArtifactRecord, type ChildRunRecord, type ConversationMessage, type ConversationSummary, type KnowledgeBaseRecord, type KnowledgeReference, type ProjectRecord, type TaskEvidenceRecord } from '@/features/conversations/model/types'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { notify as toast } from '@/features/notifications'
+import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { useUserProfile } from '@/features/profile/user-profile'
 import { useModelService } from '@/features/settings/use-model-service'
 import { matchesShortcutAction } from '@/features/settings/shortcut-model'
@@ -901,6 +902,22 @@ export function Workbench() {
     }
     toast.success('对话已恢复')
   }
+  // A context reset keeps the chat: only the model context starts over in a
+  // new Pi session generation. The confirmation names what is kept.
+  const resetManagedConversation = async (conversation: ConversationSummary) => {
+    const confirmed = await confirmDialog({
+      title: '重置会话上下文',
+      description: '将开始一个新的 Pi 会话。历史消息、专家绑定、记忆与知识库绑定都会保留；旧会话文件仍保留在磁盘上，直到永久删除对话。',
+      confirmLabel: '重置上下文',
+    })
+    if (!confirmed) return
+    const result = await desktopConversation.resetConversationContext(conversation.id)
+    if (!result.ok) {
+      toast.error(result.error ?? '无法重置会话上下文')
+      return
+    }
+    toast.success('会话上下文已重置，下一条消息将使用新的会话')
+  }
   const trashManagedConversation = async (conversation: ConversationSummary) => {
     const result = await desktopConversation.deleteConversation(conversation.id)
     if (!result.deleted) {
@@ -1526,7 +1543,7 @@ export function Workbench() {
           /></Suspense>}
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
-          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
+          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onResetContext={(conversation) => void resetManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
 <div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''} ${activeView === 'chat' && activeExpert ? 'has-expert-lanyard' : ''}`}>
   {activeView === 'chat' && activeExpert && <Suspense fallback={null}><ExpertLanyard expertId={activeExpert.id} name={activeExpert.name} description={activeExpert.description || activeExpert.category} frontImage={asAgentCard(activeExpert).image} autoCollapseKey={timelineEmpty ? 0 : pendingUserMessage?.createdAt ?? desktopUserMessage?.createdAt ?? 1} /></Suspense>}
   {assistantUiThreadPanel}

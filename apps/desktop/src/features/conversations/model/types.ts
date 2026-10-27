@@ -1454,6 +1454,17 @@ export interface AcceptanceRecord {
   resolvedAt: string | null
 }
 
+/**
+ * Result of resetting a conversation's model context: the same chat continues
+ * in a brand-new Pi session generation. Not a delete: history, expert binding,
+ * memory, knowledge bindings and the agent backend are untouched.
+ */
+export interface ConversationContextReset {
+  conversationId: string
+  contextGeneration: number
+  runtimeSessionId: string
+}
+
 export interface WorkStateCounts {
   goals: number
   tasks: number

@@ -2229,6 +2229,61 @@ impl RuntimeSessionRecord {
     }
 }
 
+/// One session file a conversation owns, across the live mapping and every
+/// retired generation.
+///
+/// Read before a permanent delete so the Host can enumerate exactly what the
+/// conversation owns. The row identity is carried verbatim: the cleanup never
+/// re-derives a path from an id, because a guessed path is not proof of
+/// ownership.
+#[derive(Debug, Clone)]
+pub struct RuntimeSessionFileRecord {
+    /// The conversation the row belongs to, as stored. Checked again by the
+    /// caller: a row that names another conversation is never deleted.
+    pub conversation_id: String,
+    pub context_generation: i64,
+    pub runtime_session_id: String,
+    /// The legacy Fox snapshot path (format_version 1), if this row had one.
+    pub session_path: Option<String>,
+    /// The Pi-native JSONL path (format_version >= 2), if this row had one.
+    pub native_session_path: Option<String>,
+    /// 1 = legacy Fox JSON snapshot, 2 = Pi native JSONL.
+    pub format_version: i64,
+    pub status: String,
+    /// True for the live `runtime_sessions` row, false for a retired generation.
+    pub current: bool,
+}
+
+impl RuntimeSessionFileRecord {
+    /// The exact file this row owns, if any. Never guessed: a row whose format
+    /// and path disagree owns nothing.
+    pub fn file_path(&self) -> Option<std::path::PathBuf> {
+        let recorded = if self.format_version >= 2 {
+            self.native_session_path.as_deref()
+        } else {
+            self.session_path.as_deref()
+        }?;
+        let trimmed = recorded.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(std::path::PathBuf::from(trimmed))
+    }
+
+    pub fn is_native(&self) -> bool {
+        self.format_version >= 2
+    }
+}
+
+/// What a context reset produced: the new generation the conversation now uses.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationContextReset {
+    pub conversation_id: String,
+    pub context_generation: i64,
+    pub runtime_session_id: String,
+}
+
 /// Lifecycle of a `runtime_sessions` row.
 ///
 /// Stage two needs three states because Pi's JSONL is written lazily: the
