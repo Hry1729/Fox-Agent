@@ -21,6 +21,8 @@ pub(crate) use repositories::{
 #[cfg(test)]
 pub(crate) use repositories::finalize_fault;
 #[cfg(test)]
+pub(crate) use repositories::native_session_fault;
+#[cfg(test)]
 pub(crate) use repositories::stage_fault;
 pub use models::*;
 /// Cap on `tool_calls.result_json`. Published here because the model-view binder

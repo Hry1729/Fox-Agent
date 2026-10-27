@@ -16,6 +16,7 @@ mod run_admission;
 mod kernel_host;
 pub(crate) mod office_grants;
 mod waiting_jobs_wake;
+mod session_lifecycle;
 mod kernel_authority;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
@@ -1156,6 +1157,23 @@ pub struct RuntimeHost {
     active_tool_handlers: Arc<AtomicUsize>,
     root_run_admission: Arc<run_admission::Gate>,
     child_run_admission: Arc<run_admission::Gate>,
+}
+
+/// Routes the session lifecycle's create/resume requests through the Host's
+/// live runtime worker. Kept tiny on purpose: the lifecycle owns the decisions,
+/// this only owns the transport.
+struct HostSessionLink<'a> {
+    host: &'a RuntimeHost,
+}
+
+impl session_lifecycle::SessionRuntimeLink for HostSessionLink<'_> {
+    fn send_session_request(
+        &mut self,
+        request: RuntimeRequest,
+        timeout: Duration,
+    ) -> Result<RuntimeEnvelope, String> {
+        self.host.send_request(request, timeout)
+    }
 }
 
 impl RuntimeHost {
@@ -2687,159 +2705,34 @@ impl RuntimeHost {
     ///
     /// The format is recorded in the row, never inferred: a row written before
     /// stage two is a legacy Fox JSON snapshot, a `format_version >= 2` row is a
-    /// Pi-native session whose exact file the Host must open.
+    /// Pi-native session whose exact file the Host must open. All of the
+    /// decisions live in `session_lifecycle`, which knows that a failed native
+    /// restore must never become a fresh context.
     fn open_runtime_session(&self, conversation_id: &str) -> Result<(String, PathBuf), String> {
-        if let Some(existing) = self.database.get_runtime_session(conversation_id)? {
-            if existing.status != "unavailable" {
-                return self.resume_runtime_session(conversation_id, existing);
-            }
-        }
-        self.create_native_runtime_session(conversation_id)
+        let mut link = HostSessionLink { host: self };
+        self.session_lifecycle()
+            .open(conversation_id, &mut link)
+            .map_err(|error| error.user_message())
     }
 
-    fn resume_runtime_session(
-        &self,
-        conversation_id: &str,
-        existing: crate::database::RuntimeSessionRecord,
-    ) -> Result<(String, PathBuf), String> {
-        let plan = resume_plan(&existing, self.session_path(&existing.runtime_session_id));
-        let native = matches!(plan, ResumePlan::Native { .. });
-        let (payload, path) = match &plan {
-            ResumePlan::Native { path, session_id } => (
-                json!({
-                    "sessionFormat": "pi-native",
-                    "nativeSessionPath": path.to_string_lossy(),
-                    "nativeSessionId": session_id,
-                    "contextGeneration": existing.context_generation,
-                }),
-                path.clone(),
-            ),
-            ResumePlan::Legacy { path } => (json!({ "sessionPath": path }), path.clone()),
-        };
-        let resume_request = RuntimeRequest::new("resume_session")
-            .with_conversation(conversation_id)
-            .with_runtime_session(&existing.runtime_session_id)
-            .with_payload(payload);
-        let response = self.send_request(resume_request, RESPONSE_TIMEOUT)?;
-        if response.r#type == "session_created" {
-            if native {
-                self.database.ensure_native_runtime_session(
-                    conversation_id,
-                    &existing.runtime_session_id,
-                    existing.runtime_version.as_deref(),
-                    path.to_string_lossy().as_ref(),
-                    existing.native_session_ref.as_deref(),
-                    existing.context_generation,
-                )?;
-            } else {
-                self.database.ensure_runtime_session(
-                    conversation_id,
-                    &existing.runtime_session_id,
-                    existing.runtime_version.as_deref(),
-                    path.to_str(),
-                )?;
-            }
-            return Ok((existing.runtime_session_id, path));
-        }
-        self.database
-            .mark_runtime_session_unavailable(conversation_id)?;
-        if native {
-            // A Pi-native conversation whose file cannot be reopened is a
-            // recovery problem. Starting an empty context here would silently
-            // drop the conversation; the user has to reset it explicitly.
-            return Err(format!(
-                "会话上下文无法恢复（{}）：{}。请先按提示重置会话上下文再继续，历史与资料绑定不会被删除。",
-                response
-                    .payload
-                    .as_ref()
-                    .and_then(|payload| payload.get("code"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("session.resume_failed"),
-                response_error(&response, "Pi session could not be resumed")
-            ));
-        }
-        self.create_native_runtime_session(conversation_id)
+    fn session_lifecycle(&self) -> session_lifecycle::SessionLifecycle<'_> {
+        session_lifecycle::SessionLifecycle::new(
+            &self.database,
+            &self.sessions_dir,
+            self.current_runtime_version(),
+        )
     }
 
-    /// Create a Pi-native session and record exactly where the runtime put it.
+    /// Bounded, best-effort verification: promote an `allocated` native mapping
+    /// to `ready` once Pi has really written the session file.
     ///
-    /// Order matters: the runtime writes the file first, then the Host commits
-    /// the mapping. A mapping is only written for a file that exists inside the
-    /// Fox session directory, and a mapping failure removes the orphan file, so
-    /// the database can never claim a session that is not on disk.
-    fn create_native_runtime_session(&self, conversation_id: &str) -> Result<(String, PathBuf), String> {
-        let runtime_session_id = Uuid::new_v4().to_string();
-        std::fs::create_dir_all(&self.sessions_dir)
-            .map_err(|error| format!("会话目录不可用: {error}"))?;
-        let create_request = RuntimeRequest::new("create_session")
-            .with_conversation(conversation_id)
-            .with_runtime_session(&runtime_session_id)
-            .with_payload(json!({
-                "sessionFormat": "pi-native",
-                "sessionDir": self.sessions_dir.to_string_lossy(),
-                "cwd": self.sessions_dir.to_string_lossy(),
-                "contextGeneration": 1,
-            }));
-        let response = self.send_request(create_request, RESPONSE_TIMEOUT)?;
-        if response.r#type != "session_created" {
-            return Err(response_error(
-                &response,
-                "runtime session could not be created",
-            ));
+    /// Called after a run reports that a message or its terminal state was
+    /// persisted. A failure here never fails the run — the next open re-checks
+    /// the file anyway, and this method never creates or edits the file.
+    fn verify_native_session_mapping(&self, conversation_id: &str) {
+        if let Err(error) = self.session_lifecycle().verify(conversation_id) {
+            eprintln!("fox native session verification: {}", error.user_message());
         }
-        let payload = response.payload.as_ref();
-        let reported = payload
-            .and_then(|payload| payload.get("nativeSessionPath"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                "运行时没有返回 Pi 会话文件路径，已拒绝把无法恢复的会话记入数据库".to_owned()
-            })?;
-        // The Host owns the location: a path outside the Fox session directory
-        // is refused rather than recorded.
-        //
-        // The file itself may not exist yet — Pi writes its header on the first
-        // append — so the Host validates the *directory* (which it does control)
-        // and keeps the runtime's file name. A later resume demands the file.
-        let directory = std::fs::canonicalize(&self.sessions_dir)
-            .map_err(|error| format!("会话目录不可用: {error}"))?;
-        let reported = PathBuf::from(reported);
-        let parent = reported
-            .parent()
-            .ok_or_else(|| "Pi 会话文件路径没有父目录".to_owned())?;
-        let canonical_parent = std::fs::canonicalize(parent)
-            .map_err(|error| format!("Pi 会话目录不可用: {error}"))?;
-        let file_name = reported
-            .file_name()
-            .ok_or_else(|| "Pi 会话文件路径没有文件名".to_owned())?;
-        if canonical_parent != directory {
-            return Err("Pi 会话文件不在 Fox 会话目录内，已拒绝记录".to_owned());
-        }
-        let file = canonical_parent.join(file_name);
-        let native_ref = payload
-            .and_then(|payload| payload.get("nativeSessionId"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let generation = payload
-            .and_then(|payload| payload.get("contextGeneration"))
-            .and_then(Value::as_i64)
-            .unwrap_or(1);
-        if let Err(error) = self.database.ensure_native_runtime_session(
-            conversation_id,
-            &runtime_session_id,
-            self.current_runtime_version().as_deref(),
-            file.to_string_lossy().as_ref(),
-            native_ref.as_deref(),
-            generation,
-        ) {
-            // Nothing points at the file, so it must not look recoverable.
-            let _ = std::fs::remove_file(&file);
-            return Err(error);
-        }
-        Ok((runtime_session_id, file))
-    }
-
-    fn session_path(&self, runtime_session_id: &str) -> PathBuf {
-        self.sessions_dir.join(format!("{runtime_session_id}.json"))
     }
 
     fn start_child_runtime(
@@ -4652,6 +4545,18 @@ impl RuntimeHost {
                     }
                     match database.apply_runtime_event(&run_id, seq, &payload) {
                         Ok(applied) => {
+                            if applied
+                                && payload
+                                    .get("type")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(session_lifecycle::event_proves_persistence)
+                            {
+                                // Stage two: Pi writes its JSONL on the first
+                                // appended message, so an `allocated` mapping
+                                // only becomes `ready` here — never at create
+                                // time, and never by the Host touching the file.
+                                runtime_host.verify_native_session_mapping(&conversation_id);
+                            }
                             let is_continuation_proposal =
                                 payload.get("type").and_then(Value::as_str)
                                     == Some(continuation::CONTINUATION_PROPOSAL_EVENT_TYPE);
@@ -5149,6 +5054,9 @@ pub(crate) fn resume_plan(
         path: recorded(&record.session_path).unwrap_or(fallback),
     }
 }
+
+#[cfg(test)]
+mod stage_two_session_lifecycle_tests;
 
 #[cfg(test)]
 mod stage_two_session_tests {

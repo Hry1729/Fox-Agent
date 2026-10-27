@@ -2207,6 +2207,66 @@ pub struct RuntimeSessionRecord {
     pub context_generation: i64,
 }
 
+impl RuntimeSessionRecord {
+    /// A Pi-native row (format_version 2). Anything older is the legacy Fox
+    /// JSON snapshot and keeps the pre-stage-two behaviour.
+    pub fn is_native(&self) -> bool {
+        self.format_version >= 2
+    }
+
+    /// The exact Pi session file this row names, if one was recorded.
+    pub fn native_path(&self) -> Option<std::path::PathBuf> {
+        self.native_session_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
+    /// The recorded status, or `None` when this build does not know the value.
+    pub fn status_kind(&self) -> Option<RuntimeSessionStatus> {
+        RuntimeSessionStatus::parse(&self.status)
+    }
+}
+
+/// Lifecycle of a `runtime_sessions` row.
+///
+/// Stage two needs three states because Pi's JSONL is written lazily: the
+/// runtime books a file path at `create_session` time and only creates the
+/// file on the first appended message. `allocated` says exactly that, so
+/// neither the database nor a caller can claim the session is recoverable
+/// before Pi has persisted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeSessionStatus {
+    /// The Host booked a file path; Pi has not written the file yet.
+    Allocated,
+    /// The file exists with real content and can be reopened.
+    Ready,
+    /// A reopen attempt failed; the conversation needs an explicit reset.
+    Unavailable,
+}
+
+impl RuntimeSessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allocated => "allocated",
+            Self::Ready => "ready",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Unknown strings stay `None` on purpose: a row this build does not
+    /// understand must never be silently treated as recoverable.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "allocated" => Some(Self::Allocated),
+            "ready" => Some(Self::Ready),
+            "unavailable" => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConversationRuntimeRecord {
     pub runtime_type: String,

@@ -12,7 +12,8 @@ use super::{
     ModelServiceRecord, PendingWorkModeDispatch, PluginCatalogEntryRecord, PluginInstallStatus,
     PluginInstallationRecord, PluginKind, PluginOrigin, ProviderModelRecord,
     RecoverableExternalRunRecord, RunEventRecord, RunRecord, RuntimePromptMessage,
-    RuntimeSessionRecord, SaveAgentRequest, StartRunResult, ToolCallRecord, ToolResultRange,
+    RuntimeSessionRecord, RuntimeSessionStatus, SaveAgentRequest, StartRunResult,
+    ToolCallRecord, ToolResultRange,
     YuxiAgentRecord,
     YuxiConnectionTest, YuxiServiceRecord,
 };
@@ -72,6 +73,53 @@ pub(crate) use delivery_checks::{
 pub(crate) use delivery_checks::finalize_fault;
 #[cfg(test)]
 pub(crate) use delivery_checks::stage_fault;
+
+/// Test-only fault injection for the stage-two session mapping write.
+///
+/// The window this models is real: the mapping row is written, then the Run is
+/// associated with it. Stage two requires both in one transaction, so an abort
+/// at the second statement must leave neither behind. It is thread-local so
+/// parallel tests cannot inject into each other, and it is absent from
+/// production builds.
+#[cfg(test)]
+pub(crate) mod native_session_fault {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static FIRED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The next session mapping aborts at the Run association (the second
+    /// statement), exactly like a process death inside the transaction.
+    pub(crate) fn fail_next_run_association() {
+        ARMED.with(|armed| armed.set(true));
+        FIRED.with(|fired| fired.set(false));
+    }
+
+    pub(crate) fn disarm() {
+        ARMED.with(|armed| armed.set(false));
+        FIRED.with(|fired| fired.set(false));
+    }
+
+    /// Read-only probe: did the injected abort actually fire on this thread?
+    pub(crate) fn fired() -> bool {
+        FIRED.with(Cell::get)
+    }
+
+    /// Called between the two statements; true when this write must abort.
+    pub(crate) fn should_abort() -> bool {
+        ARMED.with(|armed| {
+            if armed.get() {
+                armed.set(false);
+                FIRED.with(|fired| fired.set(true));
+                true
+            } else {
+                false
+            }
+        })
+    }
+}
 pub(crate) use managed_files::{ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput, RestoreClaim, RestoreRequestRecord};
 pub(crate) use run_steering::{
     adopt_received_steering_in_tx, apply_delivered_steering_in_tx, cancel_open_steering_in_tx,
@@ -5971,8 +6019,16 @@ impl Database {
     }
 
     /// Record a Pi-native session (format_version 2): the exact file the
-    /// runtime wrote and Pi's own session id. The file is written first, so a
-    /// row never claims a session that does not exist on disk.
+    /// runtime named and Pi's own session id.
+    ///
+    /// `status` is the truth about the file, never an assumption: Pi writes its
+    /// JSONL lazily on the first appended message, so right after
+    /// `create_session` the path is only `Allocated`. A row may only say
+    /// `Ready` once the file really exists.
+    ///
+    /// The mapping and the Run association are one transaction on purpose: a
+    /// caller that deletes an unusable session file after a failure must never
+    /// leave a row behind that points at it.
     pub fn ensure_native_runtime_session(
         &self,
         conversation_id: &str,
@@ -5981,20 +6037,22 @@ impl Database {
         native_session_path: &str,
         native_session_ref: Option<&str>,
         context_generation: i64,
+        status: RuntimeSessionStatus,
     ) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            connection.execute(
+            let transaction = connection.transaction()?;
+            transaction.execute(
                 "INSERT INTO runtime_sessions(
                     id, conversation_id, runtime_type, runtime_session_id, runtime_version,
                     session_path, status, created_at, updated_at,
                     native_session_ref, native_session_path, format_version, context_generation
-                 ) VALUES (?1, ?2, 'pi', ?1, ?3, NULL, 'ready', ?4, ?4, ?5, ?6, 2, ?7)
+                 ) VALUES (?1, ?2, 'pi', ?1, ?3, NULL, ?8, ?4, ?4, ?5, ?6, 2, ?7)
                  ON CONFLICT(conversation_id, runtime_type) DO UPDATE SET
                     runtime_session_id = excluded.runtime_session_id,
                     runtime_version = excluded.runtime_version,
                     session_path = NULL,
-                    status = 'ready',
+                    status = excluded.status,
                     native_session_ref = excluded.native_session_ref,
                     native_session_path = excluded.native_session_path,
                     format_version = 2,
@@ -6007,14 +6065,43 @@ impl Database {
                     now,
                     native_session_ref,
                     native_session_path,
-                    context_generation
+                    context_generation,
+                    status.as_str()
                 ],
             )?;
-            connection.execute(
+            // Fault injection point: the second phase of the write. A process
+            // death here must leave neither the row nor the association.
+            #[cfg(test)]
+            if native_session_fault::should_abort() {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            transaction.execute(
                 "UPDATE runs SET runtime_session_id = ?2 WHERE conversation_id = ?1 AND status = 'queued'",
                 params![conversation_id, runtime_session_id],
             )?;
+            transaction.commit()?;
             Ok(())
+        })
+    }
+
+    /// Promote an `allocated` native mapping to `ready`, but only when the row
+    /// still points at exactly this file and is still allocated. Returns
+    /// whether the row really changed.
+    pub fn confirm_native_runtime_session_ready(
+        &self,
+        conversation_id: &str,
+        native_session_path: &str,
+    ) -> Result<bool, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let changed = connection.execute(
+                "UPDATE runtime_sessions SET status = 'ready', updated_at = ?3
+                 WHERE conversation_id = ?1 AND runtime_type = 'pi'
+                   AND status = 'allocated' AND format_version >= 2
+                   AND native_session_path = ?2",
+                params![conversation_id, native_session_path, now],
+            )?;
+            Ok(changed > 0)
         })
     }
 
