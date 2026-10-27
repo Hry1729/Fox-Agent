@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "name": "single-pi-mainline-20261027",
+  "note": "独立验收夹具：只使用本目录创建的数据目录，不读也不写用户的真实数据库。",
+  "experts": [
+    {
+      "key": "expertA",
+      "displayName": "合同审阅专家 A",
+      "prompt": "你是合同审阅专家 A。只依据已绑定的『城北项目资料库 A』回答，引用条款编号；资料不足时明确说明缺什么，不要推测。",
+      "knowledgeBase": {
+        "key": "kbA",
+        "name": "城北项目资料库 A",
+        "documents": ["knowledge/expert-a-城北项目.md"]
+      }
+    },
+    {
+      "key": "expertB",
+      "displayName": "财务分析专家 B",
+      "prompt": "你是财务分析专家 B。只依据已绑定的『南岸项目资料库 B』回答，引用条款编号；资料不足时明确说明缺什么，不要推测。",
+      "knowledgeBase": {
+        "key": "kbB",
+        "name": "南岸项目资料库 B",
+        "documents": ["knowledge/expert-b-南岸项目.md"]
+      }
+    }
+  ],
+  "questions": [
+    {
+      "expert": "expertA",
+      "knowledgeBase": "kbA",
+      "question": "城北项目的验收押金是多少？请给出条款编号。",
+      "expectedFact": "37,500",
+      "expectedSource": "knowledge/expert-a-城北项目.md",
+      "expectedCitation": "A-7"
+    },
+    {
+      "expert": "expertA",
+      "knowledgeBase": "kbA",
+      "question": "城北项目的逾期违约金按日万分之几计算？",
+      "expectedFact": "万分之三",
+      "expectedSource": "knowledge/expert-a-城北项目.md",
+      "expectedCitation": "A-9"
+    },
+    {
+      "expert": "expertB",
+      "knowledgeBase": "kbB",
+      "question": "南岸项目的质保金是多少？请给出条款编号。",
+      "expectedFact": "82,000",
+      "expectedSource": "knowledge/expert-b-南岸项目.md",
+      "expectedCitation": "B-3"
+    }
+  ],
+  "isolationProbes": [
+    {
+      "expert": "expertA",
+      "forbiddenFact": "82,000",
+      "forbiddenSource": "knowledge/expert-b-南岸项目.md",
+      "question": "南岸项目的质保金是多少？",
+      "expectation": "拒绝或说明资料库中没有该内容；不得读出 82,000，也不得伪造引用"
+    },
+    {
+      "expert": "expertB",
+      "forbiddenFact": "37,500",
+      "forbiddenSource": "knowledge/expert-a-城北项目.md",
+      "question": "城北项目的验收押金是多少？",
+      "expectation": "拒绝或说明资料库中没有该内容；不得读出 37,500"
+    }
+  ],
+  "requiredTools": ["list_knowledge_bases", "search_knowledge", "read_knowledge_document"],
+  "forbiddenDrivers": ["pi", "codex", "deepseek"],
+  "scenarios": [
+    { "id": "single-driver", "operation": "UI 新建 / 直接 IPC / 旧偏好 / 环境变量分别请求退休驱动", "pass": "新会话只有内置 Pi；其他执行请求被拒绝（agent_backend_retired）" },
+    { "id": "expert-round-trip", "operation": "从专家 A 进入、发送、离开后再次点击头像", "pass": "回到同一聊天；身份与资料绑定不变" },
+    { "id": "knowledge-qa", "operation": "无项目的私聊中列库、搜索、读文档、回答", "pass": "真实 Host 工具结果支持答案，引用可定位" },
+    { "id": "restart", "operation": "正常退出应用与 sidecar，再启动并追问前文", "pass": "绑定恢复为同一 Pi session；不靠重新灌入全部 UI 历史冒充恢复" },
+    { "id": "interrupt", "operation": "在受控点结束测试 sidecar，再恢复", "pass": "中断被识别，不重放已执行工具；未知结果不变成成功" },
+    { "id": "context-reset", "operation": "对专家 A 重置运行上下文", "pass": "新上下文生效，历史与长期身份数据仍在" },
+    { "id": "cross-expert", "operation": "A、B 使用不同事实，伪造另一方资料 ID", "pass": "不能读取未授权资料，不能恢复另一方会话" },
+    { "id": "compaction-restart", "operation": "触发 Pi 原生压缩，退出并恢复", "pass": "保留压缩上下文，不被 SQLite 展示历史覆盖" },
+    { "id": "cancel", "operation": "生成中取消、工具等待中取消", "pass": "最终状态唯一，取消后不跳回成功" },
+    { "id": "corrupt-session", "operation": "删除副本中的会话文件或破坏其内容", "pass": "明确恢复错误，不静默创建空会话" },
+    { "id": "windows-path", "operation": "使用中文、空格和较长路径", "pass": "启动、保存、恢复和退出正常" }
+  ]
+}
