@@ -140,7 +140,7 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRigh
           <span className="fox-chat-title">{conversation?.title || '新对话'}</span>
           <DropdownMenu>
             <Tooltip>
-              <TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button fox-chat-title-more" aria-label="更多"><MoreHorizontal size={16} /></Button></DropdownMenuTrigger></TooltipTrigger>
+              <TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button fox-chat-title-more" data-testid="conversation-menu" aria-label="更多"><MoreHorizontal size={16} /></Button></DropdownMenuTrigger></TooltipTrigger>
               <TooltipContent side="bottom"><p>更多</p></TooltipContent>
             </Tooltip>
             <DropdownMenuContent align="start" className="fox-top-menu">
@@ -151,6 +151,7 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRigh
               <DropdownMenuItem
                 disabled={!resetContextItem.available}
                 title={resetContextItem.reason ?? undefined}
+                data-testid="reset-context"
                 aria-label={resetContextItem.reason ? `重置上下文（不可用：${resetContextItem.reason}）` : '重置上下文'}
                 onSelect={() => conversation && resetContextItem.available && onResetContext(conversation)}
               ><RotateCcw />重置上下文{!resetContextItem.available && resetContextItem.reason ? <span className="fox-menu-hint">{resetContextItem.reason}</span> : null}</DropdownMenuItem>
