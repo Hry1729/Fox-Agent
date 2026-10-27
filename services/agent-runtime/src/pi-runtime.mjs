@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline'
 import { dirname, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
+import { createFatalErrorHandler } from './runtime-fatal.mjs'
 import {
   DefaultResourceLoader,
   PI_PACKAGE_VERSION,
@@ -489,6 +490,10 @@ async function executePrompt(request) {
     budgetError: null,
     abort: runAbort,
     mapper: null,
+    // Identity for a terminal frame written from outside this promise chain
+    // (see `reportRunFailure` below); a fatal error must still end the Run.
+    request,
+    seq,
   }
   // Abort a Host request when either the run is cancelled or Pi's per-tool signal
   // fires. AbortSignal.any is available on the supported Node runtime.
@@ -1092,6 +1097,34 @@ async function handleRequest(request) {
     respond(request, 'request_failed', { code, message })
   }
 }
+
+// An uncaught exception or an unhandled rejection is a process-level failure:
+// without this the Host only saw the stdout pipe close (`runtime.process_crashed`
+// / "runtime process closed stdout") and the Run's real cause was lost. Every
+// active Run is ended with its normal terminal frame first, the stack is kept
+// on stderr, and the process still exits non-zero.
+const handleFatal = createFatalErrorHandler({
+  activeRuns: () => [...activeRuns.values()],
+  reportRunFailure: (run, code, message) => {
+    if (run?.mapper) {
+      const error = new Error(message)
+      error.code = code
+      run.mapper.fail(error)
+      return
+    }
+    const request = run?.request ?? {}
+    write(createEnvelope('event', 'runtime_event', {
+      conversationId: request.conversationId ?? null,
+      runtimeSessionId: request.runtimeSessionId ?? null,
+      runId: request.runId ?? null,
+      seq: Number.isInteger(run?.seq?.value) ? run.seq.value++ : 1,
+      payload: { type: 'run.failed', code, message, recoverable: true },
+    }))
+  },
+  stderr: (line) => process.stderr.write(line),
+})
+process.on('uncaughtException', (error) => { handleFatal(error, 'uncaughtException') })
+process.on('unhandledRejection', (reason) => { handleFatal(reason, 'unhandledRejection') })
 
 const kernelWorker = process.argv.includes('--kernel-worker') ? createKernelWorker(write) : null
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
