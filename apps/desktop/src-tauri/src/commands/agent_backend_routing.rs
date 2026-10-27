@@ -1135,6 +1135,58 @@ mod tests {
         assert_eq!(unknown.unwrap_err().error.unwrap().code, "agent_backend_invalid");
     }
 
+    /// The Yuxi remote knowledge agent is NOT one of the retired drivers.
+    ///
+    /// Retirement is about the conversation-level Agent backend (`agent_backend`).
+    /// A Yuxi expert keeps its own `agents.runtime_type = 'yuxi'` remote
+    /// runtime; the conversation is still the supported Fox path, so it stays
+    /// runnable and its remote knowledge base is untouched.
+    #[test]
+    fn a_yuxi_remote_expert_stays_on_the_supported_path() {
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                     VALUES ('expert-yuxi','远程知识库专家','', 'yuxi','', '', 1, 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("yuxi expert");
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("远程知识库会话"), None, None)
+            .expect("conversation");
+        // Rebind the conversation to the remote expert the way the create path
+        // does (the summary read-back of a hand-inserted agent row is the
+        // test fixture's business, not this rule's).
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE conversations SET agent_id = 'expert-yuxi' WHERE id = ?1",
+                    [&conversation.id],
+                )?;
+                Ok(())
+            })
+            .expect("bind yuxi expert");
+        // The conversation still belongs to the one supported Agent path…
+        assert_eq!(
+            database.conversation_agent_backend(&conversation.id).unwrap().as_deref(),
+            Some("fox"),
+            "a Yuxi conversation is the supported Fox path, not a retired backend"
+        );
+        // …while its expert keeps the remote runtime.
+        assert_eq!(database.conversation_runtime(&conversation.id).unwrap().runtime_type, "yuxi");
+        for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve, HostEntry::Resume] {
+            let gated: Result<Route, ApiResponse<()>> =
+                gate_conversation(&database, entry, &conversation.id, None, None);
+            assert!(
+                matches!(gated, Ok(Route::Fox)),
+                "{entry:?} must stay on the supported path for a Yuxi expert"
+            );
+        }
+    }
+
     /// The status surface the UI mirrors declares one supported backend and
     /// lists the retired ones with their reason.
     #[test]
