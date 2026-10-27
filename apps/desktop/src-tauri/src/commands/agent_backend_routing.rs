@@ -1,6 +1,12 @@
 //! Thin Host glue for the conversation-level `agent_backend` (four-agent plan
 //! v0.3.1, 5.4 / 6.6; Host wiring first batch).
 //!
+//! Since the single Pi mainline the only supported path is the built-in
+//! Fox route (`agent_backend = fox`, model engine `pi`). The three external
+//! backends are retired: a new conversation is always `fox`, a request that
+//! names a retired backend is refused with `agent_backend_retired`, and a
+//! conversation frozen to one stays readable and read-only.
+//!
 //! All decisions live in `fox_agent_backend::host_routing` (unit-tested there).
 //! This file only reads the frozen value from the database, calls the routing
 //! function, turns a refusal into an `ApiResponse` failure with the stable
@@ -178,6 +184,8 @@ pub struct AgentBackendOption {
     /// the list so the UI can still tell whether an existing conversation of
     /// that backend is runnable (`enabled`).
     pub hidden: bool,
+    /// Retired in this build: its history stays readable, no runtime starts.
+    pub retired: bool,
     pub reason: Option<String>,
 }
 
@@ -187,6 +195,10 @@ pub struct AgentBackendStatus {
     /// Name of the Host switch, for the UI explanation.
     pub switch_env: String,
     pub any_external_enabled: bool,
+    /// The backends a new conversation can use. Exactly one: `fox`.
+    pub supported_backends: Vec<String>,
+    /// Backends retired in this build (readable history, no runtime).
+    pub retired_backends: Vec<String>,
     pub options: Vec<AgentBackendOption>,
     /// Entries of the switch that name no backend (ignored, shown for support).
     pub unknown_entries: Vec<String>,
@@ -205,6 +217,7 @@ pub fn agent_backends_status() -> ApiResponse<AgentBackendStatus> {
             wired: option.wired,
             experimental: option.experimental,
             hidden: option.hidden,
+            retired: option.retired,
             reason: option.reason,
         })
         .collect();
@@ -213,6 +226,8 @@ pub fn agent_backends_status() -> ApiResponse<AgentBackendStatus> {
         // "Can an external backend be picked for a new conversation": a
         // hidden one does not count.
         any_external_enabled: options.iter().any(|option| option.backend != "fox" && option.enabled && !option.hidden),
+        supported_backends: host_routing::SUPPORTED_BACKENDS.iter().map(|backend| backend.as_str().to_owned()).collect(),
+        retired_backends: host_routing::RETIRED_BACKENDS.iter().map(|backend| backend.as_str().to_owned()).collect(),
         options,
         unknown_entries: switch.unknown_entries().to_vec(),
     })
@@ -463,8 +478,11 @@ pub struct AgentBackendPreferences {
     pub full_access_forbidden: bool,
     pub forbidden_reason: Option<String>,
     pub switch_env: String,
-    /// Every external backend is forced off by the administrator.
+    /// No external backend can be used (in this build: every one is retired).
     pub forced_off: bool,
+    /// Backends retired in this build; the UI explains them instead of
+    /// offering them.
+    pub retired_backends: Vec<String>,
     /// The choices of「新会话使用的 Agent」; hidden backends are left out.
     pub options: Vec<AgentBackendPreferenceOption>,
     /// Name of 模型服务's default provider used for the unified login.
@@ -496,31 +514,26 @@ pub(crate) fn preferences_view(
     provider: Option<String>,
     codex: Option<CodexResponsesProbe>,
 ) -> AgentBackendPreferences {
+    // Only the supported path can be picked. Retired backends stay listed so
+    // the settings page can say why they are gone instead of hiding them
+    // silently; the Host refuses them whether or not a UI shows this.
     let options: Vec<AgentBackendPreferenceOption> = host_routing::backend_options(switch)
         .into_iter()
         .filter(|option| !option.hidden)
-        .map(|option| {
-            let codex_unsupported = option.backend == AgentBackend::Codex && option.enabled && codex.as_ref().is_some_and(|probe| probe.supported == Some(false));
-            AgentBackendPreferenceOption {
-                backend: option.backend.as_str().to_owned(),
-                enabled: option.enabled && !codex_unsupported,
-                experimental: option.experimental,
-                reason: if codex_unsupported {
-                    Some(format!(
-                        "模型服务的默认 provider「{}」的地址不支持 Responses 接口（POST /responses 返回 404 / 405），Codex 无法用它登录",
-                        provider.as_deref().unwrap_or("-")
-                    ))
-                } else {
-                    option.reason
-                },
-            }
+        .map(|option| AgentBackendPreferenceOption {
+            backend: option.backend.as_str().to_owned(),
+            enabled: option.enabled,
+            experimental: option.experimental,
+            reason: option.reason,
         })
         .collect();
     // The administrator's switch wins; a Codex whose provider lacks the
     // Responses API stays effective if it was saved (the user may have their
     // own Codex login in the private HOME), it just cannot be newly picked.
     // A backend saved before it was hidden falls back to Fox too.
-    let effective = if switch.is_enabled(stored) && !stored.hidden() { stored } else { AgentBackend::Fox };
+    // A saved backend of an older release is reported as saved, but a new
+    // conversation always uses the supported path.
+    let effective = if host_routing::is_supported(stored) && !stored.hidden() { stored } else { AgentBackend::Fox };
     AgentBackendPreferences {
         default_backend: stored.as_str().to_owned(),
         effective_backend: effective.as_str().to_owned(),
@@ -530,6 +543,7 @@ pub(crate) fn preferences_view(
         forbidden_reason: forbidden.then(|| fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON.to_owned()),
         switch_env: host_routing::EXTERNAL_BACKENDS_ENV.to_owned(),
         forced_off: !switch.any_external(),
+        retired_backends: host_routing::RETIRED_BACKENDS.iter().map(|backend| backend.as_str().to_owned()).collect(),
         options,
         unified_login_provider: provider,
         codex_responses: codex,
@@ -579,6 +593,10 @@ pub(crate) fn validate_preferences_change(
                 return Err((RouteError::CODE_HIDDEN, refusal.message()));
             }
             let option = current.options.iter().find(|option| option.backend == backend.as_str());
+            if host_routing::is_retired(backend) {
+                let refusal = RouteError::Retired { backend, existing_conversation: false };
+                return Err((RouteError::CODE_RETIRED, refusal.message()));
+            }
             if backend != AgentBackend::Fox && !option.is_some_and(|option| option.enabled) {
                 let reason = option.and_then(|option| option.reason.clone()).unwrap_or_default();
                 return Err((RouteError::CODE_DISABLED, format!("不能选择「{}」：{reason}", backend.as_str())));
@@ -899,51 +917,71 @@ mod tests {
             gate_conversation(&database, HostEntry::Start, "missing", None, None);
         assert!(gated.is_ok(), "unknown conversation is left to the existing path");
 
-        // Settings batch: with FOX_EXTERNAL_BACKENDS unset nothing is forced
-        // off, so a lookup that fails is refused (an external conversation
-        // must never fall back to Fox); only a forced-off switch keeps the
-        // old fallback.
-        let fallback = !BackendSwitch::from_env().any_external();
+        // The Fox path is the only runnable path, so a failed read is answered
+        // with it. A request that explicitly names a retired backend is still
+        // refused: the answer must match what was asked for.
         let storage_error: Result<Route, ApiResponse<()>> =
             gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), None);
-        assert_eq!(storage_error.is_ok(), fallback);
+        assert!(storage_error.is_ok());
         let missing_column: Result<Route, ApiResponse<()>> =
             gate_run_identity(HostEntry::Approve, Err("no such column: c.agent_backend".to_owned()), None);
-        assert_eq!(missing_column.is_ok(), fallback);
+        assert!(missing_column.is_ok());
         let unknown: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(None), None);
-        // A request that names an external backend is refused when the read fails.
+        for retired in ["pi", "codex", "deepseek"] {
+            let named: Result<Route, ApiResponse<()>> =
+                gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), Some(retired));
+            assert_eq!(named.unwrap_err().error.unwrap().code, "agent_backend_retired", "{retired}");
+        }
         let named: Result<Route, ApiResponse<()>> =
-            gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), Some("pi"));
-        assert_eq!(named.unwrap_err().error.unwrap().code, "agent_backend_lookup_failed");
+            gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), Some("gpt"));
+        assert_eq!(named.unwrap_err().error.unwrap().code, "agent_backend_invalid");
         assert!(unknown.is_ok());
     }
 
     #[test]
-    fn only_a_confirmed_non_fox_backend_is_refused() {
+    /// Stage one: a conversation frozen to a retired backend keeps its value
+    /// (readable, displayed) and is refused on every runtime entry. It is never
+    /// silently re-driven by the Fox path.
+    fn a_retired_conversation_is_readable_and_never_runs() {
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        let pi = database
-            .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
-            .expect("pi conversation");
-        let gated: Result<Route, ApiResponse<()>> =
-            gate_conversation(&database, HostEntry::Start, &pi.id, None, None);
-        if BackendSwitch::from_env().is_enabled(AgentBackend::Pi) {
-            // FOX_EXTERNAL_BACKENDS unset (settings batch): pi is routed to
-            // its external runtime, never to Fox.
-            assert!(matches!(gated, Ok(Route::External(AgentBackend::Pi))));
-        } else {
-            let failure = gated.expect_err("pi is refused before any runtime");
-            let code = failure.error.as_ref().map(|error| error.code.clone());
-            assert!(matches!(code.as_deref(), Some("agent_backend_disabled")), "{code:?}");
+        for backend in ["pi", "codex", "deepseek"] {
+            let conversation = database
+                .create_conversation_with_backend(database.default_agent_id(), Some("旧会话"), None, None, backend)
+                .expect("conversation");
+            assert_eq!(
+                database.conversation_agent_backend(&conversation.id).unwrap().as_deref(),
+                Some(backend),
+                "the frozen value is never rewritten"
+            );
+            for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve, HostEntry::Resume] {
+                let gated: Result<Route, ApiResponse<()>> =
+                    gate_conversation(&database, entry, &conversation.id, None, None);
+                let failure = gated.expect_err("a retired backend never starts a runtime");
+                assert_eq!(
+                    failure.error.as_ref().map(|error| error.code.as_str()),
+                    Some("agent_backend_retired"),
+                    "{backend} {entry:?}"
+                );
+            }
+            let identity = crate::database::RunBackendIdentity {
+                conversation_id: conversation.id.clone(),
+                run_id: "r".to_owned(),
+                agent_backend: backend.to_owned(),
+                engine_id: None,
+            };
+            let cancel: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
+            assert!(!matches!(cancel.as_ref(), Ok(Route::Fox)), "never silently moved to Fox");
+            assert_eq!(cancel.unwrap_err().error.unwrap().code, "agent_backend_retired", "{backend}");
         }
-        let identity = crate::database::RunBackendIdentity {
-            conversation_id: "c".to_owned(),
-            run_id: "r".to_owned(),
-            agent_backend: "fox".to_owned(),
-            engine_id: None,
-        };
-        let fox: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
-        assert!(fox.is_ok());
+        // The supported path is untouched.
+        let fox = database
+            .create_conversation(database.default_agent_id(), Some("fox"), None, None)
+            .expect("fox conversation");
+        let gated: Result<Route, ApiResponse<()>> = gate_conversation(&database, HostEntry::Start, &fox.id, None, None);
+        assert!(matches!(gated, Ok(Route::Fox)));
+        assert!(database.conversation_agent_backend(&fox.id).unwrap().is_none_or(|backend| backend == "fox"));
     }
+
 
     /// 80b1622 acceptance: the login card must show for a NEW conversation
     /// (no row yet), and "覆盖已有登录" must be an explicit, default-off choice.
@@ -985,50 +1023,75 @@ mod tests {
     /// Settings batch, item 4: FOX_EXTERNAL_BACKENDS only forces off; the
     /// setting decides otherwise; Fox is the default and the fallback.
     #[test]
-    fn agent_backend_preferences_follow_the_setting_under_the_administrator_switch() {
-        let on = BackendSwitch::from_env_value(None);
-        let view = preferences_view(AgentBackend::Pi, false, &on, false, Some("DeepSeek".into()), None);
-        assert_eq!(view.default_backend, "pi");
-        assert_eq!(view.effective_backend, "pi");
-        assert!(!view.forced_off && view.options.iter().all(|option| option.enabled));
-        let off = BackendSwitch::from_env_value(Some("0"));
-        let forced = preferences_view(AgentBackend::Pi, true, &off, false, None, None);
-        assert_eq!(forced.effective_backend, "fox", "forced off: new conversations use Fox");
-        assert!(forced.forced_off);
-        assert!(forced.options.iter().filter(|option| option.backend != "fox").all(|option| !option.enabled && option.reason.as_deref().unwrap().contains("FOX_EXTERNAL_BACKENDS")));
-        let only_codex = BackendSwitch::from_env_value(Some("codex"));
-        assert_eq!(preferences_view(AgentBackend::Deepseek, false, &only_codex, false, None, None).effective_backend, "fox");
+    /// A saved external backend stays reported as saved, but a new
+    /// conversation always uses the supported path, whatever the environment
+    /// says. This is the "old preferences must not resurrect a driver" rule.
+    #[test]
+    fn preferences_report_a_saved_retired_backend_and_always_use_the_supported_path() {
+        for env in [None, Some("0"), Some("all"), Some("codex")] {
+            let switch = BackendSwitch::from_env_value(env);
+            for saved in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+                let view = preferences_view(saved, false, &switch, false, None, None);
+                assert_eq!(view.default_backend, saved.as_str(), "what was saved is reported as saved");
+                assert_eq!(view.effective_backend, "fox", "a new conversation uses the supported path");
+                assert_eq!(
+                    view.retired_backends,
+                    ["pi".to_owned(), "codex".to_owned(), "deepseek".to_owned()]
+                );
+                assert!(view.forced_off, "no retired backend can be used");
+                let fox = view.options.iter().find(|option| option.backend == "fox").expect("fox row");
+                assert!(fox.enabled && fox.reason.is_none());
+                for option in view.options.iter().filter(|option| option.backend != "fox") {
+                    assert!(!option.enabled, "{} is retired", option.backend);
+                    assert!(option.reason.as_deref().unwrap().contains("退休"), "{}", option.backend);
+                }
+            }
+            assert_eq!(
+                preferences_view(AgentBackend::Fox, false, &switch, false, None, None).effective_backend,
+                "fox"
+            );
+        }
         // Default when nothing was saved: Fox.
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         assert_eq!(stored_default_backend(&database), AgentBackend::Fox);
         assert!(!stored_new_external_full_access(&database));
         database.set_app_setting(DEFAULT_BACKEND_KEY, "codex").unwrap();
         database.set_app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY, "1").unwrap();
-        assert_eq!(stored_default_backend(&database), AgentBackend::Codex);
+        assert_eq!(stored_default_backend(&database), AgentBackend::Codex, "an old saved value is still recognised");
         assert!(stored_new_external_full_access(&database));
         database.set_app_setting(DEFAULT_BACKEND_KEY, "deepseek_harness").unwrap();
         assert_eq!(stored_default_backend(&database), AgentBackend::Fox, "garbage reads as Fox");
     }
 
+
     /// Settings batch, items 4 / 5: a forced-off backend and full access under
     /// FORBIDDEN cannot be saved; Codex without the Responses API is greyed.
     #[test]
+    /// Only the supported backend can be saved as the default. A retired one is
+    /// refused with its own code, not with a generic "disabled".
+    #[test]
     fn agent_backend_preference_changes_are_validated_against_the_switches() {
         let off = preferences_view(AgentBackend::Fox, false, &BackendSwitch::from_env_value(Some("off")), true, None, None);
-        let request = |backend: Option<&str>, full: Option<bool>| AgentBackendPreferencesRequest { default_backend: backend.map(str::to_owned), new_external_full_access: full };
-        assert_eq!(validate_preferences_change(&request(Some("pi"), None), &off).unwrap_err().0, "agent_backend_disabled");
-        assert_eq!(validate_preferences_change(&request(Some("fox"), None), &off).unwrap(), (Some(AgentBackend::Fox), None));
+        let request = |backend: Option<&str>, full: Option<bool>| AgentBackendPreferencesRequest {
+            default_backend: backend.map(str::to_owned),
+            new_external_full_access: full,
+        };
         assert_eq!(validate_preferences_change(&request(None, Some(true)), &off).unwrap_err().0, "agent_backend_full_access_forbidden");
         assert_eq!(validate_preferences_change(&request(None, Some(false)), &off).unwrap(), (None, Some(false)));
+        assert_eq!(validate_preferences_change(&request(Some("fox"), None), &off).unwrap(), (Some(AgentBackend::Fox), None));
         assert_eq!(validate_preferences_change(&request(Some("claude"), None), &off).unwrap_err().0, "agent_backend_invalid");
         assert!(off.forbidden_reason.is_some() && !off.effective_full_access);
-        let probe = CodexResponsesProbe { base_url: "https://api.example.com/v1".into(), supported: Some(true), status: Some(200), checked_at: 1 };
-        let on = preferences_view(AgentBackend::Fox, true, &BackendSwitch::from_env_value(None), false, Some("Example".into()), Some(probe));
-        // Codex is offered again now that external backends no longer get
-        // Fox's outer SRT layer.
-        assert!(on.options.iter().any(|option| option.backend == "codex"));
-        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &on).unwrap(), (Some(AgentBackend::Codex), None));
-        assert!(on.effective_full_access);
+
+        let on = preferences_view(AgentBackend::Fox, true, &BackendSwitch::from_env_value(None), false, Some("Example".into()), None);
+        for retired in ["pi", "codex", "deepseek"] {
+            assert_eq!(
+                validate_preferences_change(&request(Some(retired), None), &on).unwrap_err().0,
+                "agent_backend_retired",
+                "{retired}"
+            );
+        }
+        assert_eq!(validate_preferences_change(&request(Some("fox"), None), &on).unwrap(), (Some(AgentBackend::Fox), None));
+
         assert_eq!(responses_support_from_status(404), Some(false));
         assert_eq!(responses_support_from_status(405), Some(false));
         assert_eq!(responses_support_from_status(400), None);
@@ -1037,6 +1100,7 @@ mod tests {
         assert_eq!(responses_support_from_status(401), None);
         assert_eq!(responses_support_from_status(503), None);
     }
+
 
     /// Codex was hidden on 2026-10-24 because of the outer SRT layer. It is a
     /// normal selectable backend again; old Codex conversations keep their
@@ -1053,46 +1117,39 @@ mod tests {
     }
 
     #[test]
-    fn agent_backend_routing_offers_codex_again() {
-        let on = BackendSwitch::from_env_value(None);
-        let view = preferences_view(AgentBackend::Codex, false, &on, false, None, None);
-        assert_eq!(view.default_backend, "codex", "what was saved is reported as saved");
-        assert_eq!(view.effective_backend, "codex", "a saved Codex choice is usable again");
-        assert!(view.options.iter().any(|option| option.backend == "codex"));
-        assert!(view.options.iter().any(|option| option.backend == "pi") && view.options.iter().any(|option| option.backend == "deepseek"));
-        let only_codex = BackendSwitch::from_env_value(Some("codex"));
-        assert_eq!(preferences_view(AgentBackend::Codex, false, &only_codex, false, None, None).effective_backend, "codex");
-
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        database.set_app_setting(DEFAULT_BACKEND_KEY, "codex").unwrap();
-        assert_eq!(stored_default_backend(&database), AgentBackend::Codex);
-        let chosen: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("codex"));
-        assert_eq!(chosen.ok(), Some(AgentBackend::Codex));
-        let fox: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(None);
-        assert_eq!(fox.ok(), Some(AgentBackend::Fox));
-
-        // An existing Codex conversation keeps its backend and its entries
-        // route to the Codex runtime unless the administrator forced Codex
-        // off (then read-only, as for any external backend).
-        let old = database
-            .create_conversation_with_backend(database.default_agent_id(), Some("旧 Codex 会话"), None, None, "codex")
-            .expect("codex conversation");
-        assert_eq!(database.conversation_agent_backend(&old.id).unwrap().as_deref(), Some("codex"));
-        for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve] {
-            let gated: Result<Route, ApiResponse<()>> = gate_conversation(&database, entry, &old.id, None, None);
-            if BackendSwitch::from_env().is_enabled(AgentBackend::Codex) {
-                assert!(matches!(gated, Ok(Route::External(AgentBackend::Codex))), "{entry:?}");
-            } else {
-                assert_eq!(gated.unwrap_err().error.unwrap().code, "agent_backend_disabled");
-            }
+    /// The gate every new conversation goes through: a retired backend is
+    /// refused with its own code, and no request is answered with another
+    /// driver.
+    #[test]
+    fn the_host_refuses_every_retired_backend_for_a_new_conversation() {
+        for backend in ["pi", "codex", "deepseek"] {
+            let chosen: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some(backend));
+            let failure = chosen.expect_err("a retired backend is refused before any run");
+            assert_eq!(failure.error.unwrap().code, "agent_backend_retired", "{backend}");
         }
-        let identity = crate::database::RunBackendIdentity {
-            conversation_id: old.id.clone(),
-            run_id: "r".to_owned(),
-            agent_backend: "codex".to_owned(),
-            engine_id: None,
-        };
-        let cancel: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
-        assert!(!matches!(cancel, Ok(Route::Fox)), "never silently moved to Fox");
+        let absent: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(None);
+        assert_eq!(absent.ok(), Some(AgentBackend::Fox));
+        let explicit: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("fox"));
+        assert_eq!(explicit.ok(), Some(AgentBackend::Fox));
+        let unknown: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("gpt"));
+        assert_eq!(unknown.unwrap_err().error.unwrap().code, "agent_backend_invalid");
     }
+
+    /// The status surface the UI mirrors declares one supported backend and
+    /// lists the retired ones with their reason.
+    #[test]
+    fn the_status_surface_declares_one_supported_backend() {
+        let status = agent_backends_status();
+        let status = status.data.expect("status data");
+        assert_eq!(status.supported_backends, ["fox".to_owned()]);
+        assert_eq!(status.retired_backends, ["pi".to_owned(), "codex".to_owned(), "deepseek".to_owned()]);
+        assert!(!status.any_external_enabled);
+        let fox = status.options.iter().find(|option| option.backend == "fox").expect("fox row");
+        assert!(fox.enabled && fox.wired && !fox.retired && fox.reason.is_none());
+        for option in status.options.iter().filter(|option| option.backend != "fox") {
+            assert!(option.retired && !option.enabled && !option.wired, "{}", option.backend);
+            assert!(option.reason.as_deref().unwrap().contains("退休"), "{}", option.backend);
+        }
+    }
+
 }

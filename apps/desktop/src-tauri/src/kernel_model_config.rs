@@ -1,12 +1,38 @@
 //! Host-owned model configuration; credentials are not part of the snapshot.
+//!
+//! ## One engine
+//!
+//! The single Pi mainline pins every Kernel run to the Pi engine. `codex` and
+//! `deepseek_harness` are retired: their recorded `engine_id` values stay
+//! readable (the column keeps its CHECK, old rows are never rewritten), but no
+//! run can be started or frozen with them any more, and an explicit request is
+//! refused with a recognizable code instead of falling back to another model
+//! adapter. Removing an engine never removes the model service: Pi keeps
+//! driving whichever provider the user configured, including DeepSeek.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub(crate) const KERNEL_MODEL_ADAPTER: &str = "pi-1.4.0/fox-kernel-worker-v1";
 
-fn pi_engine() -> String { "pi".into() }
-fn is_pi(value: &str) -> bool { value == "pi" }
+/// Refusal prefix of a retired Kernel engine. Stable, greppable, and never a
+/// silent substitution: the Host reports it and starts nothing.
+pub(crate) const KERNEL_ENGINE_RETIRED_CODE: &str = "kernel_engine_retired";
+
+/// The only engine this build executes.
+pub(crate) const SUPPORTED_KERNEL_ENGINE: &str = "pi";
+
+/// Engines retired by the single Pi mainline. Readable, never executable.
+pub(crate) const RETIRED_KERNEL_ENGINES: [&str; 2] = ["codex", "deepseek_harness"];
+
+fn pi_engine() -> String { SUPPORTED_KERNEL_ENGINE.into() }
+fn is_pi(value: &str) -> bool { value == SUPPORTED_KERNEL_ENGINE }
+
+fn retired_engine_error(engine: &str) -> String {
+    format!(
+        "{KERNEL_ENGINE_RETIRED_CODE}: Kernel engine `{engine}` is retired in this build; only `{SUPPORTED_KERNEL_ENGINE}` runs. Old records stay readable, but no run is started with a retired engine."
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -15,26 +41,26 @@ pub(crate) struct NativeAdapterConfig {
     pub binary_hash: String,
 }
 
+/// The engine a new run uses. Unset or empty means Pi.
+///
+/// `codex` / `deepseek_harness` are refused as retired: the process must not
+/// silently select another adapter because an old deployment still exports
+/// `FOX_KERNEL_ENGINE`.
 pub(crate) fn configured_engine() -> Result<String, String> {
-    let name = std::env::var("FOX_KERNEL_ENGINE").unwrap_or_else(|_| "pi".into());
-    match name.as_str() {
-        "pi" | "codex" | "deepseek_harness" => Ok(name),
-        _ => Err("FOX_KERNEL_ENGINE must name an installed supported adapter: pi, codex or deepseek_harness".into()),
-    }
+    let name = std::env::var("FOX_KERNEL_ENGINE").unwrap_or_else(|_| SUPPORTED_KERNEL_ENGINE.into());
+    let name = name.trim();
+    if name.is_empty() || name == SUPPORTED_KERNEL_ENGINE { return Ok(SUPPORTED_KERNEL_ENGINE.into()); }
+    if RETIRED_KERNEL_ENGINES.contains(&name) { return Err(retired_engine_error(name)); }
+    Err(format!(
+        "{KERNEL_ENGINE_RETIRED_CODE}: FOX_KERNEL_ENGINE=`{name}` is not a supported engine; only `{SUPPORTED_KERNEL_ENGINE}` runs in this build."
+    ))
 }
 
+/// A native engine executable is never captured any more: the only engine is
+/// Pi, which runs in the sidecar and has no native binary to attest.
 pub(crate) fn capture_native_adapter(engine: &str) -> Result<Option<NativeAdapterConfig>, String> {
-    if matches!(engine, "pi" | "deepseek_harness") { return Ok(None); }
-    if engine != "codex" { return Err("Kernel engine is not installed".into()); }
-    let command = std::env::var("FOX_KERNEL_CODEX_BINARY").map_err(|_| "Set FOX_KERNEL_CODEX_BINARY to the verified Codex executable before selecting this engine")?;
-    let path = std::path::Path::new(&command);
-    if !path.is_absolute() { return Err("native engine executable path must be absolute".into()); }
-    let path = path.canonicalize().map_err(|_| "native engine executable is missing")?;
-    let metadata = path.metadata().map_err(|_| "native engine executable cannot be read")?;
-    if !metadata.is_file() || metadata.len() > 536_870_912 { return Err("native engine executable has an invalid size".into()); }
-    let bytes = std::fs::read(&path).map_err(|_| "native engine executable cannot be read")?;
-    Ok(Some(NativeAdapterConfig { command: path.to_string_lossy().into_owned(),
-        binary_hash: format!("sha256:{}", hex::encode(Sha256::digest(bytes))) }))
+    if engine == SUPPORTED_KERNEL_ENGINE { return Ok(None); }
+    Err(retired_engine_error(engine))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,6 +72,9 @@ pub(crate) struct KernelModelConfig {
     pub proposal_tools: Vec<Value>,
     #[serde(default = "pi_engine", skip_serializing_if = "is_pi")]
     pub engine_id: String,
+    /// Only reachable through a record written before the single Pi mainline.
+    /// Kept so an old snapshot still round-trips (readable) without ever being
+    /// executable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_adapter: Option<NativeAdapterConfig>,
 }
@@ -87,12 +116,14 @@ fn object_rooted_parameters(parameters: &Value) -> bool {
 impl KernelModelConfig {
     pub(crate) fn adapter_version(&self) -> Result<&'static str, String> {
         match (self.engine_id.as_str(), self.native_adapter.as_ref()) {
-            ("pi", None) => Ok(KERNEL_MODEL_ADAPTER),
-            ("deepseek_harness", None) if self.model_service["apiType"] == "openai-completions" => Ok("deepseek-harness-0.1.2-rc.1/fox-kernel-worker-v1"),
-            ("codex", Some(native)) if self.model_service["apiType"] == "openai-responses"
-                && std::path::Path::new(&native.command).is_absolute()
-                && fox_engine_protocol::valid_hash(&native.binary_hash) => Ok("codex-app-server/fox-kernel-worker-v1"),
-            _ => Err("unsupported or incomplete Kernel engine adapter".into()),
+            (SUPPORTED_KERNEL_ENGINE, None) => Ok(KERNEL_MODEL_ADAPTER),
+            (SUPPORTED_KERNEL_ENGINE, Some(_)) => {
+                Err("the Pi engine runs in the sidecar and cannot carry a native adapter".into())
+            }
+            (retired, _) if RETIRED_KERNEL_ENGINES.contains(&retired) => Err(retired_engine_error(retired)),
+            (other, _) => Err(format!(
+                "{KERNEL_ENGINE_RETIRED_CODE}: unsupported or incomplete Kernel engine adapter `{other}`"
+            )),
         }
     }
 
@@ -230,4 +261,85 @@ mod tests {
         let mut wire = serde_json::to_value(&good).unwrap(); wire["extra"] = json!(true);
         assert!(serde_json::from_value::<KernelModelConfig>(wire).is_err());
     }
+    /// Serialize the tests that read or write the process environment.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn with_engine_env<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let _guard = env_lock();
+        let original = std::env::var("FOX_KERNEL_ENGINE").ok();
+        match value {
+            Some(value) => std::env::set_var("FOX_KERNEL_ENGINE", value),
+            None => std::env::remove_var("FOX_KERNEL_ENGINE"),
+        }
+        let outcome = body();
+        match original {
+            Some(original) => std::env::set_var("FOX_KERNEL_ENGINE", original),
+            None => std::env::remove_var("FOX_KERNEL_ENGINE"),
+        }
+        outcome
+    }
+
+    /// Stage one of the single Pi mainline: one engine, chosen explicitly.
+    #[test]
+    fn the_only_engine_this_build_runs_is_pi() {
+        assert_eq!(with_engine_env(None, configured_engine), Ok("pi".into()));
+        assert_eq!(with_engine_env(Some("pi"), configured_engine), Ok("pi".into()));
+        assert_eq!(with_engine_env(Some(" pi "), configured_engine), Ok("pi".into()));
+        assert_eq!(with_engine_env(Some(""), configured_engine), Ok("pi".into()));
+    }
+
+    /// A retired engine is refused with a recognizable code. It must never
+    /// quietly fall back to another adapter because an old deployment still
+    /// exports `FOX_KERNEL_ENGINE`.
+    #[test]
+    fn a_retired_or_unknown_engine_is_refused_with_a_stable_code() {
+        for engine in RETIRED_KERNEL_ENGINES {
+            let refusal = with_engine_env(Some(engine), configured_engine).unwrap_err();
+            assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
+            assert!(refusal.contains(engine), "the refusal names the engine: {refusal}");
+        }
+        for engine in ["gpt", "codex-cli", "pi-1.4.0"] {
+            let refusal = with_engine_env(Some(engine), configured_engine).unwrap_err();
+            assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_native_adapter_is_never_captured() {
+        assert_eq!(capture_native_adapter("pi"), Ok(None));
+        for engine in RETIRED_KERNEL_ENGINES {
+            let refusal = capture_native_adapter(engine).unwrap_err();
+            assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
+        }
+    }
+
+    /// A retired run record stays readable (deserializable, unchanged engine
+    /// id) but is not an executable Kernel configuration.
+    #[test]
+    fn an_old_retired_engine_record_stays_readable_but_is_never_executable() {
+        for engine in RETIRED_KERNEL_ENGINES {
+            let wire = json!({
+                "executionProfileId": "legacy",
+                "modelService": {"apiType": "openai-completions", "modelId": "old", "baseUrl": "https://example.com/v1"},
+                "systemPrompt": "Host instructions",
+                "proposalTools": [],
+                "engineId": engine
+            });
+            let record: KernelModelConfig = serde_json::from_value(wire).expect("old record still reads");
+            assert_eq!(record.engine_id, engine);
+            let refusal = record.adapter_version().unwrap_err();
+            assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
+            assert!(record.hash().is_err(), "a retired engine hash must not freeze a run");
+        }
+        // A Pi record with a stale native adapter is refused too: the only
+        // engine runs in the sidecar and has no binary to attest.
+        let mut stale = config();
+        stale.native_adapter = Some(NativeAdapterConfig { command: "/tmp/codex".into(), binary_hash: format!("sha256:{}", "0".repeat(64)) });
+        assert!(stale.adapter_version().is_err());
+        assert!(stale.hash().is_err());
+    }
+
 }
