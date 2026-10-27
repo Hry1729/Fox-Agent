@@ -121,6 +121,12 @@ node apps/desktop/tests/acceptance/single-pi-20261027/drive.mjs `
   --ask  "城北项目的验收押金是多少？请给出条款编号。" --wait 30000 --json
 ```
 
-`drive.mjs` 会把输入值写进 `<textarea>` 并回读断言，然后点编辑器容器内的发送按钮；页面异常会随结果一起打印。
-发送后核对数据库（同目录 `evidence` 记录）：`runs` 新增一行、`runtime_sessions` 的 `native_session_ref` 与文件路径、`tool_calls` 的三次检索。
+`drive.mjs` 的操作与判定都是页面自身的事实，不靠位置猜测：
+
+- 发送控件按"发送语义"定位：编辑器里的 `button.fox-send-button`，其 `aria-label` 在可发送时为 `Submit`、运行中变为 `Stop`；重新发送横幅的按钮、补充要求（steering）按钮与停止按钮因此天然被排除。
+- 点击前断言该控件存在、`aria-label="Submit"` 且 `disabled=false`；不解除禁用、不绕过提交流程。
+- 写入后回读断言输入值，点击后断言 `<textarea>` 已被清空（Host 接受发送才会清空）。
+- **点击不等于成功**：`sent`、`runStarted`、`completed` 分别报告。`runStarted` 只由页面进入运行态证明（发送控件变为 `Stop`、或顶栏出现「运行中」徽标、或渲染出新的助手轮次），`completed` 只由运行态结束且出现新的助手轮次证明。页面异常随结果打印。
+- 退出码：`0` 已发送且运行已结束；`1` 发送没有变成一次 Run（含发送控件不可用/未清空/页面打不开对话）；`2` 没有 CDP 页面；`3` 已发送并进入运行态，但 `--wait` 内没有结束（仍报告 `runStarted:true`）。
+- 驱动读不到数据库：运行 id、`runtime_sessions` 的 `native_session_ref`/文件路径、`tool_calls` 仍需另行核对（同目录 `evidence` 记录与 `single-pi-acceptance-fixture dump`）。
 

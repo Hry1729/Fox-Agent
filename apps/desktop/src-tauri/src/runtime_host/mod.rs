@@ -17,6 +17,10 @@ mod kernel_host;
 pub(crate) mod office_grants;
 mod waiting_jobs_wake;
 mod session_lifecycle;
+
+/// The reset availability rule, shared with the UI fact and the command's own
+/// refusal.
+pub(crate) use session_lifecycle::ResetAvailability;
 mod kernel_authority;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
@@ -2813,6 +2817,22 @@ impl RuntimeHost {
             &self.sessions_dir,
             conversation_id,
         )
+    }
+
+    /// Whether a context reset is available for this conversation, and why.
+    ///
+    /// The rule itself lives in the lifecycle, so the UI fact returned here and
+    /// the refusal `reset_conversation_context` produces can never disagree.
+    pub(crate) fn context_reset_availability(
+        &self,
+        conversation_id: &str,
+    ) -> Result<session_lifecycle::ResetAvailability, String> {
+        let runtime_type = self.database.conversation_runtime_type(conversation_id)?;
+        let mapping = self.database.get_runtime_session(conversation_id)?;
+        Ok(session_lifecycle::reset_availability(
+            &runtime_type,
+            mapping.as_ref(),
+        ))
     }
 
     fn session_lifecycle(&self) -> session_lifecycle::SessionLifecycle<'_> {

@@ -83,6 +83,16 @@ impl SessionRuntimeLink for ScriptedRuntime {
                     // Only the runtime writes the file. The Host never does.
                     std::fs::write(&path, "{\"type\":\"session\"}\n").unwrap();
                 }
+                // The real runtime echoes the generation it was asked for
+                // (pi-runtime.mjs `create_session`), so the double does too:
+                // a hardcoded 1 would make a generation-2 install look like a
+                // runtime that renamed the Host's fact.
+                let echoed_generation = request
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("contextGeneration"))
+                    .cloned()
+                    .unwrap_or(json!(1));
                 (
                     "session_created",
                     json!({
@@ -90,7 +100,7 @@ impl SessionRuntimeLink for ScriptedRuntime {
                         "format": "pi-native",
                         "nativeSessionPath": path.to_string_lossy(),
                         "nativeSessionId": session_id,
-                        "contextGeneration": 1,
+                        "contextGeneration": echoed_generation,
                     }),
                 )
             }
@@ -340,22 +350,40 @@ fn a_session_that_pi_never_persisted_is_never_called_recoverable() {
     assert!(!file.exists(), "the Host must never pre-create Pi's file");
     assert_eq!(mapping.runtime_session_id, runtime_session_id);
 
-    // The process dies here. The later open must not claim a recoverable
-    // context and must not silently retarget the conversation.
-    let mut later = ScriptedRuntime::default();
-    let error = fixture
+    // The process dies here (the worker that held the session is gone). The
+    // later open must not claim a recoverable context and must never resume the
+    // missing file — but the generation the user already created is continued
+    // by adopting the session Pi creates now, in the same generation, with no
+    // history replayed. Refusing here is what forced a second reset.
+    let adopted_file = fixture.session_file("20261027_pi-adopted.jsonl");
+    let mut later = ScriptedRuntime::with(vec![Scripted::Created {
+        path: adopted_file.clone(),
+        session_id: "pi-adopted".to_owned(),
+        persist: false,
+    }]);
+    let (adopted_id, adopted_path) = fixture
         .lifecycle()
         .open(&fixture.conversation_id, &mut later)
-        .expect_err("a never-persisted session cannot be resumed");
-    assert_eq!(recovery_code(&error), Some(SESSION_NOT_PERSISTED), "{error:?}");
-    assert!(
-        later.requests.is_empty(),
-        "no resume may be attempted against a file that does not exist: {:?}",
-        later.request_types()
+        .expect("a generation Pi never wrote is continued, not refused");
+    assert_eq!(
+        adopted_id, runtime_session_id,
+        "adoption keeps the conversation's Fox runtime session id"
     );
-    assert_eq!(fixture.mapping().unwrap().runtime_session_id, runtime_session_id);
-    assert_eq!(fixture.mapping().unwrap().status, "allocated");
-    assert!(!file.exists());
+    assert_eq!(
+        later.request_types(),
+        vec!["create_session"],
+        "the missing file is never resumed: the new generation adopts a new Pi session"
+    );
+    let mapping = fixture.mapping().expect("the mapping survives adoption");
+    assert_eq!(mapping.status, "allocated", "adoption never claims the file exists");
+    assert_eq!(mapping.runtime_session_id, runtime_session_id);
+    assert_eq!(mapping.context_generation, 1, "adoption keeps the generation");
+    assert_eq!(mapping.native_session_ref.as_deref(), Some("pi-adopted"));
+    let expected_adopted = std::fs::canonicalize(&fixture.sessions_dir)
+        .unwrap()
+        .join("20261027_pi-adopted.jsonl");
+    assert_eq!(adopted_path, expected_adopted);
+    assert_eq!(!file.exists(), true);
 }
 
 /// An `allocated` mapping whose file did appear (Pi wrote it after the Host

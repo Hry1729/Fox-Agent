@@ -528,6 +528,18 @@ export interface ChildRunNotification {
   childRun: ChildRunRecord
 }
 
+/**
+ * Where the Host offers a context reset for this conversation. The menu item
+ * mirrors this fact; the command still refuses on its own.
+ */
+export interface ContextResetAvailability {
+  supported: boolean
+  /** Stable Host code when unsupported (`session.reset_legacy_context`, ...). */
+  code: string | null
+  /** User-facing reason, shown next to the disabled menu item. */
+  reason: string | null
+}
+
 export interface ConversationDetail {
   /** Authoritative-only, independently versioned read model; never a Legacy sequence. */
   kernelSnapshot?: KernelRunSnapshot | null
@@ -557,6 +569,10 @@ export interface ConversationDetail {
   childRuns: ChildRunRecord[]
   expertWorkflow: ExpertWorkflowSnapshot | null
   expertTeam: ExpertTeamSnapshot | null
+  /** Host-read reset availability. Missing means the Host did not report it. */
+  contextReset?: ContextResetAvailability
+  /** Why a reset is unavailable right now (an active Run), if it is. */
+  contextResetBlockedReason?: string | null
 }
 
 export interface DeliveryChecklistRecord {

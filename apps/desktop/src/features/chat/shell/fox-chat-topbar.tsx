@@ -80,10 +80,39 @@ function ConversationSummaryPopover({ detail, modelName, onOpenRightMode }: { de
   )
 }
 
+/**
+ * Where the "重置上下文" item is offered.
+ *
+ * The Host owns the boundary (Yuxi conversations keep their context remotely,
+ * a legacy `format_version 1` snapshot is not a Pi session, and a live Run owns
+ * the session a reset would retire). The menu only mirrors it, with the Host's
+ * own reason, so a click can never be the first time the user learns a reset is
+ * unavailable.
+ */
+function resetContextItemState(
+  detail: ConversationDetail | null,
+  state: ChatState,
+  conversation: ConversationSummary | null | undefined,
+): { available: boolean; reason: string | null } {
+  if (!conversation) return { available: false, reason: '先打开一个对话' }
+  const availability = detail?.contextReset
+  if (availability && !availability.supported) {
+    return { available: false, reason: availability.reason ?? '该对话暂不支持重置上下文' }
+  }
+  if (state === 'running') {
+    return { available: false, reason: detail?.contextResetBlockedReason ?? '当前对话正在运行，请先停止生成' }
+  }
+  if (detail?.contextResetBlockedReason) {
+    return { available: false, reason: detail.contextResetBlockedReason }
+  }
+  return { available: true, reason: null }
+}
+
 export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onResetContext, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onResetContext: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
   const waiting = detail && detail.conversation.id === conversation?.id
     ? activeModelWaiting(detail.runtimeEvents, { runId: detail.lastRun?.id, runState: conversationRunState(detail) }) : null
+  const resetContextItem = resetContextItemState(detail, state, conversation)
   const projectRoot = conversation?.projectRoot?.trim() ?? ''
   const normalizedProjectRoot = projectRoot.replace(/[\\/]+$/, '')
   const projectName = normalizedProjectRoot.split(/[\\/]/).at(-1) || '未绑定项目'
@@ -119,7 +148,12 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRigh
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onPinConversation(conversation)}>{conversation?.pinned ? <PinOff /> : <Pin />}{conversation?.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名</DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onResetContext(conversation)}><RotateCcw />重置上下文</DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!resetContextItem.available}
+                title={resetContextItem.reason ?? undefined}
+                aria-label={resetContextItem.reason ? `重置上下文（不可用：${resetContextItem.reason}）` : '重置上下文'}
+                onSelect={() => conversation && resetContextItem.available && onResetContext(conversation)}
+              ><RotateCcw />重置上下文{!resetContextItem.available && resetContextItem.reason ? <span className="fox-menu-hint">{resetContextItem.reason}</span> : null}</DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onArchiveConversation(conversation)}><Archive />归档对话</DropdownMenuItem>
             </DropdownMenuContent>

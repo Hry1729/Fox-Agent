@@ -134,6 +134,80 @@ pub(crate) const SESSION_FILE_REFUSED_UNKNOWN: &str = "session.file_ownership_un
 /// The file passed every ownership check but the filesystem refused the delete.
 pub(crate) const SESSION_FILE_DELETE_FAILED: &str = "session.file_delete_failed";
 
+/// A reset is unavailable for this conversation, and why. Stable code + text
+/// so the UI can mirror the Host instead of guessing.
+pub(crate) const RESET_UNSUPPORTED_RUNTIME: &str = "session.reset_unsupported_runtime";
+/// A legacy `format_version 1` conversation has no Pi session to reset yet.
+pub(crate) const RESET_LEGACY_CONTEXT: &str = "session.reset_legacy_context";
+
+/// Whether this conversation's context may be reset at all.
+///
+/// One rule, shared by the Host's refusal and the UI's menu item, so the two
+/// cannot disagree about where reset is offered.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResetAvailability {
+    pub supported: bool,
+    pub code: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl ResetAvailability {
+    pub(crate) fn supported() -> Self {
+        Self { supported: true, code: None, reason: None }
+    }
+
+    pub(crate) fn unsupported(code: &str, reason: impl Into<String>) -> Self {
+        Self {
+            supported: false,
+            code: Some(code.to_owned()),
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// The refusal the command must return when the UI (or any other caller)
+    /// asks for an unsupported reset anyway.
+    pub(crate) fn refusal(&self) -> Option<ResetRefusal> {
+        if self.supported {
+            return None;
+        }
+        Some(ResetRefusal {
+            code: self.code.clone().unwrap_or_else(|| RESET_FAILED.to_owned()),
+            message: self.reason.clone().unwrap_or_default(),
+        })
+    }
+}
+
+/// Where a context reset is available.
+///
+/// * Yuxi conversations keep their context in the remote knowledge service;
+///   there is no Pi session for this command to replace.
+/// * A legacy `format_version 1` row is a Fox JSON snapshot, not a Pi session:
+///   resetting it would be a migration, not a reset, and the old snapshot is
+///   still the conversation's only context.
+/// * A `format_version >= 2` row (or no row yet, which a reset creates) is the
+///   Pi-native model this command was built for.
+pub(crate) fn reset_availability(
+    runtime_type: &str,
+    mapping: Option<&RuntimeSessionRecord>,
+) -> ResetAvailability {
+    if runtime_type == "yuxi" {
+        return ResetAvailability::unsupported(
+            RESET_UNSUPPORTED_RUNTIME,
+            "玉溪对话的上下文由远程知识库服务持有，不支持重置会话上下文",
+        );
+    }
+    if let Some(record) = mapping {
+        if record.format_version < 2 {
+            return ResetAvailability::unsupported(
+                RESET_LEGACY_CONTEXT,
+                "该对话仍使用旧版 Fox 会话快照（format_version 1），尚未迁移到 Pi 原生会话，暂不支持重置上下文",
+            );
+        }
+    }
+    ResetAvailability::supported()
+}
+
 /// What `open` must do with the mapping it found.
 ///
 /// Pure and unit tested: getting this wrong either loses a conversation's
@@ -146,6 +220,11 @@ pub(crate) enum OpenDecision {
     Resume,
     /// Refuse, reporting a recovery problem. Never a fresh context.
     Refuse { code: &'static str, detail: &'static str },
+    /// An `allocated` native session whose file Pi never wrote and whose
+    /// worker is gone: there is no context to lose, so the session Pi creates
+    /// now may be adopted *into the same generation* instead of forcing a
+    /// second reset.
+    Adopt,
     /// An `allocated` native session that the live runtime worker still holds.
     /// Pi has simply not written its JSONL yet, so nothing was lost: the
     /// recorded session is used as-is, without a runtime request and without
@@ -168,6 +247,24 @@ pub(crate) fn allocated_mapping_is_live(
     mapping.is_native()
         && matches!(mapping.status_kind(), Some(RuntimeSessionStatus::Allocated))
         && live_runtime_session_id.is_some_and(|live| live == mapping.runtime_session_id)
+}
+
+/// May this mapping adopt the session Pi creates now?
+///
+/// Deliberately narrow: only an `allocated` row (Pi booked a path but never
+/// appended a message), only when that recorded file does not exist at all, and
+/// only for a Pi-native conversation. A `ready` row whose file is missing, an
+/// empty-but-present file, a corrupt file or an identity mismatch never
+/// qualifies: those are recovery problems, and they keep refusing exactly as
+/// before.
+pub(crate) fn adoption_is_safe(
+    mapping: &RuntimeSessionRecord,
+    session_file_exists: bool,
+) -> bool {
+    mapping.is_native()
+        && matches!(mapping.status_kind(), Some(RuntimeSessionStatus::Allocated))
+        && mapping.native_path().is_some()
+        && !session_file_exists
 }
 
 /// The stable code for "the conversation's Pi context could not be restored".
@@ -289,11 +386,16 @@ impl<'a> SessionLifecycle<'a> {
             .map_err(SessionOpenError::Failed)?;
         // Pi writes its JSONL lazily, so an `allocated` mapping has to be
         // re-checked against the filesystem before it is called recoverable.
-        let persisted = match mapping.as_ref() {
+        // `recorded_file_exists` distinguishes "Pi never wrote anything" (the
+        // only case that may adopt) from "a file is there but unusable".
+        let (persisted, recorded_file_exists) = match mapping.as_ref() {
             Some(record) if mapping_is_allocated(record) => {
-                self.promote_if_persisted(conversation_id, record)?
+                let exists = record
+                    .native_path()
+                    .is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
+                (self.promote_if_persisted(conversation_id, record)?, exists)
             }
-            _ => false,
+            _ => (false, false),
         };
         let decision = match open_decision(mapping.as_ref(), persisted) {
             OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
@@ -302,6 +404,17 @@ impl<'a> SessionLifecycle<'a> {
                 }) =>
             {
                 OpenDecision::ReuseLive
+            }
+            // The worker that created the generation is gone, so the live id
+            // proves nothing — but Pi still never wrote this generation's file,
+            // so there is no context to lose: adopt the session Pi creates now
+            // instead of forcing a second reset.
+            OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
+                if mapping.as_ref().is_some_and(|record| {
+                    adoption_is_safe(record, recorded_file_exists)
+                }) =>
+            {
+                OpenDecision::Adopt
             }
             other => other,
         };
@@ -317,6 +430,10 @@ impl<'a> SessionLifecycle<'a> {
                     SessionOpenError::Failed("会话映射缺少 Pi 会话文件路径".to_owned())
                 })?;
                 Ok((record.runtime_session_id.clone(), path))
+            }
+            OpenDecision::Adopt => {
+                let record = mapping.expect("an adopt decision always comes from a mapping");
+                self.adopt(conversation_id, &record, link)
             }
             OpenDecision::Refuse { code, detail } => Err(SessionOpenError::RecoveryProblem {
                 code: code.to_owned(),
@@ -355,20 +472,35 @@ impl<'a> SessionLifecycle<'a> {
     /// inside its own session directory, then the mapping is committed in one
     /// transaction. Only after that transaction has definitely not committed is
     /// the orphan file removed — otherwise a row could point at a deleted file.
+    /// A session created here is a *new generation*, not a reset of an old
+    /// one: the generation is allocated above every generation this
+    /// conversation has used (live or retired), and the row this replaces is
+    /// retired into the ledger by the same transaction. The edit/rerun
+    /// `format_version 1` fallback goes through this path, and it must not
+    /// leave the snapshot it replaces without an owner.
     pub(crate) fn create(
         &self,
         conversation_id: &str,
         link: &mut dyn SessionRuntimeLink,
     ) -> Result<OpenedSession, SessionOpenError> {
+        let context_generation = self
+            .database
+            .next_runtime_session_generation(conversation_id)
+            .map_err(SessionOpenError::Failed)?;
         let (runtime_session_id, file, native_ref, status) =
-            self.allocate(conversation_id, link, 1)?;
+            self.allocate(
+                conversation_id,
+                link,
+                context_generation,
+                Uuid::new_v4().to_string(),
+            )?;
         if let Err(error) = self.database.ensure_native_runtime_session(
             conversation_id,
             &runtime_session_id,
             self.runtime_version.as_deref(),
             file.to_string_lossy().as_ref(),
             native_ref.as_deref(),
-            1,
+            context_generation,
             status,
         ) {
             // The mapping write is all-or-nothing, so a failure means no row
@@ -387,14 +519,15 @@ impl<'a> SessionLifecycle<'a> {
     ///
     /// Nothing is recorded here: the caller owns the mapping transaction, so a
     /// failed write can compensate by removing exactly the file no row
-    /// references.
+    /// references. The runtime session id is the caller's, because an adoption
+    /// must keep the id the live row already carries.
     fn allocate(
         &self,
         conversation_id: &str,
         link: &mut dyn SessionRuntimeLink,
         context_generation: i64,
+        runtime_session_id: String,
     ) -> Result<(String, PathBuf, Option<String>, RuntimeSessionStatus), SessionOpenError> {
-        let runtime_session_id = Uuid::new_v4().to_string();
         std::fs::create_dir_all(self.sessions_dir)
             .map_err(|error| SessionOpenError::Failed(format!("会话目录不可用: {error}")))?;
         let create_request = RuntimeRequest::new("create_session")
@@ -474,18 +607,35 @@ impl<'a> SessionLifecycle<'a> {
         if active {
             return Err(ResetRefusal::run_active());
         }
+        // The same support boundary the UI mirrors: a Yuxi context is remote and
+        // a `format_version 1` snapshot is not a Pi session. The command is
+        // refused here even if a caller (or a stale UI) asks for it anyway.
+        let runtime_type = self
+            .database
+            .conversation_runtime_type(conversation_id)
+            .map_err(|error| ResetRefusal::new(RESET_FAILED, error))?;
         let current = self
             .database
             .get_runtime_session(conversation_id)
             .map_err(|error| ResetRefusal::new(RESET_FAILED, error))?;
-        let context_generation = current
-            .as_ref()
-            .map(|record| record.context_generation)
-            .unwrap_or(0)
-            + 1;
+        if let Some(refusal) = reset_availability(&runtime_type, current.as_ref()).refusal() {
+            return Err(refusal);
+        }
+        // Allocated above the live *and* every retired generation: a number the
+        // ledger already holds would overwrite a retired session's ownership
+        // record. The transaction re-checks this before it writes.
+        let context_generation = self
+            .database
+            .next_runtime_session_generation(conversation_id)
+            .map_err(|error| ResetRefusal::new(RESET_FAILED, error))?;
         let (runtime_session_id, file, native_ref, status) =
-            self.allocate(conversation_id, link, context_generation)
-                .map_err(ResetRefusal::from_open)?;
+            self.allocate(
+                conversation_id,
+                link,
+                context_generation,
+                Uuid::new_v4().to_string(),
+            )
+            .map_err(ResetRefusal::from_open)?;
         if let Err(error) = self.database.reset_native_runtime_session(
             conversation_id,
             &runtime_session_id,
@@ -507,6 +657,84 @@ impl<'a> SessionLifecycle<'a> {
             session_path: file,
             context_generation,
         })
+    }
+
+    /// Continue an `allocated` generation Pi never persisted.
+    ///
+    /// The user already paid for this generation by resetting; the app restart
+    /// (or the switch to another conversation and back) only lost the live
+    /// runtime id. Pi still has nothing on disk for it, so the Host re-creates
+    /// the Pi session *inside the same generation* — same conversation, same
+    /// generation, same Fox runtime session id — and records the file Pi now
+    /// owns. Nothing is replayed and the previous generation is never reopened.
+    ///
+    /// This cannot mask real data loss:
+    ///
+    /// * it is reachable only for `allocated` rows (`ready` rows whose file
+    ///   exists are resumed, and a `ready` row whose file is missing still
+    ///   refuses — that is a restore failure, not a fresh start);
+    /// * the recorded file must not exist at the moment of adoption, re-checked
+    ///   right before the write, so no real file can lose its owner;
+    /// * a corrupt file or an identity mismatch is a *resume* path and still
+    ///   refuses;
+    /// * the generation adopted is the one the user just created and Pi never
+    ///   wrote anything into, so the empty context is the truth about it, not a
+    ///   substitute for lost history.
+    fn adopt(
+        &self,
+        conversation_id: &str,
+        existing: &RuntimeSessionRecord,
+        link: &mut dyn SessionRuntimeLink,
+    ) -> Result<OpenedSession, SessionOpenError> {
+        let Some(recorded) = existing.native_path() else {
+            return Err(SessionOpenError::Failed(
+                "会话映射缺少 Pi 会话文件路径".to_owned(),
+            ));
+        };
+        if std::fs::symlink_metadata(&recorded).is_ok() {
+            // The file appeared between the decision and the write. Adopting
+            // would drop the owner of a real file, so keep refusing.
+            return Err(SessionOpenError::RecoveryProblem {
+                code: SESSION_NOT_PERSISTED.to_owned(),
+                message:
+                    "Pi 还没有把该会话写入磁盘（进程在第一次写入前就结束了），没有可恢复的上下文"
+                        .to_owned(),
+            });
+        }
+        let context_generation = existing.context_generation;
+        let (runtime_session_id, file, native_ref, status) = self.allocate(
+            conversation_id,
+            link,
+            context_generation,
+            existing.runtime_session_id.clone(),
+        )?;
+        let adopted = self
+            .database
+            .adopt_native_runtime_session(
+                conversation_id,
+                &runtime_session_id,
+                file.to_string_lossy().as_ref(),
+                native_ref.as_deref(),
+                context_generation,
+            )
+            .map_err(SessionOpenError::Failed)?;
+        if !adopted {
+            // The row moved (another reset, or another open) while Pi was
+            // creating the session: refuse rather than record a session the
+            // conversation no longer owns.
+            return Err(SessionOpenError::Failed(
+                "会话映射在采纳新的 Pi 会话时发生了变化，请重试".to_owned(),
+            ));
+        }
+        if matches!(status, RuntimeSessionStatus::Ready) {
+            self.database
+                .confirm_native_runtime_session_ready(
+                    conversation_id,
+                    file.to_string_lossy().as_ref(),
+                )
+                .map_err(SessionOpenError::Failed)?;
+        }
+        Ok((runtime_session_id, file))
     }
 
     fn resume(

@@ -131,6 +131,12 @@ pub(crate) struct ConversationLoadResponse {
     detail: ConversationDetail,
     knowledge_references: Vec<KnowledgeReference>,
     kernel_snapshot: Option<fox_engine_protocol::KernelRunSnapshot>,
+    /// Where the Host offers a context reset for this conversation. The menu
+    /// item mirrors this fact; the command still refuses on its own.
+    context_reset: crate::runtime_host::ResetAvailability,
+    /// Why a reset is unavailable *right now* (an active Run), if it is. The
+    /// support boundary above is durable; this one is per-instant.
+    context_reset_blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2026,11 +2032,32 @@ pub fn conversation_load(
                 .database
                 .conversation_knowledge_references(&request.conversation_id)
             {
-                Ok(knowledge_references) => ApiResponse::success(ConversationLoadResponse {
-                    detail,
-                    knowledge_references,
-                    kernel_snapshot,
-                }),
+                Ok(knowledge_references) => {
+                    let context_reset = match state
+                        .runtime_host
+                        .context_reset_availability(&request.conversation_id)
+                    {
+                        Ok(availability) => availability,
+                        Err(error) => {
+                            return ApiResponse::failure("session.reset_status_unavailable", error, true)
+                        }
+                    };
+                    let context_reset_blocked_reason = match state
+                        .database
+                        .conversation_has_active_run(&request.conversation_id)
+                    {
+                        Ok(true) => Some("当前对话正在运行，请先停止生成再重置会话上下文".to_owned()),
+                        Ok(false) => None,
+                        Err(error) => return storage_error(error),
+                    };
+                    ApiResponse::success(ConversationLoadResponse {
+                        detail,
+                        knowledge_references,
+                        kernel_snapshot,
+                        context_reset,
+                        context_reset_blocked_reason,
+                    })
+                }
                 Err(error) => storage_error(error),
             }
         }

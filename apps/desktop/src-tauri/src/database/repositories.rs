@@ -330,6 +330,128 @@ fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite:
     Ok(())
 }
 
+/// What happened when the conversation's live mapping was copied into the
+/// retired-generation ledger.
+enum RetiredMapping {
+    /// There was no live mapping.
+    NoMapping,
+    /// The live mapping now has a ledger row.
+    Recorded,
+    /// The ledger already held exactly this mapping (idempotent re-entry).
+    AlreadyRecorded,
+    /// The ledger already holds a *different* mapping at this generation.
+    /// Overwriting it would orphan the file it owns, so callers refuse.
+    Collision { generation: i64 },
+}
+
+/// Copy the conversation's live Pi mapping into the retired-generation ledger.
+///
+/// Every path that *replaces* the live row calls this first — an explicit reset
+/// and the edit/rerun `format_version 1` fallback that creates a fresh Pi
+/// session — so the file the replaced row owned keeps an owner and permanent
+/// delete can still find it.
+///
+/// The ledger row is never overwritten by a different mapping: a generation
+/// that already names another session is reported as a collision, because
+/// silently rewriting it would lose that session's file.
+///
+/// Runs inside the caller's transaction: retiring and installing commit
+/// together or not at all.
+fn retire_live_pi_mapping(
+    transaction: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+    now: i64,
+) -> rusqlite::Result<RetiredMapping> {
+    let current = transaction
+        .query_row(
+            "SELECT context_generation, runtime_session_id, runtime_version, session_path,
+                    native_session_ref, native_session_path, format_version, status
+             FROM runtime_sessions
+             WHERE conversation_id = ?1 AND runtime_type = 'pi'",
+            [conversation_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        generation,
+        session_id,
+        version,
+        snapshot_path,
+        native_ref,
+        native_path,
+        format_version,
+        status,
+    )) = current
+    else {
+        return Ok(RetiredMapping::NoMapping);
+    };
+    let already: Option<String> = transaction
+        .query_row(
+            "SELECT runtime_session_id FROM runtime_session_generations
+             WHERE conversation_id = ?1 AND runtime_type = 'pi' AND context_generation = ?2",
+            params![conversation_id, generation],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(retired_session_id) = already {
+        if retired_session_id == session_id {
+            return Ok(RetiredMapping::AlreadyRecorded);
+        }
+        return Ok(RetiredMapping::Collision { generation });
+    }
+    transaction.execute(
+        "INSERT INTO runtime_session_generations(
+            conversation_id, runtime_type, context_generation, runtime_session_id,
+            runtime_version, session_path, native_session_ref, native_session_path,
+            format_version, status, retired_at
+         ) VALUES (?1, 'pi', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            conversation_id,
+            generation,
+            session_id,
+            version,
+            snapshot_path,
+            native_ref,
+            native_path,
+            format_version,
+            status,
+            now
+        ],
+    )?;
+    Ok(RetiredMapping::Recorded)
+}
+
+/// The highest context generation this conversation has used, live or retired.
+fn pi_generation_high_water(
+    transaction: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+) -> rusqlite::Result<i64> {
+    transaction.query_row(
+        "SELECT MAX(generation) FROM (
+            SELECT COALESCE(MAX(context_generation), 0) AS generation
+            FROM runtime_sessions
+            WHERE conversation_id = ?1 AND runtime_type = 'pi'
+            UNION ALL
+            SELECT COALESCE(MAX(context_generation), 0) AS generation
+            FROM runtime_session_generations
+            WHERE conversation_id = ?1 AND runtime_type = 'pi'
+         )",
+        [conversation_id],
+        |row| row.get(0),
+    )
+}
+
 impl Database {
     /// Open the desktop database, first backing it up into `backups_dir` when
     /// it has a pending schema migration. When the backup fails the database
@@ -6019,6 +6141,34 @@ impl Database {
         })
     }
 
+    /// The highest context generation this conversation has used, live or
+    /// retired.
+    ///
+    /// Generation numbers are never reused: a reset or a replacing install must
+    /// allocate above this, or a retired row's ownership record would be
+    /// overwritten and the file it owns orphaned.
+    pub fn runtime_session_generation_high_water(
+        &self,
+        conversation_id: &str,
+    ) -> Result<i64, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let high = pi_generation_high_water(&transaction, conversation_id)?;
+            transaction.commit()?;
+            Ok(high)
+        })
+    }
+
+    /// The generation a new mapping for this conversation must be installed at:
+    /// one above every generation it has used, live or retired.
+    pub fn next_runtime_session_generation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<i64, String> {
+        self.runtime_session_generation_high_water(conversation_id)
+            .map(|high| high.saturating_add(1))
+    }
+
     /// Record a Pi-native session (format_version 2): the exact file the
     /// runtime named and Pi's own session id.
     ///
@@ -6030,6 +6180,13 @@ impl Database {
     /// The mapping and the Run association are one transaction on purpose: a
     /// caller that deletes an unusable session file after a failure must never
     /// leave a row behind that points at it.
+    ///
+    /// A *replacement* (a different runtime session or a different file) first
+    /// retires the row it replaces into the generation ledger, exactly like a
+    /// reset: the legacy `format_version 1` fallback and any edit/rerun that
+    /// starts a fresh Pi session must not drop the old file's owner. An
+    /// in-place update of the same session (a promotion to `ready`) retires
+    /// nothing.
     pub fn ensure_native_runtime_session(
         &self,
         conversation_id: &str,
@@ -6041,8 +6198,44 @@ impl Database {
         status: RuntimeSessionStatus,
     ) -> Result<(), String> {
         let now = now_ms();
-        self.with_connection(|connection| {
+        enum Written {
+            Installed,
+            Collision { generation: i64 },
+        }
+        let written = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            let live: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT runtime_session_id, COALESCE(native_session_path, '')
+                     FROM runtime_sessions
+                     WHERE conversation_id = ?1 AND runtime_type = 'pi'",
+                    [conversation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let in_place = live.as_ref().is_some_and(|(session_id, path)| {
+                session_id == runtime_session_id && path == native_session_path
+            });
+            if !in_place {
+                if let RetiredMapping::Collision { generation } =
+                    retire_live_pi_mapping(&transaction, conversation_id, now)?
+                {
+                    return Ok(Written::Collision { generation });
+                }
+                // A retired row must never share its generation with the row
+                // that replaces it: two owners at one number cannot both be
+                // kept by a later permanent delete.
+                let retired_high: i64 = transaction.query_row(
+                    "SELECT COALESCE(MAX(context_generation), 0)
+                     FROM runtime_session_generations
+                     WHERE conversation_id = ?1 AND runtime_type = 'pi'",
+                    [conversation_id],
+                    |row| row.get(0),
+                )?;
+                if context_generation <= retired_high {
+                    return Ok(Written::Collision { generation: context_generation });
+                }
+            }
             transaction.execute(
                 "INSERT INTO runtime_sessions(
                     id, conversation_id, runtime_type, runtime_session_id, runtime_version,
@@ -6081,7 +6274,77 @@ impl Database {
                 params![conversation_id, runtime_session_id],
             )?;
             transaction.commit()?;
-            Ok(())
+            Ok(Written::Installed)
+        })?;
+        match written {
+            Written::Installed => Ok(()),
+            Written::Collision { generation } => Err(format!(
+                "context generation {generation} is already retired for this conversation; a replacing session install must allocate a free generation"
+            )),
+        }
+    }
+
+    /// Adopt a Pi session Pi has just created for an `allocated` mapping whose
+    /// recorded file was never written.
+    ///
+    /// Only the pointer moves: `runtime_session_id`, `context_generation` and
+    /// the conversation stay exactly as they were, and the row stays
+    /// `allocated` (Pi has not appended anything yet). The recorded path is
+    /// replaced by the file Pi will actually write, because the old path
+    /// provably holds no file (an `allocated` row means Pi never persisted
+    /// it), so no file loses its owner — while keeping a path that will never
+    /// exist would leave the real JSONL unowned and unremovable.
+    ///
+    /// The update is conditional on the row still being the same allocated
+    /// mapping at the same generation, so a concurrent reset can never have the
+    /// adoption overwrite its own generation. Returns whether the row changed.
+    pub fn adopt_native_runtime_session(
+        &self,
+        conversation_id: &str,
+        runtime_session_id: &str,
+        native_session_path: &str,
+        native_session_ref: Option<&str>,
+        context_generation: i64,
+    ) -> Result<bool, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let changed = connection.execute(
+                "UPDATE runtime_sessions
+                 SET native_session_path = ?3, native_session_ref = ?4, updated_at = ?5
+                 WHERE conversation_id = ?1 AND runtime_type = 'pi'
+                   AND runtime_session_id = ?2 AND context_generation = ?6
+                   AND status = 'allocated' AND format_version >= 2",
+                params![
+                    conversation_id,
+                    runtime_session_id,
+                    native_session_path,
+                    native_session_ref,
+                    now,
+                    context_generation
+                ],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// The runtime that owns this conversation's session.
+    ///
+    /// `yuxi` when the bound agent or an existing session row is a Yuxi one
+    /// (that context lives in the remote knowledge service, not in a Pi
+    /// session), otherwise `pi`.
+    pub fn conversation_runtime_type(&self, conversation_id: &str) -> Result<String, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT CASE WHEN
+                    EXISTS(SELECT 1 FROM runtime_sessions
+                           WHERE conversation_id = ?1 AND runtime_type = 'yuxi')
+                 OR EXISTS(SELECT 1 FROM conversations c
+                           JOIN agents a ON a.id = c.agent_id
+                           WHERE c.id = ?1 AND a.runtime_type = 'yuxi')
+                 THEN 'yuxi' ELSE 'pi' END",
+                [conversation_id],
+                |row| row.get::<_, String>(0),
+            )
         })
     }
 
@@ -6212,6 +6475,13 @@ impl Database {
     /// status) so the old file keeps an owner for a later permanent delete. A
     /// failure anywhere rolls the whole thing back: the previous mapping then
     /// still names the old, untouched session.
+    ///
+    /// The generation is allocated here, under the writing transaction, as one
+    /// above the highest generation this conversation has used — the live row
+    /// *and* every retired row. Allocating from the live row alone could hand
+    /// out a number the ledger already holds (an edit/rerun may have replaced
+    /// the live row) and overwrite a retired session's ownership record; a
+    /// collision is therefore a bug and is refused, never retried silently.
     pub fn reset_native_runtime_session(
         &self,
         conversation_id: &str,
@@ -6225,82 +6495,25 @@ impl Database {
         if context_generation < 1 {
             return Err("context generation must be >= 1".to_owned());
         }
-        let live_generation: i64 = self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT COALESCE(MAX(context_generation), 0) FROM runtime_sessions
-                 WHERE conversation_id = ?1 AND runtime_type = 'pi'",
-                [conversation_id],
-                |row| row.get::<_, i64>(0),
-            )
-        })?;
-        if context_generation <= live_generation {
-            return Err(format!(
-                "context generation must increase (current {live_generation}, requested {context_generation})"
-            ));
-        }
         let now = now_ms();
-        self.with_connection(|connection| {
+        enum Written {
+            Installed,
+            NotNext { next: i64, requested: i64 },
+            Collision { generation: i64 },
+        }
+        let written = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            let current = transaction
-                .query_row(
-                    "SELECT context_generation, runtime_session_id, runtime_version, session_path,
-                            native_session_ref, native_session_path, format_version, status
-                     FROM runtime_sessions
-                     WHERE conversation_id = ?1 AND runtime_type = 'pi'",
-                    [conversation_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                            row.get::<_, Option<String>>(5)?,
-                            row.get::<_, i64>(6)?,
-                            row.get::<_, String>(7)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            if let Some((
-                retired_generation,
-                retired_session_id,
-                retired_version,
-                retired_snapshot_path,
-                retired_ref,
-                retired_native_path,
-                retired_format,
-                retired_status,
-            )) = current
+            let high = pi_generation_high_water(&transaction, conversation_id)?;
+            if context_generation != high.saturating_add(1) {
+                return Ok(Written::NotNext {
+                    next: high.saturating_add(1),
+                    requested: context_generation,
+                });
+            }
+            if let RetiredMapping::Collision { generation } =
+                retire_live_pi_mapping(&transaction, conversation_id, now)?
             {
-                transaction.execute(
-                    "INSERT INTO runtime_session_generations(
-                        conversation_id, runtime_type, context_generation, runtime_session_id,
-                        runtime_version, session_path, native_session_ref, native_session_path,
-                        format_version, status, retired_at
-                     ) VALUES (?1, 'pi', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                     ON CONFLICT(conversation_id, runtime_type, context_generation) DO UPDATE SET
-                        runtime_session_id = excluded.runtime_session_id,
-                        runtime_version = excluded.runtime_version,
-                        session_path = excluded.session_path,
-                        native_session_ref = excluded.native_session_ref,
-                        native_session_path = excluded.native_session_path,
-                        format_version = excluded.format_version,
-                        status = excluded.status,
-                        retired_at = excluded.retired_at",
-                    params![
-                        conversation_id,
-                        retired_generation,
-                        retired_session_id,
-                        retired_version,
-                        retired_snapshot_path,
-                        retired_ref,
-                        retired_native_path,
-                        retired_format,
-                        retired_status,
-                        now
-                    ],
-                )?;
+                return Ok(Written::Collision { generation });
             }
             transaction.execute(
                 "INSERT INTO runtime_sessions(
@@ -6340,8 +6553,17 @@ impl Database {
                 params![conversation_id, runtime_session_id],
             )?;
             transaction.commit()?;
-            Ok(())
-        })
+            Ok(Written::Installed)
+        })?;
+        match written {
+            Written::Installed => Ok(()),
+            Written::NotNext { next, requested } => Err(format!(
+                "context generation must be the next free one (next is {next}, requested {requested})"
+            )),
+            Written::Collision { generation } => Err(format!(
+                "the retired session ledger already holds context generation {generation}; refusing to overwrite another session's ownership record"
+            )),
+        }
     }
 
     pub fn mark_run_cancelling(&self, run_id: &str) -> Result<Option<String>, String> {
