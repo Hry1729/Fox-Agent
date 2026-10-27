@@ -7294,6 +7294,12 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // v97 (provider protocol profiles): per-provider protocol entries as a
     // JSON column, default `[]` (existing providers keep their connection).
     apply_migration(&transaction, PROVIDER_PROTOCOL_SCHEMA_VERSION, "ALTER TABLE model_providers ADD COLUMN protocol_profiles TEXT NOT NULL DEFAULT '[]';", now)?;
+    // v98 (stage two, work package C): the Pi-native session mapping. Additive:
+    // four columns, every existing row keeps working as format_version 1 (the
+    // legacy Fox JSON snapshot) with context generation 1. No historical row is
+    // read, rewritten or deleted, so rolling back to the previous build simply
+    // ignores the columns.
+    apply_migration(&transaction, RUNTIME_SESSION_MAPPING_SCHEMA_VERSION, MIGRATION_98_RUNTIME_SESSION_MAPPING, now)?;
     finish_transaction(transaction)
 }
 
@@ -7955,6 +7961,42 @@ fn apply_graph_review_acceptance_migration(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod stage_two_runtime_session_migration_tests {
+    /// v98 maps a Pi-native session onto `runtime_sessions`. It must only add
+    /// columns (a rollback to the previous build has to keep working), and every
+    /// pre-existing row must keep reading as the legacy Fox snapshot.
+    #[test]
+    fn the_native_session_mapping_is_additive_and_defaults_to_the_legacy_format() {
+        let upper = super::MIGRATION_98_RUNTIME_SESSION_MAPPING.to_ascii_uppercase();
+        for column in ["NATIVE_SESSION_REF", "NATIVE_SESSION_PATH", "FORMAT_VERSION", "CONTEXT_GENERATION"] {
+            assert!(upper.contains(&format!("ADD COLUMN {column}")), "missing {column}");
+        }
+        for forbidden in ["DROP TABLE", "DELETE FROM", "UPDATE RUNTIME_SESSIONS", "RENAME", "NOT NULL DEFAULT '"] {
+            assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
+        }
+        assert_eq!(super::RUNTIME_SESSION_MAPPING_SCHEMA_VERSION, 98);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 98);
+
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let columns: Vec<String> = database
+            .with_connection(|connection| {
+                let mut statement = connection.prepare("SELECT name FROM pragma_table_info('runtime_sessions')")?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                let mut names = Vec::new();
+                for row in rows {
+                    names.push(row?);
+                }
+                Ok(names)
+            })
+            .expect("columns");
+        for column in ["native_session_ref", "native_session_path", "format_version", "context_generation"] {
+            assert!(columns.iter().any(|name| name == column), "missing column {column}");
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -15373,6 +15415,16 @@ const FULL_ACCESS_SCHEMA_VERSION: i64 = fox_agent_backend::host_routing::FULL_AC
 /// v97: `model_providers.protocol_profiles` (per-provider protocol entries).
 pub(crate) const PROVIDER_PROTOCOL_SCHEMA_VERSION: i64 = 97;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= PROVIDER_PROTOCOL_SCHEMA_VERSION);
+
+/// v98 (stage two, C): Pi-native session mapping on `runtime_sessions`.
+pub(crate) const RUNTIME_SESSION_MAPPING_SCHEMA_VERSION: i64 = 98;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= RUNTIME_SESSION_MAPPING_SCHEMA_VERSION);
+const MIGRATION_98_RUNTIME_SESSION_MAPPING: &str = r#"
+ALTER TABLE runtime_sessions ADD COLUMN native_session_ref TEXT;
+ALTER TABLE runtime_sessions ADD COLUMN native_session_path TEXT;
+ALTER TABLE runtime_sessions ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE runtime_sessions ADD COLUMN context_generation INTEGER NOT NULL DEFAULT 1;
+"#;
 
 const MIGRATION_94: &str = r#"
 ALTER TABLE artifacts ADD COLUMN turn_call_id TEXT;

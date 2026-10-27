@@ -5948,7 +5948,8 @@ impl Database {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT runtime_session_id, runtime_version, session_path, status
+                    "SELECT runtime_session_id, runtime_version, session_path, status,
+                            native_session_ref, native_session_path, format_version, context_generation
                      FROM runtime_sessions
                      WHERE conversation_id = ?1 AND runtime_type = 'pi'",
                     [conversation_id],
@@ -5958,10 +5959,62 @@ impl Database {
                             runtime_version: row.get(1)?,
                             session_path: row.get(2)?,
                             status: row.get(3)?,
+                            native_session_ref: row.get(4)?,
+                            native_session_path: row.get(5)?,
+                            format_version: row.get(6)?,
+                            context_generation: row.get(7)?,
                         })
                     },
                 )
                 .optional()
+        })
+    }
+
+    /// Record a Pi-native session (format_version 2): the exact file the
+    /// runtime wrote and Pi's own session id. The file is written first, so a
+    /// row never claims a session that does not exist on disk.
+    pub fn ensure_native_runtime_session(
+        &self,
+        conversation_id: &str,
+        runtime_session_id: &str,
+        runtime_version: Option<&str>,
+        native_session_path: &str,
+        native_session_ref: Option<&str>,
+        context_generation: i64,
+    ) -> Result<(), String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO runtime_sessions(
+                    id, conversation_id, runtime_type, runtime_session_id, runtime_version,
+                    session_path, status, created_at, updated_at,
+                    native_session_ref, native_session_path, format_version, context_generation
+                 ) VALUES (?1, ?2, 'pi', ?1, ?3, NULL, 'ready', ?4, ?4, ?5, ?6, 2, ?7)
+                 ON CONFLICT(conversation_id, runtime_type) DO UPDATE SET
+                    runtime_session_id = excluded.runtime_session_id,
+                    runtime_version = excluded.runtime_version,
+                    session_path = NULL,
+                    status = 'ready',
+                    native_session_ref = excluded.native_session_ref,
+                    native_session_path = excluded.native_session_path,
+                    format_version = 2,
+                    context_generation = excluded.context_generation,
+                    updated_at = excluded.updated_at",
+                params![
+                    runtime_session_id,
+                    conversation_id,
+                    runtime_version,
+                    now,
+                    native_session_ref,
+                    native_session_path,
+                    context_generation
+                ],
+            )?;
+            connection.execute(
+                "UPDATE runs SET runtime_session_id = ?2 WHERE conversation_id = ?1 AND status = 'queued'",
+                params![conversation_id, runtime_session_id],
+            )?;
+            Ok(())
         })
     }
 

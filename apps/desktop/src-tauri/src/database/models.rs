@@ -2192,8 +2192,19 @@ pub struct RuntimePromptMessage {
 pub struct RuntimeSessionRecord {
     pub runtime_session_id: String,
     pub runtime_version: Option<String>,
+    /// Legacy Fox JSON snapshot (format_version 1); unused by a Pi-native row.
     pub session_path: Option<String>,
     pub status: String,
+    /// Pi's own session id for a Pi-native session (format_version 2).
+    pub native_session_ref: Option<String>,
+    /// The exact Pi session JSONL file, as reported by the runtime and kept in
+    /// a Fox-managed directory. Never guessed on resume.
+    pub native_session_path: Option<String>,
+    /// 1 = legacy Fox JSON snapshot, 2 = Pi native JSONL.
+    pub format_version: i64,
+    /// Which model-context generation this row belongs to; a reset starts a
+    /// new one instead of overwriting the old file.
+    pub context_generation: i64,
 }
 
 #[derive(Debug, Clone)]

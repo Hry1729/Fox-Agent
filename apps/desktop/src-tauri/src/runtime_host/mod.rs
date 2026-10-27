@@ -2683,38 +2683,103 @@ impl RuntimeHost {
         self.runtime_command().is_ok()
     }
 
+    /// How an existing `runtime_sessions` row is reopened.
+    ///
+    /// The format is recorded in the row, never inferred: a row written before
+    /// stage two is a legacy Fox JSON snapshot, a `format_version >= 2` row is a
+    /// Pi-native session whose exact file the Host must open.
     fn open_runtime_session(&self, conversation_id: &str) -> Result<(String, PathBuf), String> {
         if let Some(existing) = self.database.get_runtime_session(conversation_id)? {
             if existing.status != "unavailable" {
-                let session_path = existing
-                    .session_path
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.session_path(&existing.runtime_session_id));
-                let resume_request = RuntimeRequest::new("resume_session")
-                    .with_conversation(conversation_id)
-                    .with_runtime_session(&existing.runtime_session_id)
-                    .with_payload(json!({ "sessionPath": session_path }));
-                let response = self.send_request(resume_request, RESPONSE_TIMEOUT)?;
-                if response.r#type == "session_created" {
-                    self.database.ensure_runtime_session(
-                        conversation_id,
-                        &existing.runtime_session_id,
-                        existing.runtime_version.as_deref(),
-                        session_path.to_str(),
-                    )?;
-                    return Ok((existing.runtime_session_id, session_path));
-                }
-                self.database
-                    .mark_runtime_session_unavailable(conversation_id)?;
+                return self.resume_runtime_session(conversation_id, existing);
             }
         }
+        self.create_native_runtime_session(conversation_id)
+    }
 
+    fn resume_runtime_session(
+        &self,
+        conversation_id: &str,
+        existing: crate::database::RuntimeSessionRecord,
+    ) -> Result<(String, PathBuf), String> {
+        let plan = resume_plan(&existing, self.session_path(&existing.runtime_session_id));
+        let native = matches!(plan, ResumePlan::Native { .. });
+        let (payload, path) = match &plan {
+            ResumePlan::Native { path, session_id } => (
+                json!({
+                    "sessionFormat": "pi-native",
+                    "nativeSessionPath": path.to_string_lossy(),
+                    "nativeSessionId": session_id,
+                    "contextGeneration": existing.context_generation,
+                }),
+                path.clone(),
+            ),
+            ResumePlan::Legacy { path } => (json!({ "sessionPath": path }), path.clone()),
+        };
+        let resume_request = RuntimeRequest::new("resume_session")
+            .with_conversation(conversation_id)
+            .with_runtime_session(&existing.runtime_session_id)
+            .with_payload(payload);
+        let response = self.send_request(resume_request, RESPONSE_TIMEOUT)?;
+        if response.r#type == "session_created" {
+            if native {
+                self.database.ensure_native_runtime_session(
+                    conversation_id,
+                    &existing.runtime_session_id,
+                    existing.runtime_version.as_deref(),
+                    path.to_string_lossy().as_ref(),
+                    existing.native_session_ref.as_deref(),
+                    existing.context_generation,
+                )?;
+            } else {
+                self.database.ensure_runtime_session(
+                    conversation_id,
+                    &existing.runtime_session_id,
+                    existing.runtime_version.as_deref(),
+                    path.to_str(),
+                )?;
+            }
+            return Ok((existing.runtime_session_id, path));
+        }
+        self.database
+            .mark_runtime_session_unavailable(conversation_id)?;
+        if native {
+            // A Pi-native conversation whose file cannot be reopened is a
+            // recovery problem. Starting an empty context here would silently
+            // drop the conversation; the user has to reset it explicitly.
+            return Err(format!(
+                "会话上下文无法恢复（{}）：{}。请先按提示重置会话上下文再继续，历史与资料绑定不会被删除。",
+                response
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("code"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("session.resume_failed"),
+                response_error(&response, "Pi session could not be resumed")
+            ));
+        }
+        self.create_native_runtime_session(conversation_id)
+    }
+
+    /// Create a Pi-native session and record exactly where the runtime put it.
+    ///
+    /// Order matters: the runtime writes the file first, then the Host commits
+    /// the mapping. A mapping is only written for a file that exists inside the
+    /// Fox session directory, and a mapping failure removes the orphan file, so
+    /// the database can never claim a session that is not on disk.
+    fn create_native_runtime_session(&self, conversation_id: &str) -> Result<(String, PathBuf), String> {
         let runtime_session_id = Uuid::new_v4().to_string();
-        let session_path = self.session_path(&runtime_session_id);
+        std::fs::create_dir_all(&self.sessions_dir)
+            .map_err(|error| format!("会话目录不可用: {error}"))?;
         let create_request = RuntimeRequest::new("create_session")
             .with_conversation(conversation_id)
             .with_runtime_session(&runtime_session_id)
-            .with_payload(json!({ "sessionPath": session_path }));
+            .with_payload(json!({
+                "sessionFormat": "pi-native",
+                "sessionDir": self.sessions_dir.to_string_lossy(),
+                "cwd": self.sessions_dir.to_string_lossy(),
+                "contextGeneration": 1,
+            }));
         let response = self.send_request(create_request, RESPONSE_TIMEOUT)?;
         if response.r#type != "session_created" {
             return Err(response_error(
@@ -2722,13 +2787,55 @@ impl RuntimeHost {
                 "runtime session could not be created",
             ));
         }
-        self.database.ensure_runtime_session(
+        let payload = response.payload.as_ref();
+        let reported = payload
+            .and_then(|payload| payload.get("nativeSessionPath"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "运行时没有返回 Pi 会话文件路径，已拒绝把无法恢复的会话记入数据库".to_owned()
+            })?;
+        // The Host owns the location: a path outside the Fox session directory
+        // is refused rather than recorded.
+        //
+        // The file itself may not exist yet — Pi writes its header on the first
+        // append — so the Host validates the *directory* (which it does control)
+        // and keeps the runtime's file name. A later resume demands the file.
+        let directory = std::fs::canonicalize(&self.sessions_dir)
+            .map_err(|error| format!("会话目录不可用: {error}"))?;
+        let reported = PathBuf::from(reported);
+        let parent = reported
+            .parent()
+            .ok_or_else(|| "Pi 会话文件路径没有父目录".to_owned())?;
+        let canonical_parent = std::fs::canonicalize(parent)
+            .map_err(|error| format!("Pi 会话目录不可用: {error}"))?;
+        let file_name = reported
+            .file_name()
+            .ok_or_else(|| "Pi 会话文件路径没有文件名".to_owned())?;
+        if canonical_parent != directory {
+            return Err("Pi 会话文件不在 Fox 会话目录内，已拒绝记录".to_owned());
+        }
+        let file = canonical_parent.join(file_name);
+        let native_ref = payload
+            .and_then(|payload| payload.get("nativeSessionId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let generation = payload
+            .and_then(|payload| payload.get("contextGeneration"))
+            .and_then(Value::as_i64)
+            .unwrap_or(1);
+        if let Err(error) = self.database.ensure_native_runtime_session(
             conversation_id,
             &runtime_session_id,
             self.current_runtime_version().as_deref(),
-            session_path.to_str(),
-        )?;
-        Ok((runtime_session_id, session_path))
+            file.to_string_lossy().as_ref(),
+            native_ref.as_deref(),
+            generation,
+        ) {
+            // Nothing points at the file, so it must not look recoverable.
+            let _ = std::fs::remove_file(&file);
+            return Err(error);
+        }
+        Ok((runtime_session_id, file))
     }
 
     fn session_path(&self, runtime_session_id: &str) -> PathBuf {
@@ -4999,6 +5106,117 @@ fn write_protocol_message<T: Serialize>(
         .write_all(format!("{line}\n").as_bytes())
         .and_then(|_| writer.flush())
         .map_err(|error| error.to_string())
+}
+
+/// How an existing `runtime_sessions` row is reopened.
+///
+/// The format is read from the row, never inferred from a file extension: a row
+/// written before stage two is a legacy Fox JSON snapshot, a
+/// `format_version >= 2` row is a Pi-native session whose exact file has to be
+/// opened. Pure and unit tested, because getting it wrong either loses context
+/// or retargets a conversation at another one's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumePlan {
+    /// Pi owns the context: open this exact file (and check this session id).
+    Native { path: PathBuf, session_id: Option<String> },
+    /// The legacy Fox JSON snapshot.
+    Legacy { path: PathBuf },
+}
+
+pub(crate) fn resume_plan(
+    record: &crate::database::RuntimeSessionRecord,
+    fallback: PathBuf,
+) -> ResumePlan {
+    let recorded = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    if record.format_version >= 2 {
+        return ResumePlan::Native {
+            path: recorded(&record.native_session_path).unwrap_or(fallback),
+            session_id: record
+                .native_session_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+        };
+    }
+    ResumePlan::Legacy {
+        path: recorded(&record.session_path).unwrap_or(fallback),
+    }
+}
+
+#[cfg(test)]
+mod stage_two_session_tests {
+    use super::{resume_plan, ResumePlan};
+    use crate::database::RuntimeSessionRecord;
+    use std::path::PathBuf;
+
+    fn record(format_version: i64) -> RuntimeSessionRecord {
+        RuntimeSessionRecord {
+            runtime_session_id: "runtime-1".into(),
+            runtime_version: Some("0.1.0+pi-1.4.0".into()),
+            session_path: Some("C:/fox/runtime-1.json".into()),
+            status: "ready".into(),
+            native_session_ref: Some("pi-session-7".into()),
+            native_session_path: Some("C:/fox/sessions/pi-session-7.jsonl".into()),
+            format_version,
+            context_generation: 3,
+        }
+    }
+
+    #[test]
+    fn a_native_row_reopens_its_exact_file_and_session_id() {
+        let plan = resume_plan(&record(2), PathBuf::from("C:/fallback.json"));
+        assert_eq!(
+            plan,
+            ResumePlan::Native {
+                path: PathBuf::from("C:/fox/sessions/pi-session-7.jsonl"),
+                session_id: Some("pi-session-7".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_native_row_without_a_path_never_borrows_the_legacy_snapshot() {
+        let mut missing = record(2);
+        missing.native_session_path = None;
+        missing.session_path = Some("C:/fox/runtime-1.json".into());
+        assert_eq!(
+            resume_plan(&missing, PathBuf::from("C:/fallback.jsonl")),
+            ResumePlan::Native {
+                path: PathBuf::from("C:/fallback.jsonl"),
+                session_id: Some("pi-session-7".into()),
+            },
+            "a native row must not fall back to the legacy snapshot file"
+        );
+    }
+
+    #[test]
+    fn an_old_row_stays_on_the_legacy_snapshot() {
+        let plan = resume_plan(&record(1), PathBuf::from("C:/fallback.json"));
+        assert_eq!(plan, ResumePlan::Legacy { path: PathBuf::from("C:/fox/runtime-1.json") });
+        let mut unknown = record(0);
+        unknown.session_path = None;
+        assert_eq!(
+            resume_plan(&unknown, PathBuf::from("C:/fallback.json")),
+            ResumePlan::Legacy { path: PathBuf::from("C:/fallback.json") }
+        );
+    }
+
+    #[test]
+    fn an_unreadable_session_id_is_not_passed_on() {
+        let mut blank = record(2);
+        blank.native_session_ref = Some("   ".into());
+        match resume_plan(&blank, PathBuf::from("C:/fallback.jsonl")) {
+            ResumePlan::Native { session_id, .. } => assert_eq!(session_id, None),
+            other => panic!("expected a native plan, got {other:?}"),
+        }
+    }
 }
 
 fn response_error(response: &RuntimeEnvelope, fallback: &str) -> String {
