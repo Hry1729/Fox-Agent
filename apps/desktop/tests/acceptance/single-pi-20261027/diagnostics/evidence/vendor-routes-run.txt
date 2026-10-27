@@ -1,0 +1,13 @@
+401   documented chat route, no credential         {"error": {"code": 16,"message": "Authorization Not Found"}}
+401   documented chat route, fake credential       {"error": {"code": 16,"message": "Forbidden"}}
+401   models list, fake credential                 {"error": {"code": 16,"message": "Forbidden"}}
+401   responses route, no credential               {"error": {"code": 16,"message": "Authorization Not Found"}}
+404   path without /v1                             {"error": {"code": 5,"message": "NOT_FOUND","details": []}}
+404   double-appended /v1                          {"error": {"code": 5,"message": "NOT_FOUND","details": []}}
+404   version suffix /v4                           {"error": {"code": 5,"message": "NOT_FOUND","details": []}}
+401   trailing slash after /v1                     {"error": {"code": 16,"message": "Authorization Not Found"}}
+404   second SenseNova host, /v1/chat/completions  {"message":"no Route matched with those values"}
+401   second SenseNova host, documented llm route  {"error": {"code": 16,"message": "Authorization Not Found"}}
+
+recorded SDK failure body: {"message":"model route not found","type":"not_found_error","code":"5"}
+MISMATCH  none of the probed routes answer with the recorded body; the failing request was not this route/host

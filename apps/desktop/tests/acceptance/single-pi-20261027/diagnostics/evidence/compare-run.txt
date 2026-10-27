@@ -1,0 +1,19 @@
+| field | sdk-fresh-session | sdk-resumed-session | sdk-legacy-snapshot | kernel-round |
+| --- | --- | --- | --- | --- |
+| method | "POST" | "POST" | "POST" | "POST" |
+| path | "/v1/chat/completions" | "/v1/chat/completions" | "/v1/chat/completions" | "/v1/chat/completions" |
+| query | "" | "" | "" | "" |
+| model | "sensenova-6.8-flash-lite" | "sensenova-6.8-flash-lite" | "sensenova-6.8-flash-lite" | "sensenova-6.8-flash-lite" |
+| stream | true | true | true | true |
+| maxTokens | 65535 | 65535 | 65535 | 65535 |
+| streamOptions | {"include_usage":true} | {"include_usage":true} | {"include_usage":true} | {"include_usage":true} |
+| store | null | null | null | null |
+| authorizationScheme | "Bearer" | "Bearer" | "Bearer" | "Bearer" |
+
+run sdk-fresh-session: run.completed
+run sdk-resumed-session: run.completed
+run sdk-legacy-snapshot: run.completed
+run kernel-round: kernel.model_response
+
+PASS  SDK and Kernel paths send the same base URL, path, model and protocol (method, path, query, model, stream, maxTokens, streamOptions, store, authorizationScheme)
+evidence: D:\python\projects\Fox\Fox\apps\desktop\tests\acceptance\single-pi-20261027\diagnostics\evidence\captured-requests.json

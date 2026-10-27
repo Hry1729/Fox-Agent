@@ -1,0 +1,3 @@
+resume: session_created (01a17de8-1b43-7443-bfec-5219fa669232)
+captured POST /v1/chat/completions model=sensenova-6.8-flash-lite bytes=68519
+PASS  the recorded session resumes and dials POST <baseUrl>/chat/completions with the configured model

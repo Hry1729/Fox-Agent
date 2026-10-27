@@ -1,0 +1,20 @@
+{
+  "baseUrl": "https://token.sensenova.cn/v1",
+  "sdk": {
+    "outcome": "provider_rejected",
+    "message": "401: {\"code\":16,\"message\":\"Forbidden\"}"
+  },
+  "kernel": {
+    "outcome": "model_round_settled",
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "model": "sensenova-6.8-flash-lite",
+        "upstreamStatus": 401,
+        "upstreamBody": "{\"error\": {\"code\": 16,\"message\": \"Forbidden\"}}"
+      }
+    ]
+  }
+}
+PASS  both paths dial POST <baseUrl>/chat/completions at the real provider; it answers 401 auth, never 404 route

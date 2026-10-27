@@ -1,0 +1,261 @@
+{
+  "capturedAt": "2026-10-27T17:10:16.644Z",
+  "note": "authorization header values are replaced by <redacted>; no credential is used or stored",
+  "sdk": {
+    "baseUrl": "http://127.0.0.1:51233/v1",
+    "runs": [
+      {
+        "label": "sdk-fresh-session",
+        "outcome": "run.completed",
+        "detail": {
+          "type": "run.completed"
+        }
+      },
+      {
+        "label": "sdk-resumed-session",
+        "outcome": "run.completed",
+        "detail": {
+          "type": "run.completed"
+        }
+      },
+      {
+        "label": "sdk-legacy-snapshot",
+        "outcome": "run.completed",
+        "detail": {
+          "type": "run.completed"
+        }
+      }
+    ],
+    "requests": [
+      {
+        "phase": "sdk-fresh-session",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "path": "/v1/chat/completions",
+        "httpVersion": "1.1",
+        "headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "accept-language": "*",
+          "authorization": "Bearer <redacted>",
+          "connection": "keep-alive",
+          "content-length": "68336",
+          "content-type": "application/json",
+          "host": "127.0.0.1:51233",
+          "sec-fetch-mode": "cors",
+          "user-agent": "pi/1.4.0 (win32; node/v24.15.0; x64)",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "js",
+          "x-stainless-os": "Windows",
+          "x-stainless-package-version": "7.19.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "node",
+          "x-stainless-runtime-version": "v24.15.0",
+          "x-stainless-timeout": "90"
+        },
+        "bodyBytes": 68336,
+        "routing": {
+          "method": "POST",
+          "path": "/v1/chat/completions",
+          "query": "",
+          "model": "sensenova-6.8-flash-lite",
+          "stream": true,
+          "maxTokens": 65535,
+          "streamOptions": {
+            "include_usage": true
+          },
+          "store": null,
+          "bodyKeys": "max_tokens,messages,model,stream,stream_options,tools",
+          "authorizationScheme": "Bearer"
+        },
+        "messageRoles": [
+          "system",
+          "user"
+        ],
+        "toolCount": 50,
+        "bodyKeys": [
+          "max_tokens",
+          "messages",
+          "model",
+          "stream",
+          "stream_options",
+          "tools"
+        ]
+      },
+      {
+        "phase": "sdk-resumed-session",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "path": "/v1/chat/completions",
+        "httpVersion": "1.1",
+        "headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "accept-language": "*",
+          "authorization": "Bearer <redacted>",
+          "connection": "keep-alive",
+          "content-length": "68475",
+          "content-type": "application/json",
+          "host": "127.0.0.1:51233",
+          "sec-fetch-mode": "cors",
+          "user-agent": "pi/1.4.0 (win32; node/v24.15.0; x64)",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "js",
+          "x-stainless-os": "Windows",
+          "x-stainless-package-version": "7.19.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "node",
+          "x-stainless-runtime-version": "v24.15.0",
+          "x-stainless-timeout": "90"
+        },
+        "bodyBytes": 68475,
+        "routing": {
+          "method": "POST",
+          "path": "/v1/chat/completions",
+          "query": "",
+          "model": "sensenova-6.8-flash-lite",
+          "stream": true,
+          "maxTokens": 65535,
+          "streamOptions": {
+            "include_usage": true
+          },
+          "store": null,
+          "bodyKeys": "max_tokens,messages,model,stream,stream_options,tools",
+          "authorizationScheme": "Bearer"
+        },
+        "messageRoles": [
+          "system",
+          "user",
+          "assistant",
+          "user"
+        ],
+        "toolCount": 50,
+        "bodyKeys": [
+          "max_tokens",
+          "messages",
+          "model",
+          "stream",
+          "stream_options",
+          "tools"
+        ]
+      },
+      {
+        "phase": "sdk-legacy-snapshot",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "path": "/v1/chat/completions",
+        "httpVersion": "1.1",
+        "headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "accept-language": "*",
+          "authorization": "Bearer <redacted>",
+          "connection": "keep-alive",
+          "content-length": "94859",
+          "content-type": "application/json",
+          "host": "127.0.0.1:51233",
+          "sec-fetch-mode": "cors",
+          "user-agent": "pi/1.4.0 (win32; node/v24.15.0; x64)",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "js",
+          "x-stainless-os": "Windows",
+          "x-stainless-package-version": "7.19.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "node",
+          "x-stainless-runtime-version": "v24.15.0",
+          "x-stainless-timeout": "90"
+        },
+        "bodyBytes": 94859,
+        "routing": {
+          "method": "POST",
+          "path": "/v1/chat/completions",
+          "query": "",
+          "model": "sensenova-6.8-flash-lite",
+          "stream": true,
+          "maxTokens": 65535,
+          "streamOptions": {
+            "include_usage": true
+          },
+          "store": null,
+          "bodyKeys": "max_tokens,messages,model,stream,stream_options,tools",
+          "authorizationScheme": "Bearer"
+        },
+        "messageRoles": [
+          "system",
+          "user"
+        ],
+        "toolCount": 50,
+        "bodyKeys": [
+          "max_tokens",
+          "messages",
+          "model",
+          "stream",
+          "stream_options",
+          "tools"
+        ]
+      }
+    ]
+  },
+  "kernel": {
+    "baseUrl": "http://127.0.0.1:51241/v1",
+    "outcome": "kernel.model_response",
+    "requests": [
+      {
+        "phase": "kernel-round",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "path": "/v1/chat/completions",
+        "httpVersion": "1.1",
+        "headers": {
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "accept-language": "*",
+          "authorization": "Bearer <redacted>",
+          "connection": "keep-alive",
+          "content-length": "348",
+          "content-type": "application/json",
+          "host": "127.0.0.1:51241",
+          "sec-fetch-mode": "cors",
+          "user-agent": "pi/1.4.0 (win32; node/v24.15.0; x64)",
+          "x-stainless-arch": "x64",
+          "x-stainless-lang": "js",
+          "x-stainless-os": "Windows",
+          "x-stainless-package-version": "7.19.0",
+          "x-stainless-retry-count": "0",
+          "x-stainless-runtime": "node",
+          "x-stainless-runtime-version": "v24.15.0",
+          "x-stainless-timeout": "300"
+        },
+        "bodyBytes": 348,
+        "routing": {
+          "method": "POST",
+          "path": "/v1/chat/completions",
+          "query": "",
+          "model": "sensenova-6.8-flash-lite",
+          "stream": true,
+          "maxTokens": 65535,
+          "streamOptions": {
+            "include_usage": true
+          },
+          "store": null,
+          "bodyKeys": "max_tokens,messages,model,stream,stream_options",
+          "authorizationScheme": "Bearer"
+        },
+        "messageRoles": [
+          "system",
+          "user"
+        ],
+        "toolCount": null,
+        "bodyKeys": [
+          "max_tokens",
+          "messages",
+          "model",
+          "stream",
+          "stream_options"
+        ]
+      }
+    ]
+  },
+  "differences": [],
+  "pass": true
+}

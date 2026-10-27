@@ -1,0 +1,211 @@
+
+==============================================================================
+run 03d4938d-986e-4b37-a4ea-45f526f09b80
+==============================================================================
+runs row: {
+ "id": "03d4938d-986e-4b37-a4ea-45f526f09b80",
+ "status": "completed",
+ "model": "sensenova-6.8-flash-lite",
+ "error_code": null,
+ "error_message": null,
+ "runtime_session_id": null,
+ "run_kind": "primary"
+}
+frozen control binding: {
+ "authority": "authoritative",
+ "engineId": "pi",
+ "executionProfileId": "legacy",
+ "readOnlyExecutor": "rust"
+}
+frozen Kernel modelService (authoritative path only): {
+ "apiType": "openai-completions",
+ "baseUrl": "https://token.sensenova.cn/v1",
+ "contextWindow": 256000,
+ "maxOutputTokens": 65535,
+ "modelId": "sensenova-6.8-flash-lite",
+ "supportsImageInput": true
+}
+usage.request[0] (the body actually serialized): {
+ "provider": "fox-openai-compatible",
+ "modelId": "sensenova-6.8-flash-lite",
+ "api": "openai-completions",
+ "outcome": "success",
+ "transportAttempts": 1,
+ "config": {
+  "evidenceLevel": "request_captured",
+  "raw": {
+   "apiType": "openai-completions",
+   "contextWindow": 256000,
+   "maxOutputTokens": 65535,
+   "modelId": "sensenova-6.8-flash-lite",
+   "supportsImageInput": true
+  },
+  "rejected": [],
+  "resolved": {
+   "api": "openai-completions",
+   "contextWindow": 256000,
+   "maxOutputTokens": 65535,
+   "model": "sensenova-6.8-flash-lite",
+   "reasoning": false,
+   "thinkingLevel": null
+  },
+  "sent": {
+   "max_tokens": 65535,
+   "model": "sensenova-6.8-flash-lite",
+   "stream": true
+  }
+ },
+ "usage": {
+  "cacheModel": "exclusive",
+  "cacheRead": 6144,
+  "cacheWrite": null,
+  "completeness": "partial",
+  "input": 12593,
+  "missingFields": [
+   "cacheWrite"
+  ],
+  "notes": [],
+  "output": 75,
+  "overApproximated": false,
+  "raw": {
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": 6144,
+   "input_tokens": 12593,
+   "output_tokens": 75
+  }
+ }
+}
+event 2 run.phase: {
+ "authority": "kernel",
+ "dispatchSeq": 3,
+ "kernelSeq": 3,
+ "phase": "request_sent",
+ "requestId": null,
+ "startedAt": 1793112301724,
+ "type": "run.phase"
+}
+event 6 run.completed: {
+ "type": "run.completed"
+}
+
+==============================================================================
+run 5ba50bda-ff24-46e5-94c2-bd244820f17d
+==============================================================================
+runs row: {
+ "id": "5ba50bda-ff24-46e5-94c2-bd244820f17d",
+ "status": "failed",
+ "model": "sensenova-6.8-flash-lite",
+ "error_code": "provider.request_failed",
+ "error_message": "404: {\"message\":\"model route not found\",\"type\":\"not_found_error\",\"code\":\"5\"}",
+ "runtime_session_id": "8772d267-4534-44dd-bb65-ae4d98b1938c",
+ "run_kind": "primary"
+}
+frozen control binding: {
+ "authority": "legacy",
+ "engineId": "pi",
+ "executionProfileId": "legacy",
+ "readOnlyExecutor": "rust"
+}
+sidecar run.request_snapshot: {
+ "model": "sensenova-6.8-flash-lite",
+ "apiType": "openai-completions",
+ "provider": "fox-openai-compatible",
+ "baseUrl": "https://token.sensenova.cn/v1",
+ "maxOutputTokens": 65535,
+ "modelProfile": {
+  "api": "openai-completions",
+  "contextWindow": 256000,
+  "family": "generic",
+  "id": "openai-compatible/generic",
+  "maxOutputTokens": 65535,
+  "planner": {
+   "enabled": true,
+   "maxOutputTokens": 2048,
+   "thinkingLevel": "off"
+  },
+  "provider": "openai-compatible",
+  "reasoning": false,
+  "reasoningTransport": "none",
+  "schemaVersion": 1,
+  "supportsImageInput": true,
+  "supportsParallelTools": true,
+  "supportsPromptCache": false,
+  "supportsTools": true,
+  "thinkingLevel": "off"
+ }
+}
+usage.request[0] (the body actually serialized): {
+ "provider": "fox-openai-compatible",
+ "modelId": "sensenova-6.8-flash-lite",
+ "api": "openai-completions",
+ "outcome": "failure",
+ "transportAttempts": 1,
+ "config": {
+  "evidenceLevel": "request_captured",
+  "raw": {
+   "apiType": "openai-completions",
+   "contextWindow": 256000,
+   "maxOutputTokens": 65535,
+   "modelId": "sensenova-6.8-flash-lite",
+   "supportsImageInput": true
+  },
+  "rejected": [],
+  "resolved": {
+   "api": "openai-completions",
+   "contextWindow": 256000,
+   "maxOutputTokens": 65535,
+   "model": "sensenova-6.8-flash-lite",
+   "reasoning": false,
+   "thinkingLevel": null
+  },
+  "sent": {
+   "max_tokens": 65535,
+   "model": "sensenova-6.8-flash-lite",
+   "stream": true
+  }
+ },
+ "usage": {
+  "cacheModel": "exclusive",
+  "cacheRead": null,
+  "cacheWrite": null,
+  "completeness": "unavailable",
+  "input": null,
+  "missingFields": [
+   "usage"
+  ],
+  "notes": [
+   "provider returned no usage object"
+  ],
+  "output": null,
+  "overApproximated": false,
+  "raw": null
+ }
+}
+event 3 run.phase: {
+ "phase": "preparing",
+ "type": "run.phase"
+}
+event 4 run.phase: {
+ "attempt": 1,
+ "phase": "model_streaming",
+ "type": "run.phase"
+}
+event 5 run.phase: {
+ "phase": "model_streaming",
+ "shadowModelRequest": "begin",
+ "type": "run.phase"
+}
+event 7 run.phase: {
+ "phase": "model_streaming",
+ "shadowModelRequest": "settle",
+ "type": "run.phase"
+}
+event 11 run.failed: {
+ "code": "provider.request_failed",
+ "message": "404: {\"message\":\"model route not found\",\"type\":\"not_found_error\",\"code\":\"5\"}",
+ "type": "run.failed"
+}
+
+credential *name* resolved by each path = the model base URL above;
+the keyring service is `com.fox.agent.model` (apps/desktop/src-tauri/src/model_service.rs:9,335).
+No credential value is read by this script.
