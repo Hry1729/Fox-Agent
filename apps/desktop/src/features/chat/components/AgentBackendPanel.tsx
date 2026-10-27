@@ -34,7 +34,7 @@ import {
   type ImportReport,
 } from '@/features/conversations/model/agent-backend-onboarding'
 import type { NativePermissionRequest, NativePermissionView } from '@/features/conversations/model/agent-native-permission'
-import { isAgentBackendHidden, refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
+import { agentBackendAccess, isAgentBackendHidden, isAgentBackendRetired, NEW_CONVERSATION_AGENT_BACKEND, refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
 
 /** The Host calls the panel needs (a subset of `desktopClient`). */
 export interface AgentBackendPanelClient extends Partial<AgentNetworkClient> {
@@ -111,12 +111,19 @@ export function AgentBackendPanel({
   /** Bumped by the caller to refresh everything (e.g. after a run). */
   sessionTick?: number
 }) {
-  // A hidden backend (HIDDEN_AGENT_BACKENDS) is never a draft's backend: the
-  // draft is shown, probed and created as Fox. Locked (existing)
-  // conversations keep theirs.
-  const draftBackend: AgentBackendId = isAgentBackendHidden(pickedDraftBackend, status) ? 'fox' : pickedDraftBackend
+  // A new conversation can only use the built-in route, so a hidden or
+  // retired backend passed by an older caller is shown, probed and created as
+  // that supported route: no login / permission prompt of a retired driver is
+  // ever rendered for a new conversation. A locked (existing) conversation
+  // keeps its own backend, and a retired one stays read-only.
+  const draftBackend: AgentBackendId = isAgentBackendHidden(pickedDraftBackend, status) || isAgentBackendRetired(pickedDraftBackend, status)
+    ? NEW_CONVERSATION_AGENT_BACKEND
+    : pickedDraftBackend
   const shownBackend: AgentBackendId = lockedBackend ?? draftBackend
-  const capabilityConversationId = lockedBackend ? conversationId : null
+  // Read-only (retired) conversation: no runtime, so nothing is loaded for it -
+  // no capability chips, no permission list, no login card.
+  const external = shownBackend !== NEW_CONVERSATION_AGENT_BACKEND && agentBackendAccess(shownBackend, status) === 'runnable'
+  const capabilityConversationId = external && lockedBackend ? conversationId : null
   const [eventTick, setEventTick] = useState(0)
   const [onboardingTick, setOnboardingTick] = useState(0)
   // Bumped after a permission change / full-access revoke: the capability
@@ -141,7 +148,6 @@ export function AgentBackendPanel({
     return () => { disposed = true; unlisten?.() }
   }, [client, capabilityConversationId])
 
-  const external = shownBackend !== 'fox'
   const capabilityKey = external ? JSON.stringify([shownBackend, capabilityConversationId]) : ''
   const capabilities = useKeyedResource(capabilityKey, sessionTick + eventTick + permissionTick, useCallback((key: string) => {
     const [backend, id] = JSON.parse(key) as [AgentBackendId, string | null]
@@ -155,15 +161,16 @@ export function AgentBackendPanel({
   }, [client]))
 
   // The draft's mode is the setting as the Host applies it (FORBIDDEN never
-  // grants it); the probe of a draft uses it.
-  const target = credentialProbeTarget({
+  // grants it); the probe of a draft uses it. Nothing of a read-only (retired)
+  // conversation is probed: there is no runtime, so there is no login card.
+  const target = external ? credentialProbeTarget({
     lockedBackend,
     conversationId,
     draftBackend,
     draftProjectId,
     draftProjectRoot,
     draftFullAccess,
-  })
+  }) : null
   const targetKey = credentialProbeTargetKey(target)
   const modelTick = sessionTick + onboardingTick
   const [connectionOverride, setConnectionOverride] = useState<(Keyed<AgentModelConnection> & { tick: number }) | null>(null)

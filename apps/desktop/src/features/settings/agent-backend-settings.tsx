@@ -1,25 +1,30 @@
-// Settings batch, items 4 / 5: 设置 → Agent →「外部 Agent」 (rows in the unified settings layout).
+// Settings batch, items 4 / 5: 设置 → Agent →「Agent 驱动」(rows in the
+// unified settings layout).
 //
-// *「新会话使用的 Agent」: Fox / pi / Codex / DeepSeek (default Fox); every
-//   backend is selectable unless the administrator forced it off
-//   (`FOX_EXTERNAL_BACKENDS`). A saved hidden choice shows as Fox.
-// * Each Agent's native default permission is listed in its own names. Fox
-//   no longer adds an outer SRT sandbox to external Agents, so there is no
-//   "new external conversation uses full access" switch.
+// *「新会话使用的 Agent」is a plain statement since the single Pi mainline
+//   (product decision 2026-10-27): only the built-in Fox route (model engine
+//   Pi) can drive a new conversation, so there is no select to make. A saved
+//   backend of an older release is reported as no longer applicable, and old
+//   conversations keep their own binding (read-only).
+// * Each external Agent's native default permission is no longer offered: it
+//   only ever applied to a new conversation of a driver this build retired.
+//   Fox's own permission settings live on this page (项目权限) and stay.
 //
-// Saved by the Host (`agent_backend_preferences_save`, `app_settings`); a
-// change is broadcast so the open draft re-probes its login at once.
-import { useCallback, useEffect, useState } from 'react'
+// The preferences are still read from the Host (`agent_backend_preferences_get`,
+// `app_settings`); this page no longer writes one, because there is no choice to
+// save. `dispatchAgentBackendPreferencesChanged` stays wired for a Host that
+// ever offers more than one driver again.
+import { useEffect, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { SettingsGroup, SettingsRow } from './settings-layout'
 import {
   AGENT_BACKEND_PREFERENCES_EVENT,
   agentBackendForcedOffNotice,
-  agentBackendSettingRows,
-  agentBackendSettingValue,
-  AGENT_BACKEND_LABELS,
+  agentBackendSavedRetiredNotice,
   isAgentBackendHidden,
-  isAgentBackendId,
+  isAgentBackendRetired,
+  NEW_CONVERSATION_AGENT_BACKEND,
+  NEW_CONVERSATION_BACKEND_STATEMENT,
   type AgentBackendId,
   type AgentBackendPreferences,
   type CodexResponsesProbe,
@@ -39,17 +44,28 @@ export interface AgentBackendSettingsClient {
   agentBackendNativePermissionSet?: (request: NativePermissionRequest & { mode: string }) => Promise<NativePermissionView>
 }
 
-/** The external Agents that have a native permission list, in settings order (hidden backends left out). */
+/**
+ * The external Agents that have a native permission list, in settings order
+ * (hidden and retired backends left out). Empty since the single Pi mainline:
+ * an Agent's own "default permission" only applies to a NEW conversation of
+ * that Agent, and no retired backend can have one. The Host command and
+ * `AgentNativePermissionPicker` stay for the records already made, and
+ * Fox's own permission settings are on this page (项目权限).
+ */
 export const NATIVE_PERMISSION_SETTING_BACKENDS: readonly { backend: AgentBackendId; label: string }[] = ([
   { backend: 'codex', label: 'Codex' },
   { backend: 'deepseek', label: 'DeepSeek' },
-  { backend: 'pi', label: 'pi' },
-] as const).filter(({ backend }) => !isAgentBackendHidden(backend))
+  { backend: 'pi', label: 'Pi' },
+] as const).filter(({ backend }) => !isAgentBackendHidden(backend) && !isAgentBackendRetired(backend))
 
 /**
  * 设置 → each Agent's default permission for its NEW conversations, in its
  * own names. Full access is left out of the default; it stays an explicit
  * per-conversation choice in the Agent's own picker.
+ *
+ * Renders nothing while `NATIVE_PERMISSION_SETTING_BACKENDS` is empty (every
+ * external Agent is retired): kept so the Host command and the row layout stay
+ * in place, and so re-enabling a driver is a one-line change.
  */
 function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClient }) {
   const list = client.agentBackendNativePermissions
@@ -105,6 +121,7 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
   )
 }
 
+/** Broadcast a preferences change (the open draft re-probes on it). */
 export function dispatchAgentBackendPreferencesChanged(preferences: AgentBackendPreferences) {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent(AGENT_BACKEND_PREFERENCES_EVENT, { detail: preferences }))
@@ -113,7 +130,6 @@ export function dispatchAgentBackendPreferencesChanged(preferences: AgentBackend
 export function AgentBackendSettingsSection({ client }: { client: AgentBackendSettingsClient }) {
   const [preferences, setPreferences] = useState<AgentBackendPreferences | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -123,60 +139,17 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
     return () => { cancelled = true }
   }, [client])
 
-  const save = useCallback(async (change: { defaultBackend?: AgentBackendId; newExternalFullAccess?: boolean }) => {
-    setSaving(true)
-    setError(null)
-    try {
-      const saved = await client.saveAgentBackendPreferences(change)
-      setPreferences(saved)
-      dispatchAgentBackendPreferencesChanged(saved)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setSaving(false)
-    }
-  }, [client])
-
-  const rows = agentBackendSettingRows(preferences)
   const forcedOff = agentBackendForcedOffNotice(preferences)
-  const selected = agentBackendSettingValue(preferences)
-  const effective = preferences?.effectiveBackend ?? 'fox'
-  const savedHidden = preferences && isAgentBackendId(preferences.defaultBackend) && isAgentBackendHidden(preferences.defaultBackend)
-    ? AGENT_BACKEND_LABELS[preferences.defaultBackend]
-    : null
-  const unavailableReasons = rows.filter((row) => row.disabled && row.reason)
+  const savedRetired = agentBackendSavedRetiredNotice(preferences)
   return (
-    <SettingsGroup title="外部 Agent" className="fox-agent-backend-settings" aside={<span>只影响之后新建的会话</span>}>
-      <SettingsRow title="新会话使用的 Agent" description="默认 Fox。外部 Agent 自动使用当前供应商；缺少地址时会在后端栏提示补充。已有登录优先。">
-        <Select
-          value={selected}
-          disabled={!preferences || saving}
-          onValueChange={(next) => {
-            if (isAgentBackendId(next) && !rows.find((row) => row.value === next)?.disabled) void save({ defaultBackend: next })
-          }}
-        >
-          <SelectTrigger className="fox-settings-agent-select" aria-label="新会话使用的 Agent"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            {rows.map((row) => (
-              <SelectItem key={row.value} value={row.value} data-value={row.value} disabled={row.disabled} title={row.reason ?? undefined}>
-                {row.label}{row.disabled ? '（不可用）' : ''}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+    <SettingsGroup title="Agent 驱动" className="fox-agent-backend-settings" aside={<span>只影响之后新建的会话</span>}>
+      {/* One supported driver: a select with one option is not a choice, so the
+          row states what a new conversation uses instead of offering a pick. */}
+      <SettingsRow title="新会话使用的 Agent" description="本版本只支持一个 Agent 驱动；会话创建后不能更换，已有会话保留创建时的绑定。">
+        <span className="fox-settings-value" data-agent-backend={NEW_CONVERSATION_AGENT_BACKEND} aria-live="polite">{preferences ? NEW_CONVERSATION_BACKEND_STATEMENT : '正在读取…'}</span>
       </SettingsRow>
       {forcedOff && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">{forcedOff}</p>}
-      {!forcedOff && unavailableReasons.length > 0 && (
-        <ul className="fox-settings-footnote fox-agent-backend-settings-note" aria-label="不可用的 Agent">
-          {unavailableReasons.map((row) => <li key={row.value}>{row.label}：{row.reason}</li>)}
-        </ul>
-      )}
-      {savedHidden && (
-        <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">之前保存的 {savedHidden} 暂未开放，新会话使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}；已有的 {savedHidden} 会话不受影响。</p>
-      )}
-      {preferences && !savedHidden && selected !== effective && (
-        <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">已保存的选择当前不可用，新会话暂时使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}。</p>
-      )}
+      {savedRetired && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note" data-retired-default={preferences?.defaultBackend}>{savedRetired}</p>}
       <NativePermissionDefaults client={client} />
       {error && <p className="fox-settings-error fox-agent-backend-settings-error" role="alert">{error}</p>}
     </SettingsGroup>

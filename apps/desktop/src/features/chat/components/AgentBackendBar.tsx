@@ -1,11 +1,13 @@
-// Four-agent plan v0.3.1, Host wiring (P6 minimal UI), settings batch:
-// * the new conversation's backend follows its draft selection. External
-//   Agents no longer get Fox's SRT wrapper, so the bar shows the Agent's own
-//   native permission picker instead of a Fox sandbox / full-access chip.
-// * an existing conversation shows its frozen backend as locked, and a
-//   read-only notice when the Host would refuse to start its runtime;
-// * status, capability chips, the missing-login card and the import receipt
-//   stay on the bar.
+// Four-agent plan v0.3.1, Host wiring (P6 minimal UI), settings batch; single
+// Pi mainline (product decision 2026-10-27):
+// * a new conversation has exactly one supported driver (the built-in Fox
+//   route), so there is no draft row, no backend chip and no login or
+//   permission prompt of a retired driver - only the Host's refusal is shown;
+// * an existing conversation keeps its frozen backend, shown as locked. A
+//   retired one is read-only and the notice names its own backend, never the
+//   built-in Pi driver;
+// * capability chips, the login card and the import receipt stay wired for the
+//   records already made (nothing of theirs is loaded for a retired backend).
 //
 // Display only: every rule is enforced by the Host (`host_routing`), so a
 // stale or tampered UI can never widen what runs.
@@ -16,7 +18,6 @@ import {
   AGENT_BACKEND_LABELS,
   agentBackendAccess,
   agentBackendLockNotice,
-  canPickAgentBackend,
   agentBackendCapabilityChips,
   type AgentBackendCapabilities,
   type AgentBackendId,
@@ -57,9 +58,6 @@ function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; o
     </div>
   )
 }
-
-/** Where the backend of a new conversation is chosen. */
-export const NEW_CONVERSATION_BACKEND_HINT = '在输入区右下角选择本次新对话的 Agent，创建后不可更换'
 
 export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker = null, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
   status: AgentBackendStatus | null
@@ -117,23 +115,8 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
     )
   }
 
-  // New conversation: display the selected draft backend. Fox keeps
-  // today's composer (no row) unless a refusal has to be shown.
-  const value: AgentBackendId = canPickAgentBackend(draftBackend, status) ? draftBackend : 'fox'
-  if (value === 'fox') {
-    return refusalNotice ? <div className="fox-agent-backend-bar" data-access="draft">{refusalNotice}</div> : null
-  }
-  return (
-    <div className="fox-agent-backend-bar" data-access="draft" aria-label="新会话的 Agent 后端">
-      <span className="fox-agent-backend-chip" data-draft-backend={value} title={NEW_CONVERSATION_BACKEND_HINT}>
-        新会话：{AGENT_BACKEND_LABELS[value]}
-      </span>
-      {permissionPicker ?? <NoFoxSandboxNote />}
-      {refusalNotice ?? <CapabilityChips capabilities={capabilities} />}
-      {/* Same rule as a locked conversation: the login card shows before the
-          first message (80b1622). */}
-      {credentialCard}
-      {receiptNotice}
-    </div>
-  )
+  // New conversation: this build has exactly one supported driver, so there
+  // is no draft chip and no login / permission prompt to render (a select with
+  // one option is not a choice). Only a refused send is reported here.
+  return refusalNotice ? <div className="fox-agent-backend-bar" data-access="draft">{refusalNotice}</div> : null
 }

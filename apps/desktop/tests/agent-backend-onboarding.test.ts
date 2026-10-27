@@ -242,18 +242,29 @@ describe('source assertions', () => {
 
   const panel = readFileSync(new URL('../src/features/chat/components/AgentBackendPanel.tsx', import.meta.url), 'utf8')
 
-  test('AgentBackendBar shows the login card in the draft too (same as a locked conversation)', () => {
+  test('a new conversation renders no login card and no permission chip: one supported driver', () => {
+    // The only login / permission UI a new conversation could show belongs to an
+    // external driver, and the single Pi mainline retired every one of them
+    // (2026-10-27). The card stays wired for the records already made - an open
+    // conversation - and is never offered for a new conversation.
     expect(bar).toContain("{access === 'runnable' && credentialCard}")
-    const draft = bar.slice(bar.indexOf('data-access="draft" aria-label="新会话的 Agent 后端"'))
-    expect(draft).toContain('{credentialCard}')
-    // The draft card is not hidden behind the refusal notice.
-    expect(draft.indexOf('{credentialCard}')).toBeGreaterThan(draft.indexOf('{refusalNotice ??'))
+    expect(bar).not.toContain('新会话：')
+    const draft = bar.slice(bar.indexOf('data-access="draft"'))
+    expect(draft).toContain('{refusalNotice}')
+    expect(draft).not.toContain('{credentialCard}')
+    expect(draft).not.toContain('permissionPicker')
+    // A retired backend picked by an older caller is shown and created as the
+    // built-in route, so it is never probed for credentials.
+    expect(panel).toContain('isAgentBackendRetired(pickedDraftBackend, status)')
+    expect(panel).toContain("agentBackendAccess(shownBackend, status) === 'runnable'")
   })
 
   test('the import receipt is rendered once, by the bar, keyed to its target', () => {
     expect(bar).toContain('function ImportReceiptNotice(')
     expect(bar).toContain('aria-label="导入回执"')
-    expect(bar.match(/\{receiptNotice\}/g)?.length).toBe(2)
+    // One render site: a new conversation has no login card, so the only bar
+    // that can carry a receipt is an open conversation's.
+    expect(bar.match(/\{receiptNotice\}/g)?.length).toBe(1)
     expect(panel).toContain('setReceipt({ key: targetKey, value: importReceiptLines(report) })')
     expect(panel).toContain('importReceipt={visibleReceipt}')
     expect(panel).toContain('IMPORT_RECEIPT_VISIBLE_MS')

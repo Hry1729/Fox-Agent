@@ -1,14 +1,19 @@
-// Settings batch: 13.15 re-test fixes ① ② and the new settings (④ ⑤),
-// rendered with happy-dom against a fake Host.
+// Settings batch ①②④, on the single Pi mainline (product decision 2026-10-27).
 //
-// ① The draft login probe is keyed by backend + project: a change drops the
-//   previous card / chips at once, late answers for an older target are
-//   discarded, and the card is remounted per target (no stale local state).
-// ② A successful import's receipt is shown once (on the bar); "知道了" or
-//   30 s removes the whole text from the DOM. An import error stays in the card.
-// ④ The bar has no backend picker; the backend comes from 设置. The settings
-//   section greys forced-off backends and broadcasts a change.
+// A new conversation has exactly one supported driver - the built-in Fox route
+// (model engine Pi) - so nothing offers a choice: the bar has no draft row, the
+// composer has no Agent menu, and 设置 →「新会话使用的 Agent」is a plain
+// statement. An existing conversation frozen to a retired backend (pi / codex /
+// deepseek) shows its OWN binding and is read-only.
+//
+// ① No login probe / capability request / native permission list is made or
+//   rendered for a retired backend (draft or locked).
+// ② The import receipt the login card used to leave on the bar still renders
+//   once and is fully removed ("知道了"); the plumbing itself stays and is
+//   covered by agent-backend-onboarding.test.ts.
+// ④ The backend of a new conversation comes from the product, not a setting.
 import { afterEach, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
@@ -16,14 +21,16 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 const React = await import('react')
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import('@testing-library/react')
 const { AgentBackendPanel } = await import('../src/features/chat/components/AgentBackendPanel')
+const { AgentBackendBar } = await import('../src/features/chat/components/AgentBackendBar')
 const { AgentBackendSettingsSection, NATIVE_PERMISSION_SETTING_BACKENDS } = await import('../src/features/settings/agent-backend-settings')
 const { ComposerAgentPicker } = await import('../src/features/chat/composer/composer-agent-picker')
-const { protocolAgents } = await import('../src/features/settings/provider-protocol-editor')
 const {
-  AGENT_BACKEND_PREFERENCES_EVENT,
+  AGENT_BACKEND_ERROR_CODES,
   DEFAULT_AGENT_BACKEND_PREFERENCES,
   HIDDEN_AGENT_BACKENDS,
+  RETIRED_AGENT_BACKEND_IDS,
   SELECTABLE_AGENT_BACKEND_IDS,
+  SUPPORTED_AGENT_BACKEND_IDS,
   agentBackendSettingRows,
   agentBackendSettingValue,
   canPickAgentBackend,
@@ -31,7 +38,8 @@ const {
   newConversationBackend,
 } = await import('../src/features/conversations/model/agent-backend')
 import type { AgentBackendCapabilities, AgentBackendId, AgentBackendPreferences, AgentBackendStatus } from '../src/features/conversations/model/agent-backend'
-import type { AgentBackendTarget, CredentialProbe, ImportReport } from '../src/features/conversations/model/agent-backend-onboarding'
+import type { NativePermissionRequest } from '../src/features/conversations/model/agent-native-permission'
+import type { AgentBackendTarget, CredentialProbe } from '../src/features/conversations/model/agent-backend-onboarding'
 const { IMPORT_RECEIPT_VISIBLE_MS } = await import('../src/features/conversations/model/agent-backend-onboarding')
 
 afterEach(cleanup)
@@ -44,11 +52,36 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
+/** The status the current Host reports: one supported backend, three retired. */
 const status: AgentBackendStatus = {
   switchEnv: 'FOX_EXTERNAL_BACKENDS',
-  anyExternalEnabled: true,
-  options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({ backend, enabled: true, wired: true, experimental: backend === 'deepseek', reason: null })),
+  anyExternalEnabled: false,
+  supportedBackends: ['fox'],
+  retiredBackends: ['pi', 'codex', 'deepseek'],
+  options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
+    backend,
+    enabled: backend === 'fox',
+    wired: backend === 'fox',
+    experimental: backend === 'deepseek',
+    hidden: false,
+    retired: backend !== 'fox',
+    reason: backend === 'fox' ? null : `外部 Agent 路由（${backend}）已退休`,
+  })),
   unknownEntries: [],
+}
+
+function preferences(over: Partial<AgentBackendPreferences> = {}): AgentBackendPreferences {
+  return {
+    ...DEFAULT_AGENT_BACKEND_PREFERENCES,
+    options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
+      backend,
+      enabled: backend === 'fox',
+      experimental: backend === 'deepseek',
+      retired: backend !== 'fox',
+      reason: backend === 'fox' ? null : `外部 Agent 路由（${backend}）已退休`,
+    })),
+    ...over,
+  }
 }
 
 function missing(backend: string): CredentialProbe {
@@ -68,413 +101,218 @@ function missing(backend: string): CredentialProbe {
   }
 }
 
-function capabilities(backend: AgentBackendId, label: string): AgentBackendCapabilities {
-  const dim = { summary: label, detail: label }
-  return { backend, mode: 'sandboxed', source: 'planned', approval: dim, sandbox: { summary: `${label}-沙箱`, detail: '' }, cancel: { summary: `${label}-取消`, detail: '' }, observability: { summary: `${label}-观测`, detail: '' }, warning: null }
-}
-
 /** A fake Host where every probe / capability call is answered by the test. */
 function fakeClient() {
   const probes: { target: AgentBackendTarget; reply: Deferred<CredentialProbe> }[] = []
   const caps: { backend: AgentBackendId; reply: Deferred<AgentBackendCapabilities> }[] = []
-  const imports: { reply: Deferred<ImportReport> }[] = []
   const client = {
     agentBackendCapabilities: (backend: AgentBackendId) => { const reply = deferred<AgentBackendCapabilities>(); caps.push({ backend, reply }); return reply.promise },
     agentBackendPermissionStatus: async () => ({ fullAccessForbidden: false, forbiddenReason: null, engineeringSwitch: false }),
     agentBackendCredentials: (target: AgentBackendTarget) => { const reply = deferred<CredentialProbe>(); probes.push({ target, reply }); return reply.promise },
     agentBackendImportCandidates: async () => [{ id: 'file:.pi/agent/auth.json', kind: 'file' as const, name: 'auth.json', destination: '.pi/agent/auth.json' }],
-    agentBackendImportCredentials: () => { const reply = deferred<ImportReport>(); imports.push({ reply }); return reply.promise },
+    agentBackendImportCredentials: async () => ({ backend: 'pi', homes: 0, files: [], keys: [], skipped: [] }),
     agentBackendOpenPrivateHome: async () => '/fox/homes/p1',
     agentBackendRevokeFullAccess: async () => ({}),
     listenRuntimeEvents: async () => () => {},
   }
-  return { client, probes, caps, imports }
+  return { client, probes, caps }
 }
 
-function Panel({ client, backend, project = 'p1', locked = null, conversationId = null }: { client: any; backend: AgentBackendId; project?: string; locked?: AgentBackendId | null; conversationId?: string | null }) {
-  return <AgentBackendPanel client={client} status={status} lockedBackend={locked} conversationId={conversationId} draftBackend={backend} draftProjectId={project} draftProjectRoot={`D:/${project}`} />
+function Panel({ client, backend, project = 'p1', locked = null, conversationId = null, refusal = null }: { client: any; backend: AgentBackendId; project?: string; locked?: AgentBackendId | null; conversationId?: string | null; refusal?: string | null }) {
+  return <AgentBackendPanel client={client} status={status} lockedBackend={locked} conversationId={conversationId} draftBackend={backend} draftProjectId={project} draftProjectRoot={`D:/${project}`} refusal={refusal} />
 }
 
 const text = () => document.body.textContent ?? ''
-
-test('Pi source choice stays visible even when Fox login is ready and sends explicit reuse consent', async () => {
-  const fake = fakeClient()
-  let choice: unknown = null
-  let imported: unknown[] = []
-  const client = {
-    ...fake.client,
-    agentBackendChooseFoxSource: async (_target: AgentBackendTarget, remember: boolean) => { choice = remember },
-    agentBackendImportCredentials: async (...args: unknown[]) => {
-      imported = args
-      return { backend: 'pi', homes: 1, files: ['.pi/agent/auth.json'], keys: [], skipped: [] }
-    },
-  }
-  render(<Panel client={client} backend="pi" />)
-  await act(async () => fake.probes[0].reply.resolve({ ...missing('pi'), state: 'ready', source: { choiceRequired: true, nativeAvailable: true, reusable: false, sourceChanged: false, current: 'fox', modelEndpoint: null } }))
-  expect(screen.getByText('选择 Pi 配置来源')).toBeTruthy()
-  fireEvent.click(screen.getByLabelText('新项目沿用本次选择'))
-  fireEvent.click(screen.getByText('从真实 HOME 导入…'))
-  await waitFor(() => expect(screen.getByLabelText('auth.json').checked).toBe(true))
-  fireEvent.click(screen.getByText('复制选中的项目'))
-  await waitFor(() => expect(imported[4]).toBe(true))
-  expect(imported[3]).toBe(false)
-  expect(choice).toBeNull()
-})
-
-test('a ready Agent retains its configuration import entry', async () => {
-  const fake = fakeClient()
-  render(<Panel client={fake.client} backend="pi" />)
-  await act(async () => fake.probes[0].reply.resolve({ ...missing('pi'), state: 'ready' }))
-  const summary = screen.getByText('Agent 配置来源与导入')
-  expect(summary.closest('details')?.hasAttribute('open')).toBe(false)
-  fireEvent.click(summary)
-  expect(screen.getByText('从真实 HOME 导入…')).toBeTruthy()
-})
 
 async function settle() {
   await act(async () => { await Promise.resolve(); await Promise.resolve() })
 }
 
-
-// The settings dropdowns are the shared Radix Select: open with the keyboard,
-// read the listed options (value + disabled), pick by clicking an option.
-async function openSettingsSelect(trigger: HTMLElement) {
-  fireEvent.keyDown(trigger, { key: 'Enter' })
-  return await waitFor(() => {
-    const items = screen.getAllByRole('option')
-    expect(items.length).toBeGreaterThan(0)
-    return items.map((item) => ({ item, value: item.getAttribute('data-value') ?? '', label: item.textContent ?? '', disabled: item.getAttribute('aria-disabled') === 'true' || item.hasAttribute('data-disabled') }))
-  })
-}
-async function closeSettingsSelect() {
-  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
-  await waitFor(() => expect(screen.queryAllByRole('option')).toHaveLength(0))
-}
-async function pickSettingsSelect(trigger: HTMLElement, value: string) {
-  const options = await openSettingsSelect(trigger)
-  const option = options.find((entry) => entry.value === value)
-  expect(option).toBeTruthy()
-  fireEvent.click(option!.item)
-}
-
-describe('① draft login probe is keyed by backend + project', () => {
-  test('switching backend drops the old card at once and ignores the late answer of the old target', async () => {
+describe('① a new conversation never renders or loads a retired driver', () => {
+  test('a draft naming a retired backend shows no card, no chips and asks the Host nothing', async () => {
     const fake = fakeClient()
     const view = render(<Panel client={fake.client} backend="deepseek" />)
     await settle()
-    expect(fake.probes.map((probe) => (probe.target as any).backend)).toEqual(['deepseek'])
-    await act(async () => fake.probes[0].reply.resolve(missing('deepseek')))
-    await waitFor(() => expect(text()).toContain('DEEPSEEK_API_KEY'))
+    expect(fake.probes).toHaveLength(0)
+    expect(fake.caps).toHaveLength(0)
+    expect(text()).toBe('')
 
-    // Same draft, now pi: the DeepSeek card is gone before pi answers.
-    view.rerender(<Panel client={fake.client} backend="pi" />)
-    expect(text()).not.toContain('DEEPSEEK_API_KEY')
-    expect(text()).not.toContain('这个后端还没有登录')
+    view.rerender(<Panel client={fake.client} backend="codex" />)
     await settle()
-    const piRequest = fake.probes.at(-1)!
-    expect((piRequest.target as any).backend).toBe('pi')
+    expect(fake.probes).toHaveLength(0)
+    expect(text()).toBe('')
 
-    // Back to DeepSeek and to pi again while answers are in flight: only the
-    // answer for the CURRENT target is shown, an older one is discarded.
-    view.rerender(<Panel client={fake.client} backend="deepseek" />)
-    await settle()
-    const lateDeepseek = fake.probes.at(-1)!
     view.rerender(<Panel client={fake.client} backend="pi" />)
     await settle()
-    const currentPi = fake.probes.at(-1)!
-    await act(async () => lateDeepseek.reply.resolve(missing('deepseek')))
-    await act(async () => piRequest.reply.resolve(missing('deepseek')))
-    expect(text()).not.toContain('DEEPSEEK_API_KEY')
-    await act(async () => currentPi.reply.resolve(missing('pi')))
-    await waitFor(() => expect(text()).toContain('.pi/agent/auth.json'))
-    expect(text()).toContain('新会话：pi')
-
-    // pi -> Fox: no card, no bar.
-    view.rerender(<Panel client={fake.client} backend="fox" />)
+    expect(fake.probes).toHaveLength(0)
     expect(text()).toBe('')
   })
 
-  test('changing the project re-probes and never shows the other project\'s card', async () => {
+  test('an existing conversation of a retired backend keeps its binding and is read-only', async () => {
     const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="pi" project="p1" />)
+    const view = render(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" />)
     await settle()
-    await act(async () => fake.probes[0].reply.resolve(missing('pi')))
-    await waitFor(() => expect(text()).toContain('/fox/homes/p1/pi'))
-    view.rerender(<Panel client={fake.client} backend="pi" project="p2" />)
-    expect(text()).not.toContain('/fox/homes/p1/pi')
-    await settle()
-    expect((fake.probes.at(-1)!.target as any).projectId).toBe('p2')
+    expect(text()).toContain('后端：Codex（已锁定）')
+    expect(text()).toContain('退休')
+    expect(text()).toContain('只能查看历史')
+    expect(text()).toContain('不会启动运行时')
+    // Its OWN binding, never relabelled as the built-in Pi driver.
+    expect(text()).not.toContain('Pi')
+    expect(document.querySelector('.fox-agent-backend-bar')?.getAttribute('data-access')).toBe('read_only_retired')
+    // Nothing of the retired runtime is loaded: no login probe, no chips, no
+    // native permission picker, no network panel.
+    expect(fake.probes).toHaveLength(0)
+    expect(fake.caps).toHaveLength(0)
+    expect(screen.queryByLabelText('权限')).toBeNull()
+    expect(screen.queryByText('隔离：Fox 不额外包装（Agent 原生）')).toBeNull()
+
+    // A refused send replaces the lock notice: one message, never two.
+    view.rerender(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" refusal="Agent 后端「Codex」已在本版本退休" />)
+    expect(screen.getByRole('alert').textContent).toBe('Agent 后端「Codex」已在本版本退休')
+    expect(text()).not.toContain('只能查看历史')
   })
 
-  test('capability chips are cleared on a target change and a late answer is ignored', async () => {
+  test('a deepseek conversation shows DeepSeek, not the built-in driver', async () => {
     const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="deepseek" />)
+    render(<Panel client={fake.client} backend="fox" locked="deepseek" conversationId="c-old-ds" />)
     await settle()
-    await act(async () => fake.caps[0].reply.resolve(capabilities('deepseek', 'DS审批')))
-    await waitFor(() => expect(text()).toContain('DS审批'))
-    view.rerender(<Panel client={fake.client} backend="pi" />)
-    expect(text()).not.toContain('DS审批')
-    await settle()
-    const piCaps = fake.caps.at(-1)!
-    expect(piCaps.backend).toBe('pi')
-    // Codex is hidden for new conversations; an existing (locked) Codex
-    // conversation still gets its chips.
-    view.rerender(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" />)
-    await settle()
-    await act(async () => piCaps.reply.resolve(capabilities('pi', 'PI审批')))
-    expect(text()).not.toContain('PI审批')
-    await act(async () => fake.caps.at(-1)!.reply.resolve(capabilities('codex', 'CX审批')))
-    await waitFor(() => expect(text()).toContain('CX审批'))
-  })
-
-  test('after a successful import, switching to another backend in the same draft shows its card', async () => {
-    const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="pi" />)
-    await settle()
-    await act(async () => fake.probes[0].reply.resolve(missing('pi')))
-    await waitFor(() => screen.getByText('从真实 HOME 导入…'))
-    fireEvent.click(screen.getByText('从真实 HOME 导入…'))
-    await waitFor(() => screen.getByRole('checkbox', { name: 'auth.json' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'auth.json' }))
-    fireEvent.click(screen.getByText('复制选中的项目'))
-    await settle()
-    await act(async () => fake.imports[0].reply.resolve({ backend: 'pi', homes: 1, homesWritten: 1, files: ['.pi/agent/auth.json'], keys: [], skipped: [] }))
-    await settle()
-    // The refresh after the import: pi is ready now.
-    await act(async () => fake.probes.at(-1)!.reply.resolve({ ...missing('pi'), state: 'ready', credentialsPresent: true }))
-    await waitFor(() => expect(text()).not.toContain('这个后端还没有登录'))
-    for (const backend of ['deepseek', 'pi'] as const) {
-      view.rerender(<Panel client={fake.client} backend={backend} project="p9" />)
-      await settle()
-      await act(async () => fake.probes.at(-1)!.reply.resolve(missing(backend)))
-      await waitFor(() => expect(text()).toContain('这个后端还没有登录'))
-      expect(text()).toContain(`/fox/homes/p1/${backend}`)
-    }
-  })
-
-  test('the card is remounted per target: an import error of one backend does not follow to the next', async () => {
-    const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="pi" />)
-    await settle()
-    await act(async () => fake.probes[0].reply.resolve(missing('pi')))
-    await waitFor(() => screen.getByText('从真实 HOME 导入…'))
-    fireEvent.click(screen.getByText('从真实 HOME 导入…'))
-    await waitFor(() => screen.getByRole('checkbox', { name: 'auth.json' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'auth.json' }))
-    fireEvent.click(screen.getByText('复制选中的项目'))
-    await settle()
-    await act(async () => fake.imports[0].reply.reject(new Error('导入失败：磁盘只读')))
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('导入失败：磁盘只读'))
-    view.rerender(<Panel client={fake.client} backend="deepseek" />)
-    await settle()
-    await act(async () => fake.probes.at(-1)!.reply.resolve(missing('deepseek')))
-    await waitFor(() => expect(text()).toContain('DEEPSEEK_API_KEY'))
-    expect(text()).not.toContain('导入失败')
-    expect(screen.queryByRole('checkbox', { name: 'auth.json' })).toBeNull()
+    expect(text()).toContain('后端：DeepSeek（已锁定）')
+    expect(text()).toContain('此会话绑定已退休的 Agent 后端「DeepSeek」')
+    expect(text()).not.toContain('内置')
+    expect(fake.probes).toHaveLength(0)
   })
 })
 
-describe('② the import receipt is shown once and fully removed', () => {
-  async function importOnce(stillMissing: boolean) {
-    const fake = fakeClient()
-    render(<Panel client={fake.client} backend="pi" />)
-    await settle()
-    await act(async () => fake.probes[0].reply.resolve(missing('pi')))
-    await waitFor(() => screen.getByText('从真实 HOME 导入…'))
-    fireEvent.click(screen.getByText('从真实 HOME 导入…'))
-    await waitFor(() => screen.getByRole('checkbox', { name: 'auth.json' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'auth.json' }))
-    fireEvent.click(screen.getByText('复制选中的项目'))
-    await settle()
-    await act(async () => fake.imports[0].reply.resolve({ backend: 'pi', homes: 2, homesWritten: 1, files: ['.pi/agent/auth.json'], keys: [], skipped: [] }))
-    await settle()
-    // The refresh may still say "missing" (e.g. copied to the other project
-    // only): the card stays, and must not echo the receipt.
-    await act(async () => fake.probes.at(-1)!.reply.resolve(stillMissing ? missing('pi') : { ...missing('pi'), state: 'ready', credentialsPresent: true }))
-    await waitFor(() => screen.getByLabelText('关闭导入回执'))
-    return fake
+describe('② the import receipt is rendered once, by the bar, and fully removed', () => {
+  function ReceiptBar({ line }: { line: string }) {
+    const [receipt, setReceipt] = React.useState<readonly string[] | null>([line])
+    return <AgentBackendBar status={status} lockedBackend="codex" draftBackend="fox" importReceipt={receipt} onDismissImportReceipt={() => setReceipt(null)} />
   }
 
-  test('"知道了" removes the receipt TEXT from the DOM, not only the button (card still shown)', async () => {
-    await importOnce(true)
-    const receipt = '已复制到 1 个项目的私有 HOME：auth.json'
-    expect(text().split(receipt).length - 1).toBe(1)
-    expect(text()).toContain('这个后端还没有登录')
+  test('"知道了" removes the receipt TEXT from the DOM, not only the button', async () => {
+    const line = '已复制到 1 个项目的私有 HOME：auth.json'
+    render(<ReceiptBar line={line} />)
+    expect(text().split(line).length - 1).toBe(1)
     fireEvent.click(screen.getByLabelText('关闭导入回执'))
     expect(screen.queryByLabelText('关闭导入回执')).toBeNull()
-    expect(text()).not.toContain(receipt)
+    expect(text()).not.toContain(line)
     expect(text()).not.toContain('已复制到')
   })
 
-  test('the receipt disappears entirely after 30 s', async () => {
-    // Capture the receipt's 30 s timer instead of waiting for it.
-    const realSetTimeout = globalThis.setTimeout
-    const armed: (() => void)[] = []
-    globalThis.setTimeout = ((callback: () => void, ms?: number, ...rest: unknown[]) => {
-      if (ms === IMPORT_RECEIPT_VISIBLE_MS) {
-        armed.push(callback)
-        return realSetTimeout(() => {}, 0)
-      }
-      return realSetTimeout(callback as any, ms, ...(rest as []))
-    }) as typeof setTimeout
-    try {
-      await importOnce(false)
-      expect(text()).toContain('已复制到 1 个项目的私有 HOME：auth.json')
-      expect(armed.length).toBeGreaterThan(0)
-      await act(async () => { armed.at(-1)!() })
-      expect(text()).not.toContain('已复制到')
-      expect(screen.queryByLabelText('导入回执')).toBeNull()
-    } finally {
-      globalThis.setTimeout = realSetTimeout
-    }
+  test('the panel still clears the receipt after its visible window (plumbing kept)', () => {
+    const panel = readFileSync(new URL('../src/features/chat/components/AgentBackendPanel.tsx', import.meta.url), 'utf8')
+    expect(panel).toContain('IMPORT_RECEIPT_VISIBLE_MS')
+    expect(panel).toContain('setReceipt(null)')
+    expect(IMPORT_RECEIPT_VISIBLE_MS).toBeGreaterThanOrEqual(10_000)
   })
 })
 
-describe('④ backend comes from the settings; no picker on the bar', () => {
-  test('the bar shows the settings backend as a chip, with no select, and no row for Fox', async () => {
-    const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="pi" />)
+describe('④ 新会话使用的 Agent: a statement, not a choice', () => {
+  test('the settings row states the built-in driver and offers no select at all', async () => {
+    const client = { agentBackendPreferences: async () => preferences(), saveAgentBackendPreferences: async () => preferences(), probeCodexResponses: async () => null }
+    render(<AgentBackendSettingsSection client={client} />)
+    await waitFor(() => expect(text()).toContain('新会话使用内置 Pi 驱动'))
     expect(screen.queryByRole('combobox')).toBeNull()
-    expect(screen.queryByLabelText('新会话的 Agent 后端')?.tagName).not.toBe('SELECT')
-    expect(text()).toContain('新会话：pi')
-    expect(text()).toContain('隔离：Fox 不额外包装（Agent 原生）')
-    view.rerender(<Panel client={fake.client} backend="fox" />)
-    expect(text()).toBe('')
-  })
-
-  function preferences(over: Partial<AgentBackendPreferences> = {}): AgentBackendPreferences {
-    return {
-      ...DEFAULT_AGENT_BACKEND_PREFERENCES,
-      options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({ backend, enabled: true, experimental: backend === 'deepseek', reason: null })),
-      ...over,
-    }
-  }
-
-  test('model: forced off greys every external choice; new conversations use Fox; FORBIDDEN greys full access', () => {
-    const forced = preferences({
-      forcedOff: true,
-      defaultBackend: 'pi',
-      effectiveBackend: 'fox',
-      options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({ backend, enabled: backend === 'fox', experimental: false, reason: backend === 'fox' ? null : '已被管理员关闭（环境变量 FOX_EXTERNAL_BACKENDS）' })),
-    })
-    expect(agentBackendSettingRows(forced).map((row) => [row.value, row.disabled])).toEqual([['fox', false], ['pi', true], ['codex', true], ['deepseek', true]])
-    expect(newConversationBackend(forced)).toBe('fox')
-    expect(newConversationBackend(null)).toBe('fox')
-    expect(fullAccessSettingState(preferences({ fullAccessForbidden: true, forbiddenReason: '本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1）', newExternalFullAccess: true }))).toEqual({ checked: false, disabled: true, reason: '本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1）' })
-    expect(fullAccessSettingState(preferences())).toEqual({ checked: false, disabled: false, reason: null })
-  })
-
-  test('settings section: choosing pi saves it and broadcasts the change (the open draft re-probes)', async () => {
-    let saved: AgentBackendPreferences = preferences()
-    const changes: unknown[] = []
-    const client = {
-      agentBackendPreferences: async () => saved,
-      saveAgentBackendPreferences: async (change: { defaultBackend?: AgentBackendId; newExternalFullAccess?: boolean }) => {
-        changes.push(change)
-        saved = { ...saved, defaultBackend: change.defaultBackend ?? saved.defaultBackend, effectiveBackend: change.defaultBackend ?? saved.effectiveBackend }
-        return saved
-      },
-      probeCodexResponses: async () => null,
-    }
-    const heard: AgentBackendPreferences[] = []
-    const listener = (event: Event) => heard.push((event as CustomEvent<AgentBackendPreferences>).detail)
-    window.addEventListener(AGENT_BACKEND_PREFERENCES_EVENT, listener)
-    render(<AgentBackendSettingsSection client={client} />)
-    const select = await waitFor(() => screen.getByRole('combobox', { name: '新会话使用的 Agent' }) as HTMLButtonElement)
-    await waitFor(() => expect(select.disabled).toBe(false))
-    expect(select.textContent).toBe('Fox')
-    await pickSettingsSelect(select, 'pi')
-    await waitFor(() => expect(heard.length).toBe(1))
-    expect(changes).toEqual([{ defaultBackend: 'pi' }])
-    expect(heard[0].effectiveBackend).toBe('pi')
-    window.removeEventListener(AGENT_BACKEND_PREFERENCES_EVENT, listener)
-
-    // The panel follows: a draft switched from Fox to pi probes pi at once.
-    const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="fox" />)
-    await settle()
-    expect(fake.probes).toHaveLength(0)
-    view.rerender(<Panel client={fake.client} backend={newConversationBackend(heard[0])} />)
-    await settle()
-    expect((fake.probes.at(-1)!.target as any).backend).toBe('pi')
-  })
-
-  test('settings section: forced off shows Fox only with the explanation; no Fox full-access switch', async () => {
-    const forced = preferences({
-      forcedOff: true,
-      fullAccessForbidden: true,
-      forbiddenReason: '本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1）',
-      options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({ backend, enabled: backend === 'fox', experimental: false, reason: backend === 'fox' ? null : '已被管理员关闭（环境变量 FOX_EXTERNAL_BACKENDS）' })),
-    })
-    const client = { agentBackendPreferences: async () => forced, saveAgentBackendPreferences: async () => forced, probeCodexResponses: async () => null }
-    render(<AgentBackendSettingsSection client={client} />)
-    const select = await waitFor(() => screen.getByRole('combobox', { name: '新会话使用的 Agent' }) as HTMLButtonElement)
-    await waitFor(() => expect(text()).toContain('管理员已通过环境变量 FOX_EXTERNAL_BACKENDS 关闭外部 Agent 后端'))
-    await waitFor(() => expect(select.disabled).toBe(false))
-    const options = await openSettingsSelect(select)
-    expect(options.filter((option) => !option.disabled).map((option) => option.value)).toEqual(['fox'])
-    // Picking a forced-off backend never reaches the Host.
-    fireEvent.click(options.find((option) => option.value === 'pi')!.item)
-    await settle()
-    expect(select.textContent).toBe('Fox')
-    if (screen.queryAllByRole('option').length) await closeSettingsSelect()
-    // External Agents have their own native permissions; Fox no longer has
-    // an outer full-access switch. FORBIDDEN still disables the native
-    // full-access option in the catalog.
+    expect(screen.queryByRole('combobox', { name: '新会话使用的 Agent' })).toBeNull()
+    expect(screen.queryByLabelText('新会话使用的 Agent')?.tagName).not.toBe('SELECT')
+    // The retirement is explained instead of a greyed option list.
+    expect(text()).toContain('外部 Agent 后端已在本版本退休')
+    expect(text()).not.toContain('（不可用）')
+    // No Fox-wide full-access switch either.
     expect(screen.queryByRole('switch', { name: '新外部会话使用完全访问' })).toBeNull()
     expect(text()).not.toContain('新外部会话使用完全访问')
   })
-})
 
-describe('Codex is selectable again (2026-10-26)', () => {
-  function preferences(over: Partial<AgentBackendPreferences> = {}): AgentBackendPreferences {
-    return {
-      ...DEFAULT_AGENT_BACKEND_PREFERENCES,
-      options: (['fox', 'pi', 'deepseek'] as const).map((backend) => ({ backend, enabled: true, experimental: backend === 'deepseek', reason: null })),
-      ...over,
-    }
-  }
-
-  test('one central list offers Codex everywhere a user chooses an Agent', () => {
-    expect(HIDDEN_AGENT_BACKENDS).toEqual([])
-    expect(SELECTABLE_AGENT_BACKEND_IDS).toEqual(['fox', 'pi', 'codex', 'deepseek'])
-    expect(agentBackendSettingRows(preferences()).map((row) => row.value)).toEqual(['fox', 'pi', 'codex', 'deepseek'])
-    expect(canPickAgentBackend('codex', status)).toBe(true)
-    expect(canPickAgentBackend('pi', status)).toBe(true)
-    expect(NATIVE_PERMISSION_SETTING_BACKENDS.map((item) => item.backend)).toEqual(['codex', 'deepseek', 'pi'])
-    expect(Object.values(protocolAgents).flat()).toContain('codex')
-  })
-
-  test('a saved codex preference stays usable and is shown', async () => {
-    const saved = preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' })
-    expect(newConversationBackend(saved)).toBe('codex')
-    expect(newConversationBackend(preferences({ effectiveBackend: 'codex' }))).toBe('codex')
-    expect(agentBackendSettingValue(saved)).toBe('codex')
+  test('a saved retired default no longer applies; old conversations keep their binding', async () => {
+    const saved = preferences({ defaultBackend: 'codex', effectiveBackend: 'fox' })
     const client = { agentBackendPreferences: async () => saved, saveAgentBackendPreferences: async () => saved, probeCodexResponses: async () => null }
     render(<AgentBackendSettingsSection client={client} />)
-    const select = await waitFor(() => screen.getByRole('combobox', { name: '新会话使用的 Agent' }) as HTMLButtonElement)
-    await waitFor(() => expect(select.textContent).toContain('Codex'))
-    await waitFor(() => expect(select.disabled).toBe(false))
-    expect((await openSettingsSelect(select)).map((option) => option.value)).toEqual(['fox', 'pi', 'codex', 'deepseek'])
+    await waitFor(() => expect(text()).toContain('之前保存的「Codex」已退休'))
+    expect(text()).toContain('不再用于新会话')
+    expect(text()).toContain('仍按原绑定显示')
+    expect(text()).toContain('只能查看历史')
+    // The statement itself still names the built-in driver, not the saved one.
+    expect(text()).toContain('新会话使用内置 Pi 驱动')
+    expect(screen.queryByRole('combobox')).toBeNull()
   })
 
-  test('the composer picker lists Codex', async () => {
-    render(<ComposerAgentPicker value="fox" status={status} onSelect={() => {}} />)
-    fireEvent.keyDown(screen.getByRole('button', { name: '选择 Agent，当前 Fox' }), { key: 'ArrowDown' })
-    await waitFor(() => expect(screen.getByRole('menuitem', { name: 'pi' })).toBeTruthy())
-    const items = screen.queryAllByRole('menuitem').map((item) => item.textContent ?? '')
-    expect(items.some((item) => item.includes('pi'))).toBe(true)
-    expect(items.some((item) => item.includes('Codex'))).toBe(true)
+  test('no per-Agent default permission rows are offered for a retired driver', async () => {
+    const calls: NativePermissionRequest[] = []
+    const client = {
+      agentBackendPreferences: async () => preferences(),
+      saveAgentBackendPreferences: async () => preferences(),
+      probeCodexResponses: async () => null,
+      agentBackendNativePermissions: async (request: NativePermissionRequest) => { calls.push(request); throw new Error('must not be called') },
+      agentBackendNativePermissionSet: async () => { throw new Error('must not be called') },
+    }
+    render(<AgentBackendSettingsSection client={client} />)
+    await waitFor(() => expect(text()).toContain('新会话使用内置 Pi 驱动'))
+    await settle()
+    expect(calls).toHaveLength(0)
+    expect(NATIVE_PERMISSION_SETTING_BACKENDS).toEqual([])
+    expect(screen.queryByLabelText('Codex 默认权限')).toBeNull()
+    expect(screen.queryByLabelText('pi 默认权限')).toBeNull()
   })
 
-  test('a draft shows Codex and an existing Codex conversation keeps its backend', async () => {
+  test('the model: a retired choice can be neither chosen nor saved', () => {
+    expect(SELECTABLE_AGENT_BACKEND_IDS).toEqual(['fox'])
+    expect(HIDDEN_AGENT_BACKENDS).toEqual([])
+    expect(agentBackendSettingRows(preferences()).map((row) => [row.value, row.disabled])).toEqual([['fox', false]])
+    for (const backend of ['pi', 'codex', 'deepseek'] as const) {
+      expect(canPickAgentBackend(backend, status)).toBe(false)
+      expect(agentBackendSettingValue(preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe('fox')
+      expect(newConversationBackend(preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe('fox')
+      expect(preferences({ defaultBackend: backend }).effectiveBackend).toBe('fox')
+    }
+    // The Host's own refusal of such a save is a routing refusal, recognised by
+    // the UI and never shown as a generic failure.
+    expect(AGENT_BACKEND_ERROR_CODES.retired).toBe('agent_backend_retired')
+    // The removed Fox-wide full-access switch is permanently unavailable.
+    expect(fullAccessSettingState(preferences()).disabled).toBe(true)
+  })
+
+  test('the composer has no Agent menu: one driver is not a choice', async () => {
+    const view = render(<ComposerAgentPicker value="fox" status={status} onSelect={() => {}} />)
+    expect(view.container.textContent).toBe('')
+    expect(screen.queryByRole('button')).toBeNull()
+    await settle()
+    expect(document.querySelector('.fox-composer-agent-trigger')).toBeNull()
+  })
+
+  test('the bar has no picker: a new conversation shows no backend row', async () => {
     const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="codex" />)
+    const view = render(<Panel client={fake.client} backend="fox" />)
+    expect(screen.queryByRole('combobox')).toBeNull()
+    expect(text()).toBe('')
+    // An old saved default (retired) cannot put an external driver back on the
+    // bar: the draft is created as the built-in route.
+    const saved = preferences({ defaultBackend: 'deepseek', effectiveBackend: 'deepseek' })
+    view.rerender(<Panel client={fake.client} backend={newConversationBackend(saved)} />)
     await settle()
-    expect(text()).toContain('Codex')
-    view.rerender(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" />)
-    await settle()
-    expect(text()).toContain('后端：Codex（已锁定）')
-    expect(text()).not.toContain('只能查看历史')
+    expect(text()).toBe('')
+    expect(fake.probes).toHaveLength(0)
+    expect(newConversationBackend(saved)).toBe('fox')
+  })
+})
+
+describe('single Pi mainline (2026-10-27): the four-driver era is over', () => {
+  test('no user-facing choice offers a retired driver', () => {
+    expect(RETIRED_AGENT_BACKEND_IDS).toEqual(['pi', 'codex', 'deepseek'])
+    expect(SUPPORTED_AGENT_BACKEND_IDS).toEqual(['fox'])
+    expect(agentBackendSettingRows(preferences()).map((row) => row.value)).toEqual(['fox'])
+    expect(agentBackendSettingRows(preferences()).some((row) => row.value !== 'fox')).toBe(false)
+    expect(canPickAgentBackend('codex', status)).toBe(false)
+    expect(canPickAgentBackend('pi', status)).toBe(false)
+    expect(NATIVE_PERMISSION_SETTING_BACKENDS).toEqual([])
+  })
+
+  test("Fox's own permission settings are untouched and stay on the page", () => {
+    const page = readFileSync(new URL('../src/features/settings/settings-agent-page.tsx', import.meta.url), 'utf8')
+    // 设置 → Agent still renders the backend section and the project-permission
+    // controls (Fox's own settings), which this work package must not remove.
+    expect(page).toContain('<AgentBackendSettingsSection')
+    expect(page).toContain('项目权限')
+    expect(page).toContain('新项目权限')
+    expect(page).toContain('默认模型')
   })
 })

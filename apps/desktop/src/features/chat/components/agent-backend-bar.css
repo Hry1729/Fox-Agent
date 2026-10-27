@@ -76,6 +76,9 @@
   opacity: 0.85;
 }
 
+/* Single Pi mainline: a retired conversation's notice is the one thing on the
+   bar, so it gets the same weight as the older read-only notices. */
+.fox-agent-backend-bar[data-access='read_only_retired'] .fox-agent-backend-notice,
 .fox-agent-backend-bar[data-access='read_only_disabled'] .fox-agent-backend-notice,
 .fox-agent-backend-bar[data-access='read_only_not_wired'] .fox-agent-backend-notice,
 .fox-agent-backend-refusal {

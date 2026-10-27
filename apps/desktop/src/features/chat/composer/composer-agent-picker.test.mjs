@@ -41,13 +41,18 @@ for (const backend of ['fox', 'pi', 'codex', 'deepseek']) {
   })
 }
 
-test('starting another draft clears its override and reads the saved Agent default', async () => {
+test('starting another draft clears its override and never applies a retired saved default', async () => {
+  // The Host still reports the saved `deepseek` value, but a new conversation
+  // uses the built-in Pi route: a retired preference must not be applied
+  // behind the user's back, and neither may the previous draft's override.
   const requests = fakeHost('deepseek')
   const { result } = renderHook(() => useDesktopConversation())
   await act(async () => result.current.setDraftAgentBackend('pi'))
   await act(async () => { await result.current.createConversationForAgent('fox-general') })
   await act(async () => { await result.current.send('使用保存的默认值') })
-  expect(requests[0].agentBackend).toBe('deepseek')
+  // The default route travels as an absent field; anything else would be a
+  // retired driver applied without the user choosing it.
+  expect(requests[0].agentBackend ?? 'fox').toBe('fox')
 })
 
 test('project selected before switching Agent stays bound through repeated switches and send', async () => {
@@ -64,12 +69,12 @@ test('project selected before switching Agent stays bound through repeated switc
   expect(requests[0].agentBackend).toBe('pi')
 })
 
-test('a saved codex default is used for a new conversation', async () => {
+test('a saved codex default is not used for a new conversation', async () => {
   const requests = fakeHost('codex')
   const { result } = renderHook(() => useDesktopConversation())
   await act(async () => { await result.current.createConversationForAgent('fox-general') })
   await act(async () => { await result.current.send('保存过 codex') })
-  expect(requests[0].agentBackend ?? 'fox').toBe('codex')
+  expect(requests[0].agentBackend ?? 'fox').toBe('fox')
 })
 
 test('external creation does not submit a Fox-only expert binding', async () => {
@@ -83,21 +88,18 @@ test('external creation does not submit a Fox-only expert binding', async () => 
   expect(requests[0].expertId).toBeUndefined()
 })
 
-test('the Agent menu lists Fox, pi, Codex and DeepSeek and retains the unavailable reason', async () => {
-  let selected = null
+test('a single supported driver renders no Agent menu at all', async () => {
+  // One option is not a choice: the composer shows no picker even when an
+  // older Host still reports four rows. The retired rows are never offered.
   const view = render(createElement(ComposerAgentPicker, { value: 'fox', status: { switchEnv: 'FOX_EXTERNAL_BACKENDS', anyExternalEnabled: true, unknownEntries: [], options: [
     { backend: 'fox', enabled: true, wired: true, experimental: false, reason: null },
     { backend: 'pi', enabled: true, wired: true, experimental: false, reason: null },
-    { backend: 'codex', enabled: true, wired: true, experimental: false, hidden: false, reason: null },
-    { backend: 'deepseek', enabled: false, wired: true, experimental: false, reason: '测试禁用原因' },
-  ] }, onSelect: value => { selected = value } }))
-  fireEvent.keyDown(view.getByRole('button', { name: '选择 Agent，当前 Fox' }), { key: 'ArrowDown' })
-  await waitFor(() => expect(view.getByRole('menuitem', { name: 'pi' })).toBeTruthy())
-  expect(view.getByRole('menuitem', { name: 'Codex' })).toBeTruthy()
-  expect(view.getByRole('menuitem', { name: /DeepSeek/ }).getAttribute('data-disabled')).not.toBeNull()
-  expect(view.getByText('测试禁用原因')).toBeTruthy()
-  fireEvent.click(view.getByRole('menuitem', { name: 'pi' }))
-  expect(selected).toBe('pi')
+    { backend: 'codex', enabled: false, wired: false, experimental: false, hidden: false, retired: true, reason: '本版本已退休' },
+    { backend: 'deepseek', enabled: false, wired: false, experimental: false, retired: true, reason: '本版本已退休' },
+  ] }, onSelect: () => { throw new Error('nothing can be selected') } }))
+  expect(view.queryByRole('button', { name: /选择 Agent/ })).toBeNull()
+  expect(view.queryByRole('menu')).toBeNull()
+  expect(view.container.childElementCount).toBe(0)
 })
 
 test('only the new-conversation expert entry opens selection directly', () => {

@@ -1078,11 +1078,12 @@ export function useDesktopConversation(): DesktopConversationState {
     let pendingMessageId: string | null = null
     let previousLastRun: RunRecord | null = detail?.lastRun ?? null
     if (active) {
-      // An external conversation whose backend is switched off is read-only:
+      // A conversation bound to a RETIRED backend is read-only (history only):
       // refuse locally, before anything optimistic, instead of send-then-refuse.
+      // The same code the Host answers with, so one notice covers both paths.
       const lockedReason = agentBackendInputLockedReason(conversationAgentBackend(active.conversation), agentBackendStatusRef.current)
       if (lockedReason) {
-        setAgentBackendRefusal({ conversationId: active.conversation.id, code: 'agent_backend_disabled', message: lockedReason })
+        setAgentBackendRefusal({ conversationId: active.conversation.id, code: 'agent_backend_retired', message: lockedReason })
         return AGENT_BACKEND_REFUSED
       }
     }

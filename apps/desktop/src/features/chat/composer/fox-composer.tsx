@@ -1,6 +1,5 @@
 import { ExpertBindingChip } from '../components/ExpertBindingChip'
 import { ComposerProjectBar } from './composer-project-bar'
-import { ComposerAgentPicker } from './composer-agent-picker'
 import { ComposerEntryContext } from './composer-entry-context'
 import { ComposerModelPicker } from './composer-model-picker'
 import { GoalProgress } from '../components/GoalProgress'
@@ -795,8 +794,9 @@ function Composer({ topSlot, inputLockedReason = null, initialAttachments, onIni
         </PromptInput>
         </ComposerBorderBeam>}
         {!decisionPending && newConversation && runtimeControlled && <div className="fox-composer-draft-footer">
+          {/* Single Pi mainline: a new conversation has exactly one supported
+              driver, so there is no Agent picker to make a choice with. */}
           {entry.onSelectProject && entry.onAddProject && <ComposerProjectBar projectRoot={projectRoot} projects={entry.projects} onSelect={entry.onSelectProject} onAdd={entry.onAddProject} />}
-          {entry.onSelectAgentBackend && <ComposerAgentPicker value={entry.draftAgentBackend ?? 'fox'} status={entry.agentBackendStatus ?? null} disabled={runtimeInitializing || chatState === 'running'} onSelect={entry.onSelectAgentBackend} />}
         </div>}
       </div>
     </div>

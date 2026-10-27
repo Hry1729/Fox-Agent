@@ -71,27 +71,6 @@ function view(catalog: NativePermissionCatalog, patch: Partial<NativePermissionV
 }
 
 
-// The settings dropdowns are the shared Radix Select: open with the keyboard,
-// read the listed options (value + disabled), pick by clicking an option.
-async function openSettingsSelect(trigger: HTMLElement) {
-  fireEvent.keyDown(trigger, { key: 'Enter' })
-  return await waitFor(() => {
-    const items = screen.getAllByRole('option')
-    expect(items.length).toBeGreaterThan(0)
-    return items.map((item) => ({ item, value: item.getAttribute('data-value') ?? '', label: item.textContent ?? '', disabled: item.getAttribute('aria-disabled') === 'true' || item.hasAttribute('data-disabled') }))
-  })
-}
-async function closeSettingsSelect() {
-  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
-  await waitFor(() => expect(screen.queryAllByRole('option')).toHaveLength(0))
-}
-async function pickSettingsSelect(trigger: HTMLElement, value: string) {
-  const options = await openSettingsSelect(trigger)
-  const option = options.find((entry) => entry.value === value)
-  expect(option).toBeTruthy()
-  fireEvent.click(option!.item)
-}
-
 describe('model', () => {
   test('Codex rows use the native names and keep the auto-review reason', () => {
     const rows = nativePermissionRows(view(codexCatalog()))
@@ -134,7 +113,8 @@ describe('model', () => {
     expect(nativeAppliedNotice(view({ ...codexCatalog(false), displayName: 'Codex' }, { applied: 'next_turn' }))).toBe('已保存，下一轮开始时重启 Codex 生效')
     expect(nativeAppliedNotice(view({ ...dshCatalog, displayName: 'DeepSeek' }, { applied: 'next_turn' }))).toBe('已保存，下一轮开始时重启 DeepSeek 生效')
     // An older Host without displayName: the backend bar's label.
-    expect(nativeBackendName(view(piCatalog))).toBe('pi')
+    // The external Pi backend's display name is the driver name `Pi`.
+    expect(nativeBackendName(view(piCatalog))).toBe('Pi')
     expect(nativeBackendName(view(dshCatalog))).toBe('DeepSeek')
     expect(nativeBackendName(view(codexCatalog()))).toBe('Codex')
     for (const catalog of [piCatalog, codexCatalog(), dshCatalog]) {
@@ -226,87 +206,68 @@ describe('picker', () => {
   })
 })
 
-describe('native permission switches refresh the capability chips', () => {
+describe('a retired conversation is read-only: no permission switch and no chips', () => {
   const status: AgentBackendStatus = {
     switchEnv: 'FOX_EXTERNAL_BACKENDS',
-    anyExternalEnabled: true,
-    options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({ backend, enabled: true, wired: true, experimental: false, reason: null })),
+    anyExternalEnabled: false,
+    supportedBackends: ['fox'],
+    retiredBackends: ['pi', 'codex', 'deepseek'],
+    options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
+      backend,
+      enabled: backend === 'fox',
+      wired: backend === 'fox',
+      experimental: false,
+      retired: backend !== 'fox',
+      reason: backend === 'fox' ? null : '外部 Agent 路由已退休',
+    })),
     unknownEntries: [],
   }
-  const caps = (full: boolean): AgentBackendCapabilities => ({
-    backend: 'pi',
-    mode: 'full_access',
-    source: 'live',
-    approval: { summary: '审批：Fox 拦截', detail: '' },
-    sandbox: { summary: full ? '沙箱：Fox 外层无；原生文件无、网络无' : '沙箱：Fox 外层无；原生文件强制、网络强制', detail: '' },
-    cancel: { summary: '取消：支持', detail: '' },
-    observability: { summary: '观测：完整', detail: '' },
-    warning: null,
-  })
 
-  test('pi conversation: switching back to a restricted native mode refreshes the chips', async () => {
-    let full = true
-    let capabilityCalls = 0
+  test('pi conversation: nothing of the retired runtime is loaded or offered', async () => {
+    const calls: string[] = []
+    const refuse = (name: string) => async () => { calls.push(name); throw new Error(`must not be called: ${name}`) }
     const client = {
-      agentBackendCapabilities: async () => { capabilityCalls += 1; return caps(full) },
-      agentBackendPermissionStatus: async () => ({ fullAccessForbidden: false, forbiddenReason: null, engineeringSwitch: false, granted: false, mode: 'full_access' as const, locked: true }),
-      agentBackendCredentials: async () => ({ backend: 'pi', mode: 'sandboxed', state: 'ready', privateHome: '/h', credentialsPresent: true, loopbackBlocked: false, presentKeys: [], presentFiles: [], requiredKeys: [], requiredFiles: [], templates: [] }),
-      agentBackendImportCandidates: async () => [],
-      agentBackendImportCredentials: async () => ({ copied: [], skipped: [], failed: [], projects: 1 }),
-      agentBackendOpenPrivateHome: async () => '/h',
+      agentBackendCapabilities: refuse('capabilities'),
+      agentBackendPermissionStatus: refuse('permission'),
+      agentBackendCredentials: refuse('credentials'),
+      agentBackendImportCandidates: refuse('importCandidates'),
+      agentBackendImportCredentials: refuse('importCredentials'),
+      agentBackendOpenPrivateHome: refuse('openPrivateHome'),
       listenRuntimeEvents: async () => () => {},
-      agentBackendNativePermissions: async () => view({ ...piCatalog, displayName: 'pi' }, { current: 'full_access', fullAccess: true }),
-      agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => {
-        full = false
-        return { ...view({ ...piCatalog, displayName: 'pi' }, { current: request.mode }), applied: 'next_turn' }
-      },
+      agentBackendNativePermissions: refuse('nativePermissions'),
+      agentBackendNativePermissionSet: refuse('nativePermissionSet'),
     }
     render(<AgentBackendPanel client={client as any} status={status} lockedBackend="pi" conversationId="c-pi" draftBackend="fox" />)
-    expect(await screen.findByText('沙箱：Fox 外层无；原生文件无、网络无')).toBeTruthy()
-    const before = capabilityCalls
-    fireEvent.change(await screen.findByLabelText('权限'), { target: { value: 'ask' } })
-    fireEvent.click(screen.getByText('切回受限权限'))
-    expect(await screen.findByText('已保存，下一轮开始时重启 pi 生效')).toBeTruthy()
-    await waitFor(() => expect(screen.getByText('沙箱：Fox 外层无；原生文件强制、网络强制')).toBeTruthy())
-    expect(capabilityCalls).toBeGreaterThan(before)
+    // The bar states the retirement and keeps the conversation's own name.
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('退休'))
+    expect(screen.getByRole('status').textContent).toContain('Pi')
+    expect(screen.getByRole('status').getAttribute('data-access')).toBe('read_only_retired')
+    // A read-only conversation has no runtime to configure: no native
+    // permission switch, no capability chips, no login card.
+    expect(screen.queryByLabelText('权限')).toBeNull()
+    await waitFor(() => expect(calls).toEqual([]))
   })
 })
 
 describe('settings', () => {
-  test('per-Agent defaults list sandboxed options only and save with defaultOnly', async () => {
+  test('no per-Agent default permission rows: every external Agent is retired', async () => {
     const calls: Array<NativePermissionRequest & { mode: string }> = []
-    const catalogs: Record<string, NativePermissionCatalog> = {
-      codex: codexCatalog(),
-      deepseek: dshCatalog,
-      pi: { backend: 'pi', options: [
-        { id: 'read_only', label: '只读', description: 'd', native: 'n', fullAccess: false, disabledReason: null },
-        { id: 'ask', label: '询问', description: 'd', native: 'n', fullAccess: false, disabledReason: null },
-        { id: 'allow', label: '自动', description: 'd', native: 'n', fullAccess: false, disabledReason: null },
-        { id: 'full_access', label: '完全访问', description: 'd', native: 'n', fullAccess: true, disabledReason: null },
-      ], defaultMode: 'ask', switchTiming: 'host_answered', switchNote: '由 Fox 作答' },
-    }
     const client = {
       agentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
       saveAgentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
       probeCodexResponses: async () => null,
-      agentBackendNativePermissions: async (request: NativePermissionRequest) => view(catalogs[request.backend!], { draft: true, sandboxedMode: request.backend === 'deepseek' ? 'read-only' : undefined, current: request.backend === 'deepseek' ? 'danger-full-access' : catalogs[request.backend!].defaultMode }),
-      agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => {
-        calls.push(request)
-        return view(catalogs[request.backend!], { draft: true, current: request.mode })
-      },
+      agentBackendNativePermissions: async (request: NativePermissionRequest) => { calls.push(request as NativePermissionRequest & { mode: string }); throw new Error('must not be called') },
+      agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => { calls.push(request); throw new Error('must not be called') },
     }
     render(<AgentBackendSettingsSection client={client} />)
-    const dsh = await screen.findByRole('combobox', { name: 'DeepSeek 默认权限' })
-    // Full access from the switch: the remembered sandboxed choice is shown.
-    expect(dsh.textContent).toBe('只读')
-    const dshOptions = await openSettingsSelect(dsh)
-    expect(dshOptions.find((option) => option.item.getAttribute('aria-selected') === 'true')?.value).toBe('read-only')
-    expect(dshOptions.map((option) => option.value)).not.toContain('danger-full-access')
-    await closeSettingsSelect()
-    const pi = await screen.findByRole('combobox', { name: 'pi 默认权限' })
-    await pickSettingsSelect(pi, 'allow')
-    await waitFor(() => expect(calls).toEqual([{ backend: 'pi', mode: 'allow', defaultOnly: true }]))
-    // Codex is selectable again: its default-permission row is present.
-    expect(screen.getByLabelText('Codex 默认权限')).toBeTruthy()
+    // 设置 →「新会话使用的 Agent」is a plain statement (one supported driver),
+    // and an Agent's native default permission only ever applied to a NEW
+    // conversation of that Agent, so no retired driver offers one any more.
+    await waitFor(() => expect(document.body.textContent).toContain('新会话使用内置 Pi 驱动'))
+    await waitFor(() => expect(calls).toEqual([]))
+    expect(screen.queryByRole('combobox')).toBeNull()
+    expect(screen.queryByLabelText('Codex 默认权限')).toBeNull()
+    expect(screen.queryByLabelText('pi 默认权限')).toBeNull()
+    expect(screen.queryByLabelText('DeepSeek 默认权限')).toBeNull()
   })
 })
