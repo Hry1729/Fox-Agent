@@ -2,6 +2,14 @@
   "schemaVersion": 1,
   "name": "single-pi-mainline-20261027",
   "note": "独立验收夹具：只使用本目录创建的数据目录，不读也不写用户的真实数据库。",
+  "seed": {
+    "note": "single-pi-acceptance-fixture（src/bin/single-pi-acceptance-fixture.rs）用的稳定标识；资料库与专家按名称、会话按标题查重后复用。",
+    "marker": ".fox-single-pi-acceptance",
+    "conversationTitleFormat": "{displayName} @ {knowledgeBase.name}",
+    "conversationAgentBackend": "fox",
+    "expertActivationSource": "expert_center",
+    "expertCategory": "general"
+  },
   "experts": [
     {
       "key": "expertA",
@@ -31,7 +39,8 @@
       "question": "城北项目的验收押金是多少？请给出条款编号。",
       "expectedFact": "37,500",
       "expectedSource": "knowledge/expert-a-城北项目.md",
-      "expectedCitation": "A-7"
+      "expectedCitation": "A-7",
+      "searchQuery": "验收押金"
     },
     {
       "expert": "expertA",
@@ -39,7 +48,8 @@
       "question": "城北项目的逾期违约金按日万分之几计算？",
       "expectedFact": "万分之三",
       "expectedSource": "knowledge/expert-a-城北项目.md",
-      "expectedCitation": "A-9"
+      "expectedCitation": "A-9",
+      "searchQuery": "逾期违约金"
     },
     {
       "expert": "expertB",
@@ -47,13 +57,15 @@
       "question": "南岸项目的质保金是多少？请给出条款编号。",
       "expectedFact": "82,000",
       "expectedSource": "knowledge/expert-b-南岸项目.md",
-      "expectedCitation": "B-3"
+      "expectedCitation": "B-3",
+      "searchQuery": "质保金"
     }
   ],
   "isolationProbes": [
     {
       "expert": "expertA",
       "forbiddenFact": "82,000",
+      "searchQuery": "质保金",
       "forbiddenSource": "knowledge/expert-b-南岸项目.md",
       "question": "南岸项目的质保金是多少？",
       "expectation": "拒绝或说明资料库中没有该内容；不得读出 82,000，也不得伪造引用"
@@ -61,6 +73,7 @@
     {
       "expert": "expertB",
       "forbiddenFact": "37,500",
+      "searchQuery": "验收押金",
       "forbiddenSource": "knowledge/expert-a-城北项目.md",
       "question": "城北项目的验收押金是多少？",
       "expectation": "拒绝或说明资料库中没有该内容；不得读出 37,500"

@@ -71,3 +71,36 @@ node apps/desktop/tests/acceptance/single-pi-20261027/evidence.mjs
 
 - 脚本不驱动界面：界面操作的观察与判定由人完成，脚本只提供隔离启动、精确停止和可核对的事实。
 - 在未构建桌面二进制、或未配置可用模型时，`launch.mjs` 会以退出码 2 失败；此时本目录的全部场景保持「未验证」。
+
+## 用夹具程序建好两位专家（D2 快照）
+
+界面里「新建资料库 / 新建专家」的按钮在 WebView 上不可靠，所以这一步由程序完成：
+`apps/desktop/src-tauri/src/bin/single-pi-acceptance-fixture.rs`。
+
+```powershell
+$env:FOX_DATA_DIR = "$env:TEMP\fox-fixture-check\data"      # 必须是绝对路径
+cargo build -p fox-desktop --bin single-pi-acceptance-fixture
+
+# 1. 建好两位专家、两个资料库、两条会话
+#    （幂等：重复执行按名称/标题查重后复用，不会新增任何一行）
+.\apps\desktop\src-tauri\target\debug\single-pi-acceptance-fixture.exe seed
+
+# 2. 记录证据（同一个 JSON 直接贴进 evidence-*.md）
+.\apps\desktop\src-tauri\target\debug\single-pi-acceptance-fixture.exe dump
+```
+
+- stdout 只有一个 JSON 对象，进度写 stderr。
+- 只接受绝对路径的 `FOX_DATA_DIR`；目录里已经有 `fox.db` 却没有 `.fox-single-pi-acceptance`
+  标记时直接拒绝（退出码 2），所以不可能写进 `%APPDATA%\com.fox.agent`。
+- 建库、导入文档、建专家、绑定专家与资料库全部走产品 API
+  （`LocalKnowledgeStore::create_base` / `start_import`、`Database::save_agent` /
+  `bind_conversation_expert` / `set_knowledge_reference_bindings`），没有直接写 SQL。
+- 会话用 `create_conversation_with_backend(..., "fox")` 建成，再绑定专家：
+  会话只能属于助手，专家是通过 `conversation_expert_bindings` 挂上去的
+  （与界面里点专家头像进入时同一条路径）。
+- `dump.searchProbes` 用 Host 的 `search_knowledge` / `read_knowledge_document` 对本地库
+  调用的同一对方法（`LocalKnowledgeStore::search_lexical` / `read_document`）检索夹具事实，
+  并复刻 Host 的绑定校验；**完整的 Host 工具层（工具守卫、审批、Run 记录）不在此程序内验证**。
+
+`fixture.json` 的 `seed` 段与每条 `questions` / `isolationProbes` 的 `searchQuery` 字段
+就是本程序使用的稳定标识与短检索词（长中文问题按 Host 的提示需要退化成短关键词才有命中）。

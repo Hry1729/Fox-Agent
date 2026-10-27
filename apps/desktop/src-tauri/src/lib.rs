@@ -569,3 +569,27 @@ pub fn run() {
         }
     });
 }
+
+// Single-Pi mainline acceptance fixture (2026-10-27), work package D2/D3.
+//
+// `src/bin/single-pi-acceptance-fixture.rs` seeds two experts with separate
+// local knowledge bases in an isolated `FOX_DATA_DIR` and dumps what exists.
+// It must go through the production APIs only (`LocalKnowledgeStore::create_base`
+// / `start_import`, `Database::save_agent` / `bind_conversation_expert` /
+// `set_knowledge_reference_bindings`), but every module in this crate is private,
+// so a bin cannot reach them. This re-export block is the whole surface it needs;
+// it exposes nothing new (every item is already `pub` inside a private module)
+// and it is additive, with no change to existing behaviour.
+#[doc(hidden)]
+pub mod acceptance_api {
+    pub use crate::database::{
+        AgentRecord, ConversationExpertBinding, ConversationSummary, Database, KnowledgeReference,
+        KnowledgeReferenceBindingInput, KnowledgeReferenceBindingRecord, RuntimeSessionRecord,
+        SaveAgentRequest,
+    };
+    pub use crate::local_knowledge::{
+        CreateLocalKnowledgeBaseRequest, LocalKnowledgeBase, LocalKnowledgeDocumentsRequest,
+        LocalKnowledgeImportFileRequest, LocalKnowledgeImportRequest, LocalKnowledgeStore,
+    };
+    pub use crate::local_knowledge_storage::LOCAL_KNOWLEDGE_STORAGE_PATH_KEY;
+}

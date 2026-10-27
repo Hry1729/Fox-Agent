@@ -34,6 +34,15 @@ name = "closeout-db-dump"
 path = "src/bin/closeout-db-dump.rs"
 required-features = ["kernel-acceptance"]
 
+# Single-Pi mainline acceptance (2026-10-27) D2/D3: seed the two experts with
+# their separate local knowledge bases in an isolated FOX_DATA_DIR, and dump what
+# exists. Uses production APIs only and refuses a data directory that holds a
+# real user database. Development/acceptance facility; not gated behind a
+# feature so `cargo build -p fox-desktop --bin single-pi-acceptance-fixture`
+# works with the default feature set.
+[[bin]]
+name = "single-pi-acceptance-fixture"
+path = "src/bin/single-pi-acceptance-fixture.rs"
 [[bin]]
 name = "local-embedding-smoke"
 path = "src/local_embedding.rs"
