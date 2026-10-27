@@ -46,7 +46,7 @@ for (const run of state.runs) {
 say()
 
 // ---- 1. database facts (read-only copy, never the live file)
-const databasePath = join(DATA_DIR, 'facts.db')
+const databasePath = [join(DATA_DIR, 'fox.db'), join(DATA_DIR, 'facts.db')].find((candidate) => existsSync(candidate)) ?? join(DATA_DIR, 'fox.db')
 const snapshotPath = join(EVIDENCE_DIR, `facts-${Date.now()}.db`)
 let databaseFacts = null
 if (existsSync(databasePath)) {
@@ -75,7 +75,7 @@ if (existsSync(databasePath)) {
 } else {
   say('## 1. 数据库事实')
   say()
-  say('- 未找到 `facts.db`：应用可能尚未启动，或数据目录不是本次运行的目录。**未验证**。')
+  say('- 未找到 `fox.db`：应用可能尚未启动，或数据目录不是本次运行的目录。**未验证**。')
   say()
 }
 

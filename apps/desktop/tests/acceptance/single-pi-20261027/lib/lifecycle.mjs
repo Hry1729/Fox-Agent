@@ -48,10 +48,11 @@ export function resolveBinary(explicit) {
   const candidates = [
     explicit,
     process.env.FOX_ACCEPTANCE_BINARY,
-    resolve(FIXTURE_DIR, '../../../../src-tauri/target/release/fox-desktop.exe'),
-    resolve(FIXTURE_DIR, '../../../../src-tauri/target/release/Fox.exe'),
-    resolve(FIXTURE_DIR, '../../../../src-tauri/target/debug/fox-desktop.exe'),
-    resolve(FIXTURE_DIR, '../../../../src-tauri/target/debug/Fox.exe'),
+    // FIXTURE_DIR is apps/desktop/tests/acceptance/single-pi-20261027.
+    resolve(FIXTURE_DIR, '../../../src-tauri/target/release/fox-desktop.exe'),
+    resolve(FIXTURE_DIR, '../../../src-tauri/target/release/Fox.exe'),
+    resolve(FIXTURE_DIR, '../../../src-tauri/target/debug/fox-desktop.exe'),
+    resolve(FIXTURE_DIR, '../../../src-tauri/target/debug/Fox.exe'),
   ].filter(Boolean)
   return candidates.find((candidate) => existsSync(candidate)) ?? null
 }
