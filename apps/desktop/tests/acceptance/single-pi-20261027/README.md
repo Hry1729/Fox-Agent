@@ -103,4 +103,24 @@ cargo build -p fox-desktop --bin single-pi-acceptance-fixture
   并复刻 Host 的绑定校验；**完整的 Host 工具层（工具守卫、审批、Run 记录）不在此程序内验证**。
 
 `fixture.json` 的 `seed` 段与每条 `questions` / `isolationProbes` 的 `searchQuery` 字段
-就是本程序使用的稳定标识与短检索词（长中文问题按 Host 的提示需要退化成短关键词才有命中）。
+就是本程序使用的稳定标识与短检索词（长中文问题按 Host 的提示需要退化成短关键词才有命中）。## 实际运行命令（桌面验收）
+
+```powershell
+# 1. 前端（debug 构建从 devUrl 取页面，缺它窗口只会显示 127.0.0.1 拒绝连接）
+node scripts/start-desktop-dev.mjs
+
+# 2. 桌面程序：隔离数据目录 + SDK 原型运行模式 + WebView CDP
+$env:FOX_DATA_DIR="$env:TEMP\fox-fixture-check\data"      # 夹具目录，勿用 --reset
+$env:FOX_KERNEL_MODE="legacy"                              # SDK 原型路径（authoritative 不走会话映射）
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"
+apps/desktop/src-tauri/target/debug/fox-desktop.exe
+
+# 3. 驱动一次真实发送（不是点击模拟，走页面真实事件与真实发送按钮）
+node apps/desktop/tests/acceptance/single-pi-20261027/drive.mjs `
+  --conv "合同审阅专家 A @ 城北项目资料库 A" `
+  --ask  "城北项目的验收押金是多少？请给出条款编号。" --wait 30000 --json
+```
+
+`drive.mjs` 会把输入值写进 `<textarea>` 并回读断言，然后点编辑器容器内的发送按钮；页面异常会随结果一起打印。
+发送后核对数据库（同目录 `evidence` 记录）：`runs` 新增一行、`runtime_sessions` 的 `native_session_ref` 与文件路径、`tool_calls` 的三次检索。
+
