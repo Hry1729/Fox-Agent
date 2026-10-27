@@ -188,45 +188,43 @@ test('HTTP final-answer contract rejects premature stops and keeps explicit answ
   }
 })
 
+// Retired by the single Pi mainline (2026-10-27). These tests used to drive
+// the native engines end to end; the product rule now is: refuse the engine
+// with a stable code, make no model request, and never answer with the Pi
+// adapter the caller did not ask for. The records stay readable (see the
+// kernel-engine-retirement suite and the Host's kernel_model_config tests).
 for (const engine of ['deepseek_harness', 'codex']) {
-  test(`isolated ${engine} worker supports native continuation and Host compaction`,
-    { skip: engine === 'codex' && !process.env.FOX_TEST_CODEX_BINARY, timeout: 90000 }, async t => {
-      let calls = 0
+  test(`isolated ${engine} worker refuses the retired native engine without any model request`,
+    { timeout: 30000 }, async t => {
+      const requests = []
       const server = createServer(async (req, res) => {
         let raw = ''; for await (const chunk of req) raw += chunk
-        const body = JSON.parse(raw); calls++
-        assert.equal(body.model, engine === 'codex' ? 'gpt-5.1-codex' : 'deepseek-v4-flash')
-        if (calls === 2) assert.ok(!body.tools?.length)
-        res.writeHead(200, { 'content-type': 'text/event-stream' })
-        if (engine === 'codex') {
-          const item = { type: 'message', id: `msg-${calls}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Native continuation 中文', annotations: [] }] }
-          for (const event of [{ type: 'response.created', response: { id: `resp-${calls}` } },
-            { type: 'response.output_item.done', output_index: 0, item },
-            { type: 'response.completed', response: { id: `resp-${calls}`, status: 'completed', output: [item], usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 } } }]) res.write(`data: ${JSON.stringify(event)}\n\n`)
-          res.end()
-        } else {
-          for (const choice of [{ index: 0, delta: { role: 'assistant', content: 'Native continuation 中文' }, finish_reason: null },
-            { index: 0, delta: {}, finish_reason: 'stop' }]) res.write(`data: ${JSON.stringify({ id: `resp-${calls}`, object: 'chat.completion.chunk', model: body.model, created: 1, choices: [choice] })}\n\n`)
-          res.end('data: [DONE]\n\n')
-        }
+        requests.push(raw)
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end('{"error":{"message":"a retired engine must never reach a provider"}}')
       })
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
       t.after(() => { server.closeAllConnections(); server.close() })
-      const nativeAdapter = engine === 'codex' ? { command: process.env.FOX_TEST_CODEX_BINARY,
-        binaryHash: `sha256:${createHash('sha256').update(await readFile(process.env.FOX_TEST_CODEX_BINARY)).digest('hex')}` } : undefined
-      for (const mode of ['batch', 'compaction']) {
-        const child = await worker(t)
-        assert.equal((await child.request('kernel.initialize', initialization({ engineId: engine, nativeAdapter,
-          proposalTools: mode === 'compaction' ? [] : initialization().proposalTools,
-          modelService: { apiType: engine === 'codex' ? 'openai-responses' : 'openai-completions', modelId: engine === 'codex' ? 'gpt-5.1-codex' : 'deepseek-v4-flash',
-            baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-test', reasoning: false } }))).type, 'kernel.ready')
-        const payload = mode === 'batch' ? resumePayload() : compactionPayload()
-        payload.controlBinding.engineId = engine
-        const result = await child.request(mode === 'batch' ? 'kernel.resume_batch' : 'kernel.compact_context', payload)
-        assert.equal(result.type, mode === 'batch' ? 'kernel.model_response' : 'kernel.compaction_result')
-        assert.ok(JSON.stringify(result).includes('Native continuation 中文'))
-      }
-      assert.equal(calls, 2)
+      const child = await worker(t)
+      const response = await child.request('kernel.initialize', initialization({
+        engineId: engine,
+        nativeAdapter: engine === 'codex'
+          ? { command: 'C:/does-not-exist/codex.exe', binaryHash: `sha256:${'0'.repeat(64)}` }
+          : undefined,
+        proposalTools: [],
+        modelService: {
+          apiType: engine === 'codex' ? 'openai-responses' : 'openai-completions',
+          modelId: 'retired-model',
+          baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+          apiKey: 'local-test',
+        },
+      }))
+      assert.equal(response.type, 'request_failed')
+      assert.equal(response.payload.code, 'kernel_engine_retired')
+      assert.ok(response.payload.message.includes(engine), 'the refusal names the engine')
+      assert.equal(response.payload.retryable, false)
+      assert.equal(requests.length, 0, 'a retired engine makes no model request')
+      assert.equal(child.events.some(event => event.type === 'kernel.ready'), false)
     })
 }
 

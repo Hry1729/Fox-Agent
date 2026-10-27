@@ -102,24 +102,9 @@ async function createBundlerWorkspace() {
     '@earendil-works/pi-agent-core',
     '@earendil-works/pi-ai',
     '@earendil-works/pi-coding-agent',
-    '@deepseek-ai/dsh-llm',
-    '@deepseek-ai/dsh-llm-deepseek',
   ]) {
     await materializeDependency(dependency)
   }
-  // The pinned Harness SDK reads its own version with createRequire at module
-  // initialization. A single-file Bun executable has no adjacent package.json.
-  // Replace only this metadata lookup in the disposable staging copy, retaining
-  // the exact installed version and leaving installed SDK files untouched.
-  const harnessRoot = resolve(workspace, 'node_modules', '@deepseek-ai/dsh-llm')
-  const harnessManifest = JSON.parse(await readFile(resolve(harnessRoot, 'package.json'), 'utf8'))
-  const harnessEntry = resolve(harnessRoot, 'lib', 'index.js')
-  const harnessSource = await readFile(harnessEntry, 'utf8')
-  const versionLookup = 'const { version } = createRequire(import.meta.url)("../package.json");'
-  if (harnessManifest.version !== '0.1.2-rc.1' || harnessSource.split(versionLookup).length !== 2) {
-    throw new Error('Harness package metadata layout changed; review the standalone adapter build')
-  }
-  await writeFile(harnessEntry, harnessSource.replace(versionLookup, `const version = ${JSON.stringify(harnessManifest.version)};`))
   // Stage all local modules so new transitive imports remain available to Bun.
   for (const file of await readdir(resolve(root, 'src'))) {
     if (!file.endsWith('.mjs') && !file.endsWith('.json')) continue

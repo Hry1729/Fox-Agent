@@ -11,8 +11,20 @@ import { describeKernelRun } from './pi-kernel-description.mjs'
 import { observeKernelModelTransport } from './pi-kernel-model-failure.mjs'
 import { describeKernelError, diagnosticLine } from './pi-kernel-diagnostics.mjs'
 import { prepareKernelCompaction, compactPiKernelContext, kernelCompactionResult, compactionFailureDiagnostic } from './pi-kernel-compaction.mjs'
-import { observeNativeUsage } from './model-usage-runtime.mjs'
-import { CODEX_KERNEL_ADAPTER, runCodexKernelModel } from './codex-kernel-adapter.mjs'
+/** The only Kernel model engine this worker executes (single Pi mainline). */
+export const SUPPORTED_KERNEL_ENGINE = 'pi'
+/** Engines retired by the single Pi mainline: readable records, never executed. */
+export const RETIRED_KERNEL_ENGINES = ['codex', 'deepseek_harness']
+
+/**
+ * A retired engine is refused with a stable code. It is never answered by the
+ * Pi adapter instead: the caller asked for a driver this build does not run.
+ */
+export function retiredEngineError(engineId) {
+  const error = new Error(`kernel_engine_retired: Kernel engine \`${engineId}\` is retired in this build; only \`${SUPPORTED_KERNEL_ENGINE}\` runs. Old records stay readable, but no run is started with a retired engine.`)
+  error.code = 'kernel_engine_retired'
+  return error
+}
 import { completionRequired, completionPreview, KernelIncompleteResponseError, incompleteResponseReason, modelFailureDiagnostic } from './kernel-completion.mjs'
 import { createResponseDiagnosticObserver, responseAdmissionTag } from './pi-kernel-response-diagnostic.mjs'
 
@@ -33,6 +45,8 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
   let active
   let setup
   let modelFailure
+  // Never assigned since the single Pi mainline retired the native engines;
+  // the branches that read them below stay unreachable on purpose.
   let nativeConfig
   let nativeModel
   let requireCompletion = false
@@ -98,22 +112,11 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     }
     if (!nonempty(config?.modelId) || !nonempty(config?.baseUrl) || typeof systemPrompt !== 'string'
         || !Array.isArray(definitions)) throw new Error('Incomplete Host model/prompt/tool configuration')
-    if (identity.engineId !== 'pi') {
-      let adapterVersion
-      if (identity.engineId === 'codex' && config.apiType === 'openai-responses' && request.payload.nativeAdapter) {
-        nativeModel = runCodexKernelModel; adapterVersion = CODEX_KERNEL_ADAPTER
-      } else if (identity.engineId === 'deepseek_harness' && config.apiType === 'openai-completions' && !request.payload.nativeAdapter) {
-        const deepseek = await import('./deepseek-kernel-adapter.mjs')
-        nativeModel = deepseek.runDeepSeekKernelModel; adapterVersion = deepseek.DEEPSEEK_KERNEL_ADAPTER
-      } else throw new Error('Unsupported native engine configuration')
-      if (state !== 'initializing') throw new Error('Native engine initialization was cancelled')
-      nativeConfig = structuredClone(request.payload)
-      nativeModel = observeNativeUsage(nativeModel, { runId: request.runId,
-        stage: () => accountingRequest?.type === 'kernel.compact_context' ? 'compaction' : 'agent',
-        onRecord: record => { responseObservation.noteUsage(record); if (accountingRequest && request.payload.usageRecords === true) respond(accountingRequest, 'kernel.usage_record', record) } })
-      state = 'ready'
-      respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false, hostCompaction: true, roundLoop: false, adapterVersion })
-      return
+    if (identity.engineId !== SUPPORTED_KERNEL_ENGINE) {
+      // Single Pi mainline: the native engine flows (Codex app-server, DeepSeek
+      // Harness) are retired. Refuse before any state changes, and never fall
+      // back to the Pi adapter the caller did not ask for.
+      throw retiredEngineError(identity.engineId)
     }
     const profile = resolveModelProfile(config)
     let model
@@ -398,6 +401,15 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
           throw new Error('This isolated Kernel worker rejects Legacy and unknown commands')
       }
     } catch (error) {
+      // A retired engine keeps its own code across the wire: the message names
+      // only the engine id (never the configuration, credentials or history),
+      // and no model request was made.
+      if (error?.code === 'kernel_engine_retired') {
+        respond(request ?? {}, 'request_failed', {
+          code: 'kernel_engine_retired', message: error.message, retryable: false,
+        })
+        return
+      }
       if (startedInitialization) {
         state = 'consumed'
         await session?.abort().catch(() => {})
