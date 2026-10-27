@@ -16,7 +16,18 @@ export function ComposerAgentPicker({ value, status, disabled, onSelect }: {
   onSelect: (backend: AgentBackendId) => void
 }) {
   const choices = SELECTABLE_AGENT_BACKEND_IDS.filter((backend) => !isAgentBackendHidden(backend, status) && !isAgentBackendRetired(backend, status))
-  if (choices.length <= 1) return null
+  if (choices.length <= 1) {
+    // One supported driver is not a choice, but the composer keeps its slot:
+    // removing the element entirely made this build's composer look different
+    // from the rest of the product. Show the current driver as a static chip,
+    // with no menu to open.
+    const label = AGENT_BACKEND_LABELS[value] ?? AGENT_BACKEND_LABELS[SELECTABLE_AGENT_BACKEND_IDS[0]]
+    return (
+      <span className="fox-composer-agent-trigger fox-composer-agent-static" data-agent-backend={value} title="本版本只有一种受支持的 Agent 驱动" aria-label={`当前 Agent：${label}`}>
+        <span>{label}</span>
+      </span>
+    )
+  }
   return <DropdownMenu>
     <DropdownMenuTrigger asChild><button type="button" className="fox-composer-agent-trigger" disabled={disabled} aria-label={`选择 Agent，当前 ${AGENT_BACKEND_LABELS[value]}`}><span>{AGENT_BACKEND_LABELS[value]}</span><ChevronDown size={13} /></button></DropdownMenuTrigger>
     <DropdownMenuContent align="end" side="bottom" className="fox-composer-agent-menu">
