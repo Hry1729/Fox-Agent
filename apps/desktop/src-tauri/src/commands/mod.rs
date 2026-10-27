@@ -1560,14 +1560,11 @@ pub async fn conversation_create(
     let picker_mode = draft_full.map(|full| {
         if full { fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS } else { fox_agent_backend::host_routing::NEW_MODE_SANDBOXED }
     });
-    let setting_mode = (external_backend
-        && !forbidden
-        && request.external_permission_mode.is_none()
-        && picker_mode.is_none()
-        && agent_backend_routing::stored_new_external_full_access(&state.database))
-    .then_some(fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS);
-    let grant_full_access = match fox_agent_backend::host_routing::decide_new_conversation_mode(
-        request.external_permission_mode.as_deref().or(picker_mode).or(setting_mode),
+    // The old Fox-wide "new external conversations use full access" setting
+    // is no longer consulted: it was the outer SRT switch, not the Agent's
+    // native mode. Only an explicit new-conversation pick can start full.
+    let native_full_access = match fox_agent_backend::host_routing::decide_new_conversation_mode(
+        request.external_permission_mode.as_deref().or(picker_mode),
         agent_backend,
         forbidden,
     ) {
@@ -1668,22 +1665,24 @@ pub async fn conversation_create(
             ))
         }
     };
-    if grant_full_access {
-        if let Err(error) = state.database.grant_full_access_at_creation(&conversation.id) {
-            let _ = state.database.delete_conversation(&conversation.id);
-            return Ok(ApiResponse::failure("conversation.create_failed", format!("无法记录完全访问授权：{error}"), false));
-        }
+    if external_backend {
+        // Seed the Agent's native mode directly. There is no Fox outer grant:
+        // full access is just one of that Agent's native modes.
+        agent_backend_routing::seed_conversation_native_mode(
+            &state.database,
+            &conversation.id,
+            agent_backend,
+            native_full_access,
+        );
         let _ = state.database.append_agent_backend_audit(
             Some(&conversation.id),
             agent_backend.as_str(),
-            "agent_backend.full_access_granted",
-            &serde_json::json!({ "grant": "conversation", "source": if picker_mode.is_some() { "permission_list" } else if setting_mode.is_some() { "settings" } else { "new_conversation" } }),
+            "agent_backend.native_mode_changed",
+            &serde_json::json!({
+                "source": if picker_mode.is_some() { "permission_list" } else { "new_conversation" },
+                "fullAccess": native_full_access,
+            }),
         );
-    }
-    if external_backend {
-        // The Agent's last sandboxed choice becomes this conversation's mode
-        // (the full-access option follows the grant above).
-        agent_backend_routing::seed_conversation_native_mode(&state.database, &conversation.id, agent_backend);
         if draft_full.is_some() {
             agent_backend_routing::clear_draft_full_access_choice(&state.database, agent_backend);
         }

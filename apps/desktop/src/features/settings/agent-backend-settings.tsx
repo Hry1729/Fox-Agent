@@ -1,20 +1,16 @@
 // Settings batch, items 4 / 5: 设置 → Agent →「外部 Agent」 (rows in the unified settings layout).
 //
-// *「新会话使用的 Agent」: Fox / pi / DeepSeek (default Fox); hidden backends
-//   (`HIDDEN_AGENT_BACKENDS`, Codex since 2026-10-24) are not listed, and a
-//   saved hidden choice shows as Fox with a note. Every NEW conversation uses
-//   it; existing conversations keep the backend they were created with. A
-//   backend the administrator forced off (FOX_EXTERNAL_BACKENDS) is greyed
-//   with the reason.
-// *「新外部会话使用完全访问」: off by default; read by the Host when it
-//   creates an external conversation (grant + audit as before); greyed under
-//   FORBIDDEN. Revoking mid-session stays on the bar above the input.
+// *「新会话使用的 Agent」: Fox / pi / Codex / DeepSeek (default Fox); every
+//   backend is selectable unless the administrator forced it off
+//   (`FOX_EXTERNAL_BACKENDS`). A saved hidden choice shows as Fox.
+// * Each Agent's native default permission is listed in its own names. Fox
+//   no longer adds an outer SRT sandbox to external Agents, so there is no
+//   "new external conversation uses full access" switch.
 //
 // Saved by the Host (`agent_backend_preferences_save`, `app_settings`); a
 // change is broadcast so the open draft re-probes its login at once.
 import { useCallback, useEffect, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
 import { SettingsGroup, SettingsRow } from './settings-layout'
 import {
   AGENT_BACKEND_PREFERENCES_EVENT,
@@ -22,14 +18,12 @@ import {
   agentBackendSettingRows,
   agentBackendSettingValue,
   AGENT_BACKEND_LABELS,
-  fullAccessSettingState,
   isAgentBackendHidden,
   isAgentBackendId,
   type AgentBackendId,
   type AgentBackendPreferences,
   type CodexResponsesProbe,
 } from '@/features/conversations/model/agent-backend'
-import { FULL_ACCESS_RISK_POINTS } from '@/features/conversations/model/agent-backend-onboarding'
 import {
   nativePermissionRows,
   type NativePermissionRequest,
@@ -54,9 +48,8 @@ export const NATIVE_PERMISSION_SETTING_BACKENDS: readonly { backend: AgentBacken
 
 /**
  * 设置 → each Agent's default permission for its NEW conversations, in its
- * own names. Sandboxed options only: full access stays the「新外部会话使用
- * 完全访问」switch (with its risk text); saved with `defaultOnly`, so the
- * one-shot pick on the bar is untouched.
+ * own names. Full access is left out of the default; it stays an explicit
+ * per-conversation choice in the Agent's own picker.
  */
 function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClient }) {
   const list = client.agentBackendNativePermissions
@@ -146,7 +139,6 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
 
   const rows = agentBackendSettingRows(preferences)
   const forcedOff = agentBackendForcedOffNotice(preferences)
-  const fullAccess = fullAccessSettingState(preferences)
   const selected = agentBackendSettingValue(preferences)
   const effective = preferences?.effectiveBackend ?? 'fox'
   const savedHidden = preferences && isAgentBackendId(preferences.defaultBackend) && isAgentBackendHidden(preferences.defaultBackend)
@@ -185,16 +177,7 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
       {preferences && !savedHidden && selected !== effective && (
         <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">已保存的选择当前不可用，新会话暂时使用 {rows.find((row) => row.value === effective)?.label ?? 'Fox'}。</p>
       )}
-      <SettingsRow title="新外部会话使用完全访问" description={`默认关闭（沙箱）。开启后新建的外部会话不套沙箱：${FULL_ACCESS_RISK_POINTS.join('')}会话中途只能在输入框上方撤销。`}>
-        <Switch
-          aria-label="新外部会话使用完全访问"
-          checked={fullAccess.checked}
-          disabled={fullAccess.disabled || saving}
-          onCheckedChange={(value) => void save({ newExternalFullAccess: value })}
-        />
-      </SettingsRow>
       <NativePermissionDefaults client={client} />
-      {fullAccess.reason && preferences?.fullAccessForbidden && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">{fullAccess.reason}</p>}
       {error && <p className="fox-settings-error fox-agent-backend-settings-error" role="alert">{error}</p>}
     </SettingsGroup>
   )

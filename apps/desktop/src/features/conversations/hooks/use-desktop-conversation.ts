@@ -102,7 +102,7 @@ interface DesktopConversationState {
   setDraftExternalPermissionMode: (mode: ExternalPermissionMode) => void
   /** Host picker / lock state; null until loaded or outside Tauri. */
   agentBackendStatus: AgentBackendStatus | null
-  /** Settings batch: 设置 →「新会话使用的 Agent」/「新外部会话使用完全访问」(Host view); null until loaded. */
+  /** Settings batch: 设置 →「新会话使用的 Agent」(Host view); null until loaded. */
   agentBackendPreferences: AgentBackendPreferences | null
   /**
    * The one notice for a send refused by backend routing (`agent_backend_*`).
@@ -277,7 +277,7 @@ export function useDesktopConversation(): DesktopConversationState {
       draftAgentBackendRef.current = backend
       setDraftAgentBackendState(backend)
     }
-    setDraftExternalPermissionMode(preferences?.effectiveFullAccess ? 'full_access' : 'sandboxed')
+    setDraftExternalPermissionMode('sandboxed')
   }, [setDraftExternalPermissionMode])
   const agentBackendStatusRef = useRef<AgentBackendStatus | null>(null)
   agentBackendStatusRef.current = agentBackendStatus

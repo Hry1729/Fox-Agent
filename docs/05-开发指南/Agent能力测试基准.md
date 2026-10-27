@@ -12,7 +12,7 @@
 - `evals/fixtures/` 现有 8 组 Fixture；新增的三组（图评审验收、权限失败、恢复契约）见[可观测性与测试架构](../02-架构/可观测性与测试架构.md)。`evals/harness-v1/` 是另一套独立的 Harness，本次没有复核。
 - **129 个 case 的新基线没有重跑**，本页没有新的通过数，也没有新的 Hash。引用时只能写“2026-08-27 基线 121/121”，不能写成当前版本的结果。
 - 离线 Eval 不在 CI 中。Rust Host、Runtime、前端测试的命令已改为与 CI 一致，见[测试指南](测试指南.md)；下文结论摘要和复现命令里的测试数字、`cargo test --manifest-path ...` 写法都属于当时的基线。
-- 外部 Agent（pi、DeepSeek Harness、Codex）不在这套 Eval 的范围内，它们的验证记录在 `crates/fox-agent-backend/docs/`。
+- 外部 Agent（pi、DeepSeek Harness、Codex）不在这套 Eval 的范围内，它们的验证记录在 `crates/fox-agent-backend/docs/`。Fox Agent 的 Host 命令另有 `FOX_TEST_REAL_SRT=1` 的真实 SRT 测试。
 
 
 ## 结论摘要

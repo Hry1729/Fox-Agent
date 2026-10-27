@@ -1,4 +1,15 @@
-# 外部 Agent 后端的权限模式与 srt 沙箱层
+# SRT 历史记录与当前 Fox Agent Host 边界
+
+> **2026-10-26 生效范围变更**：本文件第 1–13 节记录的是“外部 Agent 外层 SRT”的历史设计、实现与实测，该层已从产品路径移除。pi、DeepSeek Harness、Codex 现在由 Fox 直接启动，保留它们自己的原生沙箱、权限和审批；不使用 SRT 安装/预检、SRT settings、ACP bridge、网络 broker 或 `FOX_EXTERNAL_FULL_ACCESS` 授权。SRT 只用于 Fox Agent 自己的 Host 命令。下文保留作历史证据，不应作为外部 Agent 当前启动路径的依据；当前边界见 `docs/02-架构/安全架构.md`。
+
+## 0 当前：Fox Agent Host 命令的 SRT 边界
+
+- 实现：`apps/desktop/src-tauri/src/host_sandbox.rs`（`HostSandbox`、`SrtHostBackend`）。
+- `run_command` 在 `tool_host.rs` 中经 `revalidate_target` → `HostSandbox::discover` → `HostSandbox::begin` → `execute_spawn_spec` 执行；初始化失败返回 `tool.sandbox_unavailable`，**不回退**宿主裸跑。
+- 后台命令作业由 `runtime_host/command_jobs.rs` 使用同一 SRT 边界，并把 `HostSandboxSession` 保持到作业结束；`process_jobs::ExecutionBackend::SrtHost` 与能力查询反映真实可用性。
+- 策略：项目根可写、会话临时目录、Fox 私有 HOME；`allowed_domains` 默认空（网络默认拒绝）。Windows 使用 SRT 账户、文件写 ACL 和祖先 ACE 协调，不宣称完整读取隔离或通用网络防火墙。
+- 文件工具 `read_file` / `write_file` / `edit_file` 仍在 Host 进程内，依靠路径规范化、项目根检查、重解析点/UNC 拒绝和写准入；它们不经 SRT。
+- 验证：普通单测默认证明 SRT 不可用（fail closed）；`FOX_TEST_REAL_SRT=1` 才运行真实进程测试。已覆盖 `srt-sandbox` 账户、项目内写入、项目外写入拒绝、超时和取消。
 
 运行时 0.1.3 的模型端点授权、精确回环代理和 pi 错误结算见 [受管模型连接](model-connectivity.md)。当前 0.1.5 的动态网络审批、预览、写入受限令牌、严格目录能力检查、Windows 实测边界及 MXC 评估见 [网络审批与预览](network-preview.md)。下文关于 stock dsh 回环直连和完全访问退路的测量记录保留作历史证据，不适用于已验证的受管补丁。
 

@@ -1,8 +1,9 @@
 //! The real launcher for external backends (feature `acp`): Fox-managed
-//! runtime layout, per-backend launch specs, the session's permission mode
-//! (sandboxed by default, never degraded), `prepare_launch` + srt, and on
-//! Windows the private layout, the ACP bridge and the ancestor ACEs. The
-//! desktop builds one [`HostLauncher`] at startup and hands it to
+//! runtime layout, per-backend launch specs, the private HOME, and the
+//! Agent-native permission mode. External Agents (pi / Codex / DeepSeek) run
+//! in their own native sandboxes and approvals; Fox deliberately does not
+//! add its SRT layer around them. SRT is only for the Fox Agent's Host tools.
+//! The desktop builds one [`HostLauncher`] at startup and hands it to
 //! [`crate::external::ExternalRuntime`].
 //!
 //! Managed runtime layout (the same on every OS; on Windows it is the package
@@ -32,13 +33,12 @@
 //! `npx` (`agent_backend_not_installed`).
 
 use crate::capability_view::PiLaunch;
-use crate::config::{HostPolicy, SessionSnapshot};
+use crate::config::HostPolicy;
 use crate::external::{ExternalLauncher, LaunchFailure, LaunchRequest, Launched};
 use crate::launch::LaunchSpec;
 use crate::port::AgentBackend;
 use crate::sandbox::{
-    effective_permission_mode, prepare_full_access, prepare_launch, FullAccessPrivate, preflight, AuthorizedDir, HostOs, PermissionMode, PrivateHomes,
-    RealProbe, SandboxError, SandboxErrorCode, SandboxPolicy, SandboxSetup, SrtInstall, SrtLauncher, SETTING_PERMISSION_MODE,
+    prepare_full_access, AuthorizedDir, FullAccessPrivate, HostOs, PermissionMode, PrivateHomes, RealProbe, SandboxError, SandboxPolicy, SrtInstall,
 };
 use futures::future::BoxFuture;
 use std::collections::BTreeMap;
@@ -209,25 +209,16 @@ impl HostLaunchConfig {
         policy
     }
 
-    /// Effective permission mode of a conversation: sandboxed unless the Host
-    /// both requests and grants full access (and policy does not forbid it).
-    /// Grant sources (OR): the engineering switch [`FULL_ACCESS_ENV`] and the
-    /// user's per-conversation choice at creation
-    /// ([`LaunchRequest::full_access_granted`], persisted as
-    /// `conversation:<id>`). [`FULL_ACCESS_FORBIDDEN_ENV`] beats both.
-    pub fn permission_mode(&self, request: &LaunchRequest) -> PermissionMode {
-        let mut policy = self.host_policy(&request.conversation_id, &request.project_root);
-        if request.full_access_granted {
-            policy.full_access_grants.insert(crate::sandbox::FullAccessGrant::Conversation(request.conversation_id.clone()).key());
-        }
-        let requested = if self.full_access == FullAccessSwitch::Off && !request.full_access_granted { "sandboxed" } else { "full_access" };
-        let snapshot = SessionSnapshot {
-            backend: request.backend,
-            project_root: request.project_root.to_string_lossy().into_owned(),
-            egress_allowed: false,
-            settings: BTreeMap::from([(SETTING_PERMISSION_MODE.to_owned(), requested.to_owned())]),
-        };
-        effective_permission_mode(&policy, &snapshot, &request.conversation_id).mode
+    /// The Fox outer layer around an external backend no longer exists: SRT
+    /// is only used for the Fox Agent's Host tools. The returned value keeps
+    /// the old public API and means "no Fox sandbox"; it must never be used
+    /// to replace the Agent's native permission mode.
+    ///
+    /// `full_access_granted` and the engineering switch are retained in the
+    /// persisted data for compatibility, but they no longer decide whether
+    /// Fox wraps the process.
+    pub fn permission_mode(&self, _request: &LaunchRequest) -> PermissionMode {
+        PermissionMode::FullAccess
     }
 
     fn exe(&self, name: &str) -> String {
@@ -286,7 +277,7 @@ impl HostLaunchConfig {
     /// (`agent_backend_not_installed`) in every mode. Production never
     /// launches through `npx`.
     pub fn launch_spec(&self, backend: AgentBackend, mode: PermissionMode, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
-        let native = crate::native_permission::effective_mode(backend, None, mode == PermissionMode::FullAccess, &Default::default());
+        let native = crate::native_permission::effective_mode(backend, None, false, &Default::default());
         self.launch_spec_with(backend, mode, native, project_root)
     }
 
@@ -295,7 +286,7 @@ impl HostLaunchConfig {
     /// Codex starts in that codex-acp mode (`INITIAL_AGENT_MODE`), dsh with
     /// the `--patch` of that preset (approval written per preset), pi
     /// unchanged (the Host answers its gate).
-    pub fn launch_spec_with(&self, backend: AgentBackend, mode: PermissionMode, native: &str, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
+    pub fn launch_spec_with(&self, backend: AgentBackend, _mode: PermissionMode, native: &str, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
         if backend == AgentBackend::Fox {
             return Err(LaunchFailure::new("agent_backend_invalid", "Fox 不经外部运行时启动"));
         }
@@ -311,18 +302,19 @@ impl HostLaunchConfig {
         let mut pi_launch = PiLaunch::Stock;
         let mut spec = match backend {
             AgentBackend::Deepseek => {
-                use crate::backends::deepseek::{default_preset_patch_path, preset_file_name, preset_patch, verify_installed_preset_patch, DshPreset};
-                // The preset the user picked; full access is dsh's own
-                // danger-full-access exactly when srt is off.
-                let preset = if mode == PermissionMode::FullAccess { DshPreset::DangerFullAccess } else { crate::native_permission::dsh_preset(native) };
-                let preset = if mode == PermissionMode::Sandboxed && preset == DshPreset::DangerFullAccess { DshPreset::WorkspaceWriteNever } else { preset };
-                let network = mode == PermissionMode::FullAccess;
+                use crate::backends::deepseek::{default_preset_patch_path, preset_file_name, preset_patch, verify_installed_preset_patch};
+                // The preset the user picked in dsh's own permission list.
+                // Fox no longer translates its old full-access flag onto it.
+                let preset = crate::native_permission::dsh_preset(native);
+                // Fox does not add a network sandbox around dsh any more, so
+                // dsh's own workspace preset keeps its native web tools.
+                let network = true;
                 let managed_patch = default_preset_patch_path(&self.runtime_root, preset, network);
-                let patch = if managed_patch.is_file() || mode == PermissionMode::Sandboxed {
+                let patch = if managed_patch.is_file() {
                     managed_patch
                 } else {
-                    // Full access with a program outside the runtime package
-                    // (override): the Host patch is written to Fox state.
+                    // A program override outside the runtime package: the Host
+                    // patch is written to Fox state.
                     let dir = self.state_root.join(crate::backends::deepseek::PATCH_DIR);
                     let patch = dir.join(preset_file_name(preset, network));
                     std::fs::create_dir_all(&dir)
@@ -348,13 +340,10 @@ impl HostLaunchConfig {
         match backend {
             AgentBackend::Codex => {
                 let _ = project_root;
-                // The codex-acp mode the user picked; agent-full-access only
-                // without srt (Fox full access), never inside the sandbox.
-                let codex_mode = match crate::native_permission::codex_mode(native) {
-                    crate::backends::codex::CodexMode::FullAccess if mode == PermissionMode::Sandboxed => crate::backends::codex::CodexMode::WorkspaceWrite,
-                    other => other,
-                };
-                spec.session_env = crate::backends::codex::session_env_for_mode(codex_mode);
+                // The codex-acp mode the user picked. Codex's own sandbox and
+                // approval policy stay exactly in that mode; removing Fox's
+                // outer SRT layer must not turn it into full access.
+                spec.session_env = crate::backends::codex::session_env_for_mode(crate::native_permission::codex_mode(native));
             }
             AgentBackend::Pi => {
                 let gate = self.pi_gate_script();
@@ -369,26 +358,14 @@ impl HostLaunchConfig {
             }
             _ => {}
         }
-        // Tool-chain variables (RUSTUP_HOME, CARGO_HOME ...) the Host chose to
-        // pass: full access only. In sandboxed mode they would point outside
-        // the readable roots and widen nothing safely; they are dropped.
-        if mode == PermissionMode::FullAccess {
-            for name in &self.env_passthrough {
-                if let Some(value) = std::env::var_os(name) {
-                    spec.session_env.retain(|(key, _)| key != name);
-                    spec.session_env.push((name.clone(), value.to_string_lossy().into_owned()));
-                }
+        // Tool-chain variables (RUSTUP_HOME, CARGO_HOME ...) the Host chose
+        // to pass. There is no outer SRT policy to hide them from any more;
+        // this remains an explicit Host allowlist, not the whole environment.
+        for name in &self.env_passthrough {
+            if let Some(value) = std::env::var_os(name) {
+                spec.session_env.retain(|(key, _)| key != name);
+                spec.session_env.push((name.clone(), value.to_string_lossy().into_owned()));
             }
-        }
-        // A loopback model gateway (e.g. 127.0.0.1:3425) on the allowlist:
-        // srt on Linux / macOS sets NO_PROXY=localhost,127.0.0.1, so the
-        // backend would bypass the proxy and reach nothing inside the network
-        // namespace. Clear it for the backend so the request goes through the
-        // srt proxy, which enforces the allowlist (srt on Windows already
-        // drops NO_PROXY).
-        if mode == PermissionMode::Sandboxed && self.os != HostOs::Windows && self.allows_loopback(backend) {
-            spec.session_env.push(("NO_PROXY".into(), String::new()));
-            spec.session_env.push(("no_proxy".into(), String::new()));
         }
         Ok((spec, pi_launch))
     }
@@ -542,34 +519,40 @@ pub const LOOPBACK_REFUSAL_REMEDY_FORBIDDEN: &str = LOOPBACK_REFUSAL_REMEDY;
 pub const FULL_ACCESS_FORBIDDEN_REASON: &str = "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），外部后端只能在沙箱中运行";
 
 impl HostLaunchConfig {
-    /// Full access: the private HOME and session temp root a sandboxed launch
-    /// of the same request would use. Linux / macOS:
-    /// `<fox data>/sandbox-homes/<project uuid>/<backend>` and
-    /// `<state>/sandbox-tmp`. Windows: the per-user private root
-    /// (`%ProgramData%\Fox\sandbox\<SID>\{homes,tmp}`), created and
-    /// verified exactly as for the sandbox (its base comes from "启用沙箱").
+    /// The private HOME and session temp root of an external backend.
+    ///
+    /// These are Fox-managed directories, not an SRT boundary. On Windows the
+    /// old `%ProgramData%\Fox\sandbox\<SID>` location is reused when it
+    /// already exists, so existing logins survive the removal of the outer
+    /// SRT layer; otherwise (and on every new install without SRT) the
+    /// per-user `<fox data>/agent-homes` is used. Nothing here reads the SRT
+    /// registry, runs a preflight or needs the srt sandbox account.
     pub fn full_access_private(&self, request: &LaunchRequest) -> Result<FullAccessPrivate, LaunchFailure> {
         let project_uuid = request.project_uuid.clone().unwrap_or_default();
-        let (homes_root, tmp_root) = if self.os == HostOs::Windows {
-            use crate::winacl::RealWindowsAcl;
-            use crate::winruntime::{known_srt_sids, prepare_windows_private_root, WindowsPrivateLayout};
-            let layout = WindowsPrivateLayout::for_current_user(&RealWindowsAcl)?;
-            let known = known_srt_sids(&self.state_root)?;
-            prepare_windows_private_root(&layout, &RealWindowsAcl, &RealWindowsAcl, &known)?;
-            (layout.homes_root(), layout.tmp_root())
-        } else {
-            (self.fox_data.join("sandbox-homes"), self.state_root.join("sandbox-tmp"))
-        };
+        let (homes_root, tmp_root) = self.external_private_roots();
         let home = PrivateHomes::new(homes_root).home_for(&project_uuid, request.backend)?;
         Ok(FullAccessPrivate { private_home: home.path, tmp_root })
     }
 
-    /// The private HOME of `backend` in project `project_uuid` (the one both
-    /// modes use). Reads only; nothing is created.
+    /// External backends' private roots. Deliberately independent of SRT:
+    /// reuse the old per-user ProgramData root only when it already exists.
+    fn external_private_roots(&self) -> (PathBuf, PathBuf) {
+        if self.os == HostOs::Windows {
+            use crate::winacl::RealWindowsAcl;
+            use crate::winruntime::WindowsPrivateLayout;
+            if let Ok(layout) = WindowsPrivateLayout::for_current_user(&RealWindowsAcl) {
+                if layout.user_root().is_dir() {
+                    return (layout.homes_root(), layout.tmp_root());
+                }
+            }
+        }
+        (self.fox_data.join("agent-homes"), self.state_root.join("agent-tmp"))
+    }
+
+    /// The private HOME of `backend` in project `project_uuid` (used by every
+    /// external launch). Reads only; nothing is created.
     pub fn private_home_path(&self, project_uuid: &str, backend: AgentBackend) -> Result<PathBuf, LaunchFailure> {
-        let root = self
-            .sandbox_homes_root()
-            .ok_or_else(|| LaunchFailure::new("sandbox_runtime_not_installed", "Fox 私有 HOME 的根目录不可用（Windows 需先启用一次沙箱）"))?;
+        let (root, _) = self.external_private_roots();
         Ok(PrivateHomes::new(root).home_for(project_uuid, backend)?.path)
     }
 
@@ -711,15 +694,12 @@ impl HostLaunchConfig {
         if backend == AgentBackend::Fox || projects.is_empty() {
             return Err(LaunchFailure::new("agent_backend_import_invalid", "没有可导入的外部后端或项目"));
         }
-        let prepare_windows = || -> Result<PathBuf, LaunchFailure> {
-            use crate::winacl::RealWindowsAcl;
-            use crate::winruntime::{known_srt_sids, prepare_windows_private_root, WindowsPrivateLayout};
-            let layout = WindowsPrivateLayout::for_current_user(&RealWindowsAcl)?;
-            let known = known_srt_sids(&self.state_root)?;
-            prepare_windows_private_root(&layout, &RealWindowsAcl, &RealWindowsAcl, &known)?;
-            Ok(layout.homes_root())
-        };
-        let homes_root = if self.os == HostOs::Windows { prepare_windows()? } else { self.fox_data.join("sandbox-homes") };
+        // Import into the same private HOME a launch will read. This must
+        // not require the SRT registry, a sandbox account or a preflight.
+        let (homes_root, _) = self.external_private_roots();
+        std::fs::create_dir_all(&homes_root).map_err(|error| {
+            LaunchFailure::new("agent_backend_import_failed", format!("cannot create {}: {error}", homes_root.display()))
+        })?;
         let homes = PrivateHomes::new(homes_root);
         let targets = projects
             .iter()
@@ -744,22 +724,9 @@ impl HostLaunchConfig {
                     .map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_import_failed", format!("文件已导入，但模型端点授权未完成：{error}")))?;
             }
         }
-        if self.os == HostOs::Windows {
-            prepare_windows()?;
-        }
         Ok(report)
     }
 
-    /// Root of the private HOMEs a sandboxed launch on this OS uses (Windows:
-    /// the per-user private root; elsewhere `<fox data>/sandbox-homes`).
-    /// Reads only; nothing is created.
-    fn sandbox_homes_root(&self) -> Option<PathBuf> {
-        if self.os == HostOs::Windows {
-            crate::winruntime::WindowsPrivateLayout::for_current_user(&crate::winacl::RealWindowsAcl).ok().map(|layout| layout.homes_root())
-        } else {
-            Some(self.fox_data.join("sandbox-homes"))
-        }
-    }
 
     /// Refuse a sandboxed DeepSeek launch whose base URL (the private HOME's
     /// dsh config, [`crate::backends::deepseek::base_url_candidates`]) names a
@@ -825,110 +792,43 @@ impl HostLauncher {
         result.map_err(|error| LaunchFailure::new("agent_backend_version_mismatch", error))
     }
 
-    async fn launch_now(config: HostLaunchConfig, request: LaunchRequest, network: Option<crate::network::NetworkCallback>) -> Result<Launched, LaunchFailure> {
-        let mode = config.permission_mode(&request);
+    async fn launch_now(config: HostLaunchConfig, request: LaunchRequest, _network: Option<crate::network::NetworkCallback>) -> Result<Launched, LaunchFailure> {
+        // External Agents are not wrapped in Fox's SRT sandbox any more.
+        // Their own native sandbox, approval and permission settings remain
+        // authoritative. The private HOME is still Fox-managed.
+        let mode = PermissionMode::FullAccess;
         if request.backend == AgentBackend::Pi && crate::launch::program_override(AgentBackend::Pi).is_none() && !config.runtime_proxy_adapter_verified(AgentBackend::Pi) {
-            return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "pi 运行时缺少已验证的模型错误与沙箱代理适配")
-                .remedy("安装或修复 Fox 外部运行时 0.1.3 后重试；当前会话的权限模式无需更改"));
+            return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "pi 运行时缺少已验证的模型错误适配")
+                .remedy("安装或修复 Fox 外部运行时后重试"));
         }
+        // The native mode is the user's stored per-Agent choice. `mode` here
+        // only says that Fox adds no outer layer, so it must not be folded
+        // into that choice.
         let (mut spec, pi_launch) = config.launch_spec_with(request.backend, mode, request.native_mode(mode), &request.project_root)?;
-        // Unified login (settings batch, item 6) first, so the loopback and
-        // missing-login checks below see the generated files. The Codex key
-        // goes into the backend's environment only (never config.toml).
+        // Unified login first: the Codex key goes into the backend's
+        // environment only (never config.toml).
         if let Some(report) = config.apply_unified_login(&request)? {
             for (name, value) in &report.env {
                 spec.session_env.retain(|(key, _)| key != name);
                 spec.session_env.push((name.clone(), value.expose().to_owned()));
             }
         }
-        // DeepSeek + loopback gateway + sandbox: refuse now, not after the
-        // first prompt fails with "Connection error".
-        if let Some(refusal) = config.sandbox_homes_root().and_then(|homes| config.loopback_refusal(&request, mode, homes)) {
-            return Err(refusal);
-        }
         // No login at all: refuse before anything starts, so the first run of
         // a new project shows the login card instead of the backend's own
-        // error (80b1622 acceptance: codex-acp exited before initialize).
+        // error (codex-acp exits before initialize).
         if let Some(refusal) = config.missing_login_refusal(&request) {
             return Err(refusal);
         }
-        if mode == PermissionMode::Sandboxed {
-            let home = config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend)?;
-            if let Some(endpoint) = config.model_endpoint(&request, &home)? {
-                if endpoint.loopback && !config.runtime_proxy_adapter_verified(request.backend) && request.backend == AgentBackend::Deepseek {
-                    return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "当前 DeepSeek 运行时不能通过沙箱代理访问本机模型").remedy("安装带 Fox 模型代理适配的运行时，然后重试当前沙箱会话"));
-                }
-                if endpoint.loopback {
-                    spec.session_env.push(("NO_PROXY".into(), String::new()));
-                    spec.session_env.push(("no_proxy".into(), String::new()));
-                }
-                spec.session_env.push(("FOX_MODEL_ENDPOINT".into(), format!("{}://{}", endpoint.scheme, endpoint.entry)));
-                spec.session_env.push(("FOX_MODEL_PROXY_REQUIRED".into(), "1".into()));
-            }
-        }
         let os = config.os;
-        // Windows sandboxed: private layout + srt registry + ancestor ACEs.
-        let mut windows: Option<WindowsSandboxContext> = None;
-        let mut prepared = match mode {
-            // Full access lifts the isolation only: HOME (Windows
-            // USERPROFILE / APPDATA / LOCALAPPDATA), XDG_*, temp and the
-            // backend's own home still point at the private HOME of this
-            // project x backend, the one the sandbox uses.
-            PermissionMode::FullAccess => {
-                let private = config.full_access_private(&request)?;
-                prepare_full_access(spec, &request.session_key, &private, os)?
-            }
-            PermissionMode::Sandboxed => {
-                let install = config.srt_install().ok_or_else(|| {
-                    LaunchFailure::from(
-                        SandboxError::new(SandboxErrorCode::SandboxDependencyMissing, format!("Node is not installed in {}", config.runtime_root.display()))
-                            .remedy("安装 Fox 的外部后端运行时（含 Node、srt 与后端）"),
-                    )
-                })?;
-                let ready = preflight(&install, &RealProbe);
-                let (homes_root, launcher) = match ready {
-                    Err(error) => (config.fox_data.join("sandbox-homes"), Err(error)),
-                    Ok(ready) => {
-                        if os == HostOs::Windows {
-                            let context = WindowsSandboxContext::prepare(&config.state_root)?;
-                            let launcher = SrtLauncher::new(ready, config.state_root.clone())
-                                .with_managed_runtime_root(config.runtime_root.clone())
-                                .with_tmp_root(context.layout.tmp_root())
-                                .with_srt_sandbox_sid(context.sid.clone());
-                            let homes = context.layout.homes_root();
-                            windows = Some(context);
-                            (homes, Ok(launcher))
-                        } else {
-                            (config.fox_data.join("sandbox-homes"), Ok(SrtLauncher::new(ready, config.state_root.clone())))
-                        }
-                    }
-                };
-                let policy = config.sandbox_policy(&request, homes_root);
-                let setup_error;
-                let setup = match (&launcher, &policy) {
-                    (Ok(launcher), Ok(policy)) => SandboxSetup::Ready { launcher, policy },
-                    (Err(error), _) | (_, Err(error)) => {
-                        setup_error = error.clone();
-                        SandboxSetup::Unavailable(setup_error)
-                    }
-                };
-                prepare_launch(mode, spec, &request.session_key, setup, os)?
-            }
-        };
-        let network_broker = if mode == PermissionMode::Sandboxed {
-            network.map(|callback| crate::network::NetworkBroker::attach(&mut prepared, callback))
-                .transpose().map_err(|error| LaunchFailure::new("sandbox_network_broker_failed", error))?
-        } else { None };
+        // No SRT preflight, no srt settings, no bridge, no network broker:
+        // the external process is a normal child of the Fox Host and keeps
+        // whatever native protection its Agent provides.
+        let private = config.full_access_private(&request)?;
+        let prepared = prepare_full_access(spec, &request.session_key, &private, os)?;
         let declaration = prepared.declaration.clone();
         let cwd = request.project_root.clone();
-        let (connection, on_closed) = match windows {
-            None => (AcpConnection::spawn_prepared_detailed(prepared, &cwd).await?, None),
-            Some(context) => context.spawn(prepared, cwd, request.session_key.clone()).await?,
-        };
-        let on_closed: Option<Box<dyn FnOnce() + Send>> = Some(Box::new(move || {
-            drop(network_broker);
-            if let Some(callback) = on_closed { callback(); }
-        }));
+        let connection = AcpConnection::spawn_prepared_detailed(prepared, &cwd).await?;
+        let on_closed: Option<Box<dyn FnOnce() + Send>> = None;
         let mut connection = connection;
         // Peek at initialize (it is the first queued event) for the version
         // check without consuming it for the runtime.
@@ -1005,67 +905,6 @@ impl ExternalLauncher for HostLauncher {
     }
 }
 
-/// Windows sandboxed launch context (docs/sandbox.md 7.5, 7.6): the per-user
-/// private root, the srt sandbox SID and the ancestor-ACE coordinator. The
-/// spawn runs inside the global srt transition on a blocking thread.
-struct WindowsSandboxContext {
-    layout: crate::winruntime::WindowsPrivateLayout,
-    sid: String,
-    coordinator: std::sync::Arc<crate::winancestor::AncestorAceCoordinator>,
-}
-
-impl WindowsSandboxContext {
-    fn prepare(state_root: &Path) -> Result<Self, LaunchFailure> {
-        use crate::winacl::RealWindowsAcl;
-        use crate::winruntime::{prepare_windows_private_root, read_srt_registry, record_srt_sid, WindowsPrivateLayout};
-        let registry = read_srt_registry(&RealProbe)?;
-        let known = record_srt_sid(state_root, &registry)?;
-        let layout = WindowsPrivateLayout::for_current_user(&RealWindowsAcl)?;
-        prepare_windows_private_root(&layout, &RealWindowsAcl, &RealWindowsAcl, &known)?;
-        let acl = std::sync::Arc::new(RealWindowsAcl);
-        let coordinator = crate::winancestor::AncestorAceCoordinator::new(state_root.to_path_buf(), acl.clone(), acl)
-            .with_srt_acl_lock(crate::winancestor::srt_acl_lock_path());
-        Ok(Self { layout, sid: registry.sandbox_user_sid, coordinator: std::sync::Arc::new(coordinator) })
-    }
-
-    /// Ancestor ACEs + spawn inside one srt transition; the returned callback
-    /// ends the ancestor session inside another transition after close.
-    async fn spawn(
-        self,
-        prepared: crate::sandbox::PreparedLaunch,
-        cwd: PathBuf,
-        session_key: String,
-    ) -> Result<(AcpConnection, Option<Box<dyn FnOnce() + Send>>), LaunchFailure> {
-        let handle = tokio::runtime::Handle::current();
-        let coordinator = std::sync::Arc::clone(&self.coordinator);
-        let sid = self.sid.clone();
-        let key = session_key.clone();
-        let spawned = tokio::task::spawn_blocking(move || -> Result<AcpConnection, LaunchFailure> {
-            let mut transition = coordinator.transition()?;
-            if let Err(error) = transition.begin_session(&key, &sid, &prepared.windows_ancestor_aces) {
-                transition.finish();
-                return Err(error.into());
-            }
-            let result = handle.block_on(AcpConnection::spawn_prepared_detailed(prepared, &cwd));
-            if result.is_err() {
-                let _ = transition.end_session(&key);
-            }
-            transition.finish();
-            result.map_err(LaunchFailure::from)
-        })
-        .await
-        .map_err(|error| LaunchFailure::new("spawn_failed", format!("launch task failed: {error}")))??;
-        let coordinator = std::sync::Arc::clone(&self.coordinator);
-        let on_closed: Box<dyn FnOnce() + Send> = Box::new(move || {
-            if let Ok(mut transition) = coordinator.transition() {
-                let _ = transition.end_session(&session_key);
-                transition.finish();
-            }
-        });
-        Ok((spawned, Some(on_closed)))
-    }
-}
-
 /// Startup crash recovery on Windows: remove every ancestor ACE left by a
 /// previous Fox process (no session is alive at startup). No-op elsewhere.
 pub fn recover_at_startup(config: &HostLaunchConfig) -> Result<(), String> {
@@ -1081,6 +920,7 @@ pub fn recover_at_startup(config: &HostLaunchConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::SandboxErrorCode;
 
     #[test]
     fn strict_directory_requirement_is_preserved_by_host_policy() {
@@ -1128,19 +968,15 @@ mod tests {
     }
 
     #[test]
-    fn mode_is_sandboxed_unless_requested_granted_and_not_forbidden() {
+    fn full_access_switch_parsing_is_compatible_but_does_not_add_a_wrapper() {
         let root = std::env::temp_dir().join("fox-ext-launch-mode");
         let mut config = config(&root);
         let req = request(AgentBackend::Pi, &root);
-        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed);
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         config.full_access = FullAccessSwitch::parse(Some("1"));
         assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
-        config.full_access = FullAccessSwitch::parse(Some("conversation:other"));
-        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "a grant for another conversation does not apply");
-        config.full_access = FullAccessSwitch::parse(Some("conversation:c1"));
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         config.full_access_forbidden = true;
-        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "enterprise switch wins");
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         assert_eq!(FullAccessSwitch::parse(Some(" off ")), FullAccessSwitch::Off);
         assert_eq!(FullAccessSwitch::parse(None), FullAccessSwitch::Off);
     }
@@ -1156,7 +992,7 @@ mod tests {
         let mut req = request(AgentBackend::Deepseek, &root);
         let probe = config.credential_probe(&req).unwrap();
         assert_eq!(probe.state, crate::onboarding::CredentialState::MissingCredentials);
-        assert_eq!(probe.private_home, root.join("data/sandbox-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek"));
+        assert_eq!(probe.private_home, root.join("data/agent-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek"));
         let real = root.join("real");
         std::fs::create_dir_all(real.join(".dsh/profiles/acp")).unwrap();
         std::fs::write(real.join(".dsh/.env"), "DEEPSEEK_API_KEY=sk-glue-secret-1
@@ -1178,7 +1014,7 @@ mod tests {
         // Overwrite: backed up under each private HOME.
         let over = config.import_credentials(AgentBackend::Deepseek, &projects[..1], &real, &selected[1..], true).unwrap();
         assert_eq!(over.backups.len(), 1);
-        assert!(over.backups[0].directory.starts_with(root.join("data/sandbox-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek").join(crate::onboarding::BACKUP_DIR)));
+        assert!(over.backups[0].directory.starts_with(root.join("data/agent-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek").join(crate::onboarding::BACKUP_DIR)));
         assert!(!report.audit_event().to_string().contains("sk-glue-secret-1"));
         // Sandboxed + loopback base URL: refused category; full access: ready.
         let probe = config.credential_probe(&req).unwrap();
@@ -1225,29 +1061,26 @@ mod tests {
         assert!(crate::model_endpoint::import_approved(&config.state_root, AgentBackend::Pi, &home, &native).unwrap());
     }
 
-    /// UX batch ②: the user's per-conversation choice (persisted, carried as
-    /// `LaunchRequest::full_access_granted`) grants full access to exactly
-    /// that conversation, OR-ed with the engineering switch; FORBIDDEN beats
-    /// both.
+    /// The outer Fox layer is gone for every external backend. The old
+    /// full-access flag remains persisted data, but it must not decide
+    /// whether a process is wrapped and must not rewrite native permissions.
     #[test]
-    fn the_conversation_grant_from_the_ui_or_the_switch_and_forbidden_wins() {
+    fn external_permission_mode_has_no_fox_sandbox_and_keeps_native_choices() {
         let root = std::env::temp_dir().join("fox-ext-launch-grant");
         let mut config = config(&root);
         let mut req = request(AgentBackend::Deepseek, &root);
-        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "sandboxed by default");
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         req.full_access_granted = true;
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess, "chosen at creation");
-        let mut other = request(AgentBackend::Deepseek, &root);
-        other.conversation_id = "c2".into();
-        assert_eq!(config.permission_mode(&other), PermissionMode::Sandboxed, "the grant is per conversation");
-        req.full_access_granted = false;
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         config.full_access = FullAccessSwitch::All;
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess, "engineering switch alone");
-        req.full_access_granted = true;
         config.full_access_forbidden = true;
-        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "FORBIDDEN beats the UI grant and the switch");
-        config.full_access = FullAccessSwitch::Off;
-        assert_eq!(config.permission_mode(&req), PermissionMode::Sandboxed, "FORBIDDEN beats the UI grant alone");
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
+        req.native_permission = Some("workspace-write-never".into());
+        assert_eq!(req.native_mode(PermissionMode::FullAccess), "workspace-write-never");
+        req.backend = AgentBackend::Codex;
+        req.native_permission = Some("agent-full-access".into());
+        assert_eq!(req.native_mode(PermissionMode::FullAccess), "agent-full-access");
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
     }
 
     #[test]
@@ -1279,82 +1112,71 @@ mod tests {
         assert_eq!(launch, PiLaunch::Gated);
         assert!(spec.session_env.iter().any(|(key, value)| key == "FOX_PI_BIN" && Path::new(value) == bin.join("pi")));
         assert!(spec.session_env.iter().any(|(key, value)| key == "PI_ACP_PI_COMMAND" && Path::new(value) == gate_dir.join("pi-gated.sh")));
-        // Codex: workspace-write mode; tool-chain passthrough only in full access.
+        // Codex: the Agent's own mode is passed through untouched, and the
+        // tool-chain passthrough is an explicit Host allowlist, not an SRT
+        // sandbox decision.
         let codex = under(&root, &["runtime", "backends", "codex", "node_modules", ".bin"]);
         std::fs::create_dir_all(&codex).unwrap();
         std::fs::write(codex.join("codex-acp"), "").unwrap();
         config.env_passthrough = vec!["PATH".into()];
         let (spec, _) = config.launch_spec(AgentBackend::Codex, PermissionMode::FullAccess, &root).unwrap();
-        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "agent-full-access"), "full access is Codex's own agent-full-access");
-        assert!(spec.session_env.iter().any(|(key, _)| key == "PATH"), "passthrough in full access");
+        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"), "mode FullAccess no longer maps to Codex full access");
+        assert!(spec.session_env.iter().any(|(key, _)| key == "PATH"), "explicit Host passthrough");
         let (spec, _) = config.launch_spec(AgentBackend::Codex, PermissionMode::Sandboxed, &root).unwrap();
         assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"));
-        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::Sandboxed, "agent", &root).unwrap();
+        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::FullAccess, "agent", &root).unwrap();
         assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "agent"));
-        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::Sandboxed, "agent-full-access", &root).unwrap();
-        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"), "never full access inside srt");
-        assert!(!spec.session_env.iter().any(|(key, _)| key == "PATH"), "never in sandboxed mode");
+        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::FullAccess, "agent-full-access", &root).unwrap();
+        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "agent-full-access"), "the Agent's native full access is not rewritten");
+        assert!(spec.session_env.iter().any(|(key, _)| key == "PATH"), "passthrough is unchanged");
         // DeepSeek managed (runtime package 0.1.1 layout: `backends/dsh`): the
         // installed patch must match byte for byte.
         let dsh = under(&root, &["runtime", "backends", "dsh", "node_modules", ".bin"]);
         std::fs::create_dir_all(&dsh).unwrap();
         std::fs::write(dsh.join("dsh"), "").unwrap();
-        let error = config.launch_spec(AgentBackend::Deepseek, PermissionMode::Sandboxed, &root).unwrap_err();
-        assert_eq!(error.code, "agent_backend_not_installed");
-        let patch_policy = crate::backends::deepseek::HostPolicy { workspace_write: true, network: false };
+        let patch_policy = crate::backends::deepseek::HostPolicy { workspace_write: true, network: true };
         let patch = crate::backends::deepseek::default_patch_path(&config.runtime_root, &patch_policy);
         std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
         std::fs::write(&patch, crate::backends::deepseek::policy_patch(&patch_policy).patch_yaml).unwrap();
         let (spec, _) = config.launch_spec(AgentBackend::Deepseek, PermissionMode::Sandboxed, &root).unwrap();
         assert!(spec.args.iter().any(|arg| Path::new(arg) == patch));
         assert_eq!(Path::new(&spec.program), dsh.join("dsh"));
-        // The ask preset needs its own installed variant (approval: ask).
-        let error = config.launch_spec_with(AgentBackend::Deepseek, PermissionMode::Sandboxed, "workspace-write", &root).unwrap_err();
-        assert_eq!(error.code, "agent_backend_not_installed");
-        let ask = crate::backends::deepseek::default_preset_patch_path(&config.runtime_root, crate::backends::deepseek::DshPreset::WorkspaceWriteAsk, false);
-        std::fs::write(&ask, crate::backends::deepseek::preset_patch(crate::backends::deepseek::DshPreset::WorkspaceWriteAsk, false).patch_yaml).unwrap();
+        // The ask preset is generated into Fox state when the runtime
+        // package does not carry that variant (no SRT preflight involved).
         let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, PermissionMode::Sandboxed, "workspace-write", &root).unwrap();
-        assert!(spec.args.iter().any(|arg| Path::new(arg) == ask));
-        assert!(std::fs::read_to_string(&ask).unwrap().contains("policy: ask"));
-        // Full access: dsh's own danger-full-access preset (written to Fox state when not installed).
-        let (spec, _) = config.launch_spec(AgentBackend::Deepseek, PermissionMode::FullAccess, &root).unwrap();
+        let ask = spec.args.iter().find(|arg| arg.ends_with("workspace-write-ask.yml")).expect("ask patch argument");
+        assert!(std::fs::read_to_string(ask).unwrap().contains("policy: ask"));
+        // Native dsh danger-full-access is selected only when the user stored
+        // it; the old Fox mode no longer produces it.
+        let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, PermissionMode::FullAccess, "danger-full-access", &root).unwrap();
         assert!(spec.args.iter().any(|arg| arg.ends_with("danger-full-access.yml")), "{:?}", spec.args);
-        // A local gateway on the pi allowlist clears NO_PROXY for the backend (Linux / macOS).
-        config.extra_domains = parse_extra_domains(Some("pi=127.0.0.1:3425"));
-        assert!(config.allows_loopback(AgentBackend::Pi));
-        let (spec, _) = config.launch_spec(AgentBackend::Pi, PermissionMode::Sandboxed, &root).unwrap();
-        assert!(spec.session_env.iter().any(|(key, value)| key == "NO_PROXY" && value.is_empty()));
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The production launcher refuses a sandboxed DeepSeek session with a
-    /// loopback base URL before preflight / srt (here no srt is installed:
-    /// without the refusal the error would be `sandbox_dependency_missing`).
+    /// Removing the outer SRT layer also removes the loopback-only refusal:
+    /// a DeepSeek session with a local gateway is started as a normal child
+    /// (and here fails on the empty dsh entry, never on a missing sandbox).
     #[tokio::test(flavor = "current_thread")]
-    async fn host_launcher_refuses_a_sandboxed_deepseek_loopback_gateway_before_starting() {
+    async fn host_launcher_does_not_refuse_a_native_deepseek_loopback_gateway() {
         let root = std::env::temp_dir().join(format!("fox-ext-launch-dsh-refuse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let config = config(&root);
         let dsh = root.join("runtime").join("backends").join("dsh").join("node_modules").join(".bin");
         std::fs::create_dir_all(&dsh).unwrap();
         std::fs::write(dsh.join("dsh"), "").unwrap();
-        let patch_policy = crate::backends::deepseek::HostPolicy { workspace_write: true, network: false };
+        let patch_policy = crate::backends::deepseek::HostPolicy { workspace_write: true, network: true };
         let patch = crate::backends::deepseek::default_patch_path(&config.runtime_root, &patch_policy);
         std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
         std::fs::write(&patch, crate::backends::deepseek::policy_patch(&patch_policy).patch_yaml).unwrap();
         let request = request(AgentBackend::Deepseek, &root);
         std::fs::create_dir_all(&request.project_root).unwrap();
-        let home = PrivateHomes::new(config.fox_data.join("sandbox-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Deepseek).unwrap();
+        let home = PrivateHomes::new(config.fox_data.join("agent-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Deepseek).unwrap();
         std::fs::create_dir_all(home.path.join(".dsh")).unwrap();
         let launcher = HostLauncher::new(config.clone());
-        // Remote base URL: gets past the refusal (and then fails on the missing srt).
-        std::fs::write(home.path.join(".dsh").join("cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: https://api.deepseek.com/anthropic\n").unwrap();
-        let error = launcher.launch(request.clone()).await.err().expect("no srt here");
-        assert_ne!(error.code, LOOPBACK_REQUIRES_FULL_ACCESS);
-        // Loopback base URL: refused with the dedicated code.
         std::fs::write(home.path.join(".dsh").join("cordis.patch.yml"), "- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:3425/anthropic\n").unwrap();
-        let error = launcher.launch(request.clone()).await.err().expect("refused");
-        assert_eq!(error.code, LOOPBACK_REQUIRES_FULL_ACCESS, "{error:?}");
+        let error = launcher.launch(request.clone()).await.err().expect("empty dsh exits");
+        assert_ne!(error.code, LOOPBACK_REQUIRES_FULL_ACCESS, "{error:?}");
+        assert_ne!(error.code, "sandbox_dependency_missing", "{error:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1384,7 +1206,7 @@ mod tests {
         let detail = serde_json::to_string(&error.detail).unwrap();
         assert!(detail.contains(".codex/auth.json") && detail.contains("missing_credentials"), "{detail}");
         // A login in the private HOME: past the refusal.
-        let home = PrivateHomes::new(config.fox_data.join("sandbox-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Codex).unwrap().path;
+        let home = PrivateHomes::new(config.fox_data.join("agent-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Codex).unwrap().path;
         std::fs::create_dir_all(home.join(".codex")).unwrap();
         std::fs::write(home.join(".codex").join("auth.json"), r#"{"OPENAI_API_KEY":"sk-fox-test-not-real"}"#).unwrap();
         let error = launcher.launch(request.clone()).await.err().expect("no srt here");
@@ -1417,16 +1239,57 @@ mod tests {
         let request = request(AgentBackend::Pi, &root);
         std::fs::create_dir_all(&request.project_root).unwrap();
         assert_eq!(config.permission_mode(&request), PermissionMode::FullAccess);
-        let home = PrivateHomes::new(config.fox_data.join("sandbox-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Pi).unwrap().path;
+        let home = PrivateHomes::new(config.fox_data.join("agent-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Pi).unwrap().path;
         assert!(!home.exists());
         let _ = HostLauncher::new(config.clone()).launch(request.clone()).await;
         let recorded = std::fs::read_to_string(home.join("fox-env.txt")).expect("the backend wrote under the private HOME");
-        let tmp = config.state_root.join("sandbox-tmp").join("s1");
+        let tmp = config.state_root.join("agent-tmp").join("s1");
         assert!(recorded.contains(&format!("argv0={}\n", script.display())), "not wrapped: {recorded}");
         assert!(recorded.contains(&format!("HOME={}\n", home.display())), "{recorded}");
         assert!(recorded.contains(&format!("TMPDIR={}\n", tmp.display())), "{recorded}");
         assert!(recorded.contains(&format!("XDG_CONFIG_HOME={}\n", home.join(".config").display())), "{recorded}");
         assert!(recorded.contains("PROXY=\n"), "no srt-only variables: {recorded}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows counterpart of the real-process check above: the codex-acp
+    /// entry that Fox launches is the Agent adapter itself, not srt's node
+    /// cli.js, and it receives the private HOME and no SRT proxy variables.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_launcher_external_process_is_not_wrapped_by_srt_on_windows() {
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = config(&root);
+        let config = HostLaunchConfig { os: HostOs::Windows, ..config };
+        let bin = root.join("runtime").join("backends").join("codex").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("codex-acp.cmd");
+        std::fs::write(&script, r#"@echo off
+> "%HOME%\fox-launch.txt" (
+  echo argv0=%0
+  echo HOME=%HOME%
+  echo CODEX_HOME=%CODEX_HOME%
+  echo NODE_USE_ENV_PROXY=%NODE_USE_ENV_PROXY%
+)
+exit /b 0
+"#).unwrap();
+        let request = request(AgentBackend::Codex, &root);
+        std::fs::create_dir_all(&request.project_root).unwrap();
+        let home = config.private_home_path(request.project_uuid.as_deref().unwrap(), AgentBackend::Codex).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex").join("auth.json"), r#"{"OPENAI_API_KEY":"sk-fox-test-not-real"}"#).unwrap();
+        let result = HostLauncher::new(config.clone()).launch(request).await;
+        if let Err(error) = &result { eprintln!("launch error after process exit: {error:?}"); }
+        let recorded = std::fs::read_to_string(home.join("fox-launch.txt")).unwrap_or_else(|error| {
+            panic!("the backend wrote no recording under {}: {error}", home.display())
+        });
+        assert!(recorded.to_ascii_lowercase().contains("argv0=") && recorded.to_ascii_lowercase().contains("codex-acp.cmd"), "not the Agent adapter: {recorded}");
+        assert!(recorded.contains(&format!("HOME={}\r\n", home.display())) || recorded.contains(&format!("HOME={}\n", home.display())), "{recorded}");
+        assert!(recorded.contains("NODE_USE_ENV_PROXY=\r\n") || recorded.contains("NODE_USE_ENV_PROXY=\n"), "no SRT proxy variables: {recorded}");
+        assert!(!recorded.to_ascii_lowercase().contains("srt"), "no SRT wrapper: {recorded}");
+        assert!(!recorded.contains("sk-fox-test-not-real"), "no credential value in the recording");
+        let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1493,7 +1356,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-endpoint-policy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let config = config(&root);
-        let homes = config.fox_data.join("sandbox-homes");
+        let homes = config.fox_data.join("agent-homes");
         let mut request = request(AgentBackend::Pi, &root);
         request.unified_login = Some(UnifiedLogin { provider_name: "DeepSeek".into(), base_url: "https://api.deepseek.com".into(), api_type: "openai-completions".into(), model: "deepseek-v4-pro".into(), api_key: Secret::new("sk-host-test"), responses_supported: None });
         let home = PrivateHomes::new(homes.clone()).home_for(request.project_uuid.as_deref().unwrap(), request.backend).unwrap().path;

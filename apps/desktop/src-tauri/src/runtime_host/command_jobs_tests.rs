@@ -150,7 +150,7 @@ impl Fixture {
         let mut evidence = ExecutionEvidence::NotStarted;
         let mut outcome = CallOutcome::Completed;
         let response = execute_inner(&self.database, &self.run_id, &input, &self.root,
-            &self.token, Duration::from_secs(30), proof, Some(&credential), &mut evidence, &mut outcome);
+            &self.token, Duration::from_secs(30), false, proof, Some(&credential), &mut evidence, &mut outcome);
         match evidence {
             ExecutionEvidence::Started => self.database.record_attempt_started(&self.run_id, &dispatch)?,
             ExecutionEvidence::Unknown => self.database.mark_attempt_unknown(&self.run_id, &dispatch)?,
@@ -168,7 +168,7 @@ impl Fixture {
         proof: Arc<dyn crate::process_jobs::BackendCapabilityProof>,
     ) -> Result<Value, String> {
         execute_inner(&self.database, &self.run_id, &value, &self.root, &self.token,
-            Duration::from_secs(30), proof, None,
+            Duration::from_secs(30), false, proof, None,
             &mut ExecutionEvidence::NotStarted, &mut CallOutcome::Completed)
     }
 
@@ -738,7 +738,7 @@ fn backend_change_at_manager_boundary_keeps_job_audit_without_start_evidence() {
     let mut evidence = ExecutionEvidence::NotStarted;
     let mut outcome = CallOutcome::Completed;
     let response = execute_inner(&fixture.database, &fixture.run_id, &input, &fixture.root,
-        &fixture.token, Duration::from_secs(30),
+        &fixture.token, Duration::from_secs(30), false,
         Arc::new(ChangingProof(std::sync::atomic::AtomicUsize::new(0))), Some(&credential),
         &mut evidence, &mut outcome).unwrap();
     assert_eq!(evidence, ExecutionEvidence::NotStarted);
@@ -766,7 +766,7 @@ fn real_child_start_returns_positive_evidence_independent_of_later_exit_failure(
     let mut evidence = ExecutionEvidence::NotStarted;
     let mut outcome = CallOutcome::Completed;
     let response = execute_inner(&fixture.database, &fixture.run_id, &input, &fixture.root,
-        &fixture.token, Duration::from_secs(30), authorized_proof(), Some(&credential),
+        &fixture.token, Duration::from_secs(30), false, authorized_proof(), Some(&credential),
         &mut evidence, &mut outcome).unwrap();
     assert_eq!(evidence, ExecutionEvidence::Started);
     let row = fixture.wait_terminal(job_id(&response));

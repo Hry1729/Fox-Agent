@@ -12,6 +12,7 @@ mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod external_backend;
+mod host_sandbox;
 mod external_model;
 mod kernel;
 mod kernel_compaction;

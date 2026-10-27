@@ -6,7 +6,7 @@
 // 完全访问权限」, dsh its presets, pi Fox's own answers. This file only turns
 // the Host's view into picker rows and decides which confirmation a pick
 // needs; the Host refuses anything the UI should not have offered.
-import { FULL_ACCESS_LOCK_NOTE, FULL_ACCESS_RISK_POINTS, REVOKE_FULL_ACCESS_NOTICE } from './agent-backend-onboarding'
+import { FULL_ACCESS_RISK_POINTS, REVOKE_FULL_ACCESS_NOTICE } from './agent-backend-onboarding'
 import { AGENT_BACKEND_LABELS, type AgentBackendId } from './agent-backend'
 
 export type NativeSwitchTiming = 'live' | 'next_turn_restart' | 'host_answered'
@@ -17,7 +17,7 @@ export interface NativePermissionOption {
   description: string
   /** The Agent's own name of what is configured. */
   native: string
-  /** This option is the Agent's full access (Fox's「完全访问」). */
+  /** This option is the Agent's own full-access mode. */
   fullAccess: boolean
   disabledReason: string | null
 }
@@ -71,18 +71,18 @@ export interface NativePermissionRow {
 export const NEXT_TURN_RESTART_BADGE = '下一轮重启生效'
 
 /**
- * Picker rows in the Agent's own names. Disabled rows keep their reason
- * (Codex「帮我批准」off OpenAI, FORBIDDEN, full access mid-session).
- * `sandboxedOnly` (设置) leaves the full-access option out: it is the
- * 「新外部会话使用完全访问」switch there.
+ * Picker rows in the Agent's own names. Disabled rows keep only the Host's
+ * reason (e.g. Codex「帮我批准」off OpenAI, or FORBIDDEN). The Agent's own
+ * full access is selectable in place; it is not a Fox sandbox mode.
+ * `sandboxedOnly` (设置) leaves the full-access option out of the default
+ * permission rows.
  */
 export function nativePermissionRows(view: NativePermissionView | null | undefined, options: { sandboxedOnly?: boolean } = {}): NativePermissionRow[] {
   if (!view) return []
   return view.catalog.options
     .filter((option) => !(options.sandboxedOnly && option.fullAccess))
     .map((option) => {
-      const locked = option.fullAccess && !view.draft && !view.fullAccess
-      const reason = option.disabledReason ?? (locked ? (view.fullAccessLockedReason ?? FULL_ACCESS_LOCK_NOTE) : null)
+      const reason = option.disabledReason
       return {
         value: option.id,
         label: option.label,
@@ -103,9 +103,9 @@ export function nativeSwitchBadge(view: NativePermissionView | null | undefined)
 export type NativePermissionChange =
   | { kind: 'none' }
   | { kind: 'refused'; reason: string }
-  /** A new conversation picks full access: the existing risk confirmation. */
+  /** The Agent's native full access: the risk confirmation. */
   | { kind: 'confirm_full_access'; points: readonly string[] }
-  /** Leaving full access mid-session: the existing revoke confirmation. */
+  /** Leaving the Agent's native full access: one confirmation. */
   | { kind: 'confirm_revoke'; notice: string }
   | { kind: 'apply' }
 
@@ -116,11 +116,9 @@ export function nativePermissionChange(view: NativePermissionView | null | undef
   if (!row) return { kind: 'refused', reason: '没有这个权限选项' }
   if (row.disabled) return { kind: 'refused', reason: row.reason ?? '不可用' }
   if (row.fullAccess) {
-    // Mid-session full access is never offered (row disabled above).
-    return view.draft ? { kind: 'confirm_full_access', points: FULL_ACCESS_RISK_POINTS } : { kind: 'none' }
+    return { kind: 'confirm_full_access', points: FULL_ACCESS_RISK_POINTS }
   }
   if (!view.draft && view.fullAccess) {
-    if (!view.fullAccessGranted) return { kind: 'refused', reason: '本会话的完全访问来自工程开关（FOX_EXTERNAL_FULL_ACCESS），不能在界面撤销' }
     return { kind: 'confirm_revoke', notice: REVOKE_FULL_ACCESS_NOTICE }
   }
   return { kind: 'apply' }

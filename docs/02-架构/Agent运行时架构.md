@@ -3,11 +3,11 @@
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：`services/agent-runtime`、`apps/desktop/src-tauri/src/runtime_host`、`crates/fox-agent-backend`、Runtime Adapter 契约<br>
-> 最后更新：2026-10-25
+> 最后更新：2026-10-26
 
 ## 目标与边界
 
-Fox 把 Agent Runtime 定义为可替换的模型执行适配层，而不是产品状态中心。会话先按外层 Agent 后端分流（Fox / DeepSeek Harness / pi，Codex 已实现但暂时隐藏，见[外层 Agent 后端](#外层-agent-后端四-agent)）；本文其余部分描述 Fox 自己的执行路径。Fox 的本地实现基于 Pi Coding Agent SDK，但对话、消息、Run、Goal、Task、Evidence、项目授权和审批都属于 Fox Host；替换 Pi 或增加其他 Agent 框架时，不应重写这些产品模型。
+Fox 把 Agent Runtime 定义为可替换的模型执行适配层，而不是产品状态中心。会话先按外层 Agent 后端分流（Fox / DeepSeek Harness / pi / Codex，见[外层 Agent 后端](#外层-agent-后端四-agent)）；本文其余部分描述 Fox 自己的执行路径。Fox 的本地实现基于 Pi Coding Agent SDK，但对话、消息、Run、Goal、Task、Evidence、项目授权和审批都属于 Fox Host；替换 Pi 或增加其他 Agent 框架时，不应重写这些产品模型。
 
 稳定边界如下：
 
@@ -57,7 +57,7 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 | `fox` | Fox | 内置，默认 | 现有 Fox 路径：Kernel / Authoritative（默认）或 Legacy（仅调试和旧 Run） | 进程内 Kernel（FoxBackend） |
 | `deepseek` | DeepSeek Harness（dsh） | 内置，实验 | `crate::external_backend` → `fox_agent_backend::external` | ACP v1：`dsh --profile acp`（锁定 `0.2.1-rc.2`） |
 | `pi` | pi | 内置 | 同上 | ACP v1：`pi-acp`（锁定 `0.0.34`）启动 pi `1.4.0` |
-| `codex` | Codex | **已实现，暂时隐藏** | 同上 | ACP v1：`codex-acp`（锁定 `2.2.2`） |
+| `codex` | Codex | 内置，可选 | 同上 | ACP v1：`codex-acp`（锁定 `2.2.2`） |
 
 `agent_backend` 与 Kernel 的 `engine_id`（`pi | codex | deepseek_harness`）不是同一个字段：`engine_id` 是 Fox 会话内部 Kernel 使用的模型引擎，保持历史语义；用过 Kernel Codex 引擎的旧会话仍是 `fox` 会话。
 
@@ -80,22 +80,23 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 | `0` / `off` / `false` / `none` / `no` | 关闭所有外部后端，新会话只能是 Fox；已有外部会话只读 |
 | 逗号或空格分隔的列表，如 `pi,deepseek` | 只保留列出的外部后端，其余关闭；无法识别的项被忽略并上报 |
 
-### Codex 暂时隐藏
+### Codex 已恢复可选
 
-产品定位是内置 Fox、dsh、pi 三个 Agent；Codex 以及其他 ACP Agent 以后通过通用的「自定义 ACP Agent」入口由用户自己安装、填写启动命令接入（**待办 / 规划中**，本版本没有这个入口）。在此之前：
+Codex 与 pi、DeepSeek Harness 一样，是可直接选择的外部 Agent：
 
-- 隐藏开关集中在一处：Host `AgentBackend::HIDDEN`（`crates/fox-agent-backend/src/port.rs`），前端镜像 `HIDDEN_AGENT_BACKENDS`（`agent-backend.ts`）。恢复显示时删掉这两处的条目即可。
-- 设置 →「新会话使用的 Agent」、新会话的 Agent 选择器、各 Agent 的默认权限、供应商协议的“适用于”列表都不列出 Codex。
-- 新建会话请求 `codex` 会被拒绝（`agent_backend_hidden`）；之前保存的 `default_backend = codex` 仍按原值保存，但有效值回退为 Fox，设置页给出说明。
+- 隐藏开关集中在一处：Host `AgentBackend::HIDDEN`（`crates/fox-agent-backend/src/port.rs`），前端镜像 `HIDDEN_AGENT_BACKENDS`（`agent-backend.ts`）；当前两者都为空。
+- 设置 →「新会话使用的 Agent」、新会话的 Agent 选择器、各 Agent 的默认权限、供应商协议的“适用于”列表都显示 Codex。
+- 新建会话可以请求 `codex`；之前保存的 `default_backend = codex` 继续有效。
 - 已有的 Codex 会话照常打开、查看历史，并按原有路由继续运行（仍受 `FOX_EXTERNAL_BACKENDS` 约束），不会被换成其他后端。
-- Codex 后端代码、能力声明和测试全部保留（`crates/fox-agent-backend/src/backends/codex.rs`、`tests/codex_backend.rs`）。
-- 这个隐藏开关独立于 `FOX_EXTERNAL_BACKENDS`，后者的语义不变。
+- Codex 后端代码、能力声明和测试全部保留（`crates/fox-agent-backend/src/backends/codex.rs`、`tests/codex_backend.rs`）；Codex 的原生沙箱/审批模式不会因为 Fox 不再套 SRT 而被改写。
+- `AgentBackend::HIDDEN` 仍保留为未来临时下线的唯一开关；`FOX_EXTERNAL_BACKENDS` 的语义不变。
 
 ### 外部后端的进程与沙箱
 
 - Host 侧 ACP 客户端使用官方 Rust 库 `agent-client-protocol`（`crates/fox-agent-backend/src/acp.rs`）。
 - 桌面 Host 只从 Fox 管理的运行时目录启动外部后端（`<runtime>/backends/<pi|codex|dsh>/...`，见 `crates/fox-agent-backend/src/external_launch.rs`），或开发用的 `FOX_PI_ACP_PROGRAM` / `FOX_CODEX_ACP_PROGRAM` / `FOX_DSH_PROGRAM`；**不会**通过 `npx` 启动，未安装时返回 `agent_backend_not_installed`。`npx` 入口只用于开发和真实二进制测试。
-- 进程只继承白名单环境变量；默认在沙箱（srt；Windows 另有私有目录布局、ACP bridge 和祖先 ACE）里运行，模式为 `sandboxed`。
+- 进程只继承白名单环境变量，并使用 Fox 管理的私有 HOME。**Fox 不再给外部后端套 SRT**：不安装/初始化 SRT、不做 SRT 预检、不注入 SRT settings、bridge、代理或网络 broker；进程边界由该 Agent 自己的原生沙箱/审批决定，Fox 只负责 ACP、审批转发、取消和凭据隔离。
+- 因此“是否使用 Fox SRT”和“外部 Agent 自己的权限模式”相互独立。即使 SRT 不可用，pi / DeepSeek Harness / Codex 仍可启动；反过来，选择原生完全访问也不会被解释成 Fox 外层授权。
 - 每个后端的登录信息放在 Fox 管理的私有 HOME 里，可以从真实 HOME 按白名单导入（只复制用户确认过的文件，按名字审计）。
 - 能力按“审批覆盖 / 沙箱范围 / 取消能力 / 可观测性”四个维度声明并在后端栏显示（`agent_backend_capabilities`）。各后端实测证据见 `crates/fox-agent-backend/docs/pi.md`、`deepseek.md`、`codex.md`，人工复测记录见 `crates/fox-agent-backend/docs/sandbox.md`。
 
@@ -107,16 +108,16 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 | --- | --- | --- |
 | DeepSeek | 只读、工作区可写（询问）、**工作区可写（不询问）**、完全访问 | 下一轮开始时重启 dsh 生效 |
 | pi | 只读、**询问**、自动、完全访问 | 由 Fox 作答，从下一次工具调用起生效 |
-| Codex（隐藏） | **请求审批**、帮我批准（只有 OpenAI 供应商可用）、完全访问权限 | 立即生效（`session/set_mode`） |
+| Codex | **请求审批**、帮我批准（只有 OpenAI 供应商可用）、完全访问权限 | 立即生效（`session/set_mode`） |
 
-- **完全访问是独立开关**：设置 →「新外部会话使用完全访问」（默认关闭）决定新外部会话是否默认完全访问；新会话的权限列表里也可以一次性选择该 Agent 的完全访问项。完全访问只在创建会话时授予并审计，会话中途只能撤销（撤销后后端在沙箱里重启），不能开启。
-- `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时完全访问不可选；`FOX_EXTERNAL_FULL_ACCESS` 是工程开关，它授予的完全访问不能在界面撤销。
-- 设置页的「默认权限」只记各 Agent 的沙箱内选项，供之后的新会话使用。
+- **完全访问属于该 Agent 的原生模式**：新会话和会话中都可以切换；切换会中止当前轮、结清待处理审批，并按该 Agent 的原生方式重建会话，本轮不重放。Fox 不保存外层“完全访问授权”，也不因切换而关闭/改写 Agent 的原生沙箱配置。
+- `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时所有外部 Agent 的原生完全访问项都不可选；`FOX_EXTERNAL_FULL_ACCESS` 工程开关不再存在。
+- 设置页的「默认权限」按各 Agent 的完整原生选项保存，供之后的新会话使用。
 - Fox 会话不用这张表，沿用项目权限模式（只读 / 询问 / 允许）和 Kernel 的审批，见[项目与权限架构](项目与权限架构.md)。
 
 ### 模型与凭据
 
-- 外部 Agent 默认使用「模型服务」里的供应商（统一登录）。一个供应商可以配多个协议（OpenAI Chat Completions、Anthropic Messages、OpenAI Responses），并为每个 Agent 指定默认协议：Completions 给 pi，Messages 给 pi / DeepSeek，Responses 给 pi /（隐藏的）Codex。后端里已有的 Agent 登录优先。
+- 外部 Agent 默认使用「模型服务」里的供应商（统一登录）。一个供应商可以配多个协议（OpenAI Chat Completions、Anthropic Messages、OpenAI Responses），并为每个 Agent 指定默认协议：Completions 给 pi，Messages 给 pi / DeepSeek，Responses 给 pi / Codex。后端里已有的 Agent 登录优先。
 - API Key 存在系统凭据库（Keyring，服务名 `com.fox.agent.model`），**以 base URL 为键在本机全局共享**：同一个 base URL 的供应商、Fox 和各外部 Agent 读到的是同一把 Key。协议单独配置的 Key 用 `fox-protocol:<provider>:<profile>` 作键。保存时先写 Key 再写记录，失败回滚（`crates/fox-agent-backend/src/credential_save.rs`）；删除供应商时先删记录，再删除它的 base URL Key 和全部协议 Key，删除失败只写审计警告（`credential_delete.rs`）。因为 Key 按 base URL 共享，删除一个供应商也会删掉同地址其他条目在用的 Key，这是有意的设计（不检查是否还有其他条目使用同一地址）。
 - 数据库只记录“是否已配置”，前端拿不到明文 Key。
 

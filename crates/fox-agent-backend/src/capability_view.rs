@@ -134,9 +134,10 @@ pub fn apply_full_access_forbidden(view: &mut CapabilityView) {
     view.sandbox.detail = view.sandbox.detail.replace(DEEPSEEK_LOOPBACK_LIMIT, DEEPSEEK_LOOPBACK_LIMIT_FORBIDDEN);
 }
 
-/// Sandbox detail in full access: isolation is lifted, the private HOME is
-/// not (see [`crate::sandbox::prepare_full_access`]).
-pub const FULL_ACCESS_DETAIL: &str = "完全访问模式：不套沙箱，不承诺目录边界；使用 Fox 私有 HOME（与沙箱模式相同的登录与配置）";
+/// External backends no longer get Fox's SRT wrapper. This describes only the
+/// Fox layer; the Agent's own sandbox and approval policy are shown from its
+/// native measurement and remain authoritative.
+pub const FULL_ACCESS_DETAIL: &str = "Fox 不额外包装外部 Agent（不再套 SRT）；Agent 自身的沙箱、权限模式和审批保持不变，Fox 仍提供私有 HOME 与会话管理";
 
 fn sandbox_dimension(backend: AgentBackend, declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
     let mut dimension = sandbox_dimension_base(declared, declaration, launched);
@@ -150,8 +151,17 @@ fn sandbox_dimension(backend: AgentBackend, declared: &CapabilityDeclaration, de
 fn sandbox_dimension_base(declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
     match declaration.mode {
         PermissionMode::FullAccess => Dimension {
-            summary: "沙箱：无（完全访问）".to_owned(),
-            detail: FULL_ACCESS_DETAIL.to_owned(),
+            summary: format!(
+                "沙箱：Fox 外层无；原生文件{}、网络{}",
+                enforcement_label(declared.sandbox_filesystem),
+                enforcement_label(declared.sandbox_network)
+            ),
+            detail: format!(
+                "{}；原生文件边界：{}；原生网络边界：{}",
+                FULL_ACCESS_DETAIL,
+                enforcement_label(declared.sandbox_filesystem),
+                enforcement_label(declared.sandbox_network)
+            ),
         },
         PermissionMode::Sandboxed if !launched => Dimension {
             summary: "沙箱：srt（启动后确认）".to_owned(),
@@ -223,9 +233,10 @@ pub fn capability_view(
 ) -> CapabilityView {
     let launched = initialize_response.is_some();
     let mut declared = backend_declaration(backend, initialize_response.unwrap_or(&Value::Null), pi_launch);
-    if launched {
-        declaration.apply_to(&mut declared);
-    } else if declaration.mode == PermissionMode::FullAccess {
+    // Only a real Fox SRT session contributes to the sandbox dimensions.
+    // FullAccess here means "no Fox outer layer", so the Agent's native
+    // declaration stays exactly as measured.
+    if launched && declaration.mode == PermissionMode::Sandboxed {
         declaration.apply_to(&mut declared);
     }
     CapabilityView {
@@ -260,12 +271,16 @@ mod tests {
     }
 
     #[test]
-    fn full_access_shows_no_sandbox_whatever_the_backend_has() {
+    fn no_outer_layer_keeps_the_agents_native_sandbox_declaration() {
         let full = SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::Linux);
         let view = capability_view(AgentBackend::Codex, Some(&serde_json::json!({})), &full, PiLaunch::Stock);
         assert_eq!(view.mode, "full_access");
-        assert_eq!(view.sandbox.summary, "沙箱：无（完全访问）");
-        assert!(view.sandbox.detail.contains("使用 Fox 私有 HOME（与沙箱模式相同的登录与配置）"), "{}", view.sandbox.detail);
+        assert!(view.sandbox.summary.contains("Fox 外层无"), "{}", view.sandbox.summary);
+        // The removal of Fox's outer layer must not turn the Agent's native
+        // declaration into "无". Linux has a measured enforced write boundary;
+        // Windows / macOS remain unverified.
+        let label = if cfg!(target_os = "linux") { "原生文件强制" } else { "原生文件未验证" };
+        assert!(view.sandbox.summary.contains(label), "{}", view.sandbox.summary);
         assert_eq!(view.source, "live");
     }
 

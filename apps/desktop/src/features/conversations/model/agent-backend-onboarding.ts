@@ -166,20 +166,20 @@ export const EXTERNAL_PERMISSION_MODE_LABELS: Record<ExternalPermissionMode, str
 }
 
 /**
- * Risk confirmation shown before a new conversation is created with full
- * access. Three points (no srt, no directory boundary, the process can read
- * and write anything the user can), then where logins live.
+ * Confirmation shown before an Agent's own full-access mode is selected.
+ * Fox no longer adds an outer SRT layer; this describes the Agent's native
+ * consequences, not a Fox sandbox.
  */
 export const FULL_ACCESS_RISK_POINTS: readonly string[] = [
-  '不套沙箱（srt）：后端进程直接在你的账户下运行。',
-  '不承诺目录边界：授权的项目文件夹之外，Fox 也不会拦住它。',
-  '后端进程能读写当前用户能访问的任何文件。',
+  'Fox 不额外包装外部 Agent；这里切换的是该 Agent 自己的完全访问模式。',
+  'Codex / DeepSeek 的原生沙箱会随该模式关闭；pi 没有系统级沙箱，边界由 Fox 审批拦截。',
+  '后端进程能读写当前用户能访问的文件；超出项目范围时不再由原生沙箱限制。',
 ]
 export const FULL_ACCESS_PRIVATE_HOME_NOTE = '登录和配置仍放在 Fox 私有 HOME 里，不会串到你真实的 HOME。'
-export const FULL_ACCESS_LOCK_NOTE = '选定后与后端一起锁定；会话中只能撤销，不能再开启。'
+export const FULL_ACCESS_LOCK_NOTE = 'Fox 不锁定 Agent 的原生完全访问；会话中可按该 Agent 的方式切换。'
 
 /** Shown before the revoke button acts. */
-export const REVOKE_FULL_ACCESS_NOTICE = '撤销完全访问会取消当前这一轮、结清待处理的审批，并在沙箱中重新启动外部后端；本轮不会重放。'
+export const REVOKE_FULL_ACCESS_NOTICE = '切回受限权限会取消当前这一轮、结清待处理的审批，并按该 Agent 的原生方式重建会话；本轮不会重放。'
 
 /** The permission-mode choices of a new external conversation. */
 export function externalPermissionModeOptions(status: AgentBackendPermissionStatus | null | undefined): { value: ExternalPermissionMode; label: string; disabled: boolean; reason: string | null }[] {
@@ -200,15 +200,10 @@ export function effectiveDraftPermissionMode(mode: ExternalPermissionMode, statu
   return mode === 'full_access' && !status?.fullAccessForbidden ? 'full_access' : 'sandboxed'
 }
 
-/** Lock chip text of an open external conversation. */
+/** Legacy lock-chip text; the bar now shows the Agent's native picker. */
 export function permissionChipLabel(status: AgentBackendPermissionStatus | null | undefined): string | null {
   if (!status?.mode) return null
-  return `权限：${status.mode === 'full_access' ? '完全访问' : '沙箱'}（已锁定）`
-}
-
-/** Whether the "撤销完全访问" action applies (only a user grant can be revoked). */
-export function canRevokeFullAccess(status: AgentBackendPermissionStatus | null | undefined): boolean {
-  return Boolean(status?.granted)
+  return '隔离：Fox 不额外包装（Agent 原生）'
 }
 
 export interface CredentialCardModel {
@@ -248,10 +243,8 @@ export function credentialCardModel(probe: CredentialProbe | null | undefined, p
     const forbidden = Boolean(permission?.fullAccessForbidden)
     return {
       kind: 'loopback',
-      title: '本机网关在沙箱模式下不可用',
-      description: forbidden
-        ? 'DeepSeek 的 base URL 指向本机回环地址（如 Magpie），沙箱模式会在启动前拒绝。本机已禁止完全访问，请把 base URL 改成官方 https://api.deepseek.com/anthropic。'
-        : 'DeepSeek 的 base URL 指向本机回环地址（如 Magpie），沙箱模式会在启动前拒绝。请在“设置 → 助手设置”中打开“新外部会话使用完全访问”后新建会话，或把 base URL 改成官方 https://api.deepseek.com/anthropic。',
+      title: '本机网关连接未就绪',
+      description: 'DeepSeek 的 base URL 指向本机回环地址（如 Magpie）。Fox 不再为外部 Agent 添加 SRT 网络代理；请确认本机网关正在运行，或改用官方 https://api.deepseek.com/anthropic。',
       privateHome: probe.privateHome,
       requiredKeys: [],
       requiredFiles: probe.presentFiles,

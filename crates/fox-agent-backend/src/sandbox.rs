@@ -652,6 +652,16 @@ pub enum ReadScope {
 }
 
 impl ReadScope {
+    /// Stable machine-readable name (capability declarations and Host audit).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorizedOnly => "authorized_only",
+            Self::UserDirsOnly => "user_dirs_only",
+            Self::UsersGroupReadable => "users_group_readable",
+            Self::None => "none",
+        }
+    }
+
     /// UI text (Chinese product copy) for this scope.
     pub fn ui_label(self, verified: bool) -> &'static str {
         match (self, verified) {
@@ -2776,16 +2786,14 @@ impl SandboxDeclaration {
 
     /// Fold this into a backend's measured capabilities.
     ///
-    /// * full access: sandbox dimensions become `Absent` whatever the backend
-    ///   natively has, because Fox promises no boundary in this mode.
+    /// * full access: this now means "Fox adds no outer layer"; the Agent's
+    ///   own native sandbox declaration is kept exactly as measured. Removing
+    ///   Fox's SRT wrapper must never erase Codex's / dsh's native sandbox.
     /// * sandboxed: the stronger of the native measurement and srt's, so a
     ///   measured native sandbox is not hidden and srt is not overstated.
     pub fn apply_to(&self, declared: &mut CapabilityDeclaration) {
         match self.mode {
-            PermissionMode::FullAccess => {
-                declared.sandbox_filesystem = Enforcement::Absent;
-                declared.sandbox_network = Enforcement::Absent;
-            }
+            PermissionMode::FullAccess => {}
             PermissionMode::Sandboxed => {
                 declared.sandbox_filesystem = stronger(declared.sandbox_filesystem, self.filesystem);
                 declared.sandbox_network = stronger(declared.sandbox_network, self.network);

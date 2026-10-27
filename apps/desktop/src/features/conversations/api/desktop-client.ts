@@ -779,7 +779,7 @@ export const desktopClient = {
   /** UX batch ②: permission mode / lock / FORBIDDEN. */
   agentBackendPermissionStatus: (conversationId?: string | null) =>
     command<AgentBackendPermissionStatus>('agent_backend_permission_status', conversationId ? { conversationId } : {}),
-  /** Settings batch: 设置 →「新会话使用的 Agent」/「新外部会话使用完全访问」. */
+  /** Settings batch: 设置 →「新会话使用的 Agent」. */
   agentBackendPreferences: () => command<AgentBackendPreferences>('agent_backend_preferences_get'),
   saveAgentBackendPreferences: (change: { defaultBackend?: AgentBackendId; newExternalFullAccess?: boolean }) =>
     command<AgentBackendPreferences>('agent_backend_preferences_save', change),

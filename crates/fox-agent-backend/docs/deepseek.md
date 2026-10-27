@@ -4,7 +4,7 @@
 
 > 本节是当前事实；下文是 2026-10-19 的阶段 0 实测原文，未改动。下文“T04 不满足 → 不得默认开启、不对用户开放”是阶段 0 的结论，之后 Host 在 dsh 进程外加了 srt 沙箱（见 `sandbox.md` 第 13 节），dsh 作为实验后端内置。
 
-- DeepSeek Harness（dsh）是**内置 Agent** 之一，标记为实验（`AgentBackend::experimental`）。另两个内置 Agent 是 Fox 和 pi；Codex 已实现但暂时隐藏。四 Agent 改造已完成并合入 `main`。
+- DeepSeek Harness（dsh）是**内置 Agent** 之一，标记为实验（`AgentBackend::experimental`）。另三个内置 Agent 是 Fox、pi 和 Codex。四 Agent 改造已完成并合入 `main`。
 - 桌面 Host 从 Fox 管理的运行时 `<runtime>/backends/dsh/` 启动 `dsh --profile acp`（锁定 `0.2.1-rc.2`），并应用 `<runtime>/dsh-patches/` 下逐字节校验过的 Host 补丁；不经 `npx`。见 `src/external_launch.rs`。
 - 默认在 srt 沙箱里运行；进程只继承白名单环境变量；登录信息放在 Fox 管理的私有 HOME。
 - 权限按 dsh 的原生选项显示（`src/native_permission.rs`）：只读、工作区可写（询问）、工作区可写（不询问，默认）、完全访问。dsh 不支持会话中途切换，下一轮开始时重启 dsh 生效。完全访问是独立开关，只在创建会话时授予，会话中只能撤销。

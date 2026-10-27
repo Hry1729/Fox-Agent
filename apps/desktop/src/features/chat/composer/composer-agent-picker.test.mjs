@@ -31,12 +31,10 @@ for (const backend of ['fox', 'pi', 'codex', 'deepseek']) {
     await act(async () => { await result.current.createConversationForAgent('fox-general') })
     await act(async () => result.current.setDraftAgentBackend(backend))
     await act(async () => result.current.selectProject('D:/test-project', 'ask'))
-    // Codex is hidden (HIDDEN_AGENT_BACKENDS): a pick of it stays Fox.
-    const expected = backend === 'codex' ? 'fox' : backend
-    expect(result.current.draftAgentBackend).toBe(expected)
+    expect(result.current.draftAgentBackend).toBe(backend)
     await act(async () => { await result.current.send('测试消息') })
     expect(requests).toHaveLength(1)
-    expect(requests[0].agentBackend ?? 'fox').toBe(expected)
+    expect(requests[0].agentBackend ?? 'fox').toBe(backend)
     expect(requests[0].projectRoot).toBe('D:/test-project')
     expect(requests[0].permissionMode).toBe('ask')
     expect(requests[0].externalPermissionMode).toBeUndefined()
@@ -66,12 +64,12 @@ test('project selected before switching Agent stays bound through repeated switc
   expect(requests[0].agentBackend).toBe('pi')
 })
 
-test('a saved codex default is not used for a new conversation', async () => {
+test('a saved codex default is used for a new conversation', async () => {
   const requests = fakeHost('codex')
   const { result } = renderHook(() => useDesktopConversation())
   await act(async () => { await result.current.createConversationForAgent('fox-general') })
   await act(async () => { await result.current.send('保存过 codex') })
-  expect(requests[0].agentBackend ?? 'fox').toBe('fox')
+  expect(requests[0].agentBackend ?? 'fox').toBe('codex')
 })
 
 test('external creation does not submit a Fox-only expert binding', async () => {
@@ -85,17 +83,17 @@ test('external creation does not submit a Fox-only expert binding', async () => 
   expect(requests[0].expertId).toBeUndefined()
 })
 
-test('the Agent menu lists Fox, pi and DeepSeek (Codex hidden) and retains the unavailable reason', async () => {
+test('the Agent menu lists Fox, pi, Codex and DeepSeek and retains the unavailable reason', async () => {
   let selected = null
   const view = render(createElement(ComposerAgentPicker, { value: 'fox', status: { switchEnv: 'FOX_EXTERNAL_BACKENDS', anyExternalEnabled: true, unknownEntries: [], options: [
     { backend: 'fox', enabled: true, wired: true, experimental: false, reason: null },
     { backend: 'pi', enabled: true, wired: true, experimental: false, reason: null },
-    { backend: 'codex', enabled: true, wired: true, experimental: false, hidden: true, reason: null },
+    { backend: 'codex', enabled: true, wired: true, experimental: false, hidden: false, reason: null },
     { backend: 'deepseek', enabled: false, wired: true, experimental: false, reason: '测试禁用原因' },
   ] }, onSelect: value => { selected = value } }))
   fireEvent.keyDown(view.getByRole('button', { name: '选择 Agent，当前 Fox' }), { key: 'ArrowDown' })
   await waitFor(() => expect(view.getByRole('menuitem', { name: 'pi' })).toBeTruthy())
-  expect(view.queryByRole('menuitem', { name: /Codex/ })).toBeNull()
+  expect(view.getByRole('menuitem', { name: 'Codex' })).toBeTruthy()
   expect(view.getByRole('menuitem', { name: /DeepSeek/ }).getAttribute('data-disabled')).not.toBeNull()
   expect(view.getByText('测试禁用原因')).toBeTruthy()
   fireEvent.click(view.getByRole('menuitem', { name: 'pi' }))

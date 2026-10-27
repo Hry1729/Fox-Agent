@@ -97,9 +97,10 @@ describe('model', () => {
     const rows = nativePermissionRows(view(codexCatalog()))
     expect(rows.map((row) => row.label)).toEqual(['请求审批', '帮我批准', '完全访问权限'])
     expect(rows[1]).toMatchObject({ disabled: true, reason: AUTO_REVIEW_REASON })
-    // Mid-session, not in full access: the full-access row is locked.
-    expect(rows[2].disabled).toBe(true)
-    expect(rows[2].reason).toContain('只能撤销')
+    // The Agent's native full access is selectable in place; Fox no longer
+    // adds or removes an outer SRT layer around it.
+    expect(rows[2].disabled).toBe(false)
+    expect(rows[2].reason).toBeNull()
     // A new conversation may pick it.
     expect(nativePermissionRows(view(codexCatalog(), { draft: true }))[2].disabled).toBe(false)
     // 设置 lists sandboxed options only.
@@ -108,12 +109,12 @@ describe('model', () => {
 
   test('changes: confirm full access in a draft, refuse mid-session, confirm revoke', () => {
     expect(nativePermissionChange(view(codexCatalog(), { draft: true }), 'agent-full-access').kind).toBe('confirm_full_access')
-    expect(nativePermissionChange(view(codexCatalog()), 'agent-full-access').kind).toBe('refused')
+    expect(nativePermissionChange(view(codexCatalog()), 'agent-full-access').kind).toBe('confirm_full_access')
     expect(nativePermissionChange(view(codexCatalog()), 'agent').kind).toBe('refused')
     const full = view(codexCatalog(false), { current: 'agent-full-access', fullAccess: true, fullAccessGranted: true })
     expect(nativePermissionChange(full, 'workspace-write').kind).toBe('confirm_revoke')
     const engineering = { ...full, fullAccessGranted: false }
-    expect(nativePermissionChange(engineering, 'workspace-write')).toMatchObject({ kind: 'refused' })
+    expect(nativePermissionChange(engineering, 'workspace-write').kind).toBe('confirm_revoke')
     expect(nativePermissionChange(view(dshCatalog), 'read-only').kind).toBe('apply')
     expect(nativePermissionChange(view(dshCatalog), 'workspace-write-never').kind).toBe('none')
   })
@@ -163,18 +164,17 @@ describe('picker', () => {
     const { client, calls } = fakeClient(view(codexCatalog()), (request) => ({ ...view(codexCatalog()), current: request.mode, applied: 'applied' }))
     render(<AgentNativePermissionPicker client={client} conversationId="c1" backend="codex" />)
     const select = await screen.findByLabelText('权限') as HTMLSelectElement
-    expect(Array.from(select.options).map((option) => option.textContent)).toEqual(['请求审批', '帮我批准（不可用）', '完全访问权限（不可用）'])
+    expect(Array.from(select.options).map((option) => option.textContent)).toEqual(['请求审批', '帮我批准（不可用）', '完全访问权限'])
     expect(screen.getByText(`帮我批准：${AUTO_REVIEW_REASON}`)).toBeTruthy()
-    // 13.19 fix ③: the full-access lock is shown inline too, not only in the tooltip.
-    const lock = document.querySelector('[data-disabled-option="agent-full-access"]')
-    expect(lock?.textContent).toBe('完全访问权限：完全访问只能在新建会话时选择（会话中只能撤销）')
-    expect(lock?.getAttribute('role')).toBe('note')
-    // Options, names and greying are unchanged.
-    expect(Array.from(select.options).map((option) => option.disabled)).toEqual([false, true, true])
+    // The native full-access row is not locked by Fox.
+    expect(document.querySelector('[data-disabled-option="agent-full-access"]')).toBeNull()
+    expect(Array.from(select.options).map((option) => option.disabled)).toEqual([false, true, false])
     expect(screen.queryByText(NEXT_TURN_RESTART_BADGE)).toBeNull()
-    // Picking the locked full-access option never reaches the Host.
+    // Picking it asks for the native risk confirmation and does not reach
+    // the Host until confirmed.
     fireEvent.change(select, { target: { value: 'agent-full-access' } })
     expect(calls).toHaveLength(0)
+    expect(screen.getByRole('alertdialog', { name: '确认完全访问' })).toBeTruthy()
   })
 
   test('dsh mid-session shows「下一轮重启生效」and applies at once (no confirmation)', async () => {
@@ -197,7 +197,7 @@ describe('picker', () => {
     // A draft has no full-access lock: no inline lock note.
     expect(document.querySelector('[data-disabled-option="agent-full-access"]')).toBeNull()
     const dialog = screen.getByRole('alertdialog', { name: '确认完全访问' })
-    expect(dialog.textContent).toContain('不套沙箱')
+    expect(dialog.textContent).toContain('Fox 不额外包装')
     fireEvent.click(screen.getByText('取消'))
     expect(screen.queryByRole('alertdialog')).toBeNull()
     fireEvent.change(select, { target: { value: 'agent-full-access' } })
@@ -213,7 +213,7 @@ describe('picker', () => {
     expect(select.value).toBe('agent-full-access')
     fireEvent.change(select, { target: { value: 'workspace-write' } })
     expect(screen.getByRole('alertdialog', { name: '撤销完全访问' })).toBeTruthy()
-    fireEvent.click(screen.getByText('撤销并重启到沙箱'))
+    fireEvent.click(screen.getByText('切回受限权限'))
     await waitFor(() => expect(calls).toEqual([{ conversationId: 'c3', mode: 'workspace-write' }]))
     await waitFor(() => expect((screen.getByLabelText('权限') as HTMLSelectElement).value).toBe('workspace-write'))
   })
@@ -226,7 +226,7 @@ describe('picker', () => {
   })
 })
 
-describe('13.19 fix ②: revoking full access refreshes the capability chips', () => {
+describe('native permission switches refresh the capability chips', () => {
   const status: AgentBackendStatus = {
     switchEnv: 'FOX_EXTERNAL_BACKENDS',
     anyExternalEnabled: true,
@@ -235,56 +235,41 @@ describe('13.19 fix ②: revoking full access refreshes the capability chips', (
   }
   const caps = (full: boolean): AgentBackendCapabilities => ({
     backend: 'pi',
-    mode: full ? 'full_access' : 'sandboxed',
-    source: full ? 'live' : 'planned',
+    mode: 'full_access',
+    source: 'live',
     approval: { summary: '审批：Fox 拦截', detail: '' },
-    sandbox: { summary: full ? '沙箱：无（完全访问）' : '沙箱：srt', detail: '' },
+    sandbox: { summary: full ? '沙箱：Fox 外层无；原生文件无、网络无' : '沙箱：Fox 外层无；原生文件强制、网络强制', detail: '' },
     cancel: { summary: '取消：支持', detail: '' },
     observability: { summary: '观测：完整', detail: '' },
     warning: null,
   })
 
-  for (const path of ['picker', 'chip'] as const) {
-    test(`pi conversation, revoke via the ${path}: the chip goes back to the sandbox`, async () => {
-      let full = true
-      let capabilityCalls = 0
-      const piFull = () => view({ ...piCatalog, displayName: 'pi' }, full
-        ? { current: 'full_access', fullAccess: true, fullAccessGranted: true, fullAccessLockedReason: null }
-        : {})
-      const client = {
-        agentBackendCapabilities: async () => { capabilityCalls += 1; return caps(full) },
-        agentBackendPermissionStatus: async () => ({ fullAccessForbidden: false, forbiddenReason: null, engineeringSwitch: false, granted: full, mode: full ? 'full_access' as const : 'sandboxed' as const, locked: true }),
-        agentBackendCredentials: async () => ({ backend: 'pi', mode: 'sandboxed', state: 'ready', privateHome: '/h', credentialsPresent: true, loopbackBlocked: false, presentKeys: [], presentFiles: [], requiredKeys: [], requiredFiles: [], templates: [] }),
-        agentBackendImportCandidates: async () => [],
-        agentBackendImportCredentials: async () => ({ copied: [], skipped: [], failed: [], projects: 1 }),
-        agentBackendOpenPrivateHome: async () => '/h',
-        // Revoke = the Host drops the grant; the runtime is back in the sandbox.
-        agentBackendRevokeFullAccess: async () => { full = false; return { outcome: 'restart_sandboxed', stopConfirmed: true } },
-        listenRuntimeEvents: async () => () => {},
-        ...(path === 'picker' ? {
-          agentBackendNativePermissions: async () => piFull(),
-          agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => {
-            full = false
-            return { ...view({ ...piCatalog, displayName: 'pi' }, { current: request.mode }), applied: 'next_turn' }
-          },
-        } : {}),
-      }
-      render(<AgentBackendPanel client={client as any} status={status} lockedBackend="pi" conversationId="c-pi" draftBackend="fox" />)
-      expect(await screen.findByText('沙箱：无（完全访问）')).toBeTruthy()
-      const before = capabilityCalls
-      if (path === 'picker') {
-        fireEvent.change(await screen.findByLabelText('权限'), { target: { value: 'ask' } })
-        fireEvent.click(screen.getByText('撤销并重启到沙箱'))
-        expect(await screen.findByText('已保存，下一轮开始时重启 pi 生效')).toBeTruthy()
-      } else {
-        fireEvent.click(await screen.findByText('撤销完全访问'))
-        fireEvent.click(screen.getByText('撤销并重启到沙箱'))
-      }
-      await waitFor(() => expect(screen.getByText('沙箱：srt')).toBeTruthy())
-      expect(screen.queryByText('沙箱：无（完全访问）')).toBeNull()
-      expect(capabilityCalls).toBeGreaterThan(before)
-    })
-  }
+  test('pi conversation: switching back to a restricted native mode refreshes the chips', async () => {
+    let full = true
+    let capabilityCalls = 0
+    const client = {
+      agentBackendCapabilities: async () => { capabilityCalls += 1; return caps(full) },
+      agentBackendPermissionStatus: async () => ({ fullAccessForbidden: false, forbiddenReason: null, engineeringSwitch: false, granted: false, mode: 'full_access' as const, locked: true }),
+      agentBackendCredentials: async () => ({ backend: 'pi', mode: 'sandboxed', state: 'ready', privateHome: '/h', credentialsPresent: true, loopbackBlocked: false, presentKeys: [], presentFiles: [], requiredKeys: [], requiredFiles: [], templates: [] }),
+      agentBackendImportCandidates: async () => [],
+      agentBackendImportCredentials: async () => ({ copied: [], skipped: [], failed: [], projects: 1 }),
+      agentBackendOpenPrivateHome: async () => '/h',
+      listenRuntimeEvents: async () => () => {},
+      agentBackendNativePermissions: async () => view({ ...piCatalog, displayName: 'pi' }, { current: 'full_access', fullAccess: true }),
+      agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => {
+        full = false
+        return { ...view({ ...piCatalog, displayName: 'pi' }, { current: request.mode }), applied: 'next_turn' }
+      },
+    }
+    render(<AgentBackendPanel client={client as any} status={status} lockedBackend="pi" conversationId="c-pi" draftBackend="fox" />)
+    expect(await screen.findByText('沙箱：Fox 外层无；原生文件无、网络无')).toBeTruthy()
+    const before = capabilityCalls
+    fireEvent.change(await screen.findByLabelText('权限'), { target: { value: 'ask' } })
+    fireEvent.click(screen.getByText('切回受限权限'))
+    expect(await screen.findByText('已保存，下一轮开始时重启 pi 生效')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('沙箱：Fox 外层无；原生文件强制、网络强制')).toBeTruthy())
+    expect(capabilityCalls).toBeGreaterThan(before)
+  })
 })
 
 describe('settings', () => {
@@ -321,7 +306,7 @@ describe('settings', () => {
     const pi = await screen.findByRole('combobox', { name: 'pi 默认权限' })
     await pickSettingsSelect(pi, 'allow')
     await waitFor(() => expect(calls).toEqual([{ backend: 'pi', mode: 'allow', defaultOnly: true }]))
-    // Codex is hidden (HIDDEN_AGENT_BACKENDS): no default-permission row.
-    expect(screen.queryByLabelText('Codex 默认权限')).toBeNull()
+    // Codex is selectable again: its default-permission row is present.
+    expect(screen.getByLabelText('Codex 默认权限')).toBeTruthy()
   })
 })

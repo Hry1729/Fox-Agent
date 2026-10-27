@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | A0–A6、E1–E4 | 已完成 | 工程实现与离线回归，见[能力矩阵](../01-项目概览/能力矩阵.md) |
 | Kernel 统一控制（Fox 自身执行路径） | 已完成，默认启用 | Kernel / Authoritative 是默认；Legacy 只用于调试和旧 Run。进度和余项见 [Kernel 改造进度](Kernel-改造进度.md) |
-| 外层 Agent（四 Agent，经 ACP） | 阶段 0–3 已完成 | 内置 Fox、DeepSeek Harness（实验）、pi；Codex 已实现但界面隐藏。见 [Agent 运行时架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent) |
+| 外层 Agent（四 Agent，经 ACP） | 阶段 0–3 已完成 | 内置 Fox、DeepSeek Harness（实验）、pi；Codex 已恢复可选。见 [Agent 运行时架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent) |
 | 「自定义 ACP Agent」入口 | **待办** | 让用户自行安装其他 ACP Agent、填写启动命令；Codex 以后也走这里 |
 | 共享 Host 加固（四 Agent 阶段 1） | 部分完成 | 第 2 项（测试授权语义）未关闭；第 4 项只在 Windows 上关闭；其余已关闭或撤回 |
 | Legacy / Shadow 清理（四 Agent 阶段 4） | **未开始** | |

@@ -637,13 +637,13 @@ pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> 
 // is storage (`app_settings`) and the two commands for the backend bar.
 //
 // * `agent_backend.native_mode.conversation.<id>`: the conversation's current
-//   sandboxed choice (the full-access option comes from the grant).
+//   native choice, including the Agent's own full-access mode.
 // * `agent_backend.native_mode.last.<backend>`: each Agent's last sandboxed
 //   choice, the starting point of its next new conversation.
 // * `agent_backend.native_mode.draft_full.<backend>`: `1` / `0` when the
 //   user picked (or left) the full-access option in a new conversation's
-//   list; read once at creation and cleared. Absent: 设置 →「新外部会话使用
-//   完全访问」is the default.
+//   list; read once at creation and cleared. Absent: the setting is ignored;
+//   the Agent's last sandboxed choice is the default.
 
 pub(crate) const NATIVE_MODE_CONVERSATION_PREFIX: &str = "agent_backend.native_mode.conversation.";
 pub(crate) const NATIVE_MODE_LAST_PREFIX: &str = "agent_backend.native_mode.last.";
@@ -673,11 +673,17 @@ pub(crate) fn clear_draft_full_access_choice(database: &crate::database::Databas
     let _ = database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "");
 }
 
-/// Record a new conversation's starting mode (the Agent's last sandboxed
-/// choice, when it has one).
-pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend) {
-    if let Some(mode) = stored_last_native_mode(database, backend) {
-        if fox_agent_backend::native_permission::is_known(backend, &mode) && !fox_agent_backend::native_permission::is_full_access(backend, &mode) {
+/// Record a new conversation's starting native mode. An explicit full-access
+/// pick stores the Agent's own full mode; otherwise the Agent's last
+/// sandboxed choice is the starting point.
+pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend, full_access: bool) {
+    let mode = if full_access {
+        fox_agent_backend::native_permission::full_access_mode(backend).map(str::to_owned)
+    } else {
+        stored_last_native_mode(database, backend)
+    };
+    if let Some(mode) = mode {
+        if fox_agent_backend::native_permission::is_known(backend, &mode) {
             let _ = database.set_app_setting(&format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode);
         }
     }
@@ -711,11 +717,12 @@ fn native_context(state: &AppState, backend: AgentBackend, forbidden: bool) -> f
     }
 }
 
-/// Which Agent, whether its session runs in full access, and whether that
-/// comes from a removable grant. `Err` = refusal for the UI.
+/// Which Agent and whether its native permission is the Agent's own full
+/// access. There is no removable Fox grant any more: the value is derived
+/// from the stored native mode, never from the removed outer SRT layer.
 fn native_target(
     state: &AppState,
-    external: &crate::external_backend::ExternalBackendHost,
+    _external: &crate::external_backend::ExternalBackendHost,
     request: &NativePermissionRequest,
 ) -> Result<(AgentBackend, bool, bool), ApiResponse<serde_json::Value>> {
     match request.conversation_id.as_deref() {
@@ -725,10 +732,9 @@ fn native_target(
                 Ok(None) => return Err(ApiResponse::failure("conversation.not_found", "会话不存在", false)),
                 Err(error) => return Err(ApiResponse::failure("agent_backend_lookup_failed", error, true)),
             };
-            let status = external.permission_status(Some(id));
-            let full = status.get("mode").and_then(serde_json::Value::as_str) == Some("full_access");
-            let granted = status.get("granted").and_then(serde_json::Value::as_bool).unwrap_or(false);
-            Ok((backend, full, granted))
+            let stored = stored_conversation_native_mode(&state.database, id);
+            let full = stored.as_deref().is_some_and(|mode| fox_agent_backend::native_permission::is_full_access(backend, mode));
+            Ok((backend, full, false))
         }
         None => {
             let backend = request.backend.as_deref().and_then(AgentBackend::parse).unwrap_or(AgentBackend::Fox);
@@ -738,16 +744,15 @@ fn native_target(
                 let refusal = RouteError::Hidden(backend);
                 return Err(ApiResponse::failure(refusal.code(), refusal.message(), false));
             }
-            let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
-            let full = !forbidden
-                && draft_full_access_choice(&state.database, backend).unwrap_or_else(|| stored_new_external_full_access(&state.database));
-            Ok((backend, full, full))
+            let stored = stored_last_native_mode(&state.database, backend);
+            let full = stored.as_deref().is_some_and(|mode| fox_agent_backend::native_permission::is_full_access(backend, mode));
+            Ok((backend, full, false))
         }
     }
 }
 
 fn native_view(state: &AppState, external: &crate::external_backend::ExternalBackendHost, request: &NativePermissionRequest) -> ApiResponse<serde_json::Value> {
-    let (backend, full, granted) = match native_target(state, external, request) {
+    let (backend, _full, _granted) = match native_target(state, external, request) {
         Ok(target) => target,
         Err(refusal) => return refusal,
     };
@@ -758,20 +763,26 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
         Some(id) => stored_conversation_native_mode(&state.database, id),
         None => stored_last_native_mode(&state.database, backend),
     };
-    let current = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), full, &context);
-    // The sandboxed choice behind a full-access session (设置 shows it).
-    let sandboxed = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), false, &context);
+    let current = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), false, &context);
+    // The restricted choice behind a full-access selection, for settings.
+    let sandboxed = stored
+        .as_deref()
+        .filter(|mode| !fox_agent_backend::native_permission::is_full_access(backend, mode))
+        .filter(|mode| catalog.options.iter().any(|option| option.id == *mode && !option.full_access && option.disabled_reason.is_none()))
+        .unwrap_or(catalog.default_mode);
+    let current_full = fox_agent_backend::native_permission::is_full_access(backend, current);
     let draft = request.conversation_id.is_none();
     ApiResponse::success(serde_json::json!({
         "catalog": catalog,
         "current": current,
         "sandboxedMode": sandboxed,
-        "fullAccess": full,
-        "fullAccessGranted": granted,
+        "fullAccess": current_full,
+        "fullAccessGranted": false,
         "fullAccessForbidden": forbidden,
         "draft": draft,
-        // Full access is granted only when a conversation is created.
-        "fullAccessLockedReason": if draft || full { None } else { Some("完全访问只能在新建会话时选择（会话中只能撤销）") },
+        // The Agent's native modes are switchable in place; Fox no longer
+        // wraps or unwraps an outer SRT sandbox around them.
+        "fullAccessLockedReason": serde_json::Value::Null,
     }))
 }
 
@@ -786,12 +797,10 @@ pub fn agent_backend_native_permissions(
     native_view(&state, &external, &request)
 }
 
-/// Switch the mode. A new conversation: remembered for its Agent (the
-/// full-access option is a one-shot pick, granted and audited at creation).
-/// An open conversation: Codex switches live (`session/set_mode`), dsh at
-/// the next turn (restart), pi at the next request; leaving the full-access
-/// option revokes full access through the existing revoke path (audited,
-/// backend restarted in the sandbox); entering it mid-session is refused.
+/// Switch the mode. A new conversation: remembered for its Agent, including
+/// its native full-access mode. An open conversation: Codex switches live
+/// (`session/set_mode`), dsh at the next turn (restart), pi at the next
+/// request. There is no Fox outer grant to create or revoke.
 #[tauri::command]
 pub async fn agent_backend_native_permission_set(
     state: State<'_, AppState>,
@@ -799,7 +808,7 @@ pub async fn agent_backend_native_permission_set(
     request: NativePermissionRequest,
 ) -> Result<ApiResponse<serde_json::Value>, ()> {
     use fox_agent_backend::native_permission as native;
-    let (backend, full, granted) = match native_target(&state, &external, &request) {
+    let (backend, _full, _granted) = match native_target(&state, &external, &request) {
         Ok(target) => target,
         Err(refusal) => return Ok(refusal),
     };
@@ -840,45 +849,24 @@ pub async fn agent_backend_native_permission_set(
         }
         return Ok(native_view(&state, &external, &request));
     };
-    if option.full_access && !full {
-        return Ok(ApiResponse::failure("agent_backend_full_access_locked", "完全访问只能在新建会话时选择；会话中只能撤销，不能开启", false));
-    }
-    let previous = native::effective_mode(backend, stored_conversation_native_mode(&state.database, &conversation_id).as_deref(), full, &context);
-    let mut revoked = None;
-    if !option.full_access && full {
-        if !granted {
-            return Ok(ApiResponse::failure(
-                "agent_backend_full_access_engineering",
-                "本会话的完全访问来自工程开关（FOX_EXTERNAL_FULL_ACCESS），不能在界面撤销",
-                false,
-            ));
-        }
-        // Leaving full access = the existing revoke (grant removed,
-        // audited, the backend restarts in the sandbox).
-        let response = external.revoke_full_access(&conversation_id).await;
-        if !response.ok {
-            return Ok(response);
-        }
-        revoked = response.data;
-    }
-    if !option.full_access {
-        let stored = set(format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode)
-            .and_then(|_| set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode));
-        if let Err(error) = stored {
-            return Ok(storage_error(error));
-        }
+    let previous = native::effective_mode(backend, stored_conversation_native_mode(&state.database, &conversation_id).as_deref(), false, &context);
+    // Native modes are independent of Fox's removed SRT layer. Store the
+    // choice and let the backend switch in its own way (Codex live, dsh on
+    // restart, pi at the next request); there is no Fox full-access grant to
+    // revoke and no outer sandbox to re-enter.
+    let stored = set(format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode)
+        .and_then(|_| set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode));
+    if let Err(error) = stored {
+        return Ok(storage_error(error));
     }
     let outcome = external.apply_native_mode(&conversation_id, &mode).await;
-    let details = serde_json::json!({ "from": previous, "to": mode, "applied": outcome.as_str(), "fullAccessRevoked": revoked.is_some() });
+    let details = serde_json::json!({ "from": previous, "to": mode, "applied": outcome.as_str(), "fullAccessRevoked": false });
     let _ = state.database.append_agent_backend_audit(Some(&conversation_id), backend.as_str(), "agent_backend.permission_mode_changed", &details);
     let mut view = native_view(&state, &external, &request);
     if let Some(data) = view.data.as_mut() {
         data["applied"] = serde_json::json!(outcome.as_str());
         if let fox_agent_backend::external::NativeModeOutcome::Failed(message) = &outcome {
             data["appliedError"] = serde_json::json!(message);
-        }
-        if let Some(revoked) = revoked {
-            data["revoke"] = revoked;
         }
     }
     Ok(view)
@@ -1034,13 +1022,12 @@ mod tests {
         assert_eq!(validate_preferences_change(&request(None, Some(false)), &off).unwrap(), (None, Some(false)));
         assert_eq!(validate_preferences_change(&request(Some("claude"), None), &off).unwrap_err().0, "agent_backend_invalid");
         assert!(off.forbidden_reason.is_some() && !off.effective_full_access);
-        let probe = CodexResponsesProbe { base_url: "https://api.example.com/v1".into(), supported: Some(false), status: Some(404), checked_at: 1 };
+        let probe = CodexResponsesProbe { base_url: "https://api.example.com/v1".into(), supported: Some(true), status: Some(200), checked_at: 1 };
         let on = preferences_view(AgentBackend::Fox, true, &BackendSwitch::from_env_value(None), false, Some("Example".into()), Some(probe));
-        // Codex is hidden (2026-10-24): not a choice at all, and refused by
-        // its own code whatever the probe says.
-        assert!(on.options.iter().all(|option| option.backend != "codex"));
-        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &on).unwrap_err().0, "agent_backend_hidden");
-        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &off).unwrap_err().0, "agent_backend_hidden");
+        // Codex is offered again now that external backends no longer get
+        // Fox's outer SRT layer.
+        assert!(on.options.iter().any(|option| option.backend == "codex"));
+        assert_eq!(validate_preferences_change(&request(Some("codex"), None), &on).unwrap(), (Some(AgentBackend::Codex), None));
         assert!(on.effective_full_access);
         assert_eq!(responses_support_from_status(404), Some(false));
         assert_eq!(responses_support_from_status(405), Some(false));
@@ -1051,33 +1038,42 @@ mod tests {
         assert_eq!(responses_support_from_status(503), None);
     }
 
-    /// 2026-10-24: Codex is hidden from users (`AgentBackend::HIDDEN`). A
-    /// saved `codex` preference falls back to Fox, it is never offered, a new
-    /// conversation cannot be created with it, and an existing Codex
-    /// conversation still opens and routes to its own runtime.
+    /// Codex was hidden on 2026-10-24 because of the outer SRT layer. It is a
+    /// normal selectable backend again; old Codex conversations keep their
+    /// binding and routing.
     #[test]
-    fn agent_backend_routing_hides_codex_and_falls_back_saved_codex_to_fox() {
+    fn native_full_access_is_seeded_as_the_agent_mode_not_a_fox_grant() {
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        database.set_app_setting("agent_backend.native_mode.last.codex", "workspace-write").unwrap();
+        seed_conversation_native_mode(&database, "c-full", AgentBackend::Codex, true);
+        assert_eq!(stored_conversation_native_mode(&database, "c-full").as_deref(), Some("agent-full-access"));
+        assert!(!database.conversation_full_access_granted("c-full").unwrap(), "no Fox outer grant is created");
+        seed_conversation_native_mode(&database, "c-restricted", AgentBackend::Codex, false);
+        assert_eq!(stored_conversation_native_mode(&database, "c-restricted").as_deref(), Some("workspace-write"));
+    }
+
+    #[test]
+    fn agent_backend_routing_offers_codex_again() {
         let on = BackendSwitch::from_env_value(None);
         let view = preferences_view(AgentBackend::Codex, false, &on, false, None, None);
         assert_eq!(view.default_backend, "codex", "what was saved is reported as saved");
-        assert_eq!(view.effective_backend, "fox", "a saved hidden backend falls back to Fox");
-        assert!(view.options.iter().all(|option| option.backend != "codex"));
+        assert_eq!(view.effective_backend, "codex", "a saved Codex choice is usable again");
+        assert!(view.options.iter().any(|option| option.backend == "codex"));
         assert!(view.options.iter().any(|option| option.backend == "pi") && view.options.iter().any(|option| option.backend == "deepseek"));
         let only_codex = BackendSwitch::from_env_value(Some("codex"));
-        assert_eq!(preferences_view(AgentBackend::Codex, false, &only_codex, false, None, None).effective_backend, "fox");
+        assert_eq!(preferences_view(AgentBackend::Codex, false, &only_codex, false, None, None).effective_backend, "codex");
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         database.set_app_setting(DEFAULT_BACKEND_KEY, "codex").unwrap();
         assert_eq!(stored_default_backend(&database), AgentBackend::Codex);
-        let refused: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("codex"));
-        assert_eq!(refused.unwrap_err().error.unwrap().code, "agent_backend_hidden");
+        let chosen: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("codex"));
+        assert_eq!(chosen.ok(), Some(AgentBackend::Codex));
         let fox: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(None);
         assert_eq!(fox.ok(), Some(AgentBackend::Fox));
 
-        // An existing Codex conversation (created before the hide) keeps its
-        // backend: it opens, and its entries route to the Codex runtime
-        // unless the administrator forced Codex off (then read-only, as for
-        // any external backend).
+        // An existing Codex conversation keeps its backend and its entries
+        // route to the Codex runtime unless the administrator forced Codex
+        // off (then read-only, as for any external backend).
         let old = database
             .create_conversation_with_backend(database.default_agent_id(), Some("旧 Codex 会话"), None, None, "codex")
             .expect("codex conversation");

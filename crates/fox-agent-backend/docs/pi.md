@@ -6,7 +6,7 @@
 
 > 本节是当前事实；下文是 2026-10-19 的阶段 0 实测原文，未改动。
 
-- pi 是**内置 Agent** 之一（另两个是 Fox 和 DeepSeek Harness；Codex 已实现但暂时隐藏）。四 Agent 改造已完成并合入 `main`。
+- pi 是**内置 Agent** 之一（另三个是 Fox、DeepSeek Harness 和 Codex）。四 Agent 改造已完成并合入 `main`。
 - 桌面 Host 从 Fox 管理的运行时 `<runtime>/backends/pi/` 启动 `pi-acp`（锁定 `0.0.34`），pi 本体为 `1.4.0`；不经 `npx`（`npx` 入口只用于开发和真实二进制测试）。运行时带 `<runtime>/pi-gate/` 时用 Fox 审批拦截扩展启动 pi（门控），否则按原样启动（没有 Host 审批）。见 `src/external_launch.rs`。
 - 默认在 srt 沙箱里运行；进程只继承白名单环境变量；登录信息放在 Fox 管理的私有 HOME。
 - 权限按 pi 的原生选项显示（`src/native_permission.rs`）：只读、询问（默认）、自动、完全访问。由 Fox 作答，切换后从下一次工具调用起生效。完全访问是独立开关，只在创建会话时授予，会话中只能撤销。

@@ -48,14 +48,14 @@ describe('agent backend presentation (Host wiring first batch)', () => {
   test('picker is disabled and explained while the switch is off', () => {
     expect(agentBackendPickerDisabledReason(status([]))).toContain('FOX_EXTERNAL_BACKENDS')
     expect(agentBackendPickerDisabledReason(status(['pi']))).toBeNull()
-    expect(agentBackendPickerDisabledReason(status([]))).not.toContain('Codex')
+    expect(agentBackendPickerDisabledReason(status([]))).toContain('Codex')
     expect(canPickAgentBackend('fox', null)).toBe(true)
     expect(canPickAgentBackend('pi', status([]))).toBe(false)
     expect(canPickAgentBackend('pi', status(['pi']))).toBe(true)
     expect(canPickAgentBackend('deepseek', status(['pi']))).toBe(false)
-    // Codex is hidden: never pickable for a new conversation, even when enabled.
-    expect(canPickAgentBackend('codex', status(['codex']))).toBe(false)
-    // ...but an existing Codex conversation keeps its access from the switch.
+    // Codex is selectable again now that Fox no longer wraps external Agents.
+    expect(canPickAgentBackend('codex', status(['codex']))).toBe(true)
+    // An existing Codex conversation keeps its access from the switch.
     expect(agentBackendAccess('codex', { ...status(['codex']), options: status(['codex']).options.map((option) => ({ ...option, wired: true })) })).toBe('runnable')
     expect(isAgentBackendRefusalCode('agent_backend_hidden')).toBe(true)
   })

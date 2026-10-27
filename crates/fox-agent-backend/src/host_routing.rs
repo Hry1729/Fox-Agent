@@ -827,28 +827,21 @@ mod tests {
             assert!(option.reason.is_none());
         }
         assert!(all.iter().find(|option| option.backend == AgentBackend::Deepseek).unwrap().experimental);
-        // Codex is hidden from users but still enabled, so its existing
-        // conversations stay runnable.
+        // Codex is selectable again after the outer SRT layer was removed
+        // from external backends.
         let codex = all.iter().find(|option| option.backend == AgentBackend::Codex).unwrap();
-        assert!(codex.hidden && codex.enabled);
-        assert!(all.iter().filter(|option| option.backend != AgentBackend::Codex).all(|option| !option.hidden));
+        assert!(!codex.hidden && codex.enabled && codex.wired);
+        assert!(all.iter().all(|option| !option.hidden));
     }
 
-    /// 2026-10-24: Codex is hidden (one switch, `AgentBackend::HIDDEN`). A new
-    /// conversation cannot pick it whatever the switch says; an existing Codex
-    /// conversation keeps routing to its runtime, and the administrator
-    /// switch still only forces off.
+    /// 2026-10-24 hid Codex because of outer SRT. That layer now applies only
+    /// to the Fox Agent, so a new conversation can choose and start Codex.
     #[test]
-    fn hidden_codex_refuses_new_conversations_but_keeps_existing_ones() {
-        assert_eq!(AgentBackend::HIDDEN, [AgentBackend::Codex]);
-        assert!(AgentBackend::Codex.hidden());
+    fn codex_is_selectable_again_and_keeps_existing_sessions() {
+        assert!(AgentBackend::HIDDEN.is_empty());
+        assert!(!AgentBackend::Codex.hidden());
         assert!(!AgentBackend::Fox.hidden() && !AgentBackend::Pi.hidden() && !AgentBackend::Deepseek.hidden());
-        for switch in [on(), BackendSwitch::from_env_value(Some("codex")), BackendSwitch::all_off()] {
-            let error = choose_for_new_conversation(Some("codex"), &switch).unwrap_err();
-            assert_eq!(error.code(), RouteError::CODE_HIDDEN);
-            assert!(!error.retryable());
-            assert!(error.message().contains("已有会话不受影响"));
-        }
+        assert_eq!(choose_for_new_conversation(Some("codex"), &on()), Ok(AgentBackend::Codex));
         for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve] {
             assert_eq!(route_stored(entry, Some("codex"), None, &on()), Ok((AgentBackend::Codex, Route::External(AgentBackend::Codex))));
             assert_eq!(route_stored(entry, Some("codex"), Some("codex"), &on()), Ok((AgentBackend::Codex, Route::External(AgentBackend::Codex))));

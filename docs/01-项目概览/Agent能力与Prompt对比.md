@@ -14,7 +14,7 @@
 
 **本文的对比、排名和建议是 2026-08-24 至 2026-08-26 基于固定源码快照做的分析（见「对比基准」），之后没有重新分析，也没有重新核对 Maka、Kun、DeepSeek-Reasonix 和 OpenAI Codex 的新版本。** 2026-10-25 只按 `main` 当前代码更新了文中关于 Fox 的事实。与分析时相比，Fox 的主要变化：
 
-- **外层 Agent**：分析时 Fox 没有外层 Agent 选择。现在每个会话创建时选定一个外层 Agent：Fox（默认，Kernel / Authoritative）、DeepSeek Harness（dsh，实验）、pi；Codex 已作为外部 Agent 实现但暂时隐藏。外部 Agent 都经 ACP v1 接入，在 srt 沙箱中运行，权限按各自原生选项显示。本文对比的 “Codex” 指 OpenAI Codex 项目本身，不是 Fox 里的 Codex 外部 Agent。见 [Agent Runtime 架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+- **外层 Agent**：分析时 Fox 没有外层 Agent 选择。现在每个会话创建时选定一个外层 Agent：Fox（默认，Kernel / Authoritative）、DeepSeek Harness（dsh，实验）、pi；Codex 已作为外部 Agent 恢复可选。外部 Agent 都经 ACP v1 接入，由 Fox 直接启动，保留各自的原生沙箱/审批，权限按各自原生选项显示。本文对比的 “Codex” 指 OpenAI Codex 项目本身，不是 Fox 里的 Codex 外部 Agent。见 [Agent Runtime 架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
 - **执行路径**：Fox 会话默认由 Kernel / Authoritative 执行；`FOX_KERNEL_MODE=legacy` 只用于调试和兼容旧 Run。
 - **Child Run**：深度仍为 1；Kernel 路径**不再**单独限制 Child Run 的数量和同时运行数，单个时长默认 5 分钟、最长 15 分钟（见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md)）。下文“并发限制”“深度与并发较保守”等说法已按此修正。
 - **数据库**：`fox.db` schema v97。

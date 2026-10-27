@@ -41,13 +41,14 @@ impl AgentBackend {
     /// that a NEW conversation cannot be frozen to. Existing conversations of
     /// a hidden backend keep their binding and run as before.
     ///
-    /// The single switch for the product decision "built-in Agents are Fox,
-    /// dsh and pi; Codex will come back through the custom ACP Agent entry"
-    /// (2026-10-24). Remove an entry here (and from `HIDDEN_AGENT_BACKENDS`
-    /// in `apps/desktop/src/features/conversations/model/agent-backend.ts`)
-    /// to show it again. Independent of `FOX_EXTERNAL_BACKENDS`, which can
-    /// still only force a backend off.
-    pub const HIDDEN: [AgentBackend; 1] = [Self::Codex];
+    /// Codex was hidden on 2026-10-24 because the outer SRT layer could not
+    /// run it reliably. The outer SRT layer is no longer applied to external
+    /// backends (2026-10-26), so Codex is selectable again. Keep the list and
+    /// `HIDDEN_AGENT_BACKENDS` in
+    /// `apps/desktop/src/features/conversations/model/agent-backend.ts` in
+    /// sync. Independent of `FOX_EXTERNAL_BACKENDS`, which can still only
+    /// force a backend off.
+    pub const HIDDEN: [AgentBackend; 0] = [];
 
     /// Whether this backend is hidden from user-facing choices ([`Self::HIDDEN`]).
     pub fn hidden(self) -> bool {

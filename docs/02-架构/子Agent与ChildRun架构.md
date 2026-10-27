@@ -5,7 +5,7 @@
 > 最后更新：2026-10-25
 > 基线与成熟度口径见[当前状态与核验基线](../01-项目概览/当前状态与核验基线.md)
 
-> 适用范围与复核（2026-10-25）：本文描述外层 Agent 后端为 `fox` 的会话。DeepSeek Harness、pi（以及已实现但暂时隐藏的 Codex）会话由外部 Agent 经 ACP 执行，不提供本文的委派工具，见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。正文已于 2026-10-25 对照 `main`（`c8a42a9`）代码复核。
+> 适用范围与复核（2026-10-25）：本文描述外层 Agent 后端为 `fox` 的会话。DeepSeek Harness、pi（以及Codex）会话由外部 Agent 经 ACP 执行，不提供本文的委派工具，见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。正文已于 2026-10-25 对照 `main`（`c8a42a9`）代码复核。
 
 ## 目标与边界
 

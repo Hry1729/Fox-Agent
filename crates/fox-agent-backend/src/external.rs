@@ -119,9 +119,14 @@ impl LaunchRequest {
         }
     }
 
-    /// The native mode a session of this request runs in under `mode`.
-    pub fn native_mode(&self, mode: PermissionMode) -> &'static str {
-        crate::native_permission::effective_mode(self.backend, self.native_permission.as_deref(), mode == PermissionMode::FullAccess, &self.native_context())
+    /// The native mode a session of this request runs in.
+    ///
+    /// `mode` is accepted for API compatibility. It describes Fox's removed
+    /// outer SRT layer, so it must not rewrite the Agent's own stored
+    /// permission choice: removing the outer layer can never turn Codex or
+    /// dsh into full access.
+    pub fn native_mode(&self, _mode: PermissionMode) -> &'static str {
+        crate::native_permission::effective_mode(self.backend, self.native_permission.as_deref(), false, &self.native_context())
     }
 }
 

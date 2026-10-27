@@ -64,7 +64,7 @@ type ApiResponse<T> =
 - 本机资料库：删除资料库、目录、存储路径重置（`local_knowledge_storage_path_reset`）；本机向量模型与检索测试（`local_embedding_*`、`local_knowledge_index_start`、`local_knowledge_retrieval_*`）。
 - 文档活动命令改名为 `knowledge_document_reading_state_save`、`knowledge_document_bookmark_save/delete`、`knowledge_document_annotation_save/delete`。
 
-`conversation_create` 另接受可选 `agentBackend`（`fox` / `pi` / `deepseek` / `codex`，创建后冻结）和 `externalPermissionMode`（仅外部后端：`sandboxed` 默认或 `full_access`，`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时拒绝 `full_access`）。外部 Agent 会话也使用 `conversation_create`、`run_start`、`run_cancel`、`approval_resolve`：命令层按会话冻结的 `agent_backend` 路由（`commands/agent_backend_routing.rs`），请求指向其他后端会被拒绝（`agent_backend_misrouted`），`run_resume` 对外部会话返回 `agent_backend_entry_unsupported`，新建隐藏后端（Codex）的会话返回 `agent_backend_hidden`。错误码见[错误与状态参考](错误与状态.md#外部-agent-后端)。
+`conversation_create` 另接受可选 `agentBackend`（`fox` / `pi` / `deepseek` / `codex`，创建后冻结）和 `externalPermissionMode`（仅外部后端：`sandboxed` 默认或 `full_access`，`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时拒绝 `full_access`）。外部 Agent 会话也使用 `conversation_create`、`run_start`、`run_cancel`、`approval_resolve`：命令层按会话冻结的 `agent_backend` 路由（`commands/agent_backend_routing.rs`），请求指向其他后端会被拒绝（`agent_backend_misrouted`），`run_resume` 对外部会话返回 `agent_backend_entry_unsupported`，当前 `AgentBackend::HIDDEN` 为空，Codex 可正常新建；被 HIDDEN 临时下线的后端才返回 `agent_backend_hidden`。错误码见[错误与状态参考](错误与状态.md#外部-agent-后端)。
 
 `mcp_server_save` 的 `transport` 为 `stdio|streamable_http|openapi`。stdio 使用 `command/args/credentials`；HTTP 使用 `endpointUrl/credentials`；OpenAPI 使用 `definition` 和可选 `endpointUrl` 覆盖。`credentials` 只写入 Keyring，不在读取结果中回传。
 

@@ -468,10 +468,16 @@ pub fn execute_with_cancellation(
             timeout,
             ..
         } => {
-            crate::process_jobs::authorize_execution().map_err(|error|
-                ToolErrorCode::SandboxUnavailable.error(error.reason()))?;
+            // Fox Agent commands are the one path that gets Fox's SRT layer.
+            // The session is held for the whole call: settings/temp and the
+            // Windows ancestor ACE stay alive exactly as long as the child.
             revalidate_target(&root, &cwd, Some(true))?;
-            execute_command(&command, &cwd, timeout, cancellation)
+            let sandbox = crate::host_sandbox::HostSandbox::discover().map_err(|error|
+                ToolErrorCode::SandboxUnavailable.error(format!("{}: {}", error.code.as_str(), error.message)))?;
+            let wrapped = sandbox
+                .begin(&command, &cwd, &root, &sync_session_id())
+                .map_err(|error| ToolErrorCode::SandboxUnavailable.error(format!("{}: {}", error.code.as_str(), error.message)))?;
+            execute_spawn_spec(wrapped.spec.clone(), &cwd, timeout, cancellation, Some(&wrapped.declaration))
         }
     }
 }
@@ -1659,7 +1665,23 @@ pub(crate) fn run_contained_program(
     }
 }
 
+/// A unique sync session id that satisfies SRT's `[A-Za-z0-9_-]` rule.
+fn sync_session_id() -> String {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_nanos()).unwrap_or(0);
+    format!("sync-{}-{nanos}", std::process::id())
+}
+
 fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
+    execute_spawn_spec(command_spawn_spec(command, cwd), cwd, timeout, cancellation, None)
+}
+
+fn execute_spawn_spec(
+    spec: crate::process_jobs::SpawnSpec,
+    cwd: &Path,
+    timeout: Duration,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+    sandbox: Option<&fox_agent_backend::sandbox::SandboxDeclaration>,
+) -> Result<Value, String> {
     // The reader budget is process-wide, so the tests that measure it cannot run
     // against each other's reservations. Compiles out of the product build; in
     // tests it serializes command execution on a re-entrant guard (a test that
@@ -1667,7 +1689,7 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
     #[cfg(test)]
     let _budget = tests::lock_reader_budget();
     let ContainedRun { outcome, wait_failure, stdout, stderr, started } = run_contained(
-        command_spawn_spec(command, cwd),
+        spec,
         timeout,
         &[],
         &|| check_cancellation(cancellation),
@@ -1750,6 +1772,9 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
         "shell": if cfg!(windows) { "cmd.exe /D /S /C" } else { "sh -lc" },
         "platform": if cfg!(windows) { "windows" } else { "posix" },
         "outputEncoding": encoding,
+        "sandboxMechanism": sandbox.map(|declaration| declaration.mechanism.clone()).unwrap_or(None),
+        "sandboxMode": sandbox.map(|declaration| declaration.mode.as_str()),
+        "sandboxReadScope": sandbox.map(|declaration| declaration.read_scope.as_str()),
     });
     if let Some(error_code) = error_code {
         if let Some(object) = details.as_object_mut() {
@@ -2822,6 +2847,74 @@ mod tests {
         assert!(error.contains("sandbox_unavailable"));
         assert!(!root.join("should-not-exist.txt").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The end-to-end Host command path under the explicitly enabled real
+    /// SRT test. Unlike the helper test in host_sandbox, this goes through
+    /// prepare -> revalidate -> HostSandbox -> execute_spawn_spec.
+    #[cfg(windows)]
+    #[test]
+    fn real_srt_host_command_tool_is_confined_to_the_project() {
+        if std::env::var("FOX_TEST_REAL_SRT").ok().as_deref() != Some("1") {
+            eprintln!("skipped: set FOX_TEST_REAL_SRT=1 to run the real SRT tool check");
+            return;
+        }
+        let root = project();
+        let outside_name = format!("fox-tool-srt-outside-{}.txt", std::process::id());
+        let outside = root.parent().unwrap().join(&outside_name);
+        let _ = fs::remove_file(&outside);
+        let command = format!("whoami > who.txt & echo outside > \"..\\{outside_name}\"");
+        let action = prepare("run_command", &json!({"command": command, "timeoutSeconds": 30}), root.to_str().unwrap()).unwrap();
+        let result = execute(action).expect("the real SRT command path");
+        assert_eq!(result["details"]["sandboxMechanism"], "srt");
+        assert_eq!(result["details"]["sandboxMode"], "sandboxed");
+        let who = fs::read_to_string(root.join("who.txt")).expect("whoami output");
+        assert!(who.to_ascii_lowercase().contains("srt-sandbox"), "not the SRT account: {who:?}");
+        assert!(!outside.exists(), "write outside the project reached the Host: {}", outside.display());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_srt_host_command_timeout_terminates_the_sandboxed_tree() {
+        if std::env::var("FOX_TEST_REAL_SRT").ok().as_deref() != Some("1") {
+            eprintln!("skipped: set FOX_TEST_REAL_SRT=1 to run the real SRT timeout check");
+            return;
+        }
+        let root = project();
+        let action = prepare("run_command", &json!({"command":"ping -n 30 127.0.0.1 > NUL", "timeoutSeconds": 2}), root.to_str().unwrap()).unwrap();
+        let started = Instant::now();
+        let result = execute(action).expect("the wrapped command returns a timeout result");
+        assert!(started.elapsed() < Duration::from_secs(20), "the SRT job must be bounded");
+        assert_eq!(result["details"]["timedOut"], true);
+        assert_eq!(result["details"]["sandboxMechanism"], "srt");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_srt_host_command_cancellation_stops_the_sandboxed_tree() {
+        use crate::kernel::CancellationPort;
+        if std::env::var("FOX_TEST_REAL_SRT").ok().as_deref() != Some("1") {
+            eprintln!("skipped: set FOX_TEST_REAL_SRT=1 to run the real SRT cancellation check");
+            return;
+        }
+        let root = project();
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("r").unwrap();
+        let token = registry.tool_token("r", "srt-cancel").unwrap();
+        let action = prepare("run_command", &json!({"command":"echo started>started.txt & ping -n 30 127.0.0.1 > NUL", "timeoutSeconds": 60}), root.to_str().unwrap()).unwrap();
+        let worker = thread::spawn(move || execute_with_cancellation(action, Some(&token)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !root.join("started.txt").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(root.join("started.txt").exists(), "the sandboxed command must start before cancellation");
+        registry.request_tool_cancel("r", "srt-cancel");
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.contains("tool.cancelled"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

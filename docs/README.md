@@ -14,7 +14,7 @@
 
 > **注意（2026-10-25）**：该页最后一次核验是 2026-09-22，早于之后合入 `main` 的四 Agent 改造、设置页改版和启动降级修复。这几项的当前事实分别以下列位置为准，基线页尚未同步：
 >
-> - 四 Agent（Fox / DeepSeek / pi，Codex 已实现但隐藏）：[Agent Runtime 架构 · 外层 Agent 后端](02-架构/Agent运行时架构.md#外层-agent-后端四-agent)、[四 Agent 改造实施方案](02-架构/四Agent改造实施方案-v0.3.1.md)开头的实施状态，以及 `crates/fox-agent-backend/docs/`（`sandbox.md`、`codex.md`、`pi.md`、`deepseek.md`）。
+> - 四 Agent（Fox / DeepSeek / pi，Codex 已恢复可选）：[Agent Runtime 架构 · 外层 Agent 后端](02-架构/Agent运行时架构.md#外层-agent-后端四-agent)、[四 Agent 改造实施方案](02-架构/四Agent改造实施方案-v0.3.1.md)开头的实施状态，以及 `crates/fox-agent-backend/docs/`（`sandbox.md`、`codex.md`、`pi.md`、`deepseek.md`）。
 > - 设置页：7 个入口（通用 / 对话 / 模型 / Agent / 插件 / 资料库 / 数据与关于），见下文「设置页现状」。
 > - 启动修复与降级、`fox.db` Schema v97：[Tauri 后端架构](02-架构/Tauri后端架构.md)、[数据架构](02-架构/数据架构.md)。
 

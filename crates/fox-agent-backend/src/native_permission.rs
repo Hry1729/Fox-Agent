@@ -214,21 +214,26 @@ pub fn is_known(backend: AgentBackend, id: &str) -> bool {
     catalog(backend, &CatalogContext::default()).options.iter().any(|option| option.id == id.trim())
 }
 
-/// The mode a session really runs in: the full-access option exactly when
-/// the session runs without srt (`full_access`), otherwise the stored choice
-/// when it is a known, enabled, sandboxed option, else the Agent's default
-/// (fail-closed: an unreadable, unknown or greyed choice never widens).
+/// The mode a session really runs in: the stored choice when it is a known,
+/// enabled option (including the Agent's own full-access option), else the
+/// Agent's default. An unknown or greyed choice never widens.
+///
+/// `full_access` is retained for old callers: it may select the full option
+/// when no stored choice exists. It is no longer tied to Fox's removed outer
+/// SRT layer and cannot rewrite an existing native choice.
 pub fn effective_mode(backend: AgentBackend, stored: Option<&str>, full_access: bool, context: &CatalogContext) -> &'static str {
+    let catalog = catalog(backend, context);
+    if let Some(option) = stored.and_then(|stored| {
+        catalog.options.iter().find(|option| option.id == stored.trim() && option.disabled_reason.is_none())
+    }) {
+        return option.id;
+    }
     if full_access {
-        if let Some(full) = full_access_mode(backend) {
-            return full;
+        if let Some(full) = catalog.options.iter().find(|option| option.full_access && option.disabled_reason.is_none()) {
+            return full.id;
         }
     }
-    let catalog = catalog(backend, context);
-    stored
-        .and_then(|stored| catalog.options.iter().find(|option| option.id == stored.trim() && !option.full_access && option.disabled_reason.is_none()))
-        .map(|option| option.id)
-        .unwrap_or(catalog.default_mode)
+    catalog.default_mode
 }
 
 /// The codex-acp mode of a Codex option id.
@@ -346,16 +351,20 @@ mod tests {
     }
 
     #[test]
-    fn full_access_option_follows_the_grant_only() {
+    fn native_full_access_is_a_stored_choice_not_a_fox_sandbox_mode() {
         let context = CatalogContext::default();
         for backend in [AgentBackend::Codex, AgentBackend::Deepseek, AgentBackend::Pi] {
             let full = full_access_mode(backend).unwrap();
-            assert_eq!(effective_mode(backend, Some(full), false, &context), catalog(backend, &context).default_mode, "{backend:?}: no grant, no full access");
-            assert_eq!(effective_mode(backend, None, true, &context), full);
+            assert_eq!(effective_mode(backend, Some(full), false, &context), full, "{backend:?}: the Agent's own stored choice survives");
+            assert_eq!(effective_mode(backend, None, true, &context), full, "legacy full-access callers still map explicitly");
             assert_eq!(effective_mode(backend, Some("junk"), false, &context), catalog(backend, &context).default_mode);
         }
         let forbidden = CatalogContext { full_access_forbidden: true, ..Default::default() };
-        assert!(catalog(AgentBackend::Pi, &forbidden).options.iter().find(|option| option.full_access).unwrap().disabled_reason.is_some());
+        for backend in [AgentBackend::Codex, AgentBackend::Deepseek, AgentBackend::Pi] {
+            let full = full_access_mode(backend).unwrap();
+            assert!(catalog(backend, &forbidden).options.iter().find(|option| option.id == full).unwrap().disabled_reason.is_some());
+            assert_eq!(effective_mode(backend, Some(full), false, &forbidden), catalog(backend, &forbidden).default_mode, "{backend:?}: FORBIDDEN still refuses");
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@
 | --- | --- | --- |
 | 设置页改版 | 已完成 | 三组 7 个入口（通用 / 对话 / 模型 / Agent / 插件 / 资料库 / 数据与关于），旧路由重定向，见 [docs/README · 设置页现状](../README.md#设置页现状)。「通用」页仍是旧卡片结构 |
 | 外层 Agent 选择 | 已完成 | 设置 → Agent →「外部 Agent」选择新会话的 Agent；内置 Fox、DeepSeek Harness（实验）、pi；各 Agent 的原生权限选项；完全访问独立开关 |
-| Codex | 已实现，界面隐藏 | 新会话不能选，已有会话照常可用 |
+| Codex | 内置，可选 | 新会话不能选，已有会话照常可用 |
 | 「自定义 ACP Agent」入口 | **待办** | 用户自行安装其他 ACP Agent、填写启动命令 |
 | 统一登录（模型服务供应商给外部 Agent 用） | 已完成 | 一个供应商可配多个协议；Key 按 base URL 共享 |
 | 应用内确认框与输入框 | 已完成 | 见 `crates/fox-agent-backend/docs/sandbox.md` 13.21、13.23 |

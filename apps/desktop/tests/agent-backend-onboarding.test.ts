@@ -4,7 +4,6 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import {
-  canRevokeFullAccess,
   credentialCardModel,
   credentialProbeTarget,
   credentialProbeTargetKey,
@@ -81,8 +80,8 @@ describe('credentialCardModel: three probe states', () => {
     const p = probe({ state: 'loopback_requires_full_access', credentialsPresent: true, loopbackBlocked: true, presentKeys: ['DEEPSEEK_API_KEY'], presentFiles: ['.dsh/.env'] })
     const card = credentialCardModel(p, allowed)!
     expect(card.kind).toBe('loopback')
-    expect(card.title).toBe('本机网关在沙箱模式下不可用')
-    expect(card.description).toContain('打开“新外部会话使用完全访问”后新建会话')
+    expect(card.title).toBe('本机网关连接未就绪')
+    expect(card.description).toContain('Fox 不再为外部 Agent 添加 SRT 网络代理')
     expect(card.description).toContain('https://api.deepseek.com/anthropic')
     expect(card.offerImport).toBe(false)
     expect(card.requiredKeys).toEqual([])
@@ -90,10 +89,10 @@ describe('credentialCardModel: three probe states', () => {
     noValue(card)
   })
 
-  test('loopback under FORBIDDEN → only the official endpoint is suggested', () => {
+  test('loopback no longer depends on a Fox full-access grant', () => {
     const p = probe({ state: 'loopback_requires_full_access', loopbackBlocked: true })
     const card = credentialCardModel(p, forbidden)!
-    expect(card.description).toContain('本机已禁止完全访问')
+    expect(card.description).toContain('本机网关正在运行')
     expect(card.description).not.toContain('新外部会话使用完全访问')
   })
 })
@@ -208,22 +207,19 @@ describe('permission mode (semantics A)', () => {
     expect(effectiveDraftPermissionMode('sandboxed', allowed)).toBe('sandboxed')
   })
 
-  test('lock chip and revocability', () => {
+  test('the bar names the Agent-native boundary, not a Fox lock', () => {
     expect(permissionChipLabel(null)).toBeNull()
-    expect(permissionChipLabel({ ...allowed, mode: 'full_access', granted: true, locked: true })).toBe('权限：完全访问（已锁定）')
-    expect(permissionChipLabel({ ...allowed, mode: 'sandboxed', locked: true })).toBe('权限：沙箱（已锁定）')
-    expect(canRevokeFullAccess({ ...allowed, granted: true })).toBe(true)
-    // Engineering switch without a user grant: nothing to revoke from the UI.
-    expect(canRevokeFullAccess({ ...allowed, engineeringSwitch: true, mode: 'full_access' })).toBe(false)
+    expect(permissionChipLabel({ ...allowed, mode: 'full_access', granted: true, locked: true })).toBe('隔离：Fox 不额外包装（Agent 原生）')
+    expect(permissionChipLabel({ ...allowed, mode: 'sandboxed', locked: true })).toBe('隔离：Fox 不额外包装（Agent 原生）')
   })
 
-  test('risk copy: three points + private HOME; revoke notice says it restarts', () => {
+  test('risk copy describes the Agent native mode and private HOME', () => {
     expect(FULL_ACCESS_RISK_POINTS).toHaveLength(3)
-    expect(FULL_ACCESS_RISK_POINTS[0]).toContain('srt')
-    expect(FULL_ACCESS_RISK_POINTS[1]).toContain('目录边界')
-    expect(FULL_ACCESS_RISK_POINTS[2]).toContain('任何文件')
+    expect(FULL_ACCESS_RISK_POINTS[0]).toContain('Fox 不额外包装')
+    expect(FULL_ACCESS_RISK_POINTS[1]).toContain('原生沙箱')
+    expect(FULL_ACCESS_RISK_POINTS[2]).toContain('当前用户')
     expect(FULL_ACCESS_PRIVATE_HOME_NOTE).toContain('私有 HOME')
-    expect(REVOKE_FULL_ACCESS_NOTICE).toContain('沙箱中重新启动')
+    expect(REVOKE_FULL_ACCESS_NOTICE).toContain('原生方式重建')
   })
 })
 
@@ -233,21 +229,12 @@ describe('source assertions', () => {
 
   const settings = readFileSync(new URL('../src/features/settings/agent-backend-settings.tsx', import.meta.url), 'utf8')
 
-  // Settings batch, item 5: full access is chosen in 设置, not on the bar.
-  test('full access moved to the settings: risk points shown there; the bar has no picker for it', () => {
-    expect(settings).toContain('新外部会话使用完全访问')
-    expect(settings).toContain("FULL_ACCESS_RISK_POINTS.join('')")
-    expect(settings).toContain('disabled={fullAccess.disabled || saving}')
+  test('there is no Fox-wide full-access switch or revoke control', () => {
+    expect(settings).not.toContain('新外部会话使用完全访问')
     expect(bar).not.toContain('function DraftPermissionPicker')
     expect(bar).not.toContain('aria-label="新会话的权限模式"')
-    expect(bar).toContain('（来自设置）')
-  })
-
-  test('AgentBackendBar warns that revoking restarts before calling onRevoke', () => {
-    expect(bar).toContain('{REVOKE_FULL_ACCESS_NOTICE}')
-    expect(bar).toContain('onClick={() => setConfirming(true)}>撤销完全访问')
-    expect(bar).toContain('onClick={() => { setConfirming(false); onRevoke() }}>撤销并重启到沙箱')
-    expect(bar).toContain('canRevokeFullAccess(permission)')
+    expect(bar).not.toContain('撤销完全访问')
+    expect(bar).toContain('隔离：Fox 不额外包装（Agent 原生）')
   })
 
   const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')

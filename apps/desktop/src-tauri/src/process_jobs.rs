@@ -151,8 +151,9 @@ impl JobError {
 //     naming a different helper, backend, root list or handle.
 //   * `BackendAvailability` is only produced by a `BackendCapabilityProof`, and
 //     the proof is an **injected dependency** — a constructor argument or an
-//     instance field. There is no process-global proof. Production wiring passes
-//     `HostVerifiedBackend`, whose only answer on this Host is `Unavailable`.
+//     instance field. There is no process-global proof. Production Host commands
+//     use `SrtHostBackend` (or a live snapshot of it); `HostVerifiedBackend` is
+//     the refusing legacy proof used only by callers that have not adopted SRT.
 //   * Injection exists so tests and the `tests/` integration target can exercise
 //     the authorized path with a real child. The grant type `AvailableInTests`
 //     is `#[cfg(test)]`: that target pulls this module in with
@@ -174,6 +175,9 @@ pub enum ExecutionBackend {
     /// local account, a machine-wide WFP egress fence keyed on that account's
     /// SID, and per-session explicit ACEs for the configured paths.
     SrtWindows,
+    /// `@anthropic-ai/sandbox-runtime` for a Fox Agent Host command (Windows
+    /// account isolation or the Unix bwrap / seatbelt backend).
+    SrtHost,
 }
 
 impl ExecutionBackend {
@@ -181,6 +185,7 @@ impl ExecutionBackend {
         match self {
             Self::HostUserUnconfined => "host_user_unconfined",
             Self::SrtWindows => "srt_windows",
+            Self::SrtHost => "srt_host",
         }
     }
 }
@@ -307,8 +312,9 @@ impl BackendAvailability {
 /// test. Per-instance injection removes the shared mutable state instead of
 /// trying to schedule access to it.
 ///
-/// Production passes [`HostVerifiedBackend`], whose only honest answer on this
-/// Host is `Unavailable`. A test passes [`AvailableInTests`]. Because the proof
+/// Production Host commands pass [`SrtHostBackend`] (or a snapshot guard over
+/// it); [`HostVerifiedBackend`] remains the refusing legacy proof. A test passes
+/// [`AvailableInTests`]. Because the proof
 /// is an argument rather than a global, a test cannot change another test's
 /// decision, and the order in which tests run cannot change any of them.
 /// `Send + Sync` because a manager holding a proof is moved onto the supervision
@@ -317,8 +323,9 @@ pub trait BackendCapabilityProof: Send + Sync {
     fn availability(&self) -> BackendAvailability;
 }
 
-/// The production proof. It exists so that wiring has a single, named place to
-/// consult, and it refuses because no verified backend is integrated.
+/// The legacy refusing proof. New production wiring uses [`SrtHostBackend`];
+/// this type stays for tests and callers that have not integrated a confinement
+/// backend, and always refuses.
 pub struct HostVerifiedBackend;
 
 impl BackendCapabilityProof for HostVerifiedBackend {
@@ -378,7 +385,18 @@ impl BackendCapabilityProof for AvailableInTests {
 /// they were given. Kept because the wiring layer, `command_jobs`, and the
 /// capability report need a way to ask "what does the shipped artifact do?".
 pub fn execution_availability() -> BackendAvailability {
-    HostVerifiedBackend.availability()
+    SrtHostBackend.availability()
+}
+
+/// The real Fox Agent command backend. `HostVerifiedBackend` remains the
+/// deliberately refusing proof used by tests and by any caller that has not
+/// integrated a confinement backend; production Host commands use this one.
+pub struct SrtHostBackend;
+
+impl BackendCapabilityProof for SrtHostBackend {
+    fn availability(&self) -> BackendAvailability {
+        crate::host_sandbox::SrtHostBackend.availability()
+    }
 }
 
 /// Environment facts, separate from the engine's schema manifest. A catalog
@@ -393,7 +411,7 @@ pub fn runtime_capabilities(manifest_hash: &str, profile_id: &str) -> serde_json
         "schemaVersion":1,"capabilityManifestHash":manifest_hash,"executionProfileId":profile_id,
         "tools":{"run_command":{
             "availability":state,"reasonCode":if availability.is_available(){None}else{Some("sandbox_unavailable")},
-            "reason":reason,"source":"HostVerifiedBackend",
+            "reason":reason,"source":"SrtHostBackend",
             "actions":{"start":state,"status":"available","output":"available","cancel":"available"}
         }}
     })
@@ -2010,15 +2028,16 @@ pub struct ProcessJobManager {
 }
 
 impl ProcessJobManager {
-    /// Production constructor. Always refuses on this Host, because
-    /// [`HostVerifiedBackend`] always refuses.
+    /// Production-style constructor. It consults the real SRT proof; in unit
+    /// tests `SrtHostBackend` deliberately reports unavailable unless
+    /// `FOX_TEST_REAL_SRT=1`, so it still fails closed.
     pub fn new(
         clock: Arc<dyn Clock>,
         spawner: Arc<dyn ProcessSpawner>,
         probe: Arc<dyn IdentityProbe>,
         config: ManagerConfig,
     ) -> Self {
-        Self::with_backend_proof(clock, spawner, probe, config, Arc::new(HostVerifiedBackend))
+        Self::with_backend_proof(clock, spawner, probe, config, Arc::new(SrtHostBackend))
     }
 
     /// Constructor with an explicit execution decision.

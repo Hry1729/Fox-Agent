@@ -199,7 +199,8 @@ pub(super) fn execute(
     token: &CancellationToken,
     budget: Duration,
 ) -> Result<Value, String> {
-    // Production always refuses, because this is the refusing proof.
+    // Production uses the real SRT proof; tests fail closed because
+    // `SrtHostBackend` is unavailable unless FOX_TEST_REAL_SRT=1.
     execute_inner(
         database,
         run_id,
@@ -207,7 +208,8 @@ pub(super) fn execute(
         root,
         token,
         budget,
-        Arc::new(crate::process_jobs::HostVerifiedBackend),
+        true,
+        Arc::new(crate::process_jobs::SrtHostBackend),
         None,
         &mut ExecutionEvidence::NotStarted,
         &mut CallOutcome::Completed,
@@ -223,8 +225,8 @@ pub(super) fn execute_authorized(
 ) -> (Result<Value, String>, ExecutionEvidence, CallOutcome) {
     let mut evidence = ExecutionEvidence::NotStarted;
     let mut outcome = CallOutcome::Completed;
-    let response = execute_inner(database, run_id, input, root, token, budget,
-        Arc::new(crate::process_jobs::HostVerifiedBackend), Some(claim.credential()),
+    let response = execute_inner(database, run_id, input, root, token, budget, true,
+        Arc::new(crate::process_jobs::SrtHostBackend), Some(claim.credential()),
         &mut evidence, &mut outcome);
     if let Err(error) = &response {
         outcome = CallOutcome::Failed { code: error.clone() };
@@ -304,6 +306,7 @@ fn execute_inner(
     root: &Path,
     token: &CancellationToken,
     budget: Duration,
+    wrap_srt: bool,
     proof: Arc<dyn crate::process_jobs::BackendCapabilityProof>,
     credential: Option<&ExecutionCredential>,
     evidence: &mut ExecutionEvidence,
@@ -358,6 +361,21 @@ fn execute_inner(
         else {
             unreachable!()
         };
+        // Prepare the SRT boundary before the durable job is published. A
+        // missing runtime or policy refuses here, before any process exists.
+        // Test-only callers may inject an authorizing proof without the real
+        // SRT installation; production passes `wrap_srt = true`.
+        let wrapped = if wrap_srt {
+            let sandbox = crate::host_sandbox::HostSandbox::discover()
+                .map_err(|error| format!("[{}] {}", error.code.as_str(), error.message))?;
+            Some(sandbox
+                .begin(&command, &cwd, root, &format!("job-{}", credential.dispatch_id))
+                .map_err(|error| format!("[{}] {}", error.code.as_str(), error.message))?)
+        } else {
+            None
+        };
+        let spawn_spec = wrapped.as_ref().map(|session| session.spec.clone())
+            .unwrap_or_else(|| crate::tool_host::command_spawn_spec(&command, &cwd));
         let requested = unsigned(input, "timeoutSeconds", 600, 3600)?;
         let duration = Duration::from_secs(requested)
             .min(Duration::from_millis(credential.budget_ceiling_ms.max(0) as u64))
@@ -438,7 +456,7 @@ fn execute_inner(
             let launch = manager.start_authorized(StartRequest {
                 run_id: run_id.into(),
                 idempotency_key: credential.dispatch_id.clone(),
-                spec: crate::tool_host::command_spawn_spec(&command, &cwd),
+                spec: spawn_spec,
                 execution_budget: duration,
             }, |_| {
                 token.check().map_err(crate::process_jobs::JobError::InvalidRequest)?;
@@ -480,6 +498,10 @@ fn execute_inner(
                     let parent = token.clone();
                     let owner = manager.clone();
                     let spawn=std::thread::Builder::new().name("fox-command-job".into()).spawn(move || {
+                        // Keep the SRT settings, temp dir and Windows ancestor
+                        // ACE reference alive for the whole job, not just the
+                        // spawn call.
+                        let _sandbox = wrapped;
                         // The manager owns the child; the worker owns durable publication.
                         let work=(||->Result<(),String>{
                             let mut last_view = None;

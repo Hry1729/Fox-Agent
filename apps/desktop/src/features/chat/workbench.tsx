@@ -1443,7 +1443,9 @@ export function Workbench() {
   const openConversationId = openConversationSummary?.id ?? null
   const draftProjectRoot = desktopConversation.draftProjectRoot
   const draftProjectId = lockedAgentBackend ? null : (projects.find((item) => item.rootPath === draftProjectRoot)?.id ?? null)
-  const draftFullAccess = Boolean(desktopConversation.agentBackendPreferences?.effectiveFullAccess)
+  // External Agents use their own native permission; Fox no longer has an
+  // outer full-access grant for a new conversation.
+  const draftFullAccess = false
   const agentBackendBar = useMemo(() => desktopConversation.enabled ? (
     <AgentBackendPanel
       client={desktopClient}

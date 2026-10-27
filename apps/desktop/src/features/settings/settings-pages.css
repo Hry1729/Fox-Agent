@@ -692,7 +692,7 @@
   }
 }
 
-/* Settings batch: 外部 Agent (新会话使用的 Agent / 新外部会话使用完全访问). */
+/* Settings batch: 外部 Agent（新会话使用的 Agent；旧完全访问开关已移除）. */
 .fox-agent-backend-settings select {
   min-width: 10rem;
   border: 1px solid var(--border);

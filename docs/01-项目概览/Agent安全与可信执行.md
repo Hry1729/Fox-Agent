@@ -9,12 +9,12 @@
 
 Fox 不把模型当作可信程序。会话分两类，安全边界不同：
 
-- **Fox 会话**（默认）：模型只能生成文字或提出结构化工具请求；文件、程序、数据库、知识库和 MCP 操作都由 Tauri Host 执行。Host 根据用户授权、项目范围、Execution Profile、工具协议、参数、审批和任务状态决定是否执行。生产构建中没有经过验证的命令后端，任意 Shell 保持拒绝。
-- **外部 Agent 会话**（dsh / pi；Codex 已实现但隐藏）：Agent 自己执行模型循环和工具，但由 Host 从 Fox 管理的运行时目录启动，只继承白名单环境变量，在 srt 沙箱里运行，必须绑定项目。审批请求经 ACP 回到 Fox 由用户作答；完全访问只能在创建会话时授予，中途只能撤销。会话记录由 Host 写入 Fox 数据库，Fox 不向外部 Agent 提供访问数据库的接口。
+- **Fox 会话**（默认）：模型只能生成文字或提出结构化工具请求；文件、程序、数据库、知识库和 MCP 操作都由 Tauri Host 执行。Host 根据用户授权、项目范围、Execution Profile、工具协议、参数、审批和任务状态决定是否执行。任意 Shell 由真实 SRT 限制，初始化失败拒绝执行。
+- **外部 Agent 会话**（dsh / pi；Codex 已恢复可选）：Agent 自己执行模型循环和工具，但由 Host 从 Fox 管理的运行时目录启动，只继承白名单环境变量，由 Fox 直接启动并绑定项目；Fox 不再套外层 SRT，边界由各 Agent 原生沙箱/审批决定。审批请求经 ACP 回到 Fox 由用户作答；完全访问是该 Agent 的原生模式，新会话和会话中都可切换；切换会中止当前轮并按原生方式重建。会话记录由 Host 写入 Fox 数据库，Fox 不向外部 Agent 提供访问数据库的接口。
 
 限制工具只是第一层。Fox 会话还通过路径隔离、权限交集、审批绑定、资源预算、状态机、Evidence、独立 Reviewer、持久审计和 fail-closed 恢复共同约束 Agent。
 
-已知未闭合的边界见本页末「已知安全边界」，其中包括：Fox Host 命令路径没有操作系统级隔离；`test_run` 的授权没有绑定工作区修订或脚本内容。
+已知未闭合的边界见本页末「已知安全边界」，其中包括：Fox Host 的 `run_command` 已接入 SRT，但文件工具仍在 Host 内、只靠路径检查；`test_run` 的授权没有绑定工作区修订或脚本内容。
 
 ## 答辩时可以直接这样回答
 
@@ -22,7 +22,7 @@ Fox 不把模型当作可信程序。会话分两类，安全边界不同：
 
 如果被问到外部 Agent（如 pi、DeepSeek），可以补充：
 
-> 外部 Agent 自己执行工具，但它运行在 Fox 启动的沙箱里，只拿到白名单环境变量和绑定项目的工作区；需要审批的操作通过协议回到 Fox 由用户决定。完全访问必须在创建会话时单独授予并留审计，会话中途只能收回，不能打开。
+> 外部 Agent 自己执行工具；Fox 直接启动它，只给白名单环境变量和绑定项目的工作区，但不再套外层 SRT。边界由该 Agent 自己的原生沙箱/审批决定；需要审批的操作通过协议回到 Fox 由用户决定。完全访问是该 Agent 的原生模式，不是 Fox 外层授权。
 
 如果评委继续追问，可以补充一句：
 
@@ -54,7 +54,7 @@ flowchart LR
 
 Agent Runtime 负责模型循环、上下文和工具请求，不直接持有 Fox 数据库写权限。写文件、执行进程、读取附件、调用知识库和 MCP 等系统能力由 Rust Host 提供。
 
-Host 自己执行程序时也有限制：任意 Shell（`run_command`）在生产构建中保持拒绝，因为没有经过验证的隔离后端（`process_jobs::HostVerifiedBackend` 固定不可用，返回 `tool.sandbox_unavailable`）。`git_read`、`test_run`、`code_check`、`format_code` 这类固定能力工具由 Host 生成固定的程序和参数（不经 Shell），启动时清空环境变量、只传白名单，在 Windows 上放进 Job Object 以便整树回收，并限制输出和时长。这只是进程管理，不是文件或网络隔离。
+Host 自己执行程序时也有限制：任意 Shell（`run_command`）由真实 SRT 限制（`host_sandbox::HostSandbox`），SRT 不可用时返回 `tool.sandbox_unavailable`，不会回退宿主裸跑。`git_read`、`test_run`、`code_check`、`format_code` 这类固定能力工具由 Host 生成固定的程序和参数（不经 Shell），启动时清空环境变量、只传白名单，在 Windows 上放进 Job Object 以便整树回收，并限制输出和时长。这只是进程管理，不是文件或网络隔离。
 
 即使模型输出一段命令或伪造“系统已批准”的文字，这些文字也不会自动成为系统操作。
 
@@ -147,16 +147,16 @@ SQLite 保存 Run、ToolCall、Approval、Attempt、Evidence、Reviewer decision
 | --- | --- | --- |
 | 启动来源 | 只从 Fox 管理的运行时目录启动，不用 `npx`；未安装时报 `agent_backend_not_installed` | `crates/fox-agent-backend/src/external_launch.rs` |
 | 环境变量 | 只继承白名单 | 同上 |
-| 沙箱 | 默认整个外部 Agent 进程在每会话一个 srt 沙箱里运行：只能读写授权目录、私有 HOME 和运行必需的系统目录，出站网络限于该 Agent 的模型 API 域名；Windows 另有私有目录布局、ACP bridge 和祖先 ACE。沙箱起不来时拒绝启动，绝不回退到完全访问 | `crates/fox-agent-backend/src/sandbox.rs`、`win*.rs` |
+| 沙箱 | 外部 Agent 不再套 Fox 的 srt；Fox 直接启动进程并使用私有 HOME，边界由该 Agent 自己的原生沙箱/审批决定。Codex / dsh 的原生限制保留；pi 没有系统级沙箱，只有 Fox 审批门禁。Fox Agent 的 Host 命令才由 srt 限制 | `apps/desktop/src-tauri/src/host_sandbox.rs`、`crates/fox-agent-backend/src/native_permission.rs` |
 | 项目 | 外部会话必须绑定项目才能开始运行 | `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs` |
 | 登录信息 | 放在 Fox 管理的私有 HOME；从真实 HOME 导入时只复制用户确认过的文件，并按名字审计 | `crates/fox-agent-backend/src/onboarding.rs` |
 | 审批 | Agent 的审批请求经 ACP `session/request_permission` 由 Host 作答 | `crates/fox-agent-backend/src/external.rs`、`native_permission.rs` |
 | 权限 | 按该 Agent 自己的原生选项（如 pi 只读 / 询问 / 自动；dsh 只读 / 工作区可写） | `crates/fox-agent-backend/src/native_permission.rs` |
-| 完全访问 | 独立开关；只在创建会话时授予并写审计，会话中只能撤销（撤销后在沙箱里重启）；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时不可选 | 同上 |
+| 完全访问 | 该 Agent 自己的原生模式；新会话和会话中都可切换，切换会中止当前轮并按原生方式重建；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时不可选 | `crates/fox-agent-backend/src/native_permission.rs`、`commands/agent_backend_routing.rs` |
 | 路由 | 会话后端创建时冻结；请求与冻结值不一致时拒绝；读库失败时不会把外部会话交给 Fox | `crates/fox-agent-backend/src/host_routing.rs` |
 | 关闭 | 管理员可用 `FOX_EXTERNAL_BACKENDS` 强制关闭，被关闭的已有外部会话只读 | 同上 |
 
-外部 Agent 在沙箱内能做什么，取决于它自己的工具和所选权限；Fox 不审查它每一步工具调用的参数，也不对它的输出建立 Evidence / Acceptance。能力按“审批覆盖 / 沙箱范围 / 取消能力 / 可观测性”四个维度声明并显示。详见[安全架构 · 外部 Agent 会话](../02-架构/安全架构.md#外部-agent-会话)。
+外部 Agent 在其原生边界内能做什么，取决于它自己的工具和所选权限；Fox 不审查它每一步工具调用的参数，也不对它的输出建立 Evidence / Acceptance。能力按“审批覆盖 / 沙箱范围 / 取消能力 / 可观测性”四个维度声明并显示。详见[安全架构 · 外部 Agent 会话](../02-架构/安全架构.md#外部-agent-会话)。
 
 ## 常见追问
 
@@ -184,11 +184,11 @@ Child Run 的权限来自父级与自身 Profile 的交集，不能继承父级�
 
 Fox 采用纵深防御，但下列边界尚未闭合（2026-10-25 对照代码）：
 
-- **Fox Host 命令路径没有操作系统级隔离**：没有 OS 沙箱、受限用户、ACL 或防火墙规则。因此任意 Shell 保持拒绝；固定能力工具只有进程回收、环境变量白名单和资源上限。
+- **Fox Host 命令路径已接入 SRT**：`run_command` 与后台命令作业由真实 SRT 限制，初始化失败拒绝执行。文件工具仍在 Host 内，依靠路径检查；固定能力工具仍只有进程回收、环境变量白名单和资源上限。
 - **`test_run` 授权没有绑定工作区修订或脚本内容**（四 Agent 方案阶段 1 第 2 项，未关闭）。
 - **非 Windows 平台的子进程收尾**只杀直接子进程，没有进程树终止（阶段 1 第 4 项只在 Windows 上关闭；产品发布目标是 Windows）。
 - Fox 会话的 Runtime 与本地 MCP 进程没有进入 OS 容器或 Windows AppContainer。
-- 外部 Agent 的安全依赖 srt 沙箱和该 Agent 自己的权限实现；完全访问一旦授予，该会话不再有沙箱和目录边界，只保留 Host 侧的环境变量白名单、不下发凭据、取消与进程树清理、记录和原生审批转发（`crates/fox-agent-backend/src/sandbox.rs` 模块说明）。
+- 外部 Agent 的安全依赖该 Agent 自己的原生沙箱/权限实现；Fox 不再增加外层 srt。选择原生完全访问时，该 Agent 的原生沙箱和审批会按其自身语义关闭或放宽；Fox 仍保留环境变量白名单、私有 HOME、取消与进程树清理、记录和审批转发。pi 没有系统级沙箱，不能按 Codex/dsh 的原生隔离来描述。
 - Tauri 已配置 `csp` 与 `devCsp`，但没有浏览器端的策略回归测试。
 - 用户显式配置的 MCP / OpenAPI 地址和本地命令属于高风险受信配置。
 - Office / PDF 等复杂解析器需要持续更新依赖并做恶意文件测试。
@@ -200,7 +200,7 @@ Fox 采用纵深防御，但下列边界尚未闭合（2026-10-25 对照代码�
 
 - `apps/desktop/src-tauri/src/tool_guard.rs`：项目路径和只读工具边界。
 - `apps/desktop/src-tauri/src/tool_host.rs`：文件与程序执行（`run_contained_program`）。
-- `apps/desktop/src-tauri/src/process_jobs.rs`：生产执行证明（`HostVerifiedBackend`）与 Windows Job Object。
+- `apps/desktop/src-tauri/src/host_sandbox.rs`：Fox Agent Host 命令的 SRT 边界；`process_jobs.rs`：执行证明与 Windows Job Object。
 - `apps/desktop/src-tauri/src/command_environment.rs`：子进程环境变量白名单。
 - `apps/desktop/src-tauri/src/runtime_host/capability_tools.rs`：固定能力工具。
 - `apps/desktop/src-tauri/src/runtime_host/protocol.rs`：Host canonical 工具协议。

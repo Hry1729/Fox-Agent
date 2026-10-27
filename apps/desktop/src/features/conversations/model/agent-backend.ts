@@ -27,11 +27,11 @@ export const AGENT_BACKEND_LABELS: Record<AgentBackendId, string> = {
  * conversation with it (`agent_backend_hidden`). Existing conversations of a
  * hidden backend still open, show their backend and run as before.
  *
- * Product decision 2026-10-24: built-in Agents are Fox, dsh and pi; Codex
- * returns through the planned custom ACP Agent entry. Remove the entry here
- * and in the Host to show it again.
+ * Product decision 2026-10-24 hid Codex because of the outer SRT layer. That
+ * layer now applies only to the Fox Agent, so Codex is offered again. Keep
+ * this list and the Host's `AgentBackend::HIDDEN` in sync.
  */
-export const HIDDEN_AGENT_BACKENDS: readonly AgentBackendId[] = ['codex']
+export const HIDDEN_AGENT_BACKENDS: readonly AgentBackendId[] = []
 
 /** Whether a backend is hidden from user-facing choices (local list or the Host's `hidden` flag). */
 export function isAgentBackendHidden(backend: string, status?: { options: { backend: string; hidden?: boolean }[] } | null): boolean {
@@ -130,7 +130,7 @@ export function agentBackendPickerDisabledReason(status: AgentBackendStatus | nu
 
 // ---------------------------------------------------------------------------
 // Settings batch, items 4 / 5: 设置 →「新会话使用的 Agent」and
-// 「新外部会话使用完全访问」(Host: `agent_backend_preferences_get/save`).
+// 旧「新外部会话使用完全访问」设置（仅兼容读取；外部 Agent 已改用原生权限）。
 // Precedence: FOX_EXTERNAL_BACKENDS (administrator, can only force off) >
 // this setting > Fox (default). Existing conversations keep their backend.
 
@@ -216,7 +216,7 @@ export function agentBackendForcedOffNotice(preferences: AgentBackendPreferences
   return `管理员已通过环境变量 ${preferences.switchEnv} 关闭外部 Agent 后端，新会话一律使用 Fox。`
 }
 
-/** State of the「新外部会话使用完全访问」switch. */
+/** 旧「新外部会话使用完全访问」设置的兼容状态；界面已不再渲染该开关。 */
 export function fullAccessSettingState(preferences: AgentBackendPreferences | null | undefined): { checked: boolean; disabled: boolean; reason: string | null } {
   if (!preferences) return { checked: false, disabled: true, reason: '正在读取…' }
   if (preferences.fullAccessForbidden) return { checked: false, disabled: true, reason: preferences.forbiddenReason || '本机已禁止完全访问' }

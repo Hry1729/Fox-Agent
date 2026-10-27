@@ -9,9 +9,9 @@ date: 2026 年 10 月 19 日
 > 本节是后加的状态说明；从“0 v0.3.1 变更说明”起是方案原文，未改动。当前架构以 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent) 为准。
 
 - **已完成并合入 `main`**：阶段 0（三个外部后端的协议原型与证据，见 `crates/fox-agent-backend/docs/pi.md`、`deepseek.md`、`codex.md`）、阶段 2（Fox + 公共基础：会话级 `agent_backend` 冻结、Host 路由、ACP 端口）、阶段 3（pi、DeepSeek Harness、Codex 三个后端经 ACP 接通，含沙箱、审批、取消、能力声明）。逐批复测记录见 `crates/fox-agent-backend/docs/sandbox.md` 第 12、13 节。
-- **产品定位调整**：内置 Agent 为 Fox（Kernel，即 FoxBackend）、DeepSeek Harness（dsh，实验）和 pi。**Codex 已实现但暂时隐藏**：新会话不能选，已有 Codex 会话照常可用，代码和测试保留；隐藏开关为 `AgentBackend::HIDDEN`。
+- **产品定位调整（2026-10-26 再调整）**：内置 Agent 为 Fox（Kernel，即 FoxBackend）、DeepSeek Harness（dsh，实验）、pi 和 Codex。Codex 入口已恢复，`AgentBackend::HIDDEN` 为空；已有 Codex 会话和新建会话都可正常使用。
 - **待办 / 规划中**：「自定义 ACP Agent」通用接入入口（用户自行安装其他 ACP Agent、填写启动命令，Codex 以后也走这里）。
-- **与方案原文不同的落地点**：`FOX_EXTERNAL_BACKENDS` 最终是管理员“只能强制关闭”的开关，未设置时由用户在 设置 →「新会话使用的 Agent」中选择（默认 Fox）；权限按各 Agent 的原生选项显示，完全访问是独立开关，只在创建会话时授予；模型 API Key 按 base URL 在系统凭据库全局共享。
+- **与方案原文不同的落地点**：`FOX_EXTERNAL_BACKENDS` 最终是管理员“只能强制关闭”的开关，未设置时由用户在 设置 →「新会话使用的 Agent」中选择（默认 Fox）；权限按各 Agent 的原生选项显示。**外部 Agent（pi / dsh / Codex）不再套 Fox 的 SRT 沙箱，也没有 Fox 外层 full-access 授予**；SRT 只用于 Fox Agent 的 Host 命令（`apps/desktop/src-tauri/src/host_sandbox.rs`）。模型 API Key 仍按 base URL 在系统凭据库全局共享。
 - **Fox 自身执行路径**：Kernel / Authoritative 是默认路径；Legacy（`FOX_KERNEL_MODE=legacy`）只用于调试和兼容旧 Run。
 - **阶段 4（收敛）仍待做**：Legacy 路径和 Shadow 观察路径的清理尚未开始。
 
@@ -514,3 +514,12 @@ ACP 规范与本方案的对应：`session/cancel` 后客户端必须以 `cancel
     - 细节、运行方法与合并后的 Windows 复测清单（13.5，取代 13.4）见 `crates/fox-agent-backend/docs/sandbox.md` 第 13.5–13.8 节。
 
 **已知限制**：Windows alpha，沙箱账户可读写 DACL 对所有本地账户开放的位置（产品决定只警告），非 Fox 的 srt 客户端可能在 Fox 两次启停之间抹掉祖先 ACE（下次启停 reconcile 才补回），系统 DNS 解析不受限，Windows 沙箱内拿不到 Host 环境凭据（只能用私有 HOME 内的原生登录）；Windows 上代理令牌在 runner 命令行中可见；网络按域名过滤、不检查内容；私有 HOME 中的原生凭据对后端进程可读；macOS / Windows 尚未实测。
+
+
+## 2026-10-26 变更：外部 Agent 去 SRT、Codex 恢复
+
+- 外部 Agent 的启动路径删除 SRT 安装、预检、settings、ACP bridge、网络 broker、代理环境注入和 `FOX_EXTERNAL_FULL_ACCESS` 外层授权；`HostLauncher` 直接启动 Agent，保留私有 HOME、凭据、模型选择、ACP、审批、取消、会话恢复和共享依赖。
+- “是否使用 Fox SRT”和“该 Agent 自己的权限模式”已解耦。Codex / dsh 的原生沙箱不会被 Fox 的旧 FullAccess 映射关闭；pi 仍只有 Fox 审批门禁，没有系统级沙箱。
+- Fox Agent 的 `run_command` 和后台命令作业接入真实 SRT；初始化失败 fail closed，不回退宿主。文件工具仍在 Host 内，依靠原有路径检查。
+- Codex 入口恢复：设置页、新会话选择器、编辑器选择器和默认权限列表都显示 Codex；`AgentBackend::HIDDEN = []`。
+- 验证：`cargo test -p fox-agent-backend --features acp`；桌面定向测试；`FOX_TEST_REAL_SRT=1` 的真实 Host 命令写入/越界/超时/取消测试。未重新打包安装，也未替换当前运行的 Fox。

@@ -105,7 +105,7 @@ export function AgentBackendPanel({
   draftBackend: AgentBackendId
   draftProjectId?: string | null
   draftProjectRoot?: string | null
-  /** 设置 →「新外部会话使用完全访问」as the Host applies it (false under FORBIDDEN). */
+  /** Legacy Fox full-access preference; kept only for older Hosts. */
   draftFullAccess?: boolean
   refusal?: string | null
   /** Bumped by the caller to refresh everything (e.g. after a run). */

@@ -5,9 +5,8 @@
 //   Host greys (Codex「帮我批准」off OpenAI, FORBIDDEN, full access
 //   mid-session) shows its reason inline next to the picker.
 // * dsh: a mid-session change is marked「下一轮重启生效」.
-// * Picking full access in a new conversation goes through the existing risk
-//   confirmation; mid-session full access is never offered (only revoke,
-//   with the existing revoke confirmation).
+// * This is the Agent's own permission mode. Fox no longer adds an outer SRT
+//   sandbox; the confirmation explains the native consequences.
 // * Keyed by target: a late answer for another conversation / backend is
 //   dropped. Every rule is enforced again by the Host.
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -122,7 +121,7 @@ export function AgentNativePermissionPicker({ client, conversationId, backend, t
       {shownPending?.change.kind === 'confirm_revoke' && (
         <span className="fox-agent-backend-risk" role="alertdialog" aria-label="撤销完全访问">
           {shownPending.change.notice}
-          <button type="button" onClick={() => void apply(shownPending.mode)}>撤销并重启到沙箱</button>
+          <button type="button" onClick={() => void apply(shownPending.mode)}>切回受限权限</button>
           <button type="button" onClick={() => setPending(null)}>取消</button>
         </span>
       )}

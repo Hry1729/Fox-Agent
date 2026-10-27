@@ -611,9 +611,10 @@ async fn full_access_codex_and_dsh_requests_still_show_the_card_never_auto_allow
     for (index, (backend, full_mode, deny)) in [(AgentBackend::Codex, "agent-full-access", false), (AgentBackend::Deepseek, "danger-full-access", true)].into_iter().enumerate() {
         let conversation = format!("c-d5-{}", backend.as_str());
         let run = format!("r-d5-{}", backend.as_str());
-        // Even a stored sandboxed choice is overridden by full access.
+        // The Agent's own full mode is the stored choice; Fox's mode only
+        // says that it adds no outer SRT layer.
         let mut request = turn(&conversation, &run, "hello", backend, None);
-        request.launch.native_permission = Some("workspace-write".into());
+        request.launch.native_permission = Some(full_mode.into());
         runtime.start_turn(request).unwrap();
         let session = sink.wait_for(&run, "agent_backend.session").await;
         assert_eq!(session["mode"], "full_access", "{session}");
@@ -636,8 +637,10 @@ async fn full_access_codex_and_dsh_requests_still_show_the_card_never_auto_allow
     }
     assert!(sink.0.lock().unwrap().audits.iter().all(|(_, event, _)| event != "agent_backend.permission_auto_answered"));
 
-    // pi 完全访问: Fox's gate answers (自动), no card.
-    runtime.start_turn(turn("c-d5-pi", "r-d5-pi", "hello", AgentBackend::Pi, None)).unwrap();
+    // pi 完全访问: the stored native full mode makes Fox's gate answer (自动), no card.
+    let mut pi = turn("c-d5-pi", "r-d5-pi", "hello", AgentBackend::Pi, None);
+    pi.launch.native_permission = Some("full_access".into());
+    runtime.start_turn(pi).unwrap();
     assert_eq!(sink.terminal("r-d5-pi").await["type"], "run.completed");
     assert_eq!(sink.approvals().len(), 2, "no card for pi in full access");
     let answered = sink.events("r-d5-pi").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("pi gate answered");
