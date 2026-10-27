@@ -696,6 +696,7 @@ export const API_PARAMETER_FIELDS = Object.freeze({
     'service_tier',
   ]),
   'anthropic-messages': Object.freeze([
+    'betas',
     'model',
     'messages',
     'system',

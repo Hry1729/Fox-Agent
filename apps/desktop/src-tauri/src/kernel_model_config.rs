@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub(crate) const KERNEL_MODEL_ADAPTER: &str = "pi-0.84.2/fox-kernel-worker-v1";
+pub(crate) const KERNEL_MODEL_ADAPTER: &str = "pi-1.4.0/fox-kernel-worker-v1";
 
 fn pi_engine() -> String { "pi".into() }
 fn is_pi(value: &str) -> bool { value == "pi" }

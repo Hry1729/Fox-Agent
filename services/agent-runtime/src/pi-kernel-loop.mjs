@@ -5,6 +5,7 @@
 // resource: an installed executor without a settled Host directive throws, and
 // replacement sessions are refused when they retain executable tools.
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
+import { appendFoxAgentMessages, setFoxAgentHistory } from './pi-adapter.mjs'
 import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError, incompleteResponseReason, modelFailureDiagnostic } from './kernel-completion.mjs'
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
 import { effectiveBoundableTool, modelToolResultContent, toolResultRef } from './tool-view.mjs'
@@ -142,7 +143,7 @@ export function installKernelHostTools(session, definitions, { settledFor } = {}
   }))
   session.agent.state.tools = tools
   installedToolsBySession.set(session, tools)
-  // Pi 0.84.2 marks every normally returned tool result `isError: false` and
+  // Pi marks every normally returned tool result `isError: false` and
   // never reads the returned object's own flag; only `afterToolCall` can set
   // it. The Host's settled state is authoritative for Host tools, so a failed
   // settlement stays an error even if an earlier hook returned the input flag;
@@ -217,15 +218,18 @@ const installedToolsBySession = new WeakMap()
  */
 function installHostSchemaProjection(session, strictParameters) {
   const innerStream = session.agent.streamFunction
+  const projectTools = tools => tools.map(tool => strictParameters.has(tool?.name)
+    ? { ...tool, parameters: strictParameters.get(tool.name) }
+    : tool)
   session.agent.streamFunction = (model, context, options) => {
-    const tools = context?.tools
-    if (!Array.isArray(tools) || !tools.length || ![...strictParameters.keys()].some(name => tools.some(tool => tool?.name === name))) {
-      return innerStream(model, context, options)
-    }
-    const projectedTools = tools.map(tool => strictParameters.has(tool?.name)
-      ? { ...tool, parameters: strictParameters.get(tool.name) }
-      : tool)
-    return innerStream(model, { ...context, tools: projectedTools }, options)
+    const messages = context.messages.map(message => message.role === 'system' && message.toolsAdded
+      ? { ...message, toolsAdded: projectTools(message.toolsAdded) }
+      : message)
+    return innerStream(model, {
+      ...context,
+      messages,
+      ...(Array.isArray(context.tools) ? { tools: projectTools(context.tools) } : {}),
+    }, options)
   }
 }
 
@@ -296,22 +300,16 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       pendingHostNotices.push(hostJobNoticeMessage(notice))
     }
   }
-  // Inject through the loop's own context. Pi 0.84.2 runs each continuation on
-  // a snapshot (`state.messages.slice()`) and hands `transformContext` that
-  // snapshot's live array before every model request; pushing there keeps the
-  // notice in every later round of the same continuation. The previous
-  // stream-function injection only touched the outer transcript and the
-  // per-request converted array, so a second tool round lost it.
+  // Record notices in Pi's canonical session as well as the current request.
+  // Later rounds rebuild their context from that session projection.
   const priorTransform = session.agent.transformContext
   session.agent.transformContext = async (messages, signal) => {
     if (pendingSteering.length || pendingHostNotices.length) {
       const additions = [...pendingSteering.splice(0), ...pendingHostNotices.splice(0)]
       const transcript = session.agent.state.messages
       if (!Array.isArray(transcript) || !Array.isArray(messages)) fail('engine transcript unavailable for steering')
-      for (const message of additions) {
-        if (messages !== transcript) transcript.push(message)
-        messages.push(message)
-      }
+      appendFoxAgentMessages(session, additions)
+      if (messages !== session.agent.state.messages) messages.push(...additions)
     }
     return typeof priorTransform === 'function' ? priorTransform.call(session.agent, messages, signal) : messages
   }
@@ -449,7 +447,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   })
 
   try {
-    session.agent.state.messages = prepared.messages
+    setFoxAgentHistory(session, prepared.messages)
     let final
     while (true) {
       // Arm the per-round deadline before the provider request is issued, not
@@ -541,8 +539,8 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         resetPreviewRound(directive.previewSeq)
         roundCursor = previewCursor
         hooks?.onCursor?.(roundCursor)
-        session.agent.state.messages = [...session.agent.state.messages,
-          { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: 0 }]
+        appendFoxAgentMessages(session, [
+          { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: 0 }])
         // Spliced after the review prompt at the next provider request.
         queueSteering(directive.steering)
         queueHostJobNotices(directive.hostJobNotices)

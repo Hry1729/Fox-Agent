@@ -13,6 +13,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { normalizeContext } from '@earendil-works/pi-ai'
 import { streamSimple as completionsStreamSimple } from '@earendil-works/pi-ai/api/openai-completions'
 import { streamSimple as responsesStreamSimple } from '@earendil-works/pi-ai/api/openai-responses'
 import { streamSimple as anthropicStreamSimple } from '@earendil-works/pi-ai/api/anthropic-messages'
@@ -77,7 +78,7 @@ async function captureViaAdapter(streamFn, config, { context = BASE_CONTEXT, opt
   const payloads = []
   const errors = []
   try {
-    const stream = streamFn(model, context, {
+    const stream = streamFn(model, normalizeContext(context), {
       apiKey: 'offline-contract-test-not-a-credential',
       maxTokens: 512,
       ...options,

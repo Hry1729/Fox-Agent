@@ -4,6 +4,7 @@
 import { validateKernelControl } from './control-binding.mjs'
 import { sanitizeProviderHistory } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
+import { setFoxAgentHistory } from './pi-adapter.mjs'
 import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
 import { responseAdmissionError } from './pi-kernel-response-diagnostic.mjs'
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
@@ -340,8 +341,7 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
       session.agent.abort()
       throw new Error(stopMarker)
     }) : undefined
-    // Pi 0.84's documented public state setter copies the message array.
-    session.agent.state.messages = prepared.messages
+    setFoxAgentHistory(session, prepared.messages)
     await session.agent.continue()
     // Timeout evidence outranks a proposal admission failure: the bound fired first and
     // its abort is what left the proposal incomplete.

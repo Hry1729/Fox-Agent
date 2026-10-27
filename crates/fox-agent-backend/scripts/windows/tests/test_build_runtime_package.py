@@ -115,7 +115,7 @@ class VersionTest(unittest.TestCase):
             match = re.search(r'pub const RUNTIME_PACKAGE_VERSION: &str = "([^"]+)";', handle.read())
         self.assertIsNotNone(match, "RUNTIME_PACKAGE_VERSION not found in src/launch.rs")
         self.assertEqual(brp.DEFAULT_VERSION, match.group(1))
-        self.assertEqual(brp.DEFAULT_VERSION, "0.1.5")
+        self.assertEqual(brp.DEFAULT_VERSION, "0.1.6")
 
     def test_srt_version_matches_the_rust_constant(self):
         with open(os.path.join(brp.CRATE, "src", "sandbox.rs"), encoding="utf-8") as handle:

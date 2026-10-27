@@ -144,6 +144,9 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     await resourceLoader.reload()
     ;({ session } = await createFoxAgentSession({ cwd, agentDir: cwd, model, thinkingLevel: profile.thinkingLevel,
       tools: [], customTools: [], resourceLoader, sessionManager: SessionManager.inMemory(cwd), settingsManager, modelRuntime }))
+    // The Host freezes this worker's prompt and tools. Pi's session refresh would
+    // rebuild an empty SDK loadout and remove the Host-installed tools next turn.
+    session.agent.prepareNextTurnWithContext = undefined
     if (liveLoop) {
       // The live loop installs replay executors and services round boundaries.
       installKernelHostTools(session, definitions, {

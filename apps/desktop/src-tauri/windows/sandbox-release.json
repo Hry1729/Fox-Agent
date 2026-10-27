@@ -1,13 +1,14 @@
 {
-  "version": "0.1.5",
+  "version": "0.1.6",
   "architecture": "x64",
-  "sha256": "c8543620fc5e31bd2204833bd31d6a743c958497f8a948ac488bf1e84f690225",
+  "sha256": "c83bcee7e39d8ec42c4b6237e403fc3390b091e79a73a644e04b72bbfaf80e5f",
   "bridgeSha256": "b71a8c64bacb23efc292b069acd3e9449e51a098636585100eed9e6581474bad",
   "adapters": {
     "backends/pi/node_modules/pi-acp/dist/index.js": "bb8c9785ce8dd5b88fdcfae4b12521ad8f4e433ba23d907109627018b328f7e3",
     "backends/pi/node_modules/pi-acp/dist/fox-turn-outcome.mjs": "a114e4f99ed0be6567ff1845cb6c3f412ac4491a0fab6cfc8241ec5f27a99f18",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/index.js": "a67c7f6b64989efbe5838276085593ce8743fb408148025bd24076cc9fd386e3",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/fox-model-proxy.mjs": "c4de3d75afb063066250e61b4d247eeb32f40fe419d1d7632fffd4f8aa884dc0",
-    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js": "46840e819c9b455b835f47e115bcc7c77c630a78df720d8b722de0a6066a74b3"
+    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js": "0d4de7e398ae61237fa73cff9ad687c380524819a6c3cb9bd6710cf05dbdd352",
+    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-MM3LKT73.js": "411fc1b279c931ea0074d090d6837e634b8be5b648a2b9b9038c4c515bb3c324"
   }
 }

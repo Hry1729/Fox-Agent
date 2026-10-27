@@ -57,7 +57,7 @@ ASSETS = os.path.join(CRATE, "runtime-assets")
 PI_FIXTURES = os.path.join(CRATE, "fixtures", "pi")
 # Must equal fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION (the
 # directory Fox looks for under the install root); a unit test checks it.
-DEFAULT_VERSION = "0.1.5"
+DEFAULT_VERSION = "0.1.6"
 # Package key -> source file in this crate. Each is copied by `stage` and must
 # be byte-equal (modulo CRLF) in `pack`.
 PI_GATE_FILES = {

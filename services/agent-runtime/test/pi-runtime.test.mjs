@@ -1061,7 +1061,7 @@ test('maps Anthropic thinking blocks separately from the final answer', async (c
   let runtime
   context.after(() => closeRuntimeAndRemoveDirectory(runtime, directory))
   const server = createServer((request, response) => {
-    assert.equal(request.url, '/v1/messages')
+    assert.equal(request.url, '/v1/messages?beta=true')
     response.writeHead(200, { 'content-type': 'text/event-stream' })
     const events = [
       ['message_start', { type: 'message_start', message: { id: 'msg-1', type: 'message', role: 'assistant', model: 'MiniMax-M3', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 4, output_tokens: 0 } } }],

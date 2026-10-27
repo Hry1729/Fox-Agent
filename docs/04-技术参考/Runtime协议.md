@@ -271,7 +271,7 @@ Host 启动时分页扫描尚未投影的 `run.continuation_proposed` 原始事�
 
 `durable_v2_shadow` 是纯观测路径：malformed、游标、重复、身份、原始事件写入、Decision append 与诊断写入错误都不得 `mark_run_failed`、Crash Worker 或改变 Legacy 可见状态，只发出/保留诊断；非 Shadow 对同类协议或持久化错误保持 fail-closed。Shadow 与非 Shadow 的判定来自 Host 当前 Profile或事件链权威 Profile，不能信任 proposal 自报字段。
 
-`usage.updated` 的五个数值都是当前 Run 自启动以来的累计值，不是本次 provider call 的单步值。Pi mapper 每个 `executePrompt` 新建实例，因此新 Run（包括 resume session 后的新 Run）从零开始；工具回合、重试与多次 assistant `message_end` 则持续累加。每次 provider usage 的 `input/output/cacheRead/cacheWrite/totalTokens` 只接受有限、非负、安全整数；四个 component 先各自累加，单步 total 取 `max(provider totalTokens, input + output + cacheRead + cacheWrite)`，Run total 累加每个单步 total 并保证不小于四个累计 component 之和。Pi 0.84.2 供应商适配层已将 `input` 定义为扣除 cache read/write 后的非缓存输入，所以这个四项和不会重复计算 cache token。NaN、负数、浮点、非安全整数或任一累加溢出都以 `runtime.usage.invalid/overflow` fail-closed，不发出部分或降账的 `usage.updated`。Pi 事件无稳定 event ID，mapper 防止同一内存事件对象重复计费，跨进程/持久化重放仍由 Host 现有 `(runId, seq)` 幂等门禁处理。日曲线对满足单调合同的 Run 按相邻累计值 delta 归到事件发生日；对升级前没有合同版本且出现下降的 Legacy Run，保守地只把该 Run 最后一条 Usage 总量归到最后事件日，其他日计零，保证 daily 非负且总和与 latest-per-run 全局统计一致。
+`usage.updated` 的五个数值都是当前 Run 自启动以来的累计值，不是本次 provider call 的单步值。Pi mapper 每个 `executePrompt` 新建实例，因此新 Run（包括 resume session 后的新 Run）从零开始；工具回合、重试与多次 assistant `message_end` 则持续累加。每次 provider usage 的 `input/output/cacheRead/cacheWrite/totalTokens` 只接受有限、非负、安全整数；四个 component 先各自累加，单步 total 取 `max(provider totalTokens, input + output + cacheRead + cacheWrite)`，Run total 累加每个单步 total 并保证不小于四个累计 component 之和。Pi 1.4.0 供应商适配层已将 `input` 定义为扣除 cache read/write 后的非缓存输入，所以这个四项和不会重复计算 cache token。NaN、负数、浮点、非安全整数或任一累加溢出都以 `runtime.usage.invalid/overflow` fail-closed，不发出部分或降账的 `usage.updated`。Pi 事件无稳定 event ID，mapper 防止同一内存事件对象重复计费，跨进程/持久化重放仍由 Host 现有 `(runId, seq)` 幂等门禁处理。日曲线对满足单调合同的 Run 按相邻累计值 delta 归到事件发生日；对升级前没有合同版本且出现下降的 Legacy Run，保守地只把该 Run 最后一条 Usage 总量归到最后事件日，其他日计零，保证 daily 非负且总和与 latest-per-run 全局统计一致。
 
 `cacheReadTokens` 与 `cacheWriteTokens` 由模型供应商 usage 原样分项后累加；不支持 Prompt 缓存的供应商上报 `0`。Fox 使用 `cacheReadTokens / (inputTokens + cacheReadTokens)` 作为缓存命中率，Prompt 稳定前缀和工具目录共享这一供应商口径，不伪造无法从 provider 区分的“工具独立命中率”。
 
@@ -362,7 +362,7 @@ Host 校验冻结 Team 定义、串行成员顺序、父 Scope 与 Member Allowl
 
 ## Pi Coding Agent 扩展边界
 
-Fox Runtime 固定使用同版本的 `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 和 `@earendil-works/pi-coding-agent@0.84.2`。`pi-adapter.mjs` 是唯一允许直接导入 Pi 包的 Runtime 模块，负责 `ModelRuntime`、`DefaultResourceLoader`、`createAgentSession` 和 Faux Provider 兼容；业务工具和执行流程不能直接依赖 Pi 包入口。Fox 的规划扩展注册 A0 Work Tool，并可消费 Host 提供的同一结构化工作快照；项目授权与工作快照的模型可见表达统一由 Prompt Composer 生成，扩展不得二次注入。
+Fox Runtime 固定使用同版本的 `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 和 `@earendil-works/pi-coding-agent@1.4.0`。`pi-adapter.mjs` 是唯一允许直接导入 Pi 包的 Runtime 模块，负责 `ModelRuntime`、`DefaultResourceLoader`、`createAgentSession` 和 Faux Provider 兼容；业务工具和执行流程不能直接依赖 Pi 包入口。Fox 的规划扩展注册 A0 Work Tool，并可消费 Host 提供的同一结构化工作快照；项目授权与工作快照的模型可见表达统一由 Prompt Composer 生成，扩展不得二次注入。
 
 Coding Agent 的内置 `bash/read/edit/write`、TUI plan-mode 示例和本地 todo 持久化不会启用。项目读写、命令、Goal、Task、Evidence 与审批仍全部经过 Fox Host；SQLite 仍是唯一事实源。Runtime 仅加载 Fox 内联扩展，不自动发现用户目录或项目目录中的 Pi 扩展。
 
@@ -475,7 +475,7 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 
 初始化与批次请求上限均为 1 MiB；错误不包含原始凭证、历史或 Provider 响应。模型请求受冻结预算约束，Node 取消后仍等待引擎结束。
 
-Rust `KernelCoordinator::dispatch_stored_batch_with_worker` 是受控正式调用入口：只从 v55 `kernel_model_configs` 恢复模型/提示/工具描述/Profile 配置，核对内容哈希与持久 `prompt_config_hash` 后才进入 Outbox 领取事务；外部调用者不能传入当前配置作为替代。快照必须在 Run 启动前冻结，缺失或损坏不自动回填。凭证单独传入，不进入该配置哈希或命令行参数。`kernel.ready.adapterVersion` 必须与快照支持的 `pi-0.84.2/fox-kernel-worker-v1` 匹配。启动与管道写入、响应等待共享剩余 Run/模型预算；取消/超时清理并回收该次创建的子进程，不复用 Legacy 进程。不确定交付保持租约事实，不能因进程已退出就重播。
+Rust `KernelCoordinator::dispatch_stored_batch_with_worker` 是受控正式调用入口：只从 v55 `kernel_model_configs` 恢复模型/提示/工具描述/Profile 配置，核对内容哈希与持久 `prompt_config_hash` 后才进入 Outbox 领取事务；外部调用者不能传入当前配置作为替代。快照必须在 Run 启动前冻结，缺失或损坏不自动回填。凭证单独传入，不进入该配置哈希或命令行参数。`kernel.ready.adapterVersion` 必须与快照支持的 `pi-1.4.0/fox-kernel-worker-v1` 匹配。启动与管道写入、响应等待共享剩余 Run/模型预算；取消/超时清理并回收该次创建的子进程，不复用 Legacy 进程。不确定交付保持租约事实，不能因进程已退出就重播。
 
 Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session、批次及游标，拒绝超大帧、其他身份和非预期事件。模型响应仍经协调器同事务提交。配置内容可持久恢复，用于桌面 Authoritative 路径（当前默认）的批次及首轮派发。
 

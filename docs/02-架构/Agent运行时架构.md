@@ -56,7 +56,7 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 | --- | --- | --- | --- | --- |
 | `fox` | Fox | 内置，默认 | 现有 Fox 路径：Kernel / Authoritative（默认）或 Legacy（仅调试和旧 Run） | 进程内 Kernel（FoxBackend） |
 | `deepseek` | DeepSeek Harness（dsh） | 内置，实验 | `crate::external_backend` → `fox_agent_backend::external` | ACP v1：`dsh --profile acp`（锁定 `0.2.1-rc.2`） |
-| `pi` | pi | 内置 | 同上 | ACP v1：`pi-acp`（锁定 `0.0.34`）启动 pi `0.84.2` |
+| `pi` | pi | 内置 | 同上 | ACP v1：`pi-acp`（锁定 `0.0.34`）启动 pi `1.4.0` |
 | `codex` | Codex | **已实现，暂时隐藏** | 同上 | ACP v1：`codex-acp`（锁定 `2.2.2`） |
 
 `agent_backend` 与 Kernel 的 `engine_id`（`pi | codex | deepseek_harness`）不是同一个字段：`engine_id` 是 Fox 会话内部 Kernel 使用的模型引擎，保持历史语义；用过 Kernel Codex 引擎的旧会话仍是 `fox` 会话。
@@ -233,7 +233,7 @@ Pi 提供模型抽象、Agent Session、工具调用、重试和上下文压缩�
 
 | 模块 | Fox 职责 |
 | --- | --- |
-| `pi-adapter.mjs` | 封装 Pi 0.84.2 `ModelRuntime`、Session、ResourceLoader 与 Faux Provider，限制升级影响面 |
+| `pi-adapter.mjs` | 封装 Pi 1.4.0 `ModelRuntime`、Session、ResourceLoader 与 Faux Provider，限制升级影响面 |
 | `tool-adapter.mjs` | 在 Fox Tool Definition 与 Pi Custom Tool 之间转换，保持 Host 权限契约独立于 Agent 引擎 |
 | `model-profile.mjs` | 按 API、供应商和模型族生成能力画像及兼容参数 |
 | `runtime-instructions.mjs` | 定义 Fox 稳定运行规则、Goal 意图和安全边界 |
@@ -571,7 +571,7 @@ Provider 原生 reasoning 优先映射到 `reasoning.delta`。对把 `<think>` �
 - 保存前清理 Runtime 私有字段、不兼容 reasoning 字段和不应恢复的临时规划内容。
 - 工具结束、消息结束和 Agent 结束会触发串行检查点，避免并发覆盖。
 - 重试与 Context Compaction 参数来自 Model Profile；不同模型可以设置不同退避和 Token 预留。
-- `usage.updated` 记录当前 Run 累计的 input、output、cache read、cache write 和 total tokens，而不是覆盖为最后一次 provider call。Pi mapper 实例与 `executePrompt`/Run 同生命周期，新 Run 严格清零，工具回合和重试累加；只接受有限非负安全整数，并以“单步 total 不低于四个互斥 component 之和、累计 total 不低于累计 component 之和”保持可审计。Pi 0.84.2 中 `input` 已排除 cache read/write，不会与缓存分项重复计数；非法值或溢出 fail-closed。Fake Runtime 使用相同的五字段 Run 累计 Host 合同。
+- `usage.updated` 记录当前 Run 累计的 input、output、cache read、cache write 和 total tokens，而不是覆盖为最后一次 provider call。Pi mapper 实例与 `executePrompt`/Run 同生命周期，新 Run 严格清零，工具回合和重试累加；只接受有限非负安全整数，并以“单步 total 不低于四个互斥 component 之和、累计 total 不低于累计 component 之和”保持可审计。Pi 1.4.0 中 `input` 已排除 cache read/write，不会与缓存分项重复计数；非法值或溢出 fail-closed。Fake Runtime 使用相同的五字段 Run 累计 Host 合同。
 
 模型配置重新加载时，Host 会停止旧 Worker；活动 Run 存在时拒绝热切换，避免一次运行中途改变模型契约。
 

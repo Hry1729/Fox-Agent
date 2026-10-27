@@ -68,7 +68,8 @@ def patch_pi_dispatcher(source):
 PATCHES = [
     {"id": "pi-acp-errors", "package": "backends/pi/node_modules/pi-acp", "version": "0.0.34", "file": "dist/index.js", "sha256": "324aeb8bba1228937e16b1326fb3e014e2a625b2dea549dbcd49b006cd5df6a2", "patch": patch_pi_acp, "helper": ("pi-turn-outcome.mjs", "dist/fox-turn-outcome.mjs")},
     {"id": "dsh-model-proxy", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "5310861bc89788ea24be82a3b323e34cbd42b9e6214e2a179b2e6f92a8758cd5", "patch": patch_dsh_proxy, "helper": ("dsh-model-proxy.mjs", "lib/fox-model-proxy.mjs")},
-    {"id": "pi-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "0.84.2", "file": "dist/core/http-dispatcher.js", "sha256": "3b85f8e50dd8b1c547d8e1c393928f3db7ec671d6f72b94f636331e529485ea4", "patch": patch_pi_dispatcher},
+    {"id": "pi-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/core/http-dispatcher.js", "sha256": "f9aa2c81b0a5958ffba6368506f24c9b202904c234ada19494cdc9c4a1d0e97b", "patch": patch_pi_dispatcher},
+    {"id": "pi-bundled-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/bundle/chunks/chunk-MM3LKT73.js", "sha256": "aa4c8b091657bda611f6fd58343561fa44cda1070ae4cd5dbd09ffe1d9a34aab", "patch": patch_pi_dispatcher},
 ]
 
 

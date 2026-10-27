@@ -171,7 +171,7 @@ test('HTTP final-answer contract rejects premature stops and keeps explicit answ
     const result = await child.request(command, payload)
     assert.equal(result.type, item.incomplete ? 'kernel.model_failure' : 'kernel.model_response')
     assert.equal(requests.length, item.responses.length, 'the engine loop only calls the model for planned rounds')
-    assert.ok(requests[0].messages.some(message => typeof message.content === 'string' && message.content.includes('Fox final-answer protocol v1')))
+    assert.ok(requests[0].messages.some(message => typeof message.content === 'string' && message.content.includes('Fox final-answer protocol v1')), JSON.stringify(requests[0]))
     if (item.incomplete) {
       assert.equal(result.payload.category, 'incomplete_response')
       assert.equal(child.roundOutputs.length, 0, 'an incomplete stop never reaches the Host boundary')
@@ -266,7 +266,7 @@ test('HTTP model handles prior assistant history in initial and tool-batch round
     assert.equal(response.payload.response.assistantMessage.content.find(block => block.type === 'text').text, '历史续跑成功 😀')
   }
   assert.equal(requests.length, 2)
-  assert.ok(requests[0].messages.some(message => message.role === 'assistant' && message.content === 'Earlier answer'))
+  assert.ok(requests[0].messages.some(message => message.role === 'assistant' && message.content === 'Earlier answer'), JSON.stringify(requests[0]))
   assert.ok(requests[1].messages.some(message => message.role === 'tool' && message.tool_call_id === 'read-a'))
 })
 
@@ -353,6 +353,7 @@ test('streamed argument keys and corrective tool feedback survive real HTTP work
   const correctionRequest = requests[1]
   assert.equal(correctionRequest.messages.findLast(message => message.role === 'tool').content, feedback)
   assert.deepEqual(JSON.parse(correctionRequest.messages.findLast(message => message.tool_calls)?.tool_calls[0].function.arguments), inputs[0])
+  assert.ok(correctionRequest.tools?.length, JSON.stringify(correctionRequest))
   assert.deepEqual(correctionRequest.tools[0].function.parameters.required, ['objective'])
 })
 
@@ -550,7 +551,7 @@ test('real isolated worker returns one model response and refuses replay or Lega
   const child = await worker(t)
   const ready = await child.request('kernel.initialize', initialization())
   assert.equal(ready.type, 'kernel.ready')
-  assert.equal(ready.payload.adapterVersion, 'pi-0.84.2/fox-kernel-worker-v1')
+  assert.equal(ready.payload.adapterVersion, 'pi-1.4.0/fox-kernel-worker-v1')
   assert.equal((await child.request('prompt', {})).type, 'request_failed')
   assert.equal((await child.request('kernel.initialize', initialization())).type, 'request_failed')
   const result = await child.request('kernel.resume_batch', resumePayload())

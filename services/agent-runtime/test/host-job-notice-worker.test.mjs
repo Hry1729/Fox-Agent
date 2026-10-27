@@ -180,7 +180,7 @@ test('real live worker projects a new Host notice once after a settled tool roun
       return { schemaVersion: 1, kind: 'batch', batchId: 'notice-batch', checkpointSeq: 9,
         tools: [{ toolCallId: 'read-a', tool: 'read', sourceOrder: 0, canonicalInput: { path: 'a.txt' },
           state: 'completed', result: { content: [{ type: 'text', text: 'Host-settled file body' }] } }],
-        hostJobNotices: [notice] }
+        hostJobNotices: [notice], steering: [{ messageId: 'steering-one', content: '保留原始统计口径。' }] }
     }
     if (round === 2) return { schemaVersion: 1, kind: 'continuation', prompt: 'Give the final answer.', previewSeq: 11 }
     return { schemaVersion: 1, kind: 'final' }
@@ -193,6 +193,9 @@ test('real live worker projects a new Host notice once after a settled tool roun
   assert.equal(child.rounds.length, 3)
   assert.equal(http.requests.length, 3)
   assert.deepEqual(http.requests.map(request => noticeMessages(request).length), [0, 1, 1])
+  assert.deepEqual(http.requests.map(request => request.messages.filter(message =>
+    message.role === 'user' && messageText(message).includes('保留原始统计口径。')).length), [0, 1, 1])
+  assert.equal(messageText(http.requests[2].messages.at(-1)), 'Give the final answer.')
   for (const request of http.requests.slice(1)) {
     assert.match(messageText(noticeMessages(request)[0]), /"jobId":"compute-job"/)
     assert.equal(request.messages.filter(message => message.role === 'tool' && message.tool_call_id === 'read-a').length, 1,

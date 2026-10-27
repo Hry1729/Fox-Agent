@@ -1,4 +1,4 @@
-import { InMemoryCredentialStore, InMemoryModelsStore } from '@earendil-works/pi-ai'
+import { InMemoryCredentialStore, InMemoryModelsStore, normalizeContext, toToolDeclaration } from '@earendil-works/pi-ai'
 import { observeModelUsage } from './model-usage-runtime.mjs'
 const usageContexts = new WeakMap()
 import { fauxAssistantMessage, registerFauxProvider, streamSimple } from '@earendil-works/pi-ai/compat'
@@ -10,7 +10,27 @@ import {
   createAgentSession,
 } from '@earendil-works/pi-coding-agent'
 
-export const PI_PACKAGE_VERSION = '0.84.2'
+export const PI_PACKAGE_VERSION = '1.4.0'
+
+export function setFoxAgentHistory(session, messages) {
+  // Pi 1.x carries instructions and tool declarations in the transcript.
+  // Restore Fox history together with the current Host-owned prompt and tools.
+  const restored = normalizeContext({
+    systemPrompt: session.systemPrompt,
+    tools: session.agent.state.tools.map(toToolDeclaration),
+    messages,
+  }).messages
+  appendFoxAgentMessages(session, restored)
+}
+
+export function appendFoxAgentMessages(session, messages) {
+  if (session.sessionManager) {
+    for (const message of messages) session.sessionManager.appendMessage(message)
+    session.refreshContext()
+  } else {
+    session.agent.state.messages.push(...messages)
+  }
+}
 
 export {
   DefaultResourceLoader,

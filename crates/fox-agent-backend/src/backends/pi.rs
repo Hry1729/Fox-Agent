@@ -3,7 +3,7 @@
 //! PiBackend reaches pi through `pi-acp` (MIT, MVP adapter by svkozak), which
 //! spawns `pi --mode rpc --no-themes` and bridges pi RPC to ACP v1. Everything
 //! here is measured against pi-acp 0.0.34 + `@earendil-works/pi-coding-agent`
-//! 0.84.2 (the pi Fox already locks in services/agent-runtime). Evidence and the
+//! 1.4.0 (the pi Fox locks in services/agent-runtime). Evidence and the
 //! measurement steps are in `docs/pi.md`; the real-binary checks are in
 //! `tests/pi_backend.rs` (gated by `FOX_TEST_REAL_ACP=1`).
 //!
@@ -31,7 +31,7 @@ use serde_json::Value;
 pub const PI_ACP_PACKAGE: &str = "pi-acp";
 pub const PI_ACP_VERSION: &str = crate::launch::PI_ACP_VERSION;
 /// The pi binary the measurements were taken with (Fox's existing lock).
-pub const PI_VERSION: &str = "0.84.2";
+pub const PI_VERSION: &str = "1.4.0";
 /// pi-acp README: "`pi` v0.81.0+ installed and available on your PATH".
 pub const PI_MIN_VERSION_FOR_PI_ACP: &str = "0.81.0";
 

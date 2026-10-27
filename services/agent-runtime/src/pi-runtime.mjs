@@ -6,6 +6,7 @@ import {
   SessionManager,
   SettingsManager,
   createFoxAgentSession,
+  setFoxAgentHistory,
   createFoxModelRuntime,
   fauxAssistantMessage,
   registerFauxProvider,
@@ -759,7 +760,7 @@ async function executePrompt(request) {
   })
   agent = created.session
   runControl.agent = agent
-  agent.state.messages = transcript
+  setFoxAgentHistory(agent, transcript)
   const saveCheckpoint = () => {
     checkpoint = checkpoint.then(async () => {
       session.messages = normalizeHistory(sanitizeAssistantHistory(agent.state.messages))

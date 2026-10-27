@@ -2,17 +2,27 @@
 
 运行时 0.1.3 的模型授权、代理和错误结算以 [受管模型连接](model-connectivity.md) 为准。下文保留早期 stock pi-acp 的测量记录。
 
-## 当前状态（2026-10-24）
+## 当前状态（2026-10-27）
 
 > 本节是当前事实；下文是 2026-10-19 的阶段 0 实测原文，未改动。
 
 - pi 是**内置 Agent** 之一（另两个是 Fox 和 DeepSeek Harness；Codex 已实现但暂时隐藏）。四 Agent 改造已完成并合入 `main`。
-- 桌面 Host 从 Fox 管理的运行时 `<runtime>/backends/pi/` 启动 `pi-acp`（锁定 `0.0.34`），pi 本体为 `0.84.2`；不经 `npx`（`npx` 入口只用于开发和真实二进制测试）。运行时带 `<runtime>/pi-gate/` 时用 Fox 审批拦截扩展启动 pi（门控），否则按原样启动（没有 Host 审批）。见 `src/external_launch.rs`。
+- 桌面 Host 从 Fox 管理的运行时 `<runtime>/backends/pi/` 启动 `pi-acp`（锁定 `0.0.34`），pi 本体为 `1.4.0`；不经 `npx`（`npx` 入口只用于开发和真实二进制测试）。运行时带 `<runtime>/pi-gate/` 时用 Fox 审批拦截扩展启动 pi（门控），否则按原样启动（没有 Host 审批）。见 `src/external_launch.rs`。
 - 默认在 srt 沙箱里运行；进程只继承白名单环境变量；登录信息放在 Fox 管理的私有 HOME。
 - 权限按 pi 的原生选项显示（`src/native_permission.rs`）：只读、询问（默认）、自动、完全访问。由 Fox 作答，切换后从下一次工具调用起生效。完全访问是独立开关，只在创建会话时授予，会话中只能撤销。
 - 模型默认来自「模型服务」供应商：pi 可用 OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 三种协议；API Key 按 base URL 在系统凭据库全局共享。
 
 完整的路由、隐藏开关、权限和凭据说明见 `docs/02-架构/Agent运行时架构.md` 的「外层 Agent 后端（四 Agent）」一节；人工复测记录见本目录 `sandbox.md`。
+
+### Pi 1.4.0 升级核验（2026-10-27）
+
+- npm `latest` 与上游 `v1.4.0` 发布一致。三个 Pi SDK 包和受管原生 Pi 同步锁定 `1.4.0`，`pi-acp` 保持 `0.0.34`。Windows 运行时包版本为 `0.1.6`。
+- Pi 1.4 将系统提示和工具声明放入消息记录，并从 `SessionManager` 重建请求。Fox 通过 Adapter 写入历史、补充要求、任务通知和审查提示；Kernel 保留 Host 冻结的工具集，供应商请求仍使用 Host 的严格参数 schema。
+- CLI 改用 `dist/bundle/cli.js`。模型代理补丁同时覆盖 SDK dispatcher 和 CLI bundle chunk，分别校验上游哈希及补丁后哈希。
+- 定向源码测试覆盖 Kernel、Legacy、历史恢复、通知跨轮保留、供应商协议、取消和工具审批。编译后 Runtime 的 5 项 HTTP 检查通过，另有侧车冒烟通过。未提供 Codex 外部二进制的检查保持跳过。
+- 实际 Windows srt 0.0.81 + Pi 1.4.0 + pi-acp 0.0.34 已验证模型选择、正常输出、401 明确失败、空网络允许列表失败且服务收到零请求。模型为本机脚本服务，不使用真实供应商凭据。
+- 原生工具批准、拒绝、取消、取消后续聊在隔离 HOME 下通过。补充的沙箱审批检查因全局 `.acl-init.lock` 拒绝访问而未进入 Pi；该项未计为沙箱审批通过。此升级不代表沙箱整体隔离问题已解决，也不代表桌面或真实供应商验收。
+- 旧会话升级在隔离 HOME 下通过：先用真实 Pi 0.84.2 创建对话并结束进程，再用 Pi 1.4.0 的 ACP `session/load` 载入。后续 HTTP 请求保留旧用户消息、旧回答和新问题。
 
 分支：pi（阶段 3）｜实测日期：2026-10-19｜实测平台：Linux x86_64（沙箱），Node v22.23.3｜Windows / macOS：未实测
 
