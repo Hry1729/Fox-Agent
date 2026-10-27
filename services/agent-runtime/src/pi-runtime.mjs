@@ -1,4 +1,6 @@
 import { createInterface } from 'node:readline'
+import { dirname, join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
 import {
   DefaultResourceLoader,
@@ -130,6 +132,49 @@ function respond(request, type, payload = {}) {
     runId: request.runId ?? null,
     payload,
   }))
+}
+
+// ---------------------------------------------------------------------------
+// Native Pi sessions (stage two of the single Pi mainline).
+//
+// A `pi-native` session is owned by Pi's SessionManager: the model context,
+// the compaction record and the branch live in the session JSONL file the
+// manager writes, not in a Fox snapshot. Fox may keep a display copy elsewhere,
+// but this runtime never writes the transcript back over it.
+//
+// The Host always names the directory (it owns the user data directory) and the
+// runtime reports the exact file and session id it created, so a later resume
+// opens that file and nothing else. Guessing (`continueRecent`) is never used:
+// several experts may share one working directory.
+
+/** Host request for a Pi-owned session (explicit flag, or an explicit .jsonl). */
+function requestsNativeSession(payload) {
+  if (!payload || typeof payload !== 'object') return false
+  if (payload.sessionFormat === 'pi-native') return true
+  if (payload.sessionFormat === 'fox-snapshot') return false
+  return typeof payload.nativeSessionPath === 'string' && payload.nativeSessionPath.endsWith('.jsonl')
+}
+
+/** A distinguishable failure: the Host must tell these apart, never fall back. */
+function sessionError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+function nativeSessionDirectory(payload) {
+  if (typeof payload?.sessionDir === 'string' && payload.sessionDir.trim()) return payload.sessionDir
+  if (typeof payload?.sessionPath === 'string' && payload.sessionPath.trim()) return dirname(payload.sessionPath)
+  return join(process.cwd(), 'sessions')
+}
+
+function nativeSessionMetadata(session) {
+  return {
+    format: 'pi-native',
+    nativeSessionPath: session.nativeSessionPath,
+    nativeSessionId: session.nativeSessionId,
+    contextGeneration: session.contextGeneration ?? 1,
+  }
 }
 
 function runtimeEvent(request, seqRef, type, payload = {}) {
@@ -746,6 +791,13 @@ async function executePrompt(request) {
     systemPrompt: promptComposition.prompt,
   })
   await resourceLoader.reload()
+  // Stage two: a pi-native session keeps its whole context in Pi's
+  // SessionManager. The manager is the only writer; the Fox snapshot path is
+  // left untouched for the legacy (fox-snapshot) sessions.
+  const nativeManager = session.format === 'pi-native' ? session.nativeManager : null
+  if (session.format === 'pi-native' && !nativeManager) {
+    throw sessionError('session.native_not_open', 'The native Pi session is not open for this run.')
+  }
   const created = await createFoxAgentSession({
     cwd,
     agentDir: process.cwd(),
@@ -754,14 +806,25 @@ async function executePrompt(request) {
     tools: effectiveToolNames,
     customTools,
     resourceLoader,
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager: nativeManager ?? SessionManager.inMemory(cwd),
     settingsManager,
     modelRuntime,
   })
   agent = created.session
   runControl.agent = agent
-  setFoxAgentHistory(agent, transcript)
+  if (nativeManager) {
+    // The manager already holds every prior turn (and the compaction record).
+    // Injecting Fox's display history here would duplicate the conversation and
+    // could reintroduce context Pi has compacted away.
+    session.nativeSessionId = agent.sessionManager?.getSessionId?.() ?? session.nativeSessionId
+    session.nativeSessionPath = agent.sessionManager?.getSessionFile?.() ?? session.nativeSessionPath
+  } else {
+    setFoxAgentHistory(agent, transcript)
+  }
   const saveCheckpoint = () => {
+    // Pi writes its own JSONL while the turn runs; a Fox snapshot would be a
+    // second writer of the same context.
+    if (nativeManager) return
     checkpoint = checkpoint.then(async () => {
       session.messages = normalizeHistory(sanitizeAssistantHistory(agent.state.messages))
       if (session.sessionPath) await saveSessionState(session.sessionPath, session)
@@ -813,8 +876,10 @@ async function executePrompt(request) {
     // concurrent renames are not reliably replace-safe on Windows.
     await checkpoint
     if (checkpointError) throw checkpointError
-    session.messages = normalizeHistory(sanitizeAssistantHistory(agent.state.messages))
-    if (session.sessionPath) await saveSessionState(session.sessionPath, session)
+    if (!nativeManager) {
+      session.messages = normalizeHistory(sanitizeAssistantHistory(agent.state.messages))
+      if (session.sessionPath) await saveSessionState(session.sessionPath, session)
+    }
     if (approvalDemo && toolExecutionCount === 0) {
       session.messages = replaceLatestAssistantText(session.messages, APPROVAL_DEMO_NO_TOOL_MESSAGE)
       if (session.sessionPath) await saveSessionState(session.sessionPath, session)
@@ -902,6 +967,30 @@ async function handleRequest(request) {
         break
       }
       case 'create_session': {
+        if (requestsNativeSession(request.payload)) {
+          const cwd = String(request.payload?.cwd || process.cwd())
+          const sessionDir = nativeSessionDirectory(request.payload)
+          let manager
+          try {
+            manager = SessionManager.create(cwd, sessionDir)
+          } catch (error) {
+            throw sessionError('session.native_directory_unusable', `The Pi session directory cannot be used: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          const session = {
+            schemaVersion: 2,
+            format: 'pi-native',
+            runtimeSessionId: request.runtimeSessionId,
+            conversationId: request.conversationId,
+            contextGeneration: Number.isInteger(request.payload?.contextGeneration) ? request.payload.contextGeneration : 1,
+            nativeManager: manager,
+            nativeSessionPath: manager.getSessionFile(),
+            nativeSessionId: manager.getSessionId(),
+            messages: [],
+          }
+          sessions.set(request.runtimeSessionId, session)
+          respond(request, 'session_created', { runtimeSessionId: request.runtimeSessionId, ...nativeSessionMetadata(session) })
+          break
+        }
         const session = createSessionState(request.runtimeSessionId, request.conversationId)
         session.sessionPath = request.payload?.sessionPath
         sessions.set(request.runtimeSessionId, session)
@@ -910,6 +999,48 @@ async function handleRequest(request) {
         break
       }
       case 'resume_session': {
+        if (requestsNativeSession(request.payload)) {
+          const path = request.payload?.nativeSessionPath ?? request.payload?.sessionPath
+          if (typeof path !== 'string' || !path.trim()) {
+            throw sessionError('session.native_path_required', 'A native Pi session resume must name the exact session file.')
+          }
+          // Pi's `open` starts a fresh session when the file is absent; a Fox
+          // resume must never be answered by a silently created empty session.
+          if (!existsSync(path)) {
+            throw sessionError('session.native_missing', `The Pi session file does not exist: ${path}`)
+          }
+          let manager
+          try {
+            manager = SessionManager.open(path, request.payload?.sessionDir, request.payload?.cwd)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            const code = /ENOENT|no such file|not found/i.test(message) ? 'session.native_missing' : 'session.native_corrupt'
+            throw sessionError(code, `The Pi session file cannot be opened: ${message}`)
+          }
+          const expected = request.payload?.nativeSessionId
+          const actual = manager.getSessionId()
+          if (typeof expected === 'string' && expected && expected !== actual) {
+            throw sessionError('session.native_identity_mismatch', 'The Pi session file belongs to another session; refusing to open it as this conversation.')
+          }
+          if (request.payload?.conversationId && manager.getHeader?.()?.conversationId
+            && manager.getHeader().conversationId !== request.conversationId) {
+            throw sessionError('session.native_conversation_mismatch', 'The Pi session file belongs to another conversation.')
+          }
+          const session = {
+            schemaVersion: 2,
+            format: 'pi-native',
+            runtimeSessionId: request.runtimeSessionId,
+            conversationId: request.conversationId,
+            contextGeneration: Number.isInteger(request.payload?.contextGeneration) ? request.payload.contextGeneration : 1,
+            nativeManager: manager,
+            nativeSessionPath: path,
+            nativeSessionId: actual,
+            messages: [],
+          }
+          sessions.set(request.runtimeSessionId, session)
+          respond(request, 'session_created', { runtimeSessionId: request.runtimeSessionId, ...nativeSessionMetadata(session) })
+          break
+        }
         const session = await loadSessionState(request.payload?.sessionPath, request.runtimeSessionId)
         session.sessionPath = request.payload?.sessionPath
         sessions.set(request.runtimeSessionId, session)
@@ -956,7 +1087,9 @@ async function handleRequest(request) {
         respond(request, 'request_failed', { code: 'protocol.unknown_request', message: `Unknown request type: ${request.type}` })
     }
   } catch (error) {
-    respond(request, 'request_failed', { code: 'runtime.request_failed', message: error instanceof Error ? error.message : String(error) })
+    const message = error instanceof Error ? error.message : String(error)
+    const code = typeof error?.code === 'string' && error.code.startsWith('session.') ? error.code : 'runtime.request_failed'
+    respond(request, 'request_failed', { code, message })
   }
 }
 
