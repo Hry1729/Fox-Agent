@@ -3,7 +3,7 @@
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：`services/agent-runtime`、`apps/desktop/src-tauri/src/runtime_host`、`crates/fox-agent-backend`、Runtime Adapter 契约<br>
-> 最后更新：2026-10-28（单 Pi 分支同步；本轮未复跑产品测试）
+> 最后更新：2026-10-28（单 Pi 合并；同步生命周期实现与限定桌面证据）
 
 ## 目标与边界
 
@@ -50,7 +50,7 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 
 ## 单 Pi 驱动与历史兼容
 
-本节描述 `feat/single-pi-mainline-20261027@d0495a3a`。旧锚点保留用于历史链接；四 Agent 原文见[历史实施方案](四Agent改造实施方案-v0.3.1.md)。
+本节描述单 Pi 主线，产品修复截至 `315a50dd`，桌面证据见 `be29b174`。旧锚点保留用于历史链接；四 Agent 原文见[历史实施方案](四Agent改造实施方案-v0.3.1.md)。
 
 | 标识 | 当前准入 | 说明 |
 | --- | --- | --- |
@@ -82,7 +82,9 @@ v98 增加 `native_session_ref`、`native_session_path`、`format_version`、`co
 
 `create_session` 的原型请求携带 `sessionFormat: pi-native`、`sessionDir`、`cwd`、`contextGeneration`；运行时返回原生文件位置与 Pi 会话 ID。`resume_session` 使用 `nativeSessionPath` / `nativeSessionId`，SDK 原生会话跳过旧历史回灌。
 
-**阶段二与 C gap 未完成。** 在已提交基线 `d0495a3a` 中，新映射位于 Legacy 路径；Authoritative 仍提前进入 Kernel。原生恢复失败在当次请求返回错误，但 unavailable 行再次打开会新建；缺路径时仍有 fallback；创建映射时只校验父目录，文件可能尚未落盘。不能把冻结契约里的保证写成已验收事实。本轮中途出现了并行的 `session_lifecycle.rs` 未提交实现；上述源码缺口属于 `d0495a3a`，不能直接当作并行实现的缺陷结论或修复验收。两个已有运行错误、源码边界和未验证场景见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md#c-gap-与未验证项)。
+后续生命周期实现已提交：v99 的 `runtime_session_generations` 保存退休代次；上下文重置安装新代次并保留历史、记忆和资料绑定；永久删除按归属清理当前及退休代次文件；恢复失败和 unavailable 映射拒绝静默新建。编辑重跑会保留被替换映射的归属，失败重试保留原失败事实。限定桌面矩阵已验证这些路径，详见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md)。
+
+**阶段二整体仍未完成。** 上述原生会话接入位于显式 Legacy 路径；默认 Authoritative 仍进入 Kernel。桌面证据按各项实际构建记录，不代表最终统一构建、完整 CI 或安装包验收。
 
 ## Runtime Adapter Contract
 
