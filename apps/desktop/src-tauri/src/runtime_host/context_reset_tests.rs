@@ -300,6 +300,82 @@ fn recorded_run_session(fixture: &Fixture, run_id: &str) -> Option<String> {
 }
 
 #[test]
+fn rewind_refuses_failed_native_recovery_without_erasing_the_failure() {
+    let fixture = Fixture::new("rewind-corrupt-session");
+    let path = fixture.seed_generation_one("corrupt.jsonl", "invalid native session");
+    let started = fixture.database.create_run(&fixture.conversation_id, "retry this prompt", None).unwrap();
+    let refusal = fixture.lifecycle().open_for_run(
+        &fixture.conversation_id,
+        &started.run.id,
+        &mut ScriptedRuntime::with(vec![Scripted::Rejected { code: "session.native_corrupt", message: "invalid JSONL" }]),
+        None,
+    ).unwrap_err();
+    fixture.database.mark_run_failed(&started.run.id, "runtime.start_failed", &refusal.user_message()).unwrap();
+    let detail_before = serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap();
+    let mapping_before = format!("{:?}", fixture.mapping());
+    let generations_before = fixture.generations();
+    assert!(fixture.database.conversation_requires_native_recovery(&fixture.conversation_id).unwrap());
+
+    for _ in 0..2 {
+        let error = fixture.database.rewind_run(&fixture.conversation_id, &started.user_message.id, "retry this prompt", None).unwrap_err();
+        assert!(error.contains("session.native_unavailable"), "{error}");
+        assert_eq!(serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap(), detail_before);
+        assert_eq!(format!("{:?}", fixture.mapping()), mapping_before);
+        assert_eq!(fixture.generations(), generations_before);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid native session");
+        assert_eq!(fixture.files(), vec!["corrupt.jsonl"]);
+    }
+}
+
+#[test]
+fn rewind_retires_the_persisted_mapping_before_a_new_generation_is_created() {
+    let fixture = Fixture::new("rewind-ready-session");
+    let old_path = fixture.seed_generation_one("old.jsonl", "persisted generation one");
+    let started = fixture.database.create_run(&fixture.conversation_id, "original prompt", None).unwrap();
+    fixture.database.mark_run_failed(&started.run.id, "provider.request_failed", "ordinary provider failure").unwrap();
+    assert!(!fixture.database.conversation_requires_native_recovery(&fixture.conversation_id).unwrap());
+    let replacement = fixture.database.rewind_run(&fixture.conversation_id, &started.user_message.id, "edited prompt", None).unwrap();
+    assert!(fixture.mapping().is_none());
+    let retired = fixture.generations();
+    assert_eq!(retired.len(), 1);
+    assert_eq!((retired[0].0, retired[0].1.as_str(), retired[0].3), (1, "runtime-1", false));
+    assert_eq!(fixture.database.next_runtime_session_generation(&fixture.conversation_id).unwrap(), 2);
+    let new_path = fixture.file("edited.jsonl");
+    fixture.lifecycle().open_for_run(
+        &fixture.conversation_id,
+        &replacement.run.id,
+        &mut ScriptedRuntime::with(vec![Scripted::Created { path: new_path, session_id: "pi-edited".into(), persist: true }]),
+        None,
+    ).unwrap();
+    assert_eq!(fixture.mapping().unwrap().context_generation, 2);
+    assert_eq!(std::fs::read_to_string(&old_path).unwrap(), "persisted generation one");
+    fixture.database.mark_run_failed(&replacement.run.id, "run.test", "end test run").unwrap();
+    let reset = fixture.lifecycle().reset(
+        &fixture.conversation_id,
+        &mut ScriptedRuntime::with(vec![Scripted::Created { path: fixture.file("reset.jsonl"), session_id: "pi-reset".into(), persist: false }]),
+    ).unwrap();
+    assert_eq!(reset.context_generation, 3);
+    assert_eq!(fixture.generations().iter().map(|row| (row.0, row.3)).collect::<Vec<_>>(), vec![(1, false), (2, false), (3, true)]);
+}
+
+#[test]
+fn rewind_generation_collision_rolls_back_messages_runs_and_mapping() {
+    let fixture = Fixture::new("rewind-generation-collision");
+    fixture.seed_generation_one("current.jsonl", "current bytes");
+    fixture.seed_retired_generation(&fixture.conversation_id, 1, "different-runtime", &fixture.file("retired.jsonl"), 2);
+    let started = fixture.database.create_run(&fixture.conversation_id, "keep this prompt", None).unwrap();
+    fixture.database.mark_run_failed(&started.run.id, "provider.request_failed", "ordinary failure").unwrap();
+    let before = serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap();
+    let mapping = format!("{:?}", fixture.mapping());
+    let generations = fixture.generations();
+    let error = fixture.database.rewind_run(&fixture.conversation_id, &started.user_message.id, "edited prompt", None).unwrap_err();
+    assert!(error.contains("rewind.context_generation_collision"), "{error}");
+    assert_eq!(serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap(), before);
+    assert_eq!(format!("{:?}", fixture.mapping()), mapping);
+    assert_eq!(fixture.generations(), generations);
+}
+
+#[test]
 fn run_session_binding_covers_create_live_adopt_and_resume() {
     for route in ["create", "live", "adopt", "resume"] {
         let fixture = Fixture::new(&format!("run-binding-{route}"));

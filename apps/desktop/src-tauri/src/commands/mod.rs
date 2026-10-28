@@ -2769,6 +2769,17 @@ pub async fn run_rewind(
     }
 
     let mut replacement_thread: Option<(String, String, String, String)> = None;
+    if runtime.runtime_type != "yuxi" {
+        match state.database.conversation_requires_native_recovery(&request.conversation_id) {
+            Ok(true) => return Ok(ApiResponse::failure(
+                "session.native_unavailable",
+                "会话上下文无法恢复，请先重置会话上下文；重试不会替换原会话或删除失败记录",
+                false,
+            )),
+            Ok(false) => {},
+            Err(error) => return Ok(storage_error(error)),
+        }
+    }
     if runtime.runtime_type == "yuxi" {
         let prior_messages = match state.database.runtime_prompt_context_before_message(
             &request.conversation_id,

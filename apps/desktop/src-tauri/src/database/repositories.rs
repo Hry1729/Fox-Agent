@@ -432,6 +432,19 @@ fn retire_live_pi_mapping(
     Ok(RetiredMapping::Recorded)
 }
 
+fn native_session_recovery_required(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_sessions
+         WHERE conversation_id = ?1 AND runtime_type = 'pi'
+           AND format_version >= 2 AND status = 'unavailable')",
+        [conversation_id],
+        |row| row.get(0),
+    )
+}
+
 /// The highest context generation this conversation has used, live or retired.
 fn pi_generation_high_water(
     transaction: &rusqlite::Transaction<'_>,
@@ -5487,6 +5500,10 @@ impl Database {
         })
     }
 
+    pub fn conversation_requires_native_recovery(&self, conversation_id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| native_session_recovery_required(connection, conversation_id))
+    }
+
     pub fn rewind_run(
         &self,
         conversation_id: &str,
@@ -5525,6 +5542,12 @@ impl Database {
                 .is_some();
             if active_run {
                 return Err(rusqlite::Error::InvalidQuery);
+            }
+
+            if native_session_recovery_required(&transaction, conversation_id)? {
+                return Err(projection_violation(
+                    "session.native_unavailable: 会话上下文无法恢复，请先重置会话上下文；重试不会替换原会话或删除失败记录".to_owned(),
+                ));
             }
 
             let crosses_repair_override_boundary: bool = transaction.query_row(
@@ -5705,6 +5728,11 @@ impl Database {
                 "DELETE FROM messages WHERE conversation_id = ?1 AND ordinal >= ?2",
                 params![conversation_id, target_ordinal],
             )?;
+            if let RetiredMapping::Collision { generation } = retire_live_pi_mapping(&transaction, conversation_id, now_ms())? {
+                return Err(projection_violation(format!(
+                    "rewind.context_generation_collision: generation {generation} already belongs to another retired session"
+                )));
+            }
             transaction.execute(
                 "DELETE FROM runtime_sessions WHERE conversation_id = ?1",
                 [conversation_id],
