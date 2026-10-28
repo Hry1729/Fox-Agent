@@ -4,7 +4,7 @@
 > 协议版本：1<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：Tauri Host 与 Fox Agent Runtime（`services/agent-runtime`）之间的 JSONL 协议、Kernel Worker 协议、工具目录<br>
-> 最后更新：2026-10-25
+> 最后更新：2026-10-28（单 Pi 分支同步；本轮未复跑产品测试）
 
 > 复核状态（2026-10-25）：本次对照 `main@763a019` 复核并修改了「范围」「冻结控制与受控 Kernel 交接」「能力清单」「离线适配评测」中的工具数、「隔离 Kernel 模型进程与桌面权威接线」中关于默认执行权和 Shadow 的说法，依据 `runtime_host/kernel_authority.rs`、`packages/fox-engine-protocol/schema.json`（`toolContracts`）、`runtime_host/shadow_reconcile.rs`。其余各节（Phase 1.5、A0/A1 工作工具、E3、Validation/Attempt 等）沿用 2026-08-27 的内容，**未逐条复核**。
 
@@ -72,8 +72,8 @@ Kernel 路径（当前默认）使用下列共享 DTO；它们由 `--kernel-work
 | type | 必需上下文 | 说明 | 响应 |
 |---|---|---|---|
 | `initialize` | payload.modelService + executionProfile + executionStrategy | 模型、能力与受支持执行策略初始化 | `ready` |
-| `create_session` | conversation/session | 新建检查点 | `session_created` |
-| `resume_session` | sessionPath | 恢复检查点 | `session_created` |
+| `create_session` | conversation/session；原型加 `sessionFormat=pi-native`、`sessionDir`、`cwd`、`contextGeneration` | 创建旧快照或 Pi 原生会话 | `session_created`，原生格式返回 `nativeSessionPath` / `nativeSessionId` |
+| `resume_session` | 旧格式 `sessionPath`；原生格式 `sessionFormat=pi-native`、`nativeSessionPath`、`nativeSessionId`、`contextGeneration` | 按格式恢复；原生 SDK 不回灌展示历史 | `session_created` 或分类错误 |
 | `evaluation.run` | 无 | 运行内置确定性离线评测；不要求模型初始化 | `evaluation_report` |
 | `prompt` | conversation/session/run + assistantPackage + expertBinding? + expertPackage? + projectContext/workSnapshot | 开始异步推理 | `request_succeeded` |
 | `cancel` | run | 中止运行 | `request_succeeded` |
@@ -82,6 +82,12 @@ Kernel 路径（当前默认）使用下列共享 DTO；它们由 `--kernel-work
 普通运行响应仅表示请求已接收；Run 完成以事件为准。`evaluation_report` 是例外：它同步返回 schema v4 固定清单报告，不创建 Conversation/Run、不读取项目、不调用模型或网络，由 Host 校验并持久化报告 Hash、身份 Hash、分类、重复运行聚合、硬门槛和套件摘要。
 
 `assistantPackage` 表示 `conversations.agent_id` 对应的基础助手；`expertBinding` 仅在当前会话有 active 专家时携带绑定 ID、专家 ID、版本与 Hash；`expertPackage` 来自绑定时冻结并经 Hash 校验的静态执行包，再叠加当前 Run 的 Skills、知识和 Host 授权。Runtime 对助手和专家 `allowedTools` 逐层过滤，MCP scope 也取交集；这些字段不能授予 Host 未注册或未批准的能力。
+
+### 原生会话协议的实施边界
+
+阶段二新增参数位于 `pi-runtime.mjs` 与 Host `runtime_host/mod.rs`。SDK 原生会话使用精确文件打开；旧 `fox-snapshot` 仍保留。格式与字段已存在，不代表默认 Authoritative 路径已接入：当前 Host 原生映射在 Legacy 分支。
+
+原生错误包括 `session.native_path_required`、`session.native_missing`、`session.native_corrupt`、`session.native_identity_mismatch`、`session.native_conversation_mismatch`、`session.native_directory_unusable`、`session.native_not_open`。在已提交基线 `d0495a3a` 中，Host 在当次原生恢复失败时返回错误，但 unavailable 行再次打开会新建，缺路径时仍传 fallback；因此该基线的跨请求显式重置保证未闭合；工作区并行的生命周期改造仍需单独验证。**阶段二与 C gap 未完成**，详见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md)。
 
 ### Execution Profile 初始化
 

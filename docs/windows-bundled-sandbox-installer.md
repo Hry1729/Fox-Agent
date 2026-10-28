@@ -2,12 +2,14 @@
 
 `pnpm tauri:build:windows` 构建 x64 NSIS 安装包。安装器申请一次管理员授权，先安装沙箱，再复制 Fox 应用文件。沙箱安装失败时停止安装并返回非零退出码。
 
+> 适用范围（2026-10-28）：共享 SRT 仍供 Fox Host 命令使用。当前 `sandbox-release.json` 固定运行包 0.1.6；保留的外部模型适配器与 ACP bridge 校验属于资源兼容，不恢复退休驱动的执行权。本轮未构建或运行安装器，阶段二状态见[单 Pi 主线状态](01-项目概览/单Pi主线状态.md)。
+
 ## 构建
 
 先准备 `apps/desktop/src-tauri/windows/sandbox-release.json` 固定的运行时 ZIP，再执行：
 
 ```powershell
-$env:FOX_SANDBOX_RUNTIME_PACKAGE = 'D:\releases\fox-sandbox-runtime-0.1.3-windows-x64.zip'
+$env:FOX_SANDBOX_RUNTIME_PACKAGE = 'D:\releases\fox-sandbox-runtime-0.1.6-windows-x64.zip'
 pnpm install --frozen-lockfile
 pnpm tauri:build:windows
 ```
@@ -17,7 +19,7 @@ pnpm tauri:build:windows
 ## 安装和启动
 
 - NSIS 使用 `perMachine`，通过 `NSIS_HOOK_PREINSTALL` 调用 64 位 Windows PowerShell。沙箱 ZIP 随安装器分发，不需要另行下载或手动运行脚本。
-- 运行时安装到 `%ProgramFiles%\Fox\sandbox-runtime\0.1.3`。现有 srt 安装按原脚本幂等复用，不使用 `--force` 重建账号或网络规则。
+- 运行时安装到 `%ProgramFiles%\Fox\sandbox-runtime\0.1.6`。现有 srt 安装按原脚本幂等复用，不使用 `--force` 重建账号或网络规则。
 - 安装日志位于 `%ProgramData%\Fox\logs\sandbox-installer-*.log`。失败时安装器显示该位置，不显示安装成功。
 - 成功记录写入运行时目录的 `.fox-installer-result.json`。该文件由管理员拥有，普通用户只读。
 - Fox 启动时检查记录及目录的权限，并核对版本、路径和当前 srt 注册表中的 SID、创建时间、标记版本。通过后写入当前用户的 `%LOCALAPPDATA%\Fox\state`。UAC 使用另一个管理员账号时，也不会把使用者的状态写进管理员配置目录。

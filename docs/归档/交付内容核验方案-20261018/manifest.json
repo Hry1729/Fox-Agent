@@ -1,0 +1,27 @@
+[
+  {
+    "source": "D:\\python\\projects\\Fox\\Fox\\docs\\02-架构\\Fox-交付核验改造全流程与提问卡设计-20261009至20261018.md",
+    "snapshot": "Fox-交付核验改造全流程与提问卡设计-20261009至20261018.md",
+    "sha256": "A074BB7CDFCFC2E0DEBDA6E9FF253310D7942A26A5B97FC83189D1FD2337EBA4"
+  },
+  {
+    "source": "D:\\python\\projects\\Fox\\Fox\\docs\\03-产品与前端\\交付问题卡设计-20261018.md",
+    "snapshot": "交付问题卡设计-20261018.md",
+    "sha256": "61D3E5A830E263FE003689CEDAF771FCB97DB61C8D9AA02E94230CDBCC54E088"
+  },
+  {
+    "source": "D:\\python\\projects\\Fox\\output\\_mc-clarify\\evidence\\UI-MIGRATION-PREP.md",
+    "snapshot": "UI-MIGRATION-PREP.md",
+    "sha256": "51F2D24900C119C5E9B369683AD8564618A5FCC62D0DAF5C2918FA70EA50C14F"
+  },
+  {
+    "source": "D:\\python\\projects\\Fox\\output\\_mc-clarify\\evidence\\UI-INTEGRATION-RESULT.md",
+    "snapshot": "UI-INTEGRATION-RESULT.md",
+    "sha256": "6D778F3FED3AFABD6DFD8B9217B56975243D4CB0480E243A93F637CF07E886F0"
+  },
+  {
+    "source": "D:\\python\\projects\\Fox\\output\\_mc-clarify\\evidence\\UI-ACCEPTANCE-AB-RESULT.md",
+    "snapshot": "UI-ACCEPTANCE-AB-RESULT.md",
+    "sha256": "0341843E4ABC83894B3A8F4BBEF67463573D86C89A983F6BB300A89D8FA1B6A6"
+  }
+]

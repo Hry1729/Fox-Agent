@@ -3,7 +3,7 @@
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：`apps/desktop/src-tauri/src/lib.rs` 的命令注册、`fox://` 窗口事件、`desktop-client.ts` 封装<br>
-> 最后更新：2026-10-25
+> 最后更新：2026-10-28（单 Pi 分支同步；本轮未复跑产品测试）
 
 > 复核状态（2026-10-25）：命令表由脚本从 `main@763a019` 的 `lib.rs` `tauri::generate_handler![…]` 生成（253 个命令，全部列出）；事件表由 `app.emit("fox://…")` 调用与 `desktop-client.ts` 的 `listen(…)` 对照得出。命令下方的参数说明沿用原文，只修正了已改名的命令。
 
@@ -37,7 +37,7 @@ type ApiResponse<T> =
 | Runtime / 诊断 / 可观测性（10） | `runtime_initialize`、`runtime_status`、`runtime_diagnostics`、`diagnostics_export`、`diagnose_work_state`、`export_work_trace`、`usage_statistics`、`observability_statistics`、`run_ui_metric_record`、`offline_evaluation_run` | `commands/` |
 | 维护与备份（3） | `backup_create`、`backup_restore`、`data_cleanup` | `commands/` |
 | HTML 预览（2） | `html_preview_create`、`html_preview_release` | `html_preview.rs` |
-| 外部 Agent 后端（14） | `agent_backend_model_connection`、`agent_backends_status`、`agent_backend_capabilities`、`agent_backend_credentials`、`agent_backend_import_candidates`、`agent_backend_import_credentials`、`agent_backend_open_private_home`、`agent_backend_permission_status`、`agent_backend_revoke_full_access`、`agent_backend_native_permissions`、`agent_backend_native_permission_set`、`agent_backend_preferences_get`、`agent_backend_preferences_save`、`agent_backend_probe_codex_responses` | `commands::agent_backend_routing.rs`、`external_model.rs` |
+| 历史外部驱动兼容命令（14） | `agent_backend_model_connection`、`agent_backends_status`、`agent_backend_capabilities`、`agent_backend_credentials`、`agent_backend_import_candidates`、`agent_backend_import_credentials`、`agent_backend_open_private_home`、`agent_backend_permission_status`、`agent_backend_revoke_full_access`、`agent_backend_native_permissions`、`agent_backend_native_permission_set`、`agent_backend_preferences_get`、`agent_backend_preferences_save`、`agent_backend_probe_codex_responses` | `commands::agent_backend_routing.rs`、`external_model.rs` |
 | Agent / 专家能力包（9） | `agents_list`、`agent_save`、`agent_copy`、`agent_delete`、`expert_package_inspect`、`expert_package_install`、`expert_package_export`、`expert_package_versions`、`expert_package_rollback` | `commands/`、`expert_packages.rs` |
 | 专家工作流 / 团队（6） | `expert_workflow_get`、`expert_workflow_start`、`expert_workflow_gate_resolve`、`expert_workflow_cancel`、`expert_team_get`、`expert_team_cancel` | `expert_teams.rs`、`expert_workflows.rs` |
 | 数字同事（15） | `digital_colleagues_list`、`digital_colleague_create`、`digital_colleague_update`、`digital_colleague_set_paused`、`digital_colleague_revoke`、`digital_colleague_schedules_list`、`digital_colleague_schedule_save`、`digital_colleague_channels_list`、`digital_colleague_channel_create`、`digital_colleague_channel_revoke`、`digital_colleague_trigger_manual`、`digital_colleague_trigger_channel`、`digital_colleague_triggers_list`、`digital_colleague_audit_list`、`digital_colleague_run_detail` | `app_capabilities.rs`、`digital_colleagues.rs` |
@@ -55,7 +55,7 @@ type ApiResponse<T> =
 
 相比本文 2026-08-24 版的命令表，新增或改名的主要有：
 
-- 新增外部 Agent 后端命令（`agent_backend_*`，14 个）：后端状态与能力、凭据导入、私有 HOME、完全访问状态与撤销、原生权限列表与切换、「新会话使用的 Agent」偏好读写、Codex Responses 探测、外部模型连接测试（`agent_backend_model_connection`，在 `external_model.rs`）。
+- 历史外部 Agent 命令（`agent_backend_*`，14 个）仍有注册，用于兼容设置、状态、凭据、权限和协议探测。命令存在不代表后端可执行；当前准入以 `BackendSwitch` 的退休判定为准。
 - 项目管理：`projects_set_pinned`、`projects_management_list`、`project_path_update`、`project_archive`、`project_root_open`、`project_delete`、`project_folder_open`、`project_file_action`。
 - 会话：归档 / 回收站列表、置顶、归档 / 取消归档、恢复、分叉、彻底删除，以及会话级权限 `conversation_permission_state` / `conversation_permission_update`。
 - Run：`run_rewind`、`child_run_cancel_by_user`、Steering（`run_steering_*`）、交付验收（`delivery_acceptance_*`）、受管文件版本与恢复、`plan_revision_resolve`、`goal_delete`、`goal_running_set`。
@@ -64,7 +64,7 @@ type ApiResponse<T> =
 - 本机资料库：删除资料库、目录、存储路径重置（`local_knowledge_storage_path_reset`）；本机向量模型与检索测试（`local_embedding_*`、`local_knowledge_index_start`、`local_knowledge_retrieval_*`）。
 - 文档活动命令改名为 `knowledge_document_reading_state_save`、`knowledge_document_bookmark_save/delete`、`knowledge_document_annotation_save/delete`。
 
-`conversation_create` 另接受可选 `agentBackend`（`fox` / `pi` / `deepseek` / `codex`，创建后冻结）和 `externalPermissionMode`（仅外部后端：`sandboxed` 默认或 `full_access`，`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时拒绝 `full_access`）。外部 Agent 会话也使用 `conversation_create`、`run_start`、`run_cancel`、`approval_resolve`：命令层按会话冻结的 `agent_backend` 路由（`commands/agent_backend_routing.rs`），请求指向其他后端会被拒绝（`agent_backend_misrouted`），`run_resume` 对外部会话返回 `agent_backend_entry_unsupported`，当前 `AgentBackend::HIDDEN` 为空，Codex 可正常新建；被 HIDDEN 临时下线的后端才返回 `agent_backend_hidden`。错误码见[错误与状态参考](错误与状态.md#外部-agent-后端)。
+`conversation_create` 保留 `agentBackend` 参数，但当前只准入 `fox`；`pi` / `deepseek` / `codex` 返回 `agent_backend_retired`。历史行保持原值与冻结约束；`run_start`、`run_cancel`、`approval_resolve`、`run_resume` 对退休后端同样拒绝。旧 `externalPermissionMode`、HIDDEN 列表和管理员环境变量不能绕过退休判定。错误码见[错误与状态参考](错误与状态.md#外部-agent-后端)。
 
 `mcp_server_save` 的 `transport` 为 `stdio|streamable_http|openapi`。stdio 使用 `command/args/credentials`；HTTP 使用 `endpointUrl/credentials`；OpenAPI 使用 `definition` 和可选 `endpointUrl` 覆盖。`credentials` 只写入 Keyring，不在读取结果中回传。
 
@@ -94,10 +94,10 @@ type ApiResponse<T> =
 
 | 事件 | Payload | 用途 | 前端监听 |
 | --- | --- | --- | --- |
-| `fox://runtime-event` | `RuntimeEventNotification` | 文本、推理、工具、来源和 Run 状态。外部 Agent 会话的事件也走这里（`external_backend.rs` 先写库拿到 `seq` 再发） | 是 |
+| `fox://runtime-event` | `RuntimeEventNotification` | 文本、推理、工具、来源和 Run 状态；旧外部事件结构保留兼容，当前不启动退休驱动 | 是 |
 | `fox://work-event` | `WorkEventRecord` | Goal、Task 和 Evidence 的实时投影；按 conversation sequence 去重 | 是 |
 | `fox://child-run-updated` | `ChildRunNotification` | 按 `childRunId` 更新 Child Run 的 queued/running/terminal 状态、预算使用和有限结果 | 是 |
-| `fox://approval-requested` | `ApprovalRecord` | 展示待审批交互（Fox 与外部 Agent 会话） | 是 |
+| `fox://approval-requested` | `ApprovalRecord` | 展示待审批交互；历史外部审批记录不恢复退休驱动的执行权 | 是 |
 | `fox://approval-resolved` | `ApprovalRecord` | 同步审批终态 | 是 |
 | `fox://kernel-state-invalidated` | `KernelStateInvalidation { schemaVersion: 1 }` | Kernel 事实变化后通知前端重新读取 Kernel 快照（`kernel_state_publisher.rs`） | 是 |
 | `fox://kernel-model-preview` | `KernelModelPreview` | Kernel 模型请求的流式预览（`runtime_host/kernel_host.rs`） | 是 |

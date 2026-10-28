@@ -1,3 +1,6 @@
+> **单 Pi 分支适用范围（2026-10-28）**：历史候选安装包验收步骤。下文包内适配器、候选路径和 Legacy 演练均对应旧构建，不代表当前单 Pi 候选已验收；新环境按现行构建与发布指南准备，阶段二与 C gap 未完成。
+> 当前状态与证据边界见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md)。以下历史正文保持原样。
+
 # Kernel 换电脑安装验收
 
 > **现状（2026-10-25）：已过时，保留作 2026-09-10 验收包的操作记录。** 文中“未另设环境变量时默认使用 Legacy”“用 `Start-IsolatedFox.ps1` 设置模式”已不成立：自 2026-09-29 起未设置 `FOX_KERNEL_MODE` 即为 Authoritative（`runtime_host/kernel_authority.rs`）。当前人工复测流程见 `crates/fox-agent-backend/docs/sandbox.md` 第 13 节；Windows 上必须从普通目录（Medium 完整性）运行 exe。

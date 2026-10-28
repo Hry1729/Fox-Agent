@@ -3,9 +3,9 @@
 > 状态：维护中<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：Fox 自身执行路径（Kernel / Legacy / Shadow）的改造进度与待办<br>
-> 最后更新：2026-10-25（按 `main` 代码核对）
+> 最后更新：2026-10-28（单 Pi 分支同步；本轮未复跑产品测试）
 
-本文只写 Kernel 改造**现在到了哪一步、还剩什么**。Kernel 的设计和组件细节见 [Agent 运行时架构 · Kernel](../02-架构/Agent运行时架构.md)；外层 Agent（pi、DeepSeek Harness、Codex 经 ACP 接入）见同文「外层 Agent 后端」一节。
+本文记录 Kernel 改造状态。当前本地引擎只保留 Pi，旧外部驱动已退休；原生会话阶段二与 C gap 见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md)。与单 Pi 无关的余项沿用 2026-10-25 核对，不作为本轮新验收。
 
 2026-09-12 及更早的逐轮进度、测试数字和验收包说明已从本文移除，可在 Git 历史（`763a019` 之前的本文件）和 [实施记录](实施记录/) 目录里查到。
 
@@ -25,14 +25,16 @@
 | Kernel 驱动真实 Run（7A 决策权切换） | 已完成，默认 | `runtime_host/kernel_authority.rs`（含单元测试） |
 | Durable outbox 生产执行器 | 已完成 | `KernelCoordinator::dispatch_tool` 经 `kernel_outbox_lease_effect` 领取，核对工具名和 canonical input 后才执行 |
 | 模型请求超时的 begin / settle 接线 | 已完成（Authoritative 路径） | `runtime_host/kernel_coordinator.rs` |
-| Kernel 模型引擎 | 已完成：`pi`（默认）、`codex`、`deepseek_harness` | `kernel_model_config.rs`（`FOX_KERNEL_ENGINE`）、`services/agent-runtime/src/*-kernel-adapter.mjs` |
-| 启动恢复 | 已完成 | 生产使用 `runtime_host/kernel_host.rs::recover_kernel_runs_detached`；`crates/fox-agent-kernel/src/recovery.rs::plan_recovery` 只在测试中调用 |
+| Kernel 模型引擎 | 仅 Pi | `kernel_model_config.rs`；其他值返回 `kernel_engine_retired` |
+| Kernel 既有启动恢复 | 已实现；不等于阶段二原生会话恢复 | 生产使用 `runtime_host/kernel_host.rs::recover_kernel_runs_detached`；`crates/fox-agent-kernel/src/recovery.rs::plan_recovery` 只在测试中调用 |
 | Shadow 观察与退出判据 | 已完成 | `runtime_host/shadow_reconcile.rs`、`database/repositories/kernel.rs` 的 `kernel_shadow_exit_gate` / `kernel_shadow_recent_exit_gate` |
 | 7B Resource Gateway | 部分完成 | `resource_gateway.rs` 已实现四个项目读取器；其他资源类别是否全部迁入**未逐项确认** |
 | React 改读统一 Snapshot | 部分完成 | 前端有 `kernel-snapshot.ts`，Host 发 `fox://kernel-state-invalidated`；是否所有界面都只读快照**未逐个确认** |
 | 子 Agent（Child Run）走 Kernel | 已完成 | `kernel_delegation.rs`，Host Action `StartChild`，见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md) |
 | 真实进程崩溃后 UI 续跑的端到端验收 | **无法确认** | 只有 CI 的打包 Kernel worker 测试和人工脚本 `scripts/kernel-isolated-desktop.ps1`；没找到 Pi → Node → JSONL → Rust → React 真实崩溃续跑的自动化测试或验收记录 |
 | Legacy / Shadow 路径清理（阶段 4） | **未开始** | 四 Agent 实施方案第 9 节 |
+
+| 单 Pi 阶段二与 C gap | **未完成** | SDK 与 v98 映射部分落地，默认路径及恢复边界未完成验收 |
 
 ## 待办
 

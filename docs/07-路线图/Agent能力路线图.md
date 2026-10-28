@@ -3,18 +3,18 @@
 > 状态：维护中<br>
 > 适用版本：Fox `0.1.x` 及后续版本<br>
 > 维护范围：已完成能力的依赖关系、下一阶段目标与决策门<br>
-> 最后更新：2026-10-26（统一四 Agent 阶段状态；其他条目沿用 2026-10-25 核验；「当前基线」以下保留 2026-08-27 原文）
+> 最后更新：2026-10-28（单 Pi 分支同步；本轮未复跑产品测试）
 
-## 当前状态（2026-10-26）
+## 当前状态（2026-10-28）
 
 | 方向 | 状态 | 说明 |
 | --- | --- | --- |
 | A0–A6、E1–E4 | 已完成 | 工程实现与离线回归，见[能力矩阵](../01-项目概览/能力矩阵.md) |
 | Kernel 统一控制（Fox 自身执行路径） | 已完成，默认启用 | Kernel / Authoritative 是默认；Legacy 只用于调试和旧 Run。进度和余项见 [Kernel 改造进度](Kernel-改造进度.md) |
-| 外层 Agent 接入（四 Agent，经 ACP） | 阶段 0、2、3 已完成 | 内置 Fox、DeepSeek Harness（实验）、pi 和 Codex；Codex 已恢复可选。阶段 1、4 另列于下方，逐项状态见[四 Agent 实施方案](../02-架构/四Agent改造实施方案-v0.3.1.md) |
-| 「自定义 ACP Agent」入口 | **待办** | 让用户自行安装其他 ACP Agent、填写启动命令；Codex 以后也走这里 |
-| 共享 Host 加固（四 Agent 阶段 1） | 部分完成 | 第 2 项（测试授权语义）未关闭；第 4 项只在 Windows 上关闭；其余已关闭或撤回 |
-| Legacy / Shadow 清理（四 Agent 阶段 4） | **未开始** | |
+| 单 Pi 阶段一 | 已实现，有既有定向证据 | 新会话固定 `fox`，本地引擎仅 Pi；旧外部驱动只读、执行拒绝 |
+| 单 Pi 阶段二与 C gap | **未完成** | SDK 与 v98 映射部分落地；默认路径、恢复边界及真实场景仍需关闭，见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md) |
+| 历史方案中的共享 Host 加固 | 部分完成 | 第 2 项（测试授权语义）未关闭；第 4 项只在 Windows 上关闭；其余已关闭或撤回 |
+| Legacy / Shadow 清理 | **未开始** | |
 | Kernel Issue [#24](https://github.com/Hry1729/Fox-Agent/issues/24)（自我验证证据）、[#25](https://github.com/Hry1729/Fox-Agent/issues/25)（Host 生成 attemptId） | 未开始（open） | |
 | P0 真实任务质量与发布门禁 | 部分完成 | Windows CI 已覆盖前端、Runtime、桌面 Host、Kernel / 协议、外部 Agent 后端和契约 Fixture，并支持定向模式；Markdown 链接、Sidecar Smoke、安装包、离线 Eval 不在 CI；没有版本化在线 Smoke Runner，没有接入官方评测集 |
 | P1 子 Agent 与团队隔离 | 部分完成 | Child Run 已走 Kernel（`kernel_delegation.rs`），深度 1；共享写任务的 Git worktree 隔离、并行 Team、mailbox 都没有做 |

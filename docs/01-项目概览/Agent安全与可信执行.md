@@ -3,14 +3,14 @@
 > 状态：生效<br>
 > 适用版本：Fox `0.1.x`<br>
 > 维护范围：面向用户、评审与工程师解释 Fox 如何限制 Agent 权限<br>
-> 最后更新：2026-10-25
+> 最后更新：2026-10-28（单 Pi 分支同步；本轮未复跑产品测试）
 
 ## 核心结论
 
 Fox 不把模型当作可信程序。会话分两类，安全边界不同：
 
 - **Fox 会话**（默认）：模型只能生成文字或提出结构化工具请求；文件、程序、数据库、知识库和 MCP 操作都由 Tauri Host 执行。Host 根据用户授权、项目范围、Execution Profile、工具协议、参数、审批和任务状态决定是否执行。任意 Shell 由真实 SRT 限制，初始化失败拒绝执行。
-- **外部 Agent 会话**（dsh / pi；Codex 已恢复可选）：Agent 自己执行模型循环和工具，但由 Host 从 Fox 管理的运行时目录启动，只继承白名单环境变量，由 Fox 直接启动并绑定项目；Fox 不再套外层 SRT，边界由各 Agent 原生沙箱/审批决定。审批请求经 ACP 回到 Fox 由用户作答；完全访问是该 Agent 的原生模式，新会话和会话中都可切换；切换会中止当前轮并按原生方式重建。会话记录由 Host 写入 Fox 数据库，Fox 不向外部 Agent 提供访问数据库的接口。
+- **退休外部会话**（Pi ACP / Codex / DeepSeek）：只读历史，执行入口返回 `agent_backend_retired`。Yuxi 远程知识库与远程专家保留，不属于这组退休后端。
 
 限制工具只是第一层。Fox 会话还通过路径隔离、权限交集、审批绑定、资源预算、状态机、Evidence、独立 Reviewer、持久审计和 fail-closed 恢复共同约束 Agent。
 
@@ -20,9 +20,9 @@ Fox 不把模型当作可信程序。会话分两类，安全边界不同：
 
 > 我们首先把模型和系统权限分开。模型本身不能直接读写文件、运行命令或访问密钥，只能申请调用系统提供的工具。工具请求到达 Rust Host 后，还要经过工具白名单、Agent 执行 Profile、项目路径、参数范围和用户审批的多重校验。高风险任务不是模型说完成就完成，还必须提交可验证证据，并由独立只读 Reviewer 复核，最后由 Host 状态机验收。所有调用、审批和状态变化都会持久化，未知情况默认拒绝。所以我们的安全边界不依赖模型自觉，而是由模型无法绕过的 Host 和数据库规则强制执行。
 
-如果被问到外部 Agent（如 pi、DeepSeek），可以补充：
+如果被问到旧外部 Agent（Pi ACP、DeepSeek、Codex），应说明：
 
-> 外部 Agent 自己执行工具；Fox 直接启动它，只给白名单环境变量和绑定项目的工作区，但不再套外层 SRT。边界由该 Agent 自己的原生沙箱/审批决定；需要审批的操作通过协议回到 Fox 由用户决定。完全访问是该 Agent 的原生模式，不是 Fox 外层授权。
+> 当前构建不再运行这些外部驱动。历史绑定和消息保留，但不能继续执行，也不会自动改用内置 Pi。内置本地工具仍由 Fox Host 授权和执行。
 
 如果评委继续追问，可以补充一句：
 
@@ -141,22 +141,9 @@ SQLite 保存 Run、ToolCall、Approval、Attempt、Evidence、Reviewer decision
 
 ## 外部 Agent 会话的边界
 
-外部 Agent（dsh、pi；隐藏的 Codex 同样适用）的模型循环和工具执行不在 Fox Host 里，所以上面 1–10 的大部分控制不适用。Fox 用下面这些控制约束它们：
+本分支中的外部 Pi ACP、Codex、DeepSeek 后端已退休，历史会话只读。`FOX_EXTERNAL_BACKENDS`、旧偏好和直接 IPC 都不能启用退休驱动；不能通过调整原生权限绕过拒绝。
 
-| 控制 | 做法 | 代码 |
-| --- | --- | --- |
-| 启动来源 | 只从 Fox 管理的运行时目录启动，不用 `npx`；未安装时报 `agent_backend_not_installed` | `crates/fox-agent-backend/src/external_launch.rs` |
-| 环境变量 | 只继承白名单 | 同上 |
-| 沙箱 | 外部 Agent 不再套 Fox 的 srt；Fox 直接启动进程并使用私有 HOME，边界由该 Agent 自己的原生沙箱/审批决定。Codex / dsh 的原生限制保留；pi 没有系统级沙箱，只有 Fox 审批门禁。Fox Agent 的 Host 命令才由 srt 限制 | `apps/desktop/src-tauri/src/host_sandbox.rs`、`crates/fox-agent-backend/src/native_permission.rs` |
-| 项目 | 外部会话必须绑定项目才能开始运行 | `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs` |
-| 登录信息 | 放在 Fox 管理的私有 HOME；从真实 HOME 导入时只复制用户确认过的文件，并按名字审计 | `crates/fox-agent-backend/src/onboarding.rs` |
-| 审批 | Agent 的审批请求经 ACP `session/request_permission` 由 Host 作答 | `crates/fox-agent-backend/src/external.rs`、`native_permission.rs` |
-| 权限 | 按该 Agent 自己的原生选项（如 pi 只读 / 询问 / 自动；dsh 只读 / 工作区可写） | `crates/fox-agent-backend/src/native_permission.rs` |
-| 完全访问 | 该 Agent 自己的原生模式；新会话和会话中都可切换，切换会中止当前轮并按原生方式重建；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时不可选 | `crates/fox-agent-backend/src/native_permission.rs`、`commands/agent_backend_routing.rs` |
-| 路由 | 会话后端创建时冻结；请求与冻结值不一致时拒绝；读库失败时不会把外部会话交给 Fox | `crates/fox-agent-backend/src/host_routing.rs` |
-| 关闭 | 管理员可用 `FOX_EXTERNAL_BACKENDS` 强制关闭，被关闭的已有外部会话只读 | 同上 |
-
-外部 Agent 在其原生边界内能做什么，取决于它自己的工具和所选权限；Fox 不审查它每一步工具调用的参数，也不对它的输出建立 Evidence / Acceptance。能力按“审批覆盖 / 沙箱范围 / 取消能力 / 可观测性”四个维度声明并显示。详见[安全架构 · 外部 Agent 会话](../02-架构/安全架构.md#外部-agent-会话)。
+共享 SRT 继续约束内置 Host 命令，旧后端兼容模块与凭据保留。Yuxi 远程服务保持独立边界。阶段二 Pi 原生会话的恢复和落盘保证尚未闭合，不能将契约目标写成已验收承诺，见[单 Pi 主线状态](单Pi主线状态.md)。
 
 ## 常见追问
 
@@ -178,7 +165,7 @@ Prompt 隔离可以降低模型被诱导的概率，但不是最终安全边界�
 
 ### “多 Agent 会不会互相扩大权限？”
 
-Child Run 的权限来自父级与自身 Profile 的交集，不能继承父级没有的权限。Reviewer 更是固定只读。当前 Writer 不采用无界共享调度，避免多个 Agent 同时任意修改同一工作区。外部 Agent 会话按方案约定不做多 Agent 协作：会话只绑定一个后端，运行中不切换。
+Child Run 的权限来自父级与自身 Profile 的交集，不能继承父级没有的权限。Reviewer 更是固定只读。当前 Writer 不采用无界共享调度，避免多个 Agent 同时任意修改同一工作区。退休外部会话不能执行，也不会因协作请求而重新启用。
 
 ## 已知安全边界
 
@@ -188,7 +175,7 @@ Fox 采用纵深防御，但下列边界尚未闭合（2026-10-25 对照代码�
 - **`test_run` 授权没有绑定工作区修订或脚本内容**（四 Agent 方案阶段 1 第 2 项，未关闭）。
 - **非 Windows 平台的子进程收尾**只杀直接子进程，没有进程树终止（阶段 1 第 4 项只在 Windows 上关闭；产品发布目标是 Windows）。
 - Fox 会话的 Runtime 与本地 MCP 进程没有进入 OS 容器或 Windows AppContainer。
-- 外部 Agent 的安全依赖该 Agent 自己的原生沙箱/权限实现；Fox 不再增加外层 srt。选择原生完全访问时，该 Agent 的原生沙箱和审批会按其自身语义关闭或放宽；Fox 仍保留环境变量白名单、私有 HOME、取消与进程树清理、记录和审批转发。pi 没有系统级沙箱，不能按 Codex/dsh 的原生隔离来描述。
+- 阶段二原生会话接入和恢复边界尚未闭合；已记录的 Legacy 进程崩溃与模型 404 未关闭，不扩大真实运行保证。
 - Tauri 已配置 `csp` 与 `devCsp`，但没有浏览器端的策略回归测试。
 - 用户显式配置的 MCP / OpenAPI 地址和本地命令属于高风险受信配置。
 - Office / PDF 等复杂解析器需要持续更新依赖并做恶意文件测试。
