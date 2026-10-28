@@ -288,6 +288,110 @@ impl Drop for Fixture {
 fn canonical(dir: &std::path::Path, name: &str) -> PathBuf {
     std::fs::canonicalize(dir).unwrap().join(name)
 }
+
+fn recorded_run_session(fixture: &Fixture, run_id: &str) -> Option<String> {
+    fixture.database.with_connection(|connection| {
+        connection.query_row(
+            "SELECT runtime_session_id FROM runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+    }).unwrap()
+}
+
+#[test]
+fn run_session_binding_covers_create_live_adopt_and_resume() {
+    for route in ["create", "live", "adopt", "resume"] {
+        let fixture = Fixture::new(&format!("run-binding-{route}"));
+        let existing_file = fixture.file("existing.jsonl");
+        if route != "create" {
+            if route == "resume" {
+                std::fs::write(&existing_file, "persisted Pi session").unwrap();
+            }
+            fixture.seed_mapping(
+                &fixture.conversation_id,
+                "existing-runtime",
+                &existing_file,
+                2,
+                if route == "resume" { RuntimeSessionStatus::Ready } else { RuntimeSessionStatus::Allocated },
+            );
+        }
+        let run = fixture.database.create_run(&fixture.conversation_id, "读取当前资料", None).unwrap().run;
+        assert_eq!(recorded_run_session(&fixture, &run.id), None);
+        let response_path = if route == "resume" { existing_file } else { fixture.file("created.jsonl") };
+        let mut runtime = if route == "live" {
+            ScriptedRuntime::default()
+        } else {
+            ScriptedRuntime::with(vec![Scripted::Created {
+                path: response_path,
+                session_id: "pi-context".to_owned(),
+                persist: route == "resume",
+            }])
+        };
+        let opened = fixture.lifecycle().open_for_run(
+            &fixture.conversation_id,
+            &run.id,
+            &mut runtime,
+            (route == "live").then_some("existing-runtime"),
+        ).unwrap();
+        assert_eq!(recorded_run_session(&fixture, &run.id).as_deref(), Some(opened.0.as_str()), "route {route}");
+        assert_eq!(fixture.mapping().unwrap().runtime_session_id, opened.0);
+        let expected_requests = match route {
+            "live" => vec![],
+            "resume" => vec!["resume_session"],
+            _ => vec!["create_session"],
+        };
+        assert_eq!(runtime.request_types(), expected_requests, "route {route}");
+    }
+}
+
+#[test]
+fn run_session_binding_does_not_claim_a_failed_restore() {
+    let fixture = Fixture::new("run-binding-corrupt");
+    fixture.seed_generation_one("corrupt.jsonl", "corrupt");
+    let run = fixture.database.create_run(&fixture.conversation_id, "继续", None).unwrap().run;
+    let mut runtime = ScriptedRuntime::with(vec![Scripted::Rejected {
+        code: "session.native_corrupt",
+        message: "invalid Pi session",
+    }]);
+    assert!(fixture.lifecycle().open_for_run(&fixture.conversation_id, &run.id, &mut runtime, None).is_err());
+    assert_eq!(recorded_run_session(&fixture, &run.id), None);
+    assert_eq!(fixture.mapping().unwrap().status, "unavailable");
+}
+
+#[test]
+fn run_session_binding_refuses_other_conversations_and_existing_different_bindings() {
+    let fixture = Fixture::new("run-binding-owner");
+    fixture.seed_generation_one("owned.jsonl", "owned session");
+    let run = fixture.database.create_run(&fixture.conversation_id, "继续", None).unwrap().run;
+    let other_conversation = fixture.second_conversation();
+    let other_run = fixture.database.create_run(&other_conversation, "独立对话", None).unwrap().run;
+    assert!(fixture.database.associate_run_runtime_session(&other_run.id, &fixture.conversation_id, "runtime-1").is_err());
+    assert!(fixture.database.associate_run_runtime_session(&run.id, &other_conversation, "runtime-1").is_err());
+    assert_eq!(recorded_run_session(&fixture, &other_run.id), None);
+    assert_eq!(recorded_run_session(&fixture, &run.id), None);
+    fixture.database.with_connection(|connection| {
+        connection.execute("UPDATE runs SET runtime_session_id = 'previous-runtime' WHERE id = ?1", [&run.id])
+    }).unwrap();
+    assert!(fixture.database.associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1").is_err());
+    assert_eq!(recorded_run_session(&fixture, &run.id).as_deref(), Some("previous-runtime"));
+}
+
+#[test]
+fn run_session_binding_is_idempotent_but_does_not_change_finished_runs() {
+    let fixture = Fixture::new("run-binding-finished");
+    fixture.seed_generation_one("owned.jsonl", "owned session");
+    let run = fixture.database.create_run(&fixture.conversation_id, "继续", None).unwrap().run;
+    for _ in 0..2 {
+        fixture.database.associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1").unwrap();
+    }
+    fixture.database.with_connection(|connection| {
+        connection.execute("UPDATE runs SET status = 'completed' WHERE id = ?1", [&run.id])
+    }).unwrap();
+    assert!(fixture.database.associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1").is_err());
+    assert_eq!(recorded_run_session(&fixture, &run.id).as_deref(), Some("runtime-1"));
+}
+
 // ------------------------------------------ (a) two resets, three generations --
 
 /// Two consecutive resets: 1 -> 2 -> 3, each generation has its own runtime

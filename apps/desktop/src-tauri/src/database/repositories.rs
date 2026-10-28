@@ -6112,6 +6112,31 @@ impl Database {
         })
     }
 
+    pub(crate) fn associate_run_runtime_session(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        runtime_session_id: &str,
+    ) -> Result<(), String> {
+        let changed = self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET runtime_session_id = ?3
+                 WHERE id = ?1 AND conversation_id = ?2 AND status = 'queued'
+                   AND (runtime_session_id IS NULL OR runtime_session_id = ?3)
+                   AND EXISTS (
+                       SELECT 1 FROM runtime_sessions
+                       WHERE conversation_id = ?2 AND runtime_type = 'pi'
+                         AND runtime_session_id = ?3 AND status IN ('allocated', 'ready')
+                   )",
+                params![run_id, conversation_id, runtime_session_id],
+            )
+        })?;
+        if changed != 1 {
+            return Err("运行与会话绑定不一致，已拒绝发送".to_owned());
+        }
+        Ok(())
+    }
+
     pub fn get_runtime_session(
         &self,
         conversation_id: &str,

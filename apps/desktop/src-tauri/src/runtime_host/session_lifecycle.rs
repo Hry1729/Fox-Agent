@@ -367,6 +367,22 @@ impl<'a> SessionLifecycle<'a> {
         self.open_with_live_session(conversation_id, link, None)
     }
 
+    /// Bind the queued Run even when opening only reuses or adopts a session
+    /// and therefore does not rewrite the session mapping.
+    pub(crate) fn open_for_run(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        link: &mut dyn SessionRuntimeLink,
+        live_runtime_session_id: Option<&str>,
+    ) -> Result<OpenedSession, SessionOpenError> {
+        let opened = self.open_with_live_session(conversation_id, link, live_runtime_session_id)?;
+        self.database
+            .associate_run_runtime_session(run_id, conversation_id, &opened.0)
+            .map_err(SessionOpenError::Failed)?;
+        Ok(opened)
+    }
+
     /// Open (or create) the conversation's Pi session, knowing which runtime
     /// session the live worker currently holds.
     ///

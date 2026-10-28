@@ -2408,7 +2408,7 @@ impl RuntimeHost {
             return self.start_kernel_run(kernel_ownership.ok_or("missing Kernel ownership")?, binding, Value::Null, Value::Null);
         }
         let runtime_session_id = if authority == fox_engine_protocol::ExecutionAuthority::Legacy {
-            self.open_runtime_session(&started.run.conversation_id)?.0
+            self.open_runtime_session(&started.run.conversation_id, Some(&started.run.id))?.0
         } else { String::new() };
         let images = self.runtime_images(&started.run.conversation_id, attachments)?;
 
@@ -2712,19 +2712,27 @@ impl RuntimeHost {
     /// Pi-native session whose exact file the Host must open. All of the
     /// decisions live in `session_lifecycle`, which knows that a failed native
     /// restore must never become a fresh context.
-    fn open_runtime_session(&self, conversation_id: &str) -> Result<(String, PathBuf), String> {
+    fn open_runtime_session(&self, conversation_id: &str, run_id: Option<&str>) -> Result<(String, PathBuf), String> {
         // The live worker is the only source of "this allocated session is
         // still in memory": after a reset Pi has not written the JSONL yet, and
         // refusing to reuse it would make the new generation unusable.
         let live_runtime_session_id = self.live_runtime_session_id(conversation_id);
         let mut link = HostSessionLink { host: self };
-        self.session_lifecycle()
-            .open_with_live_session(
+        let lifecycle = self.session_lifecycle();
+        let opened = match run_id {
+            Some(run_id) => lifecycle.open_for_run(
+                conversation_id,
+                run_id,
+                &mut link,
+                live_runtime_session_id.as_deref(),
+            ),
+            None => lifecycle.open_with_live_session(
                 conversation_id,
                 &mut link,
                 live_runtime_session_id.as_deref(),
-            )
-            .map_err(|error| error.user_message())
+            ),
+        };
+        opened.map_err(|error| error.user_message())
     }
 
     /// The runtime session the live worker holds for this conversation.
@@ -4938,7 +4946,7 @@ impl RuntimeHost {
             thread::sleep(Duration::from_millis(500));
             let result = host
                 .spawn_worker(&conversation_id)
-                .and_then(|_| host.open_runtime_session(&conversation_id).map(|_| ()));
+                .and_then(|_| host.open_runtime_session(&conversation_id, None).map(|_| ()));
             if let Err(error) = result {
                 host.cleanup_failed_worker(&format!("Sidecar 自动恢复失败: {error}"));
             } else if let Ok(mut state) = host.state.lock() {
