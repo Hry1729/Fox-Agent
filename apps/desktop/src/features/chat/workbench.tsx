@@ -1141,7 +1141,7 @@ export function Workbench() {
   }, [activeView, timelineEmpty])
   const showConversationRightSidebar = activeView === 'chat' && !timelineEmpty
   const handleRuntimeOpenSource = useStableCallback((source: RuntimeSource) => {
-    navigate('knowledge-detail', source.knowledgeBaseId, { documentId: source.documentId, sourceLocator: source.locator })
+    navigate(source.source === 'local' ? 'local-knowledge-documents' : 'knowledge-detail', source.knowledgeBaseId, { documentId: source.documentId, sourceLocator: source.locator })
   })
   const handleRuntimeSubmitQuestion = useStableCallback(async (text: string, answers: Record<string, string | string[]>) => {
     if (!runtimeQuestion) return false

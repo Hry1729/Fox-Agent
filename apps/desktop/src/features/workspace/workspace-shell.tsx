@@ -91,6 +91,7 @@ export function WorkspaceShell({
         gateway={localKnowledgeGateway}
         knowledgeBaseId={activeEntityId ?? undefined}
         documentId={activeDocumentId ?? undefined}
+        sourceLocator={activeSourceLocator ?? undefined}
         onNavigate={navigateLocalKnowledge}
         onNavigateWorkspace={navigate}
         onBack={backFromLocalKnowledge}

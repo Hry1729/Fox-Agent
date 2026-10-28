@@ -22,7 +22,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/model/types'
-import type { LocalKnowledgeDocumentAsk } from '@/features/workspace/types'
+import type { KnowledgeSourceLocator, LocalKnowledgeDocumentAsk } from '@/features/workspace/types'
+import { LocalKnowledgeSourceText } from './local-knowledge-source-text'
 import { notify as toast } from '@/features/notifications'
 import { detectShortcutPlatform, formatShortcut, matchesShortcutAction } from '@/features/settings/shortcut-model'
 import { useShortcutPreferences } from '@/features/settings/use-shortcuts'
@@ -240,6 +241,7 @@ export interface LocalKnowledgePageProps {
 export interface LocalKnowledgeNavigationProps extends LocalKnowledgePageProps {
   knowledgeBaseId?: string
   documentId?: string
+  sourceLocator?: KnowledgeSourceLocator
   createRequest?: number
   onCreateRequestHandled?: () => void
   onBack?: () => void
@@ -1123,7 +1125,7 @@ function localDocumentMetadata(document: LocalKnowledgeDocument): KnowledgeDocum
   }
 }
 
-function LocalKnowledgeDocumentReader({ knowledgeBaseId, knowledgeBaseName, document, gateway, onBack, onDeleted, onJobAccepted, onAskDocument }: { knowledgeBaseId: string; knowledgeBaseName?: string; document: LocalKnowledgeDocument; gateway: LocalKnowledgeGateway; onBack: () => void; onDeleted: () => Promise<void>; onJobAccepted: () => void; onAskDocument?: (payload: LocalKnowledgeDocumentAsk) => void; embedded?: boolean }) {
+function LocalKnowledgeDocumentReader({ knowledgeBaseId, knowledgeBaseName, document, sourceLocator, gateway, onBack, onDeleted, onJobAccepted, onAskDocument }: { knowledgeBaseId: string; knowledgeBaseName?: string; document: LocalKnowledgeDocument; sourceLocator?: KnowledgeSourceLocator; gateway: LocalKnowledgeGateway; onBack: () => void; onDeleted: () => Promise<void>; onJobAccepted: () => void; onAskDocument?: (payload: LocalKnowledgeDocumentAsk) => void; embedded?: boolean }) {
   const [text, setText] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1210,14 +1212,16 @@ function LocalKnowledgeDocumentReader({ knowledgeBaseId, knowledgeBaseName, docu
   const unsupported = kind === 'unsupported' || kind === 'legacy-office' || (kind === 'presentation' && document.extension.toLowerCase() !== 'pptx')
   const preview = !error && (
     kind === 'pdf'
-      ? <KnowledgePdfViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={metadata} onFailure={handleFailure} openPreviewSource={openPreviewSource} />
+      ? <KnowledgePdfViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={metadata} sourceLocator={sourceLocator} onFailure={handleFailure} openPreviewSource={openPreviewSource} />
       : kind === 'docx'
-        ? <KnowledgeDocxViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={metadata} onFailure={handleFailure} openPreviewSource={openPreviewSource} />
+        ? <KnowledgeDocxViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={metadata} sourceLocator={sourceLocator} onFailure={handleFailure} openPreviewSource={openPreviewSource} />
         : kind === 'presentation' && document.extension.toLowerCase() === 'pptx'
           ? <KnowledgePptxViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={metadata} onFailure={handleFailure} openPreviewSource={openPreviewSource} />
           : kind === 'spreadsheet'
             ? <KnowledgeSpreadsheetViewer knowledgeBaseId={knowledgeBaseId} documentId={document.id} filename={document.name} metadata={metadata} onFailure={handleFailure} openPreviewSource={openPreviewSource} />
-            : kind === 'markdown'
+            : (kind === 'markdown' || kind === 'text') && sourceLocator
+              ? <LocalKnowledgeSourceText text={text} locator={sourceLocator} />
+              : kind === 'markdown'
               ? <div className="fox-local-files-markdown-preview"><MessageResponse>{text}</MessageResponse></div>
               : kind === 'text'
                 ? <pre className="fox-local-files-text-preview">{text}</pre>
@@ -1696,7 +1700,7 @@ function KnowledgeActivityClock({ jobs, knowledgeBaseName, onOpenJobs }: {
   )
 }
 
-export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, onBack, onNavigate, onOperationAccepted, onAskDocument, initialImportOpen = false }: LocalKnowledgeNavigationProps & { initialImportOpen?: boolean; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, sourceLocator, onBack, onNavigate, onOperationAccepted, onAskDocument, initialImportOpen = false }: LocalKnowledgeNavigationProps & { initialImportOpen?: boolean; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const browser = useLibraryBrowser(knowledgeBaseId)
   const [addRequest, setAddRequest] = useState<'file' | 'folder' | null>(null)
@@ -1894,7 +1898,7 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
           {activeSubview === 'jobs' && <LocalKnowledgeJobsPage embedded gateway={gateway} knowledgeBaseId={base.id} onBack={() => setActiveSubview(null)} onNavigate={navigateWithinSubview} />}
           {activeSubview === null && <>
             <KnowledgeBaseSearch key={`${base.id}:${browser.navigation}`} gateway={gateway} base={base} hint={searchShowing ? searchHint : null} omni controlContainer={searchContainer} onActiveChange={setSearchShowing} onOpenAdvanced={() => setActiveSubview('retrieval')} onOpenDocument={(documentId) => setActiveDocumentId(documentId)} />
-            <LocalKnowledgeDocumentsPanel base={base} addRequest={addRequest} onAddRequestHandled={clearAddRequest} gateway={gateway} knowledgeBaseId={base.id} documentId={activeDocumentId} onNavigate={navigateWithinSubview} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
+            <LocalKnowledgeDocumentsPanel base={base} addRequest={addRequest} onAddRequestHandled={clearAddRequest} gateway={gateway} knowledgeBaseId={base.id} documentId={activeDocumentId} sourceLocator={activeDocumentId === documentId ? sourceLocator : undefined} onNavigate={navigateWithinSubview} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
           </>}
         </>}
       </div>
@@ -2001,7 +2005,7 @@ function KnowledgeImportDropzone({ gateway, items, disabled, onItemsChange, onEr
   </div>
 }
 
-function LocalKnowledgeDocumentsPanel({ base, gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, onNavigate, addRequest, onAddRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { base: LocalKnowledgeBaseDetail; addRequest: 'file' | 'folder' | null; onAddRequestHandled: () => void; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+function LocalKnowledgeDocumentsPanel({ base, gateway = defaultLocalKnowledgeGateway, className, knowledgeBaseId, documentId, sourceLocator, onNavigate, addRequest, onAddRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { base: LocalKnowledgeBaseDetail; addRequest: 'file' | 'folder' | null; onAddRequestHandled: () => void; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const [documents, setDocuments] = useState<LocalKnowledgeDocument[]>([])
   const [folders, setFolders] = useState<LocalKnowledgeFolder[]>([])
   const browser = useLibraryBrowser(knowledgeBaseId)
@@ -2201,7 +2205,7 @@ function LocalKnowledgeDocumentsPanel({ base, gateway = defaultLocalKnowledgeGat
         </section>}
         <Dialog open={Boolean(selectedDocument)} onOpenChange={(open) => { if (!open) onNavigate?.('documents', knowledgeBaseId) }}><DialogContent className="fox-library-preview-dialog" aria-describedby={undefined} onOpenAutoFocus={() => { previewReturnFocus.current = globalThis.document.activeElement as HTMLElement }} onCloseAutoFocus={(event) => { event.preventDefault(); if (previewReturnFocus.current?.isConnected) previewReturnFocus.current.focus() }}>
           <DialogTitle className="sr-only">预览 {selectedDocument?.name}</DialogTitle>
-          {!loading && !error && selectedDocument && knowledgeBaseId && <LocalKnowledgeDocumentReader key={selectedDocument.id} knowledgeBaseName={base?.name} knowledgeBaseId={knowledgeBaseId} document={selectedDocument} gateway={gateway} onBack={() => onNavigate?.('documents', knowledgeBaseId)} onDeleted={async () => { await load(); onNavigate?.('documents', knowledgeBaseId) }} onJobAccepted={() => onNavigate?.('jobs', knowledgeBaseId)} onAskDocument={onAskDocument} />}
+          {!loading && !error && selectedDocument && knowledgeBaseId && <LocalKnowledgeDocumentReader key={selectedDocument.id} knowledgeBaseName={base?.name} knowledgeBaseId={knowledgeBaseId} document={selectedDocument} sourceLocator={sourceLocator} gateway={gateway} onBack={() => onNavigate?.('documents', knowledgeBaseId)} onDeleted={async () => { await load(); onNavigate?.('documents', knowledgeBaseId) }} onJobAccepted={() => onNavigate?.('jobs', knowledgeBaseId)} onAskDocument={onAskDocument} />}
         </DialogContent></Dialog>
       </div>
       <Dialog open={removeFiles.length > 0} onOpenChange={(open) => { if (!open && !removing) setRemoveFiles([]) }}><DialogContent showCloseButton={!removing}><DialogHeader><DialogTitle>从资料库移除 {removeFiles.length} 个文件？</DialogTitle><DialogDescription>移除资料副本和对应搜索数据，电脑上的原文件会保留。已有引用中的资料内容将不再可用。</DialogDescription></DialogHeader><ul className="fox-library-remove-list">{removeFiles.map((file) => <li key={file.id}>{file.name}</li>)}</ul><DialogFooter><Button variant="outline" disabled={removing} onClick={() => setRemoveFiles([])}>取消</Button><Button disabled={removing} onClick={() => void removeDocuments()}>{removing && <LoaderCircle className="animate-spin" />}确认移除</Button></DialogFooter></DialogContent></Dialog>
@@ -3064,13 +3068,13 @@ export function LocalKnowledgeRetrievalPage({ gateway = defaultLocalKnowledgeGat
   </div></div>
 }
 
-export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, gateway = defaultLocalKnowledgeGateway, onNavigate, onNavigateWorkspace, onBack, createRequest, onCreateRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; createRequest?: number; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, sourceLocator, gateway = defaultLocalKnowledgeGateway, onNavigate, onNavigateWorkspace, onBack, createRequest, onCreateRequestHandled, onOperationAccepted, onAskDocument }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; createRequest?: number; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const navigate = onNavigate
   switch (view) {
     case 'home': return <LocalKnowledgeHomePage gateway={gateway} onNavigate={navigate} />
     case 'files': return knowledgeBaseId ? <LocalFolderDetailPage key={knowledgeBaseId} gateway={gateway} sourceId={knowledgeBaseId} onBack={() => navigate?.('list')} renderPreview={(file, close) => <LocalFilePreviewDialog gateway={gateway} file={file} open={Boolean(file)} onOpenChange={(open) => { if (!open) close() }} />} /> : <LocalKnowledgeListPage gateway={gateway} onNavigate={navigate} onNavigateWorkspace={onNavigateWorkspace} />
     case 'detail': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
-    case 'documents': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} documentId={documentId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
+    case 'documents': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} documentId={documentId} sourceLocator={sourceLocator} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} onAskDocument={onAskDocument} />
     case 'import': return <LocalKnowledgeDetailPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} initialImportOpen onOperationAccepted={onOperationAccepted} />
     case 'jobs': return <LocalKnowledgeJobsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
     case 'models': return <LocalKnowledgeModelsPage gateway={gateway} onBack={onBack} />

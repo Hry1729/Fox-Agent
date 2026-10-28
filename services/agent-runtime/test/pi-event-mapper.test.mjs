@@ -579,3 +579,41 @@ test('projects knowledge search results into stable source events', () => {
     metadata: { source: 'architecture.md', chunk_id: 'chunk-1', page_number: 7, section: 'Runtime boundary' },
   })
 })
+
+test('projects Host local search and document chunks to the same clickable source', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload) => events.push({ type, ...payload }))
+  const chunk = { documentId: 'doc-a', chunkId: 'chunk-a', source: 'local', anchor: 'bytes:0-657', content: 'A-7 验收押金 37,500 元', sourceMetadata: { knowledgeBaseId: 'kb-a', displayName: '城北项目.md', pageNumber: null, startOffset: 0, endOffset: 657 } }
+  mapper.handle({ type: 'tool_execution_end', toolCallId: 'search', toolName: 'search_knowledge', result: { details: { source: 'local', knowledgeBaseId: 'kb-a', items: [null, chunk] } } })
+  mapper.handle({ type: 'tool_execution_end', toolCallId: 'read', toolName: 'read_knowledge_document', result: { details: { reference: { id: 'kb-a', source: 'local' }, result: { documentId: 'doc-a', chunks: [chunk] } } } })
+  const sources = events.filter(event => event.type === 'source.added')
+  assert.equal(sources.length, 2)
+  assert.deepEqual(sources[0], sources[1])
+  assert.equal(sources[0].source, 'local')
+  assert.equal(sources[0].knowledgeBaseId, 'kb-a')
+  assert.equal(sources[0].documentId, 'doc-a')
+  assert.equal(sources[0].chunkId, 'chunk-a')
+  assert.equal(sources[0].anchor, 'bytes:0-657')
+  assert.equal(sources[0].title, '城北项目.md')
+})
+
+test('projects mixed local and remote Host result envelopes without mixing targets', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'tool_execution_end', toolCallId: 'search', toolName: 'search_knowledge', result: { details: { items: [
+    { reference: { id: 'kb-local', source: 'local' }, result: { items: [{ documentId: 'local-doc', chunkId: 'local-chunk', content: '本地内容', sourceMetadata: { displayName: '本地.md' } }] } },
+    { reference: { id: 'kb-remote', source: 'remote' }, result: { results: [{ id: 'remote-chunk', file_id: 'remote-doc', content: '远程内容', metadata: { source: '远程.md' } }] } },
+  ] } } })
+  const sources = events.filter(event => event.type === 'source.added')
+  assert.deepEqual(sources.map(({ source, knowledgeBaseId, documentId }) => [source, knowledgeBaseId, documentId]), [
+    ['local', 'kb-local', 'local-doc'], ['remote', 'kb-remote', 'remote-doc'],
+  ])
+})
+
+test('failed and non-document knowledge results do not advertise citations', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'tool_execution_end', toolCallId: 'failed', toolName: 'search_knowledge', isError: true, result: { details: { kb_id: 'kb', results: [{ file_id: 'doc', content: 'partial' }] } } })
+  mapper.handle({ type: 'tool_execution_end', toolCallId: 'invalid', toolName: 'search_knowledge', result: { details: { items: [{ id: 'not-a-document', name: 'A' }] } } })
+  assert.equal(events.filter(event => event.type === 'source.added').length, 0)
+})

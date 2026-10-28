@@ -26,6 +26,7 @@ export type RuntimeSource = {
   documentId: string
   excerpt: string
   locator: KnowledgeSourceLocator
+  source?: 'local' | 'remote'
 }
 
 export function compactValue(value: unknown, fallback = '') {
@@ -283,6 +284,7 @@ export function runtimeProcess(events: RunEventRecord[]) {
         documentId: compactValue(item.event.documentId),
         excerpt: compactValue(item.event.excerpt),
         locator: normalizeKnowledgeSourceLocator(item.event, id),
+        ...(item.event.source === 'local' || item.event.source === 'remote' ? { source: item.event.source } : {}),
       })
       continue
     }

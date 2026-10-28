@@ -196,27 +196,40 @@ export function sanitizeAssistantHistory(messages) {
 }
 
 function knowledgeSources(result) {
-  const candidates = [result?.details?.results, result?.details?.details?.results, result?.results]
-  const results = candidates.find(Array.isArray) || []
-  return results.flatMap((item, index) => {
-    if (!item || typeof item !== 'object') return []
-    const metadata = item.metadata && typeof item.metadata === 'object' ? item.metadata : {}
-    const pageValue = item.page ?? item.page_number ?? metadata.page ?? metadata.page_number ?? metadata.page_num
-    const page = Number(pageValue)
-    const chunkId = String(item.chunk_id || metadata.chunk_id || item.id || '')
-    const anchor = String(item.anchor || metadata.anchor || metadata.section || metadata.heading || '')
-    return [{
-      id: String(item.id || metadata.chunk_id || `${item.kb_id || 'knowledge'}-${index + 1}`),
-      title: String(metadata.source || metadata.title || item.file_id || '知识库来源'),
-      knowledgeBaseId: String(item.kb_id || result?.details?.kb_id || ''),
-      documentId: String(item.file_id || metadata.file_id || ''),
-      excerpt: String(item.content || '').slice(0, 320),
-      chunkId,
-      page: Number.isInteger(page) && page > 0 ? page : undefined,
-      anchor,
-      metadata,
-    }]
-  })
+  const sources = []
+  function collect(value, reference = {}, depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 4) return
+    if (value.details) return collect(value.details, reference, depth + 1)
+    if (value.result) return collect(value.result, value.reference ?? reference, depth + 1)
+    const results = [value.items, value.results, value.chunks].find(Array.isArray) ?? []
+    for (const [index, item] of results.entries()) {
+      if (!item || typeof item !== 'object') continue
+      if (item.result) { collect(item, reference, depth + 1); continue }
+      const metadata = item.sourceMetadata ?? item.metadata ?? {}
+      const knowledgeBaseId = String(item.knowledgeBaseId || item.kb_id || metadata.knowledgeBaseId || value.knowledgeBaseId || value.kb_id || reference.id || '')
+      const documentId = String(item.documentId || item.file_id || metadata.documentId || metadata.file_id || value.documentId || '')
+      if (!knowledgeBaseId || !documentId) continue
+      const source = [item.source, metadata.source, value.source, reference.source].find(kind => kind === 'local' || kind === 'remote')
+      const pageValue = item.page ?? item.page_number ?? metadata.pageNumber ?? metadata.page ?? metadata.page_number ?? metadata.page_num
+      const page = Number(pageValue)
+      const chunkId = String(item.chunkId || item.chunk_id || metadata.chunkId || metadata.chunk_id || item.id || '')
+      const anchor = String(item.anchor || metadata.anchor || metadata.section || metadata.heading || '')
+      sources.push({
+        id: source === 'local' ? `local:${knowledgeBaseId}:${chunkId || `${documentId}-${index + 1}`}` : String(item.id || chunkId || `${knowledgeBaseId}-${index + 1}`),
+        title: String(metadata.displayName || metadata.title || (metadata.source !== 'local' && metadata.source !== 'remote' ? metadata.source : '') || value.document?.displayName || item.file_id || '知识库来源'),
+        knowledgeBaseId,
+        documentId,
+        excerpt: String(item.content || '').slice(0, 320),
+        chunkId,
+        page: Number.isInteger(page) && page > 0 ? page : undefined,
+        anchor,
+        metadata,
+        ...(source === 'local' || source === 'remote' ? { source } : {}),
+      })
+    }
+  }
+  collect(result)
+  return sources
 }
 
 export function createPiEventMapper(emit, options = {}) {
@@ -390,7 +403,7 @@ export function createPiEventMapper(emit, options = {}) {
           break
         case 'tool_execution_end':
           if (options.isToolRegistered && !options.isToolRegistered(event.toolName)) break
-          if (event.toolName === 'search_knowledge') {
+          if (!event.isError && (event.toolName === 'search_knowledge' || event.toolName === 'read_knowledge_document')) {
             for (const source of knowledgeSources(event.result)) emit('source.added', source)
           }
           emit('tool.completed', { toolCallId: event.toolCallId, tool: event.toolName, result: event.result, isError: Boolean(event.isError) })

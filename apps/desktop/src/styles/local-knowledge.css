@@ -4936,7 +4936,7 @@
   font-size: var(--fox-type-body);
   line-height: 1.8;
 }
-.fox-kb-hit mark { padding: 0 2px; border-radius: 3px; background: var(--fox-mark); color: var(--fox-text); }
+.fox-kb-hit mark, .fox-local-files-text-preview mark { padding: 0 2px; border-radius: 3px; background: var(--fox-mark); color: var(--fox-text); }
 /* 搜索结果出现时，资料列表让位（原型 05-kb-search） */
 .fox-local-kb-detail-content[data-searching] .fox-local-kb-browser { display: none; }
 
