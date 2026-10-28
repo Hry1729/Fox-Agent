@@ -221,4 +221,30 @@ describe('a refused rewind restores the failed run for another retry', () => {
       }
     })
   }
+
+  test('a failure after Host commits the rewind does not restore removed history', async () => {
+    const original = failedDetail()
+    original.messages.push({ ...original.messages[0], id: 'later-user', ordinal: 2, content: '随后已删除的问题' })
+    const committed = {
+      ...failedDetail(),
+      messages: [{ ...original.messages[0], runId: 'replacement-1', content: '修改后的问题', updatedAt: 2 }],
+      runtimeEvents: [],
+      lastRun: { ...original.lastRun, id: 'replacement-1', errorCode: 'work_mode.gate_failed' },
+    }
+    let stored = original
+    const h = harness(async () => { throw new Error('startRun must not be called') }, {
+      rewindRun: async () => {
+        stored = committed
+        throw refusal('work_mode.gate_failed', '工作模式检查失败')
+      },
+      loadConversation: async () => stored,
+      mergeDetail: mergeConversationDetail,
+    })
+    h.addConversation(original)
+    await h.render().openConversation('native-1')
+    expect(await h.render().rerunFromMessage('user-1', '修改后的问题')).toBe(false)
+    expect(h.render().detail?.messages).toEqual(committed.messages)
+    expect(h.render().detail?.runtimeEvents).toEqual([])
+    expect(h.render().detail?.lastRun).toEqual(committed.lastRun)
+  })
 })

@@ -80,6 +80,39 @@ function processPart(fox: FoxThreadMessage) {
 }
 
 describe('deriveFoxThreadMessages', () => {
+  test('a saved failure without an assistant row rebuilds one retryable terminal message', () => {
+    const failed = run({ id: 'r1', status: 'failed', errorCode: 'runtime.start_failed', errorMessage: 'session.native_corrupt' })
+    const saved = detail({
+      messages: [message({ id: 'u1', role: 'user', runId: 'r1', content: '重试', ordinal: 1 })],
+      lastRun: failed,
+      runs: [failed],
+      runtimeEvents: [event(1, 'run.failed', { code: failed.errorCode, message: failed.errorMessage })],
+    })
+    const cache = createFoxThreadCache()
+    for (const snapshot of [saved, { ...saved, runs: [], runtimeEvents: [] }]) {
+      const messages = deriveFoxThreadMessages({ detail: snapshot }, cache)
+      expect(messages).toHaveLength(2)
+      expect(messages[1]).toMatchObject({ id: 'assistant-r1', runId: 'r1', role: 'assistant', status: 'failed', isActiveRun: false })
+      expect(messages[1].source?.status).toBe('failed')
+      expect(messages[1].content).toContainEqual({ type: 'data-fox-error', data: { kind: 'failed', code: failed.errorCode, message: failed.errorMessage } })
+      expect(deriveFoxThreadMessages({ detail: snapshot }, cache)[1]).toBe(messages[1])
+    }
+    const withAssistant = { ...saved, messages: [...saved.messages, message({ id: 'a1', role: 'assistant', runId: 'r1', status: 'failed', ordinal: 2 })] }
+    expect(deriveFoxThreadMessages({ detail: withAssistant }).map(item => item.id)).toEqual(['u1', 'a1'])
+  })
+
+  test('a synthetic running message becomes a failure when only the saved run changes', () => {
+    const cache = createFoxThreadCache()
+    const current = detail({ lastRun: run({ id: 'r1', status: 'running' }) })
+    const before = deriveFoxThreadMessages({ detail: current }, cache)
+    const saved = { ...current, lastRun: run({ id: 'r1', status: 'failed', errorCode: 'runtime.start_failed', errorMessage: 'session.native_corrupt' }) }
+    const after = deriveFoxThreadMessages({ detail: saved }, cache)
+    expect(after).toHaveLength(1)
+    expect(after[0]).not.toBe(before[0])
+    expect(after[0]).toMatchObject({ status: 'failed', isActiveRun: false })
+    expect(after[0].failure?.message).toBe('session.native_corrupt')
+  })
+
   test('late artifacts and metadata changes invalidate completed and synthetic message caches', () => {
     for (const completed of [true, false]) {
       const cache = createFoxThreadCache()

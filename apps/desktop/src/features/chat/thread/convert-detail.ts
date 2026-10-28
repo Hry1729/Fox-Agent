@@ -116,7 +116,10 @@ export function deriveFoxThreadMessages(input: FoxThreadInput, cache: FoxThreadC
     // A draft conversation may still show a UI-level optimistic message.
     return pendingMessage ? [optimisticMessage(pendingMessage, 'complete')] : []
   }
-  const runTerminalStates = deriveRunTerminalStates({ persistedRuns: detail.runs, events: detail.runtimeEvents })
+  const runTerminalStates = deriveRunTerminalStates({
+    persistedRuns: detail.lastRun ? [...(detail.runs ?? []), detail.lastRun] : detail.runs,
+    events: detail.runtimeEvents,
+  })
   const activeRunId = conversationRunIsActive(detail) ? detail.lastRun?.id ?? null : null
   const attachmentsByMessage = groupAttachments(detail.attachments)
   const artifactsByRun = groupArtifacts(detail.artifacts)
@@ -128,13 +131,11 @@ export function deriveFoxThreadMessages(input: FoxThreadInput, cache: FoxThreadC
   }
   const pending = pendingUserMessage(pendingMessage, messages)
   if (pending) messages.push(pending)
-  // Mirror the legacy RuntimeTimeline: a run that has streamed process events or
-  // answer text before its assistant message lands still renders a bubble.
-  if (activeRunId && !messages.some((message) => message.role === 'assistant' && message.runId === activeRunId)) {
-    const hasProcess = detail.runtimeEvents.some((event) => event.runId === activeRunId)
-    if (conversationRunIsActive(detail) || streamingText || hasProcess) {
-      messages.push(syntheticAssistantMessage(detail, activeRunId, streamingText, runTerminalStates, artifactsByRun, cache))
-    }
+  // A run can fail before an assistant row exists. Reopening its saved detail
+  // must rebuild the failure card as well as an active run's streaming bubble.
+  const syntheticRunId = activeRunId ?? (detail.lastRun && runTerminalStates.failures.has(detail.lastRun.id) ? detail.lastRun.id : null)
+  if (syntheticRunId && !messages.some((message) => message.role === 'assistant' && message.runId === syntheticRunId)) {
+    messages.push(syntheticAssistantMessage(detail, syntheticRunId, activeRunId ? streamingText : '', runTerminalStates, artifactsByRun, cache, Boolean(activeRunId)))
   }
   return messages
 }
@@ -284,46 +285,46 @@ function pendingUserMessage(pendingMessage: ConversationMessage | null | undefin
 
 function syntheticAssistantMessage(
   detail: ConversationDetail,
-  activeRunId: string,
+  runId: string,
   streamingText: string,
   runTerminalStates: RunTerminalStates,
   artifactsByRun: Map<string, ArtifactRecord[]>,
   cache: FoxThreadCache,
+  isActiveRun: boolean,
 ): FoxThreadMessage {
-  // Recomputed each derivation on purpose: the synthetic streaming message
-  // changes every frame, and its id stays stable for the run's lifetime.
-  const version = runVersion(detail.runtimeEvents, activeRunId)
-  const failure = runTerminalStates.failures.get(activeRunId) ?? null
-  const cancelled = runTerminalStates.cancelled.has(activeRunId)
-  const key = `assistant-${activeRunId}:streaming:${streamingText}:${version}:${JSON.stringify(artifactsByRun.get(activeRunId) ?? [])}`
-  const cached = cache.get(`assistant-${activeRunId}`)
+  const version = runVersion(detail.runtimeEvents, runId)
+  const failure = runTerminalStates.failures.get(runId) ?? null
+  const cancelled = runTerminalStates.cancelled.has(runId)
+  const status = isActiveRun ? 'streaming' : failure?.kind ?? 'completed'
+  const key = `assistant-${runId}:${status}:${isActiveRun}:${streamingText}:${version}:${JSON.stringify(failure)}:${cancelled}:${JSON.stringify(artifactsByRun.get(runId) ?? [])}`
+  const cached = cache.get(`assistant-${runId}`)
   if (cached && cached.key === key) return cached.message
   const parts: FoxThreadPart[] = []
-  const eventsForRun = processEventsFor(detail.runtimeEvents, activeRunId)
+  const eventsForRun = processEventsFor(detail.runtimeEvents, runId)
   if (eventsForRun.length) {
     const process = runtimeProcess(eventsForRun)
-    if (hasProcessData(process)) parts.push({ type: 'data-fox-process', id: activeRunId, data: process })
+    if (hasProcessData(process)) parts.push({ type: 'data-fox-process', id: runId, data: process })
   }
   const normalized = normalizeAssistantMarkdown(streamingText)
   if (normalized) parts.push({ type: 'text', text: normalized })
-  const runArtifacts = artifactsByRun.get(activeRunId)
+  const runArtifacts = artifactsByRun.get(runId)
   if (runArtifacts?.length) parts.push({ type: 'data-fox-artifacts', data: runArtifacts })
   if (failure) parts.push({ type: 'data-fox-error', data: failure })
   const fox: FoxThreadMessage = {
-    source: { id: `assistant-${activeRunId}`, timelineKey: `assistant-run-${activeRunId}`, conversationId: detail.conversation.id, role: 'assistant', runId: activeRunId, kind: 'text', content: streamingText, status: 'streaming', ordinal: detail.messages.length + 1, createdAt: detail.lastRun?.startedAt ?? Date.now(), updatedAt: eventsForRun.at(-1)?.createdAt ?? Date.now() },
-    id: `assistant-${activeRunId}`,
+    source: { id: `assistant-${runId}`, timelineKey: `assistant-run-${runId}`, conversationId: detail.conversation.id, role: 'assistant', runId, kind: 'text', content: streamingText, status, ordinal: detail.messages.length + 1, createdAt: detail.lastRun?.startedAt ?? Date.now(), updatedAt: eventsForRun.at(-1)?.createdAt ?? Date.now() },
+    id: `assistant-${runId}`,
     role: 'assistant',
-    runId: activeRunId,
+    runId,
     createdAt: detail.lastRun?.startedAt ?? Date.now(),
-    status: 'streaming',
-    isActiveRun: true,
+    status,
+    isActiveRun,
     revision: key,
     content: parts,
     attachments: [],
     failure,
     cancelled,
   }
-  cache.set(`assistant-${activeRunId}`, { key, message: fox })
+  cache.set(`assistant-${runId}`, { key, message: fox })
   return fox
 }
 

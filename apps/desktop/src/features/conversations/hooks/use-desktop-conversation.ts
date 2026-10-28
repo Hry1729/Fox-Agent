@@ -1340,20 +1340,21 @@ export function useDesktopConversation(): DesktopConversationState {
     } catch (cause) {
       const details = desktopErrorDetails(cause)
       if (!rewindAccepted) {
-        // A refused rewind wrote no replacement run. Restore the message's
-        // original runId before merging, so its failure card stays retryable.
+        // Keep the original failed turn available if the reload also fails.
         setDetail((current) => current?.conversation.id === active.conversation.id
           && (current.lastRun?.id === pendingRun.id || current.lastRun?.id === active.lastRun?.id)
           ? active : current)
       }
-      await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
+      // The Host may have committed the rewind before dispatch failed. Its
+      // saved detail replaces the old suffix instead of merging it back in.
+      await desktopClient.loadConversation(active.conversation.id).then(setDetail).catch(() => undefined)
       if (selectionVersion === selectionVersionRef.current) {
         setError(details.message)
         setErrorDetails(details)
       }
       return false
     }
-  }, [detail, refreshList, refreshSelectedConversation, setDetail])
+  }, [detail, refreshList, setDetail])
 
   const resumeQuestion = useCallback(async (
     parentRunId: string,

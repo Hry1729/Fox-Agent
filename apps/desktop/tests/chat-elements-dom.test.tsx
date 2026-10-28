@@ -215,6 +215,26 @@ test('AUI运行中隐藏当前助手footer，历史保留，终态整体显示�
   expect(view.container.querySelector('[data-turn-message-id="a2"] .fox-message-meta')).not.toBeNull()
 })
 
+test('AUI重新加载只有用户行的失败Run后保留错误卡片和连续重试入口', async () => {
+  let retries = 0
+  function Harness({ revision = 0 }) {
+    const failed = { id: 'run', status: 'failed', startedAt: 1000, finishedAt: 2000, errorCode: 'runtime.start_failed', errorMessage: 'session.native_corrupt' }
+    const detail = { conversation: { id: 'c', updatedAt: revision }, messages: [{ id: 'u', role: 'user', content: '测试', runId: 'run', conversationId: 'c', kind: 'text', status: 'completed', ordinal: 1, createdAt: 1000, updatedAt: 1000 }], runtimeEvents: [], attachments: [], artifacts: [], approvals: [], toolCalls: [], knowledgeBindings: [], runs: [failed], lastRun: failed }
+    const runtime = useFoxRuntime({ enabled: true, detail, streamingText: '', cancel: async () => true, loadEarlierMessages: async () => {} } as any, { onSubmit: () => {}, onReload: () => { retries += 1 } })
+    return <AssistantRuntimeProvider runtime={runtime}><FoxThread fox={{ events: [], eventsByRun: new Map(), attachmentNames: new Map(), attachmentsByMessage: new Map(), knowledgeBindings: [], groupHelpers }} /></AssistantRuntimeProvider>
+  }
+  const view = render(<Harness />)
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const retry = await view.findByRole('button', { name: '重试', exact: true })
+    expect(retry.closest('[data-turn-message-id]')?.getAttribute('data-turn-message-id')).toBe('assistant-run')
+    expect((retry as HTMLButtonElement).disabled).toBe(false)
+    await act(async () => { fireEvent.click(retry) })
+    expect(retries).toBe(attempt)
+    await act(async () => view.rerender(<Harness revision={attempt} />))
+    expect(view.container.querySelectorAll('.fox-thread-msg.is-assistant')).toHaveLength(1)
+  }
+})
+
 test('经典当前助手footer运行期整体隐藏，终态显示并沿用重试回调', async () => {
   const { MemoizedRuntimeAssistantMessage } = await import('../src/features/chat/timeline/fox-runtime-assistant-message')
   let retries = 0
