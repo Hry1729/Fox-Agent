@@ -1290,7 +1290,10 @@ export function useDesktopConversation(): DesktopConversationState {
     if (!active || !cleanText || runIsActive(active)) return false
     const target = active.messages.find((message) => message.id === messageId && message.role === 'user')
     if (!target) return false
+    const selectionVersion = selectionVersionRef.current
     setError(null)
+    setErrorDetails(null)
+    let rewindAccepted = false
     const pendingRun = optimisticRun(active.conversation.id, model)
     const affectedRunIds = new Set(active.messages
       .filter((message) => message.ordinal >= target.ordinal && message.runId)
@@ -1327,6 +1330,7 @@ export function useDesktopConversation(): DesktopConversationState {
         text: cleanText,
         model,
       })
+      rewindAccepted = true
       if (activeConversationIdRef.current === active.conversation.id) activeRunIdRef.current = started.run.id
       const persisted = await desktopClient.loadConversation(active.conversation.id)
       setDetail(persisted)
@@ -1335,12 +1339,21 @@ export function useDesktopConversation(): DesktopConversationState {
       return true
     } catch (cause) {
       const details = desktopErrorDetails(cause)
+      if (!rewindAccepted) {
+        // A refused rewind wrote no replacement run. Restore the message's
+        // original runId before merging, so its failure card stays retryable.
+        setDetail((current) => current?.conversation.id === active.conversation.id
+          && (current.lastRun?.id === pendingRun.id || current.lastRun?.id === active.lastRun?.id)
+          ? active : current)
+      }
       await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
-      setError(details.message)
-      setErrorDetails(details)
+      if (selectionVersion === selectionVersionRef.current) {
+        setError(details.message)
+        setErrorDetails(details)
+      }
       return false
     }
-  }, [detail, refreshList, refreshSelectedConversation])
+  }, [detail, refreshList, refreshSelectedConversation, setDetail])
 
   const resumeQuestion = useCallback(async (
     parentRunId: string,

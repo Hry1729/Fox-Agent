@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { resolveConversationAgentId } from '../src/features/conversations/model/agent-initialization'
 import { knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../src/features/conversations/api/desktop-client'
-import { conversationRunFingerprint, conversationRunState, snapshotForRun } from '../src/features/conversations/model/kernel-snapshot'
+import { conversationRunFingerprint, conversationRunIsActive, conversationRunState, snapshotForRun } from '../src/features/conversations/model/kernel-snapshot'
+import { mergeConversationDetail } from '../src/features/conversations/model/runtime-event-reducer'
 import {
   EMPTY_CONVERSATION_RUN_OVERLAY,
   applyApprovalToOverlay,
@@ -34,7 +35,11 @@ import {
 const source = readFileSync(new URL('../src/features/conversations/hooks/use-desktop-conversation.ts', import.meta.url), 'utf8')
 const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(source.indexOf('export function useDesktopConversation'), source.indexOf('export function latestMessage')).replace('export function', 'function'))
 
-function harness(startRun: (request: any) => Promise<any>) {
+function harness(startRun: (request: any) => Promise<any>, options: {
+  rewindRun?: (request: any) => Promise<any>
+  loadConversation?: (id: string) => Promise<any>
+  mergeDetail?: typeof mergeConversationDetail
+} = {}) {
   const slots: any[] = []
   let cursor = 0
   const slot = (initial: any) => {
@@ -62,18 +67,19 @@ function harness(startRun: (request: any) => Promise<any>) {
         return conversation
       },
       // The Host wrote nothing for a refused send: the persisted detail is unchanged.
-      loadConversation: async (id: string) => conversations.get(id),
+      loadConversation: async (id: string) => options.loadConversation ? options.loadConversation(id) : conversations.get(id),
       listConversations: async () => [...conversations.values()].map((item) => item.conversation),
       listArchivedConversations: async () => [],
       listTrashedConversations: async () => [],
       runtimeStatus: async () => ({}),
       startRun: (request: any) => { startRequests.push(request); return startRun(request) },
+      rewindRun: options.rewindRun,
     },
     optimisticRun: () => ({ id: 'pending-run-1', status: 'queued' }),
     optimisticId: () => 'pending-message-1',
     flushSync: (fn: () => void) => fn(),
     extractedAttachmentContext: async () => '',
-    runIsActive: () => false,
+    runIsActive: conversationRunIsActive,
     conversationRunFingerprint,
     conversationRunState,
     snapshotForRun,
@@ -83,7 +89,7 @@ function harness(startRun: (request: any) => Promise<any>) {
     knowledgeReferenceKey,
     knowledgeReferenceFromLegacyBinding,
     desktopErrorDetails: (error: any) => ({ code: error.code ?? 'unknown', message: error.message, retryable: false }),
-    mergeConversationDetail: (persisted: any) => persisted,
+    mergeConversationDetail: options.mergeDetail ?? ((persisted: any) => persisted),
     EMPTY_CONVERSATION_RUN_OVERLAY,
     conversationRunIndicators,
     useConversationCompletionNotices: (items: any, overlay: any, snapshotAt: number) => ({
@@ -172,4 +178,47 @@ describe('a send refused by backend routing leaves no optimistic trace', () => {
     expect(state.error).toBe('运行时不可用')
     expect(state.agentBackendRefusal).toBeNull()
   })
+})
+
+describe('a refused rewind restores the failed run for another retry', () => {
+  function failedDetail() {
+    return {
+      conversation: { id: 'native-1', agentId: 'fox-general', agentBackend: 'fox', permissionMode: 'ask' },
+      messages: [{ id: 'user-1', conversationId: 'native-1', runId: 'failed-1', role: 'user', kind: 'text', content: '旧问题', status: 'completed', ordinal: 1, createdAt: 1, updatedAt: 1 }],
+      runtimeEvents: [{ runId: 'failed-1', seq: 1, eventType: 'run.failed', event: { type: 'run.failed' }, createdAt: 2 }],
+      toolCalls: [], approvals: [], attachments: [], artifacts: [], knowledgeBindings: [], expertBindings: [],
+      goals: [], tasks: [], evidence: [],
+      lastRun: { id: 'failed-1', status: 'failed', errorCode: 'runtime.start_failed', errorMessage: 'session.native_corrupt', lastSeq: 1 },
+    }
+  }
+
+  for (const reloadFails of [false, true]) {
+    test(`two rejected retries retain the original message and failure (reload fails: ${reloadFails})`, async () => {
+      const persisted = failedDetail()
+      let attempts = 0
+      const h = harness(async () => { throw new Error('startRun must not be called') }, {
+        rewindRun: async () => {
+          attempts += 1
+          throw refusal('session.native_unavailable', '原生会话不可用')
+        },
+        loadConversation: async () => {
+          if (reloadFails && attempts > 0) throw new Error('read unavailable')
+          return persisted
+        },
+        mergeDetail: mergeConversationDetail,
+      })
+      h.addConversation(persisted)
+      await h.render().openConversation('native-1')
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        expect(await h.render().rerunFromMessage('user-1', '更长的编辑问题')).toBe(false)
+        const state = h.render()
+        expect(state.detail?.messages).toEqual(persisted.messages)
+        expect(state.detail?.lastRun).toEqual(persisted.lastRun)
+        expect(state.detail?.runtimeEvents).toEqual(persisted.runtimeEvents)
+        expect(conversationRunIsActive(state.detail)).toBe(false)
+        expect(state.errorDetails?.code).toBe('session.native_unavailable')
+        expect(attempts).toBe(attempt)
+      }
+    })
+  }
 })
