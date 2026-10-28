@@ -273,10 +273,10 @@ describe('④ 新会话使用的 Agent: a statement, not a choice', () => {
 
   test('the composer has no Agent menu: one driver is not a choice', async () => {
     const view = render(<ComposerAgentPicker value="fox" status={status} onSelect={() => {}} />)
-    expect(view.container.textContent).toBe('')
+    expect(view.container.textContent).toBe('Fox')
     expect(screen.queryByRole('button')).toBeNull()
     await settle()
-    expect(document.querySelector('.fox-composer-agent-trigger')).toBeNull()
+    expect(view.getByLabelText('当前 Agent：Fox').tagName).toBe('SPAN')
   })
 
   test('the bar has no picker: a new conversation shows no backend row', async () => {

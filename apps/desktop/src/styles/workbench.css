@@ -4880,7 +4880,7 @@ img[src='/avatars/fox-assistant.png'] {
   font-size: var(--fox-type-control);
   color: var(--fox-text);
 }
-.fox-composer-agent-trigger:hover { background: var(--fox-hover); }
+.fox-composer-agent-trigger:not(.fox-composer-agent-static):hover { background: var(--fox-hover); }
 .fox-composer-agent-trigger:focus-visible { outline: 2px solid var(--fox-focus-ring); outline-offset: 2px; }
 .fox-composer-agent-trigger:disabled { opacity: .5; cursor: not-allowed; }
 .fox-composer-agent-menu { width: 260px; max-width: calc(100vw - 32px); }

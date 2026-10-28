@@ -2,13 +2,7 @@ import { Check, ChevronDown } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { SELECTABLE_AGENT_BACKEND_IDS, AGENT_BACKEND_LABELS, canPickAgentBackend, isAgentBackendHidden, isAgentBackendRetired, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
 
-/**
- * The new-conversation Agent picker. Since the single Pi mainline there is
- * exactly one supported driver, and a select with one option is not a choice:
- * nothing is rendered then (the composer shows no picker at all). The rest of
- * the component stays for the records and tests of the multi-driver era, and
- * for a Host that ever supports more than one backend again.
- */
+/** A single supported driver keeps its label without offering a menu. */
 export function ComposerAgentPicker({ value, status, disabled, onSelect }: {
   value: AgentBackendId
   status: AgentBackendStatus | null
@@ -17,10 +11,6 @@ export function ComposerAgentPicker({ value, status, disabled, onSelect }: {
 }) {
   const choices = SELECTABLE_AGENT_BACKEND_IDS.filter((backend) => !isAgentBackendHidden(backend, status) && !isAgentBackendRetired(backend, status))
   if (choices.length <= 1) {
-    // One supported driver is not a choice, but the composer keeps its slot:
-    // removing the element entirely made this build's composer look different
-    // from the rest of the product. Show the current driver as a static chip,
-    // with no menu to open.
     const label = AGENT_BACKEND_LABELS[value] ?? AGENT_BACKEND_LABELS[SELECTABLE_AGENT_BACKEND_IDS[0]]
     return (
       <span className="fox-composer-agent-trigger fox-composer-agent-static" data-agent-backend={value} title="本版本只有一种受支持的 Agent 驱动" aria-label={`当前 Agent：${label}`}>

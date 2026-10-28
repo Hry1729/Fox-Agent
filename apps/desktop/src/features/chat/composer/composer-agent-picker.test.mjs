@@ -98,10 +98,9 @@ test('a single supported driver renders no Agent menu at all', async () => {
     { backend: 'deepseek', enabled: false, wired: false, experimental: false, retired: true, reason: '本版本已退休' },
   ] }, onSelect: () => { throw new Error('nothing can be selected') } }))
   expect(view.queryByRole('button', { name: /选择 Agent/ })).toBeNull()
-  // the slot stays, as a static label (composer parity with the rest of the product)
   expect(view.getByText('Fox')).toBeTruthy()
   expect(view.queryByRole('menu')).toBeNull()
-  expect(view.container.childElementCount).toBe(0)
+  expect(view.getByLabelText('当前 Agent：Fox').tagName).toBe('SPAN')
 })
 
 test('only the new-conversation expert entry opens selection directly', () => {
