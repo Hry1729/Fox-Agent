@@ -47,23 +47,21 @@ test('输入流光仅新建页挂载，已有页即使centered、聚焦或运行
   }
 })
 
-test('中文增量只使新增字符着色，既有段落保留DOM，结束不丢Markdown', async () => {
+test('中文增量直接显示正文，既有段落保留DOM，结束不丢Markdown和光标状态', async () => {
   const view = render(<StreamingText text={'**旧中文**\n\n正在追加'} streaming />)
   await waitFor(() => expect(view.container.querySelector('[data-streamdown="strong"]')).not.toBeNull(), { timeout: 5000 })
   const title = view.container.querySelector('[data-streamdown="strong"]')!
   const oldParagraph = [...view.container.querySelectorAll('p')].find(p => p.textContent === '正在追加')!
-  const firstCharacter = oldParagraph.querySelector('[data-sd-animate]')!
+  expect(oldParagraph.childElementCount).toBe(0)
+  expect(view.container.querySelector('[data-sd-animate]')).toBeNull()
+  expect(view.container.querySelectorAll('[data-slot="streaming-text"][data-streaming="true"] > [aria-hidden]')).toHaveLength(1)
   await act(async () => view.rerender(<StreamingText text={'**旧中文**\n\n正在追加新文字'} streaming />))
   await waitFor(() => expect(view.container.textContent).toContain('正在追加新文字'))
   expect(view.container.querySelector('[data-streamdown="strong"]')).toBe(title)
-  const spans = [...oldParagraph.querySelectorAll<HTMLElement>('[data-sd-animate]')]
-  expect(oldParagraph.querySelector('[data-sd-animate]')).toBe(firstCharacter)
-  expect(spans.slice(0, 4).every(span => span.style.getPropertyValue('--sd-duration') === '0ms')).toBe(true)
-  expect(spans.slice(4).every(span => span.style.getPropertyValue('--sd-duration') === '160ms')).toBe(true)
-  expect(firstCharacter.getAttribute('data-slot')).toBe('streaming-text')
-  expect(firstCharacter.querySelector('span')?.classList.contains('animate-in')).toBe(false)
-  expect(spans.slice(4).every(span => span.querySelector('span')?.classList.contains('animate-in'))).toBe(true)
-  expect(spans.slice(4).every(span => span.firstElementChild?.firstElementChild?.classList.contains('duration-700'))).toBe(true)
+  expect([...view.container.querySelectorAll('p')].find(p => p.textContent === '正在追加新文字')).toBe(oldParagraph)
+  expect(oldParagraph.childElementCount).toBe(0)
+  expect(view.container.querySelector('[data-sd-animate]')).toBeNull()
+  expect(view.container.querySelector('.aui-streaming-fresh')).toBeNull()
   await act(async () => view.rerender(<StreamingText text={'**旧中文**\n\n正在追加新文字\n\n```typescript\nconst a = "中文";\n```'} streaming />))
   await waitFor(() => expect(view.container.querySelector('pre')?.textContent).toContain('const a = "中文";'))
   expect(view.container.querySelector('[data-streamdown="strong"]')).toBe(title)
@@ -72,6 +70,7 @@ test('中文增量只使新增字符着色，既有段落保留DOM，结束不�
   await waitFor(() => expect(view.container.querySelector('[data-slot="streaming-text"]')?.getAttribute('data-streaming')).toBe('false'))
   expect([...view.container.querySelectorAll('p')].find(p => p.textContent === '正在追加新文字')).toBe(paragraph)
   expect(view.container.querySelector('pre')?.textContent).toContain('const a = "中文";')
+  expect(view.container.querySelector('[data-slot="streaming-text"] > [aria-hidden]')).toBeNull()
 })
 
 test('已完成历史初次加载没有流式动画节点', async () => {
