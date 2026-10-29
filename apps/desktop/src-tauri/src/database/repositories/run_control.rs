@@ -35,29 +35,63 @@ pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> ru
     Ok(Some(binding))
 }
 
-/// The single-path candidate switch. Unset — the default — freezes no route, so
-/// every existing binding and dispatch decision keeps its current meaning.
+/// The single new-Run routing switch.
+///
+/// `FOX_EXECUTOR_ROUTE` is read only while a Run is being frozen, so changing
+/// it can never move an existing Run between executors:
+///
+/// - unset (default) or `pi_native`: freeze `PiNative`;
+/// - `kernel`: controlled fallback to the Kernel authoritative path (freeze no
+///   route, so the existing Kernel loop owns the new Run);
+/// - any other value: fail closed before the binding is written.
 ///
 /// A route never introduces a third authority: the Pi-native path reuses the
-/// Authoritative execution contract, so an opt-in under `Legacy` still freezes
-/// no route and leaves that Run on the legacy semantics it was created with.
+/// Authoritative execution contract. A Legacy-authority Run freezes no route.
 pub(crate) fn candidate_executor_route(
     authority: ExecutionAuthority,
 ) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
-    route_from_env(std::env::var("FOX_EXECUTOR_ROUTE"), authority)
+    default_run_route(std::env::var("FOX_EXECUTOR_ROUTE"), authority)
 }
 
-fn route_from_env(
+fn default_route_for(authority: ExecutionAuthority) -> Option<fox_engine_protocol::ExecutorRoute> {
+    match authority {
+        ExecutionAuthority::Authoritative => Some(fox_engine_protocol::ExecutorRoute::PiNative),
+        ExecutionAuthority::Legacy => None,
+    }
+}
+
+fn default_run_route(
+    configured: Result<String, std::env::VarError>,
+    authority: ExecutionAuthority,
+) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
+    match configured {
+        Err(std::env::VarError::NotPresent) => Ok(default_route_for(authority)),
+        Ok(value) if value == "pi_native" => Ok(match authority {
+            ExecutionAuthority::Authoritative => Some(fox_engine_protocol::ExecutorRoute::PiNative),
+            ExecutionAuthority::Legacy => None,
+        }),
+        Ok(value) if value == "kernel" => Ok(None),
+        Ok(_) => Err("FOX_EXECUTOR_ROUTE must be pi_native or kernel".into()),
+        Err(std::env::VarError::NotUnicode(_)) => Err("FOX_EXECUTOR_ROUTE must be valid Unicode".into()),
+    }
+}
+
+/// Test/fixture helper for the pre-S5 explicit candidate opt-in. Production new
+/// Runs go through `candidate_executor_route` and default to PiNative; keeping
+/// this separate lets an explicitly frozen Kernel test remain Kernel even when
+/// the process has no route variable.
+fn explicit_run_route(
     configured: Result<String, std::env::VarError>,
     authority: ExecutionAuthority,
 ) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
     match configured {
         Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(value) if value == "kernel" => Ok(None),
         Ok(value) if value == "pi_native" => Ok(match authority {
             ExecutionAuthority::Authoritative => Some(fox_engine_protocol::ExecutorRoute::PiNative),
             ExecutionAuthority::Legacy => None,
         }),
-        Ok(_) => Err("FOX_EXECUTOR_ROUTE must be pi_native".into()),
+        Ok(_) => Err("FOX_EXECUTOR_ROUTE must be pi_native or kernel".into()),
         Err(std::env::VarError::NotUnicode(_)) => Err("FOX_EXECUTOR_ROUTE must be valid Unicode".into()),
     }
 }
@@ -101,21 +135,26 @@ mod tests {
     }
 
     #[test]
-    fn the_candidate_switch_routes_only_the_authoritative_contract() {
+    fn the_new_run_default_and_the_controlled_kernel_fallback() {
         use std::env::VarError;
-        // Unset — the default — freezes no route, so existing semantics hold.
-        assert_eq!(route_from_env(Err(VarError::NotPresent), ExecutionAuthority::Authoritative).unwrap(), None);
-        assert_eq!(route_from_env(Err(VarError::NotPresent), ExecutionAuthority::Legacy).unwrap(), None);
-        // An opt-in routes the Authoritative contract only; the single path
-        // reuses that authority instead of introducing a third.
-        assert_eq!(
-            route_from_env(Ok("pi_native".into()), ExecutionAuthority::Authoritative).unwrap(),
-            Some(fox_engine_protocol::ExecutorRoute::PiNative)
-        );
-        assert_eq!(route_from_env(Ok("pi_native".into()), ExecutionAuthority::Legacy).unwrap(), None);
-        // A typo fails closed rather than silently keeping the old path.
-        assert!(route_from_env(Ok("kernel".into()), ExecutionAuthority::Authoritative).is_err());
-        assert!(route_from_env(Ok("".into()), ExecutionAuthority::Authoritative).is_err());
+        // Unset is now the S5 default: the Authoritative contract freezes the
+        // PiNative route. Legacy authority still freezes no route.
+        assert_eq!(default_run_route(Err(VarError::NotPresent), ExecutionAuthority::Authoritative).unwrap(),
+            Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        assert_eq!(default_run_route(Err(VarError::NotPresent), ExecutionAuthority::Legacy).unwrap(), None);
+        // Explicit candidate value remains accepted.
+        assert_eq!(default_run_route(Ok("pi_native".into()), ExecutionAuthority::Authoritative).unwrap(),
+            Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        // Controlled fallback: a new Run is Kernel authoritative (no route).
+        assert_eq!(default_run_route(Ok("kernel".into()), ExecutionAuthority::Authoritative).unwrap(), None);
+        // Typos fail closed before a binding is written.
+        for bad in ["", "legacy", "KERNEL", "typo"] {
+            assert!(default_run_route(Ok(bad.into()), ExecutionAuthority::Authoritative).is_err(), "{bad}");
+        }
+        // The explicit fixture helper keeps its pre-S5 meaning for Kernel tests.
+        assert_eq!(explicit_run_route(Err(VarError::NotPresent), ExecutionAuthority::Authoritative).unwrap(), None);
+        assert_eq!(explicit_run_route(Ok("pi_native".into()), ExecutionAuthority::Authoritative).unwrap(),
+            Some(fox_engine_protocol::ExecutorRoute::PiNative));
     }
 
     #[test]
@@ -129,6 +168,28 @@ mod tests {
             assert_eq!(frozen,reopened);
             assert_eq!(reopened.executor_route,route);
         }
+    }
+
+    #[test]
+    fn default_freeze_persists_pi_native_and_the_kernel_fallback_persists_no_route() {
+        let (db, _path, routed_run) = fixture();
+        let routed = db.freeze_selected_run_control_with_route(&routed_run, "legacy",
+            ExecutionAuthority::Authoritative, ResourceExecutor::Rust, Default::default(), "pi",
+            || default_run_route(Err(std::env::VarError::NotPresent), ExecutionAuthority::Authoritative)).unwrap();
+        assert_eq!(routed.executor_route, Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        assert_eq!(db.run_control_binding(&routed_run).unwrap().unwrap().executor_route,
+            Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        // A second independent Run uses the controlled fallback; it is frozen
+        // without a route so the Kernel authoritative loop owns it.
+        let fallback_run = {
+            let conversation = db.create_conversation("fox-general", Some("fallback"), None, None).unwrap();
+            db.create_run(&conversation.id, "fallback", None).unwrap().run.id
+        };
+        let fallback = db.freeze_selected_run_control_with_route(&fallback_run, "legacy",
+            ExecutionAuthority::Authoritative, ResourceExecutor::Rust, Default::default(), "pi",
+            || default_run_route(Ok("kernel".into()), ExecutionAuthority::Authoritative)).unwrap();
+        assert_eq!(fallback.executor_route, None);
+        assert_eq!(db.run_control_binding(&fallback_run).unwrap().unwrap().executor_route, None);
     }
 
     #[test]
@@ -392,7 +453,18 @@ impl Database {
     pub(crate) fn freeze_kernel_run_control_for_engine(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
         budgets.validate()?;
         if !matches!(engine, "pi" | "codex" | "deepseek_harness") { return Err("unsupported Kernel engine".into()); }
-        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Authoritative, fox_engine_protocol::ResourceExecutor::Rust, budgets, engine)
+        self.freeze_selected_run_control_with_route(run_id, profile_id, ExecutionAuthority::Authoritative,
+            fox_engine_protocol::ResourceExecutor::Rust, budgets, engine,
+            || explicit_run_route(std::env::var("FOX_EXECUTOR_ROUTE"), ExecutionAuthority::Authoritative))
+    }
+
+    /// Freeze a new local Run through the S5 default path. Unset switches to
+    /// PiNative; `FOX_EXECUTOR_ROUTE=kernel` is the controlled Kernel fallback.
+    pub(crate) fn freeze_default_run_control_for_engine(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
+        budgets.validate()?;
+        if !matches!(engine, "pi" | "codex" | "deepseek_harness") { return Err("unsupported Kernel engine".into()); }
+        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Authoritative,
+            fox_engine_protocol::ResourceExecutor::Rust, budgets, engine)
     }
 
     fn freeze_selected_run_control(&self, run_id: &str, profile_id: &str, authority: ExecutionAuthority,

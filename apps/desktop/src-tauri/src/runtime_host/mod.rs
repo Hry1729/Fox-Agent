@@ -1981,7 +1981,7 @@ impl RuntimeHost {
         let run_id = started.run.id.clone();
         let route = (|| -> Result<bool, String> {
             let binding = self.database.run_control_binding(&run_id)?;
-            let authority = kernel_authority::select(binding.as_ref().map(|b| b.authority), std::env::var("FOX_KERNEL_MODE"))?;
+            let authority = kernel_authority::select(binding.as_ref().map(|b| b.authority))?;
             let executor = match binding { Some(binding) => binding.executor_route, None => Database::candidate_executor_route(authority)? };
             Ok(authority == fox_engine_protocol::ExecutionAuthority::Authoritative && executor.is_none())
         })();
@@ -2455,7 +2455,6 @@ impl RuntimeHost {
         }
         let authority = kernel_authority::select(
             frozen_binding.as_ref().map(|binding| binding.authority),
-            std::env::var("FOX_KERNEL_MODE"),
         )?;
         let executor_route = match &frozen_binding {
             Some(binding) => binding.executor_route,
@@ -2544,7 +2543,7 @@ impl RuntimeHost {
                 if let Some(budget) = &self.run_budget_override {
                     budgets.restrict_execution_ms(budget.max_duration_ms as i64);
                 }
-                self.database.freeze_kernel_run_control_for_engine(&started.run.id, execution_profile.id(), budgets, &crate::kernel_model_config::configured_engine()?)?
+                self.database.freeze_default_run_control_for_engine(&started.run.id, execution_profile.id(), budgets, &crate::kernel_model_config::configured_engine()?)?
             }
             None => {
                 let executor = match std::env::var("FOX_RESOURCE_GATEWAY_READS") {
@@ -3221,7 +3220,7 @@ impl RuntimeHost {
             model_max_output,
         )?;
         let frozen = self.database.run_control_binding(&run_id)?;
-        let authority = kernel_authority::select(frozen.as_ref().map(|binding| binding.authority), std::env::var("FOX_KERNEL_MODE"))?;
+        let authority = kernel_authority::select(frozen.as_ref().map(|binding| binding.authority))?;
         let route = match frozen { Some(binding) => binding.executor_route, None => Database::candidate_executor_route(authority)? };
         let shared_native = route == Some(fox_engine_protocol::ExecutorRoute::PiNative);
         let mut managed_host = if shared_native { self.clone_for_detached_dispatch() } else { RuntimeHost::new(
