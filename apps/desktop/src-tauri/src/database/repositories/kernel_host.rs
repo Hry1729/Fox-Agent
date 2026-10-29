@@ -436,13 +436,23 @@ impl Database {
         Ok(changed)
     }
 
+    pub(crate) fn approval_run_id(&self, approval_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| connection.query_row(
+            "SELECT t.run_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",
+            [approval_id], |row| row.get(0)).optional())
+    }
+
     pub(crate) fn kernel_host_approval_target(
         &self,
         approval_id: &str,
     ) -> Result<Option<(String, String)>, String> {
+        // A native approval is not a Kernel ticket. The route column is the
+        // same frozen fact the runtime uses; an absent executorRoute is the
+        // only shape the Kernel command queue understands.
         self.with_connection(|connection| connection.query_row(
             "SELECT t.run_id,t.runtime_tool_call_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
-             JOIN run_control_bindings b ON b.run_id=t.run_id WHERE a.id=?1 AND b.authority='authoritative'",
+             JOIN run_control_bindings b ON b.run_id=t.run_id WHERE a.id=?1 AND b.authority='authoritative'
+               AND json_extract(b.binding_json,'$.executorRoute') IS NULL",
             [approval_id], |row| Ok((row.get(0)?,row.get(1)?))).optional())
     }
 
@@ -681,6 +691,16 @@ impl Database {
         approval_id: &str,
         decision: &str,
     ) -> Result<bool, String> {
+        // Defense in depth: even a direct caller cannot route a native approval
+        // through the Kernel command queue.
+        let native_route: bool = self.with_connection(|connection| connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
+             JOIN run_control_bindings b ON b.run_id=t.run_id
+             WHERE a.id=?1 AND json_extract(b.binding_json,'$.executorRoute')='pi_native')",
+            [approval_id], |row| row.get(0)))?;
+        if native_route {
+            return Err("stale_approval: native approval must not enter the Kernel command queue".into());
+        }
         let ticket:Option<(String,String,u64,String,String,String)>=self.with_connection(|c|c.query_row(
             "SELECT t.run_id,t.runtime_tool_call_id,k.policy_version,t.tool_name,t.input_json,a.request_json FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id JOIN kernel_approvals k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1 AND k.policy_version IS NOT NULL AND a.id='kernel-approval:'||k.run_id||':'||k.tool_call_id||':v'||k.policy_version",
             [approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional())?;

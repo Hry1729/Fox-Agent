@@ -32,7 +32,7 @@ impl Drop for NativeApprovalRecoveryScope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::{sidecar_sessions, WorkerHandle};
+    use super::super::{sidecar_sessions, PendingApproval, WorkerHandle};
     use crate::canonical_json::CanonicalJson;
     use crate::database::{ApprovalDecision, ChildRunBudget, CreateChildRunInput, CreateDigitalColleagueInput, Database};
     use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
@@ -404,6 +404,53 @@ mod tests {
         assert!(scope.host().ensure_delegated_tool_allowed("grep").is_ok());
         assert!(scope.host().ensure_delegated_tool_allowed("ls").is_err());
         assert!(scope.host().ensure_delegated_tool_allowed("write_file").is_err());
+    }
+
+    #[test]
+    fn host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue() {
+        if isolated("runtime_host::native_approval_scope::tests::host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let conversation=database.create_conversation(database.default_agent_id(),Some("native approval route"),None,Some("ask")).unwrap().id;
+        let run=database.create_run(&conversation,"resolve the native approval through the Host",None).unwrap().run.id;
+        make_native(database,&run,&conversation,None,"legacy");
+        let approval_id=approval(database,&run,"native-waiter","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
+        let (sender,receiver)=std::sync::mpsc::channel();
+        fixture.host.state.lock().unwrap().pending_approvals.lock().unwrap().insert(
+            approval_id.clone(),PendingApproval{run_id:run.clone(),sender});
+        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(2)).unwrap(),false);
+        let (status,decision):(String,Option<String>)=database.with_connection(|connection|connection.query_row(
+            "SELECT status,decision_json FROM approvals WHERE id=?1",[&approval_id],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        assert_eq!(status,"denied");
+        assert!(decision.unwrap().contains("\"approved\":false"));
+        let queued:i64=database.with_connection(|connection|connection.query_row(
+            "SELECT COUNT(*) FROM kernel_host_commands",[],|row|row.get(0))).unwrap();
+        assert_eq!(queued,0,"a native approval must not enter the Kernel command queue");
+        assert!(database.kernel_host_approval_target(&approval_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn host_resolve_native_approval_without_waiter_recovers_once() {
+        if isolated("runtime_host::native_approval_scope::tests::host_resolve_native_approval_without_waiter_recovers_once") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let conversation=database.create_conversation(database.default_agent_id(),Some("native approval recovery"),None,Some("ask")).unwrap().id;
+        let run=database.create_run(&conversation,"recover the native approval exactly once",None).unwrap().run.id;
+        make_native(database,&run,&conversation,None,"legacy");
+        let approval_id=approval(database,&run,"native-no-waiter","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
+        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
+        let status:String=database.with_connection(|connection|connection.query_row(
+            "SELECT status FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
+        assert_eq!(status,"denied");
+        assert!(database.kernel_host_approval_target(&approval_id).unwrap().is_none());
+        let command_count:i64=database.with_connection(|connection|connection.query_row(
+            "SELECT COUNT(*) FROM kernel_host_commands",[],|row|row.get(0))).unwrap();
+        assert_eq!(command_count,0);
     }
 
     #[test]

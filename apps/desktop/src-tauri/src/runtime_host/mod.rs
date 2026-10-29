@@ -3872,7 +3872,24 @@ impl RuntimeHost {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool, String> {
-        if self.database.kernel_host_approval_target(approval_id)?.is_some() {
+        // Read the Run's frozen route through the same single resolver used by
+        // dispatch and startup recovery. A PiNative Run must never enter the
+        // Kernel command queue: it has no Kernel consumer, and the queue's
+        // version check would reject the native ticket as stale.
+        let binding = match self.database.approval_run_id(approval_id)? {
+            Some(run_id) => self.database.run_control_binding(&run_id)?,
+            None => None,
+        };
+        let route = binding.as_ref().map(|binding| kernel_authority::resolve_run_route(Some(binding)));
+        if matches!(route.as_ref(), Some(kernel_authority::RunRoute::Reject)) {
+            return Err(
+                "run_route_unrecognized: approval belongs to a Run this build cannot execute"
+                    .to_owned(),
+            );
+        }
+        if !matches!(route.as_ref(), Some(kernel_authority::RunRoute::PiNative))
+            && self.database.kernel_host_approval_target(approval_id)?.is_some()
+        {
             let decision = match decision {
                 ApprovalDecision::AllowOnce => "allow_once",
                 ApprovalDecision::AllowConversation => "allow_conversation",
