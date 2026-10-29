@@ -87,7 +87,7 @@ pnpm dev:profile
 
 REM 3. the desktop, with the isolated data dir and CDP enabled
 set FOX_DATA_DIR=E:\fox-targets\g4-p2d-closeout-data
-set FOX_KERNEL_MODE=authoritative
+REM S5: no FOX_EXECUTOR_ROUTE means PiNative. Use FOX_EXECUTOR_ROUTE=kernel only for the controlled Kernel fallback.
 set CARGO_TARGET_DIR=E:\fox-targets\g4-p2d-closeout-target
 node <tauri-cli> dev --config "{\"build\":{\"beforeDevCommand\":\"\",\"devUrl\":\"http://127.0.0.1:1422\"},\"app\":{\"windows\":[{\"additionalBrowserArgs\":\"... --remote-debugging-port=9333\"}]}}" --no-dev-server --features kernel-acceptance
 

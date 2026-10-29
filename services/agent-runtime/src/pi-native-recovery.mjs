@@ -4,6 +4,36 @@ import { nativeToolInputDigest, nativeHostToolResult, NATIVE_RESPONSE_DIGEST, NA
 export const NATIVE_RUN_ENTRY = 'fox.runtime-run'
 export const TOOL_CALL_FACTS = 'tool_call.facts'
 
+/**
+ * Fox-owned validation for a Pi JSONL session that is about to be resumed.
+ *
+ * `SessionManager.open` is intentionally tolerant: a damaged header can be
+ * skipped and the resume can silently look like a fresh/partial session. Fox
+ * must reject that before any Run is admitted. A malformed *final* record is
+ * allowed because a process crash can interrupt the last append; S3 recovery
+ * reconciles that tail. A malformed record before the tail is damage.
+ */
+export function validateNativeSessionText(text) {
+  if (typeof text !== 'string' || !text.trim()) throw new Error('the session file is empty')
+  const lines = text.split(/\r?\n/)
+  while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+  if (!lines.length) throw new Error('the session file is empty')
+  let header
+  try { header = JSON.parse(lines[0]) } catch { throw new Error('the session header is not valid JSON') }
+  if (!header || header.type !== 'session' || typeof header.id !== 'string' || !header.id
+      || !Number.isSafeInteger(header.version)) {
+    throw new Error('the session header is missing its identity or version')
+  }
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (!line.trim()) throw new Error(`the session has an empty record at line ${index + 1}`)
+    try { JSON.parse(line) } catch {
+      if (index === lines.length - 1) break
+      throw new Error(`the session has a malformed record at line ${index + 1}`)
+    }
+  }
+}
+
 function recoveryError(code, message) {
   const error = new Error(message)
   error.code = code

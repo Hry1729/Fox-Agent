@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager, fauxAssistantMessage, registerFauxProvider, createFoxModelRuntime, createFoxAgentSession,
   SettingsManager, DefaultResourceLoader } from '../src/pi-adapter.mjs'
-import { markNativeSessionRun, nativeSessionToolCalls, reconcileNativeSession, TOOL_CALL_FACTS } from '../src/pi-native-recovery.mjs'
+import { markNativeSessionRun, nativeSessionToolCalls, reconcileNativeSession, TOOL_CALL_FACTS, validateNativeSessionText } from '../src/pi-native-recovery.mjs'
 import { nativeToolInputDigest, nativeHostToolResult, NATIVE_RESPONSE_DIGEST } from '../src/pi-native-tool-bridge.mjs'
 
 const generation = 3
@@ -314,4 +314,18 @@ test('cancellation after Host facts arrives still leaves the Pi branch untouched
       facts: [completed('read-1', 'source'), notExecuted('work-2')] } }
   } }), error => error.name === 'AbortError')
   assert.equal(await readFile(path, 'utf8'), before)
+})
+
+
+test('a damaged native session header is refused before it can become a fresh session', () => {
+  const valid = '{"type":"session","version":3,"id":"session-1"}\n{"type":"message"}\n'
+  assert.doesNotThrow(() => validateNativeSessionText(valid))
+  assert.throws(() => validateNativeSessionText('{bad-header}\n{"type":"message"}\n'), /header/)
+  assert.throws(() => validateNativeSessionText('{"type":"message"}\n'), /header/)
+  assert.throws(() => validateNativeSessionText(''), /empty/)
+  // A malformed final record is a crash tail, not a reason to reject the
+  // whole session; S3 reconciliation owns that boundary.
+  assert.doesNotThrow(() => validateNativeSessionText(valid + '{"partial"'))
+  // Damage before the tail is not tolerated.
+  assert.throws(() => validateNativeSessionText(valid + '{bad}\n{"type":"message"}\n'), /malformed record/)
 })
