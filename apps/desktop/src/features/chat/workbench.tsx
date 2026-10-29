@@ -272,11 +272,11 @@ export function Workbench() {
   // keeps the last expanded width so one number drives both sides of the motion.
   const [expandedSidebarWidth, setExpandedSidebarWidth] = useState(() => {
     // Apply the new default once, then retain subsequent manual adjustments.
-    if (window.localStorage.getItem('fox.layout.sidebarWidthVersion') !== '276-v1') {
-      window.localStorage.setItem(layoutStorage.sidebarWidth, '276')
-      window.localStorage.setItem('fox.layout.sidebarWidthVersion', '276-v1')
+    if (window.localStorage.getItem('fox.layout.sidebarWidthVersion') !== '260-v1') {
+      window.localStorage.setItem(layoutStorage.sidebarWidth, '260')
+      window.localStorage.setItem('fox.layout.sidebarWidthVersion', '260-v1')
     }
-    return readStoredNumber(layoutStorage.sidebarWidth, 276, 220, 456)
+    return readStoredNumber(layoutStorage.sidebarWidth, 260, 220, 456)
   })
   useEffect(() => {
     const query = window.matchMedia('(max-width: 700px)')
