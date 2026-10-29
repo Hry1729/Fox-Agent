@@ -1,0 +1,66 @@
+{
+  "report": "migration-work/native-performance-25ebea1a-7936-48a2-90a4-168eaf754a24/report.json",
+  "cellsValid": true,
+  "requestContractsEqual": true,
+  "sourceUnchanged": true,
+  "warmSamplesPerCell": 30,
+  "coldSamplesPerRoute": 5,
+  "decision": "within_initial_offline_threshold",
+  "sampleCountComplete": true,
+  "exceededTenPercent": false,
+  "comparisons": [
+    {
+      "load": 1,
+      "ratios": {
+        "ttftMs": {
+          "p50": 0.1763450866976851,
+          "p95": 0.18335092098267827
+        },
+        "wholeTurnMs": {
+          "p50": 0.18274215249458256,
+          "p95": 0.19050069129852254
+        }
+      }
+    },
+    {
+      "load": 2,
+      "ratios": {
+        "ttftMs": {
+          "p50": 0.20141342001824478,
+          "p95": 0.2766448967075227
+        },
+        "wholeTurnMs": {
+          "p50": 0.20856677946737676,
+          "p95": 0.2807382001907331
+        }
+      }
+    },
+    {
+      "load": 3,
+      "ratios": {
+        "ttftMs": {
+          "p50": 0.4086326452934784,
+          "p95": 0.3403047701067952
+        },
+        "wholeTurnMs": {
+          "p50": 0.4124510586477807,
+          "p95": 0.34393752998859584
+        }
+      }
+    },
+    {
+      "load": 4,
+      "ratios": {
+        "ttftMs": {
+          "p50": 0.46475864230752134,
+          "p95": 0.465375737082705
+        },
+        "wholeTurnMs": {
+          "p50": 0.46894157348520205,
+          "p95": 0.46973607769558023
+        }
+      }
+    }
+  ],
+  "scope": "offline paired Host fixture only; not S4 Host-internal queue, installer, real model, or product acceptance"
+}

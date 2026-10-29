@@ -1,0 +1,35 @@
+{
+  "kind": "fox-s5-candidate",
+  "sourceHead": "9540b68e",
+  "start": "71ffbb7ef0fc07ffaae8b3be8cefcfbdc3973739",
+  "builtAt": "2026-10-29T22:41:38+08:00",
+  "candidateRoot": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261029-2200",
+  "installer": {
+    "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261029-2200\\Fox_0.1.0_x64-setup.exe",
+    "sha256": "5db219cf2696bc61f7cb88f2058ef44072714585f2afc7d9acacb71c34327b34"
+  },
+  "payload": {
+    "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261029-2200\\payload",
+    "desktop": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261029-2200\\payload\\fox-desktop.exe",
+      "sha256": "a6bf64f31de96f33b753f14aab204371f296e8d740601dad8db13f87d03992f7"
+    },
+    "sidecar": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261029-2200\\payload\\agent-runtime\\fox-agent-runtime-x86_64-pc-windows-msvc.exe",
+      "sha256": "d773800337aebf3b356b7a099c4e53ed670c1a55d61e70abb6324027c7bbe11b"
+    }
+  },
+  "releaseInputs": {
+    "desktop": "8f0840301acd7cfb97b0492efcf1da6454c690c0ab2bb42b0862171f960712d8",
+    "sidecar": "d773800337aebf3b356b7a099c4e53ed670c1a55d61e70abb6324027c7bbe11b"
+  },
+  "sdk": {
+    "name": "@earendil-works/pi-coding-agent",
+    "version": "1.4.0",
+    "packageJsonSha256": "1885b3e17377cfe51cf9c16c7d58e9d2fdc7bbce20cca85efe1d0217380421e7"
+  },
+  "notes": [
+    "payload desktop differs from release input by the Tauri NSIS bundle type marker",
+    "payload sidecar equals dist sidecar"
+  ]
+}
