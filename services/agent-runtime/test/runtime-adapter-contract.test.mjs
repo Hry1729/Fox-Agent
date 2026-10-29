@@ -22,7 +22,7 @@ function piConfig(overrides = {}) {
       baseUrl: 'faux://fox',
       modelId: 'fox-contract',
       apiType: 'faux',
-      contextWindow: 4096,
+      contextWindow: 32768,
       maxOutputTokens: 512,
       supportsImageInput: false,
       ...overrides,

@@ -720,6 +720,73 @@ test('T1.6 deferCompletion finish() derives the same terminal as agent_end', () 
   assert.equal(completed.filter((event) => event.type === 'run.failed').length, 0)
 })
 
+test('T1.6b deferCompletion keeps one message open across a compaction retry', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }), { deferCompletion: true })
+  const assistantMessage = (text) => ({
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    stopReason: 'stop',
+    usage: {},
+  })
+
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'first' } })
+  mapper.handle({ type: 'message_end', message: assistantMessage('first') })
+  mapper.handle({ type: 'agent_end', messages: [] })
+  assert.equal(events.filter((event) => event.type === 'message.completed').length, 0,
+    'agent_end must not close the message while deferCompletion is active')
+
+  mapper.handle({ type: 'compaction_start', reason: 'overflow' })
+  mapper.handle({ type: 'compaction_end', reason: 'overflow', result: {}, willRetry: true })
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'second' } })
+  mapper.handle({ type: 'message_end', message: assistantMessage('second') })
+  mapper.handle({ type: 'agent_end', messages: [] })
+  assert.equal(events.filter((event) => event.type === 'message.completed').length, 0,
+    'the retry must still be able to stream into the same assistant message')
+
+  mapper.finish()
+  assert.equal(events.filter((event) => event.type === 'message.started').length, 1,
+    'the Host message id is fixed, so the mapper must not start a second message')
+  assert.equal(events.filter((event) => event.type === 'message.completed').length, 1)
+  const completedAt = events.findIndex((event) => event.type === 'message.completed')
+  const terminalAt = events.findIndex((event) => event.type === 'run.completed')
+  assert.ok(completedAt >= 0 && completedAt < terminalAt, 'message completion must precede Run completion')
+})
+
+test('T1.6c compaction failure still closes the message and Run once', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }), { deferCompletion: true })
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'answer' } })
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }], stopReason: 'stop', usage: {} } })
+  mapper.handle({ type: 'compaction_start', reason: 'overflow' })
+  mapper.handle({ type: 'compaction_end', reason: 'overflow', errorMessage: 'summary failed' })
+  mapper.handle({ type: 'agent_end', messages: [] })
+  mapper.finish()
+  assert.equal(events.filter((event) => event.type === 'context.compaction.failed').length, 1)
+  assert.equal(events.filter((event) => event.type === 'message.completed').length, 1)
+  assert.equal(events.filter((event) => event.type === 'run.completed').length, 1)
+  assert.equal(events.filter((event) => event.type === 'run.failed').length, 0)
+})
+
+test('T1.6d cancellation during compaction owns the single terminal', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }), { deferCompletion: true })
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  mapper.handle({ type: 'compaction_start', reason: 'overflow' })
+  mapper.cancel()
+  mapper.handle({ type: 'compaction_end', reason: 'overflow', aborted: true })
+  mapper.handle({ type: 'agent_end', messages: [] })
+  mapper.finish()
+  assert.equal(events.filter((event) => event.type === 'run.cancelled').length, 1)
+  assert.equal(events.filter((event) => event.type === 'run.completed').length, 0)
+  assert.equal(events.filter((event) => event.type === 'run.failed').length, 0)
+  assert.equal(events.filter((event) => event.type === 'message.completed').length, 0,
+    'Host cancellation closes the in-flight message; the mapper must not complete it twice')
+})
+
 test('projects knowledge search results into stable source events', () => {
   const events = []
   const mapper = createPiEventMapper((type, payload) => events.push({ type, ...payload }))

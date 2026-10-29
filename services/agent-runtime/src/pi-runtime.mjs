@@ -936,7 +936,14 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     cwd,
     agentDir: process.cwd(),
     settingsManager,
-    extensionFactories: [createFoxPlanningExtension({ workTools, context: planningContext })],
+    extensionFactories: [createFoxPlanningExtension({
+      workTools,
+      context: planningContext,
+      promptSections: {
+        stable: promptComposition.stablePrefix,
+        dynamic: promptComposition.dynamicTail,
+      },
+    })],
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,

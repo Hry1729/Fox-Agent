@@ -550,14 +550,17 @@ export function createPiEventMapper(emit, options = {}) {
             break
           }
           if (!finished) {
-            ensureMessageStarted()
-            emit('message.completed')
             const terminal = pendingTerminal ?? finalTerminalFromLastAssistant()
             pendingTerminal = null
             if (deferCompletion) {
+              // Keep the assistant message streamable until finish(). A deferred
+              // Run may compact and retry after this agent_end, and completing the
+              // message here makes the Host reject the retry's message.delta.
               agentEnded = true
               deferredTerminal = terminal
             } else {
+              ensureMessageStarted()
+              emit('message.completed')
               finished = true
               emitTerminal(terminal)
             }
@@ -604,6 +607,8 @@ export function createPiEventMapper(emit, options = {}) {
       const terminal = deferredTerminal ?? pendingTerminal ?? finalTerminalFromLastAssistant()
       deferredTerminal = null
       pendingTerminal = null
+      ensureMessageStarted()
+      emit('message.completed')
       emitTerminal(terminal)
     },
   }

@@ -92,3 +92,29 @@ test('registers Fox work tools through the Coding Agent extension lifecycle', as
   assert.deepEqual(registered, ['goal_propose', 'task_create_many'])
   assert.equal(handlers.has('before_agent_start'), false)
 })
+
+
+test('splits the stable contract from the per-turn context for SDK prompt patches', async () => {
+  const handlers = new Map()
+  const extension = createFoxPlanningExtension({
+    promptSections: { stable: 'stable contract', dynamic: 'current turn context' },
+  })
+  await extension({
+    registerTool: () => {},
+    on: (event, handler) => handlers.set(event, handler),
+  })
+  const handler = handlers.get('before_agent_start')
+  assert.equal(typeof handler, 'function')
+  const event = {
+    systemPromptOptions: {
+      customPrompt: 'full prompt',
+      sections: { existing: 'keep' },
+    },
+  }
+  await handler(event)
+  assert.equal(event.systemPromptOptions.customPrompt, 'stable contract')
+  assert.deepEqual(event.systemPromptOptions.sections, {
+    existing: 'keep',
+    fox_context: 'current turn context',
+  })
+})
