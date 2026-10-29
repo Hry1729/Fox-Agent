@@ -33,6 +33,7 @@ import {
   replaceLatestAssistantText,
 } from './runtime-instructions.mjs'
 import { stablePromptHash, buildFilePlacement } from './prompt-composer.mjs'
+import { promptTokenPreflight } from './prompt-budget.mjs'
 import { plannerHandoff, runPlanner, shouldUsePlanner } from './planner-runtime.mjs'
 import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from './expert-package.mjs'
 import { selectToolsForHostRuntime } from './host-runtime-capabilities.mjs'
@@ -806,6 +807,46 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     .map((tool) => tool.name))
   const workTools = tools.filter((tool) => workToolNames.has(tool.name))
   const customTools = tools.filter((tool) => !workToolNames.has(tool.name))
+  const composePrompt = (plannerPlan = null) => composeRuntimePrompt({
+    systemPrompt: request.payload?.systemPrompt,
+    modelInstructions: [modelProfilePrompt(modelProfile), executionProfilePrompt(activeExecutionProfile)]
+      .filter(Boolean)
+      .join('\n\n'),
+    approvalDemo,
+    budget: promptBudgetForRun(request.payload, modelProfile),
+    cache: {
+      modelId: modelService.modelId,
+      toolCatalogHash: requestSnapshot.toolCatalogHash,
+      policy: modelProfile.supportsPromptCache ? 'read_write' : 'disabled',
+    },
+    context: planningContext,
+    turn: {
+      cwd,
+      recovery: request.payload?.recoveryContext || null,
+      plannerPlan: plannerPlan ? plannerHandoff(plannerPlan) : null,
+    },
+  })
+  // Reject an impossible request before the planner or the SDK can issue any
+  // model HTTP call. Compose the same system prompt the executor will use (with
+  // no planner handoff yet) so runtime instructions and the work snapshot are
+  // counted, not just the caller's short systemPrompt. History is deliberately
+  // excluded: Pi compaction owns it.
+  const preflightPrompt = composePrompt(null)
+  const promptPreflight = promptTokenPreflight({
+    systemPrompt: preflightPrompt.prompt,
+    toolDefinitions: JSON.stringify(tools.map(({ name, description, parameters }) => ({
+      name, description, parameters,
+    }))),
+    userText: currentText,
+    contextWindow: modelProfile.contextWindow,
+    reserveTokens: modelProfile.runtime.reserveTokens,
+  })
+  if (promptPreflight.exceeds) {
+    throw failRun(
+      'model.context_window_too_small',
+      `The non-compressible prompt is approximately ${promptPreflight.estimatedTokens} tokens, but only ${promptPreflight.availableInputTokens} input tokens are available in the ${promptPreflight.contextWindow}-token context window after the ${promptPreflight.reserveTokens}-token reserve.`,
+    )
+  }
   let plannerPlan = null
   if (modelProfile.planner.enabled && shouldUsePlanner(currentText, {
     approvalDemo,
@@ -859,25 +900,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     if (runControl.budgetError) throw runControl.budgetError
     runAbort.signal.throwIfAborted()
   }
-  const promptComposition = composeRuntimePrompt({
-    systemPrompt: request.payload?.systemPrompt,
-    modelInstructions: [modelProfilePrompt(modelProfile), executionProfilePrompt(activeExecutionProfile)]
-      .filter(Boolean)
-      .join('\n\n'),
-    approvalDemo,
-    budget: promptBudgetForRun(request.payload, modelProfile),
-    cache: {
-      modelId: modelService.modelId,
-      toolCatalogHash: requestSnapshot.toolCatalogHash,
-      policy: modelProfile.supportsPromptCache ? 'read_write' : 'disabled',
-    },
-    context: planningContext,
-    turn: {
-      cwd,
-      recovery: request.payload?.recoveryContext || null,
-      plannerPlan: plannerPlan ? plannerHandoff(plannerPlan) : null,
-    },
-  })
+  const promptComposition = composePrompt(plannerPlan)
   requestSnapshot.stablePromptHash = promptComposition.stablePromptHash
   requestSnapshot.contextHash = promptComposition.contextHash
   requestSnapshot.promptDefinitionId = promptComposition.diagnostics.promptRegistry.definitionId

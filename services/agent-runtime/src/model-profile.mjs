@@ -1,4 +1,18 @@
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh'])
+// Pi's simple-options layer always keeps a fixed safety margin and refuses to
+// send a request when it cannot also leave room for an answer. Keep this in
+// sync with pi-ai/dist/api/simple-options.js:3; SDK-HASHES.json flags upgrades.
+const SDK_CONTEXT_SAFETY_TOKENS = 4_096
+const MAX_MIN_ANSWER_TOKENS = 2_048
+
+function reserveTokensForWindow(contextWindow, maxOutputTokens) {
+  const answerTokens = Math.min(Math.max(0, Math.floor(maxOutputTokens)), MAX_MIN_ANSWER_TOKENS)
+  const floor = SDK_CONTEXT_SAFETY_TOKENS + answerTokens
+  return Math.min(
+    Math.max(16_384, floor),
+    Math.max(floor, Math.floor(contextWindow * 0.12)),
+  )
+}
 
 function normalizedConfig(config = {}) {
   const modelId = String(config.modelId || '').trim()
@@ -221,7 +235,7 @@ export function resolveModelProfile(config = {}) {
         CONFIG_BOUNDS.providerMaxRetryDelayMs.minimum,
         CONFIG_BOUNDS.providerMaxRetryDelayMs.maximum,
       ),
-      reserveTokens: Math.min(16_384, Math.max(2_048, Math.floor(contextWindow * 0.12))),
+      reserveTokens: reserveTokensForWindow(contextWindow, maxOutputTokens),
       keepRecentTokens: Math.min(24_000, Math.max(4_096, Math.floor(contextWindow * 0.18))),
     },
   }

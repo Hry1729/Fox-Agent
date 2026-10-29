@@ -39,6 +39,26 @@ for (const fixture of cases) {
   })
 }
 
+test('T1.8 keeps the Pi safety margin plus a real answer slot at every window size', () => {
+  const cases = [
+    { contextWindow: 16_384, expected: 6_144 },
+    { contextWindow: 32_768, expected: 6_144 },
+    { contextWindow: 131_072, expected: 15_728 },
+    { contextWindow: 262_144, expected: 16_384 },
+  ]
+  for (const { contextWindow, expected } of cases) {
+    const profile = resolveModelProfile({
+      modelId: 'sensenova-6.8-flash-lite',
+      baseUrl: 'https://token.sensenova.cn/v1',
+      apiType: 'openai-completions',
+      contextWindow,
+      maxOutputTokens: 2_048,
+    })
+    assert.equal(profile.runtime.reserveTokens, expected, `${contextWindow}`)
+    assert.ok(profile.runtime.reserveTokens >= 4_096 + Math.min(profile.maxOutputTokens, 2_048))
+  }
+})
+
 test('applies explicit safe overrides without changing the detected family', () => {
   const profile = resolveModelProfile({
     modelId: 'MiniMax-M3',

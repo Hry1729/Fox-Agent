@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
 import { canonicalPermission } from '../src/control-binding.mjs'
+import { estimatePromptTokens } from '../src/prompt-budget.mjs'
 
 const runtimePath = fileURLToPath(new URL('../src/pi-runtime.mjs', import.meta.url))
 const crashRuntimePath = fileURLToPath(new URL('./fixtures/pi-runtime-crash.mjs', import.meta.url))
@@ -173,7 +174,7 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
-    payload: { modelService: { baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 4096, maxOutputTokens: 512 } },
+    payload: { modelService: { baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512 } },
   })
   const ready = await runtime.waitFor((message) => message.requestId === initialize.id)
   assert.equal(ready.type, 'ready')
@@ -211,7 +212,7 @@ test('unknown Office name stays an SDK error and recovers through the declared M
   const runtime = startRuntime()
   registerRuntimeCleanup(context, runtime, directory)
   const initialize = runtime.send('initialize', { payload: { modelService: {
-    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512,
     fauxResponses: [
       { content: [{ type: 'toolCall', id: 'bad-name', name: 'office_help', arguments: { format: 'xlsx' } }], stopReason: 'toolUse' },
       { content: [{ type: 'toolCall', id: 'catalog', name: 'list_mcp_tools', arguments: {} }], stopReason: 'toolUse' },
@@ -250,7 +251,7 @@ test(`projectless knowledge question reaches Host search and preserves evidence 
   registerRuntimeCleanup(context, runtime, directory)
   const reference = { source: 'remote', connectionId: 'yuxi-primary', id: 'kb-crane' }
   const initialize = runtime.send('initialize', { payload: { modelService: {
-    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512,
     fauxResponses: [
       { content: [{ type: 'toolCall', id: 'kb-list', name: 'list_knowledge_bases', arguments: {} }], stopReason: 'toolUse' },
       { content: [{ type: 'toolCall', id: 'kb-search', name: 'search_knowledge', arguments: { ...(referenceForm === 'object-array' ? { targets: [reference] } : { target: JSON.stringify(reference) }), query: '轨道吊 起升 赋值' } }], stopReason: 'toolUse' },
@@ -299,7 +300,7 @@ test('keeps every structured Host result visible when one model turn calls multi
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: [
           {
@@ -388,7 +389,7 @@ test('applies bounded correction on consecutive no-progress calls and never re-e
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: Array.from({ length: 6 }, (_, index) => ({
           content: [{ type: 'toolCall', id: `stuck-${index + 1}`, name: 'search_knowledge', arguments: { query: 'same query' } }],
@@ -465,7 +466,7 @@ test('a 7th productive web search is allowed; only no-evidence repeats are corre
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: [
           {
@@ -535,7 +536,7 @@ test('polling with changing results and read-after-write continue past the old f
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: [
           ...Array.from({ length: 5 }, (_, index) => ({
@@ -599,7 +600,7 @@ test('real progress from a wait-semantic tool disarms the no-progress ladder for
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: [
           ...Array.from({ length: 4 }, (_, index) => ({
@@ -682,7 +683,7 @@ test('a stuck loop after real progress is still bounded and idle polls cannot do
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: [
           { content: [{ type: 'toolCall', id: 'step-1', name: 'search_knowledge', arguments: { query: 'a' } }], stopReason: 'toolUse' },
@@ -764,7 +765,7 @@ test('wait-semantic polls with unchanged state are never corrected', async (cont
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: [
           ...Array.from({ length: 5 }, (_, index) => ({
@@ -827,7 +828,7 @@ test('records tool and prompt diagnostics while allowing a text-only run with no
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         fauxResponses: ['Text-only response.'],
       },
@@ -885,6 +886,115 @@ test('records tool and prompt diagnostics while allowing a text-only run with no
   await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
 })
 
+test('T1.9 rejects an over-window system prompt before any model request', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-context-too-small-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 16_384,
+        maxOutputTokens: 2_048,
+        fauxResponses: ['This answer must not be requested.'],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const sessionId = 'pi-context-too-small-session'
+  const conversationId = 'pi-context-too-small-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-context-too-small-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    runId,
+    payload: {
+      text: 'This request cannot fit.',
+      messages: [{ role: 'user', content: 'This request cannot fit.' }],
+      assistantPackage: { packageManifest: { allowedTools: [] } },
+      systemPrompt: '中'.repeat(20_000),
+    },
+  })
+
+  const failed = await runtime.waitFor((message) => message.runId === runId
+    && message.payload?.type === 'run.failed')
+  assert.equal(failed.payload.code, 'model.context_window_too_small')
+  assert.match(failed.payload.message, /approximately \d+ tokens/)
+  assert.match(failed.payload.message, /10240 input tokens/)
+  assert.equal(runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'model_request.admit').length, 0)
+  assert.equal(runtime.messages.filter((message) => message.payload?.type === 'usage.request').length, 0)
+})
+
+test('T1.9b the default tool catalog alone cannot fit a 16K/2048 window', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-context-tools-too-small-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 16_384,
+        maxOutputTokens: 2_048,
+        fauxResponses: ['This answer must not be requested.'],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const sessionId = 'pi-context-tools-too-small-session'
+  const conversationId = 'pi-context-tools-too-small-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-context-tools-too-small-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    runId,
+    payload: {
+      text: 'U08',
+      messages: [{ role: 'user', content: 'U08' }],
+    },
+  })
+
+  const failed = await runtime.waitFor((message) => message.runId === runId
+    && message.payload?.type === 'run.failed')
+  assert.equal(failed.payload.code, 'model.context_window_too_small')
+  assert.equal(runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'model_request.admit').length, 0)
+})
+
+test('T1.10 CJK-aware prompt estimate covers at least 90% of the measured Chinese sample', () => {
+  // dbd61248: 29,823 prompt chars -> 17,886 provider input tokens. The measured
+  // composition implies 13,907 CJK code points and 15,916 other characters.
+  const sample = '中'.repeat(13_907) + 'a'.repeat(15_916)
+  const estimated = estimatePromptTokens(sample)
+  assert.equal(sample.length, 29_823)
+  assert.ok(estimated >= Math.ceil(17_886 * 0.9), `${estimated}`)
+  assert.equal(estimated, 17_886)
+  assert.equal(estimatePromptTokens('中'.repeat(1_000)), 1_000)
+  assert.equal(estimatePromptTokens('a'.repeat(4_000)), 1_000)
+})
+
 test('validates Execution Profile at startup and snapshots a side-effect-free shadow surface per Run', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-profile-'))
   const runtime = startRuntime()
@@ -898,7 +1008,7 @@ test('validates Execution Profile at startup and snapshots a side-effect-free sh
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
       },
     },
@@ -1069,7 +1179,7 @@ test('keeps a forced Planner session separate from the Executor transcript', asy
         baseUrl: 'faux://fox',
         modelId: 'fox-test',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
         plannerMode: 'always',
         fauxResponses: [
@@ -1140,7 +1250,7 @@ test('maps Anthropic thinking blocks separately from the final answer', async (c
 
   runtime = startRuntime()
   const initialize = runtime.send('initialize', {
-    payload: { modelService: { baseUrl: `http://127.0.0.1:${address.port}`, modelId: 'MiniMax-M3', apiType: 'anthropic-messages', apiKey: 'test-key', contextWindow: 4096, maxOutputTokens: 512 } },
+    payload: { modelService: { baseUrl: `http://127.0.0.1:${address.port}`, modelId: 'MiniMax-M3', apiType: 'anthropic-messages', apiKey: 'test-key', contextWindow: 32768, maxOutputTokens: 512 } },
   })
   await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
   const sessionId = 'pi-anthropic-1'
@@ -1181,7 +1291,7 @@ test('streams OpenAI-compatible reasoning_content separately from the final answ
 
   runtime = startRuntime()
   const initialize = runtime.send('initialize', {
-    payload: { modelService: { baseUrl: `http://127.0.0.1:${address.port}/v1`, modelId: 'MiniMax-M3', apiType: 'openai-completions', apiKey: 'test-key', contextWindow: 4096, maxOutputTokens: 512 } },
+    payload: { modelService: { baseUrl: `http://127.0.0.1:${address.port}/v1`, modelId: 'MiniMax-M3', apiType: 'openai-completions', apiKey: 'test-key', contextWindow: 32768, maxOutputTokens: 512 } },
   })
   await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
   const sessionId = 'pi-openai-1'
@@ -1221,7 +1331,7 @@ test('run_command follows the Host runtime availability in the real request snap
     ['absent', null, true],
   ]
   const initialize = runtime.send('initialize', { payload: { modelService: {
-    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512,
     fauxResponses: cases.map(([name]) => `done ${name}`),
   } } })
   await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
@@ -1252,7 +1362,7 @@ test('a pi_native Run registers its batch and routes work tools through the Host
   registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', { payload: { modelService: {
-    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512,
     fauxResponses: [
       { content: [
         { type: 'toolCall', id: 'native-skill', name: 'skill_load', arguments: {} },
@@ -1339,7 +1449,7 @@ test('a pi_native Run preserves bounded structured results and Host failure diag
   const runtime = startRuntime()
   registerRuntimeCleanup(context, runtime, directory)
   const initialize = runtime.send('initialize', { payload: { modelService: {
-    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512,
     fauxResponses: [
       { content: [
         { type: 'toolCall', id: 'native-large', name: 'read_attachment', arguments: { attachmentId: 'native-source' } },

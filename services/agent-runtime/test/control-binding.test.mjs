@@ -101,7 +101,7 @@ test('real Pi process rejects foreign control before model events and accepts va
   const runtime = startRuntimeProcess(fileURLToPath(new URL('../src/pi-runtime.mjs', import.meta.url)))
   context.after(() => runtime.close())
   const initialize = runtime.send('initialize', { payload: { modelService: {
-    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 4096, maxOutputTokens: 512,
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512,
   } } })
   await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
   const request = requestFixture()

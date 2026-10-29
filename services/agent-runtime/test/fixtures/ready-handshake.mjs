@@ -33,5 +33,5 @@ lines.on('line', line => {
   } catch (error) { finish(1, error.message) }
 })
 child.stdin.write(`${JSON.stringify(createEnvelope('request', 'initialize', {
-  payload: { modelService: { baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 4096, maxOutputTokens: 512 } },
+  payload: { modelService: { baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512 } },
 }))}\n`)

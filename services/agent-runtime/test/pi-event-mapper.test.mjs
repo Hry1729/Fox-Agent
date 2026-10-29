@@ -529,11 +529,11 @@ test('preserves structured runtime failure codes', () => {
   }])
 })
 
-test('maps context compaction without creating assistant text', () => {
+test('maps a successful context compaction without creating assistant text', () => {
   const events = []
   const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
   mapper.handle({ type: 'compaction_start', reason: 'threshold' })
-  mapper.handle({ type: 'compaction_end', reason: 'threshold', aborted: false, willRetry: false })
+  mapper.handle({ type: 'compaction_end', reason: 'threshold', aborted: false, willRetry: false, result: { summary: 'ok' } })
 
   assert.deepEqual(events.map((event) => event.type), [
     'context.compaction.started',
@@ -542,6 +542,182 @@ test('maps context compaction without creating assistant text', () => {
     'run.phase',
   ])
   assert.equal(events.some((event) => event.type.startsWith('message.')), false)
+})
+
+test('T1.7 maps a compaction error to context.compaction.failed only', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'compaction_start', reason: 'threshold' })
+  mapper.handle({
+    type: 'compaction_end',
+    reason: 'threshold',
+    aborted: false,
+    willRetry: true,
+    errorMessage: 'summary hit the token cap',
+  })
+  mapper.handle({ type: 'compaction_end', reason: 'overflow', aborted: false, willRetry: false })
+
+  assert.deepEqual(events.map((event) => event.type), [
+    'context.compaction.started',
+    'run.phase',
+    'context.compaction.failed',
+    'context.compaction.failed',
+  ])
+  assert.equal(events.filter((event) => event.type === 'context.compaction.completed').length, 0)
+  assert.match(events[2].errorMessage, /summary hit the token cap/)
+  assert.equal(events[3].errorMessage, 'Context compaction completed without a result.')
+})
+
+test('T1.1 final length-only assistant fails with model.output_truncated', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'the model was cut off' }],
+      stopReason: 'length',
+      usage: {},
+    },
+  })
+  mapper.handle({ type: 'agent_end', messages: [] })
+
+  assert.deepEqual(events.filter((event) => event.type === 'run.failed'), [{
+    type: 'run.failed',
+    code: 'model.output_truncated',
+    message: 'The model output was truncated before a final answer.',
+  }])
+  assert.equal(events.filter((event) => event.type === 'run.completed').length, 0)
+})
+
+test('T1.2 final thinking-only stop fails with model.empty_response', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'private planning only' }],
+      stopReason: 'stop',
+      usage: {},
+    },
+  })
+  mapper.handle({ type: 'agent_end', messages: [] })
+
+  assert.deepEqual(events.filter((event) => event.type === 'run.failed'), [{
+    type: 'run.failed',
+    code: 'model.empty_response',
+    message: 'The model returned no visible answer.',
+  }])
+})
+
+test('T1.3 an intermediate length does not fail before the SDK recovery answer', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'first attempt hit the cap' }],
+      stopReason: 'length',
+      usage: {},
+    },
+  })
+  mapper.handle({ type: 'agent_end', messages: [], willRetry: true })
+  mapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'recovered answer' }],
+      stopReason: 'stop',
+      usage: {},
+    },
+  })
+  mapper.handle({ type: 'agent_end', messages: [], willRetry: false })
+
+  assert.equal(events.filter((event) => event.type === 'run.failed').length, 0)
+  assert.equal(events.filter((event) => event.type === 'run.completed').length, 1)
+})
+
+test('T1.4 tool turns stay completed while a final text answer is required for empty turns', () => {
+  const toolEvents = []
+  const toolMapper = createPiEventMapper((type, payload = {}) => toolEvents.push({ type, ...payload }))
+  toolMapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'a.txt' } }],
+      stopReason: 'toolUse',
+      usage: {},
+    },
+  })
+  toolMapper.handle({ type: 'agent_end', messages: [] })
+  assert.equal(toolEvents.filter((event) => event.type === 'run.completed').length, 1)
+
+  const finalEvents = []
+  const finalMapper = createPiEventMapper((type, payload = {}) => finalEvents.push({ type, ...payload }))
+  finalMapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'call-2', name: 'read', arguments: { path: 'b.txt' } }],
+      stopReason: 'toolUse',
+      usage: {},
+    },
+  })
+  finalMapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'final answer' }],
+      stopReason: 'stop',
+      usage: {},
+    },
+  })
+  finalMapper.handle({ type: 'agent_end', messages: [] })
+  assert.equal(finalEvents.filter((event) => event.type === 'run.completed').length, 1)
+  assert.equal(finalEvents.filter((event) => event.type === 'run.failed').length, 0)
+})
+
+test('T1.5 cancellation keeps priority over a length-only final assistant', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'thinking', thinking: 'cancelled' }],
+      stopReason: 'length',
+      usage: {},
+    },
+  })
+  mapper.cancel()
+  mapper.handle({ type: 'agent_end', messages: [] })
+
+  assert.equal(events.filter((event) => event.type === 'run.cancelled').length, 1)
+  assert.equal(events.filter((event) => event.type === 'run.failed').length, 0)
+})
+
+test('T1.6 deferCompletion finish() derives the same terminal as agent_end', () => {
+  const run = (message, events) => {
+    const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }), { deferCompletion: true })
+    mapper.handle({ type: 'message_end', message })
+    mapper.handle({ type: 'agent_end', messages: [] })
+    return mapper
+  }
+
+  const truncated = []
+  run({ role: 'assistant', content: [{ type: 'thinking', thinking: 'cut off' }], stopReason: 'length', usage: {} }, truncated).finish()
+  assert.equal(truncated.find((event) => event.type === 'run.failed')?.code, 'model.output_truncated')
+
+  const empty = []
+  run({ role: 'assistant', content: [{ type: 'thinking', thinking: 'no answer' }], stopReason: 'stop', usage: {} }, empty).finish()
+  assert.equal(empty.find((event) => event.type === 'run.failed')?.code, 'model.empty_response')
+
+  const completed = []
+  run({ role: 'assistant', content: [{ type: 'text', text: 'answer' }], stopReason: 'stop', usage: {} }, completed).finish()
+  assert.equal(completed.filter((event) => event.type === 'run.completed').length, 1)
+  assert.equal(completed.filter((event) => event.type === 'run.failed').length, 0)
 })
 
 test('projects knowledge search results into stable source events', () => {

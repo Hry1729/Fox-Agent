@@ -239,6 +239,9 @@ export function createPiEventMapper(emit, options = {}) {
   let cancelled = false
   let agentEnded = false
   let pendingTerminal = null
+  let deferredTerminal = null
+  let lastAssistant = null
+  let lastCompactionErrorMessage = null
   let pendingText = ''
   let textMode = 'undecided'
   let reasoningEmittedUntil = 0
@@ -342,7 +345,7 @@ export function createPiEventMapper(emit, options = {}) {
   }
 
   function flushPendingText(message) {
-    if (!pendingText) return
+    if (!pendingText) return { answerEmitted: false }
     const hasToolCall = Array.isArray(message?.content)
       && message.content.some((block) => block?.type === 'toolCall')
     // Providers sometimes put pre-tool narration in the normal text channel.
@@ -362,7 +365,55 @@ export function createPiEventMapper(emit, options = {}) {
         emitAnswerFrom(0)
       }
     }
+    const answerEmitted = answerEmittedUntil > 0
     resetTextTurn()
+    return { answerEmitted }
+  }
+
+  function visibleAnswerInCompletedMessage(message) {
+    if (Array.isArray(message?.content) && message.content.some((block) => block?.type === 'toolCall')) return false
+    const text = Array.isArray(message?.content)
+      ? message.content.filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => block.text).join('')
+      : typeof message?.content === 'string' ? message.content : ''
+    if (!text.trim()) return false
+    return Boolean(splitMixedAssistantText(text).answer.trim())
+  }
+
+  function finalTerminalFromLastAssistant() {
+    const assistant = lastAssistant
+    // A tool-only turn is a process step, not a final answer. The visible text
+    // and toolCall facts come from the last completed assistant message.
+    if (!assistant) {
+      return {
+        type: 'run.failed',
+        code: 'model.empty_response',
+        message: 'The model returned no visible answer.',
+      }
+    }
+    if (assistant.stopReason === 'length') {
+      return {
+        type: 'run.failed',
+        code: 'model.output_truncated',
+        message: assistant.compactionErrorMessage
+          ? `The model output was truncated after context compaction failed: ${assistant.compactionErrorMessage}`
+          : 'The model output was truncated before a final answer.',
+      }
+    }
+    if (assistant.hasToolCall || assistant.visibleText) return { type: 'run.completed' }
+    return {
+      type: 'run.failed',
+      code: 'model.empty_response',
+      message: 'The model returned no visible answer.',
+    }
+  }
+
+  function emitTerminal(terminal) {
+    if (!terminal) return
+    if (terminal.type === 'run.failed') {
+      emit('run.failed', { code: terminal.code, message: terminal.message })
+      return
+    }
+    emit(terminal.type)
   }
 
   return {
@@ -412,7 +463,17 @@ export function createPiEventMapper(emit, options = {}) {
           if (event.message?.role === 'assistant') {
             ensureMessageStarted()
             reconcileProviderReasoning(event.message)
-            flushPendingText(event.message)
+            const flushed = flushPendingText(event.message)
+            const hasToolCall = Array.isArray(event.message.content)
+              && event.message.content.some((block) => block?.type === 'toolCall')
+            // Record the last completed assistant turn. The final terminal is
+            // derived only after `agent_end` says there will be no more retries.
+            lastAssistant = {
+              stopReason: event.message.stopReason ?? null,
+              visibleText: flushed.answerEmitted || visibleAnswerInCompletedMessage(event.message),
+              hasToolCall,
+              compactionErrorMessage: lastCompactionErrorMessage,
+            }
             const usage = event.message.usage
             if (usage !== undefined && !accountedUsageEvents.has(event)) {
               const nextUsage = accumulateUsage(cumulativeUsage, normalizeUsageStep(usage))
@@ -458,7 +519,21 @@ export function createPiEventMapper(emit, options = {}) {
           emit('context.compaction.started', { reason: event.reason })
           emit('run.phase', { phase: 'compacting' })
           break
-        case 'compaction_end':
+        case 'compaction_end': {
+          const compactionFailed = Boolean(event.errorMessage)
+            || (!event.aborted && !event.result)
+          lastCompactionErrorMessage = compactionFailed
+            ? (event.errorMessage || 'Context compaction completed without a result.')
+            : null
+          if (compactionFailed) {
+            emit('context.compaction.failed', {
+              reason: event.reason,
+              aborted: Boolean(event.aborted),
+              willRetry: Boolean(event.willRetry),
+              errorMessage: lastCompactionErrorMessage,
+            })
+            break
+          }
           emit('context.compaction.completed', {
             reason: event.reason,
             aborted: Boolean(event.aborted),
@@ -467,6 +542,7 @@ export function createPiEventMapper(emit, options = {}) {
           })
           if (!event.aborted) emit('run.phase', { phase: 'model_streaming' })
           break
+        }
         case 'agent_end':
           if (event.willRetry) {
             pendingTerminal = null
@@ -476,18 +552,14 @@ export function createPiEventMapper(emit, options = {}) {
           if (!finished) {
             ensureMessageStarted()
             emit('message.completed')
-            if (pendingTerminal) {
-              finished = true
-              const terminal = pendingTerminal
-              pendingTerminal = null
-              emit(terminal.type, terminal.type === 'run.failed'
-                ? { code: terminal.code, message: terminal.message }
-                : {})
-            } else if (deferCompletion) {
+            const terminal = pendingTerminal ?? finalTerminalFromLastAssistant()
+            pendingTerminal = null
+            if (deferCompletion) {
               agentEnded = true
+              deferredTerminal = terminal
             } else {
               finished = true
-              emit('run.completed')
+              emitTerminal(terminal)
             }
           }
           break
@@ -529,7 +601,10 @@ export function createPiEventMapper(emit, options = {}) {
     finish() {
       if (!deferCompletion || finished || !agentEnded) return
       finished = true
-      emit('run.completed')
+      const terminal = deferredTerminal ?? pendingTerminal ?? finalTerminalFromLastAssistant()
+      deferredTerminal = null
+      pendingTerminal = null
+      emitTerminal(terminal)
     },
   }
 }
