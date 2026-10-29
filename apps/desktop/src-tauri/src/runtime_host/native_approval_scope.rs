@@ -441,6 +441,51 @@ mod tests {
     }
 
     #[test]
+    fn full_startup_keeps_a_valid_waiting_native_approval_pending_and_redecidable() {
+        if isolated("runtime_host::native_approval_scope::tests::full_startup_keeps_a_valid_waiting_native_approval_pending_and_redecidable") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let conversation=database.create_conversation(database.default_agent_id(),Some("full startup native approval"),None,Some("ask")).unwrap().id;
+        let run=database.create_run(&conversation,"wait for a native approval",None).unwrap().run.id;
+        make_native(database,&run,&conversation,None,"legacy");
+        let approval_id=approval(database,&run,"full-startup-approval","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
+        let runtime_call:String=database.with_connection(|connection|connection.query_row(
+            "SELECT t.runtime_tool_call_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",
+            [&approval_id],|row|row.get(0))).unwrap();
+        database.with_connection(|connection|connection.execute(
+            "INSERT INTO kernel_host_commands(run_id,command_key,kind,tool_call_id,decision,status,created_at,policy_version)
+             VALUES(?1,'synthetic-stale-native-approval','approval',?2,'denied','pending',1,NULL)",
+            params![&run,&runtime_call])).unwrap();
+        // Full startup order: generic repair/protection, F5 retirement, detached native recovery.
+        database.repair_interrupted_runs().unwrap();
+        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),1);
+        fixture.host.recover_native_approvals_detached().unwrap();
+        let state: (String,String,String,String) = database.with_connection(|connection| connection.query_row(
+            "SELECT c.status,a.status,t.status,r.status FROM kernel_host_commands c
+             JOIN approvals a ON a.id=?2 JOIN tool_calls t ON t.id=a.tool_call_id JOIN runs r ON r.id=c.run_id
+             WHERE c.run_id=?1",
+            params![&run,&approval_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
+        assert_eq!(state,("superseded".into(),"pending".into(),"pending".into(),"running".into()));
+        // A second startup must be idempotent.
+        database.repair_interrupted_runs().unwrap();
+        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),0);
+        fixture.host.recover_native_approvals_detached().unwrap();
+        let state: (String,String,String,String) = database.with_connection(|connection| connection.query_row(
+            "SELECT c.status,a.status,t.status,r.status FROM kernel_host_commands c
+             JOIN approvals a ON a.id=?2 JOIN tool_calls t ON t.id=a.tool_call_id JOIN runs r ON r.id=c.run_id
+             WHERE c.run_id=?1",
+            params![&run,&approval_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
+        assert_eq!(state,("superseded".into(),"pending".into(),"pending".into(),"running".into()));
+        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
+        let denied: (String,String) = database.with_connection(|connection| connection.query_row(
+            "SELECT a.status,t.status FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",
+            [&approval_id], |row| Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        assert_eq!(denied,(String::from("denied"),String::from("failed")));
+    }
+
+    #[test]
     fn host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue() {
         if isolated("runtime_host::native_approval_scope::tests::host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue") { return; }
         let app=app();
