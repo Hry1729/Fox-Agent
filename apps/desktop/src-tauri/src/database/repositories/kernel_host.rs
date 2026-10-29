@@ -436,6 +436,22 @@ impl Database {
         Ok(changed)
     }
 
+    /// F5: a native approval never belongs in the Kernel queue. Retire any
+    /// command written by an older build, but leave the approval itself
+    /// pending so the user can decide it again through the native route.
+    pub(crate) fn supersede_pending_native_approval_commands(&self, now: i64) -> Result<usize, String> {
+        self.with_connection(|connection| connection.execute(
+            "UPDATE kernel_host_commands
+             SET status='superseded',completed_at=?1,
+                 resolution_reason='executor route is pi_native; the decision belongs to the native approval'
+             WHERE status='pending' AND kind='approval'
+               AND EXISTS(SELECT 1 FROM run_control_bindings b
+                          WHERE b.run_id=kernel_host_commands.run_id
+                            AND json_extract(b.binding_json,'$.executorRoute')='pi_native')",
+            [now],
+        ))
+    }
+
     pub(crate) fn approval_run_id(&self, approval_id: &str) -> Result<Option<String>, String> {
         self.with_connection(|connection| connection.query_row(
             "SELECT t.run_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",

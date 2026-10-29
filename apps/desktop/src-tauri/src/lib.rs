@@ -272,6 +272,10 @@ pub fn run() {
             // path only when a preview uses the cache.
             let _ = maintenance::recover_knowledge_preview_cache_at_startup(&app.state::<AppState>());
             app.state::<AppState>().runtime_host.recover_kernel_runs_detached()?;
+            let retired_commands = app.state::<AppState>().runtime_host.retire_native_approval_commands()?;
+            if retired_commands > 0 {
+                eprintln!("fox.approval_route retired {retired_commands} stale native Kernel approval command(s)");
+            }
             app.state::<AppState>().runtime_host.recover_native_approvals_detached()?;
             if let Some(windows) = &isolated_windows {
                 for config in windows {

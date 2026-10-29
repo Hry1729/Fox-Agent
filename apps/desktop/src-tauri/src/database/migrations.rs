@@ -7533,6 +7533,11 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
         return finish_transaction(transaction);
     }
     apply_migration(&transaction,NATIVE_MODEL_BUDGET_SCHEMA_VERSION,MIGRATION_102_NATIVE_MODEL_BUDGET,now)?;
+    // v103: a native approval must never be consumed by the Kernel command
+    // queue. The status vocabulary gains `superseded` and the row carries the
+    // reason; the approval itself stays pending for the user.
+    widen_kernel_host_commands_for_v103(&transaction)?;
+    apply_migration(&transaction,NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION,MIGRATION_103_NATIVE_APPROVAL_COMMAND,now)?;
     finish_transaction(transaction)
 }
 
@@ -8026,6 +8031,13 @@ CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_generation
 pub(crate) const NATIVE_MODEL_BUDGET_SCHEMA_VERSION: i64 = 102;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_MODEL_BUDGET_SCHEMA_VERSION);
 
+pub(crate) const NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION: i64 = 103;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION);
+
+// The table rebuild below owns the actual widening. This migration records the
+// version after that rebuild.
+const MIGRATION_103_NATIVE_APPROVAL_COMMAND: &str = r#"SELECT 1;"#;
+
 pub(crate) const MIGRATION_102_NATIVE_MODEL_BUDGET: &str = r#"
 CREATE TABLE IF NOT EXISTS native_model_budget_limits (
     run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
@@ -8153,6 +8165,104 @@ CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_state
     ensure_column_if_missing(connection, "kernel_tool_calls", "input_digest", "TEXT")?;
     ensure_column_if_missing(connection, "kernel_tool_calls", "claimed_at", "INTEGER")?;
     Ok(needs_rebuild)
+}
+
+/// v103: widen `kernel_host_commands.status` for `superseded` and add the
+/// durable reason. A native approval's old Kernel command is retired without
+/// touching the approval row.
+fn widen_kernel_host_commands_for_v103(connection: &rusqlite::Connection) -> Result<()> {
+    if !sqlite_table_exists(connection, "kernel_host_commands")? {
+        return Ok(());
+    }
+    ensure_column_if_missing(connection, "kernel_host_commands", "policy_version", "INTEGER")?;
+    if sqlite_object_accepts(connection, "kernel_host_commands", "'superseded'")? {
+        ensure_column_if_missing(connection, "kernel_host_commands", "resolution_reason", "TEXT")?;
+        return Ok(());
+    }
+    connection.execute_batch(
+        r#"
+CREATE TABLE kernel_host_commands_v103 (
+    command_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES run_control_bindings(run_id) ON DELETE CASCADE,
+    command_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('cancel','approval')),
+    tool_call_id TEXT,
+    decision TEXT CHECK(decision IN ('allow_once','allow_conversation','denied')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','completed','superseded')),
+    resolution_reason TEXT,
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    policy_version INTEGER,
+    UNIQUE(run_id,command_key),
+    CHECK((kind='cancel' AND tool_call_id IS NULL AND decision IS NULL)
+       OR (kind='approval' AND length(tool_call_id)>0 AND decision IS NOT NULL))
+);
+INSERT INTO kernel_host_commands_v103
+    (command_seq,run_id,command_key,kind,tool_call_id,decision,status,resolution_reason,created_at,completed_at,policy_version)
+SELECT command_seq,run_id,command_key,kind,tool_call_id,decision,status,NULL,created_at,completed_at,policy_version
+FROM kernel_host_commands;
+DROP TABLE kernel_host_commands;
+ALTER TABLE kernel_host_commands_v103 RENAME TO kernel_host_commands;
+CREATE INDEX IF NOT EXISTS idx_kernel_host_commands_pending
+    ON kernel_host_commands(run_id,status,command_seq);
+"#,
+    )?;
+    let violations: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_foreign_key_check",
+        [],
+        |row| row.get(0),
+    )?;
+    if violations != 0 {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some(format!(
+                "kernel_host_commands v103 rebuild broke {violations} foreign-key relationship(s)"
+            )),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod native_approval_command_v103_tests {
+    use super::*;
+
+    #[test]
+    fn widening_keeps_existing_commands_and_adds_a_retirement_reason() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            r#"
+CREATE TABLE run_control_bindings(run_id TEXT PRIMARY KEY);
+CREATE TABLE kernel_host_commands (
+    command_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    command_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('cancel','approval')),
+    tool_call_id TEXT,
+    decision TEXT CHECK(decision IN ('allow_once','allow_conversation','denied')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','completed')),
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    policy_version INTEGER,
+    UNIQUE(run_id,command_key)
+);
+INSERT INTO run_control_bindings(run_id) VALUES('native');
+INSERT INTO kernel_host_commands(run_id,command_key,kind,tool_call_id,decision,status,created_at,policy_version)
+VALUES('native','old-native-approval','approval','call-1','denied','pending',1,7);
+"#,
+        ).unwrap();
+        widen_kernel_host_commands_for_v103(&connection).unwrap();
+        assert!(sqlite_object_accepts(&connection, "kernel_host_commands", "'superseded'").unwrap());
+        connection.execute(
+            "UPDATE kernel_host_commands SET status='superseded',resolution_reason='native route at startup' WHERE run_id='native'",
+            [],
+        ).unwrap();
+        let row:(String,Option<String>,Option<i64>)=connection.query_row(
+            "SELECT status,resolution_reason,policy_version FROM kernel_host_commands WHERE run_id='native'",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(row,(String::from("superseded"),Some("native route at startup".into()),Some(7)));
+        widen_kernel_host_commands_for_v103(&connection).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -8543,7 +8653,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 102);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 103);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -8592,7 +8702,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 102);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 103);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -16241,7 +16351,8 @@ mod delivery_acceptance_migration_tests {
         // applies versions by presence, not by order, so the gap is harmless.
         assert_eq!(NATIVE_TOOL_LEDGER_SCHEMA_VERSION, 101);
         assert_eq!(NATIVE_MODEL_BUDGET_SCHEMA_VERSION, 102);
-        assert_eq!(DATABASE_SCHEMA_VERSION, NATIVE_MODEL_BUDGET_SCHEMA_VERSION);
+        assert_eq!(NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION, 103);
+        assert_eq!(DATABASE_SCHEMA_VERSION, NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection

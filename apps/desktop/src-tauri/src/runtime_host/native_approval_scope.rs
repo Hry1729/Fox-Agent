@@ -407,6 +407,40 @@ mod tests {
     }
 
     #[test]
+    fn startup_retires_native_kernel_commands_but_keeps_the_approval_pending() {
+        if isolated("runtime_host::native_approval_scope::tests::startup_retires_native_kernel_commands_but_keeps_the_approval_pending") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let conversation=database.create_conversation(database.default_agent_id(),Some("retire stale commands"),None,Some("ask")).unwrap().id;
+        let run=database.create_run(&conversation,"retire the old Kernel command",None).unwrap().run.id;
+        make_native(database,&run,&conversation,None,"legacy");
+        let approval_id=approval(database,&run,"native-retire","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
+        let runtime_call:String=database.with_connection(|connection|connection.query_row(
+            "SELECT t.runtime_tool_call_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",
+            [&approval_id],|row|row.get(0))).unwrap();
+        database.with_connection(|connection|connection.execute(
+            "INSERT INTO kernel_host_commands(run_id,command_key,kind,tool_call_id,decision,status,created_at,policy_version)
+             VALUES(?1,'stale-native-approval','approval',?2,'denied','pending',1,NULL)",
+            params![&run,&runtime_call])).unwrap();
+        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),1);
+        let (command_status,reason,approval_status):(String,Option<String>,String)=database.with_connection(|connection|connection.query_row(
+            "SELECT c.status,c.resolution_reason,a.status FROM kernel_host_commands c
+             JOIN approvals a ON a.tool_call_id=(SELECT id FROM tool_calls WHERE run_id=c.run_id AND runtime_tool_call_id=c.tool_call_id)
+             WHERE c.run_id=?1",
+            [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+        assert_eq!(command_status,"superseded");
+        assert!(reason.unwrap().contains("pi_native"));
+        assert_eq!(approval_status,"pending","the decision still belongs to the user");
+        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),0,"idempotent");
+        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
+        let denied:String=database.with_connection(|connection|connection.query_row(
+            "SELECT status FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
+        assert_eq!(denied,"denied");
+    }
+
+    #[test]
     fn host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue() {
         if isolated("runtime_host::native_approval_scope::tests::host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue") { return; }
         let app=app();
@@ -529,6 +563,10 @@ impl RuntimeHost {
             remove_session,_run_lease:run_lease,_session_lease:session_lease };
         SidecarExecutionWait { state:self.state.clone(),run_id:run.to_owned() }.resume()?;
         Ok(scope)
+    }
+
+    pub(crate) fn retire_native_approval_commands(&self) -> Result<usize, String> {
+        self.database.supersede_pending_native_approval_commands(crate::database::now_ms())
     }
 
     pub(crate) fn recover_native_approvals_detached(&self) -> Result<(), String> {
