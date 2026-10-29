@@ -1,0 +1,6 @@
+
+================================================================================================
+P7 artifact  assistant message with toolCalls, no toolResults
+================================================================================================
+  assistant message persisted; exiting before any toolResult is written
+  session file: .probe-s0\tmp\p7\sessions\2026-10-28T05-35-51-129Z_01a18101-f358-71a5-9294-fae3852428fb.jsonl

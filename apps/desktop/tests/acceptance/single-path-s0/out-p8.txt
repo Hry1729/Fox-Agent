@@ -1,0 +1,35 @@
+
+================================================================================================
+P8  two AgentSessions in one process
+================================================================================================
+  RSS at script start (SDK already imported) : 118.4 MiB
+  RSS after session A                        : 120.8 MiB  (delta 2.4)
+  RSS after session B                        : 128.2 MiB  (delta 7.4)
+  tools of A: [{"n":"a_read","m":"parallel"}]
+  tools of B: [{"n":"b_read","m":"parallel"}]
+  -> aborting session A at t+376.074ms
+
+  tool executions: [{"tag":"a","id":"a-call-1","name":"a_read","at":285.191,"abortedAtEntry":false},{"tag":"b","id":"b-call-1","name":"b_read","at":285.252,"abortedAtEntry":false}]
+  signal state when each tool returned: [{"tag":"b","id":"b-call-1","aborted":false},{"tag":"a","id":"a-call-1","aborted":true}]
+  A tool events: ["a-call-1","a-call-1"]
+  B tool events: ["b-call-1","b-call-1"]
+  A messages: ["user","assistant:toolUse","toolResult:a-call-1","assistant:error"]
+  B messages: ["user","assistant:toolUse","toolResult:b-call-1","assistant:stop"]
+  A terminal assistant: stopReason=error errorMessage="This operation was aborted"
+  A provider requests: 1, B provider requests: 2
+  A session file: .probe-s0\tmp\p8\a\sessions\2026-10-28T05-35-53-029Z_01a18101-fac4-7298-b315-890ec55faa7f.jsonl
+  B session file: .probe-s0\tmp\p8\b\sessions\2026-10-28T05-35-53-062Z_01a18101-fae6-7298-b315-89104987ee9f.jsonl
+
+-- verdict
+PASS  each session only ever saw its own toolCallIds  (A=["a-call-1","a-call-1"] B=["b-call-1","b-call-1"])
+PASS  each session executed only its own tool  (["a:a-call-1","b:b-call-1"])
+PASS  aborting A did not abort B: B produced its toolResult and a final assistant turn
+PASS  A saw the abort signal, B did not  ([{"tag":"b","id":"b-call-1","aborted":false},{"tag":"a","id":"a-call-1","aborted":true}])
+PASS  different cwd and different session file per session
+
+================================================================================================
+P8b  memory
+================================================================================================
+  RSS after both runs                        : 132.4 MiB
+  RSS of a bare `node -e 0` process          : 44.3 MiB
+  separate process: import Pi + 1 session    : {"rssAtStartMiB":44.8,"importMs":765.6,"rssAfterImportMiB":119.7,"sessionMs":45.4,"rssAfterSessionMiB":122.1,"rssDeltaPerSessionMiB":2.4}

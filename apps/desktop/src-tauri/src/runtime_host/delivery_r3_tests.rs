@@ -43,6 +43,7 @@ impl Fixture {
             approval_epoch: None,
         };
         let binding = RunControlBinding {
+            executor_route: None,
             schema_version: 1,
             run_id: run.clone(),
             conversation_id: conversation.id,

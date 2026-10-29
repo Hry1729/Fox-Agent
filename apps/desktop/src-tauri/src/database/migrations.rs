@@ -6829,6 +6829,214 @@ CREATE TABLE IF NOT EXISTS conversation_tool_permissions (
 );
 "#;
 
+pub(super) fn read_compatible_schema_version(connection: &Connection) -> Result<Option<i64>> {
+    let kind: Option<String> = connection
+        .query_row(
+            "SELECT type FROM main.sqlite_master WHERE name = 'schema_migrations' COLLATE NOCASE AND type IN ('table', 'view')",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    if kind != "table" {
+        return Err(schema_version_error("database.schema_invalid: schema_migrations 不是数据表".to_owned()));
+    }
+    let invalid: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.schema_migrations WHERE typeof(version) <> 'integer' OR version < 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid {
+        return Err(schema_version_error("database.schema_invalid: 数据库版本记录无效".to_owned()));
+    }
+    let current: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM main.schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current > DATABASE_SCHEMA_VERSION {
+        return Err(schema_version_error(format!(
+            "database.schema_too_new: 数据库版本 {current} 高于此 Fox 支持的版本 {DATABASE_SCHEMA_VERSION}；已停止打开，请使用兼容版本或恢复升级前的备份"
+        )));
+    }
+    Ok(Some(current))
+}
+
+fn schema_version_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+        Some(message),
+    )
+}
+
+#[cfg(test)]
+mod future_schema_guard_tests {
+    use super::*;
+    use crate::database::Database;
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct FileState {
+        bytes: Vec<u8>,
+        modified: SystemTime,
+    }
+
+    fn fixture_root(label: &str) -> PathBuf {
+        let parent = std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = parent.join(format!("fox-schema-guard-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        println!("schema guard fixture retained at {}", root.display());
+        root
+    }
+
+    fn state(path: &Path) -> Option<FileState> {
+        path.exists().then(|| FileState {
+            bytes: std::fs::read(path).unwrap(),
+            modified: std::fs::metadata(path).unwrap().modified().unwrap(),
+        })
+    }
+
+    fn wal_path(path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}-wal", path.display()))
+    }
+
+    fn shm_path(path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}-shm", path.display()))
+    }
+
+    fn seed_version(path: &Path, version: i64) -> Connection {
+        let connection = Connection::open(path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+             CREATE TABLE guard_evidence(value TEXT NOT NULL);
+             INSERT INTO guard_evidence VALUES('keep this database');",
+        ).unwrap();
+        connection.execute("INSERT INTO schema_migrations VALUES(?1, 1)", [version]).unwrap();
+        connection
+    }
+
+    fn refused(path: &Path, backups: &Path, with_backup: bool) -> String {
+        let result = if with_backup {
+            Database::open_with_migration_backup(path.to_path_buf(), backups)
+        } else {
+            Database::open(path.to_path_buf())
+        };
+        match result {
+            Ok(_) => panic!("future database must be refused: {}", path.display()),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn future_schema_blocks_both_product_open_paths_without_mutating_the_database() {
+        for with_backup in [false, true] {
+            let root = fixture_root("future");
+            let path = root.join("fox.db");
+            drop(seed_version(&path, DATABASE_SCHEMA_VERSION + 1));
+            let before = state(&path);
+            let backups = root.join("backups");
+            let error = refused(&path, &backups, with_backup);
+            assert!(error.contains("database.schema_too_new"), "{error}");
+            assert!(error.contains(&(DATABASE_SCHEMA_VERSION + 1).to_string()), "{error}");
+            assert!(error.contains(&DATABASE_SCHEMA_VERSION.to_string()), "{error}");
+            assert_eq!(state(&path), before, "the main database bytes and mtime must stay exact");
+            assert!(!wal_path(&path).exists());
+            assert!(!shm_path(&path).exists());
+            assert!(!backups.exists());
+        }
+    }
+
+    #[test]
+    fn future_schema_in_wal_is_seen_without_changing_database_or_wal() {
+        let root = fixture_root("wal");
+        let path = root.join("fox.db");
+        let connection = seed_version(&path, DATABASE_SCHEMA_VERSION);
+        connection.pragma_update(None, "journal_mode", "WAL").unwrap();
+        connection.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        connection.execute("INSERT INTO schema_migrations VALUES(?1, 2)", [DATABASE_SCHEMA_VERSION + 1]).unwrap();
+        let before = state(&path);
+        let wal_before = state(&wal_path(&path));
+        assert!(wal_before.as_ref().is_some_and(|state| !state.bytes.is_empty()));
+        let shm_before = state(&shm_path(&path));
+        let backups = root.join("backups");
+        for with_backup in [false, true] {
+            let error = refused(&path, &backups, with_backup);
+            assert!(error.contains("database.schema_too_new"), "{error}");
+            assert_eq!(state(&path), before, "the main database must not be checkpointed");
+            assert_eq!(state(&wal_path(&path)), wal_before, "committed WAL bytes and mtime must stay exact");
+            assert!(!backups.exists());
+        }
+        println!("read-only WAL probe changed SHM coordination bytes: {}",
+            shm_before != state(&shm_path(&path)));
+        drop(connection);
+    }
+
+    #[test]
+    fn supported_database_open_paths_preserve_new_current_old_and_repeated_migrations() {
+        let root = fixture_root("supported");
+        let memory = Database::open(PathBuf::from(":memory:")).unwrap();
+        assert_eq!(memory.schema_version().unwrap(), DATABASE_SCHEMA_VERSION);
+        for name in ["new", "zero-byte", "empty-sqlite"] {
+            let path = root.join(format!("{name}.db"));
+            if name == "zero-byte" {
+                std::fs::write(&path, []).unwrap();
+            } else if name == "empty-sqlite" {
+                drop(Connection::open(&path).unwrap());
+            }
+            let database = Database::open(path.clone()).unwrap();
+            assert_eq!(database.schema_version().unwrap(), DATABASE_SCHEMA_VERSION);
+            drop(database);
+            let backups = root.join(format!("{name}-backups"));
+            let current = Database::open_with_migration_backup(path, &backups).unwrap();
+            assert_eq!(current.schema_version().unwrap(), DATABASE_SCHEMA_VERSION);
+            assert!(!backups.exists());
+        }
+        let path = root.join("old.db");
+        let mut connection = Connection::open(&path).unwrap();
+        run_to_v74_for_test(&mut connection, 1).unwrap();
+        drop(connection);
+        let backups = root.join("old-backups");
+        for _ in 0..2 {
+            let database = Database::open_with_migration_backup(path.clone(), &backups).unwrap();
+            assert_eq!(database.schema_version().unwrap(), DATABASE_SCHEMA_VERSION);
+            let records: i64 = database.with_connection(|connection| connection.query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1", [DATABASE_SCHEMA_VERSION], |row| row.get(0),
+            )).unwrap();
+            assert_eq!(records, 1);
+        }
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1, "only the real v74 upgrade needs a backup");
+    }
+
+    #[test]
+    fn malformed_schema_metadata_is_not_treated_as_an_empty_database() {
+        for definition in [
+            "CREATE VIEW schema_migrations AS SELECT 1 AS version",
+            "CREATE TABLE schema_migrations(version TEXT); INSERT INTO schema_migrations VALUES('next')",
+            "CREATE TABLE schema_migrations(version INTEGER); INSERT INTO schema_migrations VALUES(NULL)",
+            "CREATE TABLE schema_migrations(version INTEGER); INSERT INTO schema_migrations VALUES(-1)",
+        ] {
+            let root = fixture_root("invalid");
+            let path = root.join("fox.db");
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(definition).unwrap();
+            drop(connection);
+            let before = state(&path);
+            let error = refused(&path, &root.join("backups"), true);
+            assert!(error.contains("database.schema_invalid"), "{error}");
+            assert_eq!(state(&path), before);
+            assert!(!wal_path(&path).exists());
+            assert!(!shm_path(&path).exists());
+            assert!(!root.join("backups").exists());
+        }
+    }
+}
+
 pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     run_with_target(connection, now, MigrationTarget::Latest)
 }
@@ -6857,6 +7065,8 @@ enum MigrationTarget {
     V94,
     #[cfg(test)]
     V98,
+    #[cfg(test)]
+    V101,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7311,6 +7521,18 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // existing row still maps to generation 1 and rolling back simply ignores
     // the ledger (an older build keeps one generation, as it always did).
     apply_migration(&transaction, RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, MIGRATION_99_RUNTIME_SESSION_GENERATIONS, now)?;
+    // v100 is intentionally absent: the contacts plan reserves it. v101
+    // (single-path convergence, S2) gives the tool ledger a context generation
+    // and a close reason, and widens `state` with `not_started`. The widening
+    // needs a table rebuild, so the Rust step runs first and the SQL half only
+    // records the version plus the generation index.
+    widen_kernel_tool_calls_for_v101(&transaction)?;
+    apply_migration(&transaction, NATIVE_TOOL_LEDGER_SCHEMA_VERSION, MIGRATION_101_NATIVE_TOOL_LEDGER, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V101) {
+        return finish_transaction(transaction);
+    }
+    apply_migration(&transaction,NATIVE_MODEL_BUDGET_SCHEMA_VERSION,MIGRATION_102_NATIVE_MODEL_BUDGET,now)?;
     finish_transaction(transaction)
 }
 
@@ -7783,6 +8005,336 @@ CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_state
     Ok(tool_needs_rebuild)
 }
 
+/// v101 (single-path convergence, S2): the tool ledger vocabulary the Pi-native
+/// executor needs. Numbering deliberately skips v100, which the contacts plan
+/// reserves.
+pub(crate) const NATIVE_TOOL_LEDGER_SCHEMA_VERSION: i64 = 101;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_TOOL_LEDGER_SCHEMA_VERSION);
+
+/// Index half of v101. The column half and the CHECK widening are Rust
+/// (`widen_kernel_tool_calls_for_v101`), because SQLite cannot widen a CHECK in
+/// place.
+///
+/// Opening a Run reconciles one context generation at a time and needs that
+/// generation's positions in source order — the order the batch barrier reasons
+/// about — which is what this index serves.
+const MIGRATION_101_NATIVE_TOOL_LEDGER: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_generation
+    ON kernel_tool_calls(run_id, context_generation, source_order);
+"#;
+
+pub(crate) const NATIVE_MODEL_BUDGET_SCHEMA_VERSION: i64 = 102;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_MODEL_BUDGET_SCHEMA_VERSION);
+
+pub(crate) const MIGRATION_102_NATIVE_MODEL_BUDGET: &str = r#"
+CREATE TABLE IF NOT EXISTS native_model_budget_limits (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    binding_hash TEXT NOT NULL CHECK(length(binding_hash)=71 AND binding_hash GLOB 'sha256:*'),
+    limits_json TEXT NOT NULL CHECK(json_valid(limits_json) AND json_type(limits_json)='object'),
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS native_model_requests (
+    run_id TEXT NOT NULL REFERENCES native_model_budget_limits(run_id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL CHECK(length(trim(request_id)) BETWEEN 1 AND 512),
+    stage TEXT NOT NULL CHECK(stage IN ('agent','planner','compaction')),
+    requested_output INTEGER NOT NULL CHECK(requested_output BETWEEN 1 AND 9007199254740991),
+    admitted_output INTEGER NOT NULL CHECK(admitted_output BETWEEN 0 AND requested_output),
+    reserved_total INTEGER NOT NULL CHECK(reserved_total BETWEEN 0 AND 9007199254740991),
+    reserved_output INTEGER NOT NULL CHECK(reserved_output BETWEEN 0 AND 9007199254740991),
+    admitted_at INTEGER NOT NULL,
+    deadline_at INTEGER NOT NULL CHECK(deadline_at>=admitted_at),
+    admission_json TEXT NOT NULL CHECK(json_valid(admission_json)),
+    completion_json TEXT CHECK(completion_json IS NULL OR json_valid(completion_json)),
+    input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens BETWEEN 0 AND 9007199254740991),
+    output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens BETWEEN 0 AND 9007199254740991),
+    status TEXT NOT NULL CHECK(status IN ('admitted','denied','completed','failed','cancelled')),
+    PRIMARY KEY(run_id,request_id),
+    CHECK((status IN ('admitted','denied') AND completion_json IS NULL AND input_tokens IS NULL AND output_tokens IS NULL)
+       OR (status IN ('completed','failed','cancelled') AND completion_json IS NOT NULL)),
+    CHECK(status<>'denied' OR (admitted_output=0 AND reserved_total=0 AND reserved_output=0)),
+    CHECK(status<>'admitted' OR (admitted_output>0 AND deadline_at>admitted_at))
+);
+CREATE INDEX IF NOT EXISTS idx_native_model_requests_run ON native_model_requests(run_id,status);
+"#;
+
+/// Teach `kernel_tool_calls` two things without losing a single existing row.
+///
+/// * `context_generation` records which context generation a position belongs
+///   to, so a Run reopened after a reset can tell "this call is from the retired
+///   context" apart from "this call is still owed". Every pre-v101 row belongs
+///   to generation 1, which is how v98 already reads an unmapped session.
+/// * `close_reason` says *why* a position ended without a result, and `state`
+///   gains `not_started`. The SDK reports `tool_execution_end` for positions it
+///   never ran; the Host must close those as never-executed rather than record a
+///   failure the model would read as "the tool broke".
+///
+/// Widening the CHECK forces a rebuild, and `kernel_host_actions` references
+/// this table with `ON DELETE CASCADE`. That is safe only because the migration
+/// transaction runs with `foreign_keys` off (`run_with_target` sets it before
+/// `BEGIN IMMEDIATE`, and the pragma is a no-op inside a transaction): with
+/// enforcement on, dropping the old table would silently delete every run's Host
+/// action ledger while `PRAGMA foreign_key_check` still reported a clean
+/// database, because cascades are legal deletions.
+///
+/// Idempotent: a table that already accepts `'not_started'` is not rebuilt, and
+/// both columns go through `ensure_column_if_missing`.
+fn widen_kernel_tool_calls_for_v101(connection: &Connection) -> Result<bool> {
+    if !sqlite_table_exists(connection, "kernel_tool_calls")? {
+        return Ok(false);
+    }
+    let needs_rebuild = !sqlite_object_accepts(connection, "kernel_tool_calls", "'not_started'")?;
+    if needs_rebuild {
+        // Only the eleven columns every post-v49 table is guaranteed to have are
+        // copied; the two new ones take their defaults.
+        connection.execute_batch(
+            r#"
+CREATE TABLE kernel_tool_calls_v101 (
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    source_order INTEGER NOT NULL,
+    canonical_input_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending','waiting_approval','running','completed','failed','cancelled','expired','not_started'
+    )),
+    result_json TEXT,
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    dispatch_idempotency_key TEXT,
+    context_generation INTEGER NOT NULL DEFAULT 1,
+    close_reason TEXT CHECK(close_reason IS NULL OR close_reason IN (
+        'unknown_tool','validation_failed','intercepted','aborted','not_started'
+    )),
+    PRIMARY KEY(run_id, tool_call_id)
+);
+INSERT INTO kernel_tool_calls_v101
+    (run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json, state,
+     result_json, created_at, settled_at, dispatch_idempotency_key)
+SELECT run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json, state,
+       result_json, created_at, settled_at, dispatch_idempotency_key
+FROM kernel_tool_calls;
+DROP TABLE kernel_tool_calls;
+ALTER TABLE kernel_tool_calls_v101 RENAME TO kernel_tool_calls;
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_batch
+    ON kernel_tool_calls(run_id, batch_id);
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_state
+    ON kernel_tool_calls(run_id, state);
+"#,
+        )?;
+        let violations: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+            [],
+            |row| row.get(0),
+        )?;
+        if violations != 0 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                Some(format!(
+                    "kernel v101 rebuild broke {violations} foreign-key relationship(s)"
+                )),
+            ));
+        }
+    }
+    // Also covers a database whose CHECK was widened by an earlier build that
+    // never added the columns; a no-op right after the rebuild above.
+    ensure_column_if_missing(
+        connection,
+        "kernel_tool_calls",
+        "context_generation",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    ensure_column_if_missing(
+        connection,
+        "kernel_tool_calls",
+        "close_reason",
+        "TEXT CHECK(close_reason IS NULL OR close_reason IN ('unknown_tool','validation_failed','intercepted','aborted','not_started'))",
+    )?;
+    ensure_column_if_missing(connection, "kernel_tool_calls", "input_digest", "TEXT")?;
+    ensure_column_if_missing(connection, "kernel_tool_calls", "claimed_at", "INTEGER")?;
+    Ok(needs_rebuild)
+}
+
+#[cfg(test)]
+mod native_model_budget_v102_tests {
+    use super::*;
+
+    #[test]
+    fn upgrading_v101_adds_empty_budget_tables_without_rewriting_tool_facts() {
+        let mut connection=Connection::open_in_memory().unwrap();
+        run_with_target(&mut connection,100,MigrationTarget::V101).unwrap();
+        connection.execute("INSERT INTO kernel_tool_calls(run_id,tool_call_id,batch_id,tool,source_order,
+            canonical_input_json,state,result_json,created_at,settled_at)
+            VALUES('historical','call','batch','read',0,'{}','completed','{\"proof\":\"retained\"}',1,2)",[]).unwrap();
+        for now in [200,300] {
+            run_with_target(&mut connection,now,MigrationTarget::Latest).unwrap();
+            let fact:(String,String)=connection.query_row("SELECT state,result_json FROM kernel_tool_calls WHERE run_id='historical'",[],
+                |row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(fact,("completed".into(),"{\"proof\":\"retained\"}".into()));
+            for table in ["native_model_budget_limits","native_model_requests"] {
+                let count:i64=connection.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|row|row.get(0)).unwrap();
+                assert_eq!(count,0);
+            }
+            let count:i64=connection.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=102",[],|row|row.get(0)).unwrap();
+            assert_eq!(count,1);
+            let violations:i64=connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check",[],|row|row.get(0)).unwrap();
+            assert_eq!(violations,0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_tool_ledger_v101_tests {
+    use super::*;
+
+    /// The rebuild has to widen the state vocabulary *and* keep every dependent
+    /// row. `kernel_host_actions` references `kernel_tool_calls` with
+    /// `ON DELETE CASCADE`, so a rebuild that ran with foreign keys on would
+    /// empty the Host action ledger of every run while
+    /// `PRAGMA foreign_key_check` still reported a clean database.
+    #[test]
+    fn widening_the_ledger_keeps_rows_and_the_host_action_that_cascades_off_them() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 100).expect("create database");
+        assert_eq!(
+            connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("version"),
+            DATABASE_SCHEMA_VERSION
+        );
+        // A database already at the v101 shape must not be rebuilt on every open.
+        assert!(
+            !widen_kernel_tool_calls_for_v101(&connection).expect("widen"),
+            "an already widened table is left alone"
+        );
+
+        connection
+            .execute_batch(
+                r#"
+INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool, source_order,
+    canonical_input_json, state, result_json, created_at, settled_at,
+    dispatch_idempotency_key, context_generation)
+VALUES ('run-1','call-1','batch-1','write_file',0,'{}','running',NULL,1,NULL,'idem-1',7);
+INSERT INTO kernel_host_actions(run_id, tool_call_id, body_json, body_hash, created_at)
+VALUES ('run-1','call-1','{"action":"dispatch"}','sha256:body',1);
+"#,
+            )
+            .expect("seed a dispatched call and its Host action");
+
+        // Narrow the ledger back to its pre-v101 shape and forget the version, so
+        // the next `run` is a real upgrade rather than a no-op.
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .expect("foreign keys off");
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE kernel_tool_calls_v100 (
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    source_order INTEGER NOT NULL,
+    canonical_input_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending','waiting_approval','running','completed','failed','cancelled','expired'
+    )),
+    result_json TEXT,
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    dispatch_idempotency_key TEXT,
+    PRIMARY KEY(run_id, tool_call_id)
+);
+INSERT INTO kernel_tool_calls_v100
+    (run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json, state,
+     result_json, created_at, settled_at, dispatch_idempotency_key)
+SELECT run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json, state,
+       result_json, created_at, settled_at, dispatch_idempotency_key
+FROM kernel_tool_calls;
+DROP TABLE kernel_tool_calls;
+ALTER TABLE kernel_tool_calls_v100 RENAME TO kernel_tool_calls;
+CREATE INDEX idx_kernel_tool_calls_batch ON kernel_tool_calls(run_id, batch_id);
+CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
+DELETE FROM schema_migrations WHERE version = 101;
+"#,
+            )
+            .expect("narrow to the pre-v101 shape");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys on");
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool,
+                     source_order, canonical_input_json, state, created_at)
+                     VALUES ('run-1','call-2','batch-1','read',1,'{}','not_started',1)",
+                    []
+                )
+                .is_err(),
+            "the narrowed table must really refuse not_started before the upgrade"
+        );
+
+        run(&mut connection, 200).expect("upgrade to v101");
+
+        let (state, generation, idempotency_key, close_reason): (String, i64, Option<String>, Option<String>) =
+            connection
+                .query_row(
+                    "SELECT state, context_generation, dispatch_idempotency_key, close_reason
+                     FROM kernel_tool_calls WHERE tool_call_id = 'call-1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("the upgraded row is still there");
+        assert_eq!(
+            (state.as_str(), generation, idempotency_key.as_deref(), close_reason.as_deref()),
+            ("running", 1, Some("idem-1"), None),
+            "an upgraded position keeps its facts and reads as generation 1"
+        );
+        let host_actions: i64 = connection
+            .query_row("SELECT COUNT(*) FROM kernel_host_actions", [], |row| row.get(0))
+            .expect("count host actions");
+        assert_eq!(host_actions, 1, "the cascade child survives the rebuild");
+        let generation_index: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'
+                 AND name = 'idx_kernel_tool_calls_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count indexes");
+        assert_eq!(generation_index, 1, "the reconcile query keeps its index");
+
+        connection
+            .execute(
+                "UPDATE kernel_tool_calls SET state = 'not_started', close_reason = 'not_started'
+                 WHERE tool_call_id = 'call-1'",
+                [],
+            )
+            .expect("a position the SDK never ran closes as not_started");
+        assert!(
+            connection
+                .execute(
+                    "UPDATE kernel_tool_calls SET close_reason = 'model_said_so'
+                     WHERE tool_call_id = 'call-1'",
+                    []
+                )
+                .is_err(),
+            "close_reason is a closed vocabulary, not free text"
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE kernel_tool_calls SET state = 'not_really_started'
+                     WHERE tool_call_id = 'call-1'",
+                    []
+                )
+                .is_err(),
+            "widening the CHECK must not remove it"
+        );
+    }
+}
+
 /// Whether a table exists. Used so the pre-transaction v68 step can skip a fresh
 /// database whose Kernel tables are still created by the migration runner.
 fn sqlite_table_exists(connection: &Connection, table: &str) -> Result<bool> {
@@ -7991,7 +8543,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 99);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 102);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -8040,7 +8592,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 99);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 102);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -15684,8 +16236,12 @@ mod delivery_acceptance_migration_tests {
         // (model_providers.protocol_profiles) are the only migrations after
         // v94.
         assert_eq!(PROVIDER_PROTOCOL_SCHEMA_VERSION, 97);
-        assert_eq!(DATABASE_SCHEMA_VERSION, RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION);
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
+        // v100 is skipped on purpose: the contacts plan reserves it. The runner
+        // applies versions by presence, not by order, so the gap is harmless.
+        assert_eq!(NATIVE_TOOL_LEDGER_SCHEMA_VERSION, 101);
+        assert_eq!(NATIVE_MODEL_BUDGET_SCHEMA_VERSION, 102);
+        assert_eq!(DATABASE_SCHEMA_VERSION, NATIVE_MODEL_BUDGET_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection

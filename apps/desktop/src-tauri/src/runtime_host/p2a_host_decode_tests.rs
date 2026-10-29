@@ -438,6 +438,7 @@ fn p2a_freeze_binding(
         approval_epoch: None,
     };
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run.to_owned(),
         conversation_id: conversation.to_owned(),
@@ -559,6 +560,7 @@ fn p2a_typed_root_structurally_invalid_binding_is_io() {
         approval_epoch: None,
     };
     let invalid = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run.clone(),
         conversation_id: conversation.id.clone(),

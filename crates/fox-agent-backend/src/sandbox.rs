@@ -1282,7 +1282,13 @@ impl SystemProbe for RealProbe {
     }
 
     fn run(&self, program: &Path, args: &[&str]) -> Option<String> {
-        let output = std::process::Command::new(program)
+        let mut command = std::process::Command::new(program);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        }
+        let output = command
             .args(args)
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -91,6 +91,10 @@ export const hostToolResultStorage = (_id, result) => result && typeof result ==
 
 async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
   const response = await requestHost('tool.execute', { toolCallId, tool, input }, signal)
+  return decodeHostToolResponse(tool, response)
+}
+
+export function decodeHostToolResponse(tool, response) {
   const payload = response?.payload ?? {}
   if (payload.isError || !Object.prototype.hasOwnProperty.call(payload, 'result')) {
     const baseMessage = payload.error || `Fox host tool ${tool} failed.`

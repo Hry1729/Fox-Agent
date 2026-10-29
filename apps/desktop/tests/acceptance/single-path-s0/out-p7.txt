@@ -1,0 +1,71 @@
+artifact OK: .probe-s0\tmp\p7\sessions\2026-10-28T05-35-51-129Z_01a18101-f358-71a5-9294-fae3852428fb.jsonl entries=5
+
+================================================================================================
+P7c  control: reopen the orphaned session and prompt (no repair)
+================================================================================================
+  SDK-built context:
+   {"role":"user","text":"go"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_orphan_1","call_orphan_2"]}
+  orphaned toolCalls: ["call_orphan_1","call_orphan_2"]
+
+  raw transcript the provider would receive:
+   {"role":"user","text":"go"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_orphan_1","call_orphan_2"]}
+   {"role":"user","text":"carry on"}
+   {"role":"assistant","stopReason":"stop","toolCalls":[]}
+  transformMessages inserts 2 synthetic result(s): ["call_orphan_1","call_orphan_2"]
+PASS  (c) a session with orphaned toolCalls still opens and runs
+PASS  (c) the raw transcript still contains the orphaned toolCalls
+PASS  (c) the provider layer repairs them with synthetic results
+
+================================================================================================
+P7a  reopen + SessionManager.appendMessage() for each orphaned toolCallId
+================================================================================================
+  orphans: ["call_orphan_1","call_orphan_2"]  leaf=5646aec2
+  appendMessage(toolResult call_orphan_1) -> entry 7c817b02
+  appendMessage(toolResult call_orphan_2) -> entry 988c59a1
+  context after repair:
+   {"role":"user","text":"go"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_orphan_1","call_orphan_2"]}
+   {"role":"toolResult","toolCallId":"call_orphan_1","isError":true,"text":"host recovery: outcome unknown, "}
+   {"role":"toolResult","toolCallId":"call_orphan_2","isError":true,"text":"host recovery: outcome unknown, "}
+PASS  (a) no orphaned toolCalls remain right after the repair  ([])
+
+  raw transcript the provider would receive:
+   {"role":"user","text":"go"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_orphan_1","call_orphan_2"]}
+   {"role":"toolResult","toolCallId":"call_orphan_1","isError":true,"text":"host recovery: outcome unknown, "}
+   {"role":"toolResult","toolCallId":"call_orphan_2","isError":true,"text":"host recovery: outcome unknown, "}
+   {"role":"user","text":"carry on"}
+   {"role":"assistant","stopReason":"stop","toolCalls":[]}
+PASS  (a) no duplicate toolResult per toolCallId  ({"call_orphan_1":1,"call_orphan_2":1})
+PASS  (a) the provider layer adds no synthetic result  ([])
+PASS  (a) no orphaned toolCall reaches the provider  ([])
+PASS  (a) the repaired results are positioned before the new user turn
+
+================================================================================================
+P7b  reopen + SessionManager.branch() to the entry before the orphaned assistant message
+================================================================================================
+  orphaned assistant entry: 5646aec2 (parent 44dc167b)
+  leaf moved to 44dc167b
+  context after branch:
+   {"role":"user","text":"go"}
+PASS  (b) the orphaned assistant message is gone from the active path
+
+  raw transcript the provider would receive:
+   {"role":"user","text":"go"}
+   {"role":"user","text":"carry on"}
+   {"role":"assistant","stopReason":"stop","toolCalls":[]}
+PASS  (b) no toolResult at all for the abandoned toolCalls
+PASS  (b) the file stays append-only: the abandoned entry is still in it  (entries=7)
+PASS  (b) the provider layer needs no synthetic result
+
+================================================================================================
+P7 summary
+================================================================================================
+  (a) active transcript: [{"role":"user","text":"go"},{"role":"assistant","stopReason":"toolUse","toolCalls":["call_orphan_1","call_orphan_2"]},{"role":"toolResult","toolCallId":"call_orphan_1","isError":true,"text":"host recovery: outcome unknown, "},{"role":"toolResult","toolCallId":"call_orphan_2","isError":true,"text":"host recovery: outcome unknown, "},{"role":"user","text":"carry on"},{"role":"assistant","stopReason":"stop","toolCalls":[]}]
+  (b) active transcript: [{"role":"user","text":"go"},{"role":"user","text":"carry on"},{"role":"assistant","stopReason":"stop","toolCalls":[]}]
+PASS  both recovery paths leave a provider-valid transcript
+
+  (a) keeps the assistant turn; the Host injects a result for each orphaned toolCall.
+  (b) removes the assistant turn from the active path; the model never learns it called those tools.

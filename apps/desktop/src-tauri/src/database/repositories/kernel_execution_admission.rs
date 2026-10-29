@@ -223,7 +223,7 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
         .map_err(|error| error.to_string())?;
     // Budget ceiling: bound from the run's own durable binding when present.
     // The executor may only tighten it later, never widen it.
-    let budget_ceiling_ms: i64 = transaction
+    let budget_ceiling_ms: i64 = match transaction
         .query_row(
             "SELECT binding_json FROM run_control_bindings WHERE run_id=?1",
             params![run_id],
@@ -231,9 +231,16 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
         )
         .optional()
         .map_err(|error| error.to_string())?
-        .and_then(|json| serde_json::from_str::<fox_engine_protocol::RunControlBinding>(&json).ok())
-        .map(|binding| binding.budgets.tool_execution_ms)
-        .unwrap_or(0);
+    {
+        // A binding that cannot be decoded is not an absent binding: falling back
+        // to 0 would silently strip this Run's whole tool budget instead of
+        // refusing to dispatch it.
+        Some(json) => serde_json::from_str::<fox_engine_protocol::RunControlBinding>(&json)
+            .map_err(|error| format!("corrupt frozen control binding: {error}"))?
+            .budgets
+            .tool_execution_ms,
+        None => 0,
+    };
     let policy_version: Option<u64> = transaction
         .query_row(
             "SELECT version FROM kernel_execution_policies WHERE conversation_id=?1",
@@ -1080,10 +1087,10 @@ fn read_attempt_in_tx(
 }
 
 impl Database {
-    /// Issue the fixed file credential for the production Legacy Host path.
+    /// Issue the fixed file credential for a managed Host file call.
     ///
     /// Every input comes from durable Host facts in this transaction: the
-    /// already-running legacy `tool_calls` row, its frozen run-control binding,
+    /// already-running `tool_calls` row, its Legacy or Pi-native binding,
     /// the live policy version, a consumed approval when policy/hooks require
     /// one, and the Host observation for the canonical target. The credential
     /// row itself is the durable consumed-dispatch fact; its primary key makes
@@ -1902,8 +1909,13 @@ fn issue_legacy_file_credential_in_tx(
         return Err("persisted control binding hash mismatch".into());
     }
     binding.validate()?;
-    if binding.authority != fox_engine_protocol::ExecutionAuthority::Legacy
-        || binding_authority != "legacy"
+    let expected_authority = match super::native_route::writer_route(transaction, run_id)
+        .map_err(|error| error.to_string())? {
+        super::native_route::WriterRoute::Legacy => "legacy",
+        super::native_route::WriterRoute::PiNative => "authoritative",
+        super::native_route::WriterRoute::Kernel => return Err("legacy file credential cannot admit an unrouted Kernel Run".into()),
+    };
+    if binding_authority != expected_authority
         || binding.run_id != run_id
         || binding.conversation_id != conversation_id
         || binding.conversation_id != run_conversation_id
@@ -2149,11 +2161,21 @@ fn unsatisfied_requirement(
                 |r| r.get(0),
             )
             .optional()?;
-        let live_budget = json
-            .and_then(|value| {
-                serde_json::from_str::<fox_engine_protocol::RunControlBinding>(&value).ok()
-            })
-            .map(|binding| binding.budgets.tool_execution_ms);
+        // Distinguish a binding that cannot be decoded from one that is absent;
+        // both refuse, but only one is a data-integrity failure worth reporting.
+        let live_budget = match json {
+            Some(value) => Some(
+                serde_json::from_str::<fox_engine_protocol::RunControlBinding>(&value)
+                    .map_err(|error| {
+                        rusqlite::Error::InvalidParameterName(format!(
+                            "corrupt frozen control binding: {error}"
+                        ))
+                    })?
+                    .budgets
+                    .tool_execution_ms,
+            ),
+            None => None,
+        };
         if credential.budget_ceiling_ms <= 0 || live_budget != Some(credential.budget_ceiling_ms) {
             return Ok(Some("budget_binding_unavailable"));
         }
@@ -2481,6 +2503,15 @@ mod tests {
         tool_call_id: &str,
         requires_approval: bool,
     ) -> (Database, String, String, u64) {
+        host_file_fixture(mode, tool_call_id, requires_approval, super::super::native_route::WriterRoute::Legacy)
+    }
+
+    fn host_file_fixture(
+        mode: &str,
+        tool_call_id: &str,
+        requires_approval: bool,
+        route: super::super::native_route::WriterRoute,
+    ) -> (Database, String, String, u64) {
         let (db, _, conversation, run) = fixture();
         let root = std::env::temp_dir().join(format!("fox-legacy-file-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -2498,8 +2529,6 @@ mod tests {
         })
         .unwrap();
         db.update_conversation_permission_mode(&conversation, mode)
-            .unwrap();
-        db.freeze_legacy_run_control(&run, "legacy-file-test")
             .unwrap();
         let input = serde_json::json!({"path":"document.txt","content":"new bytes"});
         let record = db
@@ -2528,6 +2557,21 @@ mod tests {
                 .unwrap()
                 .expect("approval must resolve");
             assert!(db.claim_approved_tool_call(&run, tool_call_id).unwrap());
+        }
+        // Seed the Host facts first so the unrouted Kernel test reaches the
+        // credential boundary with the same durable source row.
+        if route == super::super::native_route::WriterRoute::Legacy {
+            db.freeze_legacy_run_control(&run, "legacy-file-test").unwrap();
+        } else {
+            use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
+            let permission = FrozenPermission { mode:match mode { "ask"=>PermissionMode::Ask,"read_only"=>PermissionMode::ReadOnly,_=>PermissionMode::Allow },
+                project_root:Some(root_text),grants:Vec::new(),approval_epoch:None };
+            db.freeze_run_control(&RunControlBinding { schema_version:fox_engine_protocol::CONTROL_SCHEMA_VERSION,
+                run_id:run.clone(),conversation_id:conversation.clone(),engine_id:"pi".into(),execution_profile_id:"legacy-file-test".into(),
+                authority:ExecutionAuthority::Authoritative,
+                executor_route:(route==super::super::native_route::WriterRoute::PiNative).then_some(ExecutorRoute::PiNative),
+                read_only_executor:ResourceExecutor::Rust,permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),
+                permission,budgets:TimeBudgets::default() }).unwrap();
         }
         let input_json = crate::canonical_json::to_string(&input).unwrap();
         let resolver = crate::runtime_host::managed_files::HostFileTargetResolver {
@@ -2605,6 +2649,68 @@ mod tests {
             .issue_legacy_file_credential(&run, "legacy-stale-write", version + 1)
             .unwrap_err()
             .contains("policy_version_conflict"));
+    }
+
+    #[test]
+    fn native_file_credential_preserves_host_facts_and_the_single_execution_claim() {
+        let (db,conversation,run,version)=host_file_fixture("allow","native-write",false,super::super::native_route::WriterRoute::PiNative);
+        let credential=db.issue_legacy_file_credential(&run,"native-write",version).unwrap();
+        assert_eq!(credential.action_class,ActionClass::Write);
+        assert_eq!(credential.run_id,run);
+        assert_eq!(credential.conversation_id,conversation);
+        assert_eq!(db.issue_legacy_file_credential(&run,"native-write",version).unwrap(),credential);
+        db.verify_execution_credential(&run,&credential).unwrap();
+        db.revalidate_execution_credential(&credential).unwrap();
+        assert!(credential.requires_replace_grant,"the native route cannot bypass replacement confirmation");
+        let baseline=credential.file_baseline.as_ref().unwrap();
+        db.approve_whole_file_replacement(&run,&credential.dispatch_id,&conversation,&baseline.target_identity,&baseline.version,
+            credential.replace_candidate_digest.as_deref().unwrap(),credential.replace_request_digest.as_deref().unwrap()).unwrap();
+        assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"native-host-fixture").unwrap(),AttemptOutcome::Claimed);
+        db.revalidate_execution_credential(&credential).unwrap();
+        assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"duplicate-native-host").unwrap(),AttemptOutcome::Unknown);
+    }
+
+    #[test]
+    fn native_file_credential_cannot_adopt_unrouted_kernel_or_corrupt_binding_columns() {
+        let (db,_,run,version)=host_file_fixture("allow","kernel-host-write",false,super::super::native_route::WriterRoute::Kernel);
+        assert!(db.issue_legacy_file_credential(&run,"kernel-host-write",version).unwrap_err().contains("unrouted Kernel"));
+        assert!(db.read_execution_credential(&run,&encode_dispatch_id(&run,"kernel-host-write").unwrap()).unwrap().is_none());
+        for column in ["authority","engine_id","binding_hash"] {
+            let (db,_,run,version)=host_file_fixture("allow","native-corrupt-write",false,super::super::native_route::WriterRoute::PiNative);
+            let sql=match column {
+                "authority"=>"UPDATE run_control_bindings SET authority='legacy' WHERE run_id=?1",
+                "engine_id"=>"UPDATE run_control_bindings SET engine_id='codex' WHERE run_id=?1",
+                _=>"UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",
+            };
+            db.with_connection(|connection|connection.execute(sql,[&run])).unwrap();
+            assert!(db.issue_legacy_file_credential(&run,"native-corrupt-write",version).is_err(),"{column}");
+            assert!(db.read_execution_credential(&run,&encode_dispatch_id(&run,"native-corrupt-write").unwrap()).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn native_file_credential_still_requires_the_original_consumed_approval() {
+        let (db,_,run,version)=host_file_fixture("ask","native-approved-write",true,super::super::native_route::WriterRoute::PiNative);
+        assert!(db.issue_legacy_file_credential(&run,"native-approved-write",version).is_ok());
+        db.with_connection(|connection|connection.execute("UPDATE approvals SET claimed_at=NULL,claimed_by_run_id=NULL WHERE tool_call_id=(
+            SELECT id FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='native-approved-write')",[&run])).unwrap();
+        assert!(db.issue_legacy_file_credential(&run,"native-approved-write",version).unwrap_err().contains("approval_required"));
+
+        let (db,_,run,version)=host_file_fixture("ask","native-no-approval-write",false,super::super::native_route::WriterRoute::PiNative);
+        assert!(db.issue_legacy_file_credential(&run,"native-no-approval-write",version).unwrap_err().contains("approval_required"));
+    }
+
+    #[test]
+    fn native_file_credential_refuses_read_only_stale_policy_and_revocation_before_claim() {
+        let (db,_,run,version)=host_file_fixture("read_only","native-read-only-write",false,super::super::native_route::WriterRoute::PiNative);
+        assert!(db.issue_legacy_file_credential(&run,"native-read-only-write",version).unwrap_err().contains("policy_denied"));
+        let (db,conversation,run,version)=host_file_fixture("allow","native-revoked-write",false,super::super::native_route::WriterRoute::PiNative);
+        assert!(db.issue_legacy_file_credential(&run,"native-revoked-write",version+1).unwrap_err().contains("policy_version_conflict"));
+        let credential=db.issue_legacy_file_credential(&run,"native-revoked-write",version).unwrap();
+        db.update_conversation_permission_mode(&conversation,"read_only").unwrap();
+        assert!(db.revalidate_execution_credential(&credential).is_err());
+        let outcome=db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"revoked-native-host").unwrap();
+        assert!(matches!(outcome,AttemptOutcome::AlreadyRefused {code} if code=="policy_version_conflict" || code=="policy_denied"));
     }
 
     fn credential_for(

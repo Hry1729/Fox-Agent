@@ -41,6 +41,7 @@ fn artifact_gate_fixture() -> (Database, PathBuf, String, String, std::path::Pat
         approval_epoch: None,
     };
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run_id.clone(),
         conversation_id: conversation.id.clone(),
@@ -235,6 +236,7 @@ fn kernel_gate_accepts_own_conversation_artifact_and_rejects_abuse() {
         .create_conversation(db.default_agent_id(), None, Some(root.to_str().unwrap()), Some("allow"))
         .unwrap();
     let foreign_binding = RunControlBinding {
+        executor_route: None,
         conversation_id: foreign.id.clone(),
         ..policy.binding.clone()
     };

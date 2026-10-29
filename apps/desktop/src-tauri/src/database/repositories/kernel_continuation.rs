@@ -760,6 +760,7 @@ mod tests {
             approval_epoch: None,
         };
         let binding = fox_engine_protocol::RunControlBinding {
+            executor_route: None,
             schema_version: 1,
             run_id: source_id.clone(),
             conversation_id: conversation.id.clone(),

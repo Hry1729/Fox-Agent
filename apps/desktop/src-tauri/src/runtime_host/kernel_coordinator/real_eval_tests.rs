@@ -2611,6 +2611,7 @@ fn prepare_eval_run_with_budgets(
         approval_epoch: None,
     };
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run_id.clone(),
         conversation_id: conversation.id,

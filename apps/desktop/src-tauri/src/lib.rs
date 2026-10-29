@@ -272,6 +272,7 @@ pub fn run() {
             // path only when a preview uses the cache.
             let _ = maintenance::recover_knowledge_preview_cache_at_startup(&app.state::<AppState>());
             app.state::<AppState>().runtime_host.recover_kernel_runs_detached()?;
+            app.state::<AppState>().runtime_host.recover_native_approvals_detached()?;
             if let Some(windows) = &isolated_windows {
                 for config in windows {
                     tauri::WebviewWindowBuilder::from_config(app,config)?

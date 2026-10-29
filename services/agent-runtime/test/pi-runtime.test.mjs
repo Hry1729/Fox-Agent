@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
@@ -8,8 +9,11 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
+import { canonicalPermission } from '../src/control-binding.mjs'
 
 const runtimePath = fileURLToPath(new URL('../src/pi-runtime.mjs', import.meta.url))
+const crashRuntimePath = fileURLToPath(new URL('./fixtures/pi-runtime-crash.mjs', import.meta.url))
+const resourceRuntimePath = fileURLToPath(new URL('./fixtures/pi-runtime-resource.mjs', import.meta.url))
 const LEGACY_WORKFLOW_MUTATORS = [
   'workflow_start',
   'workflow_stage_start',
@@ -18,37 +22,68 @@ const LEGACY_WORKFLOW_MUTATORS = [
   'workflow_cancel',
 ]
 
-function startRuntime() {
-  const child = spawn(process.execPath, [runtimePath], { stdio: ['pipe', 'pipe', 'pipe'] })
+function startRuntime({ modelAdmission, modelCompletion, crashPoint, resourceProbe = false } = {}) {
+  const child = spawn(process.execPath, [crashPoint ? crashRuntimePath : resourceProbe ? resourceRuntimePath : runtimePath], {
+    stdio: ['pipe', 'pipe', 'pipe'], ...(crashPoint ? { env: { ...process.env, FOX_TEST_CRASH_POINT: crashPoint } } : {}),
+  })
   const childClosed = new Promise((resolve) => child.once('close', resolve))
   // A spawn error still emits close, but must not become an unhandled event.
   child.on('error', () => {})
   const messages = []
   const waiters = []
+  const resourceSamples = []
+  const resourceWaiters = []
+  const diagnostics = createInterface({ input: child.stderr, crlfDelay: Infinity })
+  diagnostics.on('line', line => {
+    if (!line.startsWith('FOX_RESOURCE_SAMPLE:')) return
+    resourceSamples.push(JSON.parse(line.slice('FOX_RESOURCE_SAMPLE:'.length)))
+    for (const waiter of [...resourceWaiters]) waiter()
+  })
+  const respond = (request, type, payload = {}) => {
+    const response = createEnvelope('response', type, {
+      requestId: request.id, conversationId: request.conversationId,
+      runtimeSessionId: request.runtimeSessionId, runId: request.runId, payload,
+    })
+    child.stdin.write(`${JSON.stringify(response)}\n`)
+    return response
+  }
   const output = createInterface({ input: child.stdout, crlfDelay: Infinity })
   output.on('line', (line) => {
-    messages.push(JSON.parse(line))
+    const message = JSON.parse(line)
+    messages.push(message)
     for (const waiter of [...waiters]) waiter()
+    if (message.kind === 'request' && message.type === 'model_request.admit' && modelAdmission !== false) {
+      respond(message, 'model_request.admitted', typeof modelAdmission === 'function' ? modelAdmission(message) : {
+        allowed: true, timeoutMs: 120000, firstResponseMs: 120000, idleMs: 120000,
+        maxOutputTokens: message.payload.maxOutputTokens,
+      })
+    }
+    if (message.kind === 'request' && message.type === 'model_request.complete' && modelCompletion !== false) {
+      respond(message, 'model_request.completed', typeof modelCompletion === 'function' ? modelCompletion(message) : { completed: true })
+    }
   })
   return {
     child,
+    exited: childClosed,
     messages,
+    resourceSamples,
+    async waitForResource(activeRuns) {
+      const existing = resourceSamples.find(sample => sample.activeRuns === activeRuns)
+      if (existing) return existing
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timed out waiting for runtime resource sample')), 4000)
+        resourceWaiters.push(() => {
+          const sample = resourceSamples.find(sample => sample.activeRuns === activeRuns)
+          if (sample) { clearTimeout(timer); resolve(sample) }
+        })
+      })
+    },
     send(type, fields = {}) {
       const request = createEnvelope('request', type, fields)
       child.stdin.write(`${JSON.stringify(request)}\n`)
       return request
     },
-    respond(request, type, payload = {}) {
-      const response = createEnvelope('response', type, {
-        requestId: request.id,
-        conversationId: request.conversationId,
-        runtimeSessionId: request.runtimeSessionId,
-        runId: request.runId,
-        payload,
-      })
-      child.stdin.write(`${JSON.stringify(response)}\n`)
-      return response
-    },
+    respond,
     async waitFor(predicate, timeout = 4_000) {
       const existing = messages.find(predicate)
       if (existing) return existing
@@ -65,6 +100,7 @@ function startRuntime() {
     },
     async close() {
       output.close()
+      diagnostics.close()
       if (child.exitCode === null && child.signalCode === null) child.kill()
       let timer
       try {
@@ -91,6 +127,25 @@ async function closeRuntimeAndRemoveDirectory(runtime, directory, remove = rm) {
 
 function registerRuntimeCleanup(context, runtime, directory) {
   context.after(() => closeRuntimeAndRemoveDirectory(runtime, directory))
+}
+
+function nativeControlBinding(conversationId, runId) {
+  const permission = { mode: 'ask', projectRoot: null, grants: [], approvalEpoch: null }
+  return {
+    schemaVersion: 1, runId, conversationId, engineId: 'pi', executionProfileId: 'legacy',
+    authority: 'authoritative', readOnlyExecutor: 'runtime',
+    permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(canonicalPermission(permission))).digest('hex')}`,
+    permission,
+    budgets: { modelRequestMs: 120000, toolExecutionMs: 120000, runExecutionMs: 600000, approvalWaitMs: 60000 },
+    executorRoute: 'pi_native',
+  }
+}
+
+function nativeProjectBinding(conversationId, runId, projectRoot) {
+  const binding = nativeControlBinding(conversationId, runId)
+  binding.permission = { ...binding.permission, mode: 'read_only', projectRoot }
+  binding.permissionSnapshotId = `sha256:${createHash('sha256').update(JSON.stringify(canonicalPermission(binding.permission))).digest('hex')}`
+  return binding
 }
 
 test('runtime cleanup closes the child even when directory removal fails', async () => {
@@ -1190,3 +1245,564 @@ test('run_command follows the Host runtime availability in the real request snap
     await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.completed')
   }
 })
+
+test('a pi_native Run registers its batch and routes work tools through the Host ledger', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-native-batch-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    fauxResponses: [
+      { content: [
+        { type: 'toolCall', id: 'native-skill', name: 'skill_load', arguments: {} },
+        { type: 'toolCall', id: 'native-work', name: 'work_snapshot_get', arguments: {} },
+      ], stopReason: 'toolUse' },
+      'Both native tool results were received.',
+    ],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+
+  const conversationId = 'native-batch-conversation'
+  const runtimeSessionId = 'native-batch-session'
+  const create = runtime.send('create_session', {
+    conversationId, runtimeSessionId, payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'native-batch-run'
+  const controlBinding = nativeControlBinding(conversationId, runId)
+  runtime.send('prompt', {
+    conversationId, runtimeSessionId, runId,
+    payload: { text: 'Load a skill and read the work snapshot.', controlBinding },
+  })
+
+  // The reported failure mode was zero registrations: the SDK installs its own
+  // tool hook, so nothing reached the Host until the adapter composed both.
+  const registration = await runtime.waitFor(message => (
+    message.kind === 'request' && message.type === 'tool_batch.register' && message.runId === runId
+  ))
+  assert.equal(registration.payload.contextGeneration, 1)
+  assert.deepEqual(
+    registration.payload.calls.map(({ callId, tool, sourceOrder }) => ({ callId, tool, sourceOrder })),
+    [
+      { callId: 'native-skill', tool: 'skill_load', sourceOrder: 0 },
+      // Work tools reach the session through the planning extension, so this
+      // position proves they were wrapped on that path too.
+      { callId: 'native-work', tool: 'work_snapshot_get', sourceOrder: 1 },
+    ],
+  )
+  for (const call of registration.payload.calls) assert.match(call.inputDigest, /^sha256:[0-9a-f]{64}$/)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.ok(!runtime.messages.some(message => message.runId === runId
+    && ['tool.started', 'tool.updated', 'tool.completed'].includes(message.payload?.type)),
+  'the strict Host projection must not see lifecycle events before it acknowledges registration')
+  assert.ok(!runtime.messages.some(message => message.runId === runId && message.type === 'tool_call.execute'))
+  runtime.respond(registration, 'tool_batch.registered', { batchId: 'native-batch-1', registeredCalls: 2 })
+
+  for (const tool of ['skill_load', 'work_snapshot_get']) {
+    const execute = await runtime.waitFor(message => (
+      message.kind === 'request' && message.type === 'tool_call.execute'
+      && message.runId === runId && message.payload?.tool === tool
+    ))
+    assert.equal(execute.payload.batchId, 'native-batch-1')
+    runtime.respond(execute, 'tool.execute_completed', { isError: false, result: { servedBy: tool } })
+  }
+
+  await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.completed')
+  await runtime.waitFor(message => message.runId === runId && message.type === 'run_released')
+  const lifecycle = runtime.messages.filter(message => message.runId === runId && message.payload?.type?.startsWith('tool.'))
+  assert.ok(lifecycle.some(message => message.payload.type === 'tool.started' && message.payload.toolCallId === 'native-skill'))
+  assert.ok(lifecycle.some(message => message.payload.type === 'tool.started' && message.payload.toolCallId === 'native-work'))
+  const events = runtime.messages.filter(message => message.runId === runId && message.type === 'runtime_event')
+  assert.deepEqual(events.map(message => message.seq), events.map((_, index) => index + 1))
+  // A routed Run must never fall back to the Legacy admission path.
+  assert.ok(!runtime.messages.some(message => (
+    message.kind === 'request' && message.type === 'tool.execute' && message.runId === runId
+  )))
+  const session = JSON.parse(await readFile(join(directory, 'session.json'), 'utf8'))
+  const results = session.messages
+    .filter(message => message.role === 'toolResult')
+    .map(message => ({
+      toolName: message.toolName,
+      isError: message.isError,
+      result: message.content?.[0]?.text ? JSON.parse(message.content[0].text) : null,
+    }))
+  assert.deepEqual(results, [
+    { toolName: 'skill_load', isError: false, result: { servedBy: 'skill_load' } },
+    { toolName: 'work_snapshot_get', isError: false, result: { servedBy: 'work_snapshot_get' } },
+  ])
+})
+
+test('a pi_native Run preserves bounded structured results and Host failure diagnostics', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-native-results-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    fauxResponses: [
+      { content: [
+        { type: 'toolCall', id: 'native-large', name: 'read_attachment', arguments: { attachmentId: 'native-source' } },
+        { type: 'toolCall', id: 'native-failed', name: 'work_snapshot_get', arguments: {} },
+      ], stopReason: 'toolUse' },
+      'The work snapshot failed; the skill result can be read by reference.',
+    ],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const conversationId = 'native-results-conversation'
+  const runtimeSessionId = 'native-results-session'
+  const runId = 'native-results-run'
+  const sessionPath = join(directory, 'session.json')
+  const create = runtime.send('create_session', { conversationId, runtimeSessionId, payload: { sessionPath } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', {
+    conversationId, runtimeSessionId, runId,
+    payload: { text: 'Load a skill and check the work snapshot.', controlBinding: nativeControlBinding(conversationId, runId) },
+  })
+  const registration = await runtime.waitFor(message => message.type === 'tool_batch.register' && message.runId === runId)
+  runtime.respond(registration, 'tool_batch.registered', { batchId: 'native-results-batch', registeredCalls: 2 })
+  const large = await runtime.waitFor(message => message.type === 'tool_call.execute' && message.payload?.callId === 'native-large')
+  const result = {
+    documentation: 'x'.repeat(121_000),
+    next: { offset: 550 },
+  }
+  const storedBytes = Buffer.byteLength(JSON.stringify(result), 'utf8')
+  assert.ok(storedBytes > 120_000 && storedBytes <= 131_072)
+  runtime.respond(large, 'tool.execute_completed', {
+    result,
+    toolResultStorage: { stored: true, storedBytes, retrievableBytes: storedBytes },
+  })
+  const failed = await runtime.waitFor(message => message.type === 'tool_call.execute' && message.payload?.callId === 'native-failed')
+  const resultRef = `fox-result://${runId}/native-failed`
+  runtime.respond(failed, 'tool.execute_failed', {
+    isError: true,
+    error: 'Work snapshot is unavailable.',
+    errorDetails: { code: 'work.snapshot_unavailable', retryable: false },
+    result: { content: [{ type: 'text', text: 'The referenced work record no longer exists.' }] },
+    resultRef,
+  })
+  await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.completed')
+  const session = JSON.parse(await readFile(sessionPath, 'utf8'))
+  const results = session.messages.filter(message => message.role === 'toolResult')
+  assert.equal(results.length, 2)
+  const largeResult = results.find(message => message.toolCallId === 'native-large')
+  assert.equal(largeResult.isError, false)
+  assert.ok(Buffer.byteLength(largeResult.content[0].text, 'utf8') <= 9_000)
+  const view = JSON.parse(largeResult.content[0].text)
+  assert.equal(view.foxModelView.storageVerified, true)
+  assert.equal(view.foxModelView.retrievable, true)
+  assert.equal(view.foxModelView.resultRef, `fox-result://${runId}/native-large`)
+  assert.deepEqual(view.next, { offset: 550 })
+  assert.ok(view.documentation.length < result.documentation.length)
+  const failure = results.find(message => message.toolCallId === 'native-failed')
+  assert.equal(failure.isError, true)
+  const diagnostic = failure.content.map(block => block.text ?? '').join('\n')
+  assert.match(diagnostic, /Work snapshot is unavailable/)
+  assert.match(diagnostic, /referenced work record no longer exists/)
+  assert.match(diagnostic, /work\.snapshot_unavailable/)
+  assert.ok(diagnostic.includes(resultRef))
+  assert.ok(!runtime.messages.some(message => message.kind === 'request' && message.type === 'tool.execute' && message.runId === runId))
+})
+
+test('a native model continuation waits until an unexecuted tool position is closed by the Host', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-close-barrier-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://close-barrier', modelId: 'close-model', apiType: 'faux',
+    fauxResponses: [{ content: [{ type: 'toolCall', id: 'missing-tool-id', name: 'missing_native_tool', arguments: {} }], stopReason: 'toolUse' }, 'The missing tool was not executed.'],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'close-barrier-c', runtimeSessionId: 'close-barrier-s', runId: 'close-barrier-r' }
+  const create = runtime.send('create_session', { ...identity, payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions') } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', { ...identity, payload: { text: 'Check this missing tool.', controlBinding: nativeControlBinding(identity.conversationId, identity.runId) } })
+  const registration = await runtime.waitFor(message => message.type === 'tool_batch.register')
+  runtime.respond(registration, 'tool_batch.registered', { batchId: 'missing-batch', registeredCalls: 1 })
+  const close = await runtime.waitFor(message => message.type === 'tool_call.close')
+  assert.equal(close.payload.reason, 'unknown_tool')
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(runtime.messages.filter(message => message.type === 'model_request.admit').length, 1, 'the next model request cannot pass outstanding Host tool cleanup')
+  runtime.respond(close, 'tool_call.closed', { closed: true, state: 'not_started' })
+  await runtime.waitFor(message => message.type === 'run_released' && message.runId === identity.runId)
+  assert.equal(runtime.messages.filter(message => message.type === 'model_request.admit').length, 2)
+  assert.ok(runtime.messages.some(message => message.payload?.type === 'run.completed' && message.runId === identity.runId))
+  const nextRun = 'close-barrier-follow-up'
+  runtime.send('prompt', { ...identity, runId: nextRun, payload: {
+    text: 'Continue after the unavailable tool.', controlBinding: nativeControlBinding(identity.conversationId, nextRun),
+    modelService: { baseUrl: 'faux://follow-up', modelId: 'follow-up-model', apiType: 'faux', fauxResponses: ['Verified nonexecution does not block this follow-up.'] },
+  } })
+  const facts = await runtime.waitFor(message => message.type === 'tool_call.facts' && message.runId === nextRun)
+  assert.equal(facts.payload.calls[0].hasResult, true)
+  runtime.respond(facts, 'tool_call.facts_completed', { contextGeneration: 1, blocked: false,
+    facts: [{ callId: 'missing-tool-id', state: 'not_executed', response: { isError: true, error: 'tool was not executed: unknown_tool' } }] })
+  await runtime.waitFor(message => message.type === 'run_released' && message.runId === nextRun)
+  assert.ok(runtime.messages.some(message => message.runId === nextRun && message.payload?.type === 'run.completed'))
+})
+
+test('an entirely unknown and invalid native batch registers before lifecycle projection and closes every position', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-invalid-order-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://invalid-order', modelId: 'invalid-order', apiType: 'faux',
+    fauxResponses: [{ content: [
+      { type: 'toolCall', id: 'invalid-unknown', name: 'missing_native_tool', arguments: {} },
+      { type: 'toolCall', id: 'invalid-known', name: 'read_attachment', arguments: { attachmentId: {} } },
+    ], stopReason: 'toolUse' }, 'Neither unavailable call executed.'],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'invalid-order-c', runtimeSessionId: 'invalid-order-s', runId: 'invalid-order-r' }
+  const create = runtime.send('create_session', { ...identity, payload: { sessionPath: join(directory, 'session.json') } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', { ...identity, payload: { text: 'Check unavailable tools.', controlBinding: nativeControlBinding(identity.conversationId, identity.runId) } })
+  const registration = await runtime.waitFor(message => message.type === 'tool_batch.register')
+  assert.deepEqual(registration.payload.calls.map(call => call.callId), ['invalid-unknown', 'invalid-known'])
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.ok(!runtime.messages.some(message => ['tool.started', 'tool.updated', 'tool.completed'].includes(message.payload?.type)))
+  assert.ok(!runtime.messages.some(message => message.type === 'tool_call.close' || message.type === 'tool_call.execute'))
+  runtime.respond(registration, 'tool_batch.registered', { batchId: 'invalid-order-batch', registeredCalls: 2 })
+  for (const [callId, reason] of [['invalid-unknown', 'unknown_tool'], ['invalid-known', 'validation_failed']]) {
+    const close = await runtime.waitFor(message => message.type === 'tool_call.close' && message.payload?.callId === callId)
+    assert.equal(close.payload.reason, reason)
+    runtime.respond(close, 'tool_call.closed', { closed: true, state: 'not_started' })
+  }
+  await runtime.waitFor(message => message.type === 'run_released' && message.runId === identity.runId)
+  assert.ok(runtime.messages.some(message => message.runId === identity.runId && message.payload?.type === 'run.completed'))
+  assert.ok(!runtime.messages.some(message => message.type === 'tool_call.execute'))
+  const lifecycle = runtime.messages.filter(message => message.payload?.toolCallId === 'invalid-known')
+  const start = lifecycle.find(message => message.payload.type === 'tool.started')
+  const end = lifecycle.find(message => message.payload.type === 'tool.completed')
+  assert.ok(start && end && start.seq < end.seq)
+  const events = runtime.messages.filter(message => message.runId === identity.runId && message.type === 'runtime_event')
+  assert.deepEqual(events.map(message => message.seq), events.map((_, index) => index + 1))
+})
+
+test('concurrent sessions keep Run model bindings and closing one session preserves the other', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-multi-session-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://default', modelId: 'default-model', apiType: 'faux',
+    fauxResponses: ['The process default must not replace a Run model.'],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identities = ['a', 'b'].map(name => ({ conversationId: `multi-c-${name}`, runtimeSessionId: `multi-s-${name}`, runId: `multi-r-${name}` }))
+  const tools = ['skill_load', 'work_snapshot_get']
+  for (let index = 0; index < identities.length; index += 1) {
+    const identity = identities[index]
+    const create = runtime.send('create_session', { ...identity, payload: { sessionPath: join(directory, `${index}.json`) } })
+    await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+    runtime.send('prompt', { ...identity, payload: {
+      text: `Run for ${index}.`, controlBinding: nativeControlBinding(identity.conversationId, identity.runId),
+      modelService: { baseUrl: `faux://run-${index}`, modelId: `run-model-${index}`, apiType: 'faux',
+        fauxResponses: [{ content: [{ type: 'toolCall', id: `multi-call-${index}`, name: tools[index], arguments: {} }], stopReason: 'toolUse' }, `Answer from model ${index}.`] },
+    } })
+  }
+  for (let index = 0; index < identities.length; index += 1) {
+    const registration = await runtime.waitFor(message => message.type === 'tool_batch.register' && message.runId === identities[index].runId)
+    runtime.respond(registration, 'tool_batch.registered', { batchId: `multi-batch-${index}`, registeredCalls: 1 })
+  }
+  const executing = await Promise.all(identities.map(identity => runtime.waitFor(message => message.type === 'tool_call.execute' && message.runId === identity.runId)))
+  const snapshots = await Promise.all(identities.map(identity => runtime.waitFor(message => message.runId === identity.runId && message.payload?.type === 'run.request_snapshot')))
+  assert.deepEqual(snapshots.map(message => message.payload.model), ['run-model-0', 'run-model-1'])
+  assert.deepEqual(snapshots.map(message => message.payload.baseUrl), ['faux://run-0', 'faux://run-1'])
+  assert.notEqual(snapshots[0].payload.provider, snapshots[1].payload.provider, 'faux streams must have independent providers')
+  const duplicate = runtime.send('prompt', { ...identities[0], runId: 'multi-duplicate', payload: { text: 'overlap' } })
+  const duplicateResponse = await runtime.waitFor(message => message.requestId === duplicate.id)
+  assert.equal(duplicateResponse.type, 'request_failed')
+  assert.equal(duplicateResponse.payload.code, 'session.busy')
+  const reinitialize = runtime.send('initialize', { payload: { modelService: { baseUrl: 'faux://replacement', modelId: 'replacement', apiType: 'faux' } } })
+  const busy = await runtime.waitFor(message => message.requestId === reinitialize.id)
+  assert.equal(busy.type, 'request_failed')
+  assert.equal(busy.payload.code, 'session.runtime_busy')
+  const cancelRun = runtime.send('cancel', identities[0])
+  await runtime.waitFor(message => message.requestId === cancelRun.id && message.type === 'request_succeeded')
+  const cancel = await runtime.waitFor(message => message.type === 'tool_call.cancel' && message.runId === identities[0].runId)
+  assert.ok(runtime.messages.some(message => message.runId === identities[0].runId && message.payload?.type === 'run.cancelled'))
+  assert.ok(!runtime.messages.some(message => message.type === 'run_released' && message.runId === identities[0].runId))
+  const close = runtime.send('session.close', { conversationId: identities[0].conversationId, runtimeSessionId: identities[0].runtimeSessionId })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.ok(!runtime.messages.some(message => message.requestId === close.id), 'closing a cancelled Run still waits for its outstanding Host cleanup')
+  assert.ok(!runtime.messages.some(message => message.type === 'run_released' && message.runId === identities[0].runId), 'terminal notification does not release the session before Host cleanup acknowledgement')
+  runtime.respond(cancel, 'tool_call.cancelled', { cancelled: true, resultRecorded: false, outcomeUnknown: true })
+  const closed = await runtime.waitFor(message => message.requestId === close.id)
+  assert.equal(closed.type, 'session_closed')
+  assert.equal(closed.payload.closed, true)
+  const released = runtime.messages.filter(message => message.type === 'run_released' && message.runId === identities[0].runId)
+  assert.equal(released.length, 1)
+  assert.equal(released[0].kind, 'event')
+  assert.equal(released[0].conversationId, identities[0].conversationId)
+  assert.equal(released[0].runtimeSessionId, identities[0].runtimeSessionId)
+  assert.equal(released[0].payload.contextGeneration, 1)
+  assert.ok(!runtime.messages.some(message => message.runId === identities[1].runId && ['run.failed', 'run.cancelled'].includes(message.payload?.type)))
+  runtime.respond(executing[1], 'tool.execute_completed', { result: { servedBy: 'run-b' } })
+  await runtime.waitFor(message => message.runId === identities[1].runId && message.payload?.type === 'run.completed')
+  await runtime.waitFor(message => message.type === 'run_released' && message.runId === identities[1].runId)
+  assert.equal(runtime.messages.filter(message => message.type === 'run_released' && message.runId === identities[1].runId).length, 1)
+  const b = JSON.parse(await readFile(join(directory, '1.json'), 'utf8'))
+  assert.ok(JSON.stringify(b.messages).includes('Answer from model 1.'))
+  assert.ok(!JSON.stringify(b.messages).includes('process default'))
+  const afterClose = runtime.send('prompt', { ...identities[0], runId: 'multi-after-close', payload: { text: 'must fail' } })
+  const rejected = await runtime.waitFor(message => message.requestId === afterClose.id)
+  assert.equal(rejected.type, 'request_failed')
+  assert.match(rejected.payload.message, /not open/)
+})
+
+test('concurrent native Runs send each actual HTTP request to its bound endpoint with its own model and credential', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-model-isolation-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const received = []
+  let release
+  const bothArrived = new Promise(resolve => { release = resolve })
+  const endpoints = []
+  for (let index = 0; index < 2; index += 1) {
+    const requests = []
+    received.push(requests)
+    const server = createServer(async (request, response) => {
+      let raw = ''
+      for await (const chunk of request) raw += chunk
+      requests.push({ body: JSON.parse(raw), authorization: request.headers.authorization })
+      if (received.every(items => items.length > 0)) release()
+      await bothArrived
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      for (const choice of [
+        { index: 0, delta: { role: 'assistant', content: `Endpoint ${index} replied.` }, finish_reason: null },
+        { index: 0, delta: {}, finish_reason: 'stop' },
+      ]) response.write(`data: ${JSON.stringify({ id: `model-${index}`, object: 'chat.completion.chunk', created: 1,
+        model: `bound-model-${index}`, choices: [choice], usage: { prompt_tokens: 11, completion_tokens: 2 } })}\n\n`)
+      response.end('data: [DONE]\n\n')
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    context.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) })
+    endpoints.push(`http://127.0.0.1:${server.address().port}/v1`)
+  }
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://default', modelId: 'default-model', apiType: 'faux', fauxResponses: ['Default model must not be used.'],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identities = [0, 1].map(index => ({ conversationId: `http-c-${index}`, runtimeSessionId: `http-s-${index}`, runId: `http-r-${index}` }))
+  for (let index = 0; index < 2; index += 1) {
+    const identity = identities[index]
+    const create = runtime.send('create_session', { ...identity, payload: { sessionPath: join(directory, `${index}.json`) } })
+    await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+    runtime.send('prompt', { ...identity, payload: {
+      text: `Answer from endpoint ${index}.`, controlBinding: nativeControlBinding(identity.conversationId, identity.runId),
+      modelService: { baseUrl: endpoints[index], modelId: `bound-model-${index}`, apiType: 'openai-completions',
+        apiKey: `fixture-key-${index}`, contextWindow: 32768, maxOutputTokens: 128 },
+    } })
+  }
+  await Promise.all(identities.map(identity => runtime.waitFor(message => message.runId === identity.runId && message.payload?.type === 'run.completed')))
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal(received[index].length, 1)
+    assert.equal(received[index][0].body.model, `bound-model-${index}`)
+    assert.equal(received[index][0].authorization, `Bearer fixture-key-${index}`)
+    const snapshot = JSON.parse(await readFile(join(directory, `${index}.json`), 'utf8'))
+    assert.ok(JSON.stringify(snapshot.messages).includes(`Endpoint ${index} replied.`))
+    assert.ok(!JSON.stringify(snapshot.messages).includes(`Endpoint ${1 - index} replied.`))
+  }
+})
+
+test('a Pi-native planner tool and main work tool with the same model call ID use separate Host positions', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-planner-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://planner', modelId: 'native-planner', apiType: 'faux', plannerMode: 'always',
+    fauxResponses: [
+      { content: [{ type: 'toolCall', id: 'shared-model-id', name: 'read', arguments: { path: 'never-executed-locally.txt' } }], stopReason: 'toolUse' },
+      '{"summary":"Inspect the source and work state","steps":["Read supplied evidence","Check work state"],"risks":[],"needsGoal":false}',
+      { content: [{ type: 'toolCall', id: 'shared-model-id', name: 'work_snapshot_get', arguments: {} }], stopReason: 'toolUse' },
+      'The executor used the Host work result.',
+    ],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'native-planner-c', runtimeSessionId: 'native-planner-s', runId: 'native-planner-r' }
+  const sessionPath = join(directory, 'session.json')
+  const create = runtime.send('create_session', { ...identity, payload: { sessionPath } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', { ...identity, payload: {
+    text: 'Inspect the project, then check the work state.',
+    projectContext: { projectRoot: directory, permissionMode: 'read_only' },
+    controlBinding: nativeProjectBinding(identity.conversationId, identity.runId, directory),
+  } })
+  const plannerRegistration = await runtime.waitFor(message => message.type === 'tool_batch.register' && message.payload?.calls?.[0]?.tool === 'read')
+  assert.match(plannerRegistration.payload.calls[0].callId, /^planner:[0-9a-f-]+:shared-model-id$/)
+  runtime.respond(plannerRegistration, 'tool_batch.registered', { batchId: 'planner-batch', registeredCalls: 1 })
+  const read = await runtime.waitFor(message => message.type === 'tool_call.execute' && message.payload?.tool === 'read')
+  assert.equal(read.payload.callId, plannerRegistration.payload.calls[0].callId)
+  runtime.respond(read, 'tool.execute_completed', { result: { content: [{ type: 'text', text: 'Only the Host supplied this source.' }] } })
+  await runtime.waitFor(message => message.payload?.type === 'planner.completed' && message.runId === identity.runId)
+  const mainRegistration = await runtime.waitFor(message => message.type === 'tool_batch.register' && message.payload?.calls?.[0]?.tool === 'work_snapshot_get')
+  assert.equal(mainRegistration.payload.calls[0].callId, 'shared-model-id')
+  runtime.respond(mainRegistration, 'tool_batch.registered', { batchId: 'main-batch', registeredCalls: 1 })
+  const work = await runtime.waitFor(message => message.type === 'tool_call.execute' && message.payload?.tool === 'work_snapshot_get')
+  runtime.respond(work, 'tool.execute_completed', { result: { work: 'Host work state' } })
+  await runtime.waitFor(message => message.payload?.type === 'run.completed' && message.runId === identity.runId)
+  assert.ok(!runtime.messages.some(message => message.kind === 'request' && ['tool.preflight', 'tool.execute'].includes(message.type)))
+  const stages = runtime.messages.filter(message => message.type === 'model_request.admit').map(message => message.payload.stage)
+  assert.deepEqual(stages, ['planner', 'planner', 'agent', 'agent'])
+  const records = runtime.messages.filter(message => message.payload?.type === 'usage.request').map(message => message.payload.record)
+  const admissions = runtime.messages.filter(message => message.type === 'model_request.admit')
+  assert.deepEqual(records.map(record => record.requestId), admissions.map(message => message.payload.requestId))
+  const session = JSON.parse(await readFile(sessionPath, 'utf8'))
+  assert.equal(session.messages.filter(message => message.role === 'toolResult').length, 1)
+  assert.equal(session.messages.find(message => message.role === 'toolResult').toolName, 'work_snapshot_get')
+  assert.ok(!JSON.stringify(session.messages).includes('Only the Host supplied this source.'))
+})
+
+for (const crash of [
+  { point: 'register', state: 'not_executed', effects: 0 },
+  { point: 'execute', state: 'not_executed', effects: 0 },
+  { point: 'execute', state: 'outcome_unknown', effects: 1 },
+  { point: 'execute', state: 'waiting_approval', effects: 0 },
+  { point: 'execute', state: 'committed', effects: 1 },
+  { point: 'after_result', state: 'committed', effects: 1 },
+  { point: 'after_cancel', state: 'committed', effects: 1 },
+]) {
+  test(`Pi-native process exit at ${crash.point} recovers ${crash.state} without replaying an effect`, async context => {
+    const directory = await mkdtemp(join(tmpdir(), 'fox-pi-native-crash-'))
+    const runtime = startRuntime({ crashPoint: crash.point, modelAdmission: false })
+    registerRuntimeCleanup(context, runtime, directory)
+    const initial = runtime.send('initialize', { payload: { modelService: {
+      baseUrl: 'faux://crash', modelId: 'crash-model', apiType: 'faux',
+      fauxResponses: [{ content: [{ type: 'toolCall', id: 'crash-work-call', name: 'work_snapshot_get', arguments: {} }], stopReason: 'toolUse' }, 'after result'],
+    } } })
+    await runtime.waitFor(message => message.requestId === initial.id && message.type === 'ready')
+    const identity = { conversationId: 'crash-conversation', runtimeSessionId: 'crash-session' }
+    const create = runtime.send('create_session', { ...identity,
+      payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions') } })
+    const created = await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+    const runId = 'crash-run'
+    runtime.send('prompt', { ...identity, runId,
+      payload: { text: 'Read work state.', controlBinding: nativeControlBinding(identity.conversationId, runId) } })
+    const admit = await runtime.waitFor(message => message.type === 'model_request.admit')
+    runtime.respond(admit, 'model_request.admitted', {
+      allowed: true, timeoutMs: 120000, firstResponseMs: 120000, idleMs: 120000, maxOutputTokens: admit.payload.maxOutputTokens,
+    })
+    const registration = await runtime.waitFor(message => message.type === 'tool_batch.register')
+    let effects = 0
+    const hostResult = crash.point === 'after_cancel'
+      ? { isError: true, error: 'Tool cancelled; retained output is effect evidence.',
+          result: { content: [{ type: 'text', text: 'HOST_EFFECT_RECEIPT: work effect completed before cancellation.' }] } }
+      : { result: { content: [{ type: 'text', text: 'Host committed work state.' }] } }
+    if (crash.point !== 'register') {
+      runtime.respond(registration, 'tool_batch.registered', { batchId: 'crash-batch', registeredCalls: 1 })
+      const execute = await runtime.waitFor(message => message.type === 'tool_call.execute')
+      effects += crash.effects
+      if (crash.point === 'after_result') {
+        runtime.respond(execute, 'tool.execute_completed', hostResult)
+        await runtime.waitFor(message => message.type === 'model_request.admit' && message.id !== admit.id)
+      } else if (crash.point === 'after_cancel') {
+        runtime.send('cancel', { ...identity, runId })
+        const cancel = await runtime.waitFor(message => message.type === 'tool_call.cancel')
+        runtime.respond(cancel, 'tool_call.cancelled', { cancelled: true, resultRecorded: false, outcomeUnknown: true })
+      }
+    }
+    assert.equal(await runtime.exited, 73, 'the injected failure is a real process.exit')
+    const before = await readFile(created.payload.nativeSessionPath, 'utf8')
+    const restored = startRuntime()
+    context.after(() => restored.close())
+    const initialize = restored.send('initialize', { payload: { modelService: {
+      baseUrl: 'faux://recovered', modelId: 'recovered-model', apiType: 'faux', fauxResponses: ['Recovered continuation.'],
+    } } })
+    await restored.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+    let resume = restored.send('resume_session', { ...identity, runId: 'recovery-query-run', payload: {
+      sessionFormat: 'pi-native', nativeSessionPath: created.payload.nativeSessionPath, nativeSessionId: created.payload.nativeSessionId,
+      contextGeneration: 1,
+    } })
+    let facts = await restored.waitFor(message => message.type === 'tool_call.facts')
+    if (crash.point === 'register') {
+      const competing = restored.send('resume_session', { ...identity, runId: 'recovery-query-run', payload: resume.payload })
+      const busy = await restored.waitFor(message => message.requestId === competing.id)
+      assert.equal(busy.type, 'request_failed')
+      assert.equal(busy.payload.code, 'session.busy')
+      const close = restored.send('session.close', identity)
+      const failedOpen = await restored.waitFor(message => message.requestId === resume.id)
+      assert.equal(failedOpen.type, 'request_failed')
+      assert.equal((await restored.waitFor(message => message.requestId === close.id)).type, 'session_closed')
+      assert.equal(await readFile(created.payload.nativeSessionPath, 'utf8'), before)
+      const cancelledFactsId = facts.id
+      resume = restored.send('resume_session', { ...identity, runId: 'recovery-query-run', payload: resume.payload })
+      facts = await restored.waitFor(message => message.type === 'tool_call.facts' && message.id !== cancelledFactsId)
+    }
+    assert.deepEqual(facts.payload.calls.map(call => ({ callId: call.callId, hasResult: call.hasResult })),
+      [{ callId: 'crash-work-call', hasResult: ['after_result', 'after_cancel'].includes(crash.point) }])
+    const fact = { callId: 'crash-work-call', state: crash.state,
+      ...(crash.state === 'committed' ? { response: hostResult } : crash.state === 'not_executed' ? {
+        response: { isError: true, error: 'Host confirmed this call did not start.' },
+      } : {}),
+    }
+    const blocked = ['outcome_unknown', 'waiting_approval'].includes(crash.state)
+    const factBody = { contextGeneration: 1, blocked, facts: [fact] }
+    restored.respond(facts, 'tool_call.facts_result', factBody)
+    const resumed = await restored.waitFor(message => message.requestId === resume.id)
+    if (blocked) {
+      assert.equal(resumed.type, 'request_failed')
+      assert.equal(resumed.payload.code, crash.state === 'waiting_approval' ? 'session.native_waiting_approval' : 'session.native_recovery_pending')
+      assert.equal(await readFile(created.payload.nativeSessionPath, 'utf8'), before)
+    } else {
+      assert.equal(resumed.type, 'session_created')
+      const continuationId = 'recovered-run'
+      restored.send('prompt', { ...identity, runId: continuationId, payload: {
+        text: 'Continue from settled work.', controlBinding: nativeControlBinding(identity.conversationId, continuationId),
+      } })
+      const recheck = await restored.waitFor(message => message.type === 'tool_call.facts' && message.runId === continuationId)
+      assert.equal(recheck.payload.calls[0].hasResult, true)
+      restored.respond(recheck, 'tool_call.facts_result', factBody)
+      await restored.waitFor(message => message.runId === continuationId && message.payload?.type === 'run.completed')
+      const entries = (await readFile(created.payload.nativeSessionPath, 'utf8')).trim().split('\n').map(JSON.parse)
+      const results = entries.filter(entry => entry.message?.role === 'toolResult' && entry.message.toolCallId === 'crash-work-call')
+      if (crash.point === 'after_cancel') {
+        assert.equal(results.length, 2, 'the local cancellation remains in abandoned history and the Host receipt is appended on the new branch')
+        assert.ok(JSON.stringify(results.at(-1)).includes('HOST_EFFECT_RECEIPT'))
+      } else assert.equal(results.length, 1)
+    }
+    assert.equal(effects, crash.effects)
+    assert.ok(!restored.messages.some(message => message.type === 'tool_call.execute'), 'recovery does not execute the original or a replacement call')
+  })
+}
+
+for (const activeCount of [2, 3, 4]) {
+  test(`${activeCount} native AgentSessions remain active in one process and expose an isolated resource sample`, async context => {
+    const directory = await mkdtemp(join(tmpdir(), 'fox-native-resource-'))
+    const runtime = startRuntime({ resourceProbe: true })
+    registerRuntimeCleanup(context, runtime, directory)
+    const initialize = runtime.send('initialize', { payload: { modelService: {
+      baseUrl: 'faux://resource', modelId: 'resource-model', apiType: 'faux',
+      fauxResponses: [{ content: [{ type: 'toolCall', id: 'resource-call', name: 'skill_load', arguments: {} }], stopReason: 'toolUse' }, 'complete'],
+    } } })
+    await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+    const runs = []
+    const started = new Map()
+    const latencies = []
+    for (let index = 0; index < activeCount; index += 1) {
+      const identity = { conversationId: `resource-c-${index}`, runtimeSessionId: `resource-s-${index}`, runId: `resource-r-${index}` }
+      runs.push(identity)
+      const create = runtime.send('create_session', { ...identity, payload: {
+        sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, `sessions-${index}`),
+      } })
+      await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+      started.set(identity.runId, performance.now())
+      runtime.send('prompt', { ...identity, payload: { text: `Resource sample ${index}.`, controlBinding: nativeControlBinding(identity.conversationId, identity.runId) } })
+    }
+    for (const identity of runs) {
+      const registration = await runtime.waitFor(message => message.type === 'tool_batch.register' && message.runId === identity.runId)
+      runtime.respond(registration, 'tool_batch.registered', { batchId: `resource-batch-${identity.runId}`, registeredCalls: 1 })
+    }
+    const executing = await Promise.all(runs.map(async identity => {
+      const request = await runtime.waitFor(message => message.type === 'tool_call.execute' && message.runId === identity.runId)
+      latencies.push(Math.round(performance.now() - started.get(identity.runId)))
+      return request
+    }))
+    assert.equal(executing.length, activeCount)
+    const sample = await runtime.waitForResource(activeCount)
+    assert.ok(sample.rss > 0 && sample.heapUsed > 0)
+    console.log(JSON.stringify({ scenario: 'PiNative sidecar with faux model and stub Host', activeRuns: activeCount,
+      rssMiB: +(sample.rss / 1048576).toFixed(2), heapUsedMiB: +(sample.heapUsed / 1048576).toFixed(2),
+      promptToToolRequestMs: latencies }))
+    for (const request of executing) runtime.respond(request, 'tool.execute_completed', { result: { servedBy: request.runId } })
+    await Promise.all(runs.map(identity => runtime.waitFor(message => message.payload?.type === 'run.completed' && message.runId === identity.runId)))
+  })
+}

@@ -1,0 +1,28 @@
+
+================================================================================================
+P2  whole-batch registration in the first beforeToolCall
+================================================================================================
+  t+    62.75ms  ledger                 batch registered (3 calls) ids=["call_b1_r1","call_b1_r2","call_b1_r3"]
+  t+  157.253ms  ledger                 batch registered (2 calls) ids=["call_b2_r1","call_b2_r2"]
+
+-- beforeToolCall invocations (arrival order = source order, serial prepare phase)
+  t+    8.166ms  call_b1_r1   batch_already_known=false
+  t+   62.956ms  call_b1_r2   batch_already_known=true
+  t+   62.997ms  call_b1_r3   batch_already_known=true
+  t+   95.429ms  call_b2_r1   batch_already_known=false
+  t+  157.403ms  call_b2_r2   batch_already_known=true
+
+-- registrations
+  t+   62.636ms  ids=["call_b1_r1","call_b1_r2","call_b1_r3"]
+  t+  157.238ms  ids=["call_b2_r1","call_b2_r2"]
+
+-- verdict
+  beforeToolCall argument keys: {"keys":["assistantMessage","toolCall","args","context"],"hasAssistantMessage":true,"hasContext":true,"argsType":"object"}
+PASS  beforeToolCall receives exactly { assistantMessage, toolCall, args, context }
+PASS  no deadlock: both batches and the final turn completed  (registrations=2 toolExecutions=5 elapsed=185.6ms)
+PASS  one registration per assistant batch (3+2 calls -> 2 registrations)  ([3,2])
+PASS  beforeToolCall ran for every toolCall (3+2)  (entries=5)
+PASS  re-entry within a batch never registers a second time  (batch1=[false,true,true] batch2=[false,true])
+PASS  no tool execute starts before its batch registration is acknowledged  (batch1 firstStart=63.204 ack=62.636)
+
+registration latency sits on the batch critical path: first tool ran 55.0ms after registration began (ack=50ms)

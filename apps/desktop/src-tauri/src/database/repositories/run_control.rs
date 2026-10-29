@@ -2,7 +2,7 @@
 //! never silently change a Run's authority, engine, permission or executor.
 use super::{now_ms, Database};
 use fox_engine_protocol::{ExecutionAuthority, RunControlBinding};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 fn content_hash(json: &str) -> String { format!("sha256:{}", hex::encode(Sha256::digest(json.as_bytes()))) }
@@ -14,6 +14,52 @@ fn encode(binding: &RunControlBinding) -> Result<String, String> {
         return Err("frozen permission hash does not match its content".into());
     }
     crate::canonical_json::to_string(binding).map_err(|e| e.to_string())
+}
+
+pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> rusqlite::Result<Option<RunControlBinding>> {
+    let invalid = |message: String| rusqlite::Error::InvalidParameterName(message);
+    let row: Option<(String,String,String,String,String)> = connection.query_row(
+        "SELECT conversation_id,authority,engine_id,binding_json,binding_hash FROM run_control_bindings WHERE run_id=?1", [run_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional()?;
+    let Some((conversation,authority,engine,json,hash)) = row else { return Ok(None); };
+    if content_hash(&json) != hash { return Err(invalid("persisted control binding hash mismatch".into())); }
+    let binding: RunControlBinding = serde_json::from_str(&json).map_err(|error| invalid(format!("corrupt control binding: {error}")))?;
+    encode(&binding).map_err(invalid)?;
+    let expected_authority = match binding.authority { ExecutionAuthority::Legacy => "legacy", ExecutionAuthority::Authoritative => "authoritative" };
+    let owner: String = connection.query_row("SELECT conversation_id FROM runs WHERE id=?1", [run_id], |row| row.get(0))?;
+    if binding.run_id != run_id || binding.conversation_id != conversation || conversation != owner
+        || binding.engine_id != engine || expected_authority != authority {
+        return Err(invalid("persisted control binding columns disagree with the frozen identity".into()));
+    }
+    Ok(Some(binding))
+}
+
+/// The single-path candidate switch. Unset — the default — freezes no route, so
+/// every existing binding and dispatch decision keeps its current meaning.
+///
+/// A route never introduces a third authority: the Pi-native path reuses the
+/// Authoritative execution contract, so an opt-in under `Legacy` still freezes
+/// no route and leaves that Run on the legacy semantics it was created with.
+pub(crate) fn candidate_executor_route(
+    authority: ExecutionAuthority,
+) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
+    route_from_env(std::env::var("FOX_EXECUTOR_ROUTE"), authority)
+}
+
+fn route_from_env(
+    configured: Result<String, std::env::VarError>,
+    authority: ExecutionAuthority,
+) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
+    match configured {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(value) if value == "pi_native" => Ok(match authority {
+            ExecutionAuthority::Authoritative => Some(fox_engine_protocol::ExecutorRoute::PiNative),
+            ExecutionAuthority::Legacy => None,
+        }),
+        Ok(_) => Err("FOX_EXECUTOR_ROUTE must be pi_native".into()),
+        Err(std::env::VarError::NotUnicode(_)) => Err("FOX_EXECUTOR_ROUTE must be valid Unicode".into()),
+    }
 }
 
 #[cfg(test)]
@@ -28,6 +74,69 @@ mod tests {
         db.update_conversation_permission_mode(&conversation.id, "ask").unwrap();
         let run = db.create_run(&conversation.id, "test frozen control", None).unwrap();
         (db, path, run.run.id)
+    }
+
+    /// A binding frozen before the route field existed must re-encode to the
+    /// exact stored bytes, because `freeze_run_control` compares both the JSON
+    /// and its hash before it will accept a repeat freeze.
+    #[test]
+    fn an_unrouted_binding_reencodes_to_its_stored_bytes_and_hash() {
+        let (db, _path, run_id) = fixture();
+        db.apply_runtime_event(&run_id, 1, &serde_json::json!({"type":"run.started"})).unwrap();
+        let binding = db.freeze_legacy_run_control(&run_id, "test-profile").unwrap();
+        assert_eq!(binding.executor_route, None);
+        let (stored_json, stored_hash): (String, String) = db.with_connection(|connection| {
+            connection.query_row(
+                "SELECT binding_json,binding_hash FROM run_control_bindings WHERE run_id=?1",
+                [&run_id], |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        }).unwrap();
+        assert!(!stored_json.contains("executorRoute"), "an unrouted binding must not emit the field at all");
+        assert_eq!(encode(&binding).unwrap(), stored_json);
+        assert_eq!(content_hash(&stored_json), stored_hash);
+        // So a restart re-freeze is accepted instead of refused as tampered,
+        // and the Run still carries no route afterwards.
+        db.freeze_legacy_run_control(&run_id, "test-profile").unwrap();
+        assert_eq!(db.run_control_binding(&run_id).unwrap().unwrap().executor_route, None);
+    }
+
+    #[test]
+    fn the_candidate_switch_routes_only_the_authoritative_contract() {
+        use std::env::VarError;
+        // Unset — the default — freezes no route, so existing semantics hold.
+        assert_eq!(route_from_env(Err(VarError::NotPresent), ExecutionAuthority::Authoritative).unwrap(), None);
+        assert_eq!(route_from_env(Err(VarError::NotPresent), ExecutionAuthority::Legacy).unwrap(), None);
+        // An opt-in routes the Authoritative contract only; the single path
+        // reuses that authority instead of introducing a third.
+        assert_eq!(
+            route_from_env(Ok("pi_native".into()), ExecutionAuthority::Authoritative).unwrap(),
+            Some(fox_engine_protocol::ExecutorRoute::PiNative)
+        );
+        assert_eq!(route_from_env(Ok("pi_native".into()), ExecutionAuthority::Legacy).unwrap(), None);
+        // A typo fails closed rather than silently keeping the old path.
+        assert!(route_from_env(Ok("kernel".into()), ExecutionAuthority::Authoritative).is_err());
+        assert!(route_from_env(Ok("".into()), ExecutionAuthority::Authoritative).is_err());
+    }
+
+    #[test]
+    fn a_frozen_route_never_reads_the_current_candidate_switch_again() {
+        for route in [None,Some(fox_engine_protocol::ExecutorRoute::PiNative)] {
+            let (db,_path,run_id) = fixture();
+            let frozen = db.freeze_selected_run_control_with_route(&run_id,"legacy",ExecutionAuthority::Authoritative,
+                ResourceExecutor::Rust,Default::default(),"pi",||Ok(route)).unwrap();
+            let reopened = db.freeze_selected_run_control_with_route(&run_id,"legacy",ExecutionAuthority::Authoritative,
+                ResourceExecutor::Rust,Default::default(),"pi",||panic!("an existing Run must not read a changed or invalid environment")).unwrap();
+            assert_eq!(frozen,reopened);
+            assert_eq!(reopened.executor_route,route);
+        }
+    }
+
+    #[test]
+    fn an_invalid_candidate_switch_cannot_leave_a_partially_frozen_new_run() {
+        let (db,_path,run_id) = fixture();
+        assert!(db.freeze_selected_run_control_with_route(&run_id,"legacy",ExecutionAuthority::Authoritative,
+            ResourceExecutor::Rust,Default::default(),"pi",||Err("invalid candidate switch".into())).is_err());
+        assert_eq!(db.run_control_binding(&run_id).unwrap(),None);
     }
 
     #[test]
@@ -202,6 +311,10 @@ mod tests {
 }
 
 impl Database {
+    pub(crate) fn candidate_executor_route(authority: ExecutionAuthority) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
+        candidate_executor_route(authority)
+    }
+
     /// When an approval was requested, after checking that the Run's frozen
     /// control is intact (a corrupt or mismatched binding still fails closed).
     /// Approvals have no deadline: the frozen `approval_wait_ms` is kept for
@@ -284,13 +397,22 @@ impl Database {
 
     fn freeze_selected_run_control(&self, run_id: &str, profile_id: &str, authority: ExecutionAuthority,
         executor: fox_engine_protocol::ResourceExecutor, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
+        self.freeze_selected_run_control_with_route(run_id, profile_id, authority, executor, budgets, engine,
+            || candidate_executor_route(authority))
+    }
+
+    fn freeze_selected_run_control_with_route(&self, run_id: &str, profile_id: &str, authority: ExecutionAuthority,
+        executor: fox_engine_protocol::ResourceExecutor, budgets: fox_engine_protocol::TimeBudgets, engine: &str,
+        select_route: impl FnOnce() -> Result<Option<fox_engine_protocol::ExecutorRoute>, String>) -> Result<RunControlBinding, String> {
         // A restart must reuse the existing binding, never recapture permissions.
         if let Some(binding) = self.run_control_binding(run_id)? {
-            if binding.execution_profile_id != profile_id || binding.authority != authority || binding.engine_id != engine {
+            if binding.execution_profile_id != profile_id || binding.authority != authority
+                || binding.engine_id != engine {
                 return Err("frozen Run authority/profile cannot be replaced by startup".into());
             }
             return Ok(binding);
         }
+        let executor_route = select_route()?;
         use fox_engine_protocol::{FrozenPermission, PermissionGrant};
         let authority_name = match authority { ExecutionAuthority::Legacy => "legacy", ExecutionAuthority::Authoritative => "authoritative" };
         let binding = self.with_connection(|connection| {
@@ -338,6 +460,7 @@ impl Database {
                 execution_profile_id: profile_id.into(), authority,
                 read_only_executor: executor, permission_snapshot_id, permission,
                 budgets,
+                executor_route,
             };
             let json = encode(&binding).map_err(rusqlite::Error::InvalidParameterName)?;
             transaction.execute(
@@ -378,21 +501,7 @@ impl Database {
     }
 
     pub fn run_control_binding(&self, run_id: &str) -> Result<Option<RunControlBinding>, String> {
-        let row: Option<(String,String,String,String,String)> = self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT conversation_id,authority,engine_id,binding_json,binding_hash FROM run_control_bindings WHERE run_id=?1", [run_id],
-                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))
-            ).optional()
-        })?;
-        let Some((conversation,authority,engine,json,hash)) = row else { return Ok(None); };
-        if content_hash(&json) != hash { return Err("persisted control binding hash mismatch".into()); }
-        let binding: RunControlBinding = serde_json::from_str(&json).map_err(|e| format!("corrupt control binding: {e}"))?;
-        encode(&binding)?;
-        let expected_authority = match binding.authority { ExecutionAuthority::Legacy => "legacy", ExecutionAuthority::Authoritative => "authoritative" };
-        if binding.run_id != run_id || binding.conversation_id != conversation || binding.engine_id != engine || expected_authority != authority {
-            return Err("persisted control binding columns disagree with the frozen identity".into());
-        }
-        Ok(Some(binding))
+        self.with_connection(|connection| binding_in_connection(connection, run_id))
     }
 
     /// The conversation a Run belongs to, read from Host's own persisted rows.

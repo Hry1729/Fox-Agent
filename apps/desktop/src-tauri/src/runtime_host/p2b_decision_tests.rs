@@ -130,6 +130,7 @@ fn freeze_binding(database: &Database, run: &str, conversation: &str, project_ro
         approval_epoch: None,
     };
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run.to_owned(),
         conversation_id: conversation.to_owned(),

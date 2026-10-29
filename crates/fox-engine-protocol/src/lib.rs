@@ -15,6 +15,8 @@ mod snapshot;
 pub use snapshot::*;
 mod execution;
 pub use execution::*;
+mod native_batch;
+pub use native_batch::*;
 
 pub const PROTOCOL_NAME: &str = "fox-runtime-jsonl";
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -367,7 +369,16 @@ pub fn schema_bundle() -> Value {
             "KernelStateInvalidation": schemars::schema_for!(KernelStateInvalidation),
             "ExecutionCredential": schemars::schema_for!(ExecutionCredential),
             "ExecutionEvidence": schemars::schema_for!(ExecutionEvidence),
-            "ExecutionReceipt": schemars::schema_for!(ExecutionReceipt)
+            "ExecutionReceipt": schemars::schema_for!(ExecutionReceipt),
+            "ToolBatchRegisterRequest": schemars::schema_for!(ToolBatchRegisterRequest),
+            "ToolBatchRegisterResponse": schemars::schema_for!(ToolBatchRegisterResponse),
+            "ToolCallExecuteRequest": schemars::schema_for!(ToolCallExecuteRequest),
+            "ToolCallCloseRequest": schemars::schema_for!(ToolCallCloseRequest),
+            "ToolCallCloseResponse": schemars::schema_for!(ToolCallCloseResponse),
+            "ToolCallCancelRequest": schemars::schema_for!(ToolCallCancelRequest),
+            "ToolCallCancelResponse": schemars::schema_for!(ToolCallCancelResponse),
+            "ToolCallFactsRequest": schemars::schema_for!(ToolCallFactsRequest),
+            "ToolCallFactsResponse": schemars::schema_for!(ToolCallFactsResponse)
         },
         "toolContracts": TOOL_CONTRACTS.iter().map(|t| serde_json::json!({
             "name": t.0, "category": t.1, "execution": t.2, "approval": t.3

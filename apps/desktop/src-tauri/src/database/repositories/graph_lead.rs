@@ -1403,7 +1403,7 @@ impl Database {
         with_graph_read_transaction(self, |connection| {
             let mut statement = connection
                 .prepare(
-                    "SELECT request.id, reviewer.child_run_id, parent_conversation.agent_id
+                    "SELECT request.id, reviewer.child_run_id, parent_conversation.agent_id,request.parent_run_id
                      FROM work_graph_node_review_requests AS request
                      JOIN goals AS goal ON goal.id = request.goal_id AND goal.status = 'active'
                      JOIN runs AS parent_run ON parent_run.id = request.parent_run_id
@@ -1415,23 +1415,21 @@ impl Database {
                       AND reviewer.graph_task_attempt_id IS NULL
                      WHERE request.activated_at IS NOT NULL
                        AND request.settled_at IS NULL
-                       AND NOT EXISTS(SELECT 1 FROM run_control_bindings binding
-                           WHERE binding.run_id=request.parent_run_id AND binding.authority='authoritative')
                      ORDER BY request.activated_at, request.id",
                 )
                 .map_err(database_error)?;
             let rows = statement
                 .query_map([], |row| {
                     let child_run_id = row.get::<_, Option<String>>(1)?;
-                    Ok(ActiveGraphNodeReviewRequest {
+                    Ok((row.get::<_,String>(3)?,ActiveGraphNodeReviewRequest {
                         request_id: row.get(0)?,
                         dispatched: child_run_id.is_some(),
                         reviewer_child_run_id: child_run_id,
                         reviewer_agent_id: row.get(2)?,
-                    })
+                    }))
                 })
                 .map_err(database_error)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+            host_recovery_rows(connection,rows.collect::<Result<Vec<_>, _>>().map_err(database_error)?)
         })
     }
 
@@ -1795,7 +1793,7 @@ impl Database {
         with_graph_read_transaction(self, |connection| {
             let mut statement = connection
                 .prepare(
-                    "SELECT graph_acceptance.id
+                    "SELECT graph_acceptance.id,accept_call.run_id
                      FROM work_graph_acceptances AS graph_acceptance
                      JOIN goals AS goal
                        ON goal.id = graph_acceptance.goal_id AND goal.status = 'active'
@@ -1804,19 +1802,17 @@ impl Database {
                       AND accept_call.status = 'completed'
                       AND accept_call.error_message IS NULL
                      WHERE graph_acceptance.accepted_at IS NULL
-                       AND NOT EXISTS(SELECT 1 FROM run_control_bindings binding
-                           WHERE binding.run_id=accept_call.run_id AND binding.authority='authoritative')
                      ORDER BY graph_acceptance.created_at, graph_acceptance.id",
                 )
                 .map_err(database_error)?;
             let rows = statement
                 .query_map([], |row| {
-                    Ok(PendingGraphAcceptance {
+                    Ok((row.get::<_,String>(1)?,PendingGraphAcceptance {
                         acceptance_id: row.get(0)?,
-                    })
+                    }))
                 })
                 .map_err(database_error)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+            host_recovery_rows(connection,rows.collect::<Result<Vec<_>, _>>().map_err(database_error)?)
         })
     }
 
@@ -2094,9 +2090,9 @@ impl Database {
         &self,
     ) -> Result<Vec<ActiveGraphNodeCancelIntent>, RepositoryError> {
         with_graph_read_transaction(self, |connection| {
-            connection
+            let rows=connection
                 .prepare(
-                    "SELECT intent.id, intent.child_run_id
+                    "SELECT intent.id, intent.child_run_id,intent.parent_run_id
                      FROM work_graph_node_cancel_intents AS intent
                      JOIN goals AS goal ON goal.id = intent.goal_id AND goal.status = 'active'
                      JOIN work_tasks AS task ON task.id = intent.task_id
@@ -2114,22 +2110,31 @@ impl Database {
                        AND child_run.status IN ('queued', 'running', 'cancelling')
                        AND child_run.finished_at IS NULL
                      WHERE intent.activated_at IS NOT NULL
-                       AND NOT EXISTS(SELECT 1 FROM run_control_bindings binding
-                           WHERE binding.run_id=intent.parent_run_id AND binding.authority='authoritative')
                      ORDER BY intent.activated_at, intent.id",
                 )
                 .map_err(database_error)?
                 .query_map([], |row| {
-                    Ok(ActiveGraphNodeCancelIntent {
+                    Ok((row.get::<_,String>(2)?,ActiveGraphNodeCancelIntent {
                         intent_id: row.get(0)?,
                         child_run_id: row.get(1)?,
-                    })
+                    }))
                 })
                 .map_err(database_error)?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(database_error)
+                .map_err(database_error)?;
+            host_recovery_rows(connection,rows)
         })
     }
+}
+
+pub(super) fn host_recovery_rows<T>(connection:&Connection,rows:Vec<(String,T)>) -> Result<Vec<T>,RepositoryError> {
+    let mut owned=Vec::new();
+    for (run,row) in rows {
+        if super::native_route::writer_route(connection,&run).map_err(database_error)?!=super::native_route::WriterRoute::Kernel {
+            owned.push(row);
+        }
+    }
+    Ok(owned)
 }
 
 fn settle_graph_node_review_by(
@@ -6509,6 +6514,30 @@ mod tests {
             &fixture.run.run.id, "durable_v2", fox_engine_protocol::TimeBudgets::default(),
         ).unwrap();
         assert!(fixture.database.active_graph_node_cancel_intents_for_recovery().unwrap().is_empty());
+        cleanup(fixture);
+    }
+
+    #[test]
+    fn native_parent_cancel_intent_stays_in_the_host_recovery_query() {
+        use fox_engine_protocol::{ExecutionAuthority,ExecutorRoute,FrozenPermission,PermissionMode,ResourceExecutor,RunControlBinding,TimeBudgets};
+        let fixture=fixture(json!([{ "nodeKey":"root","title":"Root","ordinal":0,"acceptanceCriteria":["report inspected"] }]),"durable_v2");
+        let started=start_single_graph_node(&fixture,"native-recovery");
+        let input=create_node_cancel_input(&fixture,&started,"native-cancel-intent","Stop this read-only node");
+        let intent=fixture.database.create_graph_node_cancel_intent(input).unwrap();
+        fixture.database.complete_host_tool_call(&fixture.run.run.id,"native-cancel-intent",Some(&json!({"pendingActivation":true})),None).unwrap();
+        assert!(fixture.database.activate_graph_node_cancel_intent(&intent.intent_id).unwrap().activated);
+        let permission=FrozenPermission { mode:PermissionMode::Ask,project_root:Some("D:/workspace".into()),grants:Vec::new(),approval_epoch:None };
+        fixture.database.freeze_run_control(&RunControlBinding {
+            schema_version:1,run_id:fixture.run.run.id.clone(),conversation_id:fixture.conversation_id.clone(),engine_id:"pi".into(),
+            execution_profile_id:"durable_v2".into(),authority:ExecutionAuthority::Authoritative,executor_route:Some(ExecutorRoute::PiNative),
+            read_only_executor:ResourceExecutor::Rust,permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),
+            permission,budgets:TimeBudgets::default(),
+        }).unwrap();
+        let recovered=fixture.database.active_graph_node_cancel_intents_for_recovery().unwrap();
+        assert_eq!(recovered.len(),1);
+        assert_eq!(recovered[0].intent_id,intent.intent_id);
+        fixture.database.with_connection(|connection|connection.execute("UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",[&fixture.run.run.id])).unwrap();
+        assert!(fixture.database.active_graph_node_cancel_intents_for_recovery().is_err());
         cleanup(fixture);
     }
 

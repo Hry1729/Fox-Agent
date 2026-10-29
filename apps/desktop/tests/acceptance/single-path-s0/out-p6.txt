@@ -1,0 +1,77 @@
+
+================================================================================================
+P6  toolResult persistence timing (real AgentSession + SessionManager.create)
+================================================================================================
+  session file: .probe-s0\tmp\p6\sessions\2026-10-28T05-29-21-273Z_01a180fc-0078-7409-8f0e-710f97f4822d.jsonl
+
+-- execution windows of the real tools (all executionMode:"parallel")
+  read   call_read_A      start=   261.37 end=  309.009
+  grep   call_grep_B      start=  261.426 end=  310.389
+  write  call_write_C     start=  310.447 end=  311.603
+  read   call_read_C2     start=  312.308 end=  356.846
+PASS  all four tools really executed  (["call_read_A","call_grep_B","call_write_C","call_read_C2"])
+PASS  write C started after read A and grep B both ended  (C.start=310.447 max(A,B).end=310.389)
+PASS  read C2 started after write C ended  (D.start=312.308 C.end=311.603)
+
+-- event log: disk state at listener time, and after one microtask hop
+   t(ms)      source   type                  toolCallId        disk@sync  disk@+1mt  entryId   leafAfter
+     238.37  session  message_end                             false      false                235d0630
+    238.427  agent    message_end                             false      false                235d0630
+    242.791  session  message_end                             false      false                3e01d25c
+    243.109  agent    message_end                             false      false                3e01d25c
+    255.732  session  message_end                             false      false                8359b52f
+    256.034  agent    message_end                             false      false                8359b52f
+    309.904  session  tool_execution_end    call_read_A       false      false                8359b52f
+    310.344  agent    tool_execution_end    call_read_A       false      false                8359b52f
+    311.827  session  tool_execution_end    call_grep_B       false      false                8359b52f
+    312.302  agent    tool_execution_end    call_grep_B       false      false                8359b52f
+    312.783  session  tool_execution_end    call_write_C      false      false                8359b52f
+    313.045  agent    tool_execution_end    call_write_C      false      false                8359b52f
+    357.452  session  tool_execution_end    call_read_C2      false      false                8359b52f
+    357.753  agent    tool_execution_end    call_read_C2      false      false                8359b52f
+    359.157  session  message_end           call_read_A       false      true       04813a35  04813a35
+    359.408  agent    message_end           call_read_A       true       true       04813a35  04813a35
+    360.597  session  message_end           call_grep_B       false      true       a8c126d6  a8c126d6
+    360.875  agent    message_end           call_grep_B       true       true       a8c126d6  a8c126d6
+    361.949  session  message_end           call_write_C      false      true       81b2f850  81b2f850
+    362.194  agent    message_end           call_write_C      true       true       81b2f850  81b2f850
+    363.246  session  message_end           call_read_C2      false      true       c76d43a4  c76d43a4
+    363.862  agent    message_end           call_read_C2      true       true       c76d43a4  c76d43a4
+    364.517  session  turn_end                                false      false                c76d43a4
+    364.799  agent    turn_end                                false      false                c76d43a4
+    370.568  session  message_end                             false      false                5fd48d54
+    370.851  agent    message_end                             false      false                5fd48d54
+    371.172  session  turn_end                                false      false                5fd48d54
+    371.448  agent    turn_end                                false      false                5fd48d54
+    371.972  session  agent_end                               false      false                5fd48d54
+    372.401  agent    agent_end                               false      false                5fd48d54
+
+-- verdict
+  AgentSession listener (session.subscribe) sees the entry NOT yet on disk at message_end
+  raw Agent listener (agent.subscribe, registered after AgentSession own listener) sees it already on disk
+PASS  [session.subscribe] at message_end the toolResult is NOT yet on disk
+PASS  [session.subscribe] after one microtask hop it IS on disk
+PASS  [agent.subscribe] at message_end it is ALREADY on disk
+PASS  the entry id on disk equals SessionManager.getLeafId() right after that hop
+PASS  each toolResult entry carries an id that maps to its toolCallId
+  last tool_execution_end t+357.753ms; first toolResult persisted t+359.157ms; agent_end t+371.972ms
+  every toolResult was on disk before agent_end: true
+
+  entry_appended events observed: 0 (emitted only for custom entries / context edits / cache-warm entries, not for message_end: agent-session.js:755-770)
+
+================================================================================================
+P6b  final JSONL
+================================================================================================
+  header {"version":3,"cwd":"D:\\python\\projects\\Fox\\Fox\\services\\agent-runtime\\.probe-s0\\tmp\\p6"}
+  38c27f66   parent=null       model_change/           
+  1ad18e18   parent=38c27f66   thinking_level_change/           
+  235d0630   parent=1ad18e18   message/system     
+  3e01d25c   parent=235d0630   message/user       
+  8359b52f   parent=3e01d25c   message/assistant  
+  04813a35   parent=8359b52f   message/toolResult toolCallId=call_read_A
+  a8c126d6   parent=04813a35   message/toolResult toolCallId=call_grep_B
+  81b2f850   parent=a8c126d6   message/toolResult toolCallId=call_write_C
+  c76d43a4   parent=81b2f850   message/toolResult toolCallId=call_read_C2
+  5fd48d54   parent=c76d43a4   message/assistant  
+
+  leafId=5fd48d54 entries=10

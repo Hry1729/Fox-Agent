@@ -1,0 +1,12 @@
+
+================================================================================================
+P2b  negative control: beforeToolCall waits for batch settlement
+================================================================================================
+  outcome after 1500ms: hung
+  tool execute() calls that ever ran: 0 of 2 registered toolCalls
+  after agent.abort() + 300ms: tool execute() calls that ran = 0
+  agent.signal.aborted = true
+
+-- verdict
+PASS  awaiting batch settlement inside beforeToolCall deadlocks the run, and abort() does not break it
+  (the prepare phase cannot advance, so no tool can ever reach execute() and settle the wait)

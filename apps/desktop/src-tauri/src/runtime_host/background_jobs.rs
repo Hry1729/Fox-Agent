@@ -41,7 +41,7 @@ pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
             allowed_fields(input,&["idempotencyKey","params","jobId"])?;
             // A queued row is not permission: reacquire the frozen Run on every launch.
             let binding=database.run_control_binding(run_id)?.ok_or("job needs a frozen Run")?;
-            if binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative {
+            if binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none() {
                 database.kernel_validate_resource_acquisition(run_id)?;
                 if !database.kernel_host_scope(run_id)?.tool_names.contains(tool) { return Err("job tool is outside frozen scope".into()); }
             }
@@ -70,6 +70,7 @@ pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
             allowed_fields(input,if tool=="compute_job_result" {&["jobId","offset","limit"]} else if tool=="compute_job_status" {&["jobId","waitMs"]} else {&["jobId"]})?;
             let id=input["jobId"].as_str().ok_or("jobId is required")?;
             let scoped_to_run = match database.run_control_binding(run_id)? {
+                Some(binding) if binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative) => true,
                 Some(binding) if binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative =>
                     database.compute_job_notice_enabled(run_id)?,
                 _ => false,

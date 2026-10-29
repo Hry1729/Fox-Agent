@@ -1530,7 +1530,8 @@ mod revision_tests {
         let root=std::env::temp_dir();
         for mode in [PermissionMode::Ask,PermissionMode::Allow] {
             let permission=FrozenPermission{mode,project_root:Some(root.to_string_lossy().into()),grants:vec![],approval_epoch:None};
-            let policy=GatewayPolicy{binding:RunControlBinding{schema_version:1,run_id:"r".into(),conversation_id:"c".into(),engine_id:"pi".into(),
+            let policy=GatewayPolicy{binding:RunControlBinding{
+                executor_route: None,schema_version:1,run_id:"r".into(),conversation_id:"c".into(),engine_id:"pi".into(),
                 execution_profile_id:"legacy".into(),authority:ExecutionAuthority::Authoritative,read_only_executor:ResourceExecutor::Rust,
                 permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),permission,budgets:TimeBudgets::default()},
                 scope:KernelHostScope{schema_version:1,tool_names:["run_command".into()].into_iter().collect(),mcp_server_hashes:Default::default(),
@@ -1570,7 +1571,8 @@ mod revision_tests {
         approval_epoch: None,
     };
         let mut policy=GatewayPolicy {
-            binding:RunControlBinding {schema_version:1,run_id:"r".into(),conversation_id:"c".into(),engine_id:"pi".into(),
+            binding:RunControlBinding {
+                executor_route: None,schema_version:1,run_id:"r".into(),conversation_id:"c".into(),engine_id:"pi".into(),
                 execution_profile_id:"legacy".into(),authority:ExecutionAuthority::Authoritative,read_only_executor:ResourceExecutor::Rust,
                 permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),permission,budgets:TimeBudgets::default()},
             scope:KernelHostScope {schema_version:1,tool_names:["edit_file".into()].into_iter().collect(),
@@ -1628,6 +1630,7 @@ mod revision_tests {
         };
         let mut policy = GatewayPolicy {
             binding: RunControlBinding {
+                executor_route: None,
                 schema_version: 1, run_id: run.clone(), conversation_id: conversation.id.clone(),
                 engine_id: "pi".into(), execution_profile_id: "legacy".into(),
                 authority: ExecutionAuthority::Authoritative,

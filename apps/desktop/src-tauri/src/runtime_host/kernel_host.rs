@@ -1753,6 +1753,18 @@ impl super::RuntimeHost {
     pub(crate) fn recover_kernel_runs_detached(&self) -> Result<(), String> {
         let runs = self.database.kernel_host_recoverable_runs()?;
         for run_id in runs {
+            // The Kernel recoverer only owns unrouted Runs. A routed binding
+            // belongs to the single path and an unrecognized one belongs to
+            // nobody, so claiming either here would drive it on the wrong loop;
+            // startup repair marks such Runs interrupted instead.
+            if !matches!(
+                super::kernel_authority::resolve_run_route(
+                    self.database.run_control_binding(&run_id)?.as_ref()
+                ),
+                super::kernel_authority::RunRoute::Kernel
+            ) {
+                continue;
+            }
             // A normal start already holds this OS lock before it registers its
             // active marker. Claiming the lock first closes that small window:
             // a duplicate recovery never registers, drives, or clears its owner.
@@ -1811,7 +1823,7 @@ impl super::RuntimeHost {
                         state.cancellation.retire_run(&run_id);
                     }
                     if state.kernel_active_runs.is_empty() && state.kernel_wake_inflight.is_empty()
-                        && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
+                        && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
                         state.state = "ready".into();
                     }
                     if result.is_err() {
@@ -2192,7 +2204,7 @@ impl super::RuntimeHost {
                 state.cancellation.retire_run(&binding.run_id);
             }
             if state.kernel_active_runs.is_empty() && state.kernel_wake_inflight.is_empty()
-                && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
+                && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
                 state.state = "ready".into();
             }
         }

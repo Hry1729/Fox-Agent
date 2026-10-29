@@ -84,7 +84,8 @@ mod tests {
         std::fs::write(&binary,b"version-1").unwrap();
         let mut server=McpServerRecord{id:id.clone(),name:"fixture".into(),command:binary.to_string_lossy().into(),args:vec![],transport:"stdio".into(),endpoint_url:None,
             definition:None,enabled:true,status:"unknown".into(),credential_configured:false,last_error:None,last_checked_at:None,last_latency_ms:None,tool_count:None,consecutive_failures:0,created_at:0,updated_at:0};
-        let mut binding=RunControlBinding{schema_version:1,run_id:id.clone(),conversation_id:"c".into(),engine_id:"pi".into(),execution_profile_id:"legacy".into(),
+        let mut binding=RunControlBinding{
+            executor_route: None,schema_version:1,run_id:id.clone(),conversation_id:"c".into(),engine_id:"pi".into(),execution_profile_id:"legacy".into(),
             authority:ExecutionAuthority::Authoritative,read_only_executor:ResourceExecutor::Rust,permission_snapshot_id:"p".into(),
             permission:FrozenPermission{mode:PermissionMode::ReadOnly,project_root:None,grants:vec![],approval_epoch:None},budgets:TimeBudgets::default()};
         let registry=crate::kernel::CancellationRegistry::default();

@@ -278,6 +278,7 @@ fn fixture_with_budgets_notice_permission_opt(clock: &dyn Clock, prompt_hash: &s
         approval_epoch: None,
     };
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run_id.clone(),
         conversation_id: conversation.id,
@@ -3769,6 +3770,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
     ];
     let prompt_hash = model.hash().unwrap();
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run_id.clone(),
         conversation_id: conversation.id.clone(),
@@ -4011,6 +4013,7 @@ fn unanswered_approval_keeps_waiting_and_a_late_decision_is_accepted() {
         approval_epoch: None,
     };
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run_id.clone(),
         conversation_id: conversation.id.clone(),
@@ -4161,6 +4164,7 @@ fn continuation_chain_is_one_way_and_one_successor_per_source() {
         approval_epoch: None,
     };
         let binding = RunControlBinding {
+            executor_route: None,
             schema_version: 1,
             run_id: legacy_run_id.clone(),
             conversation_id: "conv-chain".into(),

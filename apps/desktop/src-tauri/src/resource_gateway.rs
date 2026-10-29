@@ -8,6 +8,10 @@ use regex::RegexBuilder;
 use serde_json::{json, Value};
 use std::{collections::VecDeque, fs::{self, File, OpenOptions}, io::Read, path::{Path, PathBuf}, time::{Duration, Instant}};
 
+#[cfg(test)]
+#[path = "resource_gateway_test_probe.rs"]
+pub(crate) mod test_probe;
+
 const MAX_ENTRIES: usize = 4_000;
 const MAX_MATCHES: usize = 200;
 const MAX_CHARS: usize = 120_000;
@@ -92,9 +96,13 @@ impl Gateway<'_> {
         let (mut file, identity) = self.open_observed(path, false)?;
         let mut contents = Vec::new();
         let mut chunk = [0u8; 16 * 1024];
+        #[cfg(test)]
+        let mut probe = test_probe::begin_read(&identity)?;
         loop {
             self.check()?;
             let count = file.read(&mut chunk).map_err(|error| error.to_string())?;
+            #[cfg(test)]
+            if let Some(probe) = probe.as_mut() { probe.record_read(count); }
             if count == 0 { break; }
             if contents.len() as u64 + count as u64 > MAX_FILE_BYTES || count as u64 > self.remaining_bytes {
                 return Err("resource gateway text byte limit exceeded".into());
@@ -102,6 +110,8 @@ impl Gateway<'_> {
             self.remaining_bytes -= count as u64;
             contents.extend_from_slice(&chunk[..count]);
         }
+        #[cfg(test)]
+        if let Some(probe) = probe.as_mut() { probe.finish(); }
         Ok((contents, identity))
     }
     fn text(&mut self, path: &Path, extract_office: bool) -> Result<String, String> {
@@ -883,6 +893,7 @@ mod tests {
                 approval_epoch: None,
             };
         let binding = RunControlBinding {
+            executor_route: None,
             schema_version: 1, run_id: "gateway-run".into(), conversation_id: "gateway-conversation".into(), engine_id: "pi".into(),
             execution_profile_id: "test-profile".into(), authority: ExecutionAuthority::Legacy, read_only_executor: ResourceExecutor::Rust,
             permission_snapshot_id: crate::database::Database::run_control_permission_hash(&permission).unwrap(), permission, budgets: TimeBudgets::default(),

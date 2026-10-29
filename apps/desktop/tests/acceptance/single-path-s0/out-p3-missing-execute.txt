@@ -1,0 +1,61 @@
+
+================================================================================================
+P3a  settlement source: (a) tool_execution_end events only
+================================================================================================
+-- registered order at first beforeToolCall: ["0:call_read_A","1:call_unknown","2:call_badargs","3:call_blocked","4:call_write_D"]
+
+-- tool_execution_start / end
+  call_read_A          start=t+    5.382  end=t+   70.447  isError=false
+  call_unknown         start=t+    8.491  end=t+    8.566  isError=true
+  call_badargs         start=t+    8.597  end=t+    9.568  isError=true
+  call_blocked         start=t+     9.58  end=t+    9.685  isError=true
+  call_write_D         start=t+    9.689  end=t+   72.673  isError=false
+
+-- execute() called for: ["call_read_A","call_write_D"]
+-- toolResult emitted for: ["call_read_A","call_unknown","call_badargs","call_blocked","call_write_D"]
+-- write barrier: {"released":true,"waited":60.166} ; write execute at t+10.255
+
+-- verdict
+YES  every no-execute position still emits tool_execution_start AND tool_execution_end (isError=true)
+YES  none of the three reached execute()
+  afterToolCall ran for: ["call_read_A","call_write_D"]
+YES  afterToolCall is skipped for every no-execute position
+PASS  (a) event-driven settlement released the barrier (waited 60.166ms)
+
+================================================================================================
+P3b  settlement source: (b) registration-time pre-validation + events for the executed ones
+================================================================================================
+-- registered order at first beforeToolCall: ["0:call_read_A","1:call_unknown","2:call_badargs","3:call_blocked","4:call_write_D"]
+-- pre-validation verdicts: ["call_read_A=will-execute","call_unknown=unknown-tool","call_badargs=value-check-fails","call_blocked=blocked-by-policy","call_write_D=will-execute"]
+
+-- tool_execution_start / end
+  call_read_A          start=t+   74.092  end=t+  148.087  isError=false
+  call_unknown         start=t+   74.338  end=t+   74.348  isError=true
+  call_badargs         start=t+   74.352  end=t+   74.486  isError=true
+  call_blocked         start=t+   74.492  end=t+   74.532  isError=true
+  call_write_D         start=t+   74.536  end=t+  164.528  isError=false
+
+-- execute() called for: ["call_read_A","call_write_D"]
+-- toolResult emitted for: ["call_read_A","call_unknown","call_badargs","call_blocked","call_write_D"]
+-- write barrier: {"released":true,"waited":73.503} ; write execute at t+74.609
+
+-- verdict
+YES  every no-execute position still emits tool_execution_start AND tool_execution_end (isError=true)
+YES  none of the three reached execute()
+  afterToolCall ran for: ["call_read_A","call_write_D"]
+YES  afterToolCall is skipped for every no-execute position
+PASS  (b) pre-validated + event settlement released the barrier (waited 73.503ms)
+
+================================================================================================
+P3c  argument-validation reality check (Value.Convert runs before the schema check)
+================================================================================================
+  missing required property          Value.Check=false -> REJECTED by SDK  msg="Validation failed for tool \"read\":\n  - path: must have required proper"
+  number where string is required    Value.Check=false -> EXECUTED
+  null where string is required      Value.Check=false -> EXECUTED
+  array where string is required     Value.Check=false -> REJECTED by SDK  msg="Validation failed for tool \"read\":\n  - path: must be string\n\nReceived "
+  extra unknown property             Value.Check=true  -> EXECUTED
+
+-- P3c notes
+  toolResult messages arrive only after the whole batch settles: first tool_execution_end=t+8.566ms, first toolResult=t+72.774ms
+  agent.state.pendingToolCalls is derived only from tool_execution_start/end (agent.js:412-420), so it cannot
+  distinguish "settled" from "never entered the batch".

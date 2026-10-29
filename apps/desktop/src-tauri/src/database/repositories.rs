@@ -58,6 +58,9 @@ pub(crate) use kernel_continuation::{run_budget_for_tier, BudgetTier, Continuabl
 pub(crate) use kernel_continuation::{PreparedContinuation, VerifiedContinuationPermission};
 pub(crate) use kernel_jobs::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
 mod run_control;
+mod native_route;
+#[cfg(test)]
+mod native_route_tests;
 mod skill_activations;
 mod delivery_checks;
 pub(crate) use delivery_acceptance::{
@@ -323,11 +326,7 @@ pub struct Database {
 }
 
 fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite::Result<()> {
-    if connection.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
-        [run_id], |row| row.get::<_,bool>(0))? {
-        return Err(projection_violation("Kernel-owned read models cannot be changed by a Legacy writer".into()));
-    }
-    Ok(())
+    native_route::require_host_writer(connection, run_id)
 }
 
 /// What happened when the conversation's live mapping was copied into the
@@ -466,10 +465,29 @@ fn pi_generation_high_water(
 }
 
 impl Database {
+    pub(crate) fn inspect_compatible_schema_version(path: &Path) -> Result<Option<i64>, String> {
+        // Read committed WAL frames too. An immutable connection would miss
+        // them; SQLite may still coordinate readers through the SHM file.
+        let connection = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| format!("无法以只读方式检查数据库版本：{error}"))?;
+        migrations::read_compatible_schema_version(&connection).map_err(|error| error.to_string())
+    }
+
+    fn check_schema_before_open(path: &Path) -> Result<(), String> {
+        if path != Path::new(":memory:") && path.try_exists().map_err(|error| error.to_string())? {
+            Self::inspect_compatible_schema_version(path)?;
+        }
+        Ok(())
+    }
+
     /// Open the desktop database, first backing it up into `backups_dir` when
     /// it has a pending schema migration. When the backup fails the database
     /// is not opened (and so not migrated): the error says why.
     pub fn open_with_migration_backup(path: PathBuf, backups_dir: &Path) -> Result<Self, String> {
+        Self::check_schema_before_open(&path)?;
         if path.as_path() != Path::new(":memory:") {
             super::migration_backup::backup_before_migration(
                 &path,
@@ -480,10 +498,15 @@ impl Database {
             )
             .map_err(|error| format!("数据库升级前的自动备份失败，已停止升级，数据库未改动：{error}"))?;
         }
-        Self::open(path)
+        Self::open_after_schema_check(path)
     }
 
     pub fn open(path: PathBuf) -> Result<Self, String> {
+        Self::check_schema_before_open(&path)?;
+        Self::open_after_schema_check(path)
+    }
+
+    fn open_after_schema_check(path: PathBuf) -> Result<Self, String> {
         let memory = path.as_path() == Path::new(":memory:");
         let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
         migrations::run(&mut connection, now_ms()).map_err(|error| error.to_string())?;
@@ -1417,12 +1440,15 @@ impl Database {
     /// (`ExternalBackendHost::interrupt_runs_left_active`) with
     /// `agent_backend_host_restarted`, which ends their pending approvals as
     /// `cancelled` / `app_restarted`.
+    ///
+    /// Pi-native Runs keep their tool facts. Waiting Host approvals and explicit
+    /// unclaimed decisions remain available to Host recovery; other active Runs stop.
     pub fn repair_interrupted_runs(&self) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            kernel_projection::expire_inactive_approvals(&transaction, None, now)?;
+            native_route::protect_restart_owners(&transaction, now)?;
             child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
             transaction.execute(
                 "UPDATE runs
@@ -1430,7 +1456,7 @@ impl Database {
                      error_code = 'runtime.application_restarted',
                      error_message = 'Fox closed before the run reached a terminal state.'
                  WHERE status IN ('queued', 'running', 'cancelling')
-                   AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=runs.id AND b.authority='authoritative')
+                   AND NOT EXISTS (SELECT 1 FROM fox_restart_protected_runs p WHERE p.run_id=runs.id)
                    AND NOT EXISTS (
                        SELECT 1 FROM conversations ec
                        WHERE ec.id = runs.conversation_id AND ec.agent_backend <> 'fox'
@@ -1445,7 +1471,7 @@ impl Database {
             transaction.execute(
                 "UPDATE messages SET status = 'interrupted', updated_at = ?1
                  WHERE status = 'streaming'
-                   AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=messages.run_id AND b.authority='authoritative')
+                   AND NOT EXISTS (SELECT 1 FROM fox_restart_protected_runs p WHERE p.run_id=messages.run_id)
                    AND NOT EXISTS (
                        SELECT 1 FROM runs er JOIN conversations ec ON ec.id = er.conversation_id
                        WHERE er.id = messages.run_id AND ec.agent_backend <> 'fox'
@@ -1464,7 +1490,7 @@ impl Database {
             transaction.execute(
                 "UPDATE tool_calls SET status = 'interrupted', completed_at = ?1, updated_at = ?1
                  WHERE status IN ('pending', 'running')
-                   AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=tool_calls.run_id AND b.authority='authoritative')
+                   AND NOT EXISTS (SELECT 1 FROM fox_restart_protected_runs p WHERE p.run_id=tool_calls.run_id)
                    AND NOT EXISTS (
                        SELECT 1 FROM runs er JOIN conversations ec ON ec.id = er.conversation_id
                        WHERE er.id = tool_calls.run_id AND ec.agent_backend <> 'fox'
@@ -1485,8 +1511,8 @@ impl Database {
                  SET status = 'expired', decision_json = '{\"reason\":\"application_restarted\"}',
                       resolved_at = ?1
                  WHERE status = 'pending'
-                   AND NOT EXISTS (SELECT 1 FROM tool_calls t JOIN run_control_bindings b ON b.run_id=t.run_id
-                       WHERE t.id=approvals.tool_call_id AND b.authority='authoritative')
+                   AND NOT EXISTS (SELECT 1 FROM tool_calls t JOIN fox_restart_protected_runs p ON p.run_id=t.run_id
+                       WHERE t.id=approvals.tool_call_id)
                    AND NOT EXISTS (
                        SELECT 1 FROM tool_calls et
                        JOIN runs er ON er.id = et.run_id
@@ -1507,6 +1533,7 @@ impl Database {
             )?;
             child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
             interrupt_tasks_owned_by_terminal_runs(&transaction, &now.to_string())?;
+            transaction.execute_batch("DROP TABLE fox_restart_protected_runs;")?;
             transaction.commit()?;
             Ok(())
         })
@@ -5173,7 +5200,15 @@ impl Database {
         }
         self.with_connection(|connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            require_legacy_run_writer(&transaction, &existing.run_id)?;
+            // Legacy denial only removes authority and must stay available when
+            // its binding is damaged. Every grant and authoritative owner still
+            // goes through the complete frozen-identity check.
+            if decision.approved() || transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
+                [&existing.run_id], |row| row.get::<_,bool>(0),
+            )? {
+                require_legacy_run_writer(&transaction, &existing.run_id)?;
+            }
             let now = now_ms();
             let approved = decision.approved();
             let decision_json = json!({
@@ -6656,10 +6691,7 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            if transaction.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
-                [run_id], |row| row.get::<_,bool>(0))? {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
+            require_legacy_run_writer(&transaction, run_id)?;
             let (status, existing_code, existing_message): (
                 String,
                 Option<String>,
@@ -6754,10 +6786,7 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            if transaction.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
-                [run_id], |row| row.get::<_,bool>(0))? {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
+            require_legacy_run_writer(&transaction, run_id)?;
             let (status, existing_code, existing_message): (
                 String,
                 Option<String>,
@@ -7213,8 +7242,8 @@ impl Database {
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if transaction.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
-                [run_id], |row| row.get::<_,bool>(0))? {
+            let writer_route = native_route::writer_route(&transaction, run_id)?;
+            if writer_route == native_route::WriterRoute::Kernel {
                 return Ok(false);
             }
             let (run_status, last_seq): (String, i64) = transaction.query_row(
@@ -7279,13 +7308,30 @@ impl Database {
                 validate_runtime_usage_update(&transaction, run_id, payload, seq)?;
             }
             if event_type == "run.completed" {
+                if writer_route == native_route::WriterRoute::PiNative {
+                    native_route::require_completed(&transaction, run_id, now)?;
+                }
                 enforce_managed_run_completion_budget(&transaction, run_id, now)?;
             }
+            let native_tool_projection = if writer_route == native_route::WriterRoute::PiNative
+                && matches!(event_type,"tool.started" | "tool.updated" | "tool.completed") {
+                Some(native_route::project_tool_lifecycle(&transaction,run_id,event_type,payload,now)?)
+            } else { None };
+            let trace_payload = native_tool_projection.as_ref().and_then(|projection|projection.is_error).map(|is_error| {
+                let mut projected = payload.clone();
+                projected["isError"] = json!(is_error);
+                projected
+            });
+            let trace_event = if native_tool_projection.as_ref().is_some_and(|projection|projection.is_error.is_some()) {
+                "tool.completed"
+            } else if native_tool_projection.is_some() && event_type == "tool.completed" {
+                "tool.updated"
+            } else { event_type };
             let (trace_id, span_id) = observability::project_runtime_span(
                 &transaction,
                 run_id,
-                event_type,
-                payload,
+                trace_event,
+                trace_payload.as_ref().unwrap_or(payload),
                 now,
             )?;
             let inserted = transaction.execute(
@@ -7426,29 +7472,35 @@ impl Database {
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.started" => {
-                    project_tool_started(
-                        &transaction,
-                        run_id,
-                        payload,
-                        now,
-                        Some(&trace_id),
-                        Some(&span_id),
-                    )?;
+                    if !native_tool_projection.as_ref().is_some_and(|projection|projection.handled) {
+                        project_tool_started(
+                            &transaction,
+                            run_id,
+                            payload,
+                            now,
+                            Some(&trace_id),
+                            Some(&span_id),
+                        )?;
+                    }
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.updated" => {
-                    project_tool_updated(&transaction, run_id, payload, now)?;
+                    if !native_tool_projection.as_ref().is_some_and(|projection|projection.handled) {
+                        project_tool_updated(&transaction, run_id, payload, now)?;
+                    }
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.completed" => {
-                    project_tool_completed(
-                        &transaction,
-                        run_id,
-                        payload,
-                        now,
-                        Some(&trace_id),
-                        Some(&span_id),
-                    )?;
+                    if !native_tool_projection.as_ref().is_some_and(|projection|projection.handled) {
+                        project_tool_completed(
+                            &transaction,
+                            run_id,
+                            payload,
+                            now,
+                            Some(&trace_id),
+                            Some(&span_id),
+                        )?;
+                    }
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "run.completed" => {
@@ -10087,7 +10139,7 @@ mod tests {
         assert!(migrated.protocol_profiles.is_empty());
         assert_eq!(migrated.models[0].model_id, "native-model");
         assert_eq!(migrated.api_type, "openai-completions");
-        assert_eq!(reopened.schema_version().unwrap(), 97);
+        assert_eq!(reopened.schema_version().unwrap(), crate::database::DATABASE_SCHEMA_VERSION);
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }

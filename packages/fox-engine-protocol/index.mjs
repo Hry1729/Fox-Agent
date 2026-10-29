@@ -1696,6 +1696,13 @@ export const SCHEMA_BUNDLE = {
           ],
           "type": "string"
         },
+        "ExecutorRoute": {
+          "description": "Which executor drives a frozen Run's agent loop.\n\nAbsent (`None`) on every binding frozen before the single-path runtime\nconvergence, where `authority` alone selects the executor. A binding that\ncarries a route is rejected by an older binary via `deny_unknown_fields`,\nwhich is the intended safe failure; a newer binary still reads unrouted\nbindings unchanged, so `CONTROL_SCHEMA_VERSION` does not move.",
+          "enum": [
+            "pi_native"
+          ],
+          "type": "string"
+        },
         "FrozenPermission": {
           "additionalProperties": false,
           "properties": {
@@ -1846,6 +1853,17 @@ export const SCHEMA_BUNDLE = {
         },
         "executionProfileId": {
           "type": "string"
+        },
+        "executorRoute": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutorRoute"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`skip_serializing_if` is load-bearing, not cosmetic: `freeze_run_control`\nre-encodes a stored binding and compares both the JSON and its hash, so\nemitting an explicit `null` here would make every pre-route record look\ntampered with."
         },
         "permission": {
           "$ref": "#/$defs/FrozenPermission"
@@ -2086,6 +2104,354 @@ export const SCHEMA_BUNDLE = {
         "type"
       ],
       "title": "RuntimeRequest",
+      "type": "object"
+    },
+    "ToolBatchRegisterRequest": {
+      "$defs": {
+        "NativeToolCallRegistration": {
+          "additionalProperties": false,
+          "description": "One position in the batch, in the order the model emitted it.",
+          "properties": {
+            "callId": {
+              "type": "string"
+            },
+            "inputDigest": {
+              "description": "Digest of the arguments exactly as the model emitted them, before SDK\nconversion. It exists to detect a same-key/different-arguments replay;\napproval binds to the *converted* input carried by `tool_call.execute`.",
+              "type": "string"
+            },
+            "sourceOrder": {
+              "description": "Position in the assistant message — not Host processing order. Both the\nbarrier and the order results are appended in derive from this.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "callId",
+            "tool",
+            "sourceOrder",
+            "inputDigest"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "calls": {
+          "items": {
+            "$ref": "#/$defs/NativeToolCallRegistration"
+          },
+          "type": "array"
+        },
+        "contextGeneration": {
+          "description": "Generation of the Pi session that produced this batch. A batch arriving\nfrom a retired generation is refused rather than merged, so a reset can\nnever inherit the previous context's tool positions.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "contextGeneration",
+        "calls"
+      ],
+      "title": "ToolBatchRegisterRequest",
+      "type": "object"
+    },
+    "ToolBatchRegisterResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "batchId": {
+          "description": "Host-assigned. The bridge never invents batch identity, and a repeated\nregistration of the same batch must return the same id rather than\nopening a second ledger entry.",
+          "type": "string"
+        },
+        "registeredCalls": {
+          "description": "How many positions the Host now holds for this batch. Equal to the\nrequest's call count on a fresh registration; on an idempotent replay it\nconfirms the stored batch instead of the submitted one.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "batchId",
+        "registeredCalls"
+      ],
+      "title": "ToolBatchRegisterResponse",
+      "type": "object"
+    },
+    "ToolCallCancelRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "batchId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "batchId",
+        "callId"
+      ],
+      "title": "ToolCallCancelRequest",
+      "type": "object"
+    },
+    "ToolCallCancelResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "cancelled": {
+          "type": "boolean"
+        },
+        "outcomeUnknown": {
+          "description": "Set when the Host could not establish whether the operation took\neffect. Such a call is not automatically redone.",
+          "type": "boolean"
+        },
+        "resultRecorded": {
+          "description": "Whether the Host kept a partial result as evidence. A cancelled call\nalways fails towards the model; this only says the side effects it\nalready caused are still on the record, and that an unknown-outcome\nwrite must never be retried under a new call id.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cancelled",
+        "resultRecorded",
+        "outcomeUnknown"
+      ],
+      "title": "ToolCallCancelResponse",
+      "type": "object"
+    },
+    "ToolCallCloseRequest": {
+      "$defs": {
+        "ToolCallCloseReason": {
+          "description": "Why a position is being closed without a result.",
+          "oneOf": [
+            {
+              "const": "unknown_tool",
+              "description": "The model named a tool the Host does not expose.",
+              "type": "string"
+            },
+            {
+              "const": "validation_failed",
+              "description": "The arguments did not survive validation. The SDK converts before it\nvalidates, so the Host cannot predict this and must be told.",
+              "type": "string"
+            },
+            {
+              "const": "intercepted",
+              "description": "A hook or the Host refused the call before it ran.",
+              "type": "string"
+            },
+            {
+              "const": "aborted",
+              "description": "The Run was aborted and the call returned early without executing.",
+              "type": "string"
+            },
+            {
+              "const": "not_started",
+              "description": "Preparation stopped before this position and no event ever arrived for\nit; closed at `turn_end` so the barrier does not wait forever.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "batchId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "isError": {
+          "description": "Closing is never a success. This records whether the model should see it\nas an error result, which every reason currently does.",
+          "type": "boolean"
+        },
+        "reason": {
+          "$ref": "#/$defs/ToolCallCloseReason"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "batchId",
+        "callId",
+        "reason",
+        "isError"
+      ],
+      "title": "ToolCallCloseRequest",
+      "type": "object"
+    },
+    "ToolCallCloseResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "closed": {
+          "type": "boolean"
+        },
+        "state": {
+          "description": "The ledger state the position ended in, so the bridge can tell a close\nthat landed from one that found the position already settled.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "closed",
+        "state"
+      ],
+      "title": "ToolCallCloseResponse",
+      "type": "object"
+    },
+    "ToolCallExecuteRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "batchId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": "string"
+        },
+        "input": {
+          "description": "The arguments after SDK conversion — the values the tool will actually\nreceive. Approval is re-verified against these, not against the model's\noriginal text, so a conversion can never widen a granted scope."
+        },
+        "runId": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "batchId",
+        "callId",
+        "tool",
+        "input"
+      ],
+      "title": "ToolCallExecuteRequest",
+      "type": "object"
+    },
+    "ToolCallFactsRequest": {
+      "$defs": {
+        "NativeToolCallFactQuery": {
+          "additionalProperties": false,
+          "properties": {
+            "callId": {
+              "type": "string"
+            },
+            "hasResult": {
+              "description": "The active Pi branch already contains a result for this call. A result\nwithout a committed Host receipt is a consistency error.",
+              "type": "boolean"
+            },
+            "inputDigest": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "callId",
+            "tool",
+            "inputDigest",
+            "hasResult"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "calls": {
+          "items": {
+            "$ref": "#/$defs/NativeToolCallFactQuery"
+          },
+          "type": "array"
+        },
+        "contextGeneration": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "description": "The trusted querying Run, which can be a finished Run while opening.\nFacts may belong to earlier Runs in the same native session generation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "contextGeneration",
+        "calls"
+      ],
+      "title": "ToolCallFactsRequest",
+      "type": "object"
+    },
+    "ToolCallFactsResponse": {
+      "$defs": {
+        "NativeToolCallFact": {
+          "additionalProperties": false,
+          "properties": {
+            "callId": {
+              "type": "string"
+            },
+            "response": {
+              "description": "The exact execute response payload committed by the Host, or its\ndurable nonexecution receipt. Blocked facts carry no appendable result."
+            },
+            "state": {
+              "$ref": "#/$defs/NativeToolCallFactState"
+            }
+          },
+          "required": [
+            "callId",
+            "state"
+          ],
+          "type": "object"
+        },
+        "NativeToolCallFactState": {
+          "enum": [
+            "committed",
+            "not_executed",
+            "outcome_unknown",
+            "waiting_approval"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "blocked": {
+          "type": "boolean"
+        },
+        "contextGeneration": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "facts": {
+          "description": "Same order as the query. Every call must be checked before Pi appends\nany receipt, so an inconsistent branch cannot be partially repaired.",
+          "items": {
+            "$ref": "#/$defs/NativeToolCallFact"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contextGeneration",
+        "blocked",
+        "facts"
+      ],
+      "title": "ToolCallFactsResponse",
       "type": "object"
     }
   },

@@ -1,0 +1,105 @@
+
+================================================================================================
+P4  abort inside the beforeToolCall of call #2 (of 3)
+================================================================================================
+
+-- events
+  t+    4.759ms  message_start        {"role":"user","toolCallIds":[]}
+  t+    4.802ms  message_end          {"role":"user","toolCallIds":[]}
+  t+    6.778ms  message_start        {"role":"assistant","stopReason":"pending","toolCallIds":[]}
+  t+    6.975ms  message_end          {"role":"assistant","stopReason":"toolUse","toolCallIds":["call_p4_r1","call_p4_r2","call_p4_r3"]}
+  t+    7.728ms  tool_execution_start {"toolCallId":"call_p4_r1"}
+  t+    8.767ms  tool_execution_start {"toolCallId":"call_p4_r2"}
+  t+     9.01ms  tool_execution_end   {"toolCallId":"call_p4_r2"}
+  t+    9.069ms  tool_execution_end   {"toolCallId":"call_p4_r1"}
+  t+    9.107ms  message_start        {"role":"toolResult","toolCallId":"call_p4_r1","toolCallIds":[]}
+  t+    9.115ms  message_end          {"role":"toolResult","toolCallId":"call_p4_r1","toolCallIds":[]}
+  t+    9.553ms  message_start        {"role":"toolResult","toolCallId":"call_p4_r2","toolCallIds":[]}
+  t+    9.559ms  message_end          {"role":"toolResult","toolCallId":"call_p4_r2","toolCallIds":[]}
+  t+     9.91ms  turn_end             {"role":"assistant","stopReason":"toolUse","toolCallIds":["call_p4_r1","call_p4_r2","call_p4_r3"]}
+  t+   10.176ms  message_start        {"role":"assistant","stopReason":"aborted","toolCallIds":[]}
+  t+   10.182ms  message_end          {"role":"assistant","stopReason":"aborted","toolCallIds":[]}
+  t+   10.442ms  turn_end             {"role":"assistant","stopReason":"aborted","toolCallIds":[]}
+  t+   10.448ms  agent_end            {}
+
+-- execute() actually ran for: []
+  tool_execution_start: ["call_p4_r1","call_p4_r2"]
+  tool_execution_end:   ["call_p4_r2","call_p4_r1"]
+  toolResult messages:  ["call_p4_r1","call_p4_r2"]
+
+-- session file: D:\python\projects\Fox\Fox\services\agent-runtime\.probe-s0\tmp\p4-sessions\2026-10-28T05-29-18-426Z_01a180fb-f559-72b5-97ff-2ca1b9926726.jsonl
+-- JSONL entries:
+   header version=3 cwd=D:\python\projects\Fox\Fox\services\agent-runtime\.probe-s0\tmp
+   message  49d646f7   parent=null       role=user       stopReason= toolCalls=[]
+   message  5c9c20c5   parent=49d646f7   role=assistant  stopReason=toolUse toolCalls=["call_p4_r1","call_p4_r2","call_p4_r3"]
+   message  81de09fc   parent=5c9c20c5   role=toolResult stopReason= toolCalls=[] toolCallId=call_p4_r1
+   message  e79b219e   parent=81de09fc   role=toolResult stopReason= toolCalls=[] toolCallId=call_p4_r2
+   message  4d0af71b   parent=e79b219e   role=assistant  stopReason=aborted toolCalls=[]
+
+-- verdict (1) do the later calls get a toolResult?
+PASS  call #3 never started and has no toolResult  (start=false result=false)
+PASS  call #2 (the aborting one) does get an immediate error result  (["call_p4_r1","call_p4_r2"])
+
+-- verdict (2) JSONL contains an assistant message with toolCalls lacking toolResults
+PASS  JSONL has an assistant message with orphaned toolCalls  (orphans=["call_p4_r3"] of ["call_p4_r1","call_p4_r2","call_p4_r3"])
+
+================================================================================================
+P4(3)  next prompt: what the provider layer sees
+================================================================================================
+  request #2 message list:
+   {"role":"system","len":8}
+   {"role":"user","content":"[{\"type\":\"text\",\"text\":\"go\"}]"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_p4_r1","call_p4_r2","call_p4_r3"],"text":""}
+   {"role":"toolResult","toolCallId":"call_p4_r1","toolName":"read","isError":true,"text":"Operation aborted"}
+   {"role":"toolResult","toolCallId":"call_p4_r2","toolName":"read","isError":true,"text":"Operation aborted"}
+
+  after transformMessages() (what a real provider adapter would send):
+   {"role":"user","content":"[...]"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_p4_r1","call_p4_r2","call_p4_r3"]}
+   {"role":"toolResult","toolCallId":"call_p4_r1","isError":true,"text":"Operation aborted"}
+   {"role":"toolResult","toolCallId":"call_p4_r2","isError":true,"text":"Operation aborted"}
+   {"role":"toolResult","toolCallId":"call_p4_r3","isError":true,"text":"No result provided"}
+
+-- verdict (3)
+  raw transcript still carries ALL 3 toolCalls with 1 unanswered
+PASS  transformMessages synthesizes a result for each orphaned toolCall  (synthetic text = "No result provided")
+
+================================================================================================
+P4(4)  SessionManager.open(): SDK-built context for the same file
+================================================================================================
+   {"role":"user","content":"[...]"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_p4_r1","call_p4_r2","call_p4_r3"]}
+   {"role":"toolResult","toolCallId":"call_p4_r1","isError":true}
+   {"role":"toolResult","toolCallId":"call_p4_r2","isError":true}
+   {"role":"assistant","stopReason":"aborted","toolCalls":[]}
+
+  leaf=4d0af71b entries=5
+
+  (artifact kept for P7: D:\python\projects\Fox\Fox\services\agent-runtime\.probe-s0\tmp\p4-sessions\2026-10-28T05-29-18-426Z_01a180fb-f559-72b5-97ff-2ca1b9926726.jsonl)
+
+================================================================================================
+P4(3b)  a new prompt AFTER the aborted run: what the provider layer sees
+================================================================================================
+  (provider requests during this prompt: 1)
+   raw: {"role":"system","len":8}
+   raw: {"role":"user","content":"[{\"type\":\"text\",\"text\":\"go\"}]"}
+   raw: {"role":"assistant","stopReason":"toolUse","toolCalls":["call_p4_r1","call_p4_r2","call_p4_r3"],"text":""}
+   raw: {"role":"toolResult","toolCallId":"call_p4_r1","toolName":"read","isError":true,"text":"Operation aborted"}
+   raw: {"role":"toolResult","toolCallId":"call_p4_r2","toolName":"read","isError":true,"text":"Operation aborted"}
+   raw: {"role":"assistant","stopReason":"aborted","toolCalls":[],"text":""}
+   raw: {"role":"user","content":"[{\"type\":\"text\",\"text\":\"go again\"}]"}
+
+  after transformMessages() (what a real provider adapter would send):
+   {"role":"user","content":"[blocks]"}
+   {"role":"assistant","stopReason":"toolUse","toolCalls":["call_p4_r1","call_p4_r2","call_p4_r3"]}
+   {"role":"toolResult","toolCallId":"call_p4_r1","isError":true,"text":"Operation aborted"}
+   {"role":"toolResult","toolCallId":"call_p4_r2","isError":true,"text":"Operation aborted"}
+   {"role":"toolResult","toolCallId":"call_p4_r3","isError":true,"text":"No result provided"}
+   {"role":"user","content":"[blocks]"}
+
+-- verdict (3b)
+PASS  the raw transcript keeps the orphaned toolCall  (orphan=["call_p4_r3"])
+PASS  the aborted assistant message is dropped by the provider transform
+PASS  exactly one synthetic result is inserted for the orphan  (["call_p4_r3"])
+
+-- JSONL now has 7 entries; last: message role=assistant

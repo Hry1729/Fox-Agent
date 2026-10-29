@@ -73,6 +73,7 @@ pub fn build_u1_parked_fixture(
         approval_epoch: None,
     };
     let binding = RunControlBinding {
+        executor_route: None,
         schema_version: 1,
         run_id: run_id.clone(),
         conversation_id: conversation_id.clone(),

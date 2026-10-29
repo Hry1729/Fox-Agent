@@ -145,7 +145,7 @@ impl HostSandbox {
         policy = policy.canonicalized()?;
         policy.validate(os)?;
         let plan = if os == HostOs::Windows { Some(self.launcher.windows_ace_plan(&policy)?) } else { None };
-        let settings = serde_json::to_vec_pretty(&policy.to_srt_settings()).expect("settings serialize");
+        let settings = crate::canonical_json::to_vec_pretty(&policy.to_srt_settings()).expect("settings serialize");
         let settings_path = settings_dir.join("srt-settings.json");
         write_private(&settings_path, &settings).map_err(|error| io_error(format!("cannot write {}: {error}", settings_path.display())))?;
 

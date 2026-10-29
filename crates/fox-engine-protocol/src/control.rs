@@ -12,6 +12,17 @@ pub enum ExecutionAuthority { Legacy, Authoritative }
 #[serde(rename_all = "snake_case")]
 pub enum ResourceExecutor { Runtime, Rust }
 
+/// Which executor drives a frozen Run's agent loop.
+///
+/// Absent (`None`) on every binding frozen before the single-path runtime
+/// convergence, where `authority` alone selects the executor. A binding that
+/// carries a route is rejected by an older binary via `deny_unknown_fields`,
+/// which is the intended safe failure; a newer binary still reads unrouted
+/// bindings unchanged, so `CONTROL_SCHEMA_VERSION` does not move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorRoute { PiNative }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode { Ask, ReadOnly, Allow }
@@ -220,6 +231,12 @@ pub struct RunControlBinding {
     pub permission_snapshot_id: String,
     pub permission: FrozenPermission,
     pub budgets: TimeBudgets,
+    /// `skip_serializing_if` is load-bearing, not cosmetic: `freeze_run_control`
+    /// re-encodes a stored binding and compares both the JSON and its hash, so
+    /// emitting an explicit `null` here would make every pre-route record look
+    /// tampered with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_route: Option<ExecutorRoute>,
 }
 
 impl RunControlBinding {
@@ -310,5 +327,44 @@ mod tests {
         assert_eq!(legacy.model_first_response_ms, default_model_first_response_ms());
         assert_eq!(legacy.model_idle_ms, default_model_idle_ms());
         assert!(legacy.validate().is_ok());
+    }
+
+    #[test]
+    fn the_route_field_is_optional_and_unknown_fields_still_fail_closed() {
+        let base = serde_json::json!({
+            "schemaVersion": 1, "runId": "r", "conversationId": "c", "engineId": "pi",
+            "executionProfileId": "p", "authority": "authoritative", "readOnlyExecutor": "rust",
+            "permissionSnapshotId": "s",
+            "permission": {"mode": "ask", "projectRoot": null, "grants": []},
+            "budgets": {"modelRequestMs": 300000, "toolExecutionMs": 600000,
+                        "runExecutionMs": 1800000, "approvalWaitMs": 300000}
+        });
+        // A binding frozen before the field existed still decodes, and
+        // re-encoding it does not grow the key — `freeze_run_control` compares
+        // the stored bytes, so an emitted `null` would look like tampering.
+        let unrouted: RunControlBinding = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(unrouted.executor_route, None);
+        assert!(!serde_json::to_value(&unrouted).unwrap().as_object().unwrap().contains_key("executorRoute"));
+
+        let mut routed = base.clone();
+        routed["executorRoute"] = serde_json::json!("pi_native");
+        let decoded: RunControlBinding = serde_json::from_value(routed).unwrap();
+        assert_eq!(decoded.executor_route, Some(ExecutorRoute::PiNative));
+        // The key survives a round trip, and the encoding is stable from then on
+        // (a first decode still fills in the budget/epoch defaults).
+        let reencoded = serde_json::to_value(&decoded).unwrap();
+        assert_eq!(reencoded.as_object().unwrap().get("executorRoute").unwrap(), "pi_native");
+        assert_eq!(serde_json::from_value::<RunControlBinding>(reencoded.clone()).unwrap(), decoded);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), reencoded);
+
+        // An unrecognized route value is refused, not ignored.
+        let mut unknown_route = base.clone();
+        unknown_route["executorRoute"] = serde_json::json!("kernel_native");
+        assert!(serde_json::from_value::<RunControlBinding>(unknown_route).is_err());
+        // And `deny_unknown_fields` is what makes a newer record fail safely on
+        // an older build instead of being silently misread.
+        let mut unknown_field = base;
+        unknown_field["executorRoad"] = serde_json::json!("pi_native");
+        assert!(serde_json::from_value::<RunControlBinding>(unknown_field).is_err());
     }
 }

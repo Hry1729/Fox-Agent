@@ -340,7 +340,8 @@ fn parked_job_policy_switch(live: bool) {
     let run = db.create_run(&conversation.id, "policy switch after park", None).unwrap().run.id;
     let permission = FrozenPermission { mode: PermissionMode::Allow,
         project_root: Some(root.to_string_lossy().into_owned()), grants: vec![], approval_epoch: None };
-    let binding = RunControlBinding { schema_version: 1, run_id: run.clone(),
+    let binding = RunControlBinding {
+        executor_route: None, schema_version: 1, run_id: run.clone(),
         conversation_id: conversation.id.clone(), engine_id: "pi".into(),
         execution_profile_id: "legacy".into(), authority: ExecutionAuthority::Authoritative,
         read_only_executor: ResourceExecutor::Rust,

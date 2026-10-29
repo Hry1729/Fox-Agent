@@ -1,0 +1,78 @@
+
+================================================================================================
+P5a  abort during a 600ms read; write behind the barrier (writeChecksSignal=false, readHonoursSignal=true)
+================================================================================================
+
+-- timeline
+  t+    5.292ms  tool_execution_start call_slow_read isError=
+  t+    7.296ms  tool_execution_start call_write isError=
+  t+  112.223ms  tool_execution_end   call_slow_read isError=true
+  t+  112.239ms  tool_execution_end   call_write isError=false
+  t+  112.572ms  agent_end             isError=
+
+  abort called at t+111.751ms
+  execute() entered for: ["call_slow_read","call_write"]
+  write EFFECTS performed: ["call_write"]
+  read  result: isError=true text="Operation aborted"
+  write result: isError=false text="wrote"
+  abort -> run settled: 0.8ms (total run 109.3ms)
+
+-- verdict
+  write execute() was entered: true  (a Host that relies on "never enters execute" cannot rely on the SDK)
+  write effect performed after abort: true (writeChecksSignal=false)
+  read result classified as error: true
+  the abort signal reached the tool: true
+
+================================================================================================
+P5b  abort during a 600ms read; write behind the barrier (writeChecksSignal=true, readHonoursSignal=true)
+================================================================================================
+
+-- timeline
+  t+  113.246ms  tool_execution_start call_slow_read isError=
+  t+  113.683ms  tool_execution_start call_write isError=
+  t+  221.147ms  tool_execution_end   call_slow_read isError=true
+  t+  221.157ms  tool_execution_end   call_write isError=true
+  t+  221.388ms  agent_end             isError=
+
+  abort called at t+221.003ms
+  execute() entered for: ["call_slow_read","call_write"]
+  write EFFECTS performed: []
+  read  result: isError=true text="Operation aborted"
+  write result: isError=true text="skipped: run aborted"
+  abort -> run settled: 0.4ms (total run 108.4ms)
+
+-- verdict
+  write execute() was entered: true  (a Host that relies on "never enters execute" cannot rely on the SDK)
+  write effect performed after abort: false (writeChecksSignal=true)
+  read result classified as error: true
+  the abort signal reached the tool: true
+
+================================================================================================
+P5c  abort during a 600ms read; write behind the barrier (writeChecksSignal=true, readHonoursSignal=false)
+================================================================================================
+
+-- timeline
+  t+  221.802ms  tool_execution_start call_slow_read isError=
+  t+  222.128ms  tool_execution_start call_write isError=
+  t+  831.183ms  tool_execution_end   call_slow_read isError=false
+  t+  831.197ms  tool_execution_end   call_write isError=true
+  t+  831.836ms  agent_end             isError=
+
+  abort called at t+329.217ms
+  execute() entered for: ["call_slow_read","call_write"]
+  write EFFECTS performed: []
+  read  result: isError=false text="read done"
+  write result: isError=true text="skipped: run aborted"
+  abort -> run settled: 502.6ms (total run 610.2ms)
+
+-- verdict
+  write execute() was entered: true  (a Host that relies on "never enters execute" cannot rely on the SDK)
+  write effect performed after abort: false (writeChecksSignal=true)
+  read result classified as error: false
+  the abort signal reached the tool: true
+
+================================================================================================
+P5d  does the run settle before the tools do?
+================================================================================================
+  tool ignores the signal (800ms); abort at t+893.058ms; agent_end at t+1644.686ms
+  => the run waited 751.6ms after abort because Promise.all is not abortable

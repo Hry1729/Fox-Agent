@@ -36,17 +36,32 @@ export type KernelToolSnapshot = { "approvalState"?: (string | null); "batchId":
 export type KernelRunSnapshot = { "approvalDeadlineWallMs"?: (number | null); "compactions": number; "engineId": string; "lastEventSeq": string; "providerAttempts": number; "retryDueWallMs"?: (number | null); "runId": string; "runningElapsedMs": number; "schemaVersion": number; "state": string; "terminalWritten": boolean; "tools": Array<KernelToolSnapshot>; "turnAttempts": number; "turnId": string; }
 export type KernelStateInvalidation = { "schemaVersion": number; }
 export type ExecutionAuthority = "legacy" | "authoritative"
+export type ExecutorRoute = "pi_native"
 export type FrozenPermission = { "approvalEpoch"?: (number | null); "grants": Array<PermissionGrant>; "mode": PermissionMode; "projectRoot"?: (string | null); }
 export type GrantKind = ("resource" | "approval_reuse")
 export type PermissionGrant = { "kind"?: GrantKind; "scope": string; "tool": string; }
 export type PermissionMode = "ask" | "read_only" | "allow"
 export type ResourceExecutor = "runtime" | "rust"
 export type TimeBudgets = { "approvalWaitMs": number; "modelFirstResponseMs"?: number; "modelIdleMs"?: number; "modelRequestMs": number; "runExecutionLimited"?: boolean; "runExecutionMs": number; "toolExecutionMs": number; }
-export type RunControlBinding = { "authority": ExecutionAuthority; "budgets": TimeBudgets; "conversationId": string; "engineId": string; "executionProfileId": string; "permission": FrozenPermission; "permissionSnapshotId": string; "readOnlyExecutor": ResourceExecutor; "runId": string; "schemaVersion": number; }
+export type RunControlBinding = { "authority": ExecutionAuthority; "budgets": TimeBudgets; "conversationId": string; "engineId": string; "executionProfileId": string; "executorRoute"?: (ExecutorRoute | null); "permission": FrozenPermission; "permissionSnapshotId": string; "readOnlyExecutor": ResourceExecutor; "runId": string; "schemaVersion": number; }
 export type RuntimeToolCapability = { "approval": string; "category": string; "execution": string; "name": string; }
 export type RuntimeCapabilityManifest = { "cancellation": boolean; "contextCompaction": boolean; "dynamicModelSwitch": boolean; "imageInput": boolean; "manifestVersion": number; "reasoning": boolean; "sessionResume": boolean; "steering": boolean; "streamingText": boolean; "toolApproval": boolean; "tools": Array<RuntimeToolCapability>; "workLoop"?: boolean; }
 export type RuntimeEnvelope = { "conversationId"?: (string | null); "id": string; "kind": string; "payload"?: unknown; "protocol": string; "requestId"?: (string | null); "runId"?: (string | null); "runtimeSessionId"?: (string | null); "seq"?: (number | null); "timestamp": string; "type": string; "version": number; }
 export type RuntimeRequest = { "conversationId"?: (string | null); "id": string; "kind": string; "payload"?: unknown; "protocol": string; "runId"?: (string | null); "runtimeSessionId"?: (string | null); "timestamp": string; "type": string; "version": number; }
+export type NativeToolCallRegistration = { "callId": string; "inputDigest": string; "sourceOrder": number; "tool": string; }
+export type ToolBatchRegisterRequest = { "calls": Array<NativeToolCallRegistration>; "contextGeneration": number; "runId": string; }
+export type ToolBatchRegisterResponse = { "batchId": string; "registeredCalls": number; }
+export type ToolCallCancelRequest = { "batchId": string; "callId": string; "runId": string; }
+export type ToolCallCancelResponse = { "cancelled": boolean; "outcomeUnknown": boolean; "resultRecorded": boolean; }
+export type ToolCallCloseReason = ("unknown_tool" | "validation_failed" | "intercepted" | "aborted" | "not_started")
+export type ToolCallCloseRequest = { "batchId": string; "callId": string; "isError": boolean; "reason": ToolCallCloseReason; "runId": string; }
+export type ToolCallCloseResponse = { "closed": boolean; "state": string; }
+export type ToolCallExecuteRequest = { "batchId": string; "callId": string; "input": unknown; "runId": string; "tool": string; }
+export type NativeToolCallFactQuery = { "callId": string; "hasResult": boolean; "inputDigest": string; "tool": string; }
+export type ToolCallFactsRequest = { "calls": Array<NativeToolCallFactQuery>; "contextGeneration": number; "runId": string; }
+export type NativeToolCallFact = { "callId": string; "response"?: unknown; "state": NativeToolCallFactState; }
+export type NativeToolCallFactState = "committed" | "not_executed" | "outcome_unknown" | "waiting_approval"
+export type ToolCallFactsResponse = { "blocked": boolean; "contextGeneration": number; "facts": Array<NativeToolCallFact>; }
 
 export declare const PROTOCOL_NAME: "fox-runtime-jsonl"
 export declare const PROTOCOL_VERSION: 1

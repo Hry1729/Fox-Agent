@@ -107,9 +107,18 @@ export async function runPlanner({
   text,
   preflight,
   onAgent,
+  toolBridge,
+  prepareTools,
+  signal,
+  onToolBridgeError,
 } = {}) {
   const startedAt = Date.now()
-  const tools = adaptFoxToolsToPi(selectToolsForProjectContext(createReadOnlyTools(preflight), context).tools)
+  const selected = selectToolsForProjectContext(createReadOnlyTools(preflight), context).tools
+  const routed = toolBridge ? toolBridge.wrapTools(selected) : selected
+  const tools = prepareTools ? prepareTools(routed) : adaptFoxToolsToPi(routed)
+  const plannerAbort = new AbortController()
+  const plannerSignal = AbortSignal.any([plannerAbort.signal, ...[signal].filter(Boolean)])
+  const bridgeFailure = error => { onToolBridgeError?.(error); throw error }
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: true, reserveTokens: 4_096, keepRecentTokens: 8_192 },
     retry: {
@@ -151,7 +160,11 @@ export async function runPlanner({
     sessionManager: SessionManager.inMemory(cwd),
     settingsManager,
     modelRuntime,
+    foxBeforeToolCall: toolBridge ? (context, toolSignal) => toolBridge.beforeToolCall(context, toolSignal).catch(bridgeFailure) : undefined,
   })
+  const stopBridge = toolBridge ? session.subscribe(event => {
+    toolBridge.onEvent(event, plannerSignal).catch(error => { onToolBridgeError?.(error); void session.abort() })
+  }) : () => {}
   onAgent?.(session)
   session.state.messages = Array.isArray(history) ? history.slice(-12) : []
   let timeout = null
@@ -160,11 +173,13 @@ export async function runPlanner({
       session.prompt(text, { expandPromptTemplates: false }),
       new Promise((_, reject) => {
         timeout = setTimeout(() => {
+          plannerAbort.abort()
           session.abort()
           reject(new Error(`Planner exceeded its ${MAX_PLANNER_DURATION_MS}ms duration budget.`))
         }, MAX_PLANNER_DURATION_MS)
       }),
     ])
+    await toolBridge?.drain()
     const output = assistantText(session.state.messages)
     if (!output) throw new Error('Planner returned no final plan.')
     const plan = parsePlannerOutput(output)
@@ -175,7 +190,13 @@ export async function runPlanner({
     }
   } finally {
     if (timeout !== null) clearTimeout(timeout)
-    onAgent?.(null)
-    session.dispose()
+    try {
+      await session.abort()
+      await toolBridge?.drain()
+    } finally {
+      stopBridge()
+      onAgent?.(null)
+      session.dispose()
+    }
   }
 }

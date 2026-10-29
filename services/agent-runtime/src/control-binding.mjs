@@ -6,17 +6,17 @@ const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 // The wire schema validates shape; the adapter validates the identity it can
 // actually execute. No adapter may silently accept another engine/authority.
 export function validatePromptControl(request, executionProfileId) {
-  return validateAdapterControl(request, executionProfileId, 'legacy', true)
+  const native = request.payload?.controlBinding?.executorRoute === 'pi_native'
+  return validateAdapterControl(request, executionProfileId, native ? 'authoritative' : 'legacy', true, 'pi', true)
 }
 
-// Separate entry point: this does NOT enable authoritative prompts in the
-// Legacy sidecar. Only the controlled Kernel handoff may use this validator.
+// Kernel handoffs cannot accept a Run owned by the Pi-native executor.
 export function validateKernelControl(request, executionProfileId, engineId = 'pi') {
   if (!['pi', 'codex', 'deepseek_harness'].includes(engineId)) throw new Error('Unsupported Kernel adapter')
-  return validateAdapterControl(request, executionProfileId, 'authoritative', false, engineId)
+  return validateAdapterControl(request, executionProfileId, 'authoritative', false, engineId, false)
 }
 
-function validateAdapterControl(request, executionProfileId, authority, allowAbsent, engineId = 'pi') {
+function validateAdapterControl(request, executionProfileId, authority, allowAbsent, engineId = 'pi', allowPiNativeRoute = false) {
   const binding = request.payload?.controlBinding
   // Protocol v1 hosts predating frozen control remain supported. Explicit null
   // or malformed bindings are not the same as an absent compatibility field.
@@ -24,6 +24,13 @@ function validateAdapterControl(request, executionProfileId, authority, allowAbs
   const errors = validateWireValue('RunControlBinding', binding)
   if (errors.length) throw new Error(`Invalid frozen Run control: ${errors.join('; ')}`)
   if (binding.schemaVersion !== 1) throw new Error('Unsupported frozen Run control version')
+  // A routed binding names the executor that must run it. `pi_native` is the one
+  // route this sidecar implements, and only on the Legacy prompt path: the
+  // Kernel handoff drives its own batches, so it refuses every route rather than
+  // running a Pi-native Run on the wrong loop.
+  if (binding.executorRoute != null && !(allowPiNativeRoute && binding.executorRoute === 'pi_native')) {
+    throw new Error(`Frozen Run control routes to an executor this adapter cannot run: ${binding.executorRoute}`)
+  }
   if (binding.engineId !== engineId || binding.authority !== authority) {
     throw new Error(`Pi ${authority === 'legacy' ? 'Legacy' : 'Kernel'} adapter cannot execute the frozen Run engine/authority`)
   }

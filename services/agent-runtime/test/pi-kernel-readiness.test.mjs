@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -529,24 +529,28 @@ test('cancelling one run does not tear down in-flight Host requests of another r
   // reject only its own request and leave the victim able to finish.
   const victim = { conversationId: 'victim-conv', runtimeSessionId: 'victim-session', runId: 'victim-run' }
   const cancelled = { conversationId: 'cancelled-conv', runtimeSessionId: 'cancelled-session', runId: 'cancelled-run' }
-  await initializeRuntime(runtime, piConfig({
-    fauxResponses: [
-      { content: [toolCall('victim-tool', 'read', { path: join(directory, 'victim.txt') })], stopReason: 'toolUse' },
-      { content: [toolCall('cancelled-tool', 'read', { path: join(directory, 'cancelled.txt') })], stopReason: 'toolUse' },
-      'victim finished',
-    ],
-  }))
+  await writeFile(join(directory, 'victim.txt'), 'Victim source remains readable.')
+  await writeFile(join(directory, 'cancelled.txt'), 'Cancelled source must not be read.')
+  await initializeRuntime(runtime, piConfig())
   await createRuntimeSession(runtime, victim.conversationId, victim.runtimeSessionId, join(directory, 'victim-session.json'))
   await createRuntimeSession(runtime, cancelled.conversationId, cancelled.runtimeSessionId, join(directory, 'cancelled-session.json'))
   runtime.send('prompt', {
     ...victim,
-    payload: { projectContext: { projectRoot: directory }, text: 'victim waits', messages: [{ role: 'user', content: 'victim waits' }] },
+    payload: { projectContext: { projectRoot: directory }, text: 'victim waits', messages: [{ role: 'user', content: 'victim waits' }],
+      modelService: piConfig({ fauxResponses: [
+        { content: [toolCall('victim-tool', 'read', { path: join(directory, 'victim.txt') })], stopReason: 'toolUse' },
+        'victim finished',
+      ] }).modelService },
   })
   const victimPreflight = await runtime.waitFor((message) => message.kind === 'request'
     && message.type === 'tool.preflight' && message.runId === victim.runId)
   runtime.send('prompt', {
     ...cancelled,
-    payload: { projectContext: { projectRoot: directory }, text: 'cancelled waits', messages: [{ role: 'user', content: 'cancelled waits' }] },
+    payload: { projectContext: { projectRoot: directory }, text: 'cancelled waits', messages: [{ role: 'user', content: 'cancelled waits' }],
+      modelService: piConfig({ fauxResponses: [
+        { content: [toolCall('cancelled-tool', 'read', { path: join(directory, 'cancelled.txt') })], stopReason: 'toolUse' },
+        'cancelled must not continue',
+      ] }).modelService },
   })
   await runtime.waitFor((message) => message.kind === 'request'
     && message.type === 'tool.preflight' && message.runId === cancelled.runId)
@@ -572,6 +576,8 @@ test('cancelling one run does not tear down in-flight Host requests of another r
     && message.payload?.type === 'tool.completed')
   assert.ok(victimCompleted)
   assert.equal(victimPreflight.payload.toolCallId, victimCompleted.payload.toolCallId)
+  assert.equal(victimCompleted.payload.isError, false)
+  assert.match(JSON.stringify(victimCompleted.payload.result), /Victim source remains readable/)
 })
 
 test('resuming a sidecar session does not restore a tool that was waiting for approval', async (context) => {

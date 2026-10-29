@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline'
+import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
@@ -36,6 +37,8 @@ import { plannerHandoff, runPlanner, shouldUsePlanner } from './planner-runtime.
 import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from './expert-package.mjs'
 import { selectToolsForHostRuntime } from './host-runtime-capabilities.mjs'
 import { adaptFoxToolsToPi } from './tool-adapter.mjs'
+import { createNativeToolBridge } from './pi-native-tool-bridge.mjs'
+import { markNativeSessionRun, reconcileNativeSession } from './pi-native-recovery.mjs'
 import { runOfflineEvals } from './offline-evaluator.mjs'
 import {
   modelProfilePrompt,
@@ -59,6 +62,9 @@ import {
 
 const sessions = new Map()
 const activeRuns = new Map()
+const sessionRuns = new Map()
+const openingSessions = new Map()
+const closingSessions = new Set()
 const pendingHostRequests = new Map()
 const RUNTIME_HTTP_IDLE_TIMEOUT_MS = 90_000
 // Host requests have no fixed timeout. A Host tool may wait for a human
@@ -105,7 +111,6 @@ const WAIT_SEMANTIC_TOOLS = new Set([
   'workflow_snapshot_get',
 ])
 let modelService = null
-let fauxProvider = null
 let executionProfile = resolveExecutionProfile('legacy')
 
 function configuredFauxResponses(config) {
@@ -133,6 +138,12 @@ function respond(request, type, payload = {}) {
     runId: request.runId ?? null,
     payload,
   }))
+}
+
+function respondFailure(request, error) {
+  const message = error instanceof Error ? error.message : String(error)
+  const code = typeof error?.code === 'string' && error.code.startsWith('session.') ? error.code : 'runtime.request_failed'
+  respond(request, 'request_failed', { code, message })
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +231,9 @@ function requestHost(request, type, payload, signal) {
     signal?.addEventListener('abort', abort, { once: true })
     pendingHostRequests.set(message.id, {
       runId: request.runId,
+      conversationId: request.conversationId,
+      runtimeSessionId: request.runtimeSessionId,
+      cleanup: ['tool_call.close', 'tool_call.cancel', 'model_request.complete'].includes(type),
       resolve: (value) => settle(resolve, value),
       reject: (error) => settle(reject, error),
     })
@@ -237,14 +251,14 @@ function requestHost(request, type, payload, signal) {
 // the A5 child-runtime pool), so this is run-scoped rather than a global clear.
 function cancelPendingHostRequests(runId) {
   for (const [id, pending] of pendingHostRequests.entries()) {
-    if (runId === undefined || pending.runId === runId) {
+    if (runId === undefined || (pending.runId === runId && !pending.cleanup)) {
       pendingHostRequests.delete(id)
       pending.reject(new Error('Host request was cancelled.'))
     }
   }
 }
 
-function createModel(config, profile) {
+function createModel(config, profile, fauxProvider) {
   if (config.apiType === 'faux') return fauxProvider.getModel(config.modelId) || fauxProvider.getModel()
   return {
     id: config.modelId,
@@ -401,7 +415,7 @@ function noProgressCorrectionResult(toolName, streak) {
   }
 }
 
-function budgetedTools(tools, budget, failRun) {
+function createToolBudget(budget, failRun) {
   let totalCalls = 0
   // fingerprint -> the outcome that exact call returned last time.
   const outcomes = new Map()
@@ -415,7 +429,7 @@ function budgetedTools(tools, budget, failRun) {
     streaks.clear()
     corrections = 0
   }
-  return tools.map((tool) => ({
+  return (tools) => tools.map((tool) => ({
     ...tool,
     execute: async (toolCallId, input, signal, ...rest) => {
       totalCalls += 1
@@ -467,7 +481,34 @@ function budgetedTools(tools, budget, failRun) {
   }))
 }
 
-async function executePrompt(request) {
+function configurationForRun(request) {
+  const config = structuredClone(request.payload?.modelService ?? modelService)
+  if (!config?.baseUrl || !config?.modelId) throw new Error('Model service configuration is incomplete.')
+  const id = request.payload?.executionProfile ?? executionProfile.id
+  const strategy = request.payload?.executionStrategy
+  const profile = id === executionProfile.id && strategy === undefined
+    ? executionProfile : resolveExecutionProfile({ id, strategy })
+  return { modelService: config, executionProfile: profile }
+}
+
+function cancelRuntimeRun(runId) {
+  const run = activeRuns.get(runId)
+  const slot = [...sessionRuns.values()].find(value => value.runId === runId)
+  if (slot) {
+    slot.cancelled = true
+    slot.abort.abort()
+  }
+  if (run) {
+    run.cancelled = true
+    run.mapper?.cancel()
+    run.abort?.abort()
+    void Promise.resolve(run.agent?.abort()).catch(error => run.mapper?.fail(error))
+  }
+  cancelPendingHostRequests(runId)
+  return Boolean(run || slot)
+}
+
+async function executePrompt(request, { modelService, executionProfile }, slot) {
   const activeExecutionProfile = executionProfile
   const activeExecutionProfileSnapshot = executionProfileSnapshot(activeExecutionProfile)
   const activeContinuationContract = continuationDecisionContract(activeExecutionProfile)
@@ -482,10 +523,11 @@ async function executePrompt(request) {
     || isApprovalDemoFollowup(currentText, previousUserText)
   const bufferedAssistantEvents = []
   let toolExecutionCount = 0
+  let observedModelTokens = 0
   const runBudget = runBudgetForRequest(request.payload)
-  const runAbort = new AbortController()
+  const runAbort = slot.abort
   const runControl = {
-    cancelled: false,
+    cancelled: slot.cancelled,
     agent: null,
     budgetError: null,
     abort: runAbort,
@@ -509,9 +551,11 @@ async function executePrompt(request) {
     error.code = code
     runControl.budgetError = error
     mapper?.fail(error)
+    runAbort.abort(error)
     runControl.agent?.abort()
     return error
   }
+  const applyToolBudget = createToolBudget(runBudget, failRun)
   const emit = (type, payload = {}) => {
     if (runControl.cancelled
       && type !== 'usage.updated'
@@ -521,6 +565,16 @@ async function executePrompt(request) {
       && type !== 'run.interrupted'
       && type !== 'run.failed') return
     if (type === 'tool.started') toolExecutionCount += 1
+    if (type === 'usage.request') {
+      const usage = payload.record?.usage
+      observedModelTokens += ['input', 'output', 'cacheRead', 'cacheWrite']
+        .reduce((total, key) => total + (Number.isSafeInteger(usage?.[key]) && usage[key] > 0 ? usage[key] : 0), 0)
+      if (runBudget.maxTotalTokens !== null && observedModelTokens > runBudget.maxTotalTokens) {
+        runtimeEvent(request, seq, type, payload)
+        failRun('runtime.token_budget_exceeded', `Run exceeded its ${runBudget.maxTotalTokens} total-token budget, including model retries and compaction.`)
+        return
+      }
+    }
     if (type === 'usage.updated' && runBudget.maxTotalTokens !== null && Number(payload.totalTokens) > runBudget.maxTotalTokens) {
       runtimeEvent(request, seq, type, payload)
       failRun(
@@ -544,10 +598,14 @@ async function executePrompt(request) {
   })
   runControl.mapper = mapper
   let agent = null
+  let fauxProvider = null
   let terminalSeen = false
   let checkpoint = Promise.resolve()
   let checkpointError = null
   let stopListening = () => {}
+  let nativeToolBridge = null
+  let modelToolBridge = null
+  let nativeEventQueue = Promise.resolve()
   const budgetTimer = armRunDurationTimer(runBudget.maxDurationMs, () => {
     failRun(
       'runtime.duration_budget_exceeded',
@@ -565,15 +623,67 @@ async function executePrompt(request) {
     }, runScopedSignal(signal))
     return response.payload ?? { decision: 'block', message: 'Fox returned no preflight decision.' }
   }
-  const hostRequest = (type, payload, signal) => requestHost(request, type, payload, runScopedSignal(signal))
+  const hostTransport = (type, payload, signal) => requestHost(request, type, payload, signal).catch(error => {
+    if (error.code === 'runtime.host_response_identity_mismatch') throw failRun(error.code, error.message)
+    throw error
+  })
+  const hostRequest = (type, payload, signal) => hostTransport(type, payload, runScopedSignal(signal))
+  const executorRoute = request.payload?.controlBinding?.executorRoute ?? null
+  nativeToolBridge = executorRoute === 'pi_native'
+    ? createNativeToolBridge({
+        requestHost: hostTransport,
+        runId: request.runId,
+        contextGeneration: session.contextGeneration ?? 1,
+        signal: runAbort.signal,
+      })
+    : null
+  modelToolBridge = nativeToolBridge
   const pendingUser = fallbackMessages.at(-1)
   if (pendingUser?.role === 'user' && pendingUser.content === request.payload?.text) fallbackMessages.pop()
   const transcript = sanitizeAssistantHistory(sanitizeProviderHistory(transcriptFromSession(session, fallbackMessages)))
   const modelProfile = resolveModelProfile(modelService)
   const retryPolicy = retryPolicyForRun(request.payload, modelProfile)
-  const model = createModel(modelService, modelProfile)
+  if (modelService.apiType === 'faux') {
+    const name = `fox-faux-${randomUUID()}`
+    fauxProvider = registerFauxProvider({ api: name, provider: name,
+      models: [{ id: modelService.modelId, maxTokens: modelProfile.maxOutputTokens, ...(Number.isSafeInteger(modelService.fauxContextWindow)
+        ? { contextWindow: modelService.fauxContextWindow } : {}) }],
+      tokensPerSecond: modelService.fauxTokensPerSecond ?? 1000,
+    })
+    fauxProvider.setResponses(configuredFauxResponses(modelService))
+  }
+  const model = createModel(modelService, modelProfile, fauxProvider)
   const modelRuntime = await createFoxModelRuntime({
-    usage: { runId: request.runId, raw: modelService, onRecord: record => emit('usage.request', { record }) },
+    usage: { runId: request.runId, raw: modelService, onRecord: record => emit('usage.request', { record }),
+      ...(executorRoute === 'pi_native' ? {
+        signal: runAbort.signal,
+        onFailure: error => failRun(error.code ?? 'runtime.model_request_failed', error.message),
+        beforeAttempt: async ({ requestId, stage, maxOutputTokens, signal }) => {
+          try {
+            await modelToolBridge?.drain()
+          } catch (error) {
+            throw failRun('runtime.native_tool_bridge_failed', error.message)
+          }
+          signal?.throwIfAborted()
+          const response = await hostTransport('model_request.admit', { requestId, stage, maxOutputTokens }, signal)
+          if (response.type !== 'model_request.admitted' || response.payload?.allowed !== true) {
+            throw failRun(response.payload?.code ?? response.payload?.errorDetails?.code ?? 'runtime.model_request_denied',
+              response.payload?.error ?? response.payload?.reasonCode ?? 'Host did not admit the model request.')
+          }
+          return response.payload
+        },
+        afterAttempt: async ({ requestId, inputTokens, outputTokens, status }) => {
+          try {
+            const response = await hostTransport('model_request.complete', { requestId, inputTokens, outputTokens, status }, AbortSignal.timeout(5000))
+            if (response.type !== 'model_request.completed' || response.payload?.isError) {
+              throw new Error(response.payload?.error ?? 'Host did not confirm model request completion.')
+            }
+          } catch (error) {
+            throw failRun('runtime.model_request_completion_failed', error.message)
+          }
+        },
+      } : {}),
+    },
     model,
     apiKey: modelService.apiKey,
     fauxRegistration: modelService.apiType === 'faux' ? fauxProvider : null,
@@ -647,10 +757,14 @@ async function executePrompt(request) {
     ...projectSelection.excludedTools,
     ...hostRuntimeSelection.excludedTools,
   ]
-  const tools = budgetedTools(
-    adaptFoxToolsToPi(projectToolSelection.tools, { runId: request.runId, storageFor: hostToolResultStorage }),
-    runBudget,
-    failRun,
+  // Route the Fox executor before Pi result projection and Run budgeting. Both
+  // wrappers must still see every Host answer, including work-extension tools.
+  const localTools = projectToolSelection.tools.filter((tool) => tool.name === CONTINUATION_PROPOSAL_TOOL_NAME)
+  const routedTools = nativeToolBridge
+    ? [...nativeToolBridge.wrapTools(projectToolSelection.tools.filter((tool) => tool.name !== CONTINUATION_PROPOSAL_TOOL_NAME)), ...localTools]
+    : projectToolSelection.tools
+  const tools = applyToolBudget(
+    adaptFoxToolsToPi(routedTools, { runId: request.runId, storageFor: hostToolResultStorage }),
   )
   for (const tool of tools) {
     if (RUNTIME_TOOL_CATALOG.some(entry => entry.name === tool.name)) registeredEventTools.add(tool.name)
@@ -702,6 +816,11 @@ async function executePrompt(request) {
     emit('planner.started', { model: modelService.modelId })
     emit('run.phase', { phase: 'planning' })
     try {
+      const plannerToolBridge = nativeToolBridge ? createNativeToolBridge({
+        requestHost: hostTransport, runId: request.runId, contextGeneration: session.contextGeneration ?? 1,
+        signal: runAbort.signal, callIdPrefix: `planner:${randomUUID()}:`,
+      }) : null
+      modelToolBridge = plannerToolBridge
       const planned = await runPlanner({
         cwd,
         model,
@@ -712,6 +831,10 @@ async function executePrompt(request) {
         history: transcript,
         text: currentText,
         preflight,
+        toolBridge: plannerToolBridge,
+        prepareTools: list => applyToolBudget(adaptFoxToolsToPi(list, { runId: request.runId, storageFor: hostToolResultStorage })),
+        signal: runAbort.signal,
+        onToolBridgeError: error => failRun(error.code ?? 'runtime.native_tool_bridge_failed', error.message),
         onAgent: (plannerAgent) => { runControl.agent = plannerAgent },
       })
       if (runControl.cancelled) throw new Error('Planner was cancelled.')
@@ -731,7 +854,10 @@ async function executePrompt(request) {
       })
     } finally {
       runControl.agent = null
+      modelToolBridge = nativeToolBridge
     }
+    if (runControl.budgetError) throw runControl.budgetError
+    runAbort.signal.throwIfAborted()
   }
   const promptComposition = composeRuntimePrompt({
     systemPrompt: request.payload?.systemPrompt,
@@ -803,6 +929,8 @@ async function executePrompt(request) {
   if (session.format === 'pi-native' && !nativeManager) {
     throw sessionError('session.native_not_open', 'The native Pi session is not open for this run.')
   }
+  // The bridge hook is composed with the SDK's own beforeToolCall inside
+  // `createFoxAgentSession`; the SDK overwrites a same-named option.
   const created = await createFoxAgentSession({
     cwd,
     agentDir: process.cwd(),
@@ -814,6 +942,9 @@ async function executePrompt(request) {
     sessionManager: nativeManager ?? SessionManager.inMemory(cwd),
     settingsManager,
     modelRuntime,
+    foxBeforeToolCall: nativeToolBridge ? (context, signal) => nativeToolBridge.beforeToolCall(context, signal).catch(error => {
+      throw failRun(error.code ?? 'runtime.native_tool_bridge_failed', error.message)
+    }) : undefined,
   })
   agent = created.session
   runControl.agent = agent
@@ -840,7 +971,7 @@ async function executePrompt(request) {
     })
   }
   let shadowTurn = 0
-  stopListening = agent.subscribe((event) => {
+  const projectAgentEvent = event => {
     if (event?.type === 'turn_start') {
       shadowTurn += 1
       emit('run.phase', { phase: 'model_streaming', shadowModelRequest: 'begin' })
@@ -863,8 +994,21 @@ async function executePrompt(request) {
         })
       }
     }
-    if (event?.type === 'agent_end' && !event.willRetry) terminalSeen = true
     mapper.handle(event)
+  }
+  stopListening = agent.subscribe((event) => {
+    if (event?.type === 'agent_end' && !event.willRetry) terminalSeen = true
+    if (nativeToolBridge) {
+      const bridgeFailure = error => failRun('runtime.native_tool_bridge_failed', `Native tool bridge could not report its batch positions: ${error?.message ?? error}`)
+      Promise.resolve(nativeToolBridge.onEvent(event, runAbort.signal)).catch(bridgeFailure)
+      // SDK tool_execution_start precedes its beforeToolCall hook. Queue every
+      // projected SDK event so Host registration is acknowledged before the
+      // first lifecycle event, without reordering later events or their seq.
+      nativeEventQueue = nativeEventQueue.then(async () => {
+        await nativeToolBridge.waitForEventRegistration(event, runAbort.signal)
+        if (!runControl.budgetError) projectAgentEvent(event)
+      }).catch(bridgeFailure)
+    } else projectAgentEvent(event)
     if (event?.type === 'tool_execution_end' || event?.type === 'message_end' || event?.type === 'agent_end') {
       saveCheckpoint()
     }
@@ -874,7 +1018,12 @@ async function executePrompt(request) {
       throw new Error('The configured model does not support image input.')
     }
     emit('run.phase', { phase: 'model_streaming', attempt: 1 })
+    if (nativeManager) markNativeSessionRun(nativeManager, {
+      runId: request.runId, contextGeneration: session.contextGeneration ?? 1, executorRoute,
+    })
     await agent.prompt(request.payload?.text ?? '', { images, expandPromptTemplates: false })
+    await nativeEventQueue
+    await nativeToolBridge?.drain()
     if (runControl.budgetError) throw runControl.budgetError
     // `message_end` / `agent_end` may already have queued a checkpoint.  Wait for
     // that writer before replacing the same session file with the final snapshot;
@@ -905,10 +1054,17 @@ async function executePrompt(request) {
     else mapper.fail(error)
   } finally {
     clearTimeout(budgetTimer)
+    await nativeEventQueue
+    try {
+      await nativeToolBridge?.drain()
+    } catch (error) {
+      if (!runControl.cancelled) mapper.fail(error)
+    }
     if (!terminalSeen) mapper.fail(new Error('Pi Runtime ended without a terminal agent event.'))
     await checkpoint
     stopListening()
     agent?.dispose()
+    fauxProvider?.unregister()
     runControl.agent = null
     activeRuns.delete(request.runId)
   }
@@ -920,13 +1076,21 @@ async function handleRequest(request) {
     write(createEnvelope('event', 'fatal_error', { payload: { code: 'protocol.invalid_message', message: validationError } }))
     return
   }
+  let opening = null
   try {
+    if (request.type === 'create_session' || request.type === 'resume_session') {
+      if (openingSessions.has(request.runtimeSessionId)) throw sessionError('session.busy', 'This runtime session is already opening.')
+      let resolve
+      opening = { request, abort: new AbortController(), done: new Promise(done => { resolve = done }), resolve: () => resolve() }
+      openingSessions.set(request.runtimeSessionId, opening)
+    }
     switch (request.type) {
       case 'evaluation.run': {
         respond(request, 'evaluation_report', await runOfflineEvals())
         break
       }
       case 'initialize': {
+        if (sessionRuns.size || activeRuns.size) throw sessionError('session.runtime_busy', 'Runtime configuration cannot change while a Run is active or preparing.')
         const config = request.payload?.modelService
         if (!config?.baseUrl || !config?.modelId) throw new Error('Model service configuration is incomplete.')
         const nextExecutionProfile = resolveExecutionProfile({
@@ -940,17 +1104,9 @@ async function handleRequest(request) {
             ?? config.executionStrategy
             ?? config.execution_strategy,
         })
-        modelService = config
+        modelService = structuredClone(config)
         executionProfile = nextExecutionProfile
         const modelProfile = resolveModelProfile(config)
-        if (config.apiType === 'faux') {
-          fauxProvider?.unregister()
-          fauxProvider = registerFauxProvider({
-            models: [{ id: config.modelId }],
-            tokensPerSecond: config.fauxTokensPerSecond ?? 1000,
-          })
-          fauxProvider.setResponses(configuredFauxResponses(config))
-        }
         respond(request, 'ready', {
           protocol: PROTOCOL_NAME,
           protocolVersion: PROTOCOL_VERSION,
@@ -972,6 +1128,10 @@ async function handleRequest(request) {
         break
       }
       case 'create_session': {
+        if (sessionRuns.has(request.runtimeSessionId) || closingSessions.has(request.runtimeSessionId)) {
+          throw sessionError('session.busy', 'This runtime session is active or closing.')
+        }
+        if (sessions.has(request.runtimeSessionId)) throw sessionError('session.already_open', 'This runtime session is already open.')
         if (requestsNativeSession(request.payload)) {
           const cwd = String(request.payload?.cwd || process.cwd())
           const sessionDir = nativeSessionDirectory(request.payload)
@@ -998,12 +1158,17 @@ async function handleRequest(request) {
         }
         const session = createSessionState(request.runtimeSessionId, request.conversationId)
         session.sessionPath = request.payload?.sessionPath
-        sessions.set(request.runtimeSessionId, session)
         if (session.sessionPath) await saveSessionState(session.sessionPath, session)
+        opening.abort.signal.throwIfAborted()
+        sessions.set(request.runtimeSessionId, session)
         respond(request, 'session_created', { runtimeSessionId: request.runtimeSessionId })
         break
       }
       case 'resume_session': {
+        if (sessionRuns.has(request.runtimeSessionId) || closingSessions.has(request.runtimeSessionId)) {
+          throw sessionError('session.busy', 'This runtime session is active or closing.')
+        }
+        if (sessions.has(request.runtimeSessionId)) throw sessionError('session.already_open', 'This runtime session is already open.')
         if (requestsNativeSession(request.payload)) {
           const path = request.payload?.nativeSessionPath ?? request.payload?.sessionPath
           if (typeof path !== 'string' || !path.trim()) {
@@ -1042,11 +1207,18 @@ async function handleRequest(request) {
             nativeSessionId: actual,
             messages: [],
           }
+          await reconcileNativeSession({
+            manager, runId: request.runId, contextGeneration: session.contextGeneration,
+            requestHost: (type, payload, signal) => requestHost(request, type, payload, signal),
+            signal: AbortSignal.any([opening.abort.signal, AbortSignal.timeout(30_000)]),
+          })
+          opening.abort.signal.throwIfAborted()
           sessions.set(request.runtimeSessionId, session)
           respond(request, 'session_created', { runtimeSessionId: request.runtimeSessionId, ...nativeSessionMetadata(session) })
           break
         }
         const session = await loadSessionState(request.payload?.sessionPath, request.runtimeSessionId)
+        opening.abort.signal.throwIfAborted()
         session.sessionPath = request.payload?.sessionPath
         sessions.set(request.runtimeSessionId, session)
         respond(request, 'session_created', { runtimeSessionId: request.runtimeSessionId })
@@ -1054,36 +1226,81 @@ async function handleRequest(request) {
       }
       case 'prompt': {
         if (!modelService) throw new Error('Runtime has not been initialized.')
-        const frozenProject = validatePromptControl(request, executionProfile.id)
+        const config = configurationForRun(request)
+        const frozenProject = validatePromptControl(request, config.executionProfile.id)
         const session = currentSession(request)
         if (session.conversationId !== request.conversationId) throw new Error('Runtime session belongs to another conversation')
-        if (activeRuns.has(request.runId)) throw new Error('Run is already active')
-        if (frozenProject) request.payload.projectContext = frozenProject
-        respond(request, 'request_succeeded')
-        void executePrompt(request)
+        if (activeRuns.has(request.runId) || [...sessionRuns.values()].some(value => value.runId === request.runId)) {
+          throw new Error('Run is already active')
+        }
+        if (sessionRuns.has(request.runtimeSessionId) || openingSessions.has(request.runtimeSessionId) || closingSessions.has(request.runtimeSessionId)) {
+          throw sessionError('session.busy', 'This runtime session already has an active or preparing Run.')
+        }
+        const slot = { runId: request.runId, request, abort: new AbortController(), cancelled: false, done: null }
+        sessionRuns.set(request.runtimeSessionId, slot)
+        slot.done = (async () => {
+          let acknowledged = false
+          try {
+            if (session.format === 'pi-native') await reconcileNativeSession({
+              manager: session.nativeManager, runId: request.runId, contextGeneration: session.contextGeneration,
+              requestHost: (type, payload, signal) => requestHost(request, type, payload, signal),
+              signal: AbortSignal.any([slot.abort.signal, AbortSignal.timeout(30_000)]),
+            })
+            slot.abort.signal.throwIfAborted()
+            if (frozenProject) request.payload.projectContext = frozenProject
+            respond(request, 'request_succeeded')
+            acknowledged = true
+            await executePrompt(request, config, slot)
+          } catch (error) {
+            if (acknowledged) throw error
+            respondFailure(request, error)
+          } finally {
+            if (sessionRuns.get(request.runtimeSessionId) === slot) sessionRuns.delete(request.runtimeSessionId)
+            if (request.payload?.controlBinding?.executorRoute === 'pi_native') {
+              write(createEnvelope('event', 'run_released', {
+                conversationId: request.conversationId, runtimeSessionId: request.runtimeSessionId, runId: request.runId,
+                payload: { contextGeneration: session.contextGeneration ?? 1 },
+              }))
+            }
+          }
+        })()
+        await slot.done
         break
       }
       case 'cancel': {
-        const run = activeRuns.get(request.runId)
-        if (run) {
-          run.cancelled = true
-          // Declare the cancelled terminal immediately so an abort-induced
-          // provider 'error' event can never be projected as run.failed.
-          run.mapper?.cancel()
-          run.abort?.abort()
-          run.agent?.abort()
-          cancelPendingHostRequests(request.runId)
+        respond(request, 'request_succeeded', { cancelling: cancelRuntimeRun(request.runId) })
+        break
+      }
+      case 'session.close': {
+        const id = request.runtimeSessionId
+        const session = sessions.get(id)
+        const opening = openingSessions.get(id)
+        if ((session && session.conversationId !== request.conversationId)
+          || (opening && opening.request.conversationId !== request.conversationId)) {
+          throw sessionError('session.identity_mismatch', 'The runtime session belongs to another conversation.')
         }
-        respond(request, 'request_succeeded', { cancelling: Boolean(run) })
+        if (closingSessions.has(id)) throw sessionError('session.busy', 'This runtime session is already closing.')
+        closingSessions.add(id)
+        try {
+          if (opening) {
+            opening.abort.abort()
+            await opening.done
+          }
+          const slot = sessionRuns.get(id)
+          if (slot) {
+            cancelRuntimeRun(slot.runId)
+            await slot.done.catch(() => {})
+          }
+          sessions.delete(id)
+          respond(request, 'session_closed', { runtimeSessionId: id, closed: Boolean(session || opening) })
+        } finally {
+          closingSessions.delete(id)
+        }
         break
       }
       case 'shutdown':
-        for (const run of activeRuns.values()) {
-          run.cancelled = true
-          run.mapper?.cancel()
-          run.abort?.abort()
-          run.agent?.abort()
-        }
+        for (const opening of openingSessions.values()) opening.abort.abort()
+        for (const slot of sessionRuns.values()) cancelRuntimeRun(slot.runId)
         cancelPendingHostRequests()
         respond(request, 'request_succeeded')
         setTimeout(() => process.exit(0), 10)
@@ -1092,9 +1309,12 @@ async function handleRequest(request) {
         respond(request, 'request_failed', { code: 'protocol.unknown_request', message: `Unknown request type: ${request.type}` })
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    const code = typeof error?.code === 'string' && error.code.startsWith('session.') ? error.code : 'runtime.request_failed'
-    respond(request, 'request_failed', { code, message })
+    respondFailure(request, error)
+  } finally {
+    if (opening) {
+      if (openingSessions.get(request.runtimeSessionId) === opening) openingSessions.delete(request.runtimeSessionId)
+      opening.resolve()
+    }
   }
 }
 
@@ -1147,6 +1367,12 @@ input.on('line', (line) => {
       const pending = pendingHostRequests.get(message.requestId)
       if (pending) {
         pendingHostRequests.delete(message.requestId)
+        if (['runId', 'conversationId', 'runtimeSessionId'].some(field => (message[field] ?? null) !== (pending[field] ?? null))) {
+          const error = new Error('Host response identity does not match its request.')
+          error.code = 'runtime.host_response_identity_mismatch'
+          pending.reject(error)
+          return
+        }
         pending.resolve(message)
       }
       return

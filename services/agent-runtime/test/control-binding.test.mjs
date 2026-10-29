@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { validatePromptControl } from '../src/control-binding.mjs'
+import { validateKernelControl, validatePromptControl } from '../src/control-binding.mjs'
 import { startRuntimeProcess } from './runtime-contract-suite.mjs'
 
 // The canonical permission form must mirror the Rust `FrozenPermission` /
@@ -79,6 +79,22 @@ test('frozen permission hashing uses Rust field order rather than wire property 
   assert.deepEqual(validatePromptControl(request, 'legacy'), { projectRoot: null, permissionMode: 'ask' })
   request.payload.controlBinding.permission.mode = 'allow'
   assert.throws(() => validatePromptControl(request, 'legacy'), /hash mismatch/)
+})
+
+test('pi-native uses authoritative control without accepting Kernel handoffs', () => {
+  const routed = requestFixture()
+  routed.payload.controlBinding.executorRoute = 'pi_native'
+  assert.throws(() => validatePromptControl(routed, 'legacy'), /engine\/authority/)
+  routed.payload.controlBinding.authority = 'authoritative'
+  assert.deepEqual(validatePromptControl(routed, 'legacy'), { projectRoot: null, permissionMode: 'ask' })
+  assert.throws(() => validateKernelControl(routed, 'legacy'), /routes to an executor/)
+  for (const engineId of ['codex', 'deepseek_harness']) {
+    routed.payload.controlBinding.engineId = engineId
+    assert.throws(() => validatePromptControl(routed, 'legacy'), /engine\/authority/)
+  }
+  const unknown = requestFixture()
+  unknown.payload.controlBinding.executorRoute = 'kernel_native'
+  assert.throws(() => validatePromptControl(unknown, 'legacy'), /Invalid frozen Run control/)
 })
 
 test('real Pi process rejects foreign control before model events and accepts valid frozen control', async context => {

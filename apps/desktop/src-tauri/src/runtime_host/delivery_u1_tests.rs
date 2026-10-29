@@ -105,6 +105,7 @@ impl Fixture {
         };
         database
             .freeze_run_control(&RunControlBinding {
+                executor_route: None,
                 schema_version: 1,
                 run_id: run.clone(),
                 conversation_id: conversation.clone(),

@@ -1,0 +1,211 @@
+{
+  "generatedAt": "2026-10-28T06:25:14.551Z",
+  "purpose": "S0 probe evidence: the exact SDK build the P1-P8 conclusions were drawn from.",
+  "pinnedDependencySpec": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "typebox": "1.3.7"
+  },
+  "installedPackages": [
+    {
+      "package": "pi-agent-core",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-agent-co_a80f366447a963035d0b487d7355d6f7",
+      "packageJsonSha256": "3ee9a0f81587b917e7a010e4391fc10d2b04fa48091b693bffebe3b9b55e9f14"
+    },
+    {
+      "package": "pi-agent-core",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1",
+      "packageJsonSha256": "3ee9a0f81587b917e7a010e4391fc10d2b04fa48091b693bffebe3b9b55e9f14"
+    },
+    {
+      "package": "pi-ai",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-agent-co_a80f366447a963035d0b487d7355d6f7",
+      "packageJsonSha256": "36df91142c18a5912eafab0f2783bb4d88cdd101c5c5e7fd9173d4387cc5cced"
+    },
+    {
+      "package": "pi-ai",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-ai@1.4.0_27627f40cc2c54fb42eb32d65d1139f1",
+      "packageJsonSha256": "36df91142c18a5912eafab0f2783bb4d88cdd101c5c5e7fd9173d4387cc5cced"
+    },
+    {
+      "package": "pi-ai",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1",
+      "packageJsonSha256": "36df91142c18a5912eafab0f2783bb4d88cdd101c5c5e7fd9173d4387cc5cced"
+    },
+    {
+      "package": "pi-codemode",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-codemode@1.4.0",
+      "packageJsonSha256": "fd9ffde93569732ab626529ca689a0e8ee5c549d449a6ce8e9f0748ab8df3242"
+    },
+    {
+      "package": "pi-codemode",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1",
+      "packageJsonSha256": "fd9ffde93569732ab626529ca689a0e8ee5c549d449a6ce8e9f0748ab8df3242"
+    },
+    {
+      "package": "pi-coding-agent",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1",
+      "packageJsonSha256": "df6883685382d6a914e5797232744c26579fe7db5576ea0e9c859d018ca2d54e"
+    },
+    {
+      "package": "pi-mcp",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1",
+      "packageJsonSha256": "01372179ceb8e083cb807bb164b378992ddf378d96fa09d478a1bf52fe29f9c2"
+    },
+    {
+      "package": "pi-mcp",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-mcp@1.4.0",
+      "packageJsonSha256": "01372179ceb8e083cb807bb164b378992ddf378d96fa09d478a1bf52fe29f9c2"
+    },
+    {
+      "package": "pi-telemetry",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-ai@1.4.0_27627f40cc2c54fb42eb32d65d1139f1",
+      "packageJsonSha256": "d6e047b173341260b811a294e377e2f90ce31755fdc94ac2fe30bfbdf0d32847"
+    },
+    {
+      "package": "pi-telemetry",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-telemetry@1.4.0",
+      "packageJsonSha256": "d6e047b173341260b811a294e377e2f90ce31755fdc94ac2fe30bfbdf0d32847"
+    },
+    {
+      "package": "pi-tui",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1",
+      "packageJsonSha256": "49362a3815b3f69728c68243609d63355aa54b4c374414c5b037560b41ca6038"
+    },
+    {
+      "package": "pi-tui",
+      "version": "1.4.0",
+      "pnpmStoreDir": "@earendil-works+pi-tui@1.4.0",
+      "packageJsonSha256": "49362a3815b3f69728c68243609d63355aa54b4c374414c5b037560b41ca6038"
+    }
+  ],
+  "citedSdkFiles": [
+    {
+      "package": "pi-agent-core",
+      "path": "dist/agent-loop.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-agent-co_a80f366447a963035d0b487d7355d6f7/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js",
+      "bytes": 29656,
+      "sha256": "22ee81f9977e211044c1ad41a763876c793ca7fc1c5b39b9fa7f76f3cb281129"
+    },
+    {
+      "package": "pi-agent-core",
+      "path": "dist/agent-loop.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js",
+      "bytes": 29656,
+      "sha256": "22ee81f9977e211044c1ad41a763876c793ca7fc1c5b39b9fa7f76f3cb281129"
+    },
+    {
+      "package": "pi-agent-core",
+      "path": "dist/agent.d.ts",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-agent-co_a80f366447a963035d0b487d7355d6f7/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts",
+      "bytes": 7731,
+      "sha256": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace"
+    },
+    {
+      "package": "pi-agent-core",
+      "path": "dist/agent.d.ts",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts",
+      "bytes": 7731,
+      "sha256": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/api/transform-messages.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-agent-co_a80f366447a963035d0b487d7355d6f7/node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js",
+      "bytes": 9595,
+      "sha256": "5654d81fdacdf3f3e9ca9eb89c4dfa71b742b852163ecd49ba38307f876db63e"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/api/transform-messages.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-ai@1.4.0_27627f40cc2c54fb42eb32d65d1139f1/node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js",
+      "bytes": 9595,
+      "sha256": "5654d81fdacdf3f3e9ca9eb89c4dfa71b742b852163ecd49ba38307f876db63e"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/api/transform-messages.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js",
+      "bytes": 9595,
+      "sha256": "5654d81fdacdf3f3e9ca9eb89c4dfa71b742b852163ecd49ba38307f876db63e"
+    },
+    {
+      "package": "pi-coding-agent",
+      "path": "dist/core/agent-session.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js",
+      "bytes": 169761,
+      "sha256": "436e8be3bbab2db475ce30bb5d0bb30f0046b19a3476f8cd57b8133e68891162"
+    },
+    {
+      "package": "pi-coding-agent",
+      "path": "dist/core/sdk.d.ts",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.d.ts",
+      "bytes": 5514,
+      "sha256": "2cb83c8604497198eda83ba4691d9c001c971c6b358af05f42355afc7666c669"
+    },
+    {
+      "package": "pi-coding-agent",
+      "path": "dist/core/session-manager.d.ts",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.d.ts",
+      "bytes": 19676,
+      "sha256": "2288b69c82272311dc877da61ff2057bb04df49038ddef7eef6c8753c09f5313"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/providers/faux.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-agent-co_a80f366447a963035d0b487d7355d6f7/node_modules/@earendil-works/pi-ai/dist/providers/faux.js",
+      "bytes": 20668,
+      "sha256": "f305a512f2d90547e87b402f2b335ba0d8a9f1b7c535b8a44bfc6fce8250d26a"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/providers/faux.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-ai@1.4.0_27627f40cc2c54fb42eb32d65d1139f1/node_modules/@earendil-works/pi-ai/dist/providers/faux.js",
+      "bytes": 20668,
+      "sha256": "f305a512f2d90547e87b402f2b335ba0d8a9f1b7c535b8a44bfc6fce8250d26a"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/providers/faux.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-ai/dist/providers/faux.js",
+      "bytes": 20668,
+      "sha256": "f305a512f2d90547e87b402f2b335ba0d8a9f1b7c535b8a44bfc6fce8250d26a"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/utils/validation.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-agent-co_a80f366447a963035d0b487d7355d6f7/node_modules/@earendil-works/pi-ai/dist/utils/validation.js",
+      "bytes": 10758,
+      "sha256": "a45b42f298937ea475f326c4181b515c909b240fb82df58891907cce9954c700"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/utils/validation.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-ai@1.4.0_27627f40cc2c54fb42eb32d65d1139f1/node_modules/@earendil-works/pi-ai/dist/utils/validation.js",
+      "bytes": 10758,
+      "sha256": "a45b42f298937ea475f326c4181b515c909b240fb82df58891907cce9954c700"
+    },
+    {
+      "package": "pi-ai",
+      "path": "dist/utils/validation.js",
+      "resolved": "node_modules/.pnpm/@earendil-works+pi-coding-a_57305ff6b1cafcf7c47105c3090e00a1/node_modules/@earendil-works/pi-ai/dist/utils/validation.js",
+      "bytes": 10758,
+      "sha256": "a45b42f298937ea475f326c4181b515c909b240fb82df58891907cce9954c700"
+    }
+  ],
+  "unresolvedCitedPaths": []
+}

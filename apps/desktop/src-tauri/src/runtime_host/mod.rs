@@ -17,11 +17,26 @@ mod kernel_host;
 pub(crate) mod office_grants;
 mod waiting_jobs_wake;
 mod session_lifecycle;
+mod sidecar_sessions;
 
 /// The reset availability rule, shared with the UI fact and the command's own
 /// refusal.
 pub(crate) use session_lifecycle::ResetAvailability;
 mod kernel_authority;
+mod native_tool_batch;
+mod native_recovery;
+mod native_model_budget;
+mod native_approval_scope;
+#[cfg(test)]
+mod native_host_integration_tests;
+#[cfg(test)]
+mod native_performance_tests;
+#[cfg(test)]
+mod native_crash_integration_tests;
+#[cfg(test)]
+mod native_business_integration_tests;
+#[cfg(test)]
+mod native_isolation_tests;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
@@ -76,7 +91,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -205,6 +220,9 @@ fn create_fresh_host_tool_call(
     status: &str,
     requires_approval: bool,
 ) -> Result<HostToolCallExecution, String> {
+    if let Some(record) = native_tool_batch::recovering_host_tool_call(
+        database, run_id, runtime_tool_call_id, tool_name, input, status == "running",
+    )? { return Ok(HostToolCallExecution::Execute(record)); }
     let (record, disposition) = database.create_host_tool_call_once(
         run_id,
         runtime_tool_call_id,
@@ -232,6 +250,9 @@ fn inspect_existing_host_tool_call(
     tool_name: &str,
     input: &Value,
 ) -> Result<Option<Value>, String> {
+    if native_tool_batch::recovering_host_tool_call(database, run_id, runtime_tool_call_id, tool_name, input, false)?.is_some() {
+        return Ok(None);
+    }
     let Some((record, disposition)) =
         database.inspect_host_tool_call_replay(run_id, runtime_tool_call_id, tool_name, input)?
     else {
@@ -748,9 +769,8 @@ struct WorkerHandle {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<ChildStdin>>,
     pending: PendingResponses,
-    current_conversation_id: Option<String>,
-    active_run_id: Option<String>,
-    current_runtime_session_id: Option<String>,
+    sessions: sidecar_sessions::Sessions,
+    session_leases: HashMap<String, kernel_run_lock::KernelRunLock>,
 }
 
 struct QueuedRun {
@@ -802,6 +822,9 @@ struct RuntimeHostState {
     pending_approvals: PendingApprovals,
     active_file_writes: ActiveFileWrites,
     queued_runs: VecDeque<QueuedRun>,
+    queue_dispatcher: bool,
+    queue_changed: Arc<(Mutex<()>, Condvar)>,
+    native_run_leases: HashMap<String, kernel_run_lock::KernelRunLock>,
     dispatching_runs: HashMap<String, (String, bool)>,
     cancelled_dispatches: HashSet<String>,
     recovery_attempts: u8,
@@ -1143,6 +1166,7 @@ pub struct RuntimeHost {
     database: Database,
     state: Arc<Mutex<RuntimeHostState>>,
     run_transition: Arc<Mutex<()>>,
+    worker_launch: Arc<Mutex<()>>,
     sessions_dir: PathBuf,
     attachments_dir: PathBuf,
     skills_dir: PathBuf,
@@ -1161,6 +1185,10 @@ pub struct RuntimeHost {
     active_tool_handlers: Arc<AtomicUsize>,
     root_run_admission: Arc<run_admission::Gate>,
     child_run_admission: Arc<run_admission::Gate>,
+    /// Pi-native batch positions: registration, the in-batch barrier and the
+    /// cancel/close bookkeeping. Shared with the detached-dispatch clone so a
+    /// child Run sees the same ledger its parent registered.
+    native_batches: Arc<native_tool_batch::SharedBatchRegistry>,
 }
 
 /// Routes the session lifecycle's create/resume requests through the Host's
@@ -1168,14 +1196,25 @@ pub struct RuntimeHost {
 /// this only owns the transport.
 struct HostSessionLink<'a> {
     host: &'a RuntimeHost,
+    run_id: Option<&'a str>,
 }
 
 impl session_lifecycle::SessionRuntimeLink for HostSessionLink<'_> {
     fn send_session_request(
         &mut self,
-        request: RuntimeRequest,
+        mut request: RuntimeRequest,
         timeout: Duration,
     ) -> Result<RuntimeEnvelope, String> {
+        if let Some(run_id) = self.run_id {
+            request = request.with_run(run_id);
+            if let Some(conversation_id) = request.conversation_id.as_deref() {
+                if let Some(mapping) = self.host.database.get_runtime_session(conversation_id)? {
+                    let payload = request.payload.get_or_insert_with(|| json!({}));
+                    payload["contextGeneration"] = json!(mapping.context_generation);
+                    payload["nativeRecovery"] = json!(true);
+                }
+            }
+        }
         self.host.send_request(request, timeout)
     }
 }
@@ -1184,7 +1223,7 @@ impl RuntimeHost {
     pub(crate) fn execute_job_operation(&self, conversation: &str, run_id: &str, tool: &str, input: &Value) -> Result<Value,String> {
         run_bound_conversation(&self.database,run_id,Some(conversation))?;
         let binding=self.database.run_control_binding(run_id)?.ok_or("job operation needs a frozen Run")?;
-        let elapsed=if binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative {
+        let elapsed=if binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none() {
             let scope=self.database.kernel_host_scope(run_id)?;
             if !scope.tool_names.contains(tool) {return Err("job operation is outside the frozen tool scope".into());}
             if scope.lifecycle_hooks.iter().any(|h|h.event=="before_tool"&&matches!(h.action.as_str(),"block"|"require_approval")&&crate::lifecycle_hooks::matcher_matches(&h.matcher,tool)) {
@@ -1193,13 +1232,18 @@ impl RuntimeHost {
             self.database.kernel_build_full_snapshot(run_id)?.running_elapsed_ms
         } else {
             self.ensure_runtime_tool_allowed(run_id,tool,RuntimeToolIngress::Execute).map_err(|(_,e)|e)?;
-            0
+            if binding.executor_route.is_some() { native_model_budget::elapsed_ms(&self.database, run_id)? } else { 0 }
         };
         let token=self.state.lock().map_err(|_| "runtime state poisoned")?.cancellation.run_token(run_id).ok();
         let budget=std::time::Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, elapsed).max(0) as u64);
         let host = self.clone();
         let on_terminal = Arc::new(move |run: &str| { let _ = host.signal_waiting_run(run); });
-        background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget,Some(on_terminal))
+        let wait = if tool == "compute_job_status" && input["waitMs"].as_u64().unwrap_or(0) > 0 {
+            Some(SidecarExecutionWait::begin(&self.state, run_id)?)
+        } else { None };
+        let result = background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget,Some(on_terminal));
+        if let Some(wait) = wait { wait.resume()?; }
+        result
     }
     fn handle_job_tool_request(&self, stdin: &Arc<Mutex<ChildStdin>>, envelope: RuntimeEnvelope) {
         let outcome=(|| -> Result<Value,String> {
@@ -1219,8 +1263,7 @@ impl RuntimeHost {
         })();
         let response=outcome.unwrap_or_else(|error| json!({"isError":true,"error":error}));
         let kind=if response["isError"]==true {"tool.execute_failed"}else{"tool.execute_completed"};
-        let response=HostResponse::for_request(&envelope,kind,response);
-        if let Err(error)=write_protocol_message(stdin,&response) {eprintln!("fox job response: {error}");}
+        if let Err(error)=write_tool_protocol_response(&self.database,&self.state,stdin,&envelope,kind,response) {eprintln!("fox job response: {error}");}
     }
 
     fn try_acquire_tool_handler(&self) -> Option<ToolHandlerPermit> {
@@ -1342,6 +1385,9 @@ impl RuntimeHost {
                 pending_approvals: Arc::new(Mutex::new(HashMap::new())),
                 active_file_writes: Arc::new(Mutex::new(HashSet::new())),
                 queued_runs: VecDeque::new(),
+                queue_dispatcher: false,
+                queue_changed: Arc::new((Mutex::new(()), Condvar::new())),
+                native_run_leases: HashMap::new(),
                 dispatching_runs: HashMap::new(),
                 cancelled_dispatches: HashSet::new(),
                 recovery_attempts: 0,
@@ -1349,6 +1395,7 @@ impl RuntimeHost {
                 shadow: Arc::new(shadow_reconcile::ShadowReconciler::new(database.clone())),
             })),
             run_transition: Arc::new(Mutex::new(())),
+            worker_launch: Arc::new(Mutex::new(())),
             managed_files_dir: sessions_dir
                 .parent()
                 .map(|base| base.join("managed-file-backups"))
@@ -1368,6 +1415,7 @@ impl RuntimeHost {
             active_tool_handlers: Arc::new(AtomicUsize::new(0)),
             root_run_admission: run_admission::Gate::new(),
             child_run_admission: run_admission::Gate::new(),
+            native_batches: Arc::new(native_tool_batch::SharedBatchRegistry::new()),
         };
         host.reconcile_continuation_proposals();
         if let Err(error) = database.kernel_jobs_reconcile_orphans() {
@@ -1449,11 +1497,11 @@ impl RuntimeHost {
                 current_conversation_id: state
                     .worker
                     .as_ref()
-                    .and_then(|worker| worker.current_conversation_id.clone()),
+                    .and_then(|worker| worker.sessions.single_active().map(|session| session.conversation_id.clone())),
                 active_run_id: state
                     .worker
                     .as_ref()
-                    .and_then(|worker| worker.active_run_id.clone()),
+                    .and_then(|worker| worker.sessions.single_active().and_then(|session| session.run_id.clone())),
                 last_error: state.last_error.clone(),
             },
             Err(_) => RuntimeStatus {
@@ -1497,11 +1545,11 @@ impl RuntimeHost {
                 current_conversation_id: state
                     .worker
                     .as_ref()
-                    .and_then(|worker| worker.current_conversation_id.clone()),
+                    .and_then(|worker| worker.sessions.single_active().map(|session| session.conversation_id.clone())),
                 active_run_id: state
                     .worker
                     .as_ref()
-                    .and_then(|worker| worker.active_run_id.clone()),
+                    .and_then(|worker| worker.sessions.single_active().and_then(|session| session.run_id.clone())),
                 last_error: state.last_error.as_deref().map(redact_diagnostic_line),
                 stderr_tail: state
                     .stderr
@@ -1538,19 +1586,17 @@ impl RuntimeHost {
     }
 
     pub fn reload_configuration(&self) -> Result<(), String> {
-        let active = self
-            .state
-            .lock()
-            .map_err(|_| "runtime state lock is poisoned".to_owned())?
-            .worker
-            .as_ref()
-            .and_then(|worker| worker.active_run_id.clone());
+        let active = {
+            let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+            !state.kernel_active_runs.is_empty() || !state.dispatching_runs.is_empty()
+                || state.worker.as_ref().is_some_and(|w| !w.sessions.is_empty())
+        };
         let active_children = self
             .child_hosts
             .lock()
             .map_err(|_| "child runtime map is poisoned".to_owned())?
             .len();
-        if active.is_some() || active_children > 0 {
+        if active || active_children > 0 {
             return Err("模型配置不能在 Agent 正在运行时修改".to_owned());
         }
         self.stop_worker()?;
@@ -1621,15 +1667,14 @@ impl RuntimeHost {
             if let Ok(mut state) = self.state.lock() {
                 if retire {
                     state.cancellation.retire_run(&started.run.id);
+                    state.native_run_leases.remove(&started.run.id);
                 }
                 if let Some(worker) = state.worker.as_mut() {
-                    if worker.active_run_id.as_deref() == Some(&started.run.id) {
-                        worker.active_run_id = None;
-                    }
+                    worker.sessions.finish(&started.run.id);
                 }
                 if state.state == "busy" && state.kernel_active_runs.is_empty()
                     && state.kernel_wake_inflight.is_empty()
-                    && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
+                    && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
                     state.state = "ready".to_owned();
                 }
                 state.last_error = Some(error.clone());
@@ -1934,11 +1979,13 @@ impl RuntimeHost {
         attachments: Vec<AttachmentRecord>,
     ) {
         let run_id = started.run.id.clone();
-        let kernel = kernel_authority::select(
-            self.database.run_control_binding(&run_id).ok().flatten()
-                .as_ref().map(|binding| binding.authority),
-            std::env::var("FOX_KERNEL_MODE"),
-        ).is_ok_and(|authority| authority == fox_engine_protocol::ExecutionAuthority::Authoritative);
+        let route = (|| -> Result<bool, String> {
+            let binding = self.database.run_control_binding(&run_id)?;
+            let authority = kernel_authority::select(binding.as_ref().map(|b| b.authority), std::env::var("FOX_KERNEL_MODE"))?;
+            let executor = match binding { Some(binding) => binding.executor_route, None => Database::candidate_executor_route(authority)? };
+            Ok(authority == fox_engine_protocol::ExecutionAuthority::Authoritative && executor.is_none())
+        })();
+        let kernel = match route { Ok(kernel) => kernel, Err(error) => { self.record_start_failure(&started, error); return; } };
         let mut queued_at = None;
         if let Ok(mut state) = self.state.lock() {
             state.queued_runs.push_back(QueuedRun {
@@ -1952,7 +1999,30 @@ impl RuntimeHost {
         if let Some(at) = queued_at {
             let _ = self.database.record_host_stage_point(&run_id, &run_id, "queued", at);
         }
-        self.dispatch_next_queued_run();
+        self.ensure_queue_dispatcher();
+    }
+
+    fn ensure_queue_dispatcher(&self) {
+        let signal = {
+            let Ok(mut state) = self.state.lock() else { return; };
+            state.queue_changed.1.notify_all();
+            if state.queue_dispatcher || state.shutting_down { return; }
+            state.queue_dispatcher = true;
+            state.queue_changed.clone()
+        };
+        let host = self.clone();
+        thread::spawn(move || loop {
+            host.dispatch_next_queued_run();
+            {
+                let Ok(mut state) = host.state.lock() else { return; };
+                if state.shutting_down || state.queued_runs.is_empty() {
+                    state.queue_dispatcher = false;
+                    return;
+                }
+            }
+            let Ok(guard) = signal.0.lock() else { return; };
+            let _ = signal.1.wait_timeout(guard, Duration::from_millis(500));
+        });
     }
 
     fn dispatch_next_queued_run(&self) {
@@ -1964,15 +2034,17 @@ impl RuntimeHost {
             if state.shutting_down {
                 return;
             }
-            let legacy_available = !state.dispatching_runs.values().any(|(_, kernel)| !kernel)
-                && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none()
-                && !matches!(state.state.as_str(), "starting" | "stopping");
-            // Kernel conversations dispatch independently. Preserve the
-            // single Legacy worker boundary without delaying Kernel work.
-            let Some(index) = state.queued_runs.iter().position(|item|
-                if item.kernel { true } else { legacy_available }) else {
-                return;
-            };
+            let starting = state.dispatching_runs.iter().filter(|(run, (_, kernel))|
+                !kernel && state.worker.as_ref().is_none_or(|w| w.sessions.by_run(run).is_none())).count();
+            let occupied = state.worker.as_ref().map(|w| w.sessions.occupied()).unwrap_or(0);
+            let Some(index) = state.queued_runs.iter().position(|item| {
+                if item.kernel { return true; }
+                let conversation = &item.started.run.conversation_id;
+                occupied + starting < sidecar_sessions::ACTIVE_RUN_LIMIT
+                    && !state.dispatching_runs.values().any(|(id, _)| id == conversation)
+                    && state.worker.as_ref().is_none_or(|w| w.sessions.can_admit(conversation))
+                    && !matches!(state.state.as_str(), "starting" | "stopping")
+            }) else { return; };
             let Some(queued) = state.queued_runs.remove(index) else { return; };
             state.dispatching_runs.insert(queued.started.run.id.clone(),
                 (queued.started.run.conversation_id.clone(), queued.kernel));
@@ -1982,7 +2054,8 @@ impl RuntimeHost {
         let _ = self.database.record_host_stage_point(
             &queued.started.run.id, &queued.started.run.id, "dispatch_granted", granted_at,
         );
-        let runtime_host = self.clone();
+        let runtime_host = self.child_hosts.lock().ok().and_then(|hosts| hosts.get(&queued.started.run.id).cloned())
+            .unwrap_or_else(|| self.clone());
         std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
             let run_id = queued.started.run.id.clone();
             let cancelled = runtime_host
@@ -1998,7 +2071,7 @@ impl RuntimeHost {
                         if let Ok(mut state) = runtime_host.state.lock() {
                             if state.state == "busy" && state.kernel_active_runs.is_empty()
                                 && state.kernel_wake_inflight.is_empty()
-                                && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
+                                && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
                                 state.state = "ready".to_owned();
                             }
                         }
@@ -2012,8 +2085,7 @@ impl RuntimeHost {
             }
             runtime_host.dispatch_next_queued_run();
         }));
-        // Drain queued Kernel work iteratively; no capacity wait or recursive
-        // dispatch stack remains. Legacy still waits for its one worker.
+        // Dispatch reservations prevent two starts from taking the same conversation or capacity slot.
         }
     }
 
@@ -2027,8 +2099,7 @@ impl RuntimeHost {
                 && state
                     .worker
                     .as_ref()
-                    .and_then(|worker| worker.active_run_id.as_deref())
-                    != Some(run_id)
+                    .is_none_or(|worker| worker.sessions.by_run(run_id).is_none())
                 && !state.kernel_active_runs.contains(run_id)
             {
                 state.cancelled_dispatches.insert(run_id.to_owned());
@@ -2074,7 +2145,7 @@ impl RuntimeHost {
 
     fn record_start_failure(&self, started: &StartRunResult, message: String) {
         if self.database.run_control_binding(&started.run.id).ok().flatten()
-            .is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            .is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
             let _ = self.record_kernel_start_failure(&started.run.id);
             return;
         }
@@ -2319,6 +2390,7 @@ impl RuntimeHost {
             database: self.database.clone(),
             state: self.state.clone(),
             run_transition: self.run_transition.clone(),
+            worker_launch: self.worker_launch.clone(),
             sessions_dir: self.sessions_dir.clone(),
             attachments_dir: self.attachments_dir.clone(),
             skills_dir: self.skills_dir.clone(),
@@ -2335,6 +2407,7 @@ impl RuntimeHost {
             active_tool_handlers: self.active_tool_handlers.clone(),
             root_run_admission: self.root_run_admission.clone(),
             child_run_admission: self.child_run_admission.clone(),
+            native_batches: self.native_batches.clone(),
         }
     }
 
@@ -2377,14 +2450,24 @@ impl RuntimeHost {
             "primary"
         };
         let frozen_binding = self.database.run_control_binding(&started.run.id)?;
+        if matches!(kernel_authority::resolve_run_route(frozen_binding.as_ref()), kernel_authority::RunRoute::Reject) {
+            return Err("run_route_unrecognized: unsupported frozen executor".into());
+        }
         let authority = kernel_authority::select(
             frozen_binding.as_ref().map(|binding| binding.authority),
             std::env::var("FOX_KERNEL_MODE"),
         )?;
-        let kernel_ownership = if authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
+        let executor_route = match &frozen_binding {
+            Some(binding) => binding.executor_route,
+            None => Database::candidate_executor_route(authority)?,
+        };
+        let native = executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative);
+        let kernel = authority == fox_engine_protocol::ExecutionAuthority::Authoritative && !native;
+        let native_ownership = if native { Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?) } else { None };
+        let kernel_ownership = if kernel {
             Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?)
         } else { None };
-        if authority == fox_engine_protocol::ExecutionAuthority::Legacy {
+        if !kernel {
             crate::lifecycle_hooks::run_event(&self.database,"before_run",&started.run.id,run_kind,
                 &json!({"conversationId":started.run.conversation_id,"runKind":run_kind,
                     "depth":if run_kind=="child" {1} else {0}}))?;
@@ -2402,14 +2485,11 @@ impl RuntimeHost {
         self.database
             .freeze_run_execution_profile(&started.run.id, execution_profile.id())
             .map_err(|error| error.to_string())?;
-        if authority == fox_engine_protocol::ExecutionAuthority::Authoritative
+        if kernel
             && self.database.kernel_host_run_state(&started.run.id)?.is_some() {
             let binding = frozen_binding.as_ref().ok_or("existing Kernel has no binding")?;
             return self.start_kernel_run(kernel_ownership.ok_or("missing Kernel ownership")?, binding, Value::Null, Value::Null);
         }
-        let runtime_session_id = if authority == fox_engine_protocol::ExecutionAuthority::Legacy {
-            self.open_runtime_session(&started.run.conversation_id, Some(&started.run.id))?.0
-        } else { String::new() };
         let images = self.runtime_images(&started.run.conversation_id, attachments)?;
 
         let model_service = self
@@ -2483,6 +2563,10 @@ impl RuntimeHost {
             || control_binding.execution_profile_id != execution_profile.id() {
             return Err("Startup cannot replace the frozen Run engine/authority/profile/conversation".into());
         }
+        let runtime_session_id = if !kernel {
+            self.ensure_worker(&started.run.conversation_id)?;
+            self.open_runtime_session(&started.run.conversation_id, Some(&started.run.id))?.0
+        } else { String::new() };
         let mut project_context = project_context_for(
             &self.database,&self.sessions_dir,&started.run.conversation_id,&control_binding.permission,
         );
@@ -2579,10 +2663,17 @@ impl RuntimeHost {
             }
             state.cancellation.register_run(&started.run.id)?;
             if let Some(worker) = state.worker.as_mut() {
-                worker.active_run_id = Some(started.run.id.clone());
-                worker.current_runtime_session_id = Some(runtime_session_id.clone());
+                let generation = self.database.get_runtime_session(&started.run.conversation_id)?
+                    .ok_or("runtime session mapping is missing")?.context_generation;
+                worker.sessions.start(&started.run.conversation_id, &runtime_session_id, generation, &started.run.id)?;
             }
+            if let Some(lease) = native_ownership { state.native_run_leases.insert(started.run.id.clone(), lease); }
             state.state = "busy".to_owned();
+        }
+        if native {
+            native_model_budget::freeze(&self.database, &control_binding, effective_max_output_tokens as i64,
+                count_budget_override.map(|b| b.max_total_tokens as i64),
+                count_budget_override.map(|b| b.max_output_tokens as i64))?;
         }
 
         let prompt_request = RuntimeRequest::new("prompt")
@@ -2591,6 +2682,15 @@ impl RuntimeHost {
             .with_run(&started.run.id)
             .with_payload(json!({
                 "text": text,
+                "contextGeneration": self.database.get_runtime_session(&started.run.conversation_id)?.map(|s| s.context_generation),
+                "executionProfile": execution_profile.initialize_fields()["executionProfile"].clone(),
+                "executionStrategy": execution_profile.initialize_fields()["executionStrategy"].clone(),
+                "modelService": {
+                    "baseUrl": model_service.base_url, "modelId": model_service.model_id,
+                    "apiType": model_service.api_type, "contextWindow": model_service.context_window,
+                    "maxOutputTokens": effective_max_output_tokens, "supportsImageInput": model_service.supports_image_input,
+                    "apiKey": crate::model_service::get_api_key(&model_service.base_url),
+                },
                 "model": started.run.model,
                 "messages": messages,
                 "systemPrompt": context.system_prompt,
@@ -2717,7 +2817,15 @@ impl RuntimeHost {
         // still in memory": after a reset Pi has not written the JSONL yet, and
         // refusing to reuse it would make the new generation unusable.
         let live_runtime_session_id = self.live_runtime_session_id(conversation_id);
-        let mut link = HostSessionLink { host: self };
+        if let (Some(live), Some(mapping)) = (&live_runtime_session_id, self.database.get_runtime_session(conversation_id)?) {
+            if live == &mapping.runtime_session_id && matches!(mapping.status.as_str(), "ready" | "allocated") {
+                if let Some(run) = run_id { self.database.associate_run_runtime_session(run, conversation_id, live)?; }
+                let path = mapping.native_session_path.or(mapping.session_path).ok_or("live session path is missing")?;
+                return Ok((live.clone(), PathBuf::from(path)));
+            }
+        }
+        let lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))?;
+        let mut link = HostSessionLink { host: self, run_id };
         let lifecycle = self.session_lifecycle();
         let opened = match run_id {
             Some(run_id) => lifecycle.open_for_run(
@@ -2732,20 +2840,41 @@ impl RuntimeHost {
                 live_runtime_session_id.as_deref(),
             ),
         };
-        opened.map_err(|error| error.user_message())
+        let opened = opened.map_err(|error| error.user_message())?;
+        let mapping = self.database.get_runtime_session(conversation_id)?.ok_or("opened session mapping is missing")?;
+        self.state.lock().map_err(|_| "runtime state lock is poisoned")?
+            .worker.as_mut().ok_or("runtime worker is not running")?
+            .sessions.remember(conversation_id, &opened.0, mapping.context_generation)?;
+        self.state.lock().map_err(|_| "runtime state lock is poisoned")?
+            .worker.as_mut().ok_or("runtime worker is not running")?
+            .session_leases.insert(conversation_id.to_owned(), lease);
+        Ok(opened)
     }
 
     /// The runtime session the live worker holds for this conversation.
     ///
     /// Worker-scoped on purpose: a restarted worker (or another conversation's
     /// worker) proves nothing about this conversation's session.
+    fn close_conversation_session(&self, conversation_id: &str) -> Result<(), String> {
+        let session = self.state.lock().map_err(|_| "runtime state lock is poisoned")?
+            .worker.as_ref().and_then(|w| w.sessions.by_conversation(conversation_id).cloned());
+        if let Some(session) = session {
+            if session.run_id.is_some() { return Err("cannot close a conversation with an active Run".into()); }
+            let response = self.send_request(RuntimeRequest::new("session.close")
+                .with_conversation(conversation_id).with_runtime_session(&session.runtime_session_id), RESPONSE_TIMEOUT)?;
+            if response.r#type != "session_closed" { return Err(response_error(&response, "session close failed")); }
+            if let Some(worker) = self.state.lock().map_err(|_| "runtime state lock is poisoned")?.worker.as_mut() {
+                worker.sessions.remove(conversation_id)?;
+                worker.session_leases.remove(conversation_id);
+            }
+        }
+        Ok(())
+    }
+
     fn live_runtime_session_id(&self, conversation_id: &str) -> Option<String> {
         let state = self.state.lock().ok()?;
         let worker = state.worker.as_ref()?;
-        if worker.current_conversation_id.as_deref() != Some(conversation_id) {
-            return None;
-        }
-        worker.current_runtime_session_id.clone()
+        worker.sessions.by_conversation(conversation_id).map(|session| session.runtime_session_id.clone())
     }
 
     /// Explicit context reset: keep the conversation (history, expert, memory,
@@ -2774,8 +2903,11 @@ impl RuntimeHost {
         if active {
             return Err(session_lifecycle::ResetRefusal::run_active());
         }
+        self.close_conversation_session(conversation_id).map_err(session_lifecycle::ResetRefusal::failed)?;
+        let lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))
+            .map_err(session_lifecycle::ResetRefusal::failed)?;
         let outcome = {
-            let mut link = HostSessionLink { host: self };
+            let mut link = HostSessionLink { host: self, run_id: None };
             self.session_lifecycle().reset(conversation_id, &mut link)?
         };
         // The runtime now holds the new session. Recording it here is what lets
@@ -2783,10 +2915,9 @@ impl RuntimeHost {
         // yet (and it never points at the old session).
         if let Ok(mut state) = self.state.lock() {
             if let Some(worker) = state.worker.as_mut() {
-                if worker.current_conversation_id.as_deref() == Some(conversation_id) {
-                    worker.current_runtime_session_id =
-                        Some(outcome.runtime_session_id.clone());
-                }
+                worker.sessions.remember(conversation_id, &outcome.runtime_session_id,
+                    outcome.context_generation).map_err(session_lifecycle::ResetRefusal::failed)?;
+                worker.session_leases.insert(conversation_id.to_owned(), lease);
             }
         }
         Ok(outcome)
@@ -2801,25 +2932,11 @@ impl RuntimeHost {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<PathBuf>, session_lifecycle::SessionFileRefusal> {
-        let should_stop = self
-            .state
-            .lock()
-            .map_err(|_| {
-                session_lifecycle::SessionFileRefusal {
-                    code: session_lifecycle::SESSION_FILE_REFUSED_UNKNOWN.to_owned(),
-                    message: "runtime state lock is poisoned".to_owned(),
-                }
-            })?
-            .worker
-            .as_ref()
-            .and_then(|worker| worker.current_conversation_id.as_deref())
-            == Some(conversation_id);
-        if should_stop {
-            self.stop_worker().map_err(|error| session_lifecycle::SessionFileRefusal {
-                code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(),
-                message: error,
-            })?;
-        }
+        self.close_conversation_session(conversation_id).map_err(|message| session_lifecycle::SessionFileRefusal {
+            code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(), message,
+        })?;
+        let _lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))
+            .map_err(|message| session_lifecycle::SessionFileRefusal { code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(), message })?;
         session_lifecycle::purge_owned_session_files(
             &self.database,
             &self.sessions_dir,
@@ -2901,10 +3018,11 @@ impl RuntimeHost {
                 .database
                 .graph_attempt_id_for_child_run(&child_run_id)?
                 .is_some();
-        if let Some(parent) = self.database.run_control_binding(&child_run.parent_run_id)?
-            .filter(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
-            if self.database.pending_kernel_host_commands(&parent.run_id)?.iter().any(|command| command.kind=="cancel")
-                || self.database.kernel_host_run_state(&parent.run_id)?.as_deref()!=Some("running") {
+        let parent_control = self.database.run_control_binding(&child_run.parent_run_id)?;
+        let shared_native = parent_control.as_ref().is_some_and(|binding| binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        if let Some(parent) = parent_control.filter(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            if !shared_native && (self.database.pending_kernel_host_commands(&parent.run_id)?.iter().any(|command| command.kind=="cancel")
+                || self.database.kernel_host_run_state(&parent.run_id)?.as_deref()!=Some("running")) {
                 return Err("Kernel parent is no longer admitting child execution".into());
             }
             let mut inherited = parent;
@@ -2916,22 +3034,21 @@ impl RuntimeHost {
             inherited.budgets.restrict_execution_ms(child_run.budget.max_duration_ms);
             self.database.freeze_run_control(&inherited)?;
         }
-        let mut child_host = RuntimeHost::new(
+        let mut child_host = if shared_native { self.clone_for_detached_dispatch() } else { RuntimeHost::new(
             self.app.clone(),
             self.database.clone(),
             self.sessions_dir.clone(),
             self.attachments_dir.clone(),
             self.skills_dir.clone(),
             self.yuxi_client.clone(),
-        );
+        ) };
         child_host.root_run_admission = self.root_run_admission.clone();
         child_host.child_run_admission = self.child_run_admission.clone();
         child_host.run_budget_override = Some(child_run.budget.clone());
-        child_host
-            .state
-            .lock()
-            .map_err(|_| "child host state lock poisoned")?
-            .shadow = self.shadow_reconciler()?;
+        if !shared_native {
+            let shadow = self.shadow_reconciler()?;
+            child_host.state.lock().map_err(|_| "child host state lock poisoned")?.shadow = shadow;
+        }
         child_host.enforce_count_budget_override = enforce_count_budget_override;
         if graph_review_request_id.is_some() {
             child_host.execution_profile_override = Some(GRAPH_REVIEWER_EXECUTION_PROFILE);
@@ -2991,8 +3108,12 @@ impl RuntimeHost {
         thread::spawn(move || {
             let prompt = started.user_message.content.clone();
             let kernel_owned = coordinator.database.run_control_binding(&child_run_id)
-                .ok().flatten().is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative);
-            if let Err(error) = child_host.start_run(&started, &prompt, &[]) {
+                .ok().flatten().is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none());
+            let start = if shared_native {
+                child_host.start_run_detached(started.clone(), prompt, Vec::new());
+                Ok(())
+            } else { child_host.start_run(&started, &prompt, &[]) };
+            if let Err(error) = start {
                 if kernel_owned {
                     let _ = child_host.record_kernel_start_failure(&child_run_id);
                 } else {
@@ -3024,11 +3145,13 @@ impl RuntimeHost {
                         .run_approval_wait_ms(&child_run_id, chrono::Utc::now().timestamp_millis())
                         .unwrap_or(0)
                         .max(0) as u64;
-                    let duration_exceeded = !kernel_owned
-                        && Instant::now() >= deadline + Duration::from_millis(approval_wait);
+                    let duration_exceeded = if shared_native {
+                        native_model_budget::elapsed_ms(&coordinator.database, &child_run_id)
+                            .is_ok_and(|elapsed| elapsed >= child_run.budget.max_duration_ms)
+                    } else { !kernel_owned && Instant::now() >= deadline + Duration::from_millis(approval_wait) };
                     if duration_exceeded {
                         let _ = child_host.cancel_run(&child_run_id);
-                        let _ = child_host.stop_worker();
+                        if !shared_native { let _ = child_host.stop_worker(); }
                         let _ = coordinator.database.mark_run_failed(
                             &child_run_id,
                             "child_run.duration_budget_exceeded",
@@ -3047,7 +3170,7 @@ impl RuntimeHost {
                     thread::sleep(Duration::from_millis(100));
                 }
             }
-            let _ = child_host.stop_worker();
+            if !shared_native { let _ = child_host.stop_worker(); }
             let _ = coordinator.database.sync_child_run_terminal(&child_run_id);
             if let Some(review_request_id) = graph_review_request_id {
                 match coordinator
@@ -3097,19 +3220,22 @@ impl RuntimeHost {
             prepared.remaining_tokens,
             model_max_output,
         )?;
-        let mut managed_host = RuntimeHost::new(
+        let frozen = self.database.run_control_binding(&run_id)?;
+        let authority = kernel_authority::select(frozen.as_ref().map(|binding| binding.authority), std::env::var("FOX_KERNEL_MODE"))?;
+        let route = match frozen { Some(binding) => binding.executor_route, None => Database::candidate_executor_route(authority)? };
+        let shared_native = route == Some(fox_engine_protocol::ExecutorRoute::PiNative);
+        let mut managed_host = if shared_native { self.clone_for_detached_dispatch() } else { RuntimeHost::new(
             self.app.clone(),
             self.database.clone(),
             self.sessions_dir.clone(),
             self.attachments_dir.clone(),
             self.skills_dir.clone(),
             self.yuxi_client.clone(),
-        );
-        managed_host
-            .state
-            .lock()
-            .map_err(|_| "managed host state lock poisoned")?
-            .shadow = self.shadow_reconciler()?;
+        ) };
+        if !shared_native {
+            let shadow = self.shadow_reconciler()?;
+            managed_host.state.lock().map_err(|_| "managed host state lock poisoned")?.shadow = shadow;
+        }
         managed_host.run_budget_override = Some(ChildRunBudget {
             max_duration_ms: prepared.colleague.max_duration_ms,
             max_total_tokens: prepared.remaining_tokens.min(200_000),
@@ -3148,7 +3274,11 @@ impl RuntimeHost {
         let coordinator = self.clone();
         thread::spawn(move || {
             let prompt = prepared.started.user_message.content.clone();
-            if let Err(error) = managed_host.start_run(&prepared.started, &prompt, &[]) {
+            let start = if shared_native {
+                managed_host.start_run_detached(prepared.started.clone(), prompt, Vec::new());
+                Ok(())
+            } else { managed_host.start_run(&prepared.started, &prompt, &[]) };
+            if let Err(error) = start {
                 let (code, detail) = structured_runtime_error(&error);
                 let _ = coordinator.database.mark_run_failed(
                     &run_id,
@@ -3174,10 +3304,13 @@ impl RuntimeHost {
                         .run_approval_wait_ms(&run_id, chrono::Utc::now().timestamp_millis())
                         .unwrap_or(0)
                         .max(0) as u64;
-                    let duration_exceeded = Instant::now() >= deadline + Duration::from_millis(approval_wait);
+                    let duration_exceeded = if shared_native {
+                        native_model_budget::elapsed_ms(&coordinator.database, &run_id)
+                            .is_ok_and(|elapsed| elapsed >= prepared.colleague.max_duration_ms)
+                    } else { Instant::now() >= deadline + Duration::from_millis(approval_wait) };
                     if token_budget_exceeded || duration_exceeded {
                         let _ = managed_host.cancel_run(&run_id);
-                        let _ = managed_host.stop_worker();
+                        if !shared_native { let _ = managed_host.stop_worker(); }
                         let (code, message) = if token_budget_exceeded {
                             (
                                 "digital_colleague.token_budget_exceeded",
@@ -3203,7 +3336,7 @@ impl RuntimeHost {
                     thread::sleep(Duration::from_millis(100));
                 }
             }
-            let _ = managed_host.stop_worker();
+            if !shared_native { let _ = managed_host.stop_worker(); }
             if let Ok(mut hosts) = coordinator.child_hosts.lock() {
                 hosts.remove(&run_id);
             }
@@ -3300,7 +3433,7 @@ impl RuntimeHost {
                 "runtime.identity.session_missing",
                 "runtime envelope omitted runtimeSessionId".to_owned(),
             ))?;
-        let (expected_conversation_id, expected_run_id, expected_runtime_session_id) = {
+        let (expected_conversation_id, expected_run_id, expected_runtime_session_id, expected_generation) = {
             let state = self.state.lock().map_err(|_| {
                 (
                     "runtime.state_unavailable",
@@ -3311,12 +3444,23 @@ impl RuntimeHost {
                 "runtime.identity.worker_missing",
                 "runtime envelope arrived without an active worker".to_owned(),
             ))?;
-            (
-                worker.current_conversation_id.clone(),
-                worker.active_run_id.clone(),
-                worker.current_runtime_session_id.clone(),
-            )
+            let session = worker.sessions.by_run(run_id).ok_or((
+                "runtime.identity.run_not_active", "runtime envelope names no active sidecar Run".to_owned(),
+            ))?;
+            (Some(session.conversation_id.clone()), session.run_id.clone(), Some(session.runtime_session_id.clone()), session.generation)
         };
+        let mapping = self.database.get_runtime_session(conversation_id)
+            .map_err(|error| ("runtime.identity.mapping_invalid", error))?;
+        if let Some(mapping) = mapping {
+            if mapping.runtime_session_id != runtime_session_id || mapping.context_generation != expected_generation {
+                return Err(("runtime.identity.session_retired", "runtime event belongs to a retired session".into()));
+            }
+        }
+        if let Some(generation) = envelope.payload.as_ref().and_then(|payload| payload.get("contextGeneration")) {
+            if generation.as_i64() != Some(expected_generation) {
+                return Err(("runtime.identity.generation_mismatch", "runtime envelope belongs to a different context generation".into()));
+            }
+        }
         let authoritative_conversation_id = self
             .database
             .authoritative_run_conversation_id(run_id)
@@ -3330,6 +3474,15 @@ impl RuntimeHost {
             expected_runtime_session_id.as_deref(),
             &authoritative_conversation_id,
         )
+    }
+
+    fn execution_profile_for_run(&self, run: Option<&str>) -> Result<continuation::ExecutionProfileSelection, String> {
+        if let Some(run) = run {
+            if let Some(binding) = self.database.run_control_binding(run)? {
+                return continuation::ExecutionProfileSelection::resolve(&binding.execution_profile_id);
+            }
+        }
+        self.current_execution_profile()
     }
 
     fn current_execution_profile(&self) -> Result<continuation::ExecutionProfileSelection, String> {
@@ -3380,6 +3533,10 @@ impl RuntimeHost {
                 state.capabilities.clone(),
             )
         };
+        let active_profile_id = self.database.run_control_binding(run_id)
+            .map_err(|error| ("runtime.binding_invalid", error))?
+            .filter(|binding| binding.executor_route.is_some())
+            .map(|binding| binding.execution_profile_id).unwrap_or(active_profile_id);
         let active_profile = continuation::ExecutionProfileSelection::resolve(&active_profile_id)
             .map_err(|error| ("runtime.execution_profile.invalid", error))?;
         let manifest =
@@ -3440,7 +3597,7 @@ impl RuntimeHost {
     }
 
     fn cancel_child_runtime(&self, child_run_id: &str) -> Result<bool, String> {
-        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
             let host = self.child_hosts.lock().map_err(|_| "child runtime map is poisoned")?.get(child_run_id).cloned();
             return host.as_ref().unwrap_or(self).cancel_run(child_run_id);
         }
@@ -3454,7 +3611,7 @@ impl RuntimeHost {
         }
         if let Some(child) = self.database.child_run(child_run_id)? {
             if self.database.run_control_binding(&child.parent_run_id)?.is_some_and(|parent|
-                parent.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+                parent.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && parent.executor_route.is_none()) {
                 let _ownership = kernel_host::acquire(&self.sessions_dir,child_run_id)?;
                 if self.database.kernel_cancel_unstarted_child(&child.parent_run_id,child_run_id)? { return Ok(true); }
                 return Err("Kernel child preparation is changing; cancellation was not delegated to Legacy".into());
@@ -3496,7 +3653,7 @@ impl RuntimeHost {
         child_run_id: &str,
         allow_redelivery: bool,
     ) -> Result<bool, String> {
-        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
             return self.cancel_child_runtime(child_run_id);
         }
         let child_host = self
@@ -3641,7 +3798,7 @@ impl RuntimeHost {
             .get_expert_team(team_run_id)?
             .ok_or_else(|| "team.not_found".to_owned())?;
         let kernel_parent = self.database.run_control_binding(&snapshot.run.parent_run_id)?
-            .filter(|binding|binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative);
+            .filter(|binding|binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none());
         for member in &snapshot.members {
             if !run_status_is_terminal(&member.status) {
                 let result = self.cancel_child_runtime(&member.child_run_id);
@@ -3656,7 +3813,7 @@ impl RuntimeHost {
     }
 
     pub fn cancel_run(&self, run_id: &str) -> Result<bool, String> {
-        if self.database.run_control_binding(run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+        if self.database.run_control_binding(run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
             let queued = self.database.queue_kernel_host_command(run_id, None)?;
             self.state.lock().map_err(|_| "runtime state lock poisoned")?.cancellation.request_run_cancel(run_id);
             for child_run_id in self.database.active_child_run_ids(run_id)? {
@@ -3692,19 +3849,8 @@ impl RuntimeHost {
             let Some(worker) = state.worker.as_ref() else {
                 return Ok(false);
             };
-            if worker.active_run_id.as_deref() != Some(run_id) {
-                return Ok(false);
-            }
-            (
-                worker.current_conversation_id.clone(),
-                worker.current_conversation_id.as_ref().and_then(|id| {
-                    self.database
-                        .get_runtime_session(id)
-                        .ok()
-                        .flatten()
-                        .map(|session| session.runtime_session_id)
-                }),
-            )
+            let Some(session) = worker.sessions.by_run(run_id) else { return Ok(false); };
+            (Some(session.conversation_id.clone()), Some(session.runtime_session_id.clone()))
         };
 
         self.state.lock().map_err(|_| "runtime state lock is poisoned")?
@@ -3758,6 +3904,12 @@ impl RuntimeHost {
             .remove(approval_id);
         if let Some(pending) = sender {
             let _ = pending.sender.send(approval.status == "approved");
+        } else if self.database.run_control_binding(&approval.run_id)?
+            .is_some_and(|binding| binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative)) {
+            self.ensure_worker(&approval.conversation_id)?;
+            let stdin = self.state.lock().map_err(|_| "runtime state lock is poisoned")?
+                .worker.as_ref().ok_or("runtime worker is not running")?.stdin.clone();
+            native_tool_batch::recover_native_approval(self, &stdin, approval_id)?;
         }
         let _ = self.app.emit("fox://approval-resolved", approval);
         Ok(true)
@@ -3825,17 +3977,8 @@ impl RuntimeHost {
     }
 
     pub fn remove_conversation(&self, conversation_id: &str) -> Result<(), String> {
-        let should_stop = self
-            .state
-            .lock()
-            .map_err(|_| "runtime state lock is poisoned".to_owned())?
-            .worker
-            .as_ref()
-            .and_then(|worker| worker.current_conversation_id.as_deref())
-            == Some(conversation_id);
-        if should_stop {
-            self.stop_worker()?;
-        }
+        self.close_conversation_session(conversation_id)?;
+        let _lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))?;
         if let Some(session) = self.database.get_runtime_session(conversation_id)? {
             if let Some(path) = session.session_path.map(PathBuf::from) {
                 let sessions_root = self
@@ -3862,19 +4005,20 @@ impl RuntimeHost {
             .drain()
             .collect::<Vec<_>>();
         for (run_id, child_host) in child_hosts {
-            if self.database.run_control_binding(&run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            if Arc::ptr_eq(&self.state, &child_host.state) { continue; }
+            if self.database.run_control_binding(&run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
                 child_host.stop_kernel_runs()?;
                 continue;
             }
-            let _ = child_host.cancel_run(&run_id);
-            let _ = child_host.stop_worker();
+            let _ = child_host.stop_worker_with_shutdown(false);
+            if self.database.native_run_waiting_approval(&run_id).unwrap_or(false) { continue; }
             self.database.mark_run_interrupted(
                 &run_id,
                 "runtime.application_exit",
                 "Fox closed before the managed Run reached a terminal state.",
             )?;
         }
-        let (active_run_id, queued_run_ids) = {
+        let (active_run_ids, queued_run_ids) = {
             let mut state = self
                 .state
                 .lock()
@@ -3882,7 +4026,8 @@ impl RuntimeHost {
             let active = state
                 .worker
                 .as_ref()
-                .and_then(|worker| worker.active_run_id.clone());
+                .map(|worker| worker.sessions.active().into_iter().filter_map(|session| session.run_id).collect::<Vec<_>>())
+                .unwrap_or_default();
             let queued = state
                 .queued_runs
                 .drain(..)
@@ -3890,8 +4035,9 @@ impl RuntimeHost {
                 .collect::<Vec<_>>();
             (active, queued)
         };
-        self.stop_worker()?;
-        if let Some(run_id) = active_run_id {
+        self.stop_worker_with_shutdown(false)?;
+        for run_id in active_run_ids {
+            if self.database.native_run_waiting_approval(&run_id).unwrap_or(false) { continue; }
             self.database.mark_run_interrupted(
                 &run_id,
                 "runtime.application_exit",
@@ -3911,53 +4057,28 @@ impl RuntimeHost {
     fn mark_run_ready(&self, run_id: &str) {
         let should_dispatch = if let Ok(mut state) = self.state.lock() {
             state.cancellation.retire_run(run_id);
-            if let Some(worker) = state.worker.as_mut() {
-                if worker.active_run_id.as_deref() == Some(run_id) {
-                    worker.active_run_id = None;
-                    state.state = if state.kernel_active_runs.is_empty()
-                        && state.kernel_wake_inflight.is_empty() { "ready" } else { "busy" }.to_owned();
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
+            state.native_run_leases.remove(run_id);
+            state.queue_changed.1.notify_all();
+            let removed = state.worker.as_mut().is_some_and(|worker| worker.sessions.finish(run_id));
+            if state.kernel_active_runs.is_empty() && state.kernel_wake_inflight.is_empty()
+                && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
+                state.state = "ready".to_owned();
             }
-        } else {
-            false
-        };
-        if should_dispatch {
-            self.dispatch_next_queued_run();
-        }
+            removed
+        } else { false };
+        if should_dispatch { self.dispatch_next_queued_run(); }
     }
 
     fn ensure_worker(&self, conversation_id: &str) -> Result<(), String> {
-        let (current_conversation, current_state, worker_busy) = {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-            (
-                state
-                    .worker
-                    .as_ref()
-                    .and_then(|worker| worker.current_conversation_id.clone()),
-                state.state.clone(),
-                state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_some(),
-            )
-        };
-
-        if current_conversation.as_deref() == Some(conversation_id)
-            && !matches!(current_state.as_str(), "stopping" | "crashed")
+        let _launch = self.worker_launch.lock().map_err(|_| "runtime worker launch lock is poisoned")?;
         {
-            return Ok(());
+            let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+            if state.shutting_down { return Err("Runtime Host is shutting down".into()); }
+            if state.worker.is_some() && !matches!(state.state.as_str(), "stopping" | "crashed") {
+                return Ok(());
+            }
         }
-        if current_conversation.is_some() && worker_busy {
-            return Err("another conversation is currently running".to_owned());
-        }
-        if current_conversation.is_some() {
-            self.stop_worker()?;
-        }
+        self.stop_worker()?;
         self.spawn_worker(conversation_id)
     }
 
@@ -4020,9 +4141,8 @@ impl RuntimeHost {
                 child: Arc::new(Mutex::new(child)),
                 stdin: stdin.clone(),
                 pending: pending.clone(),
-                current_conversation_id: Some(conversation_id.to_owned()),
-                active_run_id: None,
-                current_runtime_session_id: None,
+                sessions: sidecar_sessions::Sessions::default(),
+                session_leases: HashMap::new(),
             });
         }
 
@@ -4139,11 +4259,16 @@ impl RuntimeHost {
 
         match receiver.recv_timeout(timeout) {
             Ok(response) => Ok(response),
-            Err(_) => {
-                if let Ok(mut responses) = pending.lock() {
-                    responses.remove(&request_id);
+            Err(error) => {
+                if let Ok(mut responses) = pending.lock() { responses.remove(&request_id); }
+                match error {
+                    mpsc::RecvTimeoutError::Timeout => Err(format!("runtime request timed out: {}", request.r#type)),
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        let cause = self.state.lock().ok().and_then(|state| state.last_error.clone())
+                            .unwrap_or_else(|| "runtime transport closed".into());
+                        Err(format!("runtime request disconnected: {}: {}", request.r#type, redact_diagnostic_line(&cause)))
+                    }
                 }
-                Err(format!("runtime request timed out: {}", request.r#type))
             }
         }
     }
@@ -4163,16 +4288,17 @@ impl RuntimeHost {
         let runtime_host = self.clone();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
+                if !runtime_host.is_current_transport(&stdin) { return; }
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
                         runtime_host
-                            .handle_runtime_crash(format!("runtime stdout failed: {error}"));
+                            .handle_worker_transport_crash(&stdin, format!("runtime stdout failed: {error}"));
                         return;
                     }
                 };
                 if line.len() > MAX_PROTOCOL_LINE_BYTES {
-                    runtime_host.handle_runtime_crash(
+                    runtime_host.handle_worker_transport_crash(&stdin,
                         "runtime emitted an oversized JSONL message".to_owned(),
                     );
                     return;
@@ -4180,7 +4306,7 @@ impl RuntimeHost {
                 let envelope: RuntimeEnvelope = match serde_json::from_str(&line) {
                     Ok(envelope) => envelope,
                     Err(error) => {
-                        runtime_host.handle_runtime_crash(format!(
+                        runtime_host.handle_worker_transport_crash(&stdin, format!(
                             "runtime emitted invalid JSONL: {error}"
                         ));
                         return;
@@ -4189,12 +4315,16 @@ impl RuntimeHost {
                 if envelope.protocol != protocol::PROTOCOL_NAME
                     || envelope.version != protocol::PROTOCOL_VERSION
                 {
-                    runtime_host.handle_runtime_crash(format!(
+                    runtime_host.handle_worker_transport_crash(&stdin, format!(
                         "runtime protocol mismatch: {} v{}",
                         envelope.protocol, envelope.version
                     ));
                     return;
                 }
+
+                let runtime_host = envelope.run_id.as_deref().and_then(|run|
+                    runtime_host.child_hosts.lock().ok().and_then(|hosts| hosts.get(run).cloned()))
+                    .unwrap_or_else(|| runtime_host.clone());
 
                 if envelope.kind == "response" {
                     if let Some(request_id) = envelope.request_id.as_deref() {
@@ -4223,7 +4353,7 @@ impl RuntimeHost {
                             }),
                         );
                         if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                            runtime_host.handle_runtime_crash(write_error);
+                            runtime_host.handle_worker_transport_crash(&stdin, write_error);
                             return;
                         }
                         continue;
@@ -4250,7 +4380,7 @@ impl RuntimeHost {
                             }),
                         );
                         if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                            runtime_host.handle_runtime_crash(write_error);
+                            runtime_host.handle_worker_transport_crash(&stdin, write_error);
                             return;
                         }
                         // Legacy denied the preflight. Feed the shadow so the
@@ -4325,7 +4455,7 @@ impl RuntimeHost {
                     let response =
                         HostResponse::for_request(&envelope, response_type, payload.clone());
                     if let Err(error) = write_protocol_message(&stdin, &response) {
-                        runtime_host.handle_runtime_crash(error);
+                        runtime_host.handle_worker_transport_crash(&stdin, error);
                         return;
                     }
                     // Online Shadow feed: run the same preflight through the
@@ -4334,6 +4464,29 @@ impl RuntimeHost {
                     // kernel side is the shadow controller's own decision. No
                     // side effects; failures never affect the legacy response.
                     runtime_host.shadow_feed_preflight(run_id, tool, &envelope, allowed, &payload);
+                    continue;
+                }
+
+                if envelope.kind == "request" && native_model_budget::handles(&envelope.r#type) {
+                    let admission = if envelope.r#type == native_model_budget::ADMIT {
+                        runtime_host.ensure_active_envelope_identity(&envelope).map_err(|(code,error)| format!("{code}: {error}"))
+                            .and_then(|_| runtime_host.state.lock().map_err(|_| "runtime state poisoned".to_owned())?
+                                .cancellation.run_token(envelope.run_id.as_deref().unwrap_or_default())?.check())
+                    } else { Ok(()) };
+                    let payload = match admission {
+                        Ok(()) => native_model_budget::response(&database, &envelope),
+                        Err(error) => json!({"isError":true,"error":error}),
+                    };
+                    let kind = if envelope.r#type == native_model_budget::ADMIT { "model_request.admitted" } else { "model_request.completed" };
+                    if let Err(error) = write_protocol_message(&stdin, &HostResponse::for_request(&envelope, kind, payload)) {
+                        runtime_host.handle_worker_transport_crash(&stdin, error);
+                        return;
+                    }
+                    continue;
+                }
+
+                if envelope.kind == "request" && native_tool_batch::handles(&envelope.r#type) {
+                    native_tool_batch::dispatch(&runtime_host, &stdin, envelope);
                     continue;
                 }
 
@@ -4354,7 +4507,7 @@ impl RuntimeHost {
                             }),
                         );
                         if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                            runtime_host.handle_runtime_crash(write_error);
+                            runtime_host.handle_worker_transport_crash(&stdin, write_error);
                             return;
                         }
                         continue;
@@ -4368,15 +4521,19 @@ impl RuntimeHost {
                     let run_id = envelope.run_id.as_deref().unwrap_or_default();
                     let readonly_execution = envelope.r#type == "tool.readonly_execute";
                     let ingress = if readonly_execution { RuntimeToolIngress::Preflight } else { RuntimeToolIngress::Execute };
-                    let admission = runtime_host.ensure_runtime_tool_allowed(
-                        run_id,
-                        tool,
-                        ingress,
-                    ).and_then(|_| {
-                        if readonly_execution {
-                            require_rust_reader_binding(&database, &envelope).map(|_| ()).map_err(|error| ("resource_gateway.binding_rejected", error))
-                        } else { Ok(()) }
-                    });
+                    let admission = database.run_control_binding(run_id)
+                        .map_err(|error| ("runtime.binding_invalid", error))
+                        .and_then(|binding| {
+                            if binding.is_some_and(|binding| binding.executor_route.is_some()) {
+                                Err(("runtime.native_proxy_required", "Routed Runs must use the registered native tool proxy".into()))
+                            } else { Ok(()) }
+                        })
+                        .and_then(|_| runtime_host.ensure_runtime_tool_allowed(run_id, tool, ingress))
+                        .and_then(|_| {
+                            if readonly_execution {
+                                require_rust_reader_binding(&database, &envelope).map(|_| ()).map_err(|error| ("resource_gateway.binding_rejected", error))
+                            } else { Ok(()) }
+                        });
                     if let Err((code, error)) = admission {
                         let response = HostResponse::for_request(
                             &envelope,
@@ -4391,7 +4548,7 @@ impl RuntimeHost {
                             }),
                         );
                         if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                            runtime_host.handle_runtime_crash(write_error);
+                            runtime_host.handle_worker_transport_crash(&stdin, write_error);
                             return;
                         }
                         continue;
@@ -4410,7 +4567,7 @@ impl RuntimeHost {
                             }),
                         );
                         if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                            runtime_host.handle_runtime_crash(write_error);
+                            runtime_host.handle_worker_transport_crash(&stdin, write_error);
                             return;
                         }
                         continue;
@@ -4453,7 +4610,7 @@ impl RuntimeHost {
                                 result,
                             );
                             if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                                runtime_host.handle_runtime_crash(write_error);
+                                runtime_host.handle_worker_transport_crash(&stdin, write_error);
                                 return;
                             }
                             continue;
@@ -4472,7 +4629,7 @@ impl RuntimeHost {
                                 }),
                             );
                             if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                                runtime_host.handle_runtime_crash(write_error);
+                                runtime_host.handle_worker_transport_crash(&stdin, write_error);
                                 return;
                             }
                             continue;
@@ -4496,7 +4653,7 @@ impl RuntimeHost {
                                 );
                                 if let Err(write_error) = write_protocol_message(&stdin, &response)
                                 {
-                                    runtime_host.handle_runtime_crash(write_error);
+                                    runtime_host.handle_worker_transport_crash(&stdin, write_error);
                                     return;
                                 }
                                 continue;
@@ -4516,7 +4673,7 @@ impl RuntimeHost {
                                 }),
                             );
                             if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                                runtime_host.handle_runtime_crash(write_error);
+                                runtime_host.handle_worker_transport_crash(&stdin, write_error);
                                 return;
                             }
                             continue;
@@ -4544,83 +4701,40 @@ impl RuntimeHost {
                             }),
                         );
                         if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                            runtime_host.handle_runtime_crash(write_error);
+                            runtime_host.handle_worker_transport_crash(&stdin, write_error);
                             return;
                         }
                         continue;
                     };
                     thread::spawn(move || {
                         let _tool_handler_permit = tool_handler_permit;
-                        let tool = envelope
-                            .payload
-                            .as_ref()
-                            .and_then(|payload| payload.get("tool"))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        if is_child_run_tool(tool) {
-                            handle_child_run_tool_request(
-                                &child_runtime_host,
-                                &app,
-                                &database,
-                                &state,
-                                &stdin,
-                                envelope,
-                            )
-                        } else if background_jobs::TOOLS.contains(&tool) {
-                            child_runtime_host.handle_job_tool_request(&stdin, envelope);
-                        } else if matches!(tool, "read_attachment" | "attachment_compute") {
-                            handle_attachment_tool_request(
-                                &app,
-                                &database,
-                                &attachments_dir,
-                                &sessions_dir,
-                                &state,
-                                &stdin,
-                                envelope,
-                            )
-                        } else if tool == "read_tool_result" {
-                            // Stored-result reader: no approval gate and no
-                            // side effects, so it does not need an AppHandle.
-                            handle_tool_result_read_request(&database, &stdin, envelope)
-                        } else if tool == "skill_load" {
-                            // On-demand skill text: read-only and audited, no
-                            // approval gate and no scope arguments from the model.
-                            handle_skill_load_request(
-                                &database,
-                                &child_runtime_host.skills_dir,
-                                &stdin,
-                                envelope,
-                            )
-                        } else if capability_tools::is_capability_tool(tool) {
-                            handle_capability_tool_request(
-                                &app, &database, &state, &stdin, envelope,
-                            )
-                        } else if work_tools::is_work_tool(tool) {
-                            handle_work_tool_request(
-                                &child_runtime_host,
-                                &app,
-                                &database,
-                                &state,
-                                &stdin,
-                                envelope,
-                            )
-                        } else if is_memory_tool(tool) {
-                            handle_memory_tool_request(&app, &database, &state, &stdin, envelope)
-                        } else if is_knowledge_tool(tool) {
-                            handle_knowledge_tool_request(
-                                &app,
-                                &database,
-                                &yuxi_client,
-                                &state,
-                                &stdin,
-                                envelope,
-                            )
-                        } else if is_mcp_tool(tool) {
-                            handle_mcp_tool_request(&app, &database, &state, &stdin, envelope)
-                        } else {
-                            handle_host_tool_request(&app, &database, &state, &stdin, envelope)
-                        }
+                        dispatch_tool_request_envelope(
+                            &child_runtime_host,
+                            &app,
+                            &database,
+                            &attachments_dir,
+                            &sessions_dir,
+                            &state,
+                            &stdin,
+                            &yuxi_client,
+                            envelope,
+                        )
                     });
+                    continue;
+                }
+
+                if envelope.kind == "event" && envelope.r#type == "run_released" {
+                    if runtime_host.ensure_active_envelope_identity(&envelope).is_ok() {
+                        if let Some(run) = envelope.run_id.as_deref() {
+                            let native = database.run_control_binding(run).ok().flatten().is_some_and(|binding| binding.executor_route.is_some());
+                            if native {
+                                let terminal = database.with_connection(|connection| connection.query_row("SELECT status FROM runs WHERE id=?1",[run],|row|row.get::<_,String>(0)))
+                                    .is_ok_and(|status| run_status_is_terminal(&status));
+                                if !terminal { let _ = database.mark_run_interrupted(run, "runtime.released_without_terminal", "Pi released its Run before a terminal result was recorded."); }
+                                runtime_host.mark_run_ready(run);
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -4628,7 +4742,7 @@ impl RuntimeHost {
                     if let Err((code, error)) =
                         runtime_host.ensure_active_envelope_identity(&envelope)
                     {
-                        let profile = runtime_host.current_execution_profile().ok();
+                        let profile = runtime_host.execution_profile_for_run(envelope.run_id.as_deref()).ok();
                         let shadow_proposal = profile.as_ref().is_some_and(|profile| {
                             envelope.payload.as_ref().is_some_and(|payload| {
                                 profile.treats_proposal_error_as_observation(payload)
@@ -4644,17 +4758,10 @@ impl RuntimeHost {
                             );
                             continue;
                         }
-                        let active_run_id = state.lock().ok().and_then(|state| {
-                            state
-                                .worker
-                                .as_ref()
-                                .and_then(|worker| worker.active_run_id.clone())
-                        });
-                        if let Some(active_run_id) = active_run_id {
-                            let _ = database.mark_run_failed(&active_run_id, code, &error);
+                        if let Some(run) = envelope.run_id.as_deref() {
+                            runtime_host.reject_runtime_run_event(run, code, &error);
                         }
-                        runtime_host.handle_runtime_crash(error);
-                        return;
+                        continue;
                     }
                     let (Some(conversation_id), Some(run_id), Some(seq), Some(payload)) = (
                         envelope.conversation_id.clone(),
@@ -4667,9 +4774,8 @@ impl RuntimeHost {
                     if let Err((code, error)) =
                         runtime_host.ensure_runtime_tool_event_allowed(&run_id, &payload)
                     {
-                        let _ = database.mark_run_failed(&run_id, code, &error);
-                        runtime_host.handle_runtime_crash(error);
-                        return;
+                        runtime_host.reject_runtime_run_event(&run_id, code, &error);
+                        continue;
                     }
                     match database.apply_runtime_event(&run_id, seq, &payload) {
                         Ok(applied) => {
@@ -4689,7 +4795,7 @@ impl RuntimeHost {
                                 payload.get("type").and_then(Value::as_str)
                                     == Some(continuation::CONTINUATION_PROPOSAL_EVENT_TYPE);
                             if is_continuation_proposal {
-                                let profile = runtime_host.current_execution_profile();
+                                let profile = runtime_host.execution_profile_for_run(envelope.run_id.as_deref());
                                 let shadow =
                                     profile.as_ref().is_ok_and(|profile| profile.is_shadow());
                                 let persisted = profile.and_then(|profile| {
@@ -4703,7 +4809,7 @@ impl RuntimeHost {
                                     }
                                     Err(error) => {
                                         let profile_id = runtime_host
-                                            .current_execution_profile()
+                                            .execution_profile_for_run(Some(&run_id))
                                             .ok()
                                             .map(|profile| profile.id().to_owned());
                                         let error_code = if shadow {
@@ -4726,10 +4832,8 @@ impl RuntimeHost {
                                             ),
                                         };
                                         if !shadow {
-                                            let _ = database
-                                                .mark_run_failed(&run_id, error_code, &error);
-                                            runtime_host.handle_runtime_crash(error);
-                                            return;
+                                            runtime_host.reject_runtime_run_event(&run_id, error_code, &error);
+                                            continue;
                                         }
                                         runtime_host.emit_continuation_diagnostic(
                                             Some(&run_id),
@@ -4802,12 +4906,16 @@ impl RuntimeHost {
                                         .unwrap_or("run.terminal"),
                                     &payload,
                                 );
-                                runtime_host.mark_run_ready(&run_id);
+                                if database.run_control_binding(&run_id).ok().flatten().is_some_and(|binding| binding.executor_route.is_some()) {
+                                    if payload["type"] != "run.completed" {
+                                        if let Ok(state) = state.lock() { state.cancellation.request_run_cancel(&run_id); }
+                                    }
+                                } else { runtime_host.mark_run_ready(&run_id); }
                             }
                         }
                         Err(error) => {
                             let shadow_proposal = runtime_host
-                                .current_execution_profile()
+                                .execution_profile_for_run(Some(&run_id))
                                 .is_ok_and(|profile| {
                                     profile.treats_proposal_error_as_observation(&payload)
                                 });
@@ -4821,139 +4929,101 @@ impl RuntimeHost {
                                 );
                                 continue;
                             }
-                            let _ = database.mark_run_failed(
-                                &run_id,
-                                event_projection_failure_code(&error),
-                                &error,
-                            );
-                            runtime_host.handle_runtime_crash(error);
-                            return;
+                            runtime_host.reject_runtime_run_event(&run_id, event_projection_failure_code(&error), &error);
+                            continue;
                         }
                     }
                 }
             }
-            runtime_host.handle_runtime_crash("runtime process closed stdout".to_owned());
+            runtime_host.handle_worker_transport_crash(&stdin, "runtime process closed stdout".to_owned());
         });
     }
 
-    fn handle_runtime_crash(&self, message: String) {
-        if self
-            .state
-            .lock()
-            .ok()
-            .is_some_and(|state| matches!(state.state.as_str(), "stopped" | "stopping"))
-        {
-            return;
-        }
-        let (active, conversation_id, worker, should_recover) = {
-            let mut state = match self.state.lock() {
-                Ok(state) => state,
-                Err(_) => return,
-            };
-            let active = state.worker.as_ref().and_then(|worker| {
-                Some((
-                    worker.current_conversation_id.clone()?,
-                    worker.active_run_id.clone()?,
-                ))
-            });
-            let conversation_id = state
-                .worker
-                .as_ref()
-                .and_then(|worker| worker.current_conversation_id.clone());
-            let stable_session = conversation_id
-                .as_deref()
-                .and_then(|id| self.database.get_runtime_session(id).ok().flatten())
-                .is_some_and(|session| session.status != "unavailable");
-            let should_recover = should_attempt_recovery(
-                &message,
-                stable_session,
-                state.recovery_attempts,
-                conversation_id.is_some(),
-            );
-            state.state = if should_recover {
-                "recovering"
-            } else {
-                "crashed"
-            }
-            .to_owned();
-            state.last_error = Some(message.clone());
-            if should_recover {
-                state.recovery_attempts = 1;
-                state.last_recovery_at = Some(crate::database::now_ms());
-            }
-            let worker = state.worker.take();
-            (active, conversation_id, worker, should_recover)
-        };
-        if let Some(worker) = worker {
-            if let Ok(mut child) = worker.child.lock() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-        if let Some((conversation_id, run_id)) = active {
-            let seq = self.database.next_run_seq(&run_id).unwrap_or(1);
-            let payload = json!({
-                "type": "run.failed",
-                "code": "runtime.process_crashed",
-                "message": message,
-                "recoverable": should_recover,
-            });
-            match self.database.apply_runtime_event(&run_id, seq, &payload) {
-                Ok(true) => {
-                    let _ = self.app.emit(
-                        "fox://runtime-event",
-                        RuntimeEventNotification {
-                            conversation_id,
-                            runtime_session_id: None,
-                            run_id: run_id.clone(),
-                            seq,
-                            timestamp: protocol::timestamp(),
-                            event: payload,
-                        },
-                    );
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    let _ = self.database.mark_run_failed(
-                        &run_id,
-                        "runtime.process_crashed",
-                        &format!("{message}; failed to persist crash event: {error}"),
-                    );
-                }
-            }
-            // Always close/remove the live shadow context, including duplicate
-            // or failed crash-event persistence paths.
-            self.shadow_feed_terminal(
-                &run_id,
-                "failed",
-                crate::kernel::RunOutcome::Failed {
-                    code: "runtime.process_crashed".into(),
-                    message: message.clone(),
-                },
-                Default::default(),
-            );
-            self.cancel_pending_approvals_for_run(&run_id);
-        }
-        if !should_recover {
-            self.dispatch_next_queued_run();
-            return;
-        }
-        let Some(conversation_id) = conversation_id else {
-            return;
-        };
+    fn is_current_transport(&self, stdin: &Arc<Mutex<ChildStdin>>) -> bool {
+        self.state.lock().ok().is_some_and(|state|
+            state.worker.as_ref().is_some_and(|worker| Arc::ptr_eq(&worker.stdin, stdin)))
+    }
+
+    fn handle_worker_transport_crash(&self, stdin: &Arc<Mutex<ChildStdin>>, message: String) {
+        self.handle_runtime_crash(stdin, message);
+    }
+
+    fn reject_runtime_run_event(&self, run_id: &str, code: &str, message: &str) {
+        let known = self.state.lock().ok().is_some_and(|state|
+            state.worker.as_ref().is_some_and(|w| w.sessions.by_run(run_id).is_some()));
+        if !known || self.database.with_connection(|connection| connection.query_row(
+            "SELECT status FROM runs WHERE id=?1", [run_id], |row| row.get::<_,String>(0)))
+            .is_ok_and(|status| run_status_is_terminal(&status)) { return; }
         let host = self.clone();
+        let (run, code, message) = (run_id.to_owned(), code.to_owned(), message.to_owned());
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(500));
-            let result = host
-                .spawn_worker(&conversation_id)
-                .and_then(|_| host.open_runtime_session(&conversation_id, None).map(|_| ()));
-            if let Err(error) = result {
-                host.cleanup_failed_worker(&format!("Sidecar 自动恢复失败: {error}"));
-            } else if let Ok(mut state) = host.state.lock() {
-                state.state = "ready".to_owned();
+            match host.database.mark_run_failed(&run, &code, &message) {
+                Ok(()) => {
+                    let session = host.state.lock().ok().and_then(|state|
+                        state.worker.as_ref().and_then(|worker| worker.sessions.by_run(&run).cloned()));
+                    if let Some(session) = session {
+                        let _ = host.app.emit("fox://runtime-event", RuntimeEventNotification {
+                            conversation_id: session.conversation_id, runtime_session_id: Some(session.runtime_session_id),
+                            run_id: run.clone(), seq: host.database.next_run_seq(&run).unwrap_or(1), timestamp: protocol::timestamp(),
+                            event: json!({"type":"run.failed","code":code,"message":message}),
+                        });
+                    }
+                }
+                Err(error) => eprintln!("runtime event rejection could not settle {run}: {error}"),
             }
-            host.dispatch_next_queued_run();
+            let _ = host.cancel_run(&run);
+            if !host.database.run_control_binding(&run).ok().flatten().is_some_and(|binding| binding.executor_route.is_some()) {
+                host.mark_run_ready(&run);
+            }
         });
+    }
+
+    fn handle_runtime_crash(&self, stdin: &Arc<Mutex<ChildStdin>>, message: String) {
+        let worker = {
+            let Ok(mut state) = self.state.lock() else { return; };
+            if matches!(state.state.as_str(), "stopped" | "stopping")
+                || !state.worker.as_ref().is_some_and(|worker| Arc::ptr_eq(&worker.stdin, stdin)) { return; }
+            let worker = state.worker.take();
+            if worker.is_none() { return; }
+            state.state = "crashed".to_owned();
+            state.last_error = Some(message.clone());
+            worker
+        };
+        let Some(worker) = worker else { return; };
+        if let Ok(mut pending) = worker.pending.lock() { pending.clear(); }
+        if let Ok(mut child) = worker.child.lock() { let _ = child.kill(); let _ = child.wait(); }
+        for session in worker.sessions.active() {
+            let Some(run) = session.run_id else { continue; };
+            let native = self.database.run_control_binding(&run).ok().flatten()
+                .is_some_and(|b| b.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative));
+            if native {
+                if let Err(error) = native_tool_batch::close_unclaimed_after_transport_loss(&self.database, &run) {
+                    eprintln!("native transport cleanup failed for {run}: {error}");
+                }
+            }
+            if native && self.database.native_run_waiting_approval(&run).unwrap_or(false) {
+                // The live Host handler still owns the pending approval and may commit its result after the pipe closes.
+                continue;
+            }
+            if let Ok(mut state) = self.state.lock() { state.cancellation.request_run_cancel(&run); }
+            let result = if native {
+                self.database.mark_run_interrupted(&run, "runtime.process_crashed", &message)
+            } else {
+                self.database.mark_run_failed(&run, "runtime.process_crashed", &message)
+            };
+            if let Err(error) = result { eprintln!("runtime crash persistence failed for {run}: {error}"); }
+            if let Ok(mut state) = self.state.lock() { state.native_run_leases.remove(&run); }
+            self.cancel_pending_approvals_for_run(&run);
+            self.shadow_feed_terminal(&run, "failed", crate::kernel::RunOutcome::Failed {
+                code: "runtime.process_crashed".into(), message: message.clone(),
+            }, Default::default());
+            let _ = self.app.emit("fox://runtime-event", RuntimeEventNotification {
+                conversation_id: session.conversation_id, runtime_session_id: Some(session.runtime_session_id),
+                run_id: run.clone(), seq: self.database.next_run_seq(&run).unwrap_or(1), timestamp: protocol::timestamp(),
+                event: json!({"type":if native {"run.interrupted"} else {"run.failed"},"code":"runtime.process_crashed","message":message}),
+            });
+        }
+        self.dispatch_next_queued_run();
     }
 
     fn spawn_stderr_reader(&self, stderr: std::process::ChildStderr) {
@@ -4970,7 +5040,9 @@ impl RuntimeHost {
         });
     }
 
-    fn stop_worker(&self) -> Result<(), String> {
+    fn stop_worker(&self) -> Result<(), String> { self.stop_worker_with_shutdown(true) }
+
+    fn stop_worker_with_shutdown(&self, graceful: bool) -> Result<(), String> {
         let should_shutdown = {
             let mut state = self
                 .state
@@ -4982,7 +5054,7 @@ impl RuntimeHost {
             }
             should_shutdown
         };
-        if should_shutdown {
+        if should_shutdown && graceful {
             let _ = self.send_request(RuntimeRequest::new("shutdown"), Duration::from_secs(2));
         }
         let worker = {
@@ -5125,6 +5197,99 @@ impl RuntimeHost {
                 .map(|version| format!("{}/{}", state.runtime, version))
         })
     }
+}
+
+/// Run one tool-request envelope through the Host's per-tool handlers.
+///
+/// Extracted verbatim from the reader loop so the Pi-native `tool_call.execute`
+/// path runs a tool exactly the way the Legacy `tool.execute` path does: one set
+/// of handlers, one approval gate, one Host thread budget (invariant 10). A
+/// second dispatch chain would be a second place for the two executors to drift,
+/// and the drift would only show up as a tool behaving differently depending on
+/// which loop the model happened to be driven by.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_tool_request_envelope(
+    runtime_host: &RuntimeHost,
+    app: &AppHandle,
+    database: &Database,
+    attachments_dir: &std::path::Path,
+    sessions_dir: &std::path::Path,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    yuxi_client: &YuxiClient,
+    envelope: RuntimeEnvelope,
+) {
+    let tool = envelope
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("tool"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if is_child_run_tool(tool) {
+        handle_child_run_tool_request(runtime_host, app, database, state, stdin, envelope)
+    } else if background_jobs::TOOLS.contains(&tool) {
+        runtime_host.handle_job_tool_request(stdin, envelope);
+    } else if matches!(tool, "read_attachment" | "attachment_compute") {
+        handle_attachment_tool_request(
+            app,
+            database,
+            attachments_dir,
+            sessions_dir,
+            state,
+            stdin,
+            envelope,
+        )
+    } else if tool == "read_tool_result" {
+        // Stored-result reader: no approval gate and no side effects, so it
+        // does not need an AppHandle.
+        handle_tool_result_read_request(database, state, stdin, envelope)
+    } else if tool == "skill_load" {
+        // On-demand skill text: read-only and audited, no approval gate and no
+        // scope arguments from the model.
+        handle_skill_load_request(database, state, &runtime_host.skills_dir, stdin, envelope)
+    } else if capability_tools::is_capability_tool(tool) {
+        handle_capability_tool_request(app, database, state, stdin, envelope)
+    } else if work_tools::is_work_tool(tool) {
+        handle_work_tool_request(runtime_host, app, database, state, stdin, envelope)
+    } else if is_memory_tool(tool) {
+        handle_memory_tool_request(app, database, state, stdin, envelope)
+    } else if is_knowledge_tool(tool) {
+        handle_knowledge_tool_request(app, database, yuxi_client, state, stdin, envelope)
+    } else if is_mcp_tool(tool) {
+        handle_mcp_tool_request(app, database, state, stdin, envelope)
+    } else {
+        handle_host_tool_request(app, database, state, stdin, envelope)
+    }
+}
+
+fn write_tool_protocol_response(
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    envelope: &RuntimeEnvelope,
+    response_type: &str,
+    response: Value,
+) -> Result<(), String> {
+    let response = native_tool_batch::prepare_response(database, envelope, response_type, response)?;
+    match write_protocol_message(stdin, &response) {
+        Err(error) if native_tool_batch::settle_disconnected_native_response(database, envelope)? => {
+            eprintln!("native result committed but transport response was lost: {error}");
+            if let Some(run) = envelope.run_id.as_deref() { retire_disconnected_native_run(database, state, run); }
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+fn retire_disconnected_native_run(database: &Database, state: &Arc<Mutex<RuntimeHostState>>, run: &str) {
+    let terminal = database.with_connection(|connection| connection.query_row("SELECT status FROM runs WHERE id=?1", [run], |row| row.get::<_,String>(0)))
+        .is_ok_and(|status| run_status_is_terminal(&status));
+    if terminal { if let Ok(mut state) = state.lock() {
+        state.native_run_leases.remove(run);
+        state.cancellation.retire_run(run);
+        if let Some(worker) = state.worker.as_mut() { worker.sessions.finish(run); }
+        state.queue_changed.1.notify_all();
+    } }
 }
 
 fn write_protocol_message<T: Serialize>(
@@ -5488,6 +5653,7 @@ fn execute_tool_result_read_request(
 
 fn handle_tool_result_read_request(
     database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
@@ -5502,8 +5668,7 @@ fn handle_tool_result_read_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
         eprintln!("fox: failed to answer read_tool_result: {error}");
     }
 }
@@ -5633,6 +5798,7 @@ fn execute_skill_load_request(
 
 fn handle_skill_load_request(
     database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
     skills_dir: &std::path::Path,
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
@@ -5648,8 +5814,7 @@ fn handle_skill_load_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
         eprintln!("fox: failed to answer skill_load: {error}");
     }
 }
@@ -5672,9 +5837,8 @@ fn handle_host_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -5696,9 +5860,8 @@ fn handle_capability_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -5730,9 +5893,8 @@ fn handle_work_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -5894,9 +6056,8 @@ fn handle_child_run_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -6235,7 +6396,11 @@ fn execute_child_run_tool_request(
                     .unwrap_or(0)
                     .clamp(0, 60_000) as u64;
                 let deadline = Instant::now() + Duration::from_millis(wait_ms);
-                let records = loop {
+                let token = state.lock().map_err(|_| "runtime state lock is poisoned")?
+                    .cancellation.run_token(run_id).ok();
+                let mut execution_wait = None;
+                let collected = (|| -> Result<Vec<ChildRunRecord>, String> { loop {
+                    if let Some(token) = token.as_ref() { token.check()?; }
                     let records = database
                         .child_runs_for_parent(run_id)?
                         .into_iter()
@@ -6253,10 +6418,15 @@ fn execute_child_run_tool_request(
                         || wait_ms == 0
                         || Instant::now() >= deadline
                     {
-                        break records;
+                        return Ok(records);
+                    }
+                    if execution_wait.is_none() {
+                        execution_wait = Some(SidecarExecutionWait::begin(state, run_id)?);
                     }
                     thread::sleep(Duration::from_millis(100));
-                };
+                } })();
+                if let Some(wait) = execution_wait { wait.resume()?; }
+                let records = collected?;
                 let all_terminal = records
                     .iter()
                     .all(|record| run_status_is_terminal(&record.status));
@@ -6452,9 +6622,8 @@ fn handle_memory_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -7075,6 +7244,43 @@ fn attach_permission_scope(request: &mut Value, scope: Option<&str>) {
 /// no deadline: it waits until the user answers, or until the sender is used or
 /// dropped by run cancellation / conversation close / shutdown (a `false` or a
 /// disconnect, never an approval).
+struct SidecarExecutionWait {
+    state: Arc<Mutex<RuntimeHostState>>,
+    run_id: String,
+}
+
+impl SidecarExecutionWait {
+    fn begin(state: &Arc<Mutex<RuntimeHostState>>, run_id: &str) -> Result<Self, String> {
+        let mut locked = state.lock().map_err(|_| "runtime state lock is poisoned")?;
+        if let Some(worker) = locked.worker.as_mut() { worker.sessions.set_waiting(run_id, true)?; }
+        locked.queue_changed.1.notify_all();
+        Ok(Self { state: state.clone(), run_id: run_id.to_owned() })
+    }
+
+    fn resume(self) -> Result<(), String> {
+        loop {
+            let signal = {
+                let mut state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+                if state.shutting_down { return Err("runtime is shutting down".into()); }
+                if let Ok(token) = state.cancellation.run_token(&self.run_id) { token.check()?; }
+                let Some(worker) = state.worker.as_mut() else { return Ok(()); };
+                if worker.sessions.set_waiting(&self.run_id, false).is_ok() { return Ok(()); }
+                state.queue_changed.clone()
+            };
+            let guard = signal.0.lock().map_err(|_| "runtime capacity lock is poisoned")?;
+            drop(signal.1.wait_timeout(guard, Duration::from_millis(50)).map_err(|_| "runtime capacity wait is poisoned")?);
+        }
+    }
+}
+
+fn receive_sidecar_run_approval(database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
+    run_id: &str, approval_id: &str, receiver: &mpsc::Receiver<bool>) -> Result<bool, String> {
+    let wait = SidecarExecutionWait::begin(state, run_id)?;
+    let result = receive_run_approval(database, run_id, approval_id, receiver);
+    wait.resume()?;
+    result
+}
+
 fn receive_run_approval(
     database: &Database,
     run_id: &str,
@@ -7082,7 +7288,18 @@ fn receive_run_approval(
     receiver: &mpsc::Receiver<bool>,
 ) -> Result<bool, String> {
     database.run_approval_requested_at(run_id, approval_id)?;
-    receiver.recv().map_err(|_| "Approval request was interrupted".to_owned())
+    if let Some(approved) = native_tool_batch::recovering_approval_decision(database, run_id, approval_id)? {
+        return Ok(approved);
+    }
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(approved) => return Ok(approved),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Approval request was interrupted".into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if native_tool_batch::cancelled_native_approval(database, run_id, approval_id)? { return Ok(false); }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -7460,7 +7677,8 @@ fn request_declarative_hook_approval(
             "availableDecisions": ["allow_once", "deny"],
         }),
     )?;
-    if approval.status != "pending" {
+    if approval.status != "pending"
+        && native_tool_batch::recovering_approval_decision(database, run_id, &approval.id)?.is_none() {
         return Err(format!(
             "approval '{}' is already terminal and cannot be reopened",
             approval.id
@@ -7491,7 +7709,7 @@ fn request_declarative_hook_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = app.emit("fox://approval-requested", approval);
-    let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
+    let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -7545,7 +7763,8 @@ fn request_task_repair_override_approval(
             "availableDecisions": ["allow_once", "deny"],
         }),
     )?;
-    if approval.status != "pending" {
+    if approval.status != "pending"
+        && native_tool_batch::recovering_approval_decision(database, run_id, &approval.id)?.is_none() {
         return Err(format!(
             "repair override approval '{}' is already terminal or claimed and cannot be replayed",
             approval.id
@@ -7576,7 +7795,7 @@ fn request_task_repair_override_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = app.emit("fox://approval-requested", approval.clone());
-    let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
+    let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -7687,6 +7906,8 @@ fn finalize_host_tool_execution(
     before_annotations: Vec<String>,
     outcome: Result<Value, String>,
 ) -> Result<Value, String> {
+    #[cfg(test)]
+    native_crash_integration_tests::checkpoint("resource_returned", run_id, tool_call_id);
     match outcome {
         Ok(result) => {
             // A01/A02 (EX-v1): an executor may report a completed attempt that
@@ -7700,6 +7921,10 @@ fn finalize_host_tool_execution(
             if let Err(persist_error) =
                 database.complete_host_tool_call(run_id, tool_call_id, Some(&result), error_message.as_deref())
             {
+                if let Some(retained) = native_tool_batch::retain_late_native_result(
+                    database, run_id, tool_call_id, tool, input, &result, &persist_error)? {
+                    return Ok(retained);
+                }
                 if let Some(authoritative) =
                     authoritative_host_tool_terminal(database, run_id, tool_call_id, tool, input)
                 {
@@ -7709,6 +7934,8 @@ fn finalize_host_tool_execution(
                     "[tool_call.finalize_failed] handler succeeded but its Host ToolCall could not be finalized: {persist_error}"
                 ));
             }
+            #[cfg(test)]
+            native_crash_integration_tests::checkpoint("host_result_committed", run_id, tool_call_id);
             let after_annotations =
                 crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, !reported_failure)
                     .unwrap_or_default();
@@ -7929,9 +8156,8 @@ fn handle_mcp_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -8259,7 +8485,7 @@ fn execute_mcp_tool_request(
                     );
                 let approval_id = approval.id.clone();
                 let _ = app.emit("fox://approval-requested", approval);
-                let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
+                let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
                 if let Ok(runtime_state) = state.lock() {
                     if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                         pending.remove(&approval_id);
@@ -8577,9 +8803,8 @@ fn handle_attachment_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -9087,9 +9312,8 @@ fn handle_knowledge_tool_request(
     } else {
         "tool.execute_completed"
     };
-    let response = HostResponse::for_request(&envelope, response_type, response);
-    if let Err(error) = write_protocol_message(stdin, &response) {
-        record_runtime_crash(app, database, state, error);
+    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+        record_runtime_crash(app, database, state, stdin, error);
     }
 }
 
@@ -9998,7 +10222,7 @@ fn execute_host_tool_request(
                 );
             let approval_id = approval.id.clone();
             let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
+            let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                     pending.remove(&approval_id);
@@ -10094,7 +10318,14 @@ fn execute_legacy_admitted_file(
     }, tool, input, tool_call_id, &credential, Some(token), &mut revalidate);
     let call_outcome = kernel_host::call_outcome(&result);
     kernel_host::settle_execution_outcome(database, run_id, &credential.dispatch_id, &result, evidence, &call_outcome)?;
-    let value = match result { Ok(value) => value, Err(error) => kernel_host::resource_failure_result_with_input(tool, Some(input), &error) };
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => {
+            let mut failure = kernel_host::resource_failure_result_with_input(tool, Some(input), &error);
+            failure["isError"] = json!(true);
+            failure
+        }
+    };
     kernel_host::with_execution_receipt(database, run_id, &credential.dispatch_id, value)
 }
 
@@ -10238,7 +10469,7 @@ fn execute_capability_tool_request(
                 );
             let approval_id = approval.id.clone();
             let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
+            let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                     pending.remove(&approval_id);
@@ -10331,51 +10562,17 @@ fn should_attempt_recovery(
 }
 
 fn record_runtime_crash(
-    app: &AppHandle,
-    database: &Database,
-    state: &Arc<Mutex<RuntimeHostState>>,
-    message: String,
+    _app: &AppHandle, _database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>, message: String,
 ) {
-    if state
-        .lock()
-        .ok()
-        .is_some_and(|state| matches!(state.state.as_str(), "stopped" | "stopping"))
-    {
-        return;
-    }
-    let active = state.lock().ok().and_then(|state| {
-        state.worker.as_ref().and_then(|worker| {
-            Some((
-                worker.current_conversation_id.clone()?,
-                worker.active_run_id.clone()?,
-            ))
-        })
+    let child = state.lock().ok().and_then(|mut state| {
+        let worker = state.worker.as_ref()?;
+        if !Arc::ptr_eq(&worker.stdin, stdin) { return None; }
+        let child = worker.child.clone();
+        state.last_error = Some(message);
+        Some(child)
     });
-    mark_crashed(state, message.clone());
-
-    let Some((conversation_id, run_id)) = active else {
-        return;
-    };
-    let seq = database.next_run_seq(&run_id).unwrap_or(1);
-    let payload = json!({
-        "type": "run.failed",
-        "code": "runtime.process_crashed",
-        "message": message,
-    });
-    if database.apply_runtime_event(&run_id, seq, &payload).ok() != Some(true) {
-        return;
-    }
-    let _ = app.emit(
-        "fox://runtime-event",
-        RuntimeEventNotification {
-            conversation_id,
-            runtime_session_id: None,
-            run_id,
-            seq,
-            timestamp: protocol::timestamp(),
-            event: payload,
-        },
-    );
+    if let Some(child) = child { if let Ok(mut child) = child.lock() { let _ = child.kill(); } }
 }
 
 #[cfg(test)]

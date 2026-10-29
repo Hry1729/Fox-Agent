@@ -947,9 +947,8 @@ impl Database {
             let policy = eligibility.policy;
             let normal_repair_used = eligibility.normal_repair_used;
             let normal_repair_budget = eligibility.normal_repair_budget;
-            let kernel_owned: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
-                [&input.run_id],|row|row.get(0)).map_err(RepositoryError::database)?;
+            let kernel_owned=super::native_route::writer_route(transaction,&input.run_id)
+                .map_err(RepositoryError::database)?==super::native_route::WriterRoute::Kernel;
             if kernel_owned {
                 // The desktop approval row is only a projection. Require the
                 // exact Kernel decision and a currently leased dispatch too.
@@ -1220,9 +1219,8 @@ impl Database {
     ) -> Result<(), RepositoryError> {
         validate_preflight_task_repair_override(&input)?;
         with_read_transaction(self, |transaction| {
-            let kernel_owned: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
-                [&input.run_id],|row|row.get(0)).map_err(RepositoryError::database)?;
+            let kernel_owned=super::native_route::writer_route(transaction,&input.run_id)
+                .map_err(RepositoryError::database)?==super::native_route::WriterRoute::Kernel;
             super::validate_managed_tool_acquisition_with_clock(
                 transaction,
                 &input.run_id,
@@ -6476,6 +6474,13 @@ fn not_found(entity: &'static str, id: &str) -> RepositoryError {
 }
 
 #[cfg(test)]
+impl Database {
+    pub(crate) fn native_repair_override_fixture_for_test() -> (Database,StartTaskRepairOverrideInput,super::super::ToolCallRecord,super::super::ApprovalRecord) {
+        tests::native_repair_override_fixture()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::database::{
@@ -6639,6 +6644,22 @@ mod tests {
             EvidenceValidityStatus::Valid
         );
         evidence
+    }
+
+    pub(super) fn native_repair_override_fixture() -> (Database,StartTaskRepairOverrideInput,super::super::super::ToolCallRecord,super::super::super::ApprovalRecord) {
+        use fox_engine_protocol::{ExecutionAuthority,ExecutorRoute,FrozenPermission,PermissionMode,ResourceExecutor,RunControlBinding,TimeBudgets};
+        let database=Database::open(":memory:".into()).unwrap();
+        database.create_conversation("fox-general",Some("native repair override"),None,Some("ask")).unwrap();
+        let fixture=repair_override_fixture(&database,"durable_v2",true);
+        let permission=FrozenPermission { mode:PermissionMode::Ask,project_root:None,grants:Vec::new(),approval_epoch:None };
+        database.freeze_run_control(&RunControlBinding {
+            schema_version:1,run_id:fixture.run_id.clone(),conversation_id:fixture.conversation_id.clone(),engine_id:"pi".into(),
+            execution_profile_id:"durable_v2".into(),authority:ExecutionAuthority::Authoritative,executor_route:Some(ExecutorRoute::PiNative),
+            read_only_executor:ResourceExecutor::Rust,permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),
+            permission,budgets:TimeBudgets::default(),
+        }).unwrap();
+        let (input,tool,approval)=approved_repair_override(&database,&fixture,"native-override-attempt","native-override-call");
+        (database,input,tool,approval)
     }
 
     struct RepairOverrideFixture {

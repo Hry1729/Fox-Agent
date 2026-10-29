@@ -127,14 +127,9 @@ type ExecuteFn<'a> = &'a (dyn Fn(
 const MAX_PARALLEL_READ_ONLY: usize = 4;
 
 /// Host-side parallel-safety classification for one durable dispatch. Only
-/// Host-native, side-effect-free readers may run concurrently:
-///  * `read`/`ls`/`find`/`grep` are bounded frozen-root readers with shared
-///    read handles, so even identical targets cannot conflict;
-///  * `skill_load` returns read-only skill text; its only persistence is an
-///    idempotent `INSERT OR IGNORE` activation row.
-/// Everything else — `write_file`/`edit_file`/`run_command`, generic MCP tools
-/// (a manifest read-only flag is not proof of safety), knowledge/work/
-/// delegation tools and unknown names — is a serial barrier.
+/// Which side of the batch barrier a dispatch falls on. The classification
+/// itself is shared with the Pi-native path in `native_tool_batch`, so the two
+/// executors cannot disagree about which tools are safe to overlap.
 pub(super) fn parallel_read_only_dispatch(effect: &kernel::OutboxEffect) -> bool {
     if effect.kind != kernel::OutboxEffectKind::DispatchTool {
         return false;
@@ -142,10 +137,8 @@ pub(super) fn parallel_read_only_dispatch(effect: &kernel::OutboxEffect) -> bool
     let Ok(payload) = serde_json::from_str::<Value>(&effect.payload_json) else {
         return false;
     };
-    matches!(
-        payload.get("tool").and_then(Value::as_str),
-        Some("read" | "ls" | "find" | "grep" | "skill_load")
-    )
+    payload.get("tool").and_then(Value::as_str)
+        .is_some_and(super::super::native_tool_batch::is_parallel_read_only_tool)
 }
 
 /// Source-ordered ids of the Run's still-pending tool dispatches. The outbox

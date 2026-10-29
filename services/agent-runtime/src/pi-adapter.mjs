@@ -82,13 +82,26 @@ export async function createFoxModelRuntime({ model, apiKey, fauxRegistration, u
   return modelRuntime
 }
 
-export async function createFoxAgentSession({ usageStage, usageTaskId, ...options }) {
+export async function createFoxAgentSession({ usageStage, usageTaskId, foxBeforeToolCall, ...options }) {
   const created = await createAgentSession(options)
+  // AgentSession installs its own beforeToolCall in the constructor (the
+  // extension `tool_call` runner) and ignores an option of that name, so Fox
+  // composes around the installed hook instead of replacing it: its own
+  // decision wins when it blocks, and the extension runner still sees every
+  // call Fox lets through.
+  if (foxBeforeToolCall) {
+    const installed = created.session.agent.beforeToolCall
+    created.session.agent.beforeToolCall = async (context, signal) => {
+      const decision = await foxBeforeToolCall(context, signal)
+      if (decision?.block) return decision
+      return installed ? installed(context, signal) : undefined
+    }
+  }
   const context = usageContexts.get(options.modelRuntime)
   let compacting = false
   created.session.subscribe(event => {
-    if (event.type === 'auto_compaction_start') compacting = true
-    if (event.type === 'auto_compaction_end') compacting = false
+    if (event.type === 'compaction_start') compacting = true
+    if (event.type === 'compaction_end') compacting = false
   })
   // Request limits apply in production even when telemetry was not requested.
   observeModelUsage(created.session, { ...context,

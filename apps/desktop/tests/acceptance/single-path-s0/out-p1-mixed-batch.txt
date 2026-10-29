@@ -1,0 +1,41 @@
+
+================================================================================================
+P1a  mixed batch: read A, grep B, write C, read C  (all tools executionMode:"parallel")
+================================================================================================
+  t+   60.112ms  sched                  write enters barrier (exclusive stage) id="call_write_C"
+  t+   62.107ms  sched                  write leaves barrier id="call_write_C"
+
+-- tool execution windows (ms since process start)
+  read   call_read_A      arrived=    7.665 start=    7.744 end=    59.81
+  grep   call_grep_B      arrived=      7.7 start=    7.878 end=   60.064
+  write  call_write_C     arrived=    7.705 start=   60.116 end=     62.1
+  read   call_read_C2     arrived=    7.736 start=   62.117 end=  106.288
+
+-- SDK tool-result message order (message_end, role=toolResult)
+  ["call_read_A","call_grep_B","call_write_C","call_read_C2"]
+  tool_execution_end order: ["call_read_A","call_grep_B","call_write_C","call_read_C2"]
+
+-- verdict
+PASS  A and B overlap in time  (A=[7.744,59.81] B=[7.878,60.064])
+PASS  write C starts only after A and B both ended  (C.start=60.116 max(A,B).end=60.064)
+PASS  read C starts only after write C ended  (D.start=62.117 C.end=62.1)
+PASS  toolResult message order equals source order
+PASS  tool_execution_end order is completion order (not source order)  (["call_read_A","call_grep_B","call_write_C","call_read_C2"])
+
+================================================================================================
+P1b  six read-only calls: peak concurrency must be <= 4
+================================================================================================
+-- windows
+  read   call_r1      start=  108.391 end=  169.086
+  read   call_r2      start=  108.428 end=  169.185
+  read   call_r3      start=  108.437 end=  169.237
+  read   call_r4      start=  108.445 end=  169.263
+  read   call_r5      start=  169.105 end=  231.552
+  read   call_r6      start=   169.19 end=  231.628
+
+-- verdict
+PASS  peak concurrent read-only calls <= 4  (peak=4 (scheduler.peak=4))
+PASS  all six completed
+PASS  toolResult order equals source order
+
+RSS after run: 59.7 MiB
