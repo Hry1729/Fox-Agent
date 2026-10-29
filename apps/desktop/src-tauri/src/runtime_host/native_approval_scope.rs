@@ -214,6 +214,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an isolated stopped desktop fixture and approval id"]
+    fn export_decided_unclaimed_desktop_approval_fixture() {
+        let path = std::env::var("FOX_TEST_DECIDED_APPROVAL_DB").expect("isolated database path");
+        let id = std::env::var("FOX_TEST_DECIDED_APPROVAL_ID").expect("pending approval id");
+        let database = Database::open(path.into()).unwrap();
+        let before: (String, Option<i64>, String, bool) = database.with_connection(|connection| connection.query_row(
+            "SELECT a.status,a.claimed_at,t.status,k.result_json IS NULL FROM approvals a
+             JOIN tool_calls t ON t.id=a.tool_call_id
+             JOIN kernel_tool_calls k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1",
+            [&id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
+        assert_eq!(before, ("pending".into(), None, "pending".into(), true));
+        let approval = database.resolve_approval(&id, ApprovalDecision::AllowOnce).unwrap().unwrap();
+        assert_eq!(approval.status, "approved");
+        let after: (String, Option<i64>, String, bool) = database.with_connection(|connection| connection.query_row(
+            "SELECT a.status,a.claimed_at,t.status,k.result_json IS NULL FROM approvals a
+             JOIN tool_calls t ON t.id=a.tool_call_id
+             JOIN kernel_tool_calls k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1",
+            [&id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
+        assert_eq!(after, ("approved".into(), None, "pending".into(), true));
+        println!("production approval transaction committed; execution remains unclaimed: {id}");
+    }
+
+    #[test]
     fn startup_recovers_only_decided_unclaimed_native_host_approvals() {
         if isolated("runtime_host::native_approval_scope::tests::startup_recovers_only_decided_unclaimed_native_host_approvals") { return; }
         let app=app();

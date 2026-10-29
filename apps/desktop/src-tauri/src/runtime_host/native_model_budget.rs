@@ -395,6 +395,39 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an isolated desktop with an in-flight compaction"]
+    fn probe_inflight_desktop_budget_and_settlement() {
+        let path = std::env::var("FOX_TEST_LIVE_BUDGET_DB").expect("isolated database path");
+        let run = std::env::var("FOX_TEST_LIVE_BUDGET_RUN").expect("running budget fixture id");
+        let database = Database::open(path.into()).unwrap();
+        let binding = database.run_control_binding(&run).unwrap().unwrap();
+        let session = database.get_runtime_session(&binding.conversation_id).unwrap().unwrap();
+        let (inflight, limits, completed): (String, String, String) = database.with_connection(|connection| connection.query_row(
+            "SELECT n.request_id,l.limits_json,(SELECT completion_json FROM native_model_requests WHERE run_id=n.run_id AND status='completed' LIMIT 1)
+             FROM native_model_requests n JOIN native_model_budget_limits l ON l.run_id=n.run_id
+             WHERE n.run_id=?1 AND n.stage='compaction' AND n.status='admitted'", [&run],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+        let mut envelope = RuntimeEnvelope { protocol:fox_engine_protocol::PROTOCOL_NAME.into(),version:fox_engine_protocol::PROTOCOL_VERSION,
+            kind:"request".into(),id:"desktop-overlap-probe".into(),r#type:ADMIT.into(),request_id:None,
+            conversation_id:Some(binding.conversation_id),runtime_session_id:Some(session.runtime_session_id),run_id:Some(run.clone()),
+            seq:None,timestamp:String::new(),payload:Some(json!({"requestId":"desktop-overlap-probe","stage":"agent","maxOutputTokens":2048})) };
+        let denied = admit_at(&database,&envelope,crate::database::now_ms()).unwrap();
+        assert_eq!(denied["reasonCode"],"runtime.model_request_inflight");
+        assert_eq!(admit_at(&database,&envelope,crate::database::now_ms()).unwrap(),denied);
+        envelope.r#type = COMPLETE.into();
+        envelope.payload = Some(serde_json::from_str(&completed).unwrap());
+        complete(&database,&envelope).unwrap();
+        complete(&database,&envelope).unwrap();
+        let (count, reserved, after): (i64, i64, String) = database.with_connection(|connection| connection.query_row(
+            "SELECT COUNT(*),SUM(reserved_total+reserved_output),(SELECT limits_json FROM native_model_budget_limits WHERE run_id=?1)
+             FROM native_model_requests WHERE run_id=?1 AND request_id='desktop-overlap-probe'", [&run],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+        assert_eq!((count,reserved),(1,0));
+        assert_eq!(limits,after);
+        println!("{}",json!({"runId":run,"inflightRequest":inflight,"overlap":denied,"duplicateSettlement":"idempotent","limitsUnchanged":true}));
+    }
+
+    #[test]
     fn initial_retry_and_compaction_requests_share_the_persisted_token_budget() {
         let fixture=Fixture::new(Some(100),Some(90));
         assert_eq!(fixture.admit("initial","agent",1000).unwrap()["maxOutputTokens"],80);
