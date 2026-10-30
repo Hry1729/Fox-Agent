@@ -52,7 +52,7 @@ fn native_run(database: &Database, conversation: &str, prompt: &str) -> StartRun
     let started = database.create_run(conversation, prompt, None).unwrap();
     let mut budgets = TimeBudgets::continuous();
     budgets.restrict_execution_ms(60_000);
-    let binding = database.freeze_kernel_run_control_for_engine(&started.run.id, "legacy", budgets, "pi").unwrap();
+    let binding = database.freeze_default_run_control_for_engine(&started.run.id, "legacy", budgets, "pi").unwrap();
     assert_eq!(binding.authority, ExecutionAuthority::Authoritative);
     assert_eq!(binding.executor_route, Some(ExecutorRoute::PiNative));
     assert_eq!(binding.read_only_executor, ResourceExecutor::Rust);
@@ -369,7 +369,7 @@ impl Drop for HostCleanup { fn drop(&mut self) { let _ = self.0.shutdown(); } }
 fn native_worker_child_collect_inherits_binding_and_preserves_sibling() {
     if std::env::var_os(CHILD_ENV).is_none() {
         let mut child = Command::new(std::env::current_exe().unwrap()).args([TEST,"--exact","--nocapture","--test-threads=1"])
-            .env(CHILD_ENV,"1").env("FOX_KERNEL_MODE","authoritative").env("FOX_EXECUTOR_ROUTE","pi_native")
+            .env(CHILD_ENV,"1").env("FOX_KERNEL_MODE","authoritative")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         while child.try_wait().unwrap().is_none() {
@@ -561,7 +561,7 @@ fn native_compute_job_result_and_file_delivery_use_the_real_executor() {
 
     if std::env::var_os(JOB_ENV).is_none() {
         let mut child = Command::new(std::env::current_exe().unwrap()).args([JOB_TEST,"--exact","--nocapture","--test-threads=1"])
-            .env(JOB_ENV,"1").env("FOX_KERNEL_MODE","authoritative").env("FOX_EXECUTOR_ROUTE","pi_native")
+            .env(JOB_ENV,"1").env("FOX_KERNEL_MODE","authoritative")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(150);
         while child.try_wait().unwrap().is_none() {
