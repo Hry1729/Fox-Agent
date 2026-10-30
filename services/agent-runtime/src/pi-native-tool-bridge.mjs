@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { decodeHostToolResponse, hostToolResultStorage } from './host-tools.mjs'
 import { normalizeFoxToolResultForPi } from './tool-adapter.mjs'
+import { capModelToolResultContent } from './tool-view.mjs'
 
 export const TOOL_BATCH_REGISTER = 'tool_batch.register'
 export const TOOL_CALL_EXECUTE = 'tool_call.execute'
@@ -30,8 +31,13 @@ export function nativeHostToolResult(tool, payload, { runId, toolCallId }) {
       runId, toolCallId, storage: hostToolResultStorage(toolCallId, raw),
     })
   } catch (error) {
-    result = { content: [{ type: 'text', text: error.message }], isError: true,
-      details: { ...(error.code ? { errorCode: error.code } : {}) } }
+    // TB-2: a failure's diagnostics obey the same ceiling as a success.
+    const capped = capModelToolResultContent([{ type: 'text', text: error.message }], {
+      resultRef: typeof payload?.resultRef === 'string' ? payload.resultRef : null,
+      storage: payload?.toolResultStorage ?? null,
+    })
+    result = { content: capped.content, isError: true,
+      details: { ...(error.code ? { errorCode: error.code } : {}), ...(capped.capped ? { outputTruncated: true } : {}) } }
   }
   const details = result.details && typeof result.details === 'object' && !Array.isArray(result.details)
     ? result.details : { foxNativeOriginalDetails: result.details ?? null }
