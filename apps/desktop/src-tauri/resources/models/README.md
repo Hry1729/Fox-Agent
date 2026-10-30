@@ -1,9 +1,12 @@
 # Offline ONNX embedding model packages
 
-Fox downloads the pinned ONNX Runtime binary through `ort-sys` while building
-the desktop application. `ort-sys` verifies the archive hash before extracting
-it, then links the runtime into the desktop executable. Model
-files are downloaded only after the user starts an installation. A model
+Fox uses the `ort` crate with `default-features = false` and explicitly enables
+`ndarray` and `download-binaries`. `ort-sys` downloads and hash-verifies the
+pinned ONNX Runtime archive, then links it **statically** into the desktop
+executable. There is no production dependency on a separate `onnxruntime.dll`
+and `ORT_DYLIB_PATH` must not be used by the smoke.
+
+Model files are downloaded only after the user starts an installation. A model
 package is accepted only when all required metadata and hash checks pass.
 
 Resource-center downloads are distributed as signed ZIP archives. Trusted
@@ -23,12 +26,43 @@ resources/models/<package-id>/
 ```
 
 The repository intentionally contains no model or DLL placeholder. Do not add
-an empty or fabricated resource to make the smoke gate appear green.
+an empty or fabricated resource to make the smoke gate appear green. Large
+model files are not committed; CI caches the verified package by its pinned
+identity.
 
-Downloaded resource-center archives may use `model.int8.onnx`; the installer
-must verify the archive SHA-256 and Ed25519 signature before extracting it into
-the user's model directory. The legacy offline smoke package described below
-continues to use `model.onnx` until the resource-center installer is wired in.
+## CI test package
+
+The smoke uses the controlled catalog's `multilingual-e5-small` package, not an
+invented local fixture:
+
+- source: `https://huggingface.co/Xenova/multilingual-e5-small`
+- revision: `761b726dd34fb83930e26aab4e9ac3899aa1fa78`
+- model file: `onnx/model_int8.onnx` (installed as `model.onnx`)
+- model SHA-256:
+  `4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c`
+- model bytes: `118054593`
+- tokenizer: `tokenizer.json`
+- tokenizer SHA-256:
+  `0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39`
+- tokenizer bytes: `17082730`
+- dimension: `384`
+- pooling: `mean`
+- normalize: `true`
+- query prefix: `query: `
+- passage prefix: `passage: `
+- license: MIT
+
+These are the exact revision, sizes, and hashes already listed by
+`apps/desktop/src-tauri/src/local_knowledge_vector.rs` for the controlled E5
+catalog entry. `scripts/prepare-onnx-model.ps1` downloads and verifies the two
+files, writes a BOM-free `manifest.json`, and publishes the package atomically.
+The download/preparation step and the offline inference step are separate.
+The inference step does not call Hugging Face or any model service.
+
+```powershell
+./scripts/prepare-onnx-model.ps1
+./scripts/onnx-offline-smoke.ps1
+```
 
 ## Manifest
 
@@ -38,9 +72,9 @@ continues to use `model.onnx` until the resource-center installer is wired in.
 {
   "id": "multilingual-e5-small",
   "name": "Multilingual E5 Small",
-  "version": "1.0.0",
+  "version": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
   "dimension": 384,
-  "languages": ["中文", "英文"],
+  "languages": ["zh", "en"],
   "tokenizer": "tokenizer.json",
   "hash": "sha256:<64 lowercase hexadecimal characters>",
   "license": "MIT",
@@ -73,18 +107,21 @@ script and users do not need to install a separate runtime DLL.
 
 ## Offline smoke
 
-With a complete package:
+With a prepared package:
 
 ```powershell
-$env:FOX_ONNX_MODEL_DIR = (Resolve-Path 'apps/desktop/src-tauri/resources/models/<package-id>').Path
+./scripts/prepare-onnx-model.ps1
 ./scripts/onnx-offline-smoke.ps1
 ```
 
-The smoke validates the manifest and model hash, loads `model.onnx`, runs one
-tokenized input, and verifies the output dimension. Missing resources or a
-failed inference are hard failures when the script is invoked. CI reports the
-independent gate as not passed when no complete package is checked in; it never
-claims a fabricated success.
+The smoke validates the manifest and both file hashes, loads the real
+`model.onnx` and `tokenizer.json`, runs one query-prefixed and one
+passage-prefixed tokenized input through the real ONNX session, verifies the
+384-dimension output, finite values, mean pooling, and unit norm, and checks
+that `ort-sys` selected `cargo:rustc-link-lib=static=onnxruntime`. Missing
+resources, a dynamic runtime link, a manifest/prefix mismatch, or a failed
+inference are hard failures. CI no longer skips the job on a missing model;
+the required preparation step fails explicitly.
 
 ## Storage boundary
 

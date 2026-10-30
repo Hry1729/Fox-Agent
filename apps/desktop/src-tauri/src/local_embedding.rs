@@ -89,6 +89,13 @@ pub struct ModelPackageManifest {
     pub pooling: String,
     #[serde(default)]
     pub normalize: bool,
+    /// Retrieval-query prefix declared by the model package. The smoke test
+    /// uses it so the tested input matches the production retrieval contract.
+    #[serde(default)]
+    pub query_prefix: String,
+    /// Index-chunk prefix declared by the model package.
+    #[serde(default)]
+    pub passage_prefix: String,
 }
 
 fn default_pooling() -> String {
@@ -158,6 +165,10 @@ pub struct TokenizedInput {
 
 impl TokenizedInput {
     fn from_tokenizer(package_dir: &Path, tokenizer_file: &str) -> Result<Self, EmbeddingError> {
+        Self::from_text(package_dir, tokenizer_file, "Fox 本地向量模型隔离推理测试")
+    }
+
+    fn from_text(package_dir: &Path, tokenizer_file: &str, text: &str) -> Result<Self, EmbeddingError> {
         let tokenizer_path = package_dir.join(tokenizer_file);
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|error| {
             EmbeddingError::InvalidInput(format!(
@@ -166,7 +177,7 @@ impl TokenizedInput {
             ))
         })?;
         let encoding = tokenizer
-            .encode("Fox 本地向量模型隔离推理测试", true)
+            .encode(text, true)
             .map_err(|error| {
                 EmbeddingError::InvalidInput(format!("tokenizer smoke encoding failed: {error}"))
             })?;
@@ -469,15 +480,42 @@ fn find_input_name(input_names: &[String], preferred_names: &[&str]) -> Option<S
 
 pub(crate) fn smoke_test_package(package_dir: &Path) -> Result<usize, EmbeddingError> {
     let mut provider = OnnxEmbeddingProvider::from_package_dir(package_dir)?;
-    let input = TokenizedInput::from_tokenizer(package_dir, &provider.manifest().tokenizer)?;
-    let embedding = provider.embed(&input)?;
-    if embedding.len() != provider.dimension() {
+    let manifest = provider.manifest().clone();
+    let mut dimensions = Vec::new();
+    for (kind, prefix) in [
+        ("query", manifest.query_prefix.as_str()),
+        ("passage", manifest.passage_prefix.as_str()),
+    ] {
+        let text = format!("{prefix}Fox 本地向量模型隔离推理测试");
+        let input = TokenizedInput::from_text(package_dir, &manifest.tokenizer, &text)?;
+        let embedding = provider.embed(&input)?;
+        if embedding.len() != provider.dimension() {
+            return Err(EmbeddingError::DimensionMismatch {
+                expected: provider.dimension(),
+                actual: embedding.len(),
+            });
+        }
+        if manifest.normalize {
+            let norm = embedding
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            if !norm.is_finite() || (norm - 1.0).abs() > 1e-3 {
+                return Err(EmbeddingError::Inference(format!(
+                    "{kind} embedding norm is not normalized: {norm}"
+                )));
+            }
+        }
+        dimensions.push(embedding.len());
+    }
+    if dimensions.windows(2).any(|pair| pair[0] != pair[1]) {
         return Err(EmbeddingError::DimensionMismatch {
-            expected: provider.dimension(),
-            actual: embedding.len(),
+            expected: dimensions[0],
+            actual: dimensions[1],
         });
     }
-    Ok(embedding.len())
+    Ok(dimensions[0])
 }
 
 fn main() -> Result<(), EmbeddingError> {
@@ -506,6 +544,8 @@ mod tests {
             license: "Apache-2.0".to_owned(),
             pooling: "mean".to_owned(),
             normalize: true,
+            query_prefix: String::new(),
+            passage_prefix: String::new(),
         };
         assert!(manifest.validate().is_ok());
         assert_eq!(manifest.normalized_hash().unwrap(), "a".repeat(64));
@@ -522,6 +562,8 @@ mod tests {
             license: "Apache-2.0".to_owned(),
             pooling: "mean".to_owned(),
             normalize: false,
+            query_prefix: String::new(),
+            passage_prefix: String::new(),
         };
         assert!(manifest.validate().is_err());
     }
