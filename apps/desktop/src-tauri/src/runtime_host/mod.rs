@@ -10036,6 +10036,28 @@ fn execute_host_tool_request(
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
+    if tool == "present_files" {
+        let binding = database.run_control_binding(run_id)?.ok_or("file declaration requires a frozen Run")?;
+        let tool_call = match create_fresh_host_tool_call(
+            database, run_id, tool_call_id, tool, &input,
+            if hook_decision.requires_approval { "pending" } else { "running" }, hook_decision.requires_approval,
+        )? {
+            HostToolCallExecution::Execute(record) => record,
+            HostToolCallExecution::Replay(response) => return Ok(response),
+        };
+        // A declaration records existing files without entering writer admission.
+        let outcome = (|| {
+            if hook_decision.requires_approval {
+                request_declarative_hook_approval(app, database, state, run_id, &tool_call, tool, &input,
+                    hook_decision.approval_reason.as_deref())?;
+            }
+            present_files::execute(database, &binding.conversation_id, &binding.run_id,
+                tool_call_id, &binding.permission.project_root, &input)
+                .map(|result| json!({"content":[{"type":"text","text":result.canonical_string()}],"details":result}))
+        })();
+        return finalize_host_tool_execution(database, run_id, tool_call_id, tool, &input,
+            hook_decision.annotations, outcome);
+    }
     ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
     let (project_root, permission_mode) = database
         .conversation_project_access(conversation_id)?

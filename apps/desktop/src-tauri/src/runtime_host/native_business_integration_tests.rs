@@ -20,7 +20,7 @@ const NEXT: &str = "[FOX_U09_PARENT_NEXT]";
 const CHILD: &str = "[FOX_U09_CHILD]";
 const SIBLING: &str = "[FOX_U09_SIBLING]";
 const JOB: &str = "[FOX_U09_COMPUTE_JOB]";
-const JOB_TEST: &str = "runtime_host::native_business_integration_tests::native_compute_job_start_status_and_result_use_the_real_executor";
+const JOB_TEST: &str = "runtime_host::native_business_integration_tests::native_compute_job_result_and_file_delivery_use_the_real_executor";
 const JOB_ENV: &str = "FOX_TEST_NATIVE_COMPUTE_JOB_CHILD";
 const CHILD_PROOF: &str = "U09 child proof from the actual project file";
 const SIBLING_PROOF: &str = "U09 sibling proof from its own project file";
@@ -217,8 +217,23 @@ impl ProviderShared {
             if result["jobId"] != id || result["complete"] != true { return Err("actual Job result is incomplete or has a different identity".into()); }
             let computed: Value = serde_json::from_str(result["content"].as_str().ok_or("actual Job result omitted content")?)
                 .map_err(|error| format!("actual Job content is not intact JSON: {error}"))?;
-            self.record(marker, "job-result-received", body)?;
-            return Ok(Reply::Text(format!("job {id} computed {} rows", computed["result"]["rows"])));
+            if tool_text(body, "u09-job-write")?.is_none() {
+                self.record(marker, "job-result-received", body)?;
+                return Ok(Reply::Tool("u09-job-write", "write_file", json!({
+                    "path":"job-result.txt","content":format!("rows={}\n",computed["result"]["rows"]),
+                })));
+            }
+            let Some(declared) = tool_json(body, "u09-job-present")? else {
+                self.record(marker, "job-write-result", body)?;
+                return Ok(Reply::Tool("u09-job-present", "present_files", json!({
+                    "files":[{"path":"job-result.txt","description":"Actual compute Job row count"}],
+                })));
+            };
+            if declared["recorded"] != true || declared["declared"] != 1 || declared["files"][0]["path"] != "job-result.txt" {
+                return Err(format!("actual file declaration did not complete: {declared}"));
+            }
+            self.record(marker, "job-files-declared", body)?;
+            return Ok(Reply::Text(format!("job {id} computed {} rows and declared job-result.txt", computed["result"]["rows"])));
         }
         if marker == PARENT {
             if let Some(collected) = tool_json(body, "u09-collect")? {
@@ -541,7 +556,7 @@ fn native_worker_child_collect_inherits_binding_and_preserves_sibling() {
 }
 
 #[test]
-fn native_compute_job_start_status_and_result_use_the_real_executor() {
+fn native_compute_job_result_and_file_delivery_use_the_real_executor() {
     use sha2::{Digest, Sha256};
 
     if std::env::var_os(JOB_ENV).is_none() {
@@ -613,10 +628,10 @@ fn native_compute_job_start_status_and_result_use_the_real_executor() {
     assert_eq!(std::fs::read(root.join("project/job-input.csv")).unwrap().as_slice(),csv);
     let session = database.get_runtime_session(&conversation.id).unwrap().unwrap();
     let results = pi_results(&session.native_path().unwrap());
-    let calls = ["u09-job-start","u09-job-status","u09-job-result"];
+    let calls = ["u09-job-start","u09-job-status","u09-job-result","u09-job-write","u09-job-present"];
     assert_eq!(results.iter().filter_map(|message| message["toolCallId"].as_str()).collect::<Vec<_>>(),calls);
     let state = provider.shared.state.lock().unwrap();
-    for ((call,phase),message) in calls.into_iter().zip(["job-start-result","job-status-result","job-result-received"]).zip(&results) {
+    for ((call,phase),message) in calls[..3].iter().copied().zip(["job-start-result","job-status-result","job-result-received"]).zip(&results) {
         let stored = receipt(&database,&started.run.id,call);
         assert_eq!(stored["isError"],false,"{call}: {stored}");
         assert_eq!(message["isError"],false);
@@ -635,14 +650,33 @@ fn native_compute_job_start_status_and_result_use_the_real_executor() {
     assert_eq!(result["complete"],true);
     assert!(result["nextOffset"].is_null());
     assert_eq!(result["content"].as_str().unwrap().as_bytes(),bytes);
+    for (call,phase) in [("u09-job-write","job-write-result"),("u09-job-present","job-files-declared")] {
+        let stored = receipt(&database,&started.run.id,call);
+        assert_eq!(stored["isError"],false,"{call}: {stored}");
+        let message = results.iter().find(|message| message["toolCallId"]==call).unwrap();
+        assert_eq!(message["isError"],false);
+        assert_eq!(message["content"],stored["result"]["content"]);
+        assert_eq!(state.events.iter().filter(|event| event["marker"]==JOB && event["phase"]==phase).count(),1);
+    }
+    assert_eq!(std::fs::read(root.join("project/job-result.txt")).unwrap(),b"rows=4\n");
+    let declarations: Vec<(String,String,String,String,i64)> = database.with_connection(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT conversation_id,run_id,turn_call_id,display_name,byte_size FROM artifacts WHERE declared_at IS NOT NULL",
+        )?;
+        let rows = statement.query_map([],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))?
+            .collect();
+        rows
+    }).unwrap();
+    assert_eq!(declarations,vec![(conversation.id.clone(),started.run.id.clone(),"u09-job-present".into(),"job-result.txt".into(),7)]);
     let counts:(i64,i64) = database.with_connection(|connection| connection.query_row(
         "SELECT (SELECT COUNT(*) FROM tool_calls WHERE run_id=?1),(SELECT COUNT(*) FROM kernel_tool_calls WHERE run_id=?1)",
         [&started.run.id],|row| Ok((row.get(0)?,row.get(1)?)),
     )).unwrap();
-    assert_eq!(counts,(3,3));
+    assert_eq!(counts,(5,5));
     assert!(state.errors.is_empty(),"provider failures: {:?}",state.errors);
     std::fs::write(root.join("job-result.json"),crate::canonical_json::to_string(&json!({
         "runId":started.run.id,"conversationId":conversation.id,"job":job,"result":result,"toolCallCounts":[counts.0,counts.1],
+        "fileDeclarations":declarations,
         "scope":"real Host + disk SQLite + Pi + QuickJS CSV executor + local scripted HTTP model; no external model or UI",
     })).unwrap()).unwrap();
     drop(state);
