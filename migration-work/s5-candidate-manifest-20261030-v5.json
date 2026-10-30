@@ -63,5 +63,8 @@
     "runtime0_1_6Installed": false,
     "commandExecutionOn0_1_6": false,
     "upgradeUninstall": false
-  }
+  },
+  "buildHead": "98c9c59a7bd1813f8910b939c53a2b4412bafb68",
+  "finalWorkflowHead": "87635ecc209bad38439d011b4ab94198c435033a",
+  "note": "The v5 binary build started at 98c9c59a. Commit 87635ecc changes only the test fatal injector and does not affect the candidate binary."
 }
