@@ -1736,3 +1736,94 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 6. 关键词模式：把 A 的检索模式改为「关键词」后检索，返回 `fallback.reason: "keyword_mode"`，不再有 `mode` 字段。改回「混合」后恢复第 1 项结果。
 7. 截断：带 `topK: 1`、`maxChars: 20` 检索，只返回 1 条，内容不超过 20 个字符，`truncated: true`。
 8. 全程不再出现 `vector_index_unavailable`；第 1、2 项若出现 `vector_search_failed`，请附上 `errorCode` 和 `detail`（多为向量检索隔离进程启动或模型版本问题）。
+
+### 13.31 收尾批（A0 路由收口 + A1 去 SRT / 四档审批 / 安全修复 + A2 主路径故障）：Windows 复测清单（2026-10-31）
+
+> 承接 Fox 详细方案（2026-10-31）阶段一。本批之后：
+> - Fox 自身不再使用沙箱（SRT 已从命令执行路径删除）。命令类工具的安全只靠「四档审批 + 项目规则 + 内置 block 规则 + Fox Job 进程回收」。在自动 / 完全访问下，命令等同于用户本人执行，可以联网。
+> - 新 Run 和子 Run 一律走 PiNative；历史 Kernel Run 启动时标为中断，不再续跑。
+> - 失败不回退：检索 worker 出错直接报错（不再改用关键词检索），sidecar / worker 没有 Job 就不启动。
+>
+> **13.30 第 8 项的变化**：索引已就绪时向量检索失败，以前回退为 `fallback.reason: "vector_search_failed"` 的关键词结果；现在直接返回错误「向量检索失败（索引已就绪，不会改用关键词检索）：…」，错误码保留原值（R4）。13.30 其余各项不变，按第 13 项重测。
+
+**一、改了什么（摘要）**
+
+- A0：删除 `FOX_EXECUTOR_ROUTE`；不认识的 route 报 `executor_route_unknown`；启动时把 Authoritative、无 route、状态为 queued/running/cancelling 的历史 Kernel Run 标为 `interrupted / executor_route_retired / 执行路径已退役`，界面显示「运行中断 · 执行路径已退役。已中断，可在新 Run 中继续」。
+- A1：
+  - `run_command` 走 FoxJobBackend（Windows：`cmd /D /S /C`，放进 KILL_ON_JOB_CLOSE Job），取消 / 超时用 `terminate_and_confirm` 回收整棵进程树；输出逐行解码（中文代码页）；保留 HOME、PSModulePath、代理变量。
+  - 审批引擎 `runtime_host/approval_policy.rs`：block → 受保护路径 / 越出项目 → 模式 → allow/ask 规则。四档：只读 / 询问 / 自动 / 完全访问（完全访问 = `permission_mode=allow` 且 `conversations.full_access=1`）。
+  - 迁移 v104：`conversations.full_access`、`projects.full_access_confirmed_at`、`permission_rules`、`permission_audit`。按输入哈希的「本会话允许」删除（旧表停用不删）。
+  - 审批卡「本项目总是允许以此开头的命令」（前缀可编辑）；设置 → Agent → 项目里列出规则，可撤销；Run 详情里有「自动放行记录」。
+  - 安全：git_read 单进程并禁用外部 helper；test_run 拒绝以 `-` 开头的参数；sqlite_read 读私有快照；写类工具打开后校验句柄；文件恢复锚定项目根，遇到 symlink / junction 拒绝。
+- A2：
+  - MD-1：推理只认 provider 的 reasoning 字段和正文开头显式的 `<think>` / `<thinking>` / `<analysis>` 标签，不再按中文措辞（「我先……」）判成推理。
+  - TB-1 / TB-3：空或重复的工具调用 ID 在流层改写成唯一 ID；保留 Host 返回的拒绝原因。
+  - TB-2：给模型的工具结果统一不超过 64 KiB（保留开头约 44 KiB + 结尾约 16 KiB），完整内容由 Host 保存，可用 `read_tool_result` 按 `fox-result://` 续读；Host 侧成功结果超过 128 KiB 时只发预览 + `resultRef`。
+  - RT-1：坏的 SKILL.md（YAML 错误、非 UTF-8、version 是列表等）只把这一个技能标为「校验失败」并给出原因，其他技能和会话照常。`version: 1.0` 这类数字版本号现在能被接受。
+  - CX-1 / KB-1：sidecar 和知识库检索 worker 放进 KILL_ON_JOB_CLOSE Job（Job 建不起来就不启动）；sidecar 在 stdin 关闭时自行退出；检索 worker 自带 90 秒看门狗，并响应工具 / Run 取消。
+  - CX-2：退出时 shutdown 每一步都执行，错误汇总写日志（`[fox.exit] runtime shutdown finished with errors: …`）。
+  - R4：见上方说明。MD-2：Provider 的 `Retry-After` 最多等 60 秒，且不超过本 Run 时长；超过就直接 `provider.request_failed`。MD-4 / MD-5 / CX-3 一并处理。
+
+**二、测试**：A0 的 `a0_` 单测和桌面集成测试；A1 的 `a1_` 审批判定表、前缀 / 复合命令、block 规则、Job 回收测试；A2 的 `rt1_` / `r4_` / `cx2_` 等 Rust 单测和 `services/agent-runtime/test/*` Node 单测。A3 在 main 上跑了一次全量 Windows CI（结果见 A3 报告）。修了一处 A0 引入的旧断言：`kernel_coordinator::tests::kernel_host_scope_and_commands_survive_reopen_without_double_decisions` 中途调用启动修复并断言 Kernel Run 不受影响，这正是 A0 改掉的行为，已去掉这一步（退役行为由 `native_route_tests::a0_startup_*` 覆盖）。
+
+**三、复测清单 13.31**（Windows 桌面构建，每项「通过 / 失败 + 截图 / 日志」）
+
+> - exe 必须复制到普通目录（例如 `D:\fox-test\`），以 **Medium 完整性**运行；不要直接从下载 / 解压目录（带 Low 完整性标签）运行，否则会出现与本批无关的「拒绝访问」。
+> - 开测前关闭 Fox，复制备份数据目录（`%APPDATA%\<Fox 数据目录>`，或 `FOX_DATA_DIR` 指定的目录）里的 `fox.db`。
+> - 测试项目建在中文路径下，例如 `D:\fox-test\测试项目\`。没有特别说明时，会话都绑定这个项目。
+> - 「命令」指让 Agent 调用 `run_command`，可以直接在对话里说「用 run_command 执行 `<命令>`」。
+> - 用任务管理器（详细信息页，打开「命令行」列）或 `tasklist /v`、Process Explorer 观察进程。
+
+1. 中文路径和中文命令（A1 TX-3 / TX-9）
+   - 步骤：在 `D:\fox-test\测试项目\` 下执行 `echo 你好，世界 && dir`；新建 `测试.bat`，内容为 `@echo off` 和 `echo 批处理中文 %1`，执行 `测试.bat 参数一`；再执行 `cmd /c "type 测试.bat"`。
+   - 预期：输出中文正常、没有乱码；`dir` 列出中文文件名；批处理按 cmd 语义执行（`%1` 展开为「参数一」）；退出码 0；错误信息里不含 SID 或私有 HOME 路径。
+2. 命令能联网
+   - 步骤：自动模式下执行 `curl -I https://www.baidu.com`（或 `powershell -NoProfile -Command "(Invoke-WebRequest https://www.baidu.com -UseBasicParsing).StatusCode"`）。本机配置了代理的，再执行 `set HTTPS_PROXY` 确认代理变量被带进命令。
+   - 预期：返回 HTTP 200 / 状态码 200；不再出现 SRT、域名白名单、`sandbox_unavailable` 之类的报错。
+3. 联网类工具按模式审批
+   - 步骤：分别在询问、自动、完全访问、只读下，让 Agent 调用 `http_request` 或 `web_read` 读取 `https://example.com`。
+   - 预期：询问 → 出审批卡；自动、完全访问 → 直接执行，并在 Run 详情「自动放行记录」里各出现一条；只读 → 出审批卡（联网在只读下也是「问」，不是拒绝）。
+4. 取消 / 超时后进程树清零（A1 Job）
+   - 步骤：执行 `ping -t 127.0.0.1`，再执行 `cmd /c "start /b ping -t 127.0.0.1 & ping -t 127.0.0.1"`（产生孙进程）。各自运行 10 秒后点「停止」取消 Run。再以后台方式（`run_command` 的 start）启动 `ping -t 127.0.0.1`，依次查 status、output，然后 cancel。
+   - 预期：取消后 5 秒内，所有由 Fox 启动的 `cmd.exe` / `ping.exe` / `conhost.exe` 都消失（按命令行列确认）；Run 显示「已取消」；后台任务的 status / output 能正常返回，cancel 后状态为已取消，进程消失。
+5. 四档审批各走一遍
+   - 步骤：分别在四档下，让 Agent 依次：读项目内文件 → 在项目内写 `a.txt` → 执行 `dir`（低风险）→ 执行 `git push`（高风险，可以在一个没有远端的 git 仓库里）→ 写 `D:\fox-test\项目外.txt`（越出项目）→ 修改项目里的 `.git\config`（受保护路径）。
+   - 预期（读 / 项目内写 / 低风险命令 / 高风险命令 / 越出项目 / 受保护路径）：
+     - 只读：放行 / 拒绝 / 拒绝 / 拒绝 / 拒绝 / 拒绝
+     - 询问：放行 / 问 / 问 / 问 / 问 / 问
+     - 自动：放行 / 放行 / 放行 / 问 / 问 / 问
+     - 完全访问：全部放行
+   - 另外：输入框的模式选择器显示四档；首次在某项目开启完全访问时出现应用内确认框「为这个项目开启完全访问？」，确认后同一项目再次开启不再询问，换一个项目会再次询问；Run 运行中切换模式，从下一次工具调用起生效（已经发出的审批卡不变）。
+6. 「总是允许」及其撤销
+   - 步骤：询问模式下执行 `npm test -- --help`（或 `git status`）。在审批卡上把前缀改成 `npm test`，点「本项目总是允许「npm test」」。然后依次执行 `npm test -- foo`、`npm testx`、`npm test && del a.txt`、`npm test; git push`。最后到设置 → Agent → 当前项目的规则列表撤销这条规则，再执行 `npm test`。
+   - 预期：`npm test -- foo` 直接执行，并在「自动放行记录」里显示「命中项目规则」；`npm testx` 出审批卡（前缀按 token 匹配）；两条复合命令都出审批卡（每一段都要命中规则，`git push` 是高风险，不会被宽前缀覆盖）；撤销后 `npm test` 再次出审批卡；规则列表里不再有这条。审批卡上没有「本会话允许」按钮（工具类只剩允许一次 / 本项目总是允许 / 拒绝；MCP 工具仍保留本会话允许）。
+7. block 规则（完全访问下也拒绝）
+   - 步骤：完全访问下让 Agent 执行 `rmdir /s /q D:\fox-test\测试项目`（删项目根）、`rd /s /q C:\`、`Remove-Item -Recurse -Force $HOME`（用 `powershell -Command`）。**请在测试机或虚拟机上做，并提前备份。**
+   - 预期：三条都被直接拒绝，原因说明是内置禁止规则，没有出现审批卡，也没有任何文件被删除。
+8. 坏的 SKILL.md（RT-1）
+   - 步骤：关闭 Fox，在 `<数据目录>\skills\` 下新建三个目录：`bad-yaml\SKILL.md`（头部写 `description: Use when: X`）、`bad-gbk\SKILL.md`（用记事本另存为 ANSI/GBK，内容含中文）、`num-ver\SKILL.md`（头部写 `version: 1.0`，其余合法）。启动 Fox，在设置 → 插件 → 技能里启用它们，然后新开会话发一条消息。
+   - 预期：Fox 正常启动；`bad-yaml`、`bad-gbk` 显示「校验失败」，并分别给出「SKILL.md 头部 YAML 无法解析：…」「SKILL.md 不是 UTF-8 编码（例如 GBK），请另存为 UTF-8」；`num-ver` 正常显示 v1.0；会话照常回复，其他技能仍然生效。
+9. 中文回答不再显示为推理（MD-1）
+   - 步骤：用一个没有 reasoning 字段的模型（例如普通对话模型）发：「我先说结论：请用中文分三点介绍一下你自己。」再用一个有 reasoning 的模型（DeepSeek-R1、MiniMax 等）发同样的话。
+   - 预期：第一种情况，以「我先……」「首先……」开头的中文回答完整显示在正文里，不会被折叠进「思考过程」；第二种情况，只有 provider 给出的推理内容进入「思考过程」，正文完整。
+10. 进程回收：Fox 崩溃 / 退出后 sidecar 和 worker 不残留（CX-1 / KB-1 / CX-2）
+    - 步骤：
+      a. 启动 Fox，开一个会话发消息，让 sidecar（`node.exe` / Fox Runtime）启动；对已就绪向量索引的资料库做一次 `search_knowledge`，让检索 worker 启动。在任务管理器里对 `fox-desktop.exe` 点「结束任务」（模拟崩溃）。
+      b. 再来一次，这次在 Agent 正在执行 `ping -t 127.0.0.1` 时结束 `fox-desktop.exe`。
+      c. 正常关闭窗口退出一次，查看日志。
+    - 预期：a、b 两种情况，`fox-desktop.exe` 消失后 5 秒内，它启动的 node / sidecar / 检索 worker / cmd / ping 全部消失；重新启动 Fox 后，资料库和 `knowledge.db` 没有被占用（可以正常检索、重建索引）。c 正常退出没有残留；如果某一步清理失败，日志里有 `[fox.exit] runtime shutdown finished with errors: …`，其余步骤仍然执行完。
+11. 历史 Kernel Run 显示为中断（A0）
+    - 步骤：用一份旧库（含状态为 running 的 Authoritative Kernel Run，binding 里没有 executorRoute；可以用 A0 之前版本跑一个长任务时强制结束 Fox 得到）启动本批 Fox。另外分别在不设任何环境变量、以及设置 `FOX_EXECUTOR_ROUTE=kernel` 的情况下各启动一次。
+    - 预期：该 Run 显示「运行中断 · 执行路径已退役。已中断，可在新 Run 中继续」，没有被续跑，没有新的模型请求；它的待处理审批变为已过期；在同一会话发新消息能正常回复（新 Run 走 PiNative）；`FOX_EXECUTOR_ROUTE` 不再起作用。停在 waiting_jobs 的 Run，后台任务结束后也不会被唤醒。
+12. 文件恢复的边界（DL-1）
+    - 步骤：在项目里让 Agent 写 `sub\a.txt` 两次，产生两个版本。关闭 Fox，删除 `sub` 目录，改为指向项目外目录的 junction：`mklink /J D:\fox-test\测试项目\sub D:\fox-test\项目外`（也可以用 `mklink /D` 建 symlink，需要管理员或开发者模式）。启动 Fox，在「文件版本」面板对 `sub\a.txt` 点恢复 / 强制恢复。再试一次：直接删除 `sub` 目录（不建链接）后恢复。
+    - 预期：第一种情况恢复被拒绝，提示路径包含符号链接或 junction，`D:\fox-test\项目外\` 里没有出现 `a.txt`；第二种情况在项目内重建 `sub` 并恢复成功。项目被移动 / 改名后，恢复仍然以会话当前的项目根为准。
+13. 13.30 的向量检索
+    - 按 13.30 第 1–7 项重测（混合检索、隔离、未就绪、关键词模式、截断）。
+    - 第 8 项改为：模拟向量检索失败（例如在索引就绪后删掉或改名所选向量模型的文件再检索），预期返回错误「向量检索失败（索引已就绪，不会改用关键词检索）：…」，**不再**返回 `vector_search_failed` 的关键词结果。
+14. 大结果截断与续读（TB-2，可选）
+    - 步骤：让 Agent 执行 `cmd /c "for /l %i in (1,1,20000) do @echo 第%i行 这是一段用于测试截断的中文文本"`，然后让它读出中间第 10000 行。
+    - 预期：工具结果标明中间省略了多少字节，并提示用 `read_tool_result` 按 `fox-result://` 续读；Agent 续读后能给出第 10000 行的内容；界面不卡顿。
+15. 恶意 git 配置不会被执行（TX-2，可选）
+    - 步骤：在项目的 `.git\config` 里加 `[core] fsmonitor = "cmd /c echo pwned > D:\fox-test\pwned.txt"`，以及一条 `diff.textconv` / `filter` 配置；让 Agent 调用 `git_read` 看 status、diff、log。再让它用 `git_read` 读名为 `--output=x` 的 target。
+    - 预期：`D:\fox-test\pwned.txt` 没有出现；git_read 正常返回结果；以 `-` 开头的 target 被拒绝。

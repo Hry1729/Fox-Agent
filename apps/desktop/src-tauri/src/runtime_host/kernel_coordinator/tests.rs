@@ -2570,7 +2570,11 @@ fn kernel_host_scope_and_commands_survive_reopen_without_double_decisions() {
     let approvals: i64 = connection.query_row("SELECT COUNT(*) FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
         WHERE t.run_id=?1 AND a.status='pending' AND t.status='pending'", [&run_id], |row| row.get(0)).unwrap();
     assert_eq!(approvals, 2);
-    db.repair_interrupted_runs().unwrap();
+    // A0: startup repair now retires an unrouted Kernel Run (interrupted /
+    // executor_route_retired), which `native_route_tests::a0_startup_*` covers.
+    // This test drives the frozen Kernel loop past a crash window, so it no
+    // longer runs startup repair in the middle; the legacy writers below must
+    // still refuse the live Kernel Run on their own.
     assert!(!db.apply_runtime_event(&run_id, 99_999, &json!({"type":"run.failed","code":"legacy","message":"must not overwrite"})).unwrap());
     assert!(db.mark_run_failed(&run_id, "legacy", "must not overwrite").is_err());
     assert!(db.mark_run_interrupted(&run_id, "legacy", "must not overwrite").is_err());
