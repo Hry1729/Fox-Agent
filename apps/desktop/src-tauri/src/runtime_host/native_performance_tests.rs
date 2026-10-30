@@ -369,7 +369,13 @@ fn run_batch(host: &RuntimeHost, conversations: &[String], phase: &str, sample: 
         let started = host.database.create_run(conversation,&text,None)
             .map_err(|error|format!("create_run phase={phase} sample={sample} lane={lane}: {error}"))?;
         observations.lock().unwrap().insert(started.run.id.clone(), Observation::new(&started,phase,sample,lane));
-        let binding = host.database.freeze_kernel_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi")
+        // The Kernel cell drives the frozen Kernel loop through its test
+        // fixture; the PiNative cell freezes through the production default.
+        let binding = if std::env::var("FOX_NATIVE_PERF_ROUTE").as_deref() == Ok("pi_native") {
+            host.database.freeze_default_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi")
+        } else {
+            host.database.freeze_kernel_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi")
+        }
             .map_err(|error|format!("freeze_run phase={phase} sample={sample} lane={lane}: {error}"))?;
         assert_eq!(binding.authority,ExecutionAuthority::Authoritative);
         assert_eq!(binding.read_only_executor,ResourceExecutor::Rust);
@@ -599,7 +605,6 @@ fn run_cell(root: &Path, provider: &Provider, route: &str, phase: &str, load: us
         .env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_MODE").env_remove("FOX_KERNEL_WORKER_BINARY")
         .env_remove("FOX_KERNEL_CODEX_BINARY").env_remove("FOX_EXPERIMENTAL_COMPUTE_JOB_NOTICE")
         .env("FOX_DATA_DIR",&cell).stdin(Stdio::null()).stdout(stdout).stderr(stderr);
-    if route == "pi_native" { command.env("FOX_EXECUTOR_ROUTE","pi_native"); } else { command.env_remove("FOX_EXECUTOR_ROUTE"); }
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
     let mut child = command.spawn().unwrap();
