@@ -10225,6 +10225,12 @@ fn execute_host_tool_request(
     let write_target = if file_policy.is_some() {
         Some(PathBuf::from(crate::tool_host::canonical_file_identity(Path::new(&project_root), input["path"].as_str().unwrap_or_default())?))
     } else { None };
+    // A background command start is credentialed against the policy version
+    // the decision below was made under; a mode change before launch refuses it.
+    let command_policy_version = if matches!(prepared, crate::tool_host::PreparedToolAction::CommandJob { .. })
+        && input["action"].as_str() == Some("start") {
+        Some(database.execution_policy(conversation_id)?.version)
+    } else { None };
     let policy = decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), write_target.as_deref())?;
     if let Some(refusal) = policy.refusal(tool) {
         return Err(refusal);
@@ -10371,6 +10377,10 @@ fn execute_host_tool_request(
         if let crate::tool_host::PreparedToolAction::CommandJob {root,input,..} = &prepared {
             let binding=database.run_control_binding(run_id)?.ok_or("command job needs a frozen Run")?;
             let budget=Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, 0).max(0) as u64);
+            if let Some(version) = command_policy_version {
+                return execute_legacy_admitted_command(database, run_id, conversation_id, tool_call_id,
+                    input, root, version, &cancellation, budget);
+            }
             command_jobs::execute(database,run_id,input,root,&cancellation,budget)
         } else {
             crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
@@ -10443,6 +10453,43 @@ fn execute_legacy_admitted_file(
         }
     };
     kernel_host::with_execution_receipt(database, run_id, &credential.dispatch_id, value)
+}
+
+/// Background `run_command start` on the ordinary Host tool path (legacy
+/// transport and PiNative). Like the file path, the Host issues the Execute
+/// credential from its own durable decision for this call (consumed approval
+/// or auto-allow audit row) with the Fox Job proof as backend evidence, claims
+/// the single attempt, and settles it from the executor's evidence.
+fn execute_legacy_admitted_command(
+    database: &Database, run_id: &str, conversation_id: &str, tool_call_id: &str,
+    input: &Value, root: &Path, policy_version: u64,
+    token: &crate::kernel::CancellationToken, budget: Duration,
+) -> Result<Value, String> {
+    use crate::process_jobs::BackendCapabilityProof;
+    let durable = database.get_runtime_tool_call(run_id, tool_call_id)?
+        .ok_or("credential_mismatch: durable Host tool call is missing")?;
+    if durable.tool_name != "run_command" || durable.input != *input {
+        return Err("credential_mismatch: command input differs from the durable intent".into());
+    }
+    let input = &durable.input;
+    let digest = match crate::process_jobs::FoxJobBackend.availability() {
+        crate::process_jobs::BackendAvailability::Available { digest, .. } => digest,
+        crate::process_jobs::BackendAvailability::Unavailable(refusal) =>
+            return Err(format!("sandbox_unavailable: {}", refusal.reason())),
+    };
+    let credential = database.issue_legacy_command_credential(run_id, tool_call_id, policy_version, &digest)?;
+    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.canonical_string()) {
+        return Err("credential_mismatch: command credential input binding differs".into());
+    }
+    let outcome = database.claim_execution_attempt(run_id, conversation_id, &credential,
+        &credential.intent_digest, &format!("legacy-host:{tool_call_id}"))?;
+    if outcome != fox_engine_protocol::AttemptOutcome::Claimed {
+        return kernel_host::execution_receipt_result(database, run_id, &credential.dispatch_id, "run_command", None);
+    }
+    let (result, evidence, call_outcome) =
+        command_jobs::execute_with_credential(database, run_id, input, root, token, budget, &credential);
+    kernel_host::settle_execution_outcome(database, run_id, &credential.dispatch_id, &result, evidence, &call_outcome)?;
+    result.and_then(|value| kernel_host::with_execution_receipt(database, run_id, &credential.dispatch_id, value))
 }
 
 /// Shared production executor seam. Admission is checked again here, before

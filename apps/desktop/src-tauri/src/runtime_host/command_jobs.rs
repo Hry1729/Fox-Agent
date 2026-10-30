@@ -217,6 +217,25 @@ pub(super) fn execute(
     )
 }
 
+/// Host tool path (legacy transport / PiNative): the caller has issued the
+/// Execute credential from its own durable decision and won the single
+/// execution claim for it; this adapter never claims a second time.
+pub(super) fn execute_with_credential(
+    database: &Database, run_id: &str, input: &Value, root: &Path,
+    token: &CancellationToken, budget: Duration,
+    credential: &ExecutionCredential,
+) -> (Result<Value, String>, ExecutionEvidence, CallOutcome) {
+    let mut evidence = ExecutionEvidence::NotStarted;
+    let mut outcome = CallOutcome::Completed;
+    let response = execute_inner(database, run_id, input, root, token, budget,
+        Arc::new(crate::process_jobs::FoxJobBackend), Some(credential),
+        &mut evidence, &mut outcome);
+    if let Err(error) = &response {
+        outcome = CallOutcome::Failed { code: error.clone() };
+    }
+    (response, evidence, outcome)
+}
+
 /// Consumes the Host's non-cloneable first-claim capability. No model value
 /// can construct this token, and this adapter never claims a second time.
 pub(super) fn execute_authorized(

@@ -1120,6 +1120,39 @@ impl Database {
         })
     }
 
+    /// Host credential for a background `run_command start` admitted on the
+    /// ordinary Host tool path (legacy transport and PiNative). The authority
+    /// is the Host's own decision for this tool call — a consumed approval, or
+    /// the auto-allow audit row the approval engine wrote (mode or project
+    /// rule) — and the backend evidence is the Fox Job proof the caller
+    /// actually executes through. Nothing comes from the model.
+    pub fn issue_legacy_command_credential(
+        &self,
+        run_id: &str,
+        runtime_tool_call_id: &str,
+        expected_policy_version: u64,
+        backend_evidence_digest: &str,
+    ) -> Result<ExecutionCredential, String> {
+        if run_id.trim().is_empty() || runtime_tool_call_id.trim().is_empty() {
+            return Err("legacy credential identity must be non-empty".into());
+        }
+        self.with_connection(|connection| {
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let credential = issue_legacy_command_credential_in_tx(
+                &transaction,
+                run_id,
+                runtime_tool_call_id,
+                expected_policy_version,
+                backend_evidence_digest,
+                now_ms(),
+            )
+            .map_err(rusqlite::Error::InvalidParameterName)?;
+            transaction.commit()?;
+            Ok(credential)
+        })
+    }
+
     /// Issue (or idempotently re-read) the authoritative credential.
     /// Issue (or re-read) the authoritative credential for one dispatch, in its
     /// own `IMMEDIATE` transaction. The caller supplies only durable identity:
@@ -2059,6 +2092,181 @@ fn issue_legacy_file_credential_in_tx(
         .ok_or_else(|| "legacy credential was not persisted".to_owned())
 }
 
+fn issue_legacy_command_credential_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    runtime_tool_call_id: &str,
+    expected_policy_version: u64,
+    backend_evidence_digest: &str,
+    now: i64,
+) -> Result<ExecutionCredential, String> {
+    if backend_evidence_digest.trim().is_empty() {
+        return Err("sandbox_unavailable: command credential needs backend evidence".into());
+    }
+    let row: Option<(String, String, String, String, String, bool, String, String, String, String, String, String, String)> =
+        transaction
+            .query_row(
+                "SELECT t.conversation_id,t.tool_name,t.input_json,t.status,
+                        t.execution_location,t.requires_approval,r.status,b.binding_json,
+                        r.conversation_id,b.conversation_id,b.authority,b.engine_id,b.binding_hash
+                   FROM tool_calls t
+                   JOIN runs r ON r.id=t.run_id
+                   JOIN run_control_bindings b ON b.run_id=t.run_id
+                  WHERE t.run_id=?1 AND t.runtime_tool_call_id=?2",
+                params![run_id, runtime_tool_call_id],
+                |row| {
+                    Ok((
+                        row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+                        row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
+                        row.get(10)?, row.get(11)?, row.get(12)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+    let Some((
+        conversation_id,
+        tool,
+        canonical_input_json,
+        tool_state,
+        execution_location,
+        requires_approval,
+        run_state,
+        binding_json,
+        run_conversation_id,
+        binding_conversation_id,
+        binding_authority,
+        binding_engine_id,
+        binding_hash,
+    )) = row
+    else {
+        return Err("legacy credential source tool call or frozen binding is missing".into());
+    };
+    if run_state != "running" || tool_state != "running" || execution_location != "host" {
+        return Err("legacy credential requires a running Host tool call on a running Run".into());
+    }
+    if tool != "run_command" {
+        return Err("legacy command credential only admits run_command".into());
+    }
+    let action_class = operation_class(&tool, &canonical_input_json);
+    if action_class != ActionClass::Execute {
+        return Err("legacy command credential only admits a command start".into());
+    }
+    let binding: fox_engine_protocol::RunControlBinding =
+        serde_json::from_str(&binding_json).map_err(|error| error.to_string())?;
+    let computed_binding_hash = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(binding_json.as_bytes()))
+    );
+    if computed_binding_hash != binding_hash {
+        return Err("persisted control binding hash mismatch".into());
+    }
+    binding.validate()?;
+    let expected_authority = match super::native_route::writer_route(transaction, run_id)
+        .map_err(|error| error.to_string())? {
+        super::native_route::WriterRoute::Legacy => "legacy",
+        super::native_route::WriterRoute::PiNative => "authoritative",
+        super::native_route::WriterRoute::Kernel => return Err("legacy command credential cannot admit an unrouted Kernel Run".into()),
+    };
+    if binding_authority != expected_authority
+        || binding.run_id != run_id
+        || binding.conversation_id != conversation_id
+        || binding.conversation_id != run_conversation_id
+        || binding.conversation_id != binding_conversation_id
+        || binding.engine_id != binding_engine_id
+    {
+        return Err("legacy credential source does not match its frozen binding".into());
+    }
+    if Database::run_control_permission_hash(&binding.permission)? != binding.permission_snapshot_id
+    {
+        return Err("frozen permission hash does not match its content".into());
+    }
+    let (current_policy_version, policy_mode): (u64, String) = transaction
+        .query_row(
+            "SELECT version,mode FROM kernel_execution_policies WHERE conversation_id=?1",
+            [&conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    if current_policy_version != expected_policy_version {
+        return Err("policy_version_conflict".into());
+    }
+    if policy_mode == "read_only" {
+        return Err("policy_denied".into());
+    }
+    // The Host's decision for THIS tool call is the authority. An asked call
+    // needs its approval approved and claimed by this Run; an unasked call
+    // needs the auto-allow audit row the approval engine wrote for it (mode,
+    // full access or a project allow rule). Neither is model-constructible.
+    let authorized: bool = if requires_approval {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                      FROM approvals a
+                      JOIN tool_calls approved_tool ON approved_tool.id=a.tool_call_id
+                     WHERE approved_tool.run_id=?1
+                       AND approved_tool.runtime_tool_call_id=?2
+                       AND a.status='approved'
+                       AND a.category='tool_execution'
+                       AND a.claimed_at IS NOT NULL
+                       AND a.claimed_by_run_id=?1
+                       AND json_extract(a.decision_json,'$.approved')=1
+                 )",
+                params![run_id, runtime_tool_call_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?
+    } else {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM permission_audit
+                     WHERE run_id=?1 AND tool_call_id=?2 AND tool='run_command'
+                       AND conversation_id=?3
+                 )",
+                params![run_id, runtime_tool_call_id, conversation_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?
+    };
+    if !authorized {
+        return Err("approval_required".into());
+    }
+    let parent_generation: Option<u64> = transaction
+        .query_row(
+            "SELECT COALESCE(g.generation,0)
+               FROM runs child
+               JOIN runs parent ON parent.id=child.parent_run_id
+               LEFT JOIN kernel_parent_generations g ON g.run_id=parent.id
+              WHERE child.id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let credential = ExecutionCredential::new(
+        encode_dispatch_id(run_id, runtime_tool_call_id)?,
+        run_id.to_owned(),
+        conversation_id,
+        launch_params_hash(&tool, &canonical_input_json),
+        action_class,
+        None,
+        binding.execution_profile_id,
+        binding.permission_snapshot_id,
+        Some(current_policy_version),
+        binding.budgets.tool_execution_ms,
+        parent_generation,
+        BackendRequirement {
+            required: "fox-job".to_owned(),
+            evidence_digest: Some(backend_evidence_digest.to_owned()),
+        },
+    )?;
+    issue_execution_credential_in_tx(transaction, &credential, now)?;
+    read_credential_in_tx(transaction, run_id, &credential.dispatch_id)?
+        .ok_or_else(|| "legacy command credential was not persisted".to_owned())
+}
+
 /// Evaluate the credential's real-time requirements against the facts that
 /// exist today. Returns the refusal code of the FIRST unsatisfied requirement.
 /// A missing source is unsatisfied (fail-closed), never silently satisfied.
@@ -2668,6 +2876,87 @@ mod tests {
         assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"native-host-fixture").unwrap(),AttemptOutcome::Claimed);
         db.revalidate_execution_credential(&credential).unwrap();
         assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"duplicate-native-host").unwrap(),AttemptOutcome::Unknown);
+    }
+
+    /// PiNative Run with one background `run_command start` Host tool row.
+    fn native_command_fixture(mode: &str, tool_call_id: &str, requires_approval: bool)
+        -> (Database, String, String, u64) {
+        use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
+        let (db, _, conversation, run) = fixture();
+        let root = std::env::temp_dir().join(format!("fox-a1-command-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root_text = root.to_string_lossy().into_owned();
+        db.with_connection(|connection| {
+            connection.execute("UPDATE conversations SET project_root=?2 WHERE id=?1", params![conversation, root_text])?;
+            connection.execute("UPDATE runs SET status='running',started_at=?2 WHERE id=?1", params![run, now_ms()])?;
+            Ok(())
+        }).unwrap();
+        db.update_conversation_permission_mode(&conversation, mode).unwrap();
+        let input = serde_json::json!({"action":"start","command":"npm test"});
+        let record = db.create_host_tool_call(&run, tool_call_id, "run_command", &input,
+            if requires_approval { "pending" } else { "running" }, requires_approval).unwrap();
+        if requires_approval {
+            let approval = db.create_approval(&record.id, "npm test",
+                &serde_json::json!({"availableDecisions":["allow_once","deny"]})).unwrap();
+            db.resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce).unwrap()
+                .expect("approval must resolve");
+            assert!(db.claim_approved_tool_call(&run, tool_call_id).unwrap());
+        }
+        let permission = FrozenPermission { mode: match mode { "ask"=>PermissionMode::Ask, "read_only"=>PermissionMode::ReadOnly, _=>PermissionMode::Allow },
+            project_root: Some(root_text), grants: Vec::new(), approval_epoch: None };
+        db.freeze_run_control(&RunControlBinding { schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
+            run_id: run.clone(), conversation_id: conversation.clone(), engine_id: "pi".into(), execution_profile_id: "a1-command-test".into(),
+            authority: ExecutionAuthority::Authoritative, executor_route: Some(ExecutorRoute::PiNative),
+            read_only_executor: ResourceExecutor::Rust, permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+            permission, budgets: TimeBudgets::default() }).unwrap();
+        let version = db.execution_policy(&conversation).unwrap().version;
+        (db, conversation, run, version)
+    }
+
+    fn record_auto_allow(db: &Database, conversation: &str, run: &str, tool_call_id: &str, reason: &str) {
+        db.with_connection(|connection| {
+            connection.execute("INSERT INTO permission_audit(conversation_id,run_id,tool_call_id,tool,mode,class,risk,reason,created_at)
+                VALUES(?1,?2,?3,'run_command','ask','command','low',?4,?5)", params![conversation, run, tool_call_id, reason, now_ms()])?;
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn a1_native_command_credential_from_project_rule_carries_fox_job_evidence() {
+        let (db, conversation, run, version) = native_command_fixture("ask", "rule-start", false);
+        assert!(db.issue_legacy_command_credential(&run, "rule-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
+            .unwrap_err().contains("approval_required"), "no Host decision, no credential");
+        record_auto_allow(&db, &conversation, &run, "rule-start", "rule");
+        let credential = db.issue_legacy_command_credential(&run, "rule-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST).unwrap();
+        assert_eq!(credential.action_class, ActionClass::Execute);
+        assert_eq!(credential.conversation_id, conversation);
+        assert_eq!(credential.backend_requirement.evidence_digest.as_deref(), Some(crate::process_jobs::FOX_JOB_BACKEND_DIGEST));
+        assert_eq!(db.issue_legacy_command_credential(&run, "rule-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST).unwrap(),
+            credential, "a repeated delivery returns the stored credential");
+        db.verify_execution_credential(&run, &credential).unwrap();
+        db.revalidate_execution_credential(&credential).unwrap();
+        assert_eq!(db.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest, "a1-native-command").unwrap(),
+            AttemptOutcome::Claimed);
+        assert_eq!(db.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest, "a1-native-command-again").unwrap(),
+            AttemptOutcome::Unknown, "the single claim is never replayed");
+    }
+
+    #[test]
+    fn a1_native_command_credential_accepts_a_claimed_approval_and_refuses_stale_or_read_only() {
+        let (db, _, run, version) = native_command_fixture("ask", "approved-start", true);
+        assert!(db.issue_legacy_command_credential(&run, "approved-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST).is_ok());
+
+        let (db, conversation, run, version) = native_command_fixture("allow", "stale-start", false);
+        record_auto_allow(&db, &conversation, &run, "stale-start", "mode");
+        assert!(db.issue_legacy_command_credential(&run, "stale-start", version + 1, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
+            .unwrap_err().contains("policy_version_conflict"));
+        assert!(db.issue_legacy_command_credential(&run, "stale-start", version, "")
+            .unwrap_err().contains("sandbox_unavailable"), "evidence is never synthesized");
+
+        let (db, conversation, run, version) = native_command_fixture("read_only", "ro-start", false);
+        record_auto_allow(&db, &conversation, &run, "ro-start", "mode");
+        assert!(db.issue_legacy_command_credential(&run, "ro-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
+            .unwrap_err().contains("policy_denied"));
     }
 
     #[test]
