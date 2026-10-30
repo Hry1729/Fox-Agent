@@ -368,6 +368,8 @@ pub struct ConversationSummary {
     /// Outer Agent backend frozen at creation (`fox | pi | codex | deepseek`,
     /// plan v0.3.1 6.6). Distinct from the Kernel's `engine_id`.
     pub agent_backend: String,
+    /// A1: with `permission_mode = allow`, the conversation runs in full access.
+    pub full_access: bool,
     pub status: String,
     pub pinned: bool,
     pub archived: bool,
@@ -2060,9 +2062,44 @@ pub struct UpdateProjectPermissionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateConversationPermissionRequest {
     pub conversation_id: String,
+    /// `read_only | ask | auto | full_access` (the legacy `allow` reads as `auto`).
     pub permission_mode: String,
     pub request_id: String,
     pub expected_version: u64,
+    /// A1: the user confirmed full access in the second-step dialog. Needed
+    /// only the first time per project; the project then remembers it.
+    #[serde(default)]
+    pub confirm_full_access: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowProjectRuleRequest {
+    pub approval_id: String,
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRulesListRequest {
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRuleRevokeRequest {
+    pub rule_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionAuditListRequest {
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

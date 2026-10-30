@@ -7538,6 +7538,12 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // reason; the approval itself stays pending for the user.
     widen_kernel_host_commands_for_v103(&transaction)?;
     apply_migration(&transaction,NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION,MIGRATION_103_NATIVE_APPROVAL_COMMAND,now)?;
+    // v104 (A1 approval engine): additive only. Full access is a new
+    // conversation flag next to the CHECK-constrained `permission_mode`, the
+    // per-project "first full access confirmed" marker, project permission
+    // rules and the auto-allow audit log. The retired conversation tool
+    // permission table stays in place, unread.
+    apply_migration(&transaction,PERMISSION_RULES_SCHEMA_VERSION,MIGRATION_104_PERMISSION_RULES,now)?;
     finish_transaction(transaction)
 }
 
@@ -8033,6 +8039,43 @@ const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_MODEL_BUDGET_SCHEMA_VERS
 
 pub(crate) const NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION: i64 = 103;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION);
+
+pub(crate) const PERMISSION_RULES_SCHEMA_VERSION: i64 = 104;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= PERMISSION_RULES_SCHEMA_VERSION);
+
+pub(crate) const MIGRATION_104_PERMISSION_RULES: &str = r#"
+ALTER TABLE conversations ADD COLUMN full_access INTEGER NOT NULL DEFAULT 0 CHECK(full_access IN (0, 1));
+ALTER TABLE projects ADD COLUMN full_access_confirmed_at INTEGER;
+CREATE TABLE IF NOT EXISTS permission_rules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    effect TEXT NOT NULL CHECK(effect IN ('allow', 'ask', 'block')),
+    tool TEXT NOT NULL CHECK(length(trim(tool)) BETWEEN 1 AND 64),
+    pattern TEXT NOT NULL CHECK(length(trim(pattern)) BETWEEN 1 AND 500),
+    source TEXT NOT NULL CHECK(source IN ('user', 'builtin')),
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_permission_rules_live
+    ON permission_rules(project_id, effect, tool, pattern) WHERE revoked_at IS NULL;
+CREATE TABLE IF NOT EXISTS permission_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id TEXT,
+    tool_call_id TEXT,
+    tool TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('read_only', 'ask', 'auto', 'full_access')),
+    class TEXT NOT NULL,
+    risk TEXT NOT NULL CHECK(risk IN ('low', 'high')),
+    reason TEXT NOT NULL,
+    rule_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(rule_ids_json)),
+    findings_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(findings_json)),
+    summary TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_run ON permission_audit(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_conversation ON permission_audit(conversation_id, id);
+"#;
 
 // The table rebuild below owns the actual widening. This migration records the
 // version after that rebuild.
@@ -8653,7 +8696,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 103);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 104);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -8702,7 +8745,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 103);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 104);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an

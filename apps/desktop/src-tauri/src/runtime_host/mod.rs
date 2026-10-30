@@ -52,6 +52,7 @@ pub(super) fn host_runtime_capabilities(manifest_hash: &str, profile_id: &str) -
 }
 mod kernel_delegation;
 mod protocol;
+pub(crate) mod approval_policy;
 pub(crate) mod shadow_reconcile;
 #[cfg(test)]
 mod shadow_reconcile_tests;
@@ -3828,6 +3829,38 @@ impl RuntimeHost {
         Ok(response.r#type == "request_succeeded")
     }
 
+    /// A1: "always allow in this project". Saves an allow rule for the edited
+    /// command prefix, then approves this one call. The prefix must cover every
+    /// segment of the exact command on the card; a rule that would not even
+    /// cover the call it was created from is refused rather than saved.
+    pub fn allow_approval_with_project_rules(&self, approval_id: &str, pattern: &str) -> Result<bool, String> {
+        let approval = self.database.approval_record(approval_id)?;
+        if approval.status != "pending" {
+            return Ok(false);
+        }
+        let tool = approval.tool_name.as_str();
+        let offered = approval.request.get("availableDecisions").and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("allow_project_rule")));
+        if !offered || !approval_policy::is_command_tool(tool) {
+            return Err("permission.rule_not_offered: 这次审批不能保存为项目规则".into());
+        }
+        let access = self.database.conversation_access(&approval.conversation_id)?;
+        let project_id = access.project_id.clone().ok_or("permission.rule_not_offered: 这个会话没有项目，不能保存项目规则")?;
+        let command = approval.request.get("command").and_then(Value::as_str)
+            .ok_or("permission.rule_not_offered: 审批卡上没有命令")?;
+        let cwd = approval.request.get("cwd").and_then(Value::as_str).map(PathBuf::from)
+            .or_else(|| access.project_root.as_deref().map(PathBuf::from))
+            .ok_or("permission.rule_not_offered: 审批卡上没有工作目录")?;
+        approval_policy::parse_rule_pattern(pattern)?;
+        let root = access.project_root.as_deref().map(PathBuf::from);
+        let home = approval_policy::host_home();
+        if !approval_policy::pattern_covers_command(pattern, command, &cwd, root.as_deref(), home.as_deref()) {
+            return Err(format!("permission.rule_does_not_cover: 前缀「{}」没有覆盖这条命令的每一段（或命令是高风险操作而前缀没有写出它），没有保存规则", pattern.trim()));
+        }
+        self.database.add_permission_rule(&project_id, "allow", tool, pattern, "user")?;
+        self.resolve_approval(approval_id, ApprovalDecision::AllowOnce)
+    }
+
     pub fn resolve_approval(
         &self,
         approval_id: &str,
@@ -7152,6 +7185,78 @@ fn ensure_expert_tool_allowed(
     Ok(())
 }
 
+/// A1: one approval-engine decision for a Host or capability tool call, read
+/// against the conversation's access as it is NOW (a mode switched mid-Run
+/// applies from the next tool call).
+struct ToolApprovalPolicy {
+    decision: approval_policy::PolicyDecision,
+    has_project: bool,
+}
+
+fn decide_tool_approval(
+    database: &Database,
+    conversation_id: &str,
+    tool: &str,
+    input: &Value,
+    preview: &crate::tool_host::ToolPreview,
+    write_target: Option<&Path>,
+) -> Result<ToolApprovalPolicy, String> {
+    let access = database.conversation_access(conversation_id)?;
+    let rules = database.policy_rules_for_conversation(conversation_id)?;
+    let root = access.project_root.as_deref().map(PathBuf::from);
+    let cwd = preview.cwd.as_deref().map(PathBuf::from);
+    let subject = approval_policy::subject_for(tool, input, preview.command.as_deref(), cwd.as_deref(), write_target);
+    let home = approval_policy::host_home();
+    let decision = approval_policy::decide(&approval_policy::PolicyRequest {
+        tool, subject: &subject, mode: access.mode, project_root: root.as_deref(), home: home.as_deref(), rules: &rules,
+    });
+    Ok(ToolApprovalPolicy { decision, has_project: access.project_id.is_some() })
+}
+
+impl ToolApprovalPolicy {
+    /// Refuse the call when the engine says so (block rules, read only).
+    fn refusal(&self, tool: &str) -> Option<String> {
+        match &self.decision.verdict {
+            approval_policy::Verdict::Deny { code, message } if code == "permission.read_only" => {
+                Some(format!("tool {tool} is blocked in read-only mode"))
+            }
+            approval_policy::Verdict::Deny { message, .. } => Some(message.clone()),
+            _ => None,
+        }
+    }
+
+    fn rule_offer(&self, tool: &str) -> bool {
+        self.has_project && self.decision.rule_eligible && approval_policy::is_command_tool(tool)
+    }
+
+    /// The approval card's decisions and its `policy`, `hostExecution` and
+    /// `projectRule` fields. Command tools never take a conversation grant.
+    fn decorate_request(&self, request: &mut Value, tool: &str) {
+        let Some(object) = request.as_object_mut() else { return };
+        let mut decisions = vec!["allow_once"];
+        if self.rule_offer(tool) {
+            decisions.push("allow_project_rule");
+        }
+        decisions.push("deny");
+        object.insert("availableDecisions".into(), json!(decisions));
+        object.insert("policy".into(), self.decision.card_json());
+        object.insert("hostExecution".into(), if approval_policy::is_command_tool(tool) { approval_policy::host_execution_json() } else { Value::Null });
+        let mut project_rule = self.decision.project_rule_json(tool);
+        project_rule["eligible"] = json!(self.rule_offer(tool));
+        object.insert("projectRule".into(), project_rule);
+    }
+
+    /// Every automatic allow of a non-read call leaves one audit row.
+    fn audit_auto_allow(&self, database: &Database, conversation_id: &str, run_id: &str, tool_call_id: &str,
+        tool: &str, preview: &crate::tool_host::ToolPreview) -> Result<(), String> {
+        if !self.decision.is_allow() || self.decision.class == approval_policy::ToolClass::Read {
+            return Ok(());
+        }
+        let summary = preview.command.clone().unwrap_or_else(|| preview.summary.clone());
+        database.record_permission_audit(conversation_id, Some(run_id), Some(tool_call_id), tool, &self.decision, &summary)
+    }
+}
+
 fn permission_scope_hash(kind: &str, value: &[u8]) -> String {
     format!("{kind}:sha256:{}", hex::encode(Sha256::digest(value)))
 }
@@ -10040,7 +10145,6 @@ fn execute_host_tool_request(
         .conversation_project_access(conversation_id)?
         .ok_or_else(|| "this conversation has no authorized project folder".to_owned())?;
     let manage_command = tool == "run_command" && matches!(input["action"].as_str(), Some("status" | "output" | "cancel"));
-    if tool == "run_command" { crate::process_jobs::command_start_availability(input["action"].as_str())?; }
     if permission_mode == "read_only" && !manage_command {
         return Err(format!("tool {tool} is blocked in read-only mode"));
     }
@@ -10116,21 +10220,16 @@ fn execute_host_tool_request(
         let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
         crate::tool_host::prepare_with_artifact_context(tool, &input, &project_root,database,&sessions_dir,conversation_id)?
     };
-    let permission_scope = host_permission_scope(tool, prepared.preview());
-    let has_conversation_permission = match permission_scope.as_deref() {
-        Some(scope) => {
-            database.conversation_tool_permission_granted(conversation_id, tool, scope)?
-        }
-        None => false,
-    };
-    let requires_approval = hook_decision.requires_approval
-        || (file_policy.is_some() && permission_mode == "ask")
-        || (!manage_command && (permission_mode == "ask" || tool == "run_command") && !has_conversation_permission);
-    let approval_permission_scope = if hook_decision.requires_approval {
-        None
-    } else {
-        permission_scope.as_deref()
-    };
+    // A1: one engine decides (block -> protected/outside paths -> mode ->
+    // project rules). No conversation-wide grant is read here any more.
+    let write_target = if file_policy.is_some() {
+        Some(PathBuf::from(crate::tool_host::canonical_file_identity(Path::new(&project_root), input["path"].as_str().unwrap_or_default())?))
+    } else { None };
+    let policy = decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), write_target.as_deref())?;
+    if let Some(refusal) = policy.refusal(tool) {
+        return Err(refusal);
+    }
+    let requires_approval = hook_decision.requires_approval || policy.decision.is_ask();
     let tool_call = match create_fresh_host_tool_call(
         database,
         run_id,
@@ -10206,7 +10305,7 @@ fn execute_host_tool_request(
         if requires_approval {
             let mut request =
                 serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
-            attach_permission_scope(&mut request, approval_permission_scope);
+            policy.decorate_request(&mut request, tool);
             if let Some(binding) = &replace_binding {
                 // Immutable part of the approval record: purpose, target,
                 // observed baseline and candidate digest.
@@ -10258,6 +10357,8 @@ fn execute_host_tool_request(
                 return Err("The user denied this operation.".to_owned());
             }
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
+        } else {
+            policy.audit_auto_allow(database, conversation_id, run_id, tool_call_id, tool, prepared.preview())?;
         }
 
         if let Some((version, _, observation)) = &file_policy {
@@ -10430,20 +10531,13 @@ fn execute_capability_tool_request(
         return Err(format!("tool {tool} is blocked in read-only mode"));
     }
 
-    let permission_scope = capability_permission_scope(tool, &input);
-    let has_conversation_permission = match permission_scope.as_deref() {
-        Some(scope) => {
-            database.conversation_tool_permission_granted(conversation_id, tool, scope)?
-        }
-        None => false,
-    };
-    let requires_approval = hook_decision.requires_approval
-        || (prepared.requires_approval() && !has_conversation_permission);
-    let approval_permission_scope = if hook_decision.requires_approval {
-        None
-    } else {
-        permission_scope.as_deref()
-    };
+    // A1: the same engine as Host tools; the input-hash conversation grant
+    // (TX-1) is gone, and command tools never take a conversation grant.
+    let policy = decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), None)?;
+    if let Some(refusal) = policy.refusal(tool) {
+        return Err(refusal);
+    }
+    let requires_approval = hook_decision.requires_approval || policy.decision.is_ask();
     let tool_call = match create_fresh_host_tool_call(
         database,
         run_id,
@@ -10465,7 +10559,7 @@ fn execute_capability_tool_request(
         if requires_approval {
             let mut request =
                 serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
-            attach_permission_scope(&mut request, approval_permission_scope);
+            policy.decorate_request(&mut request, tool);
             let approval =
                 database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
             let (sender, receiver) = mpsc::channel();
@@ -10505,6 +10599,8 @@ fn execute_capability_tool_request(
                 return Err("The user denied this operation.".to_owned());
             }
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
+        } else {
+            policy.audit_auto_allow(database, conversation_id, run_id, tool_call_id, tool, prepared.preview())?;
         }
 
         capability_tools::execute(prepared)

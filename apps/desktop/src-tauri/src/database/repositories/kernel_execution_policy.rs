@@ -31,14 +31,37 @@ impl Database {
         expected_version: u64,
         desired_mode: &str,
     ) -> Result<ExecutionPolicyState, String> {
+        self.change_execution_policy_with_access(conversation_id, request_id, expected_version, desired_mode, false)
+    }
+
+    /// A1: the four-mode change. Full access is `allow` plus the conversation's
+    /// `full_access` flag; every other change (including a plain `allow`)
+    /// clears the flag in the same transaction, so leaving full access can never
+    /// leave it armed for a later return to `allow`.
+    pub fn change_execution_policy_with_access(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+        expected_version: u64,
+        desired_mode: &str,
+        full_access: bool,
+    ) -> Result<ExecutionPolicyState, String> {
         if request_id.is_empty() || !matches!(desired_mode, "read_only" | "ask" | "allow") {
             return Err("invalid policy request".into());
         }
-        let digest = fox_engine_protocol::canonical_digest(&[
-            ("subject", conversation_id),
-            ("expected", &expected_version.to_string()),
-            ("desired", desired_mode),
-        ]);
+        if full_access && desired_mode != "allow" {
+            return Err("invalid policy request: full access requires allow".into());
+        }
+        let mut fields = vec![
+            ("subject", conversation_id.to_owned()),
+            ("expected", expected_version.to_string()),
+            ("desired", desired_mode.to_owned()),
+        ];
+        if full_access {
+            fields.push(("fullAccess", "1".to_owned()));
+        }
+        let borrowed: Vec<(&str, &str)> = fields.iter().map(|(key, value)| (*key, value.as_str())).collect();
+        let digest = fox_engine_protocol::canonical_digest(&borrowed);
         self.with_connection(|c| {
             let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let prior:Option<(String,u64,String)>=tx.query_row("SELECT request_digest,result_version,result_mode FROM kernel_policy_requests WHERE conversation_id=?1 AND request_id=?2",params![conversation_id,request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -52,8 +75,8 @@ impl Database {
             // effective policy. It never rewrites the project default (which is
             // only copied into a conversation at creation), and the migration-80
             // conversation trigger advances exactly this conversation's version.
-            tx.execute("UPDATE conversations SET permission_mode=?2,updated_at=?3 WHERE id=?1",
-                       params![conversation_id,desired_mode,now_ms()])?;
+            tx.execute("UPDATE conversations SET permission_mode=?2,full_access=?4,updated_at=?3 WHERE id=?1",
+                       params![conversation_id,desired_mode,now_ms(),full_access as i64])?;
             // REV-04: tightening must also withdraw the reusable write/execute
             // approvals this conversation already issued, in the SAME
             // transaction. Expiring only the pending approval cards leaves a

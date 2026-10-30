@@ -47,6 +47,7 @@ pub(crate) mod kernel_authorization;
 pub(crate) mod kernel_continuation;
 pub(crate) mod kernel_execution_admission;
 pub(crate) mod kernel_execution_policy;
+pub(crate) mod permission_rules;
 pub(crate) mod kernel_jobs;
 mod kernel_job_execution;
 mod model_usage;
@@ -2082,7 +2083,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend, c.full_access
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -2107,7 +2108,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend, c.full_access
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -2132,7 +2133,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend, c.full_access
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -2376,7 +2377,7 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
+                        COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend, c.full_access
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -4488,7 +4489,7 @@ impl Database {
         self.with_connection(|connection| {
             let updated = connection.execute(
                 "UPDATE conversations
-                 SET permission_mode = ?2, updated_at = ?3
+                 SET permission_mode = ?2, full_access = 0, updated_at = ?3
                  WHERE id = ?1 AND project_id IS NULL",
                 params![id, permission_mode, now],
             )?;
@@ -7999,6 +8000,7 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         permission_mode: row.get(17)?,
         // Frozen at creation (v95); every pre-v95 conversation reads `fox`.
         agent_backend: row.get(18)?,
+        full_access: row.get(19)?,
         // Filled in by `apply_active_run_activity` from a single query over the
         // active runs, so the four conversation list queries stay untouched.
         active_run_id: None,
@@ -8367,7 +8369,7 @@ fn query_conversation(connection: &Connection, id: &str) -> rusqlite::Result<Con
                 c.parent_conversation_id, c.forked_from_message_id,
                 COALESCE(c.lineage_root_id, c.id),
                 c.created_at, c.updated_at, c.last_message_at,
-                COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend
+                COALESCE(kep.mode, c.permission_mode, 'ask'), c.agent_backend, c.full_access
          FROM conversations c
          JOIN agents a ON a.id = c.agent_id
          LEFT JOIN projects p ON p.id = c.project_id

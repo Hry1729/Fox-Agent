@@ -50,6 +50,7 @@ use crate::{
         SetGoalRunningRequest, SetGoalRunningResult, SetMemoryEnabledRequest,
         SetSkillEnabledRequest, SkillRecord, StartRunRequest, StartRunResult,
         TestModelServiceRequest, TestYuxiServiceRequest, UpdateConversationPermissionRequest,
+        AllowProjectRuleRequest, PermissionAuditListRequest, PermissionRuleRevokeRequest, PermissionRulesListRequest,
         UpdateConversationPinnedRequest, UpdateLifecycleHookEnabledRequest,
         UpdateMcpServerEnabledRequest, UpdateMemoryRequest, UpdateProjectPermissionRequest,
         UsageStatistics, UserProfileRecord, YuxiAgentRecord, YuxiConnectionTest, YuxiLoginRequest,
@@ -1449,6 +1450,19 @@ pub fn project_permission_update(
     }
 }
 
+fn conversation_access_json(state: &AppState, conversation_id: &str) -> Result<Value, String> {
+    let policy = state.database.execution_policy(conversation_id)?;
+    let access = state.database.conversation_access(conversation_id)?;
+    Ok(json!({
+        "version": policy.version,
+        "mode": policy.mode,
+        "accessMode": access.mode.as_str(),
+        "fullAccess": access.mode.full_access(),
+        "projectId": access.project_id,
+        "projectFullAccessConfirmed": access.project_full_access_confirmed,
+    }))
+}
+
 #[tauri::command]
 pub fn conversation_permission_state(
     window: tauri::WebviewWindow,
@@ -1458,8 +1472,8 @@ pub fn conversation_permission_state(
     if let Err(error) = require_trusted_local_window(&window) {
         return ApiResponse::failure("permission.untrusted_window", error, false);
     }
-    match state.database.execution_policy(&request.conversation_id) {
-        Ok(policy) => ApiResponse::success(json!({"version":policy.version,"mode":policy.mode})),
+    match conversation_access_json(&state, &request.conversation_id) {
+        Ok(value) => ApiResponse::success(value),
         Err(error) => storage_error(error),
     }
 }
@@ -1476,14 +1490,107 @@ pub fn conversation_permission_update(
     if request.request_id.trim().is_empty() || request.request_id.len() > 200 {
         return ApiResponse::failure("permission.invalid_request", "权限请求标识无效", false);
     }
-    match state.database.change_execution_policy(&request.conversation_id, &request.request_id,
-        request.expected_version, &request.permission_mode) {
-        Ok(policy) => ApiResponse::success(json!({"version":policy.version,"mode":policy.mode})),
+    let mode = match crate::runtime_host::approval_policy::AccessMode::parse(&request.permission_mode) {
+        Ok(mode) => mode,
+        Err(error) => return ApiResponse::failure("conversation.invalid_permission_mode", error, false),
+    };
+    // A1: the first full access in a project needs the user's explicit second
+    // confirmation; the project remembers it afterwards. A conversation with
+    // no project confirms every time.
+    if mode.full_access() {
+        let access = match state.database.conversation_access(&request.conversation_id) {
+            Ok(access) => access,
+            Err(error) => return storage_error(error),
+        };
+        if !access.project_full_access_confirmed && !request.confirm_full_access {
+            return ApiResponse::failure(
+                "permission.full_access_confirmation_required",
+                "第一次在这个项目开启完全访问需要再确认一次：Fox 将不再询问任何操作（包括项目外和受保护路径），只有内置禁止规则仍然生效",
+                false,
+            );
+        }
+        if request.confirm_full_access {
+            if let Some(project_id) = access.project_id.as_deref() {
+                if let Err(error) = state.database.confirm_project_full_access(project_id) {
+                    return storage_error(error);
+                }
+            }
+        }
+    }
+    match state.database.change_execution_policy_with_access(&request.conversation_id, &request.request_id,
+        request.expected_version, mode.stored_mode(), mode.full_access()) {
+        Ok(_) => match conversation_access_json(&state, &request.conversation_id) {
+            Ok(value) => ApiResponse::success(value),
+            Err(error) => storage_error(error),
+        },
         Err(error) if error.contains("policy_version_conflict") => ApiResponse::failure(
             "permission.version_conflict", "权限已在其他操作中变更，请刷新后重新选择", false),
         Err(error) if error.contains("policy_request_identity_conflict") => ApiResponse::failure(
             "permission.request_identity_conflict", "同一权限请求标识不能用于不同请求", false),
         Err(error) => ApiResponse::failure("conversation.invalid_permission_mode", error, false),
+    }
+}
+
+#[tauri::command]
+pub fn permission_rules_list(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: PermissionRulesListRequest,
+) -> ApiResponse<Vec<crate::database::PermissionRuleRecord>> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_window", error, false);
+    }
+    match state.database.permission_rules_for_project(&request.project_id) {
+        Ok(rules) => ApiResponse::success(rules),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn permission_rule_revoke(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: PermissionRuleRevokeRequest,
+) -> ApiResponse<bool> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_window", error, false);
+    }
+    match state.database.revoke_permission_rule(&request.rule_id) {
+        Ok(revoked) => ApiResponse::success(revoked),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn approval_allow_project_rule(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: AllowProjectRuleRequest,
+) -> ApiResponse<bool> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_origin", error, false);
+    }
+    match state.runtime_host.allow_approval_with_project_rules(&request.approval_id, &request.pattern) {
+        Ok(resolved) => ApiResponse::success(resolved),
+        Err(error) => {
+            let code = error.split(':').next().filter(|code| code.starts_with("permission.")).unwrap_or("approval.resolve_failed").to_owned();
+            ApiResponse::failure(&code, error, false)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn permission_audit_list(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: PermissionAuditListRequest,
+) -> ApiResponse<Vec<crate::database::PermissionAuditRecord>> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_window", error, false);
+    }
+    match state.database.permission_audit_list(request.run_id.as_deref(), request.conversation_id.as_deref(), request.limit.unwrap_or(200)) {
+        Ok(rows) => ApiResponse::success(rows),
+        Err(error) => storage_error(error),
     }
 }
 

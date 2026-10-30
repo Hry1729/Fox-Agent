@@ -10,12 +10,13 @@ mod migration_copy_tests;
 /// contacts plan reserves that number, so the single-path convergence work took
 /// v101 for tools and v102 for model admission. The runner applies each version by presence in
 /// `schema_migrations`, not by ordering, so a later v100 still lands correctly.
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 103;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 104;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 pub(crate) use repositories::{
     delivery_review_downgrade_blocker, DowngradeBlocker, CURRENT_U1_AWARE_SCHEMA_VERSION,
 };
 pub(crate) use repositories::kernel_execution_admission;
+pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
 pub(crate) use repositories::RunBackendIdentity;
 pub(crate) use repositories::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
 pub(crate) use repositories::kernel_reconciliation::*;
