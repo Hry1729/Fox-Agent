@@ -360,11 +360,13 @@ function retryPolicyForRun(payload, modelProfile) {
     0,
     5,
   )
-  const providerMaxRetryDelayMs = positiveBudgetValue(
+  // MD-2: the wait a provider asks for can never outlast the Run itself.
+  const runDurationCap = runBudgetForRequest(payload).maxDurationMs
+  const providerMaxRetryDelayMs = Math.min(positiveBudgetValue(
     host.providerMaxRetryDelayMs,
     profileRuntime.providerMaxRetryDelayMs,
     60_000,
-  )
+  ), Number.isSafeInteger(runDurationCap) && runDurationCap > 0 ? runDurationCap : 60_000)
   const turnMaxRetries = boundedRetryInt(
     host.turnMaxRetries,
     host.turnEnabled === true ? 1 : 0,
