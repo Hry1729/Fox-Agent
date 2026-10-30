@@ -1166,7 +1166,8 @@ mod tests {
         assert!(is_within(Path::new(r"\\?\C:\work\proj\note.txt"), Path::new(r"C:\work\proj")));
         assert_eq!(path_boundary(Path::new(r"\\?\C:\work\proj\note.txt"), Some(Path::new("C:/work/proj")), None), None);
         assert_eq!(normalize(Path::new(r"\\?\C:\Work\a\..\b")), PathBuf::from("C:/Work/b"));
-        assert_eq!(normalize(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from("//srv/share/x"));
+        // UNC targets compare with a plain `\\srv\share` root the same way.
+        assert!(is_within(Path::new(r"\\?\UNC\srv\share\x"), Path::new(r"\\srv\share")));
     }
 
     fn root() -> PathBuf {
