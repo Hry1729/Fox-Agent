@@ -93,7 +93,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p .test-target
-          bun test ./apps/desktop/tests --path-ignore-patterns "**/a0-performance.test.tsx" 2>&1 | tee .test-target/desktop-bun.log
+          bun test ./apps/desktop/tests --isolate --path-ignore-patterns "**/a0-performance.test.tsx" 2>&1 | tee .test-target/desktop-bun.log
 
       # Diagnostics only: lists failing tests in the job summary and as
       # annotations. It never changes the job result.

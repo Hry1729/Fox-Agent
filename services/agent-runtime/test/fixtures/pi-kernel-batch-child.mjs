@@ -63,7 +63,11 @@ try {
     const messages = await captured
     await session.abort()
     await prompting
-    output = { messages, executions }
+    // Pi keeps the live SDK system prompt as the first state message. The
+    // Kernel checkpoint carries durable conversational history only; the
+    // replacement process rebuilds its own system prompt. Do not send the live
+    // system row as a history message.
+    output = { messages: messages.filter(message => message.role !== 'system'), executions }
   } else {
     // Proposal-only schemas are published to the model but never executed: the
     // single-round boundary returns the proposal for the Host to approve.
@@ -77,7 +81,10 @@ try {
       consumed = results.map(message => message.toolCallId)
       if (JSON.stringify(results.map(message => message.content[0]?.text)) !== JSON.stringify(expectedResults)) throw new Error('model did not receive exact durable results')
       if (mode === 'resume-propose') {
-        if (JSON.stringify(context.tools?.map(tool => tool.name)) !== JSON.stringify(['read'])) throw new Error('proposal schemas were not advertised')
+        // The faux stream callback exposes messages only, not the provider
+        // tool list. The proposal loadout is the session's current executable
+        // state; this still fails if installKernelProposalSchemas did not run.
+        if (JSON.stringify(session.agent.state.tools?.map(tool => tool.name)) !== JSON.stringify(['read'])) throw new Error('proposal schemas were not advertised')
         return fauxAssistantMessage([{ type: 'toolCall', id: 'read-c', name: 'read', arguments: { path: 'c.txt' } }], { stopReason: 'toolUse' })
       }
       return fauxAssistantMessage('durable batch consumed')
