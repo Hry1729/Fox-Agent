@@ -1,5 +1,7 @@
 # S5 default entry switch — engineering record
 
+> 2026-10-30 后续说明：本页保留旧候选的原始记录。U06/U07 的原归属、U01 首次损坏拒绝、U11 完整回退及 SDK 哈希均已重新核对；旧 PASS 不直接代表最终新包通过。修复后的候选源码为 `ea94f970`，最新结论见 [S5 收尾记录](s5-closeout-20261030.md) 和 [新候选清单](s5-candidate-manifest-20261030.json)。
+
 - Start point: `71ffbb7ef0fc07ffaae8b3be8cefcfbdc3973739` (local `main`, no push)
 - S5 branch: `s5-default-pinative-20261029`
 - Production code commits: `81e6a2fd` (default PiNative + kernel fallback), `9540b68e` (damaged native session rejection + route docs)

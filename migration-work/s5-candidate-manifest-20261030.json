@@ -1,0 +1,52 @@
+{
+  "kind": "fox-s5-closeout-final-candidate",
+  "sourceHead": "ea94f9708ccb12aa40c942aa46a9678fb844e03a",
+  "branch": "s5-default-pinative-20261029",
+  "recordedAt": "2026-10-30T11:21:50.524827+08:00",
+  "candidateRoot": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-closeout-v3",
+  "installer": {
+    "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-closeout-v3\\Fox_0.1.0_x64-setup.exe",
+    "sha256": "87f96033761f265a4b555fff20050da4f5f2717d458e0295cc7f8833d3920d30"
+  },
+  "payload": {
+    "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-closeout-v3\\payload",
+    "desktop": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-closeout-v3\\payload\\fox-desktop.exe",
+      "sha256": "16475dab2443e21dfb44bb5d9c563520ba3113fd49d0553ed295ce3291fe7e04"
+    },
+    "sidecar": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-closeout-v3\\payload\\agent-runtime\\fox-agent-runtime-x86_64-pc-windows-msvc.exe",
+      "sha256": "4f137fec08698908f4ac5edf9e0639c9c4a49fb31dba64e5a9296b73aa7ac6f0"
+    }
+  },
+  "releaseInputs": {
+    "desktop": "c7163b8662975900ed701179674cdae57c144b0501c4172b7a5564e029e3569d",
+    "sidecar": "4f137fec08698908f4ac5edf9e0639c9c4a49fb31dba64e5a9296b73aa7ac6f0"
+  },
+  "sdk": {
+    "version": "1.4.0",
+    "packageJsonSha256": "df6883685382d6a914e5797232744c26579fe7db5576ea0e9c859d018ca2d54e",
+    "sourcePackageJson": "D:\\python\\projects\\Fox\\Fox\\services\\agent-runtime\\node_modules\\@earendil-works\\pi-coding-agent\\package.json",
+    "name": "@earendil-works/pi-coding-agent"
+  },
+  "build": {
+    "extractTool": "D:\\ruanjian\\Bandizip\\bz.exe",
+    "log": "build.log",
+    "pnpm": "11.8.0",
+    "processConfig": {
+      "pnpm_config_pm_on_fail": "ignore"
+    },
+    "extractLog": "extract.log",
+    "command": "pnpm tauri:build:windows"
+  },
+  "testHost": {
+    "sha256": "ba7fb02e5fdaf3167ecd32b8f7cb31897b5a7243d2565f1849913500c9a60b8b"
+  },
+  "previousCandidate": {
+    "sourceHead": "4dfd384c16766e56d007583e38341bdb7ced89d9",
+    "root": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-closeout-v2",
+    "sidecarSameBytes": true,
+    "reason": "Add missing Native dispatch for the existing present_files implementation; verify actual Job, write, declaration and persisted identity"
+  },
+  "scope": "Built NSIS and extracted payload; no system installation or publication. Runtime 0.1.6 installation not validated; actual command environment is recorded separately."
+}
