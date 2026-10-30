@@ -716,3 +716,54 @@ export function modelToolResultContent(tool, { isError = false, content = [], de
   if (searchBlock) return [...view, searchBlock]
   return view
 }
+
+// ---------------------------------------------------------------------------
+// TB-2: one hard ceiling for every tool result the model sees.
+//
+// The projections above are tool-aware and keep JSON intact where they can.
+// Whatever they produce, no single tool result may put more than this many
+// UTF-8 bytes of text into the model context: past it, the view keeps the head
+// and the tail and says plainly whether the middle can be read back.
+// Navigation blocks (FOX_RESULT_CURSOR_V1 / FOX_SEARCH_NAV_V1) are small,
+// already bounded, and always kept.
+export const MAX_MODEL_TOOL_RESULT_BYTES = 64 * 1024
+const HARD_CAP_HEAD_BYTES = 44 * 1024
+const HARD_CAP_TAIL_BYTES = 16 * 1024
+
+function isNavigationBlock(block) {
+  return block?.type === 'text' && typeof block.text === 'string'
+    && (block.text.startsWith(`${READ_RESULT_CURSOR_MARKER} `) || block.text.startsWith(SEARCH_NAV_MARKER))
+}
+
+/**
+ * Apply the hard ceiling to a model-visible content array. Returns
+ * `{ content, capped, originalBytes }`; `content` is the input when nothing had
+ * to be cut. `storage`/`resultRef` decide whether the notice may promise that
+ * `read_tool_result` returns the omitted bytes.
+ */
+export function capModelToolResultContent(content, { resultRef = null, storage = null, maxBytes = MAX_MODEL_TOOL_RESULT_BYTES } = {}) {
+  if (!Array.isArray(content)) return { content, capped: false, originalBytes: 0 }
+  const bodyBlocks = content.filter(block => block?.type === 'text' && typeof block.text === 'string' && !isNavigationBlock(block))
+  const originalBytes = bodyBlocks.reduce((sum, block) => sum + utf8Bytes(block.text), 0)
+  if (originalBytes <= maxBytes) return { content, capped: false, originalBytes }
+  const text = bodyBlocks.map(block => block.text).join('\n')
+  const total = utf8Bytes(text)
+  const scale = Math.min(1, maxBytes / MAX_MODEL_TOOL_RESULT_BYTES)
+  const head = utf8Prefix(text, Math.floor(HARD_CAP_HEAD_BYTES * scale))
+  const tail = utf8Suffix(text, Math.floor(HARD_CAP_TAIL_BYTES * scale))
+  const omitted = Math.max(0, total - utf8Bytes(head) - utf8Bytes(tail))
+  const retrievable = Boolean(resultRef) && resultIsRetrievable(storage, total)
+  const notice = [
+    `[Fox 工具结果上限 ${maxBytes} 字节：原文约 ${total} 字节，这里保留开头 ${utf8Bytes(head)} 与结尾 ${utf8Bytes(tail)} 字节，中间省略约 ${omitted} 字节。`,
+    retrievable
+      ? retrievalInstruction(resultRef, true)
+      : '省略的部分已截断，未获 Host 完整保存确认，无法取回；请用更精确的参数重新查询，不要凭省略内容编造。',
+    ']',
+  ].join('')
+  const capped = [{ type: 'text', text: `${head}\n\n${notice}\n\n${tail}` }]
+  for (const block of content) {
+    if (isNavigationBlock(block)) capped.push(block)
+    else if (block?.type !== 'text') capped.push(block)
+  }
+  return { content: capped, capped: true, originalBytes: total, retrievable }
+}
