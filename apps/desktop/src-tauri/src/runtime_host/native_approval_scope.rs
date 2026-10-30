@@ -99,7 +99,7 @@ mod tests {
                     "streamingText":true,"cancellation":true,"reasoning":false,"sessionResume":true,"toolApproval":true,
                     "imageInput":false,"steering":false,"contextCompaction":true,"dynamicModelSwitch":false,"workLoop":true,"tools":tools});
                 state.worker=Some(WorkerHandle { child:Arc::new(Mutex::new(child)),stdin,
-                    pending:Arc::new(Mutex::new(HashMap::new())),sessions:sidecar_sessions::Sessions::default(),session_leases:HashMap::new() });
+                    pending:Arc::new(Mutex::new(HashMap::new())),sessions:sidecar_sessions::Sessions::default(),session_leases:HashMap::new(), _job:crate::runtime_host::process_job::ProcessJob::none() });
             }
             Self {host,root}
         }
