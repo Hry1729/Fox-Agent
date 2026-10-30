@@ -9,23 +9,20 @@ const kind = process.env.FOX_TEST_FATAL_KIND
 const delayMs = Number(process.env.FOX_TEST_FATAL_DELAY_MS ?? 60)
 
 if (kind === 'rejection' || kind === 'exception') {
-  let seen = ''
   let armed = false
-  process.stdin.on('data', (chunk) => {
-    if (armed) return
-    seen += chunk.toString('utf8')
-    if (!seen.includes('"type":"prompt"')) {
-      if (seen.length > 65536) seen = seen.slice(-4096)
-      return
+  const originalWrite = process.stdout.write.bind(process.stdout)
+  process.stdout.write = (chunk, ...args) => {
+    if (!armed && String(chunk).includes('"type":"run.started"')) {
+      armed = true
+      setTimeout(() => {
+        if (kind === 'rejection') {
+          // A detached rejection: nothing in the Run's own promise chain awaits it.
+          Promise.reject(new Error('injected fatal fault: detached promise rejection'))
+          return
+        }
+        throw new Error('injected fatal fault: uncaught exception in a timer')
+      }, delayMs)
     }
-    armed = true
-    setTimeout(() => {
-      if (kind === 'rejection') {
-        // A detached rejection: nothing in the Run's own promise chain awaits it.
-        Promise.reject(new Error('injected fatal fault: detached promise rejection'))
-        return
-      }
-      throw new Error('injected fatal fault: uncaught exception in a timer')
-    }, delayMs)
-  })
+    return originalWrite(chunk, ...args)
+  }
 }

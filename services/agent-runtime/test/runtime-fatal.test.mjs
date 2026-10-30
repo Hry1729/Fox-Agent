@@ -186,7 +186,7 @@ function startRuntime(extraEnv = {}) {
       const existing = frames.find(predicate)
       if (existing) return Promise.resolve(existing)
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`timed out; frames: ${JSON.stringify(frames.slice(-4))}`)), timeout)
+        const timer = setTimeout(() => reject(new Error(`timed out; frames: ${JSON.stringify(frames.slice(-4))}; stderr: ${stderr}`)), timeout)
         const check = () => {
           const message = frames.find(predicate)
           if (!message) return
