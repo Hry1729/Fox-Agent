@@ -57,7 +57,7 @@ fn write_report(path: &Path, report: &serde_json::Value) {
 }
 
 fn binding_child(root: &Path, output: &Path, route: &str) {
-    assert!(matches!(route, "default" | "pi_native" | "kernel"), "U11 invalid binding phase");
+    assert!(route == "default", "U11 invalid binding phase");
     let directory = output.join(format!("binding-{route}"));
     checked(fs::create_dir(&directory), "create binding copy");
     checked(fs::copy(root.join("baseline.db"), directory.join("fox.db")), "copy binding baseline");
@@ -67,7 +67,8 @@ fn binding_child(root: &Path, output: &Path, route: &str) {
     let conversation = checked(db.create_conversation(db.default_agent_id(), Some("U11 isolated binding"), None, Some("read_only")), "new isolated conversation");
     let run = checked(db.create_run(&conversation.id, "U11 binding only; no model execution", None), "new isolated Run");
     let binding = checked(db.freeze_default_run_control_for_engine(&run.run.id, "legacy", TimeBudgets::continuous(), "pi"), "freeze new binding");
-    let expected = if route == "kernel" { None } else { Some(ExecutorRoute::PiNative) };
+    // A0: no process switch exists; every new Run freezes PiNative.
+    let expected = Some(ExecutorRoute::PiNative);
     let route_matches = binding.executor_route == expected && binding.authority == ExecutionAuthority::Authoritative && binding.engine_id == "pi";
     let stored = checked(db.run_control_binding(&run.run.id), "read new binding");
     let persisted = stored.is_some_and(|value| value.executor_route == expected && value.authority == binding.authority && value.engine_id == binding.engine_id);
@@ -120,10 +121,9 @@ fn user_data_copy_upgrade_and_backup_rollback_preserve_core_rows() {
         tables.insert(table, serde_json::json!({"baseline":expected,"upgrade":actual[0],"automatic_backup":actual[1],"rollback_copy":actual[2],"matches":matches}));
     }
     let mut bindings = BTreeMap::new();
-    for route in ["default", "pi_native", "kernel"] {
+    for route in ["default"] {
         let mut command = Command::new(checked(std::env::current_exe(), "current candidate test binary"));
         command.args(["--ignored", "--exact", TEST]).env("FOX_TEST_USER_DATA_COPY_ROOT", &root).env("FOX_TEST_USER_DATA_COPY_OUTPUT", checked(output.file_name().ok_or(()), "evidence name")).env("FOX_TEST_USER_DATA_COPY_BINDING_ROUTE", route).env("FOX_KERNEL_MODE", "authoritative").stdout(Stdio::null()).stderr(Stdio::null());
-        if route == "default" { command.env_remove("FOX_EXECUTOR_ROUTE"); } else { command.env("FOX_EXECUTOR_ROUTE", route); }
         bindings.insert(route, checked(command.status(), "start isolated binding process").success());
     }
     let baseline_sha_after = file_digest(&baseline); let baseline_unchanged = original_sha == baseline_sha_after;
