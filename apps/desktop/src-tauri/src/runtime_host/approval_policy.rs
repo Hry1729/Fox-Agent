@@ -1041,6 +1041,15 @@ fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> 
 /// Lexical normalization over both separators (`.` and `..` folded).
 fn normalize(path: &Path) -> PathBuf {
     let text = path.to_string_lossy().replace('\\', "/");
+    // Host-canonical Windows paths are verbatim (`\\?\C:\...`,
+    // `\\?\UNC\server\share`); compare them as the plain path they name.
+    let text = if let Some(rest) = text.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = text.strip_prefix("//?/").filter(|rest| is_drive_path(rest)) {
+        rest.to_owned()
+    } else {
+        text
+    };
     let (prefix, rest) = if is_drive_path(&text) {
         (format!("{}/", &text[..2].to_ascii_uppercase()), text[2..].to_owned())
     } else if text.starts_with('/') {
@@ -1151,6 +1160,14 @@ pub fn host_home() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a1_verbatim_host_paths_compare_as_the_plain_path() {
+        assert!(is_within(Path::new(r"\\?\C:\work\proj\note.txt"), Path::new(r"C:\work\proj")));
+        assert_eq!(path_boundary(Path::new(r"\\?\C:\work\proj\note.txt"), Some(Path::new("C:/work/proj")), None), None);
+        assert_eq!(normalize(Path::new(r"\\?\C:\Work\a\..\b")), PathBuf::from("C:/Work/b"));
+        assert_eq!(normalize(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from("//srv/share/x"));
+    }
 
     fn root() -> PathBuf {
         if cfg!(windows) { PathBuf::from("C:/work/proj") } else { PathBuf::from("/work/proj") }

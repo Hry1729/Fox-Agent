@@ -190,9 +190,12 @@ mod tests {
                 database,Path::new(""),&host.conversation_id).unwrap();
             let hook=crate::lifecycle_hooks::before_tool(database,run,call,tool,input).unwrap();
             assert!(hook.blocked.is_none());
-            let scope=if hook.requires_approval {None} else {super::super::host_permission_scope(tool,prepared.preview())};
+            // A1: the request carries exactly what the Host path records — the
+            // preview decorated by the approval engine (no conversation grant).
+            let policy=super::super::decide_tool_approval(database,&host.conversation_id,tool,input,prepared.preview(),
+                Some(Path::new(&target))).unwrap();
             let mut request=serde_json::to_value(prepared.preview()).unwrap();
-            super::super::attach_permission_scope(&mut request,scope.as_deref());
+            policy.decorate_request(&mut request,tool);
             database.create_approval(&host.id,&prepared.preview().summary,&request).unwrap()
         } else {
             database.create_approval(&host.id,"native scope fixture",&json!({"input":input})).unwrap()

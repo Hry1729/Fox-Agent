@@ -7203,7 +7203,12 @@ fn decide_tool_approval(
 ) -> Result<ToolApprovalPolicy, String> {
     let access = database.conversation_access(conversation_id)?;
     let rules = database.policy_rules_for_conversation(conversation_id)?;
-    let root = access.project_root.as_deref().map(PathBuf::from);
+    // Targets and cwd arrive Host-canonical (symlinks, 8.3 names resolved),
+    // so the root they are compared with is canonicalized the same way.
+    let root = access.project_root.as_deref().map(|root| {
+        let root = PathBuf::from(root);
+        root.canonicalize().unwrap_or(root)
+    });
     let cwd = preview.cwd.as_deref().map(PathBuf::from);
     let subject = approval_policy::subject_for(tool, input, preview.command.as_deref(), cwd.as_deref(), write_target);
     let home = approval_policy::host_home();
