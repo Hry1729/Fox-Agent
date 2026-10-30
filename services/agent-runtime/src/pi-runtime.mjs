@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
 import { createFatalErrorHandler } from './runtime-fatal.mjs'
+import { abortAgent } from './agent-abort.mjs'
 import {
   DefaultResourceLoader,
   PI_PACKAGE_VERSION,
@@ -492,16 +493,6 @@ function configurationForRun(request) {
   const profile = id === executionProfile.id && strategy === undefined
     ? executionProfile : resolveExecutionProfile({ id, strategy })
   return { modelService: config, executionProfile: profile }
-}
-
-// MD-4: Pi's abort() is async. A rejection must never become an
-// unhandledRejection, which would take every Run on this sidecar down with it.
-function abortAgent(agent, onError = null) {
-  if (!agent) return
-  void Promise.resolve().then(() => agent.abort()).catch((error) => {
-    process.stderr.write(`[fox-pi-runtime] agent.abort failed: ${error instanceof Error ? error.message : String(error)}\n`)
-    onError?.(error)
-  })
 }
 
 // MD-5: once a prompt was acknowledged the request already has its response.
