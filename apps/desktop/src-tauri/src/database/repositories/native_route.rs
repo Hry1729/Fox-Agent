@@ -48,6 +48,14 @@ fn waiting_approval(connection: &Connection, run_id: &str) -> rusqlite::Result<b
 }
 
 impl super::Database {
+    /// Whether startup retired this historical Kernel Run (A0). A retired Run
+    /// is never driven again, not even by a late background-job wake.
+    pub(crate) fn run_executor_route_retired(&self, run_id: &str) -> Result<bool,String> {
+        self.with_connection(|connection| connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND status='interrupted' AND error_code=?2)",
+            params![run_id, run_control::EXECUTOR_ROUTE_RETIRED], |row| row.get(0)))
+    }
+
     pub(crate) fn initialize_native_model_budget(&self) -> Result<(),String> {
         self.with_connection(|connection|connection.execute_batch(super::super::migrations::MIGRATION_102_NATIVE_MODEL_BUDGET))
     }
@@ -60,7 +68,33 @@ impl super::Database {
     }
 }
 
-pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
+/// A0 startup retirement of the Kernel execution path.
+///
+/// A historical Kernel Run (Authoritative, no frozen route) that a previous
+/// process left unfinished is never resumed: the Kernel loop is frozen. It is
+/// interrupted with `executor_route_retired` / 「执行路径已退役」 so the desktop
+/// shows it as interrupted and the user continues in a new Run. Its Kernel
+/// facts are left untouched; only the desktop read model is settled.
+pub(super) fn retire_unrouted_kernel_runs(transaction: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<String>> {
+    let mut query = transaction.prepare(
+        "SELECT b.run_id FROM run_control_bindings b JOIN runs r ON r.id=b.run_id
+         WHERE r.status IN ('queued','running','cancelling') ORDER BY b.run_id")?;
+    let runs = query.query_map([], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(query);
+    let mut retired = Vec::new();
+    for run_id in runs {
+        if writer_route(transaction, &run_id)? != WriterRoute::Kernel { continue; }
+        super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;
+        transaction.execute(
+            "UPDATE runs SET status='interrupted', finished_at=?2, error_code=?3, error_message=?4
+             WHERE id=?1 AND status IN ('queued','running','cancelling')",
+            params![run_id, now, run_control::EXECUTOR_ROUTE_RETIRED, run_control::EXECUTOR_ROUTE_RETIRED_MESSAGE])?;
+        retired.push(run_id);
+    }
+    Ok(retired)
+}
+
+pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64, retired: &[String]) -> rusqlite::Result<()> {
     let mut query = transaction.prepare("SELECT run_id FROM run_control_bindings ORDER BY run_id")?;
     let runs = query.query_map([], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(query);
@@ -70,7 +104,11 @@ pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64) ->
         if route == WriterRoute::Kernel {
             super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;
         }
-        if route == WriterRoute::Kernel || (route == WriterRoute::PiNative && waiting_approval(transaction, &run_id)?) {
+        // A retired Kernel Run has no owner left to protect: its streaming
+        // message, open tool calls and pending approvals settle with the
+        // generic restart repair below.
+        let retired_kernel = route == WriterRoute::Kernel && retired.contains(&run_id);
+        if (route == WriterRoute::Kernel && !retired_kernel) || (route == WriterRoute::PiNative && waiting_approval(transaction, &run_id)?) {
             transaction.execute("INSERT INTO fox_restart_protected_runs(run_id) VALUES(?1)", [&run_id])?;
         }
     }
