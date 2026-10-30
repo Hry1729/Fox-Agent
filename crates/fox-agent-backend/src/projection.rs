@@ -77,7 +77,7 @@ pub struct AcpProjector {
 ///   built-in catalog, i.e. any non-OpenAI provider);
 /// * `network_reconnecting`: Codex's "Reconnecting... <n>/<max>" /
 ///   "waiting for network" retry notice (the stream cannot reach the model
-///   host; inside srt that is usually the network allowlist).
+///   host).
 pub fn backend_notice_kind(line: &str) -> Option<&'static str> {
     let line = line.trim();
     if line.contains("Model metadata for") && line.contains("not found") {

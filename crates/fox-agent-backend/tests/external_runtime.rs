@@ -15,7 +15,7 @@ use fox_agent_backend::external::{
 use fox_agent_backend::launch::LaunchSpec;
 use fox_agent_backend::port::{AgentBackend, StopConfirmation};
 use fox_agent_backend::projection::PermissionCard;
-use fox_agent_backend::sandbox::{HostOs, PermissionMode, SandboxDeclaration};
+use fox_agent_backend::external_home::{LaunchDeclaration, PermissionMode};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -41,7 +41,7 @@ impl ExternalSink for Sink {
     fn request_approval(&self, run_id: &str, _conversation_id: &str, key: &str, card: &PermissionCard) -> Result<String, String> {
         let mut recorded = self.0.lock().unwrap();
         let id = format!("appr-{}", recorded.approvals.len() + 1);
-        assert!(key.starts_with("acp-permission:") || key.starts_with("sandbox-network-"), "{key}");
+        assert!(key.starts_with("acp-permission:"), "{key}");
         recorded.approvals.push((run_id.to_owned(), id.clone(), card.clone()));
         Ok(id)
     }
@@ -104,7 +104,6 @@ impl Sink {
 
 #[derive(Clone, Default)]
 struct MockLauncher {
-    network_callback: Arc<Mutex<Option<fox_agent_backend::network::NetworkCallback>>>,
     launches: Arc<AtomicUsize>,
     fail: bool,
     /// Full access withdrawn: desired / launched mode is sandboxed.
@@ -118,10 +117,6 @@ struct MockLauncher {
 }
 
 impl ExternalLauncher for MockLauncher {
-    fn launch_with_network(&self, request: LaunchRequest, callback: fox_agent_backend::network::NetworkCallback) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
-        *self.network_callback.lock().unwrap() = Some(callback);
-        self.launch(request)
-    }
     fn connection_key(&self, _request: &LaunchRequest) -> Result<Option<String>, LaunchFailure> {
         if self.key_reads.fetch_add(1, Ordering::SeqCst) > 0 && self.fail_key_after_launch {
             return Err(LaunchFailure::new("agent_backend_model_endpoint_invalid", "configuration became unreadable"));
@@ -142,7 +137,7 @@ impl ExternalLauncher for MockLauncher {
         Box::pin(async move {
             launches.fetch_add(1, Ordering::SeqCst);
             if fail {
-                return Err(LaunchFailure::new("sandbox_dependency_missing", "sandbox runtime is not installed").remedy("reinstall"));
+                return Err(LaunchFailure::new("agent_backend_not_installed", "backend runtime is not installed").remedy("reinstall"));
             }
             let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mock-acp-session-agent.mjs");
             let spec = LaunchSpec {
@@ -154,11 +149,11 @@ impl ExternalLauncher for MockLauncher {
                 experimental: false,
                 session_env: vec![],
             };
-            let connection = AcpConnection::spawn_detailed(&spec, &request.project_root, None).await.map_err(LaunchFailure::from)?;
+            let connection = AcpConnection::spawn_detailed(&spec, &request.project_root).await.map_err(LaunchFailure::from)?;
             Ok(Launched {
                 connection,
                 mode,
-                declaration: SandboxDeclaration::declare(mode, None, HostOs::current()),
+                declaration: LaunchDeclaration::declare(mode),
                 pi_launch: PiLaunch::Stock,
                 on_closed: Some(Box::new(move || { closed.fetch_add(1, Ordering::SeqCst); })),
             })
@@ -178,44 +173,6 @@ fn new_runtime(launcher: MockLauncher) -> (ExternalRuntime<Sink, MockLauncher>, 
     let sink = Sink::default();
     let runtime = ExternalRuntime::with_cancel_timeout(sink.clone(), launcher, tokio::runtime::Handle::current(), Duration::from_millis(800));
     (runtime, sink)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn host_network_approval_pauses_idle_and_cancel_denies_pending_connections() {
-    assert!(node_available());
-    let launcher = MockLauncher::default();
-    let sink = Sink::default();
-    let runtime = ExternalRuntime::with_idle_timeout(sink.clone(), launcher.clone(), tokio::runtime::Handle::current(), Duration::from_millis(200), Duration::from_secs(2), Duration::from_millis(350));
-    runtime.start_turn(turn("network", "net1", "slow", AgentBackend::Pi, None)).unwrap();
-    sink.wait_for("net1", "message.delta").await;
-    let callback = launcher.network_callback.lock().unwrap().clone().unwrap();
-    let target = fox_agent_backend::network::NetworkTarget { host: "example.com".into(), port: 443 };
-    let waiting = tokio::spawn(callback(target.clone()));
-    let simultaneous = tokio::spawn(callback(target.clone()));
-    let (_, id, card) = sink.wait_approval(1).await;
-    assert_eq!(card.tool, "sandbox_network");
-    assert_eq!(card.input["permissionScope"], "sandbox_network:example.com:443");
-    assert!(card.available_decisions.contains(&"allow_conversation"));
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(!sink.types("net1").iter().any(|kind| kind == "run.failed"));
-    assert!(runtime.is_network_approval(&id));
-    assert_eq!(sink.approvals().len(), 1, "same-target concurrent requests share the pending card");
-    assert_eq!(runtime.answer(&id, true), AnswerOutcome::Written);
-    assert!(waiting.await.unwrap());
-    assert!(simultaneous.await.unwrap());
-    assert_eq!(runtime.answer(&id, true), AnswerOutcome::NotPending);
-    let waiting = tokio::spawn(callback(target.clone()));
-    let (_, second, _) = sink.wait_approval(2).await;
-    runtime.cancel("net1");
-    assert!(!waiting.await.unwrap());
-    assert_eq!(runtime.answer(&second, true), AnswerOutcome::NotPending);
-    sink.terminal("net1").await;
-    assert!(!callback(target.clone()).await, "idle conversation cannot originate a new grant");
-    runtime.close_conversation("network", "fixture complete").await;
-    runtime.start_turn(turn("network", "net2", "slow", AgentBackend::Pi, None)).unwrap();
-    sink.wait_for("net2", "message.delta").await;
-    assert!(!callback(target).await, "a previous connection cannot use a new turn");
-    runtime.shutdown().await;
 }
 
 fn turn(conversation: &str, run: &str, prompt: &str, backend: AgentBackend, stored: Option<&str>) -> TurnRequest {
@@ -563,7 +520,7 @@ async fn launch_failures_and_stop_reasons_settle_the_run() {
     runtime.start_turn(turn("c7", "r10", "simple", AgentBackend::Pi, None)).unwrap();
     let terminal = sink.terminal("r10").await;
     assert_eq!(terminal["type"], "run.failed");
-    assert_eq!(terminal["code"], "sandbox_dependency_missing");
+    assert_eq!(terminal["code"], "agent_backend_not_installed");
     assert!(terminal["message"].as_str().unwrap().contains("reinstall"));
     assert!(runtime.session_info("c7").unwrap().active_run.is_none(), "the conversation is free again");
 
@@ -955,31 +912,5 @@ async fn native_mode_changes_switch_codex_live_and_restart_dsh_next_turn() {
     sink.terminal("r-dsh-2").await;
     assert_eq!(launcher.launches.load(Ordering::SeqCst), 3, "dsh restarted for the new preset");
     assert!(sink.types("r-dsh-2").iter().any(|kind| kind == "agent_backend.permission_mode_restart"));
-    runtime.shutdown().await;
-}
-
-/// Codex "Reconnecting... waiting for network" inside the sandbox ends the
-/// turn at once with the blocked host in the diagnostic; the model-metadata
-/// warning never reaches the answer.
-#[tokio::test(flavor = "multi_thread")]
-async fn codex_reconnecting_in_the_sandbox_fails_fast_with_the_host() {
-    if !node_available() {
-        return;
-    }
-    let launcher = MockLauncher::default();
-    launcher.revoked.store(true, Ordering::SeqCst);
-    let (runtime, sink) = new_runtime(launcher);
-    let started = std::time::Instant::now();
-    runtime.start_turn(turn("c-net", "r-net", "reconnect", AgentBackend::Codex, None)).unwrap();
-    let terminal = sink.terminal("r-net").await;
-    assert!(started.elapsed() < Duration::from_secs(8), "no minutes of spinning");
-    assert_eq!(terminal["type"], "run.failed");
-    assert_eq!(terminal["code"], "agent_backend_network_blocked");
-    assert_eq!(terminal["diagnostic"]["kind"], "sandbox_network_blocked");
-    assert!(terminal["diagnostic"]["text"].as_str().unwrap().contains("Reconnecting"));
-    assert!(sink.text("r-net").is_empty(), "neither warning is part of the answer: {:?}", sink.text("r-net"));
-    let kinds: Vec<String> = sink.events("r-net").iter().filter(|event| event["type"] == "agent_backend.diagnostic").map(|event| event["kind"].as_str().unwrap().to_owned()).collect();
-    assert_eq!(kinds, ["model_metadata_missing", "network_reconnecting"]);
-    assert_eq!(terminal["backendNotices"].as_array().unwrap().len(), 2);
     runtime.shutdown().await;
 }

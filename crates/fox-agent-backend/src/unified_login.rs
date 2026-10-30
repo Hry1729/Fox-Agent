@@ -425,7 +425,7 @@ pub fn remove_managed(backend: AgentBackend, home: &Path) -> Result<Vec<String>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{HostOs, PermissionMode};
+    use crate::external_home::{HostOs, PermissionMode};
 
     const KEY: &str = "sk-unified-0123456789abcdef";
 

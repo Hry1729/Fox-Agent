@@ -132,7 +132,7 @@ mod real {
     use fox_agent_backend::port::AgentBackend;
     #[cfg(unix)]
     use fox_agent_backend::port::StopConfirmation;
-    use fox_agent_backend::reverse::WriteOutcome;
+    use fox_agent_backend::acp::WriteOutcome;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 

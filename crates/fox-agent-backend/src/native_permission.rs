@@ -19,10 +19,10 @@
 //!   完全访问.
 //! * **Fox**: unchanged (its own execution mode in the composer).
 //!
-//! The full-access option of each external Agent IS Fox's「完全访问」(no srt
-//! around the backend): choosing it goes through the existing grant /
-//! confirmation / audit, choosing anything else while it is on revokes it.
-//! Every other option runs inside srt.
+//! The full-access option of each external Agent is its own full-access
+//! mode: choosing it goes through the existing grant / confirmation / audit,
+//! choosing anything else while it is on revokes it. Fox adds no sandbox of
+//! its own around any option; each runs in the Agent's native sandbox.
 //!
 //! The Host's automatic answer to `session/request_permission`
 //! ([`answer`]) is only a fail-closed fallback: a request the native layer
@@ -170,8 +170,8 @@ pub fn catalog(backend: AgentBackend, context: &CatalogContext) -> NativePermiss
             vec![
                 option(PI_READ_ONLY, "只读", "只放行读取类工具，其余由 Fox 拒绝", "Fox 审批拦截扩展 · 只读", false),
                 option(PI_ASK, "询问", "每个工具调用都由你批准", "Fox 审批拦截扩展 · 询问", false),
-                option(PI_ALLOW, "自动", "Fox 自动允许一次，仍在沙箱内", "Fox 审批拦截扩展 · 自动", false),
-                option(PI_FULL, "完全访问", "不套沙箱，Fox 自动允许；即 Fox 的「完全访问」", "完全访问（无 srt）", true),
+                option(PI_ALLOW, "自动", "Fox 按审批规则自动允许", "Fox 审批拦截扩展 · 自动", false),
+                option(PI_FULL, "完全访问", "Fox 全部自动允许（block 规则仍生效）；即 Fox 的「完全访问」", "Fox 审批拦截扩展 · 完全访问", true),
             ],
             PI_ASK,
             SwitchTiming::HostAnswered,
@@ -219,8 +219,7 @@ pub fn is_known(backend: AgentBackend, id: &str) -> bool {
 /// Agent's default. An unknown or greyed choice never widens.
 ///
 /// `full_access` is retained for old callers: it may select the full option
-/// when no stored choice exists. It is no longer tied to Fox's removed outer
-/// SRT layer and cannot rewrite an existing native choice.
+/// when no stored choice exists. It cannot rewrite an existing native choice.
 pub fn effective_mode(backend: AgentBackend, stored: Option<&str>, full_access: bool, context: &CatalogContext) -> &'static str {
     let catalog = catalog(backend, context);
     if let Some(option) = stored.and_then(|stored| {

@@ -1,15 +1,15 @@
 //! What the UI shows for an external backend's effective capabilities: the
 //! four dimensions of plan section 2 (approval coverage, sandbox scope,
 //! cancel reach, observability), one line each, built from the backend's
-//! measured declaration (`backends::*::capabilities`) folded with the
-//! session's sandbox declaration (`SandboxDeclaration::apply_to`, which comes
-//! from the effective policy actually written into the srt settings).
+//! measured declaration (`backends::*::capabilities`). Fox adds no outer
+//! sandbox around an external backend, so the sandbox scope is the Agent's
+//! own native one, exactly as measured.
 //!
 //! Nothing is upgraded here: an `Unverified` gate is shown as "未验证", never
-//! as "逐次审批"; a sandbox scope comes only from the declaration.
+//! as "逐次审批".
 
 use crate::port::{AgentBackend, ApprovalGate, CancelReach, CapabilityDeclaration, Enforcement, ToolCategory, Visibility};
-use crate::sandbox::{PermissionMode, SandboxDeclaration};
+use crate::external_home::LaunchDeclaration;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -60,7 +60,8 @@ pub struct CapabilityView {
     pub sandbox: Dimension,
     pub cancel: Dimension,
     pub observability: Dimension,
-    /// Sandbox warning the UI must show next to the scope (Windows exposure).
+    /// Warning the UI shows next to the scope (none since Fox stopped adding
+    /// its own sandbox; kept in the payload the UI reads).
     pub warning: Option<String>,
 }
 
@@ -119,80 +120,24 @@ fn approval_dimension(declared: &CapabilityDeclaration) -> Dimension {
     Dimension { summary, detail: parts.join("；") }
 }
 
-/// DeepSeek in sandboxed mode: a loopback model gateway cannot be reached
-/// (dsh dials loopback directly, never through the srt proxy), so such a
-/// session is refused before launch.
-pub const DEEPSEEK_LOOPBACK_LIMIT: &str = "限制：DeepSeek 的 base URL 若指向本机回环网关（如 Magpie 的 127.0.0.1:端口），沙箱模式下不可达（dsh 对回环地址总是直连、不经 srt 代理，srt 也无法按端口放行回环直连），Fox 会在启动前拒绝（agent_backend_loopback_requires_full_access）；需要完全访问权限（在设置中打开“新外部会话使用完全访问”后新建会话；会话中不能开启），或改用官方 api.deepseek.com";
+/// External backends get no Fox sandbox. This describes only the Fox layer;
+/// the Agent's own sandbox and approval policy are shown from its native
+/// measurement and remain authoritative.
+pub const NO_FOX_LAYER_DETAIL: &str = "Fox 不额外包装外部 Agent；Agent 自身的沙箱、权限模式和审批保持不变，Fox 仍提供私有 HOME 与会话管理";
 
-/// [`DEEPSEEK_LOOPBACK_LIMIT`] when full access is forbidden on this machine
-/// (`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`): the full-access remedy is gone.
-pub const DEEPSEEK_LOOPBACK_LIMIT_FORBIDDEN: &str = "限制：DeepSeek 的 base URL 若指向本机回环网关（如 Magpie 的 127.0.0.1:端口），沙箱模式下不可达，Fox 会在启动前拒绝（agent_backend_loopback_requires_full_access）；本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），请改用官方 api.deepseek.com";
-
-/// Rewrite the view for a machine where full access is forbidden: the
-/// DeepSeek loopback limit no longer offers full access.
-pub fn apply_full_access_forbidden(view: &mut CapabilityView) {
-    view.sandbox.detail = view.sandbox.detail.replace(DEEPSEEK_LOOPBACK_LIMIT, DEEPSEEK_LOOPBACK_LIMIT_FORBIDDEN);
-}
-
-/// External backends no longer get Fox's SRT wrapper. This describes only the
-/// Fox layer; the Agent's own sandbox and approval policy are shown from its
-/// native measurement and remain authoritative.
-pub const FULL_ACCESS_DETAIL: &str = "Fox 不额外包装外部 Agent（不再套 SRT）；Agent 自身的沙箱、权限模式和审批保持不变，Fox 仍提供私有 HOME 与会话管理";
-
-fn sandbox_dimension(backend: AgentBackend, declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
-    let mut dimension = sandbox_dimension_base(declared, declaration, launched);
-    if backend == AgentBackend::Deepseek && declaration.mode == PermissionMode::Sandboxed && !crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
-        dimension.detail.push('；');
-        dimension.detail.push_str(DEEPSEEK_LOOPBACK_LIMIT);
-    }
-    dimension
-}
-
-fn sandbox_dimension_base(declared: &CapabilityDeclaration, declaration: &SandboxDeclaration, launched: bool) -> Dimension {
-    match declaration.mode {
-        PermissionMode::FullAccess => Dimension {
-            summary: format!(
-                "沙箱：Fox 外层无；原生文件{}、网络{}",
-                enforcement_label(declared.sandbox_filesystem),
-                enforcement_label(declared.sandbox_network)
-            ),
-            detail: format!(
-                "{}；原生文件边界：{}；原生网络边界：{}",
-                FULL_ACCESS_DETAIL,
-                enforcement_label(declared.sandbox_filesystem),
-                enforcement_label(declared.sandbox_network)
-            ),
-        },
-        PermissionMode::Sandboxed if !launched => Dimension {
-            summary: "沙箱：srt（启动后确认）".to_owned(),
-            detail: "默认沙箱模式；启动时按实际写入 srt 的配置确认范围，沙箱起不来则拒绝启动，不会退回完全访问".to_owned(),
-        },
-        PermissionMode::Sandboxed => {
-            let scope = declaration.read_scope.ui_label(declaration.read_scope_verified);
-            Dimension {
-                summary: format!(
-                    "沙箱：srt，文件{}、网络{}",
-                    enforcement_label(declared.sandbox_filesystem),
-                    enforcement_label(declared.sandbox_network)
-                ),
-                detail: format!(
-                    "{scope}；可写：{}；网络白名单：{}{}",
-                    if declaration.writable_roots.is_empty() { "无".to_owned() } else { declaration.writable_roots.join("、") },
-                    if declaration.allowed_domains.is_empty() { "无".to_owned() } else { declaration.allowed_domains.join("、") },
-                    loopback_detail(declaration)
-                ),
-            }
-        }
-    }
-}
-
-/// The loopback gateway sentence of the sandbox detail: which one loopback
-/// port is allowed and from which base URL, or why none is.
-fn loopback_detail(declaration: &SandboxDeclaration) -> String {
-    match &declaration.loopback_gateway {
-        Some(gateway) => format!("；放行本机回环端口：{}（仅此一个，来自 {}）", gateway.entry, gateway.source),
-        None if !declaration.loopback_diagnostics.is_empty() => format!("；未放行本机回环端口：{}", declaration.loopback_diagnostics.join("；")),
-        None => String::new(),
+fn sandbox_dimension(declared: &CapabilityDeclaration) -> Dimension {
+    Dimension {
+        summary: format!(
+            "沙箱：Fox 外层无；原生文件{}、网络{}",
+            enforcement_label(declared.sandbox_filesystem),
+            enforcement_label(declared.sandbox_network)
+        ),
+        detail: format!(
+            "{}；原生文件边界：{}；原生网络边界：{}",
+            NO_FOX_LAYER_DETAIL,
+            enforcement_label(declared.sandbox_filesystem),
+            enforcement_label(declared.sandbox_network)
+        ),
     }
 }
 
@@ -228,42 +173,36 @@ fn observability_dimension(declared: &CapabilityDeclaration) -> Dimension {
 pub fn capability_view(
     backend: AgentBackend,
     initialize_response: Option<&Value>,
-    declaration: &SandboxDeclaration,
+    declaration: &LaunchDeclaration,
     pi_launch: PiLaunch,
 ) -> CapabilityView {
     let launched = initialize_response.is_some();
-    let mut declared = backend_declaration(backend, initialize_response.unwrap_or(&Value::Null), pi_launch);
-    // Only a real Fox SRT session contributes to the sandbox dimensions.
-    // FullAccess here means "no Fox outer layer", so the Agent's native
-    // declaration stays exactly as measured.
-    if launched && declaration.mode == PermissionMode::Sandboxed {
-        declaration.apply_to(&mut declared);
-    }
+    let declared = backend_declaration(backend, initialize_response.unwrap_or(&Value::Null), pi_launch);
     CapabilityView {
         backend: backend.as_str().to_owned(),
         mode: declaration.mode.as_str().to_owned(),
         source: if launched { "live" } else { "planned" },
         approval: approval_dimension(&declared),
-        sandbox: sandbox_dimension(backend, &declared, declaration, launched),
+        sandbox: sandbox_dimension(&declared),
         cancel: cancel_dimension(&declared),
         observability: observability_dimension(&declared),
-        warning: declaration.exposure_warning.clone(),
+        warning: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::HostOs;
+    use crate::external_home::PermissionMode;
 
     #[test]
     fn stock_pi_never_claims_per_call_approval_and_gated_pi_does() {
-        let planned = SandboxDeclaration::declare(PermissionMode::Sandboxed, None, HostOs::Linux);
+        let planned = LaunchDeclaration::declare(PermissionMode::Sandboxed);
         let stock = capability_view(AgentBackend::Pi, None, &planned, PiLaunch::Stock);
         assert_eq!(stock.approval.summary, "审批：无逐次审批");
         assert!(stock.approval.detail.contains("不经 Fox 审批直接执行：读文件、写文件、命令、网络"));
         assert_eq!(stock.source, "planned");
-        assert_eq!(stock.sandbox.summary, "沙箱：srt（启动后确认）");
+        assert!(stock.sandbox.summary.starts_with("沙箱：Fox 外层无"), "{}", stock.sandbox.summary);
         assert_eq!(stock.cancel.summary, "取消：可确认");
         assert_eq!(stock.observability.summary, "可观测：工具起止");
         let gated = capability_view(AgentBackend::Pi, None, &planned, PiLaunch::Gated);
@@ -272,63 +211,25 @@ mod tests {
 
     #[test]
     fn no_outer_layer_keeps_the_agents_native_sandbox_declaration() {
-        let full = SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::Linux);
+        let full = LaunchDeclaration::declare(PermissionMode::FullAccess);
         let view = capability_view(AgentBackend::Codex, Some(&serde_json::json!({})), &full, PiLaunch::Stock);
         assert_eq!(view.mode, "full_access");
         assert!(view.sandbox.summary.contains("Fox 外层无"), "{}", view.sandbox.summary);
-        // The removal of Fox's outer layer must not turn the Agent's native
-        // declaration into "无". Linux has a measured enforced write boundary;
-        // Windows / macOS remain unverified.
+        // The Agent's native declaration is never turned into "无". Linux has
+        // a measured enforced write boundary; Windows / macOS remain unverified.
         let label = if cfg!(target_os = "linux") { "原生文件强制" } else { "原生文件未验证" };
         assert!(view.sandbox.summary.contains(label), "{}", view.sandbox.summary);
         assert_eq!(view.source, "live");
+        assert_eq!(view.warning, None);
     }
 
     #[test]
     fn deepseek_cancel_is_request_only_and_observability_unverified() {
-        let planned = SandboxDeclaration::declare(PermissionMode::Sandboxed, None, HostOs::Linux);
+        let planned = LaunchDeclaration::declare(PermissionMode::Sandboxed);
         let view = capability_view(AgentBackend::Deepseek, None, &planned, PiLaunch::Stock);
         assert_eq!(view.cancel.summary, "取消：仅发送请求");
         assert_eq!(view.observability.summary, "可观测：未验证");
         assert!(view.cancel.detail.contains("未知"));
-        assert!(view.sandbox.detail.contains("本机回环网关") && view.sandbox.detail.contains("需要完全访问权限（在设置中打开“新外部会话使用完全访问”后新建会话；会话中不能开启）") && !view.sandbox.detail.contains("FOX_EXTERNAL_FULL_ACCESS"), "{}", view.sandbox.detail);
-        assert!(!view.sandbox.detail.contains("请切换到"), "{}", view.sandbox.detail);
-        let full = SandboxDeclaration::declare(PermissionMode::FullAccess, None, HostOs::Linux);
-        let view = capability_view(AgentBackend::Deepseek, None, &full, PiLaunch::Stock);
-        assert!(!view.sandbox.detail.contains("本机回环网关"), "full access is not limited: {}", view.sandbox.detail);
-        let pi = capability_view(AgentBackend::Pi, None, &planned, PiLaunch::Stock);
-        assert!(!pi.sandbox.detail.contains("本机回环网关"));
+        assert!(!view.sandbox.detail.contains("本机回环网关"), "{}", view.sandbox.detail);
     }
-
-    #[test]
-    fn a_launched_sandbox_folds_srt_enforcement_into_the_scope() {
-        let dir = std::env::temp_dir();
-        let policy = crate::sandbox::SandboxPolicy::new(
-            vec![crate::sandbox::AuthorizedDir { path: dir.join("proj"), writable: true }],
-            dir.join("homes").join("pi"),
-            vec![],
-            vec!["api.anthropic.com".into()],
-            HostOs::Linux,
-        );
-        let declaration = SandboxDeclaration::declare(PermissionMode::Sandboxed, Some(&policy), HostOs::Linux);
-        let view = capability_view(AgentBackend::Pi, Some(&serde_json::json!({})), &declaration, PiLaunch::Stock);
-        assert_eq!(view.sandbox.summary, "沙箱：srt，文件强制、网络强制");
-        assert!(view.sandbox.detail.contains("api.anthropic.com"));
-        assert!(view.sandbox.detail.contains("读取限定在授权文件夹"));
-        assert_eq!(serde_json::to_value(&view).unwrap()["approval"]["summary"], "审批：无逐次审批");
-    }
-
-    #[test]
-    fn forbidden_rewrites_the_deepseek_loopback_limit() {
-        let mut view = capability_view(
-            AgentBackend::Deepseek,
-            None,
-            &SandboxDeclaration::declare(PermissionMode::Sandboxed, None, HostOs::Linux),
-            PiLaunch::Stock,
-        );
-        assert!(view.sandbox.detail.contains(DEEPSEEK_LOOPBACK_LIMIT));
-        apply_full_access_forbidden(&mut view);
-        assert!(view.sandbox.detail.contains("本机已禁止完全访问") && !view.sandbox.detail.contains("新建会话时选择"), "{}", view.sandbox.detail);
-    }
-
 }

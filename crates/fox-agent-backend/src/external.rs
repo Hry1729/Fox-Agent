@@ -8,9 +8,8 @@
 //!   same events the yuxi runtime emits, see [`crate::projection`]), and show
 //!   an approval card for a native permission request;
 //! * [`ExternalLauncher`]: start the backend process for a conversation
-//!   (`prepare_launch` in the session's permission mode, sandboxed by default
-//!   and never degraded; Windows over the bridge) and hand back the
-//!   initialized [`AcpConnection`].
+//!   (private HOME, the Agent's own native permission mode) and hand back
+//!   the initialized [`AcpConnection`].
 //!
 //! Everything else is here and tested on Linux against the mock ACP agent
 //! (`tests/external_runtime.rs`):
@@ -49,8 +48,8 @@ use crate::acp::{AcpConnection, BackendEvent, TerminateReport};
 use crate::capability_view::PiLaunch;
 use crate::port::{AgentBackend, CapabilityDeclaration, StopConfirmation, STOP_UNCONFIRMED_REMEDY};
 use crate::projection::{allow_option, permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, PermissionCard, PermissionOption, TurnTerminal};
-use crate::reverse::WriteOutcome;
-use crate::sandbox::{PermissionMode, SandboxDeclaration};
+use crate::acp::WriteOutcome;
+use crate::external_home::{LaunchDeclaration, PermissionMode};
 use crate::settlement::{RunTerminal, TerminalArbiter};
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -89,7 +88,7 @@ pub struct LaunchRequest {
     pub project_uuid: Option<String>,
     /// Authorized root, also the ACP `cwd`.
     pub project_root: PathBuf,
-    /// Per-launch sandbox session id (`[A-Za-z0-9_-]{1,128}`).
+    /// Per-launch session id (`[A-Za-z0-9_-]{1,128}`), names the session temp.
     pub session_key: String,
     /// Full access granted to this conversation by the user when it was
     /// created (persisted per conversation, UX batch ②). OR-ed with the
@@ -105,8 +104,7 @@ pub struct LaunchRequest {
     pub unified_login: Option<crate::unified_login::UnifiedLogin>,
     /// The conversation's choice in its Agent's own permission list
     /// ([`crate::native_permission`]), as stored. `None` / unknown / greyed:
-    /// the Agent's default. The full-access option is used exactly when the
-    /// session runs without srt, whatever is stored.
+    /// the Agent's default.
     pub native_permission: Option<String>,
 }
 
@@ -134,15 +132,14 @@ impl LaunchRequest {
 pub struct Launched {
     pub connection: AcpConnection,
     pub mode: PermissionMode,
-    pub declaration: SandboxDeclaration,
+    pub declaration: LaunchDeclaration,
     pub pi_launch: PiLaunch,
-    /// Runs after the connection was closed (Windows: end the ancestor-ACE
-    /// session inside the srt transition).
+    /// Runs after the connection was closed.
     pub on_closed: Option<Box<dyn FnOnce() + Send>>,
 }
 
-/// Structured launch refusal / failure (`sandbox_*` codes of
-/// [`crate::sandbox::SandboxErrorCode`], the initialize codes of
+/// Structured launch refusal / failure (codes of
+/// [`crate::external_home::LaunchErrorCode`], the initialize codes of
 /// [`crate::acp::InitializeFailureCode`], or `agent_backend_*`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,16 +195,9 @@ impl LaunchFailure {
     }
 }
 
-impl From<crate::sandbox::SandboxError> for LaunchFailure {
-    fn from(error: crate::sandbox::SandboxError) -> Self {
-        // A missing / unusable backend entry is the same user-facing problem
-        // whichever layer finds it: the external backend is not installed.
-        // The sandbox code stays in `detail.code` for diagnostics.
-        let code = match error.code {
-            crate::sandbox::SandboxErrorCode::SandboxBackendNotInstalled => "agent_backend_not_installed",
-            other => other.as_str(),
-        };
-        let mut failure = Self::new(code, error.message.clone());
+impl From<crate::external_home::LaunchError> for LaunchFailure {
+    fn from(error: crate::external_home::LaunchError) -> Self {
+        let mut failure = Self::new(error.code.as_str(), error.message.clone());
         failure.remedy = error.remedy.clone();
         failure.detail = serde_json::to_value(&error).unwrap_or(Value::Null);
         failure
@@ -295,57 +285,6 @@ fn with_diagnostics(mut extra: Value, stderr: Option<Value>, rpc_error_data: Opt
     extra
 }
 
-/// Number of Codex network-retry lines in a stderr tail.
-fn network_stall_lines(tail: &str) -> usize {
-    tail.lines().filter(|line| crate::projection::backend_notice_kind(line) == Some("network_reconnecting")).count()
-}
-
-/// Host srt reported as blocked in its own log (`Connection blocked to
-/// host:port`, `HTTP request blocked to host:port`, `Connection to host
-/// blocked`), the last one in the tail.
-pub fn srt_blocked_host(tail: &str) -> Option<String> {
-    let mut found = None;
-    for line in tail.lines() {
-        let candidate = if let Some((_, rest)) = line.split_once("blocked to ") {
-            rest.split_whitespace().next().map(|target| target.trim_end_matches([',', '.', ';']).to_owned())
-        } else if let Some((_, rest)) = line.split_once("Connection to ") {
-            rest.split_once(" blocked").map(|(host, _)| host.trim().to_owned())
-        } else {
-            None
-        };
-        if let Some(target) = candidate.filter(|target| !target.is_empty()) {
-            let host = target.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit())).map_or(target.as_str(), |(host, _)| host);
-            found = Some(host.to_ascii_lowercase());
-        }
-    }
-    found
-}
-
-/// The `diagnostic` object of `agent_backend_network_blocked`.
-pub fn network_stall_diagnostic(tail: &str, model_host: Option<&str>, allowed: &[String], evidence: &str) -> Value {
-    let allowlist = if allowed.is_empty() { "（空：不放行任何主机）".to_owned() } else { allowed.join("、") };
-    let in_allowlist = |host: &str| allowed.iter().any(|entry| {
-        let entry = entry.rsplit_once(':').filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit())).map_or(entry.as_str(), |(host, _)| host);
-        entry.eq_ignore_ascii_case(host) || entry.strip_prefix("*.").is_some_and(|suffix| host.to_ascii_lowercase().ends_with(&format!(".{}", suffix.to_ascii_lowercase())))
-    });
-    let blocked = srt_blocked_host(tail);
-    let (host, text) = match (&blocked, model_host) {
-        (Some(host), _) => (Some(host.clone()), format!("沙箱网络拦截了主机 {host}（srt 日志）；Codex 一直在“Reconnecting… waiting for network”，已提前结束本轮。当前白名单：{allowlist}")),
-        (None, Some(host)) if !in_allowlist(host) => (Some(host.to_owned()), format!("沙箱网络拦截了模型主机 {host}：它不在本会话的白名单里（白名单：{allowlist}）；Codex 一直在“Reconnecting… waiting for network”，已提前结束本轮")),
-        (None, Some(host)) => (None, format!("模型主机 {host} 已在白名单内，但 Codex 仍在“Reconnecting… waiting for network”：被沙箱拦截的是白名单之外的其它主机（srt 未报告具体主机名）。白名单：{allowlist}；已提前结束本轮")),
-        (None, None) => (None, format!("沙箱网络拦截了 Codex 要连接的主机（未使用 Fox 统一登录，srt 未报告具体主机名）；Codex 一直在“Reconnecting… waiting for network”，已提前结束本轮。白名单：{allowlist}")),
-    };
-    json!({
-        "kind": "sandbox_network_blocked",
-        "source": "codex_reconnecting",
-        "blockedHost": host,
-        "modelHost": model_host,
-        "allowedDomains": allowed,
-        "evidence": evidence,
-        "text": text,
-    })
-}
-
 fn tail_chars(text: &str, max: usize) -> String {
     let count = text.chars().count();
     text.chars().skip(count.saturating_sub(max)).collect()
@@ -379,9 +318,6 @@ pub trait ExternalLauncher: Send + Sync + 'static {
     }
     fn selected_model(&self, _request: &LaunchRequest) -> Option<String> { None }
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'static, Result<Launched, LaunchFailure>>;
-    fn launch_with_network(&self, request: LaunchRequest, _callback: crate::network::NetworkCallback) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
-        self.launch(request)
-    }
 }
 
 /// Where the runtime's output goes.
@@ -391,7 +327,6 @@ pub trait ExternalSink: Send + Sync + 'static {
     /// Show an approval card; returns the Host approval id. `key` is unique
     /// per native request and connection generation.
     fn request_approval(&self, run_id: &str, conversation_id: &str, key: &str, card: &PermissionCard) -> Result<String, String>;
-    fn network_granted(&self, _conversation_id: &str, _target: &crate::network::NetworkTarget) -> bool { false }
     /// Record one Host decision in the external-backend audit log (names
     /// and kinds only, never tool input). Default: nothing beyond the run
     /// event the runtime already emitted.
@@ -493,7 +428,7 @@ pub struct SessionInfo {
     pub backend: AgentBackend,
     pub live: bool,
     pub mode: Option<PermissionMode>,
-    pub declaration: Option<SandboxDeclaration>,
+    pub declaration: Option<LaunchDeclaration>,
     pub initialize_response: Option<Value>,
     pub capabilities: Option<CapabilityDeclaration>,
     pub pi_launch: PiLaunch,
@@ -506,11 +441,6 @@ struct PendingApproval {
     options: Vec<PermissionOption>,
 }
 
-struct PendingNetworkApproval {
-    target: crate::network::NetworkTarget,
-    senders: Vec<tokio::sync::oneshot::Sender<bool>>,
-}
-
 struct Turn {
     last_activity: std::time::Instant,
     active_tools: std::collections::HashSet<String>,
@@ -518,13 +448,9 @@ struct Turn {
     /// The Agent's own permission mode this turn runs in
     /// ([`crate::native_permission`]); decides the Host's fail-closed answer.
     native_mode: String,
-    /// "Reconnecting" lines in the stderr tail when the prompt was sent
-    /// (only new ones count as this turn's network stall).
-    stall_baseline: usize,
     projector: AcpProjector,
     arbiter: TerminalArbiter,
     approvals: HashMap<String, PendingApproval>,
-    network_approvals: HashMap<String, PendingNetworkApproval>,
     cancel_requested: bool,
     prompt_sent: bool,
     /// The [`BackendEvent::PromptStarted`] fence of this turn's prompt has
@@ -546,11 +472,9 @@ impl Turn {
             active_tools: std::collections::HashSet::new(),
             run_id: run_id.to_owned(),
             native_mode: native_mode.to_owned(),
-            stall_baseline: 0,
             projector: AcpProjector::new(),
             arbiter: TerminalArbiter::default(),
             approvals: HashMap::new(),
-            network_approvals: HashMap::new(),
             cancel_requested: false,
             prompt_sent: false,
             prompt_fence_seen: false,
@@ -562,7 +486,6 @@ impl Turn {
 
 #[derive(Default)]
 struct SessionState {
-    network_epoch: u64,
     generation: u64,
     connection: Option<Arc<AcpConnection>>,
     native_session_id: Option<String>,
@@ -576,13 +499,13 @@ struct SessionState {
     connection_key: Option<String>,
     /// Actual selected model destination (diagnostics only).
     model_host: Option<String>,
-    declaration: Option<SandboxDeclaration>,
+    declaration: Option<LaunchDeclaration>,
     pi_launch: Option<PiLaunch>,
     turn: Option<Turn>,
     closing: bool,
     on_closed: Option<Box<dyn FnOnce() + Send>>,
     /// A full-access process stopped for revocation was not confirmed gone:
-    /// no relaunch (in the sandbox or otherwise) until Fox restarts.
+    /// no relaunch until Fox restarts.
     stop_unconfirmed: bool,
 }
 
@@ -777,10 +700,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             }
             turn.prompt_sent = true;
             turn.last_activity = std::time::Instant::now();
-            let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
-            if let Some(turn) = state.turn.as_mut() {
-                turn.stall_baseline = network_stall_lines(&tail);
-            }
             (state.connection.clone(), state.native_session_id.clone())
         };
         let (Some(connection), Some(native)) = (connection, native) else {
@@ -840,7 +759,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let report = self.stop_connection(session, "full access withdrawn").await;
                 if let Some(report) = report {
                     if !report.confirmation.is_confirmed() {
-                        return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "原“完全访问”进程未确认全部结束，不会在沙箱中重建")
+                        return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "原“完全访问”进程未确认全部结束，不会重建")
                             .remedy(STOP_UNCONFIRMED_REMEDY)
                             .detail(json!({ "reasons": report.confirmation.reasons() })));
                     }
@@ -882,8 +801,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
         let run_id = request.run_id.clone();
         self.emit(session, &run_id, json!({ "type": "agent_backend.launching", "agentBackend": session.backend.as_str(), "mode": desired.as_str() }));
-        let callback = self.network_callback(session);
-        let launched = self.inner.launcher.launch_with_network(request.launch.clone(), callback).await?;
+        let launched = self.inner.launcher.launch(request.launch.clone()).await?;
         let Launched { mut connection, mode, declaration, pi_launch, on_closed } = launched;
         let connection_key = match self.inner.launcher.connection_key(&request.launch) {
             Ok(key) => key,
@@ -1114,7 +1032,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     Some(event) => self.handle_event(&session, generation, event),
                 },
                 _ = tick.tick() => {
-                    self.check_stderr_network_stall(&session, generation);
                     if self.check_idle(&session, generation).await { break; }
                     let (current, connection) = {
                         let state = lock(&session.state);
@@ -1175,16 +1092,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         }
                     }
                 }
-                let stalled = events
-                    .iter()
-                    .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_backend.diagnostic"))
-                    .find(|event| event.get("kind").and_then(Value::as_str) == Some("network_reconnecting"))
-                    .and_then(|event| event.get("text").and_then(Value::as_str).map(str::to_owned));
                 for event in events {
                     self.emit(session, &run_id, event);
-                }
-                if let Some(evidence) = stalled {
-                    self.fail_network_stall(session, &mut state, &run_id, &evidence);
                 }
             }
             BackendEvent::PermissionRequested { native_request_id, option_ids, request, .. } => {
@@ -1298,33 +1207,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
     }
 
-    /// Codex on stderr: a "Reconnecting... / waiting for network" line that
-    /// appeared after this turn's prompt ends the turn at once
-    /// ([`Self::fail_network_stall`]).
-    fn check_stderr_network_stall(&self, session: &Arc<Session>, generation: u64) {
-        if session.backend != AgentBackend::Codex {
-            return;
-        }
-        let mut state = lock(&session.state);
-        if state.generation != generation || state.mode != Some(PermissionMode::Sandboxed) {
-            return;
-        }
-        let Some((run_id, baseline)) = state.turn.as_ref().filter(|turn| turn.prompt_sent && !turn.cancel_requested).map(|turn| (turn.run_id.clone(), turn.stall_baseline)) else {
-            return;
-        };
-        let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
-        if network_stall_lines(&tail) > baseline {
-            let evidence = tail.lines().rev().find(|line| crate::projection::backend_notice_kind(line) == Some("network_reconnecting")).unwrap_or("Reconnecting...").trim().to_owned();
-            self.fail_network_stall(session, &mut state, &run_id, &evidence);
-        }
-    }
-
     async fn check_idle(&self, session: &Arc<Session>, generation: u64) -> bool {
         let expired = {
             let mut state = lock(&session.state);
             if state.generation != generation { return false; }
             let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent && !turn.cancel_requested) else { return false; };
-            if !turn.approvals.is_empty() || !turn.network_approvals.is_empty() {
+            if !turn.approvals.is_empty() {
                 turn.last_activity = std::time::Instant::now();
                 return false;
             }
@@ -1345,38 +1233,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             state.closing = false;
         }
         expired
-    }
-
-    /// Codex keeps retrying "Reconnecting... waiting for network" for minutes
-    /// when srt's proxy refuses its model host. Inside the sandbox the first
-    /// such notice ends the turn (`agent_backend_network_blocked`) instead of
-    /// spinning: the turn is cancelled natively, and the diagnostic names the
-    /// host srt blocked (from srt's own log line when it printed one, else
-    /// the model host of Fox's unified login) and the session's allowlist.
-    fn fail_network_stall(&self, session: &Arc<Session>, state: &mut SessionState, run_id: &str, evidence: &str) {
-        if session.backend != AgentBackend::Codex || state.mode != Some(PermissionMode::Sandboxed) {
-            return;
-        }
-        if !state.turn.as_ref().is_some_and(|turn| turn.run_id == run_id && !turn.cancel_requested && turn.network_approvals.is_empty()) {
-            return;
-        }
-        let allowed = state.declaration.as_ref().map(|declaration| declaration.allowed_domains.clone()).unwrap_or_default();
-        let tail = state.connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
-        let diagnostic = network_stall_diagnostic(&tail, state.model_host.as_deref(), &allowed, evidence);
-        if let (Some(connection), Some(native)) = (state.connection.clone(), state.native_session_id.clone()) {
-            let _ = connection.cancel(&native);
-        }
-        if let Some(turn) = state.turn.as_mut() {
-            turn.approvals.clear();
-        }
-        let message = diagnostic.get("text").and_then(Value::as_str).unwrap_or("沙箱网络拦截了 Codex 的模型请求").to_owned();
-        self.finish_turn(
-            session,
-            state,
-            run_id,
-            TurnTerminal::Failed { code: "agent_backend_network_blocked".into(), message },
-            with_diagnostics(json!({ "outcome": "unknown" }), Some(diagnostic), None),
-        );
     }
 
     /// The event stream of `generation` ended: the process exited or the
@@ -1442,7 +1298,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             turn.cancel_requested = true;
             turn.arbiter.request_cancel();
             turn.approvals.clear();
-            turn.network_approvals.clear();
             (connection.filter(|_| turn.prompt_sent), native, generation)
         };
         let answered = match (connection, native) {
@@ -1483,14 +1338,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         for session in sessions {
             let (connection, pending) = {
                 let mut state = lock(&session.state);
-                if let Some(turn) = state.turn.as_mut() {
-                    if let Some(pending) = turn.network_approvals.remove(approval_id) {
-                        turn.last_activity = std::time::Instant::now();
-                        let mut written = false;
-                        for sender in pending.senders { written |= sender.send(approved && !turn.cancel_requested).is_ok(); }
-                        return if written { AnswerOutcome::Written } else { AnswerOutcome::NotPending };
-                    }
-                }
                 let connection = state.connection.clone();
                 let Some(pending) = state.turn.as_mut().and_then(|turn| turn.approvals.remove(approval_id)) else {
                     continue;
@@ -1516,10 +1363,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         AnswerOutcome::NotPending
     }
 
-    pub fn is_network_approval(&self, approval_id: &str) -> bool {
-        lock(&self.inner.sessions).values().any(|session| lock(&session.state).turn.as_ref().is_some_and(|turn| turn.network_approvals.contains_key(approval_id)))
-    }
-
     pub fn previews(&self, conversation_id: &str) -> Result<Vec<crate::preview::Preview>, String> {
         let session = lock(&self.inner.sessions).get(conversation_id).cloned();
         let connection = session.and_then(|session| lock(&session.state).connection.clone());
@@ -1534,50 +1377,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
     }
 
-    fn network_callback(&self, session: &Arc<Session>) -> crate::network::NetworkCallback {
-        let epoch = {
-            let mut state = lock(&session.state);
-            state.network_epoch += 1;
-            state.network_epoch
-        };
-        let runtime = self.clone();
-        let session = Arc::downgrade(session);
-        Arc::new(move |target| {
-                let deny = || Box::pin(async { false }) as BoxFuture<'static, bool>;
-                let Some(session) = session.upgrade() else { return deny(); };
-                let receiver = {
-                    let mut state = lock(&session.state);
-                    if state.closing || state.network_epoch != epoch { return deny(); }
-                    let owned_preview = matches!(target.host.as_str(), "127.0.0.1" | "localhost")
-                        && state.connection.as_ref().is_some_and(|connection| connection.previews().is_ok_and(|items| items.iter().any(|preview| preview.port == target.port)));
-                    let Some(turn) = state.turn.as_mut().filter(|turn| !turn.cancel_requested) else { return deny(); };
-                    if owned_preview || runtime.inner.sink.network_granted(&session.conversation_id, &target) { return Box::pin(async { true }); }
-                    if let Some(pending) = turn.network_approvals.values_mut().find(|pending| pending.target == target) {
-                        if pending.senders.len() >= 8 { return deny(); }
-                        let (sender, receiver) = tokio::sync::oneshot::channel();
-                        pending.senders.push(sender);
-                        return Box::pin(async move { receiver.await.unwrap_or(false) });
-                    }
-                    if turn.network_approvals.len() >= 8 { return deny(); }
-                    let Ok(token) = crate::launch::random_hex(16) else { return deny(); };
-                    let key = format!("sandbox-network-{epoch}-{token}");
-                    let card = PermissionCard {
-                        title: format!("连接 {}", target.key()),
-                        native_tool_call_id: None,
-                        tool: "sandbox_network",
-                        input: json!({ "hostNetworkRequest": true, "host": target.host, "port": target.port, "permissionScope": format!("sandbox_network:{}", target.key()) }),
-                        options: Vec::new(),
-                        available_decisions: vec!["deny", "allow_once", "allow_conversation"],
-                    };
-                    let Ok(id) = runtime.inner.sink.request_approval(&turn.run_id, &session.conversation_id, &key, &card) else { return deny(); };
-                    let (sender, receiver) = tokio::sync::oneshot::channel();
-                    turn.network_approvals.insert(id, PendingNetworkApproval { target, senders: vec![sender] });
-                    receiver
-                };
-                Box::pin(async move { receiver.await.unwrap_or(false) })
-        })
-    }
-
     /// Stop the live process of a session (keeps the session entry and its
     /// native id for a later reopen). `None` when nothing was running.
     async fn stop_connection(&self, session: &Arc<Session>, reason: &str) -> Option<TerminateReport> {
@@ -1585,8 +1384,6 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let mut state = lock(&session.state);
             state.generation += 1;
             state.native_session_open = false;
-            state.network_epoch += 1;
-            if let Some(turn) = state.turn.as_mut() { turn.network_approvals.clear(); }
             (state.connection.take(), state.on_closed.take())
         };
         let connection = connection?;
@@ -1601,13 +1398,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
 
     /// Revoke full access mid-session (UX batch ②, semantics A): the Host has
     /// already withdrawn the grant, so [`ExternalLauncher::desired_mode`]
-    /// now answers sandboxed. Uses [`crate::sandbox::recheck_permission_mode`]:
+    /// now answers sandboxed. Uses [`crate::external_home::recheck_permission_mode`]:
     /// on `RestartSandboxed` the running turn is cancelled (ended
     /// `interrupted`, pending approvals settled `cancelled` by the stopping
-    /// connection), the full-access process tree is stopped and confirmed,
-    /// and the next turn launches fail-closed in the sandbox (a sandbox that
-    /// cannot start refuses; nothing is replayed). An unconfirmed stop blocks
-    /// any relaunch. `Unchanged` when nothing runs in full access.
+    /// connection), the process tree is stopped and confirmed, and the next
+    /// turn starts a new connection (nothing is replayed). An unconfirmed
+    /// stop blocks any relaunch. `Unchanged` when nothing runs in full access.
     pub async fn revoke_full_access(&self, request: &LaunchRequest) -> RevokeOutcome {
         let conversation_id = request.conversation_id.as_str();
         let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
@@ -1615,8 +1411,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         };
         let outcome = self.revoke_running(&session, request).await;
         // 13.19 fix ②: a stopped process must not keep reporting its old
-        // (full-access) declaration; the UI then shows the planned, sandboxed
-        // view until the next launch reports its own.
+        // (full-access) declaration; the UI then shows the planned view until
+        // the next launch reports its own.
         forget_stopped_launch(&session);
         outcome
     }
@@ -1632,16 +1428,16 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let desired = self.inner.launcher.desired_mode(request);
         let mut policy = crate::config::HostPolicy::default();
         if desired == PermissionMode::FullAccess {
-            policy.full_access_grants.insert(crate::sandbox::FullAccessGrant::Conversation(conversation_id.to_owned()).key());
+            policy.full_access_grants.insert(crate::external_home::FullAccessGrant::Conversation(conversation_id.to_owned()).key());
         }
         let snapshot = crate::config::SessionSnapshot {
             backend: request.backend,
             project_root: request.project_root.to_string_lossy().into_owned(),
             egress_allowed: false,
-            settings: std::collections::BTreeMap::from([(crate::sandbox::SETTING_PERMISSION_MODE.to_owned(), desired.as_str().to_owned())]),
+            settings: std::collections::BTreeMap::from([(crate::external_home::SETTING_PERMISSION_MODE.to_owned(), desired.as_str().to_owned())]),
         };
-        match crate::sandbox::recheck_permission_mode(&policy, &snapshot, conversation_id, running) {
-            crate::sandbox::ModeRecheck::RestartSandboxed(reason) => {
+        match crate::external_home::recheck_permission_mode(&policy, &snapshot, conversation_id, running) {
+            crate::external_home::ModeRecheck::RestartSandboxed(reason) => {
                 {
                     let mut state = lock(&session.state);
                     if let Some(run_id) = state.turn.as_ref().map(|turn| turn.run_id.clone()) {
@@ -1656,7 +1452,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                             &run_id,
                             TurnTerminal::Interrupted {
                                 code: "agent_backend_full_access_revoked".into(),
-                                message: "已撤销完全访问：本轮已取消，外部后端将在沙箱中重新启动（不重放本轮）".into(),
+                                message: "已撤销完全访问：本轮已取消，外部后端将在下一轮重新启动（不重放本轮）".into(),
                             },
                             json!({ "outcome": "unknown" }),
                         );
@@ -1739,10 +1535,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
 }
 
 /// Drop what a session reported about a process that no longer runs (its
-/// sandbox declaration and handshake), so capability views fall back to the
+/// launch declaration and handshake), so capability views fall back to the
 /// planned launch. `mode` is kept: [`ExternalRuntime::apply_native_mode`]
-/// still answers `NextTurn` for leaving full access (the sandboxed relaunch
-/// happens at the next turn). No-op while a connection is open.
+/// still answers `NextTurn` for leaving full access (the relaunch happens at
+/// the next turn). No-op while a connection is open.
 fn forget_stopped_launch(session: &Session) {
     let mut state = lock(&session.state);
     if state.connection.is_none() {
@@ -1786,29 +1582,4 @@ async fn close_shared(mut connection: Arc<AcpConnection>) -> TerminateReport {
         reasons: vec!["connection still in use by another task; process killed when it is released".into()],
     };
     report
-}
-
-#[cfg(test)]
-mod network_stall_tests {
-    use super::{network_stall_diagnostic, srt_blocked_host};
-
-    #[test]
-    fn the_diagnostic_names_the_blocked_host() {
-        let allowed = vec!["api.openai.com".to_owned(), "chatgpt.com".to_owned()];
-        // srt's own log names the host.
-        let tail = "[SandboxDebug] Connection blocked to api.deepseek.com:443\nReconnecting... 1/5";
-        assert_eq!(srt_blocked_host(tail).as_deref(), Some("api.deepseek.com"));
-        let diagnostic = network_stall_diagnostic(tail, None, &allowed, "Reconnecting... 1/5");
-        assert_eq!(diagnostic["blockedHost"], "api.deepseek.com");
-        assert!(diagnostic["text"].as_str().unwrap().contains("api.deepseek.com"));
-        // No srt line: the unified login's model host, not on the allowlist.
-        let diagnostic = network_stall_diagnostic("Reconnecting... 2/5", Some("api.deepseek.com"), &allowed, "x");
-        assert_eq!(diagnostic["blockedHost"], "api.deepseek.com");
-        assert!(diagnostic["text"].as_str().unwrap().contains("不在本会话的白名单"));
-        // Model host allowed: another host was blocked; no host is invented.
-        let diagnostic = network_stall_diagnostic("", Some("chatgpt.com"), &allowed, "x");
-        assert!(diagnostic["blockedHost"].is_null());
-        assert!(diagnostic["text"].as_str().unwrap().contains("已在白名单内"));
-        assert_eq!(srt_blocked_host("Connection to evil.example blocked: not allowed").as_deref(), Some("evil.example"));
-    }
 }

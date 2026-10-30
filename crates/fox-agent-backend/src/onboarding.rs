@@ -1,7 +1,7 @@
 //! Login guidance for the external backends (UX batch ①).
 //!
 //! External backends run with a Fox private HOME in both permission modes
-//! (one per project UUID × backend, [`crate::sandbox::PrivateHomes`]); a login
+//! (one per project UUID × backend, [`crate::external_home::PrivateHomes`]); a login
 //! in the user's real HOME is never used. This module lets the Host tell the
 //! user what is missing and copy a login over on request:
 //!
@@ -15,8 +15,8 @@
 //!   would read (a fixed whitelist per backend: files and `.env` key names).
 //! * [`import_into`] copies the items the user confirmed into one or more
 //!   private HOMEs: a copy (never a link), regular files only, files 0600 and
-//!   directories 0700 on Unix (Windows: the caller re-applies the private
-//!   root's DACL, [`crate::winruntime::prepare_windows_private_root`]). The
+//!   directories 0700 on Unix (Windows: they inherit the private root's
+//!   DACL). The
 //!   [`ImportReport`] is the audit record: file and key names, no value.
 //!
 //! Where each backend reads its login (checked against the pinned versions):
@@ -32,7 +32,7 @@
 //!   `auth.json` (provider → `{type: "api_key", key}` / `{type: "oauth", ...}`),
 //!   `models.json` (custom providers, may carry `apiKey`), `settings.json`.
 use crate::port::AgentBackend;
-use crate::sandbox::{HostOs, PermissionMode};
+use crate::external_home::{HostOs, PermissionMode};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -266,11 +266,11 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
                     present_files.push(file.to_owned());
                 }
             }
-            if mode == PermissionMode::Sandboxed && !crate::backends::deepseek::LOOPBACK_VIA_PROXY_SUPPORTED {
+            if mode == PermissionMode::Sandboxed {
                 // The value is classified here and dropped; only the flag leaves.
                 loopback_blocked = crate::backends::deepseek::base_url_candidates(private_home, private_home)
                     .iter()
-                    .any(|candidate| crate::loopback::names_loopback(&candidate.value));
+                    .any(|candidate| crate::model_endpoint::names_loopback(&candidate.value));
             }
             (vec!["DEEPSEEK_API_KEY"], vec![DSH_ENV, DSH_PATCH_ACP], deepseek_templates())
         }

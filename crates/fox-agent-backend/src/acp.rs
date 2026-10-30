@@ -4,10 +4,7 @@
 //! close. On Windows the child is created suspended, placed in a Job Object of
 //! its own (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, no breakaway) and only then
 //! resumed, so it and every descendant that stays in the job die with the job
-//! (`win_job`). In sandboxed mode the backend itself is NOT a descendant in
-//! that sense: srt-win starts it through the Secondary Logon service as the
-//! `srt-sandbox` account (two-hop launch), outside this job; its cleanup rests
-//! on srt-win's own job chain (docs/sandbox.md section 7.4).
+//! (`win_job`).
 //!
 //! What this module guarantees, matching the port rules:
 //! * `session/cancel` answers every pending permission request of that session
@@ -22,9 +19,8 @@
 //! * A stop reports whether the whole process tree is confirmed gone
 //!   ([`crate::port::StopConfirmation`], see [`crate::proctree`]).
 
-use crate::launch::{BridgeEndpoint, LaunchSpec};
+use crate::launch::LaunchSpec;
 use crate::port::{CapabilityDeclaration, SessionCapabilities};
-use crate::reverse::WriteOutcome;
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
@@ -179,10 +175,18 @@ pub struct AcpConnection {
     /// `data` of the last failed `session/new` / `session/load` reply
     /// (unredacted; [`Self::take_rpc_error_data`]).
     rpc_error_data: Arc<Mutex<Option<String>>>,
-    /// Per-session srt state (settings file), removed when the connection
-    /// goes away. `None` in full-access mode.
-    sandbox: Option<crate::sandbox::SandboxSession>,
-    permission_mode: crate::sandbox::PermissionMode,
+    /// Per-session temp directory, removed when the connection goes away.
+    temp: Option<crate::external_home::SessionTemp>,
+    permission_mode: crate::external_home::PermissionMode,
+}
+
+/// Whether a permission answer reached the native transport. ACP v1 has no
+/// acknowledgement for a permission response, so `Written` is as far as it
+/// goes (plan 6.3 rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Written,
+    Unconfirmed,
 }
 
 /// Map an ACP `initialize` response onto the port's capability declaration.
@@ -278,35 +282,19 @@ fn describe_exit(status: Option<std::process::ExitStatus>) -> String {
     }
 }
 
-/// Whether a stderr line comes from srt / srt-win / the Fox bridge rather than
-/// the backend. Heuristic by prefix: all of them share one stderr pipe.
-pub fn is_sandbox_stderr_line(line: &str) -> bool {
-    let line = line.trim_start();
-    ["srt-win:", "srt:", "[SandboxDebug]", "[sandbox-runtime]", "fox-acp-bridge:", "Sandbox ", "sandbox-runtime:"]
-        .iter()
-        .any(|prefix| line.starts_with(prefix))
-}
-
 /// Why a backend did not get through `initialize`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InitializeFailureCode {
     /// The process could not be started or contained.
     SpawnFailed,
-    /// The process (the backend, or srt in sandboxed mode) exited, with any
-    /// exit code including 0, before the `initialize` response arrived, or
-    /// before the bridge connected (`stage = bridge_not_connected`).
+    /// The backend process exited, with any exit code including 0, before
+    /// the `initialize` response arrived.
     BackendExitedBeforeInitialize,
     /// No `initialize` response within [`INITIALIZE_TIMEOUT`].
     InitializeTimeout,
     /// `initialize` failed while the process kept running (protocol error).
     InitializeFailed,
-    BridgeListenFailed,
-    /// The bridge did not connect and authenticate within its timeout.
-    BridgeConnectTimeout,
-    BridgeHandshakeFailed,
-    /// The client presented a wrong token.
-    BridgeHandshakeRejected,
 }
 
 impl InitializeFailureCode {
@@ -316,10 +304,6 @@ impl InitializeFailureCode {
             Self::BackendExitedBeforeInitialize => "backend_exited_before_initialize",
             Self::InitializeTimeout => "initialize_timeout",
             Self::InitializeFailed => "initialize_failed",
-            Self::BridgeListenFailed => "bridge_listen_failed",
-            Self::BridgeConnectTimeout => "bridge_connect_timeout",
-            Self::BridgeHandshakeFailed => "bridge_handshake_failed",
-            Self::BridgeHandshakeRejected => "bridge_handshake_rejected",
         }
     }
 }
@@ -331,17 +315,16 @@ impl InitializeFailureCode {
 pub struct InitializeFailure {
     pub code: InitializeFailureCode,
     pub message: String,
-    /// `bridge_not_connected` or `initialize`.
+    /// `initialize` when set.
     pub stage: Option<String>,
-    /// Exit code of the process Fox started (the srt broker in sandboxed mode).
+    /// Exit code of the backend process.
     pub exit_code: Option<i32>,
     /// Whole stderr tail as received.
     pub stderr_tail: String,
-    /// Lines from srt / srt-win / the bridge ([`is_sandbox_stderr_line`]).
-    pub srt_stderr_tail: String,
-    /// Every other line (the backend's own stderr).
+    /// The backend's own stderr (the same as `stderr_tail`: nothing else
+    /// shares the pipe since Fox stopped wrapping the backend).
     pub backend_stderr_tail: String,
-    /// Bridge mode: stdout of the process (not used for ACP there).
+    /// stdout tail when stdout is not the ACP stream (unused today).
     pub stdout_tail: String,
     /// `data` of the `initialize` JSON-RPC error, unredacted; never
     /// serialized (it is redacted into the run diagnostic,
@@ -358,7 +341,6 @@ impl InitializeFailure {
             stage: None,
             exit_code: None,
             stderr_tail: String::new(),
-            srt_stderr_tail: String::new(),
             backend_stderr_tail: String::new(),
             stdout_tail: String::new(),
             rpc_error_data: None,
@@ -370,26 +352,13 @@ impl InitializeFailure {
         self
     }
 
-    fn from_bridge(error: crate::bridge::BridgeError) -> Self {
-        use crate::bridge::BridgeErrorKind as Kind;
-        let code = match error.kind {
-            Kind::ListenFailed => InitializeFailureCode::BridgeListenFailed,
-            Kind::ConnectTimeout => InitializeFailureCode::BridgeConnectTimeout,
-            Kind::HandshakeFailed => InitializeFailureCode::BridgeHandshakeFailed,
-            Kind::HandshakeRejected => InitializeFailureCode::BridgeHandshakeRejected,
-        };
-        Self::new(code, error.message).stage("bridge_not_connected")
-    }
-
     /// `stderr` / `stdout` arrive unredacted; this is where they are redacted
     /// (once) for the report.
     fn attach_tails(&mut self, stderr: &str, stdout: &str) {
         let stderr = &redact_text(stderr);
         let stdout = &redact_text(stdout);
-        let (sandbox, backend): (Vec<&str>, Vec<&str>) = stderr.lines().partition(|line| is_sandbox_stderr_line(line));
         self.stderr_tail = limit_tail(stderr, FAILURE_TAIL_BYTES);
-        self.srt_stderr_tail = limit_tail(&sandbox.join("\n"), FAILURE_TAIL_BYTES);
-        self.backend_stderr_tail = limit_tail(&backend.join("\n"), FAILURE_TAIL_BYTES);
+        self.backend_stderr_tail = self.stderr_tail.clone();
         self.stdout_tail = limit_tail(stdout, FAILURE_TAIL_BYTES);
     }
 }
@@ -419,9 +388,8 @@ impl std::error::Error for InitializeFailure {}
 /// authorization / cookie, or exactly `auth`), the name kept; the word(s)
 /// after a sensitive header name that ends the word (`Authorization: Bearer
 /// <x>`, `x-api-key: <x>`) and after `Bearer` / `Basic`;
-/// long opaque strings (the bridge token included); and the user-info part of
-/// URLs (`http://user:pass@host` -> `http://<redacted>@host`, the srt proxy
-/// credentials). Paths, user names in paths included, are kept.
+/// long opaque strings; and the user-info part of URLs
+/// (`http://user:pass@host` -> `http://<redacted>@host`, proxy credentials). Paths, user names in paths included, are kept.
 pub(crate) fn redact_line(line: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     // How many following words to mask (header form / auth scheme).
@@ -658,7 +626,7 @@ fn redact_url_userinfo(word: &str) -> String {
 /// and the limit has no `BREAKAWAY_OK`, so a descendant can leave only through
 /// a different creation path: a process started by a service on its behalf
 /// (Secondary Logon / `CreateProcessWithLogonW`, Task Scheduler, COM servers,
-/// WMI) is created outside the job. srt-win's runner is exactly that case.
+/// WMI) is created outside the job.
 #[cfg(windows)]
 pub mod win_job {
     use std::os::windows::io::RawHandle;
@@ -839,8 +807,7 @@ pub struct TerminateReport {
     /// gone (or zombies only) and every tracked descendant gone; Windows,
     /// Fox's Job Object empty (`taskkill` fallback: never confirmed).
     pub confirmation: crate::port::StopConfirmation,
-    /// Set when "confirmed" covers less than the whole tree (Windows
-    /// sandboxed: the srt-win runner subtree is outside Fox's job).
+    /// Set when "confirmed" covers less than the whole tree.
     pub confirmation_scope_note: Option<String>,
     /// Unix: the backend's process group.
     pub process_group: Option<u32>,
@@ -884,9 +851,6 @@ impl TerminateReport {
         }
     }
 }
-
-/// What "confirmed" means for a Windows sandboxed process (two-hop launch).
-pub const WINDOWS_SANDBOXED_SCOPE_NOTE: &str = "Windows sandboxed: confirmed = Fox's Job Object is empty (node + srt CLI). The srt-win runner and the backend it starts as srt-sandbox are outside that job; they end through srt-win's own job chain when srt exits, which is not yet measured (docs/sandbox.md section 7.4).";
 
 #[cfg(windows)]
 type ProcessJob = Option<win_job::Job>;
@@ -955,45 +919,27 @@ impl AcpConnection {
     /// Returns after the `Initialized` event has been queued. The error text
     /// starts with the [`InitializeFailureCode`] (see [`Self::spawn_detailed`]).
     pub async fn spawn(spec: &LaunchSpec, cwd: &std::path::Path) -> Result<Self, String> {
-        Self::spawn_detailed(spec, cwd, None).await.map_err(|failure| failure.to_string())
+        Self::spawn_detailed(spec, cwd).await.map_err(|failure| failure.to_string())
     }
 
-    /// [`Self::spawn`] with a structured failure, and optionally over the ACP
-    /// bridge instead of stdio (Windows sandboxed mode, docs/sandbox.md 7.12):
-    /// the endpoint is created first, the process is started with stdin
-    /// `null` (its stdout / stderr are kept for diagnostics only), and ACP
-    /// runs over the one connection that completes the token handshake.
+    /// [`Self::spawn`] with a structured failure.
     ///
     /// Initialization succeeds only when the `initialize` response arrived.
     /// A process that exits first, with any exit code including 0, is
-    /// [`InitializeFailureCode::BackendExitedBeforeInitialize`] (stage
-    /// `bridge_not_connected` when the bridge never connected).
-    pub async fn spawn_detailed(spec: &LaunchSpec, cwd: &std::path::Path, bridge: Option<BridgeEndpoint>) -> Result<Self, InitializeFailure> {
+    /// [`InitializeFailureCode::BackendExitedBeforeInitialize`].
+    pub async fn spawn_detailed(spec: &LaunchSpec, cwd: &std::path::Path) -> Result<Self, InitializeFailure> {
         use InitializeFailureCode as Code;
         // What the backend sees is the ordinary path form (no `\\?\`), see
-        // launch::backend_visible_path. Over the bridge (Windows sandboxed)
-        // the bridge sets it as the backend's cwd explicitly: srt-win does
-        // not carry the caller's cwd into the sandbox.
+        // launch::backend_visible_path.
         let cwd = crate::launch::backend_visible_path(cwd);
         let cwd = cwd.as_path();
-        let bridge = bridge.map(|mut endpoint| {
-            if endpoint.child_cwd.is_none() {
-                endpoint.child_cwd = Some(cwd.to_string_lossy().into_owned());
-            }
-            endpoint
-        });
-        // Bridge: listen before the process exists.
-        let listener = match &bridge {
-            Some(endpoint) => Some(crate::bridge::BridgeListener::bind(endpoint).map_err(InitializeFailure::from_bridge)?),
-            None => None,
-        };
         let mut command = tokio::process::Command::new(&spec.program);
         command
             .args(&spec.args)
             .current_dir(cwd)
             .env_clear()
             .envs(crate::launch::process_environment(spec, std::env::vars()))
-            .stdin(if bridge.is_some() { std::process::Stdio::null() } else { std::process::Stdio::piped() })
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -1054,54 +1000,8 @@ impl AcpConnection {
             failure
         }
 
-        let (reader, writer): (Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box<dyn tokio::io::AsyncWrite + Unpin + Send>) = match (listener, &bridge) {
-            (Some(listener), Some(endpoint)) => {
-                // stdout of srt / the bridge is diagnostics only.
-                let _ = collect_tail(stdout, Arc::clone(&stdout_tail));
-                enum Connect {
-                    Accepted(Result<Box<dyn crate::bridge::BridgeStream>, crate::bridge::BridgeError>),
-                    TimedOut,
-                    Exited(std::io::Result<std::process::ExitStatus>),
-                }
-                let outcome = tokio::select! {
-                    biased;
-                    accepted = listener.accept() => Connect::Accepted(accepted),
-                    status = child.wait() => Connect::Exited(status),
-                    _ = tokio::time::sleep(endpoint.connect_timeout) => Connect::TimedOut,
-                };
-                match outcome {
-                    Connect::Accepted(Ok(stream)) => {
-                        let (read, write) = tokio::io::split(stream);
-                        (Box::new(read), Box::new(write))
-                    }
-                    Connect::Accepted(Err(error)) => {
-                        let failure = InitializeFailure::from_bridge(error);
-                        return Err(fail(failure, child_id, &job, None, &mut stderr_task, &stderr_tail, &stdout_tail).await);
-                    }
-                    Connect::TimedOut => {
-                        let failure = InitializeFailure::new(
-                            Code::BridgeConnectTimeout,
-                            format!("the sandbox bridge did not connect within {} s", endpoint.connect_timeout.as_secs_f32()),
-                        )
-                        .stage("bridge_not_connected");
-                        return Err(fail(failure, child_id, &job, None, &mut stderr_task, &stderr_tail, &stdout_tail).await);
-                    }
-                    Connect::Exited(status) => {
-                        let status = status.ok();
-                        let failure = InitializeFailure::new(
-                            Code::BackendExitedBeforeInitialize,
-                            format!("the sandboxed process exited ({}) before the bridge pipe connected", describe_exit(status)),
-                        )
-                        .stage("bridge_not_connected");
-                        return Err(fail(failure, child_id, &job, status, &mut stderr_task, &stderr_tail, &stdout_tail).await);
-                    }
-                }
-            }
-            _ => {
-                let stdin = child.stdin.take().ok_or_else(|| InitializeFailure::new(Code::SpawnFailed, "backend stdin unavailable"))?;
-                (Box::new(stdout), Box::new(stdin))
-            }
-        };
+        let stdin = child.stdin.take().ok_or_else(|| InitializeFailure::new(Code::SpawnFailed, "backend stdin unavailable"))?;
+        let (reader, writer): (Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box<dyn tokio::io::AsyncWrite + Unpin + Send>) = (Box::new(stdout), Box::new(stdin));
         let transport = ByteStreams::new(writer.compat_write(), reader.compat());
 
         let (event_tx, events) = mpsc::unbounded_channel();
@@ -1355,40 +1255,29 @@ impl AcpConnection {
             job,
             stderr_tail,
             rpc_error_data,
-            sandbox: None,
-            permission_mode: crate::sandbox::PermissionMode::FullAccess,
+            temp: None,
+            permission_mode: crate::external_home::PermissionMode::FullAccess,
         })
     }
 
-    /// Spawn what [`crate::sandbox::prepare_launch`] produced. In sandboxed
-    /// mode the backend runs inside srt and the per-session settings live as
-    /// long as this connection; on Windows ACP runs over the bridge the
-    /// launcher set up ([`crate::sandbox::PreparedLaunch::acp_bridge`]).
-    /// Sandbox refusals happen before this call (fail-closed); a sandboxed
-    /// launch that cannot start is an error here too, never a retry outside
-    /// the sandbox.
-    pub async fn spawn_prepared(prepared: crate::sandbox::PreparedLaunch, cwd: &std::path::Path) -> Result<Self, String> {
+    /// Spawn what [`crate::external_home::prepare_launch`] produced; the
+    /// session temp directory lives as long as this connection.
+    pub async fn spawn_prepared(prepared: crate::external_home::PreparedLaunch, cwd: &std::path::Path) -> Result<Self, String> {
         Self::spawn_prepared_detailed(prepared, cwd).await.map_err(|failure| failure.to_string())
     }
 
-    /// [`Self::spawn_prepared`] with a structured failure; in sandboxed mode
-    /// the message is prefixed `sandboxed launch failed:`.
-    pub async fn spawn_prepared_detailed(prepared: crate::sandbox::PreparedLaunch, cwd: &std::path::Path) -> Result<Self, InitializeFailure> {
-        let crate::sandbox::PreparedLaunch { mode, spec, sandbox, acp_bridge, .. } = prepared;
-        let mut connection = Self::spawn_detailed(&spec, cwd, acp_bridge).await.map_err(|mut failure| {
-            if mode == crate::sandbox::PermissionMode::Sandboxed {
-                failure.message = format!("sandboxed launch failed: {}", failure.message);
-            }
-            failure
-        })?;
-        connection.sandbox = sandbox;
+    /// [`Self::spawn_prepared`] with a structured failure.
+    pub async fn spawn_prepared_detailed(prepared: crate::external_home::PreparedLaunch, cwd: &std::path::Path) -> Result<Self, InitializeFailure> {
+        let crate::external_home::PreparedLaunch { mode, spec, temp, .. } = prepared;
+        let mut connection = Self::spawn_detailed(&spec, cwd).await?;
+        connection.temp = temp;
         connection.permission_mode = mode;
         Ok(connection)
     }
 
-    /// The mode this process runs in. A plain [`Self::spawn`] has no sandbox
-    /// and reports `FullAccess`, which is what it is.
-    pub fn permission_mode(&self) -> crate::sandbox::PermissionMode {
+    /// The mode this session recorded (a plain [`Self::spawn`] reports
+    /// `FullAccess`).
+    pub fn permission_mode(&self) -> crate::external_home::PermissionMode {
         self.permission_mode
     }
 
@@ -1591,17 +1480,15 @@ impl AcpConnection {
     /// child, SIGKILL tracked descendants that left the group, then poll
     /// ([`crate::proctree::confirm_tree_gone`]). Windows has no SIGTERM: the
     /// command channel is dropped first (the ACP connection then ends and the
-    /// backend's stdin closes, which lets srt run its own reset and remove its
-    /// ACEs), then the grace, then `TerminateJobObject` (taskkill only as a
+    /// backend's stdin closes), then the grace, then `TerminateJobObject` (taskkill only as a
     /// checked fallback), then `ActiveProcesses == 0` is polled.
     async fn terminate(self) -> TerminateReport {
-        let Self { commands, child, child_id, job, sandbox, permission_mode, .. } = self;
+        let Self { commands, child, child_id, job, temp, .. } = self;
         let mut report = TerminateReport::default();
         #[cfg(windows)]
         drop(commands);
         #[cfg(not(windows))]
         let _commands = commands;
-        let _ = permission_mode;
         let mut child = child.lock().await;
         if let Some(pid) = child_id {
             #[cfg(unix)]
@@ -1646,12 +1533,7 @@ impl AcpConnection {
                 {
                     let _ = pid;
                     match &job {
-                        Some(job) => {
-                            if permission_mode == crate::sandbox::PermissionMode::Sandboxed {
-                                report.confirmation_scope_note = Some(WINDOWS_SANDBOXED_SCOPE_NOTE.to_owned());
-                            }
-                            job.confirm_empty(crate::proctree::STOP_CONFIRM_TIMEOUT)
-                        }
+                        Some(job) => job.confirm_empty(crate::proctree::STOP_CONFIRM_TIMEOUT),
                         None => crate::port::StopConfirmation::FailedOrUnconfirmed {
                             reasons: vec!["no Job Object: taskkill /T /F cannot prove that every descendant ended".into()],
                         },
@@ -1668,12 +1550,11 @@ impl AcpConnection {
             eprintln!("fox-agent-backend: process tree stop NOT confirmed: {}", reasons.join("; "));
         }
         drop(job);
-        drop(sandbox);
+        drop(temp);
         report
     }
 
-    /// Whether the process Fox started (the srt broker in sandboxed mode) has
-    /// exited. `None` when it cannot be checked right now (a stop holds the
+    /// Whether the backend process has exited. `None` when it cannot be checked right now (a stop holds the
     /// child). The ACP stream itself does not end on exit, so the Host polls
     /// this to notice a crash.
     pub fn has_exited(&self) -> Option<bool> {
@@ -1685,7 +1566,7 @@ impl AcpConnection {
         }
     }
 
-    /// OS process id of the backend (the srt broker in sandboxed mode).
+    /// OS process id of the backend.
     pub fn process_id(&self) -> Option<u32> {
         self.child_id
     }
@@ -1712,8 +1593,7 @@ impl AcpConnection {
     }
 
     /// Revocation stop for a live connection: full access was withdrawn while
-    /// this process runs outside the sandbox
-    /// ([`crate::sandbox::ModeRecheck::RestartSandboxed`]).
+    /// this process runs ([`crate::external_home::ModeRecheck::RestartSandboxed`]).
     ///
     /// 1. stopping state ([`Self::begin_stopping`]): new tasks refused, every
     ///    pending permission answered `cancelled`, late ones auto-cancelled;
@@ -1721,7 +1601,7 @@ impl AcpConnection {
     /// 3. the run's pending requests settled (in flight -> `outcome_unknown`);
     /// 4. the process tree terminated and confirmed gone, the connection
     ///    consumed;
-    /// 5. the run's terminal committed. Confirmed -> `NeedsSandboxedRebuild`
+    /// 5. the run's terminal committed. Confirmed -> `NeedsRebuild`
     ///    with `replay_last_operation = false`; not confirmed ->
     ///    `StoppedUnconfirmed` and [`crate::port::rebuild_after_revocation`]
     ///    refuses.
@@ -1757,7 +1637,7 @@ mod tests {
 
     #[test]
     fn redaction_masks_proxy_credentials_and_keeps_paths() {
-        let line = redact_line(r"HTTPS_PROXY=http://srt:abc123@127.0.0.1:60080 failed at C:\Users\张三\x.js fox-acp-bridge: 0123456789abcdef0123456789abcdef");
+        let line = redact_line(r"HTTPS_PROXY=http://proxy:abc123@127.0.0.1:60080 failed at C:\Users\张三\x.js token: 0123456789abcdef0123456789abcdef");
         assert!(!line.contains("abc123"), "{line}");
         assert!(line.contains("http://<redacted>@127.0.0.1:60080") || line.contains("<redacted>"), "{line}");
         assert!(line.contains(r"C:\Users\张三\x.js"), "user-name paths kept: {line}");
@@ -1835,7 +1715,7 @@ mod tests {
             "Authorization: Bearer abc.def.ghi next",
             "x-api-key: k-123, ok",
             "token: t0ps3cret ok",
-            "HTTPS_PROXY=http://srt:abc123@127.0.0.1:60080 failed",
+            "HTTPS_PROXY=http://proxy:abc123@127.0.0.1:60080 failed",
             "got \"sk-proj-abcdefgh\" back key=sk-abcdef123456&x=1",
             "opaque 0123456789abcdef0123456789abcdef0123 done",
             "already DEEPSEEK_API_KEY=<redacted> and Bearer <redacted> and http://<redacted>@h",
@@ -1869,17 +1749,16 @@ mod tests {
     }
 
     #[test]
-    fn failure_tails_are_split_limited_and_coded() {
+    fn failure_tails_are_limited_and_coded() {
         let mut failure = InitializeFailure::new(InitializeFailureCode::BackendExitedBeforeInitialize, "exited");
-        let mut stderr = String::from("srt-win: WFP self-check ok\nfox-acp-bridge: connected\nError: cannot find module\n");
+        let mut stderr = String::from("Error: cannot find module\n");
         stderr.push_str(&"x".repeat(10_000));
         failure.attach_tails(&stderr, "");
         assert!(failure.stderr_tail.len() <= FAILURE_TAIL_BYTES);
         let mut short = InitializeFailure::new(InitializeFailureCode::BackendExitedBeforeInitialize, "exited");
         short.exit_code = Some(0);
-        short.attach_tails("srt-win: WFP self-check ok\nfox-acp-bridge: connected\nError: cannot find module", "");
-        assert_eq!(short.srt_stderr_tail, "srt-win: WFP self-check ok\nfox-acp-bridge: connected");
-        assert_eq!(short.backend_stderr_tail, "Error: cannot find module");
+        short.attach_tails("warning: x\nError: cannot find module", "");
+        assert_eq!(short.backend_stderr_tail, "warning: x\nError: cannot find module");
         let text = short.to_string();
         assert!(text.starts_with("backend_exited_before_initialize: exited [exit code 0]"), "{text}");
         assert_eq!(serde_json::to_value(&short).unwrap()["code"], "backend_exited_before_initialize");

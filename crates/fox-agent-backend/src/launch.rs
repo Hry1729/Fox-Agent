@@ -124,6 +124,28 @@ pub fn managed_entry(runtime_root: &std::path::Path, backend: AgentBackend, wind
     [base.join("node_modules").join(".bin").join(&exe), base.join(&exe)].into_iter().find(|candidate| candidate.is_file())
 }
 
+/// Windows: test / developer override of the managed runtime directory.
+pub const RUNTIME_ROOT_ENV: &str = "FOX_RUNTIME_ROOT";
+
+/// Windows: the machine-wide managed runtime the installer puts the external
+/// backends in, `%ProgramFiles%\Fox\sandbox-runtime\<version>` (directory
+/// name kept from earlier releases so existing installs are found).
+pub fn default_windows_runtime_root(version: &str) -> std::path::PathBuf {
+    std::env::var_os("ProgramFiles")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files"))
+        .join("Fox")
+        .join("sandbox-runtime")
+        .join(version)
+}
+
+/// The managed runtime directory: [`RUNTIME_ROOT_ENV`] when set, else
+/// [`default_windows_runtime_root`].
+pub fn windows_runtime_root(version: &str) -> std::path::PathBuf {
+    std::env::var_os(RUNTIME_ROOT_ENV).filter(|value| !value.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(|| default_windows_runtime_root(version))
+}
+
 /// The managed runtime the real-binary tests look in: `FOX_AGENT_RUNTIME_ROOT`;
 /// on Windows otherwise `FOX_RUNTIME_ROOT`, `FOX_RUNTIME_VERSION` or the
 /// newest version under `%ProgramFiles%\Fox\sandbox-runtime`. Linux / macOS
@@ -136,13 +158,13 @@ pub fn dev_runtime_root() -> Option<std::path::PathBuf> {
     if !cfg!(windows) {
         return None;
     }
-    if set(crate::winruntime::RUNTIME_ROOT_ENV).is_some() {
-        return Some(crate::winruntime::windows_runtime_root(""));
+    if set(RUNTIME_ROOT_ENV).is_some() {
+        return Some(windows_runtime_root(""));
     }
     if let Some(version) = std::env::var("FOX_RUNTIME_VERSION").ok().filter(|value| !value.trim().is_empty()) {
-        return Some(crate::winruntime::default_windows_runtime_root(version.trim()));
+        return Some(default_windows_runtime_root(version.trim()));
     }
-    let parent = crate::winruntime::default_windows_runtime_root("");
+    let parent = default_windows_runtime_root("");
     let expected = parent.join(RUNTIME_PACKAGE_VERSION);
     if expected.is_dir() {
         return Some(expected);
@@ -220,22 +242,6 @@ fn default_launch_spec(backend: AgentBackend) -> Option<LaunchSpec> {
     }
 }
 
-/// Node flags for every backend started inside the Windows sandbox (pi-acp /
-/// pi, codex-acp, dsh are Node programs launched through `.cmd` shims, so
-/// the flags travel as `NODE_OPTIONS`, which Node allows for both and passes
-/// on to the Node children the backend starts). `--preserve-symlinks`
-/// (`-main`) makes module resolution keep the path as given instead of
-/// `realpath`ing it, which avoids part of the ancestor `lstat` calls the
-/// sandbox account may not be allowed to make. Auxiliary only: the ancestor
-/// metadata ACEs (crate::winancestor) are what makes the profile chain
-/// stat-able; `fs.realpath` calls of the backend itself are unaffected.
-pub const WINDOWS_SANDBOX_NODE_FLAGS: &[&str] = &["--preserve-symlinks", "--preserve-symlinks-main"];
-
-/// [`WINDOWS_SANDBOX_NODE_FLAGS`] as one `NODE_OPTIONS` value.
-pub fn windows_sandbox_node_options() -> String {
-    WINDOWS_SANDBOX_NODE_FLAGS.join(" ")
-}
-
 /// The child environment: allowlisted parent variables plus this backend's
 /// named credential variables. Case-insensitive on Windows.
 pub fn child_environment(
@@ -262,12 +268,8 @@ pub fn child_environment_for(
 
 /// The full environment a launched process gets: [`child_environment`] of the
 /// parent plus the spec's own [`LaunchSpec::session_env`] (which wins). This
-/// is exactly what [`crate::acp::AcpConnection`] passes to the process it
-/// starts. For a sandboxed launch that process is the srt broker (`node
-/// cli.js`), so the spec's `session_env` there holds only what srt itself
-/// needs; the backend's private HOME and friends travel inside the command
-/// (Windows `-c` with `set`, Linux / macOS `env K=V` after `--`), see
-/// [`crate::sandbox::SrtLauncher`].
+/// is exactly what [`crate::acp::AcpConnection`] passes to the backend
+/// process it starts.
 pub fn process_environment(spec: &LaunchSpec, parent: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
     process_environment_for(cfg!(windows), spec, parent)
 }
@@ -282,117 +284,11 @@ pub fn process_environment_for(windows: bool, spec: &LaunchSpec, parent: impl In
     env
 }
 
-/// The runtime package this Fox build ships with and checks against (its
-/// `acp-bridge\bridge.mjs` must equal the embedded copy). Windows default
+/// The runtime package this Fox build ships with. Windows default
 /// when `FOX_RUNTIME_VERSION` / `FOX_RUNTIME_ROOT` are unset: this version
 /// directory if installed, else the newest installed one. Keep in step with
 /// `scripts/windows/build-runtime-package.py` `DEFAULT_VERSION`.
 pub const RUNTIME_PACKAGE_VERSION: &str = "0.1.6";
-
-/// Environment variable carrying the bridge pipe name into the sandbox
-/// (Windows sandboxed mode, docs/sandbox.md 7.12).
-pub const BRIDGE_PIPE_ENV: &str = "FOX_ACP_PIPE";
-/// Environment variable carrying the one-shot bridge token. The only
-/// secret-shaped name [`crate::sandbox::windows_command_line`] puts on the
-/// command line (it is worthless once the single connection is made; see
-/// docs/sandbox.md 7.12 for who can read a command line).
-pub const BRIDGE_TOKEN_ENV: &str = "FOX_ACP_TOKEN";
-/// First line the bridge sends: `FOX-ACP-BRIDGE/1 <token>\n`.
-pub const BRIDGE_PROTOCOL: &str = "FOX-ACP-BRIDGE/1";
-/// The bridge script as shipped in the runtime package
-/// (`<runtime>\acp-bridge\bridge.mjs`; source
-/// `runtime-assets/acp-bridge/bridge.mjs` in this crate). The installed copy
-/// must equal it byte for byte (line endings normalized), same rule as the dsh
-/// patches.
-pub const BRIDGE_SCRIPT: &str = include_str!("../runtime-assets/acp-bridge/bridge.mjs");
-/// Location of the bridge inside the managed runtime directory.
-pub const BRIDGE_RELATIVE_PATH: &[&str] = &["acp-bridge", "bridge.mjs"];
-
-/// How long the Host waits for the bridge to connect and finish the handshake.
-pub const BRIDGE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// A one-shot local endpoint the in-sandbox bridge connects back to
-/// (Windows: named pipe `\\.\pipe\fox-acp-<128-bit hex>`; Unix: a socket path,
-/// used by tests only). Created by the launcher, consumed once by
-/// [`crate::acp::AcpConnection`].
-#[derive(Clone, PartialEq, Eq)]
-pub struct BridgeEndpoint {
-    /// Pipe name (Windows) or socket path (Unix).
-    pub address: String,
-    /// 128-bit random hex token the bridge must present.
-    pub token: String,
-    /// Windows: SID of the srt sandbox account (`HKLM\SOFTWARE\sandbox-runtime`
-    /// `SandboxUserSid`), the only account besides the current user the pipe
-    /// DACL admits. Required on Windows.
-    pub allowed_sid: Option<String>,
-    pub connect_timeout: std::time::Duration,
-    /// The backend's environment, delivered to the bridge in the handshake
-    /// answer (never on the srt `-c` command line: cmd.exe cannot carry
-    /// quotes, `%` or line breaks safely, and a command line is visible in
-    /// the process list). The bridge sets exactly these over its own
-    /// environment when it starts the backend.
-    pub child_env: Vec<(String, String)>,
-    /// The backend's working directory (a plain path, see
-    /// [`backend_visible_path`]); srt-win does not carry the caller's cwd into
-    /// the sandbox, so the bridge sets it explicitly.
-    pub child_cwd: Option<String>,
-}
-
-impl std::fmt::Debug for BridgeEndpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print the token.
-        f.debug_struct("BridgeEndpoint")
-            .field("address", &self.address)
-            .field("token", &"[redacted]")
-            .field("allowed_sid", &self.allowed_sid)
-            .field("connect_timeout", &self.connect_timeout)
-            // Names only: values may be secrets.
-            .field("child_env", &self.child_env.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>())
-            .field("child_cwd", &self.child_cwd)
-            .finish()
-    }
-}
-
-impl BridgeEndpoint {
-    /// Fresh endpoint with a random name and token. `Err` when the system
-    /// random source is unavailable.
-    pub fn new_local(allowed_sid: Option<String>) -> Result<Self, String> {
-        let name = random_hex(16)?;
-        let token = random_hex(16)?;
-        let address = if cfg!(windows) {
-            format!(r"\\.\pipe\fox-acp-{name}")
-        } else {
-            std::env::temp_dir().join(format!("fox-acp-{name}.sock")).to_string_lossy().into_owned()
-        };
-        Ok(Self { address, token, allowed_sid, connect_timeout: BRIDGE_CONNECT_TIMEOUT, child_env: Vec::new(), child_cwd: None })
-    }
-
-    /// The handshake answer Fox sends after a valid token:
-    /// `OK {"cwd":..,"env":{..}}\n` (compact JSON, so one line; keys in a
-    /// fixed order). The bridge applies `env` over its own environment and
-    /// starts the backend in `cwd`.
-    pub fn handshake_answer(&self) -> Vec<u8> {
-        let env: serde_json::Map<String, serde_json::Value> = self
-            .child_env
-            .iter()
-            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
-            .collect();
-        let mut payload = serde_json::Map::new();
-        if let Some(cwd) = &self.child_cwd {
-            payload.insert("cwd".into(), serde_json::Value::String(cwd.clone()));
-        }
-        payload.insert("env".into(), serde_json::Value::Object(env));
-        let mut line = b"OK ".to_vec();
-        line.extend(serde_json::to_vec(&serde_json::Value::Object(payload)).expect("bridge answer serializes"));
-        line.push(b'\n');
-        line
-    }
-
-    /// The two variables the bridge reads.
-    pub fn env(&self) -> Vec<(String, String)> {
-        vec![(BRIDGE_PIPE_ENV.to_owned(), self.address.clone()), (BRIDGE_TOKEN_ENV.to_owned(), self.token.clone())]
-    }
-}
 
 /// `bytes` random bytes from the OS as lowercase hex.
 pub fn random_hex(bytes: usize) -> Result<String, String> {
@@ -415,7 +311,7 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// `path` as handed to a backend (ACP `cwd`, process cwd, bridge cwd, path
+/// `path` as handed to a backend (ACP `cwd`, process cwd, path
 /// values in its environment): a Windows extended-length path
 /// (`\\?\C:\x`, `\\?\UNC\server\share\x`, what `std::fs::canonicalize`
 /// returns) becomes the ordinary form (`C:\x`, `\\server\share\x`) when that
@@ -502,17 +398,6 @@ fn plain_component(component: &str) -> bool {
     !reserved
 }
 
-/// Constant-time equality for tokens (no early exit on the first mismatch).
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = (a.len() ^ b.len()) as u8 | ((a.len() ^ b.len()) >> 8) as u8;
-    for index in 0..a.len().max(b.len()) {
-        let x = a.get(index).copied().unwrap_or(0);
-        let y = b.get(index).copied().unwrap_or(0);
-        diff |= x ^ y;
-    }
-    diff == 0 && a.len() == b.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,31 +438,6 @@ mod tests {
         assert_eq!(simplify_verbatim_path(&long), None, "over MAX_PATH keeps the prefix");
         assert_eq!(backend_visible_path(std::path::Path::new(r"\\?\C:\w")), std::path::PathBuf::from(r"C:\w"));
         assert_eq!(backend_visible_path(std::path::Path::new("/w/x")), std::path::PathBuf::from("/w/x"));
-    }
-
-    #[test]
-    fn bridge_answer_carries_env_and_cwd_as_one_json_line() {
-        let mut endpoint = BridgeEndpoint::new_local(None).unwrap();
-        assert_eq!(endpoint.handshake_answer(), b"OK {\"env\":{}}\n".to_vec());
-        endpoint.child_cwd = Some(r"C:\Users\me\proj".into());
-        endpoint.child_env = vec![
-            ("CODEX_CONFIG".into(), r#"{"web_search":"disabled"}"#.into()),
-            ("PCT".into(), "100%DONE%".into()),
-            ("MULTI".into(), "line1\r\nline2".into()),
-            ("OPENAI_API_KEY".into(), "sk-test".into()),
-        ];
-        let answer = endpoint.handshake_answer();
-        assert!(answer.starts_with(b"OK {"));
-        assert_eq!(answer.iter().filter(|byte| **byte == b'\n').count(), 1, "exactly one line");
-        assert_eq!(answer.last(), Some(&b'\n'));
-        let payload: serde_json::Value = serde_json::from_slice(&answer[3..answer.len() - 1]).unwrap();
-        assert_eq!(payload["cwd"], r"C:\Users\me\proj");
-        assert_eq!(payload["env"]["CODEX_CONFIG"], r#"{"web_search":"disabled"}"#);
-        assert_eq!(payload["env"]["PCT"], "100%DONE%");
-        assert_eq!(payload["env"]["MULTI"], "line1\r\nline2");
-        assert_eq!(payload["env"]["OPENAI_API_KEY"], "sk-test");
-        let debug = format!("{endpoint:?}");
-        assert!(!debug.contains("sk-test") && !debug.contains(&endpoint.token), "no values or token in Debug");
     }
 
     #[test]
@@ -643,18 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn bridge_endpoint_is_random_and_never_prints_its_token() {
-        let a = BridgeEndpoint::new_local(None).unwrap();
-        let b = BridgeEndpoint::new_local(None).unwrap();
-        assert_eq!(a.token.len(), 32);
-        assert!(a.token.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a.token, b.token);
-        assert_ne!(a.address, b.address);
-        assert!(a.address.contains("fox-acp-"));
-        assert!(!format!("{a:?}").contains(&a.token));
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-        assert!(!constant_time_eq(b"", b"a"));
+    fn random_hex_is_random() {
+        let a = random_hex(16).unwrap();
+        let b = random_hex(16).unwrap();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 }
