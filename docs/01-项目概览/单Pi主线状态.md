@@ -1,10 +1,20 @@
 # 单 Pi 主线状态
 
 > 状态：维护中；S5 分支已默认 Authoritative + PiNative，本轮工程补测完成，尚未发布<br>
-> 适用范围：`s5-default-pinative-20261029`；候选源码 `ea94f970`，本地 main 仍为 `71ffbb7e`<br>
-> 最后更新：2026-10-30（补入 S5 分支状态；保留此前历史正文）
+> 适用范围：`s5-default-pinative-20261029`；当前源码 `2ccd2a97`，上一候选 `ea94f970`，本地 main 仍为 `71ffbb7e`<br>
+> 最后更新：2026-10-30（补入能力说明修复、完整 CI 与安装阻塞；保留此前历史正文）
 
 ## 当前结论（2026-10-30 S5 候选）
+## 最新增量（2026-10-30 能力说明修复）
+
+确认了一个实际产品缺陷：`composeFoxPrompt` 生成了能力事实和完整提示，但返回对象缺少 `stablePrefix`/`dynamicTail`；Pi 规划扩展因此收到空分区，模型实际使用 SDK 默认提示，能力 JSON 从未进入 HTTP。`2ccd2a97` 只补回这两个分区，并增加分区级回归断言；manifest/profile 校验、Host 权限和工具筛选不变。
+
+最终 payload 的真实 HTTP 已观察到 `30094` 字符系统提示、能力标题和 `<fox_context>`，冻结 profile 为 `legacy`，`run_command.availability=available`。修复前的同路径 HTTP 是 `1875` 字符的 SDK 默认提示，采样器没有漏字段。证据见 [S5 完整 CI 记录](../../migration-work/s5-full-ci-20261030.md) 和 [能力 HTTP 证据](../../migration-work/s5-capability-http-20261030.json)。
+
+新候选 `s5-pinative-20261030-capability-v4` 已构建并解包：安装包 `8f2f1822...`，payload desktop `8de1c9da...`，sidecar `f1681205...`，随包 runtime 0.1.6 `c83bcee7...`。完整 CI 的本地范围已执行但**未全绿**：desktop 全量 837/2/35/1 error，Rust Host 2270 通过/1 失败；远端 CI 未运行（`2ccd2a97` 未推送）。
+
+系统安装未执行：NSIS 清单要求 `requireAdministrator`，当前为非提升用户且没有隔离提升环境；本机仍是 runtime 0.1.5，安装包内 0.1.6 未安装、未取得收据/ACL/命令/卸载证据。解包启动不能算安装通过。S5 仍未关闭，未合并、未推送、未发布，未执行 S6。
+
 
 S5 分支的新本地 Run 默认使用 Authoritative 执行契约和 PiNative 路由，原生会话接入已实现。未设置 `FOX_EXECUTOR_ROUTE` 或设置为 `pi_native` 时走新默认；显式 `kernel` 只让之后创建的 Run 回退到 Kernel Authoritative。已有冻结绑定不改写，`FOX_KERNEL_MODE` 不再决定新 Run 的路径。数据库为 **v103**。
 

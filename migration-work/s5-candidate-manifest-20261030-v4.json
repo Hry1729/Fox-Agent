@@ -1,0 +1,62 @@
+{
+  "kind": "fox-s5-capability-closeout-candidate",
+  "sourceHead": "2ccd2a970fe867cbdbcc32b781c9059c760b45ed",
+  "branch": "s5-default-pinative-20261029",
+  "recordedAt": "2026-10-30T13:46:00+08:00",
+  "candidateRoot": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v4",
+  "installer": {
+    "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v4\\Fox_0.1.0_x64-setup.exe",
+    "sha256": "8f2f1822c98d2c6eb5091ff6afca56a9298b52fd3204fccc7d2751563475d24a",
+    "requestedExecutionLevel": "requireAdministrator"
+  },
+  "payload": {
+    "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v4\\payload",
+    "desktop": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v4\\payload\\fox-desktop.exe",
+      "sha256": "8de1c9dacf1b6a80a03e38e1830f44fea9a582cbea0845e34621b94cf102b675"
+    },
+    "sidecar": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v4\\payload\\agent-runtime\\fox-agent-runtime-x86_64-pc-windows-msvc.exe",
+      "sha256": "f16812055cdd930ec308dab4df680be318de1b51444b8a6474fb834c5b889846"
+    }
+  },
+  "releaseInputs": {
+    "desktop": "4c51693bf8f23d749154cea9f3f44ac81083e75cdb0b2804808d6734cc5ea2ee",
+    "sidecar": "f16812055cdd930ec308dab4df680be318de1b51444b8a6474fb834c5b889846"
+  },
+  "bundleDifference": {
+    "leftBytes": 135180288,
+    "rightBytes": 135180288,
+    "differingByteCount": 3,
+    "firstDifferences": [
+      123164664,
+      123164665,
+      123164666
+    ]
+  },
+  "sdk": {
+    "name": "@earendil-works/pi-coding-agent",
+    "version": "1.4.0",
+    "packageJsonSha256": "df6883685382d6a914e5797232744c26579fe7db5576ea0e9c859d018ca2d54e",
+    "sourcePackageJson": "D:\\python\\projects\\Fox\\Fox\\services\\agent-runtime\\node_modules\\@earendil-works\\pi-coding-agent\\package.json"
+  },
+  "sandboxRuntime": {
+    "bundledVersion": "0.1.6",
+    "runtimeZipSha256": "c83bcee7e39d8ec42c4b6237e403fc3390b091e79a73a644e04b72bbfaf80e5f",
+    "installedVersionOnHost": "0.1.5",
+    "installedRuntimeRoot": "C:/Program Files/Fox/sandbox-runtime/0.1.5"
+  },
+  "build": {
+    "command": "pnpm tauri:build:windows",
+    "log": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v4\\build.log",
+    "exitCode": 0,
+    "pnpm": "11.7.0",
+    "node": "v24.15.0",
+    "bun": "1.3.14"
+  },
+  "installVerification": {
+    "status": "blocked_no_elevation",
+    "reason": "NSIS manifest requests requireAdministrator; current token is non-elevated and no isolated elevated Windows environment is available",
+    "attempted": false
+  }
+}

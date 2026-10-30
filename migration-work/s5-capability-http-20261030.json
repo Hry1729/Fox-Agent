@@ -1,0 +1,72 @@
+{
+  "kind": "s5-capability-http-evidence",
+  "sourceHead": "2ccd2a970fe867cbdbcc32b781c9059c760b45ed",
+  "runId": "0c07612b-af22-4bd8-a08c-409dd13b44c0",
+  "conversationId": "c986e864-7bae-4c51-bed0-5f40692eb54c",
+  "candidatePayload": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v4\\payload",
+  "actualHttp": {
+    "systemChars": 30094,
+    "headingPresent": true,
+    "foxContextPresent": true,
+    "facts": {
+      "schemaVersion": 1,
+      "capabilityManifestHash": "sha256:06c6a76af2c2fa6e2df48efe9b5c5d3303856e4ec86a18e3eed593c7922fd02b",
+      "executionProfileId": "legacy",
+      "tools": {
+        "attachment_compute": {
+          "availability": "available",
+          "reasonCode": null,
+          "reason": null,
+          "projectPaths": true,
+          "reportPdf": {
+            "availability": "available",
+            "renderer": "krilla-0.8.2",
+            "font": "msyh.ttc",
+            "fontSha256": "d79c55e68b1131eea0cc1c47be4f572d964f28c682e143db2ad09c1e4cb07a3f",
+            "fontEmbedding": "editable-or-installable/subset/outline",
+            "maxPages": 24,
+            "maxSpecBytes": 524288,
+            "chartTypes": [
+              "line",
+              "bar",
+              "pie"
+            ]
+          }
+        },
+        "run_command": {
+          "availability": "available",
+          "reasonCode": null,
+          "reason": null,
+          "actions": {
+            "cancel": "available",
+            "output": "available",
+            "start": "available",
+            "status": "available"
+          }
+        }
+      }
+    }
+  },
+  "binding": {
+    "executionProfileId": "legacy",
+    "authority": "authoritative",
+    "executorRoute": "pi_native"
+  },
+  "beforeFix": {
+    "candidate": "v3",
+    "systemChars": 1875,
+    "headingPresent": false,
+    "foxContextPresent": false,
+    "systemPromptObserved": "SDK default Pi prompt (You are an expert coding assistant...)"
+  },
+  "rootCause": "composeFoxPrompt returned prompt but omitted stablePrefix and dynamicTail; the planning extension received undefined, so Pi used its default system prompt and never carried the capability section",
+  "fix": {
+    "commit": "2ccd2a97",
+    "files": [
+      "services/agent-runtime/src/prompt-composer.mjs",
+      "services/agent-runtime/test/host-runtime-capabilities.test.mjs"
+    ],
+    "behavior": "return the stable and dynamic halves alongside the joined prompt; capability facts remain identity-checked and authorization still comes from Host dispatch"
+  },
+  "boundary": "The actual HTTP body was sampled from a local non-secret SSE provider; only capability facts, field presence, prompt size and tool names were retained. This run used the existing installed sandbox runtime 0.1.5; it is not an installation acceptance for bundled 0.1.6."
+}
