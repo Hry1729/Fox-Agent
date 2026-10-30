@@ -35,9 +35,29 @@ struct SkillMetadata {
     id: Option<String>,
     name: Option<String>,
     description: Option<String>,
+    // RT-1: `version: 1.0` is a YAML float; accept numbers as well as strings.
+    #[serde(default, deserialize_with = "deserialize_skill_version")]
     version: Option<String>,
     #[serde(default)]
     required_tools: Vec<String>,
+}
+
+fn deserialize_skill_version<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(serde_yaml::Value::Null) => None,
+        Some(serde_yaml::Value::String(text)) => Some(text),
+        Some(serde_yaml::Value::Number(number)) => Some(number.to_string()),
+        Some(serde_yaml::Value::Bool(flag)) => Some(flag.to_string()),
+        Some(other) => {
+            return Err(serde::de::Error::custom(format!(
+                "version must be a string or a number, got {other:?}"
+            )))
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -697,13 +717,37 @@ fn load_skill(path: &Path, directory_id: Option<&str>) -> Result<LoadedSkill, St
             "SKILL.md 不能超过 128 KB",
         ));
     }
-    let source = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    // RT-1: one unreadable or malformed SKILL.md is that skill's own problem.
+    // It is listed as invalid with its diagnosis; it never stops the scan, and
+    // so never stops every conversation from building its prompt.
+    let invalid_id = directory_id.unwrap_or("invalid");
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Ok(invalid_skill(invalid_id, &source_path, &format!("无法读取 SKILL.md：{error}")))
+        }
+    };
+    let source = match String::from_utf8(bytes) {
+        Ok(source) => source,
+        Err(_) => {
+            return Ok(invalid_skill(
+                invalid_id,
+                &source_path,
+                "SKILL.md 不是 UTF-8 编码（例如 GBK），请另存为 UTF-8",
+            ))
+        }
+    };
     let (frontmatter, instructions) = split_frontmatter(&source);
-    let metadata = frontmatter
-        .map(serde_yaml::from_str::<SkillMetadata>)
-        .transpose()
-        .map_err(|error| format!("{}: {error}", path.display()))?
-        .unwrap_or_default();
+    let metadata = match frontmatter.map(serde_yaml::from_str::<SkillMetadata>).transpose() {
+        Ok(metadata) => metadata.unwrap_or_default(),
+        Err(error) => {
+            return Ok(invalid_skill(
+                invalid_id,
+                &source_path,
+                &format!("SKILL.md 头部 YAML 无法解析：{error}"),
+            ))
+        }
+    };
     let id = metadata
         .id
         .as_deref()
@@ -1080,6 +1124,30 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "writer"
                 && matches!(entry.state, SkillToolState::MissingTools(_))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rt1_a_malformed_skill_is_skipped_with_a_diagnosis_and_never_blocks_the_plan() {
+        let root = std::env::temp_dir().join(format!("fox-skill-rt1-{}", uuid::Uuid::new_v4()));
+        write_skill(&root, "good", "---\nid: good\nname: Good\nversion: 1.0\n---\nUse evidence.");
+        write_skill(&root, "badyaml", "---\nid: badyaml\ndescription: Use when: X\n---\nBody.");
+        write_skill(&root, "badlist", "---\nid: badlist\nversion: [1, 2]\n---\nBody.");
+        std::fs::create_dir_all(root.join("gbk")).unwrap();
+        std::fs::write(root.join("gbk").join("SKILL.md"), [0x2d, 0x2d, 0x2d, 0x0a, 0xd6, 0xd0, 0xce, 0xc4, 0x0a]).unwrap();
+        let enabled = ["good", "badyaml", "badlist", "gbk"].map(str::to_owned).to_vec();
+        let skills = scan_skills(&root, &enabled).expect("a bad skill must not fail the scan");
+        let good = skills.iter().find(|skill| skill.record.id == "good").unwrap();
+        assert!(good.record.valid);
+        assert_eq!(good.record.version, "1.0");
+        for id in ["badyaml", "badlist", "gbk"] {
+            let bad = skills.iter().find(|skill| skill.record.id == id).unwrap_or_else(|| panic!("{id} listed"));
+            assert!(!bad.record.valid, "{id}");
+            assert!(bad.record.validation_error.as_deref().is_some_and(|error| !error.is_empty()), "{id}");
+        }
+        let plan = skill_prompt_plan(&root, &enabled, None, "", 4_000).expect("the plan still builds");
+        assert!(plan.included.iter().any(|item| item.id == "good"));
+        assert!(!plan.included.iter().any(|item| item.id != "good"));
         let _ = std::fs::remove_dir_all(root);
     }
 
