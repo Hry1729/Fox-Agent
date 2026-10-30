@@ -2089,8 +2089,8 @@ pub struct ProcessJobManager {
     /// An instance field, deliberately: a process-global proof meant two
     /// managers in one process could not hold different decisions, so a test
     /// that authorized execution changed the result of a test that asserted the
-    /// refusal. Production constructs its managers with [`HostVerifiedBackend`],
-    /// which refuses.
+    /// refusal. Production constructs its managers with [`FoxJobBackend`]
+    /// (A1); [`HostVerifiedBackend`] is the refusing legacy proof.
     proof: Arc<dyn BackendCapabilityProof>,
     config: ManagerConfig,
     jobs: Mutex<BTreeMap<String, Arc<JobEntry>>>,
@@ -3033,30 +3033,36 @@ mod tests {
 
     // -- backend capability authority ----------------------------------------
 
-    /// The production constructor must refuse, whether or not some other test in
-    /// this binary built an authorized manager.
+    /// A1: Fox no longer gates its commands on a sandbox. The production
+    /// constructor consults [`FoxJobBackend`], which is always available and
+    /// names the Fox Job shape in its digest, so a start reaches the spawner.
+    /// The refusal path is still exercised through the legacy refusing proof
+    /// ([`HostVerifiedBackend`]) in the tests below.
     #[test]
-    fn production_constructor_refuses_start_before_any_job_is_published() {
-        let spawner: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
+    fn production_constructor_uses_the_fox_job_backend() {
+        assert_eq!(
+            execution_availability(),
+            BackendAvailability::Available {
+                backend: ExecutionBackend::FoxJob,
+                digest: FOX_JOB_BACKEND_DIGEST.to_owned(),
+            }
+        );
+        let spawner: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![scripted_plan(99, "ok")]);
         let manager = ProcessJobManager::new(
             Arc::new(ManualClock::default()),
             Arc::clone(&spawner) as Arc<dyn ProcessSpawner>,
-            Arc::new(ScriptedProbe::new(vec![])),
+            Arc::new(ScriptedProbe::new(vec![(99, Liveness::Alive { start_marker: Some(1) })])),
             ManagerConfig::default(),
         );
-        let error = manager
+        assert!(manager.start(request("fox-job", "echo ok")).is_ok());
+        assert_eq!(spawner.spawn_count(), 1, "the production backend reaches the spawner");
+
+        let refused: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
+        let error = refusing_manager(Arc::clone(&refused))
             .start(request("denied", "echo nope"))
-            .expect_err("the production constructor must refuse");
+            .expect_err("the legacy refusing proof must refuse");
         assert_eq!(error.code(), "sandbox_unavailable");
-        assert!(
-            error.message().contains("sandbox_unavailable"),
-            "{error:?}"
-        );
-        assert_eq!(
-            spawner.spawn_count(),
-            0,
-            "a refused start must not reach the spawner at all"
-        );
+        assert_eq!(refused.spawn_count(), 0, "a refused start must not reach the spawner at all");
     }
 
     /// Two managers alive at once must be able to hold *different* decisions.
@@ -3074,12 +3080,7 @@ mod tests {
         );
         let refusing_spawner_concrete: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
         let refusing_spawner: Arc<dyn ProcessSpawner> = refusing_spawner_concrete;
-        let refusing = ProcessJobManager::new(
-            Arc::new(ManualClock::default()),
-            refusing_spawner,
-            Arc::new(ScriptedProbe::new(vec![])),
-            ManagerConfig::default(),
-        );
+        let refusing = refusing_dyn_manager(refusing_spawner);
 
         // Order matters to the old defect: assert the refusing manager *after*
         // the authorized one exists, and again in the other order below.
@@ -3102,12 +3103,7 @@ mod tests {
     fn an_authorized_manager_never_opens_the_gate_for_a_refusing_one() {
         let refusing_spawner_concrete: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
         let refusing: Arc<dyn ProcessSpawner> = refusing_spawner_concrete;
-        let refusing = ProcessJobManager::new(
-            Arc::new(ManualClock::default()),
-            refusing,
-            Arc::new(ScriptedProbe::new(vec![])),
-            ManagerConfig::default(),
-        );
+        let refusing = refusing_dyn_manager(refusing);
         assert!(refusing.start(request("a", "echo nope")).is_err());
 
         let authorized_spawner: Arc<ScriptedSpawner> =
@@ -3193,12 +3189,7 @@ mod tests {
         // Meanwhile, refusals must be unaffected by all of that activity.
         for _ in 0..200 {
             let spawner: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
-            let refusing = ProcessJobManager::new(
-                Arc::new(ManualClock::default()),
-                Arc::clone(&spawner) as Arc<dyn ProcessSpawner>,
-                Arc::new(ScriptedProbe::new(vec![])),
-                ManagerConfig::default(),
-            );
+            let refusing = refusing_dyn_manager(Arc::clone(&spawner) as Arc<dyn ProcessSpawner>);
             let error = refusing
                 .start(request("denied", "echo nope"))
                 .expect_err("a refusing manager must refuse while authorized ones are live");
@@ -3688,9 +3679,24 @@ mod tests {
         config: ManagerConfig,
     ) -> ProcessJobManager {
         // Lifecycle suites run on the authorized path, injected into this one
-        // manager; the refusal has its own tests using the production
-        // constructor. Nothing global is set, so this cannot affect them.
+        // manager; the refusal has its own tests using the legacy refusing
+        // proof. Nothing global is set, so this cannot affect them.
         ProcessJobManager::with_backend_proof(clock, spawner, probe, config, lifecycle_proof())
+    }
+
+    /// A manager over the legacy refusing proof ([`HostVerifiedBackend`]).
+    fn refusing_manager(spawner: Arc<ScriptedSpawner>) -> ProcessJobManager {
+        refusing_dyn_manager(spawner as Arc<dyn ProcessSpawner>)
+    }
+
+    fn refusing_dyn_manager(spawner: Arc<dyn ProcessSpawner>) -> ProcessJobManager {
+        ProcessJobManager::with_backend_proof(
+            Arc::new(ManualClock::default()),
+            spawner,
+            Arc::new(ScriptedProbe::new(vec![])),
+            ManagerConfig::default(),
+            Arc::new(HostVerifiedBackend),
+        )
     }
 
     fn request(key: &str, command: &str) -> StartRequest {

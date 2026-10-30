@@ -1706,28 +1706,31 @@ fn rev_kernel_projection_binds_the_replacement_request() {
     assert_eq!(state, "pending", "the Kernel path proposes the request up front");
     let _ = input;
 }
+/// A1: the SRT gate is gone. Production `run_command` no longer refuses for a
+/// missing confinement backend; it runs as the current user inside a Fox Job
+/// (Windows: `cmd /D /S /C`), and the approval policy is what decides whether
+/// it may run at all. The old `sandbox_unavailable` refusal is retired.
 #[test]
-fn rev_production_command_gate_stays_closed() {
+fn rev_production_command_runs_in_a_fox_job_without_a_sandbox_gate() {
     let (db, root, _conversation, run) = rev_fixture("gate", "allow");
     let registry = CancellationRegistry::default();
     registry.register_run(&run).expect("register run");
     let token = registry.tool_token(&run, "cmd").expect("token");
     let prepared = tool_host::prepare(
         "run_command",
-        &json!({"command":"echo must-not-run > gate-marker.txt"}),
+        &json!({"command":"echo ran > gate-marker.txt"}),
         root.to_str().unwrap(),
     )
     .expect("prepare command");
-    let outcome = tool_host::execute_with_cancellation(prepared, Some(&token));
-    let error = outcome
-        .expect_err("production must refuse to start a command without a verified backend");
+    let outcome = tool_host::execute_with_cancellation(prepared, Some(&token))
+        .unwrap_or_else(|error| panic!("production run_command must start without a sandbox gate: {error}"));
+    assert!(!outcome.to_string().contains("sandbox_unavailable"), "{outcome}");
+    assert_eq!(outcome["details"]["exitCode"], 0, "{outcome}");
+    #[cfg(windows)]
+    assert_eq!(outcome["details"]["shell"], "cmd.exe /D /S /C", "{outcome}");
     assert!(
-        error.contains("sandbox_unavailable"),
-        "the refusal must name the missing verified backend, got: {error}"
-    );
-    assert!(
-        !root.join("gate-marker.txt").exists(),
-        "no external process may be started by the production gate"
+        root.join("gate-marker.txt").exists(),
+        "the command really ran in the project directory"
     );
     let _ = db;
 }

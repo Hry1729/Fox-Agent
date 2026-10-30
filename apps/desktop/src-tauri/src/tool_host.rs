@@ -2900,7 +2900,7 @@ mod tests {
         assert_eq!(result["details"]["stdoutBytes"], 300_018);
         assert_eq!(result["details"]["stderr"], "small-stderr");
         assert_eq!(result["details"]["stderrPreviewTruncated"], false);
-        let serialized = serde_json::to_string(&result).unwrap();
+        let serialized = crate::canonical_json::to_string(&result).unwrap();
         assert!(serialized.len() < 300_018 + COMMAND_DETAILS_PREVIEW_BYTES * 3, "the output is not stored twice");
         let _ = fs::remove_dir_all(root);
     }
