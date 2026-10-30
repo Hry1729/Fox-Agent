@@ -45,6 +45,48 @@ const ZVEC_STORE_VERSION: &str = "0.6.0";
 const DEFAULT_EMBEDDING_MAX_TOKENS: usize = 512;
 const EMBEDDING_MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(45);
 const RETRIEVAL_WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+/// KB-1: the worker ends itself this long after it starts, whatever its parent
+/// does; the parent's own deadline is shorter, so this only fires for an orphan.
+pub(crate) const RETRIEVAL_WORKER_WATCHDOG: Duration = Duration::from_secs(90);
+
+/// KB-1: what can stop a retrieval worker early. The cancel probe is the
+/// caller's tool/Run cancellation; the deadline is the caller's remaining
+/// budget. Both are polled while the worker runs and the worker is killed the
+/// moment either fires.
+#[derive(Clone, Default)]
+pub(crate) struct RetrievalControl {
+    cancel: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    deadline: Option<Instant>,
+}
+
+impl RetrievalControl {
+    pub(crate) fn new(
+        cancel: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+        deadline: Option<Instant>,
+    ) -> Self {
+        Self { cancel, deadline }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|probe| probe())
+    }
+
+    /// The earlier of the worker's own ceiling and the caller's deadline.
+    pub(crate) fn deadline_from(&self, started: Instant, ceiling: Duration) -> Instant {
+        let own = started + ceiling;
+        self.deadline.map_or(own, |deadline| deadline.min(own))
+    }
+
+    pub(crate) fn check(&self) -> Result<(), LocalKnowledgeError> {
+        if self.is_cancelled() {
+            return Err(LocalKnowledgeError::cancelled("知识库检索已取消"));
+        }
+        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(LocalKnowledgeError::storage("知识库检索超出本次工具的剩余时间"));
+        }
+        Ok(())
+    }
+}
 const RETRIEVAL_WORKER_ROOT_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_ROOT";
 const RETRIEVAL_WORKER_REQUEST_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_REQUEST";
 const RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV: &str = "FOX_KNOWLEDGE_ZVEC_RESOURCE_DIR";
@@ -600,7 +642,9 @@ fn retrieval_worker_error(
 fn run_retrieval_worker_process(
     store: &LocalKnowledgeStore,
     request: &KnowledgeRetrievalRequest,
+    control: &RetrievalControl,
 ) -> Result<Value, LocalKnowledgeError> {
+    control.check()?;
     let executable = std::env::current_exe().map_err(|error| {
         LocalKnowledgeError::storage(format!("无法定位 Fox 当前可执行文件：{error}"))
     })?;
@@ -624,6 +668,10 @@ fn run_retrieval_worker_process(
     let mut child = command.spawn().map_err(|error| {
         LocalKnowledgeError::storage(format!("无法启动向量检索隔离进程：{error}"))
     })?;
+    // KB-1: the worker belongs to a KILL_ON_JOB_CLOSE Job. If Fox dies, the OS
+    // reaps it, so it can never hold the index or knowledge.db as an orphan.
+    let _job = crate::runtime_host::process_job::ProcessJob::attach_or_kill(&mut child, "知识库检索 worker")
+        .map_err(LocalKnowledgeError::storage)?;
     let stdout = child.stdout.take().ok_or_else(|| {
         let _ = child.kill();
         let _ = child.wait();
@@ -642,8 +690,15 @@ fn run_retrieval_worker_process(
         .name("fox-retrieval-worker-stderr".to_owned())
         .spawn(move || collect_retrieval_worker_stream(stderr, 64 * 1024))
         .map_err(LocalKnowledgeError::storage)?;
-    let deadline = Instant::now() + RETRIEVAL_WORKER_TIMEOUT;
+    let deadline = control.deadline_from(Instant::now(), RETRIEVAL_WORKER_TIMEOUT);
     loop {
+        if control.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = finish_retrieval_worker_stream(stdout_reader);
+            let _ = finish_retrieval_worker_stream(stderr_reader);
+            return Err(LocalKnowledgeError::cancelled("知识库检索已取消，检索 worker 已终止"));
+        }
         let status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => {
@@ -680,7 +735,8 @@ fn run_retrieval_worker_process(
             let _ = finish_retrieval_worker_stream(stdout_reader);
             let diagnostics = finish_retrieval_worker_stream(stderr_reader);
             return Err(LocalKnowledgeError::storage(format!(
-                "向量检索超过 {} 秒，已安全终止隔离进程。{}",
+                "向量检索超过 {} 秒（本次工具的剩余时间与 {} 秒上限中较短者），已终止隔离进程。{}",
+                deadline.saturating_duration_since(Instant::now()).as_secs().max(1).min(RETRIEVAL_WORKER_TIMEOUT.as_secs()),
                 RETRIEVAL_WORKER_TIMEOUT.as_secs(),
                 if diagnostics.is_empty() {
                     String::new()
@@ -2010,12 +2066,24 @@ impl LocalKnowledgeStore {
         &self,
         request: KnowledgeRetrievalRequest,
     ) -> Result<Value, LocalKnowledgeError> {
+        self.search_retrieval_controlled(request, &RetrievalControl::default())
+    }
+
+    /// [`Self::search_retrieval`] that stops when `control` is cancelled or
+    /// its deadline passes (KB-1).
+    pub(crate) fn search_retrieval_controlled(
+        &self,
+        request: KnowledgeRetrievalRequest,
+        control: &RetrievalControl,
+    ) -> Result<Value, LocalKnowledgeError> {
+        control.check()?;
         let base = self.get_base(&request.knowledge_base_id)?;
         let requested_mode = request.mode.as_deref().unwrap_or(&base.search_mode);
         #[cfg(all(feature = "local-embedding", feature = "zvec"))]
         if requested_mode != "keyword" && !cfg!(test) {
-            return run_retrieval_worker_process(self, &request);
+            return run_retrieval_worker_process(self, &request, control);
         }
+        let _ = requested_mode;
         self.search_retrieval_in_process(request)
     }
 
@@ -3294,5 +3362,49 @@ mod generation_status_tests {
         assert_ne!(first, generation_status_fingerprint(&root).unwrap());
         std::fs::remove_dir_all(&root).unwrap();
         assert!(generation_status_fingerprint(&root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod kb1_retrieval_control_tests {
+    use super::*;
+    use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+
+    #[test]
+    fn kb1_cancel_probe_and_deadline_stop_a_retrieval() {
+        assert!(RetrievalControl::default().check().is_ok());
+        let flag = Arc::new(AtomicBool::new(false));
+        let probe_flag = flag.clone();
+        let control = RetrievalControl::new(Some(Arc::new(move || probe_flag.load(Ordering::Acquire))), None);
+        assert!(control.check().is_ok());
+        flag.store(true, Ordering::Release);
+        let error = control.check().unwrap_err();
+        assert_eq!(error.code(), "local_knowledge.cancelled");
+
+        let past = RetrievalControl::new(None, Some(Instant::now() - Duration::from_millis(1)));
+        assert!(past.check().is_err());
+
+        let started = Instant::now();
+        let soon = started + Duration::from_secs(5);
+        let bounded = RetrievalControl::new(None, Some(soon));
+        assert_eq!(bounded.deadline_from(started, RETRIEVAL_WORKER_TIMEOUT), soon);
+        assert_eq!(
+            RetrievalControl::default().deadline_from(started, RETRIEVAL_WORKER_TIMEOUT),
+            started + RETRIEVAL_WORKER_TIMEOUT
+        );
+        assert!(RETRIEVAL_WORKER_WATCHDOG > RETRIEVAL_WORKER_TIMEOUT);
+    }
+
+    #[test]
+    fn kb1_a_cancelled_control_stops_search_before_any_worker_starts() {
+        let control = RetrievalControl::new(Some(Arc::new(|| true)), None);
+        let root = std::env::temp_dir().join(format!("fox-kb1-{}", uuid::Uuid::new_v4()));
+        let store = LocalKnowledgeStore::open(root.clone()).expect("store");
+        let error = store
+            .search_for_agent_controlled("missing", "查询", None, None, &control)
+            .unwrap_err();
+        assert_eq!(error.code(), "local_knowledge.cancelled");
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

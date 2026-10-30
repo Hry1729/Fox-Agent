@@ -32,6 +32,7 @@ fn search(
         bindings,
         "search_knowledge",
         &input,
+        crate::local_knowledge_vector::RetrievalControl::default(),
     ))
 }
 

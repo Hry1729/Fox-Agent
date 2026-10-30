@@ -1,10 +1,3 @@
-const INTERNAL_PLANNING_PATTERN = /^(?:the user\s+(?:wants|asked|is asking|needs|provided|would like)\b|we\s+(?:need|should|must|have to)\b|i\s+(?:need|should|must|have to)\b|i(?:'ll| will)\s+(?:first|now|check|inspect|read|write|create|use|look|verify|figure|determine|handle|respond|explain|run)\b|let me\b|let's\b|looking at\s+(?:my|the)\b|now i\s+(?:have|need|can|should|will)\b|first,?\s+i\b|actually,?\b|wait,?\b|so i\s+(?:need|should|will|can)\b|the (?:task|request)\s+(?:is|asks|requires)\b)/i
-const INTERNAL_PLANNING_CONTEXT_PATTERN = /^this is (?:the )?(?:\*\*)?(?:first|second|third|fourth|fifth|\w+)(?:\*\*)? (?:round|pass|attempt)(?:\*\*)? of (?:tool )?testing\b/i
-const INTERNAL_PLANNING_ZH_PATTERN = /^(?:我(?:先|来|再|现在|需要|得|要|会先|准备|去|应该|必须|把|按守则|直接调用)|先(?:确认|看看|检查|读取|分析|验证|对照|创建|列出|处理|提议)|现在(?:去|先|来|需要|掌握|确认)|接下来|让我(?:先|再|来|看看|确认|验证|检查|读取|分析)|好，?(?:工作目录|现在|先|接下来)|好的，?本次测试|本次测试要测|测试设计|当前对话(?:没有|尚无)|目标(?:已经|已)(?:提议|提交)|快照里|Host\b|Gate\b|task_create_many\b|goal_(?:propose|complete)\b|work_snapshot_get\b|对照表|关键确认|两个观察|最后再|不过本任务)/u
-const USER_FACING_ANSWER_PATTERN = /^(?:好的|好嘞|当然|没问题|已经|完成|以下是|这里是|结果如下|结论(?:如下|是)?[：:]?|下面是|最终结果|汇总完毕|请你确认|脚本已|文件已|我已经|我为你|done\b|sure\b|certainly\b|here(?:'s| is| are)\b|i(?:'ve| have)\s+(?:created|updated|finished|completed)\b|(?:created|updated|completed)\b|#{1,6}\s|```)/i
-const INLINE_USER_FACING_ANSWER_PATTERN = /(?:好的|好嘞|当然|没问题|已经|完成|以下是|这里是|结果如下|结论(?:如下|是)?[：:]?|下面是|最终结果|汇总完毕|请你确认|脚本已|文件已|我已经|我为你)/u
-const REASONING_TAIL_CHARS = 160
-const STARTUP_CLASSIFICATION_CHARS = 220
 const USAGE_COMPONENT_FIELDS = Object.freeze([
   ['input', 'inputTokens'],
   ['output', 'outputTokens'],
@@ -64,18 +57,6 @@ function accumulateUsage(current, step) {
   return { ...next, totalTokens: Math.max(billedTotal, componentTotal) }
 }
 
-function textUnits(text) {
-  const units = []
-  const pattern = /[^\r\n]+(?:\r?\n+|$)/g
-  let match
-  while ((match = pattern.exec(text)) !== null) {
-    const content = match[0]
-    const trimmed = content.trim()
-    if (trimmed) units.push({ start: match.index, end: match.index + content.length, trimmed })
-  }
-  return units
-}
-
 function splitTaggedThinking(text) {
   const tagged = text.match(/^\s*<((?:mm:)?(?:think|thinking|analysis))>[\s\S]*?<\/\1>\s*/i)
   if (tagged) {
@@ -96,69 +77,24 @@ function splitTaggedThinking(text) {
   }
 }
 
-function looksLikeUserFacingAnswer(text) {
-  return USER_FACING_ANSWER_PATTERN.test(text)
-}
-
-function looksLikeInternalPlanning(text) {
-  return INTERNAL_PLANNING_PATTERN.test(text)
-    || INTERNAL_PLANNING_CONTEXT_PATTERN.test(text)
-    || INTERNAL_PLANNING_ZH_PATTERN.test(text)
-}
-
-function answerStartInUnit(unit) {
-  if (looksLikeUserFacingAnswer(unit.trimmed)) return unit.start
-  if (!looksLikeInternalPlanning(unit.trimmed)) return null
-  const match = INLINE_USER_FACING_ANSWER_PATTERN.exec(unit.trimmed)
-  return match && match.index > 0 ? unit.start + match.index : null
-}
-
-function mixedAnswerStart(text) {
-  const tagged = text.match(/^\s*<((?:mm:)?(?:think|thinking|analysis))>[\s\S]*?<\/\1>\s*/i)
-    || text.match(/^\s*[\s\S]*?<\/(?:mm:)?(?:think|thinking|analysis)>\s*/i)
-  if (tagged) return tagged[0].length
-
-  const units = textUnits(text)
-  if (units.length < 2 || !looksLikeInternalPlanning(units[0].trimmed)) return null
-  const internalIndexes = units.flatMap((unit, index) => looksLikeInternalPlanning(unit.trimmed) ? [index] : [])
-  if (internalIndexes.length < 2) return null
-  const lastInternalIndex = internalIndexes.at(-1)
-  const embeddedAnswer = answerStartInUnit(units[lastInternalIndex])
-  if (embeddedAnswer !== null) return embeddedAnswer
-  for (const unit of units.slice(lastInternalIndex + 1)) {
-    const answerStart = answerStartInUnit(unit)
-    if (answerStart !== null) return answerStart
-  }
-  return null
-}
+const THINKING_OPEN_TAG = /^\s*<((?:mm:)?(?:think|thinking|analysis))>/i
+const THINKING_TAG_NAMES = ['think', 'thinking', 'analysis', 'mm:think', 'mm:thinking', 'mm:analysis']
 
 /**
- * Some OpenAI-compatible providers place private planning and the final answer in
- * the same text field. Split only a strongly signalled planning preamble; ordinary
- * answers containing phrases such as "Let me explain" must remain untouched.
+ * Reasoning is whatever the provider marks as reasoning: its reasoning field,
+ * or explicit thinking tags in the text channel. Plain answer text is never
+ * reclassified by wording, in any language (MD-1).
  */
 export function splitMixedAssistantText(text) {
   if (typeof text !== 'string' || !text.trim()) return { reasoning: '', answer: text || '' }
+  return splitTaggedThinking(text) ?? { reasoning: '', answer: text }
+}
 
-  const tagged = splitTaggedThinking(text)
-  if (tagged) return tagged
-
-  const units = textUnits(text)
-  if (units.length < 3 || !looksLikeInternalPlanning(units[0].trimmed)) {
-    return { reasoning: '', answer: text }
-  }
-
-  const internalIndexes = units.flatMap((unit, index) => looksLikeInternalPlanning(unit.trimmed) ? [index] : [])
-  if (internalIndexes.length < 2) return { reasoning: '', answer: text }
-
-  const answerStart = mixedAnswerStart(text)
-  // A stopped turn can contain only private planning when the model fails to
-  // produce a final answer. Keeping the answer empty is safer than publishing it.
-  if (answerStart === null) return { reasoning: text.trim(), answer: '' }
-
-  const reasoning = text.slice(0, answerStart).trimEnd()
-  const answer = text.slice(answerStart).trimStart()
-  return reasoning && answer ? { reasoning, answer } : { reasoning: '', answer: text }
+function couldStillOpenThinkingTag(text) {
+  const trimmed = text.trimStart().toLowerCase()
+  if (!trimmed) return true
+  if (!trimmed.startsWith('<')) return false
+  return THINKING_TAG_NAMES.some((name) => `<${name}>`.startsWith(trimmed))
 }
 
 export function sanitizeAssistantHistory(messages) {
@@ -244,6 +180,8 @@ export function createPiEventMapper(emit, options = {}) {
   let lastCompactionErrorMessage = null
   let pendingText = ''
   let textMode = 'undecided'
+  let thinkingTagName = ''
+  let answerBase = 0
   let reasoningEmittedUntil = 0
   let answerEmittedUntil = 0
   const providerReasoningByIndex = new Map()
@@ -265,6 +203,8 @@ export function createPiEventMapper(emit, options = {}) {
   function resetTextTurn() {
     pendingText = ''
     textMode = 'undecided'
+    thinkingTagName = ''
+    answerBase = 0
     reasoningEmittedUntil = 0
     answerEmittedUntil = 0
     providerReasoningByIndex.clear()
@@ -309,17 +249,13 @@ export function createPiEventMapper(emit, options = {}) {
 
   function streamPendingText() {
     if (!pendingText) return
-    const units = textUnits(pendingText)
-    const first = units[0]?.trimmed ?? pendingText.trimStart()
     if (textMode === 'undecided') {
-      const internalSignals = units.filter((unit) => looksLikeInternalPlanning(unit.trimmed)).length
-      if (/^<(?:mm:)?(?:think|thinking|analysis)>/i.test(first) || internalSignals >= 2) {
+      const open = pendingText.match(THINKING_OPEN_TAG)
+      if (open) {
         textMode = 'reasoning'
-      } else if (looksLikeInternalPlanning(first)) {
-        return
-      } else if (looksLikeUserFacingAnswer(first)) {
-        textMode = 'answer'
-      } else if (/^this(?:\s|$)/i.test(first) && pendingText.length < STARTUP_CLASSIFICATION_CHARS && units.length < 2) {
+        thinkingTagName = open[1]
+        reasoningEmittedUntil = open[0].length
+      } else if (couldStillOpenThinkingTag(pendingText)) {
         return
       } else {
         textMode = 'answer'
@@ -327,21 +263,24 @@ export function createPiEventMapper(emit, options = {}) {
     }
 
     if (textMode === 'answer') {
-      emitAnswerFrom(0)
+      emitAnswerFrom(answerBase)
       return
     }
 
-    const answerStart = mixedAnswerStart(pendingText)
-    if (answerStart !== null) {
-      emitReasoningUntil(answerStart)
+    const closeTag = `</${thinkingTagName}>`
+    const closeAt = pendingText.toLowerCase().indexOf(closeTag.toLowerCase(), reasoningEmittedUntil)
+    if (closeAt >= 0) {
+      emitReasoningUntil(closeAt, 'tagged_text')
+      reasoningEmittedUntil = closeAt + closeTag.length
       textMode = 'answer'
-      emitAnswerFrom(answerStart)
+      const rest = pendingText.slice(reasoningEmittedUntil)
+      const answerStart = reasoningEmittedUntil + (rest.length - rest.trimStart().length)
+      answerBase = answerStart
+      emitAnswerFrom(answerBase)
       return
     }
-
-    // Retain a short tail so a boundary phrase split across chunks can still be
-    // classified before it is published to the work-process timeline.
-    emitReasoningUntil(Math.max(reasoningEmittedUntil, pendingText.length - REASONING_TAIL_CHARS))
+    // Hold back a closing tag that may be split across chunks.
+    emitReasoningUntil(Math.max(reasoningEmittedUntil, pendingText.length - closeTag.length), 'tagged_text')
   }
 
   function flushPendingText(message) {
@@ -352,18 +291,11 @@ export function createPiEventMapper(emit, options = {}) {
     // A tool-calling turn is process output; only the final non-tool turn is the answer.
     if (hasToolCall) {
       if (answerEmittedUntil === 0) emitReasoningUntil(pendingText.length, 'tool_turn')
+    } else if (textMode === 'reasoning') {
+      // An unclosed provider thinking tag: everything is provider-marked reasoning.
+      emitReasoningUntil(pendingText.length, 'tagged_text')
     } else {
-      const split = splitMixedAssistantText(pendingText)
-      if (split.reasoning) {
-        const answerStart = split.answer ? pendingText.indexOf(split.answer) : pendingText.length
-        emitReasoningUntil(answerStart >= 0 ? answerStart : pendingText.length)
-      }
-      if (split.answer) {
-        const answerStart = pendingText.indexOf(split.answer)
-        emitAnswerFrom(answerStart >= 0 ? answerStart : 0)
-      } else if (!split.reasoning && answerEmittedUntil === 0) {
-        emitAnswerFrom(0)
-      }
+      emitAnswerFrom(answerBase)
     }
     const answerEmitted = answerEmittedUntil > 0
     resetTextTurn()

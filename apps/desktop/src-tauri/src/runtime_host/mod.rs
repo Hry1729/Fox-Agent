@@ -11,6 +11,7 @@ pub(crate) mod delivery;
 pub(crate) mod delivery_checks_v2;
 pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
+pub(crate) mod process_job;
 mod kernel_run_lock;
 mod run_admission;
 mod kernel_host;
@@ -39,6 +40,8 @@ mod native_business_integration_tests;
 mod native_isolation_tests;
 #[cfg(test)]
 mod search_knowledge_agent_tests;
+#[cfg(test)]
+mod cx2_shutdown_tests;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
@@ -774,6 +777,9 @@ struct WorkerHandle {
     pending: PendingResponses,
     sessions: sidecar_sessions::Sessions,
     session_leases: HashMap<String, kernel_run_lock::KernelRunLock>,
+    /// CX-1: the sidecar's KILL_ON_JOB_CLOSE Job (Windows). Dropped with the
+    /// handle, or by the OS when Fox dies, which reaps the whole tree.
+    _job: process_job::ProcessJob,
 }
 
 struct QueuedRun {
@@ -4006,34 +4012,48 @@ impl RuntimeHost {
         Ok(())
     }
 
+    /// CX-2: every step runs even when an earlier one fails. Errors are
+    /// collected, written to the diagnostic log, and returned together, so a
+    /// slow Kernel run or one failed SQLite write can no longer leave child
+    /// workers, the main sidecar and the queue untouched.
     pub fn shutdown(&self) -> Result<(), String> {
+        let mut errors: Vec<String> = Vec::new();
+        let mut note = |step: &str, result: Result<(), String>| {
+            if let Err(error) = result {
+                errors.push(format!("{step}: {error}"));
+            }
+        };
         self.digital_scheduler_stop.store(true, Ordering::SeqCst);
-        self.stop_kernel_runs()?;
+        note("stop_kernel_runs", self.stop_kernel_runs());
         let child_hosts = self
             .child_hosts
             .lock()
-            .map_err(|_| "child runtime map is poisoned".to_owned())?
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .drain()
             .collect::<Vec<_>>();
         for (run_id, child_host) in child_hosts {
             if Arc::ptr_eq(&self.state, &child_host.state) { continue; }
-            if self.database.run_control_binding(&run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
-                child_host.stop_kernel_runs()?;
+            let kernel_child = match self.database.run_control_binding(&run_id) {
+                Ok(binding) => binding.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()),
+                Err(error) => {
+                    note(&format!("child {run_id} binding"), Err(error));
+                    false
+                }
+            };
+            if kernel_child {
+                note(&format!("child {run_id} stop_kernel_runs"), child_host.stop_kernel_runs());
                 continue;
             }
-            let _ = child_host.stop_worker_with_shutdown(false);
+            note(&format!("child {run_id} stop_worker"), child_host.stop_worker_with_shutdown(false));
             if self.database.native_run_waiting_approval(&run_id).unwrap_or(false) { continue; }
-            self.database.mark_run_interrupted(
+            note(&format!("child {run_id} mark_interrupted"), self.database.mark_run_interrupted(
                 &run_id,
                 "runtime.application_exit",
                 "Fox closed before the managed Run reached a terminal state.",
-            )?;
+            ).map(|_| ()));
         }
         let (active_run_ids, queued_run_ids) = {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| "runtime state lock is poisoned".to_owned())?;
+            let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let active = state
                 .worker
                 .as_ref()
@@ -4046,23 +4066,28 @@ impl RuntimeHost {
                 .collect::<Vec<_>>();
             (active, queued)
         };
-        self.stop_worker_with_shutdown(false)?;
+        note("stop_worker", self.stop_worker_with_shutdown(false));
         for run_id in active_run_ids {
             if self.database.native_run_waiting_approval(&run_id).unwrap_or(false) { continue; }
-            self.database.mark_run_interrupted(
+            note(&format!("run {run_id} mark_interrupted"), self.database.mark_run_interrupted(
                 &run_id,
                 "runtime.application_exit",
                 "Fox closed before the run reached a terminal state.",
-            )?;
+            ).map(|_| ()));
         }
         for run_id in queued_run_ids {
-            self.database.mark_run_interrupted(
+            note(&format!("queued {run_id} mark_interrupted"), self.database.mark_run_interrupted(
                 &run_id,
                 "runtime.application_exit",
                 "Fox closed before the queued run started.",
-            )?;
+            ).map(|_| ()));
         }
-        Ok(())
+        if errors.is_empty() {
+            return Ok(());
+        }
+        let summary = format!("[runtime.shutdown_incomplete] {}", errors.join("; "));
+        eprintln!("{summary}");
+        Err(summary)
     }
 
     fn mark_run_ready(&self, run_id: &str) {
@@ -4128,6 +4153,18 @@ impl RuntimeHost {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("failed to start Fox Runtime: {error}"))?;
+        // CX-1: no Job, no sidecar. Running it unowned would let it outlive a
+        // crashed Fox and keep calling the model.
+        let job = match process_job::ProcessJob::attach_or_kill(&mut child, "Fox Runtime sidecar") {
+            Ok(job) => job,
+            Err(error) => {
+                if let Ok(mut state) = self.state.lock() {
+                    state.state = "stopped".to_owned();
+                    state.last_error = Some(error.clone());
+                }
+                return Err(error);
+            }
+        };
         let stdin = child
             .stdin
             .take()
@@ -4154,6 +4191,7 @@ impl RuntimeHost {
                 pending: pending.clone(),
                 sessions: sidecar_sessions::Sessions::default(),
                 session_leases: HashMap::new(),
+                _job: job,
             });
         }
 
@@ -8061,6 +8099,38 @@ fn finalize_host_tool_execution(
                     false,
                 ));
             }
+            // TB-2: the success branch is bounded exactly like the failure
+            // branch. Above the inline cap the wire carries the persisted
+            // preview plus the Host-verified `resultRef`, never the raw
+            // multi-megabyte value (which would also be duplicated into the
+            // JSONL frame and the model context).
+            if success_result_exceeds_inline_cap(&result) {
+                let persisted = database
+                    .inspect_host_tool_call_replay(run_id, tool_call_id, tool, input)
+                    .ok()
+                    .flatten()
+                    .map(|(record, _)| record);
+                if let Some(record) = persisted {
+                    if let Some(stored) = record.result.clone() {
+                        return Ok(settled_host_tool_call_envelope(
+                            database,
+                            run_id,
+                            tool_call_id,
+                            record.conversation_id.as_str(),
+                            stored,
+                            None,
+                            merge_hook_annotations(before_annotations, after_annotations),
+                            false,
+                        ));
+                    }
+                }
+                return Ok(json!({
+                    "isError": false,
+                    "result": crate::database::bounded_tool_result_preview(&result),
+                    "toolResultStorage": tool_result_storage,
+                    "hookAnnotations": merge_hook_annotations(before_annotations, after_annotations),
+                }));
+            }
             Ok(json!({
                 "isError": false,
                 "result": result,
@@ -8085,6 +8155,13 @@ fn finalize_host_tool_execution(
             Err(error)
         }
     }
+}
+
+/// TB-2: whether a successful result is too large to travel inline.
+fn success_result_exceeds_inline_cap(result: &Value) -> bool {
+    crate::canonical_json::to_string(result)
+        .map(|serialized| serialized.len() > crate::database::MAX_STORED_TOOL_RESULT_BYTES)
+        .unwrap_or(true)
 }
 
 /// The single envelope shape a settled Host ToolCall produces, used for the
@@ -8162,12 +8239,31 @@ fn settled_host_tool_call_envelope(
             }
             envelope
         }
-        None => json!({
-            "isError": false,
-            "result": stored,
-            "toolResultStorage": storage,
-            "hookAnnotations": hook_annotations,
-        }),
+        None => {
+            let mut envelope = json!({
+                "isError": false,
+                "result": stored,
+                "toolResultStorage": storage,
+                "hookAnnotations": hook_annotations,
+            });
+            // TB-2: a bounded success names the reference its full value is
+            // read back through, and whether that reader can actually serve it.
+            if spilled {
+                if let Some(reference) =
+                    crate::kernel_compaction::tool_result_ref(run_id, tool_call_id)
+                {
+                    let retrievable = database
+                        .tool_result_range(&reference, authorized_conversation_id, 0, 4)
+                        .ok()
+                        .is_some_and(|range| range.retrievable);
+                    if let Some(object) = envelope.as_object_mut() {
+                        object.insert("resultRef".to_owned(), json!(reference));
+                        object.insert("resultRefRetrievable".to_owned(), json!(retrievable));
+                    }
+                }
+            }
+            envelope
+        }
     };
     if replayed {
         if let Some(object) = response.as_object_mut() {
@@ -9476,7 +9572,9 @@ async fn execute_knowledge_tool_request(
         }
         let bindings = database.conversation_knowledge_reference_bindings(conversation_id)?;
         let service = database.get_yuxi_service()?;
-        execute_bound_knowledge_tool(service.as_ref(), yuxi_client, local_knowledge, &bindings, tool, &input).await
+        // KB-1: tool_call.cancel / Run cancellation reach the retrieval worker.
+        let control = knowledge_retrieval_control(state, run_id, tool_call_id);
+        execute_bound_knowledge_tool(service.as_ref(), yuxi_client, local_knowledge, &bindings, tool, &input, control).await
     }
     .await;
     finalize_host_tool_execution(
@@ -9491,9 +9589,28 @@ async fn execute_knowledge_tool_request(
 }
 
 
+/// KB-1: the cancellation probe for one knowledge tool call. A Run that has no
+/// cancellation scope (already retired) is treated as cancelled.
+fn knowledge_retrieval_control(
+    state: &Arc<Mutex<RuntimeHostState>>,
+    run_id: &str,
+    tool_call_id: &str,
+) -> crate::local_knowledge_vector::RetrievalControl {
+    let token = state
+        .lock()
+        .ok()
+        .and_then(|state| state.cancellation.tool_token(run_id, tool_call_id).ok());
+    let probe: Arc<dyn Fn() -> bool + Send + Sync> = match token {
+        Some(token) => Arc::new(move || token.is_cancelled()),
+        None => Arc::new(|| false),
+    };
+    crate::local_knowledge_vector::RetrievalControl::new(Some(probe), None)
+}
+
 async fn execute_bound_knowledge_tool(
     remote_service: Option<&crate::database::YuxiServiceRecord>, yuxi_client: &YuxiClient, local_knowledge: &LocalKnowledgeStore,
     bindings: &[crate::database::KnowledgeReferenceBindingRecord], tool: &str, input: &Value,
+    control: crate::local_knowledge_vector::RetrievalControl,
 ) -> Result<Value, String> {
     let ensure_bound = |target: &KnowledgeToolTarget| {
         bindings
@@ -9614,12 +9731,14 @@ async fn execute_bound_knowledge_tool(
                     let store = local_knowledge.clone();
                     let knowledge_base_id = target.id.clone();
                     let query = query.to_owned();
+                    let control = control.clone();
                     tauri::async_runtime::spawn_blocking(move || {
-                        store.search_for_agent(
+                        store.search_for_agent_controlled(
                             &knowledge_base_id,
                             &query,
                             requested_limit,
                             requested_max_chars,
+                            &control,
                         )
                     })
                     .await
@@ -11243,6 +11362,71 @@ mod attachment_tests {
             .as_str()
             .unwrap()
             .contains("TS2322"));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// TB-2: a successful result far past the inline cap travels as the
+    /// persisted bounded copy with a Host-verified reference, never raw.
+    #[test]
+    fn tb2_an_oversized_success_travels_bounded_with_a_result_ref() {
+        const INLINE_CAP: usize = crate::database::MAX_STORED_TOOL_RESULT_BYTES;
+        let path = std::env::temp_dir().join(format!("fox-tb2-success-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "huge fetch", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let input = json!({ "url": "https://example.test/big" });
+        assert!(matches!(
+            create_fresh_host_tool_call(&database, &run.id, "call-big-ok", "http_request", &input, "running", false)
+                .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        let body = "数据".repeat(INLINE_CAP * 4);
+        let reported = json!({ "status": 200, "body": body });
+        let response = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "call-big-ok",
+            "http_request",
+            &input,
+            Vec::new(),
+            Ok(reported),
+        )
+        .unwrap();
+        let wire = crate::canonical_json::to_string(&response).unwrap();
+        assert_eq!(response["isError"], Value::Bool(false));
+        assert!(wire.len() < INLINE_CAP, "success wire must be bounded, got {}", wire.len());
+        assert_eq!(response["result"]["truncated"], Value::Bool(true));
+        let reference = response["resultRef"].as_str().expect("a bounded success names its reference").to_owned();
+        assert_eq!(response["resultRefRetrievable"], Value::Bool(true));
+        assert_eq!(response["toolResultStorage"]["stored"], Value::Bool(true));
+        let range = database
+            .tool_result_range(&reference, &conversation.id, 0, 4_096)
+            .expect("the reference resolves for the owning conversation");
+        assert!(range.retrievable);
+
+        // A small success keeps its exact shape: no reference is invented.
+        assert!(matches!(
+            create_fresh_host_tool_call(&database, &run.id, "call-small-ok", "http_request", &input, "running", false)
+                .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        let small = finalize_host_tool_execution(
+            &database, &run.id, "call-small-ok", "http_request", &input, Vec::new(),
+            Ok(json!({ "status": 200, "body": "ok" })),
+        )
+        .unwrap();
+        assert_eq!(small["result"]["body"], "ok");
+        assert!(small.get("resultRef").is_none());
 
         drop(database);
         let _ = std::fs::remove_file(path);

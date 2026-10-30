@@ -142,7 +142,9 @@ export const CONFIG_BOUNDS = Object.freeze({
   plannerMaxOutputTokens: Object.freeze({ minimum: 512, maximum: 8_192, fallback: 2_048 }),
   maxRetries: Object.freeze({ minimum: 0, maximum: 5, fallback: 0 }),
   providerMaxRetries: Object.freeze({ minimum: 0, maximum: 5, fallback: 2 }),
-  providerMaxRetryDelayMs: Object.freeze({ minimum: 500, maximum: 60_000, fallback: 8_000 }),
+  // MD-2: honour a provider's Retry-After up to 60 s by default. A shorter cap
+  // turned every 429 with Retry-After >= 9 s into an immediate failure.
+  providerMaxRetryDelayMs: Object.freeze({ minimum: 500, maximum: 60_000, fallback: 60_000 }),
 })
 
 function validThinkingLevel(value, fallback) {

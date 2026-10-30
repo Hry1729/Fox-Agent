@@ -1146,6 +1146,13 @@ impl GatewayPolicy {
         let budget = self.remaining_budget(database)?;
         tauri::async_runtime::block_on(async {
             let deadline = std::time::Instant::now() + budget;
+            // KB-1: the same cancellation and budget reach the worker itself,
+            // so dropping this future no longer leaves it running.
+            let probe_token = token.clone();
+            let control = crate::local_knowledge_vector::RetrievalControl::new(
+                Some(std::sync::Arc::new(move || probe_token.is_cancelled())),
+                Some(deadline),
+            );
             let mut request = Box::pin(super::execute_bound_knowledge_tool(
                 service.as_ref(),
                 client,
@@ -1153,6 +1160,7 @@ impl GatewayPolicy {
                 &bindings,
                 tool,
                 input,
+                control,
             ));
             loop {
                 token.check()?;

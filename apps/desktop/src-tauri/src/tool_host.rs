@@ -1764,14 +1764,22 @@ fn execute_spawn_spec(
     } else {
         format!("{}+{}", stdout.encoding, stderr.encoding)
     };
+    let (stdout_preview, stdout_preview_truncated) = command_details_preview(&stdout.text);
+    let (stderr_preview, stderr_preview_truncated) = command_details_preview(&stderr.text);
     let mut details = json!({
         "cwd": cwd,
         "exitCode": code,
         "timedOut": matches!(outcome, CommandOutcome::TimedOut),
         "cancelled": matches!(outcome, CommandOutcome::Cancelled(_)),
         "undrainedOutput": undrained,
-        "stdout": stdout.text,
-        "stderr": stderr.text,
+        // TB-2: the full retained output travels once, in the text body (and
+        // from there the Host blob store). `details` only carries a bounded
+        // head+tail preview for the command card, plus the exact byte counts.
+        "stdout": stdout_preview,
+        "stderr": stderr_preview,
+        "stdoutPreviewTruncated": stdout_preview_truncated,
+        "stderrPreviewTruncated": stderr_preview_truncated,
+        "outputPreviewBytes": COMMAND_DETAILS_PREVIEW_BYTES,
         "stdoutBytes": stdout.total_bytes,
         "stderrBytes": stderr.total_bytes,
         "outputDroppedBytes": dropped,
@@ -2615,6 +2623,26 @@ fn line_diff(old: &str, new: &str, path: &Path) -> String {
     output
 }
 
+/// TB-2: bytes of head and of tail kept in a command result's `details` preview.
+const COMMAND_DETAILS_PREVIEW_BYTES: usize = 4 * 1024;
+
+/// Head and tail (each at most `COMMAND_DETAILS_PREVIEW_BYTES`, cut on char
+/// boundaries) of one output stream, and whether the middle was left out.
+fn command_details_preview(text: &str) -> (String, bool) {
+    if text.len() <= COMMAND_DETAILS_PREVIEW_BYTES * 2 {
+        return (text.to_owned(), false);
+    }
+    let mut head_end = COMMAND_DETAILS_PREVIEW_BYTES;
+    while !text.is_char_boundary(head_end) { head_end -= 1; }
+    let mut tail_start = text.len() - COMMAND_DETAILS_PREVIEW_BYTES;
+    while !text.is_char_boundary(tail_start) { tail_start += 1; }
+    let omitted = tail_start - head_end;
+    (
+        format!("{}\n…[fox: 预览省略中间 {omitted} 字节，完整输出见结果正文]…\n{}", &text[..head_end], &text[tail_start..]),
+        true,
+    )
+}
+
 fn text_result(text: String, details: Value) -> Value {
     json!({
         "content": [{ "type": "text", "text": text }],
@@ -2843,12 +2871,47 @@ mod tests {
         .unwrap();
         let command = "node emit.js";
         let result = execute_command(command, &root, Duration::from_secs(60), None).unwrap();
-        let stdout = result["details"]["stdout"].as_str().unwrap();
+        let text = command_text(&result);
         let expected = ("abcdefgh".repeat(2000) + "\n").repeat(70).len();
         assert_eq!(result["details"]["stdoutBytes"].as_u64().unwrap() as usize, expected);
-        assert_eq!(stdout.len(), expected, "every byte is retained");
+        assert!(text.len() + 1 >= expected, "every byte is retained in the result body: {} < {expected}", text.len());
+        assert!(result["details"]["stdout"].as_str().unwrap().len() < expected, "details only carries a preview");
         assert_eq!(result["details"]["outputDroppedBytes"], 0);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tb2_run_command_details_keep_a_bounded_preview_not_a_second_full_copy() {
+        let root = project();
+        let script = root.join("emit.js");
+        fs::write(
+            &script,
+            "process.stdout.write('HEAD-MARK'+'x'.repeat(300000)+'TAIL-MARK'); process.stderr.write('small-stderr');",
+        )
+        .unwrap();
+        let result = execute_command("node emit.js", &root, Duration::from_secs(60), None).unwrap();
+        let text = command_text(&result);
+        assert!(text.contains("HEAD-MARK") && text.contains("TAIL-MARK"));
+        assert!(text.len() >= 300_018, "the body keeps the full retained output");
+        let preview = result["details"]["stdout"].as_str().unwrap();
+        assert!(preview.len() <= COMMAND_DETAILS_PREVIEW_BYTES * 2 + 200, "details preview is bounded: {}", preview.len());
+        assert!(preview.starts_with("HEAD-MARK") && preview.ends_with("TAIL-MARK"));
+        assert_eq!(result["details"]["stdoutPreviewTruncated"], true);
+        assert_eq!(result["details"]["stdoutBytes"], 300_018);
+        assert_eq!(result["details"]["stderr"], "small-stderr");
+        assert_eq!(result["details"]["stderrPreviewTruncated"], false);
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(serialized.len() < 300_018 + COMMAND_DETAILS_PREVIEW_BYTES * 3, "the output is not stored twice");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tb2_command_details_preview_cuts_on_char_boundaries() {
+        let text = "汉".repeat(COMMAND_DETAILS_PREVIEW_BYTES);
+        let (preview, truncated) = command_details_preview(&text);
+        assert!(truncated);
+        assert!(preview.starts_with('汉') && preview.ends_with('汉'));
+        assert_eq!(command_details_preview("short"), ("short".to_owned(), false));
     }
 
     #[test]

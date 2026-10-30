@@ -37,6 +37,7 @@ pub use models::*;
 /// uses it to decide whether omitted bytes are recoverable at all — one source
 /// of truth for "what Host keeps" instead of a duplicated literal.
 pub(crate) use repositories::MAX_STORED_TOOL_RESULT_BYTES;
+pub(crate) use repositories::bounded_tool_result_preview;
 #[allow(unused_imports)]
 pub use repositories::{
     now_ms, ActivateReadOnlyGraphInput, ActiveGraphNodeReviewRequest, AddEvidenceInput,

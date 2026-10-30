@@ -81,12 +81,12 @@ test('auto-spill: a near-64KiB result summary still keeps the outer files refere
   assert.equal(published.result.summary.complete, false)
 })
 
-test('no silent hard cap: an oversized result without a retrieval fact is kept whole', () => {
+test('TB-2 hard cap: an oversized result without a retrieval fact is cut and says it cannot be read back', () => {
   const result = { result: 'z'.repeat(140_000), files: [{ id: `compute-artifact:${'c'.repeat(64)}`, displayName: 'k.csv' }] }
-  const serialized = JSON.stringify(result)
   const view = normalizeFoxToolResultForPi('attachment_compute', result, { runId: 'run-1', toolCallId: 'call-3' })
-  // Without a Host storage fact nothing is dropped or character-cut.
-  assert.equal(view.details.outputTruncated, false)
-  assert.equal(view.content[0].text, serialized)
+  assert.equal(view.details.outputTruncated, true)
+  assert.ok(Buffer.byteLength(view.content[0].text, 'utf8') <= 64 * 1024 + 1024)
+  assert.ok(view.content[0].text.includes('无法取回'))
+  // The tail (where the artifact id sits) survives the cut.
   assert.ok(view.content[0].text.includes(result.files[0].id))
 })

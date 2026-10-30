@@ -465,3 +465,9 @@ test('O-D-02: the declared vocabulary names the serializer it was taken from', (
   assert.equal(built.sent.top_p, 0.9)
   assert.equal(built.passthrough.find((entry) => entry.field === 'top_p').channel, 'samplingParams')
 })
+
+test('MD-2 the provider retry delay cap honours a Retry-After of up to 60 seconds by default', () => {
+  const profile = resolveModelProfile({ contextWindow: 128_000, maxOutputTokens: 8_192 })
+  assert.equal(profile.runtime.providerMaxRetryDelayMs, 60_000)
+  assert.ok(profile.runtime.providerMaxRetryDelayMs >= 20_000, 'a 429 with Retry-After: 20 is retried, not failed')
+})

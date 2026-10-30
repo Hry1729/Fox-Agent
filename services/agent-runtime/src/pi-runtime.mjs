@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
 import { createFatalErrorHandler } from './runtime-fatal.mjs'
+import { abortAgent } from './agent-abort.mjs'
 import {
   DefaultResourceLoader,
   PI_PACKAGE_VERSION,
@@ -360,11 +361,13 @@ function retryPolicyForRun(payload, modelProfile) {
     0,
     5,
   )
-  const providerMaxRetryDelayMs = positiveBudgetValue(
+  // MD-2: the wait a provider asks for can never outlast the Run itself.
+  const runDurationCap = runBudgetForRequest(payload).maxDurationMs
+  const providerMaxRetryDelayMs = Math.min(positiveBudgetValue(
     host.providerMaxRetryDelayMs,
     profileRuntime.providerMaxRetryDelayMs,
     60_000,
-  )
+  ), Number.isSafeInteger(runDurationCap) && runDurationCap > 0 ? runDurationCap : 60_000)
   const turnMaxRetries = boundedRetryInt(
     host.turnMaxRetries,
     host.turnEnabled === true ? 1 : 0,
@@ -492,6 +495,22 @@ function configurationForRun(request) {
   return { modelService: config, executionProfile: profile }
 }
 
+// MD-5: once a prompt was acknowledged the request already has its response.
+// A later failure (including one from cleanup) ends the Run with a terminal
+// event; it never answers the same requestId a second time.
+function failAcknowledgedRun(request, slot, error) {
+  const control = slot.runControl
+  if (control?.mapper) {
+    control.mapper.fail(error)
+    return
+  }
+  runtimeEvent(request, control?.seq ?? { value: 1 }, 'run.failed', {
+    code: typeof error?.code === 'string' ? error.code : 'runtime.prompt_failed',
+    message: error instanceof Error ? error.message : String(error),
+    recoverable: true,
+  })
+}
+
 function cancelRuntimeRun(runId) {
   const run = activeRuns.get(runId)
   const slot = [...sessionRuns.values()].find(value => value.runId === runId)
@@ -503,7 +522,7 @@ function cancelRuntimeRun(runId) {
     run.cancelled = true
     run.mapper?.cancel()
     run.abort?.abort()
-    void Promise.resolve(run.agent?.abort()).catch(error => run.mapper?.fail(error))
+    abortAgent(run.agent, error => run.mapper?.fail(error))
   }
   cancelPendingHostRequests(runId)
   return Boolean(run || slot)
@@ -538,6 +557,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     request,
     seq,
   }
+  slot.runControl = runControl
   // Abort a Host request when either the run is cancelled or Pi's per-tool signal
   // fires. AbortSignal.any is available on the supported Node runtime.
   const runScopedSignal = (toolSignal) => {
@@ -553,7 +573,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     runControl.budgetError = error
     mapper?.fail(error)
     runAbort.abort(error)
-    runControl.agent?.abort()
+    abortAgent(runControl.agent)
     return error
   }
   const applyToolBudget = createToolBudget(runBudget, failRun)
@@ -1292,11 +1312,14 @@ async function handleRequest(request) {
             acknowledged = true
             await executePrompt(request, config, slot)
           } catch (error) {
-            if (acknowledged) throw error
-            respondFailure(request, error)
+            if (acknowledged) failAcknowledgedRun(request, slot, error)
+            else respondFailure(request, error)
           } finally {
             if (sessionRuns.get(request.runtimeSessionId) === slot) sessionRuns.delete(request.runtimeSessionId)
-            if (request.payload?.controlBinding?.executorRoute === 'pi_native') {
+            // CX-3: a prompt refused before acknowledgement was never a Run on
+            // this sidecar; releasing it would let the Host overwrite the real
+            // refusal with runtime.released_without_terminal.
+            if (acknowledged && request.payload?.controlBinding?.executorRoute === 'pi_native') {
               write(createEnvelope('event', 'run_released', {
                 conversationId: request.conversationId, runtimeSessionId: request.runtimeSessionId, runId: request.runId,
                 payload: { contextGeneration: session.contextGeneration ?? 1 },
@@ -1389,6 +1412,23 @@ process.on('unhandledRejection', (reason) => { handleFatal(reason, 'unhandledRej
 const kernelWorker = process.argv.includes('--kernel-worker') ? createKernelWorker(write) : null
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 if (kernelWorker) input.on('close', () => { void kernelWorker.close().catch(() => { process.exitCode = 1 }) })
+else input.on('close', () => { void shutdownOnHostGone() })
+
+// CX-1: stdin closing means the Host is gone (exit, crash or broken pipe).
+// Stop every Run and model stream now instead of spending tokens until the
+// next stdout write fails.
+async function shutdownOnHostGone() {
+  for (const opening of openingSessions.values()) opening.abort.abort()
+  const slots = [...sessionRuns.values()]
+  for (const slot of slots) cancelRuntimeRun(slot.runId)
+  for (const runId of [...activeRuns.keys()]) cancelRuntimeRun(runId)
+  cancelPendingHostRequests()
+  await Promise.race([
+    Promise.allSettled(slots.map(slot => slot.done)),
+    new Promise(resolve => setTimeout(resolve, 2000).unref()),
+  ])
+  process.exit(0)
+}
 input.on('line', (line) => {
   try {
     // Bounded normal Kernel frame (#14): 1 MiB of UTF-8 JSON per input line —

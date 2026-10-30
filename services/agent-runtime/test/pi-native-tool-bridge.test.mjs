@@ -654,3 +654,72 @@ test('raw argument digests are stable nested JSON, not SDK-prepared input', asyn
   assert.equal(digests[1], expected)
   assert.notEqual(digests[2], expected, 'array order remains part of the raw input identity')
 })
+
+// ── A2: TB-1 / TB-3 ─────────────────────────────────────────────────────────
+import { createToolCallIdNormalizer } from '../src/model-usage-runtime.mjs'
+import { NATIVE_TOOL_CALL_ID_REUSED } from '../src/pi-native-tool-bridge.mjs'
+
+const toolCallMessage = (...ids) => ({ role: 'assistant', content: ids.map((id, index) => ({
+  type: 'toolCall', id, name: 'read', arguments: { path: `f${index}` } })) })
+
+test('TB-1 the stream layer rewrites empty and per-turn repeated tool call ids', () => {
+  const normalizer = createToolCallIdNormalizer('run-a')
+  const first = normalizer.beginTurn({ messages: [] })
+  const turn1 = toolCallMessage('call_0', '')
+  first({ type: 'toolcall_start', contentIndex: 0, partial: turn1 })
+  first({ type: 'toolcall_start', contentIndex: 1, partial: turn1 })
+  first({ type: 'done', message: structuredClone(turn1) })
+  assert.equal(turn1.content[0].id, 'call_0')
+  assert.equal(turn1.content[1].id, 'fox-run-a-1-1')
+
+  // The next turn restarts at call_0 and also leaves an id empty.
+  const second = normalizer.beginTurn({ messages: [turn1] })
+  const turn2 = toolCallMessage('call_0', '')
+  second({ type: 'toolcall_start', contentIndex: 0, partial: turn2 })
+  second({ type: 'toolcall_end', contentIndex: 1, toolCall: turn2.content[1], partial: turn2 })
+  const copied = second({ type: 'done', message: toolCallMessage('call_0', '') }).message
+  assert.deepEqual(turn2.content.map(block => block.id), ['fox-run-a-2-0', 'fox-run-a-2-1'])
+  assert.deepEqual(copied.content.map(block => block.id), ['fox-run-a-2-0', 'fox-run-a-2-1'])
+
+  // A resumed session seeds the seen set from history.
+  const resumed = createToolCallIdNormalizer('run-b').beginTurn({ messages: [turn1, turn2] })
+  const turn3 = toolCallMessage('fox-run-a-2-0')
+  resumed({ type: 'done', message: turn3 })
+  assert.equal(turn3.content[0].id, 'fox-run-b-1-0')
+})
+
+test('TB-1 the bridge refuses a reused call id instead of replaying an earlier batch', async () => {
+  const requests = []
+  const bridge = createNativeToolBridge({ runId: 'run-r', contextGeneration: 1, requestHost: async (type, payload) => {
+    requests.push({ type, payload })
+    if (type === TOOL_BATCH_REGISTER) return { type: 'tool_batch.registered', payload: { batchId: `b${requests.length}`, registeredCalls: payload.calls.length } }
+    if (type === TOOL_CALL_CLOSE) return { type: 'tool_call.closed', payload: { closed: true, state: 'not_started' } }
+    return { type: 'ok', payload: {} }
+  } })
+  const turn1 = toolCallMessage('call_0')
+  await bridge.onEvent({ type: 'message_end', message: turn1 })
+  await bridge.onEvent({ type: 'turn_end', message: turn1 })
+  await bridge.drain()
+  await assert.rejects(() => bridge.beforeToolCall({ assistantMessage: toolCallMessage('call_0'), toolCall: { id: 'call_0' } }),
+    error => error.code === NATIVE_TOOL_CALL_ID_REUSED)
+  assert.throws(() => bridge.onEvent({ type: 'message_end', message: toolCallMessage('call_0', 'call_1') }),
+    error => error.code === NATIVE_TOOL_CALL_ID_REUSED)
+  assert.throws(() => bridge.onEvent({ type: 'message_end', message: toolCallMessage('') }),
+    error => error.code === NATIVE_TOOL_CALL_ID_REUSED)
+  assert.equal(requests.filter(request => request.type === TOOL_BATCH_REGISTER).length, 1)
+})
+
+test('TB-3 a Host refusal keeps its reason and code', async () => {
+  const bridge = createNativeToolBridge({ runId: 'run-x', contextGeneration: 1, requestHost: async () => ({
+    type: 'native_batch.refused',
+    payload: { isError: true, error: 'call id call_0 is held by an earlier Run', errorDetails: { code: 'native_batch.call_id_taken' } },
+  }) })
+  await assert.rejects(
+    () => bridge.beforeToolCall({ assistantMessage: toolCallMessage('call_0'), toolCall: { id: 'call_0' } }),
+    error => error.code === 'native_batch.call_id_taken' && /held by an earlier Run/.test(error.message)
+      && !/invalid tool_batch.register response/.test(error.message))
+  const plain = createNativeToolBridge({ runId: 'run-y', contextGeneration: 1, requestHost: async () => ({
+    type: 'native_batch.refused', payload: { isError: true, error: 'database is locked' } }) })
+  await assert.rejects(() => plain.beforeToolCall({ assistantMessage: toolCallMessage('c'), toolCall: { id: 'c' } }),
+    error => error.code === 'host.native_batch_refused' && error.hostReason === 'database is locked')
+})

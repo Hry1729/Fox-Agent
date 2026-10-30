@@ -90,6 +90,15 @@ pub fn local_knowledge_retrieval_worker_exit_code(
     let root = std::path::PathBuf::from(root);
     let request_json = request_json.to_string_lossy().into_owned();
     let zvec_resource_dir = zvec_resource_dir.map(std::path::PathBuf::from);
+    // KB-1: an orphaned worker (parent gone without a Job, or a hung native
+    // call) ends itself instead of holding the index and knowledge.db.
+    let _ = std::thread::Builder::new()
+        .name("fox-retrieval-watchdog".to_owned())
+        .spawn(|| {
+            std::thread::sleep(local_knowledge_vector::RETRIEVAL_WORKER_WATCHDOG);
+            eprintln!("[local_knowledge.worker_watchdog] retrieval worker exceeded its lifetime and exits");
+            std::process::exit(124);
+        });
     let result = match std::thread::Builder::new()
         .name("fox-retrieval-native".to_owned())
         .stack_size(32 * 1024 * 1024)
@@ -575,7 +584,11 @@ pub fn run() {
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
             app_handle.state::<kernel_state_publisher::KernelStatePublisher>().shutdown();
-            let _ = app_handle.state::<AppState>().runtime_host.shutdown();
+            // CX-2: shutdown already ran every step; its summary is the
+            // diagnostic record of what could not be cleaned up.
+            if let Err(error) = app_handle.state::<AppState>().runtime_host.shutdown() {
+                eprintln!("[fox.exit] runtime shutdown finished with errors: {error}");
+            }
             mcp::shutdown_connections();
             app_handle.state::<external_backend::ExternalBackendHost>().shutdown_blocking();
         }

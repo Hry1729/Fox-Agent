@@ -9851,6 +9851,12 @@ fn parse_json(value: &str) -> Value {
     serde_json::from_str(value).unwrap_or(Value::Null)
 }
 
+/// TB-2: the bounded copy a successful result travels as when it cannot be
+/// read back from its row (the same shape the row itself would hold).
+pub(crate) fn bounded_tool_result_preview(value: &Value) -> Value {
+    compact_tool_result(value)
+}
+
 fn compact_tool_result(value: &Value) -> Value {
     let Ok(serialized) = crate::canonical_json::to_string(value) else {
         return Value::Null;
