@@ -37,6 +37,8 @@ mod native_crash_integration_tests;
 mod native_business_integration_tests;
 #[cfg(test)]
 mod native_isolation_tests;
+#[cfg(test)]
+mod search_knowledge_agent_tests;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
@@ -9537,9 +9539,24 @@ async fn execute_bound_knowledge_tool(
             for target in &targets {
                 ensure_bound(target)?;
                 let value = if target.source == "local" {
-                    local_knowledge
-                        .search_lexical(&target.id, query, requested_limit, requested_max_chars)
-                        .map_err(|error| format!("[{}] {}", error.code(), error))?
+                    // Vector/hybrid retrieval is synchronous and may start the
+                    // retrieval worker process, so it runs on the blocking pool.
+                    let store = local_knowledge.clone();
+                    let knowledge_base_id = target.id.clone();
+                    let query = query.to_owned();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        store.search_for_agent(
+                            &knowledge_base_id,
+                            &query,
+                            requested_limit,
+                            requested_max_chars,
+                        )
+                    })
+                    .await
+                    .map_err(|error| {
+                        format!("[local_knowledge.search_failed] local knowledge search task failed: {error}")
+                    })?
+                    .map_err(|error| format!("[{}] {}", error.code(), error))?
                 } else {
                     let service = remote_service
                         .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
