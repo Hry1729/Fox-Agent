@@ -152,7 +152,7 @@ impl JobError {
 //   * `BackendAvailability` is only produced by a `BackendCapabilityProof`, and
 //     the proof is an **injected dependency** — a constructor argument or an
 //     instance field. There is no process-global proof. Production Host commands
-//     use `SrtHostBackend` (or a live snapshot of it); `HostVerifiedBackend` is
+//     use `FoxJobBackend` (or a live snapshot of it); `HostVerifiedBackend` is
 //     the refusing legacy proof used only by callers that have not adopted SRT.
 //   * Injection exists so tests and the `tests/` integration target can exercise
 //     the authorized path with a real child. The grant type `AvailableInTests`
@@ -178,11 +178,17 @@ pub enum ExecutionBackend {
     /// `@anthropic-ai/sandbox-runtime` for a Fox Agent Host command (Windows
     /// account isolation or the Unix bwrap / seatbelt backend).
     SrtHost,
+    /// A1: Fox's own command execution. The child runs as the current user in
+    /// a Fox Job (Windows Job Object / Unix process group): timeout, cancel and
+    /// whole-tree teardown, confirmed by the Job's active-process count. Not a
+    /// confinement boundary; the approval policy is what decides what may run.
+    FoxJob,
 }
 
 impl ExecutionBackend {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::FoxJob => "fox_job",
             Self::HostUserUnconfined => "host_user_unconfined",
             Self::SrtWindows => "srt_windows",
             Self::SrtHost => "srt_host",
@@ -312,7 +318,7 @@ impl BackendAvailability {
 /// test. Per-instance injection removes the shared mutable state instead of
 /// trying to schedule access to it.
 ///
-/// Production Host commands pass [`SrtHostBackend`] (or a snapshot guard over
+/// Production Host commands pass [`FoxJobBackend`] (or a snapshot guard over
 /// it); [`HostVerifiedBackend`] remains the refusing legacy proof. A test passes
 /// [`AvailableInTests`]. Because the proof
 /// is an argument rather than a global, a test cannot change another test's
@@ -323,7 +329,7 @@ pub trait BackendCapabilityProof: Send + Sync {
     fn availability(&self) -> BackendAvailability;
 }
 
-/// The legacy refusing proof. New production wiring uses [`SrtHostBackend`];
+/// The legacy refusing proof. New production wiring uses [`FoxJobBackend`];
 /// this type stays for tests and callers that have not integrated a confinement
 /// backend, and always refuses.
 pub struct HostVerifiedBackend;
@@ -385,17 +391,20 @@ impl BackendCapabilityProof for AvailableInTests {
 /// they were given. Kept because the wiring layer, `command_jobs`, and the
 /// capability report need a way to ask "what does the shipped artifact do?".
 pub fn execution_availability() -> BackendAvailability {
-    SrtHostBackend.availability()
+    FoxJobBackend.availability()
 }
 
-/// The real Fox Agent command backend. `HostVerifiedBackend` remains the
-/// deliberately refusing proof used by tests and by any caller that has not
-/// integrated a confinement backend; production Host commands use this one.
-pub struct SrtHostBackend;
+/// A1: the production command backend. Fox no longer wraps its commands in a
+/// sandbox; the proof states what the Host actually provides — lifecycle
+/// containment in a Fox Job — so it is always available, and its digest names
+/// that shape for the execution credential.
+pub struct FoxJobBackend;
 
-impl BackendCapabilityProof for SrtHostBackend {
+pub const FOX_JOB_BACKEND_DIGEST: &str = "fox-job:v1";
+
+impl BackendCapabilityProof for FoxJobBackend {
     fn availability(&self) -> BackendAvailability {
-        crate::host_sandbox::SrtHostBackend.availability()
+        BackendAvailability::Available { backend: ExecutionBackend::FoxJob, digest: FOX_JOB_BACKEND_DIGEST.to_owned() }
     }
 }
 
@@ -411,7 +420,7 @@ pub fn runtime_capabilities(manifest_hash: &str, profile_id: &str) -> serde_json
         "schemaVersion":1,"capabilityManifestHash":manifest_hash,"executionProfileId":profile_id,
         "tools":{"run_command":{
             "availability":state,"reasonCode":if availability.is_available(){None}else{Some("sandbox_unavailable")},
-            "reason":reason,"source":"SrtHostBackend",
+            "reason":reason,"source":"FoxJobBackend",
             "actions":{"start":state,"status":"available","output":"available","cancel":"available"}
         }}
     })
@@ -1558,6 +1567,48 @@ impl WindowsJob {
             Ok(())
         }
     }
+
+    /// Live processes in the Job (JobObjectBasicAccountingInformation).
+    pub(crate) fn active_processes(&self) -> io::Result<u32> {
+        use std::mem::{size_of, zeroed};
+        const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS: i32 = 1;
+        let mut information: JobObjectBasicAccountingInformation = unsafe { zeroed() };
+        let queried = unsafe {
+            QueryInformationJobObject(
+                self.handle,
+                JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS,
+                (&mut information as *mut JobObjectBasicAccountingInformation).cast(),
+                size_of::<JobObjectBasicAccountingInformation>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(information.active_processes)
+        }
+    }
+
+    /// A1: terminate the whole tree and confirm it is gone: the Job's
+    /// active-process count must reach zero within `wait`. A tree that is
+    /// still alive is an error, never reported as stopped.
+    pub(crate) fn terminate_and_confirm(&self, wait: std::time::Duration) -> io::Result<()> {
+        let terminated = self.terminate();
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let active = self.active_processes()?;
+            if active == 0 {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                terminated?;
+                return Err(io::Error::other(format!(
+                    "process tree still has {active} live process(es) after termination"
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1643,6 +1694,19 @@ struct JobObjectExtendedLimitInformation {
 
 #[cfg(windows)]
 #[repr(C)]
+struct JobObjectBasicAccountingInformation {
+    total_user_time: i64,
+    total_kernel_time: i64,
+    this_period_total_user_time: i64,
+    this_period_total_kernel_time: i64,
+    total_page_fault_count: u32,
+    total_processes: u32,
+    active_processes: u32,
+    total_terminated_processes: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
 struct ThreadEntry32 {
     size: u32,
     usage_count: u32,
@@ -1671,6 +1735,13 @@ extern "system" {
         process: isize,
     ) -> i32;
     fn TerminateJobObject(job: isize, exit_code: u32) -> i32;
+    fn QueryInformationJobObject(
+        job: isize,
+        information_class: i32,
+        information: *mut std::ffi::c_void,
+        information_length: u32,
+        return_length: *mut u32,
+    ) -> i32;
     fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> isize;
     fn Thread32First(snapshot: isize, entry: *mut ThreadEntry32) -> i32;
     fn Thread32Next(snapshot: isize, entry: *mut ThreadEntry32) -> i32;
@@ -2028,16 +2099,14 @@ pub struct ProcessJobManager {
 }
 
 impl ProcessJobManager {
-    /// Production-style constructor. It consults the real SRT proof; in unit
-    /// tests `SrtHostBackend` deliberately reports unavailable unless
-    /// `FOX_TEST_REAL_SRT=1`, so it still fails closed.
+    /// Production-style constructor over [`FoxJobBackend`].
     pub fn new(
         clock: Arc<dyn Clock>,
         spawner: Arc<dyn ProcessSpawner>,
         probe: Arc<dyn IdentityProbe>,
         config: ManagerConfig,
     ) -> Self {
-        Self::with_backend_proof(clock, spawner, probe, config, Arc::new(SrtHostBackend))
+        Self::with_backend_proof(clock, spawner, probe, config, Arc::new(FoxJobBackend))
     }
 
     /// Constructor with an explicit execution decision.

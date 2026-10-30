@@ -1415,12 +1415,8 @@ impl PolicyDecisionPort for GatewayPolicy {
         if tool == "task_repair_escalate_start" {
             return PolicyDecision::RequireApproval;
         }
-        // Availability precedes every approval, including declarative Hooks.
-        if tool == "run_command" {
-            if let Err(message) = crate::process_jobs::command_start_availability(input.as_ref().ok().and_then(|v| v["action"].as_str())) {
-                return PolicyDecision::Reject { code:"tool.sandbox_unavailable".into(), message };
-            }
-        }
+        // A1: Fox no longer gates commands on a sandbox backend; the command
+        // itself runs in a Fox Job and the approval policy decides below.
         if self.scope.lifecycle_hooks.iter().any(|hook| {
             hook.event == "before_tool"
                 && hook.action == "require_approval"
@@ -1525,7 +1521,7 @@ impl GatewayPolicy {
 mod revision_tests {
     use super::*;
     #[test]
-    fn o14_unavailable_command_refuses_before_any_approval_and_manage_remains_available() {
+    fn a1_kernel_gateway_commands_have_no_sandbox_gate_and_manage_remains_available() {
         use fox_engine_protocol::{FrozenPermission,TimeBudgets,ExecutionAuthority,ResourceExecutor};
         let root=std::env::temp_dir();
         for mode in [PermissionMode::Ask,PermissionMode::Allow] {
@@ -1537,8 +1533,8 @@ mod revision_tests {
                 scope:KernelHostScope{schema_version:1,tool_names:["run_command".into()].into_iter().collect(),mcp_server_hashes:Default::default(),
                     knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:vec![]},
                 database:None,sessions_dir:None,artifacts_dir:None};
-            let decision=policy.decide("r","t","run_command",&json!({"action":"start","command":"echo blocked"}).canonical_string());
-            assert!(matches!(decision,PolicyDecision::Reject{ref code,..} if code=="tool.sandbox_unavailable"),"{decision:?}");
+            let decision=policy.decide("r","t","run_command",&json!({"action":"start","command":"echo started"}).canonical_string());
+            assert!(!matches!(decision,PolicyDecision::Reject{ref code,..} if code=="tool.sandbox_unavailable"),"{decision:?}");
             for action in ["status","output","cancel"] {
                 assert!(matches!(policy.decide("r","m","run_command",&json!({"action":action,"jobId":"owned"}).canonical_string()),PolicyDecision::Allow));
             }

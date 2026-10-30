@@ -12,6 +12,8 @@ mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod external_backend;
+// A1: Fox commands no longer use SRT; removed in stage B.
+#[allow(dead_code)]
 mod host_sandbox;
 mod external_model;
 mod kernel;

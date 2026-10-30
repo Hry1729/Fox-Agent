@@ -468,16 +468,14 @@ pub fn execute_with_cancellation(
             timeout,
             ..
         } => {
-            // Fox Agent commands are the one path that gets Fox's SRT layer.
-            // The session is held for the whole call: settings/temp and the
-            // Windows ancestor ACE stay alive exactly as long as the child.
+            // A1: Fox runs its own commands directly, in a Fox Job (Windows
+            // Job Object / Unix process group). The command goes to the shell
+            // as one argument (`cmd.exe /D /S /C` / `sh -lc`), the working
+            // directory is a process-creation parameter, and no script file or
+            // session id exists. What may run is decided by the approval policy
+            // before this point.
             revalidate_target(&root, &cwd, Some(true))?;
-            let sandbox = crate::host_sandbox::HostSandbox::discover().map_err(|error|
-                ToolErrorCode::SandboxUnavailable.error(format!("{}: {}", error.code.as_str(), error.message)))?;
-            let wrapped = sandbox
-                .begin(&command, &cwd, &root, &sync_session_id())
-                .map_err(|error| ToolErrorCode::SandboxUnavailable.error(format!("{}: {}", error.code.as_str(), error.message)))?;
-            execute_spawn_spec(wrapped.spec.clone(), &cwd, timeout, cancellation, Some(&wrapped.declaration))
+            execute_command(&command, &cwd, timeout, cancellation)
         }
     }
 }
@@ -905,6 +903,12 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
     let mut staging = StagingGuard(Some(staging));
     let mut file = fs::OpenOptions::new().write(true).create_new(true).open(staging.path())
         .map_err(|e| ToolErrorCode::Unknown.error(format!("cannot stage file: {e}")))?;
+    // A1 / TX-4: the staged candidate is checked by its open handle before it
+    // is published, so a parent directory swapped for a link to somewhere
+    // outside the project is refused instead of written through.
+    let canonical_root = root.canonicalize().map_err(|e| ToolErrorCode::PermissionDenied.error(format!("project root is unavailable: {e}")))?;
+    crate::resource_gateway::verify_opened_path(&file, staging.path(), &canonical_root)
+        .map_err(|e| ToolErrorCode::PermissionDenied.error(format!("staged file left the project: {e}")))?;
     file.write_all(bytes).and_then(|_| file.sync_all())
         .map_err(|e| ToolErrorCode::Unknown.error(format!("cannot flush staged file: {e}")))?;
     drop(file);
@@ -969,6 +973,12 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         replace_existing_file_with_context(&candidate, path, expected, &file_version(bytes),
             cancellation, &mut context)?;
     }
+    // A1 / TX-4: and again after publication, by the handle of what now sits
+    // at the target path.
+    let published = fs::File::open(path).map_err(|e| ToolErrorCode::Unknown.error(format!("published file cannot be reopened: {e}")))?;
+    crate::resource_gateway::verify_opened_path(&published, path, &canonical_root)
+        .map_err(|e| ToolErrorCode::PermissionDenied.error(format!("published file is outside the project: {e}")))?;
+    drop(published);
     if let Some(context) = context.as_deref_mut() {
         context.mark_committed();
         context.record_committed(path).map_err(|error| format!(
@@ -1403,18 +1413,20 @@ impl CommandContainment {
     fn terminate(&mut self, child: &mut std::process::Child) {
         #[cfg(windows)]
         if let Some(job) = self.job.take() {
-            let _ = job.terminate();
+            let _ = job.terminate_and_confirm(TREE_CONFIRM_WAIT);
             drop(job);
         }
         terminate_process_tree(child);
     }
 
     fn close_after_parent_exit(&mut self) -> std::io::Result<()> {
+        // A1: the tree counts as cleaned up only when the Job reports zero
+        // active processes, not merely when TerminateJobObject returned.
         #[cfg(windows)]
         if let Some(job) = self.job.take() {
-            let terminated = job.terminate();
+            let confirmed = job.terminate_and_confirm(TREE_CONFIRM_WAIT);
             drop(job);
-            terminated?;
+            confirmed?;
         }
         // Same scope on Unix: descendants left running after the parent exits
         // would otherwise keep the output pipes open and outlive the tool call.
@@ -1425,6 +1437,10 @@ impl CommandContainment {
         Ok(())
     }
 }
+
+/// How long teardown waits for the Job's active-process count to reach zero.
+#[cfg(windows)]
+const TREE_CONFIRM_WAIT: Duration = Duration::from_secs(5);
 
 pub(crate) fn command_spawn_spec(
     command: &str,
@@ -1665,14 +1681,8 @@ pub(crate) fn run_contained_program(
     }
 }
 
-/// A unique sync session id that satisfies SRT's `[A-Za-z0-9_-]` rule.
-fn sync_session_id() -> String {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_nanos()).unwrap_or(0);
-    format!("sync-{}-{nanos}", std::process::id())
-}
-
 fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
-    execute_spawn_spec(command_spawn_spec(command, cwd), cwd, timeout, cancellation, None)
+    execute_spawn_spec(command_spawn_spec(command, cwd), cwd, timeout, cancellation)
 }
 
 fn execute_spawn_spec(
@@ -1680,7 +1690,6 @@ fn execute_spawn_spec(
     cwd: &Path,
     timeout: Duration,
     cancellation: Option<&crate::kernel::CancellationToken>,
-    sandbox: Option<&fox_agent_backend::sandbox::SandboxDeclaration>,
 ) -> Result<Value, String> {
     // The reader budget is process-wide, so the tests that measure it cannot run
     // against each other's reservations. Compiles out of the product build; in
@@ -1772,9 +1781,7 @@ fn execute_spawn_spec(
         "shell": if cfg!(windows) { "cmd.exe /D /S /C" } else { "sh -lc" },
         "platform": if cfg!(windows) { "windows" } else { "posix" },
         "outputEncoding": encoding,
-        "sandboxMechanism": sandbox.map(|declaration| declaration.mechanism.clone()).unwrap_or(None),
-        "sandboxMode": sandbox.map(|declaration| declaration.mode.as_str()),
-        "sandboxReadScope": sandbox.map(|declaration| declaration.read_scope.as_str()),
+        "execution": "fox_job",
     });
     if let Some(error_code) = error_code {
         if let Some(object) = details.as_object_mut() {
@@ -2159,6 +2166,25 @@ struct CapturedStream {
 /// decodable prefix and says so; anything else is decoded with the codepage the
 /// console is actually using instead of being silently replaced.
 fn decode_child_bytes(bytes: &[u8]) -> (String, String) {
+    if std::str::from_utf8(bytes).is_ok() || !bytes.contains(&b'\n') {
+        return decode_child_chunk(bytes);
+    }
+    // A1 / TX-13: one stream can mix UTF-8 (Python, Node) with the console code
+    // page (cmd built-ins). Decide per line, so one non-UTF-8 line no longer
+    // turns every UTF-8 line around it into mojibake.
+    let mut text = String::with_capacity(bytes.len());
+    let mut labels: Vec<String> = Vec::new();
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let (decoded, label) = decode_child_chunk(line);
+        text.push_str(&decoded);
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    (text, labels.join("+"))
+}
+
+fn decode_child_chunk(bytes: &[u8]) -> (String, String) {
     match std::str::from_utf8(bytes) {
         Ok(text) => (text.to_owned(), "utf-8".to_owned()),
         Err(error) if error.error_len().is_none() => {
@@ -2840,81 +2866,69 @@ mod tests {
     }
 
     #[test]
-    fn synchronous_host_commands_require_a_verified_backend() {
+    fn a1_synchronous_host_commands_run_directly_in_a_fox_job() {
         let root = project();
-        let action = prepare("run_command", &json!({"command":"echo unsafe > should-not-exist.txt"}), root.to_str().unwrap()).unwrap();
-        let error = execute(action).unwrap_err();
-        assert!(error.contains("sandbox_unavailable"));
-        assert!(!root.join("should-not-exist.txt").exists());
+        let action = prepare("run_command", &json!({"command":"echo ran> ran.txt"}), root.to_str().unwrap()).unwrap();
+        let result = execute(action).expect("the command runs without a sandbox backend");
+        assert!(root.join("ran.txt").exists());
+        assert_eq!(result["details"]["execution"], "fox_job");
+        assert_eq!(result["details"]["shell"], if cfg!(windows) { "cmd.exe /D /S /C" } else { "sh -lc" });
+        assert!(result["details"].get("sandboxMechanism").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// The end-to-end Host command path under the explicitly enabled real
-    /// SRT test. Unlike the helper test in host_sandbox, this goes through
-    /// prepare -> revalidate -> HostSandbox -> execute_spawn_spec.
-    #[cfg(windows)]
+    /// TX-3 / TX-9: no batch file. A Chinese working directory is a
+    /// process-creation parameter, and `%` keeps its command-line meaning.
     #[test]
-    fn real_srt_host_command_tool_is_confined_to_the_project() {
-        if std::env::var("FOX_TEST_REAL_SRT").ok().as_deref() != Some("1") {
-            eprintln!("skipped: set FOX_TEST_REAL_SRT=1 to run the real SRT tool check");
-            return;
-        }
+    fn a1_host_command_keeps_cmd_semantics_and_a_chinese_working_directory() {
         let root = project();
-        let outside_name = format!("fox-tool-srt-outside-{}.txt", std::process::id());
-        let outside = root.parent().unwrap().join(&outside_name);
-        let _ = fs::remove_file(&outside);
-        let command = format!("whoami > who.txt & echo outside > \"..\\{outside_name}\"");
-        let action = prepare("run_command", &json!({"command": command, "timeoutSeconds": 30}), root.to_str().unwrap()).unwrap();
-        let result = execute(action).expect("the real SRT command path");
-        assert_eq!(result["details"]["sandboxMechanism"], "srt");
-        assert_eq!(result["details"]["sandboxMode"], "sandboxed");
-        let who = fs::read_to_string(root.join("who.txt")).expect("whoami output");
-        assert!(who.to_ascii_lowercase().contains("srt-sandbox"), "not the SRT account: {who:?}");
-        assert!(!outside.exists(), "write outside the project reached the Host: {}", outside.display());
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_file(outside);
+        let chinese = root.join("毕业设计");
+        fs::create_dir_all(&chinese).unwrap();
+        let action = prepare("run_command", &json!({"command":"echo 100%> 说明.txt", "cwd":"毕业设计"}), root.to_str().unwrap()).unwrap();
+        execute(action).expect("command in a Chinese directory");
+        let written = fs::read_to_string(chinese.join("说明.txt")).expect("file written in the Chinese cwd");
+        assert_eq!(written.trim(), "100%");
+        fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(windows)]
     #[test]
-    fn real_srt_host_command_timeout_terminates_the_sandboxed_tree() {
-        if std::env::var("FOX_TEST_REAL_SRT").ok().as_deref() != Some("1") {
-            eprintln!("skipped: set FOX_TEST_REAL_SRT=1 to run the real SRT timeout check");
-            return;
-        }
-        let root = project();
-        let action = prepare("run_command", &json!({"command":"ping -n 30 127.0.0.1 > NUL", "timeoutSeconds": 2}), root.to_str().unwrap()).unwrap();
-        let started = Instant::now();
-        let result = execute(action).expect("the wrapped command returns a timeout result");
-        assert!(started.elapsed() < Duration::from_secs(20), "the SRT job must be bounded");
-        assert_eq!(result["details"]["timedOut"], true);
-        assert_eq!(result["details"]["sandboxMechanism"], "srt");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn real_srt_host_command_cancellation_stops_the_sandboxed_tree() {
+    fn a1_host_command_timeout_and_cancellation_clean_up_the_whole_tree() {
         use crate::kernel::CancellationPort;
-        if std::env::var("FOX_TEST_REAL_SRT").ok().as_deref() != Some("1") {
-            eprintln!("skipped: set FOX_TEST_REAL_SRT=1 to run the real SRT cancellation check");
-            return;
-        }
         let root = project();
+        let sleeper = if cfg!(windows) { "ping -n 30 127.0.0.1 > NUL" } else { "sleep 30" };
+        let action = prepare("run_command", &json!({"command": sleeper, "timeoutSeconds": 1}), root.to_str().unwrap()).unwrap();
+        let started = Instant::now();
+        let result = execute(action).expect("a timeout is a result");
+        assert!(started.elapsed() < Duration::from_secs(20), "the Fox Job must be bounded");
+        assert_eq!(result["details"]["timedOut"], true);
+
         let registry = crate::kernel::CancellationRegistry::default();
         registry.register_run("r").unwrap();
-        let token = registry.tool_token("r", "srt-cancel").unwrap();
-        let action = prepare("run_command", &json!({"command":"echo started>started.txt & ping -n 30 127.0.0.1 > NUL", "timeoutSeconds": 60}), root.to_str().unwrap()).unwrap();
+        let token = registry.tool_token("r", "a1-cancel").unwrap();
+        let command = if cfg!(windows) { "echo started>started.txt & ping -n 30 127.0.0.1 > NUL" } else { "echo started>started.txt; sleep 30" };
+        let action = prepare("run_command", &json!({"command": command, "timeoutSeconds": 60}), root.to_str().unwrap()).unwrap();
         let worker = thread::spawn(move || execute_with_cancellation(action, Some(&token)));
         let deadline = Instant::now() + Duration::from_secs(10);
         while !root.join("started.txt").exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(root.join("started.txt").exists(), "the sandboxed command must start before cancellation");
-        registry.request_tool_cancel("r", "srt-cancel");
+        assert!(root.join("started.txt").exists(), "the command must start before cancellation");
+        registry.request_tool_cancel("r", "a1-cancel");
         let error = worker.join().unwrap().unwrap_err();
         assert!(error.contains("tool.cancelled"), "{error}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// TX-13: mixed UTF-8 and code-page lines decode line by line.
+    #[test]
+    fn a1_mixed_output_decodes_line_by_line() {
+        let mut bytes = "第一行 utf8\n".as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xC4, 0xE3, 0xBA, 0xC3, b'\n']);
+        bytes.extend_from_slice("最后一行\n".as_bytes());
+        let (text, label) = decode_child_bytes(&bytes);
+        assert!(text.starts_with("第一行 utf8\n"), "{text}");
+        assert!(text.ends_with("最后一行\n"), "{text}");
+        assert!(label.starts_with("utf-8+"), "{label}");
     }
 
     #[test]

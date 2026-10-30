@@ -12,6 +12,9 @@ const ALLOWED_PARENT_ENV: &[&str] = &[
     "OS", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "CARGO_HOME", "RUSTUP_HOME",
     "VCPKG_ROOT", "VSINSTALLDIR", "VCINSTALLDIR", "WindowsSdkDir", "INCLUDE",
     "LIB", "LIBPATH",
+    // A1: commands run directly as the user, so the user's own HOME (git,
+    // ssh, npm), PowerShell module path and proxy settings come along.
+    "HOME", "PSModulePath", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
 ];
 
 #[cfg(not(windows))]
@@ -88,6 +91,19 @@ mod tests {
         std::env::remove_var("FOX_TEST_SECRET_TOKEN");
         assert!(!environment.iter().any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("FOX_TEST_SECRET_TOKEN")));
         assert!(environment.iter().any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a1_windows_commands_inherit_home_psmodulepath_and_proxies() {
+        for name in ["HOME", "PSModulePath", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"] {
+            assert!(canonical_allowed_name(name).is_some(), "{name}");
+        }
+        std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:7890");
+        let environment = inherited_environment();
+        std::env::remove_var("HTTPS_PROXY");
+        assert!(environment.iter().any(|(key, value)| key.to_string_lossy().eq_ignore_ascii_case("HTTPS_PROXY")
+            && value.to_string_lossy() == "http://127.0.0.1:7890"));
     }
 
     #[test]

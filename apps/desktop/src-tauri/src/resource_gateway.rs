@@ -173,7 +173,7 @@ fn is_ignored_name(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn verify_opened_path(file: &File, _requested: &Path, root: &Path) -> Result<(), String> {
+pub(crate) fn verify_opened_path(file: &File, _requested: &Path, root: &Path) -> Result<(), String> {
     use std::os::windows::{io::AsRawHandle, ffi::OsStringExt};
     use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED}};
     let mut buffer = vec![0u16; 32_768];
@@ -185,7 +185,7 @@ fn verify_opened_path(file: &File, _requested: &Path, root: &Path) -> Result<(),
 }
 
 #[cfg(not(windows))]
-fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> Result<(), String> {
+pub(crate) fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     let opened = file.metadata().map_err(|error| error.to_string())?;
     let canonical = requested.canonicalize().map_err(|error| error.to_string())?;

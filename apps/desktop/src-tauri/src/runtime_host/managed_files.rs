@@ -854,6 +854,68 @@ pub(crate) trait RestoreFaultSeam: Send + Sync {
 pub(crate) struct NoRestoreFault;
 impl RestoreFaultSeam for NoRestoreFault {}
 
+/// The canonical project root a restore may write under, after creating the
+/// target's missing folders level by level beneath it.
+fn restore_root_and_folders(database: &Database, conversation_id: &str, target: &Path) -> Result<PathBuf, String> {
+    let (project_root, _) = database
+        .conversation_project_access(conversation_id)?
+        .ok_or("restore refused: this conversation no longer has an authorized project folder")?;
+    let raw_root = PathBuf::from(&project_root);
+    let root = fs::canonicalize(&raw_root)
+        .map_err(|error| format!("restore refused: the project folder is unavailable: {error}"))?;
+    let relative = target
+        .strip_prefix(&root)
+        .or_else(|_| target.strip_prefix(&raw_root))
+        .map_err(|_| "restore refused: the recorded file is outside the authorized project folder".to_owned())?;
+    let mut components = relative.components().collect::<Vec<_>>();
+    components.pop();
+    let mut current = root.clone();
+    for component in components {
+        match component {
+            std::path::Component::Normal(name) => current.push(name),
+            _ => return Err("restore refused: the recorded path is not a plain project path".into()),
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => ensure_plain_directory(&current, &metadata)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|error| format!("cannot recreate the target folder: {error}"))?;
+                let metadata = fs::symlink_metadata(&current).map_err(|error| error.to_string())?;
+                ensure_plain_directory(&current, &metadata)?;
+            }
+            Err(error) => return Err(format!("cannot inspect the target folder: {error}")),
+        }
+        let resolved = fs::canonicalize(&current).map_err(|error| error.to_string())?;
+        if !resolved.starts_with(&root) {
+            return Err("restore refused: a folder on the way resolves outside the project".into());
+        }
+    }
+    // The recorded identity must still be what the path resolves to now.
+    let relative_text = relative.to_string_lossy();
+    let identity = crate::tool_host::canonical_file_identity(&root, &relative_text)?;
+    if Path::new(&identity) != root.join(relative) {
+        return Err("restore refused: the recorded file no longer resolves to the same project path".into());
+    }
+    Ok(root)
+}
+
+fn ensure_plain_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!("restore refused: {} is a junction or symbolic link", path.display()));
+        }
+    }
+    if metadata.file_type().is_symlink() {
+        return Err(format!("restore refused: {} is a symbolic link", path.display()));
+    }
+    if !metadata.is_dir() {
+        return Err(format!("restore refused: {} is not a folder", path.display()));
+    }
+    Ok(())
+}
+
 fn restore_intent_digest(conversation_id: &str, version_id: &str, force: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"fox.restore.intent.v1");
@@ -1015,21 +1077,21 @@ pub(crate) fn restore_version_with_seam(
         registered_version_id: None,
         seam,
     };
-    let root = target
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    if let Some(parent) = target.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            let message = format!("cannot recreate the target folder: {error}");
+    // A1 / DL-1: the restore is anchored at the conversation's CURRENT
+    // authorized project root, never at whatever the target's parent resolves
+    // to today. Missing folders are created one level at a time, and a level
+    // that is (or becomes) a symbolic link or junction is refused.
+    let root = match restore_root_and_folders(database, conversation_id, &target) {
+        Ok(root) => root,
+        Err(message) => {
             database.settle_restore_request(
-                conversation_id, request_id, &attempt_owner, "indeterminate", Some(&message),
+                conversation_id, request_id, &attempt_owner, "not_applied", Some(&message),
             ).map_err(|settle| format!(
                 "in_progress_or_uncertain: restore setup and settlement failed: {message}; {settle}"
             ))?;
             return Err(message);
         }
-    }
+    };
     let expected = baseline.clone().unwrap_or_else(|| "missing".to_owned());
     let commit = crate::tool_host::atomic_write_with_context_mode(
         &root,
@@ -1429,16 +1491,17 @@ mod tests {
             let db_path =
                 std::env::temp_dir().join(format!("fox-managed-test-{}.db", uuid::Uuid::new_v4()));
             let db = Database::open(db_path.clone()).expect("open test database");
-            let conversation = db
-                .create_conversation("fox-general", None, None, None)
-                .expect("create conversation")
-                .id;
             let root = std::env::temp_dir().join(format!(
                 "fox-managed-root-{}-{}",
                 std::process::id(),
                 uuid::Uuid::new_v4()
             ));
             fs::create_dir_all(&root).unwrap();
+            // A1 / DL-1: a restore is anchored at the conversation's project.
+            let conversation = db
+                .create_conversation("fox-general", None, Some(root.to_str().unwrap()), Some("ask"))
+                .expect("create conversation")
+                .id;
             let backups = root.join("_backups");
             Self {
                 db,
@@ -2301,6 +2364,31 @@ mod tests {
             restored.before_hash.is_none(),
             "nothing to safety-back up when the file was gone"
         );
+    }
+
+    /// A1 / DL-1: a folder swapped for a link out of the project is refused,
+    /// even with force, and nothing is written outside.
+    #[test]
+    fn a1_restore_refuses_a_folder_replaced_by_a_link() {
+        let harness = Harness::new();
+        fs::create_dir_all(harness.root.join("x")).unwrap();
+        harness.write_file("x/evil.txt", "original bytes");
+        let first = harness.recorded_write("run-1", "x/evil.txt", "first edit");
+        let outside = std::env::temp_dir().join(format!("fox-a1-outside-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&outside).unwrap();
+        fs::remove_dir_all(harness.root.join("x")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, harness.root.join("x")).unwrap();
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd").args(["/C", "mklink", "/J"])
+                .arg(harness.root.join("x")).arg(&outside).status().unwrap();
+            assert!(status.success(), "mklink /J");
+        }
+        let error = harness.restore(&first, true).unwrap_err();
+        assert!(error.contains("restore refused"), "{error}");
+        assert!(!outside.join("evil.txt").exists(), "nothing may be written through the link");
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]

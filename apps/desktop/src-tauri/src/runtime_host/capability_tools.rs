@@ -116,6 +116,7 @@ pub enum PreparedCapabilityTool {
         preview: ToolPreview,
     },
     SqliteRead {
+        root: PathBuf,
         path: PathBuf,
         query: String,
         parameters: Vec<rusqlite::types::Value>,
@@ -237,7 +238,8 @@ pub(super) enum StructuredAction {
 #[derive(Debug, Clone)]
 pub(super) enum DataInput {
     Inline(String),
-    File(PathBuf),
+    /// A project file and the canonical project root it must stay inside.
+    File(PathBuf, PathBuf),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -346,13 +348,22 @@ pub fn execute(action: PreparedCapabilityTool) -> Result<Value, String> {
             ..
         } => execute_system_info(include_processes, max_processes, include_environment),
         PreparedCapabilityTool::SqliteRead {
+            root,
             path,
             query,
             parameters,
             row_limit,
             timeout,
             ..
-        } => execute_sqlite_read(&path, &query, &parameters, row_limit, timeout),
+        } => {
+            // A1 / TX-4: open first, verify the handle, then query a private
+            // snapshot copied from that handle. Nothing reopens the path by
+            // name after the check.
+            let snapshot = private_sqlite_snapshot(&path, &root)?;
+            let result = execute_sqlite_read(snapshot.path(), &query, &parameters, row_limit, timeout);
+            drop(snapshot);
+            result
+        }
         PreparedCapabilityTool::StructuredData {
             action,
             input,
@@ -691,6 +702,7 @@ fn prepare_sqlite_read(
             command: Some(query.clone()),
             cwd: Some(root.display().to_string()),
         },
+        root,
         path,
         query,
         parameters,
@@ -855,6 +867,11 @@ fn prepare_test_run(input: &Value, project_root: &str) -> Result<PreparedCapabil
     let runner = optional_string(input, "runner").unwrap_or_else(|| "auto".to_owned());
     let script = optional_string(input, "script");
     let target = optional_string(input, "target");
+    // A1 / TX-12: a target is a test selector, never an option to the runner
+    // (`--config=build.rustc-wrapper=...` would run an arbitrary program).
+    if target.as_deref().is_some_and(|target| target.trim_start().starts_with('-')) {
+        return Err("test_run target must not start with '-': it selects tests and cannot pass options to the runner".to_owned());
+    }
     let (program, args) = test_command(&cwd, &runner, script.as_deref(), target.as_deref())?;
     prepare_process(
         "test_run",
@@ -1908,6 +1925,42 @@ fn execute_system_info(
             "environmentAllowlist": ["NODE_ENV", "PATH", "HOME", "TEMP", "TMP", "USERPROFILE", "SHELL", "COMSPEC"],
         },
     }))
+}
+
+const MAX_SQLITE_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Open a project file and prove, by its handle, that it is inside the
+/// project root (shared by sqlite_read and tabular_data / structured_data).
+fn open_verified_project_file(path: &Path, root: &Path) -> Result<fs::File, String> {
+    let file = fs::File::open(path).map_err(|error| format!("failed to open project file: {error}"))?;
+    crate::resource_gateway::verify_opened_path(&file, path, root)?;
+    Ok(file)
+}
+
+struct PrivateSnapshot(PathBuf);
+impl PrivateSnapshot {
+    fn path(&self) -> &Path { &self.0 }
+}
+impl Drop for PrivateSnapshot {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn private_sqlite_snapshot(path: &Path, root: &Path) -> Result<PrivateSnapshot, String> {
+    let mut source = open_verified_project_file(path, root)?;
+    let size = source.metadata().map_err(|error| error.to_string())?.len();
+    if size > MAX_SQLITE_SNAPSHOT_BYTES {
+        return Err("sqlite_read database exceeds the 256 MiB snapshot limit".to_owned());
+    }
+    let directory = env::temp_dir().join("fox-sqlite-snapshots");
+    fs::create_dir_all(&directory).map_err(|error| format!("failed to prepare SQLite snapshot: {error}"))?;
+    let snapshot = PrivateSnapshot(directory.join(format!("{}.sqlite", uuid::Uuid::new_v4())));
+    let mut target = fs::OpenOptions::new().write(true).create_new(true).open(snapshot.path())
+        .map_err(|error| format!("failed to prepare SQLite snapshot: {error}"))?;
+    std::io::copy(&mut (&mut source).take(MAX_SQLITE_SNAPSHOT_BYTES + 1), &mut target)
+        .map_err(|error| format!("failed to snapshot SQLite database: {error}"))?;
+    Ok(snapshot)
 }
 
 fn execute_sqlite_read(
@@ -3011,6 +3064,8 @@ fn package_script_command(cwd: &Path, script: &str) -> (String, Vec<String>) {
 /// no optional lock writes, no pager.
 const GIT_HARDENED_ENV: &[(&str, &str)] = &[
     ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" }),
+    ("GIT_CONFIG_SYSTEM", if cfg!(windows) { "NUL" } else { "/dev/null" }),
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_OPTIONAL_LOCKS", "0"),
     ("GIT_PAGER", "cat"),
@@ -3022,7 +3077,6 @@ const GIT_HARDENED_ENV: &[(&str, &str)] = &[
 /// hooks, external diff, pager, signature verification and hooks.
 const GIT_FIXED_OVERRIDES: &[&str] = &[
     "core.fsmonitor=false",
-    "core.hooksPath=",
     "core.pager=cat",
     "diff.external=",
     "log.showSignature=false",
@@ -3038,14 +3092,98 @@ fn git_safety_overrides(root: &Path) -> Result<Vec<String>, String> {
         args.push("-c".to_owned());
         args.push((*value).to_owned());
     }
-    let mut discover = args.clone();
-    discover.extend(["config", "--null", "--name-only", "--list"].map(str::to_owned));
-    let listed = run_process_with_env("git", &discover, root, Duration::from_secs(20), GIT_HARDENED_ENV)?;
-    if listed.exit_code != Some(0) {
-        return Err(format!("Git config could not be read: {}", listed.stderr.trim()));
-    }
-    args.extend(git_driver_overrides(&listed.stdout));
+    // A1 / TX-2: hooks point at the null device, and the repository's own
+    // config is read here, in process, instead of by a second `git config`
+    // process. git_read therefore starts exactly one git process, and global
+    // and system config are switched off for it (`GIT_HARDENED_ENV`).
+    args.push("-c".to_owned());
+    args.push(format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" }));
+    let names = repository_config_names(root)?;
+    args.extend(git_driver_overrides(&names));
     Ok(args)
+}
+
+/// Every `section.subsection.key` name in the repository's config files
+/// (`config`, `config.worktree`, the common dir of a linked worktree and their
+/// `include.path` / `includeIf.*.path` files), NUL-separated like
+/// `git config --null --name-only --list`. Parsing only: nothing executes.
+fn repository_config_names(root: &Path) -> Result<String, String> {
+    let dot_git = root.join(".git");
+    let git_dir = if dot_git.is_file() {
+        let text = fs::read_to_string(&dot_git).map_err(|error| format!("Git directory could not be read: {error}"))?;
+        let pointer = text.lines().find_map(|line| line.trim().strip_prefix("gitdir:")).map(str::trim)
+            .ok_or("Git directory pointer is malformed")?;
+        let pointer = Path::new(pointer);
+        if pointer.is_absolute() { pointer.to_path_buf() } else { root.join(pointer) }
+    } else if dot_git.is_dir() {
+        dot_git
+    } else {
+        return Ok(String::new());
+    };
+    let mut files = vec![git_dir.join("config"), git_dir.join("config.worktree")];
+    if let Ok(common) = fs::read_to_string(git_dir.join("commondir")) {
+        let common = Path::new(common.trim());
+        let common = if common.is_absolute() { common.to_path_buf() } else { git_dir.join(common) };
+        files.push(common.join("config"));
+    }
+    let mut names = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(file) = files.pop() {
+        if names.len() > 10_000 || !seen.insert(file.clone()) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&file) else { continue };
+        for (name, value) in parse_git_config(&text) {
+            let lower = name.to_ascii_lowercase();
+            if lower == "include.path" || (lower.starts_with("includeif.") && lower.ends_with(".path")) {
+                let include = Path::new(value.trim());
+                files.push(if include.is_absolute() { include.to_path_buf() } else { file.parent().unwrap_or(&git_dir).join(include) });
+            }
+            names.push(name);
+        }
+    }
+    Ok(names.join("\0"))
+}
+
+/// Minimal git-config reader: `[section]`, `[section "sub"]`, `[section.sub]`
+/// and `key = value` lines. Returns `(section.sub.key, value)`.
+fn parse_git_config(text: &str) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut section = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let mut rest = line;
+        if line.starts_with('[') {
+            let Some(end) = line.find(']') else { continue };
+            let header = &line[1..end];
+            section = match header.split_once(char::is_whitespace) {
+                Some((name, sub)) => {
+                    let sub = sub.trim().trim_matches('"').replace("\\\"", "\"").replace("\\\\", "\\");
+                    format!("{}.{}", name.trim(), sub)
+                }
+                None => header.trim().to_owned(),
+            };
+            rest = line[end + 1..].trim();
+            if rest.is_empty() {
+                continue;
+            }
+        }
+        if section.is_empty() {
+            continue;
+        }
+        let (key, value) = match rest.split_once('=') {
+            Some((key, value)) => (key.trim(), value.trim().trim_matches('"').to_owned()),
+            None => (rest.trim(), "true".to_owned()),
+        };
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            continue;
+        }
+        entries.push((format!("{section}.{key}"), value));
+    }
+    entries
 }
 
 fn git_driver_overrides(config_names_nul: &str) -> Vec<String> {
@@ -3233,7 +3371,7 @@ fn prepare_data_input(input: &Value, project_root: Option<&str>) -> Result<DataI
             if metadata.len() > MAX_INLINE_DATA_BYTES as u64 {
                 return Err("data file exceeds the 4 MiB limit".to_owned());
             }
-            Ok(DataInput::File(path))
+            Ok(DataInput::File(path, root))
         }
     }
 }
@@ -3242,15 +3380,24 @@ impl DataInput {
     fn label(&self) -> String {
         match self {
             Self::Inline(data) => format!("内联数据（{} 字节）", data.len()),
-            Self::File(path) => path.display().to_string(),
+            Self::File(path, _) => path.display().to_string(),
         }
     }
 
     fn read(&self) -> Result<(String, Option<DataFormat>), String> {
         match self {
             Self::Inline(data) => Ok((data.clone(), None)),
-            Self::File(path) => {
-                let source = fs::read_to_string(path)
+            Self::File(path, root) => {
+                // A1 / TX-4: read through the verified handle, never by name
+                // after the check.
+                let file = open_verified_project_file(path, root)?;
+                let mut bytes = Vec::new();
+                file.take(MAX_INLINE_DATA_BYTES as u64 + 1).read_to_end(&mut bytes)
+                    .map_err(|error| format!("failed to read data file: {error}"))?;
+                if bytes.len() > MAX_INLINE_DATA_BYTES {
+                    return Err("data file exceeds the 4 MiB limit".to_owned());
+                }
+                let source = String::from_utf8(bytes)
                     .map_err(|error| format!("failed to read data file: {error}"))?;
                 let inferred = path
                     .extension()
