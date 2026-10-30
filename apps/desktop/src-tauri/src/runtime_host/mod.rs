@@ -40,6 +40,8 @@ mod native_business_integration_tests;
 mod native_isolation_tests;
 #[cfg(test)]
 mod search_knowledge_agent_tests;
+#[cfg(test)]
+mod cx2_shutdown_tests;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
