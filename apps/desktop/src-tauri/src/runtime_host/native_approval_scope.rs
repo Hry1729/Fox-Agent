@@ -50,7 +50,7 @@ mod tests {
         if std::env::var(CHILD).as_deref() == Ok(test) { return false; }
         let mut command=Command::new(std::env::current_exe().unwrap());
         command.args([test,"--exact","--nocapture","--test-threads=1"])
-            .env(CHILD,test).env("FOX_KERNEL_MODE","authoritative").env("FOX_EXECUTOR_ROUTE","pi_native")
+            .env(CHILD,test).env("FOX_KERNEL_MODE","authoritative")
             .stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
