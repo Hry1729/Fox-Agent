@@ -310,3 +310,20 @@ describe('run failure JSON-RPC error data diagnostic', () => {
     expect(diagnosticTitle('session_failed')).toBe('后端 stderr 尾部（已脱敏，最多 4 KiB；会话打开失败）：')
   })
 })
+
+describe('A0 retired Kernel execution path', () => {
+  test('an interrupted historical Kernel Run reads as interrupted and points to a new Run', () => {
+    const failures = deriveRunFailures({
+      persistedRuns: [persistedRun({ id: 'run-kernel', status: 'interrupted', errorCode: 'executor_route_retired', errorMessage: '执行路径已退役' })],
+    })
+    expect(failures.get('run-kernel')).toEqual({ kind: 'interrupted', code: 'executor_route_retired', message: '执行路径已退役。已中断，可在新 Run 中继续' })
+    expect(runFailureDetailText(failures.get('run-kernel')!)).toBe('executor_route_retired: 执行路径已退役。已中断，可在新 Run 中继续')
+  })
+
+  test('the hint survives a row without a stored reason', () => {
+    const failures = deriveRunFailures({
+      persistedRuns: [persistedRun({ id: 'run-kernel', status: 'interrupted', errorCode: 'executor_route_retired', errorMessage: null })],
+    })
+    expect(failures.get('run-kernel')?.message).toBe('执行路径已退役。已中断，可在新 Run 中继续')
+  })
+})
