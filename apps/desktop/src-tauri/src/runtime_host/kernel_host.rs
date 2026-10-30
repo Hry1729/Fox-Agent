@@ -1892,7 +1892,8 @@ impl super::RuntimeHost {
             state.kernel_wake_inflight.insert(run_id.to_owned());
         }
         let _wake_inflight=WakeInflight {host:self,run_id:run_id.to_owned()};
-        if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs") {
+        if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs")
+            || self.database.run_executor_route_retired(run_id)? {
             return Ok(false);
         }
         let (park_seq, _) = self.database.kernel_waiting_park(run_id)?;
