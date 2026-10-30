@@ -5,8 +5,8 @@ use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, RunControlBinding};
 /// A frozen binding always wins: a process-level setting must never reinterpret
 /// an existing Run. New Runs always use the Authoritative contract. The former
 /// `FOX_KERNEL_MODE` process switch no longer selects a new Run's execution
-/// path; S5 keeps only the frozen binding and `FOX_EXECUTOR_ROUTE` (see
-/// `run_control::candidate_executor_route`).
+/// path, and since A0 there is no route switch either: a new Run always freezes
+/// PiNative (see `run_control::new_run_executor_route`).
 pub(super) fn select(frozen: Option<ExecutionAuthority>) -> Result<ExecutionAuthority, String> {
     Ok(frozen.unwrap_or(ExecutionAuthority::Authoritative))
 }
@@ -45,15 +45,79 @@ impl RunRoute {
     /// The stable refusal code for a route this build cannot execute.
     pub(super) fn refusal_reason(self) -> Option<&'static str> {
         match self {
-            Self::Reject => Some("run_route_unrecognized"),
+            Self::Reject => Some(crate::database::EXECUTOR_ROUTE_UNKNOWN),
             _ => None,
         }
     }
 }
 
+/// The binding a child Run freezes (A0).
+///
+/// A child inherits its Authoritative parent's frozen permission and budgets,
+/// never its executor: whatever route the parent was frozen with, including a
+/// historical unrouted Kernel parent, the child is frozen PiNative on the pi
+/// engine, so no child can ever land on the frozen Kernel loop.
+pub(super) fn child_run_binding(
+    parent: &RunControlBinding,
+    child_run_id: &str,
+    child_conversation_id: &str,
+    read_only: bool,
+    execution_profile: Option<&str>,
+    max_duration_ms: i64,
+) -> Result<RunControlBinding, String> {
+    if parent.authority != ExecutionAuthority::Authoritative {
+        return Err("only an Authoritative parent hands its frozen control to a child".into());
+    }
+    let mut inherited = parent.clone();
+    inherited.run_id = child_run_id.into();
+    inherited.conversation_id = child_conversation_id.into();
+    inherited.engine_id = "pi".into();
+    inherited.executor_route = crate::database::Database::new_run_executor_route(ExecutionAuthority::Authoritative);
+    if read_only { inherited.permission.mode = fox_engine_protocol::PermissionMode::ReadOnly; }
+    if let Some(profile) = execution_profile { inherited.execution_profile_id = profile.into(); }
+    inherited.permission_snapshot_id = crate::database::Database::run_control_permission_hash(&inherited.permission)?;
+    inherited.budgets.restrict_execution_ms(max_duration_ms);
+    inherited.validate()?;
+    Ok(inherited)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a0_child_runs_always_freeze_pi_native_whatever_the_parent_route() {
+        for parent_route in [None, Some(ExecutorRoute::PiNative)] {
+            for parent_engine in ["pi", "codex"] {
+                let parent = binding(ExecutionAuthority::Authoritative, parent_route, parent_engine);
+                let child = child_run_binding(&parent, "child-run", "child-conversation", false, None, 30_000).unwrap();
+                assert_eq!(child.executor_route, Some(ExecutorRoute::PiNative), "{parent_route:?} {parent_engine}");
+                assert_eq!(child.engine_id, "pi");
+                assert_eq!(child.authority, ExecutionAuthority::Authoritative);
+                assert_eq!((child.run_id.as_str(), child.conversation_id.as_str()), ("child-run", "child-conversation"));
+                // The single resolver routes it to the PiNative path, never Kernel.
+                assert!(matches!(resolve_run_route(Some(&child)), RunRoute::PiNative), "{parent_route:?} {parent_engine}");
+                assert!(child.budgets.run_execution_limited);
+                assert!(child.budgets.run_execution_ms <= 30_000);
+            }
+        }
+    }
+
+    #[test]
+    fn a0_child_binding_keeps_the_parent_permission_and_narrows_it_when_asked() {
+        let parent = binding(ExecutionAuthority::Authoritative, None, "pi");
+        let inherited = child_run_binding(&parent, "child", "child-conversation", false, None, 1_000).unwrap();
+        assert_eq!(inherited.permission, parent.permission);
+        assert_eq!(inherited.execution_profile_id, parent.execution_profile_id);
+        let reviewer = child_run_binding(&parent, "child", "child-conversation", true, Some("graph_reviewer_v1"), 1_000).unwrap();
+        assert_eq!(reviewer.permission.mode, fox_engine_protocol::PermissionMode::ReadOnly);
+        assert_eq!(reviewer.execution_profile_id, "graph_reviewer_v1");
+        assert_eq!(reviewer.permission_snapshot_id,
+            crate::database::Database::run_control_permission_hash(&reviewer.permission).unwrap());
+        assert_ne!(reviewer.permission_snapshot_id, inherited.permission_snapshot_id);
+        // A Legacy parent never hands its control to a child.
+        assert!(child_run_binding(&binding(ExecutionAuthority::Legacy, None, "pi"), "child", "c", false, None, 1_000).is_err());
+    }
 
     #[test]
     fn new_runs_use_the_authoritative_contract_without_an_environment_switch() {
@@ -125,7 +189,7 @@ mod tests {
                 "{engine} must not reach the single path"
             );
         }
-        assert_eq!(RunRoute::Reject.refusal_reason(), Some("run_route_unrecognized"));
+        assert_eq!(RunRoute::Reject.refusal_reason(), Some("executor_route_unknown"));
         assert_eq!(RunRoute::Kernel.refusal_reason(), None);
         assert_eq!(RunRoute::PiNative.refusal_reason(), None);
     }
