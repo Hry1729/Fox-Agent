@@ -6,8 +6,9 @@ import {
   collectTrustedPiExtensionTools,
   defineFoxTools,
   FOX_TOOL_DEFINITION_VERSION,
+  normalizeFoxToolResultForPi,
 } from '../src/tool-adapter.mjs'
-import { RESULT_REF_TOOL } from '../src/tool-view.mjs'
+import { MAX_MODEL_TOOL_RESULT_BYTES, RESULT_REF_TOOL } from '../src/tool-view.mjs'
 
 function piTool(overrides = {}) {
   return {
@@ -115,15 +116,15 @@ test('normalizes primitive, missing, circular, and oversized Fox tool results', 
     ok: true,
     self: '[Circular]',
   })
-  // Oversized results from a non-reference tool are published intact: the
-  // unified projection declines (execution/fact tools are never reshaped), and
-  // there is no structure-breaking character cut and no retrieval promise.
+  // TB-2: an oversized result is capped for the model whatever the tool. With
+  // no Host storage fact the view says the middle is gone, and the oversized
+  // structured copy is not duplicated into details.
   const oversized = await tools[3].execute('oversized-call', {})
-  assert.equal(oversized.details.outputTruncated, false)
-  assert.equal(oversized.details.projectionDeclined, true)
-  assert.deepEqual(JSON.parse(oversized.content[0].text), { value: 'x'.repeat(120_100) },
-    'the oversized payload must stay valid JSON with every byte intact')
-  assert.ok(!oversized.content[0].text.includes('[Tool result truncated]'))
+  assert.equal(oversized.details.outputTruncated, true)
+  assert.equal(oversized.details.structuredResult, undefined)
+  assert.equal(oversized.details.foxResultCap.retrievable, false)
+  assert.ok(Buffer.byteLength(oversized.content[0].text, 'utf8') <= MAX_MODEL_TOOL_RESULT_BYTES + 1024)
+  assert.ok(oversized.content[0].text.includes('无法取回'))
   assert.ok(!oversized.content[0].text.includes('可只读取回'))
 })
 
@@ -182,18 +183,20 @@ test('oversized results use the unified projection: valid JSON, next, references
   assert.ok(readResult.content[0].text.includes(RESULT_REF_TOOL))
   assert.ok(!readResult.content[0].text.includes('�'))
 
-  // A receipt-bearing result is execution evidence: never reshaped.
+  // A receipt-bearing result keeps its receipt at the head, but obeys the
+  // TB-2 ceiling like every other result; its stored copy is retrievable.
   const receipt = await writeFile.execute('write-call', {})
   assert.ok(receipt.content[0].text.startsWith('FOX_EXECUTION_RECEIPT_V1'))
-  assert.equal(receipt.details.outputTruncated, false)
+  assert.equal(receipt.details.outputTruncated, true)
+  assert.equal(receipt.details.foxResultCap.retrievable, true)
+  assert.ok(receipt.content[0].text.includes('fox-result://run-view/write-call'))
+  assert.ok(Buffer.byteLength(receipt.content[0].text, 'utf8') <= MAX_MODEL_TOOL_RESULT_BYTES + 2048)
   assert.ok(storedFacts.size >= 2, 'storage facts are resolved per settled call')
 })
 
-test('oversized results without a trusted storage fact keep every byte and promise nothing', async () => {
-  // The ABC review R5 counterexample: a large JSON payload for a boundable
-  // tool must never become unparseable text, and a reference alone must not be
-  // presented as proof that Host stored the result. A self-declared storage
-  // claim inside the result is ignored too.
+test('TB-2 oversized results without a trusted storage fact are capped and promise nothing', async () => {
+  // A self-declared storage claim inside the result is ignored: only the
+  // Host's fact may promise read-back.
   const payload = {
     records: Array.from({ length: 600 }, (_, index) => ({ id: index, body: 'y'.repeat(200) })),
   }
@@ -208,20 +211,26 @@ test('oversized results without a trusted storage fact keep every byte and promi
     trusted: true,
   }), { runId: 'run-unverified' })
   const result = await tools[0].execute('unverified-call', {})
-  const text = result.content[0].text
-  // Whatever shape the projection chose, the payload must stay parseable JSON
-  // and must not claim that omitted bytes can be read back.
-  const parsed = JSON.parse(text)
-  assert.ok(parsed && typeof parsed === 'object', 'the view must remain valid JSON')
+  const text = result.content.map(block => block.text).join('')
+  assert.ok(Buffer.byteLength(text, 'utf8') <= MAX_MODEL_TOOL_RESULT_BYTES + 1024)
   assert.ok(!text.includes('可只读取回'), 'no retrieval promise without a trusted fact')
-  if (parsed.foxModelView) {
-    assert.equal(parsed.foxModelView.retrievable, false)
-    assert.equal(parsed.foxModelView.storageVerified, false)
-    assert.equal((parsed.records ?? payload.records).length, 600, 'no record may be dropped')
-  } else {
-    assert.equal(text, JSON.stringify({ ...payload, details: { storage: { stored: true, storedBytes: 999_999 } } }))
-  }
+  if (result.details.outputTruncated) assert.ok(text.includes('无法取回'))
 })
+
+for (const mib of [1, 4, 10]) {
+  test(`TB-2 a ${mib} MiB Pi-shaped result never exceeds the model ceiling`, () => {
+    const text = '数'.repeat(Math.floor((mib * 1024 * 1024) / 3))
+    const stored = Buffer.byteLength(text, 'utf8')
+    const view = normalizeFoxToolResultForPi('http_request', { content: [{ type: 'text', text }], details: { bytes: stored } }, {
+      runId: 'run-mib', toolCallId: `call-${mib}`, storage: { stored: true, storedBytes: stored, retrievableBytes: stored },
+    })
+    const bytes = view.content.reduce((sum, block) => sum + Buffer.byteLength(block.text ?? '', 'utf8'), 0)
+    assert.ok(bytes <= MAX_MODEL_TOOL_RESULT_BYTES + 2048, `${bytes}`)
+    assert.ok(!view.content[0].text.includes('\uFFFD'))
+    assert.ok(view.content[0].text.includes(`fox-result://run-mib/call-${mib}`))
+    assert.ok(view.content[0].text.includes('read_tool_result'))
+  })
+}
 
 test('routes imported Pi tools through the Fox Host executor by default', async () => {
   let directExecutions = 0
