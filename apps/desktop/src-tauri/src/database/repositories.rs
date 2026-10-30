@@ -58,6 +58,7 @@ pub(crate) use kernel_continuation::{run_budget_for_tier, BudgetTier, Continuabl
 pub(crate) use kernel_continuation::{PreparedContinuation, VerifiedContinuationPermission};
 pub(crate) use kernel_jobs::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
 mod run_control;
+pub(crate) use run_control::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
 mod native_route;
 #[cfg(test)]
 mod native_route_tests;
@@ -1443,12 +1444,17 @@ impl Database {
     ///
     /// Pi-native Runs keep their tool facts. Waiting Host approvals and explicit
     /// unclaimed decisions remain available to Host recovery; other active Runs stop.
+    ///
+    /// A0: an unfinished historical Kernel Run (Authoritative, no frozen route)
+    /// is interrupted with `executor_route_retired` / 「执行路径已退役」 and is
+    /// never resumed; the user continues in a new Run.
     pub fn repair_interrupted_runs(&self) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            native_route::protect_restart_owners(&transaction, now)?;
+            let retired = native_route::retire_unrouted_kernel_runs(&transaction, now)?;
+            native_route::protect_restart_owners(&transaction, now, &retired)?;
             child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
             transaction.execute(
                 "UPDATE runs
