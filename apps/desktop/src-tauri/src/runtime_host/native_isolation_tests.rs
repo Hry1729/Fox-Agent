@@ -109,7 +109,7 @@ impl Fixture {
                 "dynamicModelSwitch":false,"workLoop":true,"tools":tools});
             state.worker = Some(WorkerHandle { child:Arc::new(Mutex::new(child)), stdin,
                 pending:Arc::new(Mutex::new(HashMap::new())), sessions:sidecar_sessions::Sessions::default(),
-                session_leases:HashMap::new() });
+                session_leases:HashMap::new(), _job:crate::runtime_host::process_job::ProcessJob::none() });
         }
         Self { host, root, knowledge, responses, _app:app }
     }
