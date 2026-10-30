@@ -7145,20 +7145,6 @@ fn typed_repair_prompt(verdict: &p2b_consumer::DeliveryVerdict) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-#[path = "delivery_r2_tests.rs"]
-mod r2_tests;
-
-#[cfg(test)]
-#[path = "delivery_r3_tests.rs"]
-mod r3_tests;
-
-/// Regression coverage for the Windows project-path identity the write gate
-/// decides containment in, and for the failure detail a policy denial keeps.
-#[cfg(test)]
-#[path = "delivery_path_identity_tests.rs"]
-mod path_identity_tests;
-
 /// Package 2-C1 §1: the five version layers and the leaf/Host interop between the
 /// frozen rule payload and the Host-side strict contract decoder. Adjacent to the
 /// frozen 2-A cases rather than inside them, so no existing assertion is bent to

@@ -1,8 +1,6 @@
 pub(crate) mod agent_backend_routing;
-mod kernel_continuation;
 mod kernel_reliability;
 mod kernel_reconciliation;
-pub use kernel_continuation::*;
 pub use kernel_reliability::*;
 pub use kernel_reconciliation::*;
 #[allow(unused_imports)]

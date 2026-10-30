@@ -677,94 +677,6 @@ pub fn rejected_by_user_message(item_key: &str) -> String {
     format!("用户判定交付项 {item_key} 不可接受，任务未通过")
 }
 
-/// End (or refuse to end) a parked Run on the strength of user acceptances.
-///
-/// # The commit path
-///
-/// This is **not** a SQL update of `kernel_runs.state`. It rehydrates a
-/// `RunController` from the durable facts, asks it for the terminal effects, and
-/// commits them through `Database::kernel_commit_decision` — the same durable
-/// decision commit every other Host transition uses, with its
-/// `run_transition_allowed` check, its `WaitingApproval ⟺ deadline` invariant and
-/// its event/replay exactness. A Run whose transition is not allowed therefore
-/// cannot be terminated by this function, and a replayed call writes nothing.
-///
-/// # The admission window
-///
-/// The admission is evaluated **before** the controller is rehydrated, and the
-/// terminal is committed in one transaction. The gap between them is the
-/// concurrency window this package claims: it is bounded to a single writer on
-/// one database, and `kernel_commit_decision` refuses a transition that is no
-/// longer legal. It is **not** a claim about multiple processes or about the file
-/// system being atomic with SQLite.
-pub fn commit_delivery_acceptance_terminal(
-    database: &Database,
-    run_id: &str,
-    now_wall_ms: i64,
-) -> Result<AcceptanceTerminal, String> {
-    let admission = match evaluate_delivery_acceptance_admission(database, run_id) {
-        Ok(admission) => admission,
-        Err(refusal) => {
-            return Ok(AcceptanceTerminal::Refused {
-                refusal,
-                detail: refusal.detail(),
-            })
-        }
-    };
-
-    let Some(rehydrated) = database
-        .kernel_rehydrate(run_id)
-        .map_err(|error| error)?
-    else {
-        return Ok(AcceptanceTerminal::Refused {
-            refusal: AdmissionRefusal::NotParked,
-            detail: AdmissionRefusal::NotParked.detail(),
-        });
-    };
-    let mut controller = RunController::rehydrate(rehydrated)
-        .map_err(|error| error.to_string())?;
-    // A second, in-process guard: the controller must still be parked. The
-    // durable commit re-checks the transition, so this is a cheap early refusal
-    // rather than the authority.
-    if controller.state() != RunState::AwaitingDeliveryReview {
-        return Ok(AcceptanceTerminal::Refused {
-            refusal: AdmissionRefusal::NotParked,
-            detail: AdmissionRefusal::NotParked.detail(),
-        });
-    }
-
-    let facts: Vec<DeliveryAcceptanceFact> = admission
-        .acceptances
-        .iter()
-        .map(|acceptance| DeliveryAcceptanceFact {
-            item_key: acceptance.item_key.clone(),
-            actor: acceptance.accepted_by.clone(),
-            accepted_at: acceptance.accepted_at,
-            candidate_sha256: acceptance.candidate_sha256.clone(),
-            spec_hash: acceptance.spec_hash.clone(),
-            acceptance_class: "unconfirmed",
-        })
-        .collect();
-
-    let mut effects = controller
-        .terminate(RunOutcome::Completed)
-        .into_iter()
-        .collect::<Vec<_>>();
-    // The acceptance marker is a separate event, committed in the same
-    // write-set, so the two can never disagree about why the Run ended.
-    effects.extend(
-        controller
-            .note_delivery_acceptance(&facts)
-            .map_err(|error| error.to_string())?,
-    );
-    let command = controller.persist_command(&effects);
-    database.kernel_commit_decision(run_id, now_wall_ms, &command)?;
-
-    Ok(AcceptanceTerminal::Completed {
-        acceptances: admission.acceptances,
-    })
-}
-
 /// Whether a refused terminal is the benign race or a real inconsistency.
 ///
 /// A Run that is no longer parked when the terminal is committed was ended by
@@ -780,48 +692,6 @@ pub fn terminal_refusal_is_benign(terminal: &AcceptanceTerminal) -> bool {
             ..
         }
     )
-}
-
-/// End a parked Run because the user rejected one of its items.
-///
-/// The same real decision-commit path as
-/// [`commit_delivery_acceptance_terminal`], with the class's own canonical
-/// failure reason. No `DecisionFact` is written and no verification class is
-/// invented: this is a conclusion about the execution.
-pub fn commit_delivery_rejection_terminal(
-    database: &Database,
-    run_id: &str,
-    item_key: &str,
-    now_wall_ms: i64,
-) -> Result<AcceptanceTerminal, String> {
-    let Some(rehydrated) = database
-        .kernel_rehydrate(run_id)
-        .map_err(|error| error)?
-    else {
-        return Ok(AcceptanceTerminal::Refused {
-            refusal: AdmissionRefusal::NotParked,
-            detail: AdmissionRefusal::NotParked.detail(),
-        });
-    };
-    let mut controller = RunController::rehydrate(rehydrated)
-        .map_err(|error| error.to_string())?;
-    if controller.state() != RunState::AwaitingDeliveryReview {
-        return Ok(AcceptanceTerminal::Refused {
-            refusal: AdmissionRefusal::NotParked,
-            detail: AdmissionRefusal::NotParked.detail(),
-        });
-    }
-    let effects = controller.terminate(RunOutcome::Failed {
-        code: REJECTED_BY_USER_CODE.into(),
-        message: rejected_by_user_message(item_key),
-    });
-    let command = controller.persist_command(&effects);
-    database.kernel_commit_decision(run_id, now_wall_ms, &command)?;
-    Ok(AcceptanceTerminal::Rejected {
-        item_key: item_key.to_owned(),
-        code: REJECTED_BY_USER_CODE,
-        message: rejected_by_user_message(item_key),
-    })
 }
 
 /// Record a user's decision about one item's unverified delivery.
@@ -937,25 +807,10 @@ pub fn resolve_delivery_acceptance(
                     )
                     .map_err(AcceptanceResolveError::Storage)?;
             }
-            // D-1: an acceptance is only half the loop. Once every item that
-            // needed accepting has one, the Run has to end. The terminal is a
-            // separate durable decision (see the function's doc), so a failure
-            // here does not lose the acceptance that was just recorded.
-            //
-            // A `NotParked` refusal is the benign race — something else already
-            // ended this Run — and is dropped. Every other refusal means the
-            // acceptance stands but the Run did not end, which is exactly the
-            // state the caller has to know about rather than a silent success.
-            let terminal = commit_delivery_acceptance_terminal(database, run_id, now)
-                .map_err(AcceptanceResolveError::Storage)?;
-            if !terminal_refusal_is_benign(&terminal) {
-                if let Some(token) = terminal.refusal_token() {
-                    return Err(AcceptanceResolveError::Storage(format!(
-                        "接受已记录，但任务未能结束（{token}）：{}",
-                        terminal.detail()
-                    )));
-                }
-            }
+            // B1: the terminal half of D-1 resumed the Kernel loop for a Run
+            // parked on `awaiting_delivery_review`. That loop is gone and such
+            // a Run is retired at startup (`executor_route_retired`), so the
+            // acceptance is recorded and nothing is resumed.
             Ok(written)
         }
         DeliveryAcceptanceDecision::Reject => {
@@ -1004,11 +859,6 @@ pub fn resolve_delivery_acceptance(
                     )
                     .map_err(AcceptanceResolveError::Storage)?;
             }
-            // D-1: a rejection is an execution-layer conclusion, so it ends the
-            // Run with the canonical failure reason. Separate durable decision,
-            // same real Controller path.
-            let _ = commit_delivery_rejection_terminal(database, run_id, item_key, now)
-                .map_err(AcceptanceResolveError::Storage)?;
             Ok(written)
         }
         DeliveryAcceptanceDecision::Revoke => {
@@ -1264,7 +1114,6 @@ fn plain_storage_path(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-
 fn spec_digest(requirements_json: &str) -> String {
     let value: serde_json::Value =
         serde_json::from_str(requirements_json).unwrap_or(serde_json::json!({}));
@@ -1332,14 +1181,4 @@ fn digest_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "delivery_u1_tests.rs"]
 mod tests;
-
-
-
-
-
-
-
-
-
-
 

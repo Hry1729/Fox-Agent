@@ -725,7 +725,7 @@ pub(crate) fn kernel_approval_reusable(
     // replacement ticket is bound to one dispatch: neither may become reusable.
     tool != "task_repair_escalate_start"
         && !replacement_bound
-        && crate::runtime_host::shadow_reconcile::tool_operation_scope(tool, input, project_root)
+        && crate::runtime_host::tool_operation_scope(tool, input, project_root)
             .is_some()
 }
 

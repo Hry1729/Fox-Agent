@@ -2854,7 +2854,7 @@ impl Database {
             } else if approval.tool_name == "task_repair_escalate_start" || approval.request.get("wholeFileReplacement").is_some() {
                 false
             } else {
-                crate::runtime_host::shadow_reconcile::tool_operation_scope(&approval.tool_name, input, root).is_some()
+                crate::runtime_host::tool_operation_scope(&approval.tool_name, input, root).is_some()
             };
             if let Some(request) = approval.request.as_object_mut() {
                 request.insert("availableDecisions".into(), if reusable {

@@ -41,6 +41,27 @@ pub(super) fn resolve_run_route(binding: Option<&RunControlBinding>) -> RunRoute
     }
 }
 
+/// Whether a frozen binding is a historical Kernel Run (B1).
+///
+/// The Kernel execution loop has been removed. A binding frozen Authoritative
+/// with no executor route used to be driven by it; such a Run is never started,
+/// resumed, cancelled into a queue or approved again. A Legacy binding, or no
+/// binding at all, is not a Kernel Run.
+pub(super) fn is_retired_kernel(binding: Option<&RunControlBinding>) -> bool {
+    binding.is_some_and(|binding| {
+        binding.authority == ExecutionAuthority::Authoritative && binding.executor_route.is_none()
+    })
+}
+
+/// The refusal a retired Kernel Run gets when anything tries to drive it.
+pub(super) fn retired_route_error() -> String {
+    format!(
+        "{}: {}",
+        crate::database::EXECUTOR_ROUTE_RETIRED,
+        crate::database::EXECUTOR_ROUTE_RETIRED_MESSAGE,
+    )
+}
+
 impl RunRoute {
     /// The stable refusal code for a route this build cannot execute.
     pub(super) fn refusal_reason(self) -> Option<&'static str> {

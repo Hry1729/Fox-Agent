@@ -56,6 +56,22 @@ impl super::Database {
             params![run_id, run_control::EXECUTOR_ROUTE_RETIRED], |row| row.get(0)))
     }
 
+    /// B1: settle one historical Kernel Run exactly like the startup
+    /// retirement. Used when something tries to start or cancel a frozen Kernel
+    /// Run after startup: the Kernel loop is gone, so nothing else may own it.
+    /// Returns whether this call changed the Run.
+    pub(crate) fn retire_kernel_run(&self, run_id: &str) -> Result<bool,String> {
+        let now = super::now_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if writer_route(&transaction, run_id)? != WriterRoute::Kernel { return Ok(false); }
+            super::kernel_projection::expire_inactive_approvals(&transaction, Some(run_id), now)?;
+            let changed = retire_kernel_run_row(&transaction, run_id, now)?;
+            transaction.commit()?;
+            Ok(changed)
+        })
+    }
+
     pub(crate) fn initialize_native_model_budget(&self) -> Result<(),String> {
         self.with_connection(|connection|connection.execute_batch(super::super::migrations::MIGRATION_102_NATIVE_MODEL_BUDGET))
     }
@@ -85,13 +101,42 @@ pub(super) fn retire_unrouted_kernel_runs(transaction: &Transaction<'_>, now: i6
     for run_id in runs {
         if writer_route(transaction, &run_id)? != WriterRoute::Kernel { continue; }
         super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;
-        transaction.execute(
-            "UPDATE runs SET status='interrupted', finished_at=?2, error_code=?3, error_message=?4
-             WHERE id=?1 AND status IN ('queued','running','cancelling')",
-            params![run_id, now, run_control::EXECUTOR_ROUTE_RETIRED, run_control::EXECUTOR_ROUTE_RETIRED_MESSAGE])?;
+        retire_kernel_run_row(transaction, &run_id, now)?;
         retired.push(run_id);
     }
+    retire_delivery_review_kernel_runs(transaction, now)?;
     Ok(retired)
+}
+
+fn retire_kernel_run_row(transaction: &Transaction<'_>, run_id: &str, now: i64) -> rusqlite::Result<bool> {
+    Ok(transaction.execute(
+        "UPDATE runs SET status='interrupted', finished_at=?2, error_code=?3, error_message=?4
+         WHERE id=?1 AND status IN ('queued','running','cancelling')",
+        params![run_id, now, run_control::EXECUTOR_ROUTE_RETIRED, run_control::EXECUTOR_ROUTE_RETIRED_MESSAGE])? > 0)
+}
+
+/// B1 (A0 follow-up): a historical Kernel Run parked on
+/// `awaiting_delivery_review` already reads `interrupted` in the desktop read
+/// model, but it used to wait for a delivery decision that resumed the Kernel
+/// loop. That loop is gone, so it is retired with the same code and message as
+/// every other historical Kernel Run. Its Kernel facts stay untouched.
+fn retire_delivery_review_kernel_runs(transaction: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
+    let mut query = transaction.prepare(
+        "SELECT r.id FROM runs r JOIN kernel_runs k ON k.run_id=r.id
+         WHERE k.state='awaiting_delivery_review' AND r.status='interrupted'
+           AND (r.error_code IS NULL OR r.error_code<>?1) ORDER BY r.id")?;
+    let runs = query.query_map([run_control::EXECUTOR_ROUTE_RETIRED], |row| row.get::<_,String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(query);
+    for run_id in runs {
+        if writer_route(transaction, &run_id)? != WriterRoute::Kernel { continue; }
+        super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;
+        transaction.execute(
+            "UPDATE runs SET finished_at=COALESCE(finished_at, ?2), error_code=?3, error_message=?4
+             WHERE id=?1 AND status='interrupted'",
+            params![run_id, now, run_control::EXECUTOR_ROUTE_RETIRED, run_control::EXECUTOR_ROUTE_RETIRED_MESSAGE])?;
+    }
+    Ok(())
 }
 
 pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64, retired: &[String]) -> rusqlite::Result<()> {
