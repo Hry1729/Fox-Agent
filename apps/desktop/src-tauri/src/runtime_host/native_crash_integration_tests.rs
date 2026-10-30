@@ -252,7 +252,7 @@ fn run_child() {
         let conversation = database.create_conversation(database.default_agent_id(),Some("isolated native crash"),root.join("project").to_str(),Some("allow")).unwrap();
         let text = "[NATIVE_CRASH_ORIGINAL] 修改 note.txt 并保存到原文件。读取后把 before-native-crash 更新为 after-native-crash，写回 note.txt。";
         let started = database.create_run(&conversation.id,text,None).unwrap();
-        let binding = database.freeze_kernel_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi").unwrap();
+        let binding = database.freeze_default_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi").unwrap();
         assert_eq!(binding.authority,ExecutionAuthority::Authoritative); assert_eq!(binding.executor_route,Some(ExecutorRoute::PiNative));
         write_json(&root.join("intent.json"),&json!({"nonce":nonce,"stage":stage,"runId":started.run.id,"callId":CALL,"conversationId":conversation.id}));
         if let Err(error) = host.start_run(&started,text,&[]) {
@@ -268,7 +268,7 @@ fn run_child() {
     let conversation = intent["conversationId"].as_str().unwrap();
     let text = "[NATIVE_CRASH_RESTORE] 继续读取已核对的结果，不重做原操作。";
     let started = database.create_run(conversation,text,None).unwrap();
-    database.freeze_kernel_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi").unwrap();
+    database.freeze_default_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi").unwrap();
     let result = host.start_run(&started,text,&[]);
     if result.is_ok() {
         let deadline = Instant::now()+Duration::from_secs(30);
@@ -299,7 +299,7 @@ impl OwnedChild {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.args([TEST,"--ignored","--exact","--nocapture","--test-threads=1"])
             .env(CHILD,"1").env(ROOT,root).env(PHASE,phase).env(STAGE,stage).env(NONCE,nonce)
-            .env("FOX_DATA_DIR",root).env("FOX_KERNEL_MODE","authoritative").env("FOX_EXECUTOR_ROUTE","pi_native").env("FOX_KERNEL_ENGINE","pi")
+            .env("FOX_DATA_DIR",root).env("FOX_KERNEL_MODE","authoritative").env("FOX_KERNEL_ENGINE","pi")
             .env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_SCRIPT").env_remove("FOX_RUNTIME_MODE")
             .env_remove("FOX_KERNEL_WORKER_BINARY").env_remove("FOX_KERNEL_CODEX_BINARY")
             .stdin(Stdio::null()).stdout(std::fs::File::create(root.join(format!("{phase}.stdout.log"))).unwrap())
