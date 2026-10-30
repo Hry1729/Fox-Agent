@@ -1,0 +1,59 @@
+{
+  "kind": "s5-capability-http-evidence",
+  "productionSourceHead": "2ccd2a970fe867cbdbcc32b781c9059c760b45ed",
+  "workflowHead": "87635ecc209bad38439d011b4ab94198c435033a",
+  "runId": "9246af48-0c11-412f-ac0f-75a701847b75",
+  "conversationId": "6fdc68f9-8f57-4541-ae1f-e5a3b055460d",
+  "candidatePayload": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-capability-v5\\payload",
+  "actualHttp": {
+    "systemChars": 30094,
+    "headingPresent": true,
+    "foxContextPresent": true,
+    "facts": {
+      "schemaVersion": 1,
+      "capabilityManifestHash": "sha256:06c6a76af2c2fa6e2df48efe9b5c5d3303856e4ec86a18e3eed593c7922fd02b",
+      "executionProfileId": "legacy",
+      "tools": {
+        "attachment_compute": {
+          "availability": "available",
+          "reasonCode": null,
+          "reason": null,
+          "projectPaths": true,
+          "reportPdf": {
+            "availability": "available",
+            "renderer": "krilla-0.8.2",
+            "font": "msyh.ttc",
+            "fontSha256": "d79c55e68b1131eea0cc1c47be4f572d964f28c682e143db2ad09c1e4cb07a3f",
+            "fontEmbedding": "editable-or-installable/subset/outline",
+            "maxPages": 24,
+            "maxSpecBytes": 524288,
+            "chartTypes": [
+              "line",
+              "bar",
+              "pie"
+            ]
+          }
+        },
+        "run_command": {
+          "availability": "available",
+          "reasonCode": null,
+          "reason": null,
+          "actions": {
+            "cancel": "available",
+            "output": "available",
+            "start": "available",
+            "status": "available"
+          }
+        }
+      }
+    }
+  },
+  "binding": {
+    "executionProfileId": "legacy",
+    "authority": "authoritative",
+    "executorRoute": "pi_native"
+  },
+  "rootCause": "composeFoxPrompt omitted stablePrefix/dynamicTail; planning extension installed empty prompt and SDK default prompt replaced Fox context",
+  "fix": "2ccd2a97 returns the stable and dynamic halves; real SDK+HTTP regression added in 98c9c59a",
+  "boundary": "Local non-secret SSE provider; only capability facts, field presence, sizes and tool names retained; installed sandbox runtime was 0.1.5, not bundled 0.1.6"
+}

@@ -1,28 +1,26 @@
 # 单 Pi 主线状态
 
-> 状态：维护中；S5 分支已默认 Authoritative + PiNative，本轮工程补测完成，尚未发布<br>
+> 状态：维护中；S5 分支已默认 Authoritative + PiNative，代码回归通过但系统安装受阻，尚未发布<br>
 > 适用范围：`s5-default-pinative-20261029`；当前源码 `2ccd2a97`，上一候选 `ea94f970`，本地 main 仍为 `71ffbb7e`<br>
 > 最后更新：2026-10-30（补入能力说明修复、完整 CI 与安装阻塞；保留此前历史正文）
 
 ## 当前结论（2026-10-30 S5 候选）
+
+S5 分支的新本地 Run 默认使用 Authoritative 执行契约和 PiNative 路由。未设置 `FOX_EXECUTOR_ROUTE` 或设置为 `pi_native` 时走新默认；显式 `kernel` 只影响之后创建的 Run。已有冻结绑定不改写，`FOX_KERNEL_MODE` 不再决定新 Run 路径。
+
+能力说明 JSON 缺口已定位为 `composeFoxPrompt` 缺少 `stablePrefix`/`dynamicTail` 的产品缺陷并修复；最终 v5 payload 的真实 HTTP 已携带完整能力事实和 Fox 上下文。完整本地 CI 的 Desktop、Agent Runtime、Rust Host、协议、ACP、Kernel worker 和性能基线在 Node 22 下通过；Zvec/ONNX 按仓库资源门控跳过，远端 CI 未运行。
+
+系统安装被管理员权限阻塞：NSIS 要求 `requireAdministrator`，直接启动返回提升错误，随包 runtime 0.1.6 的安装、重启、命令、升级/卸载均未验证。S5 仍未完整关闭，未合并、未推送、未发布；未执行 S6。
+
 ## 最新增量（2026-10-30 能力说明修复）
 
 确认了一个实际产品缺陷：`composeFoxPrompt` 生成了能力事实和完整提示，但返回对象缺少 `stablePrefix`/`dynamicTail`；Pi 规划扩展因此收到空分区，模型实际使用 SDK 默认提示，能力 JSON 从未进入 HTTP。`2ccd2a97` 只补回这两个分区，并增加分区级回归断言；manifest/profile 校验、Host 权限和工具筛选不变。
 
-最终 payload 的真实 HTTP 已观察到 `30094` 字符系统提示、能力标题和 `<fox_context>`，冻结 profile 为 `legacy`，`run_command.availability=available`。修复前的同路径 HTTP 是 `1875` 字符的 SDK 默认提示，采样器没有漏字段。证据见 [S5 完整 CI 记录](../../migration-work/s5-full-ci-20261030.md) 和 [能力 HTTP 证据](../../migration-work/s5-capability-http-20261030.json)。
+最终 v5 payload 的真实 HTTP 已观察到 `30094` 字符系统提示、能力标题和 `<fox_context>`，冻结 profile 为 `legacy`，`run_command.availability=available`。修复前同路径 HTTP 是 `1875` 字符的 SDK 默认提示。新增真实 runtime + SDK 扩展 + HTTP 序列化回归，持续保护完整交付链。证据见 [S5 完整 CI 记录](../../migration-work/s5-full-ci-20261030.md) 和 [能力 HTTP 证据](../../migration-work/s5-capability-http-20261030-v5.json)。
 
-新候选 `s5-pinative-20261030-capability-v4` 已构建并解包：安装包 `8f2f1822...`，payload desktop `8de1c9da...`，sidecar `f1681205...`，随包 runtime 0.1.6 `c83bcee7...`。完整 CI 的本地范围已执行但**未全绿**：desktop 全量 837/2/35/1 error，Rust Host 2270 通过/1 失败；远端 CI 未运行（`2ccd2a97` 未推送）。
+Node 22 下 Desktop 全量 **872 通过 / 2 跳过 / 0 失败**（工作流加 `--isolate`，不跳过断言），Rust Host **2271 通过 / 0 失败 / 31 忽略**，Agent Runtime **626 通过 + 1 个预期 todo / 0 失败**；协议、ACP、Kernel worker 和性能基线通过。Zvec/ONNX 按仓库资源门控明确跳过，远端 CI 未运行。
 
-系统安装未执行：NSIS 清单要求 `requireAdministrator`，当前为非提升用户且没有隔离提升环境；本机仍是 runtime 0.1.5，安装包内 0.1.6 未安装、未取得收据/ACL/命令/卸载证据。解包启动不能算安装通过。S5 仍未关闭，未合并、未推送、未发布，未执行 S6。
-
-
-S5 分支的新本地 Run 默认使用 Authoritative 执行契约和 PiNative 路由，原生会话接入已实现。未设置 `FOX_EXECUTOR_ROUTE` 或设置为 `pi_native` 时走新默认；显式 `kernel` 只让之后创建的 Run 回退到 Kernel Authoritative。已有冻结绑定不改写，`FOX_KERNEL_MODE` 不再决定新 Run 的路径。数据库为 **v103**。
-
-本轮 `0c0e3dcc` 修复了崩溃半尾记录首次恢复后导致第二次打开失败的问题；`4dfd384c` 修复了批准创建新文件后错误要求覆盖授权的问题；`ea94f970` 补上 Native 的文件交付声明派发。最终 sidecar 首次打开 5 个场景、恢复后追加并再次打开、最终 Host 的 7 个崩溃窗口均已有通过证据。v3 NSIS 已构建、解包，desktop 与 sidecar 的实际哈希已记录；U01–U12 的最新逐项状态、桌面补测与限制见 [S5 收尾记录](../../migration-work/s5-closeout-20261030.md) 和 [候选清单](../../migration-work/s5-candidate-manifest-20261030.json)。
-
-本轮已完成最终包的损坏拒绝/重置、真实命令、Job 交付卡、通知去重、压缩后严格重启续聊、受控累计预算及 Kernel 回退补测。各项按实际构建与证据层次记录；首轮检索隔离、v2 拒绝分支及历史性能不改写为最终包全量重测。实际 HTTP 采样未观察到能力说明 JSON，此项保留缺口。
-
-当前只是本地工作分支和候选，不代表已合入 main、推送、发布或业务验收。完整 CI、系统安装和发布观察不能由定向测试或解包运行推出。S5 完整关闭还需要至少一个发布周期没有触发回退；S6 暂不执行，旧 Kernel 执行与恢复代码保留。
+系统安装仍阻塞：NSIS 清单要求 `requireAdministrator`，直接启动返回“请求的操作需要提升”（HRESULT `0x800702E4`），当前没有隔离提升环境；本机仍是 runtime 0.1.5，随包 0.1.6 的安装、重启、命令、升级和卸载未验证。解包 payload 启动与能力 Run 不能算安装通过。S5 仍未关闭，未合并、未推送、未发布，未执行 S6。
 
 ## 历史结论（2026-10-28 桌面验收后）
 
