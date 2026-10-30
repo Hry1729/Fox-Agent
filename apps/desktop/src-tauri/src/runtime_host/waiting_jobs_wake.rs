@@ -21,7 +21,8 @@ pub(super) struct WakeSlot {
 
 impl RuntimeHost {
     pub(super) fn signal_waiting_run(&self, run_id: &str) -> Result<(), String> {
-        if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs") {
+        if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs")
+            || self.database.run_executor_route_retired(run_id)? {
             return Ok(());
         }
         let (park_seq, parked) = self.database.kernel_waiting_park(run_id)?;
