@@ -53,7 +53,7 @@ function withSignal(operation, signal) {
   })
 }
 
-function managedStream(stream, onEvent, finish, signal) {
+function managedStream(stream, onEvent, finish, signal, normalize = (value) => value) {
   const events = []
   const listeners = new Set()
   let ended = false, failure, consumer = null
@@ -72,6 +72,7 @@ function managedStream(stream, onEvent, finish, signal) {
         wake()
       }
       const result = await withSignal(stream.result(), signal)
+      normalize(result)
       await finish(result)
       return result
     } catch (error) {
@@ -108,9 +109,60 @@ function managedStream(stream, onEvent, finish, signal) {
   } })
 }
 
+/**
+ * TB-1: some OpenAI-compatible services send no tool-call id, or restart the
+ * numbering every turn. Pi copies `id || ""`, and the native bridge and Host
+ * key batches by id, so give every call a session-unique id before anything
+ * downstream sees it. The same content position keeps the id it was given, so a
+ * copied final message stays consistent with the streamed blocks.
+ */
+export function createToolCallIdNormalizer(runId = 'run') {
+  const seen = new Set()
+  let turn = 0
+  return {
+    beginTurn(prompt) {
+      turn += 1
+      for (const message of Array.isArray(prompt?.messages) ? prompt.messages : []) {
+        if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue
+        for (const block of message.content) if (block?.type === 'toolCall' && block.id) seen.add(block.id)
+      }
+      const assigned = new Map()
+      const settle = (block, index) => {
+        if (!block || block.type !== 'toolCall' || !Number.isInteger(index)) return
+        if (assigned.has(index)) { block.id = assigned.get(index); return }
+        let id = typeof block.id === 'string' ? block.id : ''
+        if (!id || seen.has(id)) {
+          let suffix = 0
+          do { id = `fox-${runId}-${turn}-${index}${suffix ? `-${suffix}` : ''}`; suffix += 1 } while (seen.has(id))
+          block.id = id
+        }
+        seen.add(id)
+        assigned.set(index, id)
+      }
+      const settleMessage = (message) => {
+        if (Array.isArray(message?.content)) message.content.forEach((block, index) => settle(block, index))
+      }
+      return (event) => {
+        if (!event || typeof event !== 'object') return event
+        if (/^toolcall_(?:start|delta|end)$/.test(event.type)) {
+          settle(event.partial?.content?.[event.contentIndex], event.contentIndex)
+          if (event.toolCall) settle(event.toolCall, event.contentIndex)
+        }
+        if (event.partial) settleMessage(event.partial)
+        if (event.type === 'done') settleMessage(event.message)
+        if (event.type === 'error') settleMessage(event.error)
+        if (event.role === 'assistant') settleMessage(event)
+        return event
+      }
+    },
+  }
+}
+
 export function observeModelUsage(session, context = {}) {
   const original = session.agent.streamFunction.bind(session.agent)
+  const toolCallIds = createToolCallIdNormalizer(context.runId ?? 'run')
   session.agent.streamFunction = async (model, prompt, options = {}) => {
+    const normalizeToolCallIds = toolCallIds.beginTurn(prompt)
     let started = performance.now()
     const logicalRequestId = randomUUID()
     let requestId = logicalRequestId, attemptIndex = 0
@@ -220,14 +272,16 @@ export function observeModelUsage(session, context = {}) {
       stream = managed ? await withSignal(operation, signal) : await operation
     } catch (error) { await finish(null, error); throw error }
     if (managed) return managedStream(stream, event => {
+      normalizeToolCallIds(event)
       if (timeoutError) throw timeoutError
       if (/(?:text|thinking|toolcall|tool_call)_(?:start|delta|end)/.test(event.type)) progress()
       if (ttft === null && /(?:text|thinking)_delta/.test(event.type)) ttft = performance.now() - started
-    }, finish, signal)
+    }, finish, signal, normalizeToolCallIds)
     return new Proxy(stream, { get(target, property) {
       if (property === Symbol.asyncIterator) return async function* () {
         try {
           for await (const event of target) {
+            normalizeToolCallIds(event)
             if (ttft === null && /(?:text|thinking)_delta/.test(event.type)) ttft = performance.now() - started
             if (event.type === 'done') await finish(event.message)
             else if (event.type === 'error') await finish(event.error, true)
@@ -237,7 +291,7 @@ export function observeModelUsage(session, context = {}) {
         finally { await finish(null) }
       }
       if (property === 'result') return async () => {
-        try { const value = await target.result(); await finish(value); return value }
+        try { const value = normalizeToolCallIds(await target.result()); await finish(value); return value }
         catch (error) { await finish(null, error); throw error }
       }
       const value = Reflect.get(target, property)
