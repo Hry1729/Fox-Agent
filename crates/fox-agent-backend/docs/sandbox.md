@@ -1697,3 +1697,42 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
    - 预期：不再是无窗口直接退出。弹出系统对话框「Fox 无法启动」，内容包含「无法打开 Fox 数据库：<数据目录>\fox.db」、原因，以及自动备份目录 `<数据目录>\backups`；点「确定」后进程退出。被覆盖的文件保持原样，没有被删除。
    - 收尾：关闭对话框，恢复备份的 `fox.db`，重启后一切正常。
 5. 以上各项都从普通 Medium 完整性目录运行 exe 完成。
+
+### 13.30 Agent `search_knowledge` 本地资料库接入向量 / 混合检索 + 复测清单（2026-10-30）
+
+> 承接 S5 已安装 v6 验收：A/B/普通会话的 `search_knowledge` 只返回 `sqlite_lexical / vector_index_unavailable`，即使资料库的向量索引已就绪。
+
+**一、根因**
+
+`runtime_host::execute_bound_knowledge_tool` 的 `search_knowledge` 分支对 `source: "local"` 固定调用 `LocalKnowledgeStore::search_lexical`，而 `search_lexical` 的返回里写死了 `fallback { kind: "sqlite_lexical", reason: "vector_index_unavailable" }`。真正的向量 / RRF 混合检索 `search_retrieval`（`local_knowledge_vector.rs`）只有检索测试入口的 Tauri 命令在调用。
+
+**二、修法**
+
+1. 新增 `LocalKnowledgeStore::search_for_agent`（`local_knowledge.rs`）：先取资料库 base。`vector_index_ready` 为真、且资料库默认检索模式为 `vector` / `hybrid` 时，调用 `search_retrieval`（生产构建会同步启动向量检索隔离进程）；工具层用 `tauri::async_runtime::spawn_blocking` 调用它，不阻塞异步执行器。`ensure_bound` 绑定检查和隔离检查不变。
+2. 结果映射成原有输出格式：`source`、`knowledgeBaseId`、`query`、`items[documentId, chunkId, anchor, score, content, source, sourceMetadata]`、`total`、`truncated`，另加 `mode`、`fusionVersion`、每条的 `vectorScore` / `lexicalScore`（有值才带），以及 `fallback.active=false`。Chunk 按 id 在本资料库内重新读取，其他资料库的命中一律丢弃。`topK` 映射为检索 `limit`（多取 1 条判断 `truncated`），`maxChars` 按 `search_lexical` 的规则累计截断。
+3. 走不了向量时回退 SQLite 关键词检索，`fallback.reason` 写明原因：`index_not_ready`（`detail` 带资料库自身的 `fallback_reason`，如「未配置向量模型」）、`keyword_mode`、`vector_search_failed`（`errorCode` + `detail`）。`search_lexical` 的其他调用方（检索相关 Tauri 命令、`single-pi-acceptance-fixture`）返回不变。
+
+**三、测试**（桌面 crate，定向 CI）
+
+- `local_knowledge::agent_search_tests::agent_search_plan_uses_retrieval_only_for_ready_vector_modes`
+- `local_knowledge::agent_search_tests::agent_search_uses_hybrid_retrieval_when_vector_index_ready`（`mode=hybrid`、`fusionVersion`、`vectorScore` / `lexicalScore`、`sourceMetadata`；`vector` 模式无 `fusionVersion`）
+- `local_knowledge::agent_search_tests::agent_search_falls_back_to_lexical_with_index_not_ready`
+- `local_knowledge::agent_search_tests::agent_search_reports_keyword_mode_and_vector_search_failures`
+- `local_knowledge::agent_search_tests::agent_search_never_returns_chunks_of_another_knowledge_base`
+- `local_knowledge::agent_search_tests::agent_search_applies_top_k_and_max_chars_to_retrieval_results`
+- `runtime_host::search_knowledge_agent_tests::search_knowledge_tool_reports_index_not_ready_and_keeps_binding_isolation`（经工具路径：未就绪时 `index_not_ready`，`topK` / `maxChars` 生效，绑定 A 查不到 B）
+
+> 测试环境装不了 ONNX 向量模型，造不出真正就绪的 Zvec 索引，所以「就绪 → hybrid」这一段把选路和映射抽成可注入检索调用的 `search_for_agent_with` 来测；真实模型 + Zvec 的端到端只能在下面的 Windows 复测里确认。
+
+**四、复测清单 13.30**（Windows 安装版，每项「通过 / 失败 + 截图 / 日志」）
+
+> 重装本批构建后再测。准备：资料库 A、B 各导入一份能区分的文档，在资料库设置里选择已安装且通过校验的向量模型、检索模式设为「混合」，重建索引直到状态显示向量索引就绪。项目 A 会话绑定资料库 A，项目 B 会话绑定资料库 B，另开一个不绑定资料库的普通会话。在 Run 详情 / 工具调用里查看 `search_knowledge` 的返回。
+
+1. A 会话的 Run 调用 `search_knowledge`：返回 `mode: "hybrid"`、`fusionVersion: "rrf-v1-k60"`、`fallback.active: false`；每条结果带 `vectorScore`（关键词也命中的还带 `lexicalScore`）以及 `sourceMetadata`；内容只来自资料库 A。
+2. B 会话同样返回 `mode: "hybrid"`，内容只来自资料库 B。
+3. 隔离：在 A 会话里让 Agent 指定资料库 B 检索，返回 `local_knowledge.binding_invalid`，看不到 B 的内容；B 会话反过来也一样。
+4. 普通会话（plain）：`list_knowledge_bases` 为空；指定 A 或 B 调 `search_knowledge` 返回 `local_knowledge.binding_invalid`。
+5. 未就绪：新建资料库 C（不配置向量模型或不重建索引），绑定到一个会话后检索，返回 `fallback.kind: "sqlite_lexical"`、`fallback.reason: "index_not_ready"`，`fallback.detail` 与资料库页面显示的原因一致（如「未配置向量模型」），结果仍有关键词命中。
+6. 关键词模式：把 A 的检索模式改为「关键词」后检索，返回 `fallback.reason: "keyword_mode"`，不再有 `mode` 字段。改回「混合」后恢复第 1 项结果。
+7. 截断：带 `topK: 1`、`maxChars: 20` 检索，只返回 1 条，内容不超过 20 个字符，`truncated: true`。
+8. 全程不再出现 `vector_index_unavailable`；第 1、2 项若出现 `vector_search_failed`，请附上 `errorCode` 和 `detail`（多为向量检索隔离进程启动或模型版本问题）。
