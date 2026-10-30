@@ -24,6 +24,7 @@ pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> ru
     ).optional()?;
     let Some((conversation,authority,engine,json,hash)) = row else { return Ok(None); };
     if content_hash(&json) != hash { return Err(invalid("persisted control binding hash mismatch".into())); }
+    require_known_route(&json).map_err(invalid)?;
     let binding: RunControlBinding = serde_json::from_str(&json).map_err(|error| invalid(format!("corrupt control binding: {error}")))?;
     encode(&binding).map_err(invalid)?;
     let expected_authority = match binding.authority { ExecutionAuthority::Legacy => "legacy", ExecutionAuthority::Authoritative => "authoritative" };
@@ -35,64 +36,38 @@ pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> ru
     Ok(Some(binding))
 }
 
-/// The single new-Run routing switch.
-///
-/// `FOX_EXECUTOR_ROUTE` is read only while a Run is being frozen, so changing
-/// it can never move an existing Run between executors:
-///
-/// - unset (default) or `pi_native`: freeze `PiNative`;
-/// - `kernel`: controlled fallback to the Kernel authoritative path (freeze no
-///   route, so the existing Kernel loop owns the new Run);
-/// - any other value: fail closed before the binding is written.
-///
-/// A route never introduces a third authority: the Pi-native path reuses the
-/// Authoritative execution contract. A Legacy-authority Run freezes no route.
-pub(crate) fn candidate_executor_route(
-    authority: ExecutionAuthority,
-) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
-    default_run_route(std::env::var("FOX_EXECUTOR_ROUTE"), authority)
-}
+/// Stable refusal code for a frozen executor route this build does not know.
+pub(crate) const EXECUTOR_ROUTE_UNKNOWN: &str = "executor_route_unknown";
 
-fn default_route_for(authority: ExecutionAuthority) -> Option<fox_engine_protocol::ExecutorRoute> {
+/// Terminal code and reason for a historical Kernel Run (Authoritative, no
+/// frozen route) found unfinished at startup. The Kernel loop is frozen: such
+/// a Run is interrupted, never resumed, and the user continues in a new Run.
+pub(crate) const EXECUTOR_ROUTE_RETIRED: &str = "executor_route_retired";
+pub(crate) const EXECUTOR_ROUTE_RETIRED_MESSAGE: &str = "执行路径已退役";
+
+/// The route every new Run freezes.
+///
+/// There is no process-level routing switch any more (A0 retired
+/// `FOX_EXECUTOR_ROUTE`): a new Authoritative Run and every child Run freeze
+/// `PiNative`. A Legacy-authority binding never carries a route, because the
+/// Pi-native path reuses the Authoritative execution contract instead of adding
+/// a third authority.
+pub(crate) fn new_run_executor_route(authority: ExecutionAuthority) -> Option<fox_engine_protocol::ExecutorRoute> {
     match authority {
         ExecutionAuthority::Authoritative => Some(fox_engine_protocol::ExecutorRoute::PiNative),
         ExecutionAuthority::Legacy => None,
     }
 }
 
-fn default_run_route(
-    configured: Result<String, std::env::VarError>,
-    authority: ExecutionAuthority,
-) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
-    match configured {
-        Err(std::env::VarError::NotPresent) => Ok(default_route_for(authority)),
-        Ok(value) if value == "pi_native" => Ok(match authority {
-            ExecutionAuthority::Authoritative => Some(fox_engine_protocol::ExecutorRoute::PiNative),
-            ExecutionAuthority::Legacy => None,
-        }),
-        Ok(value) if value == "kernel" => Ok(None),
-        Ok(_) => Err("FOX_EXECUTOR_ROUTE must be pi_native or kernel".into()),
-        Err(std::env::VarError::NotUnicode(_)) => Err("FOX_EXECUTOR_ROUTE must be valid Unicode".into()),
-    }
-}
-
-/// Test/fixture helper for the pre-S5 explicit candidate opt-in. Production new
-/// Runs go through `candidate_executor_route` and default to PiNative; keeping
-/// this separate lets an explicitly frozen Kernel test remain Kernel even when
-/// the process has no route variable.
-fn explicit_run_route(
-    configured: Result<String, std::env::VarError>,
-    authority: ExecutionAuthority,
-) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
-    match configured {
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Ok(value) if value == "kernel" => Ok(None),
-        Ok(value) if value == "pi_native" => Ok(match authority {
-            ExecutionAuthority::Authoritative => Some(fox_engine_protocol::ExecutorRoute::PiNative),
-            ExecutionAuthority::Legacy => None,
-        }),
-        Ok(_) => Err("FOX_EXECUTOR_ROUTE must be pi_native or kernel".into()),
-        Err(std::env::VarError::NotUnicode(_)) => Err("FOX_EXECUTOR_ROUTE must be valid Unicode".into()),
+/// Refuse a persisted `executorRoute` this build does not recognize with the
+/// stable `executor_route_unknown` code, instead of a generic decode error or a
+/// guessed fallback. An absent or null route is the historical unrouted shape.
+fn require_known_route(json: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| format!("corrupt control binding: {error}"))?;
+    match value.get("executorRoute") {
+        None | Some(serde_json::Value::Null) => Ok(()),
+        Some(route) if serde_json::from_value::<fox_engine_protocol::ExecutorRoute>(route.clone()).is_ok() => Ok(()),
+        Some(route) => Err(format!("{EXECUTOR_ROUTE_UNKNOWN}: frozen executor route {route} is not recognized by this build")),
     }
 }
 
@@ -135,26 +110,18 @@ mod tests {
     }
 
     #[test]
-    fn the_new_run_default_and_the_controlled_kernel_fallback() {
-        use std::env::VarError;
-        // Unset is now the S5 default: the Authoritative contract freezes the
-        // PiNative route. Legacy authority still freezes no route.
-        assert_eq!(default_run_route(Err(VarError::NotPresent), ExecutionAuthority::Authoritative).unwrap(),
+    fn a0_route_new_runs_always_freeze_pi_native_without_a_process_switch() {
+        // No environment is consulted any more: the Authoritative contract
+        // always freezes PiNative and Legacy authority never carries a route.
+        assert_eq!(new_run_executor_route(ExecutionAuthority::Authoritative),
             Some(fox_engine_protocol::ExecutorRoute::PiNative));
-        assert_eq!(default_run_route(Err(VarError::NotPresent), ExecutionAuthority::Legacy).unwrap(), None);
-        // Explicit candidate value remains accepted.
-        assert_eq!(default_run_route(Ok("pi_native".into()), ExecutionAuthority::Authoritative).unwrap(),
+        assert_eq!(new_run_executor_route(ExecutionAuthority::Legacy), None);
+        assert_eq!(Database::new_run_executor_route(ExecutionAuthority::Authoritative),
             Some(fox_engine_protocol::ExecutorRoute::PiNative));
-        // Controlled fallback: a new Run is Kernel authoritative (no route).
-        assert_eq!(default_run_route(Ok("kernel".into()), ExecutionAuthority::Authoritative).unwrap(), None);
-        // Typos fail closed before a binding is written.
-        for bad in ["", "legacy", "KERNEL", "typo"] {
-            assert!(default_run_route(Ok(bad.into()), ExecutionAuthority::Authoritative).is_err(), "{bad}");
-        }
-        // The explicit fixture helper keeps its pre-S5 meaning for Kernel tests.
-        assert_eq!(explicit_run_route(Err(VarError::NotPresent), ExecutionAuthority::Authoritative).unwrap(), None);
-        assert_eq!(explicit_run_route(Ok("pi_native".into()), ExecutionAuthority::Authoritative).unwrap(),
-            Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        // The retired switch must not exist anywhere in the routing code.
+        let source = include_str!("run_control.rs");
+        let retired = ["FOX_EXECUTOR", "_ROUTE\")"].concat();
+        assert!(!source.contains(&retired), "the retired routing switch is still read");
     }
 
     #[test]
@@ -171,25 +138,48 @@ mod tests {
     }
 
     #[test]
-    fn default_freeze_persists_pi_native_and_the_kernel_fallback_persists_no_route() {
-        let (db, _path, routed_run) = fixture();
-        let routed = db.freeze_selected_run_control_with_route(&routed_run, "legacy",
-            ExecutionAuthority::Authoritative, ResourceExecutor::Rust, Default::default(), "pi",
-            || default_run_route(Err(std::env::VarError::NotPresent), ExecutionAuthority::Authoritative)).unwrap();
+    fn a0_route_default_freeze_persists_pi_native_and_refuses_a_non_pi_engine() {
+        let (db, path, routed_run) = fixture();
+        let routed = db.freeze_default_run_control_for_engine(&routed_run, "legacy", Default::default(), "pi").unwrap();
+        assert_eq!(routed.authority, ExecutionAuthority::Authoritative);
         assert_eq!(routed.executor_route, Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        drop(db);
+        let db = Database::open(path).unwrap();
         assert_eq!(db.run_control_binding(&routed_run).unwrap().unwrap().executor_route,
             Some(fox_engine_protocol::ExecutorRoute::PiNative));
-        // A second independent Run uses the controlled fallback; it is frozen
-        // without a route so the Kernel authoritative loop owns it.
-        let fallback_run = {
-            let conversation = db.create_conversation("fox-general", Some("fallback"), None, None).unwrap();
-            db.create_run(&conversation.id, "fallback", None).unwrap().run.id
-        };
-        let fallback = db.freeze_selected_run_control_with_route(&fallback_run, "legacy",
-            ExecutionAuthority::Authoritative, ResourceExecutor::Rust, Default::default(), "pi",
-            || default_run_route(Ok("kernel".into()), ExecutionAuthority::Authoritative)).unwrap();
-        assert_eq!(fallback.executor_route, None);
-        assert_eq!(db.run_control_binding(&fallback_run).unwrap().unwrap().executor_route, None);
+        // PiNative is only driven by the pi engine; any other engine is refused
+        // before a binding is written instead of freezing an unexecutable Run.
+        for engine in ["codex", "deepseek_harness", "kernel"] {
+            let conversation = db.create_conversation("fox-general", Some("engine"), None, None).unwrap();
+            let run = db.create_run(&conversation.id, "engine", None).unwrap().run.id;
+            assert!(db.freeze_default_run_control_for_engine(&run, "legacy", Default::default(), engine).is_err(), "{engine}");
+            assert_eq!(db.run_control_binding(&run).unwrap(), None, "{engine}");
+        }
+    }
+
+    #[test]
+    fn a0_route_an_unknown_frozen_route_is_refused_with_executor_route_unknown() {
+        let (db, _path, run_id) = fixture();
+        db.freeze_default_run_control_for_engine(&run_id, "legacy", Default::default(), "pi").unwrap();
+        // A binding written by another build with a route this build does not
+        // know: the hash is consistent, so only the route itself is foreign.
+        let (json,): (String,) = db.with_connection(|connection| connection.query_row(
+            "SELECT binding_json FROM run_control_bindings WHERE run_id=?1", [&run_id], |row| Ok((row.get(0)?,)))).unwrap();
+        assert!(json.contains("\"executorRoute\":\"pi_native\""));
+        for foreign in ["\"kernel\"", "\"pi_native_v2\"", "7"] {
+            let tampered = json.replace("\"executorRoute\":\"pi_native\"", &format!("\"executorRoute\":{foreign}"));
+            db.with_connection(|connection| connection.execute(
+                "UPDATE run_control_bindings SET binding_json=?2,binding_hash=?3 WHERE run_id=?1",
+                params![run_id, tampered, content_hash(&tampered)])).unwrap();
+            let error = db.run_control_binding(&run_id).unwrap_err();
+            assert!(error.contains(EXECUTOR_ROUTE_UNKNOWN), "{foreign}: {error}");
+            // A restart re-freeze refuses it too; it never falls back to a route.
+            assert!(db.freeze_default_run_control_for_engine(&run_id, "legacy", Default::default(), "pi")
+                .unwrap_err().contains(EXECUTOR_ROUTE_UNKNOWN), "{foreign}");
+        }
+        assert!(require_known_route("{\"executorRoute\":null}").is_ok());
+        assert!(require_known_route("{}").is_ok());
+        assert!(require_known_route("{\"executorRoute\":\"pi_native\"}").is_ok());
     }
 
     #[test]
@@ -372,8 +362,8 @@ mod tests {
 }
 
 impl Database {
-    pub(crate) fn candidate_executor_route(authority: ExecutionAuthority) -> Result<Option<fox_engine_protocol::ExecutorRoute>, String> {
-        candidate_executor_route(authority)
+    pub(crate) fn new_run_executor_route(authority: ExecutionAuthority) -> Option<fox_engine_protocol::ExecutorRoute> {
+        new_run_executor_route(authority)
     }
 
     /// When an approval was requested, after checking that the Run's frozen
@@ -445,24 +435,29 @@ impl Database {
         self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Legacy, executor, fox_engine_protocol::TimeBudgets::continuous(), "pi")
     }
 
+    /// Test fixture for the frozen Kernel loop: freezes an Authoritative Run
+    /// with no route, the shape historical Kernel Runs were frozen with.
+    /// Production never freezes this shape any more (A0).
+    #[cfg(test)]
     pub(crate) fn freeze_kernel_run_control(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets) -> Result<RunControlBinding, String> {
         budgets.validate()?;
         self.freeze_kernel_run_control_for_engine(run_id, profile_id, budgets, "pi")
     }
 
+    #[cfg(test)]
     pub(crate) fn freeze_kernel_run_control_for_engine(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
         budgets.validate()?;
         if !matches!(engine, "pi" | "codex" | "deepseek_harness") { return Err("unsupported Kernel engine".into()); }
         self.freeze_selected_run_control_with_route(run_id, profile_id, ExecutionAuthority::Authoritative,
-            fox_engine_protocol::ResourceExecutor::Rust, budgets, engine,
-            || explicit_run_route(std::env::var("FOX_EXECUTOR_ROUTE"), ExecutionAuthority::Authoritative))
+            fox_engine_protocol::ResourceExecutor::Rust, budgets, engine, || Ok(None))
     }
 
-    /// Freeze a new local Run through the S5 default path. Unset switches to
-    /// PiNative; `FOX_EXECUTOR_ROUTE=kernel` is the controlled Kernel fallback.
+    /// Freeze a new local Run. Every new Run is Authoritative + PiNative,
+    /// driven by the pi engine; there is no process switch and no Kernel
+    /// fallback.
     pub(crate) fn freeze_default_run_control_for_engine(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
         budgets.validate()?;
-        if !matches!(engine, "pi" | "codex" | "deepseek_harness") { return Err("unsupported Kernel engine".into()); }
+        if engine != "pi" { return Err(format!("unsupported PiNative engine `{engine}`")); }
         self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Authoritative,
             fox_engine_protocol::ResourceExecutor::Rust, budgets, engine)
     }
@@ -470,7 +465,7 @@ impl Database {
     fn freeze_selected_run_control(&self, run_id: &str, profile_id: &str, authority: ExecutionAuthority,
         executor: fox_engine_protocol::ResourceExecutor, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
         self.freeze_selected_run_control_with_route(run_id, profile_id, authority, executor, budgets, engine,
-            || candidate_executor_route(authority))
+            || Ok(new_run_executor_route(authority)))
     }
 
     fn freeze_selected_run_control_with_route(&self, run_id: &str, profile_id: &str, authority: ExecutionAuthority,
