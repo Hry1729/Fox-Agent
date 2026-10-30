@@ -122,11 +122,22 @@ function normalize(status: string | null | undefined): string {
   return (status ?? '').trim().toLowerCase()
 }
 
+/**
+ * A0: a historical Kernel Run found unfinished at startup is interrupted with
+ * this code (reason 「执行路径已退役」) and never resumed.
+ */
+export const EXECUTOR_ROUTE_RETIRED_CODE = 'executor_route_retired'
+export const EXECUTOR_ROUTE_RETIRED_HINT = '已中断，可在新 Run 中继续'
+
 function failureFor(
   kind: RunFailureKind,
   code?: string | null,
   message?: string | null,
 ): RunFailure {
+  if (code === EXECUTOR_ROUTE_RETIRED_CODE) {
+    const reason = message && message.length > 0 ? message : '执行路径已退役'
+    return { kind, code, message: `${reason}。${EXECUTOR_ROUTE_RETIRED_HINT}` }
+  }
   return {
     kind,
     code: code && code.length > 0 ? code : UNKNOWN_CODE,
