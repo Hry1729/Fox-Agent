@@ -773,8 +773,6 @@ export const desktopClient = {
     command<import('../model/agent-network').AgentNetworkStatus>('agent_backend_network_status', { conversationId }),
   agentBackendPreviewAction: (conversationId: string, preview: import('../model/agent-network').AgentPreview, stop: boolean) =>
     command<boolean>('agent_backend_preview_action', { conversationId, preview, stop }),
-  agentBackendNetworkRule: (conversationId: string, target: import('../model/agent-network').NetworkTarget, projectScope: boolean, allowed: boolean) =>
-    command<boolean>('agent_backend_network_rule', { conversationId, target, projectScope, allowed }),
   /** UX batch ①: login probe of the private HOME (names only): a conversation, or a new conversation's backend + project. */
   agentBackendCredentials: (target: AgentBackendTarget) =>
     command<CredentialProbe>('agent_backend_credentials', target),

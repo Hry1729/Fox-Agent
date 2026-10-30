@@ -250,7 +250,7 @@ export function AgentBackendPanel({
     )
     : null
 
-  const networkPanel = external && capabilityConversationId && client.agentBackendNetworkStatus && client.agentBackendNetworkRule && client.agentBackendPreviewAction
+  const networkPanel = external && capabilityConversationId && client.agentBackendNetworkStatus && client.agentBackendPreviewAction
     ? <AgentNetworkPanel key={capabilityConversationId} client={client as AgentNetworkClient} conversationId={capabilityConversationId} /> : null
   return (
     <AgentBackendBar

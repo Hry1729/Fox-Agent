@@ -152,8 +152,8 @@ impl JobError {
 //   * `BackendAvailability` is only produced by a `BackendCapabilityProof`, and
 //     the proof is an **injected dependency** — a constructor argument or an
 //     instance field. There is no process-global proof. Production Host commands
-//     use `FoxJobBackend` (or a live snapshot of it); `HostVerifiedBackend` is
-//     the refusing legacy proof used only by callers that have not adopted SRT.
+//     use `FoxJobBackend` (or a live snapshot of it); tests inject
+//     `AvailableInTests` or the refusing `RefusingInTests`.
 //   * Injection exists so tests and the `tests/` integration target can exercise
 //     the authorized path with a real child. The grant type `AvailableInTests`
 //     is `#[cfg(test)]`: that target pulls this module in with
@@ -171,13 +171,6 @@ pub enum ExecutionBackend {
     /// The child runs as the caller. Lifecycle containment only (job object,
     /// cancellation, tree teardown). **Not** a confinement boundary.
     HostUserUnconfined,
-    /// `@anthropic-ai/sandbox-runtime` on Windows: a dedicated `srt-sandbox`
-    /// local account, a machine-wide WFP egress fence keyed on that account's
-    /// SID, and per-session explicit ACEs for the configured paths.
-    SrtWindows,
-    /// `@anthropic-ai/sandbox-runtime` for a Fox Agent Host command (Windows
-    /// account isolation or the Unix bwrap / seatbelt backend).
-    SrtHost,
     /// A1: Fox's own command execution. The child runs as the current user in
     /// a Fox Job (Windows Job Object / Unix process group): timeout, cancel and
     /// whole-tree teardown, confirmed by the Job's active-process count. Not a
@@ -190,8 +183,6 @@ impl ExecutionBackend {
         match self {
             Self::FoxJob => "fox_job",
             Self::HostUserUnconfined => "host_user_unconfined",
-            Self::SrtWindows => "srt_windows",
-            Self::SrtHost => "srt_host",
         }
     }
 }
@@ -319,8 +310,8 @@ impl BackendAvailability {
 /// trying to schedule access to it.
 ///
 /// Production Host commands pass [`FoxJobBackend`] (or a snapshot guard over
-/// it); [`HostVerifiedBackend`] remains the refusing legacy proof. A test passes
-/// [`AvailableInTests`]. Because the proof
+/// it). A test passes [`AvailableInTests`], or [`RefusingInTests`] for the
+/// refusal path. Because the proof
 /// is an argument rather than a global, a test cannot change another test's
 /// decision, and the order in which tests run cannot change any of them.
 /// `Send + Sync` because a manager holding a proof is moved onto the supervision
@@ -329,16 +320,15 @@ pub trait BackendCapabilityProof: Send + Sync {
     fn availability(&self) -> BackendAvailability;
 }
 
-/// The legacy refusing proof. New production wiring uses [`FoxJobBackend`];
-/// this type stays for tests and callers that have not integrated a confinement
-/// backend, and always refuses.
-pub struct HostVerifiedBackend;
+/// A proof that always refuses, for tests of the refusal path (the manager
+/// and spawner seams must refuse when handed a refusing proof). `#[cfg(test)]`
+/// like [`AvailableInTests`]: production only ever uses [`FoxJobBackend`].
+#[cfg(test)]
+pub struct RefusingInTests;
 
-impl BackendCapabilityProof for HostVerifiedBackend {
+#[cfg(test)]
+impl BackendCapabilityProof for RefusingInTests {
     fn availability(&self) -> BackendAvailability {
-        // Deliberately unconditional. Phase 0 found no confinement backend in
-        // this build; when one is integrated, its probe result replaces this
-        // value and must carry the verified binary/config digest with it.
         BackendAvailability::Unavailable(BackendRefusal::NoVerifiedBackend)
     }
 }
@@ -352,9 +342,8 @@ impl BackendCapabilityProof for HostVerifiedBackend {
 /// path-module layout (`O/review1/c-cfg-test-probe`, `c-cfg-test-filter.log`).
 ///
 /// So test authorization needs neither a Cargo feature nor a global switch nor a
-/// type visible in production. Production passes [`HostVerifiedBackend`], which
-/// refuses, and nothing here is reachable from model output, project files or
-/// environment variables.
+/// type visible in production. Nothing here is reachable from model output,
+/// project files or environment variables.
 #[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct AvailableInTests {
@@ -452,151 +441,6 @@ fn sandbox_unavailable_error(refusal: &BackendRefusal) -> JobError {
         "sandbox_unavailable: {}. No external process was started. Control-plane state is reported separately.",
         refusal.reason()
     ))
-}
-
-/// Raw facts about the Host's native confinement primitives.
-///
-/// This is a *probe report*, not a decision: it says what was found on the
-/// machine so a later verification batch has somewhere to record its result and
-/// so a support report can distinguish "no backend installed" from "backend
-/// installed but a capability missing". None of these booleans, alone or
-/// together, authorizes execution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeConfinementReport {
-    /// The `srt-sandbox` local account exists, i.e. a distinct execution
-    /// identity has been provisioned for the SRT Windows backend.
-    pub srt_sandbox_account_present: bool,
-    /// The current process is a member of `sandbox-runtime-users`, i.e. it may
-    /// ask the SRT broker to launch as that account.
-    pub caller_may_use_srt_sandbox: bool,
-    /// `HKLM\SOFTWARE\sandbox-runtime`, the machine-wide marker written by the
-    /// elevated `windows-install` step.
-    pub srt_machine_marker_present: bool,
-}
-
-impl NativeConfinementReport {
-    /// True when nothing about a confinement backend is present, which is the
-    /// expected phase-0 state and the reason execution is refused.
-    pub fn is_unprovisioned(&self) -> bool {
-        !self.srt_sandbox_account_present
-            && !self.caller_may_use_srt_sandbox
-            && !self.srt_machine_marker_present
-    }
-}
-
-/// Probes the native primitives without elevation and without changing
-/// anything. Every check is best-effort: an unreadable value reports as absent,
-/// which keeps the result on the refusing side.
-#[cfg(windows)]
-pub fn probe_native_confinement() -> NativeConfinementReport {
-    use std::os::windows::ffi::OsStrExt;
-
-    // Declared locally rather than through a feature-gated binding: the probe
-    // needs three read-only calls, and keeping them here means this file's
-    // confinement logic cannot be changed by altering a Cargo feature list.
-    #[link(name = "advapi32")]
-    extern "system" {
-        fn LookupAccountNameW(
-            system_name: *const u16,
-            account_name: *const u16,
-            sid: *mut u8,
-            sid_len: *mut u32,
-            referenced_domain_name: *mut u16,
-            referenced_domain_len: *mut u32,
-            sid_use: *mut i32,
-        ) -> i32;
-        fn CheckTokenMembership(token: isize, sid_to_check: *const u8, is_member: *mut i32) -> i32;
-    }
-    const ERROR_SUCCESS: i32 = 0;
-
-    fn wide(value: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(value)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    /// Resolves a local account or group name to its SID bytes. `Ok(None)` means
-    /// the principal does not exist on this machine.
-    fn resolve_sid(name: &str) -> Result<Option<Vec<u8>>, ()> {
-        let name_w = wide(name);
-        let mut sid_len: u32 = 0;
-        let mut domain_len: u32 = 0;
-        let mut sid_use: i32 = 0;
-        // Sizing pass. Expected to fail with ERROR_INSUFFICIENT_BUFFER.
-        unsafe {
-            LookupAccountNameW(
-                std::ptr::null(),
-                name_w.as_ptr(),
-                std::ptr::null_mut(),
-                &mut sid_len,
-                std::ptr::null_mut(),
-                &mut domain_len,
-                &mut sid_use,
-            );
-        }
-        if sid_len == 0 {
-            return Ok(None);
-        }
-        let mut sid = vec![0u8; sid_len as usize];
-        let mut domain = vec![0u16; domain_len.max(1) as usize];
-        let ok = unsafe {
-            LookupAccountNameW(
-                std::ptr::null(),
-                name_w.as_ptr(),
-                sid.as_mut_ptr(),
-                &mut sid_len,
-                domain.as_mut_ptr(),
-                &mut domain_len,
-                &mut sid_use,
-            )
-        };
-        if ok == 0 {
-            // A name that cannot be resolved at all is absent, not an error we
-            // should treat as permission to proceed.
-            return Ok(None);
-        }
-        sid.truncate(sid_len as usize);
-        Ok(Some(sid))
-    }
-
-    fn present(name: &str) -> bool {
-        matches!(resolve_sid(name), Ok(Some(_)))
-    }
-
-    fn caller_in_group(group_name: &str) -> bool {
-        let Ok(Some(sid)) = resolve_sid(group_name) else {
-            return false;
-        };
-        let mut is_member: i32 = 0;
-        // A null token handle means "the current process's token".
-        let checked = unsafe { CheckTokenMembership(0, sid.as_ptr(), &mut is_member) };
-        checked == ERROR_SUCCESS && is_member != 0
-    }
-
-    // `%ProgramData%\sandbox-runtime` is the unprivileged proxy for the
-    // machine-wide install marker; the HKLM credential key next to it is not
-    // readable without elevation, so reading it would report a false negative.
-    let marker_present = std::env::var_os("ProgramData")
-        .map(std::path::PathBuf::from)
-        .map(|root| root.join("sandbox-runtime"))
-        .map(|path| path.exists())
-        .unwrap_or(false);
-
-    NativeConfinementReport {
-        srt_sandbox_account_present: present("srt-sandbox"),
-        caller_may_use_srt_sandbox: caller_in_group("sandbox-runtime-users"),
-        srt_machine_marker_present: marker_present,
-    }
-}
-
-#[cfg(not(windows))]
-pub fn probe_native_confinement() -> NativeConfinementReport {
-    NativeConfinementReport {
-        srt_sandbox_account_present: false,
-        caller_may_use_srt_sandbox: false,
-        srt_machine_marker_present: false,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2090,7 +1934,7 @@ pub struct ProcessJobManager {
     /// managers in one process could not hold different decisions, so a test
     /// that authorized execution changed the result of a test that asserted the
     /// refusal. Production constructs its managers with [`FoxJobBackend`]
-    /// (A1); [`HostVerifiedBackend`] is the refusing legacy proof.
+    /// (A1); [`RefusingInTests`] is the refusing legacy proof.
     proof: Arc<dyn BackendCapabilityProof>,
     config: ManagerConfig,
     jobs: Mutex<BTreeMap<String, Arc<JobEntry>>>,
@@ -3036,8 +2880,8 @@ mod tests {
     /// A1: Fox no longer gates its commands on a sandbox. The production
     /// constructor consults [`FoxJobBackend`], which is always available and
     /// names the Fox Job shape in its digest, so a start reaches the spawner.
-    /// The refusal path is still exercised through the legacy refusing proof
-    /// ([`HostVerifiedBackend`]) in the tests below.
+    /// The refusal path is exercised through the refusing test proof
+    /// ([`RefusingInTests`]) in the tests below.
     #[test]
     fn production_constructor_uses_the_fox_job_backend() {
         assert_eq!(
@@ -3133,7 +2977,7 @@ mod tests {
             env: EnvMode::Inherit,
         };
         // `Box<dyn ChildHandle>` is not `Debug`, so match rather than expect_err.
-        match SystemSpawner.spawn(&HostVerifiedBackend, &spec) {
+        match SystemSpawner.spawn(&RefusingInTests, &spec) {
             Ok(child) => panic!("the refusing proof must not create a child: pid {}", child.pid()),
             Err(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
@@ -3217,50 +3061,16 @@ mod tests {
     #[test]
     fn capability_refusal_lists_the_missing_capabilities_verbatim() {
         let refusal = BackendRefusal::CapabilitiesNotMet {
-            backend: ExecutionBackend::SrtWindows,
+            backend: ExecutionBackend::FoxJob,
             missing: vec![
                 RequiredCapability::SystemDnsFence,
                 RequiredCapability::DistinctExecutionIdentity,
             ],
         };
         let reason = refusal.reason();
-        assert!(reason.contains("srt_windows"), "{reason}");
+        assert!(reason.contains("fox_job"), "{reason}");
         assert!(reason.contains("system_dns_fence"), "{reason}");
         assert!(reason.contains("distinct_execution_identity"), "{reason}");
-    }
-
-    /// On this Host nothing is provisioned; the probe must say so rather than
-    /// assume a backend exists. Written so that a machine where SRT *is*
-    /// installed does not fail the suite spuriously.
-    #[test]
-    fn native_confinement_probe_reports_the_actual_machine_state() {
-        let report = probe_native_confinement();
-
-        // The production proof is what the shipped artifact behaves like, and it
-        // must refuse regardless of what the probe found. This is a pure value
-        // check against `HostVerifiedBackend`: no global state is involved, so
-        // no other test can influence it.
-        let production = HostVerifiedBackend.availability();
-        assert!(
-            !production.is_available(),
-            "the production backend must never report an available backend"
-        );
-        assert_eq!(
-            production.authorize().unwrap_err(),
-            BackendRefusal::NoVerifiedBackend
-        );
-
-        // Report the observed state for the log; it is not consulted by any
-        // assertion, because a probe result must never be the reason a step
-        // passes or fails on its own.
-        eprintln!("native confinement probe: {report:?}");
-
-        // A probe result is a diagnostic and must not, by itself, become a
-        // verification result.
-        assert!(
-            !HostVerifiedBackend.availability().is_available(),
-            "reading the probe report must not change the production decision"
-        );
     }
 
     // -- fakes ---------------------------------------------------------------
@@ -3684,7 +3494,7 @@ mod tests {
         ProcessJobManager::with_backend_proof(clock, spawner, probe, config, lifecycle_proof())
     }
 
-    /// A manager over the legacy refusing proof ([`HostVerifiedBackend`]).
+    /// A manager over the refusing test proof ([`RefusingInTests`]).
     fn refusing_manager(spawner: Arc<ScriptedSpawner>) -> ProcessJobManager {
         refusing_dyn_manager(spawner as Arc<dyn ProcessSpawner>)
     }
@@ -3695,7 +3505,7 @@ mod tests {
             spawner,
             Arc::new(ScriptedProbe::new(vec![])),
             ManagerConfig::default(),
-            Arc::new(HostVerifiedBackend),
+            Arc::new(RefusingInTests),
         )
     }
 

@@ -2,7 +2,7 @@
 //! ACP; external backend wiring batch). Every decision lives in
 //! `fox_agent_backend::external` (runtime: start, stream, approvals, cancel,
 //! crash, close) and `fox_agent_backend::external_launch` (managed runtime,
-//! permission mode, srt). This file only:
+//! private HOME, native permission mode). This file only:
 //!
 //! * persists + publishes runtime events exactly like the yuxi runtime
 //!   (`record_external_event` -> `fox://runtime-event`), so the existing
@@ -19,7 +19,7 @@ use fox_agent_backend::external::{AnswerOutcome, CancelOutcome, ExternalRuntime,
 use fox_agent_backend::external_launch::{HostLaunchConfig, HostLauncher};
 use fox_agent_backend::port::AgentBackend;
 use fox_agent_backend::projection::PermissionCard;
-use fox_agent_backend::sandbox::{HostOs, SandboxDeclaration};
+use fox_agent_backend::external_home::LaunchDeclaration;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
@@ -87,20 +87,11 @@ impl ExternalSink for DesktopSink {
             "nativeToolCallId": card.native_tool_call_id,
             "options": card.options,
             "answerAcknowledged": false,
-            "hostNetworkRequest": card.tool == "sandbox_network",
-            "permissionScope": if card.tool == "sandbox_network" { card.input.get("permissionScope").cloned() } else { None },
         });
         let approval = self.database.create_approval(&tool.id, &card.title, &request)?;
         let _ = self.emit(run_id, conversation_id, json!({ "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": key }));
         let _ = self.app.emit("fox://approval-requested", &approval);
         Ok(approval.id)
-    }
-
-    fn network_granted(&self, conversation_id: &str, target: &fox_agent_backend::network::NetworkTarget) -> bool {
-        if self.database.conversation_tool_permission_granted(conversation_id, PERMISSION_TOOL_NAME, &format!("sandbox_network:{}", target.key())).unwrap_or(false) { return true; }
-        network_project(&self.database, conversation_id).ok().flatten()
-            .and_then(|project| fox_agent_backend::network::project_rules(&self.state_root, &project).ok())
-            .is_some_and(|targets| targets.contains(target))
     }
 
     /// Settings batch, item 7: a permission request Fox answered itself
@@ -171,8 +162,6 @@ pub struct AgentBackendTarget {
 #[serde(rename_all = "camelCase")]
 pub struct NetworkStatus {
     pub previews: Vec<fox_agent_backend::preview::Preview>,
-    pub conversation_rules: Vec<fox_agent_backend::network::NetworkTarget>,
-    pub project_rules: Vec<fox_agent_backend::network::NetworkTarget>,
     pub project_id: Option<String>,
 }
 
@@ -183,17 +172,8 @@ fn network_project(database: &Database, conversation_id: &str) -> Result<Option<
 impl ExternalBackendHost {
     pub fn network_status(&self, conversation_id: &str) -> Result<NetworkStatus, String> {
         let project_id = network_project(&self.database, conversation_id)?;
-        let conversation_rules = self.database.with_connection(|connection| {
-            let mut statement = connection.prepare("SELECT scope_key FROM conversation_tool_permissions WHERE conversation_id = ?1 AND tool_name = ?2 AND revoked_at IS NULL AND scope_key LIKE 'sandbox_network:%'")?;
-            let scopes = statement.query_map(rusqlite::params![conversation_id, PERMISSION_TOOL_NAME], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-            Ok(scopes.into_iter().filter_map(|scope| {
-                let (host, port) = scope.strip_prefix("sandbox_network:")?.rsplit_once(':')?;
-                fox_agent_backend::network::NetworkTarget { host: host.to_owned(), port: port.parse().ok()? }.validated()
-            }).collect())
-        })?;
-        let project_rules = project_id.as_deref().map(|project| fox_agent_backend::network::project_rules(&self.runtime.launcher().config.state_root, project)).transpose()?.unwrap_or_default();
         let previews = self.runtime.previews(conversation_id)?;
-        Ok(NetworkStatus { previews, conversation_rules, project_rules, project_id })
+        Ok(NetworkStatus { previews, project_id })
     }
 
     pub async fn preview_action(&self, conversation_id: &str, preview: &fox_agent_backend::preview::Preview, stop: bool) -> Result<String, String> {
@@ -202,51 +182,11 @@ impl ExternalBackendHost {
         Ok(preview.url.clone())
     }
 
-    pub async fn network_rule(&self, conversation_id: &str, target: fox_agent_backend::network::NetworkTarget, project_scope: bool, allowed: bool) -> Result<(), String> {
-        let target = target.validated().ok_or("网络目标无效")?;
-        let scope = format!("sandbox_network:{}", target.key());
-        if project_scope {
-            let project = network_project(&self.database, conversation_id)?.ok_or("此会话没有绑定项目")?;
-            if allowed && !self.database.conversation_tool_permission_granted(conversation_id, PERMISSION_TOOL_NAME, &scope)? {
-                return Err("请先批准此会话连接该目标，再保存为项目规则".into());
-            }
-            // Removing a project rule affects new connections; it never stops other conversations.
-            fox_agent_backend::network::set_project_rule(&self.runtime.launcher().config.state_root, &project, target.clone(), allowed)?;
-        } else {
-            if allowed { return Err("新增会话授权需要通过网络审批卡".into()); }
-            self.database.with_connection(|connection| connection.execute(
-                "UPDATE conversation_tool_permissions SET revoked_at = ?1, revoke_reason = 'network_rule_revoked' WHERE conversation_id = ?2 AND tool_name = ?3 AND scope_key = ?4 AND revoked_at IS NULL",
-                rusqlite::params![(fox_agent_backend::statefile::unix_now() * 1000) as i64, conversation_id, PERMISSION_TOOL_NAME, &scope],
-            ).map(|_| ()))?;
-            if let Some(report) = self.runtime.close_conversation(conversation_id, "conversation network rule revoked").await {
-                if !report.confirmation.is_confirmed() { return Err("授权已撤销，但当前会话的原连接未确认结束，请退出并重启 Fox".into()); }
-            }
-        }
-        let _ = self.database.append_agent_backend_audit(Some(conversation_id), "host", "sandbox_network_rule", &json!({ "target": target, "projectScope": project_scope, "allowed": allowed }));
-        Ok(())
-    }
 }
 
 impl ExternalBackendHost {
     pub fn new(app: AppHandle, database: Database, fox_data: &std::path::Path) -> Self {
         let config = HostLaunchConfig::from_env(fox_data);
-        #[cfg(windows)]
-        if config.runtime_root.join(fox_agent_backend::winruntime::INSTALLER_RECEIPT_FILE).exists() {
-            let imported = fox_agent_backend::winruntime::read_srt_registry(&fox_agent_backend::sandbox::RealProbe)
-                .and_then(|registry| fox_agent_backend::winruntime::import_installer_receipt(
-                    &config.state_root,
-                    &config.runtime_root,
-                    fox_agent_backend::launch::RUNTIME_PACKAGE_VERSION,
-                    &registry,
-                    &fox_agent_backend::winacl::RealWindowsAcl,
-                ));
-            if let Err(error) = imported {
-                eprintln!("fox.external sandbox_installer_receipt_failed={error}");
-            }
-        }
-        if let Err(error) = fox_agent_backend::external_launch::recover_at_startup(&config) {
-            eprintln!("fox.external startup_recovery_failed={error:?}");
-        }
         let sink = DesktopSink { app: app.clone(), database: database.clone(), event_lock: Arc::new(Mutex::new(())), state_root: config.state_root.clone() };
         let runtime = ExternalRuntime::new(sink, HostLauncher::new(config), tauri::async_runtime::handle().inner().clone());
         let host = Self { runtime, database, app, data_dir: fox_data.to_path_buf() };
@@ -351,7 +291,7 @@ impl ExternalBackendHost {
     /// `approval_resolve` for an external approval (already routed): record
     /// the decision, write the native one-shot option, settle the card.
     pub fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision) -> ApiResponse<bool> {
-        if decision == ApprovalDecision::AllowConversation && !self.runtime.is_network_approval(approval_id) {
+        if decision == ApprovalDecision::AllowConversation {
             return failure("approval.resolve_failed", "外部 Agent 的审批只支持“允许一次”或“拒绝”", false);
         }
         let resolved = match self.database.resolve_approval(approval_id, decision) {
@@ -431,11 +371,7 @@ impl ExternalBackendHost {
             native_permission: None,
         });
         let pi_launch = launcher.config.pi_launch();
-        let mut view = capability_view(backend, None, &SandboxDeclaration::declare(mode, None, HostOs::current()), pi_launch);
-        if launcher.config.full_access_forbidden {
-            fox_agent_backend::capability_view::apply_full_access_forbidden(&mut view);
-        }
-        view
+        capability_view(backend, None, &LaunchDeclaration::declare(mode), pi_launch)
     }
 
     /// Settings batch, item 6: Fox「模型服务」's default provider (base URL,
@@ -496,7 +432,7 @@ impl ExternalBackendHost {
         };
         let mut errors = Vec::new();
         for (id, _) in projects {
-            if fox_agent_backend::sandbox::canonical_project_uuid(&id).is_none() {
+            if fox_agent_backend::external_home::canonical_project_uuid(&id).is_none() {
                 continue;
             }
             for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
@@ -690,11 +626,11 @@ impl ExternalBackendHost {
             Ok(request) => request,
             Err(refusal) => return retype(refusal),
         };
-        let private = match self.runtime.launcher().config.full_access_private(&request) {
+        let private = match self.runtime.launcher().config.private_dirs(&request) {
             Ok(private) => private,
             Err(error) => return failure(&error.code, error.message, false),
         };
-        if let Err(error) = fox_agent_backend::sandbox::ensure_backend_home_dirs(request.backend, &private.private_home) {
+        if let Err(error) = fox_agent_backend::external_home::ensure_backend_home_dirs(request.backend, &private.private_home) {
             return failure("agent_backend_open_failed", format!("无法创建私有 HOME：{error}"), false);
         }
         match crate::app_capabilities::open_folder(&private.private_home) {

@@ -12,9 +12,6 @@ mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod external_backend;
-// A1: Fox commands no longer use SRT; removed in stage B.
-#[allow(dead_code)]
-mod host_sandbox;
 mod external_model;
 mod kernel;
 mod kernel_compaction;
@@ -511,7 +508,6 @@ pub fn run() {
             // External backend wiring batch: effective capability dimensions.
             commands::agent_backend_routing::agent_backend_capabilities,
             commands::agent_backend_routing::agent_backend_network_status,
-            commands::agent_backend_routing::agent_backend_network_rule,
             commands::agent_backend_routing::agent_backend_preview_action,
             // UX batch ①②: login guidance / import, permission mode, revocation.
             commands::agent_backend_routing::agent_backend_credentials,

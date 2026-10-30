@@ -60,10 +60,9 @@ fn fixture(tag: &str) -> PathBuf {
 
 /// The execution decision this harness injects into every manager it builds.
 ///
-/// Production constructs managers with `HostVerifiedBackend`, which refuses on
-/// this Host because no confinement backend is verified (batch C0, NO-GO). This
-/// module exists to exercise the *lifecycle* machinery against real OS
-/// processes, so it must hand each manager an authorizing proof explicitly.
+/// Production constructs managers with `FoxJobBackend`. This module exists to
+/// exercise the *lifecycle* machinery against real OS processes with an
+/// explicit test proof, so it hands each manager an authorizing proof itself.
 ///
 /// The injection is per manager instance. An earlier revision used a
 /// process-global proof installed by the unit tests, which made this target

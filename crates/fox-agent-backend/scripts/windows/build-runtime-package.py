@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Fox Windows sandbox runtime package: path budget, packing, SHA256, manifest.
+"""Fox Windows external-backend runtime package: path budget, packing, SHA256,
+manifest. The package carries Node, the external backends and Fox's runtime
+assets; it carries no sandbox runtime (srt): a package with an srt\ tree is
+refused.
 
 Runs on any OS (Linux CI included); paths are judged as they will be on
 Windows: ``<install root>\\<version>\\<relative path with backslashes>``.
@@ -9,18 +12,17 @@ Windows: ``<install root>\\<version>\\<relative path with backslashes>``.
       listing the offenders. Also checked: the enable script's staging path
       (``%ProgramFiles%\\Fox\\.s<8 hex>\\c\\...``).
 
-  stage <out-dir> [--node-dir D] [--srt-prefix P] [--backend NAME=PREFIX ...]
+  stage <out-dir> [--node-dir D] [--backend NAME=PREFIX ...]
       Assemble a package directory: copies the given Node directory to node\\,
-      the srt npm prefix to srt\\, each backend prefix to backends\\<NAME>\\, and
-      Fox's runtime assets from this crate: acp-bridge\\bridge.mjs,
-      dsh-patches\\*.yml and the pi approval gate pi-gate\\{pi-gated.cmd,
+      each backend prefix to backends\\<NAME>\\, and Fox's runtime assets from
+      this crate: dsh-patches\\*.yml and the pi approval gate pi-gate\\{pi-gated.cmd,
       fox-approval-gate.ts} (from fixtures/pi/; Fox launches pi gated only when
       <runtime>\\pi-gate\\pi-gated.cmd exists, otherwise stock pi without Host
       approvals). Does not download anything (prefixes come from
       ``npm install --prefix <p> --os=win32 --cpu=x64 <pkg>@<version>``).
 
   pack <dir> [--version V] --out <zip> [--budget 240]
-      Verify the layout (node\\node.exe, srt cli.js, acp-bridge\\bridge.mjs and
+      Verify the layout (node\\node.exe, no srt\\ or acp-bridge\\ tree,
       pi-gate\\{pi-gated.cmd,fox-approval-gate.ts} equal to this crate's copies,
       dsh-patches equal if present), run the budget
       check, write a deterministic zip, <zip>.sha256 and <zip>.manifest.json
@@ -68,12 +70,11 @@ DEFAULT_INSTALL_ROOT = r"C:\Program Files\Fox\sandbox-runtime"
 # enable-sandbox.ps1 extracts to %ProgramFiles%\Fox\.s<8 hex>\c first.
 STAGING_PREFIX = r"C:\Program Files\Fox\.s00000000\c"
 DEFAULT_BUDGET = 240
-SRT_CLI = "srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
-SRT_VERSION = "0.0.81"
-SRT_PACKAGE = "srt/node_modules/@anthropic-ai/sandbox-runtime/package.json"
-SRT_HELPER = "srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/srt-win/x64/srt-win.exe"
+# Trees earlier packages carried for the removed Fox sandbox (srt and the
+# Windows ACP bridge). A new package must not contain them.
+RETIRED_TREES = ("srt/", "acp-bridge/")
 NPM_FILES = ["node/npm.cmd", "node/npx.cmd", "node/node_modules/npm/package.json", "node/node_modules/npm/bin/npm-cli.js", "node/node_modules/npm/bin/npx-cli.js"]
-REQUIRED = ["node/node.exe", *NPM_FILES, SRT_CLI, SRT_PACKAGE, SRT_HELPER, "acp-bridge/bridge.mjs", *PI_GATE_FILES]
+REQUIRED = ["node/node.exe", *NPM_FILES, *PI_GATE_FILES]
 FIXED_TIME = (2026, 1, 1, 0, 0, 0)
 
 
@@ -217,16 +218,9 @@ def verify_layout(directory):
     root = fs_path(directory)
     keys = set(list_files(directory)) if os.path.isdir(root) else set()
     problems = [f"missing {rel}" for rel in REQUIRED if rel_key(rel) not in keys]
-    if SRT_PACKAGE in keys:
-        try:
-            package = json.loads(read_bytes(child(root, SRT_PACKAGE)))
-            if package.get("version") != SRT_VERSION:
-                problems.append(f"srt must be {SRT_VERSION} with its matching Windows helper")
-        except (ValueError, AttributeError):
-            problems.append(f"invalid {SRT_PACKAGE}")
-    if "acp-bridge/bridge.mjs" in keys:
-        if norm_text(read_bytes(child(root, "acp-bridge/bridge.mjs"))) != norm_text(read_bytes(fs_path(os.path.join(ASSETS, "acp-bridge", "bridge.mjs")))):
-            problems.append("acp-bridge/bridge.mjs differs from runtime-assets/acp-bridge/bridge.mjs (Fox refuses to start)")
+    for tree in RETIRED_TREES:
+        if any(key.startswith(tree) for key in keys):
+            problems.append(f"{tree} must not be in the package (Fox no longer ships a sandbox runtime)")
     for key, source in PI_GATE_FILES.items():
         if key in keys and norm_text(read_bytes(child(root, key))) != norm_text(read_bytes(fs_path(source))):
             problems.append(f"{key} differs from fixtures/pi/{os.path.basename(source)}")
@@ -284,17 +278,11 @@ def cmd_stage(args):
     os.makedirs(fs_path(out), exist_ok=True)
     if args.node_dir:
         copy_tree(args.node_dir, os.path.join(out, "node"), False)
-    if args.srt_prefix:
-        copy_tree(args.srt_prefix, os.path.join(out, "srt"), args.prune_dts)
     for spec in args.backend or []:
         name, _, prefix = spec.partition("=")
         if not name or not prefix:
             raise SystemExit(f"--backend expects NAME=PREFIX, got {spec!r}")
         copy_tree(prefix, os.path.join(out, "backends", name), args.prune_dts)
-    copy_tree(os.path.join(ASSETS, "acp-bridge"), os.path.join(out, "acp-bridge"), False, skip=("bridge.test.mjs",))
-    test_file = child(fs_path(out), "acp-bridge/bridge.test.mjs")
-    if os.path.exists(test_file):
-        os.remove(test_file)
     copy_tree(os.path.join(ASSETS, "dsh-patches"), os.path.join(out, "dsh-patches"), False)
     for key, source in PI_GATE_FILES.items():
         target = child(fs_path(out), key)
@@ -363,7 +351,6 @@ def main(argv=None):
     stage = sub.add_parser("stage")
     stage.add_argument("out")
     stage.add_argument("--node-dir")
-    stage.add_argument("--srt-prefix")
     stage.add_argument("--backend", action="append")
     stage.add_argument("--prune-dts", action="store_true")
     pack = sub.add_parser("pack")

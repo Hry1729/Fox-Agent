@@ -15,16 +15,16 @@ use std::time::{Duration, Instant};
 /// An authorizing proof is injected per fixture, so these tests need no global
 /// switch and no serialization against tests that assert the refusal. A test
 /// that wants the production decision uses [`Fixture::refusing`], or passes
-/// `HostVerifiedBackend` explicitly through `start_with_proof`.
+/// `RefusingInTests` explicitly through `start_with_proof`.
 fn authorized_proof() -> Arc<dyn crate::process_jobs::BackendCapabilityProof> {
     Arc::new(crate::process_jobs::AvailableInTests::host_user_unconfined(
         "command-jobs-adapter-tests",
     ))
 }
 
-/// The production decision, for the refusal tests.
+/// A refusing proof, for the refusal tests.
 fn refusing_proof() -> Arc<dyn crate::process_jobs::BackendCapabilityProof> {
-    Arc::new(crate::process_jobs::HostVerifiedBackend)
+    Arc::new(crate::process_jobs::RefusingInTests)
 }
 
 struct Fixture {
@@ -42,7 +42,7 @@ impl Fixture {
 
     /// A fixture whose default operations run under the production refusal.
     fn refusing(label: &str) -> Self {
-        Self::with_proof(label, Arc::new(crate::process_jobs::HostVerifiedBackend))
+        Self::with_proof(label, Arc::new(crate::process_jobs::RefusingInTests))
     }
 
     fn with_proof(
@@ -363,10 +363,10 @@ fn refusal_cannot_be_talked_out_of_by_request_or_environment() {
     let fixture = Fixture::refusing("no-bypass");
     // Fields a caller might hope are honored by the backend selection.
     for extra in [
-        json!({"backend":"srt_windows"}),
+        json!({"backend":"host_user_unconfined"}),
         json!({"sandbox":true}),
         json!({"allowRoots":["C:\\"]}),
-        json!({"helper":"C:\\tmp\\fake-srt.exe"}),
+        json!({"helper":"C:\\tmp\\fake-helper.exe"}),
     ] {
         let mut request = json!({
             "action": "start",
@@ -729,7 +729,7 @@ fn backend_change_at_manager_boundary_keeps_job_audit_without_start_evidence() {
         fn availability(&self) -> crate::process_jobs::BackendAvailability {
             if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
                 crate::process_jobs::AvailableInTests::host_user_unconfined("boundary-proof").availability()
-            } else { crate::process_jobs::HostVerifiedBackend.availability() }
+            } else { crate::process_jobs::RefusingInTests.availability() }
         }
     }
     let fixture = Fixture::new("manager-proof-change");

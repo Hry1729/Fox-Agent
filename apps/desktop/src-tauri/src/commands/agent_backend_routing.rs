@@ -290,23 +290,6 @@ pub async fn agent_backend_preview_action(external: tauri::State<'_, crate::exte
     })
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkRuleRequest {
-    pub conversation_id: String,
-    pub target: fox_agent_backend::network::NetworkTarget,
-    pub project_scope: bool,
-    pub allowed: bool,
-}
-
-#[tauri::command]
-pub async fn agent_backend_network_rule(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: NetworkRuleRequest) -> Result<ApiResponse<bool>, ()> {
-    Ok(match external.network_rule(&request.conversation_id, request.target, request.project_scope, request.allowed).await {
-        Ok(()) => ApiResponse::success(true),
-        Err(error) => ApiResponse::failure("sandbox.network_rule_failed", error, true),
-    })
-}
-
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBackendImportRequest {
