@@ -209,14 +209,80 @@ fn native_restart_interrupts_an_inflight_run_without_settling_its_unknown_effect
     assert!(db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).is_err());
 }
 
+fn terminal_fact(db: &Database, run: &str) -> (String,Option<String>,Option<String>,bool) {
+    db.with_connection(|connection| connection.query_row(
+        "SELECT status,error_code,error_message,finished_at IS NOT NULL FROM runs WHERE id=?1",[run],
+        |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap()
+}
+
 #[test]
-fn unrouted_kernel_runs_still_refuse_host_writers_and_runtime_events() {
+fn a0_startup_unrouted_kernel_runs_refuse_host_writers_and_are_retired_at_startup() {
     let (db,run,_) = fixture(None);
     assert!(db.create_host_tool_call(&run,"call","read",&input(),"running",false).is_err());
     assert!(db.mark_run_failed(&run,"test","failure").is_err());
     assert!(db.mark_run_interrupted(&run,"test","interruption").is_err());
     assert!(!db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).unwrap());
+    assert_eq!(db.kernel_host_recoverable_runs().unwrap(),vec![run.clone()]);
+    assert!(!db.run_executor_route_retired(&run).unwrap());
     db.repair_interrupted_runs().unwrap();
+    // A0: the frozen Kernel loop never resumes it; it is interrupted with the
+    // retired-path reason and the Kernel recoverer no longer sees it.
+    assert_eq!(terminal_fact(&db,&run),("interrupted".into(),Some("executor_route_retired".into()),Some("执行路径已退役".into()),true));
+    assert!(db.run_executor_route_retired(&run).unwrap());
+    assert!(db.kernel_host_recoverable_runs().unwrap().is_empty());
+    // Still a Kernel-owned read model: Host writers stay refused.
+    assert!(db.mark_run_failed(&run,"test","failure").is_err());
+    // A second startup is a no-op.
+    db.repair_interrupted_runs().unwrap();
+    assert_eq!(terminal_fact(&db,&run).1.as_deref(),Some("executor_route_retired"));
+}
+
+#[test]
+fn a0_startup_retirement_settles_the_kernel_read_model_and_leaves_other_routes_alone() {
+    let (db,kernel,conversation) = fixture(None);
+    let now = now_ms();
+    db.with_connection(|connection| {
+        connection.execute("INSERT INTO messages(id,conversation_id,run_id,role,kind,content,status,ordinal,created_at,updated_at)
+            VALUES('a0-message',?1,?2,'assistant','text','partial','streaming',9999,?3,?3)",params![conversation,kernel,now])?;
+        connection.execute("INSERT INTO tool_calls(id,runtime_tool_call_id,run_id,conversation_id,tool_name,input_json,status,
+            execution_location,requires_approval,started_at,updated_at)
+            VALUES('kernel-tool:a0','a0-call',?1,?2,'write_file','{}','pending','host',1,?3,?3)",params![kernel,conversation,now])?;
+        connection.execute("INSERT INTO approvals(id,tool_call_id,status,requested_action,request_json,requested_at)
+            VALUES('kernel-approval:a0','kernel-tool:a0','pending','write_file','{}',?1)",[now])?;
+        Ok(())
+    }).unwrap();
+    // A Kernel Run that already finished keeps its own terminal facts.
+    let (finished_db,finished,_) = fixture(None);
+    finished_db.with_connection(|connection| connection.execute(
+        "UPDATE runs SET status='completed',finished_at=1 WHERE id=?1",[&finished])).unwrap();
+    finished_db.repair_interrupted_runs().unwrap();
+    assert_eq!(terminal_fact(&finished_db,&finished),("completed".into(),None,None,true));
+    // A PiNative Run left running is the ordinary restart interruption.
+    let (native_db,native,_) = fixture(Some(ExecutorRoute::PiNative));
+    native_db.repair_interrupted_runs().unwrap();
+    assert_eq!(terminal_fact(&native_db,&native).1.as_deref(),Some("runtime.application_restarted"));
+    assert!(!native_db.run_executor_route_retired(&native).unwrap());
+
+    db.repair_interrupted_runs().unwrap();
+    assert_eq!(terminal_fact(&db,&kernel).1.as_deref(),Some("executor_route_retired"));
+    let settled: (String,String,String) = db.with_connection(|connection| connection.query_row(
+        "SELECT (SELECT status FROM messages WHERE id='a0-message'),(SELECT status FROM tool_calls WHERE id='kernel-tool:a0'),
+                (SELECT status FROM approvals WHERE id='kernel-approval:a0')",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+    assert_eq!(settled,("interrupted".into(),"interrupted".into(),"expired".into()));
+}
+
+#[test]
+fn a0_startup_an_unknown_frozen_route_fails_startup_with_executor_route_unknown() {
+    let (db,run,_) = fixture(Some(ExecutorRoute::PiNative));
+    db.with_connection(|connection| {
+        let raw: String = connection.query_row("SELECT binding_json FROM run_control_bindings WHERE run_id=?1",[&run],|row|row.get(0))?;
+        let raw = raw.replace("\"executorRoute\":\"pi_native\"","\"executorRoute\":\"kernel\"");
+        let hash = format!("sha256:{}",hex::encode(Sha256::digest(raw.as_bytes())));
+        connection.execute("UPDATE run_control_bindings SET binding_json=?2,binding_hash=?3 WHERE run_id=?1",params![run,raw,hash])?;
+        Ok(())
+    }).unwrap();
+    let error = db.repair_interrupted_runs().unwrap_err();
+    assert!(error.contains("executor_route_unknown"),"{error}");
     assert_eq!(status(&db,&run),"running");
 }
 
@@ -292,4 +358,40 @@ fn native_repair_override_keeps_its_specialized_atomic_once_claim() {
     assert_eq!(replay.attempt.id,started.attempt.id);
     let claimed:Option<i64>=db.with_connection(|connection|connection.query_row("SELECT claimed_at FROM approvals WHERE id=?1",[&approval.id],|row|row.get(0))).unwrap();
     assert!(claimed.is_some());
+}
+
+/// Desktop restart, end to end through the same startup sequence `lib.rs` runs
+/// (open with migration backup → repair → task audit) and the conversation
+/// reader the desktop loads: a historical Kernel Run is shown interrupted with
+/// the retired-path reason, is never recovered, and the next Run is PiNative.
+#[test]
+fn a0_startup_desktop_restart_shows_the_retired_kernel_run_and_continues_on_pi_native() {
+    let root = std::env::temp_dir().join(format!("fox-a0-restart-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("fox.db");
+    let (conversation, kernel_run) = {
+        let db = Database::open(path.clone()).unwrap();
+        let conversation = db.create_conversation("fox-general", Some("A0 restart"), None, Some("ask")).unwrap();
+        let run = db.create_run(&conversation.id, "historical Kernel task", None).unwrap().run.id;
+        let binding = db.freeze_kernel_run_control(&run, "legacy", TimeBudgets::continuous()).unwrap();
+        assert_eq!(binding.executor_route, None);
+        db.with_connection(|connection| connection.execute("UPDATE runs SET status='running',started_at=?2 WHERE id=?1",params![run,now_ms()])).unwrap();
+        (conversation.id, run)
+    };
+    let db = Database::open_with_migration_backup(path.clone(), &root.join("backups")).unwrap();
+    db.repair_interrupted_runs().unwrap();
+    db.audit_interrupted_tasks().unwrap();
+    let detail = db.load_conversation(&conversation).unwrap();
+    let last = detail.last_run.expect("the retired Run is still the conversation's last Run");
+    assert_eq!(last.id, kernel_run);
+    assert_eq!(last.status, "interrupted");
+    assert_eq!(last.error_code.as_deref(), Some("executor_route_retired"));
+    assert_eq!(last.error_message.as_deref(), Some("执行路径已退役"));
+    assert!(db.kernel_host_recoverable_runs().unwrap().is_empty());
+    // The user continues in a new Run, which is frozen PiNative.
+    let next = db.create_run(&conversation, "continue in a new Run", None).unwrap().run.id;
+    let binding = db.freeze_default_run_control_for_engine(&next, "legacy", TimeBudgets::continuous(), "pi").unwrap();
+    assert_eq!(binding.executor_route, Some(ExecutorRoute::PiNative));
+    drop(db);
+    let _ = std::fs::remove_dir_all(&root);
 }
