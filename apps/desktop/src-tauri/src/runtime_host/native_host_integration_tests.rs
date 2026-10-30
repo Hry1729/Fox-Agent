@@ -23,7 +23,7 @@ fn native_run(database: &Database, conversation: &str, text: &str) -> StartRunRe
     let started=database.create_run(conversation,text,None).unwrap();
     let (_root,mode)=database.conversation_project_access(conversation).unwrap().unwrap();
     assert_eq!(mode,"allow");
-    let binding=database.freeze_kernel_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi").unwrap();
+    let binding=database.freeze_default_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi").unwrap();
     assert_eq!(binding.authority,ExecutionAuthority::Authoritative);
     assert_eq!(binding.executor_route,Some(ExecutorRoute::PiNative));
     assert_eq!(binding.read_only_executor,ResourceExecutor::Rust);
@@ -177,7 +177,7 @@ fn native_host_real_sidecar_orders_commits_and_isolates_two_sessions() {
         let mut child=Command::new(std::env::current_exe().unwrap())
             .args(["runtime_host::native_host_integration_tests::native_host_real_sidecar_orders_commits_and_isolates_two_sessions","--exact","--nocapture","--test-threads=1"])
             .env(CHILD,"1").env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_SCRIPT").env_remove("FOX_RUNTIME_MODE")
-            .env("FOX_KERNEL_MODE","authoritative").env("FOX_EXECUTOR_ROUTE","pi_native")
+            .env("FOX_KERNEL_MODE","authoritative")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let deadline=Instant::now()+Duration::from_secs(150);
         while child.try_wait().unwrap().is_none() {
@@ -360,7 +360,7 @@ fn native_host_shared_file_conflict_preserves_the_failed_receipt() {
         let mut child=Command::new(std::env::current_exe().unwrap())
             .args([TEST,"--exact","--nocapture","--test-threads=1"])
             .env(CHILD,"1").env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_SCRIPT").env_remove("FOX_RUNTIME_MODE")
-            .env("FOX_KERNEL_MODE","authoritative").env("FOX_EXECUTOR_ROUTE","pi_native")
+            .env("FOX_KERNEL_MODE","authoritative")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let deadline=Instant::now()+Duration::from_secs(150);
         while child.try_wait().unwrap().is_none() {
@@ -498,7 +498,7 @@ fn native_host_six_readers_overlap_real_file_loops_within_four_slots() {
         let mut child=Command::new(std::env::current_exe().unwrap())
             .args([TEST,"--exact","--nocapture","--test-threads=1"])
             .env(CHILD,"1").env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_SCRIPT").env_remove("FOX_RUNTIME_MODE")
-            .env("FOX_KERNEL_MODE","authoritative").env("FOX_EXECUTOR_ROUTE","pi_native")
+            .env("FOX_KERNEL_MODE","authoritative")
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let deadline=Instant::now()+Duration::from_secs(150);
         while child.try_wait().unwrap().is_none() {
