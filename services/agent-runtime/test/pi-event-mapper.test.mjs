@@ -146,28 +146,6 @@ test('fails closed on invalid or overflowing provider usage without emitting a d
   assert.equal(events.filter(({ type }) => type === 'usage.updated').length, 1)
 })
 
-test('moves text from tool-calling turns into the reasoning stream', () => {
-  const events = []
-  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
-  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
-  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Let me inspect the directory first.' } })
-  mapper.handle({
-    type: 'message_end',
-    message: {
-      role: 'assistant',
-      content: [
-        { type: 'text', text: 'Let me inspect the directory first.' },
-        { type: 'toolCall', id: 'tool-1', name: 'ls', arguments: { path: '.' } },
-      ],
-      stopReason: 'toolUse',
-      usage: {},
-    },
-  })
-
-  assert.equal(events.find((event) => event.type === 'reasoning.delta')?.delta, 'Let me inspect the directory first.')
-  assert.equal(events.some((event) => event.type === 'message.delta'), false)
-})
-
 test('keeps the final non-tool response in the assistant message', () => {
   const events = []
   const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
@@ -261,65 +239,6 @@ test('recovers provider reasoning that is only present in the completed message'
   })
 })
 
-test('separates a strongly signalled planning preamble from the final answer', () => {
-  const text = [
-    'The user wants a CSV file. I need to inspect the directory first.',
-    '',
-    'Let me determine the safest implementation and check the available files.',
-    '',
-    '好的，脚本已经创建完成，运行后会生成文件统计.csv。',
-  ].join('\n')
-  const split = splitMixedAssistantText(text)
-  assert.match(split.reasoning, /^The user wants/)
-  assert.equal(split.answer, '好的，脚本已经创建完成，运行后会生成文件统计.csv。')
-})
-
-test('separates Chinese process narration from a concise final answer', () => {
-  const text = [
-    '我先确认一下当前的工作目录，然后看看项目里到底有哪些文档。',
-    '',
-    '现在去验证文档里的具体数字和事实声明。',
-    '',
-    '让我再快速核实最后两个容易出错的点。',
-    '',
-    '结论如下：README 中的 legacy 目录声明与实际文件系统不一致。',
-  ].join('\n')
-
-  const split = splitMixedAssistantText(text)
-  assert.match(split.reasoning, /^我先确认一下当前的工作目录/)
-  assert.equal(split.answer, '结论如下：README 中的 legacy 目录声明与实际文件系统不一致。')
-})
-
-test('keeps a planning-only Chinese turn out of the assistant answer', () => {
-  const text = [
-    '我来建一个目标，然后拆成可执行的任务。',
-    '',
-    '先看看当前有没有已激活的目标状态。',
-    '',
-    '当前对话没有现存的目标快照，那我直接新建一个。',
-    '',
-    'Gate 仍然要求确认，我需要再检查目标状态。',
-  ].join('\n')
-
-  assert.deepEqual(splitMixedAssistantText(text), { reasoning: text, answer: '' })
-})
-
-test('keeps Goal gate and Host contract narration out of the assistant answer', () => {
-  const text = [
-    '好的，本次测试要测的是目标验收：部分子任务完成、部分未完成时，结案目标是否会报错。',
-    '',
-    '测试设计：创建三个任务，完成前两个，把第三个保持 queued。',
-    '',
-    '先提议目标并等待 Host 确认。目标已提议，状态 proposed，等待 Host 确认。',
-    '',
-    '快照里仍是 goal: null，我按守则停在这里。',
-    '',
-    '我直接调用 task_create_many，让 Host 来判定。',
-  ].join('\n')
-
-  assert.deepEqual(splitMixedAssistantText(text), { reasoning: text, answer: '' })
-})
-
 test('keeps an ordinary Chinese explanation in the answer stream', () => {
   const text = '这个问题的根因是路径状态没有在选择文件夹后同步更新。'
   assert.deepEqual(splitMixedAssistantText(text), { reasoning: '', answer: text })
@@ -344,113 +263,6 @@ test('handles a MiniMax closing marker without an opening marker', () => {
 test('keeps ordinary explanatory wording in the final answer', () => {
   const text = 'Let me explain how this works.\n\nThe function scans the current directory and writes a CSV file.'
   assert.deepEqual(splitMixedAssistantText(text), { reasoning: '', answer: text })
-})
-
-test('keeps a planning-only final turn out of the assistant answer', () => {
-  const text = [
-    'Now I have a clear view of the directory. Let me write a Python script.',
-    '',
-    'Actually, I do not have a tool to execute scripts.',
-    '',
-    'Wait, let me re-read the task. I should create the script file.',
-  ].join('\n')
-  assert.deepEqual(splitMixedAssistantText(text), { reasoning: text, answer: '' })
-})
-
-test('maps mixed final text into reasoning and answer streams', () => {
-  const events = []
-  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
-  const text = 'The user asked for a script.\n\nLet me verify the output format.\n\n好的，代码已经写好。'
-  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
-  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } })
-  mapper.handle({
-    type: 'message_end',
-    message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'stop', usage: {} },
-  })
-
-  assert.match(events.find((event) => event.type === 'reasoning.delta')?.delta, /^The user asked/)
-  assert.equal(events.find((event) => event.type === 'message.delta')?.delta, '好的，代码已经写好。')
-})
-
-test('streams Chinese planning as reasoning before its final answer', () => {
-  const events = []
-  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
-  const planning = '我先确认当前目录。\n\n现在去核对项目文件。\n\n让我再验证一次。\n\n'
-  const answer = '最终结果：项目结构已经核对完成。'
-
-  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
-  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: planning } })
-  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: answer } })
-  mapper.handle({
-    type: 'message_end',
-    message: { role: 'assistant', content: [{ type: 'text', text: planning + answer }], stopReason: 'stop', usage: {} },
-  })
-
-  assert.equal(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join(''), answer)
-  assert.match(events.filter((event) => event.type === 'reasoning.delta').map((event) => event.delta).join(''), /^我先确认当前目录/)
-})
-
-test('keeps a tool-testing planning list out of the final answer', () => {
-  const text = [
-    'This is the **third round** of tool testing. Let me try some more creative and different tool calls to demonstrate variety.',
-    '',
-    "What's interesting to try:",
-    '',
-    'Grep with different patterns',
-    'Find with different patterns',
-    'Try to read with offsets',
-    '',
-    'Let me think about what would be novel:',
-    '',
-    'Try grep with case-sensitive vs case-insensitive',
-    'Try read with offset to get middle of CSV file',
-    '',
-    'Let me do a parallel batch of calls.',
-    '',
-    'Let me make calls好嘞！第三轮工具测试开始，这次试试**不同写法**和**参数边界**：',
-  ].join('\n')
-
-  const split = splitMixedAssistantText(text)
-  assert.match(split.reasoning, /^This is the \*\*third round\*\*/)
-  assert.equal(split.answer, '好嘞！第三轮工具测试开始，这次试试**不同写法**和**参数边界**：')
-})
-
-test('streams a tool-testing planning list as reasoning before its Chinese answer', () => {
-  const events = []
-  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
-  const planning = 'This is the third round of tool testing. Let me try more calls.\n\nLet me inspect different patterns.\n\n'
-  const answer = '好嘞！第三轮工具测试开始。'
-
-  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
-  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: planning } })
-  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: answer } })
-  mapper.handle({
-    type: 'message_end',
-    message: { role: 'assistant', content: [{ type: 'text', text: planning + answer }], stopReason: 'stop', usage: {} },
-  })
-
-  assert.equal(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join(''), answer)
-  assert.match(events.filter((event) => event.type === 'reasoning.delta').map((event) => event.delta).join(''), /^This is the third round/)
-})
-
-test('moves leaked planning into thinking blocks before session persistence', () => {
-  const text = 'The user wants a CSV.\n\nLet me inspect the files.\n\n好的，脚本已经完成。'
-  const messages = sanitizeAssistantHistory([{
-    role: 'assistant',
-    content: [{ type: 'text', text }],
-    stopReason: 'stop',
-  }])
-
-  assert.deepEqual(messages[0].content.map((block) => block.type), ['thinking', 'text'])
-  assert.equal(messages[0].content[1].text, '好的，脚本已经完成。')
-})
-
-test('sanitizes leaked planning from legacy string history', () => {
-  const text = 'The user wants a CSV.\n\nLet me inspect the files.\n\n好的，脚本已经完成。'
-  const messages = sanitizeAssistantHistory([{ role: 'assistant', content: text }])
-
-  assert.deepEqual(messages[0].content.map((block) => block.type), ['thinking', 'text'])
-  assert.equal(messages[0].content[1].text, '好的，脚本已经完成。')
 })
 
 test('normalizes plain legacy assistant strings to Pi text blocks', () => {
@@ -859,4 +671,52 @@ test('failed and non-document knowledge results do not advertise citations', () 
   mapper.handle({ type: 'tool_execution_end', toolCallId: 'failed', toolName: 'search_knowledge', isError: true, result: { details: { kb_id: 'kb', results: [{ file_id: 'doc', content: 'partial' }] } } })
   mapper.handle({ type: 'tool_execution_end', toolCallId: 'invalid', toolName: 'search_knowledge', result: { details: { items: [{ id: 'not-a-document', name: 'A' }] } } })
   assert.equal(events.filter(event => event.type === 'source.added').length, 0)
+})
+
+const MD1_ZH_ANSWER = '我需要先提醒你三点注意事项：\n1. 备份数据库。\n现在需要确认的是磁盘空间是否足够。\n最后重启服务即可。'
+
+test('MD-1 an ordinary Chinese answer that opens with planning-like words stays the answer', () => {
+  assert.deepEqual(splitMixedAssistantText(MD1_ZH_ANSWER), { reasoning: '', answer: MD1_ZH_ANSWER })
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  for (const chunk of MD1_ZH_ANSWER.match(/[\s\S]{1,7}/g)) {
+    mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: chunk } })
+  }
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: MD1_ZH_ANSWER }], stopReason: 'stop', usage: {} } })
+  mapper.handle({ type: 'agent_end', messages: [] })
+  assert.equal(events.some((event) => event.type === 'reasoning.delta'), false)
+  assert.equal(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join(''), MD1_ZH_ANSWER)
+  assert.equal(events.some((event) => event.type === 'run.failed'), false)
+  assert.equal(events.filter((event) => event.type === 'run.completed').length, 1)
+})
+
+test('MD-1 English planning-like openings are not reclassified as reasoning either', () => {
+  const text = 'The user wants a CSV.\n\nLet me inspect the files.\n\nWe need to check the header row.'
+  assert.deepEqual(splitMixedAssistantText(text), { reasoning: '', answer: text })
+  const messages = sanitizeAssistantHistory([{ role: 'assistant', content: [{ type: 'text', text }], stopReason: 'stop' }])
+  assert.deepEqual(messages[0].content, [{ type: 'text', text }])
+})
+
+test('MD-1 streams explicit provider thinking tags as reasoning, split across chunks', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  for (const delta of ['<thi', 'nk>我先看看目录', '。</th', 'ink>\n\n', '结果如下。']) {
+    mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta } })
+  }
+  const text = '<think>我先看看目录。</think>\n\n结果如下。'
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'stop', usage: {} } })
+  assert.equal(events.filter((event) => event.type === 'reasoning.delta').map((event) => event.delta).join(''), '我先看看目录。')
+  assert.equal(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join(''), '结果如下。')
+})
+
+test('MD-1 text before a tool call that was not tagged is kept as visible text', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '我先检查目录。' } })
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '我先检查目录。' }, { type: 'toolCall', id: 't1', name: 'ls', arguments: {} }], stopReason: 'toolUse', usage: {} } })
+  assert.equal(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join(''), '我先检查目录。')
+  assert.equal(events.some((event) => event.type === 'reasoning.delta'), false)
 })
