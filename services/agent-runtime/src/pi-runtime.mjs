@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
 import { createFatalErrorHandler } from './runtime-fatal.mjs'
 import {
@@ -39,7 +39,7 @@ import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from './ex
 import { selectToolsForHostRuntime } from './host-runtime-capabilities.mjs'
 import { adaptFoxToolsToPi } from './tool-adapter.mjs'
 import { createNativeToolBridge } from './pi-native-tool-bridge.mjs'
-import { markNativeSessionRun, reconcileNativeSession, validateNativeSessionText } from './pi-native-recovery.mjs'
+import { markNativeSessionRun, reconcileNativeSession, prepareNativeSessionFileForResume } from './pi-native-recovery.mjs'
 import { runOfflineEvals } from './offline-evaluator.mjs'
 import {
   modelProfilePrompt,
@@ -1211,11 +1211,10 @@ async function handleRequest(request) {
           }
           // `SessionManager.open` tolerates some malformed files and would
           // silently answer a resume with a fresh/partial session. Fox must
-          // validate the session header and every non-tail record itself; a
-          // final partial record is allowed because a crash can interrupt the
-          // last append, and S3 reconciliation owns that case.
+          // validate complete records and remove an interrupted final append
+          // before SDK append mode makes that tail an interior record.
           try {
-            validateNativeSessionText(readFileSync(path, 'utf8'))
+            prepareNativeSessionFileForResume(path)
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
             throw sessionError('session.native_corrupt', `The Pi session file is damaged: ${message}`)

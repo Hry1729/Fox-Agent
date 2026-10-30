@@ -1,11 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager, fauxAssistantMessage, registerFauxProvider, createFoxModelRuntime, createFoxAgentSession,
   SettingsManager, DefaultResourceLoader } from '../src/pi-adapter.mjs'
-import { markNativeSessionRun, nativeSessionToolCalls, reconcileNativeSession, TOOL_CALL_FACTS, validateNativeSessionText } from '../src/pi-native-recovery.mjs'
+import { markNativeSessionRun, nativeSessionToolCalls, reconcileNativeSession, TOOL_CALL_FACTS, validateNativeSessionText, prepareNativeSessionFileForResume } from '../src/pi-native-recovery.mjs'
 import { nativeToolInputDigest, nativeHostToolResult, NATIVE_RESPONSE_DIGEST } from '../src/pi-native-tool-bridge.mjs'
 
 const generation = 3
@@ -323,9 +323,33 @@ test('a damaged native session header is refused before it can become a fresh se
   assert.throws(() => validateNativeSessionText('{bad-header}\n{"type":"message"}\n'), /header/)
   assert.throws(() => validateNativeSessionText('{"type":"message"}\n'), /header/)
   assert.throws(() => validateNativeSessionText(''), /empty/)
-  // A malformed final record is a crash tail, not a reason to reject the
-  // whole session; S3 reconciliation owns that boundary.
-  assert.doesNotThrow(() => validateNativeSessionText(valid + '{"partial"'))
+  assert.equal(validateNativeSessionText(valid + '{"partial"'), Buffer.byteLength(valid))
+  assert.throws(() => validateNativeSessionText(valid + '{"partial"\n'), /malformed record/)
   // Damage before the tail is not tolerated.
   assert.throws(() => validateNativeSessionText(valid + '{bad}\n{"type":"message"}\n'), /malformed record/)
+})
+
+test('a truncated append is removed before SDK writes so the next reopen keeps its history', async t => {
+  const { directory, manager, path } = await fixture(t, { results: [0, 1] })
+  manager.appendMessage(fauxAssistantMessage('已完成的记录：恢复锚点 73。'))
+  const complete = (await readFile(path, 'utf8')).replaceAll('\n', '\r\n')
+  await writeFile(path, complete)
+  await appendFile(path, '{"type":"message","id":')
+
+  prepareNativeSessionFileForResume(path)
+  assert.equal(await readFile(path, 'utf8'), complete, 'complete UTF-8 records and CRLF bytes remain unchanged')
+  const resumed = SessionManager.open(path, undefined, directory)
+  const result = await reconcile(resumed, calls.map(call => completed(call.id, 'original result')))
+  assert.deepEqual(result, { checked: 2, appended: 0 })
+  resumed.appendMessage({ role: 'user', content: '继续保留锚点 73。', timestamp: Date.now() })
+  resumed.appendMessage(fauxAssistantMessage('重开后仍保留锚点 73。'))
+  const continued = await readFile(path, 'utf8')
+
+  prepareNativeSessionFileForResume(path)
+  assert.equal(await readFile(path, 'utf8'), continued)
+  const reopened = SessionManager.open(path, undefined, directory)
+  assert.equal(reopened.getSessionId(), manager.getSessionId())
+  assert.deepEqual(reopened.getBranch(), resumed.getBranch())
+  assert.ok(continued.startsWith(complete))
+  assert.ok(continued.includes('重开后仍保留锚点 73。'))
 })

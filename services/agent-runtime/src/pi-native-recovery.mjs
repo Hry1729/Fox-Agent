@@ -1,3 +1,4 @@
+import { readFileSync, truncateSync } from 'node:fs'
 import { validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { nativeToolInputDigest, nativeHostToolResult, NATIVE_RESPONSE_DIGEST, NATIVE_NONEXECUTION } from './pi-native-tool-bridge.mjs'
 
@@ -9,13 +10,13 @@ export const TOOL_CALL_FACTS = 'tool_call.facts'
  *
  * `SessionManager.open` is intentionally tolerant: a damaged header can be
  * skipped and the resume can silently look like a fresh/partial session. Fox
- * must reject that before any Run is admitted. A malformed *final* record is
- * allowed because a process crash can interrupt the last append; S3 recovery
- * reconciles that tail. A malformed record before the tail is damage.
+ * must reject that before any Run is admitted. An unterminated final record
+ * can be an interrupted append; return its byte offset so the caller removes
+ * it before SDK append mode turns it into an invalid interior record.
  */
 export function validateNativeSessionText(text) {
   if (typeof text !== 'string' || !text.trim()) throw new Error('the session file is empty')
-  const lines = text.split(/\r?\n/)
+  const lines = text.split('\n')
   while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
   if (!lines.length) throw new Error('the session file is empty')
   let header
@@ -24,14 +25,22 @@ export function validateNativeSessionText(text) {
       || !Number.isSafeInteger(header.version)) {
     throw new Error('the session header is missing its identity or version')
   }
+  let offset = lines[0].length + 1
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index]
     if (!line.trim()) throw new Error(`the session has an empty record at line ${index + 1}`)
     try { JSON.parse(line) } catch {
-      if (index === lines.length - 1) break
+      if (index === lines.length - 1 && !text.endsWith('\n')) return Buffer.byteLength(text.slice(0, offset), 'utf8')
       throw new Error(`the session has a malformed record at line ${index + 1}`)
     }
+    offset += line.length + 1
   }
+  return null
+}
+
+export function prepareNativeSessionFileForResume(path) {
+  const truncateAt = validateNativeSessionText(readFileSync(path, 'utf8'))
+  if (truncateAt !== null) truncateSync(path, truncateAt)
 }
 
 function recoveryError(code, message) {
