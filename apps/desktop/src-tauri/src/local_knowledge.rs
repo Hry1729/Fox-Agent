@@ -1911,6 +1911,11 @@ impl LocalKnowledgeStore {
         Ok(bases)
     }
 
+    /// SQLite lexical search. Its result keeps the historical
+    /// `fallback { kind: "sqlite_lexical", reason: "vector_index_unavailable" }`
+    /// marker; the agent `search_knowledge` tool uses
+    /// [`LocalKnowledgeStore::search_for_agent`] instead, which records the
+    /// real reason vector retrieval was not used.
     pub fn search_lexical(
         &self,
         knowledge_base_id: &str,
@@ -1918,16 +1923,234 @@ impl LocalKnowledgeStore {
         requested_limit: Option<usize>,
         requested_max_chars: Option<usize>,
     ) -> Result<Value, LocalKnowledgeError> {
+        self.search_lexical_with_fallback(
+            knowledge_base_id,
+            query,
+            requested_limit,
+            requested_max_chars,
+            json!({
+                "active": true,
+                "kind": "sqlite_lexical",
+                "reason": "vector_index_unavailable"
+            }),
+        )
+    }
+
+    /// Search entry point of the agent `search_knowledge` tool for a local
+    /// knowledge base. Uses the base's vector/hybrid retrieval
+    /// ([`LocalKnowledgeStore::search_retrieval`]) when its vector index is
+    /// ready and its search mode is `vector` or `hybrid`; otherwise, or when
+    /// retrieval fails, answers with SQLite lexical search and records why in
+    /// `fallback.reason` (`index_not_ready`, `keyword_mode`,
+    /// `vector_search_failed`). Synchronous and may start the retrieval
+    /// worker process: call it off the async executor.
+    pub fn search_for_agent(
+        &self,
+        knowledge_base_id: &str,
+        query: &str,
+        requested_limit: Option<usize>,
+        requested_max_chars: Option<usize>,
+    ) -> Result<Value, LocalKnowledgeError> {
+        let base = self.get_base(knowledge_base_id)?;
+        self.search_for_agent_with(&base, query, requested_limit, requested_max_chars, |request| {
+            self.search_retrieval(request)
+        })
+    }
+
+    /// [`LocalKnowledgeStore::search_for_agent`] with the retrieval call
+    /// injected, so the path selection and result mapping can be tested
+    /// without a real embedding model and Zvec index.
+    pub(crate) fn search_for_agent_with(
+        &self,
+        base: &LocalKnowledgeBase,
+        query: &str,
+        requested_limit: Option<usize>,
+        requested_max_chars: Option<usize>,
+        retrieve: impl FnOnce(
+            crate::local_knowledge_vector::KnowledgeRetrievalRequest,
+        ) -> Result<Value, LocalKnowledgeError>,
+    ) -> Result<Value, LocalKnowledgeError> {
+        let trimmed = validate_local_query(query)?;
+        let fallback = match plan_agent_search(base) {
+            AgentSearchPlan::Retrieval { mode } => {
+                let result_limit = agent_result_limit(requested_limit);
+                let request = crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+                    knowledge_base_id: base.id.clone(),
+                    query: trimmed.to_owned(),
+                    mode: Some(mode),
+                    // One extra hit tells whether more matches exist than were returned.
+                    limit: Some((result_limit + 1).min(MAX_LOCAL_SEARCH_RESULTS)),
+                };
+                match retrieve(request).and_then(|retrieved| {
+                    self.map_retrieval_for_agent(
+                        &base.id,
+                        trimmed,
+                        &retrieved,
+                        result_limit,
+                        requested_max_chars,
+                    )
+                }) {
+                    Ok(value) => return Ok(value),
+                    Err(error) => AgentSearchFallback::VectorSearchFailed {
+                        code: error.code().to_owned(),
+                        message: error.to_string(),
+                    },
+                }
+            }
+            AgentSearchPlan::Lexical(fallback) => fallback,
+        };
+        self.search_lexical_with_fallback(
+            &base.id,
+            trimmed,
+            requested_limit,
+            requested_max_chars,
+            fallback.to_json(),
+        )
+    }
+
+    /// Maps a `search_retrieval` result onto the `search_lexical` output
+    /// shape (plus `mode`, `fusionVersion`, per-item `vectorScore` /
+    /// `lexicalScore`). Chunk rows are re-read scoped to `knowledge_base_id`,
+    /// so a hit from any other base is dropped.
+    pub(crate) fn map_retrieval_for_agent(
+        &self,
+        knowledge_base_id: &str,
+        query: &str,
+        retrieved: &Value,
+        result_limit: usize,
+        requested_max_chars: Option<usize>,
+    ) -> Result<Value, LocalKnowledgeError> {
+        if retrieved
+            .get("knowledgeBaseId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id != knowledge_base_id)
+        {
+            return Err(LocalKnowledgeError::invalid(
+                "retrieval result belongs to another knowledge base",
+            ));
+        }
+        let mode = retrieved
+            .get("mode")
+            .and_then(Value::as_str)
+            .filter(|mode| matches!(*mode, "vector" | "hybrid"))
+            .ok_or_else(|| LocalKnowledgeError::invalid("retrieval result has no vector mode"))?
+            .to_owned();
+        let hits = retrieved
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| LocalKnowledgeError::invalid("retrieval result has no items"))?;
+        let chunk_ids = hits
+            .iter()
+            .filter_map(|hit| hit.get("chunkId").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let chunks = self.lexical_chunks_by_id(knowledge_base_id, &chunk_ids)?;
+        let max_chars = requested_max_chars
+            .unwrap_or(DEFAULT_LOCAL_SEARCH_CHARS)
+            .clamp(1, MAX_LOCAL_SEARCH_CHARS);
+        let scoped_hits = hits
+            .iter()
+            .filter_map(|hit| {
+                let chunk_id = hit.get("chunkId").and_then(Value::as_str)?;
+                chunks.get(chunk_id).map(|chunk| (hit, chunk))
+            })
+            .collect::<Vec<_>>();
+        let hit_count = scoped_hits.len();
+        let mut truncated = hit_count > result_limit;
+        let mut used_chars = 0usize;
+        let mut items = Vec::new();
+        for (hit, chunk) in scoped_hits.into_iter().take(result_limit) {
+            if used_chars >= max_chars {
+                truncated = true;
+                break;
+            }
+            let content = truncate_chars(&chunk.text, max_chars - used_chars);
+            if content.len() < chunk.text.len() {
+                truncated = true;
+            }
+            used_chars += content.chars().count();
+            let mut item = json!({
+                "documentId": chunk.document_id,
+                "chunkId": chunk.id,
+                "anchor": chunk.anchor,
+                "score": hit.get("score").cloned().unwrap_or(Value::Null),
+                "content": content,
+                "source": "local",
+                "sourceMetadata": source_metadata(knowledge_base_id, chunk),
+            });
+            for (from, to) in [("vectorScore", "vectorScore"), ("keywordScore", "lexicalScore")] {
+                if let Some(score) = hit.get(from).filter(|score| !score.is_null()) {
+                    item[to] = score.clone();
+                }
+            }
+            items.push(item);
+        }
+        Ok(json!({
+            "source": "local",
+            "knowledgeBaseId": knowledge_base_id,
+            "query": query,
+            "mode": mode,
+            "fusionVersion": retrieved.get("fusionVersion").cloned().unwrap_or(Value::Null),
+            "items": items,
+            "total": hit_count,
+            "truncated": truncated,
+            "fallback": { "active": false },
+        }))
+    }
+
+    fn lexical_chunks_by_id(
+        &self,
+        knowledge_base_id: &str,
+        chunk_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, LexicalChunk>, LocalKnowledgeError> {
+        if chunk_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = (0..chunk_ids.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT c.id, c.document_id, c.chunk_index, c.text, c.anchor,
+                    c.start_offset, c.end_offset, c.metadata_json, c.page_number,
+                    c.slide_number, d.display_name, d.relative_path, d.mime_type,
+                    d.content_hash
+             FROM local_kb_chunks c
+             JOIN local_kb_documents d ON d.id = c.document_id
+             WHERE d.knowledge_base_id = ?1
+               AND d.parse_status = 'ready'
+               AND c.document_revision = d.current_revision
+               AND c.id IN ({placeholders})"
+        );
+        let mut sql_params = Vec::with_capacity(chunk_ids.len() + 1);
+        sql_params.push(rusqlite::types::Value::Text(knowledge_base_id.to_owned()));
+        sql_params.extend(
+            chunk_ids
+                .iter()
+                .map(|id| rusqlite::types::Value::Text(id.clone())),
+        );
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(&sql)?;
+        let chunks = statement
+            .query_map(params_from_iter(sql_params), map_lexical_chunk)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(LocalKnowledgeError::from)?;
+        Ok(chunks
+            .into_iter()
+            .map(|chunk| (chunk.id.clone(), chunk))
+            .collect())
+    }
+
+    fn search_lexical_with_fallback(
+        &self,
+        knowledge_base_id: &str,
+        query: &str,
+        requested_limit: Option<usize>,
+        requested_max_chars: Option<usize>,
+        fallback: Value,
+    ) -> Result<Value, LocalKnowledgeError> {
         self.get_base(knowledge_base_id)?;
-        let query = query.trim();
-        if query.is_empty() {
-            return Err(LocalKnowledgeError::invalid("query is required"));
-        }
-        if query.chars().count() > MAX_LOCAL_QUERY_CHARS {
-            return Err(LocalKnowledgeError::invalid(format!(
-                "query cannot exceed {MAX_LOCAL_QUERY_CHARS} characters"
-            )));
-        }
+        let query = validate_local_query(query)?;
 
         let terms = lexical_terms(query);
         let result_limit = requested_limit
@@ -2012,11 +2235,7 @@ impl LocalKnowledgeStore {
             "items": items,
             "total": candidate_count,
             "truncated": truncated,
-            "fallback": {
-                "active": true,
-                "kind": "sqlite_lexical",
-                "reason": "vector_index_unavailable"
-            }
+            "fallback": fallback,
         }))
     }
 
@@ -3867,6 +4086,87 @@ fn lexical_score(text: &str, terms: &[String]) -> f64 {
     (coverage * 0.7 + density * 0.3).min(1.0)
 }
 
+fn validate_local_query(query: &str) -> Result<&str, LocalKnowledgeError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(LocalKnowledgeError::invalid("query is required"));
+    }
+    if query.chars().count() > MAX_LOCAL_QUERY_CHARS {
+        return Err(LocalKnowledgeError::invalid(format!(
+            "query cannot exceed {MAX_LOCAL_QUERY_CHARS} characters"
+        )));
+    }
+    Ok(query)
+}
+
+fn agent_result_limit(requested_limit: Option<usize>) -> usize {
+    requested_limit
+        .unwrap_or(DEFAULT_LOCAL_SEARCH_RESULTS)
+        .clamp(1, MAX_LOCAL_SEARCH_RESULTS)
+}
+
+/// Why the agent `search_knowledge` tool answered a local knowledge base with
+/// SQLite lexical search instead of vector/hybrid retrieval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentSearchFallback {
+    /// The base's vector index is not ready; `detail` is the base's own
+    /// `fallback_reason` when it has one.
+    IndexNotReady { detail: Option<String> },
+    /// The vector index is ready but the base searches in `keyword` mode.
+    KeywordMode,
+    /// Vector/hybrid retrieval (or its worker process) returned an error.
+    VectorSearchFailed { code: String, message: String },
+}
+
+impl AgentSearchFallback {
+    pub(crate) fn to_json(&self) -> Value {
+        match self {
+            Self::IndexNotReady { detail } => json!({
+                "active": true,
+                "kind": "sqlite_lexical",
+                "reason": "index_not_ready",
+                "detail": detail,
+            }),
+            Self::KeywordMode => json!({
+                "active": true,
+                "kind": "sqlite_lexical",
+                "reason": "keyword_mode",
+            }),
+            Self::VectorSearchFailed { code, message } => json!({
+                "active": true,
+                "kind": "sqlite_lexical",
+                "reason": "vector_search_failed",
+                "errorCode": code,
+                "detail": message,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentSearchPlan {
+    /// Run `search_retrieval` in this mode (`vector` or `hybrid`).
+    Retrieval { mode: String },
+    Lexical(AgentSearchFallback),
+}
+
+/// Chooses how the agent `search_knowledge` tool searches a local base:
+/// vector/hybrid retrieval only when the vector index is ready and the base's
+/// default search mode is `vector` or `hybrid`.
+pub(crate) fn plan_agent_search(base: &LocalKnowledgeBase) -> AgentSearchPlan {
+    if !base.vector_index_ready {
+        return AgentSearchPlan::Lexical(AgentSearchFallback::IndexNotReady {
+            detail: base.fallback_reason.clone(),
+        });
+    }
+    match base.search_mode.as_str() {
+        "vector" | "hybrid" => AgentSearchPlan::Retrieval {
+            mode: base.search_mode.clone(),
+        },
+        _ => AgentSearchPlan::Lexical(AgentSearchFallback::KeywordMode),
+    }
+}
+
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
@@ -4951,5 +5251,327 @@ mod library_latency_probe {
         assert!(store.get_base(&base.id).unwrap().vector_index_ready);
         assert!(store.generation_checks.lock().unwrap().values().any(|entry| entry.0 > expired));
         println!("LIBRARY_BENCH invalidation=count-change,expiry passed");
+    }
+}
+
+/// Fixture helpers shared by the agent `search_knowledge` tests here and in
+/// `runtime_host`.
+#[cfg(test)]
+pub(crate) mod agent_search_test_support {
+    use super::*;
+
+    pub(crate) fn temp_store(label: &str) -> (LocalKnowledgeStore, PathBuf) {
+        let root = std::env::temp_dir().join(format!("fox-agent-search-{label}-{}", Uuid::new_v4()));
+        (LocalKnowledgeStore::open(&root).unwrap(), root)
+    }
+
+    /// Creates a keyword-mode base with one ready document whose chunks are
+    /// `chunks`; returns `(base_id, document_id, chunk_ids)`.
+    pub(crate) fn base_with_document(
+        store: &LocalKnowledgeStore,
+        name: &str,
+        relative_path: &str,
+        chunks: &[&str],
+    ) -> (String, String, Vec<String>) {
+        let base = store
+            .create_base(CreateLocalKnowledgeBaseRequest {
+                name: name.to_owned(),
+                description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
+            })
+            .unwrap();
+        let document_id = Uuid::new_v4().to_string();
+        let now = crate::database::now_ms();
+        let connection = store.connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO local_kb_documents(
+                    id, knowledge_base_id, display_name, relative_path, source_path,
+                    current_revision, content_hash, file_size, mime_type, parse_status,
+                    index_status, parser_version, chunk_config_hash, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?3, ?3, 1, 'hash', 1, 'text/markdown',
+                           'ready', 'pending', 'fox-text-v1', 'utf8-4096-v1', ?4, ?4)",
+                params![document_id, base.id, relative_path, now],
+            )
+            .unwrap();
+        let mut chunk_ids = Vec::new();
+        for (index, text) in chunks.iter().enumerate() {
+            let chunk_id = Uuid::new_v4().to_string();
+            connection
+                .execute(
+                    "INSERT INTO local_kb_chunks(
+                        id, document_id, document_revision, chunk_index, text, anchor
+                     ) VALUES (?1, ?2, 1, ?3, ?4, ?5)",
+                    params![chunk_id, document_id, index as i64, text, format!("chunk-{index}")],
+                )
+                .unwrap();
+            chunk_ids.push(chunk_id);
+        }
+        (base.id, document_id, chunk_ids)
+    }
+
+    /// The base as `get_base` reports it, then marked as having a ready
+    /// vector index in `mode`. A real ready Zvec index needs an installed
+    /// ONNX embedding model, which test builds cannot download.
+    pub(crate) fn ready_base(store: &LocalKnowledgeStore, id: &str, mode: &str) -> LocalKnowledgeBase {
+        let mut base = store.get_base(id).unwrap();
+        base.vector_index_ready = true;
+        base.search_mode = mode.to_owned();
+        base.fallback_reason = None;
+        base
+    }
+
+    /// A `search_retrieval` result in the shape `search_retrieval_in_process`
+    /// returns, one hit per chunk id, best first.
+    pub(crate) fn retrieval_result(base_id: &str, query: &str, mode: &str, chunk_ids: &[String]) -> Value {
+        let items = chunk_ids
+            .iter()
+            .enumerate()
+            .map(|(index, chunk_id)| {
+                json!({
+                    "documentId": "ignored-by-mapping",
+                    "chunkId": chunk_id,
+                    "anchor": null,
+                    "content": "ignored-by-mapping",
+                    "score": 0.05 - index as f64 * 0.001,
+                    "keywordScore": if index == 0 { Some(1.5) } else { None },
+                    "vectorScore": 0.9 - index as f64 * 0.1,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "knowledgeBaseId": base_id,
+            "query": query,
+            "mode": mode,
+            "fusionVersion": if mode == "hybrid" { Some("rrf-v1-k60") } else { None },
+            "timings": { "keywordMs": 0, "vectorMs": 0, "totalMs": 0 },
+            "items": items,
+        })
+    }
+}
+
+#[cfg(test)]
+mod agent_search_tests {
+    use super::agent_search_test_support::*;
+    use super::*;
+
+    #[test]
+    fn agent_search_plan_uses_retrieval_only_for_ready_vector_modes() {
+        let (store, root) = temp_store("plan");
+        let (base_id, _, _) = base_with_document(&store, "计划", "plan.md", &["文本"]);
+        let not_ready = store.get_base(&base_id).unwrap();
+        assert!(!not_ready.vector_index_ready);
+        assert_eq!(
+            plan_agent_search(&not_ready),
+            AgentSearchPlan::Lexical(AgentSearchFallback::IndexNotReady {
+                detail: Some("未配置向量模型".to_owned())
+            })
+        );
+        assert_eq!(
+            plan_agent_search(&ready_base(&store, &base_id, "keyword")),
+            AgentSearchPlan::Lexical(AgentSearchFallback::KeywordMode)
+        );
+        for mode in ["vector", "hybrid"] {
+            assert_eq!(
+                plan_agent_search(&ready_base(&store, &base_id, mode)),
+                AgentSearchPlan::Retrieval { mode: mode.to_owned() }
+            );
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_search_uses_hybrid_retrieval_when_vector_index_ready() {
+        let (store, root) = temp_store("hybrid");
+        let (base_id, document_id, chunk_ids) = base_with_document(
+            &store,
+            "混合",
+            "guide/hybrid.md",
+            &["向量检索第一段", "向量检索第二段"],
+        );
+        let base = ready_base(&store, &base_id, "hybrid");
+        let mut seen_request = None;
+        let result = store
+            .search_for_agent_with(&base, "  向量检索  ", Some(5), None, |request| {
+                seen_request = Some(request.clone());
+                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+            })
+            .unwrap();
+        let request = seen_request.expect("retrieval was called");
+        assert_eq!(request.knowledge_base_id, base_id);
+        assert_eq!(request.query, "向量检索");
+        assert_eq!(request.mode.as_deref(), Some("hybrid"));
+        assert_eq!(request.limit, Some(6));
+
+        assert_eq!(result["source"], "local");
+        assert_eq!(result["knowledgeBaseId"], base_id.as_str());
+        assert_eq!(result["query"], "向量检索");
+        assert_eq!(result["mode"], "hybrid");
+        assert_eq!(result["fusionVersion"], "rrf-v1-k60");
+        assert_eq!(result["fallback"]["active"], false);
+        assert_eq!(result["total"], 2);
+        assert_eq!(result["truncated"], false);
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["chunkId"], chunk_ids[0].as_str());
+        assert_eq!(items[0]["documentId"], document_id.as_str());
+        assert_eq!(items[0]["content"], "向量检索第一段");
+        assert_eq!(items[0]["anchor"], "chunk-0");
+        assert_eq!(items[0]["source"], "local");
+        assert_eq!(items[0]["vectorScore"], 0.9);
+        assert_eq!(items[0]["lexicalScore"], 1.5);
+        assert!(items[0]["score"].is_number());
+        assert!(items[1].get("lexicalScore").is_none());
+        assert!(items[1]["vectorScore"].is_number());
+        assert_eq!(items[0]["sourceMetadata"]["relativePath"], "guide/hybrid.md");
+        assert_eq!(items[0]["sourceMetadata"]["knowledgeBaseId"], base_id.as_str());
+        assert_eq!(items[0]["sourceMetadata"]["chunkIndex"], 0);
+
+        let vector = store
+            .search_for_agent_with(&ready_base(&store, &base_id, "vector"), "向量", None, None, |request| {
+                assert_eq!(request.mode.as_deref(), Some("vector"));
+                Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids))
+            })
+            .unwrap();
+        assert_eq!(vector["mode"], "vector");
+        assert!(vector["fusionVersion"].is_null());
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_search_falls_back_to_lexical_with_index_not_ready() {
+        let (store, root) = temp_store("not-ready");
+        let (base_id, document_id, _) =
+            base_with_document(&store, "未就绪", "notes.md", &["第一段知识", "第二段知识"]);
+        // The public entry point reads the real base, whose vector index is
+        // not ready, so retrieval is never attempted.
+        let result = store.search_for_agent(&base_id, "第二段", Some(3), Some(1_000)).unwrap();
+        assert_eq!(result["source"], "local");
+        assert!(result.get("mode").is_none());
+        assert_eq!(result["fallback"]["active"], true);
+        assert_eq!(result["fallback"]["kind"], "sqlite_lexical");
+        assert_eq!(result["fallback"]["reason"], "index_not_ready");
+        assert_eq!(result["fallback"]["detail"], "未配置向量模型");
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["documentId"], document_id.as_str());
+        assert_eq!(items[0]["content"], "第二段知识");
+
+        // Other callers of search_lexical keep the historical marker.
+        let lexical = store.search_lexical(&base_id, "第二段", Some(3), Some(1_000)).unwrap();
+        assert_eq!(lexical["fallback"]["reason"], "vector_index_unavailable");
+        assert_eq!(lexical["items"], result["items"]);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_search_reports_keyword_mode_and_vector_search_failures() {
+        let (store, root) = temp_store("fallbacks");
+        let (base_id, _, _) = base_with_document(&store, "回退", "fallback.md", &["回退原因测试"]);
+        let keyword = store
+            .search_for_agent_with(&ready_base(&store, &base_id, "keyword"), "回退", None, None, |_| {
+                panic!("keyword mode must not call vector retrieval")
+            })
+            .unwrap();
+        assert_eq!(keyword["fallback"]["reason"], "keyword_mode");
+        assert_eq!(keyword["items"].as_array().map(Vec::len), Some(1));
+
+        let failed = store
+            .search_for_agent_with(&ready_base(&store, &base_id, "hybrid"), "回退", None, None, |_| {
+                Err(LocalKnowledgeError::storage("无法启动向量检索隔离进程：boom"))
+            })
+            .unwrap();
+        assert_eq!(failed["fallback"]["active"], true);
+        assert_eq!(failed["fallback"]["kind"], "sqlite_lexical");
+        assert_eq!(failed["fallback"]["reason"], "vector_search_failed");
+        assert_eq!(failed["fallback"]["errorCode"], "local_knowledge.storage_failed");
+        assert!(failed["fallback"]["detail"].as_str().unwrap().contains("boom"));
+        assert_eq!(failed["items"][0]["content"], "回退原因测试");
+        assert!(failed.get("mode").is_none());
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_search_never_returns_chunks_of_another_knowledge_base() {
+        let (store, root) = temp_store("isolation");
+        let (base_a, _, chunks_a) = base_with_document(&store, "A", "a.md", &["A 项目私有知识"]);
+        let (base_b, _, chunks_b) = base_with_document(&store, "B", "b.md", &["B 项目私有知识"]);
+        // A retrieval answer for A that names a chunk of B: the B hit is dropped.
+        let mixed = [chunks_b[0].clone(), chunks_a[0].clone()];
+        let result = store
+            .search_for_agent_with(&ready_base(&store, &base_a, "hybrid"), "私有知识", None, None, |request| {
+                Ok(retrieval_result(&base_a, &request.query, "hybrid", &mixed))
+            })
+            .unwrap();
+        assert_eq!(result["mode"], "hybrid");
+        assert_eq!(result["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(result["items"][0]["chunkId"], chunks_a[0].as_str());
+        assert!(!result.to_string().contains("B 项目私有知识"));
+
+        // A retrieval answer for another base is rejected and A is searched lexically.
+        let foreign = store
+            .search_for_agent_with(&ready_base(&store, &base_a, "hybrid"), "私有知识", None, None, |request| {
+                Ok(retrieval_result(&base_b, &request.query, "hybrid", &chunks_b))
+            })
+            .unwrap();
+        assert_eq!(foreign["fallback"]["reason"], "vector_search_failed");
+        assert!(!foreign.to_string().contains("B 项目私有知识"));
+        assert_eq!(foreign["items"][0]["content"], "A 项目私有知识");
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_search_applies_top_k_and_max_chars_to_retrieval_results() {
+        let (store, root) = temp_store("limits");
+        let (base_id, _, chunk_ids) = base_with_document(
+            &store,
+            "截断",
+            "limits.md",
+            &["一二三四五六七八", "甲乙丙丁戊己庚辛", "ABCDEFGH"],
+        );
+        let base = ready_base(&store, &base_id, "hybrid");
+        let top_k = store
+            .search_for_agent_with(&base, "检索", Some(2), None, |request| {
+                assert_eq!(request.limit, Some(3));
+                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+            })
+            .unwrap();
+        assert_eq!(top_k["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(top_k["total"], 3);
+        assert_eq!(top_k["truncated"], true);
+
+        let max_chars = store
+            .search_for_agent_with(&base, "检索", Some(3), Some(10), |request| {
+                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+            })
+            .unwrap();
+        let items = max_chars["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["content"], "一二三四五六七八");
+        assert_eq!(items[1]["content"], "甲乙");
+        assert_eq!(max_chars["truncated"], true);
+        let used: usize = items
+            .iter()
+            .map(|item| item["content"].as_str().unwrap().chars().count())
+            .sum();
+        assert_eq!(used, 10);
+
+        // topK is clamped to the lexical maximum and the extra probe hit stays within it.
+        store
+            .search_for_agent_with(&base, "检索", Some(500), None, |request| {
+                assert_eq!(request.limit, Some(MAX_LOCAL_SEARCH_RESULTS));
+                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+            })
+            .unwrap();
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
