@@ -389,12 +389,13 @@ async function runReadonlyNodeAgent({
   })
   const session = created.session
   let timedOut = false
-  const abort = () => session.abort()
+  // MD-4: abort() is async; never leave its rejection unhandled.
+  const abort = () => { void Promise.resolve().then(() => session.abort()).catch(() => {}) }
   if (signal.aborted) abort()
   else signal.addEventListener('abort', abort, { once: true })
   const timeout = setTimeout(() => {
     timedOut = true
-    session.abort()
+    abort()
   }, NODE_TIMEOUT_MS)
   try {
     const dependencyBlock = dependencyResults.length === 0
