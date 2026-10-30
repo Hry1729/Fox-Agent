@@ -8,7 +8,7 @@
 
 S5 分支的新本地 Run 默认使用 Authoritative 执行契约和 PiNative 路由。未设置 `FOX_EXECUTOR_ROUTE` 或设置为 `pi_native` 时走新默认；显式 `kernel` 只影响之后创建的 Run。已有冻结绑定不改写，`FOX_KERNEL_MODE` 不再决定新 Run 路径。
 
-能力说明 JSON 缺口已定位为 `composeFoxPrompt` 缺少 `stablePrefix`/`dynamicTail` 的产品缺陷并修复；最终 v5 payload 的真实 HTTP 已携带完整能力事实和 Fox 上下文。完整本地 CI 的 Desktop、Agent Runtime、Rust Host、协议、ACP、Kernel worker 和性能基线在 Node 22 下通过；Zvec/ONNX 按仓库资源门控跳过，远端 CI 未运行。
+能力说明 JSON 缺口已定位为 `composeFoxPrompt` 缺少 `stablePrefix`/`dynamicTail` 的产品缺陷并修复；最终 v5 payload 的真实 HTTP 已携带完整能力事实和 Fox 上下文。完整本地 CI 的 Desktop、Agent Runtime、Rust Host、协议、ACP、Kernel worker 和性能基线在 Node 22 下通过；Zvec/ONNX 已通过资源准备和真实 smoke（旧时点曾因资源缺失跳过），远端 CI 未运行。
 
 系统安装被管理员权限阻塞：NSIS 要求 `requireAdministrator`，直接启动返回提升错误，随包 runtime 0.1.6 的安装、重启、命令、升级/卸载均未验证。S5 仍未完整关闭，未合并、未推送、未发布；未执行 S6。
 
@@ -18,7 +18,7 @@ S5 分支的新本地 Run 默认使用 Authoritative 执行契约和 PiNative �
 
 最终 v5 payload 的真实 HTTP 已观察到 `30094` 字符系统提示、能力标题和 `<fox_context>`，冻结 profile 为 `legacy`，`run_command.availability=available`。修复前同路径 HTTP 是 `1875` 字符的 SDK 默认提示。新增真实 runtime + SDK 扩展 + HTTP 序列化回归，持续保护完整交付链。证据见 [S5 完整 CI 记录](../../migration-work/s5-full-ci-20261030.md) 和 [能力 HTTP 证据](../../migration-work/s5-capability-http-20261030-v5.json)。
 
-Node 22 下 Desktop 全量 **872 通过 / 2 跳过 / 0 失败**（工作流加 `--isolate`，不跳过断言），Rust Host **2271 通过 / 0 失败 / 31 忽略**，Agent Runtime **626 通过 + 1 个预期 todo / 0 失败**；协议、ACP、Kernel worker 和性能基线通过。Zvec/ONNX 按仓库资源门控明确跳过，远端 CI 未运行。
+Node 22 下 Desktop 全量 **872 通过 / 2 跳过 / 0 失败**（工作流加 `--isolate`，不跳过断言），Rust Host **2271 通过 / 0 失败 / 31 忽略**，Agent Runtime **626 通过 + 1 个预期 todo / 0 失败**；协议、ACP、Kernel worker 和性能基线通过。Zvec/ONNX 已通过资源准备和真实 smoke（旧时点曾因资源缺失跳过），远端 CI 未运行。
 
 系统安装仍阻塞：NSIS 清单要求 `requireAdministrator`，直接启动返回“请求的操作需要提升”（HRESULT `0x800702E4`），当前没有隔离提升环境；本机仍是 runtime 0.1.5，随包 0.1.6 的安装、重启、命令、升级和卸载未验证。解包 payload 启动与能力 Run 不能算安装通过。S5 仍未关闭，未合并、未推送、未发布，未执行 S6。
 

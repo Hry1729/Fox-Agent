@@ -1,0 +1,44 @@
+{
+  "kind": "fox-s5-zvec-onnx-candidate-v6",
+  "sourceHead": "a952125dd53d8a8bc7b01e670bf71068076ad344",
+  "branch": "s5-default-pinative-20261029",
+  "candidateRoot": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-zvec-onnx-v6",
+  "toolchain": {
+    "node": "v22.14.0",
+    "rust": "1.95.0",
+    "cargo": "1.95.0",
+    "bun": "1.3.14",
+    "pnpm": "11.7.0"
+  },
+  "build": {
+    "command": "pnpm tauri:build:windows",
+    "exitCode": 0,
+    "log": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\v6-build.log"
+  },
+  "installer": {
+    "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-zvec-onnx-v6\\Fox_0.1.0_x64-setup.exe",
+    "sha256": "8f86b8747cdcaed79825e165faf62be9ac3797e9d5acb395c5621391802e57c6",
+    "requestedExecutionLevel": "requireAdministrator"
+  },
+  "payload": {
+    "foxDesktop": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-zvec-onnx-v6\\payload\\fox-desktop.exe",
+      "sha256": "457492bec74d63d78794c2ff848d0dbf85886644ff369672d22afaf08069488f",
+      "bytes": 135585792
+    },
+    "sidecar": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-zvec-onnx-v6\\payload\\agent-runtime\\fox-agent-runtime-x86_64-pc-windows-msvc.exe",
+      "sha256": "f16812055cdd930ec308dab4df680be318de1b51444b8a6474fb834c5b889846",
+      "bytes": 110889472
+    },
+    "zvecDll": {
+      "path": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-zvec-onnx-v6\\payload\\zvec_c_api.dll",
+      "sha256": "2137ad6f24c00e8337efd54d8408df4690aa356773ab596beb495956dfeb7cd4",
+      "bytes": 35479552
+    }
+  },
+  "releaseDesktopSha256": "07a8a7d3d595b68021bafa38f992874ef327ac0c4ddd36a98cfa0c7b9697230b",
+  "smokeEvidence": "D:\\python\\projects\\Fox\\Fox\\migration-work\\s5-zvec-onnx-smoke-20261030.json",
+  "installVerification": "not run; non-elevated environment; this task does not claim runtime 0.1.6 install acceptance",
+  "remoteCi": "not run; not pushed"
+}

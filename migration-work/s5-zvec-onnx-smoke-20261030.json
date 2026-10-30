@@ -1,0 +1,100 @@
+{
+  "kind": "s5-zvec-onnx-real-smoke-evidence",
+  "recordedAt": "2026-10-30T18:30:00+08:00",
+  "sourceHead": "a952125dd53d8a8bc7b01e670bf71068076ad344",
+  "branch": "s5-default-pinative-20261029",
+  "toolchain": {
+    "node": "v22.14.0",
+    "rust": "1.95.0",
+    "cargo": "1.95.0",
+    "bun": "1.3.14",
+    "pnpm": "11.7.0"
+  },
+  "previousSkipped": {
+    "at": "87635ecc209bad38439d011b4ab94198c435033a (v5)",
+    "zvec": "resources/vector had only README; job detected no DLL and exited green without running smoke",
+    "onnx": "resources/models had no manifest.json + model.onnx + independent onnxruntime.dll; job detected no package and exited green without running smoke",
+    "note": "preserved as historical result; it is not evidence for this run"
+  },
+  "zvec": {
+    "package": "zvec-rust-sys 0.6.0 (bundled, Windows x64/MSVC)",
+    "source": "https://github.com/zvec-ai/zvec-rust/releases/download/v0.6.0/zvec-prebuilt-x86_64-pc-windows-msvc.tar.gz",
+    "license": "Apache-2.0",
+    "archiveSha256": "c823448a39a0f69aacdfe1fe06aaccb0e26eb9e0a4eea65fbd96edf749093152",
+    "dllSha256": "2137ad6f24c00e8337efd54d8408df4690aa356773ab596beb495956dfeb7cd4",
+    "libSha256": "c5fa14ea2530726be869f784a0521c1697a4216ef4c916282805fbed6fe2722d",
+    "preparedDir": "D:\\python\\projects\\Fox\\Fox\\.test-target\\zvec\\0.6.0",
+    "resourceRecord": "D:\\python\\projects\\Fox\\Fox\\.test-target\\zvec\\0.6.0\\resource.json",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/zvec-offline-smoke.ps1",
+    "exitCode": 0,
+    "test": "vector_store::tests::zvec_vector_store_offline_smoke",
+    "testResult": "1 passed, 0 failed",
+    "assertions": [
+      "create generation",
+      "write two 4-dimensional vectors",
+      "flush",
+      "vector search returns chunk-a",
+      "verify count=2 and dimension=4",
+      "drop store",
+      "reopen persisted generation",
+      "search again returns chunk-a"
+    ],
+    "log": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\zvec-smoke-clean.log",
+    "preparationLog": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\zvec-smoke-final.log"
+  },
+  "onnx": {
+    "modelId": "multilingual-e5-small",
+    "source": "https://huggingface.co/Xenova/multilingual-e5-small",
+    "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+    "license": "MIT",
+    "modelFile": "onnx/model_int8.onnx -> model.onnx",
+    "modelSha256": "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c",
+    "modelBytes": 118054593,
+    "tokenizerFile": "tokenizer.json",
+    "tokenizerSha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+    "tokenizerBytes": 17082730,
+    "dimension": 384,
+    "pooling": "mean",
+    "normalize": true,
+    "queryPrefix": "query: ",
+    "passagePrefix": "passage: ",
+    "maxTokens": 512,
+    "runtime": "ort 2.0.0-rc.9 + ort-sys download-binaries; static onnxruntime link; no onnxruntime.dll or ORT_DYLIB_PATH",
+    "preparedDir": "D:\\python\\projects\\Fox\\Fox\\.test-target\\onnx-models\\multilingual-e5-small-761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+    "manifest": "D:\\python\\projects\\Fox\\Fox\\.test-target\\onnx-models\\multilingual-e5-small-761b726dd34fb83930e26aab4e9ac3899aa1fa78\\manifest.json",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/onnx-offline-smoke.ps1",
+    "exitCode": 0,
+    "result": "ONNX offline smoke passed: dimension=384",
+    "assertions": [
+      "manifest identity",
+      "model SHA-256",
+      "tokenizer SHA-256",
+      "query prefix",
+      "passage prefix",
+      "mean pooling",
+      "normalize",
+      "real tokenizer",
+      "real ONNX inference",
+      "finite values",
+      "unit norm",
+      "static onnxruntime link"
+    ],
+    "log": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\onnx-smoke-final.log",
+    "preparationLog": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\onnx-prepare.log",
+    "targetedTestsLog": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\onnx-targeted-tests.log"
+  },
+  "candidate": {
+    "root": "D:\\python\\projects\\Fox\\output\\s5-pinative-20261030-zvec-onnx-v6",
+    "installerSha256": "8f86b8747cdcaed79825e165faf62be9ac3797e9d5acb395c5621391802e57c6",
+    "payloadDesktopSha256": "457492bec74d63d78794c2ff848d0dbf85886644ff369672d22afaf08069488f",
+    "payloadSidecarSha256": "f16812055cdd930ec308dab4df680be318de1b51444b8a6474fb834c5b889846",
+    "payloadZvecDllSha256": "2137ad6f24c00e8337efd54d8408df4690aa356773ab596beb495956dfeb7cd4",
+    "payloadZvecDllBytes": 35479552,
+    "buildLog": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\v6-build.log"
+  },
+  "ci": {
+    "localCommandsExecuted": true,
+    "remoteGithubActions": "not run; source not pushed",
+    "jobsNowRequired": "vector-runtime-smoke and onnx-runtime-smoke have no skip path"
+  }
+}
