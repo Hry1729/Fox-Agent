@@ -1984,7 +1984,7 @@ impl RuntimeHost {
         let route = (|| -> Result<bool, String> {
             let binding = self.database.run_control_binding(&run_id)?;
             let authority = kernel_authority::select(binding.as_ref().map(|b| b.authority))?;
-            let executor = match binding { Some(binding) => binding.executor_route, None => Database::candidate_executor_route(authority)? };
+            let executor = match binding { Some(binding) => binding.executor_route, None => Database::new_run_executor_route(authority) };
             Ok(authority == fox_engine_protocol::ExecutionAuthority::Authoritative && executor.is_none())
         })();
         let kernel = match route { Ok(kernel) => kernel, Err(error) => { self.record_start_failure(&started, error); return; } };
@@ -2453,14 +2453,14 @@ impl RuntimeHost {
         };
         let frozen_binding = self.database.run_control_binding(&started.run.id)?;
         if matches!(kernel_authority::resolve_run_route(frozen_binding.as_ref()), kernel_authority::RunRoute::Reject) {
-            return Err("run_route_unrecognized: unsupported frozen executor".into());
+            return Err(format!("{}: unsupported frozen executor", crate::database::EXECUTOR_ROUTE_UNKNOWN));
         }
         let authority = kernel_authority::select(
             frozen_binding.as_ref().map(|binding| binding.authority),
         )?;
         let executor_route = match &frozen_binding {
             Some(binding) => binding.executor_route,
-            None => Database::candidate_executor_route(authority)?,
+            None => Database::new_run_executor_route(authority),
         };
         let native = executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative);
         let kernel = authority == fox_engine_protocol::ExecutionAuthority::Authoritative && !native;
@@ -3019,37 +3019,30 @@ impl RuntimeHost {
                 .database
                 .graph_attempt_id_for_child_run(&child_run_id)?
                 .is_some();
+        // A0: every child Run is frozen PiNative, whatever route its parent was
+        // frozen with. A child inherits its parent's permission and budgets,
+        // never its executor, so no child can ever land on the frozen Kernel loop.
         let parent_control = self.database.run_control_binding(&child_run.parent_run_id)?;
-        let shared_native = parent_control.as_ref().is_some_and(|binding| binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative));
+        let parent_native = parent_control.as_ref().is_some_and(|binding| binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative));
         if let Some(parent) = parent_control.filter(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
-            if !shared_native && (self.database.pending_kernel_host_commands(&parent.run_id)?.iter().any(|command| command.kind=="cancel")
+            if !parent_native && (self.database.pending_kernel_host_commands(&parent.run_id)?.iter().any(|command| command.kind=="cancel")
                 || self.database.kernel_host_run_state(&parent.run_id)?.as_deref()!=Some("running")) {
                 return Err("Kernel parent is no longer admitting child execution".into());
             }
-            let mut inherited = parent;
-            inherited.run_id = child_run_id.clone();
-            inherited.conversation_id = child_run.child_conversation_id.clone();
-            if enforce_count_budget_override { inherited.permission.mode = fox_engine_protocol::PermissionMode::ReadOnly; }
-            if graph_review_request_id.is_some() { inherited.execution_profile_id = GRAPH_REVIEWER_EXECUTION_PROFILE.into(); }
-            inherited.permission_snapshot_id = Database::run_control_permission_hash(&inherited.permission)?;
-            inherited.budgets.restrict_execution_ms(child_run.budget.max_duration_ms);
+            let inherited = kernel_authority::child_run_binding(
+                &parent,
+                &child_run_id,
+                &child_run.child_conversation_id,
+                enforce_count_budget_override,
+                graph_review_request_id.is_some().then_some(GRAPH_REVIEWER_EXECUTION_PROFILE),
+                child_run.budget.max_duration_ms,
+            )?;
             self.database.freeze_run_control(&inherited)?;
         }
-        let mut child_host = if shared_native { self.clone_for_detached_dispatch() } else { RuntimeHost::new(
-            self.app.clone(),
-            self.database.clone(),
-            self.sessions_dir.clone(),
-            self.attachments_dir.clone(),
-            self.skills_dir.clone(),
-            self.yuxi_client.clone(),
-        ) };
+        let mut child_host = self.clone_for_detached_dispatch();
         child_host.root_run_admission = self.root_run_admission.clone();
         child_host.child_run_admission = self.child_run_admission.clone();
         child_host.run_budget_override = Some(child_run.budget.clone());
-        if !shared_native {
-            let shadow = self.shadow_reconciler()?;
-            child_host.state.lock().map_err(|_| "child host state lock poisoned")?.shadow = shadow;
-        }
         child_host.enforce_count_budget_override = enforce_count_budget_override;
         if graph_review_request_id.is_some() {
             child_host.execution_profile_override = Some(GRAPH_REVIEWER_EXECUTION_PROFILE);
@@ -3108,70 +3101,37 @@ impl RuntimeHost {
         let coordinator = self.clone();
         thread::spawn(move || {
             let prompt = started.user_message.content.clone();
-            let kernel_owned = coordinator.database.run_control_binding(&child_run_id)
-                .ok().flatten().is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none());
-            let start = if shared_native {
-                child_host.start_run_detached(started.clone(), prompt, Vec::new());
-                Ok(())
-            } else { child_host.start_run(&started, &prompt, &[]) };
-            if let Err(error) = start {
-                if kernel_owned {
-                    let _ = child_host.record_kernel_start_failure(&child_run_id);
-                } else {
-                let (code, detail) = structured_runtime_error(&error);
-                let _ = coordinator.database.mark_run_failed(
-                    &child_run_id,
-                    if code == "runtime.start_failed" {
-                        "child_run.start_failed"
-                    } else {
-                        code
-                    },
-                    detail,
-                );
-                }
-            } else {
-                if let Ok(Some(record)) = coordinator.database.child_run(&child_run_id) {
-                    coordinator.emit_child_run_update(&parent_conversation_id, &record);
-                }
-                let deadline =
-                    Instant::now() + Duration::from_millis(child_run.budget.max_duration_ms as u64);
-                loop {
-                    // Kernel owns its paused execution clock and terminal
-                    // facts. The Legacy wall timer must not override approval
-                    // waits or settle the child ahead of executor cleanup.
-                    // Time waiting for the user's approval does not count:
-                    // approvals have no deadline of their own.
-                    let approval_wait = coordinator
-                        .database
-                        .run_approval_wait_ms(&child_run_id, chrono::Utc::now().timestamp_millis())
-                        .unwrap_or(0)
-                        .max(0) as u64;
-                    let duration_exceeded = if shared_native {
-                        native_model_budget::elapsed_ms(&coordinator.database, &child_run_id)
-                            .is_ok_and(|elapsed| elapsed >= child_run.budget.max_duration_ms)
-                    } else { !kernel_owned && Instant::now() >= deadline + Duration::from_millis(approval_wait) };
-                    if duration_exceeded {
-                        let _ = child_host.cancel_run(&child_run_id);
-                        if !shared_native { let _ = child_host.stop_worker(); }
-                        let _ = coordinator.database.mark_run_failed(
-                            &child_run_id,
-                            "child_run.duration_budget_exceeded",
-                            "Child Run exceeded its Host-enforced duration budget.",
-                        );
-                        break;
-                    }
-                    let status = coordinator
-                        .database
-                        .child_run_status(&child_run_id)
-                        .ok()
-                        .flatten();
-                    if status.as_deref().is_some_and(run_status_is_terminal) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
+            // A child is always PiNative: detached dispatch on the shared host.
+            // A start failure is recorded on the Run by the dispatcher itself.
+            child_host.start_run_detached(started.clone(), prompt, Vec::new());
+            if let Ok(Some(record)) = coordinator.database.child_run(&child_run_id) {
+                coordinator.emit_child_run_update(&parent_conversation_id, &record);
             }
-            if !shared_native { let _ = child_host.stop_worker(); }
+            loop {
+                // The native model budget is the child's execution clock; time
+                // waiting for the user's approval does not count, because
+                // approvals have no deadline of their own.
+                let duration_exceeded = native_model_budget::elapsed_ms(&coordinator.database, &child_run_id)
+                    .is_ok_and(|elapsed| elapsed >= child_run.budget.max_duration_ms);
+                if duration_exceeded {
+                    let _ = child_host.cancel_run(&child_run_id);
+                    let _ = coordinator.database.mark_run_failed(
+                        &child_run_id,
+                        "child_run.duration_budget_exceeded",
+                        "Child Run exceeded its Host-enforced duration budget.",
+                    );
+                    break;
+                }
+                let status = coordinator
+                    .database
+                    .child_run_status(&child_run_id)
+                    .ok()
+                    .flatten();
+                if status.as_deref().is_some_and(run_status_is_terminal) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
             let _ = coordinator.database.sync_child_run_terminal(&child_run_id);
             if let Some(review_request_id) = graph_review_request_id {
                 match coordinator
@@ -3223,7 +3183,7 @@ impl RuntimeHost {
         )?;
         let frozen = self.database.run_control_binding(&run_id)?;
         let authority = kernel_authority::select(frozen.as_ref().map(|binding| binding.authority))?;
-        let route = match frozen { Some(binding) => binding.executor_route, None => Database::candidate_executor_route(authority)? };
+        let route = match frozen { Some(binding) => binding.executor_route, None => Database::new_run_executor_route(authority) };
         let shared_native = route == Some(fox_engine_protocol::ExecutorRoute::PiNative);
         let mut managed_host = if shared_native { self.clone_for_detached_dispatch() } else { RuntimeHost::new(
             self.app.clone(),
@@ -3883,10 +3843,10 @@ impl RuntimeHost {
         };
         let route = binding.as_ref().map(|binding| kernel_authority::resolve_run_route(Some(binding)));
         if matches!(route.as_ref(), Some(kernel_authority::RunRoute::Reject)) {
-            return Err(
-                "run_route_unrecognized: approval belongs to a Run this build cannot execute"
-                    .to_owned(),
-            );
+            return Err(format!(
+                "{}: approval belongs to a Run this build cannot execute",
+                crate::database::EXECUTOR_ROUTE_UNKNOWN,
+            ));
         }
         if !matches!(route.as_ref(), Some(kernel_authority::RunRoute::PiNative))
             && self.database.kernel_host_approval_target(approval_id)?.is_some()
