@@ -1283,6 +1283,12 @@ fn prepare_edit(input: &Value, root: &Path) -> Result<PreparedToolAction, String
     if old_text.is_empty() {
         return Err(ToolErrorCode::InvalidInput.error("oldText cannot be empty"));
     }
+    // A stated read version that no longer matches is a conflict first: the
+    // file changed since the caller read it, so a missing `oldText` is a
+    // symptom of that change, not a malformed request.
+    if input.get("expectedVersion").is_some_and(Value::is_string) {
+        write_precondition(input, Some(&current))?;
+    }
     let occurrences = current.matches(&old_text).count();
     if occurrences == 0 {
         return Err(ToolErrorCode::InvalidInput
@@ -3650,6 +3656,22 @@ mod revision_regression_tests {
         assert!(execute(second).unwrap_err().contains("tool.file_conflict"));
         assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(),"first");
         assert!(!fs::read_dir(&root).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".fox-write-")), "uncommitted candidates are cleaned; journal history is retained");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a3_stale_edit_whose_old_text_is_gone_reports_a_conflict() {
+        // Another writer replaced the content after this caller read it: the
+        // stale read version is the reason, not a malformed oldText.
+        let root = std::env::temp_dir().join(format!("fox-a3-edit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("file.txt"), "winner").unwrap();
+        let stale=json!({"path":"file.txt","oldText":"before","newText":"loser","expectedVersion":file_version(b"before")});
+        let error=prepare("edit_file",&stale,root.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("tool.file_conflict"), "{error}");
+        let current=json!({"path":"file.txt","oldText":"before","newText":"x","expectedVersion":file_version(b"winner")});
+        let error=prepare("edit_file",&current,root.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("tool.invalid_input"), "a current read with a wrong oldText is still invalid input: {error}");
+        assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(),"winner");
         fs::remove_dir_all(root).unwrap();
     }
     #[cfg(windows)]
