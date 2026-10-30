@@ -158,6 +158,21 @@ impl LocalKnowledgeError {
         }
     }
 
+    /// R4: the same failure, with context in front of its message.
+    pub(crate) fn with_prefix(mut self, prefix: &str) -> Self {
+        self.message = format!("{prefix}{}", self.message);
+        self
+    }
+
+    /// KB-1: the caller cancelled the search (tool or Run cancellation).
+    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            code: "local_knowledge.cancelled",
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             code: "local_knowledge.invalid_request",
@@ -1939,10 +1954,11 @@ impl LocalKnowledgeStore {
     /// Search entry point of the agent `search_knowledge` tool for a local
     /// knowledge base. Uses the base's vector/hybrid retrieval
     /// ([`LocalKnowledgeStore::search_retrieval`]) when its vector index is
-    /// ready and its search mode is `vector` or `hybrid`; otherwise, or when
-    /// retrieval fails, answers with SQLite lexical search and records why in
-    /// `fallback.reason` (`index_not_ready`, `keyword_mode`,
-    /// `vector_search_failed`). Synchronous and may start the retrieval
+    /// ready and its search mode is `vector` or `hybrid`. When the index is
+    /// not ready, or the base searches by keyword, it answers with SQLite
+    /// lexical search and says so in `fallback` (`index_not_ready`,
+    /// `keyword_mode`). A failure of a ready index's retrieval is an error;
+    /// it never falls back to keyword search (R4). Synchronous and may start the retrieval
     /// worker process: call it off the async executor.
     pub fn search_for_agent(
         &self,
@@ -1951,9 +1967,29 @@ impl LocalKnowledgeStore {
         requested_limit: Option<usize>,
         requested_max_chars: Option<usize>,
     ) -> Result<Value, LocalKnowledgeError> {
+        self.search_for_agent_controlled(
+            knowledge_base_id,
+            query,
+            requested_limit,
+            requested_max_chars,
+            &crate::local_knowledge_vector::RetrievalControl::default(),
+        )
+    }
+
+    /// KB-1: [`Self::search_for_agent`] bound to the caller's cancellation
+    /// and deadline, which reach the retrieval worker.
+    pub(crate) fn search_for_agent_controlled(
+        &self,
+        knowledge_base_id: &str,
+        query: &str,
+        requested_limit: Option<usize>,
+        requested_max_chars: Option<usize>,
+        control: &crate::local_knowledge_vector::RetrievalControl,
+    ) -> Result<Value, LocalKnowledgeError> {
+        control.check()?;
         let base = self.get_base(knowledge_base_id)?;
         self.search_for_agent_with(&base, query, requested_limit, requested_max_chars, |request| {
-            self.search_retrieval(request)
+            self.search_retrieval_controlled(request, control)
         })
     }
 
@@ -1981,21 +2017,19 @@ impl LocalKnowledgeStore {
                     // One extra hit tells whether more matches exist than were returned.
                     limit: Some((result_limit + 1).min(MAX_LOCAL_SEARCH_RESULTS)),
                 };
-                match retrieve(request).and_then(|retrieved| {
-                    self.map_retrieval_for_agent(
-                        &base.id,
-                        trimmed,
-                        &retrieved,
-                        result_limit,
-                        requested_max_chars,
-                    )
-                }) {
-                    Ok(value) => return Ok(value),
-                    Err(error) => AgentSearchFallback::VectorSearchFailed {
-                        code: error.code().to_owned(),
-                        message: error.to_string(),
-                    },
-                }
+                // R4: a ready index whose retrieval fails is a failure, not a
+                // quiet switch to keyword search. The error keeps its code.
+                return retrieve(request)
+                    .and_then(|retrieved| {
+                        self.map_retrieval_for_agent(
+                            &base.id,
+                            trimmed,
+                            &retrieved,
+                            result_limit,
+                            requested_max_chars,
+                        )
+                    })
+                    .map_err(|error| error.with_prefix("向量检索失败（索引已就绪，不会改用关键词检索）："));
             }
             AgentSearchPlan::Lexical(fallback) => fallback,
         };
@@ -4114,8 +4148,6 @@ pub(crate) enum AgentSearchFallback {
     IndexNotReady { detail: Option<String> },
     /// The vector index is ready but the base searches in `keyword` mode.
     KeywordMode,
-    /// Vector/hybrid retrieval (or its worker process) returned an error.
-    VectorSearchFailed { code: String, message: String },
 }
 
 impl AgentSearchFallback {
@@ -4126,18 +4158,12 @@ impl AgentSearchFallback {
                 "kind": "sqlite_lexical",
                 "reason": "index_not_ready",
                 "detail": detail,
+                "note": "向量索引尚未建好，本次结果来自关键词检索（SQLite），不是向量检索。",
             }),
             Self::KeywordMode => json!({
                 "active": true,
                 "kind": "sqlite_lexical",
                 "reason": "keyword_mode",
-            }),
-            Self::VectorSearchFailed { code, message } => json!({
-                "active": true,
-                "kind": "sqlite_lexical",
-                "reason": "vector_search_failed",
-                "errorCode": code,
-                "detail": message,
             }),
         }
     }
@@ -5471,7 +5497,7 @@ mod agent_search_tests {
     }
 
     #[test]
-    fn agent_search_reports_keyword_mode_and_vector_search_failures() {
+    fn r4_agent_search_reports_keyword_mode_and_fails_on_vector_search_failures() {
         let (store, root) = temp_store("fallbacks");
         let (base_id, _, _) = base_with_document(&store, "回退", "fallback.md", &["回退原因测试"]);
         let keyword = store
@@ -5482,18 +5508,21 @@ mod agent_search_tests {
         assert_eq!(keyword["fallback"]["reason"], "keyword_mode");
         assert_eq!(keyword["items"].as_array().map(Vec::len), Some(1));
 
+        // R4: a worker failure on a ready index is an error, never keyword results.
         let failed = store
             .search_for_agent_with(&ready_base(&store, &base_id, "hybrid"), "回退", None, None, |_| {
                 Err(LocalKnowledgeError::storage("无法启动向量检索隔离进程：boom"))
             })
-            .unwrap();
-        assert_eq!(failed["fallback"]["active"], true);
-        assert_eq!(failed["fallback"]["kind"], "sqlite_lexical");
-        assert_eq!(failed["fallback"]["reason"], "vector_search_failed");
-        assert_eq!(failed["fallback"]["errorCode"], "local_knowledge.storage_failed");
-        assert!(failed["fallback"]["detail"].as_str().unwrap().contains("boom"));
-        assert_eq!(failed["items"][0]["content"], "回退原因测试");
-        assert!(failed.get("mode").is_none());
+            .unwrap_err();
+        assert_eq!(failed.code(), "local_knowledge.storage_failed");
+        assert!(failed.to_string().contains("boom"));
+        assert!(failed.to_string().contains("不会改用关键词检索"));
+        let cancelled = store
+            .search_for_agent_with(&ready_base(&store, &base_id, "vector"), "回退", None, None, |_| {
+                Err(LocalKnowledgeError::cancelled("知识库检索已取消"))
+            })
+            .unwrap_err();
+        assert_eq!(cancelled.code(), "local_knowledge.cancelled");
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5515,15 +5544,13 @@ mod agent_search_tests {
         assert_eq!(result["items"][0]["chunkId"], chunks_a[0].as_str());
         assert!(!result.to_string().contains("B 项目私有知识"));
 
-        // A retrieval answer for another base is rejected and A is searched lexically.
+        // A retrieval answer for another base is rejected as an error (R4).
         let foreign = store
             .search_for_agent_with(&ready_base(&store, &base_a, "hybrid"), "私有知识", None, None, |request| {
                 Ok(retrieval_result(&base_b, &request.query, "hybrid", &chunks_b))
             })
-            .unwrap();
-        assert_eq!(foreign["fallback"]["reason"], "vector_search_failed");
+            .unwrap_err();
         assert!(!foreign.to_string().contains("B 项目私有知识"));
-        assert_eq!(foreign["items"][0]["content"], "A 项目私有知识");
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
