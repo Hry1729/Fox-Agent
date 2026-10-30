@@ -212,6 +212,12 @@ Run 分派和终态还会触发 `before_run/after_run` 审计，但不会新增 
 当原始结果超过存储上限（128 KiB）时 Host 只保留预览，此时 `retrievable=false` 且 `truncated=true`：
 视图不会省略内容，模型必须如实说明这些字节无法从该引用取回，不得重建或猜测。
 
+**工具结果上限（TB-2）**：任何一次工具调用给模型看的正文都不超过 **64 KiB**（UTF-8 字节，`MAX_MODEL_TOOL_RESULT_BYTES`），
+成功和失败、所有工具一视同仁，在 Runtime 的 `normalizeFoxToolResultForPi` 出口统一执行；`FOX_RESULT_CURSOR_V1`/`FOX_SEARCH_NAV_V1` 导航块不计入、始终保留。
+超出时保留开头约 44 KiB 和结尾约 16 KiB，中间写明省略字节数：Host 的 `toolResultStorage` 确认完整保存且带引用时，提示用 `read_tool_result` 按 `fox-result://` 续读；
+否则明确写“已截断、无法取回”。被截断的结果不再在 `details.structuredResult` 里另存一份，`details.outputTruncated=true`，`details.foxResultCap` 记录原始字节数和是否可取回。
+Host 侧成功分支与失败分支同样有界：结果序列化后超过 128 KiB（`MAX_STORED_TOOL_RESULT_BYTES`）时，线上只发送持久化的预览，并附 `resultRef` 与 `resultRefRetrievable`，不再发送原始的多 MiB 结果。
+
 ### A5 Child Run 工具
 
 四个工具固定为 `category: delegation`、`execution: host`、`approval: none`。`approval: none` 只表示创建/查询/取消 delegation 本身不需审批；Child 内部调用高风险工具时仍走真实 ToolCall 与 Host 审批。
@@ -434,7 +440,7 @@ Runtime 在 `initialize` 和每次 `prompt` 开始时，根据 `modelId`、`base
 
 Profile 至少包含：`provider`、`family`、`api`、`reasoning`、`reasoningTransport`、`thinkingLevel`、图片/工具/并行工具/Prompt Cache 能力、Planner 能力、上下文窗口、输出上限、压缩预算、重试次数和 provider 重试延迟。Planner 使用独立 Pi Session，但复用同一个模型 Profile；Executor 使用 Profile 的思考级别和图片能力。`run.request_snapshot` 与 `ready` 回执携带可序列化的 `modelProfile`，便于诊断和跨模型对比。
 
-Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、OpenAI、Qwen、GLM、Kimi、Gemini、Grok 以及通用/本地模型。模型家族只从 `modelId` 推断，不能从 URL 的版本路径推断；未知模型回落为安全的通用兼容 Profile。混合文本推理模型会收到“推理不得进入最终回答”的稳定 Prompt 规则，但最终仍以 provider reasoning 事件和事件映射为准。
+Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、OpenAI、Qwen、GLM、Kimi、Gemini、Grok 以及通用/本地模型。模型家族只从 `modelId` 推断，不能从 URL 的版本路径推断；未知模型回落为安全的通用兼容 Profile。混合文本推理模型会收到“推理不得进入最终回答”的稳定 Prompt 规则，但最终仍以 provider reasoning 事件和事件映射为准。推理内容只认 provider 给出的 reasoning 字段，以及正文开头显式的 `<think>`/`<thinking>`/`<analysis>`（含 `mm:` 前缀）标签；不再按措辞（任何语言的“我先……”“Let me……”）把正文判成推理（MD-1）。
 
 ## 离线适配评测
 
@@ -493,7 +499,7 @@ Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session
 
 取消分类：用户或 Host 取消（包括工具等待 Host 预检期间）终止为 `run.cancelled`。取消会 abort 在途 Provider 请求，Pi 可能据此产生 `stopReason=error/aborted`，但该 abort 诱发的 provider 错误**不得**投影为 `run.failed/provider.request_failed`；取消是权威终态，优先级高于迟到失败。取消按 `runId` 隔离，只中止该 Run 的在途 Host 请求，不做影响其它 Run 的全局清理；终态只写一次，取消后的迟到成功结果只进审计。
 
-重试分类：Provider HTTP 重试（单次请求的传输/5xx/429 有界重试，遵循服务端 `Retry-After`）与整轮 Turn 重试是两套独立策略，分别配置、分别观测，禁止两层对同一失败重复重试。Sidecar 默认 Turn 重试关闭（由 Fox Kernel/Host 决定），Provider 重试使用模型画像的有界上限；`run.request_snapshot.retryPolicy` 回传本轮冻结的两层上限。Kernel 侧 `run.retrying`（整轮重试调度）、`run.provider_retry`（Provider 重试观测）与 `context.compaction.started/completed`（上下文压缩）是相互独立的状态/事件，重试调度进入 `retry_scheduled` 并持久化 wall-clock scheduled/due time，压缩进入 `compacting`，二者不共用状态。
+重试分类：Provider HTTP 重试（单次请求的传输/5xx/429 有界重试，遵循服务端 `Retry-After`，最多等待 60 秒（`providerMaxRetryDelayMs` 默认 60 000，取值 500–60 000），且不超过本 Run 的执行时长上限；服务端要求的等待超过这个上限时，本次请求直接以 `provider.request_failed` 失败，不会截短等待后重试）与整轮 Turn 重试是两套独立策略，分别配置、分别观测，禁止两层对同一失败重复重试。Sidecar 默认 Turn 重试关闭（由 Fox Kernel/Host 决定），Provider 重试使用模型画像的有界上限；`run.request_snapshot.retryPolicy` 回传本轮冻结的两层上限。Kernel 侧 `run.retrying`（整轮重试调度）、`run.provider_retry`（Provider 重试观测）与 `context.compaction.started/completed`（上下文压缩）是相互独立的状态/事件，重试调度进入 `retry_scheduled` 并持久化 wall-clock scheduled/due time，压缩进入 `compacting`，二者不共用状态。
 
 时间与超时：模型、工具执行、Run 执行和审批等待分别计时。Kernel 模型请求在实际持久派发时启动，在完整响应提交时结束；临时正文预览不终止该时钟。模型请求墙钟锚点持久化，恢复不重置窗口；审批等待暂停 Run 执行计时，但使用独立持久化截止。错误分别为 `model.request_timeout`、`tool.execution_timeout`、`runtime.duration_budget_exceeded` 和 `approval.wait_timeout`。Host/Pi 已接入取消及超时清理并等待自身进程退出；进入 cancelling 后，迟到成功或超时不能覆盖取消终态。
 
