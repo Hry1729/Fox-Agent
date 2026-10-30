@@ -1,4 +1,4 @@
-import { boundToolText, modelToolResultContent, toolResultRef, RECEIPT_MARKER, RESULT_REF_TOOL } from './tool-view.mjs'
+import { boundToolText, capModelToolResultContent, modelToolResultContent, toolResultRef, RECEIPT_MARKER, RESULT_REF_TOOL } from './tool-view.mjs'
 
 export const FOX_TOOL_DEFINITION_VERSION = 1
 
@@ -148,6 +148,29 @@ function jsonSafeToolDetails(result, serialized) {
  *      about itself.
  */
 export function normalizeFoxToolResultForPi(toolName, result, viewContext = {}) {
+  return enforceModelResultCap(normalizeUncapped(toolName, result, viewContext), viewContext, result)
+}
+
+// TB-2: whatever path produced the view, the model never receives more than
+// MAX_MODEL_TOOL_RESULT_BYTES of text for one call. The full value stays with
+// the Host (its result reference), and the oversized structured copy is not
+// duplicated into `details`, which also travels in tool.completed frames.
+function enforceModelResultCap(normalized, viewContext, original) {
+  const hostRef = typeof original?.resultRef === 'string' ? original.resultRef : null
+  const resultRef = hostRef || toolResultRef(viewContext.runId, viewContext.toolCallId)
+  const { content, capped, originalBytes, retrievable } = capModelToolResultContent(normalized.content, {
+    resultRef, storage: viewContext.storage ?? null,
+  })
+  if (!capped) return normalized
+  const { structuredResult: _dropped, ...details } = normalized.details && typeof normalized.details === 'object' ? normalized.details : {}
+  return {
+    ...normalized,
+    content,
+    details: { ...details, outputTruncated: true, foxResultCap: { originalBytes, retrievable: Boolean(retrievable), ...(retrievable ? { resultRef } : {}) } },
+  }
+}
+
+function normalizeUncapped(toolName, result, viewContext) {
   if (isPiToolResult(result)) {
     // `read_tool_result` returns its range-cursor in `details`, which the
     // provider projection drops. Surface the whitelisted navigation facts as a
