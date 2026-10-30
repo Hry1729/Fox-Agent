@@ -820,7 +820,13 @@ export function Workbench() {
           // The first full access in a project needs an explicit second
           // confirmation; the project remembers it afterwards.
           if (!(cause instanceof DesktopCommandError) || cause.code !== 'permission.full_access_confirmation_required') throw cause
-          if (!window.confirm(`${cause.message}\n\n确定为这个项目开启完全访问吗？`)) return
+          const confirmed = await confirmDialog({
+            title: '为这个项目开启完全访问？',
+            description: cause.message,
+            confirmLabel: '开启完全访问',
+            destructive: true,
+          })
+          if (!confirmed) return
           const fresh = await desktopClient.conversationPermissionState(conversationId)
           await desktopClient.updateConversationPermission(
             conversationId, hostAccessMode(accessMode), crypto.randomUUID(), fresh.version, true,
