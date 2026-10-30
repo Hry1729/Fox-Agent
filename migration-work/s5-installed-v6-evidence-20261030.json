@@ -1,0 +1,127 @@
+{
+  "kind": "s5-installed-v6-evidence-review",
+  "verifiedAt": "2026-10-30T13:21:04.927348+00:00",
+  "baselineHead": "2e30234482aaa8f90b78b864fa3143d53636f4c5",
+  "candidateSourceHead": "a952125dd53d8a8bc7b01e670bf71068076ad344",
+  "reviewMethod": "Read-only artifact and recorded-result consistency checks; not a new desktop or model run",
+  "installedSha256": {
+    "desktop": "457492bec74d63d78794c2ff848d0dbf85886644ff369672d22afaf08069488f",
+    "sidecar": "f16812055cdd930ec308dab4df680be318de1b51444b8a6474fb834c5b889846"
+  },
+  "nativeSession": {
+    "piSessionId": "01a18cc2-f673-74fc-afd0-6add3c9c7d9f",
+    "hostRuntimeSessionId": "ddcb6478-df4e-4189-b77f-ea98be65a2ce",
+    "sha256": "212add298ad05c556e7269d9c961ad8427ff7d7582063427f584c8511845e73b",
+    "compactionEntryId": "c02b01ea"
+  },
+  "compaction": {
+    "syntheticProviderUsage": true,
+    "threshold": 27648,
+    "tokensBefore": 30002,
+    "events": [
+      {
+        "type": "context.compaction.started",
+        "seq": 11
+      },
+      {
+        "type": "context.compaction.completed",
+        "seq": 14
+      }
+    ],
+    "runIds": [
+      "effa0768-7b6f-4279-979d-412a2a8b5d76",
+      "00e0f2e3-301c-4fcd-ad53-f2d3292a13dc",
+      "2b102aa2-dde1-47fb-b3c3-1d983da69547"
+    ],
+    "postCompactionRequestsWithSummary": 3
+  },
+  "isolation": {
+    "A": {
+      "memoryCanonicalKeys": [
+        "s5-supp-general",
+        "s5-supp-global",
+        "s5-supp-project-a"
+      ],
+      "knowledgeDocumentId": "7badda93-3bb9-4ceb-9113-1dc4952d65b6"
+    },
+    "B": {
+      "memoryCanonicalKeys": [
+        "s5-supp-general",
+        "s5-supp-global",
+        "s5-supp-project-b"
+      ],
+      "knowledgeDocumentId": "ce88d7e2-bf23-46bc-909b-1717908590ce"
+    },
+    "plain": {
+      "memoryCanonicalKeys": [
+        "s5-supp-general",
+        "s5-supp-global"
+      ],
+      "knowledgeDocumentId": null
+    }
+  },
+  "resetA": {
+    "memoryContainsA": true,
+    "kbContainsA": true,
+    "contextGeneration": 2,
+    "BContextGeneration": 1
+  },
+  "processLifecycle": {
+    "baselineHead": "2e30234482aaa8f90b78b864fa3143d53636f4c5",
+    "preRestartPid": 21864,
+    "preRestartSidecarPid": 6252,
+    "postRestartPid": 41732,
+    "postRestartSidecarPid": 32636,
+    "appPath": "D:\\ruanjian\\Fox\\fox-desktop.exe",
+    "dataDir": "D:\\python\\projects\\Fox\\output\\s5-install-v6-supplement-20261031\\data",
+    "providerPidStopped": 10352,
+    "status": "stopped by verification only after clean close"
+  },
+  "sourceEvidence": [
+    {
+      "path": "output\\s5-install-v6-acceptance-20261030\\postinstall-report.md",
+      "sha256": "33cb749d8cfb78ea0ee1d541135558a3a4d6c39e7bd148358524b3a90d0a7ca1"
+    },
+    {
+      "path": "output\\s5-install-v6-acceptance-20261030\\evidence\\postinstall-evidence.json",
+      "sha256": "45d72230a0e6e940f802afba276ae4b68df960e8b88cf0f18412301b5ee9ce5f"
+    },
+    {
+      "path": "output\\s5-install-v6-supplement-20261031\\supplement-report.md",
+      "sha256": "da63764f395f43f87f3af2c3d2b821be3fb0bfaafbd5c6a41b3bd2f0cd69feef"
+    },
+    {
+      "path": "output\\s5-install-v6-supplement-20261031\\evidence\\supplement-evidence.json",
+      "sha256": "e711678b6437422401a768e166273747e6367891515d7846ef56e817c94f98aa"
+    },
+    {
+      "path": "output\\s5-install-v6-supplement-20261031\\evidence\\isolation-matrix.json",
+      "sha256": "e261b29e4cd9303cc1d19b28cc546e08ba989c112a6602456c66b281a3c03cab"
+    },
+    {
+      "path": "output\\s5-install-v6-supplement-20261031\\evidence\\compaction-sdk-readonly.json",
+      "sha256": "7c6a18a2b8dc377a494297f1b6140155bd8c53cdf250624487d55f27a126dcec"
+    },
+    {
+      "path": "output\\s5-install-v6-supplement-20261031\\evidence\\compaction-provider-snippets.json",
+      "sha256": "5e3296c0866c2fc7b2f0b3617e1b632931e7a80e49f0462020c74cc9731e84e8"
+    },
+    {
+      "path": "output\\s5-install-v6-supplement-20261031\\evidence\\process-lifecycle.json",
+      "sha256": "fb1dd6f3adfa0a0e790dd8942676af811648e7566327e5a23a4970b19353827f"
+    },
+    {
+      "path": "output\\s5-install-v6-supplement-20261031\\evidence\\reset-context-response.json",
+      "sha256": "fa8febf373a0df8dc94ccbc1c3bb343aa606a9e888caee3f1dc7cee879cc6bc8"
+    }
+  ],
+  "result": "PASS within recorded scope",
+  "unconfirmed": [
+    "external provider on installed v6",
+    "end-to-end vector knowledge retrieval",
+    "native folder selector success path",
+    "upgrade/uninstall/restore and ACL/SID cleanup",
+    "remote CI for delivery SHA",
+    "release-cycle observation"
+  ]
+}

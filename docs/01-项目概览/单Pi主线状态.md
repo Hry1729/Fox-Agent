@@ -1,18 +1,22 @@
 # 单 Pi 主线状态
 
-> 状态：维护中；S5 分支已默认 Authoritative + PiNative，代码回归通过但系统安装受阻，尚未发布<br>
-> 适用范围：`s5-default-pinative-20261029`；当前源码 `2ccd2a97`，上一候选 `ea94f970`，本地 main 仍为 `71ffbb7e`<br>
-> 最后更新：2026-10-30（补入能力说明修复、完整 CI 与安装阻塞；保留此前历史正文）
+> 状态：维护中；默认 Authoritative + PiNative，已安装 v6 核心链路及两项补测通过，尚未发布<br>
+> 适用范围：S5 合并交付；v6 构建源码 `a952125d`，补测交接 HEAD `2e302344`<br>
+> 最后更新：2026-10-30（补入实际安装和补测证据；保留此前历史正文）
 
 ## 当前结论（2026-10-30 S5 候选）
 
 S5 分支的新本地 Run 默认使用 Authoritative 执行契约和 PiNative 路由。未设置 `FOX_EXECUTOR_ROUTE` 或设置为 `pi_native` 时走新默认；显式 `kernel` 只影响之后创建的 Run。已有冻结绑定不改写，`FOX_KERNEL_MODE` 不再决定新 Run 路径。
 
-能力说明 JSON 缺口已定位为 `composeFoxPrompt` 缺少 `stablePrefix`/`dynamicTail` 的产品缺陷并修复；最终 v5 payload 的真实 HTTP 已携带完整能力事实和 Fox 上下文。完整本地 CI 的 Desktop、Agent Runtime、Rust Host、协议、ACP、Kernel worker 和性能基线在 Node 22 下通过；Zvec/ONNX 已通过资源准备和真实 smoke（旧时点曾因资源缺失跳过），远端 CI 未运行。
+能力说明 JSON 缺口已修复。既有完整本地 CI 及 Zvec/ONNX 独立真实 smoke 已通过，保留各自源码时点和忽略项。实际安装的 v6 desktop/sidecar 哈希已与候选核对，runtime 0.1.6 下的审批、命令、写入、交付卡打开、会话隔离、重置和重启续聊已通过。
 
-系统安装被管理员权限阻塞：NSIS 要求 `requireAdministrator`，直接启动返回提升错误，随包 runtime 0.1.6 的安装、重启、命令、升级/卸载均未验证。S5 仍未完整关闭，未合并、未推送、未发布；未执行 S6。
+两项补测已通过：自动压缩、原生落盘、严格重启与摘要续接；知识/记忆隔离及重置后保留。知识仅验证 `sqlite_lexical` 词法回退，记忆仅验证 project/global/`fox-general` 作用域。详见 [已安装 v6 验收与合并依据](../../migration-work/s5-installed-v6-acceptance-20261030.md)。
 
-## 最新增量（2026-10-30 能力说明修复）
+当前运行时实现和指定补测已确认，可合并交付 main；联系人 M1/M2 暂不推进。真实外部模型、完整向量检索、原生文件夹选择、升级/卸载/还原和发布周期观察仍待验收。远端 CI 以交付 SHA 的实际结果为准。S5 不宣称完整关闭，未发布、未执行 S6。
+
+## 历史增量（2026-10-30 安装前的能力说明修复）
+
+以下保留安装前的原始记录。其中安装阻塞、runtime 0.1.5 和未合并等状态不代表上面的当前结论。
 
 确认了一个实际产品缺陷：`composeFoxPrompt` 生成了能力事实和完整提示，但返回对象缺少 `stablePrefix`/`dynamicTail`；Pi 规划扩展因此收到空分区，模型实际使用 SDK 默认提示，能力 JSON 从未进入 HTTP。`2ccd2a97` 只补回这两个分区，并增加分区级回归断言；manifest/profile 校验、Host 权限和工具筛选不变。
 
