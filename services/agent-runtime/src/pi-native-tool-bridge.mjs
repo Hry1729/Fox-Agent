@@ -62,8 +62,28 @@ function assertRequestPayload(request, payload) {
   if (errors.length) throw new Error(`invalid ${request} payload: ${errors.join('; ')}`)
 }
 
+export const NATIVE_TOOL_CALL_ID_REUSED = 'runtime.native_tool_call_id_reused'
+export const NATIVE_BATCH_REFUSED = 'host.native_batch_refused'
+
+function codedError(code, message) {
+  const error = new Error(`[${code}] ${message}`)
+  error.code = code
+  return error
+}
+
+// TB-3: a Host refusal is not a malformed success. Keep its reason and code so
+// they reach run.failed instead of a schema-validation message.
 function responsePayload(request, response, schema) {
   const payload = response?.payload ?? {}
+  if (response?.type === 'native_batch.refused' || payload?.isError === true) {
+    const reason = typeof payload.error === 'string' && payload.error
+      ? payload.error
+      : typeof payload.message === 'string' && payload.message ? payload.message : 'no reason given'
+    const code = payload.errorDetails?.code || payload.code || NATIVE_BATCH_REFUSED
+    const error = codedError(code, `${request} refused by Host: ${reason}`)
+    error.hostReason = reason
+    throw error
+  }
   const errors = validateWireValue(schema, payload)
   if (errors.length) throw new Error(`invalid ${request} response: ${errors.join('; ')}`)
   return payload
@@ -122,21 +142,41 @@ export function createNativeToolBridge({ requestHost, runId, contextGeneration, 
     }
   }
 
-  function batchFor(assistantMessage) {
+  // TB-1: the stream layer rewrites empty or repeated ids before Pi sees them,
+  // so a reused id here is a contract breach. Fail fast instead of replaying an
+  // earlier batch's result or mixing two batches in one Host ledger entry.
+  function batchFor(assistantMessage, { allowEnded = false } = {}) {
     const calls = toolCallsOf(assistantMessage)
     if (!calls.length) return null
-    const key = calls.map((call) => call.id).sort().join('|')
-    let batch = batches.get(key)
-    if (!batch) {
-      batch = {
-        key,
-        calls,
-        batchId: null,
-        registration: null,
-      }
-      batches.set(key, batch)
-      for (const call of calls) callBatches.set(call.id, batch)
+    const ids = calls.map((call) => call.id)
+    if (ids.some((id) => typeof id !== 'string' || !id)) {
+      throw codedError(NATIVE_TOOL_CALL_ID_REUSED, 'a native tool call has no id')
     }
+    if (new Set(ids).size !== ids.length) {
+      throw codedError(NATIVE_TOOL_CALL_ID_REUSED, `a native tool batch repeats a call id: ${ids.join(', ')}`)
+    }
+    const key = [...ids].sort().join('|')
+    let batch = batches.get(key)
+    if (batch) {
+      if (batch.ended && !allowEnded) {
+        throw codedError(NATIVE_TOOL_CALL_ID_REUSED, `native tool call ids were already used by an earlier turn: ${key}`)
+      }
+      return batch
+    }
+    for (const id of ids) {
+      if (callBatches.has(id)) {
+        throw codedError(NATIVE_TOOL_CALL_ID_REUSED, `native tool call id was already used by another batch: ${id}`)
+      }
+    }
+    batch = {
+      key,
+      calls,
+      batchId: null,
+      registration: null,
+      ended: false,
+    }
+    batches.set(key, batch)
+    for (const call of calls) callBatches.set(call.id, batch)
     return batch
   }
 
@@ -236,6 +276,9 @@ export function createNativeToolBridge({ requestHost, runId, contextGeneration, 
         if (!batch) {
           throw new Error(`tool_call.execute without a registered batch: ${toolCallId}`)
         }
+        if (executed.has(toolCallId) || closed.has(toolCallId)) {
+          throw codedError(NATIVE_TOOL_CALL_ID_REUSED, `native tool call ${toolCallId} was already ${executed.has(toolCallId) ? 'executed' : 'closed'}`)
+        }
         await batch.registration
         if (signal?.aborted) {
           await cancel(batch, toolCallId)
@@ -290,7 +333,10 @@ export function createNativeToolBridge({ requestHost, runId, contextGeneration, 
       return close(batch, callId, reason)
     }
     if (event?.type === 'turn_end') {
-      if (event.message?.role === 'assistant') batchFor(event.message)
+      if (event.message?.role === 'assistant') {
+        const ending = batchFor(event.message, { allowEnded: true })
+        if (ending) ending.ended = true
+      }
       return track((async () => {
         const closes = []
         for (const batch of batches.values()) {
