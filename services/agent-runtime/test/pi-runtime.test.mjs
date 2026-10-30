@@ -1916,3 +1916,58 @@ for (const activeCount of [2, 3, 4]) {
     await Promise.all(runs.map(identity => runtime.waitFor(message => message.payload?.type === 'run.completed' && message.runId === identity.runId)))
   })
 }
+
+test('CX-3 a native prompt refused before acknowledgement is not released as a Run', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-preack-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://preack', modelId: 'preack-model', apiType: 'faux',
+    fauxResponses: [{ content: [{ type: 'toolCall', id: 'preack-tool', name: 'missing_native_tool', arguments: {} }], stopReason: 'toolUse' }, 'Done.'],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'preack-c', runtimeSessionId: 'preack-s', runId: 'preack-r' }
+  const create = runtime.send('create_session', { ...identity, payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions') } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', { ...identity, payload: { text: 'Use the missing tool.', controlBinding: nativeControlBinding(identity.conversationId, identity.runId) } })
+  const registration = await runtime.waitFor(message => message.type === 'tool_batch.register')
+  runtime.respond(registration, 'tool_batch.registered', { batchId: 'preack-batch', registeredCalls: 1 })
+  const close = await runtime.waitFor(message => message.type === 'tool_call.close')
+  runtime.respond(close, 'tool_call.closed', { closed: true, state: 'not_started' })
+  await runtime.waitFor(message => message.type === 'run_released' && message.runId === identity.runId)
+
+  const nextRun = 'preack-follow-up'
+  const prompt = runtime.send('prompt', { ...identity, runId: nextRun, payload: {
+    text: 'Continue.', controlBinding: nativeControlBinding(identity.conversationId, nextRun) } })
+  const facts = await runtime.waitFor(message => message.type === 'tool_call.facts' && message.runId === nextRun)
+  runtime.respond(facts, 'tool_call.facts_result', { contextGeneration: 1, blocked: true,
+    facts: [{ callId: facts.payload.calls[0].callId, state: 'outcome_unknown' }] })
+  const refused = await runtime.waitFor(message => message.requestId === prompt.id)
+  assert.equal(refused.type, 'request_failed')
+  assert.equal(refused.payload.code, 'session.native_recovery_pending')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(runtime.messages.filter(message => message.type === 'run_released' && message.runId === nextRun).length, 0)
+  assert.equal(runtime.messages.filter(message => message.requestId === prompt.id).length, 1)
+})
+
+test('CX-1 the sidecar cancels its Runs and exits when the Host closes stdin', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-stdin-close-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://stdin-close', modelId: 'stdin-close', apiType: 'faux',
+    fauxResponses: [{ content: [{ type: 'toolCall', id: 'hang-tool', name: 'missing_native_tool', arguments: {} }], stopReason: 'toolUse' }],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'stdin-c', runtimeSessionId: 'stdin-s', runId: 'stdin-r' }
+  const create = runtime.send('create_session', { ...identity, payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions') } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', { ...identity, payload: { text: 'Wait on the Host.', controlBinding: nativeControlBinding(identity.conversationId, identity.runId) } })
+  // The Host never answers the registration: the Run is parked on a Host request.
+  await runtime.waitFor(message => message.type === 'tool_batch.register')
+  const started = Date.now()
+  runtime.child.stdin.end()
+  await Promise.race([runtime.exited, new Promise((_, reject) => setTimeout(() => reject(new Error('sidecar did not exit after stdin closed')), 4000))])
+  assert.ok(Date.now() - started < 4000)
+  assert.equal(runtime.messages.filter(message => message.type === 'model_request.admit').length, 1, 'no new model request after the Host is gone')
+})
