@@ -96,5 +96,14 @@
     "localCommandsExecuted": true,
     "remoteGithubActions": "not run; source not pushed",
     "jobsNowRequired": "vector-runtime-smoke and onnx-runtime-smoke have no skip path"
+  },
+  "ciShell": {
+    "shell": "pwsh 7.6.8 (GitHub Actions pwsh)",
+    "zvecCommand": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/zvec-offline-smoke.ps1",
+    "zvecExitCode": 0,
+    "onnxCommand": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/onnx-offline-smoke.ps1",
+    "onnxExitCode": 0,
+    "zvecLog": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\zvec-smoke-pwsh.log",
+    "onnxLog": "D:\\python\\projects\\Fox\\output\\s5-zvec-onnx-20261030\\logs\\onnx-smoke-pwsh.log"
   }
 }
