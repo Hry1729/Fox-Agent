@@ -24,12 +24,15 @@ test('F1 Legacy: actual Pi adapter preserves a 30 KB Host read result whole', ()
   assert.equal(delivered.details.readVersion, hostResult.details.readVersion)
 })
 
-test('F1 Legacy: Pi-shaped read remains whole even beyond the generic result gate', () => {
+test('F1 Legacy / TB-2: a Pi-shaped read beyond the ceiling keeps head and tail with a read-back reference', () => {
   const source = 'A'.repeat(140_000) + MARKER
+  const total = Buffer.byteLength(source, 'utf8')
   const hostResult = { content: [{ type: 'text', text: source }], details: { truncated: false } }
   const delivered = normalizeFoxToolResultForPi('read', hostResult, {
-    runId: 'legacy-run', toolCallId: 'read-larger',
+    runId: 'legacy-run', toolCallId: 'read-larger', storage: { stored: true, storedBytes: total, retrievableBytes: total },
   })
-  assert.equal(delivered.content[0].text, source)
-  assert.equal(delivered.content[0].text.includes(MARKER), true)
+  assert.ok(Buffer.byteLength(delivered.content[0].text, 'utf8') < total)
+  assert.equal(delivered.content[0].text.includes(MARKER), true, 'the tail is kept')
+  assert.ok(delivered.content[0].text.includes('fox-result://legacy-run/read-larger'))
+  assert.equal(delivered.details.outputTruncated, true)
 })
