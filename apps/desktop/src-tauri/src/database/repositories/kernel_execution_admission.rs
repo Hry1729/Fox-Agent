@@ -2024,7 +2024,7 @@ fn issue_legacy_file_credential_in_tx(
     )?;
     // REV-05: same purpose-specific authorization as the Kernel path, recorded
     // in the same transaction so credential and grant can never disagree.
-    if tool == "write_file" && !model_delivery_covered_whole_file_in_tx(transaction, run_id, &file_baseline)? {
+    if tool == "write_file" && replace_authorization_required_in_tx(transaction, run_id, &file_baseline)? {
         let input: serde_json::Value = serde_json::from_str(&canonical_input_json)
             .map_err(|error| format!("invalid file input: {error}"))?;
         let content = input
@@ -2668,6 +2668,40 @@ mod tests {
         assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"native-host-fixture").unwrap(),AttemptOutcome::Claimed);
         db.revalidate_execution_credential(&credential).unwrap();
         assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"duplicate-native-host").unwrap(),AttemptOutcome::Unknown);
+    }
+
+    #[test]
+    fn native_file_create_credential_accepts_approved_missing_target_without_replace_grant() {
+        let call = "native-approved-create";
+        let (db, conversation, run, version) = host_file_fixture(
+            "ask", call, true, super::super::native_route::WriterRoute::PiNative,
+        );
+        let binding = db.run_control_binding(&run).unwrap().unwrap();
+        let observation = crate::resource_gateway::observe_missing_file_target(&binding, "document.txt")
+            .unwrap().host_observation(call);
+        // Replace the fixture's synthetic read with the real missing-target probe.
+        db.with_connection(|connection| connection.execute(
+            "DELETE FROM kernel_host_observations WHERE run_id=?1", [&run],
+        )).unwrap();
+        db.record_host_observation(&run, &conversation, &observation).unwrap();
+        assert_eq!(write_operation_kind(Some(&observation)), Some(WriteOperationKind::Create));
+        assert!(!db.needs_replace_grant(&run, &observation).unwrap());
+
+        let credential = db.issue_legacy_file_credential(&run, call, version).unwrap();
+        assert_eq!(credential.file_baseline.as_ref(), Some(&observation));
+        assert!(!credential.requires_replace_grant);
+        assert!(credential.replace_candidate_digest.is_none());
+        assert!(credential.replace_request_digest.is_none());
+        let grants: i64 = db.with_connection(|connection| connection.query_row(
+            "SELECT COUNT(*) FROM kernel_whole_file_replace_grants WHERE run_id=?1",
+            [&run], |row| row.get(0),
+        )).unwrap();
+        assert_eq!(grants, 0);
+        assert_eq!(
+            db.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest,
+                "native-create-host").unwrap(),
+            AttemptOutcome::Claimed,
+        );
     }
 
     #[test]
