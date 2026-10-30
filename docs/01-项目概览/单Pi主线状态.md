@@ -6,7 +6,7 @@
 
 ## 当前结论（2026-10-30 S5 候选）
 
-S5 分支的新本地 Run 默认使用 Authoritative 执行契约和 PiNative 路由。未设置 `FOX_EXECUTOR_ROUTE` 或设置为 `pi_native` 时走新默认；显式 `kernel` 只影响之后创建的 Run。已有冻结绑定不改写，`FOX_KERNEL_MODE` 不再决定新 Run 路径。
+新本地 Run 和子 Run 一律使用 Authoritative 执行契约和 PiNative 路由，没有路由开关（A0 删除了 `FOX_EXECUTOR_ROUTE`，不再有 Kernel 回退）。已有冻结绑定不改写；未结束的历史 Kernel Run 在启动时标为中断（「执行路径已退役」），不再续跑。`FOX_KERNEL_MODE` 不再决定新 Run 路径。
 
 能力说明 JSON 缺口已修复。既有完整本地 CI 及 Zvec/ONNX 独立真实 smoke 已通过，保留各自源码时点和忽略项。实际安装的 v6 desktop/sidecar 哈希已与候选核对，runtime 0.1.6 下的审批、命令、写入、交付卡打开、会话隔离、重置和重启续聊已通过。
 
