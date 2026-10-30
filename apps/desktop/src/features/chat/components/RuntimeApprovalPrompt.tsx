@@ -17,6 +17,25 @@ import {
 } from '@/features/conversations/model/approval-decision-policy'
 import type { ApprovalDecision, ApprovalRecord } from '@/features/conversations/model/types'
 import type { GrantScope } from '@/components/assistant-ui/upstream/elements/permission-grant'
+import { desktopClient } from '@/features/conversations/api/desktop-client'
+
+/** A1: the Host's offer to save "always allow in this project" for a command. */
+export function projectRuleOffer(request: Record<string, unknown>): { tool: string; suggestedPrefix: string } | null {
+  const decisions = Array.isArray(request.availableDecisions) ? request.availableDecisions : []
+  const rule = request.projectRule as { eligible?: unknown; tool?: unknown; suggestedPrefix?: unknown } | undefined
+  if (!decisions.includes('allow_project_rule') || rule?.eligible !== true || typeof rule.tool !== 'string') return null
+  return { tool: rule.tool, suggestedPrefix: typeof rule.suggestedPrefix === 'string' ? rule.suggestedPrefix : '' }
+}
+
+/** A1: one-line Host facts for a command card (no sandbox, risk, findings). */
+export function commandPolicyNote(request: Record<string, unknown>): string | null {
+  const host = request.hostExecution as { note?: unknown } | null | undefined
+  const policy = request.policy as { risk?: unknown; findings?: unknown } | undefined
+  if (!host && !policy) return null
+  const risk = policy?.risk === 'high' ? '高风险命令' : null
+  const note = typeof host?.note === 'string' ? host.note : null
+  return [risk, note].filter(Boolean).join('：') || null
+}
 
 const conversationScopeNote = '“本次对话内允许”只登记本对话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者对话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。'
 
@@ -46,6 +65,27 @@ export function RuntimeApprovalPrompt({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const submittingRef = useRef(false)
+  const ruleOffer = projectRuleOffer(request as Record<string, unknown>)
+  const [rulePrefix, setRulePrefix] = useState(ruleOffer?.suggestedPrefix ?? '')
+  const policyNote = commandPolicyNote(request as Record<string, unknown>)
+  const allowWithProjectRule = async () => {
+    if (submittingRef.current || !rulePrefix.trim()) return
+    submittingRef.current = true
+    setSubmitting(true)
+    setError(null)
+    let resolved = false
+    try {
+      resolved = await desktopClient.approvalAllowProjectRule(approval.id, rulePrefix.trim())
+      if (!resolved) setError('审批未处理成功，请重试。')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '审批未处理成功，请重试。')
+    } finally {
+      if (!resolved) {
+        submittingRef.current = false
+        setSubmitting(false)
+      }
+    }
+  }
   const resolve = async (decision: ApprovalDecision) => {
     if (submittingRef.current) return
     submittingRef.current = true
@@ -93,6 +133,15 @@ export function RuntimeApprovalPrompt({
       onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
       onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
       detailsContent={<>
+        {policyNote && <p className="fox-approval-scope-note fox-approval-host-note">{policyNote}</p>}
+        {ruleOffer && <div className="fox-approval-project-rule">
+          <label>
+            <span>本项目总是允许以此开头的命令</span>
+            <input aria-label="项目规则前缀" value={rulePrefix} disabled={submitting} onChange={event => setRulePrefix(event.currentTarget.value)} />
+          </label>
+          <button type="button" disabled={submitting || !rulePrefix.trim()} onClick={() => void allowWithProjectRule()}>本项目总是允许「{rulePrefix.trim() || '…'}」</button>
+          <small>按前缀匹配，复合命令每一段都要命中；高风险操作需要前缀写出它本身。可在设置里撤销。</small>
+        </div>}
         <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>{presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}</summary>
         <div role="region" aria-label="审批详情">
         {repairOverride && <div className={`fox-approval-context ${repairDetails ? '' : 'is-invalid'}`}>

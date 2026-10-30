@@ -19,7 +19,8 @@ import { asAgentCard } from '@/features/agents/agent-card-data'
 import { chatSelectableAgents, normalizeAgentClassification, resolveActiveChatAgent } from '@/features/agents/agent-classification'
 import { resolveExpertKnowledgeDeclaration } from '@/features/agents/expert-knowledge'
 import { useAgents } from '@/features/agents/use-agents'
-import { type LocalKnowledgeBaseDto, desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
+import { type LocalKnowledgeBaseDto, DesktopCommandError, desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
+import { type ComposerAccessMode, conversationAccessMode, hostAccessMode, storedPermissionMode } from './access-mode'
 import { latestMessage, runIsActive, useDesktopConversation } from '@/features/conversations/hooks/use-desktop-conversation'
 import { useProjectCatalog } from '@/features/conversations/hooks/use-project-catalog'
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
@@ -801,17 +802,30 @@ export function Workbench() {
     beginNewDraft()
     toast.success(`项目“${projectSelection.path.split(/[\\/]/).filter(Boolean).at(-1) ?? projectSelection.path}”已加入当前对话`)
   }
-  const changeProjectPermission = async (permissionMode: ProjectRecord['permissionMode']) => {
+  const changeProjectPermission = async (accessMode: ComposerAccessMode) => {
     const conversationId = desktopConversation.detail?.conversation.id
     const projectId = desktopConversation.detail?.conversation.projectId ?? activeProject?.id
+    const permissionMode = storedPermissionMode(accessMode)
     try {
       if (conversationId) {
         // A conversation (including project-backed conversations) changes policy
         // through a versioned local-user request. Conflicts never auto-retry.
+        // A1: four modes; a mid-Run switch applies from the next tool call.
         const policy = await desktopClient.conversationPermissionState(conversationId)
-        await desktopClient.updateConversationPermission(
-          conversationId, permissionMode, crypto.randomUUID(), policy.version,
-        )
+        try {
+          await desktopClient.updateConversationPermission(
+            conversationId, hostAccessMode(accessMode), crypto.randomUUID(), policy.version,
+          )
+        } catch (cause) {
+          // The first full access in a project needs an explicit second
+          // confirmation; the project remembers it afterwards.
+          if (!(cause instanceof DesktopCommandError) || cause.code !== 'permission.full_access_confirmation_required') throw cause
+          if (!window.confirm(`${cause.message}\n\n确定为这个项目开启完全访问吗？`)) return
+          const fresh = await desktopClient.conversationPermissionState(conversationId)
+          await desktopClient.updateConversationPermission(
+            conversationId, hostAccessMode(accessMode), crypto.randomUUID(), fresh.version, true,
+          )
+        }
         await desktopConversation.openConversation(conversationId)
         if (projectId) await refreshProjects()
       } else if (projectId) {
@@ -1276,7 +1290,7 @@ export function Workbench() {
   const handleInitialAttachmentsConsumed = useStableCallback((requestId: number) => {
     setComposerInitialAttachments((request) => request?.requestId === requestId ? null : request)
   })
-  const handleComposerPermissionModeChange = useStableCallback((permissionMode: ProjectRecord['permissionMode']) => changeProjectPermission(permissionMode))
+  const handleComposerPermissionModeChange = useStableCallback((accessMode: ComposerAccessMode) => changeProjectPermission(accessMode))
   const handleComposerAgentChange = useStableCallback((agentId: string) => {
     void desktopConversation.createConversationForAgent(agentId).then((created) => {
       if (!created) toast.error(desktopConversation.error ?? '无法切换这个助手')
@@ -1478,7 +1492,7 @@ export function Workbench() {
   ) : null, [desktopConversation.enabled, agentBackendStatus, lockedAgentBackend, openConversationId, draftAgentBackend, draftProjectId, draftProjectRoot, draftFullAccess, visibleAgentBackendRefusal])
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
-    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} sendFailureReason={desktopConversation.lastSendFailureReason} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
+    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={conversationAccessMode(desktopConversation.detail?.conversation) ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} sendFailureReason={desktopConversation.lastSendFailureReason} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
     </ComposerEntryContext.Provider>
   )
   const assistantUiThreadPanel = (

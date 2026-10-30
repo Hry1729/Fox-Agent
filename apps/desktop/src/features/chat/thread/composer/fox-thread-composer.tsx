@@ -20,6 +20,7 @@ import { notify as toast } from '@/features/notifications'
 import { ArrowUp, Check, ChevronDown, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Terminal, X } from 'lucide-react'
 import { type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { FoxDecisionCard, FOX_PERMISSION_MODES } from './fox-decision-card'
+import type { ComposerAccessMode } from '../../access-mode'
 
 /**
  * The assistant-ui composer (migration step 5D). Built on
@@ -34,7 +35,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
   runtimeControlled: boolean
   runtimeInitializing?: boolean
   projectRoot?: string | null
-  projectPermissionMode?: ProjectRecord['permissionMode'] | null
+  projectPermissionMode?: ComposerAccessMode | null
   expertReadOnly?: boolean
   expertToolAvailability?: ExpertToolAvailability
   activeExpert?: Parameters<typeof ExpertBindingChip>[0]['expert'] | null
@@ -55,7 +56,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
   onResolveWorkflowGate?: Parameters<typeof FoxDecisionCard>[0]['onResolveWorkflowGate']
   onEvidenceClick?: Parameters<typeof FoxDecisionCard>[0]['onEvidenceClick']
   onProject?: () => void
-  onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>
+  onPermissionModeChange?: (permissionMode: ComposerAccessMode) => void | Promise<void>
   onKnowledge?: () => void
   onViewExpert?: () => void
   onChangeExpert?: () => void
@@ -437,7 +438,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
                     </Button>
                   </DropdownMenuTrigger>
                 </TooltipTrigger>
-                <TooltipContent side="top"><p>执行方式</p></TooltipContent>
+                <TooltipContent side="top"><p>执行方式（运行中切换，从下一次工具调用起生效）</p></TooltipContent>
               </Tooltip>
               <DropdownMenuContent className="fox-execution-menu" side="top" align="start">
                 {FOX_PERMISSION_MODES.map(([value, label]) => (

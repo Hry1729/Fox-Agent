@@ -2,6 +2,7 @@ import { Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequ
 import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
 import { GoalProgress } from '../../components/GoalProgress'
 import { RuntimeApprovalPrompt } from '../../components/RuntimeApprovalPrompt'
+import { type ComposerAccessMode, FOX_ACCESS_MODES } from '../../access-mode'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { isConfirmationQuestion } from '../../fox-shared'
@@ -147,9 +148,5 @@ function FoxQuestionCard({ request, onSubmitQuestion }: { request: RuntimeQuesti
   </div>
 }
 
-/** The permission-mode labels shared by the composer menu. */
-export const FOX_PERMISSION_MODES: Array<[NonNullable<ProjectRecord['permissionMode']>, string]> = [
-  ['ask', '执行前询问'],
-  ['allow', '自动执行'],
-  ['read_only', '只读模式'],
-]
+/** The four execution-mode labels shared by the composer menu (A1). */
+export const FOX_PERMISSION_MODES: Array<[ComposerAccessMode, string]> = FOX_ACCESS_MODES.map(([value, , label]) => [value, label])

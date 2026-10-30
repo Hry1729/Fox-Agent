@@ -5,6 +5,7 @@ import { toolCallApprovalNote } from '@/features/conversations/model/approval-la
 import type { GoalProgressData } from '../hooks/use-goal-progress'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { notify as toast } from '@/features/notifications'
+import { PermissionAuditList } from './PermissionAuditList'
 
 export interface ActivityDetailPanelProps {
   detail: ConversationDetail | null
@@ -120,6 +121,7 @@ export function ActivityDetailPanel({ detail, goal, focusedEvidence, onEvidenceC
       {tools.length === 0 ? <p className="fox-activity-empty">当前没有工具记录。</p> : tools.map((tool) => <ToolEntry key={tool.id} tool={tool} focused={matchedTool?.id === tool.id} approvals={detail?.approvals} />)}
       {(detail?.toolCalls.length ?? 0) > tools.length && <small>仅显示最近 100 条；更早的记录可在对话历史中查看。</small>}
     </section>
+    <PermissionAuditList runId={detail?.lastRun?.id} />
     <section className="fox-activity-events"><div className="fox-activity-section-head"><strong>运行记录</strong><small>{detail?.runtimeEvents.length ?? 0} 条</small></div>
       {recentEvents.length === 0 ? <p className="fox-activity-empty">当前没有运行记录。</p> : recentEvents.map((event) => <p key={`${event.runId}:${event.seq}`}><span>{event.eventType}</span><small>{new Date(event.createdAt).toLocaleTimeString()}</small></p>)}
       {(detail?.runtimeEvents.length ?? 0) > recentEvents.length && <small>仅显示最近 30 条。</small>}

@@ -677,9 +677,18 @@ export const desktopClient = {
   updateProjectPermission: (projectId: string, permissionMode: ProjectRecord['permissionMode']) =>
     command<ProjectRecord>('project_permission_update', { projectId, permissionMode }),
   conversationPermissionState: (conversationId: string) =>
-    command<{ version: number; mode: ProjectRecord['permissionMode'] }>('conversation_permission_state', { conversationId }),
-  updateConversationPermission: (conversationId: string, permissionMode: ProjectRecord['permissionMode'], requestId: string, expectedVersion: number) =>
-    command<{ version: number; mode: ProjectRecord['permissionMode'] }>('conversation_permission_update', { conversationId, permissionMode, requestId, expectedVersion }),
+    command<import('../model/types').ConversationAccessState>('conversation_permission_state', { conversationId }),
+  /** A1: four modes. The first full access in a project needs `confirmFullAccess`. */
+  updateConversationPermission: (conversationId: string, permissionMode: import('../model/types').FoxAccessMode | ProjectRecord['permissionMode'], requestId: string, expectedVersion: number, confirmFullAccess = false) =>
+    command<import('../model/types').ConversationAccessState>('conversation_permission_update', { conversationId, permissionMode, requestId, expectedVersion, confirmFullAccess }),
+  permissionRulesList: (projectId: string) =>
+    command<import('../model/types').PermissionRuleRecord[]>('permission_rules_list', { projectId }),
+  permissionRuleRevoke: (ruleId: string) => command<boolean>('permission_rule_revoke', { ruleId }),
+  /** "Always allow in this project": saves the (edited) prefix and approves this call once. */
+  approvalAllowProjectRule: (approvalId: string, pattern: string) =>
+    command<boolean>('approval_allow_project_rule', { approvalId, pattern }),
+  permissionAuditList: (scope: { runId?: string; conversationId?: string; limit?: number }) =>
+    command<import('../model/types').PermissionAuditRecord[]>('permission_audit_list', scope),
   deleteProject: (projectId: string) => command<boolean>('project_delete', { projectId }),
   // `agentBackend` is frozen at creation (absent = fox); the Host refuses a
   // non-Fox value while FOX_EXTERNAL_BACKENDS keeps it off.

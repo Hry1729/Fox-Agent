@@ -150,6 +150,45 @@ export interface KnowledgePreviewCacheStatistics {
   limitBytes: number
 }
 
+/** A1: the four execution modes the Host decides tool calls under. */
+export type FoxAccessMode = 'read_only' | 'ask' | 'auto' | 'full_access'
+
+export interface ConversationAccessState {
+  version: number
+  mode: 'read_only' | 'ask' | 'allow'
+  accessMode: FoxAccessMode
+  fullAccess: boolean
+  projectId: string | null
+  projectFullAccessConfirmed: boolean
+}
+
+export interface PermissionRuleRecord {
+  id: string
+  projectId: string
+  effect: 'allow' | 'ask' | 'block'
+  tool: string
+  pattern: string
+  source: 'user' | 'builtin'
+  createdAt: number
+  revokedAt: number | null
+}
+
+export interface PermissionAuditRecord {
+  id: number
+  conversationId: string
+  runId: string | null
+  toolCallId: string | null
+  tool: string
+  mode: FoxAccessMode
+  class: string
+  risk: 'low' | 'high'
+  reason: string
+  ruleIds: string[]
+  findings: string[]
+  summary: string
+  createdAt: number
+}
+
 export interface ProjectRecord {
   id: string
   name: string
@@ -351,6 +390,8 @@ export interface ConversationSummary {
   projectId: string | null
   projectRoot: string | null
   permissionMode: ProjectRecord['permissionMode']
+  /** A1: with `permissionMode = allow`, the conversation runs in full access. */
+  fullAccess?: boolean
   /**
    * Outer Agent backend frozen at creation (plan v0.3.1 6.6). Optional only for
    * summaries from an older Host; absent means `fox`. Not the Kernel engineId.

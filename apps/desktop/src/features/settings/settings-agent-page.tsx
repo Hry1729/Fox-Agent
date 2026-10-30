@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { ProjectPermissionRules } from './project-permission-rules'
 import { Archive, Bot, ChevronRight, ExternalLink, FolderOpen, Info, LoaderCircle, MoreHorizontal, Plus, RotateCcw } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { cn } from '@/lib/utils'
@@ -27,12 +28,12 @@ import { rememberPluginReturn, serviceStatusLabel, useStoredPreference } from '.
 
 type PermissionMode = ProjectRecord['permissionMode']
 
-const PERMISSION_LABELS: Record<PermissionMode, string> = { read_only: '只读', ask: '询问', allow: '允许' }
+const PERMISSION_LABELS: Record<PermissionMode, string> = { read_only: '只读', ask: '询问', allow: '自动' }
 
 function PermissionSelect({ value, disabled, label, onChange, className }: { value: PermissionMode; disabled?: boolean; label: string; onChange: (value: PermissionMode) => void; className?: string }) {
   return <Select value={value} disabled={disabled} onValueChange={(next) => onChange(next as PermissionMode)}>
     <SelectTrigger className={cn('fox-settings-compact-select', className)} aria-label={label}><SelectValue /></SelectTrigger>
-    <SelectContent><SelectItem value="read_only">只读</SelectItem><SelectItem value="ask">询问</SelectItem><SelectItem value="allow">允许</SelectItem></SelectContent>
+    <SelectContent><SelectItem value="read_only">只读</SelectItem><SelectItem value="ask">询问</SelectItem><SelectItem value="allow">自动</SelectItem></SelectContent>
   </Select>
 }
 
@@ -363,8 +364,9 @@ export function AgentSettingsPage({ sidebarCollapsed, onSidebar, navigate, secti
             <section className="fox-settings-sheet-section">
               <div className="fox-settings-sheet-section-head"><h3>执行方式</h3></div>
               <PermissionSelect value={openProject.permissionMode} disabled={busyId === openProject.id} label={`${openProject.name} 执行方式`} className="is-wide" onChange={(value) => void projectsResource.updatePermission(openProject, value)} />
-              <p className="fox-settings-sheet-hint">{PERMISSION_LABELS[openProject.permissionMode]}：{openProject.permissionMode === 'read_only' ? 'Agent 只能读取项目文件。' : openProject.permissionMode === 'ask' ? '写入文件或运行命令前先询问。' : '允许在项目内写入文件和运行命令；命令、连接器与项目外写入仍单独审批。'}</p>
+              <p className="fox-settings-sheet-hint">{PERMISSION_LABELS[openProject.permissionMode]}：{openProject.permissionMode === 'read_only' ? 'Agent 只能读取项目文件。' : openProject.permissionMode === 'ask' ? '写入文件或运行命令前先询问。' : '项目内写入和低风险命令直接执行；高风险命令、项目外和受保护路径仍会询问。完全访问只能在对话里开启。'}</p>
             </section>
+            <ProjectPermissionRules projectId={openProject.id} />
             <section className="fox-settings-sheet-section">
               <div className="fox-settings-sheet-section-head"><h3>目录</h3></div>
               <dl className="fox-settings-facts">
