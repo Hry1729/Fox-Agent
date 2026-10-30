@@ -16395,7 +16395,9 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(NATIVE_TOOL_LEDGER_SCHEMA_VERSION, 101);
         assert_eq!(NATIVE_MODEL_BUDGET_SCHEMA_VERSION, 102);
         assert_eq!(NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION, 103);
-        assert_eq!(DATABASE_SCHEMA_VERSION, NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION);
+        // v104: A1 permission rules, full-access flag and auto-allow audit.
+        assert_eq!(PERMISSION_RULES_SCHEMA_VERSION, 104);
+        assert_eq!(DATABASE_SCHEMA_VERSION, PERMISSION_RULES_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
