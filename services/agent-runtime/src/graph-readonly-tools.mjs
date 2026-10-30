@@ -6,6 +6,7 @@ import {
   SettingsManager,
   createFoxAgentSession,
 } from './pi-adapter.mjs'
+import { abortAgent } from './agent-abort.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { composeFoxPrompt } from './prompt-composer.mjs'
 import { FOX_LANGUAGE_CONTRACT } from './runtime-instructions.mjs'
@@ -390,7 +391,7 @@ async function runReadonlyNodeAgent({
   const session = created.session
   let timedOut = false
   // MD-4: abort() is async; never leave its rejection unhandled.
-  const abort = () => { void Promise.resolve().then(() => session.abort()).catch(() => {}) }
+  const abort = () => abortAgent(session, null, 'graph readonly session.abort')
   if (signal.aborted) abort()
   else signal.addEventListener('abort', abort, { once: true })
   const timeout = setTimeout(() => {
