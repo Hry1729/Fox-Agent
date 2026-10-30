@@ -159,7 +159,7 @@ fn real_pi_jsonl_reads_through_rust_and_returns_the_persisted_tool_result() {
         writeln!(stdin, "{value}").unwrap(); stdin.flush().unwrap();
     };
     send(&mut stdin, serde_json::to_value(RuntimeRequest::new("initialize").with_payload(json!({"modelService":{
-        "baseUrl":"faux://fox","modelId":"fox-test","apiType":"faux","contextWindow":4096,"maxOutputTokens":512,
+        "baseUrl":"faux://fox","modelId":"fox-test","apiType":"faux","contextWindow":32768,"maxOutputTokens":512,
         "fauxResponses":[{"content":[{"type":"toolCall","id":"pi-read","name":"read","arguments":{"path":"note.txt"}}],"stopReason":"toolUse"},"read complete"]
     }}))).unwrap());
     let mut executions = 0;

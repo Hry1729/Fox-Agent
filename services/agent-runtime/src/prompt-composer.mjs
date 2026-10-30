@@ -1097,6 +1097,13 @@ export function composeFoxPrompt({
 
   return {
     prompt,
+    // The SDK extension receives these two halves separately: stablePrefix is
+    // the cacheable preamble and dynamicTail is the per-turn fox_context
+    // section. Returning only the joined prompt silently made the extension
+    // install an empty preamble, so the model received the SDK default prompt
+    // and never saw Host capability facts or Fox runtime context.
+    stablePrefix: stable,
+    dynamicTail: contextText,
     stablePromptHash: stablePromptHash(stable),
     contextHash: stablePromptHash(contextText),
     diagnostics: {

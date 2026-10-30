@@ -22,7 +22,7 @@ try {
   ]
   const initialize = runtime.send('initialize', { payload: { modelService: {
     baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux',
-    contextWindow: 8192, maxOutputTokens: 1024, fauxResponses: responses,
+    contextWindow: 32768, maxOutputTokens: 1024, fauxResponses: responses,
   } } })
   await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
   const runtimeSessionId = `shadow-session-${runId}`

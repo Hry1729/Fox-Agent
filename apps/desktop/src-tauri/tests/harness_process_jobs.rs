@@ -17,6 +17,23 @@
 #[path = "../src/process_jobs.rs"]
 mod process_jobs;
 
+// The production module names `crate::host_sandbox::SrtHostBackend` for the
+// shipped execution proof. This standalone harness compiles `process_jobs`
+// directly and intentionally does not link the desktop crate, so provide the
+// same fail-closed shape here. The harness always injects `AvailableInTests`
+// explicitly and never consults this production proof.
+mod host_sandbox {
+    use crate::process_jobs::{BackendAvailability, BackendCapabilityProof, BackendRefusal};
+
+    pub struct SrtHostBackend;
+
+    impl BackendCapabilityProof for SrtHostBackend {
+        fn availability(&self) -> BackendAvailability {
+            BackendAvailability::Unavailable(BackendRefusal::NoVerifiedBackend)
+        }
+    }
+}
+
 use process_jobs::{
     AvailableInTests, BackendCapabilityProof, EnvMode, IdentityProbe, JobRunState, Liveness,
     ManagerConfig, OutputWindow, OwnerStatus, PersistedJobRecord, ProcessIdentity,

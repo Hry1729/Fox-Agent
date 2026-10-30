@@ -23,6 +23,11 @@ test('Host availability survives bounded prompt composition',()=>{
   assert.match(composed.prompt,/no verified backend/)
   assert.match(composed.prompt,/sandbox_unavailable/)
   assert.match(composed.prompt,/schemas describe contracts/)
+  // The real SDK receives the two halves through the planning extension, not
+  // the joined prompt. A present joined prompt is not evidence of delivery.
+  assert.equal(typeof composed.stablePrefix,'string')
+  assert.match(composed.dynamicTail,/Host runtime availability for this frozen manifest\/profile:/u)
+  assert.match(composed.dynamicTail,/no verified backend/u)
 })
 test('Compaction records safe reasons while preserving unknown outcome retry refusal',()=>{
   const request={runId:'r',payload:{compaction:{compactionId:'c'}}}
