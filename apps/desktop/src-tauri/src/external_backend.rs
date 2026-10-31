@@ -31,7 +31,6 @@ pub struct DesktopSink {
     app: AppHandle,
     database: Database,
     event_lock: Arc<Mutex<()>>,
-    state_root: std::path::PathBuf,
 }
 
 impl ExternalSink for DesktopSink {
@@ -187,7 +186,7 @@ impl ExternalBackendHost {
 impl ExternalBackendHost {
     pub fn new(app: AppHandle, database: Database, fox_data: &std::path::Path) -> Self {
         let config = HostLaunchConfig::from_env(fox_data);
-        let sink = DesktopSink { app: app.clone(), database: database.clone(), event_lock: Arc::new(Mutex::new(())), state_root: config.state_root.clone() };
+        let sink = DesktopSink { app: app.clone(), database: database.clone(), event_lock: Arc::new(Mutex::new(())) };
         let runtime = ExternalRuntime::new(sink, HostLauncher::new(config), tauri::async_runtime::handle().inner().clone());
         let host = Self { runtime, database, app, data_dir: fox_data.to_path_buf() };
         host.interrupt_runs_left_active();

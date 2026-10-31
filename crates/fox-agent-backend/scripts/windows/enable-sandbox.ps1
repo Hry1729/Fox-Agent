@@ -11,10 +11,14 @@
     4. 创建 %ProgramData%\Fox\sandbox 并设 ACL：Administrators / SYSTEM 完全控制；Users 仅
        “创建子文件夹 + 读属性 + 遍历”（只对该目录本身）；CREATOR OWNER 对子项完全控制（仅继承）；
        Users 不能列出或读取他人的目录；
-    5. 运行 srt windows-install --proxy-port-range 60080-60089 --skip-profile-grant（不授权用户主目录）；
-    6. 把结果写成 JSON（-ResultPath），含 srt 沙箱账户 SID，供 Fox 写入 srt-sids 台账与 srt-install 记录；
-    7. 可选：-RepairOwnershipList 给出 Fox 非提权扫描输出的所有权修复清单时，以管理员身份逐项修复
-       （repair-ownership.ps1，见 docs/sandbox.md 7.8）。
+    5. 清理旧版 Fox 留下的 SRT 安装（srt-sandbox 账户、sandbox-runtime-users 组、WFP 出站过滤规则、
+       HKLM\SOFTWARE\sandbox-runtime、%ProgramData%\sandbox-runtime）：只有旧版安装回执
+       （sandbox-runtime\<任一版本>\.fox-installer-result.json）证明当前这份 SRT 安装是 Fox 装的
+       （srt.alreadyInstalled 为 false，且 SandboxUserSid / CreatedAt 与注册表一致）时，才用旧运行时
+       自带的 srt 执行 windows-uninstall；否则保留并在结果 legacySrt 中写明原因；
+       清理失败只记入 legacySrt 与日志，不中止运行时安装；
+    6. 删除运行时目录中已不使用的 srt\ 与 acp-bridge\（Fox 不再使用 SRT 沙箱；旧版运行时包仍带这两个目录）；
+    7. 把结果写成 JSON（-ResultPath）。
 
   解压（第五轮修复）：先按包内条目名做路径长度检查（目标目录 + 相对路径 < -MaxPathLength，超出即失败并
   列出文件，不解压）；优先 %SystemRoot%\System32\tar.exe -xf（bsdtar，支持超过 260 字符的路径），失败再退回
@@ -39,7 +43,7 @@
   不读 $env:LOCALAPPDATA / $env:USERPROFILE。
 
 .PARAMETER PackagePath
-  运行时包 zip（顶层含 node\、srt\、backends\、dsh-patches\ 等，见 docs/sandbox.md 7.5）。
+  运行时包 zip（顶层含 node\、backends\、dsh-patches\ 等，见 docs/sandbox.md 7.5）。
 .PARAMETER ExpectedSha256
   该 zip 的 SHA256（十六进制，大小写不敏感），由 Fox 安装包内置。
 .PARAMETER Version
@@ -48,11 +52,6 @@
   结果 JSON 的写入位置（通常是调用用户的 %LOCALAPPDATA%\Fox\state\enable-sandbox-result.json）。
 .PARAMETER LogPath
   日志文件；默认 %ProgramData%\Fox\logs\enable-sandbox-<时间>.log。
-.PARAMETER ProxyPortRange
-  传给 srt windows-install 的端口段，默认 60080-60089（必须与 Fox 写入 srt 设置的一致）。
-.PARAMETER RepairOwnershipList
-  可选：Fox 非提权所有权扫描输出的修复清单 JSON（fox_agent_backend::winowner::ownership_repair_list）。
-  只处理清单内条目，且读回确认当前所有者是清单记录的 srt SID 后，才把所有者改为清单给定的用户 SID。
 .PARAMETER MaxPathLength
   解压后任一文件完整路径允许的最大长度（不含），默认 260（MAX_PATH）。构建脚本用更严的 240 预算。
 #>
@@ -63,8 +62,6 @@ param(
     [Parameter(Mandatory = $true)] [string] $Version,
     [Parameter(Mandatory = $true)] [string] $ResultPath,
     [string] $LogPath,
-    [string] $ProxyPortRange = '60080-60089',
-    [string] $RepairOwnershipList,
     [int] $MaxPathLength = 260
 )
 
@@ -76,8 +73,11 @@ $SidSystem = 'S-1-5-18'
 $SidUsers = 'S-1-5-32-545'
 $SidCreatorOwner = 'S-1-3-0'
 $SrtRegistryKey = 'HKLM:\SOFTWARE\sandbox-runtime'
-$SrtCliRelative = 'srt\node_modules\@anthropic-ai\sandbox-runtime\dist\cli.js'
-$SrtPackageJsonRelative = 'srt\node_modules\@anthropic-ai\sandbox-runtime\package.json'
+# Legacy only: where pre-B2 runtime packages kept srt (used to uninstall a Fox-installed SRT).
+$LegacySrtCliRelative = 'srt\node_modules\@anthropic-ai\sandbox-runtime\dist\cli.js'
+$InstallerReceiptName = '.fox-installer-result.json'
+# Directories pre-B2 runtime packages shipped and Fox no longer uses.
+$RetiredRuntimeDirs = @('srt', 'acp-bridge')
 
 function Get-ProgramFilesDir {
     # 64-bit Program Files even when started from a 32-bit host.
@@ -331,8 +331,82 @@ function Get-SrtRegistry {
     }
 }
 
+function Find-FoxSrtReceipt([string] $RuntimeParent, [hashtable] $Registry) {
+    # A pre-B2 installer receipt proving Fox (not another program) created this SRT installation.
+    foreach ($dir in @(Get-ChildItem -LiteralPath $RuntimeParent -Directory -ErrorAction SilentlyContinue)) {
+        $receipt = Join-Path $dir.FullName $InstallerReceiptName
+        if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) { continue }
+        try { $r = Get-Content -LiteralPath $receipt -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Write-FoxLog "unreadable receipt ${receipt}: $($_.Exception.Message)"; continue }
+        if (-not ($r.PSObject.Properties.Name -contains 'srt') -or -not $r.srt) { continue }
+        if ([bool] $r.srt.alreadyInstalled) { continue }
+        if ([string] $r.srt.sandboxUserSid -ne $Registry.sandboxUserSid) { continue }
+        if ("$($r.srt.createdAt)" -ne "$($Registry.createdAt)") { continue }
+        return $receipt
+    }
+    return $null
+}
+
+function Find-LegacySrtCli([string] $RuntimeParent) {
+    # The srt CLI and node of any installed runtime version that still has them.
+    foreach ($dir in @(Get-ChildItem -LiteralPath $RuntimeParent -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
+        $cli = Join-Path $dir.FullName $LegacySrtCliRelative
+        $node = Join-Path $dir.FullName 'node\node.exe'
+        if ((Test-Path -LiteralPath $cli -PathType Leaf) -and (Test-Path -LiteralPath $node -PathType Leaf)) {
+            return @{ cli = $cli; node = $node }
+        }
+    }
+    return $null
+}
+
+function Remove-LegacyFoxSrt([string] $RuntimeParent) {
+    # Removes the SRT installation an earlier Fox made (account, group, WFP filters, HKLM key,
+    # %ProgramData%\sandbox-runtime). Never touches an SRT installation Fox cannot prove it made.
+    $legacy = @{ found = $false; decision = 'nothing_to_do'; reason = $null; receipt = $null; uninstalled = $false; removedDirs = @(); error = $null }
+    $registry = Get-SrtRegistry
+    if (-not $registry) { Write-FoxLog 'no SRT installation (HKLM\SOFTWARE\sandbox-runtime absent)'; return $legacy }
+    $legacy.found = $true
+    $receipt = Find-FoxSrtReceipt $RuntimeParent $registry
+    if (-not $receipt) {
+        $legacy.decision = 'keep'
+        $legacy.reason = 'no Fox installer receipt matches this SRT installation (SandboxUserSid / CreatedAt); another program may own it'
+        Write-FoxLog ("keeping SRT: " + $legacy.reason)
+        return $legacy
+    }
+    $legacy.receipt = $receipt
+    $srt = Find-LegacySrtCli $RuntimeParent
+    if (-not $srt) {
+        $legacy.decision = 'failed'
+        $legacy.error = 'Fox installed SRT earlier, but no installed runtime still has the srt CLI to run windows-uninstall'
+        Write-FoxLog $legacy.error
+        return $legacy
+    }
+    $legacy.decision = 'uninstall'
+    $r = Invoke-Native $srt.node @($srt.cli, 'windows-uninstall')
+    if ($r.Code -ne 0) {
+        $legacy.decision = 'failed'
+        $legacy.error = "srt windows-uninstall failed (exit $($r.Code)): $($r.Output.Trim())"
+        Write-FoxLog $legacy.error
+        return $legacy
+    }
+    if (Get-SrtRegistry) {
+        $legacy.decision = 'failed'
+        $legacy.error = 'srt windows-uninstall exited 0 but HKLM\SOFTWARE\sandbox-runtime is still present'
+        Write-FoxLog $legacy.error
+        return $legacy
+    }
+    $legacy.uninstalled = $true
+    # srt leaves its machine CA material behind (README "Uninstall").
+    $caDir = Join-Path $ProgramDataDir 'sandbox-runtime'
+    if (Test-Path -LiteralPath $caDir) {
+        Remove-FoxTree $caDir 'SRT machine state'
+        if (-not (Test-Path -LiteralPath $caDir)) { $legacy.removedDirs += $caDir }
+    }
+    Write-FoxLog 'removed the SRT installation made by an earlier Fox'
+    return $legacy
+}
+
 $script:FoxTestFaults = Get-FoxTestFault
-$result = @{ ok = $false; version = $Version; error = $null; primaryError = $null; cleanupErrors = @(); runtimeRoot = $null; privateBase = $null; srt = $null; extractMethod = $null; packagePaths = $null; ownershipRepair = $null; stagingDir = $null }
+$result = @{ ok = $false; version = $Version; error = $null; primaryError = $null; cleanupErrors = @(); runtimeRoot = $null; privateBase = $null; extractMethod = $null; packagePaths = $null; removedRuntimeDirs = @(); legacySrt = $null; stagingDir = $null }
 $staging = $null
 $backup = $null
 $installedNew = $false
@@ -343,10 +417,8 @@ try {
     $step = 'validate'
     if (-not (Test-Elevated)) { throw 'must run elevated (administrator)' }
     if ($Version -notmatch '^[0-9A-Za-z._-]+$') { throw "invalid version '$Version'" }
-    if ($ProxyPortRange -notmatch '^\d{1,5}-\d{1,5}$') { throw "invalid proxy port range '$ProxyPortRange'" }
     if ($ExpectedSha256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'ExpectedSha256 must be 64 hex characters' }
     if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw "package not found: $PackagePath" }
-    if ($RepairOwnershipList -and -not (Test-Path -LiteralPath $RepairOwnershipList -PathType Leaf)) { throw "repair list not found: $RepairOwnershipList" }
 
     $foxProgramFiles = Join-Path (Get-ProgramFilesDir) 'Fox'
     $runtimeParent = Join-Path $foxProgramFiles 'sandbox-runtime'
@@ -389,7 +461,7 @@ try {
         $step = 'extract'
         $result.extractMethod = Expand-FoxPackage $zipCopy $content
         Write-FoxLog "extracted with $($result.extractMethod)"
-        foreach ($required in @('node\node.exe', $SrtCliRelative, 'acp-bridge\bridge.mjs')) {
+        foreach ($required in @('node\node.exe')) {
             if (-not (Test-Path -LiteralPath (Join-Path $content $required))) { throw "package lacks $required" }
         }
         $markerJson = @{ version = $Version; sha256 = $ExpectedSha256.ToLowerInvariant(); installedAt = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress
@@ -416,51 +488,31 @@ try {
     Initialize-FoxDirectory $foxData { param($p) Set-FoxDataAcl $p }
     Initialize-FoxDirectory $base { param($p) Set-SandboxBaseAcl $p }
 
-    # 5. srt windows-install (idempotent in srt; never --force over someone else's config).
-    $step = 'srt-windows-install'
-    $before = Get-SrtRegistry
-    $alreadyInstalled = [bool] $before
-    $node = Join-Path $target 'node\node.exe'
-    $cli = Join-Path $target $SrtCliRelative
-    $srtPackage = Get-Content -LiteralPath (Join-Path $target $SrtPackageJsonRelative) -Raw | ConvertFrom-Json
-    if ([string] $srtPackage.version -ne '0.0.81') { throw 'Fox requires sandbox-runtime 0.0.81 with its matching Windows helper' }
-    $helper = Join-Path $target 'srt\node_modules\@anthropic-ai\sandbox-runtime\vendor\srt-win\x64\srt-win.exe'
-    $probe = Invoke-Native $helper @('user', 'status')
-    if ($probe.Code -ne 0) { throw 'Cannot inspect the Windows sandbox helper' }
-    $helperStatus = $probe.Output | ConvertFrom-Json
-    if ([int] $helperStatus.setup_version -ne 3) { throw 'Unexpected Windows sandbox setup version' }
-    if ($helperStatus.profile_grant.state -ne 'none') { throw 'Remove the existing srt profile read grant before installing the Fox sandbox' }
-    foreach ($capability in @('profile-deny-expansion', 'profile-session-grant-check', 'kept-grant-holders', 'read-deny-except', 'exec-holder')) {
-        if (-not ($helperStatus.capabilities -contains $capability)) { throw "Windows sandbox helper is missing $capability" }
+    # 5. Legacy SRT made by an earlier Fox (uses that runtime's srt, so before step 6 strips it).
+    #    Its own result: a failure is recorded in legacySrt and the log, not hidden, and does not
+    #    stop the runtime install (Fox itself no longer needs SRT).
+    $step = 'legacy-srt'
+    try {
+        $result.legacySrt = Remove-LegacyFoxSrt $runtimeParent
+    } catch {
+        $result.legacySrt = @{ found = $true; decision = 'failed'; error = $_.Exception.Message }
+        Write-FoxLog "legacy SRT clean-up failed: $($_.Exception.Message)"
     }
-    $r = Invoke-Native $node @($cli, 'windows-install', '--proxy-port-range', $ProxyPortRange, '--skip-profile-grant')
-    if ($r.Code -eq 2) { throw 'srt windows-install was cancelled at its UAC prompt' }
-    if ($r.Code -ne 0) { throw "srt windows-install failed (exit $($r.Code)): $($r.Output.Trim())" }
-    $after = Get-SrtRegistry
-    if (-not $after) { throw 'srt windows-install finished but HKLM\SOFTWARE\sandbox-runtime has no MarkerVersion / SandboxUserSid' }
-    if ($after.markerVersion -ne $helperStatus.setup_version) { throw 'Windows sandbox installation did not reach the required setup version' }
 
-    # 6. Result.
-    $result.srt = @{
-        alreadyInstalled = $alreadyInstalled
-        packageVersion = [string] $srtPackage.version
-        sandboxUserSid = $after.sandboxUserSid
-        markerVersion = $after.markerVersion
-        createdAt = $after.createdAt
-    }
-    $result.ok = $true
-    if ($backup -and (Test-Path -LiteralPath $backup)) { Remove-FoxTree $backup 'previous runtime' }
-
-    # 7. Optional elevated ownership repair (does not change ok: its own result).
-    if ($RepairOwnershipList) {
-        $step = 'repair-ownership'
-        try {
-            $result.ownershipRepair = & (Join-Path $PSScriptRoot 'repair-ownership.ps1') -ListPath $RepairOwnershipList -LogPath $LogPath
-        } catch {
-            $result.ownershipRepair = @{ ok = $false; error = $_.Exception.Message }
-            Write-FoxLog "ownership repair failed: $($_.Exception.Message)"
+    # 6. Directories older runtime packages shipped and Fox no longer uses.
+    $step = 'strip-retired'
+    foreach ($name in $RetiredRuntimeDirs) {
+        $dir = Join-Path $target $name
+        if (Test-Path -LiteralPath $dir) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+            $result.removedRuntimeDirs += $dir
+            Write-FoxLog "removed retired $dir"
         }
     }
+
+    # 7. Result.
+    $result.ok = $true
+    if ($backup -and (Test-Path -LiteralPath $backup)) { Remove-FoxTree $backup 'previous runtime' }
     Write-FoxLog 'enable-sandbox done'
 } catch {
     # The original error first, before any rollback or clean-up can fail and hide it.
