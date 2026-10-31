@@ -976,9 +976,12 @@ mod tests {
         write(&real, ".codex/config.toml", "model = \"o4\"\n");
         write(&real, ".codex/history.jsonl", "x");
         let real_home = RealHome { home: real.clone(), codex_home: None };
-        let codex: Vec<String> = import_candidates(AgentBackend::Codex, &real_home).into_iter().map(|item| item.destination).collect();
+        // The link is made on Unix only.
         #[cfg(unix)]
-        assert_eq!(codex, [CODEX_CONFIG], "a linked auth.json is not offered");
+        {
+            let codex: Vec<String> = import_candidates(AgentBackend::Codex, &real_home).into_iter().map(|item| item.destination).collect();
+            assert_eq!(codex, [CODEX_CONFIG], "a linked auth.json is not offered");
+        }
         // CODEX_HOME override.
         write(&root, "codex-home/auth.json", r#"{"OPENAI_API_KEY":"sk-openai-real-0003"}"#);
         let custom = RealHome { home: real.clone(), codex_home: Some(root.join("codex-home")) };

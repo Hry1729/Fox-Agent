@@ -115,6 +115,8 @@ async fn revocation_stop_cancels_settles_and_kills_the_backend() {
     let session = connection.new_session(std::env::temp_dir()).await.expect("session");
     connection.prompt(&session, "hello").unwrap();
     until(&mut connection, |event| matches!(event, BackendEvent::PermissionRequested { .. })).await;
+    // Checked after the stop on Unix (`kill -0`).
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let pid = connection.process_id().expect("pid");
     let mut pending = PendingRegistry::default();
     pending.open("prompt-1", 0);

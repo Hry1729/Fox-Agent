@@ -401,10 +401,9 @@ pub fn acp_model_patch(provider: &str, model: &str) -> String {
 
 /// Directory, inside Fox's managed runtime directory, holding every `--patch`
 /// variant (`runtime-assets/dsh-patches` in this crate, copied there by the
-/// one-time sandbox setup). The patch is a read-only asset the sandbox must
-/// read, so on Windows it has to live in the managed runtime (Users
-/// read+execute, administrator-owned), never under the user profile
-/// (`sandbox_path_not_owned`).
+/// runtime installer). The patch is a read-only asset, so on Windows it lives
+/// in the managed runtime (Users read+execute, administrator-owned), never
+/// under the user profile.
 pub const PATCH_DIR: &str = "dsh-patches";
 
 /// File name of the variant for `policy`: `read-only.yml`,
@@ -452,7 +451,7 @@ pub fn verify_installed_preset_patch(path: &std::path::Path, preset: DshPreset, 
     let expected = preset_patch(preset, network).patch_yaml;
     match std::fs::read_to_string(path) {
         Ok(found) if found == expected => Ok(()),
-        Ok(_) => Err(PortError::Refused(format!("{} differs from the patch Fox generates; re-run the sandbox setup", path.display()))),
+        Ok(_) => Err(PortError::Refused(format!("{} differs from the patch Fox generates; reinstall or repair the Fox external runtime", path.display()))),
         Err(error) => Err(PortError::Refused(format!("dsh patch {} is not installed: {error}", path.display()))),
     }
 }

@@ -1276,7 +1276,6 @@ name = "fox-agent-backend"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
- "dunce",
  "futures",
  "libc",
  "rusqlite",
