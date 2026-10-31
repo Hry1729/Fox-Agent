@@ -34,7 +34,13 @@ pub(super) fn sweep_writer_route(connection: &Connection, run_id: &str) -> rusql
 /// interrupted with a stable code and logged; it is not
 /// skipped past and never continued. Historical Runs that already reached a
 /// terminal state keep their own terminal facts (a graph child's terminal fact
-/// is immutable once reconciled); every reader still refuses them.
+/// is immutable once reconciled) and none of their messages, tool calls or
+/// approvals are rewritten; every reader still refuses them.
+///
+/// A Run this sweep actually moves to `interrupted` settles its own assistant
+/// messages, open tool calls and pending approvals in the same transaction.
+/// `mark_run_interrupted` cannot do that: its legacy-writer check refuses the
+/// unverifiable binding. Bindings are left untouched and no Kernel event is emitted.
 pub(super) fn interrupt_unverifiable_runs(transaction: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<String>> {
     let mut query = transaction.prepare(
         "SELECT b.run_id,r.status FROM run_control_bindings b JOIN runs r ON r.id=b.run_id ORDER BY b.run_id")?;
@@ -49,6 +55,20 @@ pub(super) fn interrupt_unverifiable_runs(transaction: &Transaction<'_>, now: i6
             "UPDATE runs SET status='interrupted', finished_at=?2, error_code=?3, error_message=?4
              WHERE id=?1 AND status IN ('queued','running','cancelling')",
             params![run_id, now, code, message])? > 0;
+        if interrupted {
+            // messages.status 无 CHECK。生产写入为 streaming/completed/interrupted；
+            // 历史失败行还可能是 failed/error/pending。只回写本 Run 的 assistant 行。
+            transaction.execute(
+                "UPDATE messages SET status='interrupted', updated_at=?2
+                 WHERE run_id=?1 AND role='assistant' AND status IN ('streaming','pending','failed','error')",
+                params![run_id, now])?;
+            transaction.execute(
+                "UPDATE tool_calls
+                 SET status='interrupted', error_message=?2, completed_at=?3, updated_at=?3
+                 WHERE run_id=?1 AND status IN ('pending','running')",
+                params![run_id, message, now])?;
+            super::end_pending_approvals_for_interrupted_run(transaction, &run_id, Some(code), now)?;
+        }
         eprintln!("fox.run_control binding_refused run={run_id} status={status} code={code} interrupted={interrupted} error={error}");
         refused.push(run_id);
     }
@@ -176,9 +196,9 @@ pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64, re
     drop(query);
     transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS fox_restart_protected_runs(run_id TEXT PRIMARY KEY); DELETE FROM fox_restart_protected_runs;")?;
     for run_id in runs {
-        // An unverifiable binding is not protected: its Run was interrupted by
-        // `interrupt_unverifiable_runs`, and its open messages, tool calls and
-        // approvals settle with the generic restart repair.
+        // An unverifiable binding is not protected. `interrupt_unverifiable_runs`
+        // already interrupted that Run and settled its assistant messages, open
+        // tool calls and pending approvals in the same transaction.
         let Some(route) = sweep_writer_route(transaction, &run_id)? else { continue };
         if route == WriterRoute::Kernel {
             super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;

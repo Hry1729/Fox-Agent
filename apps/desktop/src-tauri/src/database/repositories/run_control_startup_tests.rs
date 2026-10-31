@@ -83,3 +83,102 @@ fn dbhash_a_bad_binding_interrupts_only_its_run_and_never_blocks_startup() {
     drop(db);
     let _ = std::fs::remove_file(&path);
 }
+
+/// 绑定损坏且本次确实被改成 interrupted 的 Run，要在同一次启动事务里回写自己的
+/// assistant 消息、未结束工具调用和待处理审批。已经是终态的 Run 一行都不改。
+/// 通用重启修复只会改 streaming 消息、且不写 tool error_message、审批原因是
+/// application_restarted，所以这里用 failed 消息、工具错误文案和 run_interrupted 区分。
+#[test]
+fn binding_integrity_failure_settles_open_rows_only_when_the_run_is_interrupted() {
+    let path = std::env::temp_dir().join(format!("fox-dbhash-rows-{}.db", uuid::Uuid::new_v4()));
+    let (active, settled) = {
+        let db = Database::open(path.clone()).unwrap();
+        let active = running_run(&db);
+        let settled = running_run(&db);
+        db.with_connection(|connection| {
+            let active_conversation: String = connection.query_row(
+                "SELECT conversation_id FROM runs WHERE id=?1", [&active], |row| row.get(0))?;
+            let settled_conversation: String = connection.query_row(
+                "SELECT conversation_id FROM runs WHERE id=?1", [&settled], |row| row.get(0))?;
+            for (id, role, status, ordinal) in [
+                ("binding-active-streaming", "assistant", "streaming", 2),
+                ("binding-active-failed", "assistant", "failed", 3),
+                ("binding-active-error", "assistant", "error", 4),
+                ("binding-active-pending", "assistant", "pending", 5),
+                ("binding-active-user", "user", "failed", 6),
+            ] {
+                connection.execute(
+                    "INSERT INTO messages(id,conversation_id,run_id,role,kind,content,status,ordinal,created_at,updated_at)
+                     VALUES(?1,?2,?3,?4,'text','row',?5,?6,1,1)",
+                    params![id, active_conversation, active, role, status, ordinal])?;
+            }
+            connection.execute(
+                "INSERT INTO tool_calls(id,runtime_tool_call_id,run_id,conversation_id,tool_name,input_json,status,
+                    execution_location,requires_approval,started_at,updated_at)
+                 VALUES('binding-active-tool','binding-active-call',?1,?2,'read','{}','pending','host',1,1,1)",
+                params![active, active_conversation])?;
+            connection.execute(
+                "INSERT INTO approvals(id,tool_call_id,status,requested_action,request_json,requested_at)
+                 VALUES('binding-active-approval','binding-active-tool','pending','read','{}',1)",
+                [])?;
+            connection.execute(
+                "UPDATE runs SET status='completed', finished_at=1, error_code=NULL, error_message=NULL WHERE id=?1",
+                [&settled])?;
+            connection.execute(
+                "INSERT INTO messages(id,conversation_id,run_id,role,kind,content,status,ordinal,created_at,updated_at)
+                 VALUES('binding-settled-assistant',?1,?2,'assistant','text','kept','failed',2,1,1)",
+                params![settled_conversation, settled])?;
+            connection.execute(
+                "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id IN (?1,?2)",
+                params![active, settled])?;
+            Ok(())
+        }).unwrap();
+        (active, settled)
+    };
+
+    let db = startup(&path).expect("one bad binding must not block startup");
+    assert_eq!(fact(&db, &active), ("interrupted".into(), Some("run_control.binding_integrity_failed".into()),
+        Some("运行控制绑定校验失败，此 Run 已中断，不能继续".into())));
+    let messages: Vec<(String, String, i64)> = db.with_connection(|connection| {
+        let mut query = connection.prepare(
+            "SELECT id,status,updated_at FROM messages
+             WHERE id IN ('binding-active-streaming','binding-active-failed','binding-active-error','binding-active-pending','binding-active-user')
+             ORDER BY ordinal")?;
+        let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(query);
+        Ok(rows)
+    }).unwrap();
+    assert_eq!(messages.iter().map(|(id, status, _)| (id.as_str(), status.as_str())).collect::<Vec<_>>(), vec![
+        ("binding-active-streaming", "interrupted"),
+        ("binding-active-failed", "interrupted"),
+        ("binding-active-error", "interrupted"),
+        ("binding-active-pending", "interrupted"),
+        ("binding-active-user", "failed"),
+    ]);
+    assert!(messages.iter().take(4).all(|(_, _, updated)| *updated > 1));
+    assert_eq!(messages[4].2, 1);
+    let tool: (String, Option<String>, Option<i64>) = db.with_connection(|connection| connection.query_row(
+        "SELECT status,error_message,completed_at FROM tool_calls WHERE id='binding-active-tool'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).unwrap();
+    assert_eq!(tool.0, "interrupted");
+    assert_eq!(tool.1.as_deref(), Some("运行控制绑定校验失败，此 Run 已中断，不能继续"));
+    assert!(tool.2.is_some_and(|at| at > 1));
+    let approval: (String, String, Option<i64>) = db.with_connection(|connection| connection.query_row(
+        "SELECT status,decision_json,resolved_at FROM approvals WHERE id='binding-active-approval'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).unwrap();
+    assert_eq!(approval.0, "expired");
+    assert_eq!(approval.1, r#"{"reason":"run_interrupted"}"#);
+    assert!(approval.2.is_some_and(|at| at > 1));
+
+    let settled_fact: (String, Option<String>, Option<String>, i64) = db.with_connection(|connection| connection.query_row(
+        "SELECT status,error_code,error_message,finished_at FROM runs WHERE id=?1", [&settled],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))).unwrap();
+    assert_eq!(settled_fact, ("completed".into(), None, None, 1));
+    let settled_message: (String, i64) = db.with_connection(|connection| connection.query_row(
+        "SELECT status,updated_at FROM messages WHERE id='binding-settled-assistant'",
+        [], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+    assert_eq!(settled_message, ("failed".into(), 1));
+    drop(db);
+    let _ = std::fs::remove_file(&path);
+}
