@@ -30,11 +30,11 @@
 | 模式 | 何时 | 隔离 | 不变的 Host 底线 |
 |---|---|---|---|
 | `sandboxed`（默认） | 除明确授予 full_access 外的一切情况；旧会话（未记录模式）一律按此处理；未知取值也按此处理 | 整个外部后端进程（codex-acp / pi-acp / dsh）在 srt 里运行，一个会话一个沙箱。Linux/macOS：读写限于授权目录 + 本项目本后端的私有 HOME + 本会话临时目录，另只读放行后端/Node/srt 安装目录与第 3 节列出的最小系统路径；Windows：沙箱账户只能读写授权目录、私有 HOME、会话临时目录、Fox 运行时，以及 DACL 对所有本地账户开放的位置（见第 5、7 节）。出站网络只放行该后端模型 API 域名白名单 | 环境变量白名单 / 凭据不下发；取消与进程树清理；记录；原生审批如实转发 |
-| `full_access` | 用户按会话或项目明确授予（`HostPolicy.full_access_grants` 中的 `conversation:<id>` / `project:<root>`），且企业策略未禁止（`full_access_forbidden`）、`locked_keys.permission_mode` 未锁成 `sandboxed` | 不套沙箱，不承诺目录边界；能力声明中沙箱两维固定为 `absent`，即使后端原生有沙箱也不替它宣称 | 同上 |
+| `full_access` | 用户按会话或项目明确授予（`HostPolicy.full_access_grants` 中的 `conversation:<id>` / `project:<root>`），且企业策略未禁止（`full_access_forbidden`）、`locked_keys.permission_mode` 未锁成 `standard`（`sandboxed` 也被识别） | 不套沙箱，不承诺目录边界；能力声明中沙箱两维固定为 `absent`，即使后端原生有沙箱也不替它宣称 | 同上 |
 
 判定入口：`effective_permission_mode(policy, snapshot, conversation_id)`。项目配置、用户设置都无法单独产生 full_access：只有“会话快照请求 full_access”＋“Host 持有的有效授予”同时成立才行。
 
-收紧立即生效（沿用 6.5）：`recheck_permission_mode(...)` 与 `config::recheck_before_continue` 一起在每次继续 / 恢复前调用。授予被撤销而进程仍在沙箱外运行 → `RestartSandboxed`，Host 按第 1.1 节的“撤权停止”契约处理。放宽（运行中的沙箱会话新获授予）不静默带入，需 Host 有意重启。
+收紧立即生效（沿用 6.5）：`recheck_permission_mode(...)` 与 `config::recheck_before_continue` 一起在每次继续 / 恢复前调用。授予被撤销而进程仍在沙箱外运行 → `RestartWithoutFullAccess`，Host 按第 1.1 节的“撤权停止”契约处理。放宽（运行中的沙箱会话新获授予）不静默带入，需 Host 有意重启。
 
 ### 1.1 撤权停止：Host 接线契约
 
@@ -42,13 +42,13 @@ crate 提供语义，Host 负责在对的时机调用（Desktop Host 接线是�
 
 | 步骤 | 入口 | 语义 |
 |---|---|---|
-| 0 触发 | `recheck_permission_mode(policy, snapshot, conversation_id, running_mode)` 返回 `RestartSandboxed(reason)` | Host 在撤销授予（UI 撤权、企业策略切换、`locked_keys.permission_mode=sandboxed`）**当下**对该会话调用一次，并在每次继续 / 恢复前再调用；不得等到下一轮 turn 才处理正在跑的进程 |
+| 0 触发 | `recheck_permission_mode(policy, snapshot, conversation_id, running_mode)` 返回 `RestartWithoutFullAccess(reason)` | Host 在撤销授予（UI 撤权、企业策略切换、`locked_keys.permission_mode=standard`（`sandboxed` 也被识别））**当下**对该会话调用一次，并在每次继续 / 恢复前再调用；不得等到下一轮 turn 才处理正在跑的进程 |
 | 1 进入 Stopping | 活连接：`AcpConnection::stop_for_revocation(self, session_id, &mut pending, &mut arbiter, reason).await` 的第一步即 `begin_stopping()`；其他形态：`port::stop_for_revocation(&mut dyn RevocationTarget, ..)` 先调 `RevocationTarget::begin_stopping()` | 连接进入“正在停止”：`prompt` / `new_session` 返回 `STOPPING_REFUSAL` 错误；当时挂起的原生审批（所有会话）全部答 `cancelled`；**之后才到达的** `session/request_permission` 在到达时即由 Host 答 `cancelled`，不进入待审批表、不发 `PermissionRequested`，只发观测事件 `BackendEvent::PermissionAutoCancelled { session_id, reason, request }`（UI 可显示“已自动取消”，不得提供允许按钮）。“停止标志 + 待审批表”在同一把锁下，检查与登记、置位与清空都是原子的，不存在漏进去的窗口（见 1.3） |
 | 2 取消与结算 | 同上 | ① `session/cancel`；② 本 run 的 `PendingRegistry` 全部结算——未发出 → `cancelled`，已发出 → `outcome_unknown`（复用 6.4 规则 1，保留关联 ID，晚到响应进审计不翻转） |
 | 3 停进程并确认 | 同上（内部 `terminate()`） | Unix：先快照后代（pid + 启动时间）→ 进程组 SIGTERM → 3 s 宽限 → 再快照 → 进程组 SIGKILL → 回收子进程 → 按 pid SIGKILL 已离开进程组的被跟踪后代 → 轮询确认（≤ 3 s）。Windows：关闭命令通道 → 3 s 宽限 → `TerminateJobObject`（无 Job 才兜底 `taskkill /T /F`）→ 轮询 `ActiveProcesses == 0`。结果是 `ProcessTreeStop { force_killed, confirmation: StopConfirmation, confirmation_scope_note, process_group, tracked }`；确认标准见 1.2 |
-| 4 状态 | 返回 `RevocationStop { state, process_tree, settled, cancelled_permissions, terminal, replay_last_operation: false }` | `TerminalArbiter` 提交 `cancelled`（已先提交 `completed` 的保持 `completed`）；被强杀、有 `outcome_unknown` **或停止未确认**时标 `possible_unverified_side_effects`。`state`：确认 → `NeedsSandboxedRebuild`；未确认 → `StoppedUnconfirmed { reasons, remedy }`（阻塞，`remedy` = `STOP_UNCONFIRMED_REMEDY`，提示用户结束残留进程或重启 Fox）。`needs_review()` 列出结果未知的操作 |
-| 5 重建 | `port::rebuild_after_revocation(&mut stop, \|mode\| { preflight + prepare_launch(mode, ..) })` → `Result<RebuiltSession, RebuildError>` | **停止未确认时直接返回 `RebuildError::StopUnconfirmed { reasons, remedy }`，不调用闭包，状态保持 `StoppedUnconfirmed`，任何模式都不启动。** 已确认时：闭包只会收到 `Sandboxed`；返回的启动若不是 sandboxed（或没有 srt 会话）一律拒绝。成功 → `RebuiltSession { launch, replay_last_operation: false, review }`，Host 用 `spawn_prepared` 启动并 `bump_generation()`；**不重发上一条提示、不重跑 `review` 中的操作**，交给用户核对。沙箱失败 → `RebuildError::Sandbox { error }`，`stop.state = StoppedSandboxUnavailable { error }`，会话保持停止，UI 展示 `error.remedy`，绝不回退 full_access |
-| 6 复查（可选） | Unix：`proctree::confirm_tree_gone(stop.process_tree.process_group?, &stop.process_tree.tracked, timeout)`；任意来源的结论：`stop.record_confirmation(confirmation)` | 用户按提示处理后 Host 可复查；`Confirmed` 把状态改回 `NeedsSandboxedRebuild`，否则刷新 `StoppedUnconfirmed` 的原因。Windows 上 Job 句柄随连接关闭（kill-on-close 已生效），无法事后复查：引导用户重启 Fox 后由 Host 记录确认 |
+| 4 状态 | 返回 `RevocationStop { state, process_tree, settled, cancelled_permissions, terminal, replay_last_operation: false }` | `TerminalArbiter` 提交 `cancelled`（已先提交 `completed` 的保持 `completed`）；被强杀、有 `outcome_unknown` **或停止未确认**时标 `possible_unverified_side_effects`。`state`：确认 → `NeedsRebuild`；未确认 → `StoppedUnconfirmed { reasons, remedy }`（阻塞，`remedy` = `STOP_UNCONFIRMED_REMEDY`，提示用户结束残留进程或重启 Fox）。`needs_review()` 列出结果未知的操作 |
+| 5 重建 | `port::rebuild_after_revocation(&mut stop, \|mode\| { preflight + prepare_launch(mode, ..) })` → `Result<RebuiltSession, RebuildError>` | **停止未确认时直接返回 `RebuildError::StopUnconfirmed { reasons, remedy }`，不调用闭包，状态保持 `StoppedUnconfirmed`，任何模式都不启动。** 已确认时：闭包只会收到 `Standard`；返回的启动若不是 standard（或没有 srt 会话）一律拒绝。成功 → `RebuiltSession { launch, replay_last_operation: false, review }`，Host 用 `spawn_prepared` 启动并 `bump_generation()`；**不重发上一条提示、不重跑 `review` 中的操作**，交给用户核对。沙箱失败 → `RebuildError::Sandbox { error }`，`stop.state = StoppedSandboxUnavailable { error }`，会话保持停止，UI 展示 `error.remedy`，绝不回退 full_access |
+| 6 复查（可选） | Unix：`proctree::confirm_tree_gone(stop.process_tree.process_group?, &stop.process_tree.tracked, timeout)`；任意来源的结论：`stop.record_confirmation(confirmation)` | 用户按提示处理后 Host 可复查；`Confirmed` 把状态改回 `NeedsRebuild`，否则刷新 `StoppedUnconfirmed` 的原因。Windows 上 Job 句柄随连接关闭（kill-on-close 已生效），无法事后复查：引导用户重启 Fox 后由 Host 记录确认 |
 
 Host 侧还需要：撤权与停止写审计；停止期间到达的原生事件按旧 generation 进审计；`PermissionAutoCancelled` 只做展示；用户在 `review` 核对完之前，UI 不提供“一键重试上一步”。`AcpConnection::close()` / `close_with_report()` 同样先进入 Stopping，`TerminateReport` 带同样的 `confirmation`。
 
@@ -825,7 +825,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
 
 ### 13.10 a5e2c9d 复测后续批：最小 Windows 复测清单（2026-10-21）
 
-> **13.11 更新**：下面写的 DeepSeek 回环端口放行已撤回。dsh 对回环地址直连、不经 srt 代理，放行端口没有作用。现在的做法是：沙箱模式下 DeepSeek 的 base URL 若指向回环地址，启动前直接拒绝（`agent_backend_loopback_requires_full_access`）。第 4 项冒烟以 13.11 为准。
+> **13.11 更新**：下面写的 DeepSeek 回环端口放行已撤回。dsh 对回环地址直连、不经 srt 代理，放行端口没有作用。现在的做法是：沙箱模式下 DeepSeek 的 base URL 若指向回环地址，启动前直接拒绝（`agent_backend_loopback_requires_full_access`）（B3 已删除）。第 4 项冒烟以 13.11 为准。
 
 在本批最终 HEAD 上跑。**不需要跑全量** `cargo test -p fox-desktop`：a5e2c9d 的全量已复测（64 项，与基线持平，Graph 37 项已恢复），本批只改下列测试与 DeepSeek 回环端口推导。
 
@@ -890,7 +890,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
   - 前端：`RunFailure` 新增 `stderrTail` / `stderrTailSource`，只取自终态事件。即使持久化的 run 行覆盖了 code 和 message，尾部也保留。“查看错误详情”展开后显示 `code: message`，再加“后端 stderr 尾部（已脱敏，最多 4 KiB；…）”。
 - **DeepSeek 回环网关只允许完全访问**（`src/external_launch.rs`、`src/loopback.rs`、`src/backends/deepseek.rs`、`src/capability_view.rs`）
   - 拒绝条件：沙箱模式下启动 DeepSeek 会话前，读私有 HOME 里 dsh 的 `cordis.patch.yml`（两份，同 13.10）。只要有一个 `baseURL` 指向回环地址，就拒绝启动，不起任何进程。这里的回环地址包括端口无法确定的写法，例如 `http://localhost:${PORT}`。
-  - 错误码 `agent_backend_loopback_requires_full_access`。提示为“本机网关在沙箱模式下不可达：…dsh 对回环地址总是直连、不经沙箱代理（请切换到“完全访问”，或改用官方 api.deepseek.com）”。
+  - 错误码 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生）。提示为“本机网关在沙箱模式下不可达：…dsh 对回环地址总是直连、不经沙箱代理（请切换到“完全访问”，或改用官方 api.deepseek.com）”。
   - 不受影响的情况：完全访问模式；非回环的 base URL；其他后端。
   - 能力视图：DeepSeek 在沙箱模式下，沙箱详情会写出这个限制。
   - f2bf567 新增的“只放行这一个回环端口”逻辑不再生效，放行列表里不再有 `127.0.0.1:<端口>`：
@@ -910,7 +910,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - `cargo test -p fox-agent-backend --features acp --lib -- loopback`：恰好 9 项，全部通过。包括 `external_launch::tests::host_launcher_refuses_a_sandboxed_deepseek_loopback_gateway_before_starting` 和 `external_launch::tests::deepseek_loopback_gateway_is_refused_in_the_sandbox_and_never_allowed`。
    - 前端：`bun test tests/run-failure.test.ts`（在 `apps/desktop` 下）：11 项全部通过，其中新增 3 项在 `run failure stderr diagnostic` 组。
 2. DeepSeek 经 Magpie，沙箱模式（`FOX_EXTERNAL_BACKENDS=deepseek`；私有 HOME 的 `.dsh/cordis.patch.yml` 里 `baseURL` 指向 Magpie 的 `127.0.0.1:<端口>`）：
-   - 发一句话，应**立即**（几秒内，不等模型）失败，错误码为 `agent_backend_loopback_requires_full_access`，提示含“本机网关在沙箱模式下不可达”“请切换到“完全访问”，或改用官方 api.deepseek.com”。
+   - 发一句话，应**立即**（几秒内，不等模型）失败，错误码为 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生），提示含“本机网关在沙箱模式下不可达”“请切换到“完全访问”，或改用官方 api.deepseek.com”。
    - 不应出现 dsh 进程，也不应出现 `Connection error`。
    - 能力 chip 的沙箱详情写有“限制：DeepSeek 的 base URL 若指向本机回环网关…”。
 3. 同一会话切到“完全访问”，再跑一轮真实对话：能拿到模型回复，`run.completed`。
@@ -1026,7 +1026,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - 长行自动换行显示，详情块超过约 20rem 高时出现纵向滚动条，不出现横向滚动。
    - 在详情里搜 API key 和 Bearer 值的原文，搜不到。
    - **注（979313c 收尾批补）**：真实 dsh 遇到连接错误时只经 JSON-RPC 报错（`session/prompt` 返回 `-32603`，`message` 为 “Internal error: turn failed: DeepSeek Messages transport failed”，没有 `data`），**不写 stderr**。所以这一项在真实 dsh 上“查看错误详情”没有尾部、甚至没有详情块是正常的，不算失败。尾部的渲染（括号、`<redacted>`、长行换行与滚动、搜不到密钥）用 mock fixture 的副本（`tests/fixtures/mock-acp-session-agent.mjs` 的 `stderr-fail` / `stderr-crash` 场景）验证，见第 1 项的 `external_runtime` 用例与 `bun test tests/run-failure.test.ts`。详见 13.13。
-4. 沙箱模式（去掉 `FOX_EXTERNAL_FULL_ACCESS`）下同一配置：应立即以 `agent_backend_loopback_requires_full_access` 失败，提示含“需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com”，不再出现“请切换到“完全访问””；能力 chip 的限制说明也是新文案。
+4. 沙箱模式（去掉 `FOX_EXTERNAL_FULL_ACCESS`）下同一配置：应立即以 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生） 失败，提示含“需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com”，不再出现“请切换到“完全访问””；能力 chip 的限制说明也是新文案。
 5. 不需要跑全量，也不需要重跑 13.9 – 13.11 的其余条目。
 
 Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用例 `real_external_runtime_dsh_full_access_uses_the_private_home`（`FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_AGENT_RUNTIME_ROOT=<含 backends/dsh 的运行时> -- --include-ignored`），真实 dsh 0.2.1-rc.2、完全访问、dsh 配置只写在私有 HOME 并指向本机假网关：网关收到请求，dsh 的 `sessions`、`profiles` 写在私有 HOME 的 `.dsh` 下，真实 HOME 的 `.dsh`、`.config`、`.cache`、`.local/*` 没有新增文件。假网关不讲 Anthropic 协议，所以该轮以 `agent_backend_prompt_failed`（SSE event type mismatch）结束，这是预期的。
@@ -1056,7 +1056,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 
 在本批最终 HEAD 上跑。本批内容：
 
-- **① 登录引导**（`src/onboarding.rs`，`external_launch` 的 `credential_probe` / `import_credentials` / `private_home_path`）：探测私有 HOME 的登录状态，分三类：`ready`、`missing_credentials`、`loopback_requires_full_access`。只看文件名和 key 名，不读值。dsh 看 `.dsh/.env` 与 `cordis.patch.yml`，Codex 看 `.codex/auth.json` 或 `OPENAI_API_KEY`，pi 看 `.pi/agent/{auth,models,settings}.json`。
+- **① 登录引导**（`src/onboarding.rs`，`external_launch` 的 `credential_probe` / `import_credentials` / `private_home_path`）：探测私有 HOME 的登录状态，分三类：`ready`、`missing_credentials`、`loopback_requires_full_access`（B3 已删除）。只看文件名和 key 名，不读值。dsh 看 `.dsh/.env` 与 `cordis.patch.yml`，Codex 看 `.codex/auth.json` 或 `OPENAI_API_KEY`，pi 看 `.pi/agent/{auth,models,settings}.json`。
   - 从真实 HOME 导入：按白名单复制，拒绝符号链接；`.env` 按 key 合并；文件 0600、目录 0700；可“套用到我所有项目”。Windows 在复制前后各跑一次 `prepare_windows_private_root`。审计只记名字。
   - 桌面新增 6 个 Tauri 命令：`agent_backend_credentials`、`agent_backend_import_candidates`、`agent_backend_import_credentials`、`agent_backend_open_private_home`、`agent_backend_permission_status`、`agent_backend_revoke_full_access`。
   - 前端：`AgentBackendCredentialCard`，缺登录和回环网关是两张不同的卡片。
@@ -1064,7 +1064,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
   - 迁移 v96 新增两张表：`agent_backend_full_access_grants`（每个会话最多一条授权，随会话删除）和 `agent_backend_audit_log`。SQL 在 `host_routing::FULL_ACCESS_MIGRATION_SQL`。
   - 设了 `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时，`decide_new_conversation_mode` 直接拒绝，返回 `agent_backend_full_access_forbidden`，不会静默降级。
   - `LaunchRequest.full_access_granted`（界面授权）与 `FOX_EXTERNAL_FULL_ACCESS`（工程开关）取“或”，FORBIDDEN 优先于两者。
-  - 撤销：先删授权，再走 `RestartSandboxed`。本轮以 `agent_backend_full_access_revoked` 结束，不重放。
+  - 撤销：先删授权，再走 `RestartWithoutFullAccess`。本轮以 `agent_backend_full_access_revoked` 结束，不重放。
   - 13.12 里写的“界面上没有开关”自本批起不再成立。
 
 **Linux 上已核对的定向测试数量**（本批 HEAD，`--features acp`；`--lib` 用的是过滤名）：
@@ -1102,7 +1102,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
    - 选择“完全访问”后先弹出风险确认，内容包括三点（不套 srt；不承诺目录边界；能读写当前用户能访问的任何文件）和“登录和配置仍放在 Fox 私有 HOME 里…”这一句。点“取消”会回到沙箱。
    - 确认后创建会话，顶部 chip 显示“权限：完全访问（已锁定）”，会话中没有开启入口。
    - Host 设 `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 后重启 Fox：完全访问选项变灰，带“（已禁止）”并显示原因。另外直接用 IPC 发 `externalPermissionMode: "full_access"`，应得到 `agent_backend_full_access_forbidden`，会话不会被创建。
-   - 会话中撤销：点“撤销完全访问”后先出现提示（取消本轮、结清审批、在沙箱中重新启动、不重放），确认后：正在跑的一轮以 `agent_backend_full_access_revoked` 结束，chip 变成“权限：沙箱（已锁定）”，下一句在沙箱里启动（Magpie 回环配置此时应以 `agent_backend_loopback_requires_full_access` 拒绝）。审计里有一条 `agent_backend.full_access_revoked`。
+   - 会话中撤销：点“撤销完全访问”后先出现提示（取消本轮、结清审批、在沙箱中重新启动、不重放），确认后：正在跑的一轮以 `agent_backend_full_access_revoked` 结束，chip 变成“权限：沙箱（已锁定）”，下一句在沙箱里启动（Magpie 回环配置此时应以 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生） 拒绝）。审计里有一条 `agent_backend.full_access_revoked`。
 5. **迁移 v96 前自动备份**：用 v95 的旧数据库启动本批构建，迁移前在 `<data>/backups/` 生成一份 v95 备份（`VACUUM INTO`，机制同 13.7）。迁移后 `schema_migrations` 最大值为 96，两张新表存在，旧会话和旧 run 没有变化。
 6. **一次全量测试**：`cargo test -p fox-agent-backend --features acp` 加桌面全量，对照 64 项基线，不能有新增失败。Linux 上本批后端全量是 219 通过 / 0 失败 / 6 忽略。
 
@@ -1149,7 +1149,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
   - `0` / `off` / `false` / `none` / `no`：全部强制关闭。设置里只能选 Fox，其他三项置灰并写明原因；新会话一律 Fox；已绑定外部后端的会话只读。
   - 列表（如 `pi,codex`）：只允许列出的后端；只写了未知 id 的列表等于全部关闭。
   - 不设置时，一次后端读取失败（数据库错误）不再回退到 Fox 路径，而是拒绝（`agent_backend_lookup_failed`），避免外部会话误跑在 Fox 运行时上。
-- **完全访问挪到设置**：「新外部会话使用完全访问」，默认关（`agent_backend.new_external_full_access`）。Host 在新建外部会话时读它，按现有逻辑写 grant 和 `agent_backend.full_access_granted` 审计（`source: "settings"`）。`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时开关置灰，Host 也忽略该设置（按沙箱建会话，不报错）。会话中途的「撤销完全访问」仍在后端栏。DeepSeek 回环 baseURL 在沙箱下仍拒绝，拒绝码 `agent_backend_loopback_requires_full_access` 不变，提示改为「在设置中打开“新外部会话使用完全访问”后新建会话」。
+- **完全访问挪到设置**：「新外部会话使用完全访问」，默认关（`agent_backend.new_external_full_access`）。Host 在新建外部会话时读它，按现有逻辑写 grant 和 `agent_backend.full_access_granted` 审计（`source: "settings"`）。`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时开关置灰，Host 也忽略该设置（按沙箱建会话，不报错）。会话中途的「撤销完全访问」仍在后端栏。DeepSeek 回环 baseURL 在沙箱下仍拒绝，拒绝码 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生） 不变，提示改为「在设置中打开“新外部会话使用完全访问”后新建会话」。
 
 **统一登录（`src/unified_login.rs`）**
 
@@ -1709,6 +1709,8 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 **一、根因**
 
 `runtime_host::execute_bound_knowledge_tool` 的 `search_knowledge` 分支对 `source: "local"` 固定调用 `LocalKnowledgeStore::search_lexical`，而 `search_lexical` 的返回里写死了 `fallback { kind: "sqlite_lexical", reason: "vector_index_unavailable" }`。真正的向量 / RRF 混合检索 `search_retrieval`（`local_knowledge_vector.rs`）只有检索测试入口的 Tauri 命令在调用。
+
+> 更正（2026-10-31）：已不成立。search_knowledge 本地分支调用 search_for_agent（向量 / 混合优先）；验收夹具 single-pi-acceptance-fixture 也已改为调用 search_for_agent。
 
 **二、修法**
 

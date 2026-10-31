@@ -20,7 +20,7 @@
 | P0 真实任务质量与发布门禁 | 部分完成 | Windows CI 已覆盖前端、Runtime、桌面 Host、Kernel / 协议、外部 Agent 后端和契约 Fixture，并支持定向模式；Markdown 链接、Sidecar Smoke、安装包、离线 Eval 不在 CI；没有版本化在线 Smoke Runner，没有接入官方评测集 |
 | P1 子 Agent 与团队隔离 | 部分完成 | Child Run 已走 Kernel（`kernel_delegation.rs`），深度 1；共享写任务的 Git worktree 隔离、并行 Team、mailbox 都没有做 |
 | P1 扩展源安全与治理 | 未开始 | MCP 已支持 `stdio` 和 `streamable_http` 传输；OAuth、证书固定、操作级限流、插件签名与回滚都没有做 |
-| P2 本地知识质量 | 部分完成 | 检索测试入口有关键词、向量和 RRF 混合检索；聊天检索仍只用关键词；BM25 方案未实施。仓库里没有官方 Zvec DLL 和完整 ONNX 模型包，CI 的两个 Smoke 一直是跳过状态 |
+| P2 本地知识质量 | 部分完成 | 检索测试入口有关键词、向量和 RRF 混合检索；聊天里的 `search_knowledge` 本地分支在索引就绪时走向量 / RRF 混合检索（`LocalKnowledgeStore::search_for_agent`）；索引就绪但检索失败直接报错；只有索引未就绪或资料库为关键词模式时才走关键词检索并标注原因；BM25 方案未实施。仓库里没有官方 Zvec DLL 和完整 ONNX 模型包，CI 的两个 Smoke 一直是跳过状态 |
 | A7 模型路由 / A9 远程 Fox Runtime | 未开始 | |
 | A8 通用自动化 | 部分基础存在 | 数字同事 Schedule / Channel |
 

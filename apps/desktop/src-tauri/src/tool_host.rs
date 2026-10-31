@@ -780,13 +780,11 @@ fn settle_replace(
     match classify_replace_outcome(os_error, &layout, &record.base_version, &record.new_version) {
         ReplaceVerdict::Committed => {
             record.status = "committed".to_string();
-            // The replace committed and the original is *verified* in the
-            // backup. The backup, the applying record and the settlement record
-            // are all retained: tool_host has no durable registration receipt
-            // from the version-history layer, so deleting the only independent
-            // copy of the original here would rest on a best-effort outer
-            // snapshot. A registration failure above must not turn into a lost
-            // original ([v1.1] 6.5 / O-A01).
+            // 替换已提交，原件在 backup 里校验过。这里不删除材料：登记回执还没发生。
+            // 只有 atomic_write_with_context_mode 在 context 存在且
+            // record_committed 返回 Ok 之后才清理这些材料。context 为 None、
+            // 登记失败、NotApplied、RecoveryRequired 或 settlement 失败时，
+            // 材料原样保留，避免登记失败变成丢了原件（[v1.1] 6.5 / O-A01）。
             if let Err(error) = store_settled(&settled, record, fault) {
                 // The commit is a fact — the target holds the new bytes — so it
                 // is not replayed or reported as a failure. But the settlement
@@ -852,6 +850,118 @@ fn replace_material_paths(target: &Path) -> Result<(PathBuf, PathBuf, String), S
     Ok((backup, journal, id.to_string()))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 测试开关：把 hard_link 当成「文件系统不支持」，迫使走不覆盖的移动发布。
+    static SIMULATE_HARD_LINK_UNSUPPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 发布一个还不存在的目标。先硬链接；只有文件系统明确不支持硬链接时，
+/// Windows 才改用 `MoveFileExW`（不带 REPLACE_EXISTING）。其他错误原样返回。
+fn publish_new_file(staging: &Path, target: &Path) -> std::io::Result<&'static str> {
+    match try_publish_hard_link(staging, target) {
+        Ok(()) => Ok("hard_link"),
+        Err(error) if hard_link_is_unsupported(&error) => publish_when_hard_link_unsupported(staging, target, error),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn publish_when_hard_link_unsupported(
+    staging: &Path,
+    target: &Path,
+    _error: std::io::Error,
+) -> std::io::Result<&'static str> {
+    move_file_no_replace(staging, target)?;
+    Ok("move_no_replace")
+}
+
+#[cfg(not(windows))]
+fn publish_when_hard_link_unsupported(
+    _staging: &Path,
+    _target: &Path,
+    error: std::io::Error,
+) -> std::io::Result<&'static str> {
+    Err(error)
+}
+
+#[cfg(test)]
+fn try_publish_hard_link(staging: &Path, target: &Path) -> std::io::Result<()> {
+    if SIMULATE_HARD_LINK_UNSUPPORTED.with(|flag| flag.get()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "simulated: this volume does not support hard links",
+        ));
+    }
+    fs::hard_link(staging, target)
+}
+
+#[cfg(not(test))]
+fn try_publish_hard_link(staging: &Path, target: &Path) -> std::io::Result<()> {
+    fs::hard_link(staging, target)
+}
+
+/// 1 = ERROR_INVALID_FUNCTION，17 = ERROR_NOT_SAME_DEVICE，50 = ERROR_NOT_SUPPORTED。
+fn hard_link_is_unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        matches!(error.raw_os_error(), Some(1 | 17 | 50))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn move_file_no_replace(staging: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let source = wide(staging);
+    let destination = wide(target);
+    // 不带 MOVEFILE_REPLACE_EXISTING：目标已存在时系统拒绝，不会覆盖。
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| {
+        let code = win32_code(&error);
+        // 183 ERROR_ALREADY_EXISTS，80 ERROR_FILE_EXISTS。
+        if code == 183 || code == 80 {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("Windows error {code}"),
+            )
+        } else {
+            std::io::Error::from_raw_os_error(code as i32)
+        }
+    })
+}
+
+fn append_publish_note(note: &mut Option<String>, method: &str) {
+    let extra = format!("published_by={method}");
+    match note {
+        Some(text) if !text.is_empty() => {
+            text.push_str("; ");
+            text.push_str(&extra);
+        }
+        _ => *note = Some(extra),
+    }
+}
+
 fn atomic_write(root: &Path, path: &Path, bytes: &[u8], expected: &str,
     cancellation: Option<&crate::kernel::CancellationToken>) -> Result<(), String> {
     atomic_write_with_context(root, path, bytes, expected, cancellation, None)
@@ -865,6 +975,11 @@ pub(crate) fn atomic_write_with_context(root: &Path, path: &Path, bytes: &[u8], 
     cancellation: Option<&crate::kernel::CancellationToken>,
     context: Option<&mut dyn FileCommitContext>) -> Result<(), String> {
     atomic_write_with_context_mode(root, path, bytes, expected, cancellation, context, false)
+}
+
+/// 一次写入产生的恢复材料。登记回执成功后才允许删除。
+struct RecoveryMaterials {
+    paths: Vec<PathBuf>,
 }
 
 pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[u8], expected: &str,
@@ -918,6 +1033,7 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
     revalidate_target(root, path, None)?;
     let current = current_version_of(path, binary)?;
     ensure_unchanged(expected, current.as_deref())?;
+    let mut recovery = RecoveryMaterials { paths: Vec::new() };
     if current.is_none() {
         // Atomic create without replacing a file created since the check.
         let staging_path = staging.path().to_path_buf();
@@ -941,16 +1057,23 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
             return Err(error);
         }
         if let Some(context) = context.as_deref_mut() { context.mark_applying(); }
-        match fs::hard_link(&staging_path, path) {
-            Ok(()) => {
+        match publish_new_file(&staging_path, path) {
+            Ok(method) => {
                 // Preserve committed evidence even if the settlement disk fails.
                 if let Some(context) = context.as_deref_mut() { context.mark_committed(); }
                 staging.hand_off();
+                append_publish_note(&mut record.note, method);
                 record.status = "committed".into();
                 record.settled_at_ms = Some(epoch_ms());
-                store_settled(&settled_record_path(&journal), &record, JournalFault::NONE)
+                let settled = settled_record_path(&journal);
+                store_settled(&settled, &record, JournalFault::NONE)
                     .map_err(|error| format!("file created but settlement failed; materials retained: {error}"))?;
-                let _ = fs::remove_file(&staging_path);
+                recovery.paths.push(journal);
+                recovery.paths.push(settled);
+                // move 已经把 staging 改名为目标；硬链接还要卸掉临时名字。
+                if method != "move_no_replace" {
+                    let _ = fs::remove_file(&staging_path);
+                }
             }
             Err(e) => {
                 if let Some(context) = context.as_deref_mut() { context.mark_not_applied(); }
@@ -973,7 +1096,7 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         // settlement, judged from the verified layout, may remove it.
         let candidate = staging.hand_off();
         replace_existing_file_with_context(&candidate, path, expected, &file_version(bytes),
-            cancellation, &mut context)?;
+            cancellation, &mut context, &mut recovery.paths)?;
     }
     // A1 / TX-4: and again after publication, by the handle of what now sits
     // at the target path.
@@ -985,6 +1108,15 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         context.mark_committed();
         context.record_committed(path).map_err(|error| format!(
             "file committed but version registration failed; recovery materials retained: {error}"))?;
+        // 登记回执已经成功，恢复材料不再是唯一副本。删不掉只记日志，不改变写入结果。
+        for material in &recovery.paths {
+            if let Err(error) = fs::remove_file(material) {
+                eprintln!(
+                    "fox: 已登记的写入无法删除恢复材料 {}: {error}",
+                    material.display()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1001,13 +1133,14 @@ fn replace_existing_file(
     base_version: &str,
     new_version: &str,
 ) -> Result<(), String> {
-    replace_existing_file_with_context(candidate, target, base_version, new_version, None, &mut None)
+    replace_existing_file_with_context(candidate, target, base_version, new_version, None, &mut None, &mut Vec::new())
 }
 
 fn replace_existing_file_with_context(
     candidate: &Path, target: &Path, base_version: &str, new_version: &str,
     cancellation: Option<&crate::kernel::CancellationToken>,
     context: &mut Option<&mut dyn FileCommitContext>,
+    materials: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let (backup, journal, operation_id) = replace_material_paths(target)?;
     // Preserve a verified pre-image BEFORE admission is revalidated or the OS
@@ -1066,6 +1199,13 @@ fn replace_existing_file_with_context(
             _ if record.status == "not_applied" => context.mark_not_applied(),
             _ => {},
         }
+    }
+    if outcome.is_ok() {
+        let settled = settled_record_path(&journal);
+        materials.push(backup);
+        materials.push(preimage);
+        materials.push(journal);
+        materials.push(settled);
     }
     outcome
 }
@@ -2543,9 +2683,25 @@ fn read_text(path: &Path) -> Result<String, String> {
             MAX_FILE_BYTES
         )));
     }
-    fs::read_to_string(path).map_err(|error| {
-        ToolErrorCode::InvalidInput.error(format!("file is not valid UTF-8 text: {error}"))
-    })
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) => {
+            // 只改错误说明，不转码、不按原编码回写。能无损解成 GB18030/GBK 时点名编码。
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                if let Ok(bytes) = fs::read(path) {
+                    let (_decoded, encoding, lossy) = crate::resource_gateway::decode_text_bytes(&bytes);
+                    if encoding == "gb18030" && !lossy {
+                        return Err(ToolErrorCode::InvalidInput.error(
+                            "file is not UTF-8 (it decodes as GB18030/GBK); edit_file and write_file only modify UTF-8 text — ask the user before converting it",
+                        ));
+                    }
+                }
+            }
+            Err(ToolErrorCode::InvalidInput.error(format!(
+                "file is not valid UTF-8 text: {error}"
+            )))
+        }
+    }
 }
 
 fn read_optional_text(path: &Path) -> Result<Option<String>, String> {
@@ -2667,6 +2823,22 @@ fn failure_text_result(text: String, details: Value, failed: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GBK 文件不能被 edit_file 当 UTF-8 改；错误要指出它是 GB18030。
+    #[test]
+    fn tx8_edit_of_a_gbk_file_names_the_encoding() {
+        let dir = std::env::temp_dir().join(format!("fox-tx8-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        let (encoded, _, gbk_errors) = encoding_rs::GBK.encode("中文");
+        assert!(!gbk_errors);
+        fs::write(&path, &encoded).unwrap();
+        let error = read_text(&path).expect_err("GBK 不是 UTF-8");
+        assert!(error.contains("GB18030"), "{error}");
+        assert!(error.contains("[tool.invalid_input]"), "{error}");
+        assert!(!error.contains("file is not valid UTF-8 text"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// Phase 1 #5: network and device paths are refused from the text alone.
     #[test]
@@ -4660,6 +4832,165 @@ mod write_gate_tests {
             .expect("no mentions means no read-only set");
         ensure_writable_target(None, root.to_str().unwrap(), &root.join("a.txt"))
             .expect("no task text means no restriction");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// 不支持硬链接的卷上，新建文件改用 MoveFileExW，且不能覆盖已有目标。
+#[cfg(all(test, windows))]
+mod tx6_publish_tests {
+    use super::*;
+
+    struct UnsupportedGuard;
+    impl UnsupportedGuard {
+        fn arm() -> Self {
+            SIMULATE_HARD_LINK_UNSUPPORTED.with(|flag| flag.set(true));
+            Self
+        }
+    }
+    impl Drop for UnsupportedGuard {
+        fn drop(&mut self) {
+            SIMULATE_HARD_LINK_UNSUPPORTED.with(|flag| flag.set(false));
+        }
+    }
+
+    fn fresh_dir() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-tx6-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn tx6_create_without_hard_links_publishes_by_move_no_replace() {
+        let root = fresh_dir();
+        let _guard = UnsupportedGuard::arm();
+        let action = prepare(
+            "write_file",
+            &json!({ "path": "new.txt", "content": "hello" }),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+        execute(action).unwrap();
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"hello");
+        let temps: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".fox-write-"))
+            .collect();
+        assert!(temps.is_empty(), "staging name must be gone: {temps:?}");
+        let settled = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().ends_with(".settled.json"))
+            .expect("settled journal");
+        let body = fs::read_to_string(settled.path()).unwrap();
+        assert!(
+            body.contains("published_by=move_no_replace"),
+            "{body}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tx6_move_no_replace_never_overwrites_an_existing_target() {
+        let root = fresh_dir();
+        let _guard = UnsupportedGuard::arm();
+        let target = root.join("note.txt");
+        fs::write(&target, b"original").unwrap();
+        let staging = root.join(".fox-write-staging.tmp");
+        fs::write(&staging, b"replacement").unwrap();
+        let error = publish_new_file(&staging, &target).expect_err("must not replace");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read(&staging).unwrap(), b"replacement");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// 登记回执成功才删除恢复材料；失败或没有回执时原样留下。
+#[cfg(test)]
+mod tx5_recovery_material_tests {
+    use super::*;
+
+    struct Registration {
+        baseline: String,
+        fail: bool,
+    }
+
+    impl FileCommitContext for Registration {
+        fn baseline(&self) -> &str { &self.baseline }
+        fn dispatch_id(&self) -> &str { "tx5-dispatch" }
+        fn validate(&mut self, _: &Path) -> Result<(), String> { Ok(()) }
+        fn capture_before(&mut self, _: &Path) -> Result<(), String> { Ok(()) }
+        fn record_committed(&mut self, _: &Path) -> Result<(), String> {
+            if self.fail { Err("injected registry failure".into()) } else { Ok(()) }
+        }
+    }
+
+    fn fresh_dir() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-tx5-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn names(root: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn tx5_a_registered_replace_leaves_only_the_target() {
+        let root = fresh_dir();
+        let path = root.join("note.txt");
+        fs::write(&path, b"old").unwrap();
+        let baseline = file_version(b"old");
+        let mut context = Registration { baseline: baseline.clone(), fail: false };
+        atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(&root), vec!["note.txt".to_owned()]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tx5_a_failed_registration_keeps_every_recovery_material() {
+        let root = fresh_dir();
+        let path = root.join("note.txt");
+        fs::write(&path, b"old").unwrap();
+        let baseline = file_version(b"old");
+        let mut context = Registration { baseline: baseline.clone(), fail: true };
+        let error = atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context))
+            .expect_err("registration failure");
+        assert!(error.contains("version registration failed"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let left = names(&root);
+        assert!(
+            left.iter().any(|name| name.starts_with(".fox-replace-backup-")
+                && !name.ends_with(".verified")
+                && !name.ends_with(".staging")),
+            "backup missing: {left:?}"
+        );
+        assert!(left.iter().any(|name| name.ends_with(".verified")), "preimage missing: {left:?}");
+        assert!(
+            left.iter().any(|name| name.starts_with(".fox-replace-journal-") && !name.ends_with(".settled.json")),
+            "applying journal missing: {left:?}"
+        );
+        assert!(left.iter().any(|name| name.ends_with(".settled.json")), "settled journal missing: {left:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tx5_a_registered_create_leaves_only_the_target() {
+        let root = fresh_dir();
+        let path = root.join("created.txt");
+        let mut context = Registration { baseline: "missing".into(), fail: false };
+        atomic_write_with_context(&root, &path, b"body", "missing", None, Some(&mut context)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"body");
+        assert_eq!(names(&root), vec!["created.txt".to_owned()]);
         fs::remove_dir_all(root).unwrap();
     }
 }

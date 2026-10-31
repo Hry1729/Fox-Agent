@@ -212,7 +212,6 @@ pub fn run() {
             runtime_host.recover_active_graph_node_reviews()?;
             runtime_host.recover_active_graph_node_cancellations()?;
             runtime_host.recover_pending_graph_acceptances()?;
-            runtime_host.start_digital_colleague_scheduler();
             let yuxi_runtime = yuxi::runtime::YuxiRuntimeHost::new(
                 app.handle().clone(),
                 database.clone(),
@@ -267,6 +266,8 @@ pub fn run() {
                 app_data_dir,
                 skills_dir,
             ));
+            // AppState 注册之后才能派发：调度器拉起的 Run 会调用 app.state::<AppState>()。
+            app.state::<AppState>().runtime_host.start_digital_colleague_scheduler();
             // Not fatal: a broken preview cache directory (e.g. a file at
             // cache/knowledge-preview) is logged here and reported with its
             // path only when a preview uses the cache.
@@ -600,4 +601,24 @@ pub mod acceptance_api {
         LocalKnowledgeImportFileRequest, LocalKnowledgeImportRequest, LocalKnowledgeStore,
     };
     pub use crate::local_knowledge_storage::LOCAL_KNOWLEDGE_STORAGE_PATH_KEY;
+}
+
+#[cfg(test)]
+mod rt3_startup_order_tests {
+    /// 数字同事调度器必须在 `AppState` 注册之后才开始派发。
+    /// 更早启动时，知识库或 Office 工具里的 `app.state::<AppState>()` 会 panic。
+    #[test]
+    fn rt3_scheduler_starts_only_after_app_state_is_managed() {
+        let source = include_str!("lib.rs");
+        let managed_at = source
+            .find("app.manage(AppState::new(")
+            .expect("setup 应注册 AppState");
+        let scheduler_at = source
+            .find("start_digital_colleague_scheduler")
+            .expect("setup 应启动数字同事调度器");
+        assert!(
+            scheduler_at > managed_at,
+            "start_digital_colleague_scheduler 第一次出现必须在 app.manage(AppState::new( 之后"
+        );
+    }
 }

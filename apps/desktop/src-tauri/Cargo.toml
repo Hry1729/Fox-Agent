@@ -64,6 +64,7 @@ fox-agent-kernel = { path = "../../../crates/fox-agent-kernel" }
 # (the `acp` client is wired in the next batch).
 fox-agent-backend = { path = "../../../crates/fox-agent-backend", features = ["acp"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+encoding_rs = "0.8"
 keyring = { version = "3", features = ["windows-native"] }
 base64 = "0.22"
 hex = "0.4"

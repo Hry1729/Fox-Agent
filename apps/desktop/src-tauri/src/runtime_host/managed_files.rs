@@ -1797,18 +1797,21 @@ mod tests {
             )),
             "new bytes"
         );
-        let journals = replace_journals(&harness.root);
-        let settled = journals
-            .iter()
-            .find(|(path, _)| path.to_string_lossy().ends_with(".settled.json"))
-            .expect("atomic replace settlement journal");
-        assert_eq!(settled.1["status"], "committed");
+        // TX-5: once the version row (the registration receipt) is durable, the
+        // in-folder replace materials are no longer the only copy of either side
+        // and are removed. The dispatch binding of a retained journal is covered
+        // by the refusal test below, where the materials must stay.
         assert!(
-            settled.1["note"]
-                .as_str()
-                .is_some_and(|note| note.contains(&credential.dispatch_id)),
-            "the real journal is bound to the admitted dispatch"
+            replace_journals(&harness.root).is_empty(),
+            "a registered replace leaves no journal in the project folder"
         );
+        let leftovers = fs::read_dir(&harness.root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".fox-replace-"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "replace materials left behind: {leftovers:?}");
     }
 
     #[test]

@@ -79,6 +79,11 @@ test('recognizes only a short follow-up to a previous approval demonstration', (
   assert.equal(isApprovalDemoFollowup('继续修改项目代码', '请触发审批弹窗让我看看'), false)
 })
 
+test('tells the model that a missing remote index is not a keyword-scan fallback', () => {
+  assert.match(FOX_RUNTIME_INSTRUCTIONS, /If retrieval reports partial: true, describe the limited coverage rather than claiming the entire knowledge base has no relevant content\./)
+  assert.match(FOX_RUNTIME_INSTRUCTIONS, /remote_knowledge\.index_unavailable means the remote service does not offer indexed search to this account; do not retry it, tell the user\./)
+})
+
 test('replaces a fabricated assistant result before it is persisted into history', () => {
   const messages = [
     { role: 'user', content: '触发审批弹窗' },

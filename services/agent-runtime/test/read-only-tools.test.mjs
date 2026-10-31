@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { executeReadOnlyTool } from '../src/read-only-tool-executors.mjs'
@@ -81,4 +81,56 @@ test('R4 read version hashes the full raw file and reaches model content on ever
     assert.equal(result.details.readVersion, expected)
     assert.ok(result.content.some(block => block.text.includes(expected)))
   }
+})
+
+// Windows 创建符号链接通常需要特权，这里只在非 Windows 上跑。
+const skipSymlinks = process.platform === 'win32'
+
+test('rt4_find_and_grep_skip_links_that_leave_the_project', { skip: skipSymlinks }, async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), 'fox-rt4-boundary-'))
+  const root = join(parent, 'proj')
+  const outside = join(parent, 'proj2')
+  context.after(() => rm(parent, { recursive: true, force: true }))
+  await mkdir(root)
+  await mkdir(outside)
+  const secret = 'OUTSIDE_ROOT_SENTINEL_rt4'
+  await writeFile(join(outside, 'id_rsa'), `${secret}\n`, 'utf8')
+  await writeFile(join(root, 'keep.txt'), 'inside keep\n', 'utf8')
+  // `proj2` 以 `proj` 为前缀，但不是它的子目录。分隔符边界必须把它挡在外面。
+  await symlink(join(outside, 'id_rsa'), join(root, 'leak'))
+
+  const grep = await executeReadOnlyTool('grep', { path: root, pattern: secret })
+  assert.equal(grep.content[0].text.includes(secret), false)
+  assert.equal(grep.details.skipped.outsideRoot, 1)
+
+  const find = await executeReadOnlyTool('find', { path: root, pattern: 'leak' })
+  assert.equal(find.content[0].text.includes('leak'), false)
+  assert.equal(find.details.skipped.outsideRoot, 1)
+
+  const kept = await executeReadOnlyTool('find', { path: root, pattern: 'keep' })
+  assert.match(kept.content[0].text, /keep\.txt/)
+})
+
+test('rt4_links_inside_the_project_are_still_read', { skip: skipSymlinks }, async (context) => {
+  const parent = await mkdtemp(join(tmpdir(), 'fox-rt4-inside-'))
+  const root = join(parent, 'proj')
+  context.after(() => rm(parent, { recursive: true, force: true }))
+  await mkdir(join(root, 'src'), { recursive: true })
+  await writeFile(join(root, 'src', 'note.txt'), 'INSIDE_LINK_SENTINEL\n', 'utf8')
+  await symlink(join(root, 'src', 'note.txt'), join(root, 'alias.txt'))
+  await symlink(join(root, 'src'), join(root, 'src-link'))
+  await symlink(join(root, 'missing-target'), join(root, 'dangling'))
+
+  const grep = await executeReadOnlyTool('grep', { path: root, pattern: 'INSIDE_LINK_SENTINEL' })
+  assert.match(grep.content[0].text, /note\.txt/)
+  assert.match(grep.content[0].text, /alias\.txt/)
+  assert.equal(grep.content[0].text.includes('src-link'), false)
+  assert.equal(grep.details.skipped.outsideRoot, 0)
+  assert.equal(grep.details.skipped.brokenLinks, 1)
+  assert.equal(grep.details.skipped.linkedDirectories, 1)
+  assert.equal(grep.content[0].text.split('\n').filter(Boolean).length, 2)
+
+  const find = await executeReadOnlyTool('find', { path: root, pattern: 'alias' })
+  assert.match(find.content[0].text, /alias\.txt/)
+  assert.equal(find.details.skipped.outsideRoot, 0)
 })

@@ -1104,6 +1104,8 @@ fn now_ms() -> i64 {
 /// Recognition only; it never authorises a deletion.
 pub(crate) fn is_host_transient_name(name: &str) -> bool {
     name.starts_with(".fox-office-")
+        || name.starts_with(".fox-replace-")
+        || name.starts_with(".fox-write-")
         || name.contains(".fox-backup-")
         || staging_token_of_name(name).is_some()
 }
@@ -1598,6 +1600,8 @@ mod tests {
         assert!(is_host_transient_name(".fox-office-abc.xlsx"));
         assert!(is_host_transient_name("报告.xlsx.fox-backup-abc"));
         assert!(is_host_transient_name(".fox-stage-t.tmp"));
+        assert!(is_host_transient_name(".fox-replace-backup-abc"));
+        assert!(is_host_transient_name(".fox-write-abc.tmp"));
         assert!(!is_host_transient_name("报告.xlsx"));
     }
 

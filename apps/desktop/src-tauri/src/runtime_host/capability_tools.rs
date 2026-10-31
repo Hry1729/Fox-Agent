@@ -3258,24 +3258,120 @@ fn run_process_with_env(
         extra_env,
         &check_execution_control,
     )?;
-    let stdout_limit = MAX_PROCESS_OUTPUT_BYTES.min(output.stdout.len());
-    let stdout_end = floor_char_boundary(&output.stdout, stdout_limit);
-    let remaining = MAX_PROCESS_OUTPUT_BYTES.saturating_sub(stdout_end);
-    let stderr_end = floor_char_boundary(&output.stderr, remaining.min(output.stderr.len()));
+    let (stdout, stderr, streams_truncated) = bound_process_streams(
+        &output.stdout,
+        &output.stderr,
+        MAX_PROCESS_OUTPUT_BYTES,
+    );
     Ok(ProcessOutput {
         exit_code: output.exit_code,
-        truncated: output.truncated
-            || stdout_end < output.stdout.len()
-            || stderr_end < output.stderr.len(),
-        stdout: output.stdout[..stdout_end].to_owned(),
-        stderr: output.stderr[..stderr_end].to_owned(),
+        truncated: output.truncated || streams_truncated,
+        stdout,
+        stderr,
         duration_ms: output.duration_ms,
     })
 }
 
+/// 把两路进程输出收进 `limit` 字节。
+///
+/// stderr 与 stdout 各有 `limit / 4` 的保底；某一路用不完的保底让给另一路，
+/// 两路都还放不下时，剩余额度对半分。总字节（含省略标记）不超过 `limit`。
+/// 超出自己额度的一路保留开头 1/4 与结尾 3/4，中间插入
+/// `\n…[已省略 N 字节]…\n`。切点落在 UTF-8 字符边界上：开头向下取整，
+/// 结尾段向上取整。第三个返回值表示是否发生了截断。
+fn bound_process_streams(stdout: &str, stderr: &str, limit: usize) -> (String, String, bool) {
+    let (stdout_budget, stderr_budget) = process_stream_budgets(stdout.len(), stderr.len(), limit);
+    let (stdout_text, stdout_cut) = fit_process_stream(stdout, stdout_budget);
+    let (stderr_text, stderr_cut) = fit_process_stream(stderr, stderr_budget);
+    (stdout_text, stderr_text, stdout_cut || stderr_cut)
+}
+
+/// 两路额度。返回值之和不超过 `limit`；内容本身放得下时按原长度返回。
+fn process_stream_budgets(stdout_len: usize, stderr_len: usize, limit: usize) -> (usize, usize) {
+    if stdout_len.saturating_add(stderr_len) <= limit {
+        return (stdout_len, stderr_len);
+    }
+    let mut stdout_budget = (limit / 4).min(stdout_len);
+    let mut stderr_budget = (limit / 4).min(stderr_len);
+    let mut spare = limit.saturating_sub(stdout_budget.saturating_add(stderr_budget));
+    let stdout_short = stdout_len > stdout_budget;
+    let stderr_short = stderr_len > stderr_budget;
+    if stdout_short && stderr_short {
+        let stdout_half = spare / 2;
+        let stderr_half = spare - stdout_half;
+        let stdout_extra = stdout_half.min(stdout_len - stdout_budget);
+        let stderr_extra = stderr_half.min(stderr_len - stderr_budget);
+        stdout_budget += stdout_extra;
+        stderr_budget += stderr_extra;
+        spare -= stdout_extra + stderr_extra;
+    }
+    if spare > 0 && stdout_len > stdout_budget {
+        let extra = spare.min(stdout_len - stdout_budget);
+        stdout_budget += extra;
+        spare -= extra;
+    }
+    if spare > 0 && stderr_len > stderr_budget {
+        let extra = spare.min(stderr_len - stderr_budget);
+        stderr_budget += extra;
+    }
+    (stdout_budget, stderr_budget)
+}
+
+fn process_omission_marker(omitted: usize) -> String {
+    format!("\n…[已省略 {omitted} 字节]…\n")
+}
+
+/// 把一路输出收进 `budget` 字节。放得下则原样返回。
+fn fit_process_stream(text: &str, budget: usize) -> (String, bool) {
+    if text.len() <= budget {
+        return (text.to_owned(), false);
+    }
+    // 标记长度按「最多省略全文」估算：实际省略量不会更长，位数也不会更多。
+    let marker_len = process_omission_marker(text.len()).len();
+    if marker_len >= budget {
+        let end = floor_char_boundary(text, budget.min(text.len()));
+        return (text[..end].to_owned(), true);
+    }
+    let content_budget = budget - marker_len;
+    let head_budget = content_budget / 4;
+    let tail_budget = content_budget - head_budget;
+    let head_end = floor_char_boundary(text, head_budget.min(text.len()));
+    let raw_tail = text.len().saturating_sub(tail_budget);
+    let tail_start = ceil_char_boundary(text, raw_tail);
+    if tail_start < head_end {
+        let end = floor_char_boundary(text, budget.min(text.len()));
+        return (text[..end].to_owned(), true);
+    }
+    let omitted = tail_start - head_end;
+    let marker = process_omission_marker(omitted);
+    let mut output = String::with_capacity(head_end + marker.len() + (text.len() - tail_start));
+    output.push_str(&text[..head_end]);
+    output.push_str(&marker);
+    output.push_str(&text[tail_start..]);
+    if output.len() > budget {
+        let end = floor_char_boundary(&output, budget);
+        output.truncate(end);
+    }
+    (output, true)
+}
+
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    if index > text.len() {
+        index = text.len();
+    }
     while index > 0 && !text.is_char_boundary(index) {
         index -= 1;
+    }
+    index
+}
+
+/// 结尾段的起点若落在字符中间，向后（字符串末尾方向）挪到下一个字符边界。
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    if index > text.len() {
+        return text.len();
+    }
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
     }
     index
 }
@@ -4088,5 +4184,78 @@ mod tests {
             }
         ));
         assert!(ensure_provider_configured(SearchProvider::DuckDuckGo).is_ok());
+    }
+
+    /// stdout 远超额度时，stderr 仍占住自己的保底，1 KiB 必须原样留下。
+    #[test]
+    fn tx7_stderr_keeps_its_floor_when_stdout_is_huge() {
+        let stdout = format!(
+            "HEADMARK{}TAILMARK",
+            "x".repeat(2 * 1024 * 1024 - "HEADMARK".len() - "TAILMARK".len())
+        );
+        assert_eq!(stdout.len(), 2 * 1024 * 1024);
+        let stderr = "s".repeat(1024);
+        let limit = MAX_PROCESS_OUTPUT_BYTES;
+        let (stdout_out, stderr_out, truncated) = bound_process_streams(&stdout, &stderr, limit);
+        assert!(truncated);
+        assert_eq!(stderr_out, stderr);
+        assert!(stdout_out.len() + stderr_out.len() <= limit);
+        assert!(stdout_out.starts_with("HEADMARK"), "{stdout_out}");
+        assert!(stdout_out.contains("TAILMARK"), "{stdout_out}");
+        assert!(stdout_out.contains("\n…[已省略 "), "{stdout_out}");
+    }
+
+    /// 两路都超额时，各自保留开头、结尾，并插入省略提示。
+    #[test]
+    fn tx7_both_streams_keep_head_and_tail() {
+        let stdout = format!("STDOUT_HEAD{}STDOUT_TAIL", "a".repeat(80_000));
+        let stderr = format!("STDERR_HEAD{}STDERR_TAIL", "b".repeat(80_000));
+        let limit = 8 * 1024;
+        let (stdout_out, stderr_out, truncated) = bound_process_streams(&stdout, &stderr, limit);
+        assert!(truncated);
+        assert!(stdout_out.len() + stderr_out.len() <= limit);
+        assert!(stdout_out.contains("STDOUT_HEAD"), "{stdout_out}");
+        assert!(stdout_out.contains("STDOUT_TAIL"), "{stdout_out}");
+        assert!(stderr_out.contains("STDERR_HEAD"), "{stderr_out}");
+        assert!(stderr_out.contains("STDERR_TAIL"), "{stderr_out}");
+        assert!(stdout_out.contains("\n…[已省略 "), "{stdout_out}");
+        assert!(stderr_out.contains("\n…[已省略 "), "{stderr_out}");
+        assert_omitted_span(&stdout, &stdout_out);
+        assert_omitted_span(&stderr, &stderr_out);
+    }
+
+    /// 全中文输入的切点必须落在字符边界上，结果是合法 UTF-8，且总字节不超过额度。
+    #[test]
+    fn tx7_cut_points_respect_utf8_boundaries() {
+        let stdout = "汉".repeat(1000);
+        let stderr = "字".repeat(1000);
+        let limit = 203;
+        let (stdout_out, stderr_out, truncated) = bound_process_streams(&stdout, &stderr, limit);
+        assert!(truncated);
+        assert!(std::str::from_utf8(stdout_out.as_bytes()).is_ok());
+        assert!(std::str::from_utf8(stderr_out.as_bytes()).is_ok());
+        assert!(!stdout_out.contains('\u{FFFD}'));
+        assert!(!stderr_out.contains('\u{FFFD}'));
+        assert!(stdout_out.len() + stderr_out.len() <= limit);
+        assert_omitted_span(&stdout, &stdout_out);
+        assert_omitted_span(&stderr, &stderr_out);
+    }
+
+    /// 省略标记里的 N 必须等于被切掉的字节数，头尾分别是原文的前缀和后缀。
+    fn assert_omitted_span(original: &str, bounded: &str) {
+        let marker = "\n…[已省略 ";
+        let start = bounded.find(marker).expect("omission marker");
+        let after = &bounded[start + marker.len()..];
+        let digits_end = after.find(' ').expect("space after omitted count");
+        let omitted: usize = after[..digits_end].parse().expect("omitted count");
+        let tail_tag = " 字节]…\n";
+        assert!(after[digits_end..].starts_with(tail_tag), "{bounded}");
+        let tail = &after[digits_end + tail_tag.len()..];
+        let head = &bounded[..start];
+        assert!(original.starts_with(head), "head is not a prefix");
+        assert!(original.ends_with(tail), "tail is not a suffix");
+        assert_eq!(head.len() + omitted + tail.len(), original.len());
+        assert!(original.is_char_boundary(head.len()));
+        assert!(original.is_char_boundary(original.len() - tail.len()));
     }
 }
