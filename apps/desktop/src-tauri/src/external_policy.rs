@@ -62,6 +62,10 @@ pub fn pi_subject(approval: Option<&ToolApproval>, project_root: Option<&Path>) 
     let text = |key: &str| approval.input.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty());
     match approval.tool_name.as_str() {
         "read" | "grep" | "find" | "ls" => (approval.tool_name.clone(), ToolSubject::Read),
+        // Plan C3: the Fox tool extension's tools. The gate only lets them
+        // reach the Fox tool bridge, which makes the real decision (the same
+        // engine, `external_tools`), so the gate itself treats them as reads.
+        tool if fox_agent_backend::fox_mcp::TOOL_NAMES.contains(&tool) => (approval.tool_name.clone(), ToolSubject::Read),
         "write" | "edit" => {
             let tool = if approval.tool_name == "write" { "write_file" } else { "edit_file" };
             match text("path").or_else(|| text("file_path")) {
@@ -194,6 +198,16 @@ mod tests {
     }
     fn rule(effect: RuleEffect, tool: &str, pattern: &str) -> PolicyRule {
         PolicyRule { id: format!("r-{pattern}"), effect, tool: tool.into(), pattern: pattern.into() }
+    }
+
+    #[test]
+    fn fox_bridge_tools_pass_the_pi_gate_as_reads_in_every_tier() {
+        for mode in [PI_READ_ONLY, "ask", PI_ALLOW, PI_FULL] {
+            for tool in fox_agent_backend::fox_mcp::TOOL_NAMES {
+                assert_eq!(verdict(mode, &gate(tool, json!({})), &[]), "allow", "{tool} in {mode}");
+            }
+        }
+        assert_eq!(verdict("ask", &gate("some_other_extension_tool", json!({})), &[]), "ask", "other extension tools are not widened");
     }
 
     #[test]

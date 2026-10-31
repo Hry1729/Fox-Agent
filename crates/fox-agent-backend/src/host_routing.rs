@@ -290,6 +290,35 @@ impl BackendSwitch {
     }
 }
 
+/// AP-4: the gate of the commands that put credentials or model keys into a
+/// backend's private HOME, or probe / open it (`agent_backend_import_credentials`,
+/// `agent_backend_model_connection`, `agent_backend_open_private_home`,
+/// `agent_backend_choose_fox_source`, `agent_backend_credentials`,
+/// `agent_backend_import_candidates`, `agent_backend_probe_codex_responses`).
+/// A backend that may not run (retired, hidden, or switched off by
+/// [`EXTERNAL_BACKENDS_ENV`]) gets no copy of a login it would never use.
+/// `existing_conversation` only picks the wording. Revoking full access is
+/// deliberately NOT behind this gate (tightening is always allowed).
+pub fn credential_entry_gate(backend: AgentBackend, switch: &BackendSwitch, existing_conversation: bool) -> Result<(), RouteError> {
+    credential_entry_gate_in(&RETIRED_BACKENDS, backend, switch, existing_conversation)
+}
+
+fn credential_entry_gate_in(retired: &[AgentBackend], backend: AgentBackend, switch: &BackendSwitch, existing_conversation: bool) -> Result<(), RouteError> {
+    if backend == AgentBackend::Fox {
+        return Err(RouteError::InvalidBackend(backend.as_str().to_owned()));
+    }
+    if is_retired_in(retired, backend) {
+        return Err(RouteError::Retired { backend, existing_conversation });
+    }
+    if backend.hidden() {
+        return Err(RouteError::Hidden(backend));
+    }
+    if !switch.is_enabled_in(retired, backend) {
+        return Err(RouteError::Disabled { backend, existing_conversation });
+    }
+    Ok(())
+}
+
 /// A routing refusal. Each variant has a stable, machine-readable code that
 /// the desktop returns as `ApiError.code`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -741,6 +770,27 @@ pub fn audit_line(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn credential_entries_are_closed_for_switched_off_retired_and_fox() {
+        let on = BackendSwitch::from_env_value(None);
+        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+            assert_eq!(credential_entry_gate(backend, &on, false), Ok(()), "{backend:?} enabled by default");
+        }
+        let off = BackendSwitch::from_env_value(Some("0"));
+        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+            let refusal = credential_entry_gate(backend, &off, true).unwrap_err();
+            assert_eq!(refusal.code(), RouteError::CODE_DISABLED, "{backend:?} switched off: no credential copy");
+        }
+        let only_pi = BackendSwitch::from_env_value(Some("pi"));
+        assert_eq!(credential_entry_gate(AgentBackend::Pi, &only_pi, false), Ok(()));
+        assert_eq!(credential_entry_gate(AgentBackend::Codex, &only_pi, false).unwrap_err().code(), RouteError::CODE_DISABLED);
+        // A retired backend stays closed even when the switch names it.
+        let retired = [AgentBackend::Codex];
+        assert_eq!(credential_entry_gate_in(&retired, AgentBackend::Codex, &on, true).unwrap_err().code(), RouteError::CODE_RETIRED);
+        assert_eq!(credential_entry_gate(AgentBackend::Fox, &on, false).unwrap_err().code(), RouteError::CODE_INVALID);
+    }
+
     use super::*;
     use crate::legacy::{map_legacy, LegacyRecord};
 

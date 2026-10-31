@@ -1352,6 +1352,10 @@ export function useDesktopConversation(): DesktopConversationState {
     const cleanText = text.trim()
     if (!active || !cleanText) return false
     if (pendingRuntimeQuestion(active)?.runId !== parentRunId) return false
+    // Plan C3: an external Agent asked through the Fox `ask_user` tool. Its
+    // turn already ended (`awaiting_user`); the answer is the next turn of
+    // the same Agent session, sent like any message (the card closes on it).
+    if (conversationAgentBackend(active.conversation) !== 'fox') return send(cleanText)
     setError(null)
     const pendingRun = optimisticRun(active.conversation.id)
     const pendingMessageId = optimisticId('pending-message')
@@ -1421,7 +1425,7 @@ export function useDesktopConversation(): DesktopConversationState {
       await refreshList().catch(() => undefined)
       return false
     }
-  }, [detail, refreshList, refreshSelectedConversation])
+  }, [detail, refreshList, refreshSelectedConversation, send])
 
   const cancel = useCallback(async () => {
     const conversationId = activeConversationIdRef.current ?? detail?.conversation.id

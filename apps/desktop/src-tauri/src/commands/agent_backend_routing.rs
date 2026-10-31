@@ -600,6 +600,13 @@ pub fn agent_backend_preferences_save(state: State<'_, AppState>, request: Agent
 /// longer run this automatically or use a failed HTTP request as support proof.
 #[tauri::command]
 pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> Result<ApiResponse<Option<CodexResponsesProbe>>, ()> {
+    // AP-4: no provider key is sent on behalf of a Codex that may not run.
+    if let Err(refusal) = crate::external_backend::credential_gate(AgentBackend::Codex, false) {
+        return Ok(match refusal.error {
+            Some(error) => ApiResponse::failure(&error.code, error.message, error.retryable),
+            None => ApiResponse::failure("internal", "unexpected empty refusal", false),
+        });
+    }
     let Some(service) = crate::model_service::external_login(&state.database, AgentBackend::Codex) else {
         return Ok(ApiResponse::success(None));
     };

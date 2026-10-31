@@ -130,6 +130,8 @@ struct MockLauncher {
     key_reads: Arc<AtomicUsize>,
     fail_key_after_launch: bool,
     closed: Arc<AtomicUsize>,
+    /// L-1 / L-2: how long `launch` takes before the process starts.
+    launch_delay_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ExternalLauncher for MockLauncher {
@@ -149,9 +151,13 @@ impl ExternalLauncher for MockLauncher {
         let fail = self.fail;
         let mode = self.desired_mode(&request);
         let closed = Arc::clone(&self.closed);
+        let delay = self.launch_delay_ms.load(Ordering::SeqCst);
         self.modes.lock().unwrap().push(mode);
         Box::pin(async move {
             launches.fetch_add(1, Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
             if fail {
                 return Err(LaunchFailure::new("agent_backend_not_installed", "backend runtime is not installed").remedy("reinstall"));
             }
@@ -1025,4 +1031,137 @@ async fn native_mode_changes_switch_codex_live_and_restart_dsh_next_turn() {
     assert_eq!(launcher.launches.load(Ordering::SeqCst), 3, "dsh restarted for the new preset");
     assert!(sink.types("r-dsh-2").iter().any(|kind| kind == "agent_backend.permission_mode_restart"));
     runtime.shutdown().await;
+}
+
+
+async fn wait_count(counter: &AtomicUsize, wanted: usize) {
+    for _ in 0..200 {
+        if counter.load(Ordering::SeqCst) >= wanted {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("counter stayed at {}, wanted {wanted}", counter.load(Ordering::SeqCst));
+}
+
+/// L-1: revoking full access while the process is still starting. The
+/// revocation answers `LaunchAborted`; the process that came up in full
+/// access is stopped (its cleanup runs) before any prompt reaches it, and
+/// the next turn starts without full access.
+#[tokio::test(flavor = "multi_thread")]
+async fn l1_revoke_during_launch_never_prompts_a_full_access_process() {
+    if !node_available() {
+        return;
+    }
+    for backend in [AgentBackend::Deepseek, AgentBackend::Codex] {
+        let launcher = MockLauncher::default();
+        launcher.launch_delay_ms.store(400, Ordering::SeqCst);
+        let (runtime, sink) = new_runtime(launcher.clone());
+        let conversation = format!("l1-{}", backend.as_str());
+        let run = format!("{conversation}-run");
+        let request = turn(&conversation, &run, "simple", backend, None);
+        let launch = request.launch.clone();
+        runtime.start_turn(request).unwrap();
+        sink.wait_for(&run, "agent_backend.launching").await;
+        launcher.revoked.store(true, Ordering::SeqCst);
+        assert_eq!(runtime.revoke_full_access(&launch).await, RevokeOutcome::LaunchAborted, "{backend:?}");
+        let terminal = sink.terminal(&run).await;
+        assert_eq!(terminal["type"], "run.failed", "{backend:?}: {terminal}");
+        assert_eq!(terminal["code"], "agent_backend_full_access_revoked");
+        assert!(sink.text(&run).is_empty(), "{backend:?}: a prompt reached the full-access process");
+        assert!(!sink.types(&run).contains(&"agent_backend.session".to_owned()), "never installed");
+        wait_count(&launcher.closed, 1).await;
+        assert!(!runtime.session_info(&conversation).unwrap().live);
+        launcher.launch_delay_ms.store(0, Ordering::SeqCst);
+        let next = format!("{conversation}-next");
+        runtime.start_turn(turn(&conversation, &next, "simple", backend, None)).unwrap();
+        assert_eq!(sink.terminal(&next).await["type"], "run.completed");
+        assert_eq!(*launcher.modes.lock().unwrap().last().unwrap(), PermissionMode::Standard, "the next launch is restricted");
+        runtime.shutdown().await;
+    }
+}
+
+/// L-2 (a): the conversation is closed while its process is starting. The
+/// new process is stopped with its own cleanup, nothing stays behind the
+/// removed session, and the turn ends interrupted.
+#[tokio::test(flavor = "multi_thread")]
+async fn l2_close_during_launch_stops_the_new_process() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    launcher.launch_delay_ms.store(400, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher.clone());
+    runtime.start_turn(turn("l2", "l2-run", "simple", AgentBackend::Codex, None)).unwrap();
+    sink.wait_for("l2-run", "agent_backend.launching").await;
+    assert!(runtime.close_conversation("l2", "deleted").await.is_none(), "nothing was running yet");
+    let terminal = sink.terminal("l2-run").await;
+    assert_eq!(terminal["type"], "run.interrupted", "{terminal}");
+    wait_count(&launcher.closed, 1).await;
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+    assert!(runtime.session_info("l2").is_none(), "the closed session is not resurrected");
+    assert!(runtime.active_runs().is_empty());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(launcher.closed.load(Ordering::SeqCst), 1, "exactly one cleanup");
+    assert!(sink.text("l2-run").is_empty());
+    runtime.shutdown().await;
+}
+
+/// L-2 (b): the cancel timer ends a turn whose launch is still pending and a
+/// new turn starts at once. One launch per session at a time: the new turn
+/// waits for the pending launch and reuses its process instead of starting a
+/// second one that would overwrite (orphan) the first.
+#[tokio::test(flavor = "multi_thread")]
+async fn l2_a_new_turn_waits_for_the_pending_launch_instead_of_racing_it() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    launcher.launch_delay_ms.store(1500, Ordering::SeqCst);
+    let sink = Sink::default();
+    let runtime = ExternalRuntime::with_cancel_timeout(sink.clone(), launcher.clone(), tokio::runtime::Handle::current(), Duration::from_millis(200));
+    runtime.start_turn(turn("l2b", "first", "simple", AgentBackend::Pi, None)).unwrap();
+    sink.wait_for("first", "agent_backend.launching").await;
+    assert!(matches!(runtime.cancel("first"), CancelOutcome::Requested { .. }));
+    assert_eq!(sink.terminal("first").await["type"], "run.cancelled");
+    runtime.start_turn(turn("l2b", "second", "simple", AgentBackend::Pi, None)).unwrap();
+    assert_eq!(sink.terminal("second").await["type"], "run.completed");
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 1, "no second, racing launch");
+    assert_eq!(launcher.closed.load(Ordering::SeqCst), 0, "the only process is the live one");
+    assert!(runtime.session_info("l2b").unwrap().live);
+    runtime.shutdown().await;
+    wait_count(&launcher.closed, 1).await;
+}
+
+/// L-3: stopping a backend never parks a runtime worker. On a single-thread
+/// runtime a ticker keeps running while a process that ignores the end of
+/// its stdin is stopped (grace period, kill, tree confirmation).
+#[tokio::test(flavor = "current_thread")]
+async fn l3_stop_does_not_block_the_runtime() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher.clone());
+    runtime.start_turn(turn("l3", "l3-run", "hang", AgentBackend::Pi, None)).unwrap();
+    sink.wait_for("l3-run", "message.delta").await;
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticker = {
+        let ticks = Arc::clone(&ticks);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                ticks.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    let started = std::time::Instant::now();
+    let report = runtime.close_conversation("l3", "test stop").await.expect("a live process");
+    let elapsed = started.elapsed();
+    ticker.abort();
+    assert!(report.confirmation.is_confirmed(), "{:?}", report.confirmation);
+    let expected = (elapsed.as_millis() / 20) as usize;
+    assert!(ticks.load(Ordering::SeqCst) * 3 >= expected, "runtime starved during stop: {} ticks in {elapsed:?}", ticks.load(Ordering::SeqCst));
 }

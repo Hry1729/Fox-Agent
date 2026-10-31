@@ -216,6 +216,47 @@ impl From<crate::external_home::LaunchError> for LaunchFailure {
     }
 }
 
+/// Plan C4: the start / failure codes of an external Agent. Each one is a
+/// direct error with its own remedy (install, log in, upgrade, retry); none
+/// falls back to PiNative or another backend. The desktop maps them to an
+/// actionable hint (`agent-backend-failure.ts`).
+pub mod failure_codes {
+    /// The Agent's program is not in the Fox-managed runtime (install).
+    pub const NOT_INSTALLED: &str = "agent_backend_not_installed";
+    /// No login in the project's private HOME (log in).
+    pub const MISSING_CREDENTIALS: &str = crate::external_launch::MISSING_CREDENTIALS;
+    /// The adapter answered with another name / version than Fox pins (upgrade).
+    pub const VERSION_MISMATCH: &str = "agent_backend_version_mismatch";
+    /// The Agent speaks another ACP protocol version (upgrade).
+    pub const PROTOCOL_MISMATCH: &str = "agent_backend_protocol_mismatch";
+    /// `initialize` failed while the process kept running (upgrade / reinstall).
+    pub const PROTOCOL_ERROR: &str = "agent_backend_protocol_error";
+    /// No `initialize` answer within [`crate::acp::INITIALIZE_TIMEOUT`] (retry).
+    pub const START_TIMEOUT: &str = "agent_backend_start_timeout";
+    /// The process could not be started or put in its Job (reinstall).
+    pub const SPAWN_FAILED: &str = "agent_backend_spawn_failed";
+    /// The process exited before `initialize` (login / reinstall).
+    pub const EXITED_ON_START: &str = "agent_backend_exited_on_start";
+    /// The process died during a turn (retry).
+    pub const EXITED: &str = "agent_backend_exited";
+}
+
+fn initialize_failure_code(code: crate::acp::InitializeFailureCode) -> (&'static str, String) {
+    use crate::acp::InitializeFailureCode as Code;
+    match code {
+        Code::SpawnFailed => (failure_codes::SPAWN_FAILED, "外部 Agent 进程无法启动：请重新安装或修复 Fox 外部运行时后重试".to_owned()),
+        Code::BackendExitedBeforeInitialize => (
+            failure_codes::EXITED_ON_START,
+            "外部 Agent 启动后立即退出：先查看诊断里的后端输出；多数是未登录或运行时损坏，请在登录卡片完成登录，或重新安装 Fox 外部运行时".to_owned(),
+        ),
+        Code::InitializeTimeout => (
+            failure_codes::START_TIMEOUT,
+            format!("外部 Agent 在 {} 秒内没有完成启动握手：请重试；反复出现时检查安全软件是否拦截，或重新安装 Fox 外部运行时", crate::acp::INITIALIZE_TIMEOUT.as_secs()),
+        ),
+        Code::InitializeFailed => (failure_codes::PROTOCOL_ERROR, "外部 Agent 拒绝了 Fox 的 ACP 握手：请把 Fox 外部运行时升级到与本版 Fox 配套的版本".to_owned()),
+    }
+}
+
 impl From<crate::acp::InitializeFailure> for LaunchFailure {
     fn from(failure: crate::acp::InitializeFailure) -> Self {
         let mut message = failure.message.clone();
@@ -224,7 +265,9 @@ impl From<crate::acp::InitializeFailure> for LaunchFailure {
         }
         // Already redacted once (InitializeFailure::attach_tails); not again.
         let diagnostic = diagnostic_value(&crate::acp::limit_failure_tail(&failure.stderr_tail), "initialize");
-        let mut launch = Self::new(failure.code.as_str(), message)
+        let (code, remedy) = initialize_failure_code(failure.code);
+        let mut launch = Self::new(code, message)
+            .remedy(remedy)
             .detail(serde_json::to_value(&failure).unwrap_or(Value::Null))
             .with_rpc_error_data(failure.rpc_error_data.as_deref());
         launch.diagnostic = diagnostic;
@@ -947,7 +990,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 if let Some(callback) = on_closed {
                     callback();
                 }
-                return Err(LaunchFailure::new("initialize_failed", format!("backend did not report initialize first: {other:?}"))
+                return Err(LaunchFailure::new(failure_codes::PROTOCOL_ERROR, format!("backend did not report initialize first: {other:?}"))
+                    .remedy("请把 Fox 外部运行时升级到与本版 Fox 配套的版本")
                     .with_stderr_tail(&tail, "session_failed"));
             }
         };
@@ -1464,11 +1508,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     } else {
                         format!("外部后端进程意外退出；后端输出（已脱敏）：{}", tail_chars(&tail, 600))
                     };
+                    let message = format!("{message}（请重新发送；反复出现时查看诊断里的后端输出，或重新安装 Fox 外部运行时）");
                     self.finish_turn(
                         session,
                         &mut state,
                         &run_id,
-                        TurnTerminal::Failed { code: "agent_backend_exited".into(), message },
+                        TurnTerminal::Failed { code: failure_codes::EXITED.into(), message },
                         with_diagnostics(
                             json!({ "outcome": "unknown", "promptError": prompt_error }),
                             stderr_diagnostic(&tail, "backend_exited"),

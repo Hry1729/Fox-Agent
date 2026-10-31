@@ -8825,6 +8825,59 @@ async fn execute_knowledge_tool_request(
     )
 }
 
+/// Plan C3: one Fox tool call from an external Agent (pi / Codex / dsh) through
+/// the Fox tool MCP bridge. Same entry as a PiNative call: the conversation's
+/// expert tool scope, the lifecycle `before_tool` hooks, then the tool's own
+/// Host execution (`present_files` records the delivery card; the knowledge
+/// tools read the conversation's bound knowledge bases with the same binding
+/// checks). The approval-engine decision is made by the caller
+/// (`external_tools`), which also bounds the result to 64 KiB. A hook that
+/// asks for approval is refused: external runs have no declarative-approval
+/// path for Host tools, and Fox never runs such a call unasked.
+pub(crate) async fn execute_external_mcp_tool(
+    database: &Database,
+    yuxi_client: &YuxiClient,
+    local_knowledge: &LocalKnowledgeStore,
+    conversation_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    tool: &str,
+    input: &Value,
+) -> Result<Value, String> {
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
+    let hook_decision = crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    if hook_decision.requires_approval {
+        return Err(format!(
+            "[hook.approval_unsupported] 生命周期规则要求对 {tool} 逐次审批；外部 Agent 的 Fox 工具调用没有这条审批通道，已拒绝（未执行）"
+        ));
+    }
+    match tool {
+        "present_files" => {
+            let context = database
+                .external_conversation_context(conversation_id)?
+                .ok_or_else(|| "[tool.permission_denied] conversation not found".to_owned())?;
+            present_files::execute(database, conversation_id, run_id, tool_call_id, &context.project_root, input)
+        }
+        "list_knowledge_bases" | "search_knowledge" | "read_knowledge_document" => {
+            let bindings = database.conversation_knowledge_reference_bindings(conversation_id)?;
+            let service = database.get_yuxi_service()?;
+            let control = crate::local_knowledge_vector::RetrievalControl::new(None, None);
+            let result = execute_bound_knowledge_tool(service.as_ref(), yuxi_client, local_knowledge, &bindings, tool, input, control).await?;
+            // The model-facing text of the bounded result (the bridge caps it
+            // again at 64 KiB, the one ceiling every tool shares).
+            Ok(result
+                .pointer("/content/0/text")
+                .and_then(Value::as_str)
+                .map(|text| Value::String(text.to_owned()))
+                .unwrap_or(result))
+        }
+        other => Err(format!("[tool.invalid_input] {other} is not a Fox bridge tool")),
+    }
+}
+
 /// KB-1: the cancellation probe for one knowledge tool call. A Run that has no
 /// cancellation scope (already retired) is treated as cancelled.
 fn knowledge_retrieval_control(

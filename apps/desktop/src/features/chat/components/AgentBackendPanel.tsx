@@ -94,6 +94,7 @@ export function AgentBackendPanel({
   draftProjectRoot = null,
   draftFullAccess = false,
   refusal = null,
+  failure = null,
   sessionTick = 0,
 }: {
   client: AgentBackendPanelClient
@@ -108,6 +109,8 @@ export function AgentBackendPanel({
   /** Legacy Fox full-access preference; kept only for older Hosts. */
   draftFullAccess?: boolean
   refusal?: string | null
+  /** Plan C4: the open external conversation's last failure and its action. */
+  failure?: import('@/features/conversations/model/agent-backend-failure').AgentBackendFailureHint | null
   /** Bumped by the caller to refresh everything (e.g. after a run). */
   sessionTick?: number
 }) {
@@ -260,6 +263,7 @@ export function AgentBackendPanel({
       draftBackend={draftBackend}
       draftFullAccess={draftFullAccess}
       refusal={refusal}
+      failure={lockedBackend ? failure : null}
       capabilities={capabilities}
       permission={permission}
       onRevokeFullAccess={handleRevoke}

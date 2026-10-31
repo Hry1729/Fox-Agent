@@ -138,6 +138,9 @@ pub struct ExternalBackendHost {
     app: AppHandle,
     /// Fox data root, named in `run.create_failed` messages.
     data_dir: std::path::PathBuf,
+    /// Plan C3: why the Fox tool MCP bridge could not start (then no
+    /// external turn starts: an Agent never runs without the Fox tools).
+    mcp_error: Option<String>,
 }
 
 fn failure<T: serde::Serialize>(code: &str, message: impl Into<String>, retryable: bool) -> ApiResponse<T> {
@@ -203,8 +206,20 @@ impl ExternalBackendHost {
     pub fn new(app: AppHandle, database: Database, fox_data: &std::path::Path) -> Self {
         let config = HostLaunchConfig::from_env(fox_data);
         let sink = DesktopSink { app: app.clone(), database: database.clone(), event_lock: Arc::new(Mutex::new(())) };
-        let runtime = ExternalRuntime::new(sink, HostLauncher::new(config), tauri::async_runtime::handle().inner().clone());
-        let host = Self { runtime, database, app, data_dir: fox_data.to_path_buf() };
+        let handle = tauri::async_runtime::handle().inner().clone();
+        // Plan C3: the Fox tool MCP bridge (loopback, per-launch tokens).
+        let runtime_slot: Arc<std::sync::OnceLock<DesktopRuntime>> = Arc::default();
+        let tools = Arc::new(crate::external_tools::DesktopFoxTools::new(app.clone(), Arc::clone(&runtime_slot)));
+        let (launcher, mcp_error) = match fox_agent_backend::fox_mcp::McpBridge::start(tools, &handle) {
+            Ok(bridge) => (HostLauncher::with_mcp(config, bridge), None),
+            Err(error) => {
+                eprintln!("fox.external mcp_bridge_failed={error}");
+                (HostLauncher::new(config), Some(error.to_string()))
+            }
+        };
+        let runtime = ExternalRuntime::new(sink, launcher, handle);
+        let _ = runtime_slot.set(runtime.clone());
+        let host = Self { runtime, database, app, data_dir: fox_data.to_path_buf(), mcp_error };
         host.interrupt_runs_left_active();
         host
     }
@@ -227,6 +242,9 @@ impl ExternalBackendHost {
     pub fn start_run(&self, request: &StartRunRequest, backend: AgentBackend) -> ApiResponse<StartRunResult> {
         if !request.attachment_ids.is_empty() {
             return failure("agent_backend_attachments_unsupported", "外部 Agent 后端暂不支持附件，请只发送文字", false);
+        }
+        if let Some(error) = &self.mcp_error {
+            return failure("agent_backend_fox_tools_unavailable", format!("Fox 工具桥（MCP）没有启动，外部 Agent 不会在缺少 Fox 工具的情况下运行：{error}（请重启 Fox）"), true);
         }
         // Second check right before anything is launched (plan: re-verify the
         // frozen backend before prepare_launch). A failed read refuses.
@@ -528,12 +546,18 @@ impl ExternalBackendHost {
         })
     }
 
-    /// An existing conversation's request, else a draft's.
+    /// An existing conversation's request, else a draft's. AP-4: only for a
+    /// backend that may run ([`fox_agent_backend::host_routing::credential_entry_gate`]):
+    /// a retired, hidden or switched-off backend gets no login copied into
+    /// its private HOME, no model key written, no probe and no folder.
     fn target_request(&self, target: &AgentBackendTarget) -> Result<LaunchRequest, ApiResponse<()>> {
-        match target.conversation_id.as_deref().filter(|id| !id.is_empty()) {
+        let existing = target.conversation_id.as_deref().is_some_and(|id| !id.is_empty());
+        let request = match target.conversation_id.as_deref().filter(|id| !id.is_empty()) {
             Some(id) => self.planned_request(id),
             None => self.draft_request(target),
-        }
+        }?;
+        credential_gate(request.backend, existing)?;
+        Ok(request)
     }
 
     /// Login probe (UX batch ①): names only, never a value. Works before
@@ -715,12 +739,22 @@ impl ExternalBackendHost {
             RevokeOutcome::RestartWithoutFullAccess { confirmed } => ("restart_without_full_access", confirmed, None),
             RevokeOutcome::SwitchedLive => ("switched_live", true, None),
             RevokeOutcome::SwitchFailed(message) => ("switch_failed", true, Some(message)),
+            // L-1: revoked while the process was starting; a full-access
+            // process is stopped before any prompt reaches it.
+            RevokeOutcome::LaunchAborted => ("launch_aborted", true, None),
         };
         let backend = self.database.conversation_agent_backend(conversation_id).ok().flatten().unwrap_or_default();
         let details = json!({ "outcome": label, "stopConfirmed": confirmed, "to": restricted, "error": error });
         let _ = self.database.append_agent_backend_audit(Some(conversation_id), &backend, "agent_backend.full_access_revoked", &details);
         ApiResponse::success(details)
     }
+}
+
+/// AP-4: refuse a credential / private-HOME entry for a backend that may not
+/// run, with the routing refusal's own code (`agent_backend_disabled`, ...).
+pub(crate) fn credential_gate(backend: AgentBackend, existing_conversation: bool) -> Result<(), ApiResponse<()>> {
+    fox_agent_backend::host_routing::credential_entry_gate(backend, &fox_agent_backend::host_routing::BackendSwitch::from_env(), existing_conversation)
+        .map_err(|refusal| failure(refusal.code(), refusal.message(), refusal.retryable()))
 }
 
 #[cfg(test)]

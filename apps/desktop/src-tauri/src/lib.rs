@@ -14,6 +14,7 @@ mod expert_workflows;
 mod external_backend;
 mod external_model;
 mod external_policy;
+mod external_tools;
 mod kernel;
 mod kernel_compaction;
 mod kernel_reconciliation;

@@ -725,13 +725,30 @@ impl HostLauncher {
     /// Check the pinned adapter answered `initialize` (plan 7.3). A mismatch
     /// refuses the launch.
     fn check_initialize(backend: AgentBackend, response: &serde_json::Value) -> Result<(), LaunchFailure> {
+        // Plan C4: a protocol mismatch is its own code, before the pin check.
+        let protocol = response.get("protocolVersion").and_then(serde_json::Value::as_u64);
+        if protocol != Some(1) {
+            return Err(LaunchFailure::new(crate::external::failure_codes::PROTOCOL_MISMATCH, format!("外部 Agent 使用 ACP 协议版本 {protocol:?}，本版 Fox 只支持版本 1"))
+                .remedy("把 Fox 外部运行时升级到与本版 Fox 配套的版本")
+                .detail(serde_json::json!({ "protocolVersion": response.get("protocolVersion"), "agentInfo": response.get("agentInfo") })));
+        }
         let result = match backend {
             AgentBackend::Pi => crate::backends::pi::check_initialize(response),
             AgentBackend::Codex => crate::backends::codex::check_initialize(response).map_err(|error| error.to_string()),
             AgentBackend::Deepseek => crate::backends::deepseek::check_initialize(response).map_err(|error| error.to_string()),
             AgentBackend::Fox => Ok(()),
         };
-        result.map_err(|error| LaunchFailure::new("agent_backend_version_mismatch", error))
+        let pinned = match backend {
+            AgentBackend::Pi => format!("pi-acp {}", crate::launch::PI_ACP_VERSION),
+            AgentBackend::Codex => format!("codex-acp {}", crate::launch::CODEX_ACP_VERSION),
+            AgentBackend::Deepseek => format!("dsh {}", crate::launch::DSH_VERSION),
+            AgentBackend::Fox => String::new(),
+        };
+        result.map_err(|error| {
+            LaunchFailure::new(crate::external::failure_codes::VERSION_MISMATCH, error)
+                .remedy(format!("升级或重新安装 Fox 外部运行时（本版 Fox 锁定 {pinned}）"))
+                .detail(serde_json::json!({ "pinned": pinned, "agentInfo": response.get("agentInfo") }))
+        })
     }
 
     async fn launch_now(config: HostLaunchConfig, bridge: Option<crate::fox_mcp::McpBridge>, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
@@ -1036,6 +1053,67 @@ mod tests {
         assert!(!config.pi_turn_adapter_verified(), "the fake runtime does not carry the pinned adaptation");
         assert_eq!(config.pi_preflight(launch, || true), Ok(()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    struct NoTools;
+    impl crate::fox_mcp::FoxToolHost for NoTools {
+        fn call_tool(&self, _context: crate::fox_mcp::ToolCallContext, _tool: String, _arguments: serde_json::Value) -> BoxFuture<'static, Result<serde_json::Value, crate::fox_mcp::ToolError>> {
+            Box::pin(async { Err(crate::fox_mcp::ToolError::new("test", "unused")) })
+        }
+    }
+
+    /// Plan C3: what each Agent gets for the Fox tools, from the real launcher.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn launches_inject_the_fox_tool_bridge_per_agent_and_revoke_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let config = config(root);
+        let node = root.join("runtime/node/bin/node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, "").unwrap();
+        let bridge = crate::fox_mcp::McpBridge::start(std::sync::Arc::new(NoTools), &tokio::runtime::Handle::current()).unwrap();
+        // Codex / dsh: one ACP stdio server (the relay, run by the runtime's Node).
+        for backend in [AgentBackend::Codex, AgentBackend::Deepseek] {
+            let mut spec = crate::launch::launch_spec(backend).unwrap();
+            let before = spec.session_env.clone();
+            let launch = HostLauncher::prepare_mcp(&config, &bridge, &request(backend, root), &mut spec).unwrap();
+            let server = launch.stdio.clone().expect("stdio server");
+            assert_eq!(server.name, crate::fox_mcp::SERVER_NAME);
+            assert_eq!(server.command, node);
+            assert!(Path::new(&server.args[0]).is_file(), "relay written to Fox state");
+            assert!(server.args[0].starts_with(config.state_root.to_string_lossy().as_ref()));
+            assert_eq!(spec.session_env, before, "nothing leaks into the Agent's own environment");
+            assert_eq!(bridge.live_tokens(), 1);
+            drop(launch);
+            assert_eq!(bridge.live_tokens(), 0, "a launch that did not start revokes its token");
+        }
+        // pi: refused while the installed gate cannot load the extension.
+        let gate = root.join("runtime/pi-gate/pi-gated.sh");
+        std::fs::create_dir_all(gate.parent().unwrap()).unwrap();
+        std::fs::write(&gate, "#!/bin/sh\nexec pi -e gate.ts \"$@\"\n").unwrap();
+        let mut spec = crate::launch::launch_spec(AgentBackend::Pi).unwrap();
+        let failure = HostLauncher::prepare_mcp(&config, &bridge, &request(AgentBackend::Pi, root), &mut spec).err().expect("old gate refused");
+        assert_eq!(failure.code, "agent_backend_fox_tools_unsupported");
+        assert_eq!(bridge.live_tokens(), 0);
+        // pi with the C3 gate: environment for the gated pi, no ACP server.
+        std::fs::write(&gate, include_str!("../fixtures/pi/pi-gated.sh")).unwrap();
+        let launch = HostLauncher::prepare_mcp(&config, &bridge, &request(AgentBackend::Pi, root), &mut spec).unwrap();
+        assert!(launch.stdio.is_none());
+        let env: std::collections::HashMap<_, _> = spec.session_env.iter().cloned().collect();
+        assert!(Path::new(&env[crate::fox_mcp::PI_EXTENSION_ENV]).is_file(), "extension written to Fox state");
+        assert_eq!(env[crate::fox_mcp::ENDPOINT_ENV], bridge.endpoint());
+        assert_eq!(env[crate::fox_mcp::TOKEN_ENV].len(), 64);
+        let on_closed = launch.guard.into_on_closed();
+        assert_eq!(bridge.live_tokens(), 1, "a started launch keeps its token");
+        on_closed();
+        assert_eq!(bridge.live_tokens(), 0, "revoked when the process stops");
+        // No Node: refused, never launched without the tools.
+        std::fs::remove_file(&node).unwrap();
+        let mut config_without_node = config.clone();
+        config_without_node.os = HostOs::Windows;
+        let mut spec = crate::launch::launch_spec(AgentBackend::Codex).unwrap();
+        let failure = HostLauncher::prepare_mcp(&config_without_node, &bridge, &request(AgentBackend::Codex, root), &mut spec).err().expect("no node");
+        assert_eq!(failure.code, "agent_backend_fox_tools_unavailable");
     }
 
     #[test]

@@ -23,7 +23,23 @@ import {
   type AgentBackendId,
   type AgentBackendStatus,
 } from '@/features/conversations/model/agent-backend'
+import type { AgentBackendFailureHint } from '@/features/conversations/model/agent-backend-failure'
 import './agent-backend-bar.css'
+
+/**
+ * Plan C4: why the last turn of this external Agent failed and what to do
+ * (install / log in / upgrade / retry). Fox never falls back to another
+ * driver; this is the whole answer.
+ */
+export function AgentBackendFailureNotice({ failure }: { failure: AgentBackendFailureHint }) {
+  return (
+    <div className="fox-agent-backend-failure" role="alert" data-action={failure.action} data-code={failure.code}>
+      <strong>{failure.label}</strong>
+      <span>{failure.detail}</span>
+      <code>{failure.code}</code>
+    </div>
+  )
+}
 
 /** The four effective capability dimensions (external backend wiring batch). */
 function CapabilityChips({ capabilities }: { capabilities: AgentBackendCapabilities | null }) {
@@ -59,7 +75,7 @@ function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; o
   )
 }
 
-export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker = null, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
+export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, failure = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker = null, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
@@ -73,6 +89,8 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
    * so a refused send never produces two messages.
    */
   refusal?: string | null
+  /** Plan C4: the last turn's failure of the open external conversation, with its action. */
+  failure?: AgentBackendFailureHint | null
   /** Effective capabilities of the shown external backend; null for Fox. */
   capabilities?: AgentBackendCapabilities | null
   /** Permission mode / lock / FORBIDDEN from the Host. */
@@ -109,6 +127,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
         {access === 'runnable' && (permissionPicker ?? <NoFoxLayerNote />)}
         {refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)}
         {access === 'runnable' && <CapabilityChips capabilities={capabilities} />}
+        {failure && <AgentBackendFailureNotice failure={failure} />}
         {access === 'runnable' && credentialCard}
         {receiptNotice}
       </div>
