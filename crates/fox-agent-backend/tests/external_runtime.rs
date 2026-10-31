@@ -595,14 +595,17 @@ async fn deepseek_permission_requests_are_rejected_by_the_host_never_shown() {
     if !node_available() {
         return;
     }
-    // Without full access: the default preset (approval never). In full access dsh's
-    // danger-full-access would show the card instead.
+    // Without full access, in a preset with approval never (仅可查看
+    // read-only). dsh's default 工作区完全修改 (workspace-write, approval ask)
+    // and its danger-full-access show the card instead.
     let launcher = MockLauncher::default();
     launcher.revoked.store(true, Ordering::SeqCst);
     let (runtime, sink) = new_runtime(launcher);
-    runtime.start_turn(turn("c9", "r12", "hello", AgentBackend::Deepseek, None)).unwrap();
+    let mut request = turn("c9", "r12", "hello", AgentBackend::Deepseek, None);
+    request.launch.native_permission = Some("read-only".into());
+    runtime.start_turn(request).unwrap();
     let terminal = sink.terminal("r12").await;
-    assert!(sink.approvals().is_empty(), "no approval card for DeepSeek in its default preset (approval never)");
+    assert!(sink.approvals().is_empty(), "no approval card for DeepSeek in a preset with approval never");
     assert!(sink.types("r12").iter().any(|kind| kind == "agent_backend.permission_auto_answered"));
     // Fail-closed: the native one-shot reject option was written.
     assert!(sink.text("r12").ends_with("permission:reject"));

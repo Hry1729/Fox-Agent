@@ -1171,9 +1171,14 @@ mod tests {
         let patch = crate::backends::deepseek::default_patch_path(&config.runtime_root, &patch_policy);
         std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
         std::fs::write(&patch, crate::backends::deepseek::policy_patch(&patch_policy).patch_yaml).unwrap();
-        let (spec, _) = config.launch_spec(AgentBackend::Deepseek, &root).unwrap();
-        assert!(spec.args.iter().any(|arg| Path::new(arg) == patch));
+        // The runtime package's own patch is the old workspace-write-never
+        // preset (no longer listed, still launched where it is stored).
+        let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, "workspace-write-never", &root).unwrap();
+        assert!(spec.args.iter().any(|arg| Path::new(arg) == patch), "{:?}", spec.args);
         assert_eq!(Path::new(&spec.program), dsh.join("dsh"));
+        // The default is dsh's own workspace-write (approval ask).
+        let (spec, _) = config.launch_spec(AgentBackend::Deepseek, &root).unwrap();
+        assert!(spec.args.iter().any(|arg| arg.ends_with("workspace-write-ask.yml")), "{:?}", spec.args);
         // The ask preset is generated into Fox state when the runtime
         // package does not carry that variant.
         let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, "workspace-write", &root).unwrap();
