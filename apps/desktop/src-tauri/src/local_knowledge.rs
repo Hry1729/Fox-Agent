@@ -2013,7 +2013,7 @@ impl LocalKnowledgeStore {
                 let request = crate::local_knowledge_vector::KnowledgeRetrievalRequest {
                     knowledge_base_id: base.id.clone(),
                     query: trimmed.to_owned(),
-                    mode: Some(mode),
+                    mode: Some(mode.clone()),
                     // One extra hit tells whether more matches exist than were returned.
                     limit: Some((result_limit + 1).min(MAX_LOCAL_SEARCH_RESULTS)),
                 };
@@ -2025,6 +2025,7 @@ impl LocalKnowledgeStore {
                             &base.id,
                             trimmed,
                             &retrieved,
+                            &mode,
                             result_limit,
                             requested_max_chars,
                         )
@@ -2051,6 +2052,7 @@ impl LocalKnowledgeStore {
         knowledge_base_id: &str,
         query: &str,
         retrieved: &Value,
+        requested_mode: &str,
         result_limit: usize,
         requested_max_chars: Option<usize>,
     ) -> Result<Value, LocalKnowledgeError> {
@@ -2069,6 +2071,12 @@ impl LocalKnowledgeStore {
             .filter(|mode| matches!(*mode, "vector" | "hybrid"))
             .ok_or_else(|| LocalKnowledgeError::invalid("retrieval result has no vector mode"))?
             .to_owned();
+        // 返回的 mode 必须等于本次请求的 mode，不能只接受「是向量或混合」。
+        if mode != requested_mode {
+            return Err(LocalKnowledgeError::invalid(format!(
+                "retrieval returned mode {mode} but {requested_mode} was requested"
+            )));
+        }
         let hits = retrieved
             .get("items")
             .and_then(Value::as_array)
@@ -5598,6 +5606,39 @@ mod agent_search_tests {
                 Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
             })
             .unwrap();
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb13_mapping_refuses_a_retrieval_whose_mode_differs_from_the_request() {
+        let (store, root) = temp_store("kb13");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "模式", "mode.md", &["模式必须一致"]);
+        let error = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "模式",
+                None,
+                None,
+                |request| {
+                    assert_eq!(request.mode.as_deref(), Some("hybrid"));
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids,
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "local_knowledge.invalid_request");
+        let message = error.to_string();
+        assert!(
+            message.contains("retrieval returned mode vector but hybrid was requested"),
+            "{message}"
+        );
+        assert!(message.contains("不会改用关键词检索"), "{message}");
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
