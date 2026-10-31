@@ -952,7 +952,10 @@ fn directory_change(words: &[String], cwd: &Path, project_root: Option<&Path>, h
         if word == "-" {
             return Some(PathBuf::from("/"));
         }
-        if is_windows_switch(word) || lower.starts_with('-') {
+        // `cd /d X` (cmd) skips the switch; a lone `/d` with nothing after it
+        // is an MSYS drive path in Git Bash (`cd /d` = `D:\`), so it is the target.
+        let more = words[index + 1..].iter().any(|next| !is_windows_switch(next) && !next.starts_with('-'));
+        if (is_windows_switch(word) && more) || lower.starts_with('-') {
             index += 1;
             continue;
         }
@@ -1359,7 +1362,11 @@ fn dangerous_delete_target(target: &str, cwd: &Path, project_root: Option<&Path>
             return Some(format!("禁止{what}项目根目录"));
         }
     }
-    if is_system_directory(&resolved) {
+    // A project that itself lives under a system directory (`/usr/local/src/x`,
+    // `C:\ProgramData\...\proj`) keeps deleting its own contents normally; the
+    // project root itself is already covered above.
+    let inside_project = project_root.is_some_and(|root| is_within(&resolved, root));
+    if !inside_project && is_system_directory(&resolved) {
         return Some("禁止删除系统目录".into());
     }
     None
@@ -1674,6 +1681,7 @@ mod tests {
             "cd .. && rm -rf 测试项目",
             r"cd /d D:\fox-test && rd /s /q 测试项目",
             "cd - && rm -rf .",
+            "cd /d && rm -rf fox-test",
             r"rd /s /q C:\Windows",
             r#"rd /s /q "C:\Program Files""#,
             r"Remove-Item -Recurse C:\Users\fox",
@@ -1738,5 +1746,22 @@ mod tests {
         assert!(!decision.findings.iter().any(|finding| finding == "builtin_block"));
         assert_eq!(decision.class, ToolClass::Command);
         assert_eq!(decision.forcing_rule.as_ref().map(|rule| rule.id.as_str()), Some("b"));
+    }
+
+    /// A project under a system directory still deletes its own contents
+    /// (not a block); deleting the project root itself stays blocked.
+    #[test]
+    fn system_directory_block_does_not_reach_into_the_project() {
+        let project = PathBuf::from("/usr/local/src/proj");
+        let home_dir = posix_home();
+        let inside = decide_at(&project, &home_dir, "rm -rf build", AccessMode::FullAccess);
+        assert!(!inside.is_block(), "{:?}", inside.verdict);
+        assert_eq!(verdict(&inside), "allow");
+        assert_blocked_at(&project, &home_dir, "rm -rf /usr/local/src/proj");
+        assert_blocked_at(&project, &home_dir, "rm -rf /usr/lib");
+        let win = PathBuf::from("C:/ProgramData/Work/proj");
+        let inside = decide_at(&win, &win_home(), r"rd /s /q build", AccessMode::FullAccess);
+        assert!(!inside.is_block(), "{:?}", inside.verdict);
+        assert_blocked_at(&win, &win_home(), r"rd /s /q C:\ProgramData\Microsoft");
     }
 }
