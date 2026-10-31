@@ -191,9 +191,9 @@ impl HostLaunchConfig {
         policy
     }
 
-    /// Fox adds no outer layer around an external backend. The returned
-    /// value means "no Fox sandbox"; it must never be used to replace the
-    /// Agent's native permission mode.
+    /// Fox adds no outer layer around an external backend, so a launch
+    /// records [`PermissionMode::FullAccess`]: Fox itself restricts nothing.
+    /// It must never be used to replace the Agent's native permission mode.
     ///
     /// `full_access_granted` and the engineering switch are retained in the
     /// persisted data for compatibility, but they no longer decide whether
@@ -249,21 +249,21 @@ impl HostLaunchConfig {
         self.runtime_root.join("pi-gate").join(if self.os == HostOs::Windows { "pi-gated.cmd" } else { "pi-gated.sh" })
     }
 
-    /// The launch spec for `backend` in `mode`, always an installed program
-    /// ([`Self::managed_program`]); a backend that is not installed is refused
-    /// (`agent_backend_not_installed`) in every mode. Production never
-    /// launches through `npx`.
-    pub fn launch_spec(&self, backend: AgentBackend, mode: PermissionMode, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
+    /// The launch spec for `backend` in the Agent's default native mode,
+    /// always an installed program ([`Self::managed_program`]); a backend that
+    /// is not installed is refused (`agent_backend_not_installed`). Production
+    /// never launches through `npx`.
+    pub fn launch_spec(&self, backend: AgentBackend, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
         let native = crate::native_permission::effective_mode(backend, None, false, &Default::default());
-        self.launch_spec_with(backend, mode, native, project_root)
+        self.launch_spec_with(backend, native, project_root)
     }
 
     /// [`Self::launch_spec`] in the Agent's own permission mode `native`
-    /// ([`crate::native_permission`], already normalised against `mode`):
+    /// ([`crate::native_permission`]):
     /// Codex starts in that codex-acp mode (`INITIAL_AGENT_MODE`), dsh with
     /// the `--patch` of that preset (approval written per preset), pi
     /// unchanged (the Host answers its gate).
-    pub fn launch_spec_with(&self, backend: AgentBackend, _mode: PermissionMode, native: &str, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
+    pub fn launch_spec_with(&self, backend: AgentBackend, native: &str, project_root: &Path) -> Result<(LaunchSpec, PiLaunch), LaunchFailure> {
         if backend == AgentBackend::Fox {
             return Err(LaunchFailure::new("agent_backend_invalid", "Fox 不经外部运行时启动"));
         }
@@ -431,14 +431,13 @@ impl HostLaunchConfig {
     }
 
     /// Login probe for a conversation's backend (UX batch ①): which login
-    /// files / key names its private HOME has, in the mode a launch would
-    /// use now. Names only ([`crate::onboarding::probe`]).
+    /// files / key names its private HOME has. Names only
+    /// ([`crate::onboarding::probe`]).
     pub fn credential_probe(&self, request: &LaunchRequest) -> Result<crate::onboarding::CredentialProbe, LaunchFailure> {
         let project_uuid = request.project_uuid.clone().unwrap_or_default();
         let home = self.private_home_path(&project_uuid, request.backend)?;
-        let mode = self.permission_mode(request);
         let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-        let mut probe = crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env);
+        let mut probe = crate::onboarding::probe(request.backend, &home, &host_env);
         if request.backend == AgentBackend::Pi {
             let mut source = crate::login_source::status(&self.state_root, &home, self.native_login_home.as_ref())
                 .map_err(|e| LaunchFailure::new("agent_backend_source_failed", e))?;
@@ -459,7 +458,7 @@ impl HostLaunchConfig {
                 // The launch will generate (or already generated) a login
                 // from 模型服务: ready.
                 probe.credentials_present = true;
-                probe.state = if probe.loopback_blocked { crate::onboarding::CredentialState::LoopbackRequiresFullAccess } else { crate::onboarding::CredentialState::Ready };
+                probe.state = crate::onboarding::CredentialState::Ready;
             }
             probe.unified_login = Some(plan);
         }
@@ -485,9 +484,8 @@ impl HostLaunchConfig {
         }
         let report = match &request.unified_login {
             Some(login) => {
-                let mode = self.permission_mode(request);
                 let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-                let probe = crate::onboarding::probe(request.backend, &home, mode, self.os, &host_env);
+                let probe = crate::onboarding::probe(request.backend, &home, &host_env);
                 let report = crate::unified_login::apply(request.backend, &home, login, host_login_reaches(&probe))
                     .map_err(|error| LaunchFailure::new("agent_backend_unified_login_failed", format!("无法按模型服务生成登录配置：{error}")))?;
                 eprintln!(
@@ -531,7 +529,6 @@ impl HostLaunchConfig {
             .remedy(MISSING_CREDENTIALS_REMEDY)
             .detail(serde_json::json!({
                 "state": probe.state.as_str(),
-                "mode": probe.mode,
                 "privateHome": probe.private_home,
                 "requiredKeys": probe.required_keys,
                 "requiredFiles": probe.required_files,
@@ -632,9 +629,9 @@ impl HostLauncher {
                 .remedy("安装或修复 Fox 外部运行时后重试"));
         }
         // The native mode is the user's stored per-Agent choice. `mode` here
-        // only says that Fox adds no outer layer, so it must not be folded
-        // into that choice.
-        let (mut spec, pi_launch) = config.launch_spec_with(request.backend, mode, request.native_mode(mode), &request.project_root)?;
+        // only records that Fox adds no outer layer; it is not folded into
+        // that choice.
+        let (mut spec, pi_launch) = config.launch_spec_with(request.backend, request.native_mode(), &request.project_root)?;
         // Unified login first: the Codex key goes into the backend's
         // environment only (never config.toml).
         if let Some(report) = config.apply_unified_login(&request)? {
@@ -808,7 +805,7 @@ mod tests {
         assert_eq!(over.backups.len(), 1);
         assert!(over.backups[0].directory.starts_with(root.join("data/agent-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek").join(crate::onboarding::BACKUP_DIR)));
         assert!(!report.audit_event().to_string().contains("sk-glue-secret-1"));
-        // A loopback base URL is not refused: Fox adds no sandbox around dsh.
+        // A loopback base URL is not refused: Fox adds no layer around dsh.
         let probe = config.credential_probe(&req).unwrap();
         assert_eq!(probe.state, crate::onboarding::CredentialState::Ready);
         req.full_access_granted = true;
@@ -857,7 +854,7 @@ mod tests {
     /// full-access flag remains persisted data, but it must not decide
     /// whether a process is wrapped and must not rewrite native permissions.
     #[test]
-    fn external_permission_mode_has_no_fox_sandbox_and_keeps_native_choices() {
+    fn external_permission_mode_adds_no_fox_layer_and_keeps_native_choices() {
         let root = std::env::temp_dir().join("fox-ext-launch-grant");
         let mut config = config(&root);
         let mut req = request(AgentBackend::Deepseek, &root);
@@ -868,10 +865,10 @@ mod tests {
         config.full_access_forbidden = true;
         assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         req.native_permission = Some("workspace-write-never".into());
-        assert_eq!(req.native_mode(PermissionMode::FullAccess), "workspace-write-never");
+        assert_eq!(req.native_mode(), "workspace-write-never");
         req.backend = AgentBackend::Codex;
         req.native_permission = Some("agent-full-access".into());
-        assert_eq!(req.native_mode(PermissionMode::FullAccess), "agent-full-access");
+        assert_eq!(req.native_mode(), "agent-full-access");
         assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
     }
 
@@ -880,11 +877,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-ext-launch-spec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut config = config(&root);
-        // Nothing installed: refused in both modes, never an npx fallback.
-        for mode in [PermissionMode::Sandboxed, PermissionMode::FullAccess] {
-            let error = config.launch_spec(AgentBackend::Pi, mode, &root).unwrap_err();
-            assert_eq!(error.code, "agent_backend_not_installed");
-        }
+        // Nothing installed: refused, never an npx fallback.
+        let error = config.launch_spec(AgentBackend::Pi, &root).unwrap_err();
+        assert_eq!(error.code, "agent_backend_not_installed");
         // Paths are built and compared per component (`Path` equality), so the
         // test means the same on Windows, where `join("a/b")` would mix
         // separators and a string comparison would fail.
@@ -893,32 +888,29 @@ mod tests {
         let bin = under(&root, &["runtime", "backends", "pi", "node_modules", ".bin"]);
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("pi-acp"), "").unwrap();
-        let (spec, launch) = config.launch_spec(AgentBackend::Pi, PermissionMode::Sandboxed, &root).unwrap();
+        let (spec, launch) = config.launch_spec(AgentBackend::Pi, &root).unwrap();
         assert_eq!(Path::new(&spec.program), bin.join("pi-acp"));
         assert!(spec.args.is_empty());
         assert_eq!(launch, PiLaunch::Stock);
         let gate_dir = under(&root, &["runtime", "pi-gate"]);
         std::fs::create_dir_all(&gate_dir).unwrap();
         std::fs::write(gate_dir.join("pi-gated.sh"), "").unwrap();
-        let (spec, launch) = config.launch_spec(AgentBackend::Pi, PermissionMode::Sandboxed, &root).unwrap();
+        let (spec, launch) = config.launch_spec(AgentBackend::Pi, &root).unwrap();
         assert_eq!(launch, PiLaunch::Gated);
         assert!(spec.session_env.iter().any(|(key, value)| key == "FOX_PI_BIN" && Path::new(value) == bin.join("pi")));
         assert!(spec.session_env.iter().any(|(key, value)| key == "PI_ACP_PI_COMMAND" && Path::new(value) == gate_dir.join("pi-gated.sh")));
         // Codex: the Agent's own mode is passed through untouched, and the
-        // tool-chain passthrough is an explicit Host allowlist, not an SRT
-        // sandbox decision.
+        // tool-chain passthrough is an explicit Host allowlist.
         let codex = under(&root, &["runtime", "backends", "codex", "node_modules", ".bin"]);
         std::fs::create_dir_all(&codex).unwrap();
         std::fs::write(codex.join("codex-acp"), "").unwrap();
         config.env_passthrough = vec!["PATH".into()];
-        let (spec, _) = config.launch_spec(AgentBackend::Codex, PermissionMode::FullAccess, &root).unwrap();
-        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"), "mode FullAccess no longer maps to Codex full access");
+        let (spec, _) = config.launch_spec(AgentBackend::Codex, &root).unwrap();
+        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"), "the default native mode, never Codex full access");
         assert!(spec.session_env.iter().any(|(key, _)| key == "PATH"), "explicit Host passthrough");
-        let (spec, _) = config.launch_spec(AgentBackend::Codex, PermissionMode::Sandboxed, &root).unwrap();
-        assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "workspace-write"));
-        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::FullAccess, "agent", &root).unwrap();
+        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, "agent", &root).unwrap();
         assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "agent"));
-        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, PermissionMode::FullAccess, "agent-full-access", &root).unwrap();
+        let (spec, _) = config.launch_spec_with(AgentBackend::Codex, "agent-full-access", &root).unwrap();
         assert!(spec.session_env.iter().any(|(key, value)| key == "INITIAL_AGENT_MODE" && value == "agent-full-access"), "the Agent's native full access is not rewritten");
         assert!(spec.session_env.iter().any(|(key, _)| key == "PATH"), "passthrough is unchanged");
         // DeepSeek managed (runtime package 0.1.1 layout: `backends/dsh`): the
@@ -930,17 +922,17 @@ mod tests {
         let patch = crate::backends::deepseek::default_patch_path(&config.runtime_root, &patch_policy);
         std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
         std::fs::write(&patch, crate::backends::deepseek::policy_patch(&patch_policy).patch_yaml).unwrap();
-        let (spec, _) = config.launch_spec(AgentBackend::Deepseek, PermissionMode::Sandboxed, &root).unwrap();
+        let (spec, _) = config.launch_spec(AgentBackend::Deepseek, &root).unwrap();
         assert!(spec.args.iter().any(|arg| Path::new(arg) == patch));
         assert_eq!(Path::new(&spec.program), dsh.join("dsh"));
         // The ask preset is generated into Fox state when the runtime
-        // package does not carry that variant (no SRT preflight involved).
-        let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, PermissionMode::Sandboxed, "workspace-write", &root).unwrap();
+        // package does not carry that variant.
+        let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, "workspace-write", &root).unwrap();
         let ask = spec.args.iter().find(|arg| arg.ends_with("workspace-write-ask.yml")).expect("ask patch argument");
         assert!(std::fs::read_to_string(ask).unwrap().contains("policy: ask"));
         // Native dsh danger-full-access is selected only when the user stored
-        // it; the old Fox mode no longer produces it.
-        let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, PermissionMode::FullAccess, "danger-full-access", &root).unwrap();
+        // it.
+        let (spec, _) = config.launch_spec_with(AgentBackend::Deepseek, "danger-full-access", &root).unwrap();
         assert!(spec.args.iter().any(|arg| arg.ends_with("danger-full-access.yml")), "{:?}", spec.args);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1003,7 +995,7 @@ mod tests {
         assert_ne!(error.code, MISSING_CREDENTIALS, "{error:?}");
         assert!(!format!("{error:?}").contains("sk-fox-test-not-real"), "never a value");
         // pi is never blocked by the probe (keys may come from elsewhere).
-        let probe = crate::onboarding::probe(AgentBackend::Pi, &root.join("nothing"), PermissionMode::Sandboxed, HostOs::Linux, &|_| false);
+        let probe = crate::onboarding::probe(AgentBackend::Pi, &root.join("nothing"), &|_| false);
         assert!(!crate::onboarding::launch_blocked_by_missing_login(&probe));
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -261,9 +261,9 @@ export function useDesktopConversation(): DesktopConversationState {
     setDraftAgentBackendState(backend)
   }, [])
   // UX batch ②: chosen with the backend for a new external conversation,
-  // sent once, then locked by the Host (sandboxed unless explicitly chosen).
-  const [draftExternalPermissionMode, setDraftExternalPermissionModeState] = useState<ExternalPermissionMode>('sandboxed')
-  const draftExternalPermissionModeRef = useRef<ExternalPermissionMode>('sandboxed')
+  // sent once, then locked by the Host (standard, no full access, unless explicitly chosen).
+  const [draftExternalPermissionMode, setDraftExternalPermissionModeState] = useState<ExternalPermissionMode>('standard')
+  const draftExternalPermissionModeRef = useRef<ExternalPermissionMode>('standard')
   const setDraftExternalPermissionMode = useCallback((mode: ExternalPermissionMode) => {
     draftExternalPermissionModeRef.current = mode
     setDraftExternalPermissionModeState(mode)
@@ -279,7 +279,7 @@ export function useDesktopConversation(): DesktopConversationState {
       draftAgentBackendRef.current = backend
       setDraftAgentBackendState(backend)
     }
-    setDraftExternalPermissionMode('sandboxed')
+    setDraftExternalPermissionMode('standard')
   }, [setDraftExternalPermissionMode])
   const agentBackendStatusRef = useRef<AgentBackendStatus | null>(null)
   agentBackendStatusRef.current = agentBackendStatus

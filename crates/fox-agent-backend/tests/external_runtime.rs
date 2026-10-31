@@ -106,7 +106,7 @@ impl Sink {
 struct MockLauncher {
     launches: Arc<AtomicUsize>,
     fail: bool,
-    /// Full access withdrawn: desired / launched mode is sandboxed.
+    /// Full access withdrawn: desired / launched mode is `Standard`.
     revoked: Arc<AtomicBool>,
     modes: Arc<Mutex<Vec<PermissionMode>>>,
     config_revision: Arc<AtomicUsize>,
@@ -125,7 +125,7 @@ impl ExternalLauncher for MockLauncher {
     }
     fn selected_model(&self, _request: &LaunchRequest) -> Option<String> { self.selected_model.lock().unwrap().clone() }
     fn desired_mode(&self, _request: &LaunchRequest) -> PermissionMode {
-        if self.revoked.load(Ordering::SeqCst) { PermissionMode::Sandboxed } else { PermissionMode::FullAccess }
+        if self.revoked.load(Ordering::SeqCst) { PermissionMode::Standard } else { PermissionMode::FullAccess }
     }
 
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
@@ -359,7 +359,7 @@ async fn reject_writes_the_native_reject_option() {
     if !node_available() {
         return;
     }
-    // Sandboxed pi in 询问 (its default): the card. (Full access would be 自动.)
+    // pi without full access in 询问 (its default): the card. (Full access would be 自动.)
     let launcher = MockLauncher::default();
     launcher.revoked.store(true, Ordering::SeqCst);
     let (runtime, sink) = new_runtime(launcher);
@@ -537,7 +537,7 @@ async fn deepseek_permission_requests_are_rejected_by_the_host_never_shown() {
     if !node_available() {
         return;
     }
-    // Sandboxed: the default preset (approval never). In full access dsh's
+    // Without full access: the default preset (approval never). In full access dsh's
     // danger-full-access would show the card instead.
     let launcher = MockLauncher::default();
     launcher.revoked.store(true, Ordering::SeqCst);
@@ -634,7 +634,7 @@ async fn an_unanswered_permission_waits_without_a_deadline_until_the_turn_is_can
     if !node_available() {
         return;
     }
-    // Sandboxed pi in 询问 (its default): the card. (Full access would be 自动.)
+    // pi without full access in 询问 (its default): the card. (Full access would be 自动.)
     let launcher = MockLauncher::default();
     launcher.revoked.store(true, Ordering::SeqCst);
     let (runtime, sink) = new_runtime(launcher);
@@ -674,12 +674,12 @@ async fn closing_a_conversation_ends_its_pending_permission() {
 }
 
 /// Revoking full access mid-session (UX batch ②): `recheck_permission_mode`
-/// -> RestartSandboxed. The running turn ends `interrupted`
+/// -> RestartWithoutFullAccess. The running turn ends `interrupted`
 /// (`agent_backend_full_access_revoked`), its pending approval is settled (a
 /// late answer is never written), the process is stopped, and the next turn
-/// launches in the sandbox without replaying the cancelled one.
+/// launches without full access, without replaying the cancelled one.
 #[tokio::test(flavor = "multi_thread")]
-async fn revoking_full_access_restarts_in_the_sandbox_without_replay() {
+async fn revoking_full_access_restarts_without_it_and_without_replay() {
     if !node_available() {
         return;
     }
@@ -693,10 +693,10 @@ async fn revoking_full_access_restarts_in_the_sandbox_without_replay() {
     let (_, approval, _) = sink.wait_approval(1).await;
     // The Host withdraws the grant first, then asks the runtime to restart.
     revoked.store(true, Ordering::SeqCst);
-    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::RestartSandboxed { confirmed: true });
+    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::RestartWithoutFullAccess { confirmed: true });
     // 13.19 fix ②: the stopped full-access process no longer reports its
-    // declaration / handshake (the capability chip falls back to the planned,
-    // sandboxed view); leaving full access still reads "next turn".
+    // declaration / handshake (the capability chip falls back to the planned
+    // view, without full access); leaving full access still reads "next turn".
     let info = runtime.session_info("c-rev").expect("session kept");
     assert!(!info.live);
     assert!(info.declaration.is_none(), "stale full-access declaration: {:?}", info.declaration);
@@ -706,18 +706,18 @@ async fn revoking_full_access_restarts_in_the_sandbox_without_replay() {
     assert_eq!(terminal["type"], "run.interrupted", "{terminal}");
     assert_eq!(terminal["code"], "agent_backend_full_access_revoked", "{terminal}");
     assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending, "a pending approval is settled, never written late");
-    // Next turn: relaunched sandboxed; only the new prompt runs.
+    // Next turn: relaunched without full access; only the new prompt runs.
     runtime.start_turn(turn("c-rev", "r-rev-2", "simple", AgentBackend::Codex, None)).unwrap();
     assert_eq!(sink.terminal("r-rev-2").await["type"], "run.completed");
     let launching = sink.wait_for("r-rev-2", "agent_backend.launching").await;
-    assert_eq!(launching["mode"], "sandboxed", "{launching}");
-    assert_eq!(*modes.lock().unwrap(), [PermissionMode::FullAccess, PermissionMode::Sandboxed]);
+    assert_eq!(launching["mode"], "standard", "{launching}");
+    assert_eq!(*modes.lock().unwrap(), [PermissionMode::FullAccess, PermissionMode::Standard]);
     assert_eq!(launches.load(Ordering::SeqCst), 2);
     assert!(!sink.text("r-rev-2").contains("permission:"), "the cancelled turn is not replayed");
-    // The sandboxed relaunch reports its own declaration again.
+    // The relaunch reports its own declaration again.
     let relaunched = runtime.session_info("c-rev").expect("session").declaration.expect("declaration after relaunch");
-    assert_eq!(relaunched.mode, PermissionMode::Sandboxed);
-    // Already sandboxed: nothing to restart.
+    assert_eq!(relaunched.mode, PermissionMode::Standard);
+    // Already without full access: nothing to restart.
     assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::Unchanged);
     runtime.shutdown().await;
 }
@@ -832,7 +832,7 @@ async fn native_modes_answer_without_a_card_only_where_the_mode_says_so_and_are_
     if !node_available() {
         return;
     }
-    // Sandboxed sessions: the stored choice is the mode (full access would
+    // Sessions without full access: the stored choice is the mode (full access would
     // override it with the Agent's full-access option).
     let launcher = MockLauncher::default();
     launcher.revoked.store(true, Ordering::SeqCst);

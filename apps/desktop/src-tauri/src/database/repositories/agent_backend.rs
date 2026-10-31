@@ -105,7 +105,7 @@ pub(crate) struct ExternalConversationContext {
 impl Database {
     /// Whether the user granted full access to this external conversation
     /// when creating it (v96, UX batch ②). A failed read is an error, which
-    /// the caller treats as "not granted" (fail-closed: sandboxed).
+    /// the caller treats as "not granted" (fail-closed: standard).
     pub(crate) fn conversation_full_access_granted(&self, conversation_id: &str) -> Result<bool, String> {
         self.with_connection(|connection| {
             connection
@@ -543,7 +543,7 @@ mod full_access_grant_tests {
         let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let a = database.create_conversation_with_backend(database.default_agent_id(), Some("a"), None, None, "deepseek").expect("a");
         let b = database.create_conversation_with_backend(database.default_agent_id(), Some("b"), None, None, "deepseek").expect("b");
-        assert!(!database.conversation_full_access_granted(&a.id).unwrap(), "sandboxed by default");
+        assert!(!database.conversation_full_access_granted(&a.id).unwrap(), "no full access by default");
         database.grant_full_access_at_creation(&a.id).unwrap();
         assert!(database.conversation_full_access_granted(&a.id).unwrap());
         assert!(!database.conversation_full_access_granted(&b.id).unwrap(), "per conversation");

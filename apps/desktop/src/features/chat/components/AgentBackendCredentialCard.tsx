@@ -1,9 +1,8 @@
 // UX batch ①: login guidance for an external backend conversation.
 //
-// Two different cards (credentialCardModel): a missing login (private HOME
-// path, "打开文件夹", required key / file names, templates, "从真实 HOME 导入")
-// and a loopback gateway refused in the sandbox (full access at creation, or
-// the official endpoint). The import confirmation lists file and key NAMES
+// The card (credentialCardModel) for a missing login (private HOME path,
+// "打开文件夹", required key / file names, templates, "从真实 HOME 导入"), or the
+// Pi configuration source. The import confirmation lists file and key NAMES
 // only; the Host never sends a value to the UI.
 //
 // An import never silently replaces a login: a file / key the target already
@@ -100,7 +99,6 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
                 覆盖已有登录（先备份到私有 HOME 下的带时间戳目录）
               </label>
               <p>默认跳过已经有这些文件或 key 的项目（包括本项目），不会覆盖。</p>
-              <p>导入模型配置会允许该模型的精确主机和端口通过沙箱代理。</p>
               <button type="button" disabled={busy || selected.length === 0} onClick={() => run(async () => { setMessage(null); await onImport(selected, allProjects, overwrite, reuseForNewProjects); setCandidates(null) })}>复制选中的项目</button>
             </fieldset>
           ))}

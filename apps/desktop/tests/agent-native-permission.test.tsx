@@ -1,7 +1,7 @@
 // Per-agent native permission list: picker rows in each Agent's own names,
 // greyed options with reasons, dsh's「下一轮重启生效」, full-access
 // confirmation in a new conversation, revoke-only mid-session, and the
-// 设置 defaults (sandboxed options only, saved with `defaultOnly`).
+// 设置 defaults (non-full-access options only, saved with `defaultOnly`).
 import { afterEach, describe, expect, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
@@ -82,8 +82,8 @@ describe('model', () => {
     expect(rows[2].reason).toBeNull()
     // A new conversation may pick it.
     expect(nativePermissionRows(view(codexCatalog(), { draft: true }))[2].disabled).toBe(false)
-    // 设置 lists sandboxed options only.
-    expect(nativePermissionRows(view(dshCatalog, { draft: true }), { sandboxedOnly: true }).map((row) => row.value)).not.toContain('danger-full-access')
+    // 设置 lists non-full-access options only.
+    expect(nativePermissionRows(view(dshCatalog, { draft: true }), { restrictedOnly: true }).map((row) => row.value)).not.toContain('danger-full-access')
   })
 
   test('changes: confirm full access in a draft, refuse mid-session, confirm revoke', () => {
@@ -108,7 +108,7 @@ describe('model', () => {
   })
 
   test('13.19 fix ①: the next-turn notice names the conversation\'s own Agent, never a hard-coded dsh', () => {
-    // pi revoking full access (the Host answers next_turn: sandboxed relaunch).
+    // pi revoking full access (the Host answers next_turn: relaunch without full access).
     expect(nativeAppliedNotice(view({ ...piCatalog, displayName: 'pi' }, { applied: 'next_turn' }))).toBe('已保存，下一轮开始时重启 pi 生效')
     expect(nativeAppliedNotice(view({ ...codexCatalog(false), displayName: 'Codex' }, { applied: 'next_turn' }))).toBe('已保存，下一轮开始时重启 Codex 生效')
     expect(nativeAppliedNotice(view({ ...dshCatalog, displayName: 'DeepSeek' }, { applied: 'next_turn' }))).toBe('已保存，下一轮开始时重启 DeepSeek 生效')

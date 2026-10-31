@@ -80,7 +80,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
   onRevokeFullAccess?: () => void
   /**
    * The Agent's native permission list (when the Host offers it). Replaces
-   * the sandbox / full-access chip; mid-session revoke goes through it.
+   * the old full-access chip; mid-session revoke goes through it.
    */
   permissionPicker?: ReactNode
   /** Login guidance card of the shown external backend (open conversation, or a new one before its first message). */

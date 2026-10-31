@@ -88,11 +88,9 @@ function missing(backend: string): CredentialProbe {
   const files: Record<string, string[]> = { deepseek: ['.dsh/.env'], pi: ['.pi/agent/auth.json'], codex: ['.codex/auth.json'] }
   return {
     backend,
-    mode: 'sandboxed',
     state: 'missing_credentials',
     privateHome: `/fox/homes/p1/${backend}`,
     credentialsPresent: false,
-    loopbackBlocked: false,
     presentKeys: [],
     presentFiles: [],
     requiredKeys: backend === 'deepseek' ? ['DEEPSEEK_API_KEY'] : [],

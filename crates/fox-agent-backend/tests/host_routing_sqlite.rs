@@ -187,7 +187,7 @@ fn migrating_a_copy_leaves_the_original_readable_by_the_old_schema() {
 /// v96 (UX batch ②): the exact SQL the desktop applies as version 96. Same
 /// semantics as the desktop test
 /// `grant_is_persisted_per_conversation_and_only_removable` (which needs the
-/// Windows/macOS desktop crate): sandboxed by default, one grant per
+/// Windows/macOS desktop crate): no full access by default, one grant per
 /// conversation, grants are per conversation, only removable, cascade with
 /// the conversation, old rows untouched; the audit log stores names only.
 #[test]
@@ -217,7 +217,7 @@ fn v96_full_access_grant_is_per_conversation_and_only_removable() {
                  VALUES ('a','a','A','active',1,1,'deepseek'),('b','a','B','active',1,1,'deepseek');",
         )
         .expect("new rows");
-    assert!(!granted("a"), "sandboxed by default");
+    assert!(!granted("a"), "no full access by default");
     grant("a").expect("grant a");
     assert!(granted("a"));
     assert!(!granted("b"), "per conversation");

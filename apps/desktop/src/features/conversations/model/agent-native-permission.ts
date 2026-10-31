@@ -36,8 +36,8 @@ export interface NativePermissionCatalog {
 export interface NativePermissionView {
   catalog: NativePermissionCatalog
   current: string
-  /** The sandboxed choice (the same as `current` unless in full access). */
-  sandboxedMode?: string
+  /** The non-full-access choice (the same as `current` unless in full access). */
+  restrictedMode?: string
   fullAccess: boolean
   fullAccessGranted: boolean
   fullAccessForbidden: boolean
@@ -54,7 +54,7 @@ export interface NativePermissionRequest {
   conversationId?: string | null
   backend?: string | null
   mode?: string
-  /** 设置: remember the Agent's default sandboxed choice only. */
+  /** 设置: remember the Agent's default non-full-access choice only. */
   defaultOnly?: boolean
 }
 
@@ -73,14 +73,14 @@ export const NEXT_TURN_RESTART_BADGE = '下一轮重启生效'
 /**
  * Picker rows in the Agent's own names. Disabled rows keep only the Host's
  * reason (e.g. Codex「帮我批准」off OpenAI, or FORBIDDEN). The Agent's own
- * full access is selectable in place; it is not a Fox sandbox mode.
- * `sandboxedOnly` (设置) leaves the full-access option out of the default
+ * full access is selectable in place; it is not a Fox-level mode.
+ * `restrictedOnly` (设置) leaves the full-access option out of the default
  * permission rows.
  */
-export function nativePermissionRows(view: NativePermissionView | null | undefined, options: { sandboxedOnly?: boolean } = {}): NativePermissionRow[] {
+export function nativePermissionRows(view: NativePermissionView | null | undefined, options: { restrictedOnly?: boolean } = {}): NativePermissionRow[] {
   if (!view) return []
   return view.catalog.options
-    .filter((option) => !(options.sandboxedOnly && option.fullAccess))
+    .filter((option) => !(options.restrictedOnly && option.fullAccess))
     .map((option) => {
       const reason = option.disabledReason
       return {

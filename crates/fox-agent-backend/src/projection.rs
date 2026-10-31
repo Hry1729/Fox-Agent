@@ -464,8 +464,8 @@ pub fn reject_option(options: &[PermissionOption]) -> Option<&PermissionOption> 
 /// Fox's execution mode (the project / conversation `permissionMode`: 询问 /
 /// 自动 / 只读) applied to an external backend's `session/request_permission`
 /// (settings batch, item 7). It only decides how a native permission request
-/// is answered; the sandbox and the permission mode of the session
-/// (sandboxed / full access) are untouched: "自动" is not full access.
+/// is answered; the Agent's native sandbox and the session's Fox permission
+/// mode (standard / full access) are untouched: "自动" is not full access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExecutionMode {
     /// `ask`: every request becomes an approval card (unchanged behaviour).

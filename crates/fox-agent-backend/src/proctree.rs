@@ -1,7 +1,7 @@
 //! Confirming that a backend process tree has really ended.
 //!
-//! A revocation stop may only lead to a sandboxed rebuild once the old
-//! full-access process tree is gone (docs/sandbox.md section 8.2). "Gone" is
+//! A revocation stop may only lead to a rebuild without full access once the
+//! old full-access process tree is gone (docs/sandbox.md section 8.2). "Gone" is
 //! judged on the whole tree, never on the parent's exit alone:
 //!
 //! * Linux / macOS: the backend runs in its own process group (`process_group(0)`

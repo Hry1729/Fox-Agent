@@ -47,7 +47,7 @@ export interface AgentBackendPanelClient extends Partial<AgentNetworkClient> {
   agentBackendChooseFoxSource?: (target: AgentBackendTarget, remember: boolean) => Promise<unknown>
   agentBackendOpenPrivateHome: (target: AgentBackendTarget) => Promise<unknown>
   agentBackendRevokeFullAccess: (conversationId: string) => Promise<unknown>
-  /** Per-agent native permission list; absent = the old sandbox / full-access chip. */
+  /** Per-agent native permission list; absent = the old full-access chip. */
   agentBackendNativePermissions?: (request: NativePermissionRequest) => Promise<NativePermissionView>
   agentBackendNativePermissionSet?: (request: NativePermissionRequest & { mode: string }) => Promise<NativePermissionView>
   listenRuntimeEvents: (handler: (event: { conversationId: string; event: { type: string } }) => void) => Promise<() => void>
@@ -128,7 +128,7 @@ export function AgentBackendPanel({
   const [onboardingTick, setOnboardingTick] = useState(0)
   // Bumped after a permission change / full-access revoke: the capability
   // chips and the permission status are fetched again (13.19 fix ②: after a
-  // revoke the chip must go back to the sandbox, not keep「完全访问」).
+  // revoke the chip must drop「完全访问」).
   const [permissionTick, setPermissionTick] = useState(0)
   useEffect(() => {
     const refresh = () => setOnboardingTick(tick => tick + 1)

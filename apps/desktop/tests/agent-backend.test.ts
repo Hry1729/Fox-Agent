@@ -241,7 +241,7 @@ describe('capability chips (external backend wiring, kept for existing records)'
     const dim = (name: string) => ({ summary: `${name}-summary`, detail: `${name}-detail` })
     return {
       backend: 'pi',
-      mode: 'sandboxed',
+      mode: 'standard',
       source,
       approval: dim('approval'),
       sandbox: dim('sandbox'),

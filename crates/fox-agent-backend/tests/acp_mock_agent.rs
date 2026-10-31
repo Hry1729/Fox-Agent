@@ -104,7 +104,7 @@ async fn cancel_answers_pending_permissions_with_cancelled() {
 
 /// Revocation stop on a live connection: the pending permission is answered
 /// `cancelled`, in-flight work is `outcome_unknown`, the process is gone and
-/// the session waits for a sandboxed rebuild without replay.
+/// the session waits for a rebuild without full access, without replay.
 #[tokio::test(flavor = "multi_thread")]
 async fn revocation_stop_cancels_settles_and_kills_the_backend() {
     use fox_agent_backend::port::{RevokedSessionState, StopConfirmation};

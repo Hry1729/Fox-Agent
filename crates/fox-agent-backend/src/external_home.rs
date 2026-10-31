@@ -28,34 +28,48 @@ pub const SETTING_PERMISSION_MODE: &str = "permission_mode";
 // Permission mode
 // ---------------------------------------------------------------------------
 
-/// The mode a conversation recorded. Persisted (`agent_backend` settings,
-/// run events); Fox launches the backend the same way in both.
+/// The mode a conversation recorded: whether the user granted Fox-level full
+/// access. Persisted (`agent_backend` settings, run events); Fox launches the
+/// backend the same way in both, the Agent's own native permission mode is
+/// what limits it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     /// Explicit user grant.
     FullAccess,
-    /// Default for everything else, including sessions created before modes
-    /// existed. Stored name kept for compatibility with existing rows.
+    /// Full access not granted: the default for everything else, including
+    /// sessions created before modes existed. Rows and events written before
+    /// plan B3 carry the old name `"sandboxed"`, which still reads as this.
     #[default]
-    Sandboxed,
+    #[serde(alias = "sandboxed")]
+    Standard,
 }
+
+/// Stored name of [`PermissionMode::Standard`] before plan B3. Still accepted
+/// wherever a stored or requested mode is read; never written.
+pub const LEGACY_STANDARD_MODE: &str = "sandboxed";
 
 impl PermissionMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FullAccess => "full_access",
-            Self::Sandboxed => "sandboxed",
+            Self::Standard => "standard",
         }
     }
 
-    /// Missing or unknown values read as `Sandboxed`: an old session, a typo or
-    /// a value from a newer Fox never widens access.
+    /// Missing or unknown values read as `Standard`: an old session (stored
+    /// `"sandboxed"`), a typo or a value from a newer Fox never widens access.
     pub fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             Some("full_access") => Self::FullAccess,
-            _ => Self::Sandboxed,
+            _ => Self::Standard,
         }
+    }
+
+    /// Whether `value` names [`Self::Standard`] explicitly (current or
+    /// legacy name), as opposed to merely not being `full_access`.
+    pub fn names_standard(value: &str) -> bool {
+        matches!(value.trim(), "standard" | LEGACY_STANDARD_MODE)
     }
 
     pub fn from_settings(settings: &BTreeMap<String, String>) -> Self {
@@ -95,21 +109,21 @@ pub struct ModeDecision {
 /// Host-held grant can.
 pub fn effective_permission_mode(policy: &HostPolicy, snapshot: &SessionSnapshot, conversation_id: &str) -> ModeDecision {
     let requested = PermissionMode::from_settings(&snapshot.settings);
-    if requested == PermissionMode::Sandboxed {
-        return ModeDecision { mode: PermissionMode::Sandboxed, downgraded: None };
+    if requested == PermissionMode::Standard {
+        return ModeDecision { mode: PermissionMode::Standard, downgraded: None };
     }
     if policy.full_access_forbidden {
-        return ModeDecision { mode: PermissionMode::Sandboxed, downgraded: Some("full access is disabled by policy".into()) };
+        return ModeDecision { mode: PermissionMode::Standard, downgraded: Some("full access is disabled by policy".into()) };
     }
-    if policy.locked_keys.get(SETTING_PERMISSION_MODE).map(String::as_str) == Some("sandboxed") {
-        return ModeDecision { mode: PermissionMode::Sandboxed, downgraded: Some("host policy locks permission_mode to sandboxed".into()) };
+    if policy.locked_keys.get(SETTING_PERMISSION_MODE).is_some_and(|value| PermissionMode::names_standard(value)) {
+        return ModeDecision { mode: PermissionMode::Standard, downgraded: Some("host policy locks permission_mode to standard (no full access)".into()) };
     }
     let granted = [FullAccessGrant::Conversation(conversation_id.to_owned()), FullAccessGrant::Project(snapshot.project_root.clone())]
         .iter()
         .any(|grant| policy.full_access_grants.contains(&grant.key()));
     if !granted {
         return ModeDecision {
-            mode: PermissionMode::Sandboxed,
+            mode: PermissionMode::Standard,
             downgraded: Some("no full-access grant for this conversation or project".into()),
         };
     }
@@ -121,8 +135,8 @@ pub enum ModeRecheck {
     Unchanged,
     /// The running session recorded full access but the grant has been
     /// withdrawn: the Host stops the running turn and process, and the next
-    /// turn starts a new connection in the recorded mode.
-    RestartSandboxed(String),
+    /// turn starts a new connection without full access.
+    RestartWithoutFullAccess(String),
 }
 
 /// Run with [`crate::config::recheck_before_continue`]. Tightening applies to
@@ -130,8 +144,8 @@ pub enum ModeRecheck {
 pub fn recheck_permission_mode(policy: &HostPolicy, snapshot: &SessionSnapshot, conversation_id: &str, running: PermissionMode) -> ModeRecheck {
     let now = effective_permission_mode(policy, snapshot, conversation_id);
     match (running, now.mode) {
-        (PermissionMode::FullAccess, PermissionMode::Sandboxed) => {
-            ModeRecheck::RestartSandboxed(now.downgraded.unwrap_or_else(|| "full access withdrawn".into()))
+        (PermissionMode::FullAccess, PermissionMode::Standard) => {
+            ModeRecheck::RestartWithoutFullAccess(now.downgraded.unwrap_or_else(|| "full access withdrawn".into()))
         }
         _ => ModeRecheck::Unchanged,
     }
@@ -547,23 +561,49 @@ mod tests {
 
     #[test]
     fn unknown_or_missing_mode_reads_as_the_default() {
-        assert_eq!(PermissionMode::parse(None), PermissionMode::Sandboxed);
-        assert_eq!(PermissionMode::parse(Some("typo")), PermissionMode::Sandboxed);
+        assert_eq!(PermissionMode::parse(None), PermissionMode::Standard);
+        assert_eq!(PermissionMode::parse(Some("typo")), PermissionMode::Standard);
         assert_eq!(PermissionMode::parse(Some(" full_access ")), PermissionMode::FullAccess);
+    }
+
+    #[test]
+    fn the_pre_b3_stored_name_still_reads_as_standard() {
+        assert_eq!(PermissionMode::parse(Some("sandboxed")), PermissionMode::Standard);
+        assert_eq!(PermissionMode::parse(Some("standard")), PermissionMode::Standard);
+        assert_eq!(serde_json::from_str::<PermissionMode>("\"sandboxed\"").unwrap(), PermissionMode::Standard);
+        assert_eq!(serde_json::from_str::<PermissionMode>("\"standard\"").unwrap(), PermissionMode::Standard);
+        assert_eq!(serde_json::to_string(&PermissionMode::Standard).unwrap(), "\"standard\"");
+        assert_eq!(PermissionMode::Standard.as_str(), "standard");
+        assert!(PermissionMode::names_standard(" sandboxed ") && PermissionMode::names_standard("standard"));
+        assert!(!PermissionMode::names_standard("full_access") && !PermissionMode::names_standard("typo"));
+    }
+
+    #[test]
+    fn a_host_lock_in_either_name_keeps_full_access_off() {
+        let mut snapshot = SessionSnapshot { backend: AgentBackend::Codex, project_root: "/p".into(), egress_allowed: false, settings: BTreeMap::new() };
+        snapshot.settings.insert(SETTING_PERMISSION_MODE.into(), "full_access".into());
+        for locked in ["sandboxed", "standard"] {
+            let mut policy = HostPolicy::default();
+            policy.full_access_grants.insert(FullAccessGrant::Conversation("c".into()).key());
+            policy.locked_keys.insert(SETTING_PERMISSION_MODE.into(), locked.into());
+            let decision = effective_permission_mode(&policy, &snapshot, "c");
+            assert_eq!(decision.mode, PermissionMode::Standard, "{locked}");
+            assert!(decision.downgraded.is_some(), "{locked}");
+        }
     }
 
     #[test]
     fn full_access_needs_a_request_and_a_live_grant() {
         let mut snapshot = SessionSnapshot { backend: AgentBackend::Codex, project_root: "/p".into(), egress_allowed: false, settings: BTreeMap::new() };
         let mut policy = HostPolicy::default();
-        assert_eq!(effective_permission_mode(&policy, &snapshot, "c").mode, PermissionMode::Sandboxed);
+        assert_eq!(effective_permission_mode(&policy, &snapshot, "c").mode, PermissionMode::Standard);
         snapshot.settings.insert(SETTING_PERMISSION_MODE.into(), "full_access".into());
         assert!(effective_permission_mode(&policy, &snapshot, "c").downgraded.is_some());
         policy.full_access_grants.insert(FullAccessGrant::Conversation("c".into()).key());
         assert_eq!(effective_permission_mode(&policy, &snapshot, "c").mode, PermissionMode::FullAccess);
         assert_eq!(recheck_permission_mode(&policy, &snapshot, "c", PermissionMode::FullAccess), ModeRecheck::Unchanged);
         policy.full_access_forbidden = true;
-        assert!(matches!(recheck_permission_mode(&policy, &snapshot, "c", PermissionMode::FullAccess), ModeRecheck::RestartSandboxed(_)));
+        assert!(matches!(recheck_permission_mode(&policy, &snapshot, "c", PermissionMode::FullAccess), ModeRecheck::RestartWithoutFullAccess(_)));
     }
 
     #[test]
