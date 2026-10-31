@@ -21,7 +21,7 @@
 - **执行路径**（2026-10-31 更新）：新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关；Kernel 执行循环已删除，历史 Kernel Run 显示为中断。Fox 自身不用沙箱，命令在 Fox Job 中执行，审批分只读 / 询问 / 自动 / 完全访问四档。
 - **Child Run**：深度仍为 1；子 Run 一律走 PiNative，不单独限制 Child Run 的数量和同时运行数，单个时长默认 5 分钟、最长 15 分钟（见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md)）。下文“并发限制”“深度与并发较保守”等说法已按此修正。
 - **数据库**：`fox.db` schema v97。
-- **Prompt 组装**：`services/agent-runtime/src/prompt-composer.mjs::composeFoxPrompt` 仍是系统提示的组装入口，Legacy 路径（`pi-runtime.mjs`）和 Kernel 路径（`pi-kernel-description.mjs`）都通过 `runtime-instructions.mjs::composeRuntimePrompt` 调用它；Kernel 路径的 Host 还会在系统提示末尾追加当前冻结清单下的运行时可用性说明（`apps/desktop/src-tauri/src/runtime_host/kernel_model_worker.rs`）。片段优先级已变化，见下文「分层 Prompt 组装器」。
+- **Prompt 组装**：`services/agent-runtime/src/prompt-composer.mjs::composeFoxPrompt` 仍是系统提示的组装入口，PiNative / Legacy 路径（`pi-runtime.mjs`）和已删除的 Kernel 路径（`pi-kernel-description.mjs`，JS 残留待 B4 清理）都通过 `runtime-instructions.mjs::composeRuntimePrompt` 调用它；原 Kernel 路径的 Host 还会在系统提示末尾追加运行时可用性说明（`kernel_model_worker.rs`，已随 Kernel 执行循环删除）。片段优先级已变化，见下文「分层 Prompt 组装器」。
 - **Prompt Registry**：`services/agent-runtime/src/prompt-registry.mjs` 已有 `PROMPT_REGISTRY_SCHEMA_VERSION = 1`、`createPromptExperiment`、`evaluatePromptExperiment`、`buildPromptCacheIdentity` 等代码。是否已形成下文 P0 建议中的完整实验产品面（事实表、报告、晋升门禁），本次**没有核实**，因此 P0 建议保持原文，不标为已完成。
 - 文中提到的其余 Fox 能力（工作闭环、记忆治理、专家包 / 工作流 / 团队 / 数字同事、有界只读 Graph Lead）在当前代码中仍然存在；本次没有逐条复核其细节，当前事实以[能力矩阵](能力矩阵.md)和[当前状态与核验基线](当前状态与核验基线.md)为准。
 
@@ -57,7 +57,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 核心执行闭环 | 对话、工具、审批、恢复，加上结构化 Goal/Task/Evidence/Review/Acceptance | 事件驱动 Run/Turn/Tool 生命周期，强调耐久 TaskRun | 多工作台内统一执行，Graph Lead 负责完整交付 | Executor/Planner 双模式，配置驱动、终端优先 | 面向真实代码库的持续执行、验证和交付 |
 | 工作治理 | **最强项**。目标、计划修订、证据、发现、验收和审批均可持久化 | 有 TaskRun、Ledger 和 Graph 记录，治理重点偏执行耐久性 | Graph 节点、状态和 Review 形成监督闭环 | 结构较轻，主要依赖指令、工具策略和会话状态 | Goal、Plan、Approval、Sandbox 和会话状态较成熟，但不是 Fox 式业务工作对象模型 |
-| 多 Agent | Child Run 有预算、权限交集、取消传播和结果聚合；深度 1，Kernel 路径不单独限制数量与并发（2026-10-25 修正） | 动态 Graph 子节点、耐久记录和隔离 Worktree 思路完整 | **最强项之一**。Lead 建图、派发、监督、审查、修复、集成和验证 | 子 Agent 通过 Skills 隔离调用，轻量且聚焦 | Fork/Spawn、角色配置、Awaiter；子 Agent 不能扩大父 Agent 权限 |
+| 多 Agent | Child Run 有预算、权限交集、取消传播和结果聚合；深度 1，不单独限制数量与并发（2026-10-25 修正；子 Run 现一律 PiNative） | 动态 Graph 子节点、耐久记录和隔离 Worktree 思路完整 | **最强项之一**。Lead 建图、派发、监督、审查、修复、集成和验证 | 子 Agent 通过 Skills 隔离调用，轻量且聚焦 | Fork/Spawn、角色配置、Awaiter；子 Agent 不能扩大父 Agent 权限 |
 | 长期记忆 | **最强项**。candidate/confirmed/conflict、作用域、召回和审计 | Workspace Memory 注入与更新，和会话上下文分离 | 有 Memory 与上下文能力，更多服务于工作台连续性 | 可组合会话/配置，长期记忆治理不是核心卖点 | 支持 Memory 与上下文续接，治理粒度取决于宿主配置 |
 | 专家化 | **最强项**。`.foxexpert` 不可变版本、Hash、升级/回滚、工作流、团队、数字同事 | Skills、Bot/平台上下文和运行图组合灵活 | Code/Write/Design/Research 场景 Prompt 深、界面完整 | Skills 按需加载，内置 Explore/Review/Test 方法论清晰 | Skills、Plugins、Apps、MCP 和自定义角色组合成熟 |
 | 耐久与恢复 | Run/Event、工作对象、会话恢复、Fork/lineage | **最强项之一**。事件溯源、TaskRun、历史与上下文分离 | Graph 和会话可持续，但核心优势偏监督与多工作台 | 简洁会话恢复，机制轻 | Compaction、Resume、Goal continuation 与会话 Fork 成熟 |

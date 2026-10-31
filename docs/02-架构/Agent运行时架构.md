@@ -416,7 +416,7 @@ Host-owned ToolCall 执行期间，Runtime 仍可能回传同一调用的 `tool.
 
 `list_mcp_tools/call_mcp_tool` 统一投影持久 stdio、Streamable HTTP 和 OpenAPI 源；连接方式、凭据、Session ID 和健康状态都留在 Host，不进入 Sidecar。完整边界见[扩展源与策略生命周期架构](扩展源与策略生命周期架构.md)。
 
-### 工具错误是数据（Kernel 路径）
+### 工具错误是数据
 
 > 2026-10-20 增补。原则（产品决定）：**工具错误应该是数据，而不是错误。** 模型能读懂并改正的失败，要作为失败的工具结果交还模型，Run 继续；只有无法确认有没有产生副作用的失败，才终止 Run。
 
@@ -537,9 +537,11 @@ Provider 原生 reasoning 优先映射到 `reasoning.delta`。对把 `<think>` �
 
 模型配置重新加载时，Host 会停止旧 Worker；活动 Run 存在时拒绝热切换，避免一次运行中途改变模型契约。
 
-## Fox Agent Kernel（决策核心）
+## Fox Agent Kernel（决策核心，执行循环已删除）
 
-> 当前执行权：Kernel / Authoritative 仍为默认；`FOX_KERNEL_MODE=legacy` 是显式调试路径，已有 Run 沿用冻结绑定。Kernel 仅允许 Pi 引擎，Codex / DeepSeek 引擎拒绝。Legacy / Shadow 代码仍在；单驱动收敛不表示其清理完成，也不表示阶段二已切换默认执行路径。
+> **2026-10-31 更正（B1）**：Kernel 执行循环（controller 驱动、`kernel_gateway`、`shadow_reconcile`、`kernel_coordinator/`、`kernel_model_worker`、`kernel_delegation`）已删除。新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关，失败不回退；历史 Kernel Run 在启动时标为中断（`executor_route_retired`），不再续跑。`crates/fox-agent-kernel` 只剩状态类型，用于读历史 Kernel Run 与 authority 状态。本节以下内容保留为删除前的历史说明。
+>
+> 删除前的说明：当前执行权：Kernel / Authoritative 仍为默认；`FOX_KERNEL_MODE=legacy` 是显式调试路径，已有 Run 沿用冻结绑定。Kernel 仅允许 Pi 引擎，Codex / DeepSeek 引擎拒绝。Legacy / Shadow 代码仍在；单驱动收敛不表示其清理完成，也不表示阶段二已切换默认执行路径。
 >
 > 2026-10-25 复核：本节组件清单和末尾「当前状态」已对照 `crates/fox-agent-kernel`、`apps/desktop/src-tauri/src/runtime_host/`（`kernel_authority.rs`、`kernel_coordinator.rs`、`kernel_host.rs`、`shadow_reconcile.rs`）和 `apps/desktop/src-tauri/src/database/repositories/kernel*.rs` 逐条核对。无法从代码确认的条目单独标注。
 

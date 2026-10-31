@@ -2,9 +2,9 @@
 
 > **现状（2026-10-25 按代码核对）：部分完成；本文是设计原文，状态以本块为准。**
 > - 已完成：阶段 0A / 0B 的确定性 Eval 平台（完整清单现为 129 个 case，`phase-0b-full-baseline` 版本 `2026-10-22.1`，新基线未重跑）、Execution Profile、ValidationPolicy、WorkSnapshotV2、只读 Graph 与 Graph Acceptance（据 2026-08-27 进度，本次未逐项复核）。
-> - 已改变：下文“默认仍为 `legacy`”已过时。Fox 会话现在默认走 Kernel / Authoritative，Legacy 只能用 `FOX_KERNEL_MODE=legacy` 显式开启（`runtime_host/kernel_authority.rs`），见 [Kernel 改造进度](Kernel-改造进度.md)。
+> - 已改变：下文“默认仍为 `legacy`”已过时。2026-10-31 起 Fox 会话一律走 Authoritative + PiNative，Kernel 执行循环已删除，`FOX_KERNEL_MODE` 不再起作用（`runtime_host/kernel_authority.rs`）。
 > - 未完成：真实 Provider 在线评测、Host 故障注入 E2E、官方评测集接入；Prompt Registry 的 `registry_v1` 是否已进入生产，本次只看到生产 Profile 仍用 `stable_v1`（`services/agent-runtime/src/execution-profile.mjs`），**未进一步核实**。
-> - 相关待办：Kernel Issue #24、#25；Legacy / Shadow 清理未开始。
+> - 相关待办：Kernel Issue #24、#25（随 Kernel 执行循环删除需重新评估）；Shadow 已在 B1 删除。
 
 > Fox 对话、工具、权限、审批、重试、取消与多引擎接入的统一控制改造，见 [Fox Agent Kernel 统一控制架构改造方案](./Fox%20Agent%20Kernel统一控制架构改造方案.md)。该文档同时记录 Pi 公开扩展通道的七项契约实验和实施门槛。
 

@@ -11,7 +11,9 @@
 
 ## 结论
 
-- **Kernel / Authoritative 是 Fox 会话的默认执行路径。** 新 Run 在未设置 `FOX_KERNEL_MODE` 时由 Kernel 驱动真实执行；这一默认值从 2026-09-29 起对普通开发、普通构建和验收包统一生效（`apps/desktop/src-tauri/src/runtime_host/kernel_authority.rs`）。
+> **2026-10-31 更正**：Kernel 执行循环已在 B1 删除（controller 驱动、`kernel_gateway`、`shadow_reconcile`、`kernel_coordinator/`、`kernel_model_worker`、`kernel_delegation`）。新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关（`FOX_EXECUTOR_ROUTE` 已删除），失败不回退；历史 Kernel Run 在启动时标为中断。本页以下内容保留为删除前的历史进度。
+
+- **（历史）Kernel / Authoritative 是 Fox 会话的默认执行路径。** 新 Run 在未设置 `FOX_KERNEL_MODE` 时由 Kernel 驱动真实执行；这一默认值从 2026-09-29 起对普通开发、普通构建和验收包统一生效（`apps/desktop/src-tauri/src/runtime_host/kernel_authority.rs`）。
 - **Legacy 只用于调试和兼容旧 Run**：需要显式设置 `FOX_KERNEL_MODE=legacy`。已有 Run 始终按 `run_control_bindings` 里冻结的 `authority` 执行，不跟着新的环境设置变化。
 - **Shadow 只观察 Legacy Run**，零副作用；它的退出判据已实现（`kernelShadowGate`）。
 - `kernel-default` 构建特性只为兼容旧构建命令保留，不再改变行为。
