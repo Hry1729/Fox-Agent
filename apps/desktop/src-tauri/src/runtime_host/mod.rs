@@ -11,7 +11,6 @@ pub(crate) mod delivery;
 pub(crate) mod delivery_checks_v2;
 pub(crate) mod process_job;
 mod kernel_run_lock;
-mod run_admission;
 mod kernel_host;
 pub(crate) mod office_grants;
 mod session_lifecycle;
@@ -1052,8 +1051,6 @@ pub struct RuntimeHost {
     digital_scheduler_started: Arc<AtomicBool>,
     digital_scheduler_stop: Arc<AtomicBool>,
     active_tool_handlers: Arc<AtomicUsize>,
-    root_run_admission: Arc<run_admission::Gate>,
-    child_run_admission: Arc<run_admission::Gate>,
     /// Pi-native batch positions: registration, the in-batch barrier and the
     /// cancel/close bookkeeping. Shared with the detached-dispatch clone so a
     /// child Run sees the same ledger its parent registered.
@@ -1266,8 +1263,6 @@ impl RuntimeHost {
             digital_scheduler_started: Arc::new(AtomicBool::new(false)),
             digital_scheduler_stop: Arc::new(AtomicBool::new(false)),
             active_tool_handlers: Arc::new(AtomicUsize::new(0)),
-            root_run_admission: run_admission::Gate::new(),
-            child_run_admission: run_admission::Gate::new(),
             native_batches: Arc::new(native_tool_batch::SharedBatchRegistry::new()),
         };
         host.reconcile_continuation_proposals();
@@ -1795,8 +1790,6 @@ impl RuntimeHost {
             digital_scheduler_started: self.digital_scheduler_started.clone(),
             digital_scheduler_stop: self.digital_scheduler_stop.clone(),
             active_tool_handlers: self.active_tool_handlers.clone(),
-            root_run_admission: self.root_run_admission.clone(),
-            child_run_admission: self.child_run_admission.clone(),
             native_batches: self.native_batches.clone(),
         }
     }
@@ -2403,8 +2396,6 @@ impl RuntimeHost {
             self.database.freeze_run_control(&inherited)?;
         }
         let mut child_host = self.clone_for_detached_dispatch();
-        child_host.root_run_admission = self.root_run_admission.clone();
-        child_host.child_run_admission = self.child_run_admission.clone();
         child_host.run_budget_override = Some(child_run.budget.clone());
         child_host.enforce_count_budget_override = enforce_count_budget_override;
         if graph_review_request_id.is_some() {
