@@ -2014,8 +2014,8 @@ impl LocalKnowledgeStore {
                     knowledge_base_id: base.id.clone(),
                     query: trimmed.to_owned(),
                     mode: Some(mode.clone()),
-                    // One extra hit tells whether more matches exist than were returned.
-                    limit: Some((result_limit + 1).min(MAX_LOCAL_SEARCH_RESULTS)),
+                    // 多取 1 条用来判断 hasMore。上限比展示条数多 1，topK=20 时仍能看出还有没有更多。
+                    limit: Some((result_limit + 1).min(MAX_LOCAL_SEARCH_RESULTS + 1)),
                 };
                 // R4: a ready index whose retrieval fails is a failure, not a
                 // quiet switch to keyword search. The error keeps its code.
@@ -2150,6 +2150,8 @@ impl LocalKnowledgeStore {
             "items": items,
             "total": hit_count,
             "truncated": truncated,
+            "hasMore": hit_count > result_limit,
+            "totalIsLowerBound": true,
             "droppedHits": dropped_hits,
             "fallback": { "active": false },
         }))
@@ -2285,6 +2287,8 @@ impl LocalKnowledgeStore {
             }));
         }
 
+        // total 仍是 SQL 候选数（最多 2000）。hasMore 用这个实际候选数对比本次返回条数。
+        let returned_count = items.len();
         Ok(json!({
             "source": "local",
             "knowledgeBaseId": knowledge_base_id,
@@ -2293,6 +2297,8 @@ impl LocalKnowledgeStore {
             "items": items,
             "total": candidate_count,
             "truncated": truncated,
+            "hasMore": candidate_count > returned_count,
+            "totalIsLowerBound": false,
             "fallback": fallback,
         }))
     }
@@ -5615,10 +5621,10 @@ mod agent_search_tests {
             .sum();
         assert_eq!(used, 10);
 
-        // topK is clamped to the lexical maximum and the extra probe hit stays within it.
+        // topK 封顶 20 之后仍多取 1 条，请求上限是 21。
         store
             .search_for_agent_with(&base, "检索", Some(500), None, |request| {
-                assert_eq!(request.limit, Some(MAX_LOCAL_SEARCH_RESULTS));
+                assert_eq!(request.limit, Some(MAX_LOCAL_SEARCH_RESULTS + 1));
                 Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
             })
             .unwrap();
@@ -5739,6 +5745,166 @@ mod agent_search_tests {
         let lexical = store.search_lexical(&base_id, "尺度", None, None).unwrap();
         assert_eq!(lexical["scoreKind"], "lexical");
         assert!(lexical["items"][0].get("scoreKind").is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb4_has_more_is_reported_on_vector_and_keyword_paths() {
+        let (store, root) = temp_store("kb4-more");
+        let (base_id, _, chunk_ids) = base_with_document(
+            &store,
+            "更多",
+            "more.md",
+            &["甲一二三", "甲四五六", "甲七八九", "甲十十一"],
+        );
+        let vector = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "甲",
+                Some(2),
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(vector["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(vector["total"], 4);
+        assert_eq!(vector["hasMore"], true);
+        assert_eq!(vector["totalIsLowerBound"], true);
+        assert_eq!(vector["truncated"], true);
+
+        // 映射后的命中数没有超过 result_limit 时，字符截断也不算 hasMore。
+        let within = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "甲",
+                Some(5),
+                Some(3),
+                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids[..2])),
+            )
+            .unwrap();
+        assert_eq!(within["total"], 2);
+        assert_eq!(within["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(within["truncated"], true);
+        assert_eq!(within["hasMore"], false);
+        assert_eq!(within["totalIsLowerBound"], true);
+
+        let keyword = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "keyword"),
+                "甲",
+                Some(2),
+                None,
+                |_| panic!("keyword mode must not call vector retrieval"),
+            )
+            .unwrap();
+        assert_eq!(keyword["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(keyword["total"], 4);
+        assert_eq!(keyword["hasMore"], true);
+        assert_eq!(keyword["totalIsLowerBound"], false);
+
+        let keyword_all = store
+            .search_lexical(&base_id, "甲", Some(10), None)
+            .unwrap();
+        assert_eq!(keyword_all["items"].as_array().map(Vec::len), Some(4));
+        assert_eq!(keyword_all["total"], 4);
+        assert_eq!(keyword_all["hasMore"], false);
+        assert_eq!(keyword_all["totalIsLowerBound"], false);
+
+        // 关键词路径按实际候选数对比本次返回条数，字符预算提前停下也算还有更多。
+        let keyword_chars = store
+            .search_lexical(&base_id, "甲", Some(8), Some(2))
+            .unwrap();
+        assert_eq!(keyword_chars["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(keyword_chars["total"], 4);
+        assert_eq!(keyword_chars["hasMore"], true);
+        assert_eq!(keyword_chars["totalIsLowerBound"], false);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb4_top_k_twenty_can_still_tell_there_are_more() {
+        let (store, root) = temp_store("kb4-twenty");
+        let texts: Vec<String> = (0..22).map(|index| format!("片段{index:02}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let (base_id, _, chunk_ids) = base_with_document(&store, "二十", "twenty.md", &refs);
+        assert_eq!(chunk_ids.len(), 22);
+
+        let more = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "片段",
+                Some(20),
+                None,
+                |request| {
+                    assert_eq!(request.limit, Some(21));
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "hybrid",
+                        &chunk_ids[..21],
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(more["items"].as_array().map(Vec::len), Some(20));
+        assert_eq!(more["total"], 21);
+        assert_eq!(more["hasMore"], true);
+        assert_eq!(more["totalIsLowerBound"], true);
+
+        let exact = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "片段",
+                Some(20),
+                None,
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids[..20],
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(exact["items"].as_array().map(Vec::len), Some(20));
+        assert_eq!(exact["total"], 20);
+        assert_eq!(exact["hasMore"], false);
+        assert_eq!(exact["totalIsLowerBound"], true);
+
+        // 进程内检索上限是 21，不再把多取的那一条截掉。
+        let probed = store
+            .search_retrieval_in_process(crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+                knowledge_base_id: base_id.clone(),
+                query: "片段".to_owned(),
+                mode: Some("keyword".to_owned()),
+                limit: Some(21),
+            })
+            .unwrap();
+        assert_eq!(probed["items"].as_array().map(Vec::len), Some(21));
+        let capped = store
+            .search_retrieval_in_process(crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+                knowledge_base_id: base_id.clone(),
+                query: "片段".to_owned(),
+                mode: Some("keyword".to_owned()),
+                limit: Some(50),
+            })
+            .unwrap();
+        assert_eq!(capped["items"].as_array().map(Vec::len), Some(21));
+
+        assert_eq!(
+            crate::local_knowledge_vector::clamp_ui_retrieval_limit(Some(21)),
+            Some(20)
+        );
+        assert_eq!(
+            crate::local_knowledge_vector::clamp_ui_retrieval_limit(Some(8)),
+            Some(8)
+        );
+        assert_eq!(crate::local_knowledge_vector::clamp_ui_retrieval_limit(None), None);
 
         drop(store);
         let _ = std::fs::remove_dir_all(root);

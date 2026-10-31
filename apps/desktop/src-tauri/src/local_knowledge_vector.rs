@@ -2112,7 +2112,8 @@ impl LocalKnowledgeStore {
                     .unwrap_or_else(|| "当前知识库的向量索引尚未就绪，请先重新构建".to_owned()),
             ));
         }
-        let limit = request.limit.unwrap_or(8).clamp(1, 20);
+        // 上限 21：比界面的 20 多 1 条，供智能体判断 hasMore。界面入口另行封顶。
+        let limit = request.limit.unwrap_or(8).clamp(1, 21);
         let candidates = self.retrieval_chunks(&request.knowledge_base_id)?;
         let lexical_started = Instant::now();
         let terms = retrieval_terms(query);
@@ -2971,11 +2972,18 @@ pub fn local_knowledge_index_start(
     ))
 }
 
+/// 界面检索测试最多 20 条。智能体可以请求 21 来判断 hasMore，不能从这里漏出去。
+pub(crate) fn clamp_ui_retrieval_limit(limit: Option<usize>) -> Option<usize> {
+    const UI_RETRIEVAL_TEST_LIMIT: usize = 20;
+    limit.map(|value| value.min(UI_RETRIEVAL_TEST_LIMIT))
+}
+
 #[tauri::command]
 pub fn local_knowledge_retrieval_test(
     state: State<'_, AppState>,
-    request: KnowledgeRetrievalRequest,
+    mut request: KnowledgeRetrievalRequest,
 ) -> ApiResponse<Value> {
+    request.limit = clamp_ui_retrieval_limit(request.limit);
     model_response(state.local_knowledge.search_retrieval(request))
 }
 
