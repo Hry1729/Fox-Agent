@@ -2134,7 +2134,7 @@ impl LocalKnowledgeStore {
                 "source": "local",
                 "sourceMetadata": source_metadata(knowledge_base_id, chunk),
             });
-            for (from, to) in [("vectorScore", "vectorScore"), ("keywordScore", "lexicalScore")] {
+            for (from, to) in [("vectorScore", "vectorScore"), ("lexicalScore", "lexicalScore")] {
                 if let Some(score) = hit.get(from).filter(|score| !score.is_null()) {
                     item[to] = score.clone();
                 }
@@ -5439,7 +5439,7 @@ pub(crate) mod agent_search_test_support {
                     "anchor": null,
                     "content": "ignored-by-mapping",
                     "score": 0.05 - index as f64 * 0.001,
-                    "keywordScore": if index == 0 { Some(1.5) } else { None },
+                    "lexicalScore": if index == 0 { Some(1.5) } else { None },
                     "vectorScore": 0.9 - index as f64 * 0.1,
                 })
             })
@@ -6025,6 +6025,39 @@ mod agent_search_tests {
                 .contains("chunkId and startChunkIndex are mutually exclusive"),
             "{error}"
         );
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb7_retrieval_and_agent_results_name_the_lexical_score_the_same() {
+        let (store, root) = temp_store("kb7");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "字段", "fields.md", &["词法分数一致"]);
+        let retrieved = store
+            .search_retrieval_in_process(crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+                knowledge_base_id: base_id.clone(),
+                query: "词法".to_owned(),
+                mode: Some("keyword".to_owned()),
+                limit: Some(5),
+            })
+            .unwrap();
+        let retrieved_item = &retrieved["items"][0];
+        assert!(retrieved_item.get("lexicalScore").is_some());
+        assert!(retrieved_item["lexicalScore"].is_number());
+        assert!(retrieved_item.get("keywordScore").is_none());
+
+        let mapped = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "词法",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(mapped["items"][0]["lexicalScore"], 1.5);
+        assert!(mapped["items"][0].get("keywordScore").is_none());
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }

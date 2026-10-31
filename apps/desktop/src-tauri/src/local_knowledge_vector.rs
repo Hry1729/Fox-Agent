@@ -2248,7 +2248,7 @@ impl LocalKnowledgeStore {
                     "anchor": item.anchor,
                     "content": item.content,
                     "score": score,
-                    "keywordScore": lexical_rank.get(&item.id).map(|(_, value)| *value),
+                    "lexicalScore": lexical_rank.get(&item.id).map(|(_, value)| *value),
                     "vectorScore": vector_rank.get(&item.id).map(|(_, value)| *value),
                 })
             })
@@ -3035,12 +3035,22 @@ pub(crate) fn clamp_ui_retrieval_limit(limit: Option<usize>) -> Option<usize> {
 }
 
 #[tauri::command]
-pub fn local_knowledge_retrieval_test(
+pub async fn local_knowledge_retrieval_test(
     state: State<'_, AppState>,
     mut request: KnowledgeRetrievalRequest,
-) -> ApiResponse<Value> {
+) -> Result<ApiResponse<Value>, String> {
     request.limit = clamp_ui_retrieval_limit(request.limit);
-    model_response(state.local_knowledge.search_retrieval(request))
+    // State 不能跨线程，先克隆资料库再放进阻塞任务，避免检索卡住界面。
+    let store = state.local_knowledge.clone();
+    drop(state);
+    match tauri::async_runtime::spawn_blocking(move || store.search_retrieval(request)).await {
+        Ok(result) => Ok(model_response(result)),
+        Err(error) => Ok(ApiResponse::failure(
+            "local_knowledge.retrieval_failed",
+            format!("检索任务异常结束：{error}"),
+            true,
+        )),
+    }
 }
 
 #[tauri::command]
