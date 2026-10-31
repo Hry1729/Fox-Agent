@@ -5610,6 +5610,23 @@ pub(super) fn validate_reference(
     Ok(())
 }
 
+/// The Evidence type → reference kind pairs [`validate_reference`] accepts,
+/// spelled for model-facing guidance. Kept identical to
+/// `validate_evidence_pair` by `evidence_reference_pairs_match_the_validator`,
+/// and to the Runtime's `TASK_EVIDENCE_REFERENCE_PAIRS` by
+/// `services/agent-runtime/test/task-evidence-reference-guidance.test.mjs`,
+/// which reads this source. Only those contract checks read it.
+#[cfg(test)]
+pub const EVIDENCE_REFERENCE_PAIRS: &[(&str, &[&str])] = &[
+    ("tool_call", &["tool_call"]),
+    ("test_result", &["tool_call", "artifact"]),
+    ("file_diff", &["artifact", "run_event"]),
+    ("artifact", &["artifact"]),
+    ("trace_span", &["run_event"]),
+    ("user_confirmation", &["message"]),
+    ("external_reference", &["source"]),
+];
+
 /// Resolve a ToolCall Evidence reference to its canonical `tool_calls.id`.
 ///
 /// The canonical id (`kernel-tool:{run}:{call}` for Kernel Runs, a Host UUID
@@ -8193,6 +8210,41 @@ mod tests {
         assert_eq!(stored.invalid_reason.as_deref(), Some("workspace changed"));
         assert!(stored.checked_at.is_some());
         cleanup(database, path);
+    }
+
+    #[test]
+    fn evidence_reference_pairs_match_the_validator() {
+        let types = [
+            EvidenceType::ToolCall,
+            EvidenceType::TraceSpan,
+            EvidenceType::TestResult,
+            EvidenceType::FileDiff,
+            EvidenceType::Artifact,
+            EvidenceType::UserConfirmation,
+            EvidenceType::ExternalReference,
+        ];
+        let kinds = [
+            EvidenceReferenceKind::ToolCall,
+            EvidenceReferenceKind::Artifact,
+            EvidenceReferenceKind::RunEvent,
+            EvidenceReferenceKind::Message,
+            EvidenceReferenceKind::Source,
+        ];
+        for evidence_type in &types {
+            for ref_kind in &kinds {
+                let listed = EVIDENCE_REFERENCE_PAIRS.iter().any(|(listed_type, listed_kinds)| {
+                    *listed_type == evidence_type_text(evidence_type)
+                        && listed_kinds.contains(&reference_kind_text(ref_kind))
+                });
+                assert_eq!(
+                    validate_evidence_pair(evidence_type, ref_kind).is_ok(),
+                    listed,
+                    "{} -> {}",
+                    evidence_type_text(evidence_type),
+                    reference_kind_text(ref_kind)
+                );
+            }
+        }
     }
 
     /// Evidence scheme 3: a ToolCall reference may use the runtime/provider
