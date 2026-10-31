@@ -6531,6 +6531,46 @@ impl ToolApprovalPolicy {
     }
 }
 
+#[cfg(test)]
+mod project_rule_decision_order_tests {
+    use super::*;
+
+    fn command_decision(command: &str) -> approval_policy::PolicyDecision {
+        let root = PathBuf::from("D:/fox-test/测试项目");
+        let home = PathBuf::from("C:/Users/fox");
+        let subject = approval_policy::ToolSubject::Command { command: command.into(), cwd: root.clone(), model_risk: None };
+        approval_policy::decide(&approval_policy::PolicyRequest {
+            tool: "run_command",
+            subject: &subject,
+            mode: approval_policy::AccessMode::Ask,
+            project_root: Some(&root),
+            home: Some(&home),
+            rules: &[],
+        })
+    }
+
+    /// PiNative 卡片始终先放 allow_once；规则可写时才在它和 deny 之间插入 allow_project_rule。
+    #[test]
+    fn decorate_request_keeps_allow_once_ahead_of_the_project_rule() {
+        let eligible = command_decision("dir");
+        assert!(eligible.rule_eligible);
+        let mut request = json!({});
+        ToolApprovalPolicy { decision: eligible, has_project: true }.decorate_request(&mut request, "run_command");
+        assert_eq!(request["availableDecisions"], json!(["allow_once", "allow_project_rule", "deny"]));
+        assert_eq!(request["availableDecisions"][0], "allow_once");
+
+        let mut without_project = json!({});
+        ToolApprovalPolicy { decision: command_decision("dir"), has_project: false }.decorate_request(&mut without_project, "run_command");
+        assert_eq!(without_project["availableDecisions"], json!(["allow_once", "deny"]));
+
+        let outside = command_decision(r"type D:\other\x.txt");
+        assert!(!outside.rule_eligible);
+        let mut boundary = json!({});
+        ToolApprovalPolicy { decision: outside, has_project: true }.decorate_request(&mut boundary, "run_command");
+        assert_eq!(boundary["availableDecisions"], json!(["allow_once", "deny"]));
+    }
+}
+
 /// The exact scope key a call is measured against, computed by the same Host
 /// helpers the approval policy uses. `None` means the call cannot be named
 /// exactly (for example a host command with no target), and therefore no grant

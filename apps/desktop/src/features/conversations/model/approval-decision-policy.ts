@@ -9,6 +9,10 @@ const DECISION_ORDER: readonly ApprovalDecision[] = [
 
 const DECISIONS = new Set<ApprovalDecision>(DECISION_ORDER)
 
+// `allow_project_rule` 是「本项目总是允许」的声明，走 approval_allow_project_rule，
+// 不是 approval_resolve 的结算决策。认识它，但不放进可提交的决策集合。
+const NON_SETTLING_DECISIONS = new Set(['allow_project_rule'])
+
 type ApprovalCategoryState =
   | 'legacy_tool_execution'
   | 'tool_execution'
@@ -41,11 +45,13 @@ function explicitDecisions(request: Record<string, unknown>): Set<ApprovalDecisi
   if (!Array.isArray(value) || value.length === 0) return null
 
   const decisions = new Set<ApprovalDecision>()
+  const seen = new Set<string>()
   for (const item of value) {
-    if (typeof item !== 'string' || !DECISIONS.has(item as ApprovalDecision)) return null
-    const decision = item as ApprovalDecision
-    if (decisions.has(decision)) return null
-    decisions.add(decision)
+    if (typeof item !== 'string' || seen.has(item)) return null
+    seen.add(item)
+    if (NON_SETTLING_DECISIONS.has(item)) continue
+    if (!DECISIONS.has(item as ApprovalDecision)) return null
+    decisions.add(item as ApprovalDecision)
   }
   return decisions
 }
