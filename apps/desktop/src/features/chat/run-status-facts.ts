@@ -260,11 +260,12 @@ export function toolFailurePresentation(tool: string, result: unknown): ToolFail
   const output = record(result)
   const details = record(output?.details) ?? record(output?.error)
   const connectorTool = tool === 'call_mcp_tool' || tool === 'list_mcp_tools'
-  // Who authored this result? Only Fox writes `diagnosticSource`, and the Host
-  // writes it last at the execution boundary, so a remote connector body cannot
-  // claim Host provenance — its Host-reserved keys are moved to
-  // `connectorDetails` there. A connector result without the Host mark is never
-  // read as a Host diagnosis, whatever codes its body carries.
+  // Who authored this result? A connector result without the Host mark is never
+  // read as a Host diagnosis, whatever codes its body carries. Note (B1): the
+  // execution-boundary stamp that moved a remote body's Host-reserved keys aside
+  // lived on the removed Kernel dispatch path; the native MCP path does not stamp
+  // yet, so a remote body that writes `diagnosticSource: 'host'` itself is not
+  // fenced here. Tracked for B4.
   const source = typeof details?.diagnosticSource === 'string'
     ? details.diagnosticSource
     : typeof output?.diagnosticSource === 'string' ? output.diagnosticSource : null
