@@ -2311,6 +2311,31 @@ impl LocalKnowledgeStore {
         chunk_id: Option<&str>,
         requested_max_chars: Option<usize>,
     ) -> Result<Value, LocalKnowledgeError> {
+        self.read_document_page(
+            knowledge_base_id,
+            document_id,
+            chunk_id,
+            requested_max_chars,
+            None,
+        )
+    }
+
+    /// 按块分页读取。正文只出现在顶层 `content`；`chunks` 只保留定位信息。
+    /// `start_chunk_index` 有值时只读 `chunk_index` 大于等于它的块。
+    pub fn read_document_page(
+        &self,
+        knowledge_base_id: &str,
+        document_id: &str,
+        chunk_id: Option<&str>,
+        requested_max_chars: Option<usize>,
+        start_chunk_index: Option<usize>,
+    ) -> Result<Value, LocalKnowledgeError> {
+        let chunk_filter = chunk_id.map(str::trim).filter(|value| !value.is_empty());
+        if chunk_filter.is_some() && start_chunk_index.is_some() {
+            return Err(LocalKnowledgeError::invalid(
+                "chunkId and startChunkIndex are mutually exclusive",
+            ));
+        }
         self.get_base(knowledge_base_id)?;
         let max_chars = requested_max_chars
             .unwrap_or(DEFAULT_LOCAL_SEARCH_CHARS)
@@ -2333,9 +2358,14 @@ impl LocalKnowledgeStore {
             rusqlite::types::Value::Text(knowledge_base_id.to_owned()),
             rusqlite::types::Value::Text(document_id.to_owned()),
         ];
-        if let Some(chunk_id) = chunk_id.filter(|value| !value.trim().is_empty()) {
+        if let Some(chunk_id) = chunk_filter {
             sql.push_str(" AND c.id = ?3");
             sql_params.push(rusqlite::types::Value::Text(chunk_id.to_owned()));
+        } else if let Some(start_chunk_index) = start_chunk_index {
+            sql.push_str(" AND c.chunk_index >= ?3");
+            sql_params.push(rusqlite::types::Value::Integer(
+                i64::try_from(start_chunk_index).unwrap_or(i64::MAX),
+            ));
         }
         sql.push_str(" ORDER BY c.chunk_index ASC");
 
@@ -2344,33 +2374,46 @@ impl LocalKnowledgeStore {
             .query_map(params_from_iter(sql_params), map_lexical_chunk)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(LocalKnowledgeError::from)?;
-        if chunk_id.is_some() && chunks.is_empty() {
+        if chunk_filter.is_some() && chunks.is_empty() {
             return Err(LocalKnowledgeError::not_found("knowledge chunk"));
         }
 
         let mut used_chars = 0usize;
         let mut truncated = false;
+        let mut next_chunk_index: Option<i64> = None;
+        let mut next_chunk_partial = false;
         let mut chunk_items = Vec::new();
         let mut content_parts = Vec::new();
         for chunk in chunks {
             if used_chars >= max_chars {
                 truncated = true;
+                next_chunk_index = Some(chunk.chunk_index);
+                next_chunk_partial = false;
                 break;
             }
             let content = truncate_chars(&chunk.text, max_chars - used_chars);
-            if content.len() < chunk.text.len() {
+            let included = content.chars().count();
+            let partial = included < chunk.text.chars().count();
+            if partial {
                 truncated = true;
             }
-            used_chars += content.chars().count();
-            content_parts.push(content.clone());
+            used_chars += included;
+            content_parts.push(content);
             chunk_items.push(json!({
                 "chunkId": chunk.id,
                 "documentId": chunk.document_id,
+                "chunkIndex": chunk.chunk_index,
                 "anchor": chunk.anchor,
-                "content": content,
+                "charCount": included,
                 "source": "local",
                 "sourceMetadata": source_metadata(knowledge_base_id, &chunk),
             }));
+            if partial {
+                // 这一块只读了一部分，下一页仍从它的 chunk_index 开始。
+                next_chunk_index = Some(chunk.chunk_index);
+                next_chunk_partial = true;
+                break;
+            }
         }
 
         Ok(json!({
@@ -2378,10 +2421,12 @@ impl LocalKnowledgeStore {
             "knowledgeBaseId": knowledge_base_id,
             "documentId": document_id,
             "document": document,
-            "chunkId": chunk_id.filter(|value| !value.trim().is_empty()),
+            "chunkId": chunk_filter,
             "content": content_parts.join("\n\n"),
             "chunks": chunk_items,
             "truncated": truncated,
+            "nextChunkIndex": next_chunk_index,
+            "nextChunkPartial": next_chunk_partial,
         }))
     }
 
@@ -5907,6 +5952,79 @@ mod agent_search_tests {
         );
         assert_eq!(crate::local_knowledge_vector::clamp_ui_retrieval_limit(None), None);
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb8_read_document_returns_text_once_and_pages_by_chunk_index() {
+        let (store, root) = temp_store("kb8");
+        let (base_id, document_id, _) = base_with_document(
+            &store,
+            "分页",
+            "page.md",
+            &["AAAAAAAA", "BBBBBBBB", "CCCCCCCC"],
+        );
+        // 每块 8 个字符，12 个字符只够第一块再加第二块的一半。
+        let first = store
+            .read_document(&base_id, &document_id, None, Some(12))
+            .unwrap();
+        assert_eq!(first["content"], "AAAAAAAA\n\nBBBB");
+        assert_eq!(first["nextChunkIndex"], 1);
+        assert_eq!(first["nextChunkPartial"], true);
+        let first_chunks = first["chunks"].as_array().unwrap();
+        assert_eq!(first_chunks.len(), 2);
+        assert_eq!(first_chunks[0]["chunkIndex"], 0);
+        assert_eq!(first_chunks[0]["charCount"], 8);
+        assert_eq!(first_chunks[1]["chunkIndex"], 1);
+        assert_eq!(first_chunks[1]["charCount"], 4);
+        for item in first_chunks {
+            assert!(item.get("content").is_none(), "{item}");
+            assert!(item.get("chunkId").is_some());
+            assert!(item.get("documentId").is_some());
+            assert!(item.get("anchor").is_some());
+            assert!(item.get("source").is_some());
+            assert!(item.get("sourceMetadata").is_some());
+        }
+        assert_eq!(first.to_string().matches("AAAAAAAA").count(), 1);
+        assert_eq!(first.to_string().matches("BBBB").count(), 1);
+
+        let second = store
+            .read_document_page(&base_id, &document_id, None, Some(100), Some(1))
+            .unwrap();
+        assert_eq!(second["content"], "BBBBBBBB\n\nCCCCCCCC");
+        assert!(second["nextChunkIndex"].is_null());
+        assert_eq!(second["nextChunkPartial"], false);
+        let second_chunks = second["chunks"].as_array().unwrap();
+        assert_eq!(second_chunks.len(), 2);
+        assert_eq!(second_chunks[0]["chunkIndex"], 1);
+        assert_eq!(second_chunks[1]["chunkIndex"], 2);
+        assert!(second_chunks.iter().all(|item| item.get("content").is_none()));
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb8_chunk_id_and_start_chunk_index_are_mutually_exclusive() {
+        let (store, root) = temp_store("kb8-exclusive");
+        let (base_id, document_id, chunk_ids) =
+            base_with_document(&store, "互斥", "exclusive.md", &["只有一块"]);
+        let error = store
+            .read_document_page(
+                &base_id,
+                &document_id,
+                Some(&chunk_ids[0]),
+                Some(20),
+                Some(0),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "local_knowledge.invalid_request");
+        assert!(
+            error
+                .to_string()
+                .contains("chunkId and startChunkIndex are mutually exclusive"),
+            "{error}"
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
