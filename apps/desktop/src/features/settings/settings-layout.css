@@ -7,9 +7,9 @@
 
 .fox-settings-page {
   --fox-settings-hairline: color-mix(in oklch, var(--border) 70%, transparent);
-  width: min(760px, calc(100% - 48px));
+  width: min(760px, calc(100% - var(--fox-space-6xl)));
   margin: 0 auto;
-  padding: 48px 0 64px;
+  padding: var(--fox-space-6xl) 0 var(--fox-space-8xl);
   color: var(--foreground);
 }
 
@@ -18,8 +18,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 28px;
+  gap: var(--fox-space-xl);
+  margin-bottom: var(--fox-space-4xl);
 }
 
 .fox-settings-page .fox-settings-page-head > div:first-child {
@@ -28,7 +28,7 @@
 
 .fox-shell .fox-settings-page .fox-settings-page-head h1,
 .fox-settings-page .fox-settings-page-head h1 {
-  margin: 0 0 4px;
+  margin: 0 0 var(--fox-space-xs);
   font-size: var(--fox-type-page);
   font-weight: var(--fox-weight-semibold);
   line-height: 1.33;
@@ -46,25 +46,25 @@
   display: flex;
   flex: none;
   align-items: center;
-  gap: 8px;
+  gap: var(--fox-space-m);
 }
 
 /* ---------- Groups ---------- */
 .fox-settings-page .fox-settings-group + .fox-settings-group {
-  margin-top: 32px;
+  margin-top: var(--fox-space-4xl);
 }
 
 .fox-settings-page .fox-settings-group {
-  scroll-margin-top: 24px;
+  scroll-margin-top: var(--fox-space-3xl);
 }
 
 .fox-settings-page .fox-settings-group-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  min-height: 28px;
-  padding-bottom: 6px;
+  gap: var(--fox-space-l);
+  min-height: var(--fox-inline-action-height);
+  padding-bottom: var(--fox-space-s);
   border-bottom: 1px solid var(--border);
 }
 
@@ -80,24 +80,22 @@
 .fox-settings-page .fox-settings-group-aside {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--fox-space-m);
   color: var(--muted-foreground);
   font-size: var(--fox-type-caption);
   font-variant-numeric: tabular-nums;
 }
 
-.fox-settings-page .fox-settings-group-aside [data-slot='button'] {
-  margin-right: -8px;
-}
+/* 分组标题右侧的按钮和下面每一行的控件共用右缘，不再往外探。 */
 
 /* ---------- Rows ---------- */
 .fox-settings-page .fox-settings-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  min-height: 60px;
-  padding: 12px 0;
+  gap: var(--fox-space-3xl);
+  min-height: calc(var(--fox-control-md) + var(--fox-space-3xl) + var(--fox-space-xs));
+  padding: var(--fox-space-l) 0;
   border-bottom: 1px solid var(--fox-settings-hairline);
 }
 
@@ -112,7 +110,8 @@
 .fox-settings-page .fox-settings-row-text {
   min-width: 0;
   display: grid;
-  gap: 2px;
+  /* 标题和说明叠在同一列，左缘对齐。 */
+  gap: var(--fox-space-micro);
 }
 
 .fox-settings-page .fox-settings-row-text b {
@@ -132,20 +131,20 @@
   flex: none;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
+  gap: var(--fox-space-s);
 }
 
 .fox-settings-page .fox-settings-hint {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--fox-space-xs);
   color: var(--fox-faint);
   font-size: var(--fox-type-caption);
   line-height: 1.5;
 }
 
 .fox-settings-page .fox-settings-hint [data-slot='kbd-group'] {
-  gap: 4px;
+  gap: var(--fox-space-xs);
 }
 
 /* Controls share one height. */
@@ -166,7 +165,7 @@
 
 .fox-settings-page .fox-settings-segmented [data-slot='tabs-list'] {
   height: var(--fox-control-md);
-  padding: 3px;
+  padding: var(--fox-space-micro);
   border-radius: var(--radius);
   background: var(--muted);
 }
@@ -174,7 +173,7 @@
 .fox-settings-page .fox-settings-segmented [data-slot='tabs-trigger'] {
   height: 100%;
   flex: none;
-  padding: 0 12px;
+  padding: 0 var(--fox-space-l);
   border-radius: calc(var(--radius) - 2px);
   font-size: var(--fox-type-meta);
   font-weight: var(--fox-weight-medium);
@@ -210,13 +209,13 @@
 
 .fox-settings-page .fox-settings-shortcut > div:first-of-type > button:first-child {
   justify-content: flex-end;
-  padding: 0 4px;
+  padding: 0 var(--fox-space-xs);
 }
 
 .fox-settings-page .fox-settings-shortcut kbd {
   min-width: 20px;
   height: 20px;
-  padding: 0 6px;
+  padding: 0 var(--fox-space-s);
   border-bottom-width: 1px;
   color: var(--muted-foreground);
 }
@@ -226,7 +225,7 @@
 .fox-settings-page .fox-settings-shortcut > div:first-of-type > span:last-child {
   position: absolute;
   top: 50%;
-  right: calc(100% + 4px);
+  right: calc(100% + var(--fox-space-xs));
   padding: 0;
   transform: translateY(-50%);
   opacity: 0;
@@ -241,13 +240,13 @@
 }
 
 .fox-settings-page .fox-settings-error {
-  margin: 8px 0 0;
+  margin: var(--fox-space-m) 0 0;
   color: var(--destructive);
   font-size: var(--fox-type-caption);
 }
 
 .fox-settings-page .fox-settings-footnote {
-  margin: 12px 0 0;
+  margin: var(--fox-space-l) 0 0;
   color: var(--fox-faint);
   font-size: var(--fox-type-caption);
   line-height: 1.6;
@@ -273,10 +272,11 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
-  min-height: 60px;
-  margin: 0 -8px;
-  padding: 0 8px 0 0;
+  gap: var(--fox-space-xs);
+  min-height: calc(var(--fox-control-md) + var(--fox-space-3xl) + var(--fox-space-xs));
+  /* 负外边距只让悬停背景探出一圈；主按钮的左内边距把名称拉回和其他行同一条左缘。 */
+  margin: 0 calc(-1 * var(--fox-space-m));
+  padding: 0 var(--fox-space-m) 0 0;
   border-radius: var(--fox-radius-card);
   transition: background-color var(--fox-transition-fast);
 }
@@ -285,8 +285,8 @@
   content: '';
   position: absolute;
   top: 0;
-  right: 8px;
-  left: 8px;
+  right: var(--fox-space-m);
+  left: var(--fox-space-m);
   height: 1px;
   background: var(--fox-settings-hairline, var(--border));
 }
@@ -308,9 +308,9 @@
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--fox-space-l);
   align-self: stretch;
-  padding: 10px 0 10px 8px;
+  padding: var(--fox-space-l) 0 var(--fox-space-l) var(--fox-space-m);
   border: 0;
   border-radius: var(--fox-radius-card);
   background: transparent;
@@ -326,8 +326,8 @@
 }
 
 .fox-settings-provider-mark {
-  width: 32px;
-  height: 32px;
+  width: var(--fox-control-md);
+  height: var(--fox-control-md);
   flex: none;
   display: grid;
   place-items: center;
@@ -337,20 +337,16 @@
   color: var(--muted-foreground);
 }
 
-.fox-settings-provider-mark img {
-  width: 18px;
-  height: 18px;
+.fox-settings-provider-mark img,
+.fox-settings-provider-mark svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
   object-fit: contain;
 }
 
-.fox-settings-provider-mark svg {
-  width: 16px;
-  height: 16px;
-}
-
 .fox-settings-provider-mark.is-large {
-  width: 36px;
-  height: 36px;
+  width: var(--fox-control-lg);
+  height: var(--fox-control-lg);
 }
 
 .fox-settings-provider-mark.is-large img {
@@ -532,7 +528,7 @@
 }
 
 .fox-settings-sheet-section {
-  padding: 20px 0;
+  padding: var(--fox-space-2xl) 0;
 }
 
 .fox-settings-sheet-section + .fox-settings-sheet-section {
@@ -543,8 +539,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 28px;
-  margin-bottom: 12px;
+  min-height: var(--fox-inline-action-height);
+  margin-bottom: var(--fox-space-l);
 }
 
 .fox-settings-sheet-section-head h3 {
@@ -553,9 +549,7 @@
   font-weight: var(--fox-weight-semibold);
 }
 
-.fox-settings-sheet-section-head [data-slot='button'] {
-  margin-right: -8px;
-}
+/* 抽屉分组标题的按钮留在内容列里，和下面的控件右缘对齐。 */
 
 .fox-settings-field {
   display: grid;

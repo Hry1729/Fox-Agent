@@ -13,17 +13,17 @@
 
 .fox-page-shell .fox-settings-layout > main,
 .fox-settings-layout > main {
-  width: min(824px, calc(100% - 48px)) !important;
+  width: min(824px, calc(100% - var(--fox-space-6xl))) !important;
   max-width: none;
-  padding: 32px 32px 64px !important;
+  padding: var(--fox-space-4xl) var(--fox-space-4xl) var(--fox-space-8xl) !important;
 }
 
 .fox-settings-layout > main > header {
-  margin-bottom: 24px !important;
+  margin-bottom: var(--fox-space-3xl) !important;
 }
 
 .fox-settings-layout > main > header h1 {
-  margin: 0 0 4px !important;
+  margin: 0 0 var(--fox-space-xs) !important;
   font-size: var(--fox-type-page) !important;
   font-weight: 600;
   line-height: 1.33;
@@ -37,15 +37,15 @@
 
 /* Section card */
 .fox-settings-layout .fox-settings-section {
-  margin-bottom: 16px;
-  padding: 16px !important;
+  margin-bottom: var(--fox-space-xl);
+  padding: var(--fox-space-xl) !important;
 }
 
 .fox-settings-layout .fox-settings-section-head {
   min-height: var(--fox-control-md);
   align-items: flex-start !important;
-  gap: 12px;
-  margin-bottom: 8px;
+  gap: var(--fox-space-l);
+  margin-bottom: var(--fox-space-m);
 }
 
 .fox-settings-layout .fox-settings-section-head:last-child {
@@ -62,7 +62,7 @@
 .fox-settings-section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--fox-space-m);
   min-width: 0;
 }
 
@@ -70,19 +70,19 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--fox-space-m);
 }
 
 .fox-settings-layout .fox-setting-actions {
-  gap: 8px;
-  margin-top: 12px;
+  gap: var(--fox-space-m);
+  margin-top: var(--fox-space-l);
 }
 
 /* Preference rows */
 .fox-settings-layout .fox-setting-row-bordered {
-  min-height: 56px;
-  gap: 16px;
-  padding: 12px 0 !important;
+  min-height: calc(var(--fox-control-md) + var(--fox-space-3xl));
+  gap: var(--fox-space-xl);
+  padding: var(--fox-space-l) 0 !important;
 }
 
 .fox-settings-layout .fox-setting-row-bordered:last-child {
@@ -133,8 +133,8 @@
 .fox-settings-layout [data-slot='badge'] {
   height: var(--fox-badge-height) !important;
   min-height: 0 !important;
-  gap: 4px !important;
-  padding: 0 8px !important;
+  gap: var(--fox-space-xs) !important;
+  padding: 0 var(--fox-space-m) !important;
   border-radius: var(--fox-radius-pill) !important;
   font-size: var(--fox-type-caption) !important;
   font-weight: 500 !important;
@@ -150,7 +150,7 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--fox-space-m);
 }
 
 .fox-text-scale-control > .fox-settings-text-slider {
@@ -177,7 +177,7 @@
   height: var(--fox-control-md);
   display: inline-flex;
   align-items: center;
-  margin-left: 4px;
+  margin-left: var(--fox-space-xs);
   padding: 0 1px;
   border: 1px solid var(--border);
   border-radius: var(--fox-radius-control);
@@ -376,20 +376,20 @@
 }
 
 .fox-settings-layout .fox-provider-list {
-  gap: 8px;
+  gap: var(--fox-space-m);
 }
 
 .fox-settings-layout .fox-provider-card {
   min-height: 0;
-  grid-template-columns: 24px minmax(0, 1fr) auto var(--fox-control-sm);
-  gap: 12px;
-  padding: 12px 12px 12px 16px !important;
+  grid-template-columns: calc(var(--fox-icon-size) + var(--fox-space-m)) minmax(0, 1fr) auto var(--fox-control-sm);
+  gap: var(--fox-space-l);
+  padding: var(--fox-space-l) !important;
   border-radius: var(--fox-radius-card);
 }
 
 .fox-settings-layout .fox-provider-mark {
-  width: 24px;
-  height: 24px;
+  width: calc(var(--fox-icon-size) + var(--fox-space-m));
+  height: calc(var(--fox-icon-size) + var(--fox-space-m));
   align-self: start;
   margin-top: 0;
   border: 1px solid var(--border);
@@ -398,14 +398,10 @@
   color: var(--muted-foreground);
 }
 
-.fox-settings-layout .fox-provider-mark img {
-  width: 16px;
-  height: 16px;
-}
-
+.fox-settings-layout .fox-provider-mark img,
 .fox-settings-layout .fox-provider-mark svg {
-  width: 14px;
-  height: 14px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
 }
 
 .fox-settings-layout .fox-provider-card-main {
@@ -477,9 +473,9 @@
 }
 
 .fox-settings-layout .fox-diagnostic-checks > div {
-  min-height: 56px;
-  gap: 12px;
-  padding: 12px 0;
+  min-height: calc(var(--fox-control-md) + var(--fox-space-3xl));
+  gap: var(--fox-space-l);
+  padding: var(--fox-space-l) 0;
 }
 
 .fox-settings-layout .fox-diagnostic-checks > div:is(.is-ok, .is-warning, .is-error, .is-offline) {
@@ -512,12 +508,12 @@
 }
 
 .fox-settings-layout .fox-maintenance-stats {
-  gap: 8px;
-  margin: 12px 0;
+  gap: var(--fox-space-m);
+  margin: var(--fox-space-l) 0;
 }
 
 .fox-settings-layout .fox-maintenance-stats span {
-  padding: 12px;
+  padding: var(--fox-space-l);
   border: 1px solid var(--border);
   border-radius: var(--fox-radius-card);
   background: var(--card);
@@ -604,7 +600,7 @@
   display: flex;
   align-items: center;
   gap: var(--fox-space-m);
-  min-height: 36px;
+  min-height: var(--fox-control-lg);
   border: 0;
   border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
   padding: var(--fox-space-xs) 0;
@@ -632,19 +628,19 @@
 }
 .fox-settings-layout .fox-provider-row .fox-provider-mark {
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: var(--fox-control-sm);
+  height: var(--fox-control-sm);
   display: grid;
   place-items: center;
   color: var(--muted-foreground);
 }
-.fox-settings-layout .fox-provider-row .fox-provider-mark img { width: 18px; height: 18px; -o-object-fit: contain; object-fit: contain; }
-.fox-settings-layout .fox-provider-row .fox-provider-mark svg { width: 16px; height: 16px; }
+.fox-settings-layout .fox-provider-row .fox-provider-mark img,
+.fox-settings-layout .fox-provider-row .fox-provider-mark svg { width: var(--fox-icon-size); height: var(--fox-icon-size); -o-object-fit: contain; object-fit: contain; }
 .fox-settings-layout .fox-provider-row-name { min-width: 0; display: flex; align-items: baseline; gap: var(--fox-space-m); }
 .fox-settings-layout .fox-provider-row-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fox-type-chrome); font-weight: var(--fox-weight-medium); }
 .fox-settings-layout .fox-provider-row-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); font-size: var(--fox-type-caption); }
-.fox-settings-layout .fox-provider-row-status { flex: none; display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: var(--fox-type-caption); font-variant-numeric: tabular-nums; }
-.fox-settings-layout .fox-provider-row-add { flex: none; width: 16px; height: 16px; color: var(--muted-foreground); }
+.fox-settings-layout .fox-provider-row-status { flex: none; display: inline-flex; align-items: center; gap: var(--fox-space-s); color: var(--muted-foreground); font-size: var(--fox-type-caption); font-variant-numeric: tabular-nums; }
+.fox-settings-layout .fox-provider-row-add { flex: none; width: var(--fox-icon-size); height: var(--fox-icon-size); color: var(--muted-foreground); }
 .fox-settings-layout .fox-provider-row:hover .fox-provider-row-name strong { color: var(--foreground); }
 
 /* Arc controls keep the established Fox settings column, type scale and tokens. */
@@ -657,10 +653,10 @@
   align-items: start;
 }
 .fox-settings-layout .fox-shortcut-settings .fox-setting-row > span {
-  padding-top: 4px;
+  padding-top: var(--fox-space-xs);
 }
 .fox-shortcut-help {
-  margin: 12px 0 0;
+  margin: var(--fox-space-l) 0 0;
   color: var(--muted-foreground);
   font-size: var(--fox-type-caption);
   line-height: 1.6;
@@ -672,7 +668,7 @@
 @media (max-width: 640px) {
   .fox-settings-layout .fox-shortcut-settings .fox-setting-row {
     flex-direction: column;
-    gap: 8px;
+    gap: var(--fox-space-m);
     align-items: stretch;
   }
   .fox-settings-layout .fox-settings-shortcut-recorder {
