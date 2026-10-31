@@ -2,7 +2,7 @@ import type { desktopClient } from './conversations/api/desktop-client'
 import { runtimeEventRefreshesNotifications } from './notifications'
 
 type NotificationClient = Pick<typeof desktopClient,
-  'listenRuntimeEvents' | 'listenWorkEvents' | 'listenApprovalRequests' | 'listenApprovalResolved' | 'listenKernelStateInvalidations'>
+  'listenRuntimeEvents' | 'listenWorkEvents' | 'listenApprovalRequests' | 'listenApprovalResolved'>
 
 /** Independent registrations: one failed channel must not leak the others. */
 export function subscribeNotificationRefresh(client: NotificationClient, refresh: () => void, fail: (cause: unknown) => void) {
@@ -21,8 +21,5 @@ export function subscribeNotificationRefresh(client: NotificationClient, refresh
   register(() => client.listenWorkEvents(invalidate))
   register(() => client.listenApprovalRequests(invalidate))
   register(() => client.listenApprovalResolved(invalidate))
-  register(() => client.listenKernelStateInvalidations((notice) => {
-    if (notice?.schemaVersion === 1) invalidate()
-  }))
   return () => { disposed = true; stops.splice(0).forEach((stop) => stop()) }
 }

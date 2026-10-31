@@ -707,7 +707,6 @@ pub struct RuntimeDiagnostics {
     pub session_file_count: usize,
     pub recovery_attempts: u8,
     pub last_recovery_at: Option<i64>,
-    pub kernel_shadow_gate: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1358,10 +1357,6 @@ impl RuntimeHost {
 
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
         let available = self.runtime_available();
-        let kernel_shadow_gate = self.database.kernel_shadow_recent_exit_gate().unwrap_or_else(|error| json!({
-            "passed": false, "authoritativeEnabled": false, "productionRolloutApproved": false,
-            "blockingReasons": [redact_diagnostic_line(&error)],
-        }));
         let session_file_count = std::fs::read_dir(&self.sessions_dir)
             .ok()
             .into_iter()
@@ -1401,7 +1396,6 @@ impl RuntimeHost {
                 session_file_count,
                 recovery_attempts: state.recovery_attempts,
                 last_recovery_at: state.last_recovery_at,
-                kernel_shadow_gate: kernel_shadow_gate.clone(),
             },
             Err(_) => RuntimeDiagnostics {
                 protocol: protocol::PROTOCOL_NAME.to_owned(),
@@ -1419,7 +1413,6 @@ impl RuntimeHost {
                 session_file_count,
                 recovery_attempts: 0,
                 last_recovery_at: None,
-                kernel_shadow_gate,
             },
         }
     }

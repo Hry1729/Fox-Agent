@@ -305,12 +305,6 @@ pub struct Database {
     connection: Arc<Mutex<Connection>>,
     /// Host-derived identity shared by clones, never supplied by a tool or model.
     data_root_id: String,
-    kernel_changes: Arc<super::kernel_changes::KernelChanges>,
-    /// Volatile worker-observed model output progress: run_id -> wall_ms of the
-    /// last preview (text, thinking, or tool-parameter bytes). Never persisted:
-    /// a restart measures idleness conservatively from the persisted model
-    /// wall anchor until fresh progress arrives. Follows the KernelChanges
-    /// precedent (process-local hub on the shared Database handle).
     /// Only grants created in this Host lifetime may cross Office run boundaries.
     office_reuse_grants: Arc<Mutex<Vec<kernel_authorization::ProcessOfficeGrant>>>,
 }
@@ -548,7 +542,6 @@ impl Database {
         let database = Self {
             connection: Arc::new(Mutex::new(connection)),
             data_root_id,
-            kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
             office_reuse_grants: Arc::new(Mutex::new(Vec::new())),
         };
         database.seed_builtin_agents()?;
@@ -636,10 +629,6 @@ impl Database {
             );
         }
         Ok(repair)
-    }
-
-    pub(crate) fn subscribe_kernel_changes(&self) -> std::sync::mpsc::Receiver<()> {
-        self.kernel_changes.subscribe()
     }
 
     pub fn default_agent_id(&self) -> &'static str {
