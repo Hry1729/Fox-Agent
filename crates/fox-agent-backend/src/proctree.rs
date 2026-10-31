@@ -148,6 +148,136 @@ pub fn merge(into: &mut Vec<ProcIdentity>, more: Vec<ProcIdentity>) {
     }
 }
 
+/// 同一个进程：pid 与启动时间都相同。启动时间不同是 pid 复用，不算同一个。
+fn same_process(known: &ProcIdentity, now: &ProcIdentity) -> bool {
+    known.pid == now.pid && known.start == now.start
+}
+
+/// 当前快照里不在基线里的进程（pid 与启动时间都要比对）。
+///
+/// 基线成员留下；同 pid 不同启动时间要清扫。空基线表示「成功读到了一份空快照」，
+/// 当前进程全部都是目标。查询失败的「无基线」不是空切片，调用方必须另走 fail-closed，
+/// 不能把失败当成空基线来猜。
+pub fn sweep_targets(baseline: &[ProcIdentity], current: &[ProcIdentity]) -> Vec<ProcIdentity> {
+    current.iter().filter(|now| !baseline.iter().any(|known| same_process(known, now))).cloned().collect()
+}
+
+/// Windows Job 的 pid 列表版：只比 pid。空基线时当前 pid 全部都是目标。
+pub fn sweep_pid_targets(baseline: &[u32], current: &[u32]) -> Vec<u32> {
+    let mut targets: Vec<u32> = current.iter().copied().filter(|pid| !baseline.contains(pid)).collect();
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+}
+
+/// 进程已经结束：不存在，或（Linux）已经是僵尸。
+///
+/// 取消清扫杀掉的工具子进程，父进程是后端自己，后端不 `wait` 时会变成僵尸。
+/// 僵尸不再执行代码，测试里视为已经结束。
+#[cfg(unix)]
+pub fn process_ended(pid: u32) -> bool {
+    let Ok(pid_i) = i32::try_from(pid) else { return false };
+    if pid_i <= 0 {
+        return false;
+    }
+    // SAFETY: 只查询进程是否存在，不发终止信号。
+    let rc = unsafe { libc::kill(pid_i, 0) };
+    if rc != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_stat_is_zombie(pid);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match table() {
+            Some(rows) => match rows.iter().find(|row| row.pid == pid) {
+                Some(row) => row.zombie,
+                // kill 还看得到，但 ps 没有这一行：不当成已结束。
+                None => false,
+            },
+            None => false,
+        }
+    }
+}
+
+/// `/proc/<pid>/stat` 状态为 Z 或 X 时，进程已经退出，只等回收。
+#[cfg(target_os = "linux")]
+fn linux_stat_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        // kill(pid, 0) 刚刚成功，随即读不到 stat：进程正在退出。
+        return true;
+    };
+    stat.rfind(')')
+        .and_then(|index| stat[index + 1..].split_whitespace().next())
+        .is_some_and(|state| state == "Z" || state == "X")
+}
+
+/// Windows：`OpenProcess` + `GetExitCodeProcess` / `WaitForSingleObject`。
+/// 打不开视为已不存在。`STILL_ACTIVE` 且等待立即超时则仍在运行。
+#[cfg(windows)]
+pub fn process_ended(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        return true;
+    }
+    let mut code = 0u32;
+    let got = unsafe { GetExitCodeProcess(handle, &mut code) };
+    if got != 0 && code != STILL_ACTIVE as u32 {
+        unsafe { CloseHandle(handle) };
+        return true;
+    }
+    let waited = unsafe { WaitForSingleObject(handle, 0) };
+    unsafe { CloseHandle(handle) };
+    waited == WAIT_OBJECT_0
+}
+
+/// 对差集里的进程发 SIGKILL。已经不在（ESRCH）、已是僵尸、或 pid 已被复用的，不记失败。
+///
+/// 离开进程组的（`detached`）也按快照里的 pid 杀，不向进程组发信号，避免误伤后端。
+/// 进程表读不到时一条都不杀，全部记入失败（fail-closed）。
+#[cfg(unix)]
+pub(crate) fn kill_sweep_targets(targets: &[ProcIdentity]) -> (Vec<u32>, Vec<String>) {
+    let Some(rows) = table() else {
+        return (Vec::new(), targets.iter().map(|identity| format!("进程表不可读，未向 pid {} 发 SIGKILL", identity.pid)).collect());
+    };
+    let mut killed = Vec::new();
+    let mut failed = Vec::new();
+    for identity in targets {
+        let same = rows.iter().find(|row| row.pid == identity.pid && row.start == identity.start);
+        match same {
+            None => continue,
+            Some(row) if row.zombie => continue,
+            Some(_) => {}
+        }
+        let Ok(pid) = i32::try_from(identity.pid) else {
+            failed.push(format!("pid {} 无法作为信号目标", identity.pid));
+            continue;
+        };
+        if pid <= 1 {
+            failed.push(format!("拒绝向 pid {pid} 发 SIGKILL"));
+            continue;
+        }
+        // SAFETY: 参数是整数 pid 与 SIGKILL。
+        let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
+        if rc == 0 {
+            killed.push(identity.pid);
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            continue;
+        }
+        failed.push(format!("SIGKILL pid {} 失败: {error}", identity.pid));
+    }
+    (killed, failed)
+}
+
 /// Send `signal` to the process group `pgid`. `Ok(false)`: the group no
 /// longer exists (`ESRCH`).
 #[cfg(unix)]
@@ -280,6 +410,43 @@ mod tests {
         let mut merged = tree.clone();
         merge(&mut merged, descendants_in(&rows, 101));
         assert_eq!(merged.len(), 3, "merge dedupes by pid + start");
+    }
+
+    #[test]
+    fn sweep_targets_kills_reused_pid_keeps_baseline_and_empty_baseline_is_everyone() {
+        let baseline = vec![
+            ProcIdentity { pid: 10, pgid: 10, start: "100".into() },
+            ProcIdentity { pid: 11, pgid: 10, start: "101".into() },
+        ];
+        let current = vec![
+            ProcIdentity { pid: 10, pgid: 10, start: "100".into() },
+            // 同 pid、启动时间变了：pid 被复用，要杀。
+            ProcIdentity { pid: 11, pgid: 99, start: "999".into() },
+            // 新进程，pgid 不同也要杀（detached 离开了进程组）。
+            ProcIdentity { pid: 12, pgid: 12, start: "102".into() },
+            // 启动时间相同则 pgid 差异不构成新进程。
+            ProcIdentity { pid: 10, pgid: 77, start: "100".into() },
+        ];
+        let targets = sweep_targets(&baseline, &current);
+        let keys: Vec<(u32, &str)> = targets.iter().map(|identity| (identity.pid, identity.start.as_str())).collect();
+        assert_eq!(keys, vec![(11, "999"), (12, "102")]);
+        assert!(sweep_targets(&baseline, &baseline).is_empty(), "基线成员不杀");
+        // 空切片是「读成功但没有进程」，不是查询失败的无基线。
+        assert_eq!(sweep_targets(&[], &current).len(), current.len(), "空基线：当前进程全部都是目标");
+        assert!(sweep_targets(&baseline, &[]).is_empty());
+    }
+
+    #[test]
+    fn sweep_pid_targets_drops_baseline_pids_and_dedupes() {
+        assert_eq!(sweep_pid_targets(&[1, 2], &[2, 3, 3, 4]), vec![3, 4]);
+        assert!(sweep_pid_targets(&[7], &[7]).is_empty(), "基线 pid 不杀");
+        assert_eq!(sweep_pid_targets(&[], &[4, 4, 5]), vec![4, 5], "空基线：当前 pid 全部都是目标");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_current_process_has_not_ended() {
+        assert!(!process_ended(std::process::id()));
     }
 
     /// The parent exits while its child (same group) keeps running: not
