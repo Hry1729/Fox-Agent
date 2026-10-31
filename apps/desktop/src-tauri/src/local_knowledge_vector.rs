@@ -2114,13 +2114,24 @@ impl LocalKnowledgeStore {
     ) -> Result<Value, LocalKnowledgeError> {
         control.check()?;
         let base = self.get_base(&request.knowledge_base_id)?;
+        self.search_retrieval_for_base(&base, request, control)
+    }
+
+    /// 与 [`Self::search_retrieval_controlled`] 相同，但复用调用方已经读到的资料库。
+    pub(crate) fn search_retrieval_for_base(
+        &self,
+        base: &crate::local_knowledge::LocalKnowledgeBase,
+        request: KnowledgeRetrievalRequest,
+        control: &RetrievalControl,
+    ) -> Result<Value, LocalKnowledgeError> {
+        control.check()?;
         let requested_mode = request.mode.as_deref().unwrap_or(&base.search_mode);
         #[cfg(all(feature = "local-embedding", feature = "zvec"))]
         if requested_mode != "keyword" && !cfg!(test) {
             return run_retrieval_worker_process(self, &request, control);
         }
         let _ = requested_mode;
-        self.search_retrieval_in_process(request)
+        self.search_retrieval_in_process_for_base(base, request)
     }
 
     pub(crate) fn search_retrieval_in_process(
@@ -2128,6 +2139,15 @@ impl LocalKnowledgeStore {
         request: KnowledgeRetrievalRequest,
     ) -> Result<Value, LocalKnowledgeError> {
         let base = self.get_base(&request.knowledge_base_id)?;
+        self.search_retrieval_in_process_for_base(&base, request)
+    }
+
+    /// 与 [`Self::search_retrieval_in_process`] 相同，但复用调用方已经读到的资料库。
+    pub(crate) fn search_retrieval_in_process_for_base(
+        &self,
+        base: &crate::local_knowledge::LocalKnowledgeBase,
+        request: KnowledgeRetrievalRequest,
+    ) -> Result<Value, LocalKnowledgeError> {
         let query = request.query.trim();
         if query.is_empty() || query.chars().count() > 512 {
             return Err(LocalKnowledgeError::invalid(
@@ -2175,7 +2195,7 @@ impl LocalKnowledgeStore {
         let vector = if requested_mode == "keyword" {
             Vec::new()
         } else {
-            self.vector_scores(&base, query, limit.saturating_mul(8).clamp(20, 200))?
+            self.vector_scores(base, query, limit.saturating_mul(8).clamp(20, 200))?
         };
         let vector_ms = elapsed_ms(vector_started);
         let lexical_rank = lexical

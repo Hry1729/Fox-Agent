@@ -1988,8 +1988,9 @@ impl LocalKnowledgeStore {
     ) -> Result<Value, LocalKnowledgeError> {
         control.check()?;
         let base = self.get_base(knowledge_base_id)?;
+        // 检索路径复用这一次读到的资料库，不再在 search_retrieval 里重复 get_base。
         self.search_for_agent_with(&base, query, requested_limit, requested_max_chars, |request| {
-            self.search_retrieval_controlled(request, control)
+            self.search_retrieval_for_base(&base, request, control)
         })
     }
 
