@@ -154,8 +154,8 @@ function fakeClient() {
   return { client, probes, caps }
 }
 
-function Panel({ client, backend, project = 'p1', locked = null, conversationId = null, refusal = null }: { client: any; backend: AgentBackendId; project?: string; locked?: AgentBackendId | null; conversationId?: string | null; refusal?: string | null }) {
-  return <AgentBackendPanel client={client} status={status} lockedBackend={locked} conversationId={conversationId} draftBackend={backend} draftProjectId={project} draftProjectRoot={`D:/${project}`} refusal={refusal} />
+function Panel({ client, backend, project = 'p1', locked = null, conversationId = null, refusal = null, developerUi }: { client: any; backend: AgentBackendId; project?: string; locked?: AgentBackendId | null; conversationId?: string | null; refusal?: string | null; developerUi?: boolean }) {
+  return <AgentBackendPanel client={client} status={status} lockedBackend={locked} conversationId={conversationId} draftBackend={backend} draftProjectId={project} draftProjectRoot={`D:/${project}`} refusal={refusal} developerUi={developerUi} />
 }
 
 const text = () => document.body.textContent ?? ''
@@ -186,7 +186,7 @@ describe('① a new conversation never renders or loads a retired driver', () =>
 
   test('an existing conversation of a retired backend keeps its binding and is read-only', async () => {
     const fake = fakeClient()
-    const view = render(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" />)
+    const view = render(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" developerUi />)
     await settle()
     expect(text()).toContain('后端：Codex（已锁定）')
     expect(text()).toContain('退休')
@@ -203,19 +203,24 @@ describe('① a new conversation never renders or loads a retired driver', () =>
     expect(screen.queryByText('隔离：Fox 不额外包装（Agent 原生）')).toBeNull()
 
     // A refused send replaces the lock notice: one message, never two.
-    view.rerender(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" refusal="Agent 后端「Codex」已在本版本退休" />)
+    view.rerender(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" refusal="Agent 后端「Codex」已在本版本退休" developerUi />)
     expect(screen.getByRole('alert').textContent).toBe('Agent 后端「Codex」已在本版本退休')
     expect(text()).not.toContain('只能查看历史')
   })
 
   test('a deepseek conversation shows DeepSeek, not the built-in driver', async () => {
     const fake = fakeClient()
-    render(<Panel client={fake.client} backend="fox" locked="deepseek" conversationId="c-old-ds" />)
+    const view = render(<Panel client={fake.client} backend="fox" locked="deepseek" conversationId="c-old-ds" developerUi />)
     await settle()
     expect(text()).toContain('后端：DeepSeek（已锁定）')
     expect(text()).toContain('此会话绑定已退休的 Agent 后端「DeepSeek」')
     expect(text()).not.toContain('内置')
     expect(fake.probes).toHaveLength(0)
+    // Without developer mode: the read-only notice stays (the user needs it),
+    // the locked-backend chip does not.
+    view.rerender(<Panel client={fake.client} backend="fox" locked="deepseek" conversationId="c-old-ds" developerUi={false} />)
+    expect(text()).toContain('此会话绑定已退休的 Agent 后端「DeepSeek」')
+    expect(text()).not.toContain('后端：DeepSeek（已锁定）')
   })
 })
 

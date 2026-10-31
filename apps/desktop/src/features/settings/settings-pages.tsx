@@ -57,6 +57,7 @@ import {
 } from '@/features/notifications'
 import './settings-pages.css'
 import { connectionTypeLabel, knowledgeServiceName, useStoredPreference } from './settings-shared'
+import { developerUiFromBuild, persistDeveloperUi, useDeveloperUi } from '@/features/chat/developer-ui'
 // Batch 3 (能力 / 系统): Agent, 插件, 资料库, 数据与关于 live in their own files.
 export { AgentSettingsPage } from './settings-agent-page'
 export { ExtensionsSettingsPage } from './settings-plugins-page'
@@ -825,6 +826,7 @@ function ShortcutSettingsGroup() {
 
 export function ConversationSettingsPage({ sidebarCollapsed, onSidebar, section }: { sidebarCollapsed: boolean; onSidebar: () => void; section?: SettingsSectionAnchor }) {
   const [spellcheck, setSpellcheck] = useStoredPreference('fox.preferences.spellcheck', true)
+  const developerUi = useDeveloperUi()
   const [sendShortcut, setSendShortcut] = usePromptSendShortcutPreference()
   useScrollToSettingsSection(section)
   // 「消息导航」 has no backing state in the chat view yet, so it is not offered
@@ -843,6 +845,11 @@ export function ConversationSettingsPage({ sidebarCollapsed, onSidebar, section 
         </SettingsRow>
         <SettingsRow title="拼写检查" description="使用系统 WebView 的拼写检查能力">
           <Switch checked={spellcheck} onCheckedChange={setSpellcheck} aria-label="拼写检查" />
+        </SettingsRow>
+      </SettingsGroup>
+      <SettingsGroup title="开发者">
+        <SettingsRow title="开发者模式" description={developerUiFromBuild() ? '已由环境变量 FOX_DEV_UI 打开' : '在输入框上方显示外部 Agent 的调试信息：锁定的后端、能力声明、配置来源与导入、本地预览'}>
+          <Switch checked={developerUi} disabled={developerUiFromBuild()} onCheckedChange={persistDeveloperUi} aria-label="开发者模式" />
         </SettingsRow>
       </SettingsGroup>
       <ShortcutSettingsGroup />

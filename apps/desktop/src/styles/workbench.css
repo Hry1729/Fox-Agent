@@ -2630,6 +2630,48 @@ button.fox-chat-project-row:disabled {
 
 .fox-execution-menu {
   min-width: 164px;
+  max-width: 300px;
+}
+
+.fox-execution-menu[data-backend] {
+  min-width: 232px;
+}
+
+/* Composer batch: full name + the reason of a greyed mode, inside the menu. */
+.fox-execution-option {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.fox-execution-option > span:first-child {
+  white-space: nowrap;
+}
+
+.fox-execution-option-reason {
+  color: var(--fox-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+/* 「下一轮生效」: a small note inside the button, never a row of its own. */
+.fox-execution-control-note {
+  color: var(--fox-muted);
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.fox-execution-control-error {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--destructive, #c2410c);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fox-menu-check {

@@ -243,3 +243,16 @@ export function nativeAppliedNotice(view: NativePermissionView | null | undefine
     default: return null
   }
 }
+
+/**
+ * What a new conversation carries when its Agent changes from `previous` to
+ * `next` (composer batch): `''` when there was no previous Agent (fresh, the
+ * new Agent's default); Fox's composer mode tier when leaving Fox; else the
+ * last tier the previous external Agent showed (unknown = fresh). The Host
+ * maps the tier onto `next`'s own modes and never selects full access.
+ */
+export function draftCarryTier(previous: string | null, next: string, foxMode: string | null | undefined, last: { backend: string; tier: FoxPermissionTier } | null): FoxPermissionTier | '' {
+  if (previous === null || previous === next) return ''
+  if (previous === 'fox') return foxTierOfAccessMode(foxMode)
+  return last && last.backend === previous ? last.tier : ''
+}
