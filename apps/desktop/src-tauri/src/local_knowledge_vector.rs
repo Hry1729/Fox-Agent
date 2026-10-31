@@ -620,6 +620,28 @@ fn finish_retrieval_worker_stream(reader: thread::JoinHandle<String>) -> String 
         .unwrap_or_else(|_| "检索隔离进程输出读取线程异常终止。".to_owned())
 }
 
+/// 错误信息里最多保留 500 个字符（按 Unicode 标量截断，不切开 UTF-8）。
+/// 超出时在末尾附上截断说明；完整原文写入 Fox 日志。
+fn retrieval_diagnostic_excerpt(text: &str) -> String {
+    const LIMIT: usize = 500;
+    const SUFFIX: &str = "…（已截断，完整诊断见 Fox 日志）";
+    if text.chars().count() <= LIMIT {
+        return text.to_owned();
+    }
+    let mut excerpt = text.chars().take(LIMIT).collect::<String>();
+    excerpt.push_str(SUFFIX);
+    excerpt
+}
+
+/// 把检索 worker 的完整 stdout/stderr 写入 Fox 日志。错误信息里只放短摘录。
+#[cfg(all(feature = "local-embedding", feature = "zvec"))]
+fn log_retrieval_worker_diagnostic(stream: &str, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    eprintln!("fox.local_knowledge retrieval_worker_diagnostic {stream}={text}");
+}
+
 fn retrieval_worker_error(
     response: RetrievalWorkerResponse,
     diagnostics: &str,
@@ -629,7 +651,7 @@ fn retrieval_worker_error(
         .unwrap_or_else(|| "向量检索隔离进程没有返回错误详情".to_owned());
     if !diagnostics.is_empty() {
         message.push_str("\n\n诊断信息：\n");
-        message.push_str(diagnostics);
+        message.push_str(&retrieval_diagnostic_excerpt(diagnostics));
     }
     match response.error_code.as_deref() {
         Some("local_knowledge.invalid_request") => LocalKnowledgeError::invalid(message),
@@ -706,8 +728,12 @@ fn run_retrieval_worker_process(
                 let _ = child.wait();
                 let stdout = finish_retrieval_worker_stream(stdout_reader);
                 let stderr = finish_retrieval_worker_stream(stderr_reader);
+                log_retrieval_worker_diagnostic("stdout", &stdout);
+                log_retrieval_worker_diagnostic("stderr", &stderr);
                 return Err(LocalKnowledgeError::storage(format!(
-                    "无法读取向量检索隔离进程状态：{error}\n\n输出：{stdout}\n\n诊断：{stderr}"
+                    "无法读取向量检索隔离进程状态：{error}\n\n输出：{}\n\n诊断：{}",
+                    retrieval_diagnostic_excerpt(&stdout),
+                    retrieval_diagnostic_excerpt(&stderr),
                 )));
             }
         };
@@ -716,13 +742,19 @@ fn run_retrieval_worker_process(
             let stderr = finish_retrieval_worker_stream(stderr_reader);
             let response =
                 serde_json::from_str::<RetrievalWorkerResponse>(&stdout).map_err(|error| {
+                    log_retrieval_worker_diagnostic("stderr", &stderr);
+                    let stderr_excerpt = if stderr.is_empty() {
+                        "无".to_owned()
+                    } else {
+                        retrieval_diagnostic_excerpt(&stderr)
+                    };
                     LocalKnowledgeError::storage(format!(
-                        "向量检索隔离进程异常退出（状态 {}）：{error}\n\n诊断信息：{}",
+                        "向量检索隔离进程异常退出（状态 {}）：{error}\n\n诊断信息：{stderr_excerpt}",
                         embedding_smoke_exit_status(status),
-                        if stderr.is_empty() { "无" } else { &stderr }
                     ))
                 })?;
             if !status.success() || !response.ok {
+                log_retrieval_worker_diagnostic("stderr", &stderr);
                 return Err(retrieval_worker_error(response, &stderr));
             }
             return response
@@ -734,15 +766,19 @@ fn run_retrieval_worker_process(
             let _ = child.wait();
             let _ = finish_retrieval_worker_stream(stdout_reader);
             let diagnostics = finish_retrieval_worker_stream(stderr_reader);
+            log_retrieval_worker_diagnostic("stderr", &diagnostics);
+            let diagnostic_suffix = if diagnostics.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n诊断信息：{}",
+                    retrieval_diagnostic_excerpt(&diagnostics)
+                )
+            };
             return Err(LocalKnowledgeError::storage(format!(
-                "向量检索超过 {} 秒（本次工具的剩余时间与 {} 秒上限中较短者），已终止隔离进程。{}",
+                "向量检索超过 {} 秒（本次工具的剩余时间与 {} 秒上限中较短者），已终止隔离进程。{diagnostic_suffix}",
                 deadline.saturating_duration_since(Instant::now()).as_secs().max(1).min(RETRIEVAL_WORKER_TIMEOUT.as_secs()),
                 RETRIEVAL_WORKER_TIMEOUT.as_secs(),
-                if diagnostics.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n\n诊断信息：{diagnostics}")
-                }
             )));
         }
         thread::sleep(Duration::from_millis(25));
@@ -3054,6 +3090,66 @@ pub fn local_knowledge_document_reparse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kb3_retrieval_worker_errors_keep_only_a_short_diagnostic() {
+        const SUFFIX: &str = "…（已截断，完整诊断见 Fox 日志）";
+        let mut text = "a".repeat(499);
+        // 第 500 个字符是汉字。按字节截断会把 UTF-8 切坏。
+        text.push('检');
+        while text.len() < 70 * 1024 {
+            text.push('测');
+        }
+        assert!(text.len() >= 70 * 1024, "输入应至少 70 KB");
+
+        let excerpt = retrieval_diagnostic_excerpt(&text);
+        assert!(excerpt.chars().count() <= 500 + SUFFIX.chars().count());
+        assert_eq!(excerpt.chars().count(), 500 + SUFFIX.chars().count());
+        assert!(excerpt.ends_with(SUFFIX));
+        assert!(excerpt.contains('检'), "截断边界上的汉字必须完整");
+        assert!(!excerpt.contains('\u{FFFD}'), "中文不能变成替换字符：{excerpt}");
+        assert_eq!(retrieval_diagnostic_excerpt("诊断信息：检索失败"), "诊断信息：检索失败");
+        assert_eq!(retrieval_diagnostic_excerpt(&"中".repeat(500)), "中".repeat(500));
+
+        let error = retrieval_worker_error(
+            RetrievalWorkerResponse {
+                ok: false,
+                data: None,
+                error_code: Some("local_knowledge.storage_failed".to_owned()),
+                error_message: Some("向量检索失败".to_owned()),
+            },
+            &text,
+        );
+        assert_eq!(error.code(), "local_knowledge.storage_failed");
+        let message = error.to_string();
+        let head = "向量检索失败\n\n诊断信息：\n";
+        assert!(message.starts_with(head), "{message}");
+        assert!(message.chars().count() <= head.chars().count() + 500 + SUFFIX.chars().count());
+        assert!(message.contains('检'));
+        assert!(message.ends_with(SUFFIX));
+        assert!(!message.contains('\u{FFFD}'));
+
+        let invalid = retrieval_worker_error(
+            RetrievalWorkerResponse {
+                ok: false,
+                data: None,
+                error_code: Some("local_knowledge.invalid_request".to_owned()),
+                error_message: Some("参数错误".to_owned()),
+            },
+            &text,
+        );
+        assert_eq!(invalid.code(), "local_knowledge.invalid_request");
+        let conflict = retrieval_worker_error(
+            RetrievalWorkerResponse {
+                ok: false,
+                data: None,
+                error_code: Some("local_knowledge.job_conflict".to_owned()),
+                error_message: Some("任务冲突".to_owned()),
+            },
+            &text,
+        );
+        assert_eq!(conflict.code(), "local_knowledge.job_conflict");
+    }
 
     #[cfg(feature = "local-embedding")]
     #[test]
