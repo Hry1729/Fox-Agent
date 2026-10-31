@@ -34,13 +34,14 @@ test('输入流光仅新建页挂载，已有页即使centered、聚焦或运行
     fireEvent.focusIn(view.getByRole('textbox'))
     expect(view.container.querySelector('[data-beam]')).toBeNull()
     expect(view.queryByLabelText('当前 Agent：Fox')).toBeNull()
+    expect(view.queryByRole('button', { name: /选择 Agent/ })).toBeNull()
     await act(async()=>view.rerender(<Harness newConversation={false} running/>))
     expect(view.container.querySelector('[data-beam]')).toBeNull()
     await act(async()=>view.rerender(<Harness newConversation/>))
     fireEvent.focusIn(view.getByRole('textbox'))
     expect(view.container.querySelectorAll('[data-beam]').length).toBe(1)
-    expect(view.getByLabelText('当前 Agent：Fox').textContent).toBe('Fox')
-    expect(view.queryByRole('button', { name: /选择 Agent/ })).toBeNull()
+    // Plan C1: a new conversation offers the Agent menu (Fox / Pi / Codex / DeepSeek).
+    expect(view.getByRole('button', { name: '选择 Agent，当前 Fox' }).textContent).toBe('Fox')
   } finally {
     await act(async()=>view.unmount())
     desktopClient.listenKernelStateInvalidations = listen

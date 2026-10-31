@@ -1,17 +1,18 @@
-// Settings batch ①②④, on the single Pi mainline (product decision 2026-10-27).
+// Settings batch ①②④ after plan C1 (2026-10-31).
 //
-// A new conversation has exactly one supported driver - the built-in Fox route
-// (model engine Pi) - so nothing offers a choice: the bar has no draft row, the
-// composer has no Agent menu, and 设置 →「新会话使用的 Agent」is a plain
-// statement. An existing conversation frozen to a retired backend (pi / codex /
-// deepseek) shows its OWN binding and is read-only.
+// A new conversation can use Fox (built-in PiNative) or one of the external
+// Agents (Pi, Codex, DeepSeek / dsh): 设置 →「新会话使用的 Agent」is a select
+// again and the composer has an Agent menu. `FOX_EXTERNAL_BACKENDS` is only an
+// off switch. The retirement mechanism of the single Pi mainline (2026-10-27)
+// is kept: a Host that declares a backend retired still gets a read-only
+// conversation that shows its OWN binding, and nothing of it is loaded.
 //
 // ① No login probe / capability request / native permission list is made or
 //   rendered for a retired backend (draft or locked).
 // ② The import receipt the login card used to leave on the bar still renders
 //   once and is fully removed ("知道了"); the plumbing itself stays and is
 //   covered by agent-backend-onboarding.test.ts.
-// ④ The backend of a new conversation comes from the product, not a setting.
+// ④ The backend of a new conversation is the saved setting (default Fox).
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
@@ -52,7 +53,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-/** The status the current Host reports: one supported backend, three retired. */
+/** A Host that declares the three external backends retired (mechanism kept). */
 const status: AgentBackendStatus = {
   switchEnv: 'FOX_EXTERNAL_BACKENDS',
   anyExternalEnabled: false,
@@ -70,6 +71,43 @@ const status: AgentBackendStatus = {
   unknownEntries: [],
 }
 
+/** The status a C1 Host reports: four supported backends, none retired; `off` switched off. */
+function c1Status(off: string[] = []): AgentBackendStatus {
+  return {
+    switchEnv: 'FOX_EXTERNAL_BACKENDS',
+    anyExternalEnabled: off.length < 3,
+    supportedBackends: ['fox', 'pi', 'codex', 'deepseek'],
+    retiredBackends: [],
+    options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
+      backend,
+      enabled: !off.includes(backend),
+      wired: true,
+      experimental: backend === 'deepseek',
+      hidden: false,
+      retired: false,
+      reason: off.includes(backend) ? '已被管理员关闭（FOX_EXTERNAL_BACKENDS）' : null,
+    })),
+    unknownEntries: [],
+  }
+}
+
+/** C1 preferences: every backend usable unless switched off. */
+function c1Preferences(over: Partial<AgentBackendPreferences> = {}, off: string[] = []): AgentBackendPreferences {
+  return {
+    ...DEFAULT_AGENT_BACKEND_PREFERENCES,
+    retiredBackends: [],
+    options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
+      backend,
+      enabled: !off.includes(backend),
+      experimental: backend === 'deepseek',
+      retired: false,
+      reason: off.includes(backend) ? '已被管理员关闭（FOX_EXTERNAL_BACKENDS）' : null,
+    })),
+    ...over,
+  }
+}
+
+/** Preferences from a Host that retires the three external backends (mechanism kept). */
 function preferences(over: Partial<AgentBackendPreferences> = {}): AgentBackendPreferences {
   return {
     ...DEFAULT_AGENT_BACKEND_PREFERENCES,
@@ -205,23 +243,37 @@ describe('② the import receipt is rendered once, by the bar, and fully removed
   })
 })
 
-describe('④ 新会话使用的 Agent: a statement, not a choice', () => {
-  test('the settings row states the built-in driver and offers no select at all', async () => {
-    const client = { agentBackendPreferences: async () => preferences(), saveAgentBackendPreferences: async () => preferences(), probeCodexResponses: async () => null }
+describe('④ 新会话使用的 Agent: a choice again (plan C1)', () => {
+  test('the settings row is a select of Fox / Pi / Codex / DeepSeek; a switched-off one is greyed with its reason', async () => {
+    const client = { agentBackendPreferences: async () => c1Preferences({}, ['codex']), saveAgentBackendPreferences: async () => c1Preferences({}, ['codex']), probeCodexResponses: async () => null }
     render(<AgentBackendSettingsSection client={client} />)
-    await waitFor(() => expect(text()).toContain('新会话使用内置 Pi 驱动'))
-    expect(screen.queryByRole('combobox')).toBeNull()
-    expect(screen.queryByRole('combobox', { name: '新会话使用的 Agent' })).toBeNull()
-    expect(screen.queryByLabelText('新会话使用的 Agent')?.tagName).not.toBe('SELECT')
-    // The retirement is explained instead of a greyed option list.
-    expect(text()).toContain('外部 Agent 后端已在本版本退休')
-    expect(text()).not.toContain('（不可用）')
-    // No Fox-wide full-access switch either.
+    const trigger = await screen.findByRole('combobox', { name: '新会话使用的 Agent' })
+    await waitFor(() => expect(trigger.hasAttribute('disabled')).toBe(false))
+    expect(trigger.textContent).toContain('Fox')
+    expect(text()).not.toContain('新会话使用内置 Pi 驱动')
+    // The switched-off backend is explained, not a retirement.
+    expect(screen.getByLabelText('不可用的 Agent').textContent).toContain('Codex：已被管理员关闭（FOX_EXTERNAL_BACKENDS）')
+    expect(text()).not.toContain('退休')
+    // No Fox-wide full-access switch.
     expect(screen.queryByRole('switch', { name: '新外部会话使用完全访问' })).toBeNull()
     expect(text()).not.toContain('新外部会话使用完全访问')
   })
 
-  test('a saved retired default no longer applies; old conversations keep their binding', async () => {
+  test('a saved external choice is shown; a switched-off saved choice says Fox is used meanwhile', async () => {
+    const saved = c1Preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' })
+    const client = { agentBackendPreferences: async () => saved, saveAgentBackendPreferences: async () => saved, probeCodexResponses: async () => null }
+    const view = render(<AgentBackendSettingsSection client={client} />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '新会话使用的 Agent' }).textContent).toContain('Codex'))
+    expect(text()).not.toContain('暂时使用')
+    view.unmount()
+
+    const off = c1Preferences({ defaultBackend: 'deepseek', effectiveBackend: 'fox' }, ['deepseek'])
+    render(<AgentBackendSettingsSection client={{ agentBackendPreferences: async () => off, saveAgentBackendPreferences: async () => off, probeCodexResponses: async () => null }} />)
+    await waitFor(() => expect(text()).toContain('已保存的选择当前不可用，新会话暂时使用 Fox。'))
+    expect(text()).not.toContain('退休')
+  })
+
+  test('a Host-retired saved default no longer applies; old conversations keep their binding (mechanism kept)', async () => {
     const saved = preferences({ defaultBackend: 'codex', effectiveBackend: 'fox' })
     const client = { agentBackendPreferences: async () => saved, saveAgentBackendPreferences: async () => saved, probeCodexResponses: async () => null }
     render(<AgentBackendSettingsSection client={client} />)
@@ -229,47 +281,65 @@ describe('④ 新会话使用的 Agent: a statement, not a choice', () => {
     expect(text()).toContain('不再用于新会话')
     expect(text()).toContain('仍按原绑定显示')
     expect(text()).toContain('只能查看历史')
-    // The statement itself still names the built-in driver, not the saved one.
-    expect(text()).toContain('新会话使用内置 Pi 驱动')
-    expect(screen.queryByRole('combobox')).toBeNull()
+    // The select shows what is effective (Fox), never the retired one.
+    expect(screen.getByRole('combobox', { name: '新会话使用的 Agent' }).textContent).toContain('Fox')
   })
 
-  test('no per-Agent default permission rows are offered for a retired driver', async () => {
+  test('per-Agent default permission rows are offered for the three external Agents', async () => {
     const calls: NativePermissionRequest[] = []
     const client = {
-      agentBackendPreferences: async () => preferences(),
-      saveAgentBackendPreferences: async () => preferences(),
+      agentBackendPreferences: async () => c1Preferences(),
+      saveAgentBackendPreferences: async () => c1Preferences(),
       probeCodexResponses: async () => null,
-      agentBackendNativePermissions: async (request: NativePermissionRequest) => { calls.push(request); throw new Error('must not be called') },
-      agentBackendNativePermissionSet: async () => { throw new Error('must not be called') },
+      agentBackendNativePermissions: async (request: NativePermissionRequest) => {
+        calls.push(request)
+        return {
+          catalog: { backend: request.backend!, options: [
+            { id: 'ask', tier: 'ask' as const, label: '询问', description: 'd', native: 'n', fullAccess: false, disabledReason: null },
+            { id: 'full', tier: 'full_access' as const, label: '完全访问', description: 'd', native: 'n', fullAccess: true, disabledReason: null },
+          ], defaultMode: 'ask', switchTiming: 'live' as const, switchNote: 'note' },
+          current: 'ask', fullAccess: false, fullAccessGranted: false, fullAccessForbidden: false, draft: true, fullAccessLockedReason: null,
+        }
+      },
+      agentBackendNativePermissionSet: async () => { throw new Error('not picked in this test') },
     }
     render(<AgentBackendSettingsSection client={client} />)
-    await waitFor(() => expect(text()).toContain('新会话使用内置 Pi 驱动'))
-    await settle()
-    expect(calls).toHaveLength(0)
-    expect(NATIVE_PERMISSION_SETTING_BACKENDS).toEqual([])
-    expect(screen.queryByLabelText('Codex 默认权限')).toBeNull()
-    expect(screen.queryByLabelText('pi 默认权限')).toBeNull()
+    await waitFor(() => expect(screen.getByLabelText('Codex 默认权限')).toBeTruthy())
+    expect(screen.getByLabelText('DeepSeek 默认权限')).toBeTruthy()
+    expect(screen.getByLabelText('Pi 默认权限')).toBeTruthy()
+    expect(calls.map((request) => request.backend).sort()).toEqual(['codex', 'deepseek', 'pi'])
+    expect(NATIVE_PERMISSION_SETTING_BACKENDS.map((item) => item.backend)).toEqual(['codex', 'deepseek', 'pi'])
   })
 
-  test('the model: a retired choice can be neither chosen nor saved', () => {
-    expect(SELECTABLE_AGENT_BACKEND_IDS).toEqual(['fox'])
+  test('the model: every C1 backend can be chosen and saved; a retired or switched-off one cannot', () => {
+    expect(SELECTABLE_AGENT_BACKEND_IDS).toEqual(['fox', 'pi', 'codex', 'deepseek'])
     expect(HIDDEN_AGENT_BACKENDS).toEqual([])
-    expect(agentBackendSettingRows(preferences()).map((row) => [row.value, row.disabled])).toEqual([['fox', false]])
+    expect(agentBackendSettingRows(c1Preferences()).map((row) => [row.value, row.disabled])).toEqual([['fox', false], ['pi', false], ['codex', false], ['deepseek', false]])
     for (const backend of ['pi', 'codex', 'deepseek'] as const) {
+      expect(canPickAgentBackend(backend, c1Status())).toBe(true)
+      expect(canPickAgentBackend(backend, c1Status([backend]))).toBe(false)
+      expect(agentBackendSettingValue(c1Preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe(backend)
+      expect(newConversationBackend(c1Preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe(backend)
+      // Retirement mechanism kept: a Host-declared retirement can be neither chosen nor saved.
       expect(canPickAgentBackend(backend, status)).toBe(false)
       expect(agentBackendSettingValue(preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe('fox')
       expect(newConversationBackend(preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe('fox')
-      expect(preferences({ defaultBackend: backend }).effectiveBackend).toBe('fox')
     }
-    // The Host's own refusal of such a save is a routing refusal, recognised by
-    // the UI and never shown as a generic failure.
     expect(AGENT_BACKEND_ERROR_CODES.retired).toBe('agent_backend_retired')
-    // The removed Fox-wide full-access switch is permanently unavailable.
-    expect(fullAccessSettingState(preferences()).disabled).toBe(true)
+    expect(AGENT_BACKEND_ERROR_CODES.disabled).toBe('agent_backend_disabled')
+    // The removed Fox-wide full-access switch stays unavailable under FORBIDDEN / forced off.
+    expect(fullAccessSettingState(c1Preferences({ fullAccessForbidden: true })).disabled).toBe(true)
+    expect(fullAccessSettingState(c1Preferences({ forcedOff: true })).disabled).toBe(true)
   })
 
-  test('the composer has no Agent menu: one driver is not a choice', async () => {
+  test('the composer offers an Agent menu with the four choices', async () => {
+    const view = render(<ComposerAgentPicker value="fox" status={c1Status()} onSelect={() => {}} />)
+    const trigger = view.getByRole('button', { name: '选择 Agent，当前 Fox' })
+    expect(trigger.getAttribute('data-agent-backend')).toBe('fox')
+    await settle()
+  })
+
+  test('the composer has no Agent menu when only the built-in route is left (Host-retired drivers)', async () => {
     const view = render(<ComposerAgentPicker value="fox" status={status} onSelect={() => {}} />)
     expect(view.container.textContent).toBe('Fox')
     expect(screen.queryByRole('button')).toBeNull()
@@ -277,13 +347,11 @@ describe('④ 新会话使用的 Agent: a statement, not a choice', () => {
     expect(view.getByLabelText('当前 Agent：Fox').tagName).toBe('SPAN')
   })
 
-  test('the bar has no picker: a new conversation shows no backend row', async () => {
+  test('the bar has no backend row for a Fox draft, and a Host-retired saved default cannot put its driver back', async () => {
     const fake = fakeClient()
     const view = render(<Panel client={fake.client} backend="fox" />)
     expect(screen.queryByRole('combobox')).toBeNull()
     expect(text()).toBe('')
-    // An old saved default (retired) cannot put an external driver back on the
-    // bar: the draft is created as the built-in route.
     const saved = preferences({ defaultBackend: 'deepseek', effectiveBackend: 'deepseek' })
     view.rerender(<Panel client={fake.client} backend={newConversationBackend(saved)} />)
     await settle()
@@ -293,15 +361,16 @@ describe('④ 新会话使用的 Agent: a statement, not a choice', () => {
   })
 })
 
-describe('single Pi mainline (2026-10-27): the four-driver era is over', () => {
-  test('no user-facing choice offers a retired driver', () => {
-    expect(RETIRED_AGENT_BACKEND_IDS).toEqual(['pi', 'codex', 'deepseek'])
-    expect(SUPPORTED_AGENT_BACKEND_IDS).toEqual(['fox'])
-    expect(agentBackendSettingRows(preferences()).map((row) => row.value)).toEqual(['fox'])
-    expect(agentBackendSettingRows(preferences()).some((row) => row.value !== 'fox')).toBe(false)
+describe('plan C1 (2026-10-31): the external Agents are back, the retirement mechanism stays', () => {
+  test('every user-facing choice offers the four backends; nothing is retired by this build', () => {
+    expect(RETIRED_AGENT_BACKEND_IDS).toEqual([])
+    expect(SUPPORTED_AGENT_BACKEND_IDS).toEqual(['fox', 'pi', 'codex', 'deepseek'])
+    expect(agentBackendSettingRows(c1Preferences()).map((row) => row.value)).toEqual(['fox', 'pi', 'codex', 'deepseek'])
+    expect(canPickAgentBackend('codex', c1Status())).toBe(true)
+    expect(canPickAgentBackend('pi', c1Status())).toBe(true)
+    // A Host that retires them still wins.
     expect(canPickAgentBackend('codex', status)).toBe(false)
     expect(canPickAgentBackend('pi', status)).toBe(false)
-    expect(NATIVE_PERMISSION_SETTING_BACKENDS).toEqual([])
   })
 
   test("Fox's own permission settings are untouched and stay on the page", () => {
