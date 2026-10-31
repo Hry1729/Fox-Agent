@@ -38,7 +38,7 @@ on:
       runtime_package_version:
         description: Version of the runtime package to build
         type: string
-        default: '0.1.7'
+        default: '0.1.8'
 
 permissions:
   contents: read
