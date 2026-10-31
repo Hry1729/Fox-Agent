@@ -157,6 +157,7 @@ impl WorkToolError {
         self
     }
 
+    #[cfg(test)]
     /// True only for a failure that is known to have written nothing.
     pub fn is_rejected_before_execution(&self) -> bool {
         self.phase == WorkToolErrorPhase::Rejected
@@ -256,6 +257,7 @@ pub fn is_work_tool(tool: &str) -> bool {
     WORK_TOOLS.contains(&tool)
 }
 
+#[cfg(test)]
 pub fn execute(
     database: &Database,
     conversation_id: &str,
@@ -1404,10 +1406,6 @@ fn execute_with_optional_host_tool_call_id(
         events,
         post_finalize,
     })
-}
-
-pub(crate) fn validate_task_repair_override_request(input: &Value) -> Result<(), WorkToolError> {
-    parse_task_repair_override_request(input).map(|_| ())
 }
 
 pub(crate) fn canonicalize_task_repair_override_request(
@@ -4138,129 +4136,6 @@ mod tests {
         )
         .expect_err("acceptance criteria must be bounded");
         assert_eq!(error.code, "plan.graph_field_invalid");
-    }
-
-    #[test]
-    fn repair_override_host_schema_is_exact_bounded_and_never_directly_executable() {
-        let valid = json!({
-            "taskId": "task-1",
-            "attemptId": "attempt-override-1",
-            "expectedVersion": 7,
-            "rootCause": "the ordinary bounded repairs did not remove the root cause",
-            "findingIds": ["finding-1"],
-            "escalationReason": "the operator reviewed the evidence and authorized one final repair"
-        });
-        validate_task_repair_override_request(&valid).expect("valid exact schema");
-        assert!(is_work_tool("task_repair_escalate_start"));
-        let padded = json!({
-            "taskId": " task-1 ",
-            "attemptId": " attempt-override-1 ",
-            "expectedVersion": 7,
-            "rootCause": "  the ordinary bounded repairs did not remove the root cause  ",
-            "findingIds": [" finding-1 "],
-            "escalationReason": "  the operator reviewed the evidence and authorized one final repair  "
-        });
-        assert!(
-            canonicalize_task_repair_override_request(&padded).is_err(),
-            "Host rejects non-canonical whitespace before Runtime projection promotion or approval"
-        );
-        for whitespace_only in [
-            json!({
-                "taskId": "task-1", "attemptId": "attempt-override-1",
-                "expectedVersion": 7, "rootCause": "   ",
-                "findingIds": ["finding-1"], "escalationReason": "operator approval"
-            }),
-            json!({
-                "taskId": "task-1", "attemptId": "attempt-override-1",
-                "expectedVersion": 7, "rootCause": "root",
-                "findingIds": ["   "], "escalationReason": "operator approval"
-            }),
-            json!({
-                "taskId": "task-1", "attemptId": "attempt-override-1",
-                "expectedVersion": 7, "rootCause": "root",
-                "findingIds": ["finding-1"], "escalationReason": "   "
-            }),
-        ] {
-            assert!(canonicalize_task_repair_override_request(&whitespace_only).is_err());
-        }
-        for edge in ['\u{feff}', '\u{0085}'] {
-            for field in ["taskId", "attemptId", "rootCause", "escalationReason"] {
-                for value in [format!("{edge}value"), format!("value{edge}")] {
-                    let mut candidate = valid.clone();
-                    candidate[field] = Value::String(value);
-                    assert!(
-                        canonicalize_task_repair_override_request(&candidate).is_err(),
-                        "Host must reject {field} with U+{:04X} at either boundary",
-                        edge as u32
-                    );
-                }
-            }
-            for value in [format!("{edge}finding-1"), format!("finding-1{edge}")] {
-                let mut candidate = valid.clone();
-                candidate["findingIds"] = json!([value]);
-                assert!(
-                    canonicalize_task_repair_override_request(&candidate).is_err(),
-                    "Host must reject findingIds items with U+{:04X} at either boundary",
-                    edge as u32
-                );
-            }
-        }
-        let mut internal_whitespace = valid.clone();
-        internal_whitespace["rootCause"] =
-            Value::String("root\u{feff}cause\u{0085}detail".to_owned());
-        canonicalize_task_repair_override_request(&internal_whitespace)
-            .expect("internal FEFF/U+0085 are content, not surrounding whitespace");
-
-        for invalid in [
-            json!({
-                "taskId": "task-1",
-                "attemptId": "attempt-override-1",
-                "expectedVersion": 7,
-                "rootCause": "root",
-                "findingIds": ["finding-1"],
-                "escalationReason": "operator approval",
-                "runId": "runtime-spoof"
-            }),
-            json!({
-                "taskId": "task-1",
-                "attemptId": "attempt-override-1",
-                "expectedVersion": 7,
-                "rootCause": "root",
-                "findingIds": ["finding-1", "finding-1"],
-                "escalationReason": "operator approval"
-            }),
-            json!({
-                "taskId": "task-1",
-                "attemptId": "attempt-override-1",
-                "expectedVersion": 0,
-                "rootCause": "root",
-                "findingIds": ["finding-1"],
-                "escalationReason": "operator approval"
-            }),
-            json!({
-                "taskId": "t".repeat(201),
-                "attemptId": "attempt-override-1",
-                "expectedVersion": 7,
-                "rootCause": "root",
-                "findingIds": ["finding-1"],
-                "escalationReason": "operator approval"
-            }),
-        ] {
-            assert!(validate_task_repair_override_request(&invalid).is_err());
-        }
-
-        let (database, path, conversation_id, run_id) = setup();
-        let direct = execute(
-            &database,
-            &conversation_id,
-            &run_id,
-            "task_repair_escalate_start",
-            &valid,
-        )
-        .expect_err("direct execution must not bypass Host approval lifecycle");
-        assert_eq!(direct.code, "task.repair_override_approval_required");
-        drop(database);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]

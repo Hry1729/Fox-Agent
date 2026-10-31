@@ -650,6 +650,7 @@ impl PreparedOffice {
         self.output.as_deref()
     }
 
+    #[cfg(test)]
     /// The payload the Host streams to the CLI over stdin (batch JSON or the
     /// import CSV/TSV). Exposed crate-internally so Host-side tests can prove a
     /// compute artifact is delivered byte-for-byte without a model re-copy.
@@ -657,6 +658,7 @@ impl PreparedOffice {
         self.stdin_data.as_deref()
     }
 
+    #[cfg(test)]
     /// `(rows, columns)` planned for an `office_import_data` call.
     pub(crate) fn import_dimensions(&self) -> Option<(u64, u32)> {
         self.import.as_ref().map(|spec| (spec.rows, spec.cols))
@@ -1760,6 +1762,7 @@ mod source_version_tests {
     }
 }
 
+#[cfg(test)]
 pub fn execute(
     server: &McpServerRecord,
     tool: &str,

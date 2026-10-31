@@ -1,6 +1,7 @@
-//! Offline S5 comparison. Run the exact ignored test with --test-threads=1.
-//! Both routes enter RuntimeHost::start_run; the shared two-slot queue belongs
-//! to this fixture, because production Kernel admission currently has no cap.
+//! Offline S5 measurement of the PiNative route. Run the exact ignored test
+//! with --test-threads=1. Runs enter RuntimeHost::start_run; the shared
+//! two-slot queue belongs to this fixture, not to Host scheduling. The Kernel
+//! comparison cells left with the Kernel loop (B1).
 
 use super::*;
 use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, ResourceExecutor, TimeBudgets};
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{Listener, Manager};
 
-const TEST_NAME: &str = "runtime_host::native_performance_tests::kernel_and_native_paired_offline_performance";
+const TEST_NAME: &str = "runtime_host::native_performance_tests::native_offline_performance";
 const CHILD: &str = "FOX_NATIVE_PERF_CHILD";
 const MODEL: &str = "fox-offline-paired-performance";
 const FIXTURE_CAPACITY: usize = 2;
@@ -51,7 +52,6 @@ fn source_identity() -> Value {
         "apps/desktop/src-tauri/src/runtime_host/sidecar_sessions.rs",
         "apps/desktop/src-tauri/src/runtime_host/native_tool_batch.rs",
         "services/agent-runtime/src/pi-runtime.mjs",
-        "services/agent-runtime/src/pi-kernel-worker.mjs",
         "services/agent-runtime/src/pi-adapter.mjs",
         "services/agent-runtime/src/pi-native-tool-bridge.mjs",
         "services/agent-runtime/src/pi-native-recovery.mjs",
@@ -367,13 +367,7 @@ fn run_batch(host: &RuntimeHost, conversations: &[String], phase: &str, sample: 
         let started = host.database.create_run(conversation,&text,None)
             .map_err(|error|format!("create_run phase={phase} sample={sample} lane={lane}: {error}"))?;
         observations.lock().unwrap().insert(started.run.id.clone(), Observation::new(&started,phase,sample,lane));
-        // The Kernel cell drives the frozen Kernel loop through its test
-        // fixture; the PiNative cell freezes through the production default.
-        let binding = if std::env::var("FOX_NATIVE_PERF_ROUTE").as_deref() == Ok("pi_native") {
-            host.database.freeze_default_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi")
-        } else {
-            host.database.freeze_kernel_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi")
-        }
+        let binding = host.database.freeze_default_run_control_for_engine(&started.run.id,"legacy",TimeBudgets::continuous(),"pi")
             .map_err(|error|format!("freeze_run phase={phase} sample={sample} lane={lane}: {error}"))?;
         assert_eq!(binding.authority,ExecutionAuthority::Authoritative);
         assert_eq!(binding.read_only_executor,ResourceExecutor::Rust);
@@ -474,12 +468,6 @@ fn child_measurement() {
             }
         }
     });
-    let kernel_rows = observations.clone();
-    let kernel_listener = app.listen("fox://kernel-model-preview",move |event| {
-        if let Ok(value) = serde_json::from_str::<Value>(event.payload()) {
-            if let (Some(run),Some(text)) = (value["runId"].as_str(),value["text"].as_str()) { observe_body(&kernel_rows,run,text,clock); }
-        }
-    });
     let stop = Arc::new(AtomicBool::new(false));
     let observer = start_observer(host.clone(),observations.clone(),clock,stop.clone());
     let resources = sample_resources(clock,stop.clone(),root.join("resources.json"));
@@ -497,10 +485,11 @@ fn child_measurement() {
     stop.store(true,Ordering::SeqCst);
     observer.join().unwrap();
     let resources = resources.join().unwrap();
-    app.unlisten(native_listener); app.unlisten(kernel_listener);
+    app.unlisten(native_listener);
     let mut rows: Vec<_> = observations.lock().unwrap().values().cloned().collect();
     rows.sort_by(|left,right|left.phase.cmp(&right.phase).then(left.sample.cmp(&right.sample)).then(left.lane.cmp(&right.lane)));
-    let expected_route = if route == "pi_native" { Some(ExecutorRoute::PiNative) } else { None };
+    assert_eq!(route,"pi_native","only the PiNative route is measured");
+    let expected_route = Some(ExecutorRoute::PiNative);
     let bindings: Vec<_> = rows.iter().map(|row|database.run_control_binding(&row.run_id).ok().flatten()).collect();
     assert!(bindings.iter().flatten().all(|binding|binding.executor_route == expected_route));
     let tool_evidence: Vec<_> = rows.iter().filter(|row|row.phase != "cancellation").map(|row| {
@@ -520,9 +509,9 @@ fn child_measurement() {
         && row.terminal_status.as_deref() == Some(if row.phase == "cancellation" {"cancelled"} else {"completed"}));
     let report = json!({"route":route,"phase":phase,"load":load,"repetitions":repetitions,"valid":valid,
         "pid":std::process::id(),"clock":"per-cell monotonic milliseconds","fixtureQueueCapacity":FIXTURE_CAPACITY,
-        "hostNativeActivityLimit":sidecar_sessions::ACTIVE_RUN_LIMIT,"hostKernelActivityLimit":Value::Null,
+        "hostNativeActivityLimit":sidecar_sessions::ACTIVE_RUN_LIMIT,
         "terminalObserverPollMs":POLL_MS,"releaseDefinition":"terminal DB state and absence from Host ownership registries",
-        "firstBodyDefinition":"first nonempty Host-published answer delta or accepted Kernel text preview; excludes reasoning",
+        "firstBodyDefinition":"first nonempty Host-published answer delta; excludes reasoning",
         "entry":"RuntimeHost.start_run","sourceIdentity":source_identity(),"bindings":bindings,
         "fixtureFailure":failure,"hostDiagnosticsBeforeShutdown":diagnostics,"shutdownError":shutdown_error,
         "observations":rows,"toolEvidence":tool_evidence,"resources":resources});
@@ -553,38 +542,21 @@ fn distribution(values: Vec<f64>) -> Value {
 }
 
 fn summarize(cells: &[Value], loads: &[usize], warm_samples: usize) -> Value {
-    let mut comparisons = Vec::new();
-    let mut exceeded = false;
+    let mut measurements = Vec::new();
     let mut complete = warm_samples >= 30;
     for load in loads {
-        let mut routes = Vec::new();
-        for route in ["kernel","pi_native"] {
-            let rows: Vec<_> = cells.iter().filter(|cell|cell["route"] == route && cell["phase"] == "warm" && cell["load"] == *load)
-                .flat_map(|cell|cell["observations"].as_array().into_iter().flatten()).filter(|row|row["phase"] == "warm").collect();
-            let metric = |end: &str| rows.iter().filter_map(|row| Some(row[end].as_f64()? - row["submittedMs"].as_f64()?)).collect::<Vec<_>>();
-            complete &= rows.len() == warm_samples*load;
-            routes.push(json!({"route":route,"ttftMs":distribution(metric("firstBodyMs")),"wholeTurnMs":distribution(metric("terminalMs")),
-                "releasedMs":distribution(metric("releasedMs")),"fixtureQueueMs":distribution(rows.iter().filter_map(|row|
-                    Some(row["fixtureAdmittedMs"].as_f64()? - row["submittedMs"].as_f64()?)).collect())}));
-        }
-        let mut ratios = serde_json::Map::new();
-        for metric in ["ttftMs","wholeTurnMs"] {
-            let mut percentiles = serde_json::Map::new();
-            for quantile in ["p50","p95"] {
-                let ratio = routes[0][metric][quantile].as_f64().filter(|value|*value>0.0)
-                    .and_then(|baseline|routes[1][metric][quantile].as_f64().map(|candidate|candidate/baseline));
-                if ratio.is_none() { complete=false; }
-                exceeded |= ratio.is_some_and(|value|value>1.10);
-                percentiles.insert(quantile.into(),json!({"nativeOverKernel":ratio,"regressionPercent":ratio.map(|value|(value-1.0)*100.0)}));
-            }
-            ratios.insert(metric.into(),Value::Object(percentiles));
-        }
-        comparisons.push(json!({"submittedLoad":load,"simultaneousAdmissionLimit":FIXTURE_CAPACITY,"routes":routes,"ratios":ratios}));
+        let rows: Vec<_> = cells.iter().filter(|cell|cell["route"] == "pi_native" && cell["phase"] == "warm" && cell["load"] == *load)
+            .flat_map(|cell|cell["observations"].as_array().into_iter().flatten()).filter(|row|row["phase"] == "warm").collect();
+        let metric = |end: &str| rows.iter().filter_map(|row| Some(row[end].as_f64()? - row["submittedMs"].as_f64()?)).collect::<Vec<_>>();
+        complete &= rows.len() == warm_samples*load;
+        measurements.push(json!({"submittedLoad":load,"simultaneousAdmissionLimit":FIXTURE_CAPACITY,"route":"pi_native",
+            "ttftMs":distribution(metric("firstBodyMs")),"wholeTurnMs":distribution(metric("terminalMs")),
+            "releasedMs":distribution(metric("releasedMs")),"fixtureQueueMs":distribution(rows.iter().filter_map(|row|
+                Some(row["fixtureAdmittedMs"].as_f64()? - row["submittedMs"].as_f64()?)).collect())}));
     }
-    json!({"comparisons":comparisons,"threshold":0.10,"thresholdStatistic":"p50 and p95, separately for TTFT and whole turn in every load cell",
-        "minimumWarmRepetitionsPerCell":30,"sampleCountComplete":complete,"exceededTenPercent":exceeded,
-        "decision":if !complete {"incomplete"} else if exceeded {"pause_switch"} else {"within_initial_offline_threshold"},
-        "scope":"offline paired Host fixture only; not S4 Host-internal queue, installer, real model, or product acceptance"})
+    json!({"measurements":measurements,"minimumWarmRepetitionsPerCell":30,"sampleCountComplete":complete,
+        "decision":if complete {"complete"} else {"incomplete"},
+        "scope":"offline Host fixture only; not S4 Host-internal queue, installer, real model, or product acceptance"})
 }
 
 fn run_cell(root: &Path, provider: &Provider, route: &str, phase: &str, load: usize, repetitions: usize, suffix: usize) -> Value {
@@ -598,7 +570,6 @@ fn run_cell(root: &Path, provider: &Provider, route: &str, phase: &str, load: us
         .env(CHILD,"1").env("FOX_NATIVE_PERF_CELL_ROOT",&cell).env("FOX_NATIVE_PERF_ROUTE",route)
         .env("FOX_NATIVE_PERF_PHASE",phase).env("FOX_NATIVE_PERF_LOAD",load.to_string())
         .env("FOX_NATIVE_PERF_REPETITIONS",repetitions.to_string()).env("FOX_NATIVE_PERF_ENDPOINT",&provider.endpoint)
-        .env("FOX_KERNEL_MODE","authoritative").env("FOX_KERNEL_ENGINE","pi")
         .env("FOX_RUNTIME_SCRIPT",repository().join("services/agent-runtime/src/pi-runtime.mjs"))
         .env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_MODE").env_remove("FOX_KERNEL_WORKER_BINARY")
         .env_remove("FOX_KERNEL_CODEX_BINARY").env_remove("FOX_EXPERIMENTAL_COMPUTE_JOB_NOTICE")
@@ -633,8 +604,8 @@ fn run_cell(root: &Path, provider: &Provider, route: &str, phase: &str, load: us
 }
 
 #[test]
-#[ignore = "S5 isolated offline Kernel/PiNative performance; default 30 warm and 5 cold samples, no remote model"]
-fn kernel_and_native_paired_offline_performance() {
+#[ignore = "S5 isolated offline PiNative performance; default 30 warm and 5 cold samples, no remote model"]
+fn native_offline_performance() {
     if std::env::var_os(CHILD).is_some() { child_measurement(); return; }
     assert!(cfg!(debug_assertions),"this source-runtime fixture requires a debug test build");
     let warm = env_count("FOX_NATIVE_PERF_WARM_SAMPLES",30);
@@ -653,51 +624,30 @@ fn kernel_and_native_paired_offline_performance() {
     let provider = Provider::start(first_ms,chunk_ms);
     let mut cells = Vec::new();
     for sample in 0..cold {
-        for route in if sample%2 == 0 {["kernel","pi_native"]} else {["pi_native","kernel"]} {
-            cells.push(run_cell(&root,&provider,route,"cold",1,1,sample));
-        }
+        cells.push(run_cell(&root,&provider,"pi_native","cold",1,1,sample));
     }
-    for (index,load) in loads.iter().enumerate() {
-        for route in if index%2 == 0 {["kernel","pi_native"]} else {["pi_native","kernel"]} {
-            cells.push(run_cell(&root,&provider,route,"warm",*load,warm,0));
-        }
+    for load in &loads {
+        cells.push(run_cell(&root,&provider,"pi_native","warm",*load,warm,0));
     }
     let unchanged = identity["files"] == source_identity()["files"];
     let cells_valid = cells.iter().all(|cell|cell["valid"] == true && cell["childSucceeded"] == true);
-    let mut contract_comparisons = Vec::new();
-    for kernel in cells.iter().filter(|cell|cell["route"] == "kernel") {
-        let native = cells.iter().find(|cell|cell["route"] == "pi_native" && cell["phase"] == kernel["phase"]
-            && cell["load"] == kernel["load"] && cell["pairIndex"] == kernel["pairIndex"]);
-        let sorted = |cell: &Value| {
-            let mut contracts = cell["requestContracts"].as_array().cloned().unwrap_or_default();
-            contracts.sort_by_key(Value::to_string);
-            contracts
-        };
-        let equal = native.is_some_and(|native|!sorted(kernel).is_empty() && sorted(kernel) == sorted(native));
-        contract_comparisons.push(json!({"phase":kernel["phase"],"load":kernel["load"],"pairIndex":kernel["pairIndex"],
-            "modelToolSchemaAndParameterContractsEqual":equal}));
-    }
-    let contracts_equal = contract_comparisons.iter().all(|entry|entry["modelToolSchemaAndParameterContractsEqual"] == true);
     let mut summary = summarize(&cells,&loads,warm);
-    if !unchanged || !cells_valid || !contracts_equal { summary["decision"] = json!("incomplete"); }
-    let report = json!({"kind":"fox-kernel-native-offline-performance","schemaVersion":1,
+    if !unchanged || !cells_valid { summary["decision"] = json!("incomplete"); }
+    let report = json!({"kind":"fox-native-offline-performance","schemaVersion":1,
         "generatedAt":crate::database::now_ms(),"sourceIdentity":identity,"sourceUnchanged":unchanged,
         "provider":{"kind":"shared Rust loopback scripted SSE","endpoint":provider.endpoint,"model":MODEL,
             "firstResponseDelayMs":first_ms,"textChunkDelayMs":chunk_ms,"toolsPerBatch":6,"tool":"read",
             "promptTokensPerRequest":128,"outputTokensPerRequest":32},
         "fixtureQueueCapacity":FIXTURE_CAPACITY,"queueDefinition":"fixture_queue, not Host-internal scheduling",
-        "productionAdmission":{"kernelRunLimit":Value::Null,"piNativeRunLimit":sidecar_sessions::ACTIVE_RUN_LIMIT,
+        "productionAdmission":{"piNativeRunLimit":sidecar_sessions::ACTIVE_RUN_LIMIT,
             "sharedReadOnlyBatchLimit":native_tool_batch::PARALLEL_READ_ONLY_LIMIT},
-        "warmSamplesPerCell":warm,"coldSamplesPerRoute":cold,"submittedLoads":loads,"cellsValid":cells_valid,
-        "requestContractsEqual":contracts_equal,"contractComparisons":contract_comparisons,
-        "summary":summary,"cells":cells,
+        "warmSamplesPerCell":warm,"coldSamples":cold,"submittedLoads":loads,"cellsValid":cells_valid,
+                "summary":summary,"cells":cells,
         "limitations":["Source runtime under the debug test Host, not an installed candidate",
             "3/4 submitted tasks use the common fixture queue; not 3/4 simultaneously active Native Runs",
             "RSS and process counts are sampled lower bounds; virtual memory is not labeled private bytes",
-            "The 10 percent rule has no prescribed percentile; this fixture conservatively evaluates both p50 and p95",
-            "No real provider, approval wait, compaction, long-lived 20-session capacity, or product acceptance claim"]});
+                        "No real provider, approval wait, compaction, long-lived 20-session capacity, or product acceptance claim"]});
     write_json(&root.join("report.json"),&report);
     println!("native performance report: {}",root.join("report.json").display());
-    assert!(unchanged && cells_valid && contracts_equal,"performance evidence is incomplete; inspect {}",root.display());
-    assert_ne!(report["summary"]["decision"],"pause_switch","S5 offline warm regression exceeded 10 percent; inspect {}",root.display());
+    assert!(unchanged && cells_valid,"performance evidence is incomplete; inspect {}",root.display());
 }

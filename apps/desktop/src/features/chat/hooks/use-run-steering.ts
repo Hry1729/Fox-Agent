@@ -161,17 +161,7 @@ export function useRunSteering({
     }
     void load(true)
     const timer = window.setInterval(() => void load(true), 1500)
-    let unlisten: (() => void) | undefined
-    let disposed = false
-    void desktopClient.listenKernelStateInvalidations(() => void load(true)).then((fn) => {
-      if (disposed) fn()
-      else unlisten = fn
-    })
-    return () => {
-      disposed = true
-      window.clearInterval(timer)
-      unlisten?.()
-    }
+    return () => window.clearInterval(timer)
   }, [active, conversationId, enabled, load])
 
   const submit = useCallback(async (content: string, lane: RunSteeringLane) => {

@@ -32,6 +32,7 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn skill_activations(&self, run_id: &str) -> Result<Vec<SkillActivationRecord>, String> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(

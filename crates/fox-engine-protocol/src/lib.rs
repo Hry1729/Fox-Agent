@@ -366,7 +366,6 @@ pub fn schema_bundle() -> Value {
             "KernelCompactionRequest": schemars::schema_for!(KernelCompactionRequest),
             "KernelCompactionResponse": schemars::schema_for!(KernelCompactionResponse),
             "KernelRunSnapshot": schemars::schema_for!(KernelRunSnapshot),
-            "KernelStateInvalidation": schemars::schema_for!(KernelStateInvalidation),
             "ExecutionCredential": schemars::schema_for!(ExecutionCredential),
             "ExecutionEvidence": schemars::schema_for!(ExecutionEvidence),
             "ExecutionReceipt": schemars::schema_for!(ExecutionReceipt),

@@ -102,17 +102,6 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
     void load()
   }, [conversationId, load])
 
-  // Versions are appended at dispatch-settle boundaries; reload when the
-  // Kernel invalidates its state so the list stays current during a Run.
-  useEffect(() => {
-    if (!desktopRuntimeAvailable || !conversationId) return
-    let unlisten: (() => void) | undefined
-    void desktopClient.listenKernelStateInvalidations(() => void load(true)).then((fn) => {
-      unlisten = fn
-    })
-    return () => unlisten?.()
-  }, [conversationId, load])
-
   const groups = useMemo<FileGroup[]>(() => {
     const map = new Map<string, FileGroup>()
     for (const row of rows) {

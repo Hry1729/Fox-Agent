@@ -42,6 +42,7 @@ pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
 mod mcp_catalog;
+mod connector_provenance;
 
 pub(super) fn host_runtime_capabilities(manifest_hash: &str, profile_id: &str) -> Value {
     let mut facts=crate::process_jobs::runtime_capabilities(manifest_hash,profile_id);
@@ -706,7 +707,6 @@ pub struct RuntimeDiagnostics {
     pub session_file_count: usize,
     pub recovery_attempts: u8,
     pub last_recovery_at: Option<i64>,
-    pub kernel_shadow_gate: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1269,16 +1269,6 @@ impl RuntimeHost {
         if let Err(error) = database.kernel_jobs_reconcile_orphans() {
             eprintln!("Background job recovery could not finish: {error}");
         }
-        // Recovery half of the two-phase business-delivery write: a process
-        // death between "the Run's decision is durable" and "its item verdicts
-        // are durable" leaves stage rows, and they are completed here from the
-        // same verdicts. Bounded to Runs that really have stage rows, and it
-        // never re-asks a model or replays a tool.
-        match delivery::finalize_staged_outcomes(&database) {
-            Ok(0) => {}
-            Ok(count) => eprintln!("Recovered {count} staged delivery verdict(s) after restart"),
-            Err(error) => eprintln!("Staged delivery recovery could not finish: {error}"),
-        }
         host
     }
 
@@ -1367,10 +1357,6 @@ impl RuntimeHost {
 
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
         let available = self.runtime_available();
-        let kernel_shadow_gate = self.database.kernel_shadow_recent_exit_gate().unwrap_or_else(|error| json!({
-            "passed": false, "authoritativeEnabled": false, "productionRolloutApproved": false,
-            "blockingReasons": [redact_diagnostic_line(&error)],
-        }));
         let session_file_count = std::fs::read_dir(&self.sessions_dir)
             .ok()
             .into_iter()
@@ -1410,7 +1396,6 @@ impl RuntimeHost {
                 session_file_count,
                 recovery_attempts: state.recovery_attempts,
                 last_recovery_at: state.last_recovery_at,
-                kernel_shadow_gate: kernel_shadow_gate.clone(),
             },
             Err(_) => RuntimeDiagnostics {
                 protocol: protocol::PROTOCOL_NAME.to_owned(),
@@ -1428,7 +1413,6 @@ impl RuntimeHost {
                 session_file_count,
                 recovery_attempts: 0,
                 last_recovery_at: None,
-                kernel_shadow_gate,
             },
         }
     }
@@ -1949,36 +1933,12 @@ impl RuntimeHost {
         let mut project_context = project_context_for(
             &self.database,&self.sessions_dir,&started.run.conversation_id,&control_binding.permission,
         );
-        // Simplified file delivery: a new task does NOT seed a delivery
-        // checklist. The checklist is what `evaluate_stop` reads, and an empty
-        // one routes straight to `Complete`, so not seeding it is what keeps a
-        // new task out of content verification, repair rounds and
-        // `awaiting_delivery_review`. Hiding a panel would not do that: the
-        // blocking state would still exist.
-        //
-        // `freeze_task_delivery` and the whole verification ledger remain in the
-        // tree for the Runs that were already frozen under the previous design.
-        // Those Runs keep their rows and their existing behaviour; this branch
-        // only decides what a Run started now gets.
-        //
-        // A Run that already has checklist rows is one that was frozen earlier
-        // and is being restarted: its rows describe its own contract, so it keeps
-        // reading that contract. A continuation of a frozen Run no longer arrives
-        // here with copied rows — the continuation writer declines to seed them —
-        // so a fresh successor takes the simplified branch like any new task.
-        let already_frozen = !self
-            .database
-            .delivery_checklist(&started.run.id)?
-            .is_empty();
-        if already_frozen {
-            project_context["deliveryTargets"] =
-                delivery::frozen_delivery_reference(&self.database, &started.run.id, &project_context)?;
-        } else {
-            // Placement reference only: where a user-facing file should go. It
-            // is advice for the model and claims nothing about verification.
-            project_context["deliveryTargets"] =
-                delivery::task_delivery_reference(text, &project_context);
-        }
+        // Placement reference only: where a user-facing file should go. It is
+        // advice for the model and claims nothing about verification. A new
+        // task never seeds a delivery checklist; content verification, repair
+        // rounds and delivery review are retired.
+        project_context["deliveryTargets"] =
+            delivery::task_delivery_reference(text, &project_context);
         // Host-decided placement for user-facing files. The folder is decided
         // once per (conversation, project) and persisted, so a continuation,
         // a retry on a later day and an application restart all land in the
@@ -6615,18 +6575,6 @@ fn mcp_permission_scope(tool: &str, input: &Value) -> Option<String> {
     ))
 }
 
-fn host_permission_scope(tool: &str, preview: &crate::tool_host::ToolPreview) -> Option<String> {
-    // Shell commands are deliberately one-shot. A command string is not a stable
-    // capability boundary and must never become a conversation-wide grant.
-    if tool == "run_command" {
-        return None;
-    }
-    Some(permission_scope_hash(
-        "host-target",
-        format!("{tool}\0{}", preview.target).as_bytes(),
-    ))
-}
-
 fn capability_permission_scope(tool: &str, input: &Value) -> Option<String> {
     let encoded = crate::canonical_json::to_vec(input).ok()?;
     Some(permission_scope_hash(
@@ -8144,13 +8092,11 @@ fn execute_mcp_tool_request(
         } else {
             return Err(format!("unsupported MCP proxy tool: {tool}"));
         };
-        Ok(json!({
-            "content": if managed_office { result.get("content").cloned().unwrap_or_else(|| json!([])) }
-                else { json!([{ "type": "text", "text": crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string()) }]) },
-            "details": result,
-            "untrusted": true,
-            "sourceType": "knowledge",
-        }))
+        let content = if managed_office { result.get("content").cloned().unwrap_or_else(|| json!([])) }
+            else { json!([{ "type": "text", "text": crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string()) }]) };
+        // The Host composes the envelope and stamps its provenance; a remote
+        // connector body is fenced so it can never read as a Host diagnosis.
+        Ok(connector_provenance::mcp_result_envelope(tool, &input, content, result))
     })();
     finalize_host_tool_execution(
         database,
@@ -10110,29 +10056,6 @@ fn ensure_plan_approved_before_mutation(
     Ok(())
 }
 
-fn mark_crashed(state: &Arc<Mutex<RuntimeHostState>>, message: String) {
-    if let Ok(mut state) = state.lock() {
-        if state.state == "stopped" || state.state == "stopping" {
-            return;
-        }
-        state.state = "crashed".to_owned();
-        state.last_error = Some(message);
-    }
-}
-
-fn should_attempt_recovery(
-    message: &str,
-    stable_session: bool,
-    recovery_attempts: u8,
-    has_conversation: bool,
-) -> bool {
-    let contract_error = message.contains("protocol mismatch")
-        || message.contains("invalid JSONL")
-        || message.contains("oversized JSONL")
-        || message.contains("capability manifest");
-    !contract_error && stable_session && recovery_attempts == 0 && has_conversation
-}
-
 fn record_runtime_crash(
     _app: &AppHandle, _database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
     stdin: &Arc<Mutex<ChildStdin>>, message: String,
@@ -10150,19 +10073,7 @@ fn record_runtime_crash(
 #[cfg(test)]
 mod attachment_tests {
     use crate::canonical_json::CanonicalJson;
-    use super::{
-        apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx,
-        attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result,
-        create_fresh_host_tool_call, dispatch_created_work_child,
-        effective_digital_colleague_output_limit, ensure_plan_approved_before_mutation,
-        event_projection_failure_code, extract_docx_text, finalize_host_tool_execution,
-        inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes,
-        node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload,
-        pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package,
-        should_attempt_recovery, structured_runtime_error, validate_envelope_identity_scope,
-        validate_runtime_tool_authority, HostToolCallExecution, PendingApproval,
-        RuntimeToolIngress,
-    };
+    use super::{apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx, attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result, create_fresh_host_tool_call, dispatch_created_work_child, effective_digital_colleague_output_limit, ensure_plan_approved_before_mutation, event_projection_failure_code, extract_docx_text, finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes, node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope, validate_runtime_tool_authority, HostToolCallExecution, PendingApproval, RuntimeToolIngress};
     use crate::database::{
         AddEvidenceInput, AttachmentRecord, CreateGoalInput, CreateTaskInput, Database,
         EvidenceReferenceKind, EvidenceType, EvidenceValidityStatus, GoalStatus,
@@ -12817,40 +12728,6 @@ mod attachment_tests {
             redact_diagnostic_line("request failed api_key=secret token=another"),
             "request failed api_key=[REDACTED] token=[REDACTED]"
         );
-    }
-
-    #[test]
-    fn sidecar_recovery_is_single_attempt_and_contract_errors_are_fused() {
-        assert!(should_attempt_recovery(
-            "runtime process closed stdout",
-            true,
-            0,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime process closed stdout",
-            true,
-            1,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime protocol mismatch: old v0",
-            true,
-            0,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime emitted invalid JSONL",
-            true,
-            0,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime process closed stdout",
-            false,
-            0,
-            true
-        ));
     }
 
     #[test]

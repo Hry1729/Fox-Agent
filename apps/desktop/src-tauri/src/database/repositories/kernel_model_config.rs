@@ -11,18 +11,6 @@ fn invalid(message: impl Into<String>) -> rusqlite::Error {
 }
 
 impl Database {
-    /// No automatic backfill: an old Run with only a hash cannot infer its body.
-    pub(crate) fn freeze_kernel_model_config(
-        &self,
-        run_id: &str,
-        config: &KernelModelConfig,
-    ) -> Result<(), String> {
-        self.with_connection(|connection| {
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            freeze_model_config_in_tx(&tx, run_id, config)?;
-            tx.commit()
-        })
-    }
 
 }
 

@@ -34,7 +34,6 @@ export type KernelRoundDirective = { "batchId"?: (string | null); "checkpointSeq
 export type KernelRoundOutputFrame = { "assistantMessage": unknown; "schemaVersion": number; "turnId": string; }
 export type KernelToolSnapshot = { "approvalState"?: (string | null); "batchId": string; "sourceOrder": number; "state": string; "tool": string; "toolCallId": string; }
 export type KernelRunSnapshot = { "approvalDeadlineWallMs"?: (number | null); "compactions": number; "engineId": string; "lastEventSeq": string; "providerAttempts": number; "retryDueWallMs"?: (number | null); "runId": string; "runningElapsedMs": number; "schemaVersion": number; "state": string; "terminalWritten": boolean; "tools": Array<KernelToolSnapshot>; "turnAttempts": number; "turnId": string; }
-export type KernelStateInvalidation = { "schemaVersion": number; }
 export type ExecutionAuthority = "legacy" | "authoritative"
 export type ExecutorRoute = "pi_native"
 export type FrozenPermission = { "approvalEpoch"?: (number | null); "grants": Array<PermissionGrant>; "mode": PermissionMode; "projectRoot"?: (string | null); }

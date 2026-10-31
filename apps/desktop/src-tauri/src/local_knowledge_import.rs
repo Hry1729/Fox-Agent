@@ -10,12 +10,11 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf, Prefix},
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(test)]
+use std::sync::{atomic::AtomicBool, Arc};
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_CHUNK_MAX_BYTES: usize = 4 * 1024;
@@ -87,11 +86,13 @@ where
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub struct ImportCancellationToken {
     cancelled: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
 impl ImportCancellationToken {
     pub fn new() -> Self {
         Self::default()
@@ -106,6 +107,7 @@ impl ImportCancellationToken {
     }
 }
 
+#[cfg(test)]
 impl ImportCancellation for ImportCancellationToken {
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
@@ -127,6 +129,7 @@ impl<'a> Default for ImportOptions<'a> {
 }
 
 impl<'a> ImportOptions<'a> {
+    #[cfg(test)]
     pub fn with_max_file_size(mut self, max_file_size: u64) -> Self {
         self.max_file_size = max_file_size;
         self
@@ -179,6 +182,7 @@ enum SpecializedDocumentKind {
     Xlsx,
 }
 
+#[cfg(test)]
 pub fn import_document(
     managed_root: impl AsRef<Path>,
     knowledge_base_id: &str,
@@ -865,50 +869,6 @@ fn parse_zip_based_text(
         }
     }
     Ok(text)
-}
-
-/// List the central-directory entry names of an OOXML/ZIP container without
-/// inflating anything. Used by deterministic verification (e.g. proving a
-/// generated workbook really carries a chart part) rather than trusting the
-/// writer's self-report.
-pub(crate) fn zip_entry_names(bytes: &[u8]) -> Result<Vec<String>, String> {
-    let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
-    Ok(archive.entry_names().map(str::to_owned).collect())
-}
-
-/// Read one already-enumerated entry of an OOXML/ZIP container as UTF-8 text.
-///
-/// Deterministic verification uses this to inspect the real package (an OOXML
-/// part is XML, so text is the honest representation) instead of trusting a
-/// writer's summary. Pure and bounded: the bytes come from a file the caller
-/// already opened through an authorized handle.
-pub(crate) fn zip_entry_text(bytes: &[u8], name: &str) -> Result<Option<String>, String> {
-    let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
-    let entry = archive.read_entry(name).map_err(|error| error.to_string())?;
-    match entry {
-        Some(bytes) => Ok(Some(
-            String::from_utf8_lossy(&bytes).into_owned(),
-        )),
-        None => Ok(None),
-    }
-}
-
-/// Every entry of an OOXML/ZIP container as `(name, bytes)`.
-///
-/// Used by deterministic verification to rewrite a real package without a
-/// compressor (for example to add one OOXML part to an existing workbook).
-pub(crate) fn zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
-    let names = archive.entry_names().map(str::to_owned).collect::<Vec<_>>();
-    let mut entries = Vec::with_capacity(names.len());
-    for name in names {
-        let data = archive
-            .read_entry(&name)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("ZIP 条目 {name} 在读取时消失"))?;
-        entries.push((name, data));
-    }
-    Ok(entries)
 }
 
 /// Pure, bounded extraction from bytes already read through an authorized

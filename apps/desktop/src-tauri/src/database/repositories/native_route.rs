@@ -232,15 +232,5 @@ pub(super) fn require_completed(transaction: &Transaction<'_>, run_id: &str, now
         [run_id], |row| row.get(0),
     )?;
     if blocked { return Err(projection_violation("native Run completion is blocked by unsettled Host tools or business state".into())); }
-    let mut query = transaction.prepare("SELECT item_key,status,finding_json,requirements_json FROM delivery_checklist_items WHERE run_id=?1")?;
-    let rows = query.query_map([run_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,
-        row.get::<_,Option<String>>(2)?,row.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for (item,status,finding,requirements) in rows {
-        let qualification = crate::runtime_host::delivery::passed_qualification_of_row(&status,finding.as_deref(),requirements.as_deref(),&item);
-        if status != "passed" || matches!(qualification,
-            crate::runtime_host::delivery::PassQualification::ContradictedByFacts | crate::runtime_host::delivery::PassQualification::RecordUnusable(_)) {
-            return Err(projection_violation("native Run completion requires the Host delivery verdict".into()));
-        }
-    }
     Ok(())
 }

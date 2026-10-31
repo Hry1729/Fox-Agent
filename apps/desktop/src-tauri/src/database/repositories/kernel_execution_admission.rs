@@ -63,16 +63,6 @@ fn action_class_str(value: ActionClass) -> &'static str {
     }
 }
 
-fn attempt_state_str(value: &AttemptState) -> &'static str {
-    match value {
-        AttemptState::Claimed => "claimed",
-        AttemptState::Completed => "completed",
-        AttemptState::Refused { .. } => "refused",
-        AttemptState::Launched => "launched",
-        AttemptState::Unknown => "unknown",
-    }
-}
-
 fn attempt_state_from_str(
     value: &str,
     refusal_code: Option<String>,
@@ -115,17 +105,20 @@ pub trait FileTargetResolver {
     fn resolve(&self, class: ActionClass, canonical_input_json: &str) -> Option<String>;
 }
 
+#[cfg(test)]
 /// A resolver that never produces a target identity (the current Host state:
 /// A's canonical read path is not wired yet).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoFileTargetResolver;
 
+#[cfg(test)]
 impl FileTargetResolver for NoFileTargetResolver {
     fn resolve(&self, _class: ActionClass, _canonical_input_json: &str) -> Option<String> {
         None
     }
 }
 
+#[cfg(test)]
 /// Build the authoritative credential for one dispatch from durable facts and
 /// persist it inside the caller's admission transaction. The model never
 /// contributes a field: identity comes from the run's durable rows,
@@ -182,6 +175,7 @@ pub fn issue_dispatch_credential_in_tx(
     )
 }
 
+#[cfg(test)]
 /// Same as [issue_dispatch_credential_in_tx], with the caller''s authoritative
 /// target resolver. The resolver only supplies the target identity; the
 /// observation itself must already exist in kernel_host_observations.
@@ -971,23 +965,6 @@ impl Database {
         })
     }
 
-    /// Withdraw every unconsumed replacement request in a conversation
-    /// immediately (a `deny`, or a tightening of the permission mode).
-    pub fn withdraw_whole_file_replacements(
-        &self,
-        conversation_id: &str,
-    ) -> Result<usize, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let withdrawn = revoke_replace_grants_in_tx(&transaction, conversation_id)
-                .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
-            transaction.commit()?;
-            Ok(withdrawn)
-        })
-    }
-
     /// The explicit human confirmation of one whole-file replacement. The only
     /// path that turns a `pending` request into an `approved` authorization.
     pub fn approve_whole_file_replacement(
@@ -1148,35 +1125,6 @@ impl Database {
                 now_ms(),
             )
             .map_err(rusqlite::Error::InvalidParameterName)?;
-            transaction.commit()?;
-            Ok(credential)
-        })
-    }
-
-    /// Issue (or idempotently re-read) the authoritative credential.
-    /// Issue (or re-read) the authoritative credential for one dispatch, in its
-    /// own `IMMEDIATE` transaction. The caller supplies only durable identity:
-    /// the run, the tool call, the tool and the canonical input.
-    pub fn issue_dispatch_credential(
-        &self,
-        run_id: &str,
-        tool_call_id: &str,
-        tool: &str,
-        canonical_input_json: &str,
-    ) -> Result<Option<ExecutionCredential>, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let credential = issue_dispatch_credential_in_tx(
-                &transaction,
-                run_id,
-                tool_call_id,
-                tool,
-                canonical_input_json,
-                now_ms(),
-            )
-            .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
             transaction.commit()?;
             Ok(credential)
         })
@@ -1559,26 +1507,6 @@ impl Database {
         })
     }
 
-    /// The durable (tool, canonical input) identity of one tool call. The
-    /// execution boundary presents exactly these strings back, so a re-serialized
-    /// payload can never fake a different intent digest.
-    pub fn tool_call_identity(
-        &self,
-        run_id: &str,
-        tool_call_id: &str,
-    ) -> Result<Option<(String, String)>, String> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    "SELECT tool, canonical_input_json FROM kernel_tool_calls
-                      WHERE run_id=?1 AND tool_call_id=?2",
-                    params![run_id, tool_call_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-        })
-    }
-
     /// Record an authoritative Host observation (durable read evidence).
     pub fn record_host_observation(
         &self,
@@ -1629,20 +1557,6 @@ impl Database {
             let transaction = connection.transaction()?;
             host_observation_for_version_in_tx(&transaction, run_id, target_identity, version)
                 .map_err(|error| rusqlite::Error::InvalidParameterName(error))
-        })
-    }
-
-    /// Every observation of one target in this run, newest first (REV-05
-    /// fragment-coverage checks and append-only assertions).
-    pub fn host_observations_for_target(
-        &self,
-        run_id: &str,
-        target_identity: &str,
-    ) -> Result<Vec<HostObservation>, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            host_observations_for_target_in_tx(&transaction, run_id, target_identity)
-                .map_err(rusqlite::Error::InvalidParameterName)
         })
     }
 
@@ -2559,42 +2473,6 @@ pub fn host_observation_for_version_in_tx(
             .optional()
             .map_err(|e| e.to_string()),
     }
-}
-
-/// Every observation of one target in this run, newest first. Used by the
-/// fragment-coverage check (REV-05) and by tests that assert the registry is
-/// append-only.
-pub fn host_observations_for_target_in_tx(
-    transaction: &Transaction<'_>,
-    run_id: &str,
-    target_identity: &str,
-) -> Result<Vec<HostObservation>, String> {
-    let mut statement = transaction
-        .prepare(
-            "SELECT observation_id, target_identity, version, observed_by_tool_call_id,
-                    view_kind, covered_whole_file, range_start, range_end, total_units, truncated
-               FROM kernel_host_observations
-              WHERE run_id=?1 AND target_identity=?2
-              ORDER BY observed_at DESC, observation_id ASC",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map(params![run_id, target_identity], |r| {
-            Ok(HostObservation {
-                target_identity: r.get(1)?,
-                version: r.get(2)?,
-                observed_by_tool_call_id: r.get(3)?,
-                view_kind: fox_engine_protocol::ObservationView::from_str(&r.get::<_, String>(4)?)
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(e))?,
-                covered_whole_file: r.get::<_, i64>(5)? != 0,
-                range_start: r.get(6)?,
-                range_end: r.get(7)?,
-                total_units: r.get(8)?,
-                truncated: r.get::<_, i64>(9)? != 0,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

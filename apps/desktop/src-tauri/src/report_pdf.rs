@@ -519,6 +519,7 @@ fn svg_color(color: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])
 }
 pub(crate) struct ChartOutput { pub bytes: Vec<u8>, pub data_contract: Value }
+#[cfg(test)]
 pub(crate) fn render_chart(value: &Value) -> Result<Vec<u8>, String> {
     render_chart_output(value).map(|output|output.bytes)
 }

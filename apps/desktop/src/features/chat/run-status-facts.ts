@@ -260,15 +260,14 @@ export function toolFailurePresentation(tool: string, result: unknown): ToolFail
   const output = record(result)
   const details = record(output?.details) ?? record(output?.error)
   const connectorTool = tool === 'call_mcp_tool' || tool === 'list_mcp_tools'
-  // Who authored this result? A connector result without the Host mark is never
-  // read as a Host diagnosis, whatever codes its body carries. Note (B1): the
-  // execution-boundary stamp that moved a remote body's Host-reserved keys aside
-  // lived on the removed Kernel dispatch path; the native MCP path does not stamp
-  // yet, so a remote body that writes `diagnosticSource: 'host'` itself is not
-  // fenced here. Tracked for B4.
-  const source = typeof details?.diagnosticSource === 'string'
-    ? details.diagnosticSource
-    : typeof output?.diagnosticSource === 'string' ? output.diagnosticSource : null
+  // Who authored this result? Only the top-level `diagnosticSource` of the
+  // result envelope is read: the Host composes that envelope and stamps it at
+  // its MCP result boundary, while a connector's own body only ever reaches
+  // `details`/`content` (its Host-reserved keys are moved into `hostQuarantine`).
+  // A `diagnosticSource` inside `details` is therefore never trusted, so a
+  // remote body that writes `diagnosticSource: 'host'` itself cannot be read as
+  // a Host diagnosis.
+  const source = typeof output?.diagnosticSource === 'string' ? output.diagnosticSource : null
   const hostAuthored = !connectorTool || source === 'host'
   // Display fields come from Host-authored facts only: a connector body must not
   // be able to name the operation or the target the interface shows.

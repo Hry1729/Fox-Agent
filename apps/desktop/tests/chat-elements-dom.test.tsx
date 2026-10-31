@@ -22,9 +22,6 @@ afterEach(cleanup)
 test('输入流光仅新建页挂载，已有页即使centered、聚焦或运行也没有beam节点', async () => {
   const { MemoizedComposer } = await import('../src/features/chat/composer/fox-composer')
   const { TooltipProvider } = await import('../src/components/ui/tooltip')
-  const { desktopClient } = await import('../src/features/conversations/api/desktop-client')
-  const listen = desktopClient.listenKernelStateInvalidations
-  desktopClient.listenKernelStateInvalidations = async () => () => {}
   function Harness({ newConversation, running=false }: { newConversation: boolean; running?: boolean }) {
     const [draft,setDraft]=React.useState('')
     return <TooltipProvider><MemoizedComposer resetKey={0} draft={draft} setDraft={setDraft} chatState={running ? 'running' : 'idle'} centered newConversation={newConversation} runtimeControlled /></TooltipProvider>
@@ -44,7 +41,6 @@ test('输入流光仅新建页挂载，已有页即使centered、聚焦或运行
     expect(view.getByRole('button', { name: '选择 Agent，当前 Fox' }).textContent).toBe('Fox')
   } finally {
     await act(async()=>view.unmount())
-    desktopClient.listenKernelStateInvalidations = listen
   }
 })
 

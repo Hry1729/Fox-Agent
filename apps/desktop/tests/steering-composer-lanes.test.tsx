@@ -78,7 +78,6 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
   desktopRuntimeAvailable: true,
   desktopClient: {
     ...actualDesktopClient.desktopClient,
-    listenKernelStateInvalidations: async () => () => {},
     listRunSteering: async (conversationId: string) => {
       const injected = listImpl?.(conversationId)
       if (injected) return injected

@@ -393,6 +393,7 @@ fn result(text: String, mut details: Value, max_chars: usize) -> Value {
     json!({ "content": content, "details": details })
 }
 
+#[cfg(test)]
 pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken) -> Result<Value, String> {
     execute_with_budget(binding, tool, input, cancellation, Duration::from_millis(binding.budgets.tool_execution_ms as u64))
 }
@@ -426,6 +427,7 @@ impl VerifiedReadObservation {
         }
     }
 
+    #[cfg(test)]
     /// A read that delivered nothing usable establishes no coverage at all.
     fn empty(target_identity: String, version: String, total_units: u64) -> Self {
         Self {
@@ -441,6 +443,7 @@ impl VerifiedReadObservation {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn execute_with_observation(binding: &RunControlBinding, tool: &str,
     input: &Value, cancellation: &CancellationToken,
 ) -> Result<(Value, Option<VerifiedReadObservation>), String> {
@@ -490,6 +493,7 @@ pub(crate) fn observe_missing_file_target(binding: &RunControlBinding, path: &st
     }
 }
 
+#[cfg(test)]
 pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken, budget: Duration) -> Result<Value,String> {
     execute_observed_with_budget(binding, tool, input, cancellation, budget, None)
 }

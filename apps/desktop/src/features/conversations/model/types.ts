@@ -1,6 +1,6 @@
 import type { KernelRunSnapshot } from '../../../../../../packages/fox-engine-protocol'
 
-export type { KernelRunSnapshot, KernelStateInvalidation, KernelModelPreview } from '../../../../../../packages/fox-engine-protocol'
+export type { KernelRunSnapshot, KernelModelPreview } from '../../../../../../packages/fox-engine-protocol'
 
 export interface DesktopErrorDetails {
   code: string

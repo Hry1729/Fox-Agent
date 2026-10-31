@@ -2,7 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
-import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
+import type { KernelModelPreview } from '../model/types'
 import type { AgentBackendCapabilities, AgentBackendId, AgentBackendPreferences, AgentBackendStatus, CodexResponsesProbe } from '../model/agent-backend'
 import type { AgentBackendPermissionStatus, AgentBackendTarget, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
 import type { NativePermissionRequest, NativePermissionView } from '../model/agent-native-permission'
@@ -1045,8 +1045,6 @@ export const desktopClient = {
   agentBackendModelConnection: (request: import('@/features/chat/components/AgentModelConnectionCard').AgentModelConnectionRequest) => command<import('@/features/chat/components/AgentModelConnectionCard').AgentModelConnection>('agent_backend_model_connection', request),
   listenRuntimeEvents: (handler: (event: RuntimeEventNotification) => void): Promise<UnlistenFn> =>
     listen<RuntimeEventNotification>('fox://runtime-event', ({ payload }) => handler(payload)),
-  listenKernelStateInvalidations: (handler: (event: KernelStateInvalidation) => void): Promise<UnlistenFn> =>
-    listen<KernelStateInvalidation>('fox://kernel-state-invalidated', ({ payload }) => handler(payload)),
   listenKernelModelPreviews: (handler: (event: KernelModelPreview) => void): Promise<UnlistenFn> =>
     listen<KernelModelPreview>('fox://kernel-model-preview', ({ payload }) => handler(payload)),
   listenChildRunUpdates: (handler: (event: ChildRunNotification) => void): Promise<UnlistenFn> =>

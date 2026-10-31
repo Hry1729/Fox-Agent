@@ -9,7 +9,7 @@ function fixture(failed = '') {
   const pending: Array<() => void> = []
   let refreshes = 0
   let failures = 0
-  const names = ['listenRuntimeEvents', 'listenWorkEvents', 'listenApprovalRequests', 'listenApprovalResolved', 'listenKernelStateInvalidations']
+  const names = ['listenRuntimeEvents', 'listenWorkEvents', 'listenApprovalRequests', 'listenApprovalResolved']
   const client = Object.fromEntries(names.map((name) => [name, (handler: (event: any) => void) => {
     handlers[name] = handler
     return new Promise<() => void>((resolve, reject) => pending.push(() => name === failed
@@ -19,19 +19,17 @@ function fixture(failed = '') {
   return { handlers, stopped, pending, stop, counts: () => ({ refreshes, failures }) }
 }
 
-test('Kernel commits refresh notifications while unsupported versions and text deltas do not', async () => {
+test('Host channels refresh notifications while text deltas do not', async () => {
   const h = fixture()
   await flush(); h.pending.forEach((resolve) => resolve()); await flush()
-  expect(h.counts().refreshes).toBe(5)
-  h.handlers.listenKernelStateInvalidations({ schemaVersion: 1 })
-  h.handlers.listenKernelStateInvalidations({ schemaVersion: 2 })
-  h.handlers.listenKernelStateInvalidations(null)
+  expect(h.counts().refreshes).toBe(4)
+  h.handlers.listenWorkEvents({})
   h.handlers.listenRuntimeEvents({ event: { type: 'message.delta' } })
-  expect(h.counts().refreshes).toBe(6)
+  expect(h.counts().refreshes).toBe(5)
   h.stop(); h.stop()
-  expect(h.stopped.length).toBe(5)
-  h.handlers.listenKernelStateInvalidations({ schemaVersion: 1 })
-  expect(h.counts().refreshes).toBe(6)
+  expect(h.stopped.length).toBe(4)
+  h.handlers.listenWorkEvents({})
+  expect(h.counts().refreshes).toBe(5)
 })
 
 test('failed and late channel registration still disposes every successful subscription', async () => {
@@ -41,6 +39,6 @@ test('failed and late channel registration still disposes every successful subsc
   expect(h.counts()).toEqual({ refreshes: 1, failures: 1 })
   h.stop()
   h.pending.slice(2).forEach((resolve) => resolve()); await flush()
-  expect(h.stopped.length).toBe(4)
+  expect(h.stopped.length).toBe(3)
   expect(h.counts()).toEqual({ refreshes: 1, failures: 1 })
 })

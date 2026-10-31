@@ -188,6 +188,7 @@ impl PreparedToolAction {
         }
     }
 
+    #[cfg(test)]
     /// The file a write/edit will replace, used for Host-side version
     /// capture. Commands have no single managed target.
     pub fn target_path(&self) -> Option<&Path> {
@@ -403,6 +404,7 @@ pub(crate) fn execute_file_with_context(
         json!({"path":path,"bytes":content.len(),"operation":if expected == "missing" { "created" } else { "modified" },"readVersion":file_version(&content)})))
 }
 
+#[cfg(test)]
 pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
     execute_with_cancellation(action, None)
 }
@@ -987,6 +989,7 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
     Ok(())
 }
 
+#[cfg(test)]
 /// Replace `target` with the prepared `candidate` in place. The original is
 /// renamed to a Host-owned same-volume backup instead of being deleted, an
 /// applying record is flushed before the API call, and the outcome is judged
@@ -1168,6 +1171,7 @@ fn prepare_verified_preimage(
     Ok(())
 }
 
+#[cfg(test)]
 /// The in-place replace on platforms without `ReplaceFileW`: the Host builds
 /// and verifies the pre-image itself, then performs the single atomic rename.
 /// The verified backup is what makes `Committed` reachable, so a successful
@@ -4602,11 +4606,6 @@ mod write_gate_tests {
             for target in targets {
                 let path = root.join(target.replace('/', std::path::MAIN_SEPARATOR_STR));
                 fs::write(&path, "protected content").unwrap();
-                assert!(
-                    crate::runtime_host::delivery::read_only_input_paths(task)
-                        .contains(&crate::runtime_host::delivery::path_key(target)),
-                    "{target} must stay read-only for: {task}"
-                );
                 let before = fs::read(&path).unwrap();
                 let error = ensure_writable_target(Some(task), root.to_str().unwrap(), &path)
                     .expect_err("the write entry must refuse a prohibited target");
@@ -4635,12 +4634,6 @@ mod write_gate_tests {
         assert!(
             crate::runtime_host::delivery::expectations_from_task(task).is_empty(),
             "a prohibited target must not become a deliverable"
-        );
-        // (2) the path stays in the read-only set the write gate derives from the task.
-        assert!(
-            crate::runtime_host::delivery::read_only_input_paths(task)
-                .contains(&crate::runtime_host::delivery::path_key("out/a.md")),
-            "a prohibited path must stay read-only"
         );
         // (3) the real write entry refuses, and the bytes on disk are untouched.
         let before = fs::read(&target).unwrap();

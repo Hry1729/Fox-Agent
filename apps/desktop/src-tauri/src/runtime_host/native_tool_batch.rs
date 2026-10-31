@@ -103,6 +103,7 @@ impl SharedBatchRegistry {
         Self { gate: Mutex::new(()), changed: Condvar::new(), recovering_approvals:Mutex::new(HashSet::new()) }
     }
 
+    #[cfg(test)]
     fn register(&self, database: &Database, request: &ToolBatchRegisterRequest) -> Result<ToolBatchRegisterResponse, String> {
         self.register_inner(database, request, None, false)
     }

@@ -15,7 +15,6 @@ use std::thread;
 use std::time::Duration;
 use url::Url;
 mod owned;
-pub(crate) use owned::execute_owned;
 pub(crate) use owned::execute_owned_readonly;
 
 const CREDENTIAL_SERVICE: &str = "com.fox.agent.mcp";
@@ -809,18 +808,6 @@ mod tests {
     }
 
     #[test]
-    fn kernel_owned_mcp_validates_arguments_and_never_reuses_pooled_sessions() {
-        let registry = crate::kernel::CancellationRegistry::default();
-        registry.register_run("owned-mcp").unwrap();
-        let token = registry.run_token("owned-mcp").unwrap();
-        let server = server("valid");
-        let result = execute_owned(&server, Some(("echo", &json!({"text":"owned 中文"}))), &token, Duration::from_secs(5)).unwrap();
-        assert_eq!(result["content"][0]["text"], "owned 中文");
-        assert!(execute_owned(&server, Some(("echo", &json!({"text":42}))), &token, Duration::from_secs(5)).is_err());
-        assert!(execute_owned(&server, Some(("missing", &json!({}))), &token, Duration::from_secs(5)).is_err());
-    }
-
-    #[test]
     fn reconciliation_connector_queries_require_live_explicit_readonly_schema() {
         let registry=crate::kernel::CancellationRegistry::default();
         registry.register_run("query").unwrap();let token=registry.run_token("query").unwrap();
@@ -829,20 +816,6 @@ mod tests {
         let error=execute_owned_readonly(&server("valid"),Some(("echo",&json!({"text":"must-not-execute"}))),&token,Duration::from_secs(5)).unwrap_err();
         assert!(error.contains("只读查询"));
         assert!(execute_owned_readonly(&server("readonly"),Some(("echo",&json!({"text":42}))),&token,Duration::from_secs(5)).is_err());
-    }
-
-    #[test]
-    fn kernel_owned_mcp_cancellation_stops_waiting_and_reaps_its_server() {
-        use crate::kernel::CancellationPort;
-        let registry = crate::kernel::CancellationRegistry::default();
-        registry.register_run("cancel-mcp").unwrap();
-        let token = registry.run_token("cancel-mcp").unwrap();
-        let cancel = registry.clone();
-        let sender = thread::spawn(move || { thread::sleep(Duration::from_millis(150)); cancel.request_run_cancel("cancel-mcp"); });
-        let start = std::time::Instant::now();
-        assert!(execute_owned(&server("timeout"), None, &token, Duration::from_secs(10)).is_err());
-        assert!(start.elapsed() < Duration::from_secs(5));
-        sender.join().unwrap();
     }
 
     #[test]

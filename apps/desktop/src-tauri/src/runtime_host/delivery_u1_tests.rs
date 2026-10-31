@@ -24,10 +24,7 @@
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
 use super::*;
-use crate::database::{
-    AcceptanceWrite, CURRENT_U1_AWARE_SCHEMA_VERSION, Database, DeliveryChecklistSeed,
-    DeliveryRequirement, DowngradeBlocker, RequirementKind, delivery_review_downgrade_blocker,
-};
+use crate::database::{AcceptanceWrite, Database, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind};
 use crate::runtime_host::delivery::delivery_u1::{
     delivery_acceptance_state, effective_delivery_acceptance, parse_acceptance_decision,
     resolve_delivery_acceptance, AcceptanceIneffective,
@@ -155,23 +152,6 @@ impl Fixture {
         self.database
             .seed_delivery_checklist(&self.run, &[seed], crate::database::now_ms())
             .unwrap();
-    }
-
-    /// Run the real internal entry so the row carries a real, verified-but-
-    /// incomplete v2 verdict. The fixture's candidate satisfies the concat, so
-    /// the class here is `Confirmed`; tests that need `Unconfirmed` rewrite the
-    /// contract to something with an unimplemented obligation.
-    fn verify(&self) {
-        let result = super::super::content_requirements::classify_v2_requirement(
-            &self.database,
-            &self.run,
-            &self.item,
-            &self.spec,
-            Some(&self.root.join("out.txt")),
-            &self.finding(),
-            true,
-        );
-        assert_eq!(result.class, DeliveryClass::Confirmed, "{result:?}");
     }
 
     fn finding(&self) -> Value {
@@ -374,7 +354,6 @@ fn an_envelope_naming_another_item_cannot_be_accepted() {
 #[test]
 fn a_confirmed_row_needs_no_acceptance_and_cannot_take_one() {
     let fixture = Fixture::new("confirmed-row");
-    fixture.verify();
     fixture.store_verdict(
         "confirmed",
         vec![fact("passed", "已通过")],
@@ -735,7 +714,6 @@ fn the_item_detail_surface_keeps_verification_and_acceptance_apart() {
 #[test]
 fn the_item_detail_surface_reports_a_blocked_row_without_an_acceptance() {
     let fixture = Fixture::new("detail-blocked");
-    fixture.verify();
     fixture.store_verdict(
         "confirmed",
         vec![fact("passed", "已通过")],
@@ -899,7 +877,6 @@ fn d3_the_blocked_reason_serializes_into_the_shape_the_frontend_reads() {
     // `{"row_not_pending":{…}}` for the rest — neither has the `kind`/`detail`
     // pair the frontend reads, so every specific reason was unreachable.
     let fixture = Fixture::new("d3-shape");
-    fixture.verify();
     fixture.store_verdict("confirmed", vec![fact("passed", "已通过")]);
     let state = delivery_acceptance_state(&fixture.database, &fixture.run, &fixture.item).unwrap();
 
@@ -944,58 +921,4 @@ fn d3_the_blocked_reason_serializes_into_the_shape_the_frontend_reads() {
 // ---------------------------------------------------------------------------
 // Package 2-D repair, D-5: the executable downgrade pre-check
 // ---------------------------------------------------------------------------
-
-#[test]
-fn d5_the_downgrade_precheck_refuses_an_ahead_schema() {
-    // A database with the Kernel tables but no acceptance tables: the parked
-    // check is a legitimate "no", so the schema version is the refusal.
-    let fixture = Fixture::new("d5-schema");
-    fixture.database.with_connection(|connection| {
-        connection.execute_batch(
-            "DROP TABLE delivery_acceptances; DROP TABLE delivery_acceptance_audit;",
-        )?;
-        Ok(())
-    }).unwrap();
-    let blocker = fixture
-        .database
-        .delivery_review_downgrade_blocker(1)
-        .expect("a database ahead of the target is refused");
-    assert!(
-        matches!(blocker, DowngradeBlocker::SchemaAhead { .. }),
-        "got {blocker:?}"
-    );
-}
-
-#[test]
-fn d5_the_downgrade_precheck_refuses_the_acceptance_tables_even_with_no_parked_run() {
-    // "No parked Run" is necessary but not sufficient: the tables exist
-    // independently, and an older binary would silently drop every acceptance.
-    let fixture = Fixture::new("d5-tables");
-    let blocker = fixture
-        .database
-        .delivery_review_downgrade_blocker(CURRENT_U1_AWARE_SCHEMA_VERSION - 1)
-        .expect("the tables alone block the downgrade");
-    assert!(
-        matches!(
-            blocker,
-            DowngradeBlocker::SchemaAhead { .. } | DowngradeBlocker::AcceptanceTablesPresent
-        ),
-        "got {blocker:?}"
-    );
-}
-
-#[test]
-fn d5_the_downgrade_precheck_never_mistakes_a_database_error_for_permission() {
-    // A database error must be reported as `CheckFailed`, never as "no blocker".
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    let blocker = delivery_review_downgrade_blocker(&connection, CURRENT_U1_AWARE_SCHEMA_VERSION);
-    assert!(
-        matches!(blocker, Some(DowngradeBlocker::CheckFailed { .. })),
-        "an unreadable database is not permission to downgrade: {blocker:?}"
-    );
-}
-
-
-
-
 

@@ -403,8 +403,6 @@ pub async fn agent_backend_revoke_full_access(
 pub(crate) const DEFAULT_BACKEND_KEY: &str = "agent_backend.default_backend";
 /// `app_settings` key: `1` = new external conversations get full access.
 pub(crate) const NEW_EXTERNAL_FULL_ACCESS_KEY: &str = "agent_backend.new_external_full_access";
-/// `app_settings` key: last Responses probe of 模型服务's base URL (JSON).
-pub(crate) const CODEX_RESPONSES_PROBE_KEY: &str = "agent_backend.codex_responses_probe";
 
 /// Result of probing `POST {base}/responses` (no key, no body content).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -416,25 +414,6 @@ pub struct CodexResponsesProbe {
     pub supported: Option<bool>,
     pub status: Option<u16>,
     pub checked_at: i64,
-}
-
-/// What an HTTP status of `POST {base}/responses` (empty JSON body) says.
-pub(crate) fn responses_support_from_status(status: u16) -> Option<bool> {
-    match status {
-        404 | 405 => Some(false),
-        200..=299 => Some(true),
-        _ => None,
-    }
-}
-
-/// The cached probe, when it is about `base_url`.
-pub(crate) fn cached_codex_probe(database: &crate::database::Database, base_url: &str) -> Option<CodexResponsesProbe> {
-    database
-        .app_setting(CODEX_RESPONSES_PROBE_KEY)
-        .ok()
-        .flatten()
-        .and_then(|text| serde_json::from_str::<CodexResponsesProbe>(&text).ok())
-        .filter(|probe| probe.base_url == base_url)
 }
 
 /// One choice of「新会话使用的 Agent」.
@@ -1026,7 +1005,6 @@ mod tests {
         assert!(matches!(gated, Ok(Route::Fox)));
     }
 
-
     /// 80b1622 acceptance: the login card must show for a NEW conversation
     /// (no row yet), and "覆盖已有登录" must be an explicit, default-off choice.
     #[test]
@@ -1126,15 +1104,7 @@ mod tests {
         }
         assert_eq!(validate_preferences_change(&request(Some("fox"), None), &on).unwrap(), (Some(AgentBackend::Fox), None));
 
-        assert_eq!(responses_support_from_status(404), Some(false));
-        assert_eq!(responses_support_from_status(405), Some(false));
-        assert_eq!(responses_support_from_status(400), None);
-        assert_eq!(responses_support_from_status(422), None);
-        assert_eq!(responses_support_from_status(200), Some(true));
-        assert_eq!(responses_support_from_status(401), None);
-        assert_eq!(responses_support_from_status(503), None);
     }
-
 
     /// Codex was hidden on 2026-10-24 because of the outer SRT layer. It is a
     /// normal selectable backend again; old Codex conversations keep their

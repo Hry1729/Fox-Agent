@@ -17,19 +17,6 @@ fn hash(body: &str) -> String {
 
 impl Database {
 
-    /// Created-only insertion; exact replays are read-only even after startup.
-    /// Never infer missing historical inputs from today's conversation messages.
-    pub(crate) fn freeze_kernel_initial_input(
-        &self,
-        input: &KernelInitialModelInput,
-    ) -> Result<(), String> {
-        self.with_connection(|connection| {
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            freeze_initial_input_in_tx(&tx, input)?;
-            tx.commit()
-        })
-    }
-
 }
 
 pub(super) fn read_input(

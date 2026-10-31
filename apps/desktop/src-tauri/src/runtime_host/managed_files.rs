@@ -203,22 +203,7 @@ pub(crate) struct OfficeWriteDetails<'a> {
     pub after_backup_path: Option<&'a str>,
 }
 
-/// The artifact lifecycle verdict for one verified Office write.
-///
-/// Derived from Host facts only — the frozen operation name and the verified
-/// target path relative to the authorized project root — so a connector result
-/// cannot promote an intermediate file to a deliverable, and the renderer never
-/// has to guess from a file extension.
-pub(crate) fn office_write_artifact_class(
-    project_root: &Path,
-    target: &Path,
-    tool: &str,
-) -> &'static str {
-    crate::runtime_host::artifact_store::classify(Some(project_root), target, tool, false)
-        .0
-        .as_str()
-}
-
+#[cfg(test)]
 /// The Host-verified managed write behind one frozen dispatch.
 ///
 /// A managed write is identified from Host facts only: the real dispatch tool,
@@ -240,6 +225,7 @@ pub(crate) enum ManagedWrite {
     },
 }
 
+#[cfg(test)]
 /// Resolve the inner Office mutation of a `call_mcp_tool` dispatch.
 ///
 /// Every condition is a Host fact, not a claim from the result:
@@ -280,6 +266,7 @@ pub(crate) fn frozen_office_operation<'a>(
     ))
 }
 
+#[cfg(test)]
 /// Classify one frozen dispatch as a managed write, using only Host-verified
 /// facts: the frozen permission root, the frozen connector scope and the
 /// dispatch's own arguments.
@@ -437,6 +424,7 @@ impl crate::database::kernel_execution_admission::FileTargetResolver for HostFil
     }
 }
 
+#[cfg(test)]
 /// Construct an observation only from bytes actually read by the Host, never
 /// by reopening the file after the read (which could bind a different version).
 pub(crate) fn observation_from_read(root: &Path, path: &str, bytes: &[u8], tool_call_id: &str)
@@ -570,6 +558,7 @@ pub(crate) fn execute_admitted_file(
     (result, hooks.evidence)
 }
 
+#[cfg(test)]
 /// Run one Host dispatch with managed-file bookkeeping around it.
 ///
 /// This is the single execution seam for a file-mutating dispatch: it classifies
@@ -793,6 +782,7 @@ fn resolve_restore_source_inner(
     Err(RestoreBlocker::LegacyWithoutSnapshot)
 }
 
+#[cfg(test)]
 /// Result of a successful restore: the newly registered `restored` row.
 ///
 /// REV-02: a restore is a file mutation with a precise baseline and a precise

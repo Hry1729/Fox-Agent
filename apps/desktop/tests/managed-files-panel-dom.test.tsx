@@ -121,7 +121,6 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
       if (call.requestId) settledByRequestId.set(call.requestId, result)
       return result
     },
-    listenKernelStateInvalidations: async () => () => {},
   },
 }))
 

@@ -64,15 +64,11 @@ mod native_route;
 mod native_route_tests;
 mod skill_activations;
 mod delivery_checks;
-pub(crate) use delivery_acceptance::{
-    delivery_review_downgrade_blocker, AcceptanceBinding, AcceptanceRow, AcceptanceWrite,
-    DowngradeBlocker, CURRENT_U1_AWARE_SCHEMA_VERSION,
-};
+pub(crate) use delivery_acceptance::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 mod run_steering;
 mod managed_files;
 pub(crate) use delivery_checks::{
-    DeliveryArtifactRow, DeliveryChecklistItem, DeliveryChecklistSeed, DeliveryRequirement,
-    RequirementKind, RunWriteReceipt, StagedDeliveryItem,
+    DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
 };
 #[cfg(test)]
 pub(crate) use delivery_checks::finalize_fault;
@@ -179,12 +175,7 @@ pub use graph_lead::{
 };
 pub use work_events::WORK_EVENT_TYPES;
 #[allow(unused_imports)]
-pub use work_graph::{
-    AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository,
-    PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput,
-    StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository,
-    EVIDENCE_REFERENCE_PAIRS,
-};
+pub use work_graph::{AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository, PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput, StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository};
 
 const DEFAULT_AGENT_ID: &str = "fox-general";
 
@@ -314,12 +305,6 @@ pub struct Database {
     connection: Arc<Mutex<Connection>>,
     /// Host-derived identity shared by clones, never supplied by a tool or model.
     data_root_id: String,
-    kernel_changes: Arc<super::kernel_changes::KernelChanges>,
-    /// Volatile worker-observed model output progress: run_id -> wall_ms of the
-    /// last preview (text, thinking, or tool-parameter bytes). Never persisted:
-    /// a restart measures idleness conservatively from the persisted model
-    /// wall anchor until fresh progress arrives. Follows the KernelChanges
-    /// precedent (process-local hub on the shared Database handle).
     /// Only grants created in this Host lifetime may cross Office run boundaries.
     office_reuse_grants: Arc<Mutex<Vec<kernel_authorization::ProcessOfficeGrant>>>,
 }
@@ -557,7 +542,6 @@ impl Database {
         let database = Self {
             connection: Arc::new(Mutex::new(connection)),
             data_root_id,
-            kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
             office_reuse_grants: Arc::new(Mutex::new(Vec::new())),
         };
         database.seed_builtin_agents()?;
@@ -645,10 +629,6 @@ impl Database {
             );
         }
         Ok(repair)
-    }
-
-    pub(crate) fn subscribe_kernel_changes(&self) -> std::sync::mpsc::Receiver<()> {
-        self.kernel_changes.subscribe()
     }
 
     pub fn default_agent_id(&self) -> &'static str {
@@ -4211,15 +4191,6 @@ impl Database {
         })?;
         self.get_mcp_server(id)?
             .ok_or_else(|| "saved MCP server could not be loaded".to_owned())
-    }
-
-    pub fn record_mcp_status(
-        &self,
-        id: &str,
-        status: &str,
-        error: Option<&str>,
-    ) -> Result<(), String> {
-        self.record_mcp_health(id, status, error, None, None)
     }
 
     pub fn record_mcp_health(

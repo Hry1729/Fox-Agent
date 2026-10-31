@@ -15,7 +15,6 @@ export function useKernelStateStream({ conversationId, active = false, setDetail
   useEffect(() => {
     if (!desktopRuntimeAvailable || !conversationId) return
     let disposed = false
-    let unlisten: (() => void) | undefined
     let stopPreviews: (() => void) | undefined
     let ownError: string | null = null
     const report = (cause: unknown) => {
@@ -39,15 +38,9 @@ export function useKernelStateStream({ conversationId, active = false, setDetail
       },
       fail: report,
     })
-    void desktopClient.listenKernelStateInvalidations((notice) => {
-      if (notice?.schemaVersion === 1) refresh.invalidate()
-    }).then((stop) => {
-      if (disposed) { stop(); return }
-      unlisten = stop
-      // Always read AFTER registration, including terminal runs. Closes the
-      // window between opening a conversation and subscribing to new commits.
-      refresh.invalidate()
-    }).catch(report)
+    // Read the persisted state once on open, including terminal runs; while
+    // the run is active the interval below keeps it current.
+    refresh.invalidate()
     void desktopClient.listenKernelModelPreviews((notice) => {
       if (!disposed && notice?.conversationId === conversationId) {
         setDetail(current => applyKernelModelPreview(current, notice))
@@ -56,10 +49,9 @@ export function useKernelStateStream({ conversationId, active = false, setDetail
     }).then(stop => { if (disposed) stop(); else stopPreviews = stop }).catch(() => {
       // Transient display is optional; durable state still refreshes normally.
     })
-    // Waiting telemetry is durable presentation data; it does not advance the
-    // Kernel decision sequence or emit a state invalidation. Read it only while
-    // this selected Kernel run is active, using the same serialized merge path.
+    // Waiting telemetry is durable presentation data. Read it only while this
+    // selected run is active, using the same serialized merge path.
     const timer = active ? window.setInterval(() => refresh.invalidate(), 2_500) : null
-    return () => { disposed = true; if (timer !== null) window.clearInterval(timer); refresh.dispose(); unlisten?.(); stopPreviews?.() }
+    return () => { disposed = true; if (timer !== null) window.clearInterval(timer); refresh.dispose(); stopPreviews?.() }
   }, [conversationId, active, setDetail, setError, setErrorDetails])
 }

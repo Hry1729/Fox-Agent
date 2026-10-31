@@ -1515,19 +1515,6 @@ pub struct KnowledgeBindingRecord {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentRuntimeConfigRecord {
-    pub agent_id: String,
-    pub scope_type: String,
-    pub scope_id: String,
-    pub config_key: String,
-    pub value: Value,
-    pub source: String,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeReference {
@@ -2015,13 +2002,6 @@ pub struct SaveAttachmentsRequest {
     pub conversation_id: String,
     pub message_id: Option<String>,
     pub files: Vec<SaveAttachmentInput>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetKnowledgeBindingsRequest {
-    pub conversation_id: String,
-    pub knowledge_bases: Vec<KnowledgeBindingInput>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

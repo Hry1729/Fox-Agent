@@ -5612,7 +5612,11 @@ pub(super) fn validate_reference(
 
 /// The Evidence type → reference kind pairs [`validate_reference`] accepts,
 /// spelled for model-facing guidance. Kept identical to
-/// `validate_evidence_pair` by `evidence_reference_pairs_match_the_validator`.
+/// `validate_evidence_pair` by `evidence_reference_pairs_match_the_validator`,
+/// and to the Runtime's `TASK_EVIDENCE_REFERENCE_PAIRS` by
+/// `services/agent-runtime/test/task-evidence-reference-guidance.test.mjs`,
+/// which reads this source. Only those contract checks read it.
+#[cfg(test)]
 pub const EVIDENCE_REFERENCE_PAIRS: &[(&str, &[&str])] = &[
     ("tool_call", &["tool_call"]),
     ("test_result", &["tool_call", "artifact"]),

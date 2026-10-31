@@ -138,6 +138,7 @@ pub(super) fn execution_receipt_result(
     });
     with_execution_receipt(database, run_id, dispatch_id, serde_json::json!({
         "isError": !existing,
+        "diagnosticSource": "host",
         "content": [{"type": "text", "text": format!("[tool.{code}] {tool} was not re-executed")}],
         "details": details,
     }))
@@ -158,6 +159,7 @@ fn execution_refusal_result(tool: &str, code: &str) -> Value {
     });
     serde_json::json!({
         "isError": true,
+        "diagnosticSource": "host",
         "content": [{"type": "text", "text": format!("[tool.{code}] {tool} has no durable execution receipt; execution is unknown and must not be replayed")}],
         "details": details,
     })

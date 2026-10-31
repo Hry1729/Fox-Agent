@@ -124,6 +124,16 @@ pub enum AcceptanceIneffective {
 }
 
 impl AcceptanceIneffective {
+    #[cfg(test)]
+    pub fn is_definite(&self) -> bool {
+        !matches!(
+            self,
+            AcceptanceIneffective::Absent
+                | AcceptanceIneffective::CandidateUnreadable { .. }
+                | AcceptanceIneffective::AuthorizationWithdrawn
+        )
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AcceptanceIneffective::Absent => "absent",
@@ -173,16 +183,6 @@ impl AcceptanceIneffective {
         }
     }
 
-    /// Whether this is a definite invalidation, as opposed to one where the
-    /// current state could not be established.
-    pub fn is_definite(&self) -> bool {
-        !matches!(
-            self,
-            AcceptanceIneffective::Absent
-                | AcceptanceIneffective::CandidateUnreadable { .. }
-                | AcceptanceIneffective::AuthorizationWithdrawn
-        )
-    }
 }
 
 impl std::fmt::Display for AcceptanceIneffective {
