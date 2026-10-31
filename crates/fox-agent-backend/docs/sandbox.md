@@ -1,11 +1,15 @@
+> **现已无沙箱（2026-10-31，B4c）**：Fox 已不再使用任何沙箱。SRT（sandbox-runtime）、`host_sandbox.rs` / `SrtHostBackend`、Windows ACL / 祖先 ACE / 所有权修复（`winacl` / `winancestor` / `winowner` / `winruntime`）、网络代理（`network.rs`、`network-host.mjs`、`reverse.rs`、`loopback.rs`）和 ACP stdio 桥（`bridge.rs`）已在 A1、B2 删除，运行时打包脚本不再打包 `srt\` 和 `acp-bridge\`。现在 Fox Host 命令在 **Fox Job**（Windows Job Object / 其他平台进程组）中以当前用户身份执行，安全靠四档审批（只读 / 询问 / 自动 / 完全访问）、block 规则、受保护路径、项目前缀规则和审计，见[安全架构](../../../docs/02-架构/安全架构.md)。外部 Agent（Pi、Codex、dsh）计划在下一阶段恢复，目前不可用。
+>
+> 本文件第 0–12 节和 13.1–13.30 的记录**保留为历史**，其中「当前」「生效」等字样只对应记录时点，不描述现状。**13.31** 是收尾批（A0–A2）的 Windows 复测清单，仍然有效。
+>
 > **单 Pi 分支适用范围（2026-10-28）**：下方各批次及旧“生效范围”说明保留原文。当前外部 Pi ACP、DeepSeek、Codex 已退休，不再由 Fox 启动；第 0 节涉及的共享 Host SRT 仍需保留。旧外部 SRT、ACP 和驱动实测结果只对应记录时点，不能用来宣称当前单 Pi 阶段二通过。
 > 当前状态与证据边界见[单 Pi 主线状态](../../../docs/01-项目概览/单Pi主线状态.md)。以下历史正文保持原样。
 
-# SRT 历史记录与当前 Fox Agent Host 边界
+# SRT 与外部 Agent 历史记录、人工复测批次
 
 > **2026-10-26 生效范围变更**：本文件第 1–13 节记录的是“外部 Agent 外层 SRT”的历史设计、实现与实测，该层已从产品路径移除。pi、DeepSeek Harness、Codex 现在由 Fox 直接启动，保留它们自己的原生沙箱、权限和审批；不使用 SRT 安装/预检、SRT settings、ACP bridge、网络 broker 或 `FOX_EXTERNAL_FULL_ACCESS` 授权。SRT 只用于 Fox Agent 自己的 Host 命令。下文保留作历史证据，不应作为外部 Agent 当前启动路径的依据；当前边界见 `docs/02-架构/安全架构.md`。
 
-## 0 当前：Fox Agent Host 命令的 SRT 边界
+## 0 （历史，2026-10-26 至 A1 之前）Fox Agent Host 命令的 SRT 边界
 
 - 实现：`apps/desktop/src-tauri/src/host_sandbox.rs`（`HostSandbox`、`SrtHostBackend`）。
 - `run_command` 在 `tool_host.rs` 中经 `revalidate_target` → `HostSandbox::discover` → `HostSandbox::begin` → `execute_spawn_spec` 执行；初始化失败返回 `tool.sandbox_unavailable`，**不回退**宿主裸跑。
