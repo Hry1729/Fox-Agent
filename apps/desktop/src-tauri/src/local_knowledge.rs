@@ -2077,6 +2077,8 @@ impl LocalKnowledgeStore {
                 "retrieval returned mode {mode} but {requested_mode} was requested"
             )));
         }
+        // 混合检索分数是 RRF，纯向量是余弦。到这里 mode 只可能是二者之一。
+        let score_kind = if mode == "hybrid" { "rrf" } else { "cosine" };
         let hits = retrieved
             .get("items")
             .and_then(Value::as_array)
@@ -2143,6 +2145,7 @@ impl LocalKnowledgeStore {
             "knowledgeBaseId": knowledge_base_id,
             "query": query,
             "mode": mode,
+            "scoreKind": score_kind,
             "fusionVersion": retrieved.get("fusionVersion").cloned().unwrap_or(Value::Null),
             "items": items,
             "total": hit_count,
@@ -2286,6 +2289,7 @@ impl LocalKnowledgeStore {
             "source": "local",
             "knowledgeBaseId": knowledge_base_id,
             "query": query,
+            "scoreKind": "lexical",
             "items": items,
             "total": candidate_count,
             "truncated": truncated,
@@ -5686,6 +5690,56 @@ mod agent_search_tests {
             )
             .unwrap();
         assert_eq!(kept["droppedHits"], 0);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb12_score_kind_names_the_scale_on_every_path() {
+        let (store, root) = temp_store("kb12");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "尺度", "score.md", &["向量与关键词尺度"]);
+
+        let vector = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "尺度",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(vector["scoreKind"], "cosine");
+        assert!(vector["items"][0].get("scoreKind").is_none());
+
+        let hybrid = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "尺度",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(hybrid["scoreKind"], "rrf");
+        assert!(hybrid["items"][0].get("scoreKind").is_none());
+
+        let keyword = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "keyword"),
+                "尺度",
+                None,
+                None,
+                |_| panic!("keyword mode must not call vector retrieval"),
+            )
+            .unwrap();
+        assert_eq!(keyword["scoreKind"], "lexical");
+        assert!(keyword["items"][0].get("scoreKind").is_none());
+
+        let lexical = store.search_lexical(&base_id, "尺度", None, None).unwrap();
+        assert_eq!(lexical["scoreKind"], "lexical");
+        assert!(lexical["items"][0].get("scoreKind").is_none());
+
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
