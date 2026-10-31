@@ -10,7 +10,8 @@
 | 方向 | 状态 | 说明 |
 | --- | --- | --- |
 | A0–A6、E1–E4 | 已完成 | 工程实现与离线回归，见[能力矩阵](../01-项目概览/能力矩阵.md) |
-| Kernel 统一控制（Fox 自身执行路径） | 已完成，默认启用 | Kernel / Authoritative 是默认；Legacy 只用于调试和旧 Run。进度和余项见 [Kernel 改造进度](Kernel-改造进度.md) |
+| Kernel 统一控制（Fox 自身执行路径） | 已被 PiNative 取代（2026-10-31） | Kernel 执行循环已在 B1 删除；新 Run 一律 Authoritative + PiNative，历史 Kernel Run 显示为中断。历史进度见 [Kernel 改造进度](Kernel-改造进度.md) |
+| 外部 Agent（Pi、Codex、dsh） | 计划恢复（阶段三） | 目前退役、不可用；恢复后为可选后端 |
 | 单 Pi 阶段一 | 已实现，有既有定向证据 | 新会话固定 `fox`，本地引擎仅 Pi；旧外部驱动只读、执行拒绝 |
 | 单 Pi 阶段二与 C gap | **部分完成** | Legacy 原生会话、v99 代次、重置与删除已有限定桌面证据；默认 Authoritative 接入和剩余场景未关闭，见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md) |
 | 历史方案中的共享 Host 加固 | 部分完成 | 第 2 项（测试授权语义）未关闭；第 4 项只在 Windows 上关闭；其余已关闭或撤回 |

@@ -2,9 +2,24 @@
 
 > 状态：维护中；默认 Authoritative + PiNative，已安装 v6 核心链路及两项补测通过，尚未发布<br>
 > 适用范围：S5 合并交付；v6 构建源码 `a952125d`，补测交接 HEAD `2e302344`<br>
-> 最后更新：2026-10-30（补入实际安装和补测证据；保留此前历史正文）
+> 最后更新：2026-10-31（B4c：收尾与清理后的现状；保留此前历史正文）
 
-## 当前结论（2026-10-30 S5 候选）
+## 当前结论（2026-10-31，收尾 A0–A3 与清理 B1/B2 之后，main `999bd912`）
+
+- **执行主线**：PiNative 是内置主线。新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关；`FOX_EXECUTOR_ROUTE` 已删除，不认识的 route 直接报 `executor_route_unknown`。
+- **Kernel 执行循环已删除**（B1）：历史 Kernel Run 在启动时标为 `interrupted`（`executor_route_retired`，界面显示「执行路径已退役。已中断，可在新 Run 中继续」），不再续跑；对它们的 start / approve / 执行 job 立即报 `executor_route_retired`。Kernel 事实表只停用、不删，用于读历史。
+- **外部 Agent**：Pi、Codex、dsh 是可选后端，目前处于退役状态（旧会话只读，入口返回 `agent_backend_retired`），**计划在下一阶段（阶段三）恢复**，现在不可用。
+- **不用沙箱**：SRT、ACL、网络代理已删除（A1、B2）。命令在 Fox Job 中以当前用户身份执行（Windows Job Object / 其他平台进程组），只负责超时、取消和清理进程树。
+- **失败不回退**：任何执行失败都直接报错，不回退到 Kernel、别的后端或更宽松的路径。
+- **审批四档**：只读 / 询问 / 自动 / 完全访问；block 规则、受保护路径、按 token 前缀匹配的项目规则、完全访问的二次确认、自动放行审计。按输入哈希的「本会话允许」已删除。详见[安全架构 · 审批引擎](../02-架构/安全架构.md#审批引擎四档)与[权限参考](../04-技术参考/权限参考.md)。
+- **工具结果上限 64 KiB**：超出部分完整落盘，模型用 `read_tool_result` 按 `fox-result://` 引用续读，见 [Runtime 协议](../04-技术参考/Runtime协议.md)。
+- **检索**：本地知识库向量 / 混合检索失败直接报错；只有向量索引尚未就绪时才降级为关键词检索，并在结果 `fallback`（`index_not_ready`）中注明。
+- **风险取舍**：去掉 SRT 后命令安全只靠审批、规则和 Job；自动和完全访问模式下等同于用户本人执行；前缀规则可被「先改脚本再执行」绕过，靠审计追溯。见[安全架构 · 风险取舍](../02-架构/安全架构.md#风险取舍用户已接受)。
+- **CI**：A3 全量 CI `41143349823`（`c40b02e7`）全绿；B1 定向 `41150699693`、B2 定向 `41153130974` 通过。Windows 13.31 实测清单见 `crates/fox-agent-backend/docs/sandbox.md` 13.31 节。
+
+以下各节保留更早的结论和证据，其中关于 SRT、Kernel 路由、会话授权的描述只适用于当时。
+
+## 历史结论（2026-10-30 S5 候选）
 
 新本地 Run 和子 Run 一律使用 Authoritative 执行契约和 PiNative 路由，没有路由开关（A0 删除了 `FOX_EXECUTOR_ROUTE`，不再有 Kernel 回退）。已有冻结绑定不改写；未结束的历史 Kernel Run 在启动时标为中断（「执行路径已退役」），不再续跑。`FOX_KERNEL_MODE` 不再决定新 Run 路径。
 
@@ -60,13 +75,13 @@ Node 22 下 Desktop 全量 **872 通过 / 2 跳过 / 0 失败**（工作流加 `
 | 历史外部会话 | 原值保留、只读；start / cancel / approve / resume 拒绝；不重绑定 | 同上；`commands/agent_backend_routing.rs` |
 | 本地 Kernel `engine_id` | 未设置或 `pi` 时使用 Pi；其他引擎值拒绝，错误含 `kernel_engine_retired` | `apps/desktop/src-tauri/src/kernel_model_config.rs`、`services/agent-runtime/src/pi-kernel-worker.mjs` |
 | `FOX_EXTERNAL_BACKENDS` | 保留解析、未知值报告与诊断；任何取值都不能重新启用退休后端 | `host_routing.rs::BackendSwitch` |
-| `FOX_KERNEL_MODE` | 默认 `authoritative`；显式 `legacy` 仅用于调试和旧执行路径，已冻结 Run 沿用绑定 | `runtime_host/kernel_authority.rs` |
+| `FOX_KERNEL_MODE` | 不再决定新 Run 的执行路径（2026-10-31：新 Run 一律 Authoritative + PiNative）；只剩测试夹具设置它 | `runtime_host/kernel_authority.rs` |
 | `agents.runtime_type` | 本地 `pi` 与远程 `yuxi` 仍区分；远程服务不属于退休的会话级驱动 | `runtime_host/mod.rs`、`yuxi/runtime.rs` |
 | 设置与聊天 | 设置 → Agent →「Agent 驱动」显示固定说明；新会话不显示驱动选择器，不显示退休驱动的默认原生权限选项 | `agent-backend-settings.tsx`、`composer-agent-picker.tsx` |
 
 `agent_backend = 'pi'` 是旧外部 Pi ACP 路由，不能把数据库中的 `fox` 批量改成 `pi`。界面上的 Pi 名称、存储后端标识、Runtime 类型与执行权是不同层次。
 
-`AgentBackend` 的旧枚举、数据库 CHECK、不可变触发器、部分 ACP/权限/凭据命令与受管运行时资源仍保留兼容用途。源码、测试或配置项仍存在，不代表对应驱动可运行。SRT 仍服务内置 Fox Host 命令，不能因外部驱动退休而删除共享沙箱资源。
+`AgentBackend` 的旧枚举、数据库 CHECK、不可变触发器、部分 ACP/权限/凭据命令与受管运行时资源仍保留兼容用途。源码、测试或配置项仍存在，不代表对应驱动可运行。（2026-10-31 更正：SRT 与共享沙箱资源已在 A1、B2 删除，Fox Host 命令改在 Fox Job 中执行，不再使用沙箱。）
 
 ## 阶段完成度
 

@@ -1,5 +1,7 @@
 # Package 2-D closeout: isolated acceptance drivers
 
+> **Historical (2026-10-31, B4c).** These drivers exercised the Kernel delivery-review loop (`awaiting_delivery_review`, `kernel_run_continue`, the closeout U1 fixture). B1 deleted the Kernel execution loop, `KernelCoordinator` and `closeout-u1-fixture`; historical Kernel Runs are now marked interrupted (`executor_route_retired`) at startup and delivery acceptance only records the user's decision. The isolation contract below is still a valid pattern, but the R-1/R-2/R-3 flows no longer run against current `main`. Fox no longer uses a sandbox; external agents (Pi, Codex, dsh) are planned to return in the next stage.
+
 Test facility for the 2-D U1 delivery-acceptance closeout (R-1/R-2/R-3). None of
 these files is part of the production bundle: they are plain Node scripts that
 drive the real desktop over WebView2's remote-debugging endpoint, or run the

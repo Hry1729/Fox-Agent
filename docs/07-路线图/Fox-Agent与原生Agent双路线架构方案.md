@@ -4,7 +4,7 @@
 # Fox Agent 与原生 Agent 双路线架构方案
 
 > **现状（2026-10-25 按代码核对）：已按 [四 Agent 改造实施方案 v0.3.1](../02-架构/四Agent改造实施方案-v0.3.1.md) 实施（阶段 0–3 完成），本文的“暂缓实施”已过时；实施细节以 v0.3.1 和 [Agent 运行时架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent) 为准。**
-> - 已完成：会话创建时绑定外层 Agent（`conversations.agent_backend`，v95）；pi、DeepSeek Harness、Codex 经 ACP 接入，在沙箱里运行。产品内置 Fox、DeepSeek Harness（实验）、pi；Codex 已恢复可选。
+> - 现状（2026-10-31）：会话创建时绑定外层 Agent（`conversations.agent_backend`，v95）。内置主线是 PiNative；pi、DeepSeek Harness、Codex 经 ACP 接入的外部后端目前处于退役状态，计划在下一阶段恢复为可选后端。Fox 自身不用沙箱（SRT 已删除）；恢复后 Codex、dsh 使用各自的原生沙箱。
 > - 未做：Claude Code 没有接入；「自定义 ACP Agent」入口是待办；本文设想的“Fox 工具桥接（MCP / Agent 扩展）”让外部 Agent 调用 Fox Host 工具，代码里只有常量 `HOST_MCP_SERVER_NAME`（`crates/fox-agent-backend/src/backends/codex.rs`），没有找到把 Host 工具作为 MCP 服务交给外部 Agent 的接线，判断为未实现（**未完全核实**）。
 
 日期：2026-09-11  

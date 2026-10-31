@@ -4,23 +4,20 @@ Fox 是一个面向个人和小型技术团队的桌面智能体工作台。它�
 
 Fox 不把 Agent 理解为“会调用几个工具的聊天机器人”。一次需要执行的工作会形成可追踪的 `Goal → Plan → Task → Attempt → Evidence → Review → Acceptance` 闭环：模型负责理解和决策，Host 负责权限、状态和执行，数据库保存可恢复事实，独立 Reviewer 复核高风险结果。
 
-## 内置 Agent
-
-四 Agent 的接入能力已合入 `main`：阶段 0、2、3 已完成，阶段 1 部分完成，阶段 4 尚未开始。各阶段的剩余项见[实施状态](docs/02-架构/四Agent改造实施方案-v0.3.1.md)。每个会话在创建时选定一个 Agent，之后不能更换：
+## 内置 Agent 与外部 Agent
 
 | Agent | 状态 | 说明 |
 | --- | --- | --- |
-| Fox | 内置，默认 | Fox 自己的 Kernel（FoxBackend）。默认执行路径是 Kernel / Authoritative；`FOX_KERNEL_MODE=legacy` 只用于调试和兼容旧 Run |
-| DeepSeek Harness（dsh） | 内置，实验 | 经 ACP 接入，在沙箱中运行 |
-| pi | 内置 | 经 ACP（pi-acp）接入，在沙箱中运行 |
-| Codex | 已实现，暂时隐藏 | 后端代码和测试保留；新会话不能选，已有 Codex 会话照常可用 |
+| Fox（PiNative） | 内置主线，默认且唯一可用 | 新 Run 和子 Run 一律走 Authoritative + PiNative，没有路由开关，失败不回退。Kernel 执行循环已删除，历史 Kernel Run 显示为「已中断，可在新 Run 中继续」 |
+| Pi（外部，pi-acp） | 可选后端，**计划恢复** | 本版本仍处于退役状态：新会话不能选，旧会话只读 |
+| Codex（codex-acp） | 可选后端，**计划恢复** | 同上 |
+| DeepSeek Harness（dsh） | 可选后端，**计划恢复** | 同上 |
 
-- 新会话默认用 Fox，可在 设置 → Agent →「外部 Agent」→「新会话使用的 Agent」修改。管理员可用环境变量 `FOX_EXTERNAL_BACKENDS` 强制关闭外部 Agent（只能关，不能开）。
-- 外部 Agent 的权限按各自的原生选项显示（如 pi 的只读 / 询问 / 自动，dsh 的只读 / 工作区可写）；各 Agent 的默认权限和“新外部会话使用完全访问”也在 设置 → Agent →「外部 Agent」。完全访问是独立开关，只能在新建会话时授予，会话中只能撤销。
+- 外部 Agent 计划在下一阶段（阶段三）恢复：经 ACP v1 接入；外部 Pi 与 PiNative 共用 Fox 的审批引擎，Codex、dsh 使用各自的原生沙箱和审批。恢复前，源码里保留的 ACP 客户端、驱动和原生权限映射都不代表可用。
+- 管理员环境变量 `FOX_EXTERNAL_BACKENDS` 只保留诊断解析，不能启用外部 Agent。
 - 模型 API Key 存在系统凭据库，按供应商 base URL 在本机全局共享。
-- 「自定义 ACP Agent」入口（用户自己安装其他 ACP Agent、填启动命令接入，包括以后的 Codex）：**待办 / 规划中**。
 
-详见 [Agent Runtime 架构 · 外层 Agent 后端](docs/02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+详见 [单 Pi 主线状态](docs/01-项目概览/单Pi主线状态.md) 与 [Agent Runtime 架构 · 外层 Agent 后端](docs/02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
 
 ## 核心能力
 
@@ -71,7 +68,9 @@ Fox 不把 Agent 理解为“会调用几个工具的聊天机器人”。一次
 
 ## 安全与可信执行
 
-以下描述 Fox 会话；外部 Agent 会话的边界（ACP、白名单环境、srt 沙箱、原生权限、完全访问授予）见[安全架构](docs/02-架构/安全架构.md#外部-agent-会话)。
+以下描述 Fox 会话；外部 Agent 会话（计划恢复）的边界见[安全架构](docs/02-架构/安全架构.md#外部-agent-会话计划恢复)。
+
+**Fox 不用沙箱。** 命令在 Fox Job 中以用户本人身份执行（Windows Job Object / 其他平台进程组），Fox Job 只负责超时、取消和清理整棵进程树。是否执行由 Host 的审批引擎决定，分四档：**只读、询问、自动、完全访问**；block 规则（删除盘符根、家目录、项目根等）在任何模式下都拒绝，`.git`、`.fox`、shell 配置等受保护路径和项目外路径只有完全访问能直接放行，项目可以设命令前缀规则（「本项目总是允许」），完全访问首次开启要二次确认，每次自动放行都写审计。这是有意的取舍：在自动和完全访问模式下，等同于用户本人执行；前缀规则可以被「先改脚本再执行」绕过，靠审计追溯。详见[安全架构 · 风险取舍](docs/02-架构/安全架构.md#风险取舍用户已接受)。
 
 模型不能直接访问操作系统。它只能提出结构化工具请求，请求必须依次通过工具白名单、Execution Profile、项目路径、参数约束、审批策略和 Host 状态校验，才会由 Tauri Host 执行。
 
@@ -80,9 +79,9 @@ Fox 的安全不是只靠“限制工具数量”，而是多层约束：
 1. **能力最小化**：Assistant、Expert、Worker、Child 与 Reviewer 获得不同工具集合，最终权限取 Host 与各层声明的交集。
 2. **Host 强制执行**：Runtime、模型输出、知识内容和 MCP 返回都视为不可信，不能自行写数据库或操作系统。
 3. **路径和参数边界**：所有本地操作绑定授权项目或受管文件记录，不能靠文本路径扩大范围。
-4. **高风险审批**：命令、MCP 和敏感写入需要明确授权，批准绑定具体 Tool Call，执行时不能替换参数。
+4. **四档审批**：高风险由 Host 硬规则判定（模型只能调高风险），批准绑定具体 Tool Call，执行时不能替换参数。
 5. **证据化完成**：模型说“完成了”不等于完成；任务必须具备有效 Evidence，高风险结果还要经过独立 Reviewer 与 Host Acceptance。
-6. **失败默认关闭**：未知工具、权限、Schema、Profile、过期版本、审批超时和恢复冲突都拒绝执行。
+6. **失败默认关闭，不回退**：未知工具、权限、Schema、Profile、过期版本、审批超时和恢复冲突都拒绝执行；失败直接报错，不回退到其他执行路径。
 7. **可审计与可恢复**：调用、审批、状态转换、Review 和 Acceptance 都持久化，重复执行和崩溃恢复不能绕过安全门。
 
 面向答辩与非安全专业读者的完整说明见 [Agent 安全与可信执行](docs/01-项目概览/Agent安全与可信执行.md)，工程边界见 [安全架构](docs/02-架构/安全架构.md)和[权限参考](docs/04-技术参考/权限参考.md)。
@@ -93,18 +92,18 @@ Fox 的安全不是只靠“限制工具数量”，而是多层约束：
 React 工作台
     ↓ Tauri Command / Event
 Rust Host ── SQLite 产品事实
-    ├─ Fox 会话：Kernel（Authoritative）→ JSONL Runtime 协议 → Node Agent Runtime ── 模型供应商
-    │                                       ↓ Host Tool 请求
-    │            Rust Host ── 项目文件 / 命令 / 知识库 / MCP / OpenAPI / Keyring
-    └─ 外部 Agent 会话：ACP v1 → dsh / pi（srt 沙箱；Codex 已实现但隐藏）── 模型供应商
+    ├─ Fox 会话：PiNative（Authoritative）→ JSONL Runtime 协议 → Node Agent Runtime ── 模型供应商
+    │                                       ↓ Host Tool 请求 → 审批引擎（四档）
+    │            Rust Host ── 项目文件 / 命令（Fox Job）/ 知识库 / MCP / OpenAPI / Keyring
+    └─ 外部 Agent 会话（计划恢复）：ACP v1 → Pi / Codex / dsh ── 模型供应商
 ```
 
 | 模块 | 职责 |
 | --- | --- |
 | `apps/desktop` | React 前端、Tauri Host、SQLite Repository、权限和系统集成 |
 | `services/agent-runtime` | 模型循环、Prompt、Typed Context、Execution Profile、工具协议和离线 Eval |
-| `crates/fox-agent-backend` | 外层 Agent 后端：路由、ACP 客户端、外部 Agent 启动与沙箱、原生权限、凭据保存 / 删除规则 |
-| `crates/fox-agent-kernel`、`crates/fox-engine-protocol` | Kernel 与引擎协议 |
+| `crates/fox-agent-backend` | 外层 Agent 后端：路由、ACP 客户端、外部 Agent 启动与私有 HOME、原生权限映射、凭据保存 / 删除规则（外部 Agent 计划恢复） |
+| `crates/fox-agent-kernel`、`crates/fox-engine-protocol` | Kernel 状态类型（执行循环已删除，用于读历史 Run 与 authority 状态）与引擎协议 |
 | `scripts` | 跨模块契约、Fixture、知识预览校验和构建辅助 |
 | `docs` | 产品介绍、架构、协议、开发指南、运维与路线图 |
 
@@ -119,7 +118,7 @@ pnpm install
 pnpm dev
 ```
 
-本地运行默认使用 **Kernel / Authoritative**，包括在 `apps/desktop` 执行 `pnpm tauri.cmd dev`，无需设置环境变量。只有明确调试旧路径时才在当前 PowerShell 中设置 `$env:FOX_KERNEL_MODE='legacy'`；调试后用 `Remove-Item Env:FOX_KERNEL_MODE` 恢复默认。已有 Run 的持久执行权绑定不改写，新建 Run 才采用新的启动设置。`pi` 是默认模型引擎，不代表 Legacy。
+本地运行一律使用 **Authoritative + PiNative**，包括在 `apps/desktop` 执行 `pnpm tauri.cmd dev`，无需也无法用环境变量切换执行路径（`FOX_EXECUTOR_ROUTE` 已删除，`FOX_KERNEL_MODE` 不再决定新 Run 的路径）。已有 Run 的持久执行权绑定不改写。
 
 常用验证命令：
 
@@ -146,7 +145,7 @@ cargo test -p fox-agent-backend --features acp
 
 仓库根目录下的 `ASSISTANT-UI-MIGRATION.md`、`AUI-PENDING.md`、`STEP6-HANDOFF.md`、`UI-CHANGES-*.md`、`UI-PLAN.md`、`PAGE-REDESIGN.md`、`design-qa.md`、`COMPONENT-REUSE.md`、`DESIGN-apple.md` 是 UI 改造期间的历史文档，不再维护，清单见[架构文档导航 · 根目录历史文档](docs/02-架构/架构文档导航.md#根目录历史文档)。
 
-项目仍有明确边界，包括 Agent 产物打开链路、部分页面占位、导航历史、跨平台验收、CSP 和进程级隔离等，详见[已知限制](docs/07-路线图/已知限制.md)。
+项目仍有明确边界，包括 Agent 产物打开链路、部分页面占位、导航历史、跨平台验收、CSP，以及命令不在沙箱内执行（已接受的取舍）等，详见[已知限制](docs/07-路线图/已知限制.md)。
 
 ## 界面组件来源
 
