@@ -80,8 +80,6 @@ use protocol::{HostResponse, RuntimeCapabilityManifest, RuntimeEnvelope, Runtime
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::{BufRead, BufReader, Write},
@@ -1141,8 +1139,7 @@ impl RuntimeHost {
         if let Some(script) = runtime.script.as_ref() {
             command.arg(script);
         }
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000);
+        fox_agent_backend::console::HideConsole::hide_console(&mut command);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -3413,8 +3410,7 @@ impl RuntimeHost {
         if let Some(script) = runtime.script.as_ref() {
             command.arg(script);
         }
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000);
+        fox_agent_backend::console::HideConsole::hide_console(&mut command);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -4454,7 +4450,7 @@ impl RuntimeHost {
                     .to_owned(),
             );
         }
-        let node_available = Command::new("node")
+        let node_available = fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("node"))
             .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

@@ -529,7 +529,7 @@ pub fn digital_colleague_run_detail(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("explorer.exe"))
         .arg(path)
         .spawn()
         .map(|_| ())
@@ -537,7 +537,7 @@ pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
 }
 #[cfg(target_os = "macos")]
 pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
-    std::process::Command::new("open")
+    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("open"))
         .arg(path)
         .spawn()
         .map(|_| ())
@@ -545,7 +545,7 @@ pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
 }
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
-    std::process::Command::new("xdg-open")
+    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("xdg-open"))
         .arg(path)
         .spawn()
         .map(|_| ())

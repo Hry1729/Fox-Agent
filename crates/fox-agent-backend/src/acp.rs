@@ -932,7 +932,9 @@ fn kill_tree(pid: u32, job: &ProcessJob, report: &mut TerminateReport) {
     }
     #[cfg(windows)]
     {
+        use crate::console::HideConsole;
         let result = std::process::Command::new("taskkill")
+            .hide_console()
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -982,8 +984,13 @@ impl AcpConnection {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        // Windows: a console without a window (Fox has no console; without
+        // this, the `.cmd` entry point opens a visible cmd.exe window that the
+        // whole backend tree shares), started suspended for the Job Object.
         #[cfg(windows)]
-        command.creation_flags(win_job::CREATE_SUSPENDED);
+        crate::console::HideConsole::hide_console_with(&mut command, win_job::CREATE_SUSPENDED);
+        #[cfg(not(windows))]
+        crate::console::HideConsole::hide_console(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| InitializeFailure::new(Code::SpawnFailed, format!("failed to start {}: {error}", spec.program)))?;

@@ -100,6 +100,7 @@ fn table() -> Option<Vec<ProcRow>> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn table() -> Option<Vec<ProcRow>> {
+    // console-policy: Unix only; there are no console windows to hide.
     let output = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="])
         .stdin(std::process::Stdio::null())

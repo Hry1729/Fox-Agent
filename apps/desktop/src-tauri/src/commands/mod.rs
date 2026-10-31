@@ -5705,7 +5705,7 @@ fn open_project_folder(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err("项目路径不是文件夹".to_owned());
     }
-    std::process::Command::new("explorer.exe")
+    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("explorer.exe"))
         .arg(path)
         .spawn()
         .map(|_| ())

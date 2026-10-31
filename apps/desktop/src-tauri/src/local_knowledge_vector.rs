@@ -506,12 +506,7 @@ fn run_embedding_model_smoke_process(package_path: &Path) -> Result<(), Embeddin
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    fox_agent_backend::console::HideConsole::hide_console(&mut command);
     let mut child = command.spawn().map_err(|error| {
         embedding_smoke_failure(
             "local_embedding.smoke_launch_failed",
@@ -681,12 +676,7 @@ fn run_retrieval_worker_process(
     if let Some(resource_dir) = store.zvec_resource_dir.as_ref().as_ref() {
         command.env(RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV, resource_dir);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    fox_agent_backend::console::HideConsole::hide_console(&mut command);
     let mut child = command.spawn().map_err(|error| {
         LocalKnowledgeError::storage(format!("无法启动向量检索隔离进程：{error}"))
     })?;

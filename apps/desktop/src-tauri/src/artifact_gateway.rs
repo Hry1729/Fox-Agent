@@ -887,7 +887,7 @@ fn open_with_application(application_id: &str, path: &Path) -> Result<(), Artifa
                 false,
             )
         })?;
-    Command::new(&application.executable)
+    fox_agent_backend::console::HideConsole::hide_console(&mut Command::new(&application.executable))
         .arg(path)
         .spawn()
         .map(|_| ())
@@ -911,7 +911,7 @@ fn open_with_application(_application_id: &str, _path: &Path) -> Result<(), Arti
 
 #[cfg(windows)]
 fn copy_path_to_clipboard(path: &Path) -> Result<(), ArtifactGatewayError> {
-    let mut child = Command::new("clip.exe")
+    let mut child = fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("clip.exe"))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
