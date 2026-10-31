@@ -25,6 +25,7 @@ import { latestMessage, runIsActive, useDesktopConversation } from '@/features/c
 import { useProjectCatalog } from '@/features/conversations/hooks/use-project-catalog'
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
 import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '@/features/conversations/model/pending-interactions'
+import { lastAgentBackendFailure } from '@/features/conversations/model/agent-backend-failure'
 import { type ApprovalDecision, type ArtifactRecord, type ChildRunRecord, type ConversationMessage, type ConversationSummary, type KnowledgeBaseRecord, type KnowledgeReference, type ProjectRecord, type TaskEvidenceRecord } from '@/features/conversations/model/types'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { notify as toast } from '@/features/notifications'
@@ -1483,6 +1484,7 @@ export function Workbench() {
   // External Agents use their own native permission; Fox no longer has an
   // outer full-access grant for a new conversation.
   const draftFullAccess = false
+  const agentBackendFailure = useMemo(() => lastAgentBackendFailure(desktopConversation.detail), [desktopConversation.detail])
   const agentBackendBar = useMemo(() => desktopConversation.enabled ? (
     <AgentBackendPanel
       client={desktopClient}
