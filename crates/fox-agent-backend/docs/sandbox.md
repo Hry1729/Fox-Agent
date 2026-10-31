@@ -1710,6 +1710,8 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 
 `runtime_host::execute_bound_knowledge_tool` 的 `search_knowledge` 分支对 `source: "local"` 固定调用 `LocalKnowledgeStore::search_lexical`，而 `search_lexical` 的返回里写死了 `fallback { kind: "sqlite_lexical", reason: "vector_index_unavailable" }`。真正的向量 / RRF 混合检索 `search_retrieval`（`local_knowledge_vector.rs`）只有检索测试入口的 Tauri 命令在调用。
 
+> 更正（2026-10-31）：已不成立。search_knowledge 本地分支调用 search_for_agent（向量 / 混合优先）；验收夹具 single-pi-acceptance-fixture 也已改为调用 search_for_agent。
+
 **二、修法**
 
 1. 新增 `LocalKnowledgeStore::search_for_agent`（`local_knowledge.rs`）：先取资料库 base。`vector_index_ready` 为真、且资料库默认检索模式为 `vector` / `hybrid` 时，调用 `search_retrieval`（生产构建会同步启动向量检索隔离进程）；工具层用 `tauri::async_runtime::spawn_blocking` 调用它，不阻塞异步执行器。`ensure_bound` 绑定检查和隔离检查不变。
