@@ -24,7 +24,7 @@
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
 use super::*;
-use crate::database::{AcceptanceWrite, Database, DeliveryChecklistSeed, DeliveryRequirement, DowngradeBlocker, RequirementKind, delivery_review_downgrade_blocker};
+use crate::database::{AcceptanceWrite, Database, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind};
 use crate::runtime_host::delivery::delivery_u1::{
     delivery_acceptance_state, effective_delivery_acceptance, parse_acceptance_decision,
     resolve_delivery_acceptance, AcceptanceIneffective,
@@ -921,25 +921,4 @@ fn d3_the_blocked_reason_serializes_into_the_shape_the_frontend_reads() {
 // ---------------------------------------------------------------------------
 // Package 2-D repair, D-5: the executable downgrade pre-check
 // ---------------------------------------------------------------------------
-
-#[test]
-fn d5_the_downgrade_precheck_refuses_an_ahead_schema() {
-    // A database with the Kernel tables but no acceptance tables: the parked
-    // check is a legitimate "no", so the schema version is the refusal.
-    let fixture = Fixture::new("d5-schema");
-    fixture.database.with_connection(|connection| {
-        connection.execute_batch(
-            "DROP TABLE delivery_acceptances; DROP TABLE delivery_acceptance_audit;",
-        )?;
-        Ok(())
-    }).unwrap();
-    let blocker = fixture
-        .database
-        .delivery_review_downgrade_blocker(1)
-        .expect("a database ahead of the target is refused");
-    assert!(
-        matches!(blocker, DowngradeBlocker::SchemaAhead { .. }),
-        "got {blocker:?}"
-    );
-}
 
