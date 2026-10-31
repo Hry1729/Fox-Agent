@@ -41,7 +41,7 @@ flowchart LR
 
 | 值 | 当前实现 | 进程位置 | 会话载体 |
 | --- | --- | --- | --- |
-| `pi` | `RuntimeHost` + Pi Sidecar | Rust Host 子进程 | 默认 Kernel 流程；Legacy 原型使用 v98 映射与 Pi JSONL，旧行保留 Fox JSON |
+| `pi` | `RuntimeHost` + Pi Sidecar | Rust Host 子进程 | Authoritative + PiNative（Kernel 执行循环已删除）；原生会话使用 v98 映射与 Pi JSONL，旧行保留 Fox JSON |
 | `yuxi` | `YuxiRuntimeHost` | Tauri Host 内异步任务 + 远端服务 | 远端 Thread/Run + 本地游标 |
 
 Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增加 LangGraph、自研 Runtime 或其他 SDK 时，应新增适配器并复用 Host 契约，而不是在前端增加一套对话状态。
@@ -72,7 +72,9 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 
 历史外部会话只读，不执行 ACP 工具或原生权限切换。旧枚举、CHECK、不可变触发器、ACP 模块、部分命令与凭据数据保留，不代表可启用。`AgentBackend::HIDDEN` 不是当前准入标准；退休列表优先。
 
-内置本地工具继续通过 Fox Host、项目权限与审批；SRT 仍用于 Host 命令。远程知识库与远程专家保留其远程边界。共享沙箱资源不能随退休驱动一起删除。
+内置本地工具继续通过 Fox Host、四档审批与 Fox Job 执行；Fox 不用沙箱（SRT 已在 A1、B2 删除）。远程知识库与远程专家保留其远程边界。
+
+**外部 Agent 计划恢复（阶段三）**：Pi、Codex、dsh 将恢复为可选后端（把它们移回 `SUPPORTED_BACKENDS`，`read_only_retired` 会话恢复为可继续）。外部 Pi 与 PiNative 共用审批引擎；Codex、dsh 用各自原生沙箱与审批，Fox 把 `request_permission` 转成审批卡；未安装、未登录、版本不匹配、协议出错都直接报错，不回退到 PiNative。以上是计划，当前构建中它们仍退役、不可用。
 
 API Key 仍在系统 Keyring（`com.fox.agent.model`），按 Base URL 共享；单独协议凭据使用 `fox-protocol:<provider>:<profile>`。数据库只记录配置状态。保存与删除规则见 `credential_save.rs`、`credential_delete.rs`，退休不等于删除供应商凭据。
 
