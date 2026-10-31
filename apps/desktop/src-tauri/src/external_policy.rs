@@ -652,7 +652,7 @@ mod tests {
     fn wrapped_pi_dir_offers_the_inner_prefix_and_root_delete_stays_blocked() {
         let project = root();
         let cwd = project.to_string_lossy();
-        let wrapped = format!(r#"cd "{plain}" && dir 2>&1; echo "EXIT_CODE: $?""#);
+        let wrapped = format!(r#"cd "{cwd}" && dir 2>&1; echo "EXIT_CODE: $?""#);
         let request = gate("bash", json!({ "command": wrapped }));
         let (tool, decision) = decide_pi("ask", &request, Some(&project), Some(&home()), &[]);
         let answer = answer_from(&tool, &decision, &options(), true, Some(&wrapped), Some(&cwd));
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(answer.policy["command"], wrapped);
         assert_eq!(answer.policy["innerCommand"], "dir");
 
-        let deletion = format!(r#"cd "{plain}" && rm -rf . 2>&1; echo $?"#);
+        let deletion = format!(r#"cd "{cwd}" && rm -rf . 2>&1; echo $?"#);
         let request = gate("bash", json!({ "command": deletion }));
         let (tool, decision) = decide_pi(PI_FULL, &request, Some(&project), Some(&home()), &[]);
         assert!(decision.is_block(), "{:?}", decision.verdict);

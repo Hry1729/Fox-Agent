@@ -173,6 +173,30 @@ fn parent_pid(pid: u32) -> u32 {
     rest.split_whitespace().nth(1).and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
+/// Windows：`CREATE_NO_WINDOW` 的子进程会带一个无窗口的 conhost.exe（父进程就是该子进程），
+/// 它和子进程一起属于本轮新起的进程，也在 Job 里，清扫时应一并结束。
+#[cfg(windows)]
+fn console_hosts_of(parents: &[u32]) -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    assert!(snapshot != INVALID_HANDLE_VALUE, "CreateToolhelp32Snapshot 失败");
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut hosts = Vec::new();
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while ok {
+        let len = entry.szExeFile.iter().position(|unit| *unit == 0).unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
+        if name == "conhost.exe" && parents.contains(&entry.th32ParentProcessID) {
+            hosts.push(entry.th32ProcessID);
+        }
+        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    hosts
+}
+
 fn pids_from(text: &str) -> Vec<u32> {
     let rest = text.split("pids:").nth(1).unwrap_or_else(|| panic!("没有 pids 回报: {text}"));
     rest.split(|ch: char| !ch.is_ascii_digit() && ch != ',')
@@ -208,6 +232,11 @@ async fn confirmed_cancel_sweeps_new_children_and_keeps_the_backend() {
     assert_eq!(child_pids.len(), 2, "应回报两个子进程: {reported}");
     assert!(child_pids.iter().all(|pid| !process_ended(*pid)), "清扫前子进程应仍在: {child_pids:?}");
     let _reap = Reap(child_pids.clone());
+    // 本轮新起的进程：两个子进程，Windows 上再加它们各自的 conhost.exe（取消前记下，按映像名和父进程确认）。
+    #[allow(unused_mut)]
+    let mut turn_pids = child_pids.clone();
+    #[cfg(windows)]
+    turn_pids.extend(console_hosts_of(&child_pids));
     #[cfg(target_os = "linux")]
     let backend_pid = parent_pid(child_pids[0]);
 
@@ -231,10 +260,10 @@ async fn confirmed_cancel_sweeps_new_children_and_keeps_the_backend() {
     let killed = swept["killed"]["pids"].as_array().unwrap_or_else(|| panic!("killed.pids 缺失: {swept}"));
     let mut killed_pids: Vec<u32> = killed.iter().filter_map(|value| value.as_u64().map(|pid| pid as u32)).collect();
     killed_pids.sort_unstable();
-    let mut expected = child_pids.clone();
+    let mut expected = turn_pids.clone();
     expected.sort_unstable();
-    assert_eq!(killed_pids, expected, "killed 应正好是这两个子进程: {swept}");
-    assert_eq!(swept["killed"]["count"], 2, "{swept}");
+    assert_eq!(killed_pids, expected, "killed 应正好是这两个子进程（Windows 上加它们的 conhost.exe）: {swept}");
+    assert_eq!(swept["killed"]["count"], expected.len(), "{swept}");
     assert_eq!(swept["noBaseline"], false, "{swept}");
     assert!(swept["failed"].as_array().is_some_and(|failed| failed.is_empty()), "{swept}");
     let audits = sink.audits();
