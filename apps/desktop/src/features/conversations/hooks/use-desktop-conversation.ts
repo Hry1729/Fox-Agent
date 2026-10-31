@@ -138,6 +138,8 @@ interface DesktopConversationState {
   removeExpert: () => Promise<ExpertOperationResult>
   changeExpert: (expertId: string) => Promise<ExpertOperationResult>
   setDraftPermission: (permissionMode: ProjectRecord['permissionMode']) => void
+  /** 新建外部会话时传给 conversation_create 的当前草稿档位；null 表示用后端默认。 */
+  setDraftNativePermission: (mode: string | null) => void
   openConversation: (conversationId: string) => Promise<void>
   loadEarlierMessages: () => Promise<void>
   loadingEarlierMessages: boolean
@@ -264,6 +266,12 @@ export function useDesktopConversation(): DesktopConversationState {
   // sent once, then locked by the Host (standard, no full access, unless explicitly chosen).
   const [draftExternalPermissionMode, setDraftExternalPermissionModeState] = useState<ExternalPermissionMode>('standard')
   const draftExternalPermissionModeRef = useRef<ExternalPermissionMode>('standard')
+  // 草稿选择器当前显示的档位。创建外部会话时作为 nativePermission 传给 Host；不读草稿设置键。
+  const draftNativePermissionRef = useRef<string | null>(null)
+  const setDraftNativePermission = useCallback((mode: string | null) => {
+    const next = mode?.trim() || null
+    draftNativePermissionRef.current = next
+  }, [])
   const setDraftExternalPermissionMode = useCallback((mode: ExternalPermissionMode) => {
     draftExternalPermissionModeRef.current = mode
     setDraftExternalPermissionModeState(mode)
@@ -1107,16 +1115,18 @@ export function useDesktopConversation(): DesktopConversationState {
           .then(() => desktopClient.agentBackendPreferences())
           .then((preferences) => newConversationBackend(preferences))
           .catch(() => draftAgentBackendRef.current)
+        const nativePermission = backend === 'fox' ? undefined : draftNativePermissionRef.current ?? undefined
         const conversation = await desktopClient.createConversation({
           agentId,
           expertId: backend === 'fox' ? draft.expertId ?? draftExpertId ?? undefined : undefined,
           projectRoot: draft.projectRoot ?? draftProjectRoot ?? undefined,
           permissionMode: draft.permissionMode ?? draftPermissionMode ?? undefined,
           // Absent for Fox so an older Host sees exactly the old request.
-          // Full access is NOT sent: a pick in the new conversation's
-          // permission list (confirmed there) is read by the Host itself.
+          // 外部会话把草稿选择器当前档位显式传给 Host；没传时 Host 用后端默认，不再读草稿键。
           agentBackend: backend === 'fox' ? undefined : backend,
+          ...(nativePermission ? { nativePermission } : {}),
         })
+        draftNativePermissionRef.current = null
         active = await desktopClient.loadConversation(conversation.id)
         if (selectionVersion === selectionVersionRef.current) {
           activeConversationIdRef.current = conversation.id
@@ -1701,6 +1711,7 @@ export function useDesktopConversation(): DesktopConversationState {
     removeExpert,
     changeExpert,
     setDraftPermission,
+    setDraftNativePermission,
     openConversation,
     loadEarlierMessages,
     loadingEarlierMessages,
@@ -1716,7 +1727,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [agentBackendStatus, agentBackendPreferences, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, draftExternalPermissionMode, setDraftExternalPermissionMode, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, lastSendFailureReason, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, resetConversationContext, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [agentBackendStatus, agentBackendPreferences, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, draftExternalPermissionMode, setDraftExternalPermissionMode, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, lastSendFailureReason, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, resetConversationContext, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setDraftNativePermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

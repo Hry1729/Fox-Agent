@@ -69,9 +69,8 @@ export interface NativePermissionView {
   applied?: 'not_running' | 'applied' | 'next_turn' | 'failed' | string
   appliedError?: string
   /**
-   * The conversation's (or draft's) project already confirmed full access
-   * once (plan C2: the same first-time second confirmation as a Fox
-   * conversation). Absent from older Hosts: confirm every time.
+   * Host 仍记录这个项目是否确认过完全访问，作为第二道防线。
+   * 选择器不再用它跳过确认：每次手动选择完全访问都要再问一次。
    */
   projectFullAccessConfirmed?: boolean
 }
@@ -170,6 +169,29 @@ export function nativePendingNote(view: NativePermissionView | null | undefined)
   return view && !view.draft && view.pending ? PENDING_NEXT_TURN_NOTE : null
 }
 
+/**
+ * 这些运行时事件到来时要重新拉原生权限视图，让「下一轮生效」在下一轮开始时消失。
+ * 会话建立（agent_backend.session）以及本会话 Run 的开始和终态都算；不要轮询。
+ */
+const NATIVE_PERMISSION_REFRESH_EVENTS = new Set([
+  'agent_backend.session',
+  'run.started',
+  'run.completed',
+  'run.cancelled',
+  'run.failed',
+  'run.interrupted',
+])
+
+export function refreshesNativePermission(
+  notification: { conversationId?: string | null; event?: { type?: string | null } | null } | null | undefined,
+  conversationId: string | null | undefined,
+): boolean {
+  if (!notification || !conversationId) return false
+  if (notification.conversationId !== conversationId) return false
+  const type = notification.event?.type
+  return typeof type === 'string' && NATIVE_PERMISSION_REFRESH_EVENTS.has(type)
+}
+
 /** The Fox tier of a Fox conversation's composer mode (`allow` = 自动). */
 export function foxTierOfAccessMode(mode: string | null | undefined): FoxPermissionTier {
   switch (mode) {
@@ -213,9 +235,8 @@ export function nativePermissionChange(view: NativePermissionView | null | undef
   if (!row) return { kind: 'refused', reason: '没有这个权限选项' }
   if (row.disabled) return { kind: 'refused', reason: row.reason ?? '不可用' }
   if (row.needsConfirmation) {
-    // The first full access in a project is confirmed once; the project
-    // remembers it afterwards (the Host enforces the same rule).
-    if (view.projectFullAccessConfirmed) return { kind: 'apply' }
+    // 任何后端、任何一次手动选择完全访问都要确认。
+    // 项目以前确认过也不跳过；Host 仍按项目记住第一次确认，作为第二道防线。
     return { kind: 'confirm_full_access', points: FULL_ACCESS_RISK_POINTS }
   }
   if (!view.draft && view.fullAccess) {
