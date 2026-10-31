@@ -102,8 +102,9 @@ export interface ImportReport {
 
 /**
  * Which private HOME the probe / import / "打开文件夹" is about: an existing
- * conversation, or a NEW conversation (backend + project) before its first
- * message, so the login card shows before the user can fail once.
+ * conversation, or a NEW conversation (backend, project optional) before its
+ * first message, so the login card shows before the user can fail once.
+ * 没选项目时只带 backend 和 fullAccess。
  */
 export type AgentBackendTarget =
   | { conversationId: string }
@@ -112,8 +113,8 @@ export type AgentBackendTarget =
 /**
  * The probe target of the shown backend: the open conversation when it is
  * locked to an external backend; else, for a new conversation with an
- * external backend picked, its project (id or root) and draft mode; null for
- * Fox, or a draft with no project yet (the Host keys private HOMEs by project).
+ * external backend picked, its project (id or root, both optional) and draft
+ * mode. Null only for Fox. 没选项目时不带 projectId / projectRoot，Host 用默认对话目录的共用 HOME。
  */
 export function credentialProbeTarget(input: {
   lockedBackend: string | null
@@ -129,7 +130,6 @@ export function credentialProbeTarget(input: {
   if (input.draftBackend === 'fox') return null
   const projectId = input.draftProjectId || undefined
   const projectRoot = input.draftProjectRoot || undefined
-  if (!projectId && !projectRoot) return null
   return {
     backend: input.draftBackend,
     ...(projectId ? { projectId } : {}),

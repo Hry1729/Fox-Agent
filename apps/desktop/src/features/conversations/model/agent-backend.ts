@@ -153,6 +153,7 @@ export const AGENT_BACKEND_ERROR_CODES = {
   // Refusals of an external send before anything ran (external backend wiring batch).
   turnBusy: 'agent_backend_turn_busy',
   attachmentsUnsupported: 'agent_backend_attachments_unsupported',
+  /** 已经绑定了项目，但项目文件夹不存在或不是目录。没选项目时 Host 用默认对话目录，不返回这个码。 */
   projectRequired: 'agent_backend_project_required',
 } as const
 
