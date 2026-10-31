@@ -1,7 +1,8 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-  测试（不随运行时包发布）：enable-sandbox.ps1 在“解压与清理同时失败”时保留原始错误。
+  测试（不随运行时包发布）：enable-sandbox.ps1 在“解压与清理同时失败”时保留原始错误；
+  不再安装 SRT，只在旧版 Fox 安装回执证明时才清理遗留的 SRT（B2）。
 
 .DESCRIPTION
   两种模式：
@@ -53,9 +54,19 @@ try {
         Assert-Fox ($errors.Count -eq 0) 'enable-sandbox.ps1 parses'
         $functions = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
         foreach ($fn in $functions) { . ([scriptblock]::Create($fn.Extent.Text)) }
-        foreach ($name in @('Get-FoxTestFault', 'Test-FoxTestFault', 'Invoke-FoxTestFault', 'Resolve-FoxFailure', 'Remove-FoxTree', 'Expand-FoxPackage')) {
+        foreach ($name in @('Get-FoxTestFault', 'Test-FoxTestFault', 'Invoke-FoxTestFault', 'Resolve-FoxFailure', 'Remove-FoxTree', 'Expand-FoxPackage', 'Find-FoxSrtReceipt', 'Find-LegacySrtCli', 'Remove-LegacyFoxSrt')) {
             Assert-Fox ([bool] (Get-Command $name -CommandType Function -ErrorAction SilentlyContinue)) "function $name present"
         }
+        # B2: Fox no longer installs SRT; the srt install and ownership-repair parameters are gone.
+        $params = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        foreach ($gone in @('ProxyPortRange', 'RepairOwnershipList')) {
+            Assert-Fox (-not ($params -contains $gone)) "no -$gone parameter"
+        }
+        $scriptText = Get-Content -LiteralPath $enable -Raw
+        Assert-Fox ($scriptText.IndexOf("'windows-install'") -lt 0) 'no srt windows-install call'
+        Assert-Fox ($scriptText.IndexOf('repair-ownership.ps1') -lt 0) 'no repair-ownership.ps1 call'
+        $InstallerReceiptName = '.fox-installer-result.json'
+        $LegacySrtCliRelative = 'srt\node_modules\@anthropic-ai\sandbox-runtime\dist\cli.js'
         $LogPath = Join-Path $work 'enable.log'
         if ($env:OS -eq 'Windows_NT') {
             foreach ($exitCode in @(0, 7)) {
@@ -65,6 +76,34 @@ try {
             }
             Assert-Fox ($ErrorActionPreference -eq 'Stop') 'native stderr: restores error policy'
         }
+
+        # 0. Legacy SRT ownership: only a Fox receipt matching the registry proves Fox made it.
+        $runtimeParent = Join-Path $work 'sandbox-runtime'
+        $registry = @{ markerVersion = 3; sandboxUserSid = 'S-1-5-21-1-2-3-1001'; sandboxUser = 'srt-sandbox'; createdAt = [int64] 1767225600 }
+        $old = Join-Path $runtimeParent '0.1.6'
+        New-Item -ItemType Directory -Path $old -Force | Out-Null
+        Assert-Fox ($null -eq (Find-FoxSrtReceipt $runtimeParent $registry)) 'legacy: no receipt, no proof'
+        $receipt = Join-Path $old '.fox-installer-result.json'
+        [System.IO.File]::WriteAllText($receipt, '{"ok":true,"srt":{"alreadyInstalled":true,"sandboxUserSid":"S-1-5-21-1-2-3-1001","createdAt":1767225600}}')
+        Assert-Fox ($null -eq (Find-FoxSrtReceipt $runtimeParent $registry)) 'legacy: SRT that was already there is not Fox''s'
+        [System.IO.File]::WriteAllText($receipt, '{"ok":true,"srt":{"alreadyInstalled":false,"sandboxUserSid":"S-1-5-21-1-2-3-1001","createdAt":1767225599}}')
+        Assert-Fox ($null -eq (Find-FoxSrtReceipt $runtimeParent $registry)) 'legacy: a reinstalled SRT (CreatedAt differs) is not Fox''s'
+        [System.IO.File]::WriteAllText($receipt, '{"ok":true,"srt":{"alreadyInstalled":false,"sandboxUserSid":"S-1-5-21-1-2-3-1001","createdAt":1767225600}}')
+        Assert-Fox ((Find-FoxSrtReceipt $runtimeParent $registry) -eq $receipt) 'legacy: matching pre-B2 receipt proves Fox made it'
+        $newer = Join-Path $runtimeParent '0.1.7'
+        New-Item -ItemType Directory -Path $newer -Force | Out-Null
+        Remove-Item -LiteralPath $receipt -Force
+        $carried = Join-Path $newer '.fox-installer-result.json'
+        [System.IO.File]::WriteAllText($carried, '{"ok":true,"legacySrtRecord":{"alreadyInstalled":false,"sandboxUserSid":"S-1-5-21-1-2-3-1001","createdAt":1767225600}}')
+        Assert-Fox ((Find-FoxSrtReceipt $runtimeParent $registry) -eq $carried) 'legacy: a carried legacySrtRecord still proves it'
+        Assert-Fox ($null -eq (Find-LegacySrtCli $runtimeParent)) 'legacy: no srt CLI found when no runtime has one'
+        $cliPath = Join-Path $old $LegacySrtCliRelative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $cliPath) -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $old 'node') -Force | Out-Null
+        [System.IO.File]::WriteAllText($cliPath, '// cli')
+        [System.IO.File]::WriteAllText((Join-Path $old 'node\node.exe'), 'MZ')
+        $found = Find-LegacySrtCli $runtimeParent
+        Assert-Fox ($found -and $found.cli -eq $cliPath) 'legacy: srt CLI of an older runtime is found'
 
         # 1. Variable unset: injection points do nothing.
         Remove-Item Env:\FOX_SCRIPT_TEST_FAULTS -ErrorAction SilentlyContinue

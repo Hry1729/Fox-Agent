@@ -35,7 +35,7 @@ const nsis = process.env.NSIS_DIR || path.join(process.env.LOCALAPPDATA, 'tauri/
 const cases = [
   { name: 'nonzero-exit', script: 'exit 7\n', error: /Sandbox setup exited with code 7/ },
   { name: 'false-success', script: `param($PackagePath, $ExpectedSha256, $Version, $ResultPath, $LogPath)
-    [IO.File]::WriteAllText($ResultPath, '{"ok":false,"runtimeRoot":null,"srt":null}')
+    [IO.File]::WriteAllText($ResultPath, '{"ok":false,"runtimeRoot":null}')
     exit 0\n`, error: /did not return a successful installation result/ },
 ]
 for (const sample of cases) {

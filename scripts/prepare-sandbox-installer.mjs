@@ -7,7 +7,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const root = fileURLToPath(new URL('..', import.meta.url))
 const windows = path.join(root, 'apps/desktop/src-tauri/windows')
 const destination = path.join(root, 'apps/desktop/src-tauri/resources/sandbox-installer')
-const hash = data => createHash('sha256').update(data).digest('hex')
 
 export async function fileHash(file) {
   const digest = createHash('sha256')
@@ -29,8 +28,6 @@ export async function prepareSandboxInstaller() {
   if (!source.includes(`RUNTIME_PACKAGE_VERSION: &str = "${release.version}"`)) throw new Error('Sandbox release version differs from Host')
   const pins = JSON.parse(await fs.readFile(path.join(backend, 'runtime-assets/model-adapters/pins.json'), 'utf8'))
   if (JSON.stringify(pins.files) !== JSON.stringify(release.adapters)) throw new Error('Sandbox release adapter pins differ from Host')
-  const bridge = (await fs.readFile(path.join(backend, 'runtime-assets/acp-bridge/bridge.mjs'), 'utf8')).replace(/\r\n/g, '\n')
-  if (hash(bridge) !== release.bridgeSha256) throw new Error('Sandbox release bridge differs from Host')
   const packagePath = process.env.FOX_SANDBOX_RUNTIME_PACKAGE || path.join(destination, 'runtime.zip')
   try { await fs.access(packagePath) } catch {
     throw new Error('Set FOX_SANDBOX_RUNTIME_PACKAGE to the pinned fox-sandbox-runtime Windows x64 zip before building the installer')
