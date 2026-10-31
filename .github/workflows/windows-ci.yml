@@ -299,6 +299,10 @@ jobs:
           (cd "$rt_unix/backends/pi" && npm ci --no-audit --no-fund --loglevel=error)
           PYTHON="$(command -v python3 || command -v python)"
           "$PYTHON" crates/fox-agent-backend/scripts/windows/runtime_patches.py "$rt_unix"
+          # fox-fix-console: a second run is a no-op, and every patched pi file
+          # equals its build-time pin (so the windowsHide patches are in effect).
+          "$PYTHON" crates/fox-agent-backend/scripts/windows/runtime_patches.py "$rt_unix" > /dev/null
+          "$PYTHON" -c 'import json,sys; m=json.load(open(sys.argv[1]+"/model-adapters.json"))["files"]; p=json.load(open(sys.argv[2]))["files"]; bad=[k for k in p if k.startswith("backends/pi/") and m.get(k)!=p[k]]; sys.exit("not patched as pinned: %s" % bad if bad else 0)' "$rt_unix" crates/fox-agent-backend/runtime-assets/model-adapters/pins.json
           echo "FOX_PI_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
           echo "FOX_REQUIRE_REAL_PI=1" >> "$GITHUB_ENV"
 
@@ -343,6 +347,10 @@ jobs:
           (cd "$rt_unix/backends/pi" && npm ci --no-audit --no-fund --loglevel=error)
           PYTHON="$(command -v python3 || command -v python)"
           "$PYTHON" crates/fox-agent-backend/scripts/windows/runtime_patches.py "$rt_unix"
+          # fox-fix-console: a second run is a no-op, and every patched pi file
+          # equals its build-time pin (so the windowsHide patches are in effect).
+          "$PYTHON" crates/fox-agent-backend/scripts/windows/runtime_patches.py "$rt_unix" > /dev/null
+          "$PYTHON" -c 'import json,sys; m=json.load(open(sys.argv[1]+"/model-adapters.json"))["files"]; p=json.load(open(sys.argv[2]))["files"]; bad=[k for k in p if k.startswith("backends/pi/") and m.get(k)!=p[k]]; sys.exit("not patched as pinned: %s" % bad if bad else 0)' "$rt_unix" crates/fox-agent-backend/runtime-assets/model-adapters/pins.json
           echo "FOX_PI_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
           echo "FOX_REQUIRE_REAL_PI=1" >> "$GITHUB_ENV"
 

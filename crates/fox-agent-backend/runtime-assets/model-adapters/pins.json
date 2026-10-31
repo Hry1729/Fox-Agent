@@ -1,11 +1,11 @@
 {
   "revision": 1,
   "files": {
-    "backends/pi/node_modules/pi-acp/dist/index.js": "bb8c9785ce8dd5b88fdcfae4b12521ad8f4e433ba23d907109627018b328f7e3",
+    "backends/pi/node_modules/pi-acp/dist/index.js": "7f921a0918a96365edfaffddb39d83e371891479a9ee64b245180f5a39b970e1",
     "backends/pi/node_modules/pi-acp/dist/fox-turn-outcome.mjs": "a114e4f99ed0be6567ff1845cb6c3f412ac4491a0fab6cfc8241ec5f27a99f18",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/index.js": "a67c7f6b64989efbe5838276085593ce8743fb408148025bd24076cc9fd386e3",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/fox-model-proxy.mjs": "c4de3d75afb063066250e61b4d247eeb32f40fe419d1d7632fffd4f8aa884dc0",
     "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js": "0d4de7e398ae61237fa73cff9ad687c380524819a6c3cb9bd6710cf05dbdd352",
-    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-MM3LKT73.js": "411fc1b279c931ea0074d090d6837e634b8be5b648a2b9b9038c4c515bb3c324"
+    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-MM3LKT73.js": "ca845072d29bfdf1f473b7129e728abde91cd55052e5921d5a42259a42a857d5"
   }
 }
