@@ -921,4 +921,20 @@ mod tests {
         assert!(request.get("hostExecution").is_none());
         assert!(request["command"].is_null(), "不 eligible 时仍用卡片入参里的 command");
     }
+
+    /// 插入「本项目总是允许」时必须留下「只允许这一次」，不能把 allow_once 挤掉。
+    #[test]
+    fn inserting_allow_project_rule_keeps_allow_once() {
+        let policy = json!({
+            "projectRule": { "eligible": true, "tool": "run_command", "suggestedPrefix": "dir" },
+            "command": "cd \"D:/fox-test/测试项目\" && dir 2>&1; echo \"EXIT_CODE: $?\"",
+            "cwd": "D:/fox-test/测试项目",
+        });
+        let request = external_permission_request("pi", "pi", &card(vec!["allow_once", "deny"], Some(policy)));
+        let decisions = request["availableDecisions"].as_array().expect("decisions");
+        assert_eq!(decisions.first().and_then(|item| item.as_str()), Some("allow_once"));
+        assert!(decisions.iter().any(|item| item == "allow_once"));
+        assert!(decisions.iter().any(|item| item == "allow_project_rule"));
+        assert_eq!(request["availableDecisions"], json!(["allow_once", "allow_project_rule", "deny"]));
+    }
 }
