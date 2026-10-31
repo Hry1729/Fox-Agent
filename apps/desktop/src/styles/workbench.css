@@ -3512,18 +3512,18 @@ button.fox-chat-project-row:disabled {
 .fox-error-prompt,
 .fox-denied-prompt {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  align-items: center;
+  gap: var(--fox-space-l);
 }
 
 .fox-confirmation-body > span,
 .fox-error-prompt > span {
-  width: 31px;
-  height: 31px;
-  flex: 0 0 31px;
+  width: var(--fox-control-md);
+  height: var(--fox-control-md);
+  flex: 0 0 var(--fox-control-md);
   display: grid;
   place-items: center;
-  border-radius: 9px;
+  border-radius: var(--fox-radius-card);
 }
 
 .fox-confirmation-body > .fox-prompt-figure,
@@ -3593,12 +3593,17 @@ button.fox-chat-project-row:disabled {
 
 .fox-confirmation-actions {
   width: 100%;
-  margin-top: 11px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--fox-space-m);
+  margin-top: var(--fox-space-l);
 }
 
 .fox-confirmation-actions button {
-  border-radius: 8px;
-  font-size: 12px;
+  border-radius: var(--fox-radius-card);
+  font-size: var(--fox-type-caption);
 }
 
 .fox-error-prompt {
@@ -4967,7 +4972,7 @@ img[src='/avatars/fox-assistant.png'] {
   min-height: 148px;
   overflow: hidden;
   border-radius: inherit;
-  padding: 12px 13px;
+  padding: var(--fox-space-l);
 }
 
 .fox-decision-card > .fox-confirmation,
@@ -5153,14 +5158,18 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-runtime-confirmation .fox-confirmation-actions {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  margin-top: 14px;
+  justify-content: flex-end;
+  gap: var(--fox-space-m);
+  margin-top: var(--fox-space-l);
 }
 
 .fox-runtime-confirmation .fox-confirmation-actions button {
-  min-height: 34px;
-  padding-inline: 14px;
-  font-size: 13px;
+  min-height: var(--fox-control-md);
+  padding-inline: var(--fox-space-l);
+  font-size: var(--fox-type-chrome);
 }
 
 .fox-question-field b {
@@ -6220,39 +6229,39 @@ img[src='/avatars/fox-assistant.png'] {
   width: 100%;
 }
 
-.fox-runtime-confirmation { min-width: 0; max-height: min(52vh, 440px); justify-content: flex-start; gap: 10px; }
+.fox-runtime-confirmation { min-width: 0; max-height: min(52vh, 440px); justify-content: flex-start; gap: var(--fox-space-l); }
 .fox-runtime-confirmation .fox-confirmation-body,
 .fox-runtime-confirmation .fox-confirmation-actions { flex: 0 0 auto; }
-.fox-runtime-confirmation .fox-confirmation-content { min-height: 0; gap: 4px; }
+.fox-runtime-confirmation .fox-confirmation-content { min-height: 0; gap: var(--fox-space-xs); }
 .fox-runtime-confirmation .fox-confirmation-content p { margin: 0; }
 .fox-runtime-confirmation .fox-confirmation-body code { overflow-wrap: anywhere; word-break: normal; }
 .fox-approval-details-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
-.fox-approval-error { color: var(--destructive); font-size: 12px; line-height: 1.6; }
-.fox-approval-scope-note { margin: 0 0 8px; color: var(--fox-text); font-size: 13px; line-height: 1.6; }
-.fox-approval-disclosure { border-top: 1px solid var(--fox-border); padding-block: 8px; }
-.fox-approval-disclosure summary { cursor: pointer; color: var(--fox-text); font-size: 13px; line-height: 1.6; }
+.fox-approval-error { color: var(--destructive); font-size: var(--fox-type-caption); line-height: 1.6; }
+.fox-approval-scope-note { margin: 0 0 var(--fox-space-m); color: var(--fox-text); font-size: var(--fox-type-chrome); line-height: 1.6; }
+.fox-approval-disclosure { border-top: 1px solid var(--fox-border); padding-block: var(--fox-space-m); }
+.fox-approval-disclosure summary { cursor: pointer; color: var(--fox-text); font-size: var(--fox-type-chrome); line-height: 1.6; }
 .fox-approval-disclosure summary:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 2px; }
-.fox-approval-disclosure summary span { margin-left: 8px; color: var(--fox-muted); font-size: 12px; }
+.fox-approval-disclosure summary span { margin-left: var(--fox-space-m); color: var(--fox-muted); font-size: var(--fox-type-caption); }
 .fox-approval-disclosure .fox-approval-context,
-.fox-approval-disclosure .fox-approval-diff { border: 0; border-radius: 0; background: transparent; margin: 8px 0 0; padding: 0; }
-.fox-approval-disclosure .fox-approval-diff { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-.fox-runtime-confirmation .fox-confirmation-actions { margin-top: 0; padding-top: 10px; border-top: 1px solid var(--fox-border); }
+.fox-approval-disclosure .fox-approval-diff { border: 0; border-radius: 0; background: transparent; margin: var(--fox-space-m) 0 0; padding: 0; }
+.fox-approval-disclosure .fox-approval-diff { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fox-type-caption); }
+.fox-runtime-confirmation .fox-confirmation-actions { margin-top: 0; padding-top: var(--fox-space-l); border-top: 1px solid var(--fox-border); }
 
 .fox-approval-command,
 .fox-approval-diff,
 .fox-approval-context {
   width: 100%;
   max-width: 100%;
-  margin: 8px 0 0;
+  margin: var(--fox-space-m) 0 0;
   border: 1px solid var(--fox-border);
-  border-radius: 6px;
+  border-radius: var(--fox-radius-control);
   background: color-mix(in oklch, var(--background) 94%, var(--muted));
 }
 
 .fox-approval-context {
-  padding: 10px 12px;
+  padding: var(--fox-space-m) var(--fox-space-l);
   color: var(--fox-muted);
-  font-size: 12px;
+  font-size: var(--fox-type-caption);
   line-height: 1.55;
 }
 
@@ -6262,7 +6271,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-approval-context p + p {
-  margin-top: 5px;
+  margin-top: var(--fox-space-xs);
 }
 
 .fox-approval-context strong {
@@ -6276,9 +6285,9 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-approval-command {
   display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 8px 10px;
+  align-items: center;
+  gap: var(--fox-space-s);
+  padding: var(--fox-space-m) var(--fox-space-l);
   color: var(--fox-muted);
 }
 
@@ -6292,7 +6301,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-approval-diff {
   max-height: 220px;
   overflow: auto;
-  padding: 9px 11px;
+  padding: var(--fox-space-m) var(--fox-space-l);
   color: var(--foreground);
   font-size: 10px;
   line-height: 1.55;
@@ -10900,7 +10909,7 @@ img[src='/avatars/fox-assistant.png'] {
     width: 60px;
     height: 56px;
   }
-  .fox-decision-card { padding: 11px; }
+  .fox-decision-card { padding: var(--fox-space-l); }
   .fox-decision-card > .fox-confirmation .fox-confirmation-body,
   .fox-decision-approval-list > .fox-runtime-confirmation:first-child .fox-confirmation-body,
   .fox-decision-card > .fox-question-prompt .fox-question-heading,

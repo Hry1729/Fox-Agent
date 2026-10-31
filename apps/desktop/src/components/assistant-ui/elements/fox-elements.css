@@ -88,14 +88,14 @@
 .aui-composer-menu .fox-slash-menu [cmdk-item] .fox-command-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; flex: 1 1 auto; width: auto; }
 .aui-composer-menu .fox-slash-menu [cmdk-item] strong { display: block; color: var(--fox-text); font-size: 13px; }
 .aui-composer-menu .fox-slash-menu [cmdk-item] small { display: block; max-width: 100%; margin: 0; text-align: left; color: var(--fox-muted); }
-.aui-approval-card { display: flex; flex-direction: column; width: 100%; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-large); background: var(--fox-card); padding: 12px; }
+.aui-approval-card { display: flex; flex-direction: column; width: 100%; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-large); background: var(--fox-card); padding: var(--fox-space-l); }
 .aui-approval-card > div:first-child { flex: 0 0 auto; min-width: 0; }
 .aui-approval-card > div:first-child > div { min-width: 0; }
 .aui-approval-card > div:first-child p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aui-approval-card.fox-runtime-confirmation { max-width: none; }
 .aui-approval-card > .aui-approval-heading { flex: 0 0 auto; }
 .aui-approval-card > .fox-approval-details-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
-.aui-approval-card > .fox-confirmation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex: 0 0 auto; }
+.aui-approval-card > .fox-confirmation-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--fox-space-m); flex: 0 0 auto; }
 .aui-approval-card .fox-confirmation-actions > .aui-ink-button,
 .aui-permission-grant .fox-confirmation-actions > .aui-ink-button,
 [data-slot='feedback-dialog'] button.aui-ink-button,
@@ -104,25 +104,25 @@
 [data-slot='feedback-dialog'] [role='radio'][aria-checked='true'] { background: var(--foreground); color: var(--background); }
 .aui-permission-grant.fox-runtime-confirmation { display: flex; flex-direction: column; width: 100%; max-width: none; min-height: 0; border: 1px solid var(--fox-border); background: var(--fox-card); border-radius: var(--fox-radius-large); }
 .aui-permission-grant > .fox-approval-details-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
-.aui-permission-grant > .fox-confirmation-actions { flex: 0 0 auto; display: flex; flex-wrap: wrap; }
+.aui-permission-grant > .fox-confirmation-actions { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--fox-space-m); }
 .fox-decision-card .aui-permission-grant.fox-runtime-confirmation { border: 0; box-shadow: none; background: transparent; }
-.fox-runtime-confirmation.is-compact { gap: 8px; padding: 10px 12px; }
-.fox-decision-card .fox-runtime-confirmation.is-compact { padding: 4px 6px; }
+.fox-runtime-confirmation.is-compact { gap: var(--fox-space-m); padding: var(--fox-space-l); }
+.fox-decision-card .fox-runtime-confirmation.is-compact { padding: 0; }
 .fox-runtime-confirmation.is-compact > p { margin: 0; font-size: 12px; line-height: 1.5; }
-.aui-approval-card.is-compact > div:first-child > span { width: 30px; height: 30px; border-radius: 8px; }
-.aui-approval-card.is-compact > div:first-child { gap: 10px; }
+.aui-approval-card.is-compact > div:first-child > span { display: grid; place-items: center; width: var(--fox-control-md); height: var(--fox-control-md); border-radius: var(--fox-radius-card); }
+.aui-approval-card.is-compact > div:first-child { align-items: center; gap: var(--fox-space-m); }
 .aui-approval-card.is-compact > div:first-child p:last-child { overflow: visible; white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
-.fox-runtime-confirmation.is-compact > .fox-approval-disclosure { padding-block: 4px; }
-.fox-runtime-confirmation.is-compact .fox-confirmation-actions { padding-top: 0; border-top: 0; }
+.fox-runtime-confirmation.is-compact > .fox-approval-disclosure { padding-block: var(--fox-space-xs); }
+.fox-runtime-confirmation.is-compact .fox-confirmation-actions { display: flex; align-items: center; gap: var(--fox-space-m); padding-top: 0; border-top: 0; }
 .aui-permission-grant.is-compact [class*='items-baseline'] { overflow-wrap: anywhere; min-width: 0; }
 .fox-runtime-confirmation.is-compact > .aui-approval-operation,
-.aui-permission-grant.is-compact > div:nth-child(2) { flex: 0 0 auto; border: 0; border-radius: 12px; background: var(--muted); padding: 10px 12px; font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.aui-permission-grant.is-compact > div:nth-child(2) { flex: 0 0 auto; border: 0; border-radius: var(--fox-radius-card); background: var(--muted); padding: var(--fox-space-m) var(--fox-space-l); font-size: var(--fox-type-caption); overflow-wrap: anywhere; white-space: pre-wrap; }
 .aui-permission-grant.is-compact > div:nth-child(2) > span:first-child { display: none; }
 .fox-runtime-confirmation.is-compact > .fox-approval-disclosure { border-top: 0; }
 .fox-runtime-confirmation.is-compact > .fox-approval-disclosure > summary { color: var(--fox-muted); font-size: 12px; }
-.fox-runtime-confirmation.is-compact .fox-confirmation-actions button { border-radius: 999px; min-height: 32px; font-size: 12px; padding-inline: 12px; }
-.aui-approval-heading { display: flex; align-items: center; gap: 8px; min-width: 0; padding-bottom: 8px; font-size: 14px; }
-.aui-approval-heading > svg { flex: 0 0 16px; color: var(--fox-muted); }
+.fox-runtime-confirmation.is-compact .fox-confirmation-actions button { border-radius: var(--fox-radius-pill); min-height: var(--fox-control-md); font-size: var(--fox-type-caption); padding-inline: var(--fox-space-l); }
+.aui-approval-heading { display: flex; align-items: center; gap: var(--fox-space-m); min-width: 0; padding-bottom: var(--fox-space-m); font-size: var(--fox-type-body); }
+.aui-approval-heading > svg { width: var(--fox-icon-size); height: var(--fox-icon-size); flex: 0 0 var(--fox-icon-size); color: var(--fox-muted); }
 .aui-error-state { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding: 12px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); font-size: 13px; }
 .aui-error-state > svg { flex: 0 0 16px; color: var(--destructive); }
 .aui-error-state > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
