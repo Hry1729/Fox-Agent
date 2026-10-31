@@ -9019,15 +9019,31 @@ async fn execute_bound_knowledge_tool(
                 .and_then(|value| usize::try_from(value).ok());
             ensure_bound(&target)?;
             if target.source == "local" {
-                local_knowledge
-                    .read_document(&target.id, document_id, chunk_id, requested_max_chars)
-                    .map(|value| {
-                        json!({
-                            "reference": target.as_json(),
-                            "result": value,
-                        })
-                    })
-                    .map_err(|error| format!("[{}] {}", error.code(), error))?
+                // 本地读文档是同步的，和检索一样放到阻塞线程池，避免卡住异步运行时。
+                let store = local_knowledge.clone();
+                let knowledge_base_id = target.id.clone();
+                let document_id = document_id.to_owned();
+                let chunk_id = chunk_id.map(str::to_owned);
+                let reference = target.as_json();
+                let value = tauri::async_runtime::spawn_blocking(move || {
+                    store.read_document(
+                        &knowledge_base_id,
+                        &document_id,
+                        chunk_id.as_deref(),
+                        requested_max_chars,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    format!(
+                        "[local_knowledge.read_failed] local knowledge read task failed: {error}"
+                    )
+                })?
+                .map_err(|error| format!("[{}] {}", error.code(), error))?;
+                json!({
+                    "reference": reference,
+                    "result": value,
+                })
             } else {
                 // 非空 chunkId 在发请求前拒绝；远程分页只认 startOffset 与 maxChars。
                 remote_read_rejects_chunk_id(input)?;
