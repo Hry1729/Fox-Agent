@@ -1269,16 +1269,6 @@ impl RuntimeHost {
         if let Err(error) = database.kernel_jobs_reconcile_orphans() {
             eprintln!("Background job recovery could not finish: {error}");
         }
-        // Recovery half of the two-phase business-delivery write: a process
-        // death between "the Run's decision is durable" and "its item verdicts
-        // are durable" leaves stage rows, and they are completed here from the
-        // same verdicts. Bounded to Runs that really have stage rows, and it
-        // never re-asks a model or replays a tool.
-        match delivery::finalize_staged_outcomes(&database) {
-            Ok(0) => {}
-            Ok(count) => eprintln!("Recovered {count} staged delivery verdict(s) after restart"),
-            Err(error) => eprintln!("Staged delivery recovery could not finish: {error}"),
-        }
         host
     }
 
@@ -1949,36 +1939,12 @@ impl RuntimeHost {
         let mut project_context = project_context_for(
             &self.database,&self.sessions_dir,&started.run.conversation_id,&control_binding.permission,
         );
-        // Simplified file delivery: a new task does NOT seed a delivery
-        // checklist. The checklist is what `evaluate_stop` reads, and an empty
-        // one routes straight to `Complete`, so not seeding it is what keeps a
-        // new task out of content verification, repair rounds and
-        // `awaiting_delivery_review`. Hiding a panel would not do that: the
-        // blocking state would still exist.
-        //
-        // `freeze_task_delivery` and the whole verification ledger remain in the
-        // tree for the Runs that were already frozen under the previous design.
-        // Those Runs keep their rows and their existing behaviour; this branch
-        // only decides what a Run started now gets.
-        //
-        // A Run that already has checklist rows is one that was frozen earlier
-        // and is being restarted: its rows describe its own contract, so it keeps
-        // reading that contract. A continuation of a frozen Run no longer arrives
-        // here with copied rows — the continuation writer declines to seed them —
-        // so a fresh successor takes the simplified branch like any new task.
-        let already_frozen = !self
-            .database
-            .delivery_checklist(&started.run.id)?
-            .is_empty();
-        if already_frozen {
-            project_context["deliveryTargets"] =
-                delivery::frozen_delivery_reference(&self.database, &started.run.id, &project_context)?;
-        } else {
-            // Placement reference only: where a user-facing file should go. It
-            // is advice for the model and claims nothing about verification.
-            project_context["deliveryTargets"] =
-                delivery::task_delivery_reference(text, &project_context);
-        }
+        // Placement reference only: where a user-facing file should go. It is
+        // advice for the model and claims nothing about verification. A new
+        // task never seeds a delivery checklist; content verification, repair
+        // rounds and delivery review are retired.
+        project_context["deliveryTargets"] =
+            delivery::task_delivery_reference(text, &project_context);
         // Host-decided placement for user-facing files. The folder is decided
         // once per (conversation, project) and persisted, so a continuation,
         // a retry on a later day and an application restart all land in the

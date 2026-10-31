@@ -186,46 +186,6 @@ fn open_input_handle(source:&Path)->Result<fs::File,String> {
     open.open(source).map_err(|error|format!("Unable to read input: {error}"))
 }
 
-/// Delivery verification shares the compute snapshot's protected handle open.
-/// No temporary copy, writer or project mutation is created here.
-pub(crate) fn read_authorized_delivery_bytes(root:&Path,relative:&str,limit:u64)->Result<Vec<u8>,String> {
-    let root=super::capability_tools::canonical_directory(root,"project folder")?;
-    let source=super::capability_tools::resolve_project_path(&root,relative,true)?;
-    crate::data_compute::validate_input_path(&source)?;
-    let mut reader=open_input_handle(&source)?;let before=reader.metadata().map_err(|e|e.to_string())?;
-    if !before.is_file() || before.len()>limit {return Err("Delivery source is not a regular bounded file".into());}
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if before.file_attributes()&0x400!=0 || !opened_final_path(&reader)?.starts_with(&root)
-            || opened_final_path(&reader)?!=fs::canonicalize(&source).map_err(|e|e.to_string())? {
-            return Err("[tool.path_denied] Opened delivery source escaped its project".into());
-        }
-    }
-    let mut bytes=Vec::new();std::io::Read::by_ref(&mut reader).take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
-    if bytes.len() as u64>limit {return Err("Delivery source exceeds read budget".into());}
-    let after=reader.metadata().map_err(|e|e.to_string())?;
-    if after.len()!=before.len() || after.modified().ok()!=before.modified().ok() || bytes.len() as u64!=before.len() {
-        return Err("Delivery source changed during read".into());
-    }
-    crate::data_compute::validate_input_path(&source)?;
-    if !fs::canonicalize(&source).map_err(|e|e.to_string())?.starts_with(&root) {return Err("[tool.path_denied] Delivery source escaped during read".into());}
-    #[cfg(windows)]
-    if opened_final_path(&reader)?!=fs::canonicalize(&source).map_err(|e|e.to_string())? {return Err("Delivery source identity changed during read".into());}
-    #[cfg(unix)]
-    {use std::os::unix::fs::MetadataExt;let live=fs::metadata(&source).map_err(|e|e.to_string())?;
-        if live.dev()!=after.dev() || live.ino()!=after.ino(){return Err("Delivery source identity changed during read".into());}}
-    Ok(bytes)
-}
-
-pub(crate) fn authorized_delivery_root(database:&Database,run:&str)->Result<PathBuf,String> {
-    let binding=database.run_control_binding(run)?.ok_or("Delivery source needs a frozen Run binding")?;binding.validate()?;
-    let root=super::capability_tools::canonical_directory(Path::new(binding.permission.project_root.as_deref().ok_or("No frozen project root")?),"project folder")?;
-    let live=database.conversation_project_access(&binding.conversation_id)?.ok_or("Project access was removed")?;
-    if super::capability_tools::canonical_directory(Path::new(&live.0),"project folder")?!=root {return Err("Project authorization changed".into());}
-    Ok(root)
-}
-
 // ===========================================================================
 // Typed delivery reads (package 2-A, internal). The String-returning
 // functions above stay byte-for-byte identical and keep every existing

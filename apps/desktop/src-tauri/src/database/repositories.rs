@@ -64,15 +64,11 @@ mod native_route;
 mod native_route_tests;
 mod skill_activations;
 mod delivery_checks;
-pub(crate) use delivery_acceptance::{
-    delivery_review_downgrade_blocker, AcceptanceBinding, AcceptanceRow, AcceptanceWrite,
-    DowngradeBlocker, CURRENT_U1_AWARE_SCHEMA_VERSION,
-};
+pub(crate) use delivery_acceptance::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 mod run_steering;
 mod managed_files;
 pub(crate) use delivery_checks::{
-    DeliveryArtifactRow, DeliveryChecklistItem, DeliveryChecklistSeed, DeliveryRequirement,
-    RequirementKind, RunWriteReceipt, StagedDeliveryItem,
+    DeliveryChecklistItem, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
 };
 #[cfg(test)]
 pub(crate) use delivery_checks::finalize_fault;

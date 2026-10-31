@@ -12,9 +12,6 @@ mod migration_copy_tests;
 /// `schema_migrations`, not by ordering, so a later v100 still lands correctly.
 pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 104;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
-pub(crate) use repositories::{
-    delivery_review_downgrade_blocker, DowngradeBlocker, CURRENT_U1_AWARE_SCHEMA_VERSION,
-};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
 pub(crate) use repositories::RunBackendIdentity;
@@ -52,10 +49,10 @@ pub use repositories::{
     EVIDENCE_REFERENCE_PAIRS, WORK_EVENT_TYPES,
 };
 pub(crate) use repositories::{
-    package_snapshot_hash, CreateChildRunInput, DeliveryArtifactRow, DeliveryChecklistItem,
+    package_snapshot_hash, CreateChildRunInput, DeliveryChecklistItem,
     DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
     KernelHostScope, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput,
-    RestoreClaim, RestoreRequestRecord, RunWriteReceipt, StagedDeliveryItem,
+    RestoreClaim, RestoreRequestRecord,
     MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     SkillActivationRecord, SteeringMessage, MAX_STEERING_FOLLOWUPS,
     STEERING_LANE_CURRENT, STEERING_LANE_NEXT_TURN,

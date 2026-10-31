@@ -391,11 +391,6 @@ impl Database {
     }
 }
 
-/// The schema version that introduced the U1 delivery-review state and its two
-/// tables. A database at or below this version has no `awaiting_delivery_review`
-/// state and no acceptance tables, so an older binary can read it.
-const U1_SCHEMA_VERSION: i64 = 93;
-
 /// Why a downgrade to an older binary is not safe right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DowngradeBlocker {
@@ -557,9 +552,6 @@ impl Database {
         .flatten()
     }
 }
-
-/// The schema version this package's own binary understands.
-pub const CURRENT_U1_AWARE_SCHEMA_VERSION: i64 = U1_SCHEMA_VERSION;
 
 impl AcceptanceRow {
     /// The candidate path this row's own columns name: its bound `target_path`,
