@@ -780,13 +780,11 @@ fn settle_replace(
     match classify_replace_outcome(os_error, &layout, &record.base_version, &record.new_version) {
         ReplaceVerdict::Committed => {
             record.status = "committed".to_string();
-            // The replace committed and the original is *verified* in the
-            // backup. The backup, the applying record and the settlement record
-            // are all retained: tool_host has no durable registration receipt
-            // from the version-history layer, so deleting the only independent
-            // copy of the original here would rest on a best-effort outer
-            // snapshot. A registration failure above must not turn into a lost
-            // original ([v1.1] 6.5 / O-A01).
+            // 替换已提交，原件在 backup 里校验过。这里不删除材料：登记回执还没发生。
+            // 只有 atomic_write_with_context_mode 在 context 存在且
+            // record_committed 返回 Ok 之后才清理这些材料。context 为 None、
+            // 登记失败、NotApplied、RecoveryRequired 或 settlement 失败时，
+            // 材料原样保留，避免登记失败变成丢了原件（[v1.1] 6.5 / O-A01）。
             if let Err(error) = store_settled(&settled, record, fault) {
                 // The commit is a fact — the target holds the new bytes — so it
                 // is not replayed or reported as a failure. But the settlement
@@ -979,6 +977,11 @@ pub(crate) fn atomic_write_with_context(root: &Path, path: &Path, bytes: &[u8], 
     atomic_write_with_context_mode(root, path, bytes, expected, cancellation, context, false)
 }
 
+/// 一次写入产生的恢复材料。登记回执成功后才允许删除。
+struct RecoveryMaterials {
+    paths: Vec<PathBuf>,
+}
+
 pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[u8], expected: &str,
     cancellation: Option<&crate::kernel::CancellationToken>,
     mut context: Option<&mut dyn FileCommitContext>, binary: bool) -> Result<(), String> {
@@ -1030,6 +1033,7 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
     revalidate_target(root, path, None)?;
     let current = current_version_of(path, binary)?;
     ensure_unchanged(expected, current.as_deref())?;
+    let mut recovery = RecoveryMaterials { paths: Vec::new() };
     if current.is_none() {
         // Atomic create without replacing a file created since the check.
         let staging_path = staging.path().to_path_buf();
@@ -1061,8 +1065,11 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
                 append_publish_note(&mut record.note, method);
                 record.status = "committed".into();
                 record.settled_at_ms = Some(epoch_ms());
-                store_settled(&settled_record_path(&journal), &record, JournalFault::NONE)
+                let settled = settled_record_path(&journal);
+                store_settled(&settled, &record, JournalFault::NONE)
                     .map_err(|error| format!("file created but settlement failed; materials retained: {error}"))?;
+                recovery.paths.push(journal);
+                recovery.paths.push(settled);
                 // move 已经把 staging 改名为目标；硬链接还要卸掉临时名字。
                 if method != "move_no_replace" {
                     let _ = fs::remove_file(&staging_path);
@@ -1089,7 +1096,7 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         // settlement, judged from the verified layout, may remove it.
         let candidate = staging.hand_off();
         replace_existing_file_with_context(&candidate, path, expected, &file_version(bytes),
-            cancellation, &mut context)?;
+            cancellation, &mut context, &mut recovery.paths)?;
     }
     // A1 / TX-4: and again after publication, by the handle of what now sits
     // at the target path.
@@ -1101,6 +1108,15 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         context.mark_committed();
         context.record_committed(path).map_err(|error| format!(
             "file committed but version registration failed; recovery materials retained: {error}"))?;
+        // 登记回执已经成功，恢复材料不再是唯一副本。删不掉只记日志，不改变写入结果。
+        for material in &recovery.paths {
+            if let Err(error) = fs::remove_file(material) {
+                eprintln!(
+                    "fox: 已登记的写入无法删除恢复材料 {}: {error}",
+                    material.display()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1117,13 +1133,14 @@ fn replace_existing_file(
     base_version: &str,
     new_version: &str,
 ) -> Result<(), String> {
-    replace_existing_file_with_context(candidate, target, base_version, new_version, None, &mut None)
+    replace_existing_file_with_context(candidate, target, base_version, new_version, None, &mut None, &mut Vec::new())
 }
 
 fn replace_existing_file_with_context(
     candidate: &Path, target: &Path, base_version: &str, new_version: &str,
     cancellation: Option<&crate::kernel::CancellationToken>,
     context: &mut Option<&mut dyn FileCommitContext>,
+    materials: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let (backup, journal, operation_id) = replace_material_paths(target)?;
     // Preserve a verified pre-image BEFORE admission is revalidated or the OS
@@ -1182,6 +1199,13 @@ fn replace_existing_file_with_context(
             _ if record.status == "not_applied" => context.mark_not_applied(),
             _ => {},
         }
+    }
+    if outcome.is_ok() {
+        let settled = settled_record_path(&journal);
+        materials.push(backup);
+        materials.push(preimage);
+        materials.push(journal);
+        materials.push(settled);
     }
     outcome
 }
@@ -4880,6 +4904,93 @@ mod tx6_publish_tests {
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&target).unwrap(), b"original");
         assert_eq!(fs::read(&staging).unwrap(), b"replacement");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// 登记回执成功才删除恢复材料；失败或没有回执时原样留下。
+#[cfg(test)]
+mod tx5_recovery_material_tests {
+    use super::*;
+
+    struct Registration {
+        baseline: String,
+        fail: bool,
+    }
+
+    impl FileCommitContext for Registration {
+        fn baseline(&self) -> &str { &self.baseline }
+        fn dispatch_id(&self) -> &str { "tx5-dispatch" }
+        fn validate(&mut self, _: &Path) -> Result<(), String> { Ok(()) }
+        fn capture_before(&mut self, _: &Path) -> Result<(), String> { Ok(()) }
+        fn record_committed(&mut self, _: &Path) -> Result<(), String> {
+            if self.fail { Err("injected registry failure".into()) } else { Ok(()) }
+        }
+    }
+
+    fn fresh_dir() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-tx5-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn names(root: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn tx5_a_registered_replace_leaves_only_the_target() {
+        let root = fresh_dir();
+        let path = root.join("note.txt");
+        fs::write(&path, b"old").unwrap();
+        let baseline = file_version(b"old");
+        let mut context = Registration { baseline: baseline.clone(), fail: false };
+        atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(names(&root), vec!["note.txt".to_owned()]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tx5_a_failed_registration_keeps_every_recovery_material() {
+        let root = fresh_dir();
+        let path = root.join("note.txt");
+        fs::write(&path, b"old").unwrap();
+        let baseline = file_version(b"old");
+        let mut context = Registration { baseline: baseline.clone(), fail: true };
+        let error = atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context))
+            .expect_err("registration failure");
+        assert!(error.contains("version registration failed"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let left = names(&root);
+        assert!(
+            left.iter().any(|name| name.starts_with(".fox-replace-backup-")
+                && !name.ends_with(".verified")
+                && !name.ends_with(".staging")),
+            "backup missing: {left:?}"
+        );
+        assert!(left.iter().any(|name| name.ends_with(".verified")), "preimage missing: {left:?}");
+        assert!(
+            left.iter().any(|name| name.starts_with(".fox-replace-journal-") && !name.ends_with(".settled.json")),
+            "applying journal missing: {left:?}"
+        );
+        assert!(left.iter().any(|name| name.ends_with(".settled.json")), "settled journal missing: {left:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tx5_a_registered_create_leaves_only_the_target() {
+        let root = fresh_dir();
+        let path = root.join("created.txt");
+        let mut context = Registration { baseline: "missing".into(), fail: false };
+        atomic_write_with_context(&root, &path, b"body", "missing", None, Some(&mut context)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"body");
+        assert_eq!(names(&root), vec!["created.txt".to_owned()]);
         fs::remove_dir_all(root).unwrap();
     }
 }
