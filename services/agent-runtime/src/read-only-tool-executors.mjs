@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, realpath, stat } from 'node:fs/promises'
 
 const DEFAULT_LIMITS = Object.freeze({
   maxReadChars: 120_000,
@@ -164,6 +164,54 @@ export function sliceUtf16Budget(text, maxUnits) {
   return text.slice(0, end)
 }
 
+/**
+ * 解析后的路径是否落在 root 的 realpath 之内。
+ * 用分隔符做边界：`/a/proj2` 不算在 `/a/proj` 里。Windows 下大小写不敏感。
+ */
+function isInsideResolvedRoot(rootReal, candidateReal) {
+  const fold = (value) => {
+    let text = String(value).replace(/[\\/]+/g, '/')
+    if (text.length > 1) text = text.replace(/\/+$/, '')
+    return process.platform === 'win32' ? text.toLowerCase() : text
+  }
+  const rootKey = fold(rootReal)
+  const candidateKey = fold(candidateReal)
+  if (candidateKey === rootKey) return true
+  const prefix = rootKey === '/' ? '/' : `${rootKey}/`
+  return candidateKey.startsWith(prefix)
+}
+
+/**
+ * 符号链接：解析失败记 brokenLinks；目标越出 root 记 outsideRoot；
+ * 指向 root 内目录的不进入遍历，记 linkedDirectories；文件返回 'file'。
+ */
+async function classifyWalkSymlink(linkPath, rootReal, skipped) {
+  let resolved
+  try {
+    resolved = await realpath(linkPath)
+  } catch {
+    skipped.brokenLinks++
+    return 'skip'
+  }
+  if (!isInsideResolvedRoot(rootReal, resolved)) {
+    skipped.outsideRoot++
+    return 'skip'
+  }
+  let info
+  try {
+    info = await stat(resolved)
+  } catch (error) {
+    const failure = new Error(`Cannot stat resolved symlink ${linkPath}: ${error instanceof Error ? error.message : String(error)}`)
+    failure.code = 'read_only.symlink_stat_failed'
+    throw failure
+  }
+  if (info.isDirectory()) {
+    skipped.linkedDirectories++
+    return 'skip'
+  }
+  return 'file'
+}
+
 async function walk(root, { signal, maxEntries = 4_000, glob = null, cursor = null, cursorBinding = null } = {}) {
   const globMatcher = compileGlob(glob)
   // RD-v1 cursor (B02): deterministic continuation of the SAME bound query.
@@ -186,7 +234,16 @@ async function walk(root, { signal, maxEntries = 4_000, glob = null, cursor = nu
     consumed = parsed.consumed
   }
   const found = []
-  const skipped = { ignored: 0 }
+  const skipped = { ignored: 0, outsideRoot: 0, brokenLinks: 0, linkedDirectories: 0 }
+  // 用 root 的 realpath 做边界，后面符号链接的解析结果都和它对。
+  let rootReal
+  try {
+    rootReal = await realpath(root)
+  } catch (error) {
+    const failure = new Error(`Cannot resolve search root: ${error instanceof Error ? error.message : String(error)}`)
+    failure.code = 'read_only.root_unresolved'
+    throw failure
+  }
   const queue = [root]
   // Breadth-first order is deterministic for a fixed tree: readdir order is
   // the platform order, and the cursor counts consumed entries in that same
@@ -204,12 +261,19 @@ async function walk(root, { signal, maxEntries = 4_000, glob = null, cursor = nu
     for (const entry of entries) {
       if (isIgnored(entry.name)) { skipped.ignored++; continue }
       const path = `${directory.replace(/[\\\\/]$/, '')}/${entry.name}`
-      if (globMatcher && !entry.isDirectory() && !globMatcher.test(entry.name)) continue
-      if (index < consumed) { index++; if (entry.isDirectory()) queue.push(path); continue }
+      let directoryEntry = entry.isDirectory()
+      if (entry.isSymbolicLink()) {
+        const kind = await classifyWalkSymlink(path, rootReal, skipped)
+        if (kind === 'skip') continue
+        // 指向 root 之内的文件照常返回；目录型链接已在 classify 里跳过，避免成环。
+        directoryEntry = false
+      }
+      if (globMatcher && !directoryEntry && !globMatcher.test(entry.name)) continue
+      if (index < consumed) { index++; if (directoryEntry) queue.push(path); continue }
       index++
       lastIndex = index
-      found.push({ path, name: entry.name, directory: entry.isDirectory(), walkIndex: index })
-      if (entry.isDirectory()) queue.push(path)
+      found.push({ path, name: entry.name, directory: directoryEntry, walkIndex: index })
+      if (directoryEntry) queue.push(path)
       if (found.length >= maxEntries) break
     }
   }
@@ -410,6 +474,10 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
         scanComplete, scanTruncated: !scanComplete,
         matchLimitReached: capReached,
         skippedIgnored: skipped.ignored,
+        skippedOutsideRoot: skipped.outsideRoot,
+        skippedBrokenLinks: skipped.brokenLinks,
+        skippedLinkedDirectories: skipped.linkedDirectories,
+        skipped,
         totalMatches: scannedFromStart && scanComplete && !capReached && !outputCut ? hitsThisPage : null,
         outputTruncated: outputCut,
         cursorConsistency: 'live', cursorVersion: 1, cursorStalePossible: true,
@@ -516,6 +584,10 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
         scanComplete: effectiveScanComplete, scanTruncated: !effectiveScanComplete,
         matchLimitReached: capReached,
         skippedIgnored: skipped.ignored, skippedUnreadable: unreadable,
+        skippedOutsideRoot: skipped.outsideRoot,
+        skippedBrokenLinks: skipped.brokenLinks,
+        skippedLinkedDirectories: skipped.linkedDirectories,
+        skipped,
         totalMatches: scannedFromStart && effectiveScanComplete && !capReached && !outputCut ? hitsThisPage : null,
         outputTruncated: outputCut,
         cursorConsistency: 'live', cursorVersion: 1, cursorStalePossible: true,
