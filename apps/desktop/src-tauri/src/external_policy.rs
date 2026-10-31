@@ -492,6 +492,7 @@ mod tests {
         let npm = json!({ "toolCall": { "rawInput": { "command": "npm test", "cwd": &root_text } } });
         assert!(native_block_decision(AgentBackend::Codex, "workspace-write", &npm, Some(&project), Some(&home_dir), &[]).is_none());
         assert!(native_block_decision(AgentBackend::Codex, "workspace-write", &json!({ "toolCall": { "rawInput": {} } }), Some(&project), Some(&home_dir), &[]).is_none());
+    }
 
     fn rule_eligible(policy: &Value) -> bool {
         policy.get("projectRule").and_then(|rule| rule.get("eligible")).and_then(Value::as_bool) == Some(true)
