@@ -42,6 +42,7 @@ pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
 mod mcp_catalog;
+mod connector_provenance;
 
 pub(super) fn host_runtime_capabilities(manifest_hash: &str, profile_id: &str) -> Value {
     let mut facts=crate::process_jobs::runtime_capabilities(manifest_hash,profile_id);
@@ -8098,13 +8099,11 @@ fn execute_mcp_tool_request(
         } else {
             return Err(format!("unsupported MCP proxy tool: {tool}"));
         };
-        Ok(json!({
-            "content": if managed_office { result.get("content").cloned().unwrap_or_else(|| json!([])) }
-                else { json!([{ "type": "text", "text": crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string()) }]) },
-            "details": result,
-            "untrusted": true,
-            "sourceType": "knowledge",
-        }))
+        let content = if managed_office { result.get("content").cloned().unwrap_or_else(|| json!([])) }
+            else { json!([{ "type": "text", "text": crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string()) }]) };
+        // The Host composes the envelope and stamps its provenance; a remote
+        // connector body is fenced so it can never read as a Host diagnosis.
+        Ok(connector_provenance::mcp_result_envelope(tool, &input, content, result))
     })();
     finalize_host_tool_execution(
         database,
