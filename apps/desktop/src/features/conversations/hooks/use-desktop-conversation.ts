@@ -1355,7 +1355,7 @@ export function useDesktopConversation(): DesktopConversationState {
     // Plan C3: an external Agent asked through the Fox `ask_user` tool. Its
     // turn already ended (`awaiting_user`); the answer is the next turn of
     // the same Agent session, sent like any message (the card closes on it).
-    if (conversationAgentBackend(active.conversation) !== 'fox') return send(cleanText)
+    if (conversationAgentBackend(active.conversation) !== 'fox') return (await send(cleanText)) === true
     setError(null)
     const pendingRun = optimisticRun(active.conversation.id)
     const pendingMessageId = optimisticId('pending-message')
