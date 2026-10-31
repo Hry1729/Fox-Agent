@@ -185,7 +185,8 @@ test('pins stable_v1 Runtime prefix bytes and the knowledge-routing instruction 
   // 2026-10-09: r16 delivery-target rules (0df9162) moved the hash; 2026-10-22:
   // the delivery wording now describes present_files declaration instead of
   // the removed checklist/repair flow (4b54e68), so the hash moved again.
-  assert.equal(composed.stablePromptHash, '3af3e500efff61d8')
+  // 2026-10-31：远程索引不可用改为不可重试的 index_unavailable，前缀哈希因此变化。
+  assert.equal(composed.stablePromptHash, '7e2d058898c8dc00')
 })
 
 test('separates stable-prefix and dynamic-tail cache identities', () => {

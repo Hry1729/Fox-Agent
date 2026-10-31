@@ -1,17 +1,13 @@
-//! Prefer Yuxi's indexed retrieval; older servers can use authorized document reads.
+//! 远程知识库只走服务端原生索引检索；索引不可用时直接报错，不降级为文档关键词扫描。
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
 use super::{api_url, YuxiClient};
 use reqwest::{Response, StatusCode};
 use serde_json::{json, Value};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_SCAN_BYTES: usize = 16 * 1024 * 1024;
-const MAX_DOCUMENTS: usize = 64;
-const MAX_TREE_PAGES: usize = 5;
 const SEARCH_DURATION: Duration = Duration::from_secs(25);
-const CHUNK_CHARS: usize = 1600;
 
 fn remote_http_error(status: StatusCode) -> String {
     let (code, message) = match status.as_u16() {
@@ -155,45 +151,6 @@ fn query_terms(query: &str) -> Vec<String> {
     terms
 }
 
-fn lexical_score(text: &str, terms: &[String]) -> usize {
-    let lower = text.to_lowercase();
-    terms
-        .iter()
-        .filter(|term| lower.contains(term.as_str()))
-        .map(|term| term.chars().count().min(16))
-        .sum()
-}
-
-fn document_hits(
-    kb_id: &str,
-    file_id: &str,
-    name: &str,
-    text: &str,
-    terms: &[String],
-) -> Vec<Value> {
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut hits = Vec::new();
-    for start in (0..chars.len()).step_by(CHUNK_CHARS - 200) {
-        let end = (start + CHUNK_CHARS).min(chars.len());
-        let content = chars[start..end].iter().collect::<String>();
-        let score = lexical_score(&content, terms) * 4 + lexical_score(name, terms);
-        if score > 0 {
-            hits.push(json!({
-                "id": format!("{file_id}:chars:{start}-{end}"),
-                "kb_id": kb_id, "file_id": file_id, "documentId": file_id,
-                "content": content, "score": score,
-                "anchor": format!("chars:{start}-{end}"),
-                "metadata": { "source": name, "file_id": file_id, "sourceType": "remote",
-                    "startOffset": start, "endOffset": end, "retrievalMode": "document_lexical" }
-            }));
-        }
-        if end == chars.len() {
-            break;
-        }
-    }
-    hits
-}
-
 impl YuxiClient {
     async fn indexed_knowledge_search(
         &self,
@@ -203,7 +160,7 @@ impl YuxiClient {
         query: &str,
         limit: usize,
         max_chars: usize,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Value, String> {
         let mut endpoint = api_url(base_url, "/api/knowledge/databases/")?;
         endpoint
             .path_segments_mut()
@@ -221,16 +178,19 @@ impl YuxiClient {
             .map_err(|_| {
                 "[remote_knowledge.retrieval_unavailable] 无法连接知识库检索服务".to_owned()
             })?;
-        // Some deployments restrict indexed retrieval to admins. Document APIs
-        // independently enforce read access; never reuse admin credentials.
+        // 403/404/405/501 表示当前账号没有原生索引，或服务没有该接口。
+        // 必须直接失败，禁止再退回文档关键词扫描。
         if matches!(response.status().as_u16(), 403 | 404 | 405 | 501) {
-            return Ok(None);
+            let status = response.status().as_u16();
+            return Err(format!(
+                "[remote_knowledge.index_unavailable] 远程知识库的原生索引检索不可用（HTTP {status}）。Fox 不会改用文档关键词扫描；请让知识库管理员为当前账号开放检索接口，或改用本地资料库。"
+            ));
         }
         let bytes = bounded_body(response).await?;
         let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
             "[remote_knowledge.protocol_invalid] 知识库检索响应不是有效 JSON".to_owned()
         })?;
-        normalize_indexed_results(payload, kb_id, query, limit, max_chars).map(Some)
+        normalize_indexed_results(payload, kb_id, query, limit, max_chars)
     }
 
     async fn knowledge_bytes(
@@ -298,21 +258,45 @@ impl YuxiClient {
     }
 
     /// Model-facing text reads must use parsed downloads, not binary UI previews.
+    /// 按字符分页：max_chars 缺省 60000，并限制在 1..=60000；start_offset 超过总字符数则报错。
     pub async fn knowledge_document_text(
         &self,
         base_url: &str,
         token: &str,
         kb_id: &str,
         file_id: &str,
+        max_chars: Option<usize>,
+        start_offset: Option<usize>,
     ) -> Result<Value, String> {
         let text = self
             .parsed_knowledge_text(base_url, token, kb_id, file_id)
             .await?;
-        let content = text.chars().take(60_000).collect::<String>();
-        Ok(
-            json!({ "kb_id": kb_id, "file_id": file_id, "documentId": file_id,
-            "truncated": content.len() < text.len(), "content": content, "source": "remote" }),
-        )
+        let chars: Vec<char> = text.chars().collect();
+        let total_chars = chars.len();
+        let start_offset = start_offset.unwrap_or(0);
+        if start_offset > total_chars {
+            return Err(
+                "[remote_knowledge.invalid_query] startOffset 超出文档长度".to_owned(),
+            );
+        }
+        let max_chars = max_chars.unwrap_or(60_000).clamp(1, 60_000);
+        let end = start_offset.saturating_add(max_chars).min(total_chars);
+        let content: String = chars[start_offset..end].iter().collect();
+        let truncated = end < total_chars;
+        let mut value = json!({
+            "kb_id": kb_id,
+            "file_id": file_id,
+            "documentId": file_id,
+            "source": "remote",
+            "content": content,
+            "startOffset": start_offset,
+            "totalChars": total_chars,
+            "truncated": truncated,
+        });
+        if truncated {
+            value["nextOffset"] = json!(end);
+        }
+        Ok(value)
     }
 
     pub async fn query_knowledge_with_limits(
@@ -335,155 +319,17 @@ impl YuxiClient {
         if terms.is_empty() {
             return Err("[remote_knowledge.invalid_query] 查询需要包含文字或数字".to_owned());
         }
-        let started = Instant::now();
         let limit = top_k.unwrap_or(8).clamp(1, 20);
         let max_chars = max_chars.unwrap_or(16_000).clamp(1, 40_000);
-        if let Some(result) = tokio::time::timeout(
+        match tokio::time::timeout(
             SEARCH_DURATION,
             self.indexed_knowledge_search(base_url, token, kb_id, query, limit, max_chars),
         )
         .await
-        .map_err(|_| "[remote_knowledge.retrieval_unavailable] 知识库检索超时".to_owned())??
         {
-            return Ok(result);
+            Ok(result) => result,
+            Err(_) => Err("[remote_knowledge.retrieval_unavailable] 知识库检索超时".to_owned()),
         }
-        let mut documents = Vec::new();
-        let mut partial = false;
-        for page in 1..=MAX_TREE_PAGES {
-            let page_text = page.to_string();
-            let bytes = tokio::time::timeout(
-                SEARCH_DURATION.saturating_sub(started.elapsed()),
-                self.knowledge_bytes(
-                    base_url,
-                    token,
-                    "/api/workspace/knowledge/tree",
-                    &[
-                        ("kb_id", kb_id),
-                        ("recursive", "true"),
-                        ("files_only", "true"),
-                        ("page_size", "100"),
-                        ("page", &page_text),
-                    ],
-                ),
-            )
-            .await
-            .map_err(|_| {
-                "[remote_knowledge.retrieval_unavailable] 知识库目录读取超时".to_owned()
-            })??;
-            let tree: Value = serde_json::from_slice(&bytes).map_err(|_| {
-                "[remote_knowledge.protocol_invalid] 知识库目录不是有效 JSON".to_owned()
-            })?;
-            let entries = tree
-                .get("entries")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    "[remote_knowledge.protocol_invalid] 知识库目录缺少 entries".to_owned()
-                })?;
-            for entry in entries {
-                if entry.get("is_dir").and_then(Value::as_bool) == Some(true) {
-                    continue;
-                }
-                let Some(id) = entry
-                    .get("file_id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                else {
-                    continue;
-                };
-                if documents
-                    .iter()
-                    .any(|(existing, _): &(String, String)| existing == id)
-                {
-                    continue;
-                }
-                documents.push((
-                    id.to_owned(),
-                    entry
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or(id)
-                        .to_owned(),
-                ));
-            }
-            if tree.get("has_more").and_then(Value::as_bool) != Some(true) {
-                break;
-            }
-            if page == MAX_TREE_PAGES {
-                partial = true;
-            }
-        }
-        documents
-            .sort_by_key(|(id, name)| (std::cmp::Reverse(lexical_score(name, &terms)), id.clone()));
-        partial |= documents.len() > MAX_DOCUMENTS;
-        let total_documents = documents.len();
-        let mut scanned = 0;
-        let mut used_bytes = 0;
-        let mut failed = 0;
-        let mut last_error = None;
-        let mut hits = Vec::new();
-        for (id, name) in documents.iter().take(MAX_DOCUMENTS) {
-            if started.elapsed() >= SEARCH_DURATION || used_bytes >= MAX_SCAN_BYTES {
-                partial = true;
-                break;
-            }
-            let fetched = tokio::time::timeout(
-                SEARCH_DURATION.saturating_sub(started.elapsed()),
-                self.parsed_knowledge_text(base_url, token, kb_id, id),
-            )
-            .await;
-            let text = match fetched {
-                Ok(Ok(text)) => text,
-                Ok(Err(error)) => {
-                    if error.starts_with("[remote_knowledge.authentication_required]")
-                        || error.starts_with("[remote_knowledge.access_denied]")
-                    {
-                        return Err(error);
-                    }
-                    failed += 1;
-                    partial = true;
-                    last_error = Some(error);
-                    continue;
-                }
-                Err(_) => {
-                    partial = true;
-                    last_error =
-                        Some("[remote_knowledge.retrieval_unavailable] 知识库检索超时".to_owned());
-                    break;
-                }
-            };
-            used_bytes += text.len();
-            scanned += 1;
-            hits.extend(document_hits(kb_id, id, name, &text, &terms));
-            hits.sort_by_key(|hit| std::cmp::Reverse(hit["score"].as_u64().unwrap_or(0)));
-            hits.truncate(limit + 1);
-        }
-        if scanned == 0 && total_documents > 0 {
-            return Err(last_error.unwrap_or_else(|| {
-                "[remote_knowledge.document_unavailable] 已绑定知识库，但尚无可读取的解析文档"
-                    .to_owned()
-            }));
-        }
-        let mut truncated = hits.len() > limit;
-        hits.truncate(limit);
-        let mut remaining = max_chars;
-        let mut results = Vec::new();
-        for mut hit in hits {
-            if remaining == 0 {
-                truncated = true;
-                break;
-            }
-            let text = hit["content"].as_str().unwrap_or("");
-            let content = text.chars().take(remaining).collect::<String>();
-            truncated |= content.len() < text.len();
-            remaining -= content.chars().count();
-            hit["content"] = json!(content);
-            results.push(hit);
-        }
-        Ok(json!({ "kb_id": kb_id, "query": query, "results": results,
-            "retrievalMode": "document_lexical", "partial": true, "scanPartial": partial,
-            "degraded": true, "truncated": truncated,
-            "scannedDocuments": scanned, "listedDocuments": total_documents, "failedDocuments": failed,
-            "notice": "原生索引检索不可用或当前账号无该接口权限，已降级为授权文档关键词扫描；可能漏掉同义表达，不能据此断言知识库没有相关资料" }))
     }
 }
 
@@ -493,6 +339,7 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::{Arc, Mutex},
         thread,
     };
 
@@ -569,7 +416,7 @@ mod tests {
                 let file_id = first["file_id"].as_str().expect("real document ID");
                 assert_ne!(file_id, kb_id);
                 let document = client
-                    .knowledge_document_text(&base, &token, &kb_id, file_id)
+                    .knowledge_document_text(&base, &token, &kb_id, file_id, None, None)
                     .await
                     .expect("live parsed document read failed");
                 let content = document["content"].as_str().expect("parsed document text");
@@ -583,39 +430,50 @@ mod tests {
         });
     }
 
-    fn server(
-        mut responses: Vec<(String, u16, &'static str, Vec<u8>)>,
-    ) -> (String, thread::JoinHandle<()>) {
-        if responses
-            .first()
-            .is_some_and(|r| r.0.starts_with("/api/workspace/knowledge/tree"))
-        {
-            responses.insert(
-                0,
-                (
-                    "POST /api/knowledge/databases/kb-1/query".to_owned(),
-                    404,
-                    "application/json",
-                    b"{}".to_vec(),
-                ),
-            );
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 2048];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let size = stream.read(&mut buffer).unwrap();
+            assert!(size > 0);
+            request.extend_from_slice(&buffer[..size]);
         }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn server(
+        responses: Vec<(String, u16, &'static str, Vec<u8>)>,
+    ) -> (String, thread::JoinHandle<()>) {
+        let (address, _requests, handle) = serve(responses, false);
+        (address, handle)
+    }
+
+    /// 登记脚本化响应，并在结束后短窗口内记录额外连接，用来断言没有 tree/download。
+    fn recording_server(
+        responses: Vec<(String, u16, &'static str, Vec<u8>)>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        serve(responses, true)
+    }
+
+    fn serve(
+        responses: Vec<(String, u16, &'static str, Vec<u8>)>,
+        watch_for_extra_requests: bool,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let handle = thread::spawn(move || {
             for (expected, status, content_type, body) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0; 2048];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let size = stream.read(&mut buffer).unwrap();
-                    assert!(size > 0);
-                    request.extend_from_slice(&buffer[..size]);
-                }
-                let request = String::from_utf8(request).unwrap();
+                let request = read_http_request(&mut stream);
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(request.lines().next().unwrap_or("").to_owned());
                 let expected = if expected.starts_with("POST ") {
                     expected
                 } else {
@@ -632,12 +490,29 @@ mod tests {
                 stream.write_all(headers.as_bytes()).unwrap();
                 let _ = stream.write_all(&body); // Bounded readers can close oversized responses early.
             }
+            if !watch_for_extra_requests {
+                return;
+            }
+            // 客户端应在唯一一次 query 返回后结束。再等一小段，抓住迟到的 tree/download。
+            let _ = listener.set_nonblocking(true);
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_millis(100) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_http_request(&mut stream);
+                        recorded
+                            .lock()
+                            .unwrap()
+                            .push(request.lines().next().unwrap_or("").to_owned());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
         });
-        (address, handle)
-    }
-
-    fn tree_path(page: usize) -> String {
-        format!("/api/workspace/knowledge/tree?kb_id=kb-1&recursive=true&files_only=true&page_size=100&page={page}")
+        (address, requests, handle)
     }
 
     #[test]
@@ -726,93 +601,62 @@ mod tests {
     }
 
     #[test]
-    fn remote_search_reads_authorized_parsed_documents_with_sources_and_pagination() {
-        let (base, handle) = server(vec![
-            (tree_path(1), 200, "application/json", json!({"entries":[{"file_id":"file-1","name":"轨道吊起升赋值.pdf"}],"has_more":true}).canonical_string().into_bytes()),
-            (tree_path(2), 200, "application/json", json!({"entries":[{"file_id":"file-2","name":"其他说明.md"}],"has_more":false}).canonical_string().into_bytes()),
-            (file_path("file-1"), 200, "text/markdown; charset=utf-8", "# 轨道吊起升赋值\n这是接口回归测试的资料，不是设备操作指导。".as_bytes().to_vec()),
-            (file_path("file-2"), 200, "text/markdown", "无关资料".as_bytes().to_vec()),
-        ]);
-        let client = YuxiClient::new().unwrap();
-        let result = tauri::async_runtime::block_on(client.query_knowledge_with_limits(
-            &base,
-            "fixture-token",
-            "kb-1",
-            "如何给轨道吊起升赋值",
-            Some(1),
-            Some(500),
-        ))
-        .unwrap();
-        handle.join().unwrap();
-        assert_eq!(result["scannedDocuments"], 2);
-        assert_eq!(result["partial"], true);
-        assert_eq!(result["scanPartial"], false);
-        assert_eq!(result["degraded"], true);
-        assert_eq!(result["results"].as_array().unwrap().len(), 1);
-        assert_eq!(result["results"][0]["file_id"], "file-1");
-        assert_eq!(result["results"][0]["kb_id"], "kb-1");
-        assert_eq!(
-            result["results"][0]["metadata"]["source"],
-            "轨道吊起升赋值.pdf"
-        );
-        assert!(result["results"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("接口回归测试"));
-    }
-
-    #[test]
-    fn remote_search_reports_unparsed_documents_as_partial_not_an_empty_complete_search() {
-        let (base, handle) = server(vec![
-            (
-                tree_path(1),
-                200,
+    fn remote_search_without_native_index_fails_with_index_unavailable() {
+        for status in [403_u16, 404, 405, 501] {
+            let (base, requests, handle) = recording_server(vec![(
+                "POST /api/knowledge/databases/kb-1/query".to_owned(),
+                status,
                 "application/json",
-                json!({"entries":[{"file_id":"file-1"},{"file_id":"file-2"}]})
-                    .canonical_string()
-                    .into_bytes(),
-            ),
-            (file_path("file-1"), 400, "application/json", b"{}".to_vec()),
-            (
-                file_path("file-2"),
-                200,
-                "text/markdown",
-                "起升赋值测试资料".as_bytes().to_vec(),
-            ),
-        ]);
-        let client = YuxiClient::new().unwrap();
-        let result = tauri::async_runtime::block_on(client.query_knowledge_with_limits(
-            &base,
-            "fixture-token",
-            "kb-1",
-            "起升",
-            Some(3),
-            Some(3),
-        ))
-        .unwrap();
-        handle.join().unwrap();
-        assert_eq!(result["partial"], true);
-        assert_eq!(result["failedDocuments"], 1);
-        assert_eq!(result["truncated"], true);
-        assert_eq!(
-            result["results"][0]["content"]
-                .as_str()
-                .unwrap()
-                .chars()
-                .count(),
-            3
-        );
+                b"{}".to_vec(),
+            )]);
+            let error = tauri::async_runtime::block_on(
+                YuxiClient::new().unwrap().query_knowledge_with_limits(
+                    &base,
+                    "fixture-token",
+                    "kb-1",
+                    "箱量",
+                    Some(5),
+                    Some(100),
+                ),
+            )
+            .unwrap_err();
+            handle.join().unwrap();
+            assert!(
+                error.starts_with("[remote_knowledge.index_unavailable]"),
+                "{error}"
+            );
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            let recorded = requests.lock().unwrap();
+            assert_eq!(
+                recorded.len(),
+                1,
+                "只能请求原生索引，不能再访问目录或下载：{recorded:?}"
+            );
+            assert!(
+                recorded[0].starts_with("POST /api/knowledge/databases/kb-1/query "),
+                "{}",
+                recorded[0]
+            );
+            assert!(
+                recorded
+                    .iter()
+                    .all(|line| !line.contains("/api/workspace/knowledge/tree")
+                        && !line.contains("/download")),
+                "{recorded:?}"
+            );
+        }
     }
 
     #[test]
     fn remote_access_denial_and_missing_parsed_documents_are_errors_not_missing_bindings() {
+        // 403 与“解析文档缺失”原先依赖目录扫描降级。那条路径已删除。
+        // 401 与 503 打在原生 query 上仍然是明确错误，而不是会话未绑定。
         for (status, code) in [
-            (401, "authentication_required"),
-            (403, "access_denied"),
+            (401_u16, "authentication_required"),
             (503, "retrieval_unavailable"),
         ] {
             let (base, handle) = server(vec![(
-                tree_path(1),
+                "POST /api/knowledge/databases/kb-1/query".to_owned(),
                 status,
                 "application/json",
                 b"{}".to_vec(),
@@ -828,26 +672,6 @@ mod tests {
             handle.join().unwrap();
             assert!(error.starts_with(&format!("[remote_knowledge.{code}]")));
         }
-        let (base, handle) = server(vec![
-            (
-                tree_path(1),
-                200,
-                "application/json",
-                json!({"entries":[{"file_id":"file-1"}]})
-                    .canonical_string()
-                    .into_bytes(),
-            ),
-            (file_path("file-1"), 400, "application/json", b"{}".to_vec()),
-        ]);
-        let error = tauri::async_runtime::block_on(YuxiClient::new().unwrap().query_knowledge(
-            &base,
-            "fixture-token",
-            "kb-1",
-            "起升",
-        ))
-        .unwrap_err();
-        handle.join().unwrap();
-        assert!(error.starts_with("[remote_knowledge.document_unavailable]"));
     }
 
     #[test]
@@ -872,6 +696,8 @@ mod tests {
                     "fixture-token",
                     "kb-1",
                     "file-1",
+                    None,
+                    None,
                 ));
             handle.join().unwrap();
             if let Some(code) = expected {
@@ -882,5 +708,59 @@ mod tests {
                 assert_eq!(result.unwrap()["content"], "# 起升赋值");
             }
         }
+    }
+
+    #[test]
+    fn remote_document_read_pages_by_characters() {
+        let text = "一二三四五六七八九十";
+        assert_eq!(text.chars().count(), 10);
+        let body = text.as_bytes().to_vec();
+        let read = |max_chars: Option<usize>, start_offset: Option<usize>| {
+            let (base, handle) = server(vec![(
+                file_path("file-1"),
+                200,
+                "text/plain",
+                body.clone(),
+            )]);
+            let result = tauri::async_runtime::block_on(
+                YuxiClient::new().unwrap().knowledge_document_text(
+                    &base,
+                    "fixture-token",
+                    "kb-1",
+                    "file-1",
+                    max_chars,
+                    start_offset,
+                ),
+            );
+            handle.join().unwrap();
+            result
+        };
+
+        let first = read(Some(4), Some(0)).unwrap();
+        assert_eq!(first["content"], "一二三四");
+        assert_eq!(first["content"].as_str().unwrap().chars().count(), 4);
+        assert_eq!(first["truncated"], true);
+        assert_eq!(first["nextOffset"], json!(4));
+        assert_eq!(first["startOffset"], json!(0));
+        assert_eq!(first["totalChars"], json!(10));
+        assert_eq!(first["source"], "remote");
+        assert_eq!(first["kb_id"], "kb-1");
+        assert_eq!(first["file_id"], "file-1");
+        assert_eq!(first["documentId"], "file-1");
+
+        let tail = read(Some(4), Some(8)).unwrap();
+        assert_eq!(tail["content"], "九十");
+        assert_eq!(tail["content"].as_str().unwrap().chars().count(), 2);
+        assert_eq!(tail["truncated"], false);
+        assert_eq!(tail["startOffset"], json!(8));
+        assert_eq!(tail["totalChars"], json!(10));
+        assert!(tail.get("nextOffset").is_none());
+
+        let error = read(Some(4), Some(11)).unwrap_err();
+        assert!(
+            error.starts_with("[remote_knowledge.invalid_query]"),
+            "{error}"
+        );
+        assert!(error.contains("startOffset"), "{error}");
     }
 }
