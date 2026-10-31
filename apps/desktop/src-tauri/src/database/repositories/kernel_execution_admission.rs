@@ -105,17 +105,20 @@ pub trait FileTargetResolver {
     fn resolve(&self, class: ActionClass, canonical_input_json: &str) -> Option<String>;
 }
 
+#[cfg(test)]
 /// A resolver that never produces a target identity (the current Host state:
 /// A's canonical read path is not wired yet).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoFileTargetResolver;
 
+#[cfg(test)]
 impl FileTargetResolver for NoFileTargetResolver {
     fn resolve(&self, _class: ActionClass, _canonical_input_json: &str) -> Option<String> {
         None
     }
 }
 
+#[cfg(test)]
 /// Build the authoritative credential for one dispatch from durable facts and
 /// persist it inside the caller's admission transaction. The model never
 /// contributes a field: identity comes from the run's durable rows,
@@ -172,6 +175,7 @@ pub fn issue_dispatch_credential_in_tx(
     )
 }
 
+#[cfg(test)]
 /// Same as [issue_dispatch_credential_in_tx], with the caller''s authoritative
 /// target resolver. The resolver only supplies the target identity; the
 /// observation itself must already exist in kernel_host_observations.
@@ -2469,42 +2473,6 @@ pub fn host_observation_for_version_in_tx(
             .optional()
             .map_err(|e| e.to_string()),
     }
-}
-
-/// Every observation of one target in this run, newest first. Used by the
-/// fragment-coverage check (REV-05) and by tests that assert the registry is
-/// append-only.
-pub fn host_observations_for_target_in_tx(
-    transaction: &Transaction<'_>,
-    run_id: &str,
-    target_identity: &str,
-) -> Result<Vec<HostObservation>, String> {
-    let mut statement = transaction
-        .prepare(
-            "SELECT observation_id, target_identity, version, observed_by_tool_call_id,
-                    view_kind, covered_whole_file, range_start, range_end, total_units, truncated
-               FROM kernel_host_observations
-              WHERE run_id=?1 AND target_identity=?2
-              ORDER BY observed_at DESC, observation_id ASC",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map(params![run_id, target_identity], |r| {
-            Ok(HostObservation {
-                target_identity: r.get(1)?,
-                version: r.get(2)?,
-                observed_by_tool_call_id: r.get(3)?,
-                view_kind: fox_engine_protocol::ObservationView::from_str(&r.get::<_, String>(4)?)
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(e))?,
-                covered_whole_file: r.get::<_, i64>(5)? != 0,
-                range_start: r.get(6)?,
-                range_end: r.get(7)?,
-                total_units: r.get(8)?,
-                truncated: r.get::<_, i64>(9)? != 0,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

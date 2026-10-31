@@ -10,12 +10,11 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf, Prefix},
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(test)]
+use std::sync::{atomic::AtomicBool, Arc};
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_CHUNK_MAX_BYTES: usize = 4 * 1024;
