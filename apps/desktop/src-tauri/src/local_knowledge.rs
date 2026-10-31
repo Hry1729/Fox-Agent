@@ -2090,11 +2090,22 @@ impl LocalKnowledgeStore {
         let max_chars = requested_max_chars
             .unwrap_or(DEFAULT_LOCAL_SEARCH_CHARS)
             .clamp(1, MAX_LOCAL_SEARCH_CHARS);
+        // 本资料库找不到的 chunk（含缺少 chunkId）会被丢掉，条数必须留在结果里。
+        let mut dropped_hits = 0usize;
         let scoped_hits = hits
             .iter()
             .filter_map(|hit| {
-                let chunk_id = hit.get("chunkId").and_then(Value::as_str)?;
-                chunks.get(chunk_id).map(|chunk| (hit, chunk))
+                let Some(chunk_id) = hit.get("chunkId").and_then(Value::as_str) else {
+                    dropped_hits += 1;
+                    return None;
+                };
+                match chunks.get(chunk_id) {
+                    Some(chunk) => Some((hit, chunk)),
+                    None => {
+                        dropped_hits += 1;
+                        None
+                    }
+                }
             })
             .collect::<Vec<_>>();
         let hit_count = scoped_hits.len();
@@ -2136,6 +2147,7 @@ impl LocalKnowledgeStore {
             "items": items,
             "total": hit_count,
             "truncated": truncated,
+            "droppedHits": dropped_hits,
             "fallback": { "active": false },
         }))
     }
@@ -5639,6 +5651,41 @@ mod agent_search_tests {
             "{message}"
         );
         assert!(message.contains("不会改用关键词检索"), "{message}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb11_dropped_hits_are_counted() {
+        let (store, root) = temp_store("kb11");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "丢弃", "drop.md", &["留下的片段"]);
+        let mut ids = chunk_ids.clone();
+        ids.insert(0, "chunk-does-not-exist".to_owned());
+        let result = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "留下",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &ids)),
+            )
+            .unwrap();
+        assert_eq!(result["droppedHits"], 1);
+        assert_eq!(result["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(result["items"][0]["chunkId"], chunk_ids[0].as_str());
+        assert_eq!(result["total"], 1);
+
+        let kept = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "留下",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(kept["droppedHits"], 0);
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
