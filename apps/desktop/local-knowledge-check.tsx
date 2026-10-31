@@ -63,7 +63,7 @@ const gateway: any = {
         anchor: '第 ' + (index + 1) + ' 段',
         content: '本段用于检查较长的资料内容如何显示，前面的说明不包含检索词。'.repeat(5) + '现在介绍' + term + '的具体操作方法，可以查看资料并按文件夹整理。'.repeat(5) + '后面再次提到' + term + '，用于确认保留的是首个匹配位置。',
         score: 1 - index * 0.1,
-        keywordScore: 1 - index * 0.1,
+        lexicalScore: 1 - index * 0.1,
         vectorScore: null,
       })),
     };

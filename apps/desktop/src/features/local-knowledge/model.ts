@@ -326,7 +326,7 @@ export interface KnowledgeRetrievalResult {
     anchor: string | null
     content: string
     score: number
-    keywordScore: number | null
+    lexicalScore: number | null
     vectorScore: number | null
   }>
 }

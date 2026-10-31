@@ -48,7 +48,7 @@ const gateway: any = {
         anchor: '第 ' + (index + 1) + ' 段',
         content: '这是「' + doc.name + '」中与「' + term + '」相关的一段示例正文，用来检查命中高亮、排序与引用样式是否符合重设计稿。',
         score: 1 - index * 0.1,
-        keywordScore: 1 - index * 0.1,
+        lexicalScore: 1 - index * 0.1,
         vectorScore: null,
       })),
     };

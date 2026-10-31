@@ -956,7 +956,7 @@ fn search_probes(
             None => false,
         };
         let found = store
-            .search_lexical(&base.id, query, None, None)
+            .search_for_agent(&base.id, query, None, None)
             .map_err(|error| format!("search_knowledge on {} failed: {error}", base.id))?;
         let content = joined_content(&found);
         let fact_found = content.contains(expected_fact);
@@ -998,6 +998,8 @@ fn search_probes(
             "search": {
                 "itemCount": item_count,
                 "documentIds": document_ids,
+                "mode": found.get("mode").cloned().unwrap_or(Value::Null),
+                "fallback": found.get("fallback").cloned().unwrap_or(Value::Null),
                 "expectedFact": expected_fact,
                 "expectedFactFound": fact_found,
                 "expectedCitation": expected_citation,
@@ -1045,7 +1047,7 @@ fn search_probes(
             .unwrap_or(false);
 
         let found = store
-            .search_lexical(&own_base.id, query, None, None)
+            .search_for_agent(&own_base.id, query, None, None)
             .map_err(|error| format!("search_knowledge on {} failed: {error}", own_base.id))?;
         let leaked = joined_content(&found).contains(forbidden_fact);
         let ok = !leaked && !other_bound;
@@ -1055,6 +1057,8 @@ fn search_probes(
             "question": probe.get("question").cloned().unwrap_or(Value::Null),
             "searchQuery": query,
             "searchedKnowledgeBaseId": own_base.id.clone(),
+            "mode": found.get("mode").cloned().unwrap_or(Value::Null),
+            "fallback": found.get("fallback").cloned().unwrap_or(Value::Null),
             "forbiddenFact": forbidden_fact,
             "forbiddenFactLeaked": leaked,
             "otherKnowledgeBaseId": other_base.map(|base| base.id.clone()),
@@ -1065,7 +1069,7 @@ fn search_probes(
     }
 
     Ok(json!({
-        "method": "LocalKnowledgeStore::search_lexical and ::read_document -- the exact calls runtime_host::execute_bound_knowledge_tool makes for a source:'local' target of search_knowledge / read_knowledge_document",
+        "method": "LocalKnowledgeStore::search_for_agent and ::read_document -- the calls runtime_host::execute_bound_knowledge_tool makes for a source:'local' target",
         "bindingGate": "replicated from runtime_host::execute_bound_knowledge_tool's ensure_bound using Database::conversation_knowledge_reference_bindings; the composed Host tool (tool guard, approval, Run record) is NOT exercised by this binary",
         "allOk": all_ok,
         "questions": questions,

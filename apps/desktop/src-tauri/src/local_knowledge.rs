@@ -1988,8 +1988,9 @@ impl LocalKnowledgeStore {
     ) -> Result<Value, LocalKnowledgeError> {
         control.check()?;
         let base = self.get_base(knowledge_base_id)?;
+        // 检索路径复用这一次读到的资料库，不再在 search_retrieval 里重复 get_base。
         self.search_for_agent_with(&base, query, requested_limit, requested_max_chars, |request| {
-            self.search_retrieval_controlled(request, control)
+            self.search_retrieval_for_base(&base, request, control)
         })
     }
 
@@ -2013,9 +2014,9 @@ impl LocalKnowledgeStore {
                 let request = crate::local_knowledge_vector::KnowledgeRetrievalRequest {
                     knowledge_base_id: base.id.clone(),
                     query: trimmed.to_owned(),
-                    mode: Some(mode),
-                    // One extra hit tells whether more matches exist than were returned.
-                    limit: Some((result_limit + 1).min(MAX_LOCAL_SEARCH_RESULTS)),
+                    mode: Some(mode.clone()),
+                    // 多取 1 条用来判断 hasMore。上限比展示条数多 1，topK=20 时仍能看出还有没有更多。
+                    limit: Some((result_limit + 1).min(MAX_LOCAL_SEARCH_RESULTS + 1)),
                 };
                 // R4: a ready index whose retrieval fails is a failure, not a
                 // quiet switch to keyword search. The error keeps its code.
@@ -2025,6 +2026,7 @@ impl LocalKnowledgeStore {
                             &base.id,
                             trimmed,
                             &retrieved,
+                            &mode,
                             result_limit,
                             requested_max_chars,
                         )
@@ -2051,6 +2053,7 @@ impl LocalKnowledgeStore {
         knowledge_base_id: &str,
         query: &str,
         retrieved: &Value,
+        requested_mode: &str,
         result_limit: usize,
         requested_max_chars: Option<usize>,
     ) -> Result<Value, LocalKnowledgeError> {
@@ -2069,6 +2072,14 @@ impl LocalKnowledgeStore {
             .filter(|mode| matches!(*mode, "vector" | "hybrid"))
             .ok_or_else(|| LocalKnowledgeError::invalid("retrieval result has no vector mode"))?
             .to_owned();
+        // 返回的 mode 必须等于本次请求的 mode，不能只接受「是向量或混合」。
+        if mode != requested_mode {
+            return Err(LocalKnowledgeError::invalid(format!(
+                "retrieval returned mode {mode} but {requested_mode} was requested"
+            )));
+        }
+        // 混合检索分数是 RRF，纯向量是余弦。到这里 mode 只可能是二者之一。
+        let score_kind = if mode == "hybrid" { "rrf" } else { "cosine" };
         let hits = retrieved
             .get("items")
             .and_then(Value::as_array)
@@ -2082,11 +2093,22 @@ impl LocalKnowledgeStore {
         let max_chars = requested_max_chars
             .unwrap_or(DEFAULT_LOCAL_SEARCH_CHARS)
             .clamp(1, MAX_LOCAL_SEARCH_CHARS);
+        // 本资料库找不到的 chunk（含缺少 chunkId）会被丢掉，条数必须留在结果里。
+        let mut dropped_hits = 0usize;
         let scoped_hits = hits
             .iter()
             .filter_map(|hit| {
-                let chunk_id = hit.get("chunkId").and_then(Value::as_str)?;
-                chunks.get(chunk_id).map(|chunk| (hit, chunk))
+                let Some(chunk_id) = hit.get("chunkId").and_then(Value::as_str) else {
+                    dropped_hits += 1;
+                    return None;
+                };
+                match chunks.get(chunk_id) {
+                    Some(chunk) => Some((hit, chunk)),
+                    None => {
+                        dropped_hits += 1;
+                        None
+                    }
+                }
             })
             .collect::<Vec<_>>();
         let hit_count = scoped_hits.len();
@@ -2112,7 +2134,7 @@ impl LocalKnowledgeStore {
                 "source": "local",
                 "sourceMetadata": source_metadata(knowledge_base_id, chunk),
             });
-            for (from, to) in [("vectorScore", "vectorScore"), ("keywordScore", "lexicalScore")] {
+            for (from, to) in [("vectorScore", "vectorScore"), ("lexicalScore", "lexicalScore")] {
                 if let Some(score) = hit.get(from).filter(|score| !score.is_null()) {
                     item[to] = score.clone();
                 }
@@ -2124,10 +2146,14 @@ impl LocalKnowledgeStore {
             "knowledgeBaseId": knowledge_base_id,
             "query": query,
             "mode": mode,
+            "scoreKind": score_kind,
             "fusionVersion": retrieved.get("fusionVersion").cloned().unwrap_or(Value::Null),
             "items": items,
             "total": hit_count,
             "truncated": truncated,
+            "hasMore": hit_count > result_limit,
+            "totalIsLowerBound": true,
+            "droppedHits": dropped_hits,
             "fallback": { "active": false },
         }))
     }
@@ -2262,13 +2288,18 @@ impl LocalKnowledgeStore {
             }));
         }
 
+        // total 仍是 SQL 候选数（最多 2000）。hasMore 用这个实际候选数对比本次返回条数。
+        let returned_count = items.len();
         Ok(json!({
             "source": "local",
             "knowledgeBaseId": knowledge_base_id,
             "query": query,
+            "scoreKind": "lexical",
             "items": items,
             "total": candidate_count,
             "truncated": truncated,
+            "hasMore": candidate_count > returned_count,
+            "totalIsLowerBound": false,
             "fallback": fallback,
         }))
     }
@@ -2280,6 +2311,31 @@ impl LocalKnowledgeStore {
         chunk_id: Option<&str>,
         requested_max_chars: Option<usize>,
     ) -> Result<Value, LocalKnowledgeError> {
+        self.read_document_page(
+            knowledge_base_id,
+            document_id,
+            chunk_id,
+            requested_max_chars,
+            None,
+        )
+    }
+
+    /// 按块分页读取。正文只出现在顶层 `content`；`chunks` 只保留定位信息。
+    /// `start_chunk_index` 有值时只读 `chunk_index` 大于等于它的块。
+    pub fn read_document_page(
+        &self,
+        knowledge_base_id: &str,
+        document_id: &str,
+        chunk_id: Option<&str>,
+        requested_max_chars: Option<usize>,
+        start_chunk_index: Option<usize>,
+    ) -> Result<Value, LocalKnowledgeError> {
+        let chunk_filter = chunk_id.map(str::trim).filter(|value| !value.is_empty());
+        if chunk_filter.is_some() && start_chunk_index.is_some() {
+            return Err(LocalKnowledgeError::invalid(
+                "chunkId and startChunkIndex are mutually exclusive",
+            ));
+        }
         self.get_base(knowledge_base_id)?;
         let max_chars = requested_max_chars
             .unwrap_or(DEFAULT_LOCAL_SEARCH_CHARS)
@@ -2302,9 +2358,14 @@ impl LocalKnowledgeStore {
             rusqlite::types::Value::Text(knowledge_base_id.to_owned()),
             rusqlite::types::Value::Text(document_id.to_owned()),
         ];
-        if let Some(chunk_id) = chunk_id.filter(|value| !value.trim().is_empty()) {
+        if let Some(chunk_id) = chunk_filter {
             sql.push_str(" AND c.id = ?3");
             sql_params.push(rusqlite::types::Value::Text(chunk_id.to_owned()));
+        } else if let Some(start_chunk_index) = start_chunk_index {
+            sql.push_str(" AND c.chunk_index >= ?3");
+            sql_params.push(rusqlite::types::Value::Integer(
+                i64::try_from(start_chunk_index).unwrap_or(i64::MAX),
+            ));
         }
         sql.push_str(" ORDER BY c.chunk_index ASC");
 
@@ -2313,33 +2374,46 @@ impl LocalKnowledgeStore {
             .query_map(params_from_iter(sql_params), map_lexical_chunk)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(LocalKnowledgeError::from)?;
-        if chunk_id.is_some() && chunks.is_empty() {
+        if chunk_filter.is_some() && chunks.is_empty() {
             return Err(LocalKnowledgeError::not_found("knowledge chunk"));
         }
 
         let mut used_chars = 0usize;
         let mut truncated = false;
+        let mut next_chunk_index: Option<i64> = None;
+        let mut next_chunk_partial = false;
         let mut chunk_items = Vec::new();
         let mut content_parts = Vec::new();
         for chunk in chunks {
             if used_chars >= max_chars {
                 truncated = true;
+                next_chunk_index = Some(chunk.chunk_index);
+                next_chunk_partial = false;
                 break;
             }
             let content = truncate_chars(&chunk.text, max_chars - used_chars);
-            if content.len() < chunk.text.len() {
+            let included = content.chars().count();
+            let partial = included < chunk.text.chars().count();
+            if partial {
                 truncated = true;
             }
-            used_chars += content.chars().count();
-            content_parts.push(content.clone());
+            used_chars += included;
+            content_parts.push(content);
             chunk_items.push(json!({
                 "chunkId": chunk.id,
                 "documentId": chunk.document_id,
+                "chunkIndex": chunk.chunk_index,
                 "anchor": chunk.anchor,
-                "content": content,
+                "charCount": included,
                 "source": "local",
                 "sourceMetadata": source_metadata(knowledge_base_id, &chunk),
             }));
+            if partial {
+                // 这一块只读了一部分，下一页仍从它的 chunk_index 开始。
+                next_chunk_index = Some(chunk.chunk_index);
+                next_chunk_partial = true;
+                break;
+            }
         }
 
         Ok(json!({
@@ -2347,10 +2421,12 @@ impl LocalKnowledgeStore {
             "knowledgeBaseId": knowledge_base_id,
             "documentId": document_id,
             "document": document,
-            "chunkId": chunk_id.filter(|value| !value.trim().is_empty()),
+            "chunkId": chunk_filter,
             "content": content_parts.join("\n\n"),
             "chunks": chunk_items,
             "truncated": truncated,
+            "nextChunkIndex": next_chunk_index,
+            "nextChunkPartial": next_chunk_partial,
         }))
     }
 
@@ -5363,7 +5439,7 @@ pub(crate) mod agent_search_test_support {
                     "anchor": null,
                     "content": "ignored-by-mapping",
                     "score": 0.05 - index as f64 * 0.001,
-                    "keywordScore": if index == 0 { Some(1.5) } else { None },
+                    "lexicalScore": if index == 0 { Some(1.5) } else { None },
                     "vectorScore": 0.9 - index as f64 * 0.1,
                 })
             })
@@ -5591,13 +5667,397 @@ mod agent_search_tests {
             .sum();
         assert_eq!(used, 10);
 
-        // topK is clamped to the lexical maximum and the extra probe hit stays within it.
+        // topK 封顶 20 之后仍多取 1 条，请求上限是 21。
         store
             .search_for_agent_with(&base, "检索", Some(500), None, |request| {
-                assert_eq!(request.limit, Some(MAX_LOCAL_SEARCH_RESULTS));
+                assert_eq!(request.limit, Some(MAX_LOCAL_SEARCH_RESULTS + 1));
                 Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
             })
             .unwrap();
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb13_mapping_refuses_a_retrieval_whose_mode_differs_from_the_request() {
+        let (store, root) = temp_store("kb13");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "模式", "mode.md", &["模式必须一致"]);
+        let error = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "模式",
+                None,
+                None,
+                |request| {
+                    assert_eq!(request.mode.as_deref(), Some("hybrid"));
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids,
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "local_knowledge.invalid_request");
+        let message = error.to_string();
+        assert!(
+            message.contains("retrieval returned mode vector but hybrid was requested"),
+            "{message}"
+        );
+        assert!(message.contains("不会改用关键词检索"), "{message}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb11_dropped_hits_are_counted() {
+        let (store, root) = temp_store("kb11");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "丢弃", "drop.md", &["留下的片段"]);
+        let mut ids = chunk_ids.clone();
+        ids.insert(0, "chunk-does-not-exist".to_owned());
+        let result = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "留下",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &ids)),
+            )
+            .unwrap();
+        assert_eq!(result["droppedHits"], 1);
+        assert_eq!(result["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(result["items"][0]["chunkId"], chunk_ids[0].as_str());
+        assert_eq!(result["total"], 1);
+
+        let kept = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "留下",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(kept["droppedHits"], 0);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb12_score_kind_names_the_scale_on_every_path() {
+        let (store, root) = temp_store("kb12");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "尺度", "score.md", &["向量与关键词尺度"]);
+
+        let vector = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "尺度",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(vector["scoreKind"], "cosine");
+        assert!(vector["items"][0].get("scoreKind").is_none());
+
+        let hybrid = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "尺度",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(hybrid["scoreKind"], "rrf");
+        assert!(hybrid["items"][0].get("scoreKind").is_none());
+
+        let keyword = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "keyword"),
+                "尺度",
+                None,
+                None,
+                |_| panic!("keyword mode must not call vector retrieval"),
+            )
+            .unwrap();
+        assert_eq!(keyword["scoreKind"], "lexical");
+        assert!(keyword["items"][0].get("scoreKind").is_none());
+
+        let lexical = store.search_lexical(&base_id, "尺度", None, None).unwrap();
+        assert_eq!(lexical["scoreKind"], "lexical");
+        assert!(lexical["items"][0].get("scoreKind").is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb4_has_more_is_reported_on_vector_and_keyword_paths() {
+        let (store, root) = temp_store("kb4-more");
+        let (base_id, _, chunk_ids) = base_with_document(
+            &store,
+            "更多",
+            "more.md",
+            &["甲一二三", "甲四五六", "甲七八九", "甲十十一"],
+        );
+        let vector = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "甲",
+                Some(2),
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(vector["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(vector["total"], 4);
+        assert_eq!(vector["hasMore"], true);
+        assert_eq!(vector["totalIsLowerBound"], true);
+        assert_eq!(vector["truncated"], true);
+
+        // 映射后的命中数没有超过 result_limit 时，字符截断也不算 hasMore。
+        let within = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "甲",
+                Some(5),
+                Some(3),
+                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids[..2])),
+            )
+            .unwrap();
+        assert_eq!(within["total"], 2);
+        assert_eq!(within["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(within["truncated"], true);
+        assert_eq!(within["hasMore"], false);
+        assert_eq!(within["totalIsLowerBound"], true);
+
+        let keyword = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "keyword"),
+                "甲",
+                Some(2),
+                None,
+                |_| panic!("keyword mode must not call vector retrieval"),
+            )
+            .unwrap();
+        assert_eq!(keyword["items"].as_array().map(Vec::len), Some(2));
+        assert_eq!(keyword["total"], 4);
+        assert_eq!(keyword["hasMore"], true);
+        assert_eq!(keyword["totalIsLowerBound"], false);
+
+        let keyword_all = store
+            .search_lexical(&base_id, "甲", Some(10), None)
+            .unwrap();
+        assert_eq!(keyword_all["items"].as_array().map(Vec::len), Some(4));
+        assert_eq!(keyword_all["total"], 4);
+        assert_eq!(keyword_all["hasMore"], false);
+        assert_eq!(keyword_all["totalIsLowerBound"], false);
+
+        // 关键词路径按实际候选数对比本次返回条数，字符预算提前停下也算还有更多。
+        let keyword_chars = store
+            .search_lexical(&base_id, "甲", Some(8), Some(2))
+            .unwrap();
+        assert_eq!(keyword_chars["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(keyword_chars["total"], 4);
+        assert_eq!(keyword_chars["hasMore"], true);
+        assert_eq!(keyword_chars["totalIsLowerBound"], false);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb4_top_k_twenty_can_still_tell_there_are_more() {
+        let (store, root) = temp_store("kb4-twenty");
+        let texts: Vec<String> = (0..22).map(|index| format!("片段{index:02}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let (base_id, _, chunk_ids) = base_with_document(&store, "二十", "twenty.md", &refs);
+        assert_eq!(chunk_ids.len(), 22);
+
+        let more = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "片段",
+                Some(20),
+                None,
+                |request| {
+                    assert_eq!(request.limit, Some(21));
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "hybrid",
+                        &chunk_ids[..21],
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(more["items"].as_array().map(Vec::len), Some(20));
+        assert_eq!(more["total"], 21);
+        assert_eq!(more["hasMore"], true);
+        assert_eq!(more["totalIsLowerBound"], true);
+
+        let exact = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "片段",
+                Some(20),
+                None,
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids[..20],
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(exact["items"].as_array().map(Vec::len), Some(20));
+        assert_eq!(exact["total"], 20);
+        assert_eq!(exact["hasMore"], false);
+        assert_eq!(exact["totalIsLowerBound"], true);
+
+        // 进程内检索上限是 21，不再把多取的那一条截掉。
+        let probed = store
+            .search_retrieval_in_process(crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+                knowledge_base_id: base_id.clone(),
+                query: "片段".to_owned(),
+                mode: Some("keyword".to_owned()),
+                limit: Some(21),
+            })
+            .unwrap();
+        assert_eq!(probed["items"].as_array().map(Vec::len), Some(21));
+        let capped = store
+            .search_retrieval_in_process(crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+                knowledge_base_id: base_id.clone(),
+                query: "片段".to_owned(),
+                mode: Some("keyword".to_owned()),
+                limit: Some(50),
+            })
+            .unwrap();
+        assert_eq!(capped["items"].as_array().map(Vec::len), Some(21));
+
+        assert_eq!(
+            crate::local_knowledge_vector::clamp_ui_retrieval_limit(Some(21)),
+            Some(20)
+        );
+        assert_eq!(
+            crate::local_knowledge_vector::clamp_ui_retrieval_limit(Some(8)),
+            Some(8)
+        );
+        assert_eq!(crate::local_knowledge_vector::clamp_ui_retrieval_limit(None), None);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb8_read_document_returns_text_once_and_pages_by_chunk_index() {
+        let (store, root) = temp_store("kb8");
+        let (base_id, document_id, _) = base_with_document(
+            &store,
+            "分页",
+            "page.md",
+            &["AAAAAAAA", "BBBBBBBB", "CCCCCCCC"],
+        );
+        // 每块 8 个字符，12 个字符只够第一块再加第二块的一半。
+        let first = store
+            .read_document(&base_id, &document_id, None, Some(12))
+            .unwrap();
+        assert_eq!(first["content"], "AAAAAAAA\n\nBBBB");
+        assert_eq!(first["nextChunkIndex"], 1);
+        assert_eq!(first["nextChunkPartial"], true);
+        let first_chunks = first["chunks"].as_array().unwrap();
+        assert_eq!(first_chunks.len(), 2);
+        assert_eq!(first_chunks[0]["chunkIndex"], 0);
+        assert_eq!(first_chunks[0]["charCount"], 8);
+        assert_eq!(first_chunks[1]["chunkIndex"], 1);
+        assert_eq!(first_chunks[1]["charCount"], 4);
+        for item in first_chunks {
+            assert!(item.get("content").is_none(), "{item}");
+            assert!(item.get("chunkId").is_some());
+            assert!(item.get("documentId").is_some());
+            assert!(item.get("anchor").is_some());
+            assert!(item.get("source").is_some());
+            assert!(item.get("sourceMetadata").is_some());
+        }
+        assert_eq!(first.to_string().matches("AAAAAAAA").count(), 1);
+        assert_eq!(first.to_string().matches("BBBB").count(), 1);
+
+        let second = store
+            .read_document_page(&base_id, &document_id, None, Some(100), Some(1))
+            .unwrap();
+        assert_eq!(second["content"], "BBBBBBBB\n\nCCCCCCCC");
+        assert!(second["nextChunkIndex"].is_null());
+        assert_eq!(second["nextChunkPartial"], false);
+        let second_chunks = second["chunks"].as_array().unwrap();
+        assert_eq!(second_chunks.len(), 2);
+        assert_eq!(second_chunks[0]["chunkIndex"], 1);
+        assert_eq!(second_chunks[1]["chunkIndex"], 2);
+        assert!(second_chunks.iter().all(|item| item.get("content").is_none()));
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb8_chunk_id_and_start_chunk_index_are_mutually_exclusive() {
+        let (store, root) = temp_store("kb8-exclusive");
+        let (base_id, document_id, chunk_ids) =
+            base_with_document(&store, "互斥", "exclusive.md", &["只有一块"]);
+        let error = store
+            .read_document_page(
+                &base_id,
+                &document_id,
+                Some(&chunk_ids[0]),
+                Some(20),
+                Some(0),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "local_knowledge.invalid_request");
+        assert!(
+            error
+                .to_string()
+                .contains("chunkId and startChunkIndex are mutually exclusive"),
+            "{error}"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb7_retrieval_and_agent_results_name_the_lexical_score_the_same() {
+        let (store, root) = temp_store("kb7");
+        let (base_id, _, chunk_ids) =
+            base_with_document(&store, "字段", "fields.md", &["词法分数一致"]);
+        let retrieved = store
+            .search_retrieval_in_process(crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+                knowledge_base_id: base_id.clone(),
+                query: "词法".to_owned(),
+                mode: Some("keyword".to_owned()),
+                limit: Some(5),
+            })
+            .unwrap();
+        let retrieved_item = &retrieved["items"][0];
+        assert!(retrieved_item.get("lexicalScore").is_some());
+        assert!(retrieved_item["lexicalScore"].is_number());
+        assert!(retrieved_item.get("keywordScore").is_none());
+
+        let mapped = store
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "词法",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids)),
+            )
+            .unwrap();
+        assert_eq!(mapped["items"][0]["lexicalScore"], 1.5);
+        assert!(mapped["items"][0].get("keywordScore").is_none());
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
