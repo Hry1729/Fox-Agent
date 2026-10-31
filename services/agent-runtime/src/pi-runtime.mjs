@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readSync } from 'node:fs'
 import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
 import { createFatalErrorHandler } from './runtime-fatal.mjs'
 import { abortAgent } from './agent-abort.mjs'
@@ -173,6 +173,55 @@ function sessionError(code, message) {
   const error = new Error(message)
   error.code = code
   return error
+}
+
+const NATIVE_HEADER_LINE_LIMIT = 1024 * 1024
+
+/**
+ * 只读会话文件第一行并返回头里的 id。Pi 1.4 的会话头字段是 `id`
+ * （`type: "session"`），没有 conversationId。读不出或解析失败抛
+ * session.native_corrupt。全程只读，不改文件。
+ */
+export function readNativeSessionHeaderId(filePath) {
+  let fd
+  try {
+    fd = openSync(filePath, 'r')
+    const chunks = []
+    let total = 0
+    const buffer = Buffer.alloc(8192)
+    for (;;) {
+      const count = readSync(fd, buffer, 0, buffer.length, null)
+      if (count === 0) break
+      const slice = buffer.subarray(0, count)
+      const newline = slice.indexOf(0x0a)
+      const take = newline >= 0 ? newline : count
+      total += take
+      if (total > NATIVE_HEADER_LINE_LIMIT) {
+        throw sessionError('session.native_corrupt', 'The Pi session header line exceeds the read limit.')
+      }
+      chunks.push(Buffer.from(slice.subarray(0, take)))
+      if (newline >= 0) break
+    }
+    try { closeSync(fd) } catch { /* 关闭失败不能盖住后面的解析错误；fd 已尽力释放 */ }
+    fd = undefined
+    const line = Buffer.concat(chunks).toString('utf8').replace(/\r$/, '')
+    let header
+    try {
+      header = JSON.parse(line)
+    } catch {
+      throw sessionError('session.native_corrupt', 'The Pi session header is not valid JSON.')
+    }
+    if (!header || typeof header.id !== 'string' || header.id.length === 0) {
+      throw sessionError('session.native_corrupt', 'The Pi session header is missing its id.')
+    }
+    return header.id
+  } catch (error) {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* 读取错误优先返回 */ }
+    }
+    if (typeof error?.code === 'string' && error.code.startsWith('session.')) throw error
+    throw sessionError('session.native_corrupt', `The Pi session file cannot be read: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 function nativeSessionDirectory(payload) {
@@ -1188,6 +1237,8 @@ async function handleRequest(request) {
           } catch (error) {
             throw sessionError('session.native_directory_unusable', `The Pi session directory cannot be used: ${error instanceof Error ? error.message : String(error)}`)
           }
+          // 会话头没有 conversationId。这条自定义记录是恢复时核对会话归属的依据。
+          manager.appendCustomEntry('fox.conversation', { conversationId: request.conversationId })
           const session = {
             schemaVersion: 2,
             format: 'pi-native',
@@ -1226,6 +1277,12 @@ async function handleRequest(request) {
           if (!existsSync(path)) {
             throw sessionError('session.native_missing', `The Pi session file does not exist: ${path}`)
           }
+          // 身份先于截断：Host 指错文件时，不能先改掉另一个会话末尾的半行。
+          const headerId = readNativeSessionHeaderId(path)
+          const expected = request.payload?.nativeSessionId
+          if (typeof expected === 'string' && expected && expected !== headerId) {
+            throw sessionError('session.native_identity_mismatch', 'The Pi session file belongs to another session; refusing to open it as this conversation.')
+          }
           // `SessionManager.open` tolerates some malformed files and would
           // silently answer a resume with a fresh/partial session. Fox must
           // validate complete records and remove an interrupted final append
@@ -1244,14 +1301,17 @@ async function handleRequest(request) {
             const code = /ENOENT|no such file|not found/i.test(message) ? 'session.native_missing' : 'session.native_corrupt'
             throw sessionError(code, `The Pi session file cannot be opened: ${message}`)
           }
-          const expected = request.payload?.nativeSessionId
           const actual = manager.getSessionId()
           if (typeof expected === 'string' && expected && expected !== actual) {
             throw sessionError('session.native_identity_mismatch', 'The Pi session file belongs to another session; refusing to open it as this conversation.')
           }
-          if (request.payload?.conversationId && manager.getHeader?.()?.conversationId
-            && manager.getHeader().conversationId !== request.conversationId) {
-            throw sessionError('session.native_conversation_mismatch', 'The Pi session file belongs to another conversation.')
+          // 会话归属写在 fox.conversation 自定义记录里。没有这条记录的是本次改动之前
+          // 建的会话，照常打开。
+          for (const entry of manager.getEntries()) {
+            if (entry.type !== 'custom' || entry.customType !== 'fox.conversation') continue
+            if (entry.data?.conversationId !== request.conversationId) {
+              throw sessionError('session.native_conversation_mismatch', 'The Pi session file belongs to another conversation.')
+            }
           }
           const session = {
             schemaVersion: 2,

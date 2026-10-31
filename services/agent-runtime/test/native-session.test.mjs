@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline'
 import { createServer } from 'node:http'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { SessionManager } from '../src/pi-adapter.mjs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -191,4 +192,105 @@ test('a legacy fox-snapshot session keeps its exact behaviour', async (context) 
   assert.equal(created.type, 'session_created')
   assert.equal(created.payload.format, undefined, 'no native metadata on the legacy path')
   assert.ok(!existsSync(join(directory, 'sessions')), 'the legacy path creates no Pi session directory')
+})
+
+test('ps4_resume_of_another_sessions_file_is_refused_before_any_truncation', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-ps4-identity-'))
+  const provider = await startProvider('ok')
+  const runtime = startRuntime()
+  context.after(async () => {
+    await runtime.close()
+    provider.close()
+    await rm(directory, { recursive: true, force: true })
+  })
+  await initialize(runtime, provider.baseUrl)
+  const sessionPath = join(directory, 'other.jsonl')
+  const header = '{"type":"session","version":3,"id":"session-real","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}\n'
+  // 末尾半行是 prepareNativeSessionFileForResume 会截掉的那种损坏。身份不对时一个字节都不能动。
+  await writeFile(sessionPath, `${header}{"type":"message","id":"partial"`)
+  const before = await readFile(sessionPath)
+  const request = runtime.send('resume_session', {
+    conversationId: 'conversation-ps4',
+    runtimeSessionId: 'session-ps4-identity',
+    payload: {
+      sessionFormat: 'pi-native',
+      nativeSessionPath: sessionPath,
+      nativeSessionId: 'session-other',
+    },
+  })
+  const failed = await runtime.waitFor((message) => message.requestId === request.id)
+  assert.equal(failed.type, 'request_failed')
+  assert.equal(failed.payload.code, 'session.native_identity_mismatch', JSON.stringify(failed.payload))
+  assert.deepEqual(await readFile(sessionPath), before)
+})
+
+test('ps4_resume_from_another_conversation_is_refused', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-ps4-conversation-'))
+  const provider = await startProvider('ok')
+  const owner = { conversationId: 'conversation-ps4-owner', runtimeSessionId: 'session-ps4-owner' }
+  const runtime = startRuntime()
+  context.after(async () => {
+    await runtime.close()
+    provider.close()
+    await rm(directory, { recursive: true, force: true })
+  })
+  await initialize(runtime, provider.baseUrl)
+  const create = runtime.send('create_session', {
+    ...owner,
+    payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions') },
+  })
+  const created = await runtime.waitFor((message) => message.requestId === create.id)
+  assert.equal(created.type, 'session_created', JSON.stringify(created))
+  await prompt(runtime, { ...owner, runId: 'run-ps4-owner', text: '记下这个会话属于原对话。' })
+  const sessionPath = created.payload.nativeSessionPath
+  const stored = await readFile(sessionPath, 'utf8')
+  assert.ok(stored.includes('"customType":"fox.conversation"'), 'create_session 应写入会话归属')
+  assert.ok(stored.includes(owner.conversationId))
+
+  const other = startRuntime()
+  context.after(async () => { await other.close() })
+  await initialize(other, provider.baseUrl)
+  const resume = other.send('resume_session', {
+    conversationId: 'conversation-ps4-other',
+    runtimeSessionId: 'session-ps4-other',
+    payload: {
+      sessionFormat: 'pi-native',
+      nativeSessionPath: sessionPath,
+      nativeSessionId: created.payload.nativeSessionId,
+    },
+  })
+  const failed = await other.waitFor((message) => message.requestId === resume.id)
+  assert.equal(failed.type, 'request_failed')
+  assert.equal(failed.payload.code, 'session.native_conversation_mismatch', JSON.stringify(failed.payload))
+})
+
+test('ps4_sessions_created_before_this_change_still_resume', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-ps4-legacy-native-'))
+  const provider = await startProvider('ok')
+  const runtime = startRuntime()
+  context.after(async () => {
+    await runtime.close()
+    provider.close()
+    await rm(directory, { recursive: true, force: true })
+  })
+  await initialize(runtime, provider.baseUrl)
+  // 改动之前的文件只有 Pi 自己的头和消息，没有 fox.conversation。
+  const manager = SessionManager.create(directory, join(directory, 'sessions'))
+  manager.appendMessage({
+    role: 'user',
+    content: [{ type: 'text', text: '这是改动前就存在的会话。' }],
+    timestamp: Date.now(),
+  })
+  const sessionPath = manager.getSessionFile()
+  const nativeSessionId = manager.getSessionId()
+  const stored = await readFile(sessionPath, 'utf8')
+  assert.equal(stored.includes('fox.conversation'), false)
+  const resume = runtime.send('resume_session', {
+    conversationId: 'conversation-ps4-legacy',
+    runtimeSessionId: 'session-ps4-legacy',
+    payload: { sessionFormat: 'pi-native', nativeSessionPath: sessionPath, nativeSessionId },
+  })
+  const resumed = await runtime.waitFor((message) => message.requestId === resume.id)
+  assert.equal(resumed.type, 'session_created', JSON.stringify(resumed))
+  assert.equal(resumed.payload.nativeSessionId, nativeSessionId)
 })
