@@ -109,13 +109,34 @@ impl ExternalLauncher for BridgeLauncher {
             let assets = fox_mcp::write_assets(&state_root).map_err(|error| LaunchFailure::new("agent_backend_fox_tools_unavailable", error))?;
             let grant = bridge.issue(&request.conversation_id, request.backend).map_err(|error| LaunchFailure::new("agent_backend_fox_tools_unavailable", error))?;
             tokens.lock().unwrap().push(grant.token.clone());
-            let Some(McpInjection::AcpStdio(server)) = fox_mcp::injection_for(request.backend, &grant, &node().expect("node"), &assets) else {
-                return Err(LaunchFailure::new("agent_backend_invalid", "expected stdio injection"));
+            let node = node().expect("node");
+            let connection = match fox_mcp::injection_for(request.backend, &grant, &node, &assets) {
+                Some(McpInjection::AcpStdio(server)) => {
+                    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mock-acp-mcp-agent.mjs");
+                    let spec = LaunchSpec { backend: request.backend, program: "node".into(), args: vec![script.into()], version_pin: "mock", credential_env: &[], experimental: false, session_env: vec![] };
+                    let mut connection = AcpConnection::spawn_detailed(&spec, &request.project_root).await.map_err(LaunchFailure::from)?;
+                    connection.set_mcp_servers(vec![server]);
+                    connection
+                }
+                // pi (plan C3): the gate loads the extension; the launch is the
+                // real fixtures/pi/pi-gated.sh with FOX_PI_BIN = the mock pi.
+                Some(McpInjection::PiExtension { env }) => {
+                    let wrapper = state_root.join("fake-pi.sh");
+                    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mock-acp-pi-agent.mjs");
+                    std::fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{fixture}' \"$@\"\n", node.display())).unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    }
+                    let mut session_env = env;
+                    session_env.push(("FOX_PI_BIN".into(), wrapper.to_string_lossy().into_owned()));
+                    let gate = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/pi/pi-gated.sh");
+                    let spec = LaunchSpec { backend: request.backend, program: "sh".into(), args: vec![gate.into()], version_pin: "mock", credential_env: &[], experimental: false, session_env };
+                    AcpConnection::spawn_detailed(&spec, &request.project_root).await.map_err(LaunchFailure::from)?
+                }
+                _ => return Err(LaunchFailure::new("agent_backend_invalid", "no Fox tool injection")),
             };
-            let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mock-acp-mcp-agent.mjs");
-            let spec = LaunchSpec { backend: request.backend, program: "node".into(), args: vec![script.into()], version_pin: "mock", credential_env: &[], experimental: false, session_env: vec![] };
-            let mut connection = AcpConnection::spawn_detailed(&spec, &request.project_root).await.map_err(LaunchFailure::from)?;
-            connection.set_mcp_servers(vec![server]);
             let token = grant.token.clone();
             Ok(Launched {
                 connection,
@@ -222,5 +243,72 @@ async fn the_bridge_is_injected_used_and_revoked_for_codex_and_dsh() {
     let mut lines = tokio::io::BufReader::new(read).lines();
     let refusal: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
     assert_eq!(refusal["error"]["code"], fox_mcp::rpc_code::TOKEN_REFUSED);
+    runtime.shutdown().await;
+}
+
+/// Plan C5 (Linux): pi reaches the Fox tools through the C3 gate, which loads
+/// the real `fox-mcp-tools.ts` (`FOX_PI_MCP_EXTENSION`) after the approval
+/// gate; the extension connects to the same bridge with the launch's token.
+/// Unix only: the launch is `sh fixtures/pi/pi-gated.sh` (Windows runs the
+/// `.cmd` twin, covered by the 13.32 Windows checks).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn pi_loads_the_fox_tool_extension_through_the_gate_and_uses_the_bridge() {
+    let Some(node) = node() else {
+        eprintln!("SKIPPED: node not installed");
+        return;
+    };
+    // fox-mcp-tools.ts is TypeScript: Node runs it with type stripping (22.18+ default).
+    let strips = std::process::Command::new(&node).args(["-e", "process.exit(process.features.typescript ? 0 : 1)"]).status().map(|status| status.success()).unwrap_or(false);
+    if !strips {
+        eprintln!("SKIPPED: this Node cannot strip TypeScript types");
+        return;
+    }
+    let host = RecordingHost::default();
+    let bridge = McpBridge::start(Arc::new(host.clone()), &tokio::runtime::Handle::current()).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let launcher = BridgeLauncher { bridge: bridge.clone(), state_root: state.path().to_path_buf(), tokens: Arc::default() };
+    let sink = Sink::default();
+    let runtime = ExternalRuntime::new(sink.clone(), launcher.clone(), tokio::runtime::Handle::current());
+    let _ = host.runtime.set(runtime.clone());
+    let conversation = "conv-pi";
+
+    // 1. The gate gave pi the approval gate and then the Fox tool extension.
+    runtime.start_turn(turn(conversation, "pi-args", "args", AgentBackend::Pi)).unwrap();
+    assert_eq!(sink.terminal("pi-args").await["type"], "run.completed");
+    let args: Value = serde_json::from_str(&sink.text("pi-args")).unwrap();
+    assert_eq!(args["extensions"], json!(["fox-approval-gate.ts", fox_mcp::PI_EXTENSION_FILE]), "{args}");
+
+    // 2. The extension registered exactly the bridge's tools with pi.
+    runtime.start_turn(turn(conversation, "pi-tools", "tools", AgentBackend::Pi)).unwrap();
+    assert_eq!(sink.terminal("pi-tools").await["type"], "run.completed");
+    let tools: Vec<String> = serde_json::from_str(&sink.text("pi-tools")).unwrap();
+    assert_eq!(tools, fox_mcp::TOOL_NAMES);
+
+    // 3. A pi tool call reaches the Host bound to this conversation and turn.
+    let call = r#"call present_files {"files":[{"path":"report.docx"}],"conversationId":"someone-else"}"#;
+    runtime.start_turn(turn(conversation, "pi-present", call, AgentBackend::Pi)).unwrap();
+    assert_eq!(sink.terminal("pi-present").await["type"], "run.completed");
+    let result: Value = serde_json::from_str(&sink.text("pi-present")).unwrap();
+    let payload: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["run"], "pi-present", "the Host saw the active turn");
+    let (context, tool, _) = host.calls.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((context.conversation_id.as_str(), context.backend, tool.as_str()), (conversation, AgentBackend::Pi, "present_files"));
+
+    // 4. A Host refusal is thrown from execute (pi reports it as a tool error).
+    runtime.start_turn(turn(conversation, "pi-refused", "call read_knowledge_document {\"documentId\":\"d\"}", AgentBackend::Pi)).unwrap();
+    assert_eq!(sink.terminal("pi-refused").await["type"], "run.completed");
+    assert!(sink.text("pi-refused").starts_with("tool-error:") && sink.text("pi-refused").contains("local_knowledge.binding_invalid"), "{}", sink.text("pi-refused"));
+
+    // 5. ask_user ends the turn awaiting the user.
+    runtime.start_turn(turn(conversation, "pi-ask", "ask", AgentBackend::Pi)).unwrap();
+    let terminal = sink.terminal("pi-ask").await;
+    assert_eq!(terminal["completionReason"], "awaiting_user", "{terminal}");
+    assert!(sink.events("pi-ask").iter().any(|event| event["type"] == "user.question.requested"));
+
+    // 6. Stop: the token is revoked with the process.
+    assert_eq!(bridge.live_tokens(), 1);
+    runtime.close_conversation(conversation, "test done").await;
+    assert_eq!(bridge.live_tokens(), 0);
     runtime.shutdown().await;
 }

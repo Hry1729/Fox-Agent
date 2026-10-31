@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fox Windows external-backend runtime package: path budget, packing, SHA256,
+r"""Fox Windows external-backend runtime package: path budget, packing, SHA256,
 manifest. The package carries Node, the external backends and Fox's runtime
 assets; it carries no sandbox runtime (srt): a package with an srt\ tree is
 refused.
@@ -230,7 +230,7 @@ def verify_layout(directory):
             problems.append(f"{tree} must not be in the package (Fox no longer ships a sandbox runtime)")
     for key, source in PI_GATE_FILES.items():
         if key in keys and norm_text(read_bytes(child(root, key))) != norm_text(read_bytes(fs_path(source))):
-            problems.append(f"{key} differs from {os.path.relpath(source, CRATE)}")
+            problems.append(f"{key} differs from {os.path.relpath(source, CRATE).replace(os.sep, '/')}")
     gate = "pi-gate/pi-gated.cmd"
     if gate in keys and PI_MCP_EXTENSION_ENV.encode() not in read_bytes(child(root, gate)):
         problems.append(f"{gate} does not load the Fox tool extension ({PI_MCP_EXTENSION_ENV})")

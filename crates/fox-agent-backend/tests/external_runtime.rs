@@ -419,6 +419,41 @@ async fn cancel_answers_pending_permissions_and_ends_cancelled() {
     runtime.shutdown().await;
 }
 
+/// Plan C5 (Linux): cancel at an open approval card ends the turn as
+/// cancelled for each of the three Agents (pi 询问, Codex workspace-write, dsh
+/// workspace-write ask), the late answer is never written, and the same
+/// session takes the next turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_at_an_open_card_ends_the_turn_for_pi_codex_and_dsh() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    launcher.revoked.store(true, Ordering::SeqCst);
+    let (runtime, sink) = new_runtime(launcher.clone());
+    for (index, (backend, mode)) in [(AgentBackend::Pi, "ask"), (AgentBackend::Codex, "workspace-write"), (AgentBackend::Deepseek, "workspace-write")].into_iter().enumerate() {
+        let conversation = format!("c-c5-cancel-{}", backend.as_str());
+        let run = format!("r-c5-cancel-{}", backend.as_str());
+        let mut request = turn(&conversation, &run, "hello", backend, None);
+        request.launch.native_permission = Some(mode.into());
+        runtime.start_turn(request).unwrap();
+        let (card_run, approval, _) = sink.wait_approval(index + 1).await;
+        assert_eq!(card_run, run, "{backend:?}: the card belongs to this turn");
+        match runtime.cancel(&run) {
+            CancelOutcome::Requested { answered_permissions } => assert_eq!(answered_permissions.len(), 1, "{backend:?}"),
+            other => panic!("{backend:?}: {other:?}"),
+        }
+        let terminal = sink.terminal(&run).await;
+        assert_eq!(terminal["type"], "run.cancelled", "{backend:?}: {terminal}");
+        assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending, "{backend:?}: a late approval is never written");
+        let mut next = turn(&conversation, &format!("{run}-next"), "simple", backend, None);
+        next.launch.native_permission = Some(mode.into());
+        runtime.start_turn(next).unwrap();
+        assert_eq!(sink.terminal(&format!("{run}-next")).await["type"], "run.completed", "{backend:?}: the session survives the cancel");
+    }
+    runtime.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unconfirmed_cancel_ends_with_outcome_unknown_and_stops_the_process() {
     if !node_available() {
