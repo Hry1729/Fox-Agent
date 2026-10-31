@@ -47,7 +47,8 @@ function notificationDestination(item: AppNotificationRecord) {
   if (view.includes('knowledge') || view === 'local-files' || item.sourceType === 'knowledge') return { Icon: Database, label: '资料库', action: '打开资料库' }
   if (view === 'agents' || view === 'agent-detail') return { Icon: Bot, label: '专家', action: '查看专家' }
   if (view === 'chat' || item.sourceType === 'run') return { Icon: MessageSquare, label: '对话', action: '打开对话' }
-  if (view.startsWith('settings') || view === 'model-service') return { Icon: Settings, label: '设置', action: '去设置' }
+  if (view === 'model-service') return { Icon: Settings, label: '模型服务', action: '去设置模型服务' }
+  if (view.startsWith('settings')) return { Icon: Settings, label: '设置', action: '去设置' }
   return { Icon: ListTodo, label: '任务', action: '查看任务' }
 }
 
