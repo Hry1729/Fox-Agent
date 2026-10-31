@@ -1,8 +1,8 @@
 .fox-shell {
   --fox-shell-chrome: color-mix(in oklch, var(--background) 34%, transparent);
   /* Compact conversation spacing; project headings retain their own height. */
-  --fox-sidebar-row-gap: 1px;
-  --fox-sidebar-group-gap: 3px;
+  --fox-sidebar-row-gap: var(--fox-space-micro);
+  --fox-sidebar-group-gap: var(--fox-space-xs);
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -1130,7 +1130,7 @@
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--fox-space-micro);
 }
 
 .fox-shell .fox-sidebar-command,
@@ -1140,11 +1140,11 @@
   min-height: var(--fox-sidebar-row-height);
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--fox-sidebar-icon-gap);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--fox-radius-card);
   background: transparent;
-  padding: 6px 10px;
+  padding: 0 var(--fox-sidebar-inset);
   color: var(--fox-muted);
   font-size: var(--fox-type-control) !important;
   line-height: 1.4;
@@ -1153,17 +1153,18 @@
   transition: background 130ms ease, color 130ms ease;
 }
 
-/* The project title row stacks a 28px inner control; with the shared row gap as
-   padding it is exactly one 32px row, level with a conversation row. */
+/* 项目名行的 icon 在内部按钮上，外层不再加左内边距，避免和命令行错一列。
+   右内边距留给 + / …，和分组标题的动作列共用右缘。 */
 .fox-shell .fox-project-row {
-  min-height: 30px;
-  padding: var(--fox-sidebar-row-gap) 10px;
+  min-height: var(--fox-sidebar-row-height);
+  gap: 0;
+  padding: 0 var(--fox-sidebar-inset) 0 0;
 }
 
 .fox-shell .fox-sidebar-command {
-  min-height: 28px;
+  min-height: var(--fox-sidebar-row-height);
   border-radius: var(--fox-radius-card);
-  padding: 0 var(--fox-space-l);
+  padding: 0 var(--fox-sidebar-inset);
 }
 
 .fox-sidebar-command.starts-destination-group {
@@ -1244,17 +1245,17 @@
 }
 
 .fox-shell .fox-sidebar-command > svg {
-  width: var(--fox-sidebar-icon-size);
-  height: var(--fox-sidebar-icon-size);
-  flex: 0 0 var(--fox-sidebar-icon-size);
+  width: var(--fox-sidebar-icon-box);
+  height: var(--fox-sidebar-icon-box);
+  flex: 0 0 var(--fox-sidebar-icon-box);
   align-self: center;
   stroke-width: 1.8;
 }
 
 .fox-sidebar.is-collapsed .fox-sidebar-primary {
-  gap: 5px;
+  gap: var(--fox-space-xs);
   align-items: center;
-  transform: translateY(9px);
+  transform: translateY(var(--fox-space-m));
 }
 
 .fox-sidebar.is-collapsed .fox-sidebar-command {
@@ -1268,9 +1269,9 @@
 .fox-sidebar.is-collapsed .fox-sidebar-command svg,
 .fox-sidebar.is-collapsed .fox-sidebar-title-safe svg,
 .fox-sidebar.is-collapsed .fox-sidebar-footer svg {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
+  width: var(--fox-sidebar-icon-box);
+  height: var(--fox-sidebar-icon-box);
+  flex: 0 0 var(--fox-sidebar-icon-box);
 }
 
 .fox-sidebar.is-collapsed .fox-sidebar-title-safe .fox-icon-button,
@@ -1302,24 +1303,25 @@
 .fox-sidebar-scroll {
   min-height: 0;
   flex: 1;
-  margin: 2px -6px 0;
+  /* 负外边距和内边距成对，滚动区里的行和上面的命令行共用一条左缘。 */
+  margin: var(--fox-space-micro) calc(-1 * var(--fox-space-s)) 0;
 }
 
 .fox-sidebar-scroll [data-slot='scroll-area-viewport'] > div {
   display: block !important;
-  padding-inline: 6px;
+  padding-inline: var(--fox-space-s);
 }
 
 .fox-sidebar-section {
-  padding-top: 5px;
+  padding-top: var(--fox-space-xs);
 }
 
 .fox-section-head {
-  min-height: 39px;
+  min-height: var(--fox-sidebar-row-height);
   display: flex;
-  align-items: end;
+  align-items: center;
   justify-content: space-between;
-  padding: 0 var(--fox-space-m) var(--fox-space-xs);
+  padding: var(--fox-space-xs) var(--fox-sidebar-inset) 0;
   color: var(--fox-faint);
   font-size: var(--fox-type-caption);
   font-weight: var(--fox-weight-medium);
@@ -1333,18 +1335,31 @@
 
 .fox-section-head > span:last-child {
   display: flex;
-  gap: 0;
-  margin-right: calc(-1 * var(--fox-space-xs));
+  align-items: center;
+  gap: var(--fox-sidebar-action-gap);
+  margin-right: 0;
 }
 
 .fox-section-head .fox-icon-button,
-.fox-sidebar-row-actions .fox-icon-button {
-  width: var(--fox-control-sm) !important;
-  height: var(--fox-control-sm) !important;
-  flex-basis: var(--fox-control-sm);
+.fox-sidebar-row-actions .fox-icon-button,
+.fox-project-row-actions .fox-icon-button {
+  width: var(--fox-sidebar-action-size) !important;
+  height: var(--fox-sidebar-action-size) !important;
+  min-width: var(--fox-sidebar-action-size);
+  min-height: var(--fox-sidebar-action-size);
+  flex: 0 0 var(--fox-sidebar-action-size);
   border-radius: var(--fox-radius-control) !important;
   background: transparent !important;
   box-shadow: none;
+}
+
+/* + 和 … 的笔画收进同一尺寸，按钮中心才重合。 */
+.fox-section-head .fox-icon-button svg,
+.fox-sidebar-row-actions .fox-icon-button svg,
+.fox-project-row-actions .fox-icon-button svg {
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
+  flex: none;
 }
 
 .fox-project-row.is-active {
@@ -1377,36 +1392,36 @@
 
 .fox-project-row-main {
   min-width: 0;
-  min-height: var(--fox-inline-action-height);
+  min-height: var(--fox-sidebar-row-height);
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--fox-sidebar-icon-gap);
   border: 0;
   background: transparent;
-  padding: 0;
+  padding: 0 0 0 var(--fox-sidebar-inset);
   color: inherit;
   text-align: left;
   cursor: pointer;
 }
 
-.fox-project-row .fox-project-add {
-  width: 24px !important;
-  height: 24px !important;
-  min-width: 24px;
-  min-height: 24px;
-  flex: 0 0 24px;
-  border-radius: 6px !important;
+/* 文件夹图标占满 icon 盒子，中心线和命令行图标重合。后面的置顶钉不进这个盒子。 */
+.fox-project-row-main > svg:first-child {
+  width: var(--fox-sidebar-icon-box);
+  height: var(--fox-sidebar-icon-box);
+  flex: 0 0 var(--fox-sidebar-icon-box);
 }
 
 .fox-project-row-actions {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  gap: var(--fox-sidebar-action-gap);
+  flex: 0 0 auto;
+  /* 宽度始终占着，hover 只改透明度，项目名不会被挤一下。 */
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: translateX(2px);
-  transition: opacity 120ms ease, visibility 120ms ease, transform 120ms ease;
+  transition: opacity 120ms ease, visibility 120ms ease;
 }
 
 .fox-project-row:hover .fox-project-row-actions,
@@ -1415,17 +1430,6 @@
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
-  transform: translateX(0);
-}
-
-.fox-project-row-actions .fox-icon-button {
-  width: 24px !important;
-  height: 24px !important;
-  min-width: 24px;
-  min-height: 24px;
-  border-radius: 6px !important;
-  background: transparent !important;
-  box-shadow: none;
 }
 
 .fox-project-children {
@@ -1440,35 +1444,36 @@
   gap: var(--fox-sidebar-row-gap);
 }
 
-/* Scope the 28px conversation rows so knowledge and notification rows keep their metrics. */
+/* 对话行跟命令行一样高。资料库和通知行不在这两个容器里，保持原来的行高。 */
 .fox-project-children .fox-sidebar-tree-row,
 .fox-conversation-list .fox-sidebar-tree-row {
-  min-height: 28px;
-  padding-block: var(--fox-sidebar-row-gap);
+  min-height: var(--fox-sidebar-row-height);
+  padding-block: 0;
+  padding-right: var(--fox-sidebar-inset);
 }
 
 .fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
 .fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main {
-  min-height: 26px;
-  height: 26px;
+  min-height: var(--fox-sidebar-row-height);
+  height: auto;
 }
 
 .fox-project-children .fox-sidebar-row-actions button,
 .fox-conversation-list .fox-sidebar-row-actions button {
-  min-height: 24px;
-  height: 24px;
+  min-height: var(--fox-sidebar-action-size);
+  height: var(--fox-sidebar-action-size);
 }
 
-/* Reserve the leading status slot so activity does not shift titles. */
+/* 状态图标始终占一个 icon 盒子，出现和消失都不推动标题。 */
 .fox-sidebar-conversation-status {
-  width: 16px;
-  min-width: 16px;
-  height: 20px;
-  flex: 0 0 16px;
+  width: var(--fox-sidebar-icon-box);
+  min-width: var(--fox-sidebar-icon-box);
+  height: var(--fox-sidebar-icon-box);
+  flex: 0 0 var(--fox-sidebar-icon-box);
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-right: 2px;
+  margin: 0;
 }
 
 /* Keep the smaller sidebar glyph vertically centered in its fixed slot. */
@@ -1501,7 +1506,7 @@
   align-items: center;
   overflow: hidden;
   padding-right: 0;
-  border-radius: 8px;
+  border-radius: var(--fox-radius-card);
   color: var(--fox-muted);
   transition: background 130ms ease, color 130ms ease;
 }
@@ -1524,20 +1529,22 @@
   height: 34px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--fox-sidebar-icon-gap);
   border: 0;
   background: transparent;
-  padding: 0 8px;
+  padding: 0 var(--fox-sidebar-icon-gap) 0 var(--fox-sidebar-inset);
   color: inherit;
   text-align: left;
 }
 
-/* Project child rows keep a small inset before their status slot. */
+/* 项目下的对话：icon 盒子左缘对齐项目名文字起点
+   （inset + icon-box + icon-gap）。同一项目里的对话都用这一列，不再各自另缩进。
+   没有挂在项目下的对话仍和命令行、项目文件夹共用上面的 icon 中心线。 */
 .fox-project-conversation-row > .fox-sidebar-tree-main {
-  padding-left: 12px;
+  padding-left: calc(var(--fox-sidebar-inset) + var(--fox-sidebar-icon-box) + var(--fox-sidebar-icon-gap));
 }
 .fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
-.fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main { padding-right: 2px; }
+.fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main { padding-right: var(--fox-sidebar-icon-gap); }
 
 .fox-shell .fox-sidebar-tree-main > span:last-child {
   min-width: 0;
@@ -1566,8 +1573,9 @@
 
 .fox-sidebar-row-actions {
   position: static;
-  width: 0;
-  flex: 0 0 0;
+  /* 槽位宽度固定，出现前后标题的省略号位置不变，也不会压住按钮。 */
+  width: var(--fox-sidebar-action-size);
+  flex: 0 0 var(--fox-sidebar-action-size);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1575,16 +1583,15 @@
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: translateX(2px);
   margin-top: 0;
-  transition: width 140ms ease, flex-basis 140ms ease, opacity 120ms ease 35ms, visibility 120ms ease 35ms, transform 120ms ease 35ms;
+  transition: opacity 120ms ease, visibility 120ms ease;
 }
 
 .fox-sidebar-tree-row:hover .fox-sidebar-row-time,
 .fox-sidebar-tree-row:focus-within .fox-sidebar-row-time,
 .fox-sidebar-tree-row:has(.fox-sidebar-row-actions [data-state='open']) .fox-sidebar-row-time {
   max-width: 80px;
-  padding-right: 4px;
+  padding-right: var(--fox-space-xs);
   opacity: 1;
   visibility: visible;
 }
@@ -1592,12 +1599,9 @@
 .fox-sidebar-tree-row:hover .fox-sidebar-row-actions,
 .fox-sidebar-tree-row:focus-within .fox-sidebar-row-actions,
 .fox-sidebar-tree-row:has(.fox-sidebar-row-actions [data-state='open']) .fox-sidebar-row-actions {
-  width: var(--fox-control-sm);
-  flex-basis: var(--fox-control-sm);
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
-  transform: translateX(0);
 }
 
 .fox-conversation-menu {
@@ -1605,14 +1609,14 @@
 }
 
 .fox-project-action {
-  min-height: 31px;
-  padding-left: 8px;
+  min-height: var(--fox-sidebar-row-height);
+  padding-left: var(--fox-sidebar-inset);
   color: var(--fox-faint);
-  font-size: 12px;
+  font-size: var(--fox-type-caption);
 }
 
 .fox-conversation-section {
-  padding-bottom: 12px;
+  padding-bottom: var(--fox-space-l);
 }
 
 .fox-global-search-dialog {
@@ -12397,7 +12401,7 @@ img[src='/avatars/fox-assistant.png'] {
   padding: 0;
 }
 .fox-sidebar.is-collapsed .fox-sidebar-primary {
-  gap: 5px;
+  gap: var(--fox-space-xs);
   padding-top: 0;
   margin-top: 0;
   transform: none;
@@ -12463,12 +12467,12 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-composer-wrap.is-new-conversation [aria-label='添加内容']:hover,
 .fox-composer-wrap.is-new-conversation [aria-label='添加内容'][data-state='open'] { background: var(--fox-hover); color: var(--fox-text); }
 .fox-composer-wrap.is-new-conversation [aria-label='添加内容'] svg { width: 16px !important; height: 16px !important; }
-.fox-sidebar-date-heading { display: flex; align-items: center; gap: 8px; margin: 12px 8px 5px; color: var(--fox-muted); font-size: 12px; font-weight: 400; line-height: 20px; }
-.fox-sidebar-date-heading > svg { flex: none; }
-.fox-sidebar-tree-main > .fox-sidebar-conversation-status { flex: 0 0 14px; width: 14px; margin: 0; }
+.fox-sidebar-date-heading { display: flex; align-items: center; gap: var(--fox-sidebar-icon-gap); margin: var(--fox-space-l) 0 var(--fox-space-xs); padding-left: var(--fox-sidebar-inset); color: var(--fox-muted); font-size: var(--fox-type-caption); font-weight: 400; line-height: 20px; }
+.fox-sidebar-date-heading > svg { width: var(--fox-sidebar-icon-box); height: var(--fox-sidebar-icon-box); flex: 0 0 var(--fox-sidebar-icon-box); }
+.fox-sidebar-tree-main > .fox-sidebar-conversation-status { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--fox-sidebar-icon-box); width: var(--fox-sidebar-icon-box); height: var(--fox-sidebar-icon-box); margin: 0; }
 .fox-sidebar-tree-main > .fox-sidebar-conversation-status:not([data-run-indicator]) { visibility: hidden; }
 
-.fox-sidebar-tree-main > .fox-sidebar-conversation-status { min-width: 14px; overflow: visible; }
+.fox-sidebar-tree-main > .fox-sidebar-conversation-status { min-width: var(--fox-sidebar-icon-box); overflow: visible; }
 .fox-sidebar-date-group { display: flex; flex-direction: column; gap: var(--fox-sidebar-row-gap); }
 .fox-sidebar-flyout .fox-sidebar-collapsed-run { margin-left: 0; }
 .fox-sidebar-flyout .fox-sidebar-collapsed-run:not([data-run-indicator]) { visibility: hidden; }

@@ -20,11 +20,11 @@
   --text-sm: var(--fox-type-chrome);
   --text-base: var(--fox-type-control);
   --leading-body: 1.5;
-  --control-height-sm: 26px;
-  --space-1: 3px;
-  --space-2: 8px;
-  --space-3: 10px;
-  --space-4: 16px;
+  --control-height-sm: var(--fox-inline-action-height);
+  --space-1: var(--fox-space-micro);
+  --space-2: var(--fox-space-m);
+  --space-3: var(--fox-space-l);
+  --space-4: var(--fox-space-xl);
   --duration-fast: 160ms;
   --duration-standard: 240ms;
   --duration-spring: 420ms;
@@ -49,16 +49,42 @@
 
 .fox-sidebar-flyout {
   z-index: 150;
-  width: min(280px, calc(100vw - 16px));
+  width: min(280px, calc(100vw - var(--fox-space-xl)));
   max-height: min(420px, var(--radix-dropdown-menu-content-available-height, calc(100dvh - 56px)));
+  padding: var(--fox-space-xs);
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
 }
-.fox-sidebar-flyout [role='menuitem'] { min-width: 0; min-height: 34px; gap: 8px; }
+/* 折叠菜单和展开侧栏用同一条 icon 列、同一行高。 */
+.fox-sidebar-flyout [role='menuitem'],
+.fox-sidebar-flyout [data-slot='dropdown-menu-sub-trigger'] {
+  min-width: 0;
+  min-height: var(--fox-sidebar-row-height);
+  align-items: center;
+  gap: var(--fox-sidebar-icon-gap);
+  padding-inline: var(--fox-sidebar-inset);
+}
+.fox-sidebar-flyout :is([role='menuitem'], [data-slot='dropdown-menu-sub-trigger']) > svg,
+.fox-sidebar-flyout .fox-sidebar-collapsed-run,
+.fox-sidebar-flyout .fox-sidebar-date-heading > svg {
+  width: var(--fox-sidebar-icon-box);
+  height: var(--fox-sidebar-icon-box);
+  flex: 0 0 var(--fox-sidebar-icon-box);
+  margin: 0;
+}
+.fox-sidebar-flyout .fox-sidebar-collapsed-run {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.fox-sidebar-flyout .fox-sidebar-date-heading {
+  margin: var(--fox-space-s) 0 var(--fox-space-xs);
+  padding-inline: var(--fox-sidebar-inset);
+}
 .fox-sidebar-flyout-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fox-sidebar-flyout time, .fox-sidebar-flyout small { flex: none; color: var(--muted-foreground); font-size: 11px; }
+.fox-sidebar-flyout time, .fox-sidebar-flyout small { flex: none; color: var(--muted-foreground); font-size: var(--fox-type-caption); }
 .fox-sidebar-flyout [data-slot='dropdown-menu-label'] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fox-sidebar-flyout .is-active { background: var(--accent); }
 .fox-sidebar [data-highlight='true'] {
@@ -110,8 +136,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
-  margin: 3px 0 1px;
+  gap: var(--fox-space-xs);
+  margin: var(--fox-space-micro) 0 0;
 }
 .fox-sidebar-user-trigger {
   min-width: 0;
@@ -127,18 +153,18 @@
   z-index: 65;
 }
 .fox-sidebar-user-panel svg {
-  width: 16px;
-  height: 16px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
 }
 .fox-sidebar.is-collapsed .fox-sidebar-footer {
   align-items: center;
-  padding-bottom: 10px;
+  padding-bottom: var(--fox-space-l);
 }
 .fox-sidebar.is-collapsed .fox-sidebar-user-trigger {
   width: 34px;
   height: 34px;
   justify-content: center;
-  padding: 3px;
+  padding: var(--fox-space-micro);
 }
 .fox-sidebar-user-menu {
   min-width: 0;
@@ -158,7 +184,7 @@
 .fox-sidebar-footer-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--fox-space-xs);
   flex: 0 0 auto;
 }
 .fox-sidebar-footer-actions > * {
@@ -168,15 +194,15 @@
 }
 .fox-sidebar-footer-actions .fox-icon-button {
   box-sizing: border-box;
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
+  width: var(--fox-control-md);
+  height: var(--fox-control-md);
+  flex: 0 0 var(--fox-control-md);
   display: grid;
   place-items: center;
 }
 .fox-sidebar-footer-actions .fox-icon-button svg {
-  width: 16px;
-  height: 16px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
 }
 .fox-sidebar-search-idle {
   padding: 4px 0 10px;
@@ -226,15 +252,15 @@
 
 /* ---------- Settings navigation ---------- */
 .fox-context-sidebar-nav.is-settings .fox-context-sidebar-group {
-  gap: 2px;
+  gap: var(--fox-space-micro);
 }
 
 .fox-context-sidebar-nav.is-settings .fox-context-sidebar-group + .fox-context-sidebar-group {
-  margin-top: 18px;
+  margin-top: var(--fox-space-2xl);
 }
 
 .fox-context-sidebar-nav.is-settings .fox-context-sidebar-group-label {
-  padding: 0 var(--fox-space-l) 6px;
+  padding: 0 var(--fox-sidebar-inset) var(--fox-space-s);
   color: var(--fox-faint);
   font-size: var(--fox-type-caption) !important;
   font-weight: var(--fox-weight-medium);

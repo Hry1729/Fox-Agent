@@ -128,6 +128,15 @@
   --fox-inline-action-height: var(--fox-control-sm);
   --fox-sidebar-row-height: 32px;
   --fox-sidebar-icon-size: 16px;
+  /* 侧栏行网格。icon 中心线 = inset + icon-box / 2，命令行、分组标题旁的图标、
+     项目名、日期分组和顶层对话状态图标共用这一列。
+     项目下的对话不走这条线：icon 盒子左缘对齐项目名文字起点
+     （inset + icon-box + icon-gap），同一项目里的对话都用这一列。 */
+  --fox-sidebar-inset: var(--fox-space-m);
+  --fox-sidebar-icon-box: var(--fox-sidebar-icon-size);
+  --fox-sidebar-icon-gap: var(--fox-space-m);
+  --fox-sidebar-action-size: var(--fox-control-sm);
+  --fox-sidebar-action-gap: var(--fox-space-micro);
   --fox-command-row-height: 32px;
   --fox-badge-height: 20px;
   --fox-library-card-tag-height: 20px;
