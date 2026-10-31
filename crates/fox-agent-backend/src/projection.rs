@@ -395,6 +395,11 @@ pub struct PermissionCard {
     /// is never offered in this batch: an ACP `allow_always` grant lives in the
     /// backend, Fox cannot show or revoke it (plan 6.3 rule 2).
     pub available_decisions: Vec<&'static str>,
+    /// Host 审批引擎在「询问」时附上的策略摘要（含 `projectRule` / 命令 / cwd）。
+    /// `permission_card` 本身不填；外部运行时只在 Host 判定为询问时写入。
+    /// 没有策略时不序列化，避免改变现有卡片形状。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_policy: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -441,6 +446,7 @@ pub fn permission_card(request: &Value) -> PermissionCard {
         input: tool_input(&tool_call),
         options,
         available_decisions: available,
+        host_policy: None,
     }
 }
 
@@ -673,6 +679,7 @@ mod tests {
         assert_eq!(card.tool, "bash");
         assert_eq!(card.native_tool_call_id.as_deref(), Some("t1"));
         assert_eq!(card.available_decisions, ["allow_once", "deny"], "allow_always is never offered");
+        assert!(card.host_policy.is_none(), "permission_card 不携带 Host 策略");
         assert_eq!(allow_option(&card.options).unwrap().option_id, "allow");
         assert_eq!(reject_option(&card.options).unwrap().option_id, "reject");
         assert_eq!(card.input["command"], "npm test");
@@ -681,10 +688,12 @@ mod tests {
         let pi = permission_card(&json!({ "toolCall": {}, "options": [
             { "optionId": "yes", "name": "Yes", "kind": "allow_once" }, { "optionId": "no", "name": "No", "kind": "reject_once" } ] }));
         assert_eq!(pi.title, "外部 Agent 请求执行操作");
+        assert!(pi.host_policy.is_none());
         assert_eq!(allow_option(&pi.options).unwrap().option_id, "yes");
         // Only rejecting options: no allow decision is offered.
         let reject_only = permission_card(&json!({ "toolCall": { "title": "x" }, "options": [{ "optionId": "r", "name": "R", "kind": "reject_always" }] }));
         assert_eq!(reject_only.available_decisions, ["deny"]);
+        assert!(reject_only.host_policy.is_none());
         assert_eq!(reject_option(&reject_only.options).unwrap().option_id, "r");
         assert!(reject_option(&[]).is_none());
     }
