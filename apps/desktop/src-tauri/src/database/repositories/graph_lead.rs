@@ -6541,7 +6541,9 @@ mod tests {
         assert_eq!(recovered.len(),1);
         assert_eq!(recovered[0].intent_id,intent.intent_id);
         fixture.database.with_connection(|connection|connection.execute("UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",[&fixture.run.run.id])).unwrap();
-        assert!(fixture.database.active_graph_node_cancel_intents_for_recovery().is_err());
+        // dbhash: a refused binding is excluded from recovery (never driven)
+        // instead of failing recovery, and so startup, for every other row.
+        assert!(fixture.database.active_graph_node_cancel_intents_for_recovery().unwrap().is_empty());
         cleanup(fixture);
     }
 

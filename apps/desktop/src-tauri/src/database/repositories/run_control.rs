@@ -32,11 +32,12 @@ pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> ru
     let binding: RunControlBinding = serde_json::from_str(&json).map_err(|error| invalid(format!("corrupt control binding: {error}")))?;
     if let Err(error) = encode(&binding) {
         if error == PERMISSION_HASH_MISMATCH && legacy_permission_bytes_match(&json, &binding.permission_snapshot_id) {
-            // Intact, but frozen by a build that hashed the permission before
-            // canonical JSON (83c16042). Never continued: the user decided
+            // Intact, but frozen by a build whose permission had fewer fields
+            // (before faa1ad04 added `kind` / `approvalEpoch`): re-encoding it
+            // now adds them, so the current hash cannot match. Never continued:
             // historical Runs are interrupted, not migrated.
             return Err(rusqlite::Error::InvalidParameterName(format!(
-                "{BINDING_LEGACY_FORMAT}: frozen permission was hashed in the pre-canonical format; this historical Run cannot continue")));
+                "{BINDING_LEGACY_FORMAT}: frozen permission was hashed in an older format; this historical Run cannot continue")));
         }
         return Err(invalid(error));
     }
@@ -56,18 +57,20 @@ pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> ru
 pub(crate) const BINDING_INTEGRITY_FAILED: &str = "run_control.binding_integrity_failed";
 pub(crate) const BINDING_INTEGRITY_FAILED_MESSAGE: &str = "运行控制绑定校验失败，此 Run 已中断，不能继续";
 
-/// Stable code for an intact binding frozen before canonical JSON (83c16042,
-/// 2026-10-21): its permission hash matches the stored bytes in the old
-/// field order, not the current canonical form. It is never continued.
+/// Stable code for an intact binding frozen in an older permission format
+/// (before faa1ad04, 2026-09-23, added `kind` and `approvalEpoch`): its
+/// permission hash matches the stored bytes, not the current re-encoding. It
+/// is never continued.
 pub(crate) const BINDING_LEGACY_FORMAT: &str = "run_control.binding_legacy_format";
 pub(crate) const BINDING_LEGACY_FORMAT_MESSAGE: &str = "运行控制绑定为旧版格式，历史 Run 已中断，不能继续";
 
 const PERMISSION_HASH_MISMATCH: &str = "frozen permission hash does not match its content";
 
-/// Versioned check for bindings frozen before canonical JSON: those hashed
-/// `serde_json::to_string(&permission)` (struct field order) and stored the
-/// binding the same way, so the stored `permission` bytes are exactly what was
-/// hashed. Only the bytes are hashed; nothing is re-serialized or trusted.
+/// Versioned check for a binding frozen by an older build: every build hashed
+/// the permission exactly as it serialized it into the stored binding (struct
+/// field order), so the stored `permission` bytes are what was hashed. Only the
+/// bytes are hashed; nothing is re-serialized or trusted. A format change
+/// (fields added since) then reads as intact-but-legacy, tampering does not.
 fn legacy_permission_bytes_match(json: &str, snapshot_id: &str) -> bool {
     #[derive(serde::Deserialize)]
     struct Stored<'a> { #[serde(borrow)] permission: &'a serde_json::value::RawValue }

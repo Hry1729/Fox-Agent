@@ -79,8 +79,8 @@ quick-xml = "0.41"
 regex = "1.13.0"
 rquickjs = "=0.12.1"
 serde = { version = "1", features = ["derive"] }
-# raw_value: the run-control integrity check hashes the stored bytes of a
-# pre-canonical frozen permission (see database/repositories/run_control.rs).
+# raw_value: the run-control integrity check hashes the stored bytes of an
+# older-format frozen permission (see database/repositories/run_control.rs).
 serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
 semver = "1"

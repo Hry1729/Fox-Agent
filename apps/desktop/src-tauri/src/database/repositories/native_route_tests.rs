@@ -321,7 +321,11 @@ fn corrupt_or_unsupported_native_bindings_cannot_enter_any_host_writer() {
         assert_eq!(terminal_fact(&db,&run).1.as_deref(),Some("run_control.binding_integrity_failed"),"{corruption}");
         assert!(db.create_host_tool_call(&run,"call","read",&input(),"running",false).is_err(),"{corruption}");
         assert!(db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).is_err(),"{corruption}");
-        assert!(db.run_control_binding(&run).unwrap_err().contains("run_control.binding_integrity_failed"),"{corruption}");
+        // `unsupported_route` decodes on its own; the route check in every
+        // writer is what refuses it.
+        if corruption != "unsupported_route" {
+            assert!(db.run_control_binding(&run).unwrap_err().contains("run_control.binding_integrity_failed"),"{corruption}");
+        }
     }
 }
 
