@@ -9352,7 +9352,7 @@ mod knowledge_tool_contract_tests {
 
     #[test]
     fn remote_knowledge_errors_retry_only_transient_failures() {
-        for code in ["authentication_required", "access_denied", "document_unavailable", "protocol_invalid"] {
+        for code in ["authentication_required", "access_denied", "document_unavailable", "protocol_invalid", "index_unavailable"] {
             assert!(!structured_knowledge_error(&format!("[remote_knowledge.{code}] failed")).2);
         }
         assert!(structured_knowledge_error("[remote_knowledge.retrieval_unavailable] transient").2);

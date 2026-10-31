@@ -1097,7 +1097,7 @@ export function createKnowledgeTools(requestHost) {
       name: KNOWLEDGE_TOOL_NAMES.search,
       prepareArguments: prepareKnowledgeArguments,
       label: 'Search knowledge',
-      description: 'Search the conversation knowledge bases independently of any project folder. First call list_knowledge_bases, then pass its reference objects in targets (including source: local for local bases). query should contain concise domain keywords. knowledgeBaseId alone is only for legacy remote calls.',
+      description: 'Search the conversation knowledge bases independently of any project folder. First call list_knowledge_bases, then pass its reference objects in targets (including source: local for local bases). query should contain concise domain keywords. knowledgeBaseId alone is only for legacy remote calls. Remote knowledge bases are searched only through the service\'s native index; if it is unavailable the tool fails with remote_knowledge.index_unavailable instead of falling back to a keyword scan.',
       parameters: Type.Object({
         knowledgeBaseId: Type.Optional(Type.String()),
         target: Type.Optional(KNOWLEDGE_REFERENCE_SCHEMA),

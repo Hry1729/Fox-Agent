@@ -904,6 +904,7 @@ test('publishes source-aware schemas while keeping legacy knowledgeBaseId option
   assert.equal(list.targets.type, 'array')
   assert.deepEqual(list.targets.items, KNOWLEDGE_REFERENCE_SCHEMA)
 
+  assert.match(toolByName(tools, KNOWLEDGE_TOOL_NAMES.search).description, /Remote knowledge bases are searched only through the service's native index; if it is unavailable the tool fails with remote_knowledge\.index_unavailable instead of falling back to a keyword scan\./)
   assert.equal(search.knowledgeBaseId.type, 'string')
   assert.equal(searchSchema.required?.includes('knowledgeBaseId') ?? false, false)
   assert.equal(search.targets.type, 'array')
