@@ -852,6 +852,118 @@ fn replace_material_paths(target: &Path) -> Result<(PathBuf, PathBuf, String), S
     Ok((backup, journal, id.to_string()))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 测试开关：把 hard_link 当成「文件系统不支持」，迫使走不覆盖的移动发布。
+    static SIMULATE_HARD_LINK_UNSUPPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 发布一个还不存在的目标。先硬链接；只有文件系统明确不支持硬链接时，
+/// Windows 才改用 `MoveFileExW`（不带 REPLACE_EXISTING）。其他错误原样返回。
+fn publish_new_file(staging: &Path, target: &Path) -> std::io::Result<&'static str> {
+    match try_publish_hard_link(staging, target) {
+        Ok(()) => Ok("hard_link"),
+        Err(error) if hard_link_is_unsupported(&error) => publish_when_hard_link_unsupported(staging, target, error),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn publish_when_hard_link_unsupported(
+    staging: &Path,
+    target: &Path,
+    _error: std::io::Error,
+) -> std::io::Result<&'static str> {
+    move_file_no_replace(staging, target)?;
+    Ok("move_no_replace")
+}
+
+#[cfg(not(windows))]
+fn publish_when_hard_link_unsupported(
+    _staging: &Path,
+    _target: &Path,
+    error: std::io::Error,
+) -> std::io::Result<&'static str> {
+    Err(error)
+}
+
+#[cfg(test)]
+fn try_publish_hard_link(staging: &Path, target: &Path) -> std::io::Result<()> {
+    if SIMULATE_HARD_LINK_UNSUPPORTED.with(|flag| flag.get()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "simulated: this volume does not support hard links",
+        ));
+    }
+    fs::hard_link(staging, target)
+}
+
+#[cfg(not(test))]
+fn try_publish_hard_link(staging: &Path, target: &Path) -> std::io::Result<()> {
+    fs::hard_link(staging, target)
+}
+
+/// 1 = ERROR_INVALID_FUNCTION，17 = ERROR_NOT_SAME_DEVICE，50 = ERROR_NOT_SUPPORTED。
+fn hard_link_is_unsupported(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        matches!(error.raw_os_error(), Some(1 | 17 | 50))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn move_file_no_replace(staging: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let source = wide(staging);
+    let destination = wide(target);
+    // 不带 MOVEFILE_REPLACE_EXISTING：目标已存在时系统拒绝，不会覆盖。
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| {
+        let code = win32_code(&error);
+        // 183 ERROR_ALREADY_EXISTS，80 ERROR_FILE_EXISTS。
+        if code == 183 || code == 80 {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("Windows error {code}"),
+            )
+        } else {
+            std::io::Error::from_raw_os_error(code as i32)
+        }
+    })
+}
+
+fn append_publish_note(note: &mut Option<String>, method: &str) {
+    let extra = format!("published_by={method}");
+    match note {
+        Some(text) if !text.is_empty() => {
+            text.push_str("; ");
+            text.push_str(&extra);
+        }
+        _ => *note = Some(extra),
+    }
+}
+
 fn atomic_write(root: &Path, path: &Path, bytes: &[u8], expected: &str,
     cancellation: Option<&crate::kernel::CancellationToken>) -> Result<(), String> {
     atomic_write_with_context(root, path, bytes, expected, cancellation, None)
@@ -941,16 +1053,20 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
             return Err(error);
         }
         if let Some(context) = context.as_deref_mut() { context.mark_applying(); }
-        match fs::hard_link(&staging_path, path) {
-            Ok(()) => {
+        match publish_new_file(&staging_path, path) {
+            Ok(method) => {
                 // Preserve committed evidence even if the settlement disk fails.
                 if let Some(context) = context.as_deref_mut() { context.mark_committed(); }
                 staging.hand_off();
+                append_publish_note(&mut record.note, method);
                 record.status = "committed".into();
                 record.settled_at_ms = Some(epoch_ms());
                 store_settled(&settled_record_path(&journal), &record, JournalFault::NONE)
                     .map_err(|error| format!("file created but settlement failed; materials retained: {error}"))?;
-                let _ = fs::remove_file(&staging_path);
+                // move 已经把 staging 改名为目标；硬链接还要卸掉临时名字。
+                if method != "move_no_replace" {
+                    let _ = fs::remove_file(&staging_path);
+                }
             }
             Err(e) => {
                 if let Some(context) = context.as_deref_mut() { context.mark_not_applied(); }
@@ -4692,6 +4808,78 @@ mod write_gate_tests {
             .expect("no mentions means no read-only set");
         ensure_writable_target(None, root.to_str().unwrap(), &root.join("a.txt"))
             .expect("no task text means no restriction");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// 不支持硬链接的卷上，新建文件改用 MoveFileExW，且不能覆盖已有目标。
+#[cfg(all(test, windows))]
+mod tx6_publish_tests {
+    use super::*;
+
+    struct UnsupportedGuard;
+    impl UnsupportedGuard {
+        fn arm() -> Self {
+            SIMULATE_HARD_LINK_UNSUPPORTED.with(|flag| flag.set(true));
+            Self
+        }
+    }
+    impl Drop for UnsupportedGuard {
+        fn drop(&mut self) {
+            SIMULATE_HARD_LINK_UNSUPPORTED.with(|flag| flag.set(false));
+        }
+    }
+
+    fn fresh_dir() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-tx6-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn tx6_create_without_hard_links_publishes_by_move_no_replace() {
+        let root = fresh_dir();
+        let _guard = UnsupportedGuard::arm();
+        let action = prepare(
+            "write_file",
+            &json!({ "path": "new.txt", "content": "hello" }),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+        execute(action).unwrap();
+        assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"hello");
+        let temps: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".fox-write-"))
+            .collect();
+        assert!(temps.is_empty(), "staging name must be gone: {temps:?}");
+        let settled = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().ends_with(".settled.json"))
+            .expect("settled journal");
+        let body = fs::read_to_string(settled.path()).unwrap();
+        assert!(
+            body.contains("published_by=move_no_replace"),
+            "{body}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tx6_move_no_replace_never_overwrites_an_existing_target() {
+        let root = fresh_dir();
+        let _guard = UnsupportedGuard::arm();
+        let target = root.join("note.txt");
+        fs::write(&target, b"original").unwrap();
+        let staging = root.join(".fox-write-staging.tmp");
+        fs::write(&staging, b"replacement").unwrap();
+        let error = publish_new_file(&staging, &target).expect_err("must not replace");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read(&staging).unwrap(), b"replacement");
         fs::remove_dir_all(root).unwrap();
     }
 }
