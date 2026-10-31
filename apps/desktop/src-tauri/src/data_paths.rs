@@ -5,6 +5,20 @@
 //! concrete path (and "应为目录但是文件") into the message instead.
 use std::path::{Path, PathBuf};
 
+/// 无项目外部会话的授权目录：`<数据目录>/conversation-workspaces/<会话 id>`。
+/// 路径只在这里拼，Host 和策略不要再写第二份。
+pub(crate) const CONVERSATION_WORKSPACES_DIR: &str = "conversation-workspaces";
+
+/// `<数据目录>/conversation-workspaces`。草稿还没有会话 id 时，登录探测用这个父目录当 project_root。
+pub(crate) fn conversation_workspaces_root(data_dir: &Path) -> PathBuf {
+    data_dir.join(CONVERSATION_WORKSPACES_DIR)
+}
+
+/// 某一个无项目会话的默认对话目录。调用方负责创建，并拒绝不能当目录名的会话 id。
+pub(crate) fn default_conversation_workspace(data_dir: &Path, conversation_id: &str) -> PathBuf {
+    conversation_workspaces_root(data_dir).join(conversation_id)
+}
+
 /// Directories under the data root that every Fox run relies on.
 pub(crate) fn run_directories(data_dir: &Path) -> Vec<PathBuf> {
     vec![

@@ -158,6 +158,7 @@ pub fn fail_closed(error: &str, options: &[PermissionOption]) -> HostPermissionA
 /// block, leaves one row in the same audit as PiNative.
 pub fn answer_pi_request(
     database: &crate::database::Database,
+    data_dir: &Path,
     run_id: &str,
     conversation_id: &str,
     native_mode: &str,
@@ -166,13 +167,11 @@ pub fn answer_pi_request(
 ) -> Result<HostPermissionAnswer, String> {
     let context = database.external_conversation_context(conversation_id)?.ok_or_else(|| "conversation not found".to_owned())?;
     let rules = database.policy_rules_for_conversation(conversation_id)?;
-    // The ACP cwd is the canonical project root; compare with it the same way.
-    let root = context.project_root.as_deref().map(|root| {
-        let root = PathBuf::from(root);
-        root.canonicalize().unwrap_or(root)
-    });
+    // 有项目时用项目根；没有项目时用默认对话目录。拿不到就拒绝，不放宽。
+    let root = crate::external_backend::authorized_root(data_dir, conversation_id, context.project_id.as_deref(), context.project_root.as_deref())
+        .map_err(|response| response.error.map(|error| error.message).unwrap_or_else(|| "无法确定授权目录".to_owned()))?;
     let home = approval_policy::host_home();
-    let (tool, decision) = decide_pi(native_mode, request, root.as_deref(), home.as_deref(), &rules);
+    let (tool, decision) = decide_pi(native_mode, request, Some(root.as_path()), home.as_deref(), &rules);
     if (decision.is_allow() && decision.class != ToolClass::Read) || decision.is_block() {
         let approval = parse_tool_approval(request);
         let summary = approval
@@ -194,7 +193,7 @@ pub fn answer_pi_request(
         .as_ref()
         .and_then(|approval| approval.cwd.clone())
         .filter(|cwd| !cwd.is_empty())
-        .or_else(|| root.as_ref().map(|path| path.display().to_string()));
+        .or_else(|| Some(root.display().to_string()));
     let has_project = context.project_id.is_some() && context.project_root.as_deref().is_some_and(|path| !path.is_empty());
     Ok(answer_from(&tool, &decision, options, has_project, command, cwd.as_deref()))
 }
@@ -288,6 +287,7 @@ pub fn native_block_decision(
 /// Codex / dsh：命中 block 时拒绝并记审计。取不到命令返回 `Ok(None)`；数据库出错返回 `Err`（调用方 fail-closed）。
 pub fn block_for_native_request(
     database: &crate::database::Database,
+    data_dir: &Path,
     run_id: &str,
     conversation_id: &str,
     backend: AgentBackend,
@@ -297,12 +297,10 @@ pub fn block_for_native_request(
 ) -> Result<Option<HostPermissionAnswer>, String> {
     let context = database.external_conversation_context(conversation_id)?.ok_or_else(|| "conversation not found".to_owned())?;
     let rules = database.policy_rules_for_conversation(conversation_id)?;
-    let root = context.project_root.as_deref().map(|root| {
-        let root = PathBuf::from(root);
-        root.canonicalize().unwrap_or(root)
-    });
+    let root = crate::external_backend::authorized_root(data_dir, conversation_id, context.project_id.as_deref(), context.project_root.as_deref())
+        .map_err(|response| response.error.map(|error| error.message).unwrap_or_else(|| "无法确定授权目录".to_owned()))?;
     let home = approval_policy::host_home();
-    let Some(decision) = native_block_decision(backend, native_mode, request, root.as_deref(), home.as_deref(), &rules) else {
+    let Some(decision) = native_block_decision(backend, native_mode, request, Some(root.as_path()), home.as_deref(), &rules) else {
         return Ok(None);
     };
     let tool = "run_command";
@@ -610,7 +608,7 @@ mod tests {
     fn answer_pi_request_offers_the_rule_only_for_bash_in_a_project() {
         let (database, conversation, _root) = database_with_pi_project();
         let npm = gate("bash", json!({ "command": "npm test -- foo", "secret": "sk-not-real" }));
-        let answer = answer_pi_request(&database, "run-1", &conversation, "ask", &npm, &options()).expect("answer");
+        let answer = answer_pi_request(&database, Path::new("."), "run-1", &conversation, "ask", &npm, &options()).expect("answer");
         assert_eq!(answer.decision, AutoPermission::Ask);
         assert_eq!(answer.policy["projectRule"]["eligible"], true);
         assert_eq!(answer.policy["projectRule"]["suggestedPrefix"], "npm test");
@@ -619,20 +617,23 @@ mod tests {
         assert!(!answer.policy.to_string().contains("sk-not-real"));
 
         let push = gate("bash", json!({ "command": "git push origin main" }));
-        let push_answer = answer_pi_request(&database, "run-1", &conversation, "ask", &push, &options()).expect("push");
+        let push_answer = answer_pi_request(&database, Path::new("."), "run-1", &conversation, "ask", &push, &options()).expect("push");
         assert_eq!(push_answer.policy["projectRule"]["suggestedPrefix"], "git push");
 
         let write = gate("write", json!({ "path": "src/new.rs", "content": "x" }));
-        let write_answer = answer_pi_request(&database, "run-1", &conversation, "ask", &write, &options()).expect("write");
+        let write_answer = answer_pi_request(&database, Path::new("."), "run-1", &conversation, "ask", &write, &options()).expect("write");
         assert!(!rule_eligible(&write_answer.policy));
         let read = gate("read", json!({ "path": "src/main.rs" }));
-        let read_answer = answer_pi_request(&database, "run-1", &conversation, "ask", &read, &options()).expect("read");
+        let read_answer = answer_pi_request(&database, Path::new("."), "run-1", &conversation, "ask", &read, &options()).expect("read");
         assert!(!rule_eligible(&read_answer.policy));
 
         let bare = database
             .create_conversation_with_backend(database.default_agent_id(), Some("no-project"), None, None, "pi")
             .expect("bare");
-        let bare_answer = answer_pi_request(&database, "run-1", &bare.id, "ask", &npm, &options()).expect("bare");
+        // 无项目会创建默认对话目录，必须落在临时目录里，不能写到当前工作目录。
+        let bare_data = TempRoot(std::env::temp_dir().join(format!("fox-pi-bare-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(bare_data.path()).expect("bare data");
+        let bare_answer = answer_pi_request(&database, bare_data.path(), "run-1", &bare.id, "ask", &npm, &options()).expect("bare");
         assert!(!rule_eligible(&bare_answer.policy), "没有项目时不 eligible");
         assert!(bare_answer.policy.get("command").is_none());
     }
@@ -695,7 +696,7 @@ mod tests {
             .expect("full access");
         let deletion = format!(r#"cd "{plain}" && rm -rf . 2>&1; echo $?"#);
         let delete_request = gate_in(&project, "bash", json!({ "command": deletion }));
-        let blocked = answer_pi_request(&database, "run-1", &conversation, PI_FULL, &delete_request, &options()).expect("blocked");
+        let blocked = answer_pi_request(&database, Path::new("."), "run-1", &conversation, PI_FULL, &delete_request, &options()).expect("blocked");
         assert!(matches!(blocked.decision, AutoPermission::Reject { .. }));
         assert_eq!(blocked.policy["denyCode"], "permission.blocked");
         let audit = database.permission_audit_list(None, Some(&conversation), 10).expect("audit");
@@ -711,7 +712,80 @@ mod tests {
         let approval = pi_approval(&conversation, &wrapped, &cwd, &["allow_once", "allow_project_rule", "deny"]);
         allow_pi_with_project_rule(&database, &approval, "dir").expect("dir 覆盖内层");
         let again = gate_in(&project, "bash", json!({ "command": wrapped }));
-        let allowed = answer_pi_request(&database, "run-1", &conversation, "ask", &again, &options()).expect("allowed");
+        let allowed = answer_pi_request(&database, Path::new("."), "run-1", &conversation, "ask", &again, &options()).expect("allowed");
         assert!(matches!(allowed.decision, AutoPermission::Allow { .. }), "{:?}", allowed.policy);
+    }
+
+    fn finding(policy: &Value, name: &str) -> bool {
+        policy.get("findings").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| item.as_str() == Some(name)))
+    }
+
+    /// 无项目时，默认对话目录就是授权根：目录内写入按项目内规则，fox.db 和目录外按项目外，.git 仍受保护。不提供项目规则。
+    #[test]
+    fn no_project_pi_policy_uses_the_default_workspace_as_the_root() {
+        let database = crate::database::Database::open(PathBuf::from(":memory:")).expect("database");
+        let data = TempRoot(std::env::temp_dir().join(format!("fox-pi-default-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(data.path()).expect("data");
+        let conversation = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("no-project-policy"), None, None, "pi")
+            .expect("conversation");
+        let workspace = crate::external_backend::authorized_root(data.path(), &conversation.id, None, None).expect("workspace");
+        assert!(workspace.is_dir());
+
+        let inside = answer_pi_request(
+            &database,
+            data.path(),
+            "run-1",
+            &conversation.id,
+            "ask",
+            &gate_in(&workspace, "write", json!({ "path": workspace.join("notes.txt"), "content": "x" })),
+            &options(),
+        )
+        .expect("inside");
+        assert!(matches!(inside.decision, AutoPermission::Ask));
+        assert_eq!(inside.policy["class"], "project_write");
+        assert!(!finding(&inside.policy, "outside_project"));
+        assert!(!rule_eligible(&inside.policy), "无项目不提供本项目总是允许");
+
+        let database_file = answer_pi_request(
+            &database,
+            data.path(),
+            "run-1",
+            &conversation.id,
+            "ask",
+            &gate_in(&workspace, "write", json!({ "path": data.path().join("fox.db"), "content": "x" })),
+            &options(),
+        )
+        .expect("fox.db");
+        assert!(matches!(database_file.decision, AutoPermission::Ask));
+        assert_eq!(database_file.policy["class"], "path_boundary");
+        assert!(finding(&database_file.policy, "outside_project"), "{:?}", database_file.policy["findings"]);
+
+        let outside = answer_pi_request(
+            &database,
+            data.path(),
+            "run-1",
+            &conversation.id,
+            "ask",
+            &gate_in(&workspace, "write", json!({ "path": data.path().join("outside.txt"), "content": "x" })),
+            &options(),
+        )
+        .expect("outside");
+        assert_eq!(outside.policy["class"], "path_boundary");
+        assert!(finding(&outside.policy, "outside_project"));
+
+        let protected = answer_pi_request(
+            &database,
+            data.path(),
+            "run-1",
+            &conversation.id,
+            "ask",
+            &gate_in(&workspace, "write", json!({ "path": workspace.join(".git").join("config"), "content": "x" })),
+            &options(),
+        )
+        .expect("git");
+        assert_eq!(protected.policy["class"], "path_boundary");
+        assert!(finding(&protected.policy, "protected_git"), "{:?}", protected.policy["findings"]);
+        assert!(!rule_eligible(&protected.policy));
     }
 }
