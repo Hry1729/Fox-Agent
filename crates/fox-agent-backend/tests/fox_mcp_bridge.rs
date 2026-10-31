@@ -138,12 +138,16 @@ impl ExternalLauncher for BridgeLauncher {
                 _ => return Err(LaunchFailure::new("agent_backend_invalid", "no Fox tool injection")),
             };
             let token = grant.token.clone();
+            // As the production launcher: pi's session must open with the
+            // extension's tools listed on this token.
+            let fox_tools = (request.backend == AgentBackend::Pi).then(|| bridge.probe(&token));
             Ok(Launched {
                 connection,
                 mode: PermissionMode::Standard,
                 declaration: LaunchDeclaration::declare(PermissionMode::Standard),
                 pi_launch: PiLaunch::Stock,
                 on_closed: Some(Box::new(move || bridge.revoke(&token))),
+                fox_tools,
             })
         })
     }
@@ -246,9 +250,50 @@ async fn the_bridge_is_injected_used_and_revoked_for_codex_and_dsh() {
     runtime.shutdown().await;
 }
 
+/// C3 (fox-fix-pi): codex-acp 2.2.2 does not answer session/new with
+/// `skippedMcpServers`; it reports a Fox server it skipped (its own config
+/// defines one of that name) as a failed `mcp_startup.*` tool call in
+/// `session/update`, after session/new. That report fails the turn with
+/// agent_backend_fox_tools_rejected and stops the process.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_codex_startup_report_skipping_the_fox_server_fails_the_turn_as_rejected() {
+    if node().is_none() {
+        eprintln!("SKIPPED: node not installed");
+        return;
+    }
+    let host = RecordingHost::default();
+    let bridge = McpBridge::start(Arc::new(host.clone()), &tokio::runtime::Handle::current()).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let launcher = BridgeLauncher { bridge: bridge.clone(), state_root: state.path().to_path_buf(), tokens: Arc::default() };
+    let sink = Sink::default();
+    let runtime = ExternalRuntime::new(sink.clone(), launcher, tokio::runtime::Handle::current());
+    let _ = host.runtime.set(runtime.clone());
+    runtime.start_turn(turn("conv-skip", "skip-1", "startup-skipped", AgentBackend::Codex)).unwrap();
+    let terminal = sink.terminal("skip-1").await;
+    assert_eq!(terminal["type"], "run.failed", "{terminal}");
+    assert_eq!(terminal["code"], "agent_backend_fox_tools_rejected", "{terminal}");
+    assert!(terminal["message"].as_str().unwrap_or_default().contains(fox_mcp::SERVER_NAME), "{terminal}");
+    // The process is stopped (its token revoked); the next turn relaunches.
+    for _ in 0..100 {
+        if bridge.live_tokens() == 0 { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(bridge.live_tokens(), 0, "stopped with its token");
+    runtime.start_turn(turn("conv-skip", "skip-2", "tools", AgentBackend::Codex)).unwrap();
+    assert_eq!(sink.terminal("skip-2").await["type"], "run.completed");
+    runtime.shutdown().await;
+}
+
 /// Plan C5 (Linux): pi reaches the Fox tools through the C3 gate, which loads
 /// the real `fox-mcp-tools.ts` (`FOX_PI_MCP_EXTENSION`) after the approval
 /// gate; the extension connects to the same bridge with the launch's token.
+///
+/// fox-fix-pi: "pi" here is a MOCK (`mock-acp-pi-agent.mjs`): it plays pi-acp
+/// and pi in one Node process, imports the extension with Node's own type
+/// stripping (not pi's jiti loader), never loads the approval gate, has no
+/// RPC mode, no model and no `pi -p`. It checks the gate's argv and the
+/// extension's protocol, nothing about real pi 1.4.0 / pi-acp 0.0.34; that
+/// is `pi_real_fox_tools.rs`.
 /// Unix only: the launch is `sh fixtures/pi/pi-gated.sh` (Windows runs the
 /// `.cmd` twin, covered by the 13.32 Windows checks).
 #[cfg(unix)]
