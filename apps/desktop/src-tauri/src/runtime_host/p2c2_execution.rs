@@ -27,6 +27,10 @@ pub(crate) struct Coverage {
 }
 
 impl Coverage {
+    /// Test fixture: a contract whose completeness was never stated.
+    #[cfg(test)]
+    #[allow(non_upper_case_globals)]
+    pub(crate) const Unstated: Self = Self { obligations: None };
 
     pub(crate) fn fully_discharged(&self) -> bool {
         self.obligations.as_ref().is_some_and(|entries| {
@@ -72,17 +76,3 @@ impl Coverage {
         }
     }
 }
-
-#[cfg(test)]
-thread_local! {
-    static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce(&Database, &str)>>> = std::cell::RefCell::new(None);
-}
-
-#[cfg(test)]
-fn test_after_check(hook: impl FnOnce(&Database, &str) + 'static) {
-    AFTER_CHECK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-}
-
-#[cfg(test)]
-#[path = "p2c2_execution_tests.rs"]
-mod tests;

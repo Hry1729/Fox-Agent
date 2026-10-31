@@ -309,22 +309,6 @@ pub(crate) struct DeliveryChecklistSeed {
     pub requirements: Vec<DeliveryRequirement>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct DeliveryChecklistItem {
-    pub item_key: String,
-    pub target_path: Option<String>,
-    pub artifact_id: Option<String>,
-    pub display_name: String,
-    pub checks: Vec<String>,
-    pub status: String,
-    pub finding: Option<String>,
-    pub checked_at: Option<i64>,
-    pub updated_at: i64,
-    /// The interrupted Run this requirement was inherited from, when this Run
-    /// resumes an earlier task of the same conversation.
-    pub inherited_from_run_id: Option<String>,
-}
-
 /// Test-only fault injection for the second phase of the delivery write.
 ///
 /// The window this models is real: the round decision is durable, the process
@@ -372,52 +356,42 @@ pub(crate) mod stage_fault {
 }
 
 impl Database {
-    /// Read per-item placement metadata without Run-wide semantic de-duplication.
-    pub(crate) fn delivery_item_requirements(&self,run_id:&str,item_key:&str)->Result<Vec<DeliveryRequirement>,String> {
-        self.with_connection(|conn| {
-            let body:String=conn.query_row("SELECT requirements_json FROM delivery_checklist_items WHERE run_id=?1 AND item_key=?2",
-                params![run_id,item_key],|row|row.get(0))?;
-            serde_json::from_str(&body).map_err(|_|rusqlite::Error::InvalidParameterName("invalid frozen delivery requirements".into()))
-        })
-    }
-
-    /// Drop a staged round that must never be finalized: the decision it belonged
-    /// to was superseded (steering took the round over) or its commit failed.
-    ///
-    /// Scoped by mark so a newer round's stage is never withdrawn by a stale
-    /// caller, and idempotent.
-    pub(crate) fn withdraw_staged_delivery_outcome(
+    /// Insert checklist items that were not planned yet. Existing items (a
+    /// repaired run may re-check the same target) keep their identity.
+    /// Test fixture: historical checklist rows for the retained read model
+    /// (no production writer remains).
+    #[cfg(test)]
+    pub(crate) fn seed_delivery_checklist(
         &self,
         run_id: &str,
-        decision_mark: &str,
+        seeds: &[DeliveryChecklistSeed],
+        now: i64,
     ) -> Result<(), String> {
         self.with_connection(|conn| {
-            conn.execute(
-                "DELETE FROM delivery_outcome_stage WHERE run_id=?1 AND decision_mark=?2",
-                params![run_id, decision_mark],
-            )?;
-            conn.execute(
-                "DELETE FROM delivery_repair_stage WHERE run_id=?1 AND decision_mark=?2",
-                params![run_id, decision_mark],
-            )?;
+            let transaction=conn.unchecked_transaction()?;
+            for seed in seeds {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO delivery_checklist_items(
+                        run_id, item_key, target_path, artifact_id, display_name,
+                        checks_json, requirements_json, status, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
+                    params![
+                        run_id,
+                        seed.item_key,
+                        seed.target_path,
+                        seed.artifact_id,
+                        seed.display_name,
+                        crate::canonical_json::to_string(&seed.checks).unwrap_or_else(|_| "[]".into()),
+                        crate::canonical_json::to_string(&seed.requirements).unwrap_or_else(|_| "[]".into()),
+                        now,
+                    ],
+                )?;
+            }
+            transaction.commit()?;
             Ok(())
         })
     }
 
-    /// True when the given decision mark was committed with its decision.
-    pub(crate) fn decision_mark_committed(
-        &self,
-        run_id: &str,
-        decision_mark: &str,
-    ) -> Result<bool, String> {
-        self.with_connection(|conn| {
-            Ok(conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM kernel_decision_marks WHERE run_id=?1 AND mark=?2)",
-                params![run_id, decision_mark],
-                |row| row.get::<_, bool>(0),
-            )?)
-        })
-    }
 
     /// Test-only stand-in for the decision commit's mark write.
     ///
@@ -439,185 +413,6 @@ impl Database {
                 params![run_id, decision_mark, now],
             )?;
             Ok(())
-        })
-    }
-
-    /// Staged rounds still waiting, as `(run_id, decision_mark)`.
-    ///
-    /// A lingering stage row means the second phase never ran. Whether it may be
-    /// finalized is decided by [`Self::decision_mark_committed`], never by the
-    /// row's presence alone.
-    pub(crate) fn staged_delivery_rounds(&self) -> Result<Vec<(String, String)>, String> {
-        self.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT run_id, decision_mark FROM delivery_outcome_stage
-                 GROUP BY run_id, decision_mark
-                 UNION
-                 SELECT run_id, decision_mark FROM delivery_repair_stage
-                 GROUP BY run_id, decision_mark
-                 ORDER BY 1, 2",
-            )?;
-            let rows = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })
-    }
-
-    /// Finalize one round's staged verdicts: the item outcomes, their findings
-    /// and (for a repair round) the repair ledger row become durable together.
-    ///
-    /// The write is gated **inside this transaction** on the decision mark having
-    /// been committed, and scoped to that mark, so:
-    /// * a stage whose decision never committed (crash, cancellation, superseded
-    ///   round) writes nothing — the caller then withdraws it;
-    /// * a newer round's stage is never finalized by an older round's caller;
-    /// * re-running it is a no-op: rows already carrying the verdict, and an
-    ///   existing repair round, are left alone.
-    pub(crate) fn finalize_staged_delivery_outcome(
-        &self,
-        run_id: &str,
-        decision_mark: &str,
-        now: i64,
-    ) -> Result<usize, String> {
-        if decision_mark.trim().is_empty() {
-            return Err("delivery finalize requires a non-empty decision mark".into());
-        }
-        self.with_connection(|conn| {
-            let transaction = conn.unchecked_transaction()?;
-            let committed: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM kernel_decision_marks WHERE run_id=?1 AND mark=?2)",
-                params![run_id, decision_mark],
-                |row| row.get(0),
-            )?;
-            if !committed {
-                // Nothing to finalize: the decision this stage belongs to never
-                // landed. The caller decides whether to withdraw the stage.
-                transaction.rollback()?;
-                return Ok(0);
-            }
-            // The staged verdict and the item's **own** frozen contract are read
-            // together in one statement, so the identity always describes the row
-            // being written and no per-item contract query is issued.
-            let staged: Vec<(String, i64, String, Option<String>)> = {
-                let mut stmt = transaction.prepare(
-                    "SELECT s.item_key, s.passed, s.finding_json, i.requirements_json
-                     FROM delivery_outcome_stage s
-                     LEFT JOIN delivery_checklist_items i
-                       ON i.run_id = s.run_id AND i.item_key = s.item_key
-                     WHERE s.run_id=?1 AND s.decision_mark=?2 ORDER BY s.item_key",
-                )?;
-                let rows = stmt
-                    .query_map(params![run_id, decision_mark], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-            for (item_key, passed, finding, requirements) in &staged {
-                #[cfg(test)]
-                if finalize_fault::should_abort() {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                // Packages 2-B2 / 2-C1: the staged `passed` flag and the staged
-                // finding are written together, so the flag is checked against the
-                // finding it is about to be stored beside **and** against the
-                // item's own contract identity. A v2 record may only be written as
-                // `passed` when its own facts support that; a row that owes a v2
-                // record but carries none is written as unconfirmed rather than
-                // being discovered later by a reader. Legacy rows carry no envelope
-                // and keep the flag they were staged with.
-                //
-                // The three outcomes stay distinct: a contradicted pass is written
-                // `failed` (a definite non-pass, exactly as before), a lost or
-                // unreadable record is written `pending` (unconfirmable, so a later
-                // round may still resolve it), and everything else keeps `passed`.
-                let status = if *passed != 0 {
-                    let qualification = crate::runtime_host::delivery::passed_qualification_of_row(
-                        "passed",
-                        Some(finding.as_str()),
-                        requirements.as_deref(),
-                        item_key,
-                    );
-                    match qualification {
-                        crate::runtime_host::delivery::PassQualification::ContradictedByFacts => {
-                            "failed"
-                        }
-                        crate::runtime_host::delivery::PassQualification::RecordUnusable(_) => {
-                            "pending"
-                        }
-                        _ => "passed",
-                    }
-                } else {
-                    "failed"
-                };
-                // Only a row that has not already received this exact verdict is
-                // written, so `checked_at` keeps the instant the verdict was
-                // really decided and a replayed finalizer writes nothing.
-                transaction.execute(
-                    "UPDATE delivery_checklist_items
-                     SET status=?1, finding_json=?2, checked_at=?3, updated_at=?3
-                     WHERE run_id=?4 AND item_key=?5
-                       AND (status<>?1 OR finding_json IS NOT ?2)",
-                    params![status, finding, now, run_id, item_key],
-                )?;
-            }
-            let findings: Option<String> = transaction
-                .query_row(
-                    "SELECT findings_json FROM delivery_repair_stage
-                     WHERE run_id=?1 AND decision_mark=?2",
-                    params![run_id, decision_mark],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            if let Some(findings) = &findings {
-                transaction.execute(
-                    "INSERT OR IGNORE INTO delivery_repair_rounds(run_id, round, findings_json, created_at)
-                     SELECT ?1, COALESCE(MAX(round),0)+1, ?2, ?3 FROM delivery_repair_rounds WHERE run_id=?1",
-                    params![run_id, findings, now],
-                )?;
-            }
-            transaction.execute(
-                "DELETE FROM delivery_outcome_stage WHERE run_id=?1 AND decision_mark=?2",
-                params![run_id, decision_mark],
-            )?;
-            transaction.execute(
-                "DELETE FROM delivery_repair_stage WHERE run_id=?1 AND decision_mark=?2",
-                params![run_id, decision_mark],
-            )?;
-            transaction.commit()?;
-            Ok(staged.len())
-        })
-    }
-
-    pub(crate) fn delivery_checklist(
-        &self,
-        run_id: &str,
-    ) -> Result<Vec<DeliveryChecklistItem>, String> {
-        self.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT item_key, target_path, artifact_id, display_name, checks_json,
-                        status, finding_json, checked_at, updated_at, inherited_from_run_id
-                 FROM delivery_checklist_items WHERE run_id=?1 ORDER BY item_key",
-            )?;
-            let rows = stmt
-                .query_map(params![run_id], |row| {
-                    let checks: String = row.get(4)?;
-                    Ok(DeliveryChecklistItem {
-                        item_key: row.get(0)?,
-                        target_path: row.get(1)?,
-                        artifact_id: row.get(2)?,
-                        display_name: row.get(3)?,
-                        checks: serde_json::from_str(&checks).unwrap_or_default(),
-                        status: row.get(5)?,
-                        finding: row.get(6)?,
-                        checked_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                        inherited_from_run_id: row.get(9)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
         })
     }
 

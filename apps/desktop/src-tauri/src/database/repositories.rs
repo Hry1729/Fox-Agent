@@ -68,7 +68,7 @@ pub(crate) use delivery_acceptance::{AcceptanceBinding, AcceptanceRow, Acceptanc
 mod run_steering;
 mod managed_files;
 pub(crate) use delivery_checks::{
-    DeliveryChecklistItem, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
+    DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
 };
 #[cfg(test)]
 pub(crate) use delivery_checks::finalize_fault;

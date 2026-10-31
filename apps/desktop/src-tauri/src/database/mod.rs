@@ -49,7 +49,7 @@ pub use repositories::{
     EVIDENCE_REFERENCE_PAIRS, WORK_EVENT_TYPES,
 };
 pub(crate) use repositories::{
-    package_snapshot_hash, CreateChildRunInput, DeliveryChecklistItem,
+    package_snapshot_hash, CreateChildRunInput,
     DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
     KernelHostScope, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput,
     RestoreClaim, RestoreRequestRecord,

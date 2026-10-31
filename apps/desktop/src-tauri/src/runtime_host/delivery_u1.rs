@@ -124,6 +124,16 @@ pub enum AcceptanceIneffective {
 }
 
 impl AcceptanceIneffective {
+    #[cfg(test)]
+    pub fn is_definite(&self) -> bool {
+        !matches!(
+            self,
+            AcceptanceIneffective::Absent
+                | AcceptanceIneffective::CandidateUnreadable { .. }
+                | AcceptanceIneffective::AuthorizationWithdrawn
+        )
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AcceptanceIneffective::Absent => "absent",

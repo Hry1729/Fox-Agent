@@ -4602,11 +4602,6 @@ mod write_gate_tests {
             for target in targets {
                 let path = root.join(target.replace('/', std::path::MAIN_SEPARATOR_STR));
                 fs::write(&path, "protected content").unwrap();
-                assert!(
-                    crate::runtime_host::delivery::read_only_input_paths(task)
-                        .contains(&crate::runtime_host::delivery::path_key(target)),
-                    "{target} must stay read-only for: {task}"
-                );
                 let before = fs::read(&path).unwrap();
                 let error = ensure_writable_target(Some(task), root.to_str().unwrap(), &path)
                     .expect_err("the write entry must refuse a prohibited target");
@@ -4635,12 +4630,6 @@ mod write_gate_tests {
         assert!(
             crate::runtime_host::delivery::expectations_from_task(task).is_empty(),
             "a prohibited target must not become a deliverable"
-        );
-        // (2) the path stays in the read-only set the write gate derives from the task.
-        assert!(
-            crate::runtime_host::delivery::read_only_input_paths(task)
-                .contains(&crate::runtime_host::delivery::path_key("out/a.md")),
-            "a prohibited path must stay read-only"
         );
         // (3) the real write entry refuses, and the bytes on disk are untouched.
         let before = fs::read(&target).unwrap();

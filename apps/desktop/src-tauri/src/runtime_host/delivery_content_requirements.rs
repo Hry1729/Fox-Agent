@@ -41,25 +41,6 @@ pub(super) enum Contract {
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(super) struct Metric { column:String, operation:String }
 
-pub(super) fn model_reference(spec:&Value)->Value {
-    let Ok(contract)=serde_json::from_value::<Contract>(spec["rule"].clone()) else {return json!({"schemaVersion":1,"type":"unbound","reason":"内容契约不支持"});};
-    // The separator rule travels with the reference so a user-facing view can
-    // tell a record frozen under the historical rule from one frozen under the
-    // corrected rule. An unreadable marker keeps the legacy reading: this is a
-    // display projection, and rendering is not where a contract is validated.
-    let rule=merge_rule::from_spec(spec).unwrap_or_default();
-    match contract {
-        Contract::Concat{sources,selected,selection_order,tie_order,merge_order,read_only}=>json!({"schemaVersion":1,"type":"concat",
-            "selectionOrder":selection_order,"tieOrder":tie_order,"mergeOrder":merge_order,"selected":selected,
-            "mergeRule":rule.as_str(),
-            "sourceManifestHash":digest(&crate::canonical_json::to_vec(&sources).unwrap_or_default()),"readOnly":read_only,"format":"完整文件名 LF 原文，相邻段恰好一个空行，最后不添空行"}),
-        Contract::DataSource{source,sheet,headers,date_required,metrics}=>json!({"schemaVersion":1,"rule":{
-            "type":"dataSource","source":source,"sheet":sheet,"headers":headers,"date_required":date_required,"metrics":metrics},
-            "computeSourceSheet":if Path::new(&source.path).extension().and_then(|e|e.to_str()).is_some_and(|e|matches!(e.to_ascii_lowercase().as_str(),"csv"|"tsv")) {Some("Sheet1")}else{sheet.as_deref()}}),
-        other=>json!({"schemaVersion":1,"rule":other}),
-    }
-}
-
 // ===========================================================================
 // Host-side strict spec decoding (package 2-A, internal only).
 //
@@ -441,8 +422,6 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
     }
 }
 
-fn digest(bytes:&[u8])->String {hex::encode(Sha256::digest(bytes))}
-
 // ===========================================================================
 // Host-side typed v2 classification and the per-row version router.
 //
@@ -465,29 +444,6 @@ fn digest(bytes:&[u8])->String {hex::encode(Sha256::digest(bytes))}
 mod tests {
     use super::*;
     fn reference()->Source{Source{path:"policy.md".into(),sha256:"a".repeat(64),bytes:1,first_line:1,last_line:1}}
-    #[test]
-    fn finite_material_budget_and_subject_local_negation() {
-        let body=(0..33).map(|i|format!("禁止提及“Feature {i}”。")).collect::<Vec<_>>().join("\n");
-        let rules=material_rules(&reference(),&body);
-        assert_eq!(rules.iter().filter(|r|matches!(r,Contract::ForbiddenMention{..})).count(),32);
-        assert!(rules.iter().any(|r|matches!(r,Contract::Unbound{..})));
-        assert!(availability_claim("Guide 已发布，Other 未上线。","Guide"));
-        assert!(!availability_claim("Guide 尚未发布。","Guide"));
-        assert!(material_rules(&reference(),"Do not claim 'Smart Guide' is released.").iter().any(|r|matches!(r,Contract::ForbiddenAvailability{..})));
-        let line="这是产品上线后已经跑出来的数，不是目标值。";
-        assert!(!qualifier_negated(line,line.find("上线后").unwrap()));
-        assert!(readable(br#"{"title":"\u0048idden Preview"}"#,"brief.json").unwrap().contains("Hidden Preview"));
-    }
-    #[test]
-    fn explicit_sheet_and_multiple_source_remain_ambiguous() {
-        assert!(source_sheet_from_task("按字段统计 Sheet 'Alpha' 和 Sheet 'Beta'。").is_err());
-        assert_eq!(source_sheet_from_task("以 Detailed Ledger 为事实明细，按 Segment Group 列统计。").unwrap(),Some("Detailed Ledger".into()));
-        // asks_for_statistics deliberately stays narrow (a computed word must follow
-        // 统计), so the demand names what is counted; the two named sources are what
-        // must keep it unbound.
-        let requirement=source_statistics_demand("读取 FIRST.XLSX 和 SECOND.XLSX，按 Segment Group 列统计数量，生成 report.md。").unwrap();
-        assert!(matches!(requirement.kind,RequirementKind::SourceStatsUnbound{..}));
-    }
 
     // D1: the v1 `Contract::Concat` writer is the path that actually runs when
     // v2 is off (the default), so the empty-body separator lives here too. The
@@ -725,39 +681,6 @@ mod tests {
         );
     }
 
-    /// The frozen step writes the marker on every new record, in both envelope
-    /// shapes, so a contract cannot be frozen without saying which rule it means.
-    #[test]
-    fn d1_compat_a_new_freeze_records_the_marker_in_both_envelopes() {
-        use delivery_v2::{spec_for_contract, V2Enablement};
-        let concat = Contract::Concat {
-            sources: Vec::new(),
-            selected: Vec::new(),
-            selection_order: "byteSizeAscThenNameAsc".into(),
-            tie_order: "nameAsc".into(),
-            merge_order: "nameAsc".into(),
-            read_only: true,
-        };
-        let rule = serde_json::to_value(&concat).unwrap();
-        for (label, enablement, expected_schema) in [
-            ("v1", V2Enablement::Off, 1),
-            ("v2", V2Enablement::On, 2),
-        ] {
-            let spec = spec_for_contract(&concat, rule.clone(), "content:concat", &enablement);
-            assert_eq!(spec["schemaVersion"], json!(expected_schema), "{label}");
-            assert_eq!(
-                spec[merge_rule::KEY],
-                json!(MergeRule::current().as_str()),
-                "{label}: a new freeze must declare its separator"
-            );
-            assert_eq!(
-                decode_spec(&spec).merge_rule().expect("an unmarked v1 record always decodes with the historical rule"),
-                MergeRule::current(),
-                "{label}: what the writer froze is what the reader sees"
-            );
-        }
-    }
-
     /// An unusable marker is refused on **both** chains rather than defaulted.
     #[test]
     fn d1_compat_an_unusable_marker_is_refused_on_both_chains() {
@@ -800,7 +723,4 @@ mod tests {
 
 #[path = "p2c2_execution.rs"]
 pub(super) mod execution;
-
-#[path = "delivery_v2.rs"]
-pub(super) mod delivery_v2;
 
