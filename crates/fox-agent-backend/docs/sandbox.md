@@ -1869,13 +1869,9 @@ C. Codex（codex-acp）
 D. dsh
 7. 真实 dsh：四档可用；会话中切换显示「下一轮重启生效」，下一轮确实以新预设重启；撤销完全访问时原进程完全结束后才重建。Fox 工具同第 6 项（5 个工具、present_files / search_knowledge 成功）。
 
-dsh 的「工作区完全修改」（`workspace-write`）**只限制写入**：在工作区外写文件会弹审批卡，**读取工作区外的文件不弹卡**（dsh 自己的 workspace-write 策略不管读）。
-
-删除项目根的内置 block 现在有不依赖模型的端到端测试 `tests/host_block_e2e.rs`（假 Agent `tests/fixtures/mock-acp-permission-probe.mjs` 在完全访问下直接发 ACP `session/request_permission`；`cargo test -p fox-agent-backend --features acp` 会在 Windows 与 Linux 的 Agent backend (ACP) tests 里都跑到）。覆盖的写法：Windows 盘符根 `D:\fox-test\测试项目` 上的 `cmd //c "rd /s /q …"`、`cmd /c rmdir /s /q …`、`rm -rf` 盘符路径与 `/d/` 路径、`cd .. && rd /s /q 测试项目`，以及 pi 的 `cd "<cwd>" && … 2>&1; echo …$?` 包装；POSIX 根 `/work/fox-e2e/proj` 上的 `rm -rf <根>`、`cd .. && rm -rf proj`、`cd "<根>" && rm -rf . 2>&1; echo $?`；Codex 的字符串命令和 `["bash","-lc","rm -rf <根>"]`。Host 直接拒绝、不出审批卡，审计 reason 为 `permission.blocked`，findings 含 `builtin_block`。
-
 E. 外部 Agent 通用
 8. ask_user 往返：外部 Agent（三家各一次）调 ask_user → 本轮以等待用户结束、出现提问卡片 → 回答后作为下一轮发给同一会话，卡片关闭。
-9. 外部 Agent 完全访问的二次确认：每个项目第一次要确认，确认后同一项目新建会话不再询问；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN` 时三家的完全访问都置灰。
+9. 外部 Agent 完全访问的二次确认：每个项目第一次要确认，确认后同一项目新建会话不再询问（**13.35 起改为每次手动选完全访问都确认**）；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN` 时三家的完全访问都置灰。
 10. `FOX_EXTERNAL_BACKENDS`：未设置时四个选项都可选；设为 `0` 时外部三项置灰、设置页说明已关闭、已有外部会话只读；设为 `pi` 时只有 Pi 可选。
 11. 新会话选择器和设置：「新会话使用的 Agent」保存后下一次新建会话使用该后端；已有会话保持创建时的绑定。
 12. C4 失败提示：卸载 / 损坏运行时（`agent_backend_spawn_failed` 或 `not_installed`）、未登录（`exited_on_start` / `missing_credentials`）、启动中撤销完全访问（L-1：本轮以 `agent_backend_full_access_revoked` 结束，下一轮按撤销后的权限启动）、Windows 上停止外部会话不卡 UI（L-3）。
@@ -1891,3 +1887,42 @@ G. 知识库与默认 feature 构建
 18. 默认 feature 构建（B4a / DOC-5）：用默认 feature（`local-embedding` + `zvec`）完整构建并启动，向量检索和本地资料库正常。
 19. 远程知识库原生索引不可用时返回 `remote_knowledge.index_unavailable`，不降级为关键词扫描（B4b）。
 20. 本地检索 worker 冷启动耗时（KB-6）：记录首次检索耗时，作为后续优化的基线。
+
+### 13.35 13.34 复测问题修复 + 运行时包 0.1.8：Windows 复测清单（2026-11-01）
+
+> 承接 13.34 Windows 复测（main `403ca6da`）。本批修复：
+> - **Pi 询问档无法批准**：前端 `approval-decision-policy.ts` 把 Host 下发的 `allow_project_rule` 当成非法声明，整份 `availableDecisions` 作废，卡片只剩「拒绝」（自 A1 起 PiNative 同样受影响，外部 Pi 在 pigate-rule 之后暴露）。现在「只允许这一次」始终在。Pi 命令外层的 `cd "<cwd>" && <命令> 2>&1; echo "…$?"` 是**模型写出来的**（0.1.7 包里的 pi-coding-agent、pi-acp、pi-gate 都不加这层）；Host 引擎（PiNative 与外部 Pi 共用）精确识别这种包装：cd 目标必须等于 cwd、末尾必须是只含一个 `$?` 的 echo 标记，两种引号方言切分一致；识别后规则匹配、默认前缀、风险都按内层命令，**block 判定仍看整条命令**（内层单独命中 block 也拒绝）；越界取两次分析的或。识别不了就按原样询问。卡片 `policy.innerCommand` 给出内层命令，findings 带 `exit_marker_wrapper`。
+> - **完全访问确认**：Fox、Pi、Codex、dsh 任何一次手动选完全访问都弹同一个确认框（取代 13.32 第 9 项「同一项目只确认一次」；Host 的项目首次确认规则仍作为第二道防线保留）。
+> - **dsh「下一轮生效」**：本会话 `agent_backend.session`、Run 开始和结束时刷新审批选择器，小字在下一轮的新进程会话建立时消失。
+> - **外部会话起始档位**：`conversation_create` 不再读取草稿档位键；没有显式 `nativePermission` 时一律用后端默认（设置 → 默认权限，否则目录默认，dsh 为 `workspace-write`）。UI 新建会话会把草稿选择器当前的档位作为 `nativePermission` 传给 Host；显式完全访问必须是草稿里确认过的。
+> - **停止后回收子进程**：外部 Agent 确认取消后进程保留，Host 等 1.5 秒再清扫「本轮 prompt 之前不在进程树里」的进程（Windows：Job 进程列表 + `IsProcessInJob` 防 pid 复用；Unix：pid + 启动时间），事件 `agent_backend.cancel_swept`。没有基线或杀不掉时停止整个后端连接。Job 仍是 `KILL_ON_JOB_CLOSE`、不允许 breakaway。
+> - **删除项目根拦截的端到端测试**：`tests/host_block_e2e.rs`，Windows 与 Linux 的 ACP CI job 都跑，详见下方「补充说明」；数据库里 `permission_audit` 的真实写入由桌面测试 `wrapped_pi_root_delete_is_audited_and_a_dir_rule_allows_the_same_wrapper` 覆盖。
+> - **dsh 工作区档只限制写入**：见下方「补充说明」；13.34 二.6 的现象符合预期。
+> - **运行时包 0.1.8**：在 0.1.7 基础上加入 pi-acp 0.0.34（6 处 spawn）和 pi 1.4.0 bundle（7 处）的 `windowsHide` 补丁；pin：`pi-acp/dist/index.js` `7f921a09…`，`chunk-MM3LKT73.js` `ca845072…`。0.1.8 SHA256 **`0f9c199da3aed28b3ccdc52885c04a49548c79f65e98a89106836e50e35d397f`**，windows-ci run 41223685857 的 artifact `fox-sandbox-runtime-0.1.8-windows-x64`（2027-01-30 01:16 CST 过期）。
+
+**补充说明（自 13.32 移来）**
+
+dsh 的「工作区完全修改」（`workspace-write`）**只限制写入**：在工作区外写文件会弹审批卡，**读取工作区外的文件不弹卡**（dsh 自己的 workspace-write 策略不管读）。
+
+删除项目根的内置 block 现在有不依赖模型的端到端测试 `tests/host_block_e2e.rs`（假 Agent `tests/fixtures/mock-acp-permission-probe.mjs` 在完全访问下直接发 ACP `session/request_permission`；`cargo test -p fox-agent-backend --features acp` 会在 Windows 与 Linux 的 Agent backend (ACP) tests 里都跑到）。覆盖的写法：Windows 盘符根 `D:\fox-test\测试项目` 上的 `cmd //c "rd /s /q …"`、`cmd /c rmdir /s /q …`、`rm -rf` 盘符路径与 `/d/` 路径、`cd .. && rd /s /q 测试项目`，以及 pi 的 `cd "<cwd>" && … 2>&1; echo …$?` 包装；POSIX 根 `/work/fox-e2e/proj` 上的 `rm -rf <根>`、`cd .. && rm -rf proj`、`cd "<根>" && rm -rf . 2>&1; echo $?`；Codex 的字符串命令和 `["bash","-lc","rm -rf <根>"]`。Host 直接拒绝、不出审批卡，审计 reason 为 `permission.blocked`，findings 含 `builtin_block`。
+
+**复测清单 13.35**（Windows 桌面构建，用 0.1.8 运行时包；每项「通过 / 失败 + 截图 / 日志」）
+
+A. 0.1.8 安装
+1. 安装后 `%ProgramFiles%\Fox\sandbox-runtime\0.1.8\` 存在；`backends\pi\node_modules\pi-acp\dist\index.js` 中能搜到 6 处 `windowsHide: true`；Pi / Codex / dsh 全程没有可见控制台窗口（同 13.34 一）。
+
+B. Pi 询问档
+2. 询问档让 Pi 执行 `dir`：卡片有「拒绝」「只允许这一次」和「本项目总是允许」；点「只允许这一次」命令执行。
+3. 卡片命令显示完整的 `cd "…" && dir 2>&1; echo …`，默认前缀是 `dir`（不是 `cd`）；保存后同项目再执行包装的 `dir` 不弹卡（审计 `reason=rule`）。前缀改成 `cd` → `permission.rule_does_not_cover`；填整条命令 → `permission.invalid_rule`。
+4. PiNative（Fox 会话）询问档执行命令：同样有「只允许这一次」。
+
+C. 完全访问确认
+5. Fox、Pi、Codex、dsh 各手动选一次完全访问：都弹「确认使用「…」？」；取消后档位不变；同一项目再选一次仍弹框。
+
+D. dsh
+6. 会话中切档：按钮出现「下一轮生效」；发下一轮，新预设的 dsh 起来后小字消失，不需要刷新。
+7. 起始档位：Fox 只读 → 新会话切 dsh 显示「查看」后不发消息，再从别处（例如另一个窗口 / API）新建 dsh 会话：应为「工作区完全修改」。UI 里选「查看」后直接发消息新建：应为「仅可查看」。
+8. 停止：让 dsh 执行 `ping -n 60 127.0.0.1`，运行中点停止；约 2 秒内 `PING.EXE` 和它的 `cmd.exe` 消失（任务管理器「详细信息」）；dsh 本身还在，下一轮正常。Pi（`ping -n 60 127.0.0.1`）和 Codex 各做一次，Codex 停止后下一轮必须仍可用（若下一轮报后端退出，请附日志：可能是 Codex 在本轮中途才起的常驻子进程被清扫）。
+
+E. 删除项目根
+9. （可选）完全访问下让 Pi 执行删除项目根的命令仍被拒（模型可能拒绝调用，CI 已用假 Agent 覆盖，见上）。
