@@ -31,7 +31,7 @@ use crate::config::HostPolicy;
 use crate::external::{ExternalLauncher, LaunchFailure, LaunchRequest, Launched};
 use crate::launch::LaunchSpec;
 use crate::port::AgentBackend;
-use crate::external_home::{prepare_launch, HostOs, PermissionMode, PrivateDirs, PrivateHomes};
+use crate::external_home::{home_project_uuid, prepare_launch, HostOs, PermissionMode, PrivateDirs, PrivateHomes};
 use futures::future::BoxFuture;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -443,9 +443,10 @@ impl HostLaunchConfig {
     /// logins made there keep working; otherwise the per-user
     /// `<fox data>/agent-homes` is used.
     pub fn private_dirs(&self, request: &LaunchRequest) -> Result<PrivateDirs, LaunchFailure> {
-        let project_uuid = request.project_uuid.clone().unwrap_or_default();
+        // 没有项目时用保留 HOME，不把空串送进 home_for（空串会被拒绝）。
+        let project_uuid = home_project_uuid(request.project_uuid.as_deref());
         let (homes_root, tmp_root) = self.external_private_roots();
-        let home = PrivateHomes::new(homes_root).home_for(&project_uuid, request.backend)?;
+        let home = PrivateHomes::new(homes_root).home_for(project_uuid, request.backend)?;
         Ok(PrivateDirs { private_home: home.path, tmp_root })
     }
 
@@ -470,8 +471,8 @@ impl HostLaunchConfig {
     /// files / key names its private HOME has. Names only
     /// ([`crate::onboarding::probe`]).
     pub fn credential_probe(&self, request: &LaunchRequest) -> Result<crate::onboarding::CredentialProbe, LaunchFailure> {
-        let project_uuid = request.project_uuid.clone().unwrap_or_default();
-        let home = self.private_home_path(&project_uuid, request.backend)?;
+        let project_uuid = home_project_uuid(request.project_uuid.as_deref());
+        let home = self.private_home_path(project_uuid, request.backend)?;
         let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
         let mut probe = crate::onboarding::probe(request.backend, &home, &host_env);
         if request.backend == AgentBackend::Pi {
@@ -837,19 +838,19 @@ use crate::acp::AcpConnection;
 
 impl ExternalLauncher for HostLauncher {
     fn model_host(&self, request: &LaunchRequest) -> Option<String> {
-        let home = self.config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend).ok()?;
+        let home = self.config.private_home_path(home_project_uuid(request.project_uuid.as_deref()), request.backend).ok()?;
         crate::model_endpoint::resolve(request.backend, &home, &request.project_root).ok()?.endpoint.map(|endpoint| endpoint.entry)
             .or_else(|| self.config.unified_login_host(request, &home))
     }
     fn selected_model(&self, request: &LaunchRequest) -> Option<String> {
         if request.backend != AgentBackend::Pi { return None; }
-        let home = self.config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend).ok()?;
+        let home = self.config.private_home_path(home_project_uuid(request.project_uuid.as_deref()), request.backend).ok()?;
         let native = crate::model_endpoint::resolve(request.backend, &home, &request.project_root).ok()?;
         Some(format!("{}/{}", native.provider?, native.model?))
     }
     fn connection_key(&self, request: &LaunchRequest) -> Result<Option<String>, LaunchFailure> {
         use sha2::{Digest, Sha256};
-        let home = self.config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend)?;
+        let home = self.config.private_home_path(home_project_uuid(request.project_uuid.as_deref()), request.backend)?;
         let mut hash = Sha256::new();
         hash.update(crate::model_endpoint::source_fingerprint(request.backend, &home).map_err(|error| LaunchFailure::new("agent_backend_model_endpoint_invalid", error))?);
         if let Some(login) = &request.unified_login {
@@ -900,6 +901,21 @@ mod tests {
             unified_login: None,
             native_permission: None,
         }
+    }
+
+    /// 请求里没有项目 UUID 时，私有 HOME 落到保留键，不跟真实项目共用目录。nil 仍然拒绝。
+    #[test]
+    fn a_launch_without_a_project_uses_the_shared_conversations_home() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        let mut req = request(AgentBackend::Codex, root.path());
+        req.project_uuid = None;
+        let shared = config.private_dirs(&req).unwrap().private_home;
+        let via_id = config.private_home_path(crate::external_home::DEFAULT_CONVERSATIONS_HOME_ID, AgentBackend::Codex).unwrap();
+        assert_eq!(shared, via_id);
+        let project = config.private_home_path("8f14e45f-ceea-467a-9a36-dedd4bea2543", AgentBackend::Codex).unwrap();
+        assert_ne!(shared, project);
+        assert!(config.private_home_path("00000000-0000-0000-0000-000000000000", AgentBackend::Codex).is_err());
     }
 
     #[test]

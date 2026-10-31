@@ -159,11 +159,23 @@ describe('probe target: the card shows before the first message (80b1622)', () =
       .toEqual({ backend: 'deepseek', projectRoot: 'D:/proj', fullAccess: true })
   })
 
-  test('Fox, or a draft without a project, has no probe; a locked conversation is probed by id', () => {
+  test('Fox has no probe; a locked conversation is probed by id', () => {
     expect(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'fox', draftProjectId: 'p1' })).toBeNull()
-    expect(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'codex' })).toBeNull()
     expect(credentialProbeTarget({ lockedBackend: 'codex', conversationId: 'c1', draftBackend: 'fox' })).toEqual({ conversationId: 'c1' })
     expect(credentialProbeTarget({ lockedBackend: 'fox', conversationId: 'c1', draftBackend: 'codex', draftProjectId: 'p1' })).toBeNull()
+  })
+
+  test('a draft without a project probes the default home', () => {
+    expect(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'codex' }))
+      .toEqual({ backend: 'codex', fullAccess: false })
+    expect(credentialProbeTarget({
+      lockedBackend: null,
+      conversationId: null,
+      draftBackend: 'pi',
+      draftProjectId: null,
+      draftProjectRoot: '',
+      draftFullAccess: true,
+    })).toEqual({ backend: 'pi', fullAccess: true })
   })
 
   test('the key changes with the target only', () => {

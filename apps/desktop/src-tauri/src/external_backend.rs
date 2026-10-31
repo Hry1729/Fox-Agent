@@ -34,6 +34,8 @@ pub struct DesktopSink {
     app: AppHandle,
     database: Database,
     event_lock: Arc<Mutex<()>>,
+    /// 无项目会话的默认对话目录放在这个数据目录下。
+    data_dir: std::path::PathBuf,
 }
 
 impl ExternalSink for DesktopSink {
@@ -97,13 +99,13 @@ impl ExternalSink for DesktopSink {
     /// 数据库出错同样 fail-closed，不放宽。
     fn host_permission_answer(&self, run_id: &str, conversation_id: &str, backend: AgentBackend, native_mode: &str, request: &Value, options: &[PermissionOption]) -> Option<HostPermissionAnswer> {
         if backend == AgentBackend::Pi {
-            return Some(match crate::external_policy::answer_pi_request(&self.database, run_id, conversation_id, native_mode, request, options) {
+            return Some(match crate::external_policy::answer_pi_request(&self.database, &self.data_dir, run_id, conversation_id, native_mode, request, options) {
                 Ok(answer) => answer,
                 Err(error) => crate::external_policy::fail_closed(&error, options),
             });
         }
         if matches!(backend, AgentBackend::Codex | AgentBackend::Deepseek) {
-            return match crate::external_policy::block_for_native_request(&self.database, run_id, conversation_id, backend, native_mode, request, options) {
+            return match crate::external_policy::block_for_native_request(&self.database, &self.data_dir, run_id, conversation_id, backend, native_mode, request, options) {
                 Ok(answer) => answer,
                 Err(error) => Some(crate::external_policy::fail_closed(&error, options)),
             };
@@ -200,6 +202,70 @@ fn external_permission_request(agent_label: &str, backend: &str, card: &Permissi
     request
 }
 
+/// 会话 id 只能是目录名里的一段，避免 `..` 或分隔符把默认对话目录指到数据目录外面。
+fn safe_workspace_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && id.len() <= 128
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn project_is_bound(project_id: Option<&str>, project_root: Option<&str>) -> bool {
+    project_id.is_some_and(|id| !id.is_empty()) || project_root.is_some_and(|root| !root.is_empty())
+}
+
+fn project_inaccessible_message(project_id: Option<&str>, project_root: Option<&str>) -> String {
+    let path = project_root.filter(|root| !root.is_empty()).or(project_id.filter(|id| !id.is_empty())).unwrap_or("（没有路径）");
+    format!("项目文件夹不可访问：{path}")
+}
+
+/// 外部会话的授权目录。
+/// 有项目：规范化后的项目根；不存在或不是目录则 `agent_backend_project_required`（这个码只表示项目文件夹不可访问）。
+/// 无项目：`<数据目录>/conversation-workspaces/<会话 id>`，由 Host 创建。创建失败返回 `agent_backend_default_workspace_unavailable`，不改用更宽的目录。
+pub(crate) fn authorized_root(
+    data_dir: &std::path::Path,
+    conversation_id: &str,
+    project_id: Option<&str>,
+    project_root: Option<&str>,
+) -> Result<std::path::PathBuf, ApiResponse<()>> {
+    if project_is_bound(project_id, project_root) {
+        return match project_root.filter(|root| !root.is_empty()).map(std::path::PathBuf::from).map(|root| root.canonicalize()) {
+            Some(Ok(root)) if root.is_dir() => Ok(root),
+            _ => Err(failure("agent_backend_project_required", project_inaccessible_message(project_id, project_root), false)),
+        };
+    }
+    if !safe_workspace_id(conversation_id) {
+        return Err(failure("agent_backend_default_workspace_unavailable", "默认对话目录不可用：会话标识不能作为目录名", false));
+    }
+    let path = crate::data_paths::default_conversation_workspace(data_dir, conversation_id);
+    if let Err(reason) = crate::data_paths::ensure_directory(&path, "默认对话目录") {
+        return Err(failure("agent_backend_default_workspace_unavailable", format!("默认对话目录不可用：{reason}"), false));
+    }
+    path.canonicalize().map_err(|error| failure("agent_backend_default_workspace_unavailable", format!("默认对话目录不可用：{error}"), false))
+}
+
+/// 「套用到我所有项目」时把无项目会话的共用 HOME 也算进去，回执标签是「未选项目的对话」。
+pub(crate) fn import_home_targets(all_projects: bool, project_uuid: Option<&str>, known: &[(String, String)]) -> Vec<(String, String)> {
+    const LABEL: &str = "未选项目的对话";
+    let default_id = fox_agent_backend::external_home::DEFAULT_CONVERSATIONS_HOME_ID;
+    if all_projects {
+        let mut projects: Vec<(String, String)> = known.iter().filter(|(id, _)| id != default_id).cloned().collect();
+        projects.push((default_id.to_owned(), LABEL.to_owned()));
+        return projects;
+    }
+    let Some(id) = project_uuid.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Vec::new();
+    };
+    if id == default_id {
+        return vec![(id.to_owned(), LABEL.to_owned())];
+    }
+    let label = known.iter().find(|(known_id, _)| known_id == id).map(|(_, name)| name.clone()).unwrap_or_else(|| id.to_owned());
+    vec![(id.to_owned(), label)]
+}
+
 /// Carry a refusal over to another payload type.
 fn retype<T: serde::Serialize>(refusal: ApiResponse<()>) -> ApiResponse<T> {
     match refusal.error {
@@ -210,9 +276,9 @@ fn retype<T: serde::Serialize>(refusal: ApiResponse<()>) -> ApiResponse<T> {
 
 /// Which private HOME a login probe / import / "打开文件夹" is about: an
 /// existing conversation (`conversationId`), or a NEW conversation that has
-/// not been created yet (`backend` + `projectId` / `projectRoot`, plus the
+/// not been created yet (`backend`, optional `projectId` / `projectRoot`, plus the
 /// draft's full-access choice), so the login card can show before the first
-/// message (Windows acceptance of 80b1622).
+/// message (Windows acceptance of 80b1622). 两者都缺省时走默认对话目录的共用 HOME。
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBackendTarget {
@@ -258,7 +324,7 @@ impl ExternalBackendHost {
 impl ExternalBackendHost {
     pub fn new(app: AppHandle, database: Database, fox_data: &std::path::Path) -> Self {
         let config = HostLaunchConfig::from_env(fox_data);
-        let sink = DesktopSink { app: app.clone(), database: database.clone(), event_lock: Arc::new(Mutex::new(())) };
+        let sink = DesktopSink { app: app.clone(), database: database.clone(), event_lock: Arc::new(Mutex::new(())), data_dir: fox_data.to_path_buf() };
         let handle = tauri::async_runtime::handle().inner().clone();
         // Plan C3: the Fox tool MCP bridge (loopback, per-launch tokens).
         let runtime_slot: Arc<std::sync::OnceLock<DesktopRuntime>> = Arc::default();
@@ -311,15 +377,9 @@ impl ExternalBackendHost {
             Ok(None) => return failure("conversation.not_found", "会话不存在", false),
             Err(error) => return failure("storage.operation_failed", error, true),
         };
-        let project_root = match context.project_root.as_deref().map(std::path::PathBuf::from).map(|root| root.canonicalize()) {
-            Some(Ok(root)) if root.is_dir() => root,
-            _ => {
-                return failure(
-                    "agent_backend_project_required",
-                    "外部 Agent 后端的会话需要绑定一个可访问的项目文件夹（作为授权目录）",
-                    false,
-                )
-            }
+        let project_root = match authorized_root(&self.data_dir, &request.conversation_id, context.project_id.as_deref(), context.project_root.as_deref()) {
+            Ok(root) => root,
+            Err(refusal) => return retype(refusal),
         };
         let target = AgentBackendTarget { conversation_id: Some(request.conversation_id.clone()), backend: None, project_id: None, project_root: None, full_access: false };
         match self.model_login_context(&target) {
@@ -339,7 +399,7 @@ impl ExternalBackendHost {
             launch: LaunchRequest {
                 conversation_id: request.conversation_id.clone(),
                 backend,
-                project_uuid: context.project_id,
+                project_uuid: Some(fox_agent_backend::external_home::home_project_uuid(context.project_id.as_deref()).to_owned()),
                 project_root,
                 session_key: started.run.id.replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'), "_"),
                 // Fail-closed: a grant that cannot be read is no grant.
@@ -514,7 +574,7 @@ impl ExternalBackendHost {
         request.unified_login = None;
         let launcher = self.runtime.launcher();
         let config = &launcher.config;
-        let home = config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend).map_err(|e| e.message)?;
+        let home = config.private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), request.backend).map_err(|e| e.message)?;
         if request.backend == AgentBackend::Pi {
             let source = fox_agent_backend::login_source::status(&config.state_root, &home, Self::real_home().as_ref())?;
             if source.choice_required { return Ok((request.backend, true)); }
@@ -574,6 +634,19 @@ impl ExternalBackendHost {
                 }
             }
         }
+        // 无项目外部会话共用的 HOME 不是 projects 行，换供应商时同样清掉 Fox 代写的登录。
+        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+            let result = self
+                .runtime
+                .launcher()
+                .config
+                .private_home_path(fox_agent_backend::external_home::DEFAULT_CONVERSATIONS_HOME_ID, backend)
+                .map_err(|e| e.message)
+                .and_then(|home| fox_agent_backend::unified_login::remove_managed(backend, &home).map(|_| ()));
+            if let Err(error) = result {
+                errors.push(format!("未选项目的对话 / {}：{error}", backend.as_str()));
+            }
+        }
         errors
     }
 
@@ -599,14 +672,15 @@ impl ExternalBackendHost {
             Ok(None) => return Err(failure("conversation.not_found", "会话不存在", false)),
             Err(error) => return Err(failure("storage.operation_failed", error, true)),
         };
-        if context.project_id.is_none() {
-            return Err(failure("agent_backend_project_required", "外部 Agent 后端的会话需要先绑定项目（私有 HOME 按项目区分）", false));
-        }
+        let project_root = match authorized_root(&self.data_dir, conversation_id, context.project_id.as_deref(), context.project_root.as_deref()) {
+            Ok(root) => root,
+            Err(refusal) => return Err(refusal),
+        };
         Ok(LaunchRequest {
             conversation_id: conversation_id.to_owned(),
             backend,
-            project_uuid: context.project_id,
-            project_root: context.project_root.map(std::path::PathBuf::from).unwrap_or_default(),
+            project_uuid: Some(fox_agent_backend::external_home::home_project_uuid(context.project_id.as_deref()).to_owned()),
+            project_root,
             session_key: "planned".into(),
             full_access_granted: self.database.conversation_full_access_granted(conversation_id).unwrap_or(false),
             unified_login: self.unified_login(backend),
@@ -623,7 +697,33 @@ impl ExternalBackendHost {
         };
         let project = match self.database.project_by_id_or_root(target.project_id.as_deref(), target.project_root.as_deref()) {
             Ok(Some(project)) => project,
-            Ok(None) => return Err(failure("agent_backend_project_required", "外部 Agent 后端的会话需要先绑定项目（私有 HOME 按项目区分）", false)),
+            Ok(None) if project_is_bound(target.project_id.as_deref(), target.project_root.as_deref()) => {
+                // 点名了一个项目但库里没有：不能改落到默认目录。
+                return Err(failure(
+                    "agent_backend_project_required",
+                    project_inaccessible_message(target.project_id.as_deref(), target.project_root.as_deref()),
+                    false,
+                ));
+            }
+            Ok(None) => {
+                // 草稿还没有会话 id，不建具体会话目录。父目录必须存在：
+                // model_endpoint::resolve 对不存在的文件返回 NotFound，不会报错；
+                // 但若这条路径本身是文件，读取会失败。这里保证它是目录。
+                let root = crate::data_paths::conversation_workspaces_root(&self.data_dir);
+                if let Err(reason) = crate::data_paths::ensure_directory(&root, "默认对话目录") {
+                    return Err(failure("agent_backend_default_workspace_unavailable", format!("默认对话目录不可用：{reason}"), false));
+                }
+                return Ok(LaunchRequest {
+                    conversation_id: "draft".to_owned(),
+                    backend,
+                    project_uuid: Some(fox_agent_backend::external_home::DEFAULT_CONVERSATIONS_HOME_ID.to_owned()),
+                    project_root: root,
+                    session_key: "planned".into(),
+                    full_access_granted: target.full_access,
+                    unified_login: self.unified_login(backend),
+                    native_permission: crate::commands::agent_backend_routing::stored_last_native_mode(&self.database, backend),
+                });
+            }
             Err(error) => return Err(failure("storage.operation_failed", error, true)),
         };
         Ok(LaunchRequest {
@@ -699,19 +799,7 @@ impl ExternalBackendHost {
             Ok(known) => known,
             Err(error) => return failure("storage.operation_failed", error, true),
         };
-        let projects: Vec<(String, String)> = if all_projects {
-            known
-        } else {
-            request
-                .project_uuid
-                .clone()
-                .into_iter()
-                .map(|id| {
-                    let label = known.iter().find(|(known_id, _)| known_id == &id).map(|(_, name)| name.clone()).unwrap_or_else(|| id.clone());
-                    (id, label)
-                })
-                .collect()
-        };
+        let projects = import_home_targets(all_projects, request.project_uuid.as_deref(), &known);
         let snapshot = if reuse_for_new_projects && request.backend == AgentBackend::Pi {
             match fox_agent_backend::login_source::Snapshot::capture(&real, selected) {
                 Ok(snapshot) => Some(snapshot),
@@ -722,7 +810,7 @@ impl ExternalBackendHost {
             Ok(report) => {
                 if let Some(snapshot) = snapshot {
                     if !snapshot.matches(&real.home) { return failure("agent_backend_source_changed", "配置已导入，但原生来源已变化；新项目复用未启用，请重新确认", true); }
-                    let current_home = self.runtime.launcher().config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend);
+                    let current_home = self.runtime.launcher().config.private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), request.backend);
                     if !current_home.is_ok_and(|home| snapshot.matches(&home)) {
                         return failure("agent_backend_source_not_copied", "已有文件被保留，新项目复用尚未启用。要切换到原生配置，请勾选覆盖已有登录后重新导入；覆盖前会备份。", true);
                     }
@@ -744,7 +832,7 @@ impl ExternalBackendHost {
         let request = match self.target_request(target) { Ok(request) => request, Err(refusal) => return refusal };
         if request.backend != AgentBackend::Pi { return failure("agent_backend_invalid", "此选择仅用于 Pi", false); }
         let config = &self.runtime.launcher().config;
-        let result = config.private_home_path(request.project_uuid.as_deref().unwrap_or_default(), request.backend)
+        let result = config.private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), request.backend)
             .map_err(|e| e.message)
             .and_then(|home| fox_agent_backend::login_source::choose_fox(&config.state_root, &home, remember));
         match result { Ok(()) => ApiResponse::success(()), Err(error) => failure("agent_backend_source_failed", error, true) }
@@ -851,7 +939,7 @@ pub(crate) fn credential_gate(backend: AgentBackend, existing_conversation: bool
 
 #[cfg(test)]
 mod tests {
-    use super::{approval_outcome_label, external_permission_request};
+    use super::{approval_outcome_label, authorized_root, external_permission_request, import_home_targets};
     use fox_agent_backend::projection::{PermissionCard, PermissionOption};
     use serde_json::json;
 
@@ -936,5 +1024,89 @@ mod tests {
         assert!(decisions.iter().any(|item| item == "allow_once"));
         assert!(decisions.iter().any(|item| item == "allow_project_rule"));
         assert_eq!(request["availableDecisions"], json!(["allow_once", "allow_project_rule", "deny"]));
+    }
+
+    #[test]
+    fn agent_backend_target_deserializes_without_a_project() {
+        let target: super::AgentBackendTarget = serde_json::from_str(r#"{"backend":"codex","fullAccess":true}"#).unwrap();
+        assert_eq!(target.backend.as_deref(), Some("codex"));
+        assert!(target.conversation_id.is_none());
+        assert!(target.project_id.is_none());
+        assert!(target.project_root.is_none());
+        assert!(target.full_access);
+    }
+
+    #[test]
+    fn import_all_projects_includes_the_default_home_label() {
+        let known = vec![("8f14e45f-ceea-467a-9a36-dedd4bea2543".to_owned(), "主项目".to_owned())];
+        let all = import_home_targets(true, None, &known);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0], ("8f14e45f-ceea-467a-9a36-dedd4bea2543".to_owned(), "主项目".to_owned()));
+        assert_eq!(
+            all[1],
+            (fox_agent_backend::external_home::DEFAULT_CONVERSATIONS_HOME_ID.to_owned(), "未选项目的对话".to_owned())
+        );
+        let one = import_home_targets(false, Some(fox_agent_backend::external_home::DEFAULT_CONVERSATIONS_HOME_ID), &known);
+        assert_eq!(one, vec![(fox_agent_backend::external_home::DEFAULT_CONVERSATIONS_HOME_ID.to_owned(), "未选项目的对话".to_owned())]);
+        let named = import_home_targets(false, Some("8f14e45f-ceea-467a-9a36-dedd4bea2543"), &known);
+        assert_eq!(named, vec![("8f14e45f-ceea-467a-9a36-dedd4bea2543".to_owned(), "主项目".to_owned())]);
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("fox-ux1101-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// 无项目会话的授权目录是默认对话目录且已创建；有项目仍是项目根；项目文件夹被删掉仍拒绝。
+    #[test]
+    fn authorized_root_is_the_default_workspace_without_a_project_and_the_project_folder_with_one() {
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let data = temp_dir("data");
+        let bare = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("no-project"), None, None, "pi")
+            .expect("bare");
+        let context = database.external_conversation_context(&bare.id).expect("context").expect("row");
+        assert!(context.project_id.is_none());
+        assert!(context.project_root.is_none());
+        let root = authorized_root(&data, &bare.id, context.project_id.as_deref(), context.project_root.as_deref()).expect("default workspace");
+        let expected = crate::data_paths::default_conversation_workspace(&data, &bare.id).canonicalize().expect("created");
+        assert_eq!(root, expected);
+        assert!(root.is_dir());
+        let other = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("other"), None, None, "codex")
+            .expect("other");
+        let other_root = authorized_root(&data, &other.id, None, None).expect("other workspace");
+        assert_ne!(root, other_root);
+        assert!(other_root.ends_with(&other.id));
+
+        let project = temp_dir("project");
+        let project_text = project.to_str().expect("utf-8 project").to_owned();
+        let with_project = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("with-project"), Some(&project_text), Some("ask"), "pi")
+            .expect("project conversation");
+        let bound = database.external_conversation_context(&with_project.id).expect("bound context").expect("bound row");
+        let project_root = authorized_root(&data, &with_project.id, bound.project_id.as_deref(), bound.project_root.as_deref()).expect("project root");
+        assert_eq!(project_root, project.canonicalize().expect("project canonical"));
+
+        std::fs::remove_dir_all(&project).expect("delete project");
+        let missing = authorized_root(&data, &with_project.id, bound.project_id.as_deref(), bound.project_root.as_deref()).expect_err("deleted project");
+        let error = missing.error.expect("api error");
+        assert_eq!(error.code, "agent_backend_project_required");
+        assert!(error.message.starts_with("项目文件夹不可访问："), "{}", error.message);
+        assert!(error.message.contains(&project_text), "{}", error.message);
+
+        let unsafe_id = authorized_root(&data, "..", None, None).expect_err("path escape");
+        assert_eq!(unsafe_id.error.expect("escape error").code, "agent_backend_default_workspace_unavailable");
+
+        let blocked = temp_dir("blocked");
+        std::fs::write(blocked.join("conversation-workspaces"), b"x").unwrap();
+        let unavailable = authorized_root(&blocked, &bare.id, None, None).expect_err("file in the way");
+        let unavailable = unavailable.error.expect("unavailable");
+        assert_eq!(unavailable.code, "agent_backend_default_workspace_unavailable");
+        assert!(unavailable.message.starts_with("默认对话目录不可用："), "{}", unavailable.message);
+
+        let _ = std::fs::remove_dir_all(&data);
+        let _ = std::fs::remove_dir_all(&blocked);
     }
 }

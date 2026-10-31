@@ -285,10 +285,24 @@ pub struct PrivateHomes {
     pub scope: PrivateHomeScope,
 }
 
+/// 无项目的外部会话共用的私有 HOME 键。合法 UUID、非 nil，不对应 `projects` 表的任何一行。
+/// [`canonical_project_uuid`] 按普通项目 UUID 接受它，不必再给 [`PrivateHomes::home_for`] 开入口。
+pub const DEFAULT_CONVERSATIONS_HOME_ID: &str = "c0ffee00-0000-4000-8000-000000000001";
+
+/// 私有 HOME 用的项目键。没有项目（`None` 或空白）时返回 [`DEFAULT_CONVERSATIONS_HOME_ID`]；
+/// 非空值原样返回（只去掉首尾空白）。非法 UUID 和 nil 仍由 [`canonical_project_uuid`] 拒绝，不会改写成这个保留键。
+pub fn home_project_uuid(project_uuid: Option<&str>) -> &str {
+    match project_uuid.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => id,
+        None => DEFAULT_CONVERSATIONS_HOME_ID,
+    }
+}
+
 /// Canonical (lowercase, hyphenated) form of a project UUID from the Host
 /// database, or `None` when it is empty, not 8-4-4-4-12 hex, or the nil UUID.
 /// Names, paths and display titles are never accepted: two projects can
 /// share a name or a folder name, and a path can contain anything.
+/// [`DEFAULT_CONVERSATIONS_HOME_ID`] 是合法非 nil UUID，因此会被接受。
 pub fn canonical_project_uuid(value: &str) -> Option<String> {
     let groups: Vec<&str> = value.split('-').collect();
     let lengths = [8, 4, 4, 4, 12];
@@ -614,6 +628,23 @@ mod tests {
         assert_eq!(homes.home_for("my project", AgentBackend::Codex).unwrap_err().code, LaunchErrorCode::LaunchInvalid);
         assert!(homes.home_for("00000000-0000-0000-0000-000000000000", AgentBackend::Pi).is_err());
         assert!(homes.home_for("8f14e45f-ceea-467a-9a36-dedd4bea2543", AgentBackend::Fox).is_err());
+    }
+
+    /// 无项目外部会话共用一个保留 UUID。nil 仍然拒绝，且路径不跟任何一个真实项目撞车。
+    #[test]
+    fn default_conversations_home_id_is_accepted_and_distinct_from_a_project() {
+        let id = DEFAULT_CONVERSATIONS_HOME_ID;
+        assert_eq!(canonical_project_uuid(id).as_deref(), Some(id));
+        assert_eq!(home_project_uuid(None), id);
+        assert_eq!(home_project_uuid(Some("  ")), id);
+        assert_eq!(home_project_uuid(Some("8F14E45F-CEEA-467A-9A36-DEDD4BEA2543")), "8F14E45F-CEEA-467A-9A36-DEDD4BEA2543");
+        assert!(canonical_project_uuid("00000000-0000-0000-0000-000000000000").is_none());
+        let homes = PrivateHomes::new("/homes".into());
+        let shared = homes.home_for(id, AgentBackend::Pi).unwrap();
+        let project = homes.home_for("8f14e45f-ceea-467a-9a36-dedd4bea2543", AgentBackend::Pi).unwrap();
+        assert_ne!(shared.path, project.path);
+        assert_eq!(shared.path, Path::new("/homes").join(id).join("pi"));
+        assert!(homes.home_for("00000000-0000-0000-0000-000000000000", AgentBackend::Codex).is_err());
     }
 
     #[test]

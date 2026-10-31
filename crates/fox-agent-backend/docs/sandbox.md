@@ -1926,3 +1926,24 @@ D. dsh
 
 E. 删除项目根
 9. （可选）完全访问下让 Pi 执行删除项目根的命令仍被拒（模型可能拒绝调用，CI 已用假 Agent 覆盖，见上）。
+
+## 13.36 无项目外部会话：默认对话目录
+
+外部 Agent（dsh / Codex / Pi）不再要求先绑定项目。没选项目时，授权目录和私有 HOME 按下面的规则，档位语义与「有项目、授权根是项目文件夹」完全相同。
+
+- **授权目录**：`<Fox 数据目录>/conversation-workspaces/<会话 id>`。每个会话一份，彼此看不见。首轮发送前由 Host 用 `data_paths::ensure_directory` 创建。创建失败返回 `agent_backend_default_workspace_unavailable`（「默认对话目录不可用：<原因>」），不改用更宽的目录。
+- **私有 HOME**：所有无项目外部会话共用保留键 `DEFAULT_CONVERSATIONS_HOME_ID`（`external_home.rs`，固定合法 UUID，不是任何项目行）。有项目时仍是「项目 UUID × 后端」，跟以前一样。
+- **档位**：dsh、Codex、Pi 的原生档位（`native_permission`）对这个目录的含义，与对项目根相同。例如 dsh 的 `workspace-write` 只能写这个目录。Host 的 block、受保护路径（`.git`、`.fox`、shell 配置等）和「项目外」判定都以该目录为根，不放宽。完全访问的二次确认照旧。无项目时不提供「本项目总是允许」（没有 `project_id` 时仍是 `permission.rule_not_offered`）。
+- **有项目但文件夹不可访问**：仍返回 `agent_backend_project_required`，文案是「项目文件夹不可访问：<路径>」。这个码不再表示「必须先选项目」。
+- **草稿**：还没有会话 id。登录探测、导入、打开 HOME 只依赖上面的共用 HOME；`project_root` 用父目录 `<数据目录>/conversation-workspaces`（会先建好）。`model_endpoint::resolve` 在项目路径上的文件不存在时按 NotFound 处理，不会因此失败。
+- **「套用到我所有项目」**：导入目标包含这份共用 HOME，回执里显示为「未选项目的对话」。
+
+上文 13.1「会话必须绑定一个可访问的项目文件夹」和 13.12「会话要先绑定项目才能发消息」到此作废：没选项目可以发，授权根是默认对话目录。
+
+**复测**（Windows 桌面；dsh、Pi、Codex 各做一遍）：
+
+1. 不选项目，新建外部会话，让它执行 `dir`。确认当前目录是 `<Fox 数据目录>\conversation-workspaces\<会话 id>`，不是用户主目录，也不是别的会话的目录。
+2. 让它往该目录外面写文件（例如数据目录里的 `fox.db`，或桌面上的一个新文件）。询问档应弹审批卡；自动档应询问而不是直接写。目录里面的 `.git\config` 仍按受保护路径处理。
+3. Pi 和 Codex 按同样两步再查一次。dsh 的「工作区完全修改」只能写这个默认对话目录。
+4. 不选项目时，登录卡片仍然出现（打开 HOME 文件夹落到共用的保留 HOME）。「套用到我所有项目」的回执里能看到「未选项目的对话」。
+5. 选了项目、但把项目文件夹删掉后再发消息：应失败，提示项目文件夹不可访问，不能改落到默认对话目录。
