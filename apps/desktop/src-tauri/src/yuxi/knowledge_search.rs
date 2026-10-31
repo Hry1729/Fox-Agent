@@ -258,21 +258,45 @@ impl YuxiClient {
     }
 
     /// Model-facing text reads must use parsed downloads, not binary UI previews.
+    /// 按字符分页：max_chars 缺省 60000，并限制在 1..=60000；start_offset 超过总字符数则报错。
     pub async fn knowledge_document_text(
         &self,
         base_url: &str,
         token: &str,
         kb_id: &str,
         file_id: &str,
+        max_chars: Option<usize>,
+        start_offset: Option<usize>,
     ) -> Result<Value, String> {
         let text = self
             .parsed_knowledge_text(base_url, token, kb_id, file_id)
             .await?;
-        let content = text.chars().take(60_000).collect::<String>();
-        Ok(
-            json!({ "kb_id": kb_id, "file_id": file_id, "documentId": file_id,
-            "truncated": content.len() < text.len(), "content": content, "source": "remote" }),
-        )
+        let chars: Vec<char> = text.chars().collect();
+        let total_chars = chars.len();
+        let start_offset = start_offset.unwrap_or(0);
+        if start_offset > total_chars {
+            return Err(
+                "[remote_knowledge.invalid_query] startOffset 超出文档长度".to_owned(),
+            );
+        }
+        let max_chars = max_chars.unwrap_or(60_000).clamp(1, 60_000);
+        let end = start_offset.saturating_add(max_chars).min(total_chars);
+        let content: String = chars[start_offset..end].iter().collect();
+        let truncated = end < total_chars;
+        let mut value = json!({
+            "kb_id": kb_id,
+            "file_id": file_id,
+            "documentId": file_id,
+            "source": "remote",
+            "content": content,
+            "startOffset": start_offset,
+            "totalChars": total_chars,
+            "truncated": truncated,
+        });
+        if truncated {
+            value["nextOffset"] = json!(end);
+        }
+        Ok(value)
     }
 
     pub async fn query_knowledge_with_limits(
@@ -392,7 +416,7 @@ mod tests {
                 let file_id = first["file_id"].as_str().expect("real document ID");
                 assert_ne!(file_id, kb_id);
                 let document = client
-                    .knowledge_document_text(&base, &token, &kb_id, file_id)
+                    .knowledge_document_text(&base, &token, &kb_id, file_id, None, None)
                     .await
                     .expect("live parsed document read failed");
                 let content = document["content"].as_str().expect("parsed document text");
@@ -672,6 +696,8 @@ mod tests {
                     "fixture-token",
                     "kb-1",
                     "file-1",
+                    None,
+                    None,
                 ));
             handle.join().unwrap();
             if let Some(code) = expected {
@@ -682,5 +708,59 @@ mod tests {
                 assert_eq!(result.unwrap()["content"], "# 起升赋值");
             }
         }
+    }
+
+    #[test]
+    fn remote_document_read_pages_by_characters() {
+        let text = "一二三四五六七八九十";
+        assert_eq!(text.chars().count(), 10);
+        let body = text.as_bytes().to_vec();
+        let read = |max_chars: Option<usize>, start_offset: Option<usize>| {
+            let (base, handle) = server(vec![(
+                file_path("file-1"),
+                200,
+                "text/plain",
+                body.clone(),
+            )]);
+            let result = tauri::async_runtime::block_on(
+                YuxiClient::new().unwrap().knowledge_document_text(
+                    &base,
+                    "fixture-token",
+                    "kb-1",
+                    "file-1",
+                    max_chars,
+                    start_offset,
+                ),
+            );
+            handle.join().unwrap();
+            result
+        };
+
+        let first = read(Some(4), Some(0)).unwrap();
+        assert_eq!(first["content"], "一二三四");
+        assert_eq!(first["content"].as_str().unwrap().chars().count(), 4);
+        assert_eq!(first["truncated"], true);
+        assert_eq!(first["nextOffset"], json!(4));
+        assert_eq!(first["startOffset"], json!(0));
+        assert_eq!(first["totalChars"], json!(10));
+        assert_eq!(first["source"], "remote");
+        assert_eq!(first["kb_id"], "kb-1");
+        assert_eq!(first["file_id"], "file-1");
+        assert_eq!(first["documentId"], "file-1");
+
+        let tail = read(Some(4), Some(8)).unwrap();
+        assert_eq!(tail["content"], "九十");
+        assert_eq!(tail["content"].as_str().unwrap().chars().count(), 2);
+        assert_eq!(tail["truncated"], false);
+        assert_eq!(tail["startOffset"], json!(8));
+        assert_eq!(tail["totalChars"], json!(10));
+        assert!(tail.get("nextOffset").is_none());
+
+        let error = read(Some(4), Some(11)).unwrap_err();
+        assert!(
+            error.starts_with("[remote_knowledge.invalid_query]"),
+            "{error}"
+        );
+        assert!(error.contains("startOffset"), "{error}");
     }
 }

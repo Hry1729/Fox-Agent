@@ -9029,13 +9029,30 @@ async fn execute_bound_knowledge_tool(
                     })
                     .map_err(|error| format!("[{}] {}", error.code(), error))?
             } else {
+                // 非空 chunkId 在发请求前拒绝；远程分页只认 startOffset 与 maxChars。
+                remote_read_rejects_chunk_id(input)?;
+                let start_offset = input
+                    .get("startOffset")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok());
                 let service = remote_service
                     .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
                 let token = get_access_token(&service.base_url)
                     .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
-                yuxi_client
-                    .knowledge_document_text(&service.base_url, &token, &target.id, document_id)
-                    .await?
+                let value = yuxi_client
+                    .knowledge_document_text(
+                        &service.base_url,
+                        &token,
+                        &target.id,
+                        document_id,
+                        requested_max_chars,
+                        start_offset,
+                    )
+                    .await?;
+                json!({
+                    "reference": target.as_json(),
+                    "result": value,
+                })
             }
         }
         "query_knowledge_graph" => {
@@ -9253,6 +9270,21 @@ fn knowledge_tool_target(value: &Value) -> Result<KnowledgeToolTarget, String> {
     })
 }
 
+fn remote_read_rejects_chunk_id(input: &Value) -> Result<(), String> {
+    let chunk_id = input
+        .get("chunkId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if chunk_id.is_some() {
+        return Err(
+            "[remote_knowledge.chunk_unsupported] 远程知识库不支持按 chunkId 读取；请去掉 chunkId，用 startOffset 和 maxChars 分页读取"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn structured_knowledge_error(message: &str) -> (&str, &str, bool) {
     let Some(rest) = message.strip_prefix('[') else {
         return ("knowledge.tool_failed", message, false);
@@ -9274,7 +9306,8 @@ fn structured_knowledge_error(message: &str) -> (&str, &str, bool) {
 #[cfg(test)]
 mod knowledge_tool_contract_tests {
     use super::{
-        has_explicit_knowledge_target, knowledge_tool_targets, structured_knowledge_error,
+        has_explicit_knowledge_target, knowledge_tool_targets, remote_read_rejects_chunk_id,
+        structured_knowledge_error,
     };
     use serde_json::json;
 
@@ -9357,6 +9390,23 @@ mod knowledge_tool_contract_tests {
         }
         assert!(structured_knowledge_error("[remote_knowledge.retrieval_unavailable] transient").2);
         assert!(!structured_knowledge_error("unsupported API").2);
+    }
+
+    #[test]
+    fn remote_read_knowledge_document_refuses_chunk_id() {
+        assert!(remote_read_rejects_chunk_id(&json!({})).is_ok());
+        assert!(remote_read_rejects_chunk_id(&json!({ "chunkId": "" })).is_ok());
+        assert!(remote_read_rejects_chunk_id(&json!({ "chunkId": "  " })).is_ok());
+        let error = remote_read_rejects_chunk_id(&json!({ "chunkId": "chunk-1" })).unwrap_err();
+        assert!(
+            error.starts_with("[remote_knowledge.chunk_unsupported]"),
+            "{error}"
+        );
+        assert!(error.contains("startOffset"), "{error}");
+        assert!(error.contains("maxChars"), "{error}");
+        let (code, _, retryable) = structured_knowledge_error(&error);
+        assert_eq!(code, "remote_knowledge.chunk_unsupported");
+        assert!(!retryable);
     }
 }
 
