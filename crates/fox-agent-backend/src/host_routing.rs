@@ -1,19 +1,20 @@
 //! Host wiring: conversation-level Agent backend routing.
 //!
-//! ## This build has exactly one supported Agent path
+//! ## Supported Agent paths (plan C1, 2026-10-31)
 //!
-//! Product decision 2026-10-27 (single Pi mainline): the only supported way
-//! to drive a conversation is the built-in Fox route, whose model engine is
-//! pinned to Pi. The three external backends (`pi` / ACP, `codex`, `deepseek`
-//! / DSH) are RETIRED: they cannot be picked, cannot be started, and no
-//! environment variable, stored preference, or direct IPC call can bring one
-//! back. Retirement does not delete data: a conversation frozen to a retired
-//! backend keeps its value, its history stays readable, and the UI must show
-//! the original binding instead of relabelling it as Pi.
+//! A conversation is driven by one of four backends, chosen once at creation:
 //!
-//! A NEW conversation is frozen to [`AgentBackend::Fox`]. That value is the
-//! storage id of the built-in route, not a driver name; renaming it to `pi`
-//! would route new conversations to the retired external Pi ACP path.
+//! * [`AgentBackend::Fox`]: the built-in route (PiNative). `fox` is the
+//!   storage id of the built-in route, not a driver name; renaming it to `pi`
+//!   would route new conversations to the external Pi ACP path.
+//! * [`AgentBackend::Pi`] (external pi over ACP), [`AgentBackend::Codex`]
+//!   (codex-acp) and [`AgentBackend::Deepseek`] (dsh): the external Agents.
+//!
+//! The single Pi mainline of 2026-10-27 had retired the three external
+//! backends; plan C1 brings them back. The retirement MECHANISM is kept
+//! ([`RETIRED_BACKENDS`], [`RouteError::Retired`], [`SessionAccess::ReadOnlyRetired`],
+//! `agent_backend_retired`) for a backend that is really taken out of service
+//! later; in this build the list is empty.
 //!
 //! ## Rules implemented
 //!
@@ -26,36 +27,33 @@
 //! * Existing conversations are mapped to `fox` by the migration's column
 //!   default (one-shot, plan 6.6). The legacy-path marker keeps living where it
 //!   always did (`kernel_runs.kernel_mode = 'legacy'`); it is not rewritten.
-//! * A conversation frozen to a retired backend is read-only: history is
-//!   shown, no runtime is ever started, and every runtime entry is refused
-//!   with [`RouteError::CODE_RETIRED`]. It is never quietly re-driven by the
-//!   Fox route, because that would run one conversation's history on a
-//!   different driver than the one it was created with.
-//! * [`EXTERNAL_BACKENDS_ENV`] is still parsed so an old deployment's value is
-//!   reported (unknown entries, `request_includes`), but it can no longer
-//!   enable anything: [`BackendSwitch::is_enabled`] is true for `fox` and
-//!   false for every retired backend whatever the variable says.
+//! * A conversation frozen to a retired backend (none in this build) is
+//!   read-only: history is shown, no runtime is ever started, and every
+//!   runtime entry is refused with [`RouteError::CODE_RETIRED`]. It is never
+//!   quietly re-driven by the Fox route.
+//! * [`EXTERNAL_BACKENDS_ENV`] is the administrator's off switch: unset (or
+//!   `all`) leaves every external backend on, `0` / a list narrows it. It can
+//!   only switch a backend OFF; it never revives a retired one. A conversation
+//!   frozen to a switched-off backend stays readable (`read_only_disabled`).
 //! * A lookup of the frozen value that fails (storage error, missing column)
-//!   falls back to the Fox path, because the Fox path is now the only path
-//!   that can run. A request that explicitly names a retired backend is still
-//!   refused, so an explicit request is never satisfied by a driver the caller
-//!   did not ask for. `agent_backend_lookup_failed` is no longer produced; the
-//!   code stays known so an older UI still reads it.
+//!   falls back to the Fox path only while no external backend is on and the
+//!   request names none; otherwise it is refused (`agent_backend_lookup_failed`),
+//!   so a possibly external conversation never reaches the Fox runtime because
+//!   a read failed.
 //! * `engine_id` keeps its historical meaning; [`audit_line`] always prints it
 //!   next to `agent_backend`.
-
 use crate::port::AgentBackend;
 use std::collections::BTreeSet;
 
-/// Environment variable that used to allow the external backends to be
-/// picked. Since the single Pi mainline it can no longer enable one; it is
-/// parsed only so an old deployment's value is reported and audited.
+/// The administrator's switch for the external backends. It can only turn a
+/// supported external backend OFF; it never revives a retired one.
 ///
-/// Accepted values (all of them now mean "no retired backend runs"):
-/// * unset / empty, `all` / `1` / `on` / `true` / `yes`;
-/// * `0` / `off` / `false` / `none` / `no`;
-/// * a comma- or whitespace-separated list of backend ids (`pi,codex`).
-///   `fox` in the list is ignored (it is the supported path). Unknown ids are
+/// Accepted values:
+/// * unset / empty, `all` / `1` / `on` / `true` / `yes`: every supported
+///   external backend on (the default);
+/// * `0` / `off` / `false` / `none` / `no`: every external backend off;
+/// * a comma- or whitespace-separated list of backend ids (`pi,codex`): only
+///   those on. `fox` in the list is ignored (always on). Unknown ids are
 ///   reported by [`BackendSwitch::unknown_entries`], never treated as "all".
 pub const EXTERNAL_BACKENDS_ENV: &str = "FOX_EXTERNAL_BACKENDS";
 
@@ -94,8 +92,9 @@ pub const AGENT_BACKEND_SCHEMA_VERSION: i64 = 95;
 /// an audit log for external-backend Host actions (credential import:
 /// file / key names only). Additive; no existing row is touched.
 ///
-/// Since the single Pi mainline no new grant is created; the table stays for
-/// the records already made with it.
+/// The external Agents' full access now lives in their own native permission
+/// mode ([`crate::native_permission`]); no new grant row is created and the
+/// table stays for the records already made with it.
 pub const FULL_ACCESS_MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS agent_backend_full_access_grants (
     grant_key TEXT PRIMARY KEY CHECK(grant_key = 'conversation:' || conversation_id),
@@ -130,29 +129,35 @@ pub const NEW_MODE_FULL_ACCESS: &str = "full_access";
 /// Refusal code: full access requested where it cannot be granted.
 pub const CODE_FULL_ACCESS_FORBIDDEN: &str = "agent_backend_full_access_forbidden";
 
-/// The backends this build can start, in display order. Exactly one.
-pub const SUPPORTED_BACKENDS: [AgentBackend; 1] = [AgentBackend::Fox];
+/// The backends this build can start, in display order (plan C1: the
+/// built-in route plus the three external Agents).
+pub const SUPPORTED_BACKENDS: [AgentBackend; 4] = [AgentBackend::Fox, AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek];
 
-/// The backends retired by the single Pi mainline. Their recorded values stay
-/// readable; nothing of theirs is ever started.
-pub const RETIRED_BACKENDS: [AgentBackend; 3] = [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek];
+/// Backends really taken out of service. Their recorded values stay
+/// readable; nothing of theirs is ever started (`agent_backend_retired`).
+/// Empty in this build: the mechanism is kept for a later retirement.
+pub const RETIRED_BACKENDS: [AgentBackend; 0] = [];
 
 /// Whether this backend is retired in this build (readable, never runnable).
 pub fn is_retired(backend: AgentBackend) -> bool {
-    RETIRED_BACKENDS.contains(&backend)
+    is_retired_in(&RETIRED_BACKENDS, backend)
 }
 
-/// Whether this backend is the one supported path of this build.
+fn is_retired_in(retired: &[AgentBackend], backend: AgentBackend) -> bool {
+    backend != AgentBackend::Fox && retired.contains(&backend)
+}
+
+/// Whether this backend is a supported (startable) path of this build.
 pub fn is_supported(backend: AgentBackend) -> bool {
-    SUPPORTED_BACKENDS.contains(&backend)
+    SUPPORTED_BACKENDS.contains(&backend) && !is_retired(backend)
 }
 
-/// Whether a new conversation gets a full-access grant. `requested` is the
-/// UI's choice (absent = standard, no grant). Full access is only for external
-/// backends and is refused outright (not silently downgraded) when the
+/// Whether a new external conversation starts in its Agent's own full-access
+/// mode. `requested` is the UI's choice (absent = standard). Full access here
+/// is only for external backends (a Fox conversation sets it through its own
+/// execution mode) and is refused outright (not silently downgraded) when the
 /// machine forbids it (`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`), so a UI that
-/// ignores the disabled option cannot get around it. With every external
-/// backend retired, `full_access` is always a refusal.
+/// ignores the disabled option cannot get around it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeRefusal {
     pub code: &'static str,
@@ -165,7 +170,7 @@ pub fn decide_new_conversation_mode(requested: Option<&str>, backend: AgentBacke
         Some(NEW_MODE_STANDARD | crate::external_home::LEGACY_STANDARD_MODE) => Ok(false),
         Some(NEW_MODE_FULL_ACCESS) if backend == AgentBackend::Fox => Err(ModeRefusal {
             code: RouteError::CODE_INVALID,
-            message: "完全访问只适用于外部 Agent 后端，而本版本的会话使用内置 Pi 驱动".into(),
+            message: "Fox 会话的完全访问在输入框的执行方式里开启，不在新建外部会话时选择".into(),
         }),
         Some(NEW_MODE_FULL_ACCESS) if forbidden => Err(ModeRefusal {
             code: CODE_FULL_ACCESS_FORBIDDEN,
@@ -196,12 +201,9 @@ impl HostEntry {
     }
 }
 
-/// What [`EXTERNAL_BACKENDS_ENV`] asked for, for diagnostics only.
-///
-/// It is deliberately NOT a permission: [`Self::is_enabled`] ignores it for
-/// every retired backend. Keeping the parsed request lets a support report say
-/// "this deployment sets FOX_EXTERNAL_BACKENDS=all, which no longer enables
-/// anything" instead of silently answering "nothing was asked".
+/// What [`EXTERNAL_BACKENDS_ENV`] asked for. It narrows the supported
+/// external backends (administrator off switch); it never enables a retired
+/// one ([`Self::is_enabled`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendSwitch {
     requested: BTreeSet<AgentBackend>,
@@ -254,14 +256,22 @@ impl BackendSwitch {
         Self::from_env_value(std::env::var(EXTERNAL_BACKENDS_ENV).ok().as_deref())
     }
 
-    /// Whether this backend may run. The Fox path always may; a retired
-    /// backend never may, whatever the variable asked for.
+    /// Whether this backend may run. The Fox path always may; a supported
+    /// external backend may when the variable leaves it on; a retired backend
+    /// never may, whatever the variable asked for.
     pub fn is_enabled(&self, backend: AgentBackend) -> bool {
-        is_supported(backend)
+        self.is_enabled_in(&RETIRED_BACKENDS, backend)
     }
 
-    /// Whether the environment variable asked for this backend. Diagnostic
-    /// only: [`Self::is_enabled`] decides, and it ignores this.
+    fn is_enabled_in(&self, retired: &[AgentBackend], backend: AgentBackend) -> bool {
+        match backend {
+            AgentBackend::Fox => true,
+            other => SUPPORTED_BACKENDS.contains(&other) && !is_retired_in(retired, other) && self.requested.contains(&other),
+        }
+    }
+
+    /// Whether the environment variable asked for this backend (before
+    /// retirement is applied).
     pub fn request_includes(&self, backend: AgentBackend) -> bool {
         self.requested.contains(&backend)
     }
@@ -271,12 +281,8 @@ impl BackendSwitch {
         &self.unknown
     }
 
-    /// Whether any retired backend may run. Always false in this build; kept
-    /// so the Host glue keeps one predicate instead of hard-coding "fox".
+    /// Whether any external backend may run.
     pub fn any_external(&self) -> bool {
-        // Only the supported path runs; a retired backend never does, whatever
-        // EXTERNAL_BACKENDS_ENV asked for. Spelled out so the invariant stays
-        // visible instead of being a bare `false`.
         AgentBackend::ALL
             .into_iter()
             .filter(|backend| *backend != AgentBackend::Fox)
@@ -292,15 +298,15 @@ pub enum RouteError {
     InvalidBackend(String),
     /// The stored value is not a valid backend id (corrupt row). Fail closed.
     InvalidStoredBackend(String),
-    /// Host policy has this backend off. Kept for older callers; a retired
-    /// backend is refused with [`Self::Retired`] instead.
+    /// The administrator switched this backend off ([`EXTERNAL_BACKENDS_ENV`]).
+    /// A retired backend is refused with [`Self::Retired`] instead.
     Disabled {
         backend: AgentBackend,
         existing_conversation: bool,
     },
-    /// The backend is retired in this build. `existing_conversation` is true
-    /// for a conversation frozen to it (read-only history), false for a new
-    /// conversation that asked for it (refused).
+    /// The backend is retired in this build (none is, today). `existing_conversation`
+    /// is true for a conversation frozen to it (read-only history), false for
+    /// a new conversation that asked for it (refused).
     Retired {
         backend: AgentBackend,
         existing_conversation: bool,
@@ -318,14 +324,13 @@ pub enum RouteError {
         backend: AgentBackend,
     },
     /// The entry has no meaning for an external backend (resume of a yuxi /
-    /// Kernel run). No longer produced, because no external backend runs.
+    /// Kernel run).
     EntryUnsupported {
         entry: HostEntry,
         backend: AgentBackend,
     },
-    /// The frozen value could not be read. No longer produced (the Fox path is
-    /// the only runnable one, so a failed lookup falls back to it); kept for
-    /// older UIs.
+    /// The frozen value could not be read while an external backend may be
+    /// involved (retryable).
     LookupFailed {
         entry: HostEntry,
         detail: String,
@@ -339,7 +344,8 @@ pub enum RouteError {
 impl RouteError {
     pub const CODE_INVALID: &'static str = "agent_backend_invalid";
     pub const CODE_DISABLED: &'static str = "agent_backend_disabled";
-    /// The backend is retired in this build (readable, never runnable).
+    /// The backend is retired in this build (readable, never runnable). Kept
+    /// for a backend that is really taken out of service later.
     pub const CODE_RETIRED: &'static str = "agent_backend_retired";
     pub const CODE_MISROUTED: &'static str = "agent_backend_misrouted";
     pub const CODE_NOT_YET_WIRED: &'static str = "agent_backend_not_yet_wired";
@@ -373,21 +379,21 @@ impl RouteError {
                 backend,
                 existing_conversation: false,
             } => format!(
-                "外部 Agent 后端「{}」当前不可用，新会话使用内置 Pi 驱动",
+                "外部 Agent 后端「{}」已被管理员关闭（环境变量 {EXTERNAL_BACKENDS_ENV}），不能用于新会话",
                 backend.as_str()
             ),
             Self::Disabled {
                 backend,
                 existing_conversation: true,
             } => format!(
-                "此会话绑定外部 Agent 后端「{}」，该后端当前不可用，会话只读，不会启动运行时",
+                "此会话绑定外部 Agent 后端「{}」，该后端已被管理员关闭（{EXTERNAL_BACKENDS_ENV}），会话只读，不会启动运行时",
                 backend.as_str()
             ),
             Self::Retired {
                 backend,
                 existing_conversation: false,
             } => format!(
-                "Agent 后端「{}」已在本版本退休：新会话只使用内置 Pi 驱动，不能再选择或启动它",
+                "Agent 后端「{}」已在本版本退休：不能再选择或启动它",
                 backend.as_str()
             ),
             Self::Retired {
@@ -429,7 +435,8 @@ impl RouteError {
     }
 
     /// Whether retrying the same request can succeed without a change.
-    /// Retirement is a product decision, not a transient condition.
+    /// Retirement and the administrator switch are decisions, not transient
+    /// conditions.
     pub fn retryable(&self) -> bool {
         matches!(self, Self::LookupFailed { .. })
     }
@@ -470,15 +477,24 @@ pub fn bound_backend(stored: Option<&str>) -> Result<AgentBackend, RouteError> {
 
 /// Decide the backend a new conversation is frozen to.
 ///
-/// Absent → `fox`. Every retired backend is a refusal naming that backend,
-/// never a silent substitution by the supported path: a caller that asked for
-/// Codex must be told Codex is retired, not receive a Pi conversation.
+/// Absent → `fox`. A retired, hidden or switched-off backend is a refusal
+/// naming that backend, never a silent substitution by another driver: a
+/// caller that asked for Codex must be told why it cannot have Codex, not
+/// receive a Fox conversation.
 pub fn choose_for_new_conversation(
     requested: Option<&str>,
     switch: &BackendSwitch,
 ) -> Result<AgentBackend, RouteError> {
+    choose_for_new_conversation_in(&RETIRED_BACKENDS, requested, switch)
+}
+
+fn choose_for_new_conversation_in(
+    retired: &[AgentBackend],
+    requested: Option<&str>,
+    switch: &BackendSwitch,
+) -> Result<AgentBackend, RouteError> {
     let backend = parse_requested(requested)?.unwrap_or(AgentBackend::Fox);
-    if is_retired(backend) {
+    if is_retired_in(retired, backend) {
         return Err(RouteError::Retired {
             backend,
             existing_conversation: false,
@@ -487,8 +503,12 @@ pub fn choose_for_new_conversation(
     if backend.hidden() {
         return Err(RouteError::Hidden(backend));
     }
-    // Only one backend remains supported; the switch cannot narrow it further.
-    debug_assert!(switch.is_enabled(backend), "the supported backend is always enabled");
+    if !switch.is_enabled_in(retired, backend) {
+        return Err(RouteError::Disabled {
+            backend,
+            existing_conversation: false,
+        });
+    }
     Ok(backend)
 }
 
@@ -497,9 +517,7 @@ pub fn choose_for_new_conversation(
 pub enum Route {
     /// The existing Fox path (Kernel / legacy / yuxi selection unchanged).
     Fox,
-    /// The external runtime of this backend. Since the single Pi mainline no
-    /// route produces it; the variant stays so the Host glue and the older UI
-    /// keep one exhaustive match.
+    /// The external runtime of this backend (ACP, see `crate::external`).
     External(AgentBackend),
 }
 
@@ -507,35 +525,64 @@ pub enum Route {
 /// pre-v95 column). `Ok(())` = continue on the Fox path (audited by the
 /// caller); `Err` = refuse.
 ///
-/// Since the Fox path is the only runnable path, a failed read no longer has
-/// a wrong-runtime risk. But an explicit request that names a retired backend
-/// is still refused, so the answer always matches what was asked for.
+/// * an explicit request that names a retired backend: refused as retired;
+/// * every external backend off and the request names none: the Fox path
+///   (nothing else could run);
+/// * otherwise: refused with `agent_backend_lookup_failed` (retryable). A
+///   conversation that may be bound to an external backend must never run on
+///   the Fox runtime because a read failed.
 pub fn on_lookup_failure(
-    _entry: HostEntry,
+    entry: HostEntry,
     requested: Option<&str>,
-    _switch: &BackendSwitch,
-    _detail: &str,
+    switch: &BackendSwitch,
+    detail: &str,
 ) -> Result<(), RouteError> {
-    match parse_requested(requested)? {
-        Some(backend) if is_retired(backend) => Err(RouteError::Retired {
-            backend,
-            existing_conversation: true,
-        }),
-        // Nothing but the Fox path can run, so a failed read cannot send a
-        // conversation to the wrong runtime.
-        _ => Ok(()),
+    on_lookup_failure_in(&RETIRED_BACKENDS, entry, requested, switch, detail)
+}
+
+fn on_lookup_failure_in(
+    retired: &[AgentBackend],
+    entry: HostEntry,
+    requested: Option<&str>,
+    switch: &BackendSwitch,
+    detail: &str,
+) -> Result<(), RouteError> {
+    let requested = parse_requested(requested)?;
+    if let Some(backend) = requested.filter(|backend| is_retired_in(retired, *backend)) {
+        return Err(RouteError::Retired { backend, existing_conversation: true });
     }
+    let any_external = AgentBackend::ALL
+        .into_iter()
+        .filter(|backend| *backend != AgentBackend::Fox)
+        .any(|backend| switch.is_enabled_in(retired, backend));
+    let names_external = requested.is_some_and(|backend| backend != AgentBackend::Fox);
+    if any_external || names_external {
+        let detail: String = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+        return Err(RouteError::LookupFailed { entry, detail });
+    }
+    Ok(())
 }
 
 /// Route one Host entry for a conversation whose frozen backend is `bound`.
 ///
 /// Order of checks: a misrouted request is refused first (whatever the
-/// backend), then retirement.
+/// backend), then retirement, then the administrator switch, then entries
+/// that have no meaning for an external backend (resume).
 pub fn route(
     entry: HostEntry,
     bound: AgentBackend,
     requested: Option<AgentBackend>,
-    _switch: &BackendSwitch,
+    switch: &BackendSwitch,
+) -> Result<Route, RouteError> {
+    route_in(&RETIRED_BACKENDS, entry, bound, requested, switch)
+}
+
+fn route_in(
+    retired: &[AgentBackend],
+    entry: HostEntry,
+    bound: AgentBackend,
+    requested: Option<AgentBackend>,
+    switch: &BackendSwitch,
 ) -> Result<Route, RouteError> {
     if let Some(requested) = requested {
         if requested != bound {
@@ -548,10 +595,16 @@ pub fn route(
     }
     match bound {
         AgentBackend::Fox => Ok(Route::Fox),
-        retired => Err(RouteError::Retired {
-            backend: retired,
+        external if is_retired_in(retired, external) => Err(RouteError::Retired {
+            backend: external,
             existing_conversation: true,
         }),
+        external if !switch.is_enabled_in(retired, external) => Err(RouteError::Disabled {
+            backend: external,
+            existing_conversation: true,
+        }),
+        external if entry == HostEntry::Resume => Err(RouteError::EntryUnsupported { entry, backend: external }),
+        external => Ok(Route::External(external)),
     }
 }
 
@@ -572,13 +625,14 @@ pub fn route_stored(
 pub enum SessionAccess {
     /// Runtime entries are accepted.
     Runnable,
-    /// History is shown; no runtime is started (legacy: external backend
-    /// switched off). No longer produced; kept for older UIs.
+    /// History is shown; no runtime is started (the administrator switched
+    /// the backend off, [`EXTERNAL_BACKENDS_ENV`]).
     ReadOnlyDisabled,
     /// History is shown and the backend is not wired. No longer produced.
     ReadOnlyNotWired,
-    /// History is shown; the backend is retired in this build. No runtime is
-    /// started and the conversation is not re-bound to another driver.
+    /// History is shown; the backend is retired in this build (none is,
+    /// today). No runtime is started and the conversation is not re-bound to
+    /// another driver.
     ReadOnlyRetired,
 }
 
@@ -593,13 +647,18 @@ impl SessionAccess {
     }
 }
 
-/// Reading a conversation never fails because of retirement: keeping old data
-/// readable is the rollback path (plan 6.6).
-pub fn session_access(bound: AgentBackend, _switch: &BackendSwitch) -> SessionAccess {
+/// Reading a conversation never fails because of retirement or the switch:
+/// keeping old data readable is the rollback path (plan 6.6).
+pub fn session_access(bound: AgentBackend, switch: &BackendSwitch) -> SessionAccess {
+    session_access_in(&RETIRED_BACKENDS, bound, switch)
+}
+
+fn session_access_in(retired: &[AgentBackend], bound: AgentBackend, switch: &BackendSwitch) -> SessionAccess {
     match bound {
         AgentBackend::Fox => SessionAccess::Runnable,
-        retired if is_retired(retired) => SessionAccess::ReadOnlyRetired,
-        _ => SessionAccess::ReadOnlyRetired,
+        external if is_retired_in(retired, external) => SessionAccess::ReadOnlyRetired,
+        external if !switch.is_enabled_in(retired, external) => SessionAccess::ReadOnlyDisabled,
+        _ => SessionAccess::Runnable,
     }
 }
 
@@ -608,7 +667,7 @@ pub fn session_access(bound: AgentBackend, _switch: &BackendSwitch) -> SessionAc
 pub struct BackendOption {
     pub backend: AgentBackend,
     pub enabled: bool,
-    /// Runtime wired in this build. False for every retired backend.
+    /// Runtime wired in this build. False only for a retired backend.
     pub wired: bool,
     pub experimental: bool,
     /// Hidden from user-facing choices ([`AgentBackend::HIDDEN`]).
@@ -620,17 +679,23 @@ pub struct BackendOption {
 }
 
 pub fn backend_options(switch: &BackendSwitch) -> Vec<BackendOption> {
+    backend_options_in(&RETIRED_BACKENDS, switch)
+}
+
+fn backend_options_in(retired_list: &[AgentBackend], switch: &BackendSwitch) -> Vec<BackendOption> {
     AgentBackend::ALL
         .into_iter()
         .map(|backend| {
-            let retired = is_retired(backend);
-            let enabled = switch.is_enabled(backend);
+            let retired = is_retired_in(retired_list, backend);
+            let enabled = switch.is_enabled_in(retired_list, backend);
             let wired = !retired;
             let reason = if retired {
                 Some(format!(
-                    "本版本只支持内置 Pi 驱动，此前的外部 Agent 路由（{}）已退休；历史会话仍可查看，但不会启动运行时",
+                    "Agent 后端「{}」已在本版本退休；历史会话仍可查看，但不会启动运行时",
                     backend.as_str()
                 ))
+            } else if !enabled {
+                Some(format!("已被管理员关闭（环境变量 {EXTERNAL_BACKENDS_ENV}）"))
             } else {
                 None
             };
@@ -680,202 +745,182 @@ mod tests {
     use crate::legacy::{map_legacy, LegacyRecord};
 
     const ENTRIES: [HostEntry; 4] = [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve, HostEntry::Resume];
-    const RETIRED: [AgentBackend; 3] = [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek];
+    const EXTERNAL: [AgentBackend; 3] = [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek];
 
-    fn every_env_switch() -> Vec<BackendSwitch> {
-        [None, Some(""), Some("0"), Some("off"), Some("1"), Some("all"), Some("ALL"), Some("pi,codex"), Some("deepseek"), Some("claude,pi")]
-            .into_iter()
-            .map(BackendSwitch::from_env_value)
-            .collect()
+    fn on() -> BackendSwitch {
+        BackendSwitch::from_env_value(None)
     }
 
     #[test]
-    fn new_conversation_mode_is_standard_by_default_and_full_access_is_refused() {
+    fn new_conversation_mode_is_standard_by_default_and_full_access_is_external_only() {
         use super::decide_new_conversation_mode as decide;
         assert_eq!(decide(None, AgentBackend::Fox, false), Ok(false));
         assert_eq!(decide(Some("standard"), AgentBackend::Fox, true), Ok(false));
         // The pre-B3 name of the same choice is still accepted.
-        assert_eq!(decide(Some("sandboxed"), AgentBackend::Fox, true), Ok(false));
-        // Full access only ever applied to an external backend; the single
-        // supported path refuses it instead of silently downgrading.
+        assert_eq!(decide(Some("sandboxed"), AgentBackend::Codex, true), Ok(false));
+        for backend in EXTERNAL {
+            assert_eq!(decide(Some("full_access"), backend, false), Ok(true), "{backend:?}");
+            let refused = decide(Some("full_access"), backend, true).unwrap_err();
+            assert_eq!(refused.code, CODE_FULL_ACCESS_FORBIDDEN, "FORBIDDEN refuses, never downgrades");
+        }
+        // A Fox conversation sets full access through its own execution mode.
         let refused = decide(Some("full_access"), AgentBackend::Fox, false).unwrap_err();
         assert_eq!(refused.code, RouteError::CODE_INVALID);
-        assert!(refused.message.contains("内置 Pi 驱动"));
-        let refused = decide(Some("root"), AgentBackend::Fox, false).unwrap_err();
+        let refused = decide(Some("root"), AgentBackend::Codex, false).unwrap_err();
         assert_eq!(refused.code, "agent_backend_invalid");
     }
 
-    /// The single supported path is declared once and is the Fox route.
+    /// C1: the built-in route and the three external Agents are supported;
+    /// the retirement list is empty but kept.
     #[test]
-    fn this_build_declares_exactly_one_supported_path() {
-        assert_eq!(SUPPORTED_BACKENDS, [AgentBackend::Fox]);
-        assert_eq!(RETIRED_BACKENDS, RETIRED);
-        assert!(is_supported(AgentBackend::Fox));
-        for backend in RETIRED {
-            assert!(is_retired(backend), "{backend:?} is retired");
-            assert!(!is_supported(backend));
+    fn this_build_supports_fox_and_the_three_external_agents() {
+        assert_eq!(SUPPORTED_BACKENDS, [AgentBackend::Fox, AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek]);
+        assert!(RETIRED_BACKENDS.is_empty());
+        for backend in AgentBackend::ALL {
+            assert!(is_supported(backend), "{backend:?}");
+            assert!(!is_retired(backend), "{backend:?}");
+            assert!(on().is_enabled(backend), "{backend:?} is on by default");
+            assert_eq!(session_access(backend, &on()), SessionAccess::Runnable);
         }
+        assert!(on().any_external());
     }
 
-    /// Regression guard for the whole stage: no value of the administrator
-    /// variable, and no stored preference, can make a retired backend runnable.
     #[test]
-    fn the_environment_cannot_enable_a_retired_backend() {
-        for switch in every_env_switch() {
-            assert!(switch.is_enabled(AgentBackend::Fox));
-            for backend in RETIRED {
-                assert!(!switch.is_enabled(backend), "{backend:?} must never be enabled");
-                assert!(!switch.any_external(), "no retired backend may ever run");
+    fn the_administrator_switch_only_narrows() {
+        let off = BackendSwitch::from_env_value(Some("0"));
+        assert!(off.is_enabled(AgentBackend::Fox));
+        assert!(!off.any_external());
+        let some = BackendSwitch::from_env_value(Some("pi, Codex fox"));
+        assert!(some.is_enabled(AgentBackend::Pi) && some.is_enabled(AgentBackend::Codex));
+        assert!(!some.is_enabled(AgentBackend::Deepseek));
+        assert!(some.request_includes(AgentBackend::Pi));
+        for value in [None, Some(""), Some("1"), Some("all"), Some("ALL"), Some("yes")] {
+            let switch = BackendSwitch::from_env_value(value);
+            for backend in EXTERNAL {
+                assert!(switch.is_enabled(backend), "{value:?} {backend:?}");
             }
         }
-        // The variable is still parsed: an old deployment's request is visible
-        // for support, it just grants nothing.
-        let switch = BackendSwitch::from_env_value(Some("pi, Codex fox"));
-        assert!(switch.request_includes(AgentBackend::Pi));
-        assert!(switch.request_includes(AgentBackend::Codex));
-        assert!(!switch.is_enabled(AgentBackend::Pi));
-        assert!(!switch.is_enabled(AgentBackend::Codex));
-        let switch = BackendSwitch::from_env_value(Some("all"));
-        assert!(switch.request_includes(AgentBackend::Deepseek));
-        assert!(!switch.is_enabled(AgentBackend::Deepseek));
+        // A switched-off backend: refused for a new conversation, read-only for an old one.
+        let error = choose_for_new_conversation(Some("deepseek"), &some).unwrap_err();
+        assert_eq!(error, RouteError::Disabled { backend: AgentBackend::Deepseek, existing_conversation: false });
+        assert_eq!(error.code(), "agent_backend_disabled");
+        assert!(!error.retryable());
+        assert_eq!(session_access(AgentBackend::Deepseek, &some), SessionAccess::ReadOnlyDisabled);
+        for entry in ENTRIES {
+            assert_eq!(
+                route(entry, AgentBackend::Deepseek, None, &some),
+                Err(RouteError::Disabled { backend: AgentBackend::Deepseek, existing_conversation: true })
+            );
+        }
     }
 
     #[test]
     fn unknown_switch_entries_are_reported_and_never_mean_all() {
         let switch = BackendSwitch::from_env_value(Some("claude,deepseek_harness"));
         assert_eq!(switch.unknown_entries(), ["claude".to_owned(), "deepseek_harness".to_owned()]);
-        for backend in AgentBackend::ALL {
+        for backend in EXTERNAL {
             assert!(!switch.request_includes(backend));
+            assert!(!switch.is_enabled(backend));
         }
         assert!(BackendSwitch::from_env_value(None).unknown_entries().is_empty());
     }
 
     #[test]
-    fn a_new_conversation_is_always_the_supported_path() {
-        for switch in every_env_switch() {
-            for requested in [None, Some(""), Some("fox"), Some("  fox  ")] {
-                assert_eq!(choose_for_new_conversation(requested, &switch), Ok(AgentBackend::Fox));
-            }
+    fn a_new_conversation_takes_the_backend_it_asked_for() {
+        for requested in [None, Some(""), Some("fox"), Some("  fox  ")] {
+            assert_eq!(choose_for_new_conversation(requested, &on()), Ok(AgentBackend::Fox));
         }
-    }
-
-    /// An explicit request for a retired driver is a refusal that names it. It
-    /// must never be answered with the Fox path: that is the "silently swap the
-    /// driver" failure the product decision forbids.
-    #[test]
-    fn an_explicit_retired_request_is_refused_and_never_substituted() {
-        for switch in every_env_switch() {
-            for backend in RETIRED {
-                let error = choose_for_new_conversation(Some(backend.as_str()), &switch).unwrap_err();
-                assert_eq!(
-                    error,
-                    RouteError::Retired {
-                        backend,
-                        existing_conversation: false
-                    }
-                );
-                assert_eq!(error.code(), "agent_backend_retired");
-                assert_eq!(error.code(), RouteError::CODE_RETIRED);
-                assert!(error.message().contains("退休"), "{}", error.message());
-                assert!(!error.retryable(), "a product decision is not retryable");
-            }
+        for backend in EXTERNAL {
+            assert_eq!(choose_for_new_conversation(Some(backend.as_str()), &on()), Ok(backend));
         }
         // `engine_id` values are still not backend ids.
-        let error = choose_for_new_conversation(Some("deepseek_harness"), &BackendSwitch::all_on()).unwrap_err();
+        let error = choose_for_new_conversation(Some("deepseek_harness"), &on()).unwrap_err();
         assert_eq!(error, RouteError::InvalidBackend("deepseek_harness".into()));
         assert_eq!(error.code(), "agent_backend_invalid");
     }
 
     #[test]
-    fn fox_conversations_route_to_fox_on_all_four_entries() {
-        for switch in every_env_switch() {
-            for entry in ENTRIES {
-                assert_eq!(route(entry, AgentBackend::Fox, None, &switch), Ok(Route::Fox));
-                assert_eq!(route(entry, AgentBackend::Fox, Some(AgentBackend::Fox), &switch), Ok(Route::Fox));
+    fn every_backend_routes_to_its_own_runtime() {
+        for entry in ENTRIES {
+            assert_eq!(route(entry, AgentBackend::Fox, None, &on()), Ok(Route::Fox));
+            assert_eq!(route(entry, AgentBackend::Fox, Some(AgentBackend::Fox), &on()), Ok(Route::Fox));
+        }
+        for backend in EXTERNAL {
+            for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve] {
+                assert_eq!(route(entry, backend, None, &on()), Ok(Route::External(backend)), "{entry:?} {backend:?}");
+                assert_eq!(route(entry, backend, Some(backend), &on()), Ok(Route::External(backend)));
             }
+            // Resuming a Kernel / yuxi run has no meaning for an external Agent.
+            let error = route(HostEntry::Resume, backend, None, &on()).unwrap_err();
+            assert_eq!(error, RouteError::EntryUnsupported { entry: HostEntry::Resume, backend });
+            assert_eq!(error.code(), "agent_backend_entry_unsupported");
         }
     }
 
     #[test]
     fn misrouted_requests_are_refused_on_every_entry() {
-        for switch in every_env_switch() {
-            for entry in ENTRIES {
-                for bound in AgentBackend::ALL {
-                    for requested in AgentBackend::ALL.into_iter().filter(|candidate| *candidate != bound) {
-                        let error = route(entry, bound, Some(requested), &switch).unwrap_err();
-                        assert_eq!(error, RouteError::Misrouted { entry, bound, requested });
-                        assert_eq!(error.code(), "agent_backend_misrouted");
-                        assert!(error.message().contains("错投"));
-                    }
+        for entry in ENTRIES {
+            for bound in AgentBackend::ALL {
+                for requested in AgentBackend::ALL.into_iter().filter(|candidate| *candidate != bound) {
+                    let error = route(entry, bound, Some(requested), &on()).unwrap_err();
+                    assert_eq!(error, RouteError::Misrouted { entry, bound, requested });
+                    assert_eq!(error.code(), "agent_backend_misrouted");
+                    assert!(error.message().contains("错投"));
                 }
             }
         }
     }
 
-    /// A conversation frozen to a retired backend is read-only on every entry,
-    /// including when the caller repeats its own backend id. It is never
-    /// re-driven by the Fox route.
+    /// The retirement mechanism is kept for a backend really taken out of
+    /// service later: exercised with a list naming Codex.
     #[test]
-    fn a_retired_conversation_is_read_only_on_every_entry() {
-        for switch in every_env_switch() {
-            for entry in ENTRIES {
-                for backend in RETIRED {
-                    for requested in [None, Some(backend)] {
-                        let error = route(entry, backend, requested, &switch).unwrap_err();
-                        assert_eq!(
-                            error,
-                            RouteError::Retired {
-                                backend,
-                                existing_conversation: true
-                            }
-                        );
-                        assert_eq!(error.code(), "agent_backend_retired");
-                        assert!(error.message().contains("只读") || error.message().contains("只能查看历史"));
-                    }
-                }
+    fn the_retirement_mechanism_still_freezes_a_retired_backend() {
+        let retired = [AgentBackend::Codex];
+        let switch = BackendSwitch::from_env_value(Some("all"));
+        assert!(!switch.is_enabled_in(&retired, AgentBackend::Codex), "the switch never revives a retired backend");
+        assert!(switch.is_enabled_in(&retired, AgentBackend::Pi));
+        assert!(!is_retired_in(&retired, AgentBackend::Fox) && !is_retired_in(&[AgentBackend::Fox], AgentBackend::Fox), "the built-in route is never retired");
+        let error = choose_for_new_conversation_in(&retired, Some("codex"), &switch).unwrap_err();
+        assert_eq!(error, RouteError::Retired { backend: AgentBackend::Codex, existing_conversation: false });
+        assert_eq!(error.code(), RouteError::CODE_RETIRED);
+        assert!(error.message().contains("退休"), "{}", error.message());
+        assert!(!error.retryable());
+        for entry in ENTRIES {
+            for requested in [None, Some(AgentBackend::Codex)] {
+                let error = route_in(&retired, entry, AgentBackend::Codex, requested, &switch).unwrap_err();
+                assert_eq!(error, RouteError::Retired { backend: AgentBackend::Codex, existing_conversation: true });
+                assert!(error.message().contains("只能查看历史"));
             }
+            assert_eq!(
+                on_lookup_failure_in(&retired, entry, Some("codex"), &switch, "x"),
+                Err(RouteError::Retired { backend: AgentBackend::Codex, existing_conversation: true })
+            );
         }
+        assert_eq!(session_access_in(&retired, AgentBackend::Codex, &switch), SessionAccess::ReadOnlyRetired);
+        assert_eq!(session_access_in(&retired, AgentBackend::Codex, &switch).as_str(), "read_only_retired");
+        let options = backend_options_in(&retired, &switch);
+        let codex = options.iter().find(|option| option.backend == AgentBackend::Codex).unwrap();
+        assert!(codex.retired && !codex.enabled && !codex.wired);
+        assert!(codex.reason.as_deref().unwrap().contains("退休"));
+        // The frozen value itself is still read back unchanged.
+        assert_eq!(bound_backend(Some("codex")), Ok(AgentBackend::Codex));
     }
 
-    /// The Fox path is the only runnable path, so a failed lookup is safe to
-    /// answer with it. An explicit retired request is still refused.
+    /// A failed lookup may only fall back to Fox while nothing external could
+    /// be involved.
     #[test]
-    fn a_failed_lookup_falls_back_to_fox_and_still_refuses_explicit_retired_requests() {
-        for switch in every_env_switch() {
-            for entry in ENTRIES {
-                assert_eq!(on_lookup_failure(entry, None, &switch, "database is locked"), Ok(()));
-                assert_eq!(on_lookup_failure(entry, Some("fox"), &switch, "x"), Ok(()));
-                assert_eq!(on_lookup_failure(entry, Some(" "), &switch, "x"), Ok(()));
-                for backend in RETIRED {
-                    let error = on_lookup_failure(entry, Some(backend.as_str()), &switch, "x").unwrap_err();
-                    assert_eq!(
-                        error,
-                        RouteError::Retired {
-                            backend,
-                            existing_conversation: true
-                        }
-                    );
-                }
-                assert_eq!(
-                    on_lookup_failure(entry, Some("gpt"), &switch, "x").unwrap_err().code(),
-                    "agent_backend_invalid"
-                );
-            }
-        }
-    }
-
-    /// Keeping old data readable is the rollback path: closing the feature
-    /// never hides a conversation.
-    #[test]
-    fn retired_conversations_stay_readable() {
-        for switch in every_env_switch() {
-            assert_eq!(session_access(AgentBackend::Fox, &switch), SessionAccess::Runnable);
-            for backend in RETIRED {
-                assert_eq!(session_access(backend, &switch), SessionAccess::ReadOnlyRetired);
-                assert_eq!(session_access(backend, &switch).as_str(), "read_only_retired");
-                // The frozen value itself is still read back unchanged.
-                assert_eq!(bound_backend(Some(backend.as_str())), Ok(backend));
-            }
+    fn a_failed_lookup_is_refused_while_an_external_backend_may_be_involved() {
+        let off = BackendSwitch::from_env_value(Some("0"));
+        for entry in ENTRIES {
+            assert_eq!(on_lookup_failure(entry, None, &off, "database is locked"), Ok(()));
+            assert_eq!(on_lookup_failure(entry, Some("fox"), &off, "x"), Ok(()));
+            assert_eq!(on_lookup_failure(entry, Some(" "), &off, "x"), Ok(()));
+            let error = on_lookup_failure(entry, Some("pi"), &off, "x").unwrap_err();
+            assert_eq!(error.code(), "agent_backend_lookup_failed");
+            let error = on_lookup_failure(entry, None, &on(), "database   is\nlocked").unwrap_err();
+            assert_eq!(error, RouteError::LookupFailed { entry, detail: "database is locked".into() });
+            assert!(error.retryable());
+            assert_eq!(on_lookup_failure(entry, Some("gpt"), &on(), "x").unwrap_err().code(), "agent_backend_invalid");
         }
     }
 
@@ -894,8 +939,6 @@ mod tests {
 
     #[test]
     fn old_kernel_runs_of_every_engine_stay_on_fox() {
-        // Conversation-level mapping (column default) agrees with the run-level
-        // mapping of `legacy.rs` for every historical engine and the legacy path.
         for (mode, engine) in [
             ("authoritative", "pi"),
             ("authoritative", "codex"),
@@ -913,49 +956,38 @@ mod tests {
 
     #[test]
     fn route_stored_parses_both_sides() {
-        for switch in every_env_switch() {
-            assert_eq!(route_stored(HostEntry::Cancel, Some("fox"), Some("fox"), &switch), Ok((AgentBackend::Fox, Route::Fox)));
-            assert_eq!(route_stored(HostEntry::Cancel, Some("fox"), Some(" "), &switch), Ok((AgentBackend::Fox, Route::Fox)));
-            assert_eq!(
-                route_stored(HostEntry::Approve, Some("fox"), Some("codex"), &switch).unwrap_err().code(),
-                "agent_backend_misrouted"
-            );
-            assert_eq!(
-                route_stored(HostEntry::Approve, Some("fox"), Some("gpt"), &switch).unwrap_err(),
-                RouteError::InvalidBackend("gpt".into())
-            );
-            assert_eq!(
-                route_stored(HostEntry::Start, Some("codex"), None, &switch).unwrap_err().code(),
-                "agent_backend_retired"
-            );
+        assert_eq!(route_stored(HostEntry::Cancel, Some("fox"), Some("fox"), &on()), Ok((AgentBackend::Fox, Route::Fox)));
+        assert_eq!(route_stored(HostEntry::Cancel, Some("fox"), Some(" "), &on()), Ok((AgentBackend::Fox, Route::Fox)));
+        assert_eq!(route_stored(HostEntry::Approve, Some("fox"), Some("codex"), &on()).unwrap_err().code(), "agent_backend_misrouted");
+        assert_eq!(route_stored(HostEntry::Approve, Some("fox"), Some("gpt"), &on()).unwrap_err(), RouteError::InvalidBackend("gpt".into()));
+        for backend in EXTERNAL {
+            assert_eq!(route_stored(HostEntry::Start, Some(backend.as_str()), None, &on()), Ok((backend, Route::External(backend))));
         }
     }
 
     #[test]
-    fn picker_options_explain_retired_backends() {
-        let options = backend_options(&BackendSwitch::all_on());
-        assert_eq!(options.len(), 4);
-        let fox = &options[0];
-        assert_eq!(fox.backend, AgentBackend::Fox);
-        assert!(fox.enabled && fox.wired && !fox.retired && fox.reason.is_none());
-        for option in &options[1..] {
-            assert!(option.retired, "{:?} is retired", option.backend);
-            assert!(!option.enabled);
-            assert!(!option.wired);
-            assert!(option.reason.as_deref().unwrap().contains("退休"));
+    fn picker_options_offer_every_supported_backend() {
+        let options = backend_options(&on());
+        assert_eq!(options.iter().map(|option| option.backend).collect::<Vec<_>>(), AgentBackend::ALL);
+        for option in &options {
+            assert!(option.enabled && option.wired && !option.retired && option.reason.is_none(), "{:?}", option.backend);
         }
+        assert!(options.iter().find(|option| option.backend == AgentBackend::Deepseek).unwrap().experimental);
+        let off = backend_options(&BackendSwitch::from_env_value(Some("codex")));
+        let pi = off.iter().find(|option| option.backend == AgentBackend::Pi).unwrap();
+        assert!(!pi.enabled && pi.wired && !pi.retired);
+        assert!(pi.reason.as_deref().unwrap().contains(EXTERNAL_BACKENDS_ENV));
     }
 
     #[test]
     fn audit_line_carries_both_identities() {
         let line = audit_line(HostEntry::Cancel, "c1", Some("r1"), Some(AgentBackend::Fox), Some("codex"), Ok(Route::Fox));
         assert_eq!(line, "fox.host_routing entry=cancel conversation=c1 run=r1 agent_backend=fox engine_id=codex routed=fox");
+        let line = audit_line(HostEntry::Start, "c3", None, Some(AgentBackend::Pi), None, Ok(Route::External(AgentBackend::Pi)));
+        assert!(line.ends_with("agent_backend=pi engine_id=- routed=external:pi"), "{line}");
         let error = RouteError::Misrouted { entry: HostEntry::Start, bound: AgentBackend::Fox, requested: AgentBackend::Pi };
         let line = audit_line(HostEntry::Start, "c1", None, Some(AgentBackend::Fox), None, Err(&error));
         assert!(line.contains("agent_backend=fox engine_id=- refused=agent_backend_misrouted"));
-        let error = RouteError::Retired { backend: AgentBackend::Codex, existing_conversation: true };
-        let line = audit_line(HostEntry::Start, "c2", Some("r2"), Some(AgentBackend::Codex), Some("codex"), Err(&error));
-        assert!(line.ends_with("agent_backend=codex engine_id=codex refused=agent_backend_retired"), "{line}");
     }
 
     #[test]
@@ -967,8 +999,7 @@ mod tests {
             assert!(!upper.contains(forbidden), "migration must not contain {forbidden}");
         }
         assert_eq!(AGENT_BACKEND_SCHEMA_VERSION, 95);
-        // Retired values stay in the CHECK so their rows remain legal.
-        for backend in RETIRED {
+        for backend in EXTERNAL {
             assert!(upper.contains(&format!("'{}'", backend.as_str().to_ascii_uppercase())));
         }
     }
