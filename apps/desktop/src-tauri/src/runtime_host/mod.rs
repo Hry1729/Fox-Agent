@@ -9749,6 +9749,12 @@ fn execute_host_tool_request(
     } else { None };
     let policy = decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), write_target.as_deref())?;
     if let Some(refusal) = policy.refusal(tool) {
+        if policy.decision.is_block() {
+            let preview = prepared.preview();
+            let summary = preview.command.clone().unwrap_or_else(|| preview.summary.clone());
+            // 审计写失败不影响拒绝本身。
+            let _ = database.record_permission_audit(conversation_id, Some(run_id), Some(tool_call_id), tool, &policy.decision, &summary);
+        }
         return Err(refusal);
     }
     let requires_approval = hook_decision.requires_approval || policy.decision.is_ask();
@@ -10098,6 +10104,12 @@ fn execute_capability_tool_request(
     // (TX-1) is gone, and command tools never take a conversation grant.
     let policy = decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), None)?;
     if let Some(refusal) = policy.refusal(tool) {
+        if policy.decision.is_block() {
+            let preview = prepared.preview();
+            let summary = preview.command.clone().unwrap_or_else(|| preview.summary.clone());
+            // 审计写失败不影响拒绝本身。
+            let _ = database.record_permission_audit(conversation_id, Some(run_id), Some(tool_call_id), tool, &policy.decision, &summary);
+        }
         return Err(refusal);
     }
     let requires_approval = hook_decision.requires_approval || policy.decision.is_ask();

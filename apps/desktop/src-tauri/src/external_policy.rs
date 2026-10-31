@@ -24,6 +24,7 @@
 use crate::runtime_host::approval_policy::{self, AccessMode, PolicyDecision, PolicyRule, ToolClass, ToolSubject, Verdict};
 use fox_agent_backend::backends::pi::{parse_tool_approval, ToolApproval};
 use fox_agent_backend::external::HostPermissionAnswer;
+use fox_agent_backend::port::AgentBackend;
 use fox_agent_backend::native_permission::{PI_ALLOW, PI_FULL, PI_READ_ONLY};
 use fox_agent_backend::projection::{allow_option, reject_option, AutoPermission, PermissionOption};
 use serde_json::{json, Value};
@@ -130,8 +131,8 @@ pub fn fail_closed(error: &str, options: &[PermissionOption]) -> HostPermissionA
 }
 
 /// Answer one pi request for `conversation_id` with its project root and
-/// rules as they are now; every automatic allow of a non-read call leaves one
-/// row in the same audit as PiNative.
+/// rules as they are now. Every automatic allow of a non-read call, and every
+/// block, leaves one row in the same audit as PiNative.
 pub fn answer_pi_request(
     database: &crate::database::Database,
     run_id: &str,
@@ -149,7 +150,7 @@ pub fn answer_pi_request(
     });
     let home = approval_policy::host_home();
     let (tool, decision) = decide_pi(native_mode, request, root.as_deref(), home.as_deref(), &rules);
-    if decision.is_allow() && decision.class != ToolClass::Read {
+    if (decision.is_allow() && decision.class != ToolClass::Read) || decision.is_block() {
         let approval = parse_tool_approval(request);
         let summary = approval
             .as_ref()
@@ -159,6 +160,76 @@ pub fn answer_pi_request(
         database.record_permission_audit(conversation_id, Some(run_id), tool_call_id.as_deref(), &tool, &decision, &summary)?;
     }
     Ok(answer_from(&tool, &decision, options))
+}
+
+/// `toolCall.rawInput.command`：字符串，或字符串数组（按空格拼接，`["bash","-lc","脚本"]` 交给嵌套分析）。
+fn command_line(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_owned());
+    }
+    let words: Vec<&str> = value.as_array()?.iter().filter_map(Value::as_str).map(str::trim).filter(|word| !word.is_empty()).collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+/// Codex / dsh 的 `session/request_permission` 里 Fox 能看到命令时，只做 block 判定。
+/// 没有命令、或没有命中 block 时返回 `None`（不替它们放行）。
+pub fn native_block_decision(
+    backend: AgentBackend,
+    native_mode: &str,
+    request: &Value,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+    rules: &[PolicyRule],
+) -> Option<PolicyDecision> {
+    let raw = request.get("toolCall")?.get("rawInput")?;
+    let command = command_line(raw.get("command")?)?;
+    let cwd = raw
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| project_root.map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let subject = ToolSubject::Command { command, cwd, model_risk: None };
+    let decision = approval_policy::decide(&approval_policy::PolicyRequest {
+        tool: "run_command",
+        subject: &subject,
+        mode: crate::external_tools::external_access_mode(backend, native_mode),
+        project_root,
+        home,
+        rules,
+    });
+    decision.is_block().then_some(decision)
+}
+
+/// Codex / dsh：命中 block 时拒绝并记审计。取不到命令返回 `Ok(None)`；数据库出错返回 `Err`（调用方 fail-closed）。
+pub fn block_for_native_request(
+    database: &crate::database::Database,
+    run_id: &str,
+    conversation_id: &str,
+    backend: AgentBackend,
+    native_mode: &str,
+    request: &Value,
+    options: &[PermissionOption],
+) -> Result<Option<HostPermissionAnswer>, String> {
+    let context = database.external_conversation_context(conversation_id)?.ok_or_else(|| "conversation not found".to_owned())?;
+    let rules = database.policy_rules_for_conversation(conversation_id)?;
+    let root = context.project_root.as_deref().map(|root| {
+        let root = PathBuf::from(root);
+        root.canonicalize().unwrap_or(root)
+    });
+    let home = approval_policy::host_home();
+    let Some(decision) = native_block_decision(backend, native_mode, request, root.as_deref(), home.as_deref(), &rules) else {
+        return Ok(None);
+    };
+    let tool = "run_command";
+    let raw = request.get("toolCall").and_then(|call| call.get("rawInput"));
+    let summary = raw.and_then(|raw| raw.get("command")).and_then(command_line).unwrap_or_else(|| tool.to_owned());
+    let tool_call_id = request.get("toolCall").and_then(|call| call.get("toolCallId")).and_then(Value::as_str).filter(|id| !id.is_empty());
+    database.record_permission_audit(conversation_id, Some(run_id), tool_call_id, tool, &decision, &summary)?;
+    Ok(Some(answer_from(tool, &decision, options)))
 }
 
 #[cfg(test)]
@@ -293,5 +364,52 @@ mod tests {
         let only_reject = vec![PermissionOption { option_id: "no".into(), name: "No".into(), kind: "reject_once".into() }];
         assert!(matches!(answer_from(&tool, &decision, &only_reject).decision, AutoPermission::Reject { .. }));
         assert!(matches!(fail_closed("db locked", &options()).decision, AutoPermission::Reject { option_id: Some(_) }));
+    }
+
+    #[test]
+    fn pi_gate_blocks_destructive_commands_in_full_access_and_allows_dir() {
+        let win = PathBuf::from("D:/fox-test/测试项目");
+        let win_home = PathBuf::from("C:/Users/fox");
+        for command in [
+            r"rmdir /s /q D:\fox-test\测试项目",
+            r#"cmd //c "rmdir /s /q D:\\fox-test\\测试项目""#,
+            "rm -rf /d/fox-test/测试项目",
+            r#"powershell -Command "Remove-Item -Recurse -Force 'D:\fox-test\测试项目'""#,
+            "rm -rf /c/Windows/System32",
+        ] {
+            let request = gate("bash", json!({ "command": command }));
+            let (tool, decision) = decide_pi(PI_FULL, &request, Some(&win), Some(&win_home), &[]);
+            assert!(decision.is_block(), "{command}: {:?}", decision.verdict);
+            let answer = answer_from(&tool, &decision, &options());
+            assert!(matches!(answer.decision, AutoPermission::Reject { .. }), "{command}");
+            assert_eq!(answer.policy["denyCode"], "permission.blocked", "{command}");
+            let findings = answer.policy["findings"].as_array().unwrap();
+            assert!(findings.iter().any(|finding| finding == "builtin_block"), "{command}: {findings:?}");
+        }
+        assert_eq!(verdict(PI_ALLOW, &gate("bash", json!({ "command": "dir" })), &[]), "allow");
+    }
+
+    #[test]
+    fn native_block_decision_rejects_codex_root_deletes_and_ignores_npm_test() {
+        use fox_agent_backend::port::AgentBackend;
+        let project = root();
+        let home_dir = home();
+        let root_text = project.display().to_string();
+        let string_request = json!({
+            "toolCall": { "toolCallId": "t1", "rawInput": { "command": format!("rm -rf {root_text}"), "cwd": &root_text } }
+        });
+        let decision = native_block_decision(AgentBackend::Codex, "agent-full-access", &string_request, Some(&project), Some(&home_dir), &[])
+            .expect("string command is a block");
+        assert!(decision.is_block());
+        assert!(matches!(decision.verdict, crate::runtime_host::approval_policy::Verdict::Deny { ref code, .. } if code == "permission.blocked"));
+        let array_request = json!({
+            "toolCall": { "rawInput": { "command": ["bash", "-lc", format!("rm -rf {root_text}")] } }
+        });
+        let decision = native_block_decision(AgentBackend::Deepseek, "workspace-write", &array_request, Some(&project), Some(&home_dir), &[])
+            .expect("bash -lc array is a block");
+        assert!(decision.is_block());
+        let npm = json!({ "toolCall": { "rawInput": { "command": "npm test", "cwd": &root_text } } });
+        assert!(native_block_decision(AgentBackend::Codex, "workspace-write", &npm, Some(&project), Some(&home_dir), &[]).is_none());
+        assert!(native_block_decision(AgentBackend::Codex, "workspace-write", &json!({ "toolCall": { "rawInput": {} } }), Some(&project), Some(&home_dir), &[]).is_none());
     }
 }

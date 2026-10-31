@@ -26,14 +26,17 @@
 //! * **Approvals** (plan C2): `session/request_permission` -> approval card;
 //!   the user's answer is written as the native one-shot option (`allow_once`
 //!   / `reject_once`) and reported as written, never acknowledged (6.3 rule
-//!   3). pi's requests (Fox's approval gate) are first put to the Host's own
-//!   approval engine ([`ExternalSink::host_permission_answer`], the same
-//!   engine, rules and block rules as PiNative); only what it leaves to the
-//!   user becomes a card. Codex and dsh keep their own sandbox and approval:
-//!   a mode that asks shows the card, a dsh preset with approval `never`
-//!   rejects what still arrives (fail-closed), never shown as answerable.
-//!   Requests that arrive after a stop began are auto-cancelled by the
-//!   connection and only observed (`agent_backend.permission_auto_cancelled`).
+//!   3). Every backend's request is first offered to the Host
+//!   ([`ExternalSink::host_permission_answer`]). pi is answered by the same
+//!   engine, rules and block rules as PiNative; only what it leaves to the
+//!   user becomes a card. Codex and dsh keep their own sandbox and approval,
+//!   except a command the Host can see that hits a block rule: the sink
+//!   returns a refusal and no card is shown. Otherwise the sink returns
+//!   `None` and [`crate::native_permission::answer`] decides (a mode that
+//!   asks shows the card; a dsh preset with approval `never` rejects what
+//!   still arrives, fail-closed). Fox never auto-allows on behalf of Codex
+//!   or dsh. Requests that arrive after a stop began are auto-cancelled by
+//!   the connection and only observed (`agent_backend.permission_auto_cancelled`).
 //! * **End**: the stop reason decides the terminal
 //!   ([`crate::projection::terminal_for_stop_reason`]); the first terminal
 //!   wins ([`TerminalArbiter`]); a cancel that the backend does not confirm
@@ -406,13 +409,18 @@ pub trait ExternalSink: Send + Sync + 'static {
     /// and kinds only, never tool input). Default: nothing beyond the run
     /// event the runtime already emitted.
     fn audit(&self, _conversation_id: &str, _backend: AgentBackend, _event: &str, _details: &Value) {}
-    /// pi (plan C2): answer one request of Fox's approval gate with the
-    /// Host's approval engine, read against the conversation's tier
-    /// (`native_mode`), project rules and block rules as they are NOW. The
-    /// desktop always answers (an engine failure is a fail-closed reject).
-    /// `None` = this sink has no engine (tests); the runtime then uses the
-    /// built-in tier table ([`crate::native_permission::answer`]). Never
-    /// called for Codex or dsh: their own approval decides.
+    /// Answer one `session/request_permission` with the Host's approval
+    /// engine. Called for every backend.
+    ///
+    /// * **pi**: the desktop always answers (an engine failure is a
+    ///   fail-closed reject), against the conversation's tier
+    ///   (`native_mode`), project rules and block rules as they are NOW.
+    ///   `None` means this sink has no engine (tests); the runtime then uses
+    ///   the built-in tier table ([`crate::native_permission::answer`]).
+    /// * **Codex / dsh**: return `Some` only when the command hits a Host
+    ///   block rule (built-in or project). Otherwise return `None` and the
+    ///   runtime uses [`crate::native_permission::answer`] — their own
+    ///   approval still decides, and Fox never auto-allows for them.
     fn host_permission_answer(
         &self,
         _run_id: &str,
@@ -1439,16 +1447,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let card = permission_card(&request);
                 let key = format!("acp-permission:{generation}:{native_request_id}");
                 let run_id = turn.run_id.clone();
-                // Plan C2: pi's gate requests go to the Host's approval
-                // engine (same as PiNative); Codex / dsh keep their own
-                // approval: a mode that asks shows the card, a mode in which
-                // nothing should ask rejects what still arrives (fail-closed).
-                // Fox never auto-allows on behalf of Codex or dsh.
-                let host = if session.backend == AgentBackend::Pi {
-                    self.inner.sink.host_permission_answer(&run_id, &session.conversation_id, session.backend, &turn.native_mode, &request, &card.options)
-                } else {
-                    None
-                };
+                // 所有后端都先问 Host。Pi 由审批引擎完整作答。Codex / dsh 只在命中
+                // block 时由 sink 返回拒绝；否则 None，再走 native_permission::answer
+                // （询问档出卡，不该问的档位 fail-closed 拒绝）。Fox 不替它们放行。
+                let host = self.inner.sink.host_permission_answer(&run_id, &session.conversation_id, session.backend, &turn.native_mode, &request, &card.options);
                 let (decision, policy) = match host {
                     Some(answer) => (answer.decision, Some(answer.policy)),
                     None => (crate::native_permission::answer(session.backend, &turn.native_mode, &request, &card.options), None),

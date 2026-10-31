@@ -1,7 +1,7 @@
 //! A1: project permission rules, the four-mode conversation access, the
 //! per-project full-access confirmation and the auto-allow audit log.
 use super::{now_ms, Database};
-use crate::runtime_host::approval_policy::{AccessMode, PolicyDecision, PolicyRule, RuleEffect};
+use crate::runtime_host::approval_policy::{AccessMode, PolicyDecision, PolicyRule, RuleEffect, Verdict};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
@@ -194,10 +194,20 @@ impl Database {
         })
     }
 
-    /// One row per automatic allow of a non-read tool call.
+    /// 自动放行记一行；block / 拒绝也记一行（表结构不变）。
+    /// 放行的 reason 仍是 allow_reason；拒绝的 reason 是拒绝码。
+    /// block 命中项目规则时，rule_ids_json 写 forcing_rule 的 id。
     pub fn record_permission_audit(&self, conversation_id: &str, run_id: Option<&str>, tool_call_id: Option<&str>,
         tool: &str, decision: &PolicyDecision, summary: &str) -> Result<(), String> {
-        let reason = decision.allow_reason.as_ref().map(|reason| reason.as_str()).unwrap_or("unknown");
+        let reason = match &decision.verdict {
+            Verdict::Deny { code, .. } => code.as_str(),
+            _ => decision.allow_reason.as_ref().map(|reason| reason.as_str()).unwrap_or("unknown"),
+        };
+        let rule_ids = if decision.is_block() {
+            decision.forcing_rule.iter().map(|rule| rule.id.clone()).collect::<Vec<_>>()
+        } else {
+            decision.rule_ids()
+        };
         let summary: String = summary.chars().take(500).collect();
         self.with_connection(|connection| {
             connection.execute(
@@ -205,7 +215,7 @@ impl Database {
                                               reason, rule_ids_json, findings_json, summary, created_at)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![conversation_id, run_id, tool_call_id, tool, decision.mode.as_str(), decision.class.as_str(),
-                        decision.risk.as_str(), reason, json!(decision.rule_ids()).to_string(),
+                        decision.risk.as_str(), reason, json!(rule_ids).to_string(),
                         json!(decision.findings).to_string(), summary, now_ms()],
             )?;
             Ok(())

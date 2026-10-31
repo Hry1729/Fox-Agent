@@ -55,6 +55,10 @@ impl ExternalSink for Sink {
     }
 
     fn host_permission_answer(&self, _run_id: &str, _conversation_id: &str, backend: AgentBackend, native_mode: &str, _request: &Value, options: &[PermissionOption]) -> Option<HostPermissionAnswer> {
+        // 非 Pi 保持原语义：这个测试 sink 不替 Codex / dsh 做决定（block 判定在桌面 sink）。
+        if backend != AgentBackend::Pi {
+            return None;
+        }
         let mut recorded = self.0.lock().unwrap();
         let policy = recorded.host_policy?;
         recorded.policy_calls.push((backend.as_str().to_owned(), native_mode.to_owned()));

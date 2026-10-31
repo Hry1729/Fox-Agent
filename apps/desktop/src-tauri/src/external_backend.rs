@@ -102,17 +102,23 @@ impl ExternalSink for DesktopSink {
         let _ = self.database.append_agent_backend_audit(Some(conversation_id), backend.as_str(), event, details);
     }
 
-    /// Plan C2: pi is answered by the Host approval engine (same as
-    /// PiNative); a failure to consult it is a fail-closed reject, never a
-    /// fallback to another rule set. Codex / dsh: their own approval.
+    /// Pi 由 Host 审批引擎完整作答（失败则 fail-closed）。
+    /// Codex / dsh 只在命令命中 block 时拒绝；否则 `None`，仍由它们自己的审批决定。
+    /// 数据库出错同样 fail-closed，不放宽。
     fn host_permission_answer(&self, run_id: &str, conversation_id: &str, backend: AgentBackend, native_mode: &str, request: &Value, options: &[PermissionOption]) -> Option<HostPermissionAnswer> {
-        if backend != AgentBackend::Pi {
-            return None;
+        if backend == AgentBackend::Pi {
+            return Some(match crate::external_policy::answer_pi_request(&self.database, run_id, conversation_id, native_mode, request, options) {
+                Ok(answer) => answer,
+                Err(error) => crate::external_policy::fail_closed(&error, options),
+            });
         }
-        Some(match crate::external_policy::answer_pi_request(&self.database, run_id, conversation_id, native_mode, request, options) {
-            Ok(answer) => answer,
-            Err(error) => crate::external_policy::fail_closed(&error, options),
-        })
+        if matches!(backend, AgentBackend::Codex | AgentBackend::Deepseek) {
+            return match crate::external_policy::block_for_native_request(&self.database, run_id, conversation_id, backend, native_mode, request, options) {
+                Ok(answer) => answer,
+                Err(error) => Some(crate::external_policy::fail_closed(&error, options)),
+            };
+        }
+        None
     }
 }
 
