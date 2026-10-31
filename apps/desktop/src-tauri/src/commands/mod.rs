@@ -3363,14 +3363,17 @@ fn legacy_knowledge_bindings(
         .collect()
 }
 
+/// AP-3: async so a PiNative recovery branch (which may start the Node
+/// worker) never runs on the UI thread; the Host work itself runs on the
+/// blocking pool.
 #[tauri::command]
-pub fn approval_resolve(
+pub async fn approval_resolve(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     request: ResolveApprovalRequest,
-) -> ApiResponse<bool> {
+) -> Result<ApiResponse<bool>, String> {
     if let Err(error) = require_trusted_local_window(&window) {
-        return ApiResponse::failure("permission.untrusted_origin", error, false);
+        return Ok(ApiResponse::failure("permission.untrusted_origin", error, false));
     }
     match agent_backend_routing::gate_run_identity(
         fox_agent_backend::host_routing::HostEntry::Approve,
@@ -3380,20 +3383,26 @@ pub fn approval_resolve(
         Ok(agent_backend_routing::Route::Fox) => {}
         Ok(agent_backend_routing::Route::External(_)) => {
             use tauri::Manager;
-            return window
+            return Ok(window
                 .app_handle()
                 .state::<crate::external_backend::ExternalBackendHost>()
-                .resolve_approval(&request.approval_id, request.decision);
+                .resolve_approval(&request.approval_id, request.decision));
         }
-        Err(failure) => return failure,
+        Err(failure) => return Ok(failure),
     }
-    match state
-        .runtime_host
-        .resolve_approval(&request.approval_id, request.decision)
-    {
+    let runtime_host = state.runtime_host.clone();
+    let approval_id = request.approval_id;
+    let decision = request.decision;
+    let resolved = tauri::async_runtime::spawn_blocking(move || {
+        runtime_host.resolve_approval(&approval_id, decision)
+    })
+    .await
+    .map_err(|error| format!("approval resolve task failed: {error}"))
+    .and_then(|result| result);
+    Ok(match resolved {
         Ok(resolved) => ApiResponse::success(resolved),
         Err(error) => ApiResponse::failure("approval.resolve_failed", error, true),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
