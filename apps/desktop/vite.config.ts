@@ -68,6 +68,9 @@ export default defineConfig(({ mode }) => {
     define: {
       __FOX_PROFILING__: JSON.stringify(profilingEnabled),
       __FOX_BUILD_ID__: JSON.stringify(buildId),
+      // `FOX_DEV_UI=1` at build / dev-server start turns the developer UI on
+      // (the 设置 → 对话 →「开发者模式」switch can still turn it on at runtime).
+      __FOX_DEV_UI__: JSON.stringify(['1', 'true', 'on'].includes((process.env.FOX_DEV_UI ?? '').trim().toLowerCase())),
     },
     resolve: {
       alias: [

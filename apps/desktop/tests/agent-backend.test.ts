@@ -350,15 +350,15 @@ describe('capability chips (external backend wiring, kept for existing records)'
     expect(agentBackendCapabilityChips(undefined)).toEqual([])
   })
 
-  test('four chips in a fixed order; live detail is unmarked', () => {
+  test('three chips in a fixed order (the retired sandbox chip is gone); live detail is unmarked', () => {
     const chips = agentBackendCapabilityChips(view('live'))
-    expect(chips.map((chip) => chip.key)).toEqual(['approval', 'sandbox', 'cancel', 'observability'])
+    expect(chips.map((chip) => chip.key)).toEqual(['approval', 'cancel', 'observability'])
     expect(chips[0]).toEqual({ key: 'approval', label: 'approval-summary', title: 'approval-detail' })
   })
 
   test('a planned view marks every title as a pre-launch estimate', () => {
     const chips = agentBackendCapabilityChips(view('planned'))
     expect(chips.every((chip) => chip.title.endsWith('（启动前预估）'))).toBe(true)
-    expect(chips[3].label).toBe('observability-summary')
+    expect(chips[2].label).toBe('observability-summary')
   })
 })

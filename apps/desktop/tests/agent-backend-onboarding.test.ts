@@ -218,7 +218,10 @@ describe('source assertions', () => {
     expect(bar).not.toContain('function DraftPermissionPicker')
     expect(bar).not.toContain('aria-label="新会话的权限模式"')
     expect(bar).not.toContain('撤销完全访问')
-    expect(bar).toContain('隔离：Fox 不额外包装（Agent 原生）')
+    // Composer batch: the bar no longer carries a permission picker or the
+    // isolation note; the one approval selector is in the composer.
+    expect(bar).not.toContain('隔离：Fox 不额外包装（Agent 原生）')
+    expect(bar).not.toContain('{permissionPicker}')
   })
 
   const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
@@ -231,7 +234,7 @@ describe('source assertions', () => {
     // external driver, and the single Pi mainline retired every one of them
     // (2026-10-27). The card stays wired for the records already made - an open
     // conversation - and is never offered for a new conversation.
-    expect(bar).toContain("{access === 'runnable' && credentialCard}")
+    expect(bar).toContain('const userCard = runnable ? credentialCard : null')
     expect(bar).not.toContain('新会话：')
     const draft = bar.slice(bar.indexOf('data-access="draft"'))
     expect(draft).toContain('{refusalNotice}')

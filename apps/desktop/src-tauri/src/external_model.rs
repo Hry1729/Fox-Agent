@@ -72,9 +72,8 @@ pub fn external_login(database: &Database, backend: AgentBackend) -> Option<Unif
     login(&provider, &profiles[0])
 }
 
-/// 13.19 fix ④: the provider address an Agent's native permission list is
-/// reports (it used to decide Codex「帮我批准」; plan C2 never offers that
-/// mode). Unlike [`external_login`] it
+/// 13.19 fix ④: the provider address an Agent's native permission list
+/// depends on (Codex「帮我批准」is offered on OpenAI only). Unlike [`external_login`] it
 /// needs no key and no verification, so a new conversation's list is right
 /// before the first login: the protocol address that serves `backend`, else
 /// (no such address bound) the default provider's own base URL. `None` when
@@ -187,7 +186,7 @@ mod tests {
     #[test]
     fn permission_catalog_falls_back_to_the_provider_address_without_a_login() {
         use fox_agent_backend::native_permission::{catalog, CatalogContext, CODEX_NO_AUTO_TIER_REASON};
-        // Plan C2: Codex's 自动 tier is greyed whatever the provider.
+        // Codex「帮我批准」(agent) is offered on an OpenAI address only.
         let auto_review = |url: Option<String>| catalog(AgentBackend::Codex, &CatalogContext { provider_base_url: url, full_access_forbidden: false })
             .options.into_iter().find(|option| option.id == "agent").unwrap().disabled_reason;
         // No protocol address for Codex (Responses): the provider's own URL.
@@ -201,7 +200,7 @@ mod tests {
         openai.base_url = "https://api.openai.com/v1".into();
         p.protocol_profiles = vec![openai];
         assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://api.openai.com/v1"));
-        assert_eq!(auto_review(provider_catalog_base_url(&p, AgentBackend::Codex)).as_deref(), Some(CODEX_NO_AUTO_TIER_REASON));
+        assert_eq!(auto_review(provider_catalog_base_url(&p, AgentBackend::Codex)), None);
         // Two candidates, one not OpenAI: the non-OpenAI one is reported.
         p.protocol_profiles.push(endpoint("other", "openai-responses"));
         assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://example.com/v1"));

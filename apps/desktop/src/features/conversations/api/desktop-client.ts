@@ -5,7 +5,7 @@ import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions }
 import type { KernelModelPreview } from '../model/types'
 import type { AgentBackendCapabilities, AgentBackendId, AgentBackendPreferences, AgentBackendStatus, CodexResponsesProbe } from '../model/agent-backend'
 import type { AgentBackendPermissionStatus, AgentBackendTarget, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
-import type { NativePermissionRequest, NativePermissionView } from '../model/agent-native-permission'
+import type { ApprovalModeLists, NativePermissionRequest, NativePermissionView } from '../model/agent-native-permission'
 import type {
   AgentRecord,
   ApiResponse,
@@ -798,8 +798,10 @@ export const desktopClient = {
   /** Per-agent native permission list (a conversation, or a new conversation's backend) and the current choice. */
   agentBackendNativePermissions: (request: NativePermissionRequest) =>
     command<NativePermissionView>('agent_backend_native_permissions', request),
-  /** Switch the permission tier (plan C2: full access needs the first-time confirmation per project). */
-  agentBackendNativePermissionSet: (request: NativePermissionRequest & { mode: string }) =>
+  /** Every backend's approval mode list (Fox / PiNative included): the one source the composer shows. */
+  agentBackendApprovalModes: () => command<ApprovalModeLists>('agent_backend_approval_modes'),
+  /** Switch the permission tier (plan C2: full access needs the first-time confirmation per project); a draft without `mode` carries `carryTier`. */
+  agentBackendNativePermissionSet: (request: NativePermissionRequest & { mode?: string }) =>
     command<NativePermissionView>('agent_backend_native_permission_set', request),
   /** Leave full access mid-session (Codex at once, pi from the next request, dsh restarts). */
   agentBackendRevokeFullAccess: (conversationId: string) =>

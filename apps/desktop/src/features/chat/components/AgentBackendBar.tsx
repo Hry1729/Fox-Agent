@@ -9,6 +9,14 @@
 // * capability chips, the login card and the import receipt stay wired for the
 //   records already made (nothing of theirs is loaded for a retired backend).
 //
+// Composer batch (2026-10-31): the bar is for what the user must act on
+// (a refused send, a failed turn with its action, a read-only conversation,
+// a missing login / model connection, an import receipt). The debugging
+// details - the locked-backend chip, the capability chips, the configuration
+// source / import fold of a ready login and the local preview - are shown
+// only in developer mode (`developerUi`). The approval mode selector lives in
+// the composer, next to the send button (one selector, not two).
+//
 // Display only: every rule is enforced by the Host (`host_routing`), so a
 // stale or tampered UI can never widen what runs.
 import { Lock } from 'lucide-react'
@@ -55,11 +63,6 @@ function CapabilityChips({ capabilities }: { capabilities: AgentBackendCapabilit
   )
 }
 
-/** A neutral statement for older Hosts that do not send a native picker. */
-function NoFoxLayerNote() {
-  return <span className="fox-agent-backend-chip" data-isolation="native">隔离：Fox 不额外包装（Agent 原生）</span>
-}
-
 /**
  * The last import receipt, kept on the bar after the login card is gone (a
  * successful import turns the probe ready and the card disappears with its
@@ -75,7 +78,7 @@ function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; o
   )
 }
 
-export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, failure = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker = null, credentialCard = null, importReceipt = null, onDismissImportReceipt }: {
+export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, failure = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker: _permissionPicker = null, credentialCard = null, developerDetails = null, developerUi = false, importReceipt = null, onDismissImportReceipt }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
@@ -96,13 +99,14 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
   /** Permission mode / lock / FORBIDDEN from the Host. */
   permission?: AgentBackendPermissionStatus | null
   onRevokeFullAccess?: () => void
-  /**
-   * The Agent's native permission list (when the Host offers it). Replaces
-   * the old full-access chip; mid-session revoke goes through it.
-   */
+  /** Retained for callers; the approval selector now lives in the composer. */
   permissionPicker?: ReactNode
-  /** Login guidance card of the shown external backend (open conversation, or a new one before its first message). */
+  /** Login guidance the user must act on (missing login / model connection). Always shown. */
   credentialCard?: ReactNode
+  /** Developer-only details (configuration source / import of a ready login, local preview). */
+  developerDetails?: ReactNode
+  /** Developer mode: show the backend chip, capability chips and `developerDetails`. */
+  developerUi?: boolean
   /** Last successful import receipt, shown once, here. */
   importReceipt?: readonly string[] | null
   onDismissImportReceipt?: () => void
@@ -118,17 +122,24 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
     const notice = agentBackendLockNotice(lockedBackend, access, status?.switchEnv)
     // A Fox conversation keeps today's composer exactly: no extra row.
     if (lockedBackend === 'fox') return null
+    const runnable = access === 'runnable'
+    const shownNotice = refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)
+    const userCard = runnable ? credentialCard : null
+    const devCard = runnable && developerUi ? developerDetails : null
+    if (!developerUi && !shownNotice && !failure && !userCard && !receiptNotice) return null
     return (
-      <div className="fox-agent-backend-bar" data-access={access} role="status">
-        <span className="fox-agent-backend-chip" title="会话创建时已确定，之后不可更换">
-          <Lock size={11} aria-hidden="true" />
-          后端：{AGENT_BACKEND_LABELS[lockedBackend]}（已锁定）
-        </span>
-        {access === 'runnable' && (permissionPicker ?? <NoFoxLayerNote />)}
-        {refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)}
-        {access === 'runnable' && <CapabilityChips capabilities={capabilities} />}
+      <div className="fox-agent-backend-bar" data-access={access} data-developer-ui={developerUi ? 'true' : undefined} role="status">
+        {developerUi && (
+          <span className="fox-agent-backend-chip" title="会话创建时已确定，之后不可更换">
+            <Lock size={11} aria-hidden="true" />
+            后端：{AGENT_BACKEND_LABELS[lockedBackend]}（已锁定）
+          </span>
+        )}
+        {shownNotice}
+        {developerUi && runnable && <CapabilityChips capabilities={capabilities} />}
         {failure && <AgentBackendFailureNotice failure={failure} />}
-        {access === 'runnable' && credentialCard}
+        {userCard}
+        {devCard}
         {receiptNotice}
       </div>
     )
