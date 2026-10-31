@@ -50,6 +50,42 @@ pub(crate) fn reconciliation_fingerprint(binding: &RunControlBinding, path: &str
     Ok(json!({"bytes":bytes,"sha256":format!("sha256:{}",hex::encode(hash.finalize()))}))
 }
 
+/// 把文件字节解成文本。
+///
+/// 返回 `(文本, 编码名, 是否有损)`。顺序是：UTF-8 BOM、UTF-16LE/BE BOM、
+/// 合法 UTF-8，其余按 GB18030。有损与否以解码器的 `had_errors` 为准；
+/// 合法 UTF-8 一定无损。UTF-8 BOM 会从文本里去掉。
+pub(crate) fn decode_text_bytes(bytes: &[u8]) -> (String, &'static str, bool) {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        let (text, had_errors) = encoding_rs::UTF_8.decode_without_bom_handling(&bytes[3..]);
+        return (text.into_owned(), "utf-8-bom", had_errors);
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (text, _, had_errors) = encoding_rs::UTF_16LE.decode(bytes);
+        return (text.into_owned(), "utf-16le", had_errors);
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let (text, _, had_errors) = encoding_rs::UTF_16BE.decode(bytes);
+        return (text.into_owned(), "utf-16be", had_errors);
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return (text.to_owned(), "utf-8", false);
+    }
+    let (text, _, had_errors) = encoding_rs::GB18030.decode(bytes);
+    (text.into_owned(), "gb18030", had_errors)
+}
+
+/// 编码不是 UTF-8 时，加在模型可见文本前面的一行说明。
+fn model_encoding_notice(encoding: &str) -> Option<String> {
+    if encoding == "utf-8" {
+        None
+    } else {
+        Some(format!(
+            "[Fox：此文件按 {encoding} 解码显示（不是 UTF-8）。edit_file 不能直接修改它；需要修改时请先告诉用户。]\n"
+        ))
+    }
+}
+
 struct Gateway<'a> {
     root: PathBuf,
     cancellation: &'a CancellationToken,
@@ -122,7 +158,7 @@ impl Gateway<'_> {
                 return Ok(text);
             }
         }
-        Ok(String::from_utf8_lossy(&contents).into_owned())
+        Ok(decode_text_bytes(&contents).0)
     }
     fn entries(&self, path: &Path, limit: usize) -> Result<(Vec<Entry>, bool), String> {
         let _directory_guard = self.open(path, true)?;
@@ -520,7 +556,31 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         // document's source text: it can never authorize a whole-file
         // replacement (REV-05).
         let extracted = crate::local_knowledge_import::extract_office_text(&bytes, &path.to_string_lossy())?;
-        let text = extracted.clone().unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+        // Office 抽取保持原样。普通字节按 BOM / UTF-8 / GB18030 解码；version 仍按原始字节计算。
+        let (text, decoded_encoding) = if let Some(text) = extracted.clone() {
+            (text, None)
+        } else {
+            let (text, encoding, lossy) = decode_text_bytes(&bytes);
+            (text, Some((encoding, lossy)))
+        };
+        let encoding_notice = decoded_encoding.and_then(|(encoding, _)| model_encoding_notice(encoding));
+        let notice_units = encoding_notice
+            .as_ref()
+            .map(|notice| notice.encode_utf16().count())
+            .unwrap_or(0);
+        let with_encoding = |mut details: Value| -> Value {
+            if let Some((encoding, lossy)) = decoded_encoding {
+                details["encoding"] = json!(encoding);
+                details["lossyDecode"] = json!(lossy);
+            }
+            details
+        };
+        let show = |body: String| -> String {
+            match &encoding_notice {
+                Some(notice) => format!("{notice}{body}"),
+                None => body,
+            }
+        };
         gateway.check()?;
         // B03: line-mode parameters are mutually exclusive with offset/limit.
         let has_line_mode = input.get("startLine").is_some() || input.get("lineCount").is_some();
@@ -570,13 +630,13 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
                     None,
                     true,
                 );
-                return Ok(result(String::new(), json!({
+                return Ok(result(show(String::new()), with_encoding(json!({
                     "path": path, "readVersion": version, "truncated": false,
                     "startLine": start_line, "lineCount": line_count,
                     "totalLines": total_lines, "pageComplete": true,
                     "scanComplete": true,
                     "readMode": "lines",
-                }), limits.output_chars));
+                })), limits.output_chars));
             }
             let end_line = start_line.saturating_add(line_count).saturating_sub(1).min(total_lines);
             let selected: String = lines[start_line - 1..end_line].concat();
@@ -585,7 +645,8 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             // Any internal (read_chars) or output (result) truncation means the
             // requested page was not fully returned. Both cuts are
             // surrogate-pair safe (O-REVIEW-03 item 2).
-            let budget = limits.read_chars.min(limits.output_chars);
+            // 说明行占用输出额度，避免 result() 再把文件正文尾部切掉后 nextOffset 对不上。
+            let budget = limits.read_chars.min(limits.output_chars).saturating_sub(notice_units);
             let bounded = bounded_nonempty_utf16(&selected, budget)?;
             let delivered_utf16 = bounded.encode_utf16().count();
             let truncated = delivered_utf16 < selected_utf16;
@@ -620,7 +681,7 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
                 Some(range_to),
                 truncated,
             );
-            return Ok(result(bounded, json!({
+            return Ok(result(show(bounded), with_encoding(json!({
                 "path": path, "readVersion": version, "truncated": truncated,
                 "startLine": start_line, "lineCount": line_count,
                 "totalLines": total_lines, "pageComplete": end_line == total_lines && !truncated,
@@ -629,7 +690,7 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
                 "nextOffset": if truncated { json!(selected_start + delivered_utf16) } else { Value::Null },
                 "nextStartLine": next_start_line_value,
                 "returnedUnits": delivered_utf16, "totalUnits": text.encode_utf16().count(),
-            }), limits.output_chars));
+            })), limits.output_chars));
         }
         // Legacy UTF-16 code-unit mode: surrogate-pair safe, with nextOffset
         // derived from the ACTUALLY RETURNED text after the output budget
@@ -640,7 +701,7 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
         let total_units = text.encode_utf16().count();
         let (page_text, actual_start, safe_end) = slice_utf16_range(&text, offset, limit);
-        let final_text = bounded_nonempty_utf16(&page_text, limits.output_chars)?;
+        let final_text = bounded_nonempty_utf16(&page_text, limits.output_chars.saturating_sub(notice_units))?;
         let final_units = final_text.encode_utf16().count();
         let page_units = page_text.encode_utf16().count();
         let output_cut = final_units < page_units;
@@ -666,13 +727,13 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             Some(range_to),
             !fully_delivered,
         );
-        return Ok(result(final_text, json!({
+        return Ok(result(show(final_text), with_encoding(json!({
             "path": path, "readVersion": version, "truncated": !source_exhausted || output_cut,
             "readMode": "utf16",
             "offset": start,
             "nextOffset": next_offset,
             "totalUnits": total_units,
-        }), limits.output_chars));
+        })), limits.output_chars));
     }
     if tool == "ls" {
         let (entries, truncated) = gateway.entries(&path, limits.entries)?;
@@ -1138,5 +1199,30 @@ mod tests {
         assert_eq!(incomplete["details"]["scanComplete"], false);
         assert_eq!(incomplete["details"]["pageComplete"], false);
         assert!(incomplete["details"]["totalMatches"].is_null());
+    }
+
+    /// GBK「中文」无损解成 gb18030；UTF-8 BOM 被去掉；合法 UTF-8 原样保留。
+    #[test]
+    fn tx8_decode_text_bytes_detects_bom_utf8_and_gb18030() {
+        let (gbk, _, gbk_errors) = encoding_rs::GBK.encode("中文");
+        assert!(!gbk_errors);
+        assert!(std::str::from_utf8(&gbk).is_err(), "GBK 中文不应是合法 UTF-8");
+        let (text, encoding, lossy) = decode_text_bytes(&gbk);
+        assert_eq!(text, "中文");
+        assert_eq!(encoding, "gb18030");
+        assert!(!lossy);
+
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice("中文".as_bytes());
+        let (text, encoding, lossy) = decode_text_bytes(&bom);
+        assert_eq!(text, "中文");
+        assert!(!text.starts_with('\u{FEFF}'));
+        assert_eq!(encoding, "utf-8-bom");
+        assert!(!lossy);
+
+        let (text, encoding, lossy) = decode_text_bytes("中文".as_bytes());
+        assert_eq!(text, "中文");
+        assert_eq!(encoding, "utf-8");
+        assert!(!lossy);
     }
 }

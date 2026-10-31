@@ -2543,9 +2543,25 @@ fn read_text(path: &Path) -> Result<String, String> {
             MAX_FILE_BYTES
         )));
     }
-    fs::read_to_string(path).map_err(|error| {
-        ToolErrorCode::InvalidInput.error(format!("file is not valid UTF-8 text: {error}"))
-    })
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) => {
+            // 只改错误说明，不转码、不按原编码回写。能无损解成 GB18030/GBK 时点名编码。
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                if let Ok(bytes) = fs::read(path) {
+                    let (_decoded, encoding, lossy) = crate::resource_gateway::decode_text_bytes(&bytes);
+                    if encoding == "gb18030" && !lossy {
+                        return Err(ToolErrorCode::InvalidInput.error(
+                            "file is not UTF-8 (it decodes as GB18030/GBK); edit_file and write_file only modify UTF-8 text — ask the user before converting it",
+                        ));
+                    }
+                }
+            }
+            Err(ToolErrorCode::InvalidInput.error(format!(
+                "file is not valid UTF-8 text: {error}"
+            )))
+        }
+    }
 }
 
 fn read_optional_text(path: &Path) -> Result<Option<String>, String> {
@@ -2667,6 +2683,22 @@ fn failure_text_result(text: String, details: Value, failed: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GBK 文件不能被 edit_file 当 UTF-8 改；错误要指出它是 GB18030。
+    #[test]
+    fn tx8_edit_of_a_gbk_file_names_the_encoding() {
+        let dir = std::env::temp_dir().join(format!("fox-tx8-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        let (encoded, _, gbk_errors) = encoding_rs::GBK.encode("中文");
+        assert!(!gbk_errors);
+        fs::write(&path, &encoded).unwrap();
+        let error = read_text(&path).expect_err("GBK 不是 UTF-8");
+        assert!(error.contains("GB18030"), "{error}");
+        assert!(error.contains("[tool.invalid_input]"), "{error}");
+        assert!(!error.contains("file is not valid UTF-8 text"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// Phase 1 #5: network and device paths are refused from the text alone.
     #[test]
