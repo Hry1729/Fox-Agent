@@ -79,17 +79,7 @@ impl ExternalSink for DesktopSink {
             AgentBackend::Deepseek => "DeepSeek",
             AgentBackend::Fox => "Fox",
         });
-        let request = json!({
-            "title": format!("允许 {} 执行此操作？", label.unwrap_or("外部 Agent")),
-            "summary": card.title,
-            "input": card.input,
-            "command": card.input.get("command"),
-            "availableDecisions": card.available_decisions,
-            "agentBackend": backend,
-            "nativeToolCallId": card.native_tool_call_id,
-            "options": card.options,
-            "answerAcknowledged": false,
-        });
+        let request = external_permission_request(label.unwrap_or("外部 Agent"), &backend, card);
         let approval = self.database.create_approval(&tool.id, &card.title, &request)?;
         let _ = self.emit(run_id, conversation_id, json!({ "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": key }));
         let _ = self.app.emit("fox://approval-requested", &approval);
@@ -151,6 +141,63 @@ pub struct ExternalBackendHost {
 
 fn failure<T: serde::Serialize>(code: &str, message: impl Into<String>, retryable: bool) -> ApiResponse<T> {
     ApiResponse::failure(code, message.into(), retryable)
+}
+
+/// `permission.` 开头的错误原样作为 failure code；其余归到审批结算失败。
+fn permission_failure<T: serde::Serialize>(error: String) -> ApiResponse<T> {
+    let code = error.split(':').next().filter(|code| code.starts_with("permission.")).unwrap_or("approval.resolve_failed").to_owned();
+    failure(&code, error, false)
+}
+
+/// Host 策略允许「本项目总是允许」时，从 host_policy 取出要写进卡片的字段。
+/// 没有 eligible 的 projectRule，或没有命令原文，就不提供该选项（fail-closed）。
+fn pi_project_rule_offer(card: &PermissionCard) -> Option<(Value, String, Option<String>, Value)> {
+    let policy = card.host_policy.as_ref()?;
+    let rule = policy.get("projectRule")?;
+    if rule.get("eligible").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let command = policy.get("command").and_then(Value::as_str).map(str::trim).filter(|command| !command.is_empty())?;
+    let cwd = policy.get("cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()).map(str::to_owned);
+    let mut summary = policy.clone();
+    if let Some(object) = summary.as_object_mut() {
+        object.remove("projectRule");
+        object.remove("command");
+        object.remove("cwd");
+    }
+    Some((rule.clone(), command.to_owned(), cwd, summary))
+}
+
+/// 外部审批卡的 request。不 eligible 时与原来完全一样；eligible 时在 allow_once 与 deny
+/// 之间插入 `allow_project_rule`，并带上 projectRule、policy 摘要、命令、cwd 和 hostExecution: null。
+fn external_permission_request(agent_label: &str, backend: &str, card: &PermissionCard) -> Value {
+    let mut decisions: Vec<&str> = card.available_decisions.clone();
+    let offer = pi_project_rule_offer(card);
+    if offer.is_some() && !decisions.iter().any(|item| *item == "allow_project_rule") {
+        let at = decisions.iter().position(|item| *item == "deny").unwrap_or(decisions.len());
+        decisions.insert(at, "allow_project_rule");
+    }
+    let mut request = json!({
+        "title": format!("允许 {agent_label} 执行此操作？"),
+        "summary": card.title,
+        "input": card.input,
+        "command": card.input.get("command"),
+        "availableDecisions": decisions,
+        "agentBackend": backend,
+        "nativeToolCallId": card.native_tool_call_id,
+        "options": card.options,
+        "answerAcknowledged": false,
+    });
+    if let Some((rule, command, cwd, summary)) = offer {
+        request["command"] = json!(command);
+        if let Some(cwd) = cwd {
+            request["cwd"] = json!(cwd);
+        }
+        request["projectRule"] = rule;
+        request["policy"] = summary;
+        request["hostExecution"] = Value::Null;
+    }
+    request
 }
 
 /// Carry a refusal over to another payload type.
@@ -325,6 +372,39 @@ impl ExternalBackendHost {
                 failure("runtime.cancel_not_active", message, true)
             }
         }
+    }
+
+    /// pi 卡片上的「本项目总是允许」：校验并写入 `run_command` 规则，再按允许一次结算。
+    /// 非 pending 返回 success(false)，与 Fox 的 `allow_approval_with_project_rules` 一致。
+    /// Codex / dsh 不提供该选项，调用到这里也拒绝。
+    pub fn allow_with_project_rule(&self, approval_id: &str, pattern: &str) -> ApiResponse<bool> {
+        let approval = match self.database.approval_record(approval_id) {
+            Ok(approval) => approval,
+            Err(error) => return failure("approval.resolve_failed", error, false),
+        };
+        if approval.status != "pending" {
+            return ApiResponse::success(false);
+        }
+        let backend = match self.database.conversation_agent_backend(&approval.conversation_id) {
+            Ok(Some(backend)) => backend,
+            Ok(None) => return permission_failure("permission.rule_not_offered: 这次审批不能保存为项目规则".into()),
+            Err(error) => return failure("approval.resolve_failed", error, false),
+        };
+        if AgentBackend::parse(&backend) != Some(AgentBackend::Pi) {
+            return permission_failure("permission.rule_not_offered: 这次审批不能保存为项目规则".into());
+        }
+        let offered = approval
+            .request
+            .get("availableDecisions")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("allow_project_rule")));
+        if !offered {
+            return permission_failure("permission.rule_not_offered: 这次审批不能保存为项目规则".into());
+        }
+        if let Err(error) = crate::external_policy::allow_pi_with_project_rule(&self.database, &approval, pattern) {
+            return permission_failure(error);
+        }
+        self.resolve_approval(approval_id, ApprovalDecision::AllowOnce)
     }
 
     /// `approval_resolve` for an external approval (already routed): record
@@ -765,7 +845,9 @@ pub(crate) fn credential_gate(backend: AgentBackend, existing_conversation: bool
 
 #[cfg(test)]
 mod tests {
-    use super::approval_outcome_label;
+    use super::{approval_outcome_label, external_permission_request};
+    use fox_agent_backend::projection::{PermissionCard, PermissionOption};
+    use serde_json::json;
 
     #[test]
     fn expired_approvals_read_expired_not_user_denied() {
@@ -773,5 +855,64 @@ mod tests {
         assert_eq!(approval_outcome_label("denied"), "用户拒绝");
         assert_eq!(approval_outcome_label("cancelled"), "已取消");
         assert_ne!(approval_outcome_label("expired"), approval_outcome_label("denied"));
+    }
+
+    fn card(decisions: Vec<&'static str>, host_policy: Option<serde_json::Value>) -> PermissionCard {
+        PermissionCard {
+            title: "Fox approval: bash".into(),
+            native_tool_call_id: Some("pi-ui-1".into()),
+            tool: "agent_tool",
+            input: json!({ "method": "confirm", "message": "not-the-command" }),
+            options: vec![PermissionOption { option_id: "yes".into(), name: "Yes".into(), kind: "allow_once".into() }],
+            available_decisions: decisions,
+            host_policy,
+        }
+    }
+
+    #[test]
+    fn an_eligible_pi_card_inserts_allow_project_rule_between_the_native_choices() {
+        let policy = json!({
+            "mode": "ask",
+            "class": "command",
+            "risk": "low",
+            "tool": "run_command",
+            "verdict": "ask",
+            "projectRule": { "eligible": true, "tool": "run_command", "suggestedPrefix": "npm test" },
+            "command": "npm test -- foo",
+            "cwd": "/work/proj",
+        });
+        let request = external_permission_request("pi", "pi", &card(vec!["allow_once", "deny"], Some(policy)));
+        assert_eq!(request["availableDecisions"], json!(["allow_once", "allow_project_rule", "deny"]));
+        assert_eq!(request["projectRule"]["eligible"], true);
+        assert_eq!(request["projectRule"]["suggestedPrefix"], "npm test");
+        assert_eq!(request["command"], "npm test -- foo");
+        assert_eq!(request["cwd"], "/work/proj");
+        assert_eq!(request["hostExecution"], serde_json::Value::Null);
+        assert!(request["policy"].get("projectRule").is_none());
+        assert!(request["policy"].get("command").is_none());
+        assert_eq!(request["policy"]["risk"], "low");
+        assert_eq!(request["input"]["message"], "not-the-command");
+    }
+
+    #[test]
+    fn a_card_without_an_eligible_project_rule_is_unchanged() {
+        let plain = external_permission_request("Codex", "codex", &card(vec!["allow_once", "deny"], None));
+        assert_eq!(plain["availableDecisions"], json!(["allow_once", "deny"]));
+        assert!(plain.get("projectRule").is_none());
+        assert!(plain.get("policy").is_none());
+        assert!(plain.get("cwd").is_none());
+        assert!(plain.get("hostExecution").is_none());
+        assert!(plain["command"].is_null());
+
+        let ineligible = json!({
+            "projectRule": { "eligible": false, "tool": "run_command" },
+            "command": "npm test",
+            "cwd": "/work/proj",
+        });
+        let request = external_permission_request("pi", "pi", &card(vec!["allow_once", "deny"], Some(ineligible)));
+        assert_eq!(request["availableDecisions"], json!(["allow_once", "deny"]));
+        assert!(request.get("projectRule").is_none());
+        assert!(request.get("hostExecution").is_none());
+        assert!(request["command"].is_null(), "不 eligible 时仍用卡片入参里的 command");
     }
 }

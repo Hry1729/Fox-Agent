@@ -101,8 +101,19 @@ pub fn decide_pi(native_mode: &str, request: &Value, project_root: Option<&Path>
 }
 
 /// The native answer of an engine decision, with its summary for the run
-/// event and the audit (never tool input).
-pub fn answer_from(tool: &str, decision: &PolicyDecision, options: &[PermissionOption]) -> HostPermissionAnswer {
+/// event and the audit.
+///
+/// `has_project` 为真、判定是询问、引擎工具是 `run_command` 且规则可写时，
+/// policy 额外带上 `projectRule`（eligible=true）、命令原文和解析用的 cwd。
+/// 只放这两项，不放工具入参里的其他字段。条件不齐就不提供该选项（fail-closed）。
+pub fn answer_from(
+    tool: &str,
+    decision: &PolicyDecision,
+    options: &[PermissionOption],
+    has_project: bool,
+    command: Option<&str>,
+    cwd: Option<&str>,
+) -> HostPermissionAnswer {
     let reject = || AutoPermission::Reject { option_id: reject_option(options).map(|option| option.option_id.clone()) };
     let (verdict, auto) = match &decision.verdict {
         // An allow without a one-shot allow option cannot be written: refuse.
@@ -118,6 +129,18 @@ pub fn answer_from(tool: &str, decision: &PolicyDecision, options: &[PermissionO
     if let Verdict::Deny { code, message } = &decision.verdict {
         policy["denyCode"] = json!(code);
         policy["denyMessage"] = json!(message);
+    }
+    let command = command.map(str::trim).filter(|command| !command.is_empty());
+    if matches!(decision.verdict, Verdict::Ask) && tool == "run_command" && decision.rule_eligible && has_project {
+        if let Some(command) = command {
+            let mut rule = decision.project_rule_json("run_command");
+            rule["eligible"] = json!(true);
+            policy["projectRule"] = rule;
+            policy["command"] = json!(command);
+            if let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) {
+                policy["cwd"] = json!(cwd);
+            }
+        }
     }
     HostPermissionAnswer { decision: auto, policy }
 }
@@ -159,7 +182,65 @@ pub fn answer_pi_request(
         let tool_call_id = approval.as_ref().map(|approval| approval.tool_call_id.clone()).filter(|id| !id.is_empty());
         database.record_permission_audit(conversation_id, Some(run_id), tool_call_id.as_deref(), &tool, &decision, &summary)?;
     }
-    Ok(answer_from(&tool, &decision, options))
+    // 与 pi_subject 使用同一条命令和同一个 cwd，供卡片上「本项目总是允许」校验前缀。
+    let approval = parse_tool_approval(request);
+    let command = approval.as_ref().and_then(|approval| {
+        if approval.tool_name != "bash" {
+            return None;
+        }
+        approval.input.get("command").and_then(Value::as_str)
+    });
+    let cwd = approval
+        .as_ref()
+        .and_then(|approval| approval.cwd.clone())
+        .filter(|cwd| !cwd.is_empty())
+        .or_else(|| root.as_ref().map(|path| path.display().to_string()));
+    let has_project = context.project_id.is_some() && context.project_root.as_deref().is_some_and(|path| !path.is_empty());
+    Ok(answer_from(&tool, &decision, options, has_project, command, cwd.as_deref()))
+}
+
+/// 从 pi 的审批卡写入「本项目总是允许」规则。错误码和中文文案与
+/// `RuntimeHost::allow_approval_with_project_rules` 相同；规则工具名固定为
+/// `run_command`（pi 的 bash 映射），不用卡片上的 `agent_permission`。
+pub fn allow_pi_with_project_rule(
+    database: &crate::database::Database,
+    approval: &crate::database::ApprovalRecord,
+    pattern: &str,
+) -> Result<(), String> {
+    let offered = approval
+        .request
+        .get("availableDecisions")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("allow_project_rule")));
+    let rule_tool = approval.request.get("projectRule").and_then(|rule| rule.get("tool")).and_then(Value::as_str);
+    if !offered || rule_tool.is_some_and(|tool| tool != "run_command") {
+        return Err("permission.rule_not_offered: 这次审批不能保存为项目规则".into());
+    }
+    let access = database.conversation_access(&approval.conversation_id)?;
+    let project_id = access.project_id.clone().ok_or("permission.rule_not_offered: 这个会话没有项目，不能保存项目规则")?;
+    let command = approval
+        .request
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or("permission.rule_not_offered: 审批卡上没有命令")?;
+    let cwd = approval
+        .request
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| access.project_root.as_deref().map(PathBuf::from))
+        .ok_or("permission.rule_not_offered: 审批卡上没有工作目录")?;
+    approval_policy::parse_rule_pattern(pattern)?;
+    let root = access.project_root.as_deref().map(PathBuf::from);
+    let home = approval_policy::host_home();
+    if !approval_policy::pattern_covers_command(pattern, command, &cwd, root.as_deref(), home.as_deref()) {
+        return Err(format!(
+            "permission.rule_does_not_cover: 前缀「{}」没有覆盖这条命令的每一段（或命令是高风险操作而前缀没有写出它），没有保存规则",
+            pattern.trim()
+        ));
+    }
+    database.add_permission_rule(&project_id, "allow", "run_command", pattern, "user")?;
+    Ok(())
 }
 
 /// `toolCall.rawInput.command`：字符串，或字符串数组（按空格拼接，`["bash","-lc","脚本"]` 交给嵌套分析）。
@@ -229,7 +310,7 @@ pub fn block_for_native_request(
     let summary = raw.and_then(|raw| raw.get("command")).and_then(command_line).unwrap_or_else(|| tool.to_owned());
     let tool_call_id = request.get("toolCall").and_then(|call| call.get("toolCallId")).and_then(Value::as_str).filter(|id| !id.is_empty());
     database.record_permission_audit(conversation_id, Some(run_id), tool_call_id, tool, &decision, &summary)?;
-    Ok(Some(answer_from(tool, &decision, options)))
+    Ok(Some(answer_from(tool, &decision, options, false, None, None)))
 }
 
 #[cfg(test)]
@@ -261,7 +342,7 @@ mod tests {
     }
     fn verdict(mode: &str, request: &Value, rules: &[PolicyRule]) -> &'static str {
         let (tool, decision) = decide_pi(mode, request, Some(&root()), Some(&home()), rules);
-        match answer_from(&tool, &decision, &options()).decision {
+        match answer_from(&tool, &decision, &options(), false, None, None).decision {
             AutoPermission::Allow { .. } => "allow",
             AutoPermission::Ask => "ask",
             AutoPermission::Reject { .. } => "deny",
@@ -349,20 +430,20 @@ mod tests {
     fn the_answer_carries_a_summary_and_never_the_input() {
         let request = gate("bash", json!({ "command": "git push origin main", "secret": "sk-not-real" }));
         let (tool, decision) = decide_pi("allow", &request, Some(&root()), Some(&home()), &[]);
-        let answer = answer_from(&tool, &decision, &options());
+        let answer = answer_from(&tool, &decision, &options(), false, None, None);
         assert_eq!(answer.decision, AutoPermission::Ask);
         assert_eq!(answer.policy["tool"], "run_command");
         assert_eq!(answer.policy["mode"], "auto");
         assert_eq!(answer.policy["risk"], "high");
         assert!(!answer.policy.to_string().contains("sk-not-real"));
         let (tool, decision) = decide_pi("read_only", &gate("write", json!({ "path": "a.txt" })), Some(&root()), Some(&home()), &[]);
-        let answer = answer_from(&tool, &decision, &options());
+        let answer = answer_from(&tool, &decision, &options(), false, None, None);
         assert_eq!(answer.decision, AutoPermission::Reject { option_id: Some("no".into()) });
         assert_eq!(answer.policy["denyCode"], "permission.read_only");
         // An allow that cannot be written as a one-shot allow is refused.
         let (tool, decision) = decide_pi("full_access", &gate("write", json!({ "path": "a.txt" })), Some(&root()), Some(&home()), &[]);
         let only_reject = vec![PermissionOption { option_id: "no".into(), name: "No".into(), kind: "reject_once".into() }];
-        assert!(matches!(answer_from(&tool, &decision, &only_reject).decision, AutoPermission::Reject { .. }));
+        assert!(matches!(answer_from(&tool, &decision, &only_reject, false, None, None).decision, AutoPermission::Reject { .. }));
         assert!(matches!(fail_closed("db locked", &options()).decision, AutoPermission::Reject { option_id: Some(_) }));
     }
 
@@ -380,7 +461,7 @@ mod tests {
             let request = gate("bash", json!({ "command": command }));
             let (tool, decision) = decide_pi(PI_FULL, &request, Some(&win), Some(&win_home), &[]);
             assert!(decision.is_block(), "{command}: {:?}", decision.verdict);
-            let answer = answer_from(&tool, &decision, &options());
+            let answer = answer_from(&tool, &decision, &options(), false, None, None);
             assert!(matches!(answer.decision, AutoPermission::Reject { .. }), "{command}");
             assert_eq!(answer.policy["denyCode"], "permission.blocked", "{command}");
             let findings = answer.policy["findings"].as_array().unwrap();
@@ -411,5 +492,147 @@ mod tests {
         let npm = json!({ "toolCall": { "rawInput": { "command": "npm test", "cwd": &root_text } } });
         assert!(native_block_decision(AgentBackend::Codex, "workspace-write", &npm, Some(&project), Some(&home_dir), &[]).is_none());
         assert!(native_block_decision(AgentBackend::Codex, "workspace-write", &json!({ "toolCall": { "rawInput": {} } }), Some(&project), Some(&home_dir), &[]).is_none());
+
+    fn rule_eligible(policy: &Value) -> bool {
+        policy.get("projectRule").and_then(|rule| rule.get("eligible")).and_then(Value::as_bool) == Some(true)
+    }
+
+    /// 询问档的 bash 可以保存项目规则；前缀与 PiNative 相同。没有项目、或不是命令，就不提供。
+    #[test]
+    fn ask_bash_offers_a_project_rule_with_the_command_and_prefix() {
+        let npm = gate("bash", json!({ "command": "npm test -- foo", "secret": "sk-not-real" }));
+        let project = root();
+        let cwd = project.to_str().expect("项目路径是 UTF-8");
+        let (tool, decision) = decide_pi("ask", &npm, Some(&project), Some(&home()), &[]);
+        let answer = answer_from(&tool, &decision, &options(), true, Some("npm test -- foo"), Some(cwd));
+        assert_eq!(answer.decision, AutoPermission::Ask);
+        assert_eq!(answer.policy["projectRule"]["eligible"], true);
+        assert_eq!(answer.policy["projectRule"]["tool"], "run_command");
+        assert_eq!(answer.policy["projectRule"]["suggestedPrefix"], "npm test");
+        assert_eq!(answer.policy["command"], "npm test -- foo");
+        assert_eq!(answer.policy["cwd"], cwd);
+        assert!(!answer.policy.to_string().contains("sk-not-real"), "只放命令和 cwd，不放其他入参");
+
+        let push = gate("bash", json!({ "command": "git push origin main" }));
+        let (tool, decision) = decide_pi("ask", &push, Some(&project), Some(&home()), &[]);
+        let answer = answer_from(&tool, &decision, &options(), true, Some("git push origin main"), Some(cwd));
+        assert_eq!(answer.policy["projectRule"]["eligible"], true);
+        assert_eq!(answer.policy["projectRule"]["suggestedPrefix"], "git push");
+
+        let (tool, decision) = decide_pi("ask", &npm, Some(&project), Some(&home()), &[]);
+        let without_project = answer_from(&tool, &decision, &options(), false, Some("npm test -- foo"), Some(cwd));
+        assert!(!rule_eligible(&without_project.policy), "没有项目就不提供规则");
+        assert!(without_project.policy.get("command").is_none());
+    }
+
+    #[test]
+    fn write_and_read_do_not_offer_an_eligible_project_rule() {
+        let write = gate("write", json!({ "path": "src/new.rs", "content": "x" }));
+        let read = gate("read", json!({ "path": "src/main.rs" }));
+        for request in [&write, &read] {
+            let (tool, decision) = decide_pi("ask", request, Some(&root()), Some(&home()), &[]);
+            let answer = answer_from(&tool, &decision, &options(), true, Some("ignored"), Some("."));
+            assert!(!rule_eligible(&answer.policy), "{tool}");
+            assert!(answer.policy.get("command").is_none(), "{tool} 不把入参放进 policy");
+        }
+    }
+
+    struct TempRoot(PathBuf);
+    impl TempRoot {
+        fn path(&self) -> &Path { &self.0 }
+    }
+    impl Drop for TempRoot {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn database_with_pi_project() -> (crate::database::Database, String, TempRoot) {
+        let database = crate::database::Database::open(PathBuf::from(":memory:")).expect("database");
+        let root = TempRoot(std::env::temp_dir().join(format!("fox-pi-rule-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(root.path()).expect("root");
+        let conversation = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("pi-rule"), Some(root.path().to_str().unwrap()), Some("ask"), "pi")
+            .expect("conversation");
+        (database, conversation.id, root)
+    }
+
+    fn pi_approval(conversation_id: &str, command: &str, cwd: &str, decisions: &[&str]) -> crate::database::ApprovalRecord {
+        crate::database::ApprovalRecord {
+            id: "approval-1".into(),
+            tool_call_id: "tool-1".into(),
+            run_id: "run-1".into(),
+            conversation_id: conversation_id.to_owned(),
+            tool_name: "agent_permission".into(),
+            status: "pending".into(),
+            requested_action: "bash".into(),
+            request: json!({
+                "availableDecisions": decisions,
+                "command": command,
+                "cwd": cwd,
+                "projectRule": { "eligible": true, "tool": "run_command", "suggestedPrefix": "npm test" },
+            }),
+            decision: None,
+            requested_at: 0,
+            resolved_at: None,
+            category: "tool_execution".into(),
+            claimed_at: None,
+            claimed_by_run_id: None,
+        }
+    }
+
+    #[test]
+    fn saving_a_pi_project_rule_checks_the_prefix_then_allows_later_bash() {
+        let (database, conversation, root) = database_with_pi_project();
+        let cwd = root.path().to_str().unwrap();
+        let approval = pi_approval(&conversation, "npm test -- foo", cwd, &["allow_once", "allow_project_rule", "deny"]);
+        let missed = allow_pi_with_project_rule(&database, &approval, "git").expect_err("git 盖不住 npm test");
+        assert!(missed.starts_with("permission.rule_does_not_cover"), "{missed}");
+        let invalid = allow_pi_with_project_rule(&database, &approval, "npm test && echo hi").expect_err("连接符非法");
+        assert!(invalid.starts_with("permission.invalid_rule"), "{invalid}");
+        let hidden = pi_approval(&conversation, "npm test -- foo", cwd, &["allow_once", "deny"]);
+        let not_offered = allow_pi_with_project_rule(&database, &hidden, "npm test").expect_err("卡片没有该选项");
+        assert!(not_offered.starts_with("permission.rule_not_offered"), "{not_offered}");
+
+        allow_pi_with_project_rule(&database, &approval, "npm test").expect("前缀覆盖则写入");
+        let rules = database.policy_rules_for_conversation(&conversation).expect("rules");
+        assert_eq!(verdict("ask", &gate("bash", json!({ "command": "npm test -- bar" })), &rules), "allow");
+        assert_eq!(verdict("ask", &gate("bash", json!({ "command": "npm install" })), &rules), "ask");
+
+        let bare = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("no-project"), None, None, "pi")
+            .expect("bare");
+        let bare_approval = pi_approval(&bare.id, "npm test -- foo", cwd, &["allow_once", "allow_project_rule", "deny"]);
+        let no_project = allow_pi_with_project_rule(&database, &bare_approval, "npm test").expect_err("没有项目");
+        assert!(no_project.starts_with("permission.rule_not_offered"), "{no_project}");
+    }
+
+    #[test]
+    fn answer_pi_request_offers_the_rule_only_for_bash_in_a_project() {
+        let (database, conversation, _root) = database_with_pi_project();
+        let npm = gate("bash", json!({ "command": "npm test -- foo", "secret": "sk-not-real" }));
+        let answer = answer_pi_request(&database, "run-1", &conversation, "ask", &npm, &options()).expect("answer");
+        assert_eq!(answer.decision, AutoPermission::Ask);
+        assert_eq!(answer.policy["projectRule"]["eligible"], true);
+        assert_eq!(answer.policy["projectRule"]["suggestedPrefix"], "npm test");
+        assert_eq!(answer.policy["command"], "npm test -- foo");
+        assert!(!answer.policy["cwd"].as_str().unwrap_or("").is_empty());
+        assert!(!answer.policy.to_string().contains("sk-not-real"));
+
+        let push = gate("bash", json!({ "command": "git push origin main" }));
+        let push_answer = answer_pi_request(&database, "run-1", &conversation, "ask", &push, &options()).expect("push");
+        assert_eq!(push_answer.policy["projectRule"]["suggestedPrefix"], "git push");
+
+        let write = gate("write", json!({ "path": "src/new.rs", "content": "x" }));
+        let write_answer = answer_pi_request(&database, "run-1", &conversation, "ask", &write, &options()).expect("write");
+        assert!(!rule_eligible(&write_answer.policy));
+        let read = gate("read", json!({ "path": "src/main.rs" }));
+        let read_answer = answer_pi_request(&database, "run-1", &conversation, "ask", &read, &options()).expect("read");
+        assert!(!rule_eligible(&read_answer.policy));
+
+        let bare = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("no-project"), None, None, "pi")
+            .expect("bare");
+        let bare_answer = answer_pi_request(&database, "run-1", &bare.id, "ask", &npm, &options()).expect("bare");
+        assert!(!rule_eligible(&bare_answer.policy), "没有项目时不 eligible");
+        assert!(bare_answer.policy.get("command").is_none());
     }
 }

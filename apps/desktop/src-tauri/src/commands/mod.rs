@@ -1568,6 +1568,23 @@ pub fn approval_allow_project_rule(
     if let Err(error) = require_trusted_local_window(&window) {
         return ApiResponse::failure("permission.untrusted_origin", error, false);
     }
+    // 与 approval_resolve 同一条路由：外部审批交给外部 Host，Fox 走原来的项目规则。
+    // 前端不传 agentBackend，第三个参数为 None，未知审批仍落到 Fox 路径。
+    match agent_backend_routing::gate_run_identity(
+        fox_agent_backend::host_routing::HostEntry::Approve,
+        state.database.approval_agent_backend(&request.approval_id),
+        None,
+    ) {
+        Ok(agent_backend_routing::Route::Fox) => {}
+        Ok(agent_backend_routing::Route::External(_)) => {
+            use tauri::Manager;
+            return window
+                .app_handle()
+                .state::<crate::external_backend::ExternalBackendHost>()
+                .allow_with_project_rule(&request.approval_id, &request.pattern);
+        }
+        Err(failure) => return failure,
+    }
     match state.runtime_host.allow_approval_with_project_rules(&request.approval_id, &request.pattern) {
         Ok(resolved) => ApiResponse::success(resolved),
         Err(error) => {

@@ -1444,7 +1444,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     let _ = connection.answer_permission(&native_request_id, None);
                     return;
                 };
-                let card = permission_card(&request);
+                let mut card = permission_card(&request);
                 let key = format!("acp-permission:{generation}:{native_request_id}");
                 let run_id = turn.run_id.clone();
                 // 所有后端都先问 Host。Pi 由审批引擎完整作答。Codex / dsh 只在命中
@@ -1485,6 +1485,9 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.permission_auto_answered", &details);
                     return;
                 }
+                // Host 判定为询问时，把策略摘要交给卡片。桌面端据此决定是否提供「本项目总是允许」。
+                // Codex / dsh 没有 Host 答案，policy 为 None，卡片与原来一样。
+                card.host_policy = policy;
                 match self.inner.sink.request_approval(&run_id, &session.conversation_id, &key, &card) {
                     Ok(approval_id) => {
                         turn.approvals.insert(approval_id, PendingApproval { native_id: native_request_id, options: card.options.clone() });
