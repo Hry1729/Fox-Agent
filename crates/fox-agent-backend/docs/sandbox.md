@@ -890,7 +890,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
   - 前端：`RunFailure` 新增 `stderrTail` / `stderrTailSource`，只取自终态事件。即使持久化的 run 行覆盖了 code 和 message，尾部也保留。“查看错误详情”展开后显示 `code: message`，再加“后端 stderr 尾部（已脱敏，最多 4 KiB；…）”。
 - **DeepSeek 回环网关只允许完全访问**（`src/external_launch.rs`、`src/loopback.rs`、`src/backends/deepseek.rs`、`src/capability_view.rs`）
   - 拒绝条件：沙箱模式下启动 DeepSeek 会话前，读私有 HOME 里 dsh 的 `cordis.patch.yml`（两份，同 13.10）。只要有一个 `baseURL` 指向回环地址，就拒绝启动，不起任何进程。这里的回环地址包括端口无法确定的写法，例如 `http://localhost:${PORT}`。
-  - 错误码 `agent_backend_loopback_requires_full_access`（B3 已删除）。提示为“本机网关在沙箱模式下不可达：…dsh 对回环地址总是直连、不经沙箱代理（请切换到“完全访问”，或改用官方 api.deepseek.com）”。
+  - 错误码 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生）。提示为“本机网关在沙箱模式下不可达：…dsh 对回环地址总是直连、不经沙箱代理（请切换到“完全访问”，或改用官方 api.deepseek.com）”。
   - 不受影响的情况：完全访问模式；非回环的 base URL；其他后端。
   - 能力视图：DeepSeek 在沙箱模式下，沙箱详情会写出这个限制。
   - f2bf567 新增的“只放行这一个回环端口”逻辑不再生效，放行列表里不再有 `127.0.0.1:<端口>`：
@@ -910,7 +910,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - `cargo test -p fox-agent-backend --features acp --lib -- loopback`：恰好 9 项，全部通过。包括 `external_launch::tests::host_launcher_refuses_a_sandboxed_deepseek_loopback_gateway_before_starting` 和 `external_launch::tests::deepseek_loopback_gateway_is_refused_in_the_sandbox_and_never_allowed`。
    - 前端：`bun test tests/run-failure.test.ts`（在 `apps/desktop` 下）：11 项全部通过，其中新增 3 项在 `run failure stderr diagnostic` 组。
 2. DeepSeek 经 Magpie，沙箱模式（`FOX_EXTERNAL_BACKENDS=deepseek`；私有 HOME 的 `.dsh/cordis.patch.yml` 里 `baseURL` 指向 Magpie 的 `127.0.0.1:<端口>`）：
-   - 发一句话，应**立即**（几秒内，不等模型）失败，错误码为 `agent_backend_loopback_requires_full_access`（B3 已删除），提示含“本机网关在沙箱模式下不可达”“请切换到“完全访问”，或改用官方 api.deepseek.com”。
+   - 发一句话，应**立即**（几秒内，不等模型）失败，错误码为 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生），提示含“本机网关在沙箱模式下不可达”“请切换到“完全访问”，或改用官方 api.deepseek.com”。
    - 不应出现 dsh 进程，也不应出现 `Connection error`。
    - 能力 chip 的沙箱详情写有“限制：DeepSeek 的 base URL 若指向本机回环网关…”。
 3. 同一会话切到“完全访问”，再跑一轮真实对话：能拿到模型回复，`run.completed`。
@@ -1026,7 +1026,7 @@ cargo test -j2 -p fox-agent-backend --features acp --test sandbox_srt real_srt_e
    - 长行自动换行显示，详情块超过约 20rem 高时出现纵向滚动条，不出现横向滚动。
    - 在详情里搜 API key 和 Bearer 值的原文，搜不到。
    - **注（979313c 收尾批补）**：真实 dsh 遇到连接错误时只经 JSON-RPC 报错（`session/prompt` 返回 `-32603`，`message` 为 “Internal error: turn failed: DeepSeek Messages transport failed”，没有 `data`），**不写 stderr**。所以这一项在真实 dsh 上“查看错误详情”没有尾部、甚至没有详情块是正常的，不算失败。尾部的渲染（括号、`<redacted>`、长行换行与滚动、搜不到密钥）用 mock fixture 的副本（`tests/fixtures/mock-acp-session-agent.mjs` 的 `stderr-fail` / `stderr-crash` 场景）验证，见第 1 项的 `external_runtime` 用例与 `bun test tests/run-failure.test.ts`。详见 13.13。
-4. 沙箱模式（去掉 `FOX_EXTERNAL_FULL_ACCESS`）下同一配置：应立即以 `agent_backend_loopback_requires_full_access`（B3 已删除） 失败，提示含“需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com”，不再出现“请切换到“完全访问””；能力 chip 的限制说明也是新文案。
+4. 沙箱模式（去掉 `FOX_EXTERNAL_FULL_ACCESS`）下同一配置：应立即以 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生） 失败，提示含“需要完全访问权限（当前构建由 Host 配置 FOX_EXTERNAL_FULL_ACCESS 开启），或改用官方 api.deepseek.com”，不再出现“请切换到“完全访问””；能力 chip 的限制说明也是新文案。
 5. 不需要跑全量，也不需要重跑 13.9 – 13.11 的其余条目。
 
 Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用例 `real_external_runtime_dsh_full_access_uses_the_private_home`（`FOX_TEST_REAL_SRT=1 FOX_TEST_REAL_ACP=1 FOX_AGENT_RUNTIME_ROOT=<含 backends/dsh 的运行时> -- --include-ignored`），真实 dsh 0.2.1-rc.2、完全访问、dsh 配置只写在私有 HOME 并指向本机假网关：网关收到请求，dsh 的 `sessions`、`profiles` 写在私有 HOME 的 `.dsh` 下，真实 HOME 的 `.dsh`、`.config`、`.cache`、`.local/*` 没有新增文件。假网关不讲 Anthropic 协议，所以该轮以 `agent_backend_prompt_failed`（SSE event type mismatch）结束，这是预期的。
@@ -1102,7 +1102,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
    - 选择“完全访问”后先弹出风险确认，内容包括三点（不套 srt；不承诺目录边界；能读写当前用户能访问的任何文件）和“登录和配置仍放在 Fox 私有 HOME 里…”这一句。点“取消”会回到沙箱。
    - 确认后创建会话，顶部 chip 显示“权限：完全访问（已锁定）”，会话中没有开启入口。
    - Host 设 `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 后重启 Fox：完全访问选项变灰，带“（已禁止）”并显示原因。另外直接用 IPC 发 `externalPermissionMode: "full_access"`，应得到 `agent_backend_full_access_forbidden`，会话不会被创建。
-   - 会话中撤销：点“撤销完全访问”后先出现提示（取消本轮、结清审批、在沙箱中重新启动、不重放），确认后：正在跑的一轮以 `agent_backend_full_access_revoked` 结束，chip 变成“权限：沙箱（已锁定）”，下一句在沙箱里启动（Magpie 回环配置此时应以 `agent_backend_loopback_requires_full_access`（B3 已删除） 拒绝）。审计里有一条 `agent_backend.full_access_revoked`。
+   - 会话中撤销：点“撤销完全访问”后先出现提示（取消本轮、结清审批、在沙箱中重新启动、不重放），确认后：正在跑的一轮以 `agent_backend_full_access_revoked` 结束，chip 变成“权限：沙箱（已锁定）”，下一句在沙箱里启动（Magpie 回环配置此时应以 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生） 拒绝）。审计里有一条 `agent_backend.full_access_revoked`。
 5. **迁移 v96 前自动备份**：用 v95 的旧数据库启动本批构建，迁移前在 `<data>/backups/` 生成一份 v95 备份（`VACUUM INTO`，机制同 13.7）。迁移后 `schema_migrations` 最大值为 96，两张新表存在，旧会话和旧 run 没有变化。
 6. **一次全量测试**：`cargo test -p fox-agent-backend --features acp` 加桌面全量，对照 64 项基线，不能有新增失败。Linux 上本批后端全量是 219 通过 / 0 失败 / 6 忽略。
 
@@ -1149,7 +1149,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
   - `0` / `off` / `false` / `none` / `no`：全部强制关闭。设置里只能选 Fox，其他三项置灰并写明原因；新会话一律 Fox；已绑定外部后端的会话只读。
   - 列表（如 `pi,codex`）：只允许列出的后端；只写了未知 id 的列表等于全部关闭。
   - 不设置时，一次后端读取失败（数据库错误）不再回退到 Fox 路径，而是拒绝（`agent_backend_lookup_failed`），避免外部会话误跑在 Fox 运行时上。
-- **完全访问挪到设置**：「新外部会话使用完全访问」，默认关（`agent_backend.new_external_full_access`）。Host 在新建外部会话时读它，按现有逻辑写 grant 和 `agent_backend.full_access_granted` 审计（`source: "settings"`）。`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时开关置灰，Host 也忽略该设置（按沙箱建会话，不报错）。会话中途的「撤销完全访问」仍在后端栏。DeepSeek 回环 baseURL 在沙箱下仍拒绝，拒绝码 `agent_backend_loopback_requires_full_access`（B3 已删除） 不变，提示改为「在设置中打开“新外部会话使用完全访问”后新建会话」。
+- **完全访问挪到设置**：「新外部会话使用完全访问」，默认关（`agent_backend.new_external_full_access`）。Host 在新建外部会话时读它，按现有逻辑写 grant 和 `agent_backend.full_access_granted` 审计（`source: "settings"`）。`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1` 时开关置灰，Host 也忽略该设置（按沙箱建会话，不报错）。会话中途的「撤销完全访问」仍在后端栏。DeepSeek 回环 baseURL 在沙箱下仍拒绝，拒绝码 `agent_backend_loopback_requires_full_access`（历史码，B3 后不再产生） 不变，提示改为「在设置中打开“新外部会话使用完全访问”后新建会话」。
 
 **统一登录（`src/unified_login.rs`）**
 
