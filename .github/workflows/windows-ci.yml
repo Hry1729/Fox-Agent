@@ -307,6 +307,10 @@ jobs:
           echo "FOX_REQUIRE_REAL_PI=1" >> "$GITHUB_ENV"
 
       - name: Test fox-agent-backend (acp)
+        # fox-fix-console: tests/pi_real_no_console_window.rs must really look
+        # for console windows here (its positive control must see one), not skip.
+        env:
+          FOX_REQUIRE_CONSOLE_WINDOW_CHECK: '1'
         run: cargo test -p fox-agent-backend --features acp --no-fail-fast
 
   # Plan B3: the external-backend layer builds and tests on Linux on its own
