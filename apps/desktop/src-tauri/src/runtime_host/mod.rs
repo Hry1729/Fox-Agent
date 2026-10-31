@@ -1029,49 +1029,6 @@ pub(crate) fn conversation_prompt_context(
     }
 }
 
-/// The model-facing prompt payload of one Kernel Run.
-///
-/// One constructor for every entry point, so the keys and the reference data a
-/// Run receives cannot drift between the application start path and a non-UI
-/// caller such as the real acceptance harness.
-///
-/// Everything is borrowed: the caller keeps ownership of the same values for the
-/// Legacy prompt that follows, and the reference-data fields stay generic over
-/// `Serialize` exactly as the `json!` literal they replace did.
-pub(crate) struct KernelPromptPayload<'a, M, W, R> {
-    pub text: &'a str,
-    pub messages: &'a M,
-    pub images: &'a [Value],
-    pub context: &'a AgentPromptContext,
-    pub project_context: &'a Value,
-    pub work_snapshot: &'a W,
-    pub memory_context: &'a R,
-    pub max_prompt_tokens: i64,
-}
-
-pub(crate) fn kernel_prompt_payload<M, W, R>(payload: KernelPromptPayload<'_, M, W, R>) -> Value
-where
-    M: serde::Serialize,
-    W: serde::Serialize,
-    R: serde::Serialize,
-{
-    json!({
-        "text": payload.text,
-        "messages": payload.messages,
-        "images": payload.images,
-        "systemPrompt": payload.context.system_prompt,
-        "skillPrompt": payload.context.skill_prompt,
-        "assistantPackage": payload.context.assistant_package,
-        "expertPackage": payload.context.expert_package,
-        "expertBinding": payload.context.expert_binding_payload,
-        "runContext": payload.context.run_context,
-        "projectContext": payload.project_context,
-        "workSnapshot": payload.work_snapshot,
-        "memoryContext": payload.memory_context,
-        "promptBudget": {"maxPromptTokens": payload.max_prompt_tokens},
-    })
-}
-
 #[derive(Clone)]
 pub struct RuntimeHost {
     app: AppHandle,

@@ -626,7 +626,6 @@ fn resolve_compute_artifact(
     Ok(buffer)
 }
 
-
 /// Verified placement of one `office_import_data` block.
 #[derive(Debug, Clone)]
 struct ImportSpec {
@@ -1776,11 +1775,6 @@ pub fn execute(
 #[cfg(test)]
 thread_local! {
     static TEST_EXECUTOR_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn executor_entries_for_test() -> u64 {
-    TEST_EXECUTOR_ENTRIES.with(std::cell::Cell::get)
 }
 
 pub(crate) fn execute_with_cancellation(

@@ -120,10 +120,6 @@ pub(crate) use p2b_decision::{
     decide as decide_facts, DecisionFact, DecisionResult, FactClass, FactOrigin,
 };
 
-pub(crate) fn ensure_frozen_content_writable(database:&Database,run:&str,task:Option<&str>,root:&str,target:&Path)->Result<(),String> {
-    content_requirements::ensure_concat_writable(database,run,task,root,target)
-}
-
 /// Independent bounded-repair budget, separate from both the stop-review
 /// continuation limit and from provider/turn model-failure retries.
 pub(crate) const DELIVERY_REPAIR_LIMIT: i64 = 2;
@@ -1837,15 +1833,6 @@ impl DeliveryStop {
         }
     }
 
-    /// The repair instruction, when this stop armed a repair round.
-    pub(crate) fn repair_prompt(&self) -> Option<&str> {
-        match self {
-            DeliveryStop::Repair { prompt, .. } => Some(prompt),
-            DeliveryStop::Typed(typed) => typed.repair_prompt.as_deref(),
-            _ => None,
-        }
-    }
-
     /// The typed v2 verdict, when this stop carries one.
     pub(crate) fn typed(&self) -> Option<&TypedDeliveryStop> {
         match self {
@@ -1870,61 +1857,9 @@ impl DeliveryStop {
         check_row_ambiguity(&typed.verdict)
     }
 
-    /// What a consumer must do about this stop.
-    ///
-    /// **The one definition of the class -> route mapping.** Both terminal lanes
-    /// take their route from here, so a class cannot be completed by one lane and
-    /// failed by the other. In particular the mapping is derived from the verdict
-    /// class, never from "is this stop typed": that conflation is what let a
-    /// `RepairNeeded` delivery be terminated as `Completed` and a `Refused` one be
-    /// terminated with a caller-supplied reason.
-    ///
-    /// The legacy variants have no class of their own and keep the routing they
-    /// have always had.
-    pub(crate) fn route(&self) -> DeliveryRoute {
-        match self {
-            DeliveryStop::Typed(typed) => typed.route(),
-            // The legacy no-checklist case has nothing to stage; the caller still
-            // routes it to completion, and the mark decision is made there.
-            DeliveryStop::NoChecklist | DeliveryStop::Passed { .. } => DeliveryRoute::Complete,
-            // An exhausted legacy gate has no repair round left to arm, so the
-            // Run ends as it always did.
-            DeliveryStop::Exhausted { .. } => DeliveryRoute::Complete,
-            DeliveryStop::Repair { .. } => DeliveryRoute::Repair,
-        }
-    }
 }
 
 impl TypedDeliveryStop {
-    /// What the verdict's **own class** requires. See [`DeliveryStop::route`].
-    pub(crate) fn route(&self) -> DeliveryRoute {
-        match self.verdict.disposition() {
-            p2b_consumer::DeliveryDisposition::Accept => DeliveryRoute::Complete,
-            p2b_consumer::DeliveryDisposition::Repair => DeliveryRoute::Repair,
-            p2b_consumer::DeliveryDisposition::Terminal { code, message, .. } => {
-                DeliveryRoute::Fail { code, message }
-            }
-            p2b_consumer::DeliveryDisposition::RequiresU1 { reason } => {
-                DeliveryRoute::RequiresU1 { reason }
-            }
-        }
-    }
-}
-
-/// What happens to the Run after a stop.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DeliveryRoute {
-    /// Finalize the staged verdicts and report the Run as completed.
-    Complete,
-    /// Arm one bounded repair round; the Run stays non-final.
-    Repair,
-    /// The class's own definite non-pass, with its own canonical reason.
-    Fail {
-        code: &'static str,
-        message: String,
-    },
-    /// Neither complete nor fail: no terminal write at all.
-    RequiresU1 { reason: String },
 }
 
 /// Consume an already-computed v2 decision as a typed [`DeliveryStop`].
@@ -2020,23 +1955,6 @@ fn typed_stop_from_rows(
         repair_prompt,
         repair_findings_json,
     }
-}
-
-/// Test-only: build the deferred stop for a verdict the typed constructor refuses.
-///
-/// [`typed_stop_from_verdict`] returns `Err` for a `RequiresU1` verdict, because the
-/// variants **it** can return all complete or fail the Run. The seam exists so a
-/// test can drive the shared completion tail on a deferred delivery without going
-/// through the producer. It delegates to [`typed_stop_from_rows`], the same builder
-/// [`route_typed_run`] uses in production, so a test cannot assert a shape the
-/// router would never produce.
-#[cfg(test)]
-pub(crate) fn typed_stop_bypassing_the_refusal_for_test(
-    ledger: &[DeliveryChecklistItem],
-    verdict: p2b_consumer::DeliveryVerdict,
-) -> DeliveryStop {
-    let rows = encode_typed_rows(ledger, &verdict).expect("test fixture verdict is unambiguous");
-    DeliveryStop::Typed(Box::new(typed_stop_from_rows(rows, verdict)))
 }
 
 /// The audit payload recorded for a typed repair round.
@@ -2724,30 +2642,6 @@ pub(crate) fn inherit_interrupted_deliverables(
     Ok(inherited)
 }
 
-pub(crate) fn stage_failure_outcome(
-    database: &Database,
-    run_id: &str,
-    decision_mark: &str,
-    stop: &DeliveryStop,
-    now: i64,
-) -> Result<(), String> {
-    // Same shared check as `stage_outcome`: the failing lane writes to the same
-    // ledger and must refuse an ambiguous verdict just as the completing one does.
-    stop.validate().map_err(|ambiguity| ambiguity.message())?;
-    let items = staged_items(stop);
-    database.stage_delivery_outcome(run_id, decision_mark, &items, None, now)
-}
-
-/// Withdraw a staged round that must never be finalized: its decision was
-/// superseded by a steering round, or its commit failed.
-pub(crate) fn withdraw_outcome(
-    database: &Database,
-    run_id: &str,
-    decision_mark: &str,
-) -> Result<(), String> {
-    database.withdraw_staged_delivery_outcome(run_id, decision_mark)
-}
-
 /// Make a staged round final, but **only** if the decision that owns it really
 /// committed. Returns how many item verdicts were written (0 when the decision
 /// is not committed, which the caller resolves by withdrawing the stage).
@@ -2795,47 +2689,6 @@ fn staged_items(stop: &DeliveryStop) -> Vec<StagedDeliveryItem> {
         .collect()
 }
 
-/// Retain a typed verdict that produced **no stop at all**.
-///
-/// A `RequiresU1` aggregate — `Unconfirmed` alone, or a pass beside an unverified
-/// item, since the aggregate folds every item's facts — is neither a pass nor a
-/// failure and has no terminal decision. Nothing is staged for it, so **every**
-/// item's facts must be retained on the pending path, not only the items whose
-/// own class is `Unconfirmed`: a `Confirmed` sibling's facts are just as durable
-/// and just as needed by a later U1, and filtering to the non-staged rows alone
-/// would silently drop them. The aggregate's refusal to decide is not a licence
-/// to lose the items it could decide.
-///
-/// The ledger's `pending` status is the existing non-terminal state, and the row
-/// keeps its full finding (including the v2 verdict envelope) so a later U1 has
-/// the facts, not a summary of them. Nothing here writes a status or a terminal:
-/// this is the explicit "blocked before the terminal stage" path the card
-/// requires, and it needs no migration.
-///
-/// The write stays scoped to `status='pending'` (see
-/// [`Database::retain_pending_delivery_findings`]), so a row that a real decision
-/// already terminated is never reopened.
-///
-/// An ambiguous verdict retains nothing and reports why: the caller is told the
-/// input was refused, rather than being handed a `usize` that implies a partial
-/// save completed.
-pub(crate) fn retain_pending_typed_outcome(
-    database: &Database,
-    run_id: &str,
-    ledger: &[DeliveryChecklistItem],
-    verdict: &p2b_consumer::DeliveryVerdict,
-    now: i64,
-) -> Result<usize, TypedRetentionError> {
-    let rows = encode_typed_rows(ledger, verdict).map_err(TypedRetentionError::Ambiguous)?;
-    let items: Vec<(String, String)> = rows
-        .into_iter()
-        .map(|row| (row.item_key, row.finding_json))
-        .collect();
-    database
-        .retain_pending_delivery_findings(run_id, &items, now)
-        .map_err(TypedRetentionError::Storage)
-}
-
 /// Why a typed retention wrote nothing.
 ///
 /// The two cases must not be conflated: an ambiguous verdict is a **refused
@@ -2872,48 +2725,6 @@ impl std::fmt::Display for TypedRetentionError {
             TypedRetentionError::Storage(detail) => formatter.write_str(detail),
         }
     }
-}
-
-/// Retain the facts that an **already computed** typed stop cannot stage.
-///
-/// [`retain_pending_typed_outcome`] re-encodes the verdict against a checklist
-/// ledger. A typed stop was produced from a ledger the caller may not hold any
-/// more — and re-reading one would be a second evaluation of a decision that has
-/// already been made — so the rows it already encoded are reused verbatim. Same
-/// encoder, same rows: this is a de-duplication of the read, not a second
-/// mapping.
-pub(crate) fn retain_pending_items(
-    database: &Database,
-    run_id: &str,
-    items: &[(String, String)],
-    now: i64,
-) -> Result<usize, String> {
-    database.retain_pending_delivery_findings(run_id, items, now)
-}
-
-/// Retain the non-terminal siblings of an **already computed** typed stop.
-///
-/// One definition for both lanes that can carry a typed stop (the completion
-/// caller and the live loop), so a mixed verdict keeps its unknown facts
-/// whichever lane observed it. A stop with no pending items — a `Confirmed`
-/// aggregate, or a `RepairNeeded` one whose rows are all staged — is a no-op
-/// rather than an error: the empty case is the ordinary one, not a defect.
-///
-/// The retention entry shares [`DeliveryStop::validate`] with the two stage
-/// entries, so a stop that cannot be written cannot be retained either. A stop
-/// built outside [`typed_stop_from_verdict`] therefore cannot smuggle an
-/// ambiguous verdict past the encoder by taking this path.
-pub(crate) fn retain_pending_typed_stop(
-    database: &Database,
-    run_id: &str,
-    stop: &DeliveryStop,
-    now: i64,
-) -> Result<usize, String> {
-    stop.validate().map_err(|ambiguity| ambiguity.message())?;
-    let Some(typed) = stop.typed() else {
-        return Ok(0);
-    };
-    retain_pending_items(database, run_id, &typed.pending_items, now)
 }
 
 fn now_ms() -> i64 {
@@ -5393,128 +5204,6 @@ fn rels_path_of(part: &str) -> Result<String, String> {
         .rsplit_once('/')
         .ok_or_else(|| format!("part {part} has no directory"))?;
     Ok(format!("{dir}/_rels/{file}.rels"))
-}
-
-/// Attach one real chart to **every worksheet** of an existing workbook, wired
-/// through the same relationships a viewer follows (worksheet -> drawing ->
-/// chart), including the package content types.
-///
-/// Tests need this to build a deliverable that genuinely satisfies a per-sheet
-/// chart demand: a chart part that no worksheet references is not something the
-/// user can see, and the gate is right to reject it.
-#[cfg(test)]
-pub(crate) fn zip_attach_chart_per_sheet(bytes: &[u8]) -> Vec<u8> {
-    let mut entries = match crate::local_knowledge_import::zip_entries(bytes) {
-        Ok(entries) => entries,
-        Err(_) => return bytes.to_vec(),
-    };
-    let workbook = crate::local_knowledge_import::zip_entry_text(bytes, "xl/workbook.xml")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let workbook_rels =
-        crate::local_knowledge_import::zip_entry_text(bytes, "xl/_rels/workbook.xml.rels")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-    let part_of = relationship_targets(&workbook_rels, "xl");
-    let mut content_type_overrides: Vec<String> = Vec::new();
-    for (index, (_name, rel_id)) in sheet_relationships(&workbook).into_iter().enumerate() {
-        let Some(part) = part_of.get(&rel_id) else {
-            continue;
-        };
-        let Some(sheet_xml) = crate::local_knowledge_import::zip_entry_text(bytes, part)
-            .ok()
-            .flatten()
-        else {
-            continue;
-        };
-        let drawing = index + 1;
-        let rel_id_drawing = format!("rIdDrw{drawing}");
-        if !sheet_xml.contains("<drawing ") {
-            let Some(at) = sheet_xml.rfind("</worksheet>") else {
-                continue;
-            };
-            let with_drawing = format!(
-                r#"{}{}<drawing r:id="{rel_id_drawing}"/></worksheet>"#,
-                &sheet_xml[..at],
-                ""
-            );
-            if let Some(entry) = entries.iter_mut().find(|(name, _)| name == part) {
-                entry.1 = with_drawing.into_bytes();
-            }
-        }
-        let Ok(sheet_rels_path) = rels_path_of(part) else {
-            continue;
-        };
-        let existing_rels = crate::local_knowledge_import::zip_entry_text(bytes, &sheet_rels_path)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#.to_owned()
-            });
-        let rels = existing_rels.replacen(
-            "</Relationships>",
-            &format!(
-                r#"<Relationship Id="{rel_id_drawing}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing{drawing}.xml"/></Relationships>"#
-            ),
-            1,
-        );
-        set_entry(&mut entries, &sheet_rels_path, rels);
-        let drawing_part = format!("xl/drawings/drawing{drawing}.xml");
-        set_entry(
-            &mut entries,
-            &drawing_part,
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><c:chart r:id="rIdChart{drawing}"/></xdr:wsDr>"#
-            ),
-        );
-        let drawing_rels = format!("xl/drawings/_rels/drawing{drawing}.xml.rels");
-        set_entry(
-            &mut entries,
-            &drawing_rels,
-            format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart{drawing}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{drawing}.xml"/></Relationships>"#
-            ),
-        );
-        let chart_part = format!("xl/charts/chart{drawing}.xml");
-        set_entry(
-            &mut entries,
-            &chart_part,
-            r#"<?xml version="1.0" encoding="UTF-8"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#
-                .to_owned(),
-        );
-        content_type_overrides.push(format!(
-            r#"<Override PartName="/{drawing_part}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/{chart_part}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#
-        ));
-    }
-    if !content_type_overrides.is_empty() {
-        if let Some(existing) = crate::local_knowledge_import::zip_entry_text(
-            bytes,
-            "[Content_Types].xml",
-        )
-        .ok()
-        .flatten()
-        {
-            if existing.contains("</Types>") {
-                let updated = existing.replacen(
-                    "</Types>",
-                    &format!("{}</Types>", content_type_overrides.join("")),
-                    1,
-                );
-                set_entry(&mut entries, "[Content_Types].xml", updated);
-            }
-        }
-    }
-    stored_zip(&entries)
-}
-
-#[cfg(test)]
-fn set_entry(entries: &mut Vec<(String, Vec<u8>)>, name: &str, body: String) {
-    match entries.iter_mut().find(|(existing, _)| existing == name) {
-        Some(entry) => entry.1 = body.into_bytes(),
-        None => entries.push((name.to_owned(), body.into_bytes())),
-    }
 }
 
 /// Paragraph-level text of a Word document, in document order.

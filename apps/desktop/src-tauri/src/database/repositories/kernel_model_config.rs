@@ -24,14 +24,6 @@ impl Database {
         })
     }
 
-    pub(crate) fn kernel_model_config(&self, run_id: &str) -> Result<KernelModelConfig, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            let config = read_model_config(&transaction, run_id)?;
-            transaction.commit()?;
-            Ok(config)
-        })
-    }
 }
 
 /// Shared so a startup input and its model configuration are verified against

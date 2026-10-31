@@ -3402,23 +3402,6 @@ fn task_event_type(status: &WorkTaskStatus) -> Option<&'static str> {
     }
 }
 
-/// Model-facing guidance attached (Kernel path) to a refused
-/// `task_evidence_add`: the legal Evidence/reference pairs, which id a ToolCall
-/// reference takes, and what a text-only task can cite. Describes the existing
-/// matrix and checks only; it grants nothing new.
-pub(crate) fn evidence_reference_guidance() -> Value {
-    let pairs = crate::database::EVIDENCE_REFERENCE_PAIRS
-        .iter()
-        .map(|(evidence_type, kinds)| ((*evidence_type).to_owned(), json!(kinds)))
-        .collect::<serde_json::Map<_, _>>();
-    json!({
-        "allowedPairs": Value::Object(pairs),
-        "toolCallRefId": "refKind=tool_call takes details.evidenceRef.refId of an earlier SUCCESSFUL tool result in this conversation (kernel-tool:<run>:<call>); the id of your own completed tool call is also accepted when it is unambiguous in this conversation. Failed or unfinished calls cannot be cited.",
-        "textOnlyTask": "A text-only task with no file, test or artifact cites a completed tool call: evidenceType=tool_call, refKind=tool_call, refId=<its evidenceRef.refId>, plus validationCheckType=inspection when the frozen ValidationPolicy allows it.",
-        "messageRef": "refKind=message is only for evidenceType=user_confirmation and must be a USER message id.",
-    })
-}
-
 fn tool_result(details: Value) -> Value {
     let text = crate::canonical_json::to_string_pretty(&details).unwrap_or_else(|_| details.canonical_string());
     json!({

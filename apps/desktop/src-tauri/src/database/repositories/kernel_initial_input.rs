@@ -16,18 +16,6 @@ fn hash(body: &str) -> String {
 }
 
 impl Database {
-    pub(crate) fn kernel_initial_start_state(&self, run_id: &str) -> Result<(KernelInitialModelInput, crate::kernel::RunFrozenConfig, String), String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            let input = read_input(&transaction, run_id)?;
-            let (config, hash): (String, String) = transaction.query_row(
-                "SELECT r.frozen_config_json,i.input_hash FROM kernel_runs r JOIN kernel_initial_inputs i ON i.run_id=r.run_id
-                 WHERE r.run_id=?1 AND r.state='created' AND r.last_event_seq=0", [run_id], |row| Ok((row.get(0)?,row.get(1)?)))?;
-            let config = serde_json::from_str(&config).map_err(|_| invalid("invalid initial Run configuration"))?;
-            transaction.commit()?;
-            Ok((input, config, hash))
-        })
-    }
 
     /// Created-only insertion; exact replays are read-only even after startup.
     /// Never infer missing historical inputs from today's conversation messages.
@@ -42,17 +30,6 @@ impl Database {
         })
     }
 
-    pub(crate) fn kernel_initial_input(
-        &self,
-        run_id: &str,
-    ) -> Result<KernelInitialModelInput, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            let input = read_input(&transaction, run_id)?;
-            transaction.commit()?;
-            Ok(input)
-        })
-    }
 }
 
 pub(super) fn read_input(
