@@ -1212,6 +1212,9 @@ impl Database {
     ///
     /// Returns the display names in declaration order, so the caller can report
     /// exactly what was recorded.
+    ///
+    /// 每个文件都要能读到。读失败或超过交付大小上限时，整次声明返回错误并回滚，
+    /// 不把大小记成 0，也不写入任何行。成功时把内容的 sha256（小写十六进制）写入。
     pub(crate) fn record_present_files_declaration(
         &self,
         conversation_id: &str,
@@ -1223,13 +1226,36 @@ impl Database {
         if files.is_empty() {
             return Ok(Vec::new());
         }
+        // 与 artifact_gateway::MAX_ARTIFACT_FILE_BYTES 相同。超过则不读全文算哈希。
+        const MAX_PRESENT_FILE_BYTES: u64 = 512 * 1024 * 1024;
         self.with_connection(|connection| {
+            let refuse = |message: String| {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(message),
+                )
+            };
             let transaction = connection.unchecked_transaction()?;
             let mut names = Vec::with_capacity(files.len());
             for (path, display_name, description) in files {
-                let byte_size = std::fs::metadata(path)
-                    .map(|metadata| metadata.len() as i64)
-                    .unwrap_or(0);
+                let metadata = std::fs::metadata(path).map_err(|error| {
+                    refuse(format!("present_files: cannot read {display_name}: {error}"))
+                })?;
+                if metadata.len() > MAX_PRESENT_FILE_BYTES {
+                    return Err(refuse(format!(
+                        "present_files: {display_name} is larger than the delivery limit"
+                    )));
+                }
+                let bytes = std::fs::read(path).map_err(|error| {
+                    refuse(format!("present_files: cannot read {display_name}: {error}"))
+                })?;
+                if bytes.len() as u64 > MAX_PRESENT_FILE_BYTES {
+                    return Err(refuse(format!(
+                        "present_files: {display_name} is larger than the delivery limit"
+                    )));
+                }
+                let byte_size = bytes.len() as i64;
+                let sha256 = hex::encode(Sha256::digest(&bytes));
                 let media_type = mime_for_display_name(display_name);
                 // One file is one row per Run. A retry of the same call carries
                 // the same identity, so this updates its own earlier row rather
@@ -1237,9 +1263,9 @@ impl Database {
                 let updated = transaction.execute(
                     "UPDATE artifacts
                         SET display_name=?3, media_type=COALESCE(?4,media_type),
-                            byte_size=?5, artifact_class='deliverable',
-                            turn_call_id=?6, declared_at=?7,
-                            declared_description=?8, updated_at=?7
+                            byte_size=?5, sha256=?6, artifact_class='deliverable',
+                            turn_call_id=?7, declared_at=?8,
+                            declared_description=?9, updated_at=?8
                       WHERE run_id=?1 AND storage_path=?2",
                     params![
                         run_id,
@@ -1247,6 +1273,7 @@ impl Database {
                         display_name,
                         media_type,
                         byte_size,
+                        sha256,
                         turn_call_id,
                         now,
                         description
@@ -1260,7 +1287,7 @@ impl Database {
                             byte_size, sha256, status, created_at, updated_at,
                             turn_call_id, declared_at, declared_description)
                          VALUES (?1,?2,?3,?4,'created_file','deliverable','project',
-                                 ?5,?6,?7,NULL,'ready',?8,?8,?9,?8,?10)",
+                                 ?5,?6,?7,?8,'ready',?9,?9,?10,?9,?11)",
                         params![
                             format!("presented:{run_id}:{}", uuid::Uuid::new_v4()),
                             conversation_id,
@@ -1269,6 +1296,7 @@ impl Database {
                             path,
                             media_type,
                             byte_size,
+                            sha256,
                             now,
                             turn_call_id,
                             description
@@ -15518,5 +15546,175 @@ mod tests {
 
         drop(database);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 声明测试用的最小会话：产物行外键指向会话和 Run。
+    fn present_declaration_database(tag: &str) -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "fox-dl2-{tag}-{}-{}.db",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let database = Database::open(path.clone()).expect("open database");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO agents(id,name,description,runtime_type,system_prompt,
+                                        default_model,created_at,updated_at)
+                     VALUES ('agent-1','a','d','native','p','m',1,1)",
+                    [],
+                )?;
+                connection.execute(
+                    "INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                     VALUES ('conv-1','agent-1','t','active',1,1)",
+                    [],
+                )?;
+                connection.execute(
+                    "INSERT INTO runs(id,conversation_id,status,model,created_at)
+                     VALUES ('run-1','conv-1','running','m',1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("seed conversation");
+        (database, path)
+    }
+
+    #[test]
+    fn dl2_declaration_records_the_content_hash() {
+        use sha2::Digest;
+        let (database, db_path) = present_declaration_database("hash");
+        let file_path = std::env::temp_dir().join(format!("fox-dl2-file-{}", Uuid::new_v4()));
+        let contents = b"delivery-body-\xE4\xB8\xAD";
+        std::fs::write(&file_path, contents).unwrap();
+        let names = database
+            .record_present_files_declaration(
+                "conv-1",
+                "run-1",
+                "call-1",
+                &[(
+                    file_path.to_string_lossy().into_owned(),
+                    "report.md".into(),
+                    Some("说明".into()),
+                )],
+                10,
+            )
+            .expect("declare");
+        assert_eq!(names, vec!["report.md".to_owned()]);
+        let expected = hex::encode(sha2::Sha256::digest(contents));
+        let (sha, size): (String, i64) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT sha256, byte_size FROM artifacts WHERE run_id='run-1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(sha, expected);
+        assert_eq!(sha, sha.to_ascii_lowercase());
+        assert_eq!(size, contents.len() as i64);
+
+        // 再次声明同一路径时，UPDATE 也要换成新内容的哈希。
+        let next = b"changed";
+        std::fs::write(&file_path, next).unwrap();
+        database
+            .record_present_files_declaration(
+                "conv-1",
+                "run-1",
+                "call-2",
+                &[(
+                    file_path.to_string_lossy().into_owned(),
+                    "report.md".into(),
+                    None,
+                )],
+                11,
+            )
+            .unwrap();
+        let updated: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT sha256 FROM artifacts WHERE run_id='run-1'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(updated, hex::encode(sha2::Sha256::digest(next)));
+        assert_eq!(
+            database
+                .query_count_raw("SELECT COUNT(*) FROM artifacts", &[])
+                .unwrap(),
+            1
+        );
+        drop(database);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn dl2_declaration_of_an_unreadable_file_is_refused() {
+        let (database, db_path) = present_declaration_database("missing");
+        let missing = std::env::temp_dir().join(format!("fox-dl2-missing-{}", Uuid::new_v4()));
+        let error = database
+            .record_present_files_declaration(
+                "conv-1",
+                "run-1",
+                "call-1",
+                &[(
+                    missing.to_string_lossy().into_owned(),
+                    "missing.txt".into(),
+                    None,
+                )],
+                10,
+            )
+            .expect_err("missing file");
+        assert!(
+            error.contains("present_files: cannot read missing.txt"),
+            "{error}"
+        );
+        assert_eq!(
+            database
+                .query_count_raw("SELECT COUNT(*) FROM artifacts", &[])
+                .unwrap(),
+            0
+        );
+
+        // 同一声明里先写得进的文件也不能留下：失败必须回滚整次事务。
+        let readable = std::env::temp_dir().join(format!("fox-dl2-ok-{}", Uuid::new_v4()));
+        std::fs::write(&readable, b"ok").unwrap();
+        let error = database
+            .record_present_files_declaration(
+                "conv-1",
+                "run-1",
+                "call-2",
+                &[
+                    (
+                        readable.to_string_lossy().into_owned(),
+                        "ok.txt".into(),
+                        None,
+                    ),
+                    (
+                        missing.to_string_lossy().into_owned(),
+                        "missing.txt".into(),
+                        None,
+                    ),
+                ],
+                11,
+            )
+            .expect_err("second file missing");
+        assert!(
+            error.contains("present_files: cannot read missing.txt"),
+            "{error}"
+        );
+        assert_eq!(
+            database
+                .query_count_raw("SELECT COUNT(*) FROM artifacts", &[])
+                .unwrap(),
+            0
+        );
+        drop(database);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&readable);
     }
 }
