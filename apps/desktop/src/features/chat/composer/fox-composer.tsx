@@ -797,7 +797,7 @@ function Composer({ topSlot, inputLockedReason = null, initialAttachments, onIni
         </ComposerBorderBeam>}
         {!decisionPending && newConversation && runtimeControlled && <div className="fox-composer-draft-footer">
           {entry.onSelectProject && entry.onAddProject && <ComposerProjectBar projectRoot={projectRoot} projects={entry.projects} onSelect={entry.onSelectProject} onAdd={entry.onAddProject} />}
-          <ComposerAgentPicker value={entry.draftAgentBackend ?? 'fox'} status={entry.agentBackendStatus ?? null} onSelect={(backend) => entry.onSelectAgentBackend?.(backend)} />
+          <ComposerAgentPicker value={entry.draftAgentBackend ?? 'fox'} status={entry.agentBackendStatus ?? null} disabled={runtimeInitializing || chatState === 'running'} onSelect={(backend) => entry.onSelectAgentBackend?.(backend)} />
         </div>}
       </div>
     </div>

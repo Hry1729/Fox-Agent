@@ -4,11 +4,12 @@
 // only mirrors it for display, so the settings statement, the lock badge and
 // the refusal notice say the same thing the Host will answer.
 //
-// This build supports exactly ONE driver for a new conversation: the built-in
-// Fox route (`agent_backend = 'fox'`, model engine `pi`). The three external
-// backends (`pi` / ACP, `codex`, `deepseek`) are retired: their stored records
-// stay readable and their conversations stay openable, but no runtime is ever
-// started for them and no new conversation can pick one.
+// Plan C1 (2026-10-31): a new conversation can use the built-in Fox route
+// (`agent_backend = 'fox'`, PiNative) or one of the external Agents (`pi`,
+// `codex`, `deepseek` / dsh), unless the administrator switched one off
+// (`FOX_EXTERNAL_BACKENDS`). The retirement mechanism of the single Pi
+// mainline (2026-10-27) is kept for a backend that is really taken out of
+// service later: none is retired in this build.
 //
 // `agentBackend` is NOT the Kernel's `engineId` (`pi | codex | deepseek_harness`):
 // an old conversation that used the Codex model adapter is still a `fox`
@@ -23,6 +24,14 @@ export const AGENT_BACKEND_LABELS: Record<AgentBackendId, string> = {
   pi: 'Pi',
   codex: 'Codex',
   deepseek: 'DeepSeek',
+}
+
+/** What each choice of the new-conversation picker runs (shown under its name). */
+export const AGENT_BACKEND_PICKER_HINTS: Record<AgentBackendId, string> = {
+  fox: '内置 PiNative',
+  pi: '外部 pi（ACP）',
+  codex: 'codex-acp',
+  deepseek: 'dsh',
 }
 
 /**
@@ -47,25 +56,25 @@ export function isAgentBackendHidden(backend: string, status?: { options: { back
 }
 
 /**
- * Backends RETIRED by the single Pi mainline (product decision 2026-10-27).
- * Mirrors the Host's `host_routing::RETIRED_BACKENDS`: the ids stay readable
- * (an old conversation keeps showing its own binding), but nothing of theirs
- * is ever started and no new conversation can use one
- * (`agent_backend_retired`).
+ * Backends RETIRED in this build. Mirrors the Host's
+ * `host_routing::RETIRED_BACKENDS`: the ids stay readable (an old
+ * conversation keeps showing its own binding), but nothing of theirs is ever
+ * started and no new conversation can use one (`agent_backend_retired`).
+ * Empty since plan C1; kept for a backend that is really taken out of service.
  */
-export const RETIRED_AGENT_BACKEND_IDS: readonly AgentBackendId[] = ['pi', 'codex', 'deepseek']
+export const RETIRED_AGENT_BACKEND_IDS: readonly AgentBackendId[] = []
 
-/** The backends a NEW conversation can use: exactly one, the built-in Fox route. */
-export const SUPPORTED_AGENT_BACKEND_IDS: readonly AgentBackendId[] = ['fox']
+/** The backends a NEW conversation can use (plan C1: the built-in route and the three external Agents). */
+export const SUPPORTED_AGENT_BACKEND_IDS: readonly AgentBackendId[] = ['fox', 'pi', 'codex', 'deepseek']
 
 /**
- * The backend a new conversation is frozen to. `fox` is the storage id of the
- * built-in route, not a driver name: renaming it to `pi` would route a new
- * conversation to the retired external Pi ACP path.
+ * The backend a new conversation is frozen to by default. `fox` is the
+ * storage id of the built-in route, not a driver name: renaming it to `pi`
+ * would route a new conversation to the external Pi ACP path.
  */
 export const NEW_CONVERSATION_AGENT_BACKEND: AgentBackendId = 'fox'
 
-/** Name of the driver the built-in Fox route runs (its model engine is pinned to Pi). */
+/** Name of the driver the built-in Fox route runs (PiNative: its model engine is Pi). */
 export const BUILTIN_AGENT_DRIVER_LABEL = 'Pi'
 
 /** What an Agent-backend mirror (status / preferences) may say about retirement. */
@@ -87,12 +96,12 @@ export function agentBackendOptionRetired(option: { backend: string; enabled: bo
 }
 
 /**
- * The retired ids of a Host mirror: the declared list, else the options
- * (absent `retired` = `!enabled`), else this build's own list.
+ * The retired ids of a Host mirror: the declared list when the Host sends
+ * one (a C1 Host sends `[]`), else the options of an older Host (absent
+ * `retired` = `!enabled`), else this build's own list.
  */
 export function agentBackendRetiredIds(mirror?: AgentBackendRetirementMirror | null): AgentBackendId[] {
-  const declared = (mirror?.retiredBackends ?? []).filter(isAgentBackendId)
-  if (declared.length > 0) return declared
+  if (Array.isArray(mirror?.retiredBackends)) return mirror.retiredBackends.filter(isAgentBackendId)
   const derived = (mirror?.options ?? [])
     .filter((option) => option.backend !== 'fox' && agentBackendOptionRetired(option))
     .map((option) => option.backend)
@@ -115,9 +124,9 @@ export function isAgentBackendRetired(backend: string, mirror?: AgentBackendReti
 }
 
 /**
- * The backends a user can choose for a NEW conversation, in display order.
- * Exactly one in this build (the built-in Fox route): a select with one option
- * is not a choice, so no picker is rendered (see `ComposerAgentPicker`).
+ * The backends a user can choose for a NEW conversation, in display order
+ * (plan C1: Fox, Pi, Codex, DeepSeek / dsh). Whether one can be picked right
+ * now is the Host's answer (`canPickAgentBackend`).
  */
 export const SELECTABLE_AGENT_BACKEND_IDS: readonly AgentBackendId[] = AGENT_BACKEND_IDS
   .filter((backend) => !isAgentBackendHidden(backend))
@@ -136,10 +145,9 @@ export const AGENT_BACKEND_ERROR_CODES = {
   /** A new conversation asked for a hidden backend (`HIDDEN_AGENT_BACKENDS`). */
   hidden: 'agent_backend_hidden',
   /**
-   * The backend is retired in this build (product decision 2026-10-27):
-   * readable history, never runnable. Returned for a request that names a
-   * retired backend and for every runtime entry of a conversation frozen to
-   * one.
+   * The backend is retired in this build (none is since plan C1): readable
+   * history, never runnable. Returned for a request that names a retired
+   * backend and for every runtime entry of a conversation frozen to one.
    */
   retired: 'agent_backend_retired',
   // Refusals of an external send before anything ran (external backend wiring batch).
@@ -151,7 +159,7 @@ export const AGENT_BACKEND_ERROR_CODES = {
 export interface AgentBackendOption {
   backend: AgentBackendId
   enabled: boolean
-  /** Runtime wired in this build: false for every retired backend. */
+  /** Runtime wired in this build: false only for a retired backend. */
   wired: boolean
   experimental: boolean
   /** Hidden from pickers (Host `AgentBackend::HIDDEN`); absent from older Hosts. */
@@ -165,7 +173,7 @@ export interface AgentBackendOption {
 export interface AgentBackendStatus {
   switchEnv: string
   anyExternalEnabled: boolean
-  /** The backends a new conversation can use; absent from older Hosts (= only `fox`). */
+  /** The backends a new conversation can use; absent from older Hosts. */
   supportedBackends?: string[]
   /** Backends retired in this build; absent from older Hosts (= derived from `options`). */
   retiredBackends?: string[]
@@ -174,9 +182,10 @@ export interface AgentBackendStatus {
 }
 
 /**
- * How an existing conversation may be presented. `read_only_retired` is the
- * only read-only value this build produces (mirrors
- * `SessionAccess::ReadOnlyRetired`); the two others stay for older Hosts.
+ * How an existing conversation may be presented (mirrors
+ * `host_routing::session_access`): `read_only_disabled` when the
+ * administrator switched its backend off, `read_only_retired` for a retired
+ * backend (none since plan C1); `read_only_not_wired` stays for older Hosts.
  */
 export type AgentBackendAccess = 'runnable' | 'read_only_retired' | 'read_only_disabled' | 'read_only_not_wired'
 
@@ -229,23 +238,20 @@ export function agentBackendLockNotice(backend: AgentBackendId, access: AgentBac
 }
 
 /**
- * Why a new conversation cannot choose a driver: this build has exactly one,
- * and every external one is retired (no environment variable, stored
- * preference or IPC call can bring one back).
+ * Why a new conversation cannot choose an external driver: every one is
+ * switched off by the administrator or retired.
  */
 export function agentBackendPickerDisabledReason(status: AgentBackendStatus | null | undefined): string {
   const names = agentBackendRetiredIds(status).map((backend) => AGENT_BACKEND_LABELS[backend]).join(' / ')
   const retired = names ? `外部 Agent 后端（${names}）已退休；` : ''
-  return `本版本只支持内置 ${BUILTIN_AGENT_DRIVER_LABEL} 驱动，${retired}新会话无法选择其他 Agent 后端。`
+  return `${retired}其余外部 Agent 已被管理员关闭（${status?.switchEnv ?? 'FOX_EXTERNAL_BACKENDS'}），新会话只能使用内置 ${BUILTIN_AGENT_DRIVER_LABEL} 驱动。`
 }
 
 // ---------------------------------------------------------------------------
-// Settings batch, items 4 / 5: 设置 →「新会话使用的 Agent」.
-// Since the single Pi mainline that row is a plain statement, not a select:
-// the saved value is still reported (`defaultBackend`) so an old preference can
-// be explained, but `effectiveBackend` is always the built-in route and every
-// external backend is retired. Existing conversations keep their own binding,
-// shown and read-only.
+// Settings batch, items 4 / 5: 设置 →「新会话使用的 Agent」(a select again
+// since plan C1). `effectiveBackend` is the saved backend unless it is hidden,
+// retired or switched off, then Fox. Existing conversations keep their own
+// binding.
 
 export interface AgentBackendPreferenceOption {
   backend: AgentBackendId
@@ -273,7 +279,7 @@ export interface AgentBackendPreferences {
   fullAccessForbidden: boolean
   forbiddenReason: string | null
   switchEnv: string
-  /** No external backend can be used; always true since the single Pi mainline. */
+  /** No external backend can be used (the administrator switched every one off). */
   forcedOff: boolean
   /** Backends retired in this build; absent from older Hosts (= derived from `options`). */
   retiredBackends?: string[]
@@ -285,7 +291,7 @@ export interface AgentBackendPreferences {
 /** Window event fired after the settings change (detail: the new preferences). */
 export const AGENT_BACKEND_PREFERENCES_EVENT = 'fox:agent-backend-preferences-changed'
 
-/** Before the Host answered: the built-in route, nothing else. */
+/** Before the Host answered: the built-in route. */
 export const DEFAULT_AGENT_BACKEND_PREFERENCES: AgentBackendPreferences = {
   defaultBackend: NEW_CONVERSATION_AGENT_BACKEND,
   effectiveBackend: NEW_CONVERSATION_AGENT_BACKEND,
@@ -294,7 +300,7 @@ export const DEFAULT_AGENT_BACKEND_PREFERENCES: AgentBackendPreferences = {
   fullAccessForbidden: false,
   forbiddenReason: null,
   switchEnv: 'FOX_EXTERNAL_BACKENDS',
-  forcedOff: true,
+  forcedOff: false,
   retiredBackends: [...RETIRED_AGENT_BACKEND_IDS],
   options: [],
   unifiedLoginProvider: null,
@@ -302,9 +308,8 @@ export const DEFAULT_AGENT_BACKEND_PREFERENCES: AgentBackendPreferences = {
 }
 
 /**
- * The backend a NEW conversation uses. This build supports exactly one, so a
- * saved preference (or an older Host) can never bring a retired driver back:
- * the answer is always the built-in Fox route.
+ * The backend a NEW conversation uses: the Host's effective backend unless
+ * this build hides or retires it, then the built-in Fox route.
  */
 export function newConversationBackend(preferences: AgentBackendPreferences | null | undefined): AgentBackendId {
   const value = preferences?.effectiveBackend
@@ -319,11 +324,7 @@ export function agentBackendSettingValue(preferences: AgentBackendPreferences | 
   return newConversationBackend(preferences)
 }
 
-/**
- * Rows of the「新会话使用的 Agent」choice. Exactly one since the single Pi
- * mainline, which is why the settings page renders the statement instead of a
- * select (a select with one option is not a choice).
- */
+/** Rows of the「新会话使用的 Agent」select. */
 export function agentBackendSettingRows(preferences: AgentBackendPreferences | null | undefined): { value: AgentBackendId; label: string; disabled: boolean; reason: string | null }[] {
   return SELECTABLE_AGENT_BACKEND_IDS.map((backend) => {
     if (backend === 'fox') return { value: backend, label: AGENT_BACKEND_LABELS.fox, disabled: false, reason: null }
@@ -338,7 +339,7 @@ export function agentBackendSettingRows(preferences: AgentBackendPreferences | n
   })
 }
 
-/** The plain statement that replaced the「新会话使用的 Agent」select: one supported driver. */
+/** What a new conversation uses when only the built-in route can be used. */
 export const NEW_CONVERSATION_BACKEND_STATEMENT = `新会话使用内置 ${BUILTIN_AGENT_DRIVER_LABEL} 驱动`
 
 /**
@@ -353,10 +354,10 @@ export function agentBackendSavedRetiredNotice(preferences: AgentBackendPreferen
   return `之前保存的「${label}」已退休，不再用于新会话；已有的 ${label} 会话仍按原绑定显示，只能查看历史。`
 }
 
-/** Explanation beside the statement: no external backend can be used in this build. */
+/** Explanation beside the select: the administrator switched every external backend off. */
 export function agentBackendForcedOffNotice(preferences: AgentBackendPreferences | null | undefined): string | null {
   if (!preferences?.forcedOff) return null
-  return `外部 Agent 后端已在本版本退休，新会话一律使用内置 ${BUILTIN_AGENT_DRIVER_LABEL} 驱动。`
+  return `外部 Agent 已被管理员关闭（${preferences.switchEnv || 'FOX_EXTERNAL_BACKENDS'}），新会话一律使用内置 ${BUILTIN_AGENT_DRIVER_LABEL} 驱动。`
 }
 
 /** 旧「新外部会话使用完全访问」设置的兼容状态；界面已不再渲染该开关。 */
@@ -367,7 +368,7 @@ export function fullAccessSettingState(preferences: AgentBackendPreferences | nu
   return { checked: preferences.newExternalFullAccess, disabled: false, reason: null }
 }
 
-/** Whether a picked value can be used for a new conversation: only the supported path can. */
+/** Whether a picked value can be used for a new conversation (the Host's `enabled`). */
 export function canPickAgentBackend(backend: AgentBackendId, status: AgentBackendStatus | null | undefined): boolean {
   if (isAgentBackendRetired(backend, status)) return false
   if (isAgentBackendHidden(backend, status)) return false
@@ -401,11 +402,16 @@ export interface AgentBackendRefusal {
 
 /**
  * Why the composer input is disabled for this conversation; null when it may
- * send. A conversation bound to a retired backend is read-only (history
- * only), so a send is never made just to be refused. A Fox conversation is
- * never locked here, and a retired one is never relabelled as the built-in
- * driver.
+ * send. A conversation bound to a retired or switched-off backend is
+ * read-only (history only), so a send is never made just to be refused. A Fox
+ * conversation is never locked here, and a locked one is never relabelled as
+ * the built-in driver.
  */
+/** The refusal code that goes with `agentBackendInputLockedReason`. */
+export function agentBackendInputLockedCode(backend: AgentBackendId, status: AgentBackendStatus | null | undefined): string {
+  return agentBackendAccess(backend, status) === 'read_only_retired' ? AGENT_BACKEND_ERROR_CODES.retired : AGENT_BACKEND_ERROR_CODES.disabled
+}
+
 export function agentBackendInputLockedReason(backend: AgentBackendId, status: AgentBackendStatus | null | undefined): string | null {
   if (backend === NEW_CONVERSATION_AGENT_BACKEND) return null
   const access = agentBackendAccess(backend, status)

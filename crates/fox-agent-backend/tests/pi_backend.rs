@@ -99,6 +99,7 @@ fn tool_approval_is_decoded_only_from_the_fox_gate() {
     assert_eq!(approval.tool_name, "bash");
     assert_eq!(approval.input["command"], "ls");
     assert_eq!(approval.dialog_tool_call_id, "pi-ui-1234");
+    assert_eq!(approval.cwd.as_deref(), Some("/w"));
     // Another extension's confirm is not a tool approval.
     assert!(parse_tool_approval(&gate_request("Delete?", "really?", &["yes", "no"])).is_none());
     // Spoofed title without the marker.

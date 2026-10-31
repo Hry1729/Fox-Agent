@@ -199,6 +199,8 @@ pub struct ToolApproval {
     pub input: Value,
     /// pi-acp's id for the dialog (`pi-ui-<uuid>`), not the tool call id.
     pub dialog_tool_call_id: String,
+    /// The working directory pi reported for the call (`ctx.cwd`).
+    pub cwd: Option<String>,
 }
 
 /// Decode a gate approval. Returns `None` for any other permission request
@@ -231,6 +233,7 @@ pub fn parse_tool_approval(request: &Value) -> Option<ToolApproval> {
         tool_name: message.get("toolName").and_then(Value::as_str).unwrap_or("").to_owned(),
         input: message.get("input").cloned().unwrap_or(Value::Null),
         dialog_tool_call_id: tool_call.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_owned(),
+        cwd: message.get("cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()).map(str::to_owned),
     })
 }
 

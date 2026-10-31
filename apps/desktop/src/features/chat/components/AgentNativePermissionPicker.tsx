@@ -1,12 +1,13 @@
-// Per-agent native permission picker on the backend bar.
+// Per-agent permission picker on the backend bar (plan C2).
 //
-// * Lists ONLY what the shown Agent supports, in its own names (Codex:
-//  「请求审批 / 帮我批准 / 完全访问权限」; dsh / pi their own lists); a row the
-//   Host greys (Codex「帮我批准」off OpenAI, FORBIDDEN, full access
-//   mid-session) shows its reason inline next to the picker.
-// * dsh: a mid-session change is marked「下一轮重启生效」.
-// * This is the Agent's own permission mode; Fox adds no outer layer. The
-//   confirmation explains the native consequences.
+// * Lists Fox's four tiers mapped to the shown Agent's own modes; a tier the
+//   Agent does not have (Codex 自动) or one the Host greys (FORBIDDEN) shows
+//   its reason inline next to the picker.
+// * When a change applies is marked: Codex「切换立即生效」, pi「下一次请求起
+//   生效」, dsh「下一轮重启生效」.
+// * Full access takes the first-time second confirmation per project, like a
+//   Fox conversation. Fox adds no outer layer; the confirmation explains the
+//   native consequences.
 // * Keyed by target: a late answer for another conversation / backend is
 //   dropped. Every rule is enforced again by the Host.
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -30,22 +31,24 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
-export function AgentNativePermissionPicker({ client, conversationId, backend, tick = 0, onChanged }: {
+export function AgentNativePermissionPicker({ client, conversationId, backend, projectId = null, tick = 0, onChanged }: {
   client: NativePermissionClient
   /** The open conversation; null for a new conversation of `backend`. */
   conversationId: string | null
   backend: string
+  /** A new conversation's project (full access is confirmed once per project). */
+  projectId?: string | null
   tick?: number
   onChanged?: (view: NativePermissionView) => void
 }) {
-  const key = JSON.stringify([conversationId, backend])
+  const key = JSON.stringify([conversationId, backend, projectId])
   const [state, setState] = useState<{ key: string; view: NativePermissionView } | null>(null)
   const [pending, setPending] = useState<{ key: string; mode: string; change: NativePermissionChange } | null>(null)
   const [message, setMessage] = useState<{ key: string; text: string; error: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
   const sequence = useRef(0)
 
-  const request = useCallback((): NativePermissionRequest => (conversationId ? { conversationId } : { backend }), [conversationId, backend])
+  const request = useCallback((): NativePermissionRequest => (conversationId ? { conversationId } : { backend, projectId }), [conversationId, backend, projectId])
 
   useEffect(() => {
     const id = ++sequence.current
@@ -61,11 +64,11 @@ export function AgentNativePermissionPicker({ client, conversationId, backend, t
   const rows = nativePermissionRows(view)
   if (!view || rows.length === 0) return null
 
-  const apply = async (mode: string) => {
+  const apply = async (mode: string, confirmFullAccess = false) => {
     setBusy(true)
     const id = sequence.current
     try {
-      const next = await client.agentBackendNativePermissionSet({ ...request(), mode })
+      const next = await client.agentBackendNativePermissionSet({ ...request(), mode, ...(confirmFullAccess ? { confirmFullAccess: true } : {}) })
       if (id !== sequence.current) return
       setState({ key, view: next })
       const notice = nativeAppliedNotice(next)
@@ -106,7 +109,7 @@ export function AgentNativePermissionPicker({ client, conversationId, backend, t
           </option>
         ))}
       </select>
-      {badge && <span className="fox-agent-backend-notice" data-native-badge="next_turn">{badge}</span>}
+      {badge && <span className="fox-agent-backend-notice" data-native-badge={view.catalog.switchTiming}>{badge}</span>}
       {/* Every greyed option says why, inline (the full-access lock mid-session too, 13.19 fix ③). */}
       {rows.filter((row) => row.disabled && row.reason).map((row) => (
         <span key={row.value} className="fox-agent-backend-notice" role="note" data-disabled-option={row.value}>{row.label}：{row.reason}</span>
@@ -114,7 +117,7 @@ export function AgentNativePermissionPicker({ client, conversationId, backend, t
       {shownPending?.change.kind === 'confirm_full_access' && (
         <span className="fox-agent-backend-risk" role="alertdialog" aria-label="确认完全访问">
           {shownPending.change.points.join('')}{FULL_ACCESS_PRIVATE_HOME_NOTE}
-          <button type="button" onClick={() => void apply(shownPending.mode)}>确认使用完全访问</button>
+          <button type="button" onClick={() => void apply(shownPending.mode, true)}>确认使用完全访问</button>
           <button type="button" onClick={() => setPending(null)}>取消</button>
         </span>
       )}
