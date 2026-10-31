@@ -260,8 +260,9 @@ jobs:
           if-no-files-found: ignore
 
   # External agent backends (ACP): fox-agent-backend with the acp feature.
-  # Real-backend tests stay gated off (FOX_TEST_REAL_ACP unset). Runs on full
-  # runs, and on targeted runs when the acp input is set.
+  # The FOX_TEST_REAL_ACP tests stay gated off; the real pi + pi-acp Fox tool
+  # tests (pi_real_fox_tools, fox-fix-pi) run against the pinned lockfile.
+  # Runs on full runs, and on targeted runs when the acp input is set.
   agent-backend:
     name: Agent backend (ACP) tests
     if: ${{ !inputs.targeted || inputs.acp }}
@@ -283,6 +284,23 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           key: agent-backend-acp
+
+      - name: Real pi runtime for pi_real_fox_tools (pinned lockfile + audited patches)
+        # fox-fix-pi: real pi-acp 0.0.34 + pi 1.4.0 from the runtime package's
+        # lockfile, patched by runtime_patches.py like the package build. The
+        # real-pi tests (tests/pi_real_fox_tools.rs) fail instead of skipping.
+        shell: bash
+        run: |
+          set -euo pipefail
+          rt="$RUNNER_TEMP/fox-pi-runtime"
+          if command -v cygpath >/dev/null 2>&1; then rt_unix="$(cygpath -u "$rt")"; else rt_unix="$rt"; fi
+          mkdir -p "$rt_unix/backends"
+          cp -r crates/fox-agent-backend/scripts/windows/runtime-package/backends/pi "$rt_unix/backends/pi"
+          (cd "$rt_unix/backends/pi" && npm ci --no-audit --no-fund --loglevel=error)
+          PYTHON="$(command -v python3 || command -v python)"
+          "$PYTHON" crates/fox-agent-backend/scripts/windows/runtime_patches.py "$rt_unix"
+          echo "FOX_PI_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
+          echo "FOX_REQUIRE_REAL_PI=1" >> "$GITHUB_ENV"
 
       - name: Test fox-agent-backend (acp)
         run: cargo test -p fox-agent-backend --features acp --no-fail-fast
@@ -310,6 +328,23 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           key: agent-backend-acp-linux
+
+      - name: Real pi runtime for pi_real_fox_tools (pinned lockfile + audited patches)
+        # fox-fix-pi: real pi-acp 0.0.34 + pi 1.4.0 from the runtime package's
+        # lockfile, patched by runtime_patches.py like the package build. The
+        # real-pi tests (tests/pi_real_fox_tools.rs) fail instead of skipping.
+        shell: bash
+        run: |
+          set -euo pipefail
+          rt="$RUNNER_TEMP/fox-pi-runtime"
+          if command -v cygpath >/dev/null 2>&1; then rt_unix="$(cygpath -u "$rt")"; else rt_unix="$rt"; fi
+          mkdir -p "$rt_unix/backends"
+          cp -r crates/fox-agent-backend/scripts/windows/runtime-package/backends/pi "$rt_unix/backends/pi"
+          (cd "$rt_unix/backends/pi" && npm ci --no-audit --no-fund --loglevel=error)
+          PYTHON="$(command -v python3 || command -v python)"
+          "$PYTHON" crates/fox-agent-backend/scripts/windows/runtime_patches.py "$rt_unix"
+          echo "FOX_PI_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
+          echo "FOX_REQUIRE_REAL_PI=1" >> "$GITHUB_ENV"
 
       - name: Test fox-agent-backend (acp)
         run: cargo test -p fox-agent-backend --features acp --no-fail-fast

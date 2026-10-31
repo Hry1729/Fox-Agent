@@ -17,7 +17,10 @@
 //! `scripts/windows/runtime_patches.py`; the Linux ACP CI job builds it.
 //! Without it the tests print SKIPPED (not a pass); with
 //! `FOX_REQUIRE_REAL_PI=1` (CI) a missing runtime fails.
-#![cfg(all(feature = "acp", unix))]
+//!
+//! Runs on Linux and on Windows (there through the real `pi-gated.cmd`,
+//! `pi.cmd` / `pi-acp.cmd` npm shims and cmd.exe, which is where 13.32 failed).
+#![cfg(feature = "acp")]
 
 use fox_agent_backend::acp::AcpConnection;
 use fox_agent_backend::capability_view::PiLaunch;
@@ -35,7 +38,7 @@ use std::time::{Duration, Instant};
 
 fn runtime_dir(test: &str) -> Option<PathBuf> {
     let dir = std::env::var_os("FOX_PI_RUNTIME_DIR").map(PathBuf::from);
-    let usable = dir.as_ref().filter(|dir| dir.join("backends/pi/node_modules/.bin/pi-acp").is_file() && dir.join("backends/pi/node_modules/.bin/pi").is_file());
+    let usable = dir.as_ref().filter(|dir| dir.join(shim("backends/pi/node_modules/.bin/pi-acp")).is_file() && dir.join(shim("backends/pi/node_modules/.bin/pi")).is_file());
     match usable {
         Some(dir) => Some(dir.clone()),
         None if std::env::var("FOX_REQUIRE_REAL_PI").as_deref() == Ok("1") => {
@@ -46,6 +49,11 @@ fn runtime_dir(test: &str) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// npm's command shim: `<name>.cmd` on Windows.
+fn shim(path: &str) -> String {
+    if cfg!(windows) { format!("{path}.cmd") } else { path.to_owned() }
 }
 
 fn fixtures() -> PathBuf {
@@ -164,36 +172,49 @@ impl ExternalLauncher for RealPiLauncher {
                 Wiring::Endpoint(endpoint) => env.iter_mut().filter(|(key, _)| key == fox_mcp::ENDPOINT_ENV).for_each(|(_, value)| *value = endpoint.clone()),
                 Wiring::WrongToken => env.iter_mut().filter(|(key, _)| key == fox_mcp::TOKEN_ENV).for_each(|(_, value)| *value = "0".repeat(64)),
             }
-            // The checkout stores the gate without its executable bit:
-            // pi-acp spawns a private executable copy next to the gate it loads.
+            // The gate and what it loads, as the runtime package lays them
+            // out (pi-gate/). Unix: the checkout stores pi-gated.sh without its
+            // executable bit, so pi-acp spawns a private executable copy.
             let gate = launcher.state_root.join("pi-gate");
             std::fs::create_dir_all(&gate).unwrap();
-            for file in ["pi-gated.sh", "fox-approval-gate.ts"] {
+            let gate_script = if cfg!(windows) { "pi-gated.cmd" } else { "pi-gated.sh" };
+            for file in [gate_script, "fox-approval-gate.ts"] {
                 std::fs::copy(fixtures().join(file), gate.join(file)).unwrap();
             }
+            #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(gate.join("pi-gated.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+                std::fs::set_permissions(gate.join(gate_script), std::fs::Permissions::from_mode(0o755)).unwrap();
             }
             let home = launcher.state_root.join(format!("home-{}", request.session_key));
             std::fs::create_dir_all(&home).unwrap();
             let bin = launcher.runtime.join("backends/pi/node_modules/.bin");
-            let path = format!("{}:{}:{}", bin.display(), node.parent().unwrap().display(), std::env::var("PATH").unwrap_or_default());
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            let path = [bin.display().to_string(), node.parent().unwrap().display().to_string(), std::env::var("PATH").unwrap_or_default()].join(separator);
+            let scripted = fixtures().join("scripted-provider.ts").display().to_string();
             env.extend([
-                ("PI_ACP_PI_COMMAND".to_owned(), gate.join("pi-gated.sh").display().to_string()),
-                ("FOX_PI_BIN".to_owned(), bin.join("pi").display().to_string()),
+                ("PI_ACP_PI_COMMAND".to_owned(), gate.join(gate_script).display().to_string()),
+                ("FOX_PI_BIN".to_owned(), bin.join(shim("pi")).display().to_string()),
                 ("HOME".to_owned(), home.display().to_string()),
+                ("USERPROFILE".to_owned(), home.display().to_string()),
                 ("PATH".to_owned(), path),
-                ("FOX_PI_EXTRA_ARGS".to_owned(), format!("-e {} --provider foxscripted --model scripted", fixtures().join("scripted-provider.ts").display())),
                 // The scripted model listens on 127.0.0.1 inside pi.
                 ("NO_PROXY".to_owned(), "127.0.0.1,localhost".to_owned()),
                 ("no_proxy".to_owned(), "127.0.0.1,localhost".to_owned()),
                 // Failure cases should not wait the production 20 s.
                 ("FOX_MCP_INIT_TIMEOUT_MS".to_owned(), "4000".to_owned()),
             ]);
+            // The scripted model: pi-gated.cmd quotes one test extension path
+            // (FOX_PI_TEST_EXTENSION); FOX_PI_EXTRA_ARGS is word-split there.
+            if cfg!(windows) {
+                env.push(("FOX_PI_TEST_EXTENSION".to_owned(), scripted));
+                env.push(("FOX_PI_EXTRA_ARGS".to_owned(), "--provider foxscripted --model scripted".to_owned()));
+            } else {
+                env.push(("FOX_PI_EXTRA_ARGS".to_owned(), format!("-e {scripted} --provider foxscripted --model scripted")));
+            }
             let spec = LaunchSpec {
                 backend: AgentBackend::Pi,
-                program: bin.join("pi-acp").display().to_string(),
+                program: bin.join(shim("pi-acp")).display().to_string(),
                 args: vec![],
                 version_pin: fox_agent_backend::launch::PI_ACP_VERSION,
                 credential_env: &[],
