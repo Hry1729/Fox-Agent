@@ -80,6 +80,9 @@ use protocol::{HostResponse, RuntimeCapabilityManifest, RuntimeEnvelope, Runtime
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+// The runtime_host test modules (`use super::*`) call `creation_flags`.
+#[cfg(all(windows, test))]
+use std::os::windows::process::CommandExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::{BufRead, BufReader, Write},
