@@ -636,4 +636,82 @@ mod tests {
         assert!(!rule_eligible(&bare_answer.policy), "没有项目时不 eligible");
         assert!(bare_answer.policy.get("command").is_none());
     }
+
+    fn gate_in(cwd: &Path, tool: &str, input: Value) -> Value {
+        let message = json!({ "fox": "tool-approval", "v": 1, "toolCallId": "call_1", "toolName": tool, "input": input, "cwd": cwd }).to_string();
+        json!({
+            "sessionId": "s1",
+            "toolCall": { "toolCallId": "pi-ui-1", "title": format!("Fox approval: {tool}"), "kind": "other", "status": "pending",
+                "rawInput": { "method": "confirm", "title": format!("Fox approval: {tool}"), "message": message } },
+            "options": [{ "optionId": "yes", "name": "Yes", "kind": "allow_once" }, { "optionId": "no", "name": "No", "kind": "reject_once" }]
+        })
+    }
+
+    /// 询问档的包装 `dir` 用内层前缀，卡片上的 command 仍是整条原文。完全访问删项目根仍拒绝。
+    #[test]
+    fn wrapped_pi_dir_offers_the_inner_prefix_and_root_delete_stays_blocked() {
+        let project = root();
+        let cwd = project.to_string_lossy();
+        let wrapped = format!(r#"cd "{cwd}" && dir 2>&1; echo "EXIT_CODE: $?""#);
+        let request = gate("bash", json!({ "command": wrapped }));
+        let (tool, decision) = decide_pi("ask", &request, Some(&project), Some(&home()), &[]);
+        let answer = answer_from(&tool, &decision, &options(), true, Some(&wrapped), Some(&cwd));
+        assert_eq!(answer.decision, AutoPermission::Ask);
+        assert_eq!(answer.policy["projectRule"]["eligible"], true);
+        assert_eq!(answer.policy["projectRule"]["suggestedPrefix"], "dir");
+        assert_eq!(answer.policy["command"], wrapped);
+        assert_eq!(answer.policy["innerCommand"], "dir");
+
+        let deletion = format!(r#"cd "{cwd}" && rm -rf . 2>&1; echo $?"#);
+        let request = gate("bash", json!({ "command": deletion }));
+        let (tool, decision) = decide_pi(PI_FULL, &request, Some(&project), Some(&home()), &[]);
+        assert!(decision.is_block(), "{:?}", decision.verdict);
+        let answer = answer_from(&tool, &decision, &options(), true, Some(&deletion), Some(&cwd));
+        assert!(matches!(answer.decision, AutoPermission::Reject { .. }));
+        assert_eq!(answer.policy["denyCode"], "permission.blocked");
+        let findings = answer.policy["findings"].as_array().expect("findings");
+        assert!(findings.iter().any(|finding| finding == "builtin_block"), "{findings:?}");
+    }
+
+    /// 完全访问下包装的删项目根记一条 block 审计；询问档用内层前缀保存规则后，同样的包装请求放行。
+    #[test]
+    fn wrapped_pi_root_delete_is_audited_and_a_dir_rule_allows_the_same_wrapper() {
+        let database = crate::database::Database::open(PathBuf::from(":memory:")).expect("database");
+        let scratch = TempRoot(std::env::temp_dir().join(format!("fox-pi-wrap-{}", uuid::Uuid::new_v4())));
+        std::fs::create_dir_all(scratch.path()).expect("root");
+        // 引擎会 canonicalize 项目根；命令里的 cwd 用同一条路径，cd 目标才能对上。
+        let project = scratch.path().canonicalize().expect("canonical project");
+        let cwd = project.to_str().expect("utf-8 project").to_owned();
+        // Windows 上 canonicalize 得到 `\\?\C:\...`；模型写的 cd 目标是普通路径。
+        // 双引号里的 `\\` 在 bash 里会被解码成一个反斜杠，所以 cd 目标用去掉前缀的普通路径。
+        let plain = cwd.strip_prefix(r"\\?\").unwrap_or(&cwd).to_owned();
+        let conversation = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("pi-wrap"), Some(&cwd), Some("ask"), "pi")
+            .expect("conversation")
+            .id;
+        let policy = database.execution_policy(&conversation).expect("policy");
+        database
+            .change_execution_policy_with_access(&conversation, "fox-1334-full", policy.version, "allow", true)
+            .expect("full access");
+        let deletion = format!(r#"cd "{plain}" && rm -rf . 2>&1; echo $?"#);
+        let delete_request = gate_in(&project, "bash", json!({ "command": deletion }));
+        let blocked = answer_pi_request(&database, "run-1", &conversation, PI_FULL, &delete_request, &options()).expect("blocked");
+        assert!(matches!(blocked.decision, AutoPermission::Reject { .. }));
+        assert_eq!(blocked.policy["denyCode"], "permission.blocked");
+        let audit = database.permission_audit_list(None, Some(&conversation), 10).expect("audit");
+        assert_eq!(audit.len(), 1, "完全访问的 block 多一行审计");
+        assert_eq!(audit[0].reason, "permission.blocked");
+        assert!(audit[0].findings.iter().any(|finding| finding == "builtin_block"), "{:?}", audit[0].findings);
+
+        let policy = database.execution_policy(&conversation).expect("policy after full");
+        database
+            .change_execution_policy_with_access(&conversation, "fox-1334-ask", policy.version, "ask", false)
+            .expect("back to ask");
+        let wrapped = format!(r#"cd "{plain}" && dir 2>&1; echo "EXIT_CODE: $?""#);
+        let approval = pi_approval(&conversation, &wrapped, &cwd, &["allow_once", "allow_project_rule", "deny"]);
+        allow_pi_with_project_rule(&database, &approval, "dir").expect("dir 覆盖内层");
+        let again = gate_in(&project, "bash", json!({ "command": wrapped }));
+        let allowed = answer_pi_request(&database, "run-1", &conversation, "ask", &again, &options()).expect("allowed");
+        assert!(matches!(allowed.decision, AutoPermission::Allow { .. }), "{:?}", allowed.policy);
+    }
 }

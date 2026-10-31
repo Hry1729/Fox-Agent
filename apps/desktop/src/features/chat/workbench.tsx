@@ -1,7 +1,7 @@
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { AgentBackendPanel } from './components/AgentBackendPanel'
 import { AGENT_BACKEND_REFUSED, agentBackendAccess, agentBackendInputLockedReason, conversationAgentBackend, isAgentBackendHidden, isAgentBackendRetired, NEW_CONVERSATION_AGENT_BACKEND, type AgentBackendId } from '@/features/conversations/model/agent-backend'
-import { approvalCatalogFor, draftCarryTier, type ApprovalModeLists, type FoxPermissionTier, type NativePermissionView } from '@/features/conversations/model/agent-native-permission'
+import { approvalCatalogFor, draftCarryTier, refreshesNativePermission, type ApprovalModeLists, type FoxPermissionTier, type NativePermissionView } from '@/features/conversations/model/agent-native-permission'
 import { NativeApprovalControl } from './composer/composer-approval-control'
 import { type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { expertErrorMessage, expertInteractionLocked, latestExpertToolAvailability } from './components/expert-binding-ui'
@@ -805,7 +805,7 @@ export function Workbench() {
     beginNewDraft()
     toast.success(`项目“${projectSelection.path.split(/[\\/]/).filter(Boolean).at(-1) ?? projectSelection.path}”已加入当前对话`)
   }
-  const changeProjectPermission = async (accessMode: ComposerAccessMode) => {
+  const changeProjectPermission = async (accessMode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => {
     const conversationId = desktopConversation.detail?.conversation.id
     const projectId = desktopConversation.detail?.conversation.projectId ?? activeProject?.id
     const permissionMode = storedPermissionMode(accessMode)
@@ -816,8 +816,11 @@ export function Workbench() {
         // A1: four modes; a mid-Run switch applies from the next tool call.
         const policy = await desktopClient.conversationPermissionState(conversationId)
         try {
+          // 输入框已经确认过完全访问时，第一次请求就带 confirmFullAccess。
+          // Host 若仍返回 permission.full_access_confirmation_required，下面的兜底保留。
           await desktopClient.updateConversationPermission(
             conversationId, hostAccessMode(accessMode), crypto.randomUUID(), policy.version,
+            options?.confirmedFullAccess === true,
           )
         } catch (cause) {
           // The first full access in a project needs an explicit second
@@ -1299,7 +1302,7 @@ export function Workbench() {
   const handleInitialAttachmentsConsumed = useStableCallback((requestId: number) => {
     setComposerInitialAttachments((request) => request?.requestId === requestId ? null : request)
   })
-  const handleComposerPermissionModeChange = useStableCallback((accessMode: ComposerAccessMode) => changeProjectPermission(accessMode))
+  const handleComposerPermissionModeChange = useStableCallback((accessMode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => changeProjectPermission(accessMode, options))
   const handleComposerAgentChange = useStableCallback((agentId: string) => {
     void desktopConversation.createConversationForAgent(agentId).then((created) => {
       if (!created) toast.error(desktopConversation.error ?? '无法切换这个助手')
@@ -1528,17 +1531,35 @@ export function Workbench() {
   const draftCarry = useRef<{ backend: AgentBackendId; tier: FoxPermissionTier | '' } | null>(null)
   const previousDraftBackend = useRef<AgentBackendId | null>(null)
   if (lockedAgentBackend) {
+    if (previousDraftBackend.current !== null) desktopConversation.setDraftNativePermission(null)
     previousDraftBackend.current = null
     draftCarry.current = null
   } else if (previousDraftBackend.current !== shownDraftBackend) {
     const previous = previousDraftBackend.current
     previousDraftBackend.current = shownDraftBackend
     draftCarry.current = { backend: shownDraftBackend, tier: draftCarryTier(previous, shownDraftBackend, draftFoxMode, lastDraftTier.current) }
+    // 切到另一个 Agent 后，旧草稿档位不能带进下一次创建，等新视图回来再写入。
+    if (previous !== null) desktopConversation.setDraftNativePermission(null)
   }
   const handleApprovalView = useStableCallback((view: NativePermissionView) => {
-    if (view.draft && view.currentTier) lastDraftTier.current = { backend: view.catalog.backend as AgentBackendId, tier: view.currentTier }
+    // 用渲染期写好的 ref，避免切 Agent 后旧请求把上一个后端的档位写回来。
+    if (!view.draft || view.catalog.backend !== previousDraftBackend.current) return
+    if (view.currentTier) lastDraftTier.current = { backend: view.catalog.backend as AgentBackendId, tier: view.currentTier }
+    desktopConversation.setDraftNativePermission(view.current)
   })
   const carryTier: FoxPermissionTier | '' = draftCarry.current && draftCarry.current.backend === shownDraftBackend ? draftCarry.current.tier : ''
+  // 本会话的 dsh 进程建立，或 Run 开始 / 进入终态时，重新拉权限视图以清掉「下一轮生效」。
+  const nativePermissionConversationId = approvalExternal && lockedAgentBackend ? openConversationId : null
+  const [nativePermissionTick, setNativePermissionTick] = useState(0)
+  useEffect(() => {
+    if (!desktopConversation.enabled || !nativePermissionConversationId) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    desktopClient.listenRuntimeEvents((notification) => {
+      if (refreshesNativePermission(notification, nativePermissionConversationId)) setNativePermissionTick((tick) => tick + 1)
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop }).catch(() => {})
+    return () => { disposed = true; unlisten?.() }
+  }, [desktopConversation.enabled, nativePermissionConversationId])
   const approvalControl = useMemo(() => approvalExternal ? (
     <NativeApprovalControl
       key={lockedAgentBackend ? `conversation:${openConversationId}` : `draft:${approvalBackend}`}
@@ -1547,10 +1568,11 @@ export function Workbench() {
       backend={approvalBackend}
       projectId={lockedAgentBackend ? null : draftProjectId}
       carryTier={carryTier}
+      tick={nativePermissionTick}
       disabled={chatState === 'running' && !lockedAgentBackend}
       onView={handleApprovalView}
     />
-  ) : undefined, [approvalExternal, lockedAgentBackend, openConversationId, approvalBackend, draftProjectId, carryTier, chatState, handleApprovalView])
+  ) : undefined, [approvalExternal, lockedAgentBackend, openConversationId, approvalBackend, draftProjectId, carryTier, nativePermissionTick, chatState, handleApprovalView])
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
     <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} approvalControl={approvalControl} foxApprovalCatalog={foxApprovalCatalog} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={conversationAccessMode(desktopConversation.detail?.conversation) ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} sendFailureReason={desktopConversation.lastSendFailureReason} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>

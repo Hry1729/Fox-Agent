@@ -1869,6 +1869,10 @@ C. Codex（codex-acp）
 D. dsh
 7. 真实 dsh：四档可用；会话中切换显示「下一轮重启生效」，下一轮确实以新预设重启；撤销完全访问时原进程完全结束后才重建。Fox 工具同第 6 项（5 个工具、present_files / search_knowledge 成功）。
 
+dsh 的「工作区完全修改」（`workspace-write`）**只限制写入**：在工作区外写文件会弹审批卡，**读取工作区外的文件不弹卡**（dsh 自己的 workspace-write 策略不管读）。
+
+删除项目根的内置 block 现在有不依赖模型的端到端测试 `tests/host_block_e2e.rs`（假 Agent `tests/fixtures/mock-acp-permission-probe.mjs` 在完全访问下直接发 ACP `session/request_permission`；`cargo test -p fox-agent-backend --features acp` 会在 Windows 与 Linux 的 Agent backend (ACP) tests 里都跑到）。覆盖的写法：Windows 盘符根 `D:\fox-test\测试项目` 上的 `cmd //c "rd /s /q …"`、`cmd /c rmdir /s /q …`、`rm -rf` 盘符路径与 `/d/` 路径、`cd .. && rd /s /q 测试项目`，以及 pi 的 `cd "<cwd>" && … 2>&1; echo …$?` 包装；POSIX 根 `/work/fox-e2e/proj` 上的 `rm -rf <根>`、`cd .. && rm -rf proj`、`cd "<根>" && rm -rf . 2>&1; echo $?`；Codex 的字符串命令和 `["bash","-lc","rm -rf <根>"]`。Host 直接拒绝、不出审批卡，审计 reason 为 `permission.blocked`，findings 含 `builtin_block`。
+
 E. 外部 Agent 通用
 8. ask_user 往返：外部 Agent（三家各一次）调 ask_user → 本轮以等待用户结束、出现提问卡片 → 回答后作为下一轮发给同一会话，卡片关闭。
 9. 外部 Agent 完全访问的二次确认：每个项目第一次要确认，确认后同一项目新建会话不再询问；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN` 时三家的完全访问都置灰。

@@ -98,8 +98,9 @@ describe('model', () => {
     expect(nativePermissionChange(engineering, 'workspace-write').kind).toBe('confirm_revoke')
     expect(nativePermissionChange(view(dshCatalog), 'read-only').kind).toBe('apply')
     expect(nativePermissionChange(view(dshCatalog), 'workspace-write-never').kind).toBe('none')
-    // Plan C2: a project that already confirmed full access once is not asked again.
-    expect(nativePermissionChange(view(codexCatalog(), { draft: true, projectFullAccessConfirmed: true }), 'agent-full-access').kind).toBe('apply')
+    // 13.34：项目确认过完全访问也不再跳过，每次手动选择都要确认。
+    expect(nativePermissionChange(view(codexCatalog(), { draft: true, projectFullAccessConfirmed: true }), 'agent-full-access').kind).toBe('confirm_full_access')
+    expect(nativePermissionChange(view(piCatalog, { projectFullAccessConfirmed: true }), 'full_access').kind).toBe('confirm_full_access')
     expect(nativePermissionChange(view(piCatalog, { projectFullAccessConfirmed: false }), 'full_access').kind).toBe('confirm_full_access')
   })
 
@@ -195,13 +196,15 @@ describe('picker', () => {
     await waitFor(() => expect(calls).toEqual([{ backend: 'codex', projectId: 'p1', mode: 'agent-full-access', confirmFullAccess: true }]))
   })
 
-  test('new conversation in a project that already confirmed full access: applied without asking again', async () => {
+  test('new conversation in a project that already confirmed full access still asks, then sends confirmFullAccess', async () => {
     const { client, calls } = fakeClient(view(piCatalog, { draft: true, fullAccessLockedReason: null, projectFullAccessConfirmed: true }))
     render(<AgentNativePermissionPicker client={client} conversationId={null} backend="pi" projectId="p1" />)
     const select = await screen.findByLabelText('权限') as HTMLSelectElement
     fireEvent.change(select, { target: { value: 'full_access' } })
-    expect(screen.queryByRole('alertdialog')).toBeNull()
-    await waitFor(() => expect(calls).toEqual([{ backend: 'pi', projectId: 'p1', mode: 'full_access' }]))
+    expect(calls).toHaveLength(0)
+    expect(screen.getByRole('alertdialog', { name: '确认完全访问' })).toBeTruthy()
+    fireEvent.click(screen.getByText('确认使用完全访问'))
+    await waitFor(() => expect(calls).toEqual([{ backend: 'pi', projectId: 'p1', mode: 'full_access', confirmFullAccess: true }]))
   })
 
   test('mid-session full access: leaving it goes through the revoke confirmation', async () => {

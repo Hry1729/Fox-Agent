@@ -629,13 +629,10 @@ pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> 
 // * `agent_backend.native_mode.last.<backend>`: each Agent's default
 //   non-full-access choice (设置 → 默认权限), the starting point of a new
 //   conversation that made no pick of its own.
-// * `agent_backend.native_mode.draft.<backend>`: the new conversation's own
-//   non-full-access pick (or the mode carried over when the user switched
-//   its Agent); consumed at creation.
-// * `agent_backend.native_mode.draft_full.<backend>`: `1` / `0` when the
-//   user picked (or left) the full-access option in a new conversation's
-//   list; read once at creation and cleared. Absent: the setting is ignored;
-//   the Agent's last non-full-access choice is the default.
+// * `agent_backend.native_mode.draft.<backend>`: 草稿选择器当前的非完全访问档位
+//   （切 Agent 时沿用的档位也写在这里）。只给草稿视图显示，创建会话不再读取。
+// * `agent_backend.native_mode.draft_full.<backend>`: 草稿里是否明确确认过完全访问
+//   （`1` / `0`）。创建时只用来校验显式的完全访问请求，之后和 draft 键一起清空。
 
 pub(crate) const NATIVE_MODE_CONVERSATION_PREFIX: &str = "agent_backend.native_mode.conversation.";
 pub(crate) const NATIVE_MODE_LAST_PREFIX: &str = "agent_backend.native_mode.last.";
@@ -671,21 +668,101 @@ pub(crate) fn clear_draft_full_access_choice(database: &crate::database::Databas
     let _ = database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "");
 }
 
-/// Record a new conversation's starting native mode. An explicit full-access
-/// pick stores the Agent's own full mode; otherwise the draft's own pick,
-/// else the Agent's default (设置). The draft pick is consumed.
-pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend, full_access: bool) {
-    let draft = stored_draft_native_mode(database, backend);
+/// 创建之后清空该后端的两枚草稿键，无论起始档位走哪条路径。
+fn clear_draft_native_keys(database: &crate::database::Database, backend: AgentBackend) {
     let _ = database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()), "");
-    let mode = if full_access {
-        fox_agent_backend::native_permission::full_access_mode(backend).map(str::to_owned)
-    } else {
-        draft.or_else(|| stored_last_native_mode(database, backend))
-    };
-    if let Some(mode) = mode {
-        if fox_agent_backend::native_permission::is_known(backend, &mode) {
-            let _ = database.set_app_setting(&format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode);
+    clear_draft_full_access_choice(database, backend);
+}
+
+/// 显式 `nativePermission` 不能作为起始档位时的失败。不改写成别的档位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeModeRefusal {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// 新外部会话的起始档位。
+///
+/// * `requested` 有值：必须是该后端已列出、未置灰的选项。完全访问还要求
+///   `draft_full == Some(true)`（草稿里确认过）且不在 FORBIDDEN 下，否则
+///   `agent_backend_permission_unavailable`。
+/// * `requested` 没有：用 `stored_default`（设置 → 默认权限）里仍列出、未置灰、
+///   且不是完全访问的档位；没有则用目录默认。不读取草稿档位键。
+pub(crate) fn resolve_starting_native_mode(
+    backend: AgentBackend,
+    requested: Option<&str>,
+    draft_full: Option<bool>,
+    forbidden: bool,
+    stored_default: Option<&str>,
+    context: &fox_agent_backend::native_permission::CatalogContext,
+) -> Result<String, NativeModeRefusal> {
+    use fox_agent_backend::native_permission as native;
+    let catalog = native::catalog(backend, context);
+    let unavailable = |message: String| NativeModeRefusal { code: "agent_backend_permission_unavailable", message };
+    if let Some(mode) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+        let Some(option) = catalog.options.iter().find(|option| option.id == mode) else {
+            return Err(unavailable(format!("「{}」没有权限选项「{mode}」", native::display_name(backend))));
+        };
+        if !option.listed || option.disabled_reason.is_some() {
+            let message = option.disabled_reason.clone().unwrap_or_else(|| format!("「{}」已不再提供，不能作为新会话的起始档位", option.label));
+            return Err(unavailable(message));
         }
+        if option.full_access && (forbidden || draft_full != Some(true)) {
+            let message = if forbidden {
+                native::FULL_ACCESS_FORBIDDEN_NOTE.to_owned()
+            } else {
+                format!("「{}」需要先在新会话里确认完全访问", option.label)
+            };
+            return Err(unavailable(message));
+        }
+        return Ok(option.id.to_owned());
+    }
+    if let Some(mode) = stored_default.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(option) = catalog.options.iter().find(|option| option.id == mode && option.listed && option.disabled_reason.is_none() && !option.full_access) {
+            return Ok(option.id.to_owned());
+        }
+    }
+    Ok(catalog.default_mode.to_owned())
+}
+
+/// `conversation_create` 用的起始档位：显式 `nativePermission` 优先；
+/// 否则仍尊重旧的 `externalPermissionMode`（FORBIDDEN 下明确拒绝，不静默降级）；
+/// 都没有则用后端默认。草稿档位键不参与。
+pub(crate) fn starting_native_mode_for_create(
+    state: &AppState,
+    backend: AgentBackend,
+    native_permission: Option<&str>,
+    external_permission_mode: Option<&str>,
+) -> Result<String, NativeModeRefusal> {
+    let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
+    let context = native_context(state, backend, forbidden);
+    let requested = native_permission.map(str::trim).filter(|value| !value.is_empty());
+    if requested.is_some() {
+        let draft_full = draft_full_access_choice(&state.database, backend);
+        return resolve_starting_native_mode(backend, requested, draft_full, forbidden, None, &context);
+    }
+    if let Some(external) = external_permission_mode.map(str::trim).filter(|value| !value.is_empty()) {
+        match fox_agent_backend::host_routing::decide_new_conversation_mode(Some(external), backend, forbidden) {
+            Ok(true) => {
+                let Some(full) = fox_agent_backend::native_permission::full_access_mode(backend) else {
+                    return Err(NativeModeRefusal { code: "agent_backend_permission_unavailable", message: "这个后端没有完全访问档位".to_owned() });
+                };
+                return Ok(full.to_owned());
+            }
+            Ok(false) => {}
+            Err(refusal) => return Err(NativeModeRefusal { code: refusal.code, message: refusal.message }),
+        }
+    }
+    let stored = stored_last_native_mode(&state.database, backend);
+    resolve_starting_native_mode(backend, None, None, forbidden, stored.as_deref(), &context)
+}
+
+/// 把已经决定好的起始档位写入会话，并清空该后端的草稿键。
+pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend, mode: &str) {
+    clear_draft_native_keys(database, backend);
+    let mode = mode.trim();
+    if fox_agent_backend::native_permission::is_known(backend, mode) {
+        let _ = database.set_app_setting(&format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), mode);
     }
 }
 
@@ -1191,34 +1268,98 @@ mod tests {
     /// Codex was hidden on 2026-10-24 because of Fox's outer sandbox layer. It is a
     /// normal selectable backend again; old Codex conversations keep their
     /// binding and routing.
+    /// 调用改为写入已经决定好的档位字符串（不再用 bool 从草稿键推导）；
+    /// 「不会创建 Fox 外层授权」这条断言不变。
     #[test]
     fn native_full_access_is_seeded_as_the_agent_mode_not_a_fox_grant() {
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         database.set_app_setting("agent_backend.native_mode.last.codex", "workspace-write").unwrap();
-        seed_conversation_native_mode(&database, "c-full", AgentBackend::Codex, true);
+        seed_conversation_native_mode(&database, "c-full", AgentBackend::Codex, "agent-full-access");
         assert_eq!(stored_conversation_native_mode(&database, "c-full").as_deref(), Some("agent-full-access"));
         assert!(!database.conversation_full_access_granted("c-full").unwrap(), "no Fox outer grant is created");
-        seed_conversation_native_mode(&database, "c-restricted", AgentBackend::Codex, false);
+        seed_conversation_native_mode(&database, "c-restricted", AgentBackend::Codex, "workspace-write");
         assert_eq!(stored_conversation_native_mode(&database, "c-restricted").as_deref(), Some("workspace-write"));
     }
 
-    /// Composer batch: the new conversation's own pick (or the mode carried
-    /// when its Agent was switched) wins over the Agent's default and is
-    /// consumed by creation.
+    /// 按数据库里的设置和草稿确认标志决定起始档位，不读取草稿档位键本身。
+    fn decide_start(database: &crate::database::Database, backend: AgentBackend, requested: Option<&str>) -> Result<String, NativeModeRefusal> {
+        let context = fox_agent_backend::native_permission::CatalogContext::default();
+        resolve_starting_native_mode(
+            backend,
+            requested,
+            draft_full_access_choice(database, backend),
+            false,
+            stored_last_native_mode(database, backend).as_deref(),
+            &context,
+        )
+    }
+
+    /// 旧断言是「草稿键 workspace-write 盖过设置里的 read-only，并在创建时被消费」。
+    /// 新规则：没带 nativePermission 时用设置默认（read-only），草稿键只被清空、不决定档位。
     #[test]
-    fn the_draft_pick_seeds_the_conversation_and_is_consumed() {
+    fn the_draft_pick_no_longer_seeds_the_conversation() {
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         database.set_app_setting("agent_backend.native_mode.last.deepseek", "read-only").unwrap();
         database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "workspace-write").unwrap();
         assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek).as_deref(), Some("workspace-write"));
-        seed_conversation_native_mode(&database, "c-draft", AgentBackend::Deepseek, false);
-        assert_eq!(stored_conversation_native_mode(&database, "c-draft").as_deref(), Some("workspace-write"));
-        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None, "consumed");
-        seed_conversation_native_mode(&database, "c-default", AgentBackend::Deepseek, false);
-        assert_eq!(stored_conversation_native_mode(&database, "c-default").as_deref(), Some("read-only"), "no pick: the Agent's default");
+        let mode = decide_start(&database, AgentBackend::Deepseek, None).unwrap();
+        assert_eq!(mode, "read-only", "设置默认胜出，草稿键里的 workspace-write 不再生效");
+        seed_conversation_native_mode(&database, "c-draft", AgentBackend::Deepseek, &mode);
+        assert_eq!(stored_conversation_native_mode(&database, "c-draft").as_deref(), Some("read-only"));
+        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None, "草稿键仍被清空");
+        let again = decide_start(&database, AgentBackend::Deepseek, None).unwrap();
+        seed_conversation_native_mode(&database, "c-default", AgentBackend::Deepseek, &again);
+        assert_eq!(stored_conversation_native_mode(&database, "c-default").as_deref(), Some("read-only"));
         let request: NativePermissionRequest = serde_json::from_value(serde_json::json!({ "backend": "codex", "carryTier": "ask" })).unwrap();
         assert_eq!(request.carry_tier.as_deref(), Some("ask"));
         assert!(request.mode.is_none());
+    }
+
+    /// 创建请求的起始档位：不读陈旧草稿，显式档位必须合法，完全访问必须已确认。
+    #[test]
+    fn starting_native_mode_uses_the_backend_default_unless_the_request_names_one() {
+        let context = fox_agent_backend::native_permission::CatalogContext::default();
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "read-only").unwrap();
+        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "0").unwrap();
+        let mode = decide_start(&database, AgentBackend::Deepseek, None).unwrap();
+        assert_eq!(mode, "workspace-write", "没带 nativePermission：目录默认，不采用草稿里的 read-only");
+        seed_conversation_native_mode(&database, "c-api", AgentBackend::Deepseek, &mode);
+        assert_eq!(stored_conversation_native_mode(&database, "c-api").as_deref(), Some("workspace-write"));
+        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None);
+        assert_eq!(draft_full_access_choice(&database, AgentBackend::Deepseek), None);
+
+        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "workspace-write").unwrap();
+        let explicit = decide_start(&database, AgentBackend::Deepseek, Some("read-only")).unwrap();
+        assert_eq!(explicit, "read-only");
+        seed_conversation_native_mode(&database, "c-explicit", AgentBackend::Deepseek, &explicit);
+        assert_eq!(stored_conversation_native_mode(&database, "c-explicit").as_deref(), Some("read-only"));
+        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None, "显式路径同样清空草稿键");
+
+        database.set_app_setting("agent_backend.native_mode.last.deepseek", "read-only").unwrap();
+        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "workspace-write").unwrap();
+        assert_eq!(decide_start(&database, AgentBackend::Deepseek, None).unwrap(), "read-only", "设置默认是 read-only 时没带参数用 read-only");
+
+        let unconfirmed = decide_start(&database, AgentBackend::Deepseek, Some("danger-full-access")).unwrap_err();
+        assert_eq!(unconfirmed.code, "agent_backend_permission_unavailable");
+        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "0").unwrap();
+        let declined = decide_start(&database, AgentBackend::Deepseek, Some("danger-full-access")).unwrap_err();
+        assert_eq!(declined.code, "agent_backend_permission_unavailable");
+        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "1").unwrap();
+        assert_eq!(decide_start(&database, AgentBackend::Deepseek, Some("danger-full-access")).unwrap(), "danger-full-access");
+
+        let forbidden_context = fox_agent_backend::native_permission::CatalogContext { full_access_forbidden: true, provider_base_url: None };
+        let forbidden = resolve_starting_native_mode(AgentBackend::Deepseek, Some("danger-full-access"), Some(true), true, None, &forbidden_context).unwrap_err();
+        assert_eq!(forbidden.code, "agent_backend_permission_unavailable");
+        let flagged = resolve_starting_native_mode(AgentBackend::Deepseek, Some("danger-full-access"), Some(true), true, None, &context).unwrap_err();
+        assert_eq!(flagged.code, "agent_backend_permission_unavailable");
+
+        let unlisted = decide_start(&database, AgentBackend::Deepseek, Some("workspace-write-never")).unwrap_err();
+        assert_eq!(unlisted.code, "agent_backend_permission_unavailable");
+        let unknown = decide_start(&database, AgentBackend::Deepseek, Some("not-a-mode")).unwrap_err();
+        assert_eq!(unknown.code, "agent_backend_permission_unavailable");
+        let greyed = resolve_starting_native_mode(AgentBackend::Codex, Some("agent"), None, false, None, &context).unwrap_err();
+        assert_eq!(greyed.code, "agent_backend_permission_unavailable");
     }
 
     /// C1: the gate every new conversation goes through takes any supported

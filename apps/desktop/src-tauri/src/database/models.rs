@@ -1965,6 +1965,10 @@ pub struct CreateConversationRequest {
     /// `full_access` is refused when `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`.
     #[serde(default)]
     pub external_permission_mode: Option<String>,
+    /// 新建外部会话的起始档位（选项 id）。有值则必须是该后端已列出且未置灰的选项；
+    /// 缺省时用后端默认，不再读取草稿键。
+    #[serde(default)]
+    pub native_permission: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

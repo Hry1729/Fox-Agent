@@ -1670,36 +1670,29 @@ pub async fn conversation_create(
         Err(failure) => return Ok(failure),
     };
     let external_backend = agent_backend != fox_agent_backend::port::AgentBackend::Fox;
-    // UX batch ② (semantics A): the external permission mode is chosen here,
-    // once, and locked with the backend. FORBIDDEN refuses full access
-    // outright, whatever the UI sent.
-    // Settings batch, item 5: when the request does not say, a new external
-    // conversation takes 设置 →「新外部会话使用完全访问」(off by default).
-    // Under FORBIDDEN the setting is ignored (no grant), never a refusal; an
-    // explicit `full_access` request is still refused there.
-    let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
-    // Per-agent permission list: an explicit pick in the new conversation's
-    // list (the Agent's full-access option, or any other native option) wins
-    // over the setting; read once here and cleared after creation.
+    // 草稿是否确认过完全访问：只用于「已确认的完全访问」记住到项目，不再当作起始档位。
     let draft_full = if external_backend && request.external_permission_mode.is_none() {
         agent_backend_routing::draft_full_access_choice(&state.database, agent_backend)
     } else {
         None
     };
-    let picker_mode = draft_full.map(|full| {
-        if full { fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS } else { fox_agent_backend::host_routing::NEW_MODE_STANDARD }
-    });
-    // The old Fox-wide "new external conversations use full access" setting
-    // is no longer consulted: it was the switch of Fox's removed outer sandbox, not the Agent's
-    // native mode. Only an explicit new-conversation pick can start full.
-    let native_full_access = match fox_agent_backend::host_routing::decide_new_conversation_mode(
-        request.external_permission_mode.as_deref().or(picker_mode),
-        agent_backend,
-        forbidden,
-    ) {
-        Ok(grant) => grant,
-        Err(refusal) => return Ok(ApiResponse::failure(refusal.code, refusal.message, false)),
+    // 起始档位：显式 nativePermission，或后端默认。不读草稿档位键。校验失败则不创建会话。
+    let starting_native_mode = if external_backend {
+        match agent_backend_routing::starting_native_mode_for_create(
+            &state,
+            agent_backend,
+            request.native_permission.as_deref(),
+            request.external_permission_mode.as_deref(),
+        ) {
+            Ok(mode) => Some(mode),
+            Err(error) => return Ok(ApiResponse::failure(error.code, error.message, false)),
+        }
+    } else {
+        None
     };
+    let native_full_access = starting_native_mode.as_deref().is_some_and(|mode| {
+        fox_agent_backend::native_permission::is_full_access(agent_backend, mode)
+    });
     // Plan C2: starting in the Agent's own full access takes the same
     // first-time second confirmation as a Fox conversation (per project). A
     // pick in the new conversation's permission list was confirmed there; an
@@ -1820,24 +1813,24 @@ pub async fn conversation_create(
     if external_backend {
         // Seed the Agent's native mode directly. There is no Fox outer grant:
         // full access is just one of that Agent's native modes.
-        agent_backend_routing::seed_conversation_native_mode(
-            &state.database,
-            &conversation.id,
-            agent_backend,
-            native_full_access,
-        );
+        if let Some(mode) = starting_native_mode.as_deref() {
+            agent_backend_routing::seed_conversation_native_mode(
+                &state.database,
+                &conversation.id,
+                agent_backend,
+                mode,
+            );
+        }
+        let explicit_native = request.native_permission.as_deref().is_some_and(|value| !value.trim().is_empty());
         let _ = state.database.append_agent_backend_audit(
             Some(&conversation.id),
             agent_backend.as_str(),
             "agent_backend.native_mode_changed",
             &serde_json::json!({
-                "source": if picker_mode.is_some() { "permission_list" } else { "new_conversation" },
+                "source": if explicit_native { "permission_list" } else { "new_conversation" },
                 "fullAccess": native_full_access,
             }),
         );
-        if draft_full.is_some() {
-            agent_backend_routing::clear_draft_full_access_choice(&state.database, agent_backend);
-        }
         // A confirmed draft pick made before the project was known: the
         // project remembers the confirmation now.
         if draft_full == Some(true) && native_full_access {

@@ -21,7 +21,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { PromptInputActionMenu, PromptInputActionMenuContent, PromptInputActionMenuItem, PromptInputActionMenuTrigger } from '@/components/ai-elements/prompt-input'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { FULL_ACCESS_PRIVATE_HOME_NOTE } from '@/features/conversations/model/agent-backend-onboarding'
+import { FULL_ACCESS_PRIVATE_HOME_NOTE, FULL_ACCESS_RISK_POINTS } from '@/features/conversations/model/agent-backend-onboarding'
 import {
   catalogRows,
   nativeAppliedNotice,
@@ -90,17 +90,48 @@ function ApprovalMenu({ backend, rows, current, disabled, tooltip, note, onPick 
 }
 
 /**
+ * 完全访问的确认框。Fox / Pi / Codex / dsh 共用同一标题、风险说明和按钮。
+ * 外部后端额外说明私有 HOME；Fox 不加这句。取消则保持原档位。
+ */
+function FullAccessConfirmDialog({ open, label, includePrivateHomeNote, onCancel, onConfirm }: {
+  open: boolean
+  label: string
+  includePrivateHomeNote: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel() }}>
+      <DialogContent aria-label="确认完全访问">
+        <DialogHeader>
+          <DialogTitle>确认使用「{label}」？</DialogTitle>
+          <DialogDescription>
+            {FULL_ACCESS_RISK_POINTS.join('')}{includePrivateHomeNote ? FULL_ACCESS_PRIVATE_HOME_NOTE : ''}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel}>取消</Button>
+          <Button type="button" onClick={onConfirm}>确认使用{label}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
  * Fox / PiNative conversation: Fox's four modes. The list comes from the
  * Host (`approvalModes`); without one (browser preview, older Host) the
  * built-in table with the same ids is used.
+ * 选中需要确认的完全访问时，先弹与外部后端相同的确认框，确认后才 `onChange`。
  */
 export function FoxApprovalControl({ catalog, value, disabled, onChange }: {
   catalog: NativePermissionCatalog | null
   value: ComposerAccessMode | null | undefined
   disabled?: boolean
-  onChange?: (mode: ComposerAccessMode) => void | Promise<void>
+  onChange?: (mode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => void | Promise<void>
 }) {
   const current = value ?? 'ask'
+  const [pendingMode, setPendingMode] = useState<string | null>(null)
   const rows: NativePermissionRow[] = catalog
     ? catalogRows(catalog, current)
     : FOX_ACCESS_MODES.map(([mode, short, label, description]) => ({
@@ -114,15 +145,38 @@ export function FoxApprovalControl({ catalog, value, disabled, onChange }: {
       reason: null,
       fullAccess: mode === 'full_access',
     }))
+  const pendingRow = pendingMode ? rows.find((row) => row.value === pendingMode) : null
+  const pick = (mode: string) => {
+    if (mode === current) return
+    const row = rows.find((item) => item.value === mode)
+    if (row?.needsConfirmation) {
+      setPendingMode(mode)
+      return
+    }
+    void onChange?.(mode as ComposerAccessMode)
+  }
   return (
-    <ApprovalMenu
-      backend="fox"
-      rows={rows}
-      current={current}
-      disabled={disabled}
-      tooltip={`审批模式（${catalog?.switchNote || '运行中切换，从下一次工具调用起生效'}）`}
-      onPick={(mode) => void onChange?.(mode as ComposerAccessMode)}
-    />
+    <>
+      <ApprovalMenu
+        backend="fox"
+        rows={rows}
+        current={current}
+        disabled={disabled}
+        tooltip={`审批模式（${catalog?.switchNote || '运行中切换，从下一次工具调用起生效'}）`}
+        onPick={pick}
+      />
+      <FullAccessConfirmDialog
+        open={pendingMode !== null}
+        label={pendingRow?.label ?? '完全访问'}
+        includePrivateHomeNote={false}
+        onCancel={() => setPendingMode(null)}
+        onConfirm={() => {
+          const mode = pendingMode
+          setPendingMode(null)
+          if (mode) void onChange?.(mode as ComposerAccessMode, { confirmedFullAccess: true })
+        }}
+      />
+    </>
   )
 }
 
@@ -233,20 +287,13 @@ export function NativeApprovalControl({ client, conversationId, backend, project
         onPick={pick}
       />
       {shownMessage?.error && <span className="fox-execution-control-error" role="alert">{shownMessage.text}</span>}
-      <Dialog open={shownPending?.change.kind === 'confirm_full_access'} onOpenChange={(open) => { if (!open) setPending(null) }}>
-        <DialogContent aria-label="确认完全访问">
-          <DialogHeader>
-            <DialogTitle>确认使用「{fullRow?.label ?? '完全访问'}」？</DialogTitle>
-            <DialogDescription>
-              {shownPending?.change.kind === 'confirm_full_access' ? shownPending.change.points.join('') : ''}{FULL_ACCESS_PRIVATE_HOME_NOTE}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setPending(null)}>取消</Button>
-            <Button type="button" onClick={() => { if (shownPending) void apply(shownPending.mode, true) }}>确认使用{fullRow?.label ?? '完全访问'}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <FullAccessConfirmDialog
+        open={shownPending?.change.kind === 'confirm_full_access'}
+        label={fullRow?.label ?? '完全访问'}
+        includePrivateHomeNote
+        onCancel={() => setPending(null)}
+        onConfirm={() => { if (shownPending) void apply(shownPending.mode, true) }}
+      />
       <Dialog open={shownPending?.change.kind === 'confirm_revoke'} onOpenChange={(open) => { if (!open) setPending(null) }}>
         <DialogContent aria-label="撤销完全访问">
           <DialogHeader>

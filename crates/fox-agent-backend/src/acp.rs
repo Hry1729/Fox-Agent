@@ -654,6 +654,8 @@ fn redact_url_userinfo(word: &str) -> String {
 /// a different creation path: a process started by a service on its behalf
 /// (Secondary Logon / `CreateProcessWithLogonW`, Task Scheduler, COM servers,
 /// WMI) is created outside the job.
+///
+/// 取消不会关 Job，取消后由 Host 清扫本轮新进程。
 #[cfg(windows)]
 pub mod win_job {
     use std::os::windows::io::RawHandle;
@@ -735,6 +737,57 @@ pub mod win_job {
         pub fn contains(&self, process: RawHandle) -> Option<bool> {
             let mut result = 0;
             (unsafe { IsProcessInJob(process as HANDLE, self.0, &mut result) } != 0).then_some(result != 0)
+        }
+
+        /// 结束仍在本 Job 里的 `pid`。`Ok(true)` 已终止；`Ok(false)` 进程已不在，
+        /// 或不在本 Job（pid 复用，不杀）。打不开或杀不掉返回错误。
+        ///
+        /// `OpenProcess` 的访问权是 `PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`
+        /// （windows-sys 里 SYNCHRONIZE 名为 `PROCESS_SYNCHRONIZE`，值同为 `0x00100000`）。
+        pub fn terminate_member(&self, pid: u32, wait: std::time::Duration) -> Result<bool, String> {
+            use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE, WAIT_OBJECT_0};
+            use windows_sys::Win32::System::Threading::{
+                GetExitCodeProcess, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            };
+            struct CloseOnDrop(HANDLE);
+            impl Drop for CloseOnDrop {
+                fn drop(&mut self) {
+                    if !self.0.is_null() {
+                        unsafe { CloseHandle(self.0) };
+                    }
+                }
+            }
+            let access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+            let handle = unsafe { OpenProcess(access, 0, pid) };
+            if handle.is_null() {
+                let error = last_error();
+                if error == ERROR_INVALID_PARAMETER {
+                    return Ok(false);
+                }
+                return Err(format!("OpenProcess({pid}) 失败 (Win32 {error})"));
+            }
+            let _guard = CloseOnDrop(handle);
+            match self.contains(handle as RawHandle) {
+                Some(true) => {}
+                Some(false) => return Ok(false),
+                None => return Err(format!("IsProcessInJob({pid}) 失败 (Win32 {})", last_error())),
+            }
+            if unsafe { TerminateProcess(handle, 1) } == 0 {
+                let error = last_error();
+                let mut code = STILL_ACTIVE as u32;
+                let got = unsafe { GetExitCodeProcess(handle, &mut code) };
+                if got != 0 && code != STILL_ACTIVE as u32 {
+                    return Ok(true);
+                }
+                return Err(format!("TerminateProcess({pid}) 失败 (Win32 {error})"));
+            }
+            let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX);
+            let waited = unsafe { WaitForSingleObject(handle, millis) };
+            if waited == WAIT_OBJECT_0 {
+                Ok(true)
+            } else {
+                Err(format!("pid {pid} 在 {} ms 内没有退出 (WaitForSingleObject={waited})", wait.as_millis()))
+            }
         }
 
         /// Number of processes currently in the job
@@ -886,6 +939,69 @@ type ProcessJob = Option<NoJob>;
 /// Placeholder: no Job Object off Windows (process groups instead).
 #[cfg(not(windows))]
 pub struct NoJob;
+
+/// 一轮 prompt 发出前的进程树。查询失败是 `Unavailable`，不是空列表。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessBaseline {
+    /// Windows：Job 内的 pid。只在 Windows 上构造。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Pids(Vec<u32>),
+    /// Unix：pid + 启动时间。只在 Unix 上构造。
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Tree(Vec<crate::proctree::ProcIdentity>),
+    /// 查询失败。取消后不能猜该杀谁。
+    Unavailable { reason: String },
+}
+
+/// 一次取消清扫的结果。`no_baseline` 或 `failed` 非空时，调用方应停掉整个后端连接。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SweepOutcome {
+    pub killed: Vec<u32>,
+    pub failed: Vec<String>,
+    pub no_baseline: bool,
+}
+
+impl SweepOutcome {
+    fn fail(reason: impl Into<String>) -> Self {
+        Self { killed: Vec::new(), failed: vec![reason.into()], no_baseline: false }
+    }
+
+    pub(crate) fn stop_required(&self) -> bool {
+        self.no_baseline || !self.failed.is_empty()
+    }
+}
+
+/// 清扫时等单个进程退出的上限。超时记失败，并由 Host 停掉整个后端。
+#[cfg(windows)]
+const SWEEP_KILL_WAIT: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// 已有更新一轮的基线时，只保留那份基线里也有的 pid。读不到则失败，不猜。
+#[cfg(windows)]
+fn restrict_later_pids(targets: &mut Vec<u32>, later: Option<&ProcessBaseline>) -> Option<SweepOutcome> {
+    let later = later?;
+    match later {
+        ProcessBaseline::Unavailable { reason } => Some(SweepOutcome::fail(format!("后续轮次没有进程基线，无法安全清扫：{reason}"))),
+        ProcessBaseline::Pids(allow) => {
+            targets.retain(|pid| allow.contains(pid));
+            None
+        }
+        ProcessBaseline::Tree(_) => Some(SweepOutcome::fail("后续轮次的基线不是 Windows Job pid 列表")),
+    }
+}
+
+/// 已有更新一轮的基线时，只保留 pid 与启动时间都对得上的进程。
+#[cfg(unix)]
+fn restrict_later_tree(targets: &mut Vec<crate::proctree::ProcIdentity>, later: Option<&ProcessBaseline>) -> Option<SweepOutcome> {
+    let later = later?;
+    match later {
+        ProcessBaseline::Unavailable { reason } => Some(SweepOutcome::fail(format!("后续轮次没有进程基线，无法安全清扫：{reason}"))),
+        ProcessBaseline::Tree(allow) => {
+            targets.retain(|identity| allow.iter().any(|known| known.pid == identity.pid && known.start == identity.start));
+            None
+        }
+        ProcessBaseline::Pids(_) => Some(SweepOutcome::fail("后续轮次的基线不是 Unix 进程树")),
+    }
+}
 
 fn note(report: &mut TerminateReport, text: String) {
     eprintln!("fox-agent-backend: {text}");
@@ -1652,6 +1768,138 @@ impl AcpConnection {
     /// OS process id of the backend.
     pub fn process_id(&self) -> Option<u32> {
         self.child_id
+    }
+
+    /// 发 prompt 之前记下的本轮进程基线。查询失败是 [`ProcessBaseline::Unavailable`]，
+    /// 调用方不能把它当成空列表去猜该杀谁。
+    pub(crate) fn capture_turn_baseline(&self) -> ProcessBaseline {
+        #[cfg(windows)]
+        {
+            let Some(job) = self.job.as_ref() else {
+                return ProcessBaseline::Unavailable { reason: "后端不在 Job Object 中，无法记录本轮进程基线".into() };
+            };
+            return match job.process_ids() {
+                Ok(pids) if pids.is_empty() => ProcessBaseline::Unavailable { reason: "Job 进程列表为空，无法作为本轮基线".into() },
+                Ok(pids) => ProcessBaseline::Pids(pids),
+                Err(reason) => ProcessBaseline::Unavailable { reason: format!("读取 Job 进程列表失败：{reason}") },
+            };
+        }
+        #[cfg(unix)]
+        {
+            let Some(root) = self.child_id else {
+                return ProcessBaseline::Unavailable { reason: "后端没有进程号，无法记录本轮进程基线".into() };
+            };
+            let tree = crate::proctree::snapshot_tree(root);
+            if tree.iter().any(|identity| identity.pid == root) {
+                ProcessBaseline::Tree(tree)
+            } else {
+                ProcessBaseline::Unavailable { reason: "无法读取后端进程树，本轮没有进程基线".into() }
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            ProcessBaseline::Unavailable { reason: "当前平台无法记录进程基线".into() }
+        }
+    }
+
+    /// 在 blocking 线程上清扫不在基线里的进程。`later_of` 在拿到当前快照之后调用，
+    /// 读到的是之后一轮 prompt 之前的基线：只杀掉那份基线里已经在、且不属于本轮基线的进程。
+    pub(crate) async fn sweep_retained_children(
+        connection: Arc<Self>,
+        baseline: ProcessBaseline,
+        later_of: impl FnMut() -> Option<ProcessBaseline> + Send + 'static,
+    ) -> SweepOutcome {
+        run_blocking(move || connection.sweep_blocking(&baseline, later_of)).await
+    }
+
+    fn sweep_blocking(&self, baseline: &ProcessBaseline, later_of: impl FnMut() -> Option<ProcessBaseline>) -> SweepOutcome {
+        if let ProcessBaseline::Unavailable { reason } = baseline {
+            return SweepOutcome { killed: Vec::new(), failed: vec![reason.clone()], no_baseline: true };
+        }
+        #[cfg(windows)]
+        {
+            let ProcessBaseline::Pids(pids) = baseline else {
+                return SweepOutcome::fail("Windows 上的基线必须是 Job pid 列表");
+            };
+            return self.sweep_windows(pids, later_of);
+        }
+        #[cfg(unix)]
+        {
+            let ProcessBaseline::Tree(tree) = baseline else {
+                return SweepOutcome::fail("Unix 上的基线必须是进程树快照");
+            };
+            return self.sweep_unix(tree, later_of);
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = later_of;
+            SweepOutcome::fail("当前平台无法清扫进程")
+        }
+    }
+
+    #[cfg(windows)]
+    fn sweep_windows(&self, baseline: &[u32], mut later_of: impl FnMut() -> Option<ProcessBaseline>) -> SweepOutcome {
+        let Some(job) = self.job.as_ref() else {
+            return SweepOutcome::fail("后端不在 Job Object 中，无法清扫");
+        };
+        let current = match job.process_ids() {
+            Ok(pids) => pids,
+            Err(reason) => return SweepOutcome::fail(format!("清扫时读取 Job 进程列表失败：{reason}")),
+        };
+        let mut targets = crate::proctree::sweep_pid_targets(baseline, &current);
+        if let Some(root) = self.child_id {
+            targets.retain(|pid| *pid != root);
+        }
+        // 快照之后再读后续轮次的基线，新一轮在此之后才启动的进程不在那份基线里。
+        if let Some(outcome) = restrict_later_pids(&mut targets, later_of().as_ref()) {
+            return outcome;
+        }
+        let mut killed = Vec::new();
+        let mut failed = Vec::new();
+        for pid in targets {
+            match job.terminate_member(pid, SWEEP_KILL_WAIT) {
+                Ok(true) => killed.push(pid),
+                Ok(false) => {}
+                Err(reason) => failed.push(reason),
+            }
+        }
+        killed.sort_unstable();
+        killed.dedup();
+        SweepOutcome { killed, failed, no_baseline: false }
+    }
+
+    #[cfg(unix)]
+    fn sweep_unix(&self, baseline: &[crate::proctree::ProcIdentity], mut later_of: impl FnMut() -> Option<ProcessBaseline>) -> SweepOutcome {
+        let current = match self.unix_current_tree() {
+            Ok(tree) => tree,
+            Err(reason) => return SweepOutcome::fail(reason),
+        };
+        let mut targets = crate::proctree::sweep_targets(baseline, &current);
+        if let Some(root) = self.child_id {
+            targets.retain(|identity| identity.pid != root);
+        }
+        // 快照之后再读后续轮次的基线，新一轮在此之后才启动的进程不在那份基线里。
+        if let Some(outcome) = restrict_later_tree(&mut targets, later_of().as_ref()) {
+            return outcome;
+        }
+        let (mut killed, failed) = crate::proctree::kill_sweep_targets(&targets);
+        killed.sort_unstable();
+        killed.dedup();
+        SweepOutcome { killed, failed, no_baseline: false }
+    }
+
+    #[cfg(unix)]
+    fn unix_current_tree(&self) -> Result<Vec<crate::proctree::ProcIdentity>, String> {
+        let root = self.child_id.ok_or_else(|| "后端没有进程号".to_owned())?;
+        let tree = crate::proctree::snapshot_tree(root);
+        if tree.iter().any(|identity| identity.pid == root) {
+            return Ok(tree);
+        }
+        match self.has_exited() {
+            Some(true) => Ok(tree),
+            Some(false) => Err("后端仍在运行，但进程树快照没有根进程，无法确定该杀哪些进程".into()),
+            None => Err("无法确认后端是否仍在运行，进程树快照也没有根进程".into()),
+        }
     }
 
     pub fn previews(&self) -> Result<Vec<crate::preview::Preview>, String> {

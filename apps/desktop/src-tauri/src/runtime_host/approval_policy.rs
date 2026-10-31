@@ -241,6 +241,8 @@ pub struct PolicyDecision {
     pub suggested_prefix: Option<String>,
     /// Whether "always allow in this project" can be offered at all.
     pub rule_eligible: bool,
+    /// 识别出 `cd <cwd> && … ; echo …$?` 包装时的内层命令原文。没有包装则为 None。
+    pub inner_command: Option<String>,
 }
 
 impl PolicyDecision {
@@ -256,13 +258,18 @@ impl PolicyDecision {
     }
     /// Short machine summary for the approval card's `policy` field.
     pub fn card_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "mode": self.mode.as_str(),
             "class": self.class.as_str(),
             "risk": self.risk.as_str(),
             "findings": self.findings,
             "forcingRule": self.forcing_rule.as_ref().map(|rule| json!({"id":rule.id,"effect":rule.effect.as_str(),"pattern":rule.pattern})),
-        })
+        });
+        // 没有包装时不加键，避免现有卡片快照多一个 null。
+        if let Some(inner) = &self.inner_command {
+            value["innerCommand"] = json!(inner);
+        }
+        value
     }
     /// The `projectRule` field of the approval card.
     pub fn project_rule_json(&self, tool: &str) -> Value {
@@ -323,6 +330,7 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
         forcing_rule: None,
         suggested_prefix: None,
         rule_eligible: false,
+        inner_command: None,
     };
     let deny = |code: &str, message: String| Verdict::Deny { code: code.to_owned(), message };
     match request.subject {
@@ -383,19 +391,301 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
     decision
 }
 
+/// 顶层命令分隔符。`>&` 重定向不算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopOpKind {
+    AndAnd,
+    OrOr,
+    Semi,
+    Pipe,
+    Amp,
+}
+
+struct TopOp {
+    kind: TopOpKind,
+    start: usize,
+    end: usize,
+}
+
+struct BashWord {
+    start: usize,
+    end: usize,
+    decoded: String,
+}
+
+/// 已识别的 `cd <cwd> && <内层> ; echo <标记>`。`collapsed` 把 cd 目标写成 `.`，
+/// 供越界判断使用：目标已经证明等于 cwd，`.` 解析回同一个目录。
+struct RecognizedWrapper {
+    inner: String,
+    collapsed: String,
+}
+
+/// 只在命令完全是「cd 到当前 cwd，然后执行内层，最后 echo 一个含 $? 的标记」时返回内层原文。
+/// 任何对不齐的写法都返回 None，调用方按整条原文处理（fail-closed）。
+fn unwrap_exit_marker_wrapper(command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<String> {
+    recognize_exit_marker_wrapper(command, cwd, project_root, home).map(|recognized| recognized.inner)
+}
+
+fn recognize_exit_marker_wrapper(command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<RecognizedWrapper> {
+    // 整条命令里出现换行或回车，直接不认。
+    if command.chars().any(|ch| ch == '\n' || ch == '\r') {
+        return None;
+    }
+    let bash_ops = scan_toplevel_ops(command, true)?;
+    let cmd_ops = scan_toplevel_ops(command, false)?;
+    let bash_first = bash_ops.first()?;
+    let bash_last = bash_ops.last()?;
+    let cmd_first = cmd_ops.first()?;
+    let cmd_last = cmd_ops.last()?;
+    // `&&` 必须是第一个顶层运算符，`;` 必须是最后一个。两种引号扫描的位置必须一致。
+    if bash_first.kind != TopOpKind::AndAnd || bash_last.kind != TopOpKind::Semi {
+        return None;
+    }
+    if cmd_first.kind != TopOpKind::AndAnd || cmd_last.kind != TopOpKind::Semi {
+        return None;
+    }
+    if bash_first.start != cmd_first.start || bash_last.start != cmd_last.start {
+        return None;
+    }
+    let prefix = &command[..bash_first.start];
+    let suffix = &command[bash_last.end..];
+    let middle = &command[bash_first.end..bash_last.start];
+    let prefix_words = bash_ws_words(prefix)?;
+    if prefix_words.len() != 2 || &prefix[prefix_words[0].start..prefix_words[0].end] != "cd" {
+        return None;
+    }
+    let target = &prefix_words[1];
+    if invalid_cd_target(&target.decoded) {
+        return None;
+    }
+    let resolved = resolve_word(&target.decoded, cwd, home, project_root);
+    if components(&resolved) != components(cwd) {
+        return None;
+    }
+    let inner = inner_command_slice(middle)?;
+    let suffix_words = bash_ws_words(suffix)?;
+    if suffix_words.len() != 2 || &suffix[suffix_words[0].start..suffix_words[0].end] != "echo" {
+        return None;
+    }
+    let marker = &suffix_words[1];
+    if !marker_ok(&marker.decoded) {
+        return None;
+    }
+    // 越界视图：cd 目标换成 `.`（已证明等于 cwd），标记换成 `x`。
+    // `$?` 会被 looks_like_path 当成路径并解析到文件系统根，那不是真的越界。
+    let marker_start = bash_last.end + marker.start;
+    let marker_end = bash_last.end + marker.end;
+    let mut collapsed = String::with_capacity(command.len());
+    collapsed.push_str(&command[..target.start]);
+    collapsed.push('.');
+    collapsed.push_str(&command[target.end..marker_start]);
+    collapsed.push('x');
+    collapsed.push_str(&command[marker_end..]);
+    Some(RecognizedWrapper { inner: inner.to_owned(), collapsed })
+}
+
+/// bash 引号规则下的顶层运算符。`escapes == false` 时反斜杠不转义（cmd 方言，与 `tokenize_with(_, false)` 一致）。
+fn scan_toplevel_ops(command: &str, escapes: bool) -> Option<Vec<TopOp>> {
+    let mut ops = Vec::new();
+    let mut chars = command.char_indices().peekable();
+    let mut quote: Option<char> = None;
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(q) = quote {
+            if ch == '\\' && escapes && q == '"' {
+                if chars.next().is_none() {
+                    return None;
+                }
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if ch == '\\' && escapes {
+            if chars.next().is_none() {
+                return None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ';' => ops.push(TopOp { kind: TopOpKind::Semi, start: idx, end: idx + 1 }),
+            '|' => {
+                if chars.peek().is_some_and(|(_, next)| *next == '|') {
+                    let (next_idx, next) = chars.next().unwrap();
+                    ops.push(TopOp { kind: TopOpKind::OrOr, start: idx, end: next_idx + next.len_utf8() });
+                } else {
+                    ops.push(TopOp { kind: TopOpKind::Pipe, start: idx, end: idx + 1 });
+                }
+            }
+            '&' => {
+                if chars.peek().is_some_and(|(_, next)| *next == '&') {
+                    let (next_idx, next) = chars.next().unwrap();
+                    ops.push(TopOp { kind: TopOpKind::AndAnd, start: idx, end: next_idx + next.len_utf8() });
+                } else {
+                    ops.push(TopOp { kind: TopOpKind::Amp, start: idx, end: idx + 1 });
+                }
+            }
+            '>' => {
+                // `>&1` 是文件描述符复制，不是后台 `&`。
+                if chars.peek().is_some_and(|(_, next)| *next == '&') {
+                    chars.next();
+                    while chars.peek().is_some_and(|(_, next)| next.is_ascii_digit()) {
+                        chars.next();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    Some(ops)
+}
+
+/// 按 bash 引号规则切出空白分隔的词，并解码。引号不闭合返回 None。
+fn bash_ws_words(text: &str) -> Option<Vec<BashWord>> {
+    let mut i = 0;
+    let mut words = Vec::new();
+    while i < text.len() {
+        let ch = text[i..].chars().next()?;
+        if ch == ' ' || ch == '\t' {
+            i += ch.len_utf8();
+            continue;
+        }
+        let start = i;
+        let mut decoded = String::new();
+        let mut quote: Option<char> = None;
+        while i < text.len() {
+            let ch = text[i..].chars().next()?;
+            if quote.is_none() && (ch == ' ' || ch == '\t') {
+                break;
+            }
+            i += ch.len_utf8();
+            if let Some(q) = quote {
+                if q == '"' && ch == '\\' {
+                    let next = text[i..].chars().next()?;
+                    i += next.len_utf8();
+                    // 双引号里反斜杠只转义 $ ` " \ 和换行，其余反斜杠保留。
+                    if matches!(next, '$' | '`' | '"' | '\\' | '\n') {
+                        decoded.push(next);
+                    } else {
+                        decoded.push('\\');
+                        decoded.push(next);
+                    }
+                    continue;
+                }
+                if ch == q {
+                    quote = None;
+                    continue;
+                }
+                decoded.push(ch);
+                continue;
+            }
+            match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => {
+                    let next = text[i..].chars().next()?;
+                    i += next.len_utf8();
+                    decoded.push(next);
+                }
+                _ => decoded.push(ch),
+            }
+        }
+        if quote.is_some() {
+            return None;
+        }
+        words.push(BashWord { start, end: i, decoded });
+    }
+    Some(words)
+}
+
+fn invalid_cd_target(decoded: &str) -> bool {
+    decoded.is_empty()
+        || decoded == "-"
+        || decoded.starts_with('-')
+        || is_windows_switch(decoded)
+        || decoded.contains('$')
+        || decoded.contains('`')
+        || decoded.contains('~')
+}
+
+/// 内层原文：去掉首尾空白和可选的顶层 `2>&1`。以运算符结尾或为空则不认。
+fn inner_command_slice(region: &str) -> Option<&str> {
+    let words = bash_ws_words(region)?;
+    if words.is_empty() {
+        return None;
+    }
+    let mut end = region.len();
+    if let Some(last) = words.last() {
+        let raw = &region[last.start..last.end];
+        let preceded_by_ws = last.start > 0 && matches!(region[..last.start].chars().next_back(), Some(' ' | '\t'));
+        if raw == "2>&1" && preceded_by_ws {
+            end = last.start;
+        }
+    }
+    let trimmed = region[..end].trim();
+    if trimmed.is_empty() || ends_with_toplevel_op(trimmed) {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn ends_with_toplevel_op(text: &str) -> bool {
+    match scan_toplevel_ops(text, true) {
+        Some(ops) => ops.last().is_some_and(|op| op.end == text.len()),
+        None => true,
+    }
+}
+
+/// 标记解码后恰好含一个 `$?`，其余只能是约定的 ASCII 字符。
+fn marker_ok(decoded: &str) -> bool {
+    if decoded.matches("$?").count() != 1 {
+        return false;
+    }
+    let rest = decoded.replacen("$?", "", 1);
+    if rest.contains('$') || rest.contains('`') {
+        return false;
+    }
+    rest.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(ch, ' ' | '_' | ':' | '=' | '-' | '[' | ']' | '(' | ')' | '.' | ',' | '#' | '/')
+    })
+}
+
 fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, command: &str, cwd: &Path, model_risk: Option<&str>) {
     let mode = request.mode;
     let analysis = analyze_command(command, cwd, request.project_root, request.home);
+    let recognized = recognize_exit_marker_wrapper(command, cwd, request.project_root, request.home);
+    let inner_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.inner, cwd, request.project_root, request.home));
+    // Linux 默认方言会吃掉双引号里的反斜杠，把已经等于 cwd 的 cd 目标误判成越界。
+    // 目标换成 `.` 后仍解析回同一个 cwd，越界结论不会因此变松。
+    let collapsed_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.collapsed, cwd, request.project_root, request.home));
+    let whole_view = collapsed_analysis.as_ref().unwrap_or(&analysis);
     decision.class = ToolClass::Command;
-    decision.risk = analysis.risk;
-    decision.findings = analysis.findings.clone();
+    decision.inner_command = recognized.map(|recognized| recognized.inner);
+    let host_risk = inner_analysis.as_ref().map(|inner| inner.risk).unwrap_or(analysis.risk);
+    decision.risk = host_risk;
+    decision.findings = whole_view.findings.clone();
+    if let Some(inner) = &inner_analysis {
+        for finding in &inner.findings {
+            if !decision.findings.contains(finding) {
+                decision.findings.push(finding.clone());
+            }
+        }
+        decision.findings.push("exit_marker_wrapper".into());
+    }
     if model_risk.is_some_and(|risk| risk.eq_ignore_ascii_case("high")) && decision.risk < Risk::High {
         decision.risk = Risk::High;
         decision.findings.push("model_declared_high".into());
     }
     // 1. block: built-in dangerous deletions, then project block rules.
-    // block 先于 path_boundary，class 保持 Command。
-    if let Some(block) = &analysis.block {
+    // block 先于 path_boundary，class 保持 Command。内置 block 始终看整条原文；
+    // 识别出包装时，内层单独分析命中的 block 也算（只会更严）。
+    let builtin_block = analysis.block.as_ref().or_else(|| inner_analysis.as_ref().and_then(|inner| inner.block.as_ref()));
+    if let Some(block) = builtin_block {
         decision.findings.push("builtin_block".into());
         decision.verdict = Verdict::Deny {
             code: "permission.blocked".into(),
@@ -403,9 +693,12 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         };
         return;
     }
-    let segments = &analysis.segments;
+    let segments = inner_analysis.as_ref().map(|inner| inner.segments.as_slice()).unwrap_or(analysis.segments.as_slice());
     if let Some(rule) = request.rules.iter().filter(|rule| rule.effect == RuleEffect::Block && rule_names_tool(rule, request.tool))
-        .find(|rule| segments.iter().any(|segment| rule_prefix_matches(rule, segment)))
+        .find(|rule| {
+            analysis.segments.iter().any(|segment| rule_prefix_matches(rule, segment))
+                || inner_analysis.as_ref().is_some_and(|inner| inner.segments.iter().any(|segment| rule_prefix_matches(rule, segment)))
+        })
     {
         decision.forcing_rule = Some(rule.clone());
         decision.findings.push("project_block_rule".into());
@@ -416,7 +709,10 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         return;
     }
     // 2. protected / outside paths: only full access lets them through.
-    if analysis.path_boundary {
+    // 包装时取折叠后的整条命令与内层的或，只会更严，不会把 cd 到 cwd 误判成越界。
+    let path_boundary = whole_view.path_boundary || inner_analysis.as_ref().is_some_and(|inner| inner.path_boundary);
+    let opaque = analysis.opaque || whole_view.opaque || inner_analysis.as_ref().is_some_and(|inner| inner.opaque);
+    if path_boundary {
         decision.class = ToolClass::PathBoundary;
         decision.verdict = match mode {
             AccessMode::ReadOnly => Verdict::Deny { code: "permission.read_only".into(), message: format!("tool {} is blocked in read-only mode", request.tool) },
@@ -441,7 +737,7 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         }
         AccessMode::Ask | AccessMode::Auto => {}
     }
-    decision.rule_eligible = !analysis.opaque && !segments.is_empty();
+    decision.rule_eligible = !opaque && !segments.is_empty();
     decision.suggested_prefix = if decision.rule_eligible { suggested_prefix(segments) } else { None };
     // 4. ask rules force a prompt; allow rules cover segment by segment.
     if let Some(rule) = request.rules.iter().filter(|rule| rule.effect == RuleEffect::Ask && rule_names_tool(rule, request.tool))
@@ -451,7 +747,7 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         decision.verdict = Verdict::Ask;
         return;
     }
-    if decision.rule_eligible && !(model_risk.is_some_and(|risk| risk.eq_ignore_ascii_case("high")) && analysis.risk < Risk::High) {
+    if decision.rule_eligible && !(model_risk.is_some_and(|risk| risk.eq_ignore_ascii_case("high")) && host_risk < Risk::High) {
         let allow_rules: Vec<&PolicyRule> = request.rules.iter()
             .filter(|rule| rule.effect == RuleEffect::Allow && rule_names_tool(rule, request.tool)).collect();
         let mut used: Vec<PolicyRule> = Vec::new();
@@ -532,11 +828,24 @@ pub fn parse_rule_pattern(pattern: &str) -> Result<Vec<String>, String> {
 }
 
 /// Whether `pattern` (an allow rule) covers every segment of `command`.
+/// 识别出退出码包装时，覆盖的是内层每一段；整条命令的 block 仍要为空，两次分析都不能越界或 opaque。
 pub fn pattern_covers_command(pattern: &str, command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> bool {
     let rule = PolicyRule { id: "candidate".into(), effect: RuleEffect::Allow, tool: "*".into(), pattern: pattern.to_owned() };
     let analysis = analyze_command(command, cwd, project_root, home);
-    analysis.block.is_none() && !analysis.path_boundary && !analysis.opaque && !analysis.segments.is_empty()
-        && analysis.segments.iter().all(|segment| rule_covers_segment(&rule, segment))
+    if analysis.block.is_some() {
+        return false;
+    }
+    let recognized = recognize_exit_marker_wrapper(command, cwd, project_root, home);
+    let inner_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.inner, cwd, project_root, home));
+    if inner_analysis.as_ref().is_some_and(|inner| inner.block.is_some()) {
+        return false;
+    }
+    let collapsed_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.collapsed, cwd, project_root, home));
+    let whole = collapsed_analysis.as_ref().unwrap_or(&analysis);
+    let path_boundary = whole.path_boundary || inner_analysis.as_ref().is_some_and(|inner| inner.path_boundary);
+    let opaque = analysis.opaque || whole.opaque || inner_analysis.as_ref().is_some_and(|inner| inner.opaque);
+    let segments = inner_analysis.as_ref().map(|inner| inner.segments.as_slice()).unwrap_or(analysis.segments.as_slice());
+    !path_boundary && !opaque && !segments.is_empty() && segments.iter().all(|segment| rule_covers_segment(&rule, segment))
 }
 
 fn suggested_prefix(segments: &[Segment]) -> Option<String> {
@@ -1763,5 +2072,129 @@ mod tests {
         let inside = decide_at(&win, &win_home(), r"rd /s /q build", AccessMode::FullAccess);
         assert!(!inside.is_block(), "{:?}", inside.verdict);
         assert_blocked_at(&win, &win_home(), r"rd /s /q C:\ProgramData\Microsoft");
+    }
+
+    fn decide_win(command: &str, mode: AccessMode, rules: &[PolicyRule]) -> PolicyDecision {
+        let project = win_root();
+        let home_dir = win_home();
+        let subject = ToolSubject::Command { command: command.into(), cwd: project.clone(), model_risk: None };
+        decide(&PolicyRequest { tool: "run_command", subject: &subject, mode, project_root: Some(&project), home: Some(&home_dir), rules })
+    }
+
+    /// 模型把命令包成 `cd "<cwd>" && … ; echo …$?` 时，只在语法完全对齐时剥出内层。
+    #[test]
+    fn exit_marker_wrapper_unwraps_cd_to_the_cwd_and_rejects_anything_else() {
+        let project = win_root();
+        let home_dir = win_home();
+        let unwrap = |command: &str| unwrap_exit_marker_wrapper(command, &project, Some(&project), Some(&home_dir));
+        assert_eq!(unwrap(r#"cd "D:\fox-test\测试项目" && dir 2>&1; echo "EXIT_CODE: $?""#).as_deref(), Some("dir"));
+        assert_eq!(unwrap(r#"cd 'D:/fox-test/测试项目' && npm test -- foo; echo $?"#).as_deref(), Some("npm test -- foo"));
+        assert_eq!(unwrap(r#"cd "d:\FOX-TEST\测试项目" && git status 2>&1; echo "[exit:$?]""#).as_deref(), Some("git status"));
+        for command in [
+            r#"cd "D:\fox-test" && dir 2>&1; echo "EXIT_CODE: $?""#,
+            r#"cd /d "D:\fox-test\测试项目" && dir 2>&1; echo $?"#,
+            r#"cd "D:\fox-test\测试项目" && dir 2>&1"#,
+            r#"cd "D:\fox-test\测试项目" && dir; echo "$(whoami)""#,
+            "cd \"D:\\fox-test\\测试项目\" && dir; echo '`x`'",
+            r#"cd "D:\fox-test\测试项目" && dir; echo "$? $?""#,
+            r#"cd "D:\fox-test\测试项目" && dir; echo $? extra"#,
+            r#"cd "D:\fox-test\测试项目" ; dir; echo $?"#,
+            "cd \"D:\\fox-test\\测试项目\" && dir\n; echo $?",
+            r#"cd "D:\fox-test\测试项目 && dir; echo $?"#,
+            r#"cd "$HOME" && dir; echo $?"#,
+            r#"cd "D:\fox-test\测试项目" && dir 2>&1; echo $?; rm -rf x"#,
+        ] {
+            assert_eq!(unwrap(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn exit_marker_wrapper_decides_from_the_inner_command() {
+        let wrapped_dir = r#"cd "D:\fox-test\测试项目" && dir 2>&1; echo "EXIT_CODE: $?""#;
+        let asked = decide_win(wrapped_dir, AccessMode::Ask, &[]);
+        assert!(asked.is_ask(), "{:?}", asked.verdict);
+        assert!(asked.rule_eligible);
+        assert_eq!(asked.suggested_prefix.as_deref(), Some("dir"));
+        assert_eq!(asked.inner_command.as_deref(), Some("dir"));
+        assert!(asked.findings.iter().any(|finding| finding == "exit_marker_wrapper"), "{:?}", asked.findings);
+        assert_eq!(asked.class, ToolClass::Command);
+        assert_eq!(asked.card_json()["innerCommand"], "dir");
+        let plain = decide_win("dir", AccessMode::Ask, &[]);
+        assert!(plain.card_json().get("innerCommand").is_none(), "没有包装时不加 innerCommand");
+
+        let auto_dir = decide_win(wrapped_dir, AccessMode::Auto, &[]);
+        assert!(auto_dir.is_allow(), "{:?}", auto_dir.verdict);
+        assert_eq!(auto_dir.risk, Risk::Low);
+        assert_eq!(auto_dir.allow_reason.as_ref().map(AllowReason::as_str), Some("mode"));
+
+        let wrapped_push = r#"cd "D:\fox-test\测试项目" && git push 2>&1; echo $?"#;
+        let auto_push = decide_win(wrapped_push, AccessMode::Auto, &[]);
+        assert!(auto_push.is_ask(), "{:?}", auto_push.verdict);
+        assert_eq!(auto_push.suggested_prefix.as_deref(), Some("git push"));
+    }
+
+    #[test]
+    fn exit_marker_wrapper_rules_cover_the_inner_command_and_block_stays_on_the_whole_line() {
+        let project = win_root();
+        let home_dir = win_home();
+        let wrapped_dir = r#"cd "D:\fox-test\测试项目" && dir 2>&1; echo "EXIT_CODE: $?""#;
+        assert!(pattern_covers_command("dir", wrapped_dir, &project, Some(&project), Some(&home_dir)));
+        assert!(!pattern_covers_command("cd", wrapped_dir, &project, Some(&project), Some(&home_dir)));
+        let wrapped_push = r#"cd "D:\fox-test\测试项目" && git push 2>&1; echo $?"#;
+        assert!(!pattern_covers_command("git", wrapped_push, &project, Some(&project), Some(&home_dir)));
+        assert!(pattern_covers_command("git push", wrapped_push, &project, Some(&project), Some(&home_dir)));
+        let allowed = decide_win(wrapped_dir, AccessMode::Ask, &[rule("d", RuleEffect::Allow, "run_command", "dir")]);
+        assert!(allowed.is_allow(), "{:?}", allowed.verdict);
+        assert_eq!(allowed.allow_reason.as_ref().map(AllowReason::as_str), Some("rule"));
+        let invalid = parse_rule_pattern(wrapped_dir).expect_err("整条包装不能当规则");
+        assert!(invalid.starts_with("permission.invalid_rule"), "{invalid}");
+
+        for command in [
+            r#"cd "D:\fox-test\测试项目" && rd /s /q D:\fox-test\测试项目 2>&1; echo $?"#,
+            r#"cd "D:\fox-test\测试项目" && cd .. && rm -rf 测试项目 2>&1; echo "EXIT: $?""#,
+            r#"cd "D:\fox-test\测试项目" && rm -rf . 2>&1; echo $?"#,
+        ] {
+            assert_blocked_at(&project, &home_dir, command);
+        }
+        let curl = r#"cd "D:\fox-test\测试项目" && curl x 2>&1; echo $?"#;
+        let block = [rule("c", RuleEffect::Block, "run_command", "curl")];
+        for mode in MODES {
+            let decision = decide_win(curl, mode, &block);
+            assert!(decision.is_block(), "{curl} in {mode:?}: {:?}", decision.verdict);
+        }
+        let outside = decide_win(r#"cd "D:\fox-test\测试项目" && type D:\other\x.txt 2>&1; echo $?"#, AccessMode::Auto, &[]);
+        assert_eq!(verdict(&outside), "ask");
+        assert_eq!(outside.class, ToolClass::PathBoundary, "{:?}", outside.findings);
+    }
+
+    /// 审查补充：包装里的删除，内层按 cwd 单独分析命中 block 也拒绝（任何方言下都不会漏）。
+    #[test]
+    fn exit_marker_wrapper_inner_block_is_enough_to_refuse() {
+        for mode in [AccessMode::ReadOnly, AccessMode::Ask, AccessMode::Auto, AccessMode::FullAccess] {
+            for command in [
+                r#"cd "D:\fox-test\测试项目" && rm -rf . 2>&1; echo "EXIT_CODE: $?""#,
+                r#"cd "D:\fox-test\测试项目" && rd /s /q . 2>&1; echo $?"#,
+            ] {
+                let decision = decide_win(command, mode, &[]);
+                assert!(decision.is_block(), "{mode:?} {command}: {:?}", decision.verdict);
+                assert!(decision.findings.iter().any(|finding| finding == "builtin_block"), "{:?}", decision.findings);
+            }
+        }
+    }
+
+    /// 与 Windows 盘符同一套规则，POSIX 的 `cd "/work/proj" && …` 也要剥内层。
+    #[test]
+    fn exit_marker_wrapper_also_unwraps_a_posix_cd() {
+        let project = posix_root();
+        let home_dir = posix_home();
+        let command = r#"cd "/work/proj" && ls -la 2>&1; echo "EXIT_CODE: $?""#;
+        assert_eq!(unwrap_exit_marker_wrapper(command, &project, Some(&project), Some(&home_dir)).as_deref(), Some("ls -la"));
+        let decision = decide_at(&project, &home_dir, command, AccessMode::Ask);
+        assert!(decision.is_ask(), "{:?}", decision.verdict);
+        assert!(decision.rule_eligible);
+        assert_eq!(decision.suggested_prefix.as_deref(), Some("ls"));
+        assert_eq!(decision.inner_command.as_deref(), Some("ls -la"));
+        assert!(decision.findings.iter().any(|finding| finding == "exit_marker_wrapper"));
+        assert_blocked_at(&project, &home_dir, r#"cd "/work/proj" && rm -rf . 2>&1; echo $?"#);
     }
 }

@@ -42,7 +42,10 @@
 //!   wins ([`TerminalArbiter`]); a cancel that the backend does not confirm
 //!   within [`CANCEL_CONFIRM_TIMEOUT`] ends the run `cancelled` with
 //!   `outcome: "unknown"` and stops the process (6.4: cancel result may be
-//!   unknown, never shown as confirmed).
+//!   unknown, never shown as confirmed). A confirmed cancel keeps the
+//!   process: after [`CANCEL_SWEEP_GRACE`] the Host kills processes that were
+//!   not in the tree recorded just before the prompt. No snapshot: the
+//!   connection is stopped instead of guessing.
 //! * **Crash**: the connection closing while a turn runs fails the run
 //!   (`agent_backend_exited`, with the redacted stderr tail); the next turn
 //!   relaunches and reopens the native session.
@@ -50,7 +53,7 @@
 //!   [`ExternalRuntime::shutdown`] stop the process tree and report whether it
 //!   is confirmed gone ([`crate::port::StopConfirmation`]).
 
-use crate::acp::{AcpConnection, BackendEvent, TerminateReport};
+use crate::acp::{AcpConnection, BackendEvent, ProcessBaseline, SweepOutcome, TerminateReport};
 use crate::capability_view::PiLaunch;
 use crate::port::{AgentBackend, CapabilityDeclaration, StopConfirmation, STOP_UNCONFIRMED_REMEDY};
 use crate::projection::{allow_option, permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, PermissionCard, PermissionOption, TurnTerminal};
@@ -81,6 +84,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// before the Host records the cancel outcome as unknown and stops the
 /// process.
 pub const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 取消已被后端确认、进程仍保留时，先等后端自己回收工具子进程，再由 Host 清扫本轮新进程。
+pub const CANCEL_SWEEP_GRACE: Duration = Duration::from_millis(1500);
 
 /// How often the pump checks whether the backend process exited.
 pub const EXIT_POLL: Duration = Duration::from_millis(250);
@@ -588,6 +594,12 @@ struct Turn {
     /// Plan C3: the Agent asked the user through the Fox `ask_user` tool; the
     /// turn completes as `awaiting_user` (the question card stays open).
     awaiting_user: bool,
+    /// prompt 发出前的进程树。`None` 表示 prompt 还没记基线（本轮没有新起的工具进程）。
+    process_baseline: Option<ProcessBaseline>,
+    /// 记基线时的 [`SessionState::baseline_seq`]。之后的轮次序号更大。
+    baseline_seq: u64,
+    /// 取消超时后会停掉整个连接，不再按基线清扫。
+    skip_cancel_sweep: bool,
 }
 
 impl Turn {
@@ -607,6 +619,9 @@ impl Turn {
             prompt_error_data: None,
             revoke_epoch,
             awaiting_user: false,
+            process_baseline: None,
+            baseline_seq: 0,
+            skip_cancel_sweep: false,
         }
     }
 }
@@ -639,6 +654,10 @@ struct SessionState {
     /// L-1: moves on every full-access revocation; compared with the turn's
     /// copy before and after a launch.
     revoke_epoch: u64,
+    /// 每记一次 prompt 基线加一。清扫用它识别「取消之后又开始的一轮」。
+    baseline_seq: u64,
+    /// 当前这条连接上，最近一次 prompt 之前的基线。
+    latest_baseline: Option<ProcessBaseline>,
 }
 
 struct Session {
@@ -716,6 +735,22 @@ pub struct TurnRequest {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 连接已换代时交给清扫的空基线：与当前快照的交集为空，不再杀进程。
+fn empty_later_baseline() -> ProcessBaseline {
+    #[cfg(windows)]
+    {
+        ProcessBaseline::Pids(Vec::new())
+    }
+    #[cfg(unix)]
+    {
+        ProcessBaseline::Tree(Vec::new())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        ProcessBaseline::Unavailable { reason: "当前平台没有进程基线".into() }
+    }
 }
 
 impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
@@ -848,10 +883,19 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             // with the cancel request kept on record.
             extra.insert("cancelRequested".into(), json!(true));
         }
+        // 确认取消且进程会留下来时才清扫。超时路径会停掉整棵树，skip 为真。
+        let sweep = (matches!(&terminal, TurnTerminal::Cancelled) && turn.cancel_requested && !turn.skip_cancel_sweep)
+            .then(|| turn.process_baseline.clone())
+            .flatten();
+        let sweep_seq = turn.baseline_seq;
+        let sweep_generation = state.generation;
         events.push(terminal.event(Value::Object(extra)));
         state.turn = None;
         for event in events {
             self.emit(session, run_id, event);
+        }
+        if let Some(baseline) = sweep {
+            self.schedule_cancel_sweep(session, run_id, sweep_generation, sweep_seq, baseline);
         }
     }
 
@@ -869,7 +913,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             self.finish_turn(&session, &mut state, &run_id, terminal, with_diagnostics(json!({ "launch": failure }), diagnostic, rpc_error_data));
             return;
         }
-        let (connection, native) = {
+        // 基线必须在 prompt 发出之前记下。查询放在 blocking 线程，不占 tokio worker。
+        let connection_for_baseline = {
             let mut state = lock(&session.state);
             let Some(turn) = state.turn.as_mut().filter(|turn| turn.run_id == run_id) else {
                 return;
@@ -879,8 +924,37 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 self.finish_turn(&session, &mut state, &run_id, TurnTerminal::Cancelled, json!({ "outcome": "not_started" }));
                 return;
             }
-            turn.prompt_sent = true;
-            turn.last_activity = std::time::Instant::now();
+            state.connection.clone()
+        };
+        let baseline = match &connection_for_baseline {
+            Some(connection) => {
+                let connection = Arc::clone(connection);
+                match tokio::task::spawn_blocking(move || connection.capture_turn_baseline()).await {
+                    Ok(baseline) => baseline,
+                    Err(_) => ProcessBaseline::Unavailable { reason: "记录本轮进程基线的任务崩溃".into() },
+                }
+            }
+            None => ProcessBaseline::Unavailable { reason: "外部后端连接已不在，无法记录本轮进程基线".into() },
+        };
+        let (connection, native) = {
+            let mut state = lock(&session.state);
+            if state.turn.as_ref().filter(|turn| turn.run_id == run_id).is_none() {
+                return;
+            }
+            if state.turn.as_ref().is_some_and(|turn| turn.cancel_requested) {
+                // 基线记在 prompt 之前；prompt 没发出就取消，没有本轮新进程。
+                self.finish_turn(&session, &mut state, &run_id, TurnTerminal::Cancelled, json!({ "outcome": "not_started" }));
+                return;
+            }
+            let seq = state.baseline_seq.saturating_add(1);
+            state.baseline_seq = seq;
+            state.latest_baseline = Some(baseline.clone());
+            if let Some(turn) = state.turn.as_mut() {
+                turn.baseline_seq = seq;
+                turn.process_baseline = Some(baseline);
+                turn.prompt_sent = true;
+                turn.last_activity = std::time::Instant::now();
+            }
             (state.connection.clone(), state.native_session_id.clone())
         };
         let (Some(connection), Some(native)) = (connection, native) else {
@@ -1667,6 +1741,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let mut state = lock(&session.state);
                 let running = state.turn.as_ref().is_some_and(|turn| turn.run_id == run_id) && state.generation == generation;
                 if running {
+                    if let Some(turn) = state.turn.as_mut() {
+                        // 接下来 stop_connection 会杀掉整棵树，不再按基线清扫。
+                        turn.skip_cancel_sweep = true;
+                    }
                     runtime.finish_turn(
                         &session,
                         &mut state,
@@ -1682,6 +1760,86 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             }
         });
         CancelOutcome::Requested { answered_permissions: answered }
+    }
+
+    /// 宽限期在定时器上等，真正的查进程和终止放在 blocking 线程，不占 tokio worker。
+    fn schedule_cancel_sweep(&self, session: &Session, run_id: &str, generation: u64, baseline_seq: u64, baseline: ProcessBaseline) {
+        let runtime = self.clone();
+        let conversation_id = session.conversation_id.clone();
+        let run_id = run_id.to_owned();
+        self.inner.handle.spawn(async move {
+            runtime.sweep_after_confirmed_cancel(conversation_id, run_id, generation, baseline_seq, baseline).await;
+        });
+    }
+
+    async fn sweep_after_confirmed_cancel(&self, conversation_id: String, run_id: String, generation: u64, baseline_seq: u64, baseline: ProcessBaseline) {
+        tokio::time::sleep(CANCEL_SWEEP_GRACE).await;
+        let Some(session) = lock(&self.inner.sessions).get(&conversation_id).cloned() else {
+            return;
+        };
+        let connection = {
+            let state = lock(&session.state);
+            // 超时或关闭已经停掉这条连接：整棵树会由那条路径杀掉。
+            if state.generation != generation {
+                return;
+            }
+            let Some(connection) = state.connection.clone() else { return };
+            connection
+        };
+        let session_for_later = Arc::clone(&session);
+        let outcome = AcpConnection::sweep_retained_children(connection, baseline, move || {
+            let state = lock(&session_for_later.state);
+            if state.generation != generation {
+                // 清扫期间连接已换代。返回空基线，交集为空，不再杀进程。
+                return Some(empty_later_baseline());
+            }
+            if state.baseline_seq == baseline_seq {
+                return None;
+            }
+            Some(match &state.latest_baseline {
+                Some(baseline) => baseline.clone(),
+                None => ProcessBaseline::Unavailable { reason: "已有更新的一轮，但读不到它的进程基线".into() },
+            })
+        })
+        .await;
+        let stop = {
+            let state = lock(&session.state);
+            state.generation == generation && state.connection.is_some() && outcome.stop_required()
+        };
+        self.record_cancel_sweep(&session, &run_id, &outcome);
+        if stop {
+            let reason = if outcome.no_baseline {
+                "取消后没有本轮进程基线，已停止后端"
+            } else {
+                "取消后未能清扫本轮新进程，已停止后端"
+            };
+            let _ = self.stop_connection(&session, reason).await;
+        }
+    }
+
+    fn record_cancel_sweep(&self, session: &Session, run_id: &str, outcome: &SweepOutcome) {
+        let mut details = json!({
+            "killed": { "count": outcome.killed.len(), "pids": outcome.killed },
+            "failed": outcome.failed,
+            "noBaseline": outcome.no_baseline,
+        });
+        if outcome.no_baseline || !outcome.failed.is_empty() {
+            let reason = outcome.failed.join("; ");
+            details["reason"] = json!(if reason.is_empty() { "没有本轮进程基线".to_owned() } else { reason });
+        }
+        let mut event = details.clone();
+        event["type"] = json!("agent_backend.cancel_swept");
+        event["agentBackend"] = json!(session.backend.as_str());
+        self.emit(session, run_id, event);
+        self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.cancel_swept", &details);
+        eprintln!(
+            "fox.external conversation={} agent_backend={} cancel_swept killed={} failed={} no_baseline={}",
+            session.conversation_id,
+            session.backend.as_str(),
+            outcome.killed.len(),
+            outcome.failed.len(),
+            outcome.no_baseline
+        );
     }
 
     /// The user's decision on an approval card: the native one-shot option
@@ -1738,6 +1896,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let mut state = lock(&session.state);
             state.generation += 1;
             state.native_session_open = false;
+            // 连接没了，旧基线不能再用来判断该杀谁。
+            state.latest_baseline = None;
             (state.connection.take(), state.on_closed.take())
         };
         let connection = connection?;
