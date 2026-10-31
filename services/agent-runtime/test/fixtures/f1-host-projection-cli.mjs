@@ -1,5 +1,5 @@
 // Test bridge: take a real Host read envelope from Rust and apply the same
-// Legacy Pi adapter or Kernel worker projection used in production.
+// Pi adapter projection used in production.
 import { readFileSync } from 'node:fs'
 import { normalizeFoxToolResultForPi } from '../../src/tool-adapter.mjs'
 import { modelToolResultContent } from '../../src/tool-view.mjs'

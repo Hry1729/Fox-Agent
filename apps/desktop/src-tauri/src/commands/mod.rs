@@ -1673,7 +1673,7 @@ pub async fn conversation_create(
         if full { fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS } else { fox_agent_backend::host_routing::NEW_MODE_STANDARD }
     });
     // The old Fox-wide "new external conversations use full access" setting
-    // is no longer consulted: it was the outer SRT switch, not the Agent's
+    // is no longer consulted: it was the switch of Fox's removed outer sandbox, not the Agent's
     // native mode. Only an explicit new-conversation pick can start full.
     let native_full_access = match fox_agent_backend::host_routing::decide_new_conversation_mode(
         request.external_permission_mode.as_deref().or(picker_mode),

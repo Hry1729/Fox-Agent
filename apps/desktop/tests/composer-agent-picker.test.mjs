@@ -1,11 +1,11 @@
 import { afterEach, expect, spyOn, test } from 'bun:test'
 import { createElement } from 'react'
 import { act, cleanup, fireEvent, render, renderHook, waitFor } from '@testing-library/react'
-import { ComposerAgentPicker } from './composer-agent-picker'
-import { ExpertBindingChip } from '../components/ExpertBindingChip'
-import { desktopClient } from '../../conversations/api/desktop-client'
-import { useDesktopConversation } from '../../conversations/hooks/use-desktop-conversation'
-import { DEFAULT_AGENT_BACKEND_PREFERENCES } from '../../conversations/model/agent-backend'
+import { ComposerAgentPicker } from '../src/features/chat/composer/composer-agent-picker'
+import { ExpertBindingChip } from '../src/features/chat/components/ExpertBindingChip'
+import { desktopClient } from '../src/features/conversations/api/desktop-client'
+import { useDesktopConversation } from '../src/features/conversations/hooks/use-desktop-conversation'
+import { DEFAULT_AGENT_BACKEND_PREFERENCES } from '../src/features/conversations/model/agent-backend'
 
 const spies = []
 afterEach(() => { cleanup(); spies.splice(0).forEach(spy => spy.mockRestore()) })

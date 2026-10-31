@@ -751,7 +751,7 @@ mod tests {
     /// A reference plus the Host's trusted storage fact is what makes an
     /// omitted byte reachable, so every fixture that expects a bounded view
     /// carries both — as every production caller will once R4-A1 is wired
-    /// (`live.rs` and `pi-kernel-loop.mjs` mint the reference per settled call;
+    /// (the PiNative tool bridge mints the reference per settled call;
     /// the storage fact comes from the durable write path).
     const TEST_REF: &str = "fox-result://run-1/call-1";
 

@@ -43,7 +43,7 @@ export const AGENT_BACKEND_PICKER_HINTS: Record<AgentBackendId, string> = {
  * conversation with it (`agent_backend_hidden`). Existing conversations of a
  * hidden backend still open, show their backend and run as before.
  *
- * Product decision 2026-10-24 hid Codex because of the outer SRT layer. That
+ * Product decision 2026-10-24 hid Codex because of Fox's outer sandbox layer. That
  * layer is gone (plan B2), so Codex is no longer hidden. Keep
  * this list and the Host's `AgentBackend::HIDDEN` in sync.
  */

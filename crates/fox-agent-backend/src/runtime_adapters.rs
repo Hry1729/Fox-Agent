@@ -7,8 +7,8 @@ use std::path::Path;
 /// The pi-acp adaptation Fox still relies on (plan C1): `fox-turn-outcome`
 /// turns a model / transport failure into an ACP error instead of a silent
 /// `end_turn`. The two pi-coding-agent "model proxy" patches only change
-/// anything when `FOX_MODEL_PROXY_REQUIRED=1`, which only the removed SRT
-/// network proxy set (plan B2); they stay pinned in the package but no
+/// anything when `FOX_MODEL_PROXY_REQUIRED=1`, which only Fox's removed
+/// sandbox network proxy set (plan B2); they stay pinned in the package but no
 /// longer decide whether pi may start.
 pub const PI_TURN_OUTCOME_ADAPTER: [&str; 2] = [
     "backends/pi/node_modules/pi-acp/dist/index.js",

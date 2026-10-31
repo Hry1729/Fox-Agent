@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 
 #[cfg(windows)]
-#[path = "kernel_model_worker_job.rs"]
+#[path = "process_tree_job.rs"]
 mod owned_job;
 
 const TEST: &str = "runtime_host::native_crash_integration_tests::native_host_crash_boundaries_reconcile_without_reexecution";
@@ -300,7 +300,6 @@ impl OwnedChild {
             .env(CHILD,"1").env(ROOT,root).env(PHASE,phase).env(STAGE,stage).env(NONCE,nonce)
             .env("FOX_DATA_DIR",root).env("FOX_KERNEL_MODE","authoritative").env("FOX_KERNEL_ENGINE","pi")
             .env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_SCRIPT").env_remove("FOX_RUNTIME_MODE")
-            .env_remove("FOX_KERNEL_WORKER_BINARY").env_remove("FOX_KERNEL_CODEX_BINARY")
             .stdin(Stdio::null()).stdout(std::fs::File::create(root.join(format!("{phase}.stdout.log"))).unwrap())
             .stderr(std::fs::File::create(root.join(format!("{phase}.stderr.log"))).unwrap()).creation_flags(0x0800_0000);
         let child = command.spawn().unwrap();

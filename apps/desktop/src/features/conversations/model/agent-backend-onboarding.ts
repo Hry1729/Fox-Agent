@@ -170,7 +170,7 @@ export const EXTERNAL_PERMISSION_MODE_LABELS: Record<ExternalPermissionMode, str
 
 /**
  * Confirmation shown before an Agent's own full-access mode is selected.
- * Fox no longer adds an outer SRT layer; this describes the Agent's native
+ * Fox adds no outer sandbox of its own; this describes the Agent's native
  * consequences, not a Fox sandbox.
  */
 export const FULL_ACCESS_RISK_POINTS: readonly string[] = [

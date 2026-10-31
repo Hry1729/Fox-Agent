@@ -54,7 +54,7 @@ try {
         Assert-Fox ($errors.Count -eq 0) 'enable-sandbox.ps1 parses'
         $functions = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
         foreach ($fn in $functions) { . ([scriptblock]::Create($fn.Extent.Text)) }
-        foreach ($name in @('Get-FoxTestFault', 'Test-FoxTestFault', 'Invoke-FoxTestFault', 'Resolve-FoxFailure', 'Remove-FoxTree', 'Expand-FoxPackage', 'Find-FoxSrtReceipt', 'Find-LegacySrtCli', 'Remove-LegacyFoxSrt')) {
+        foreach ($name in @('Get-FoxTestFault', 'Test-FoxTestFault', 'Invoke-FoxTestFault', 'Resolve-FoxFailure', 'Remove-FoxTree', 'Expand-FoxPackage', 'Find-FoxSrtReceipt', 'Find-LegacySrtCli', 'Remove-LegacyFoxSrt', 'Remove-RetiredRuntimeTrees')) {
             Assert-Fox ([bool] (Get-Command $name -CommandType Function -ErrorAction SilentlyContinue)) "function $name present"
         }
         # B2: Fox no longer installs SRT; the srt install and ownership-repair parameters are gone.
@@ -104,6 +104,22 @@ try {
         [System.IO.File]::WriteAllText((Join-Path $old 'node\node.exe'), 'MZ')
         $found = Find-LegacySrtCli $runtimeParent
         Assert-Fox ($found -and $found.cli -eq $cliPath) 'legacy: srt CLI of an older runtime is found'
+
+        # 0b. B5: retired srt\ / acp-bridge\ trees go from the installed version and from older
+        #     versions, except older ones while a failed legacy clean-up still needs their srt.
+        $RetiredRuntimeDirs = @('srt', 'acp-bridge')
+        New-Item -ItemType Directory -Path (Join-Path $old 'acp-bridge') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $newer 'srt\x') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $runtimeParent '.o12345678\srt') -Force | Out-Null
+        $kept = @(Remove-RetiredRuntimeTrees $runtimeParent $newer $true)
+        Assert-Fox ($kept.Count -eq 1 -and $kept[0] -eq (Join-Path $newer 'srt')) 'retired: legacy clean-up failed -> only the installed version is stripped'
+        Assert-Fox (Test-Path -LiteralPath (Join-Path $old 'srt')) 'retired: older srt kept for the retry'
+        $stripped = @(Remove-RetiredRuntimeTrees $runtimeParent $newer $false)
+        Assert-Fox ($stripped.Count -eq 2) 'retired: older srt\ and acp-bridge\ removed'
+        Assert-Fox (-not (Test-Path -LiteralPath (Join-Path $old 'srt')) -and -not (Test-Path -LiteralPath (Join-Path $old 'acp-bridge'))) 'retired: nothing left in the older version'
+        Assert-Fox (Test-Path -LiteralPath (Join-Path $old 'node\node.exe')) 'retired: the rest of the older version is untouched'
+        Assert-Fox (Test-Path -LiteralPath (Join-Path $runtimeParent '.o12345678\srt')) 'retired: backup / staging directories are not touched'
+        Assert-Fox (@(Remove-RetiredRuntimeTrees $runtimeParent $newer $false).Count -eq 0) 'retired: idempotent'
 
         # 1. Variable unset: injection points do nothing.
         Remove-Item Env:\FOX_SCRIPT_TEST_FAULTS -ErrorAction SilentlyContinue

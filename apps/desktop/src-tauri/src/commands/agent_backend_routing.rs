@@ -742,7 +742,7 @@ fn native_context(state: &AppState, backend: AgentBackend, forbidden: bool) -> f
 
 /// Which Agent and whether its native permission is the Agent's own full
 /// access. There is no removable Fox grant any more: the value is derived
-/// from the stored native mode, never from the removed outer SRT layer.
+/// from the stored native mode, never from Fox's removed outer sandbox layer.
 fn native_target(
     state: &AppState,
     _external: &crate::external_backend::ExternalBackendHost,
@@ -805,7 +805,7 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
         "fullAccessForbidden": forbidden,
         "draft": draft,
         // The Agent's native modes are switchable in place; Fox no longer
-        // wraps or unwraps an outer SRT sandbox around them.
+        // wraps or unwraps an outer sandbox of its own around them.
         "fullAccessLockedReason": serde_json::Value::Null,
         // Plan C2: the first full access in a project asks once more.
         "projectFullAccessConfirmed": project_full_access_confirmed(state, project.as_deref()),
@@ -894,7 +894,7 @@ pub async fn agent_backend_native_permission_set(
         return Ok(native_view(&state, &external, &request));
     };
     let previous = native::effective_mode(backend, stored_conversation_native_mode(&state.database, &conversation_id).as_deref(), false, &context);
-    // Native modes are independent of Fox's removed SRT layer. Store the
+    // Native modes are independent of Fox's removed outer sandbox layer. Store the
     // choice and let the backend switch in its own way (Codex live, dsh on
     // restart, pi at the next request); there is no Fox full-access grant to
     // revoke and no outer sandbox to re-enter.
@@ -1113,7 +1113,7 @@ mod tests {
 
     }
 
-    /// Codex was hidden on 2026-10-24 because of the outer SRT layer. It is a
+    /// Codex was hidden on 2026-10-24 because of Fox's outer sandbox layer. It is a
     /// normal selectable backend again; old Codex conversations keep their
     /// binding and routing.
     #[test]

@@ -571,8 +571,8 @@ fn run_cell(root: &Path, provider: &Provider, route: &str, phase: &str, load: us
         .env("FOX_NATIVE_PERF_PHASE",phase).env("FOX_NATIVE_PERF_LOAD",load.to_string())
         .env("FOX_NATIVE_PERF_REPETITIONS",repetitions.to_string()).env("FOX_NATIVE_PERF_ENDPOINT",&provider.endpoint)
         .env("FOX_RUNTIME_SCRIPT",repository().join("services/agent-runtime/src/pi-runtime.mjs"))
-        .env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_MODE").env_remove("FOX_KERNEL_WORKER_BINARY")
-        .env_remove("FOX_KERNEL_CODEX_BINARY").env_remove("FOX_EXPERIMENTAL_COMPUTE_JOB_NOTICE")
+        .env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_MODE")
+        .env_remove("FOX_EXPERIMENTAL_COMPUTE_JOB_NOTICE")
         .env("FOX_DATA_DIR",&cell).stdin(Stdio::null()).stdout(stdout).stderr(stderr);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);

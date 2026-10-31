@@ -158,6 +158,10 @@ class StagePackTest(unittest.TestCase):
         # The pi approval gate ships next to each other under pi-gate/.
         self.assertIn("pi-gate/pi-gated.cmd", keys)
         self.assertIn("pi-gate/fox-approval-gate.ts", keys)
+        # Plan C3 / B5: the Fox tool extension ships with the gate, and the gate loads it.
+        self.assertIn("pi-gate/fox-mcp-tools.ts", keys)
+        with open(brp.child(brp.fs_path(out), "pi-gate/pi-gated.cmd"), "rb") as gate:
+            self.assertIn(b"FOX_PI_MCP_EXTENSION", gate.read())
         for key, source in brp.PI_GATE_FILES.items():
             with open(brp.child(brp.fs_path(out), key), "rb") as staged, open(source, "rb") as original:
                 self.assertEqual(staged.read(), original.read(), key)
@@ -220,6 +224,42 @@ class StagePackTest(unittest.TestCase):
         self.assertIn("pi-gate/fox-approval-gate.ts differs from fixtures/pi/fox-approval-gate.ts", problems)
         self.assertNotIn("missing pi-gate/pi-gated.cmd", problems)
         self.assertFalse(any("pi-gated.cmd differs" in problem for problem in problems))
+
+    def test_pre_c3_gate_that_cannot_load_the_fox_tools_is_refused(self):
+        # The 0.1.6 gate knew nothing of FOX_PI_MCP_EXTENSION; Fox refuses pi with it
+        # (agent_backend_fox_tools_unsupported), so a package must not carry it.
+        os.makedirs(os.path.join("pkg", "pi-gate"))
+        with open(os.path.join("pkg", "pi-gate", "pi-gated.cmd"), "w", newline="\n") as handle:
+            handle.write('@echo off\n"%FOX_PI_BIN%" --no-extensions -e "%~dp0fox-approval-gate.ts" %*\n')
+        problems = brp.verify_layout("pkg")
+        self.assertIn("pi-gate/pi-gated.cmd does not load the Fox tool extension (FOX_PI_MCP_EXTENSION)", problems)
+        self.assertIn("missing pi-gate/fox-mcp-tools.ts", problems)
+
+    def test_runtime_package_pins_are_exact(self):
+        # Backends are installed with `npm ci` from committed lockfiles; every
+        # top-level dependency is an exact version equal to the Host's pins.
+        import re
+        with open(os.path.join(brp.CRATE, "src", "launch.rs"), encoding="utf-8") as handle:
+            launch = handle.read()
+        pin = lambda name: re.search(rf'pub const {name}: &str = "([^"]+)";', launch).group(1)
+        expected = {
+            "pi": {"pi-acp": pin("PI_ACP_VERSION"), "@earendil-works/pi-coding-agent": "1.4.0"},
+            "codex": {"@agentclientprotocol/codex-acp": pin("CODEX_ACP_VERSION")},
+            "dsh": {"@deepseek-ai/dsh": pin("DSH_VERSION")},
+        }
+        base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(brp.__file__))), "windows", "runtime-package")
+        for backend, deps in expected.items():
+            with open(os.path.join(base, "backends", backend, "package.json"), encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["dependencies"], deps, backend)
+            with open(os.path.join(base, "backends", backend, "package-lock.json"), encoding="utf-8") as handle:
+                lock = json.load(handle)
+            self.assertEqual(lock["packages"][""]["dependencies"], deps, backend)
+            for name, version in deps.items():
+                self.assertEqual(lock["packages"]["node_modules/" + name]["version"], version, name)
+        with open(os.path.join(base, "node.json"), encoding="utf-8") as handle:
+            node = json.load(handle)
+        self.assertRegex(node["sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(node["url"].endswith(node["directory"] + ".zip"))
 
     def test_dsh_patch_mismatch_and_missing(self):
         os.makedirs(os.path.join("pkg", "dsh-patches"))

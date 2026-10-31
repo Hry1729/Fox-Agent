@@ -16,14 +16,17 @@ Windows: ``<install root>\\<version>\\<relative path with backslashes>``.
       Assemble a package directory: copies the given Node directory to node\\,
       each backend prefix to backends\\<NAME>\\, and Fox's runtime assets from
       this crate: dsh-patches\\*.yml and the pi approval gate pi-gate\\{pi-gated.cmd,
-      fox-approval-gate.ts} (from fixtures/pi/; Fox launches pi gated only when
-      <runtime>\\pi-gate\\pi-gated.cmd exists, otherwise stock pi without Host
-      approvals). Does not download anything (prefixes come from
-      ``npm install --prefix <p> --os=win32 --cpu=x64 <pkg>@<version>``).
+      fox-approval-gate.ts} (from fixtures/pi/) plus the Fox tool extension
+      pi-gate\\fox-mcp-tools.ts (from runtime-assets/fox-mcp/; plan C3: the gate
+      loads it when Fox sets FOX_PI_MCP_EXTENSION). Fox refuses to launch pi
+      without <runtime>\\pi-gate\\pi-gated.cmd (agent_backend_pi_gate_missing).
+      Does not download anything (prefixes come from ``npm ci`` of the pinned
+      lockfiles in runtime-package/backends/, see build-runtime-release.ps1).
 
   pack <dir> [--version V] --out <zip> [--budget 240]
       Verify the layout (node\\node.exe, no srt\\ or acp-bridge\\ tree,
-      pi-gate\\{pi-gated.cmd,fox-approval-gate.ts} equal to this crate's copies,
+      pi-gate\\{pi-gated.cmd,fox-approval-gate.ts,fox-mcp-tools.ts} equal to
+      this crate's copies, the gate able to load the Fox tool extension,
       dsh-patches equal if present), run the budget
       check, write a deterministic zip, <zip>.sha256 and <zip>.manifest.json
       (every file with size and SHA256, longest installed path).
@@ -65,7 +68,11 @@ DEFAULT_VERSION = "0.1.6"
 PI_GATE_FILES = {
     "pi-gate/pi-gated.cmd": os.path.join(PI_FIXTURES, "pi-gated.cmd"),
     "pi-gate/fox-approval-gate.ts": os.path.join(PI_FIXTURES, "fox-approval-gate.ts"),
+    "pi-gate/fox-mcp-tools.ts": os.path.join(ASSETS, "fox-mcp", "fox-mcp-tools.ts"),
 }
+# The variable Fox sets for the Fox tool extension; a gate without it makes Fox
+# refuse pi (agent_backend_fox_tools_unsupported, external_launch.rs).
+PI_MCP_EXTENSION_ENV = "FOX_PI_MCP_EXTENSION"
 DEFAULT_INSTALL_ROOT = r"C:\Program Files\Fox\sandbox-runtime"
 # enable-sandbox.ps1 extracts to %ProgramFiles%\Fox\.s<8 hex>\c first.
 STAGING_PREFIX = r"C:\Program Files\Fox\.s00000000\c"
@@ -223,7 +230,10 @@ def verify_layout(directory):
             problems.append(f"{tree} must not be in the package (Fox no longer ships a sandbox runtime)")
     for key, source in PI_GATE_FILES.items():
         if key in keys and norm_text(read_bytes(child(root, key))) != norm_text(read_bytes(fs_path(source))):
-            problems.append(f"{key} differs from fixtures/pi/{os.path.basename(source)}")
+            problems.append(f"{key} differs from {os.path.relpath(source, CRATE)}")
+    gate = "pi-gate/pi-gated.cmd"
+    if gate in keys and PI_MCP_EXTENSION_ENV.encode() not in read_bytes(child(root, gate)):
+        problems.append(f"{gate} does not load the Fox tool extension ({PI_MCP_EXTENSION_ENV})")
     if any(key.startswith("dsh-patches/") for key in keys):
         for name in sorted(os.listdir(fs_path(os.path.join(ASSETS, "dsh-patches")))):
             key = f"dsh-patches/{name}"

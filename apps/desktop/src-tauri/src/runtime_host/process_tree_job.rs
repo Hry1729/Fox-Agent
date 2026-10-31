@@ -11,14 +11,14 @@ pub(super) struct WorkerJob(HANDLE);
 impl WorkerJob {
     pub(super) fn attach(child: &Child) -> Result<Self, String> {
         unsafe {
-            let job = Self(CreateJobObjectW(None, None).map_err(|_| "could not create Kernel worker job")?);
+            let job = Self(CreateJobObjectW(None, None).map_err(|_| "could not create the process job")?);
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             SetInformationJobObject(job.0, JobObjectExtendedLimitInformation,
                 &limits as *const _ as *const _, std::mem::size_of_val(&limits) as u32)
-                .map_err(|_| "could not bound Kernel worker process tree")?;
+                .map_err(|_| "could not bound the process tree")?;
             AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle()))
-                .map_err(|_| "could not attach Kernel worker process tree")?;
+                .map_err(|_| "could not attach the process tree")?;
             Ok(job)
         }
     }

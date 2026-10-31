@@ -47,8 +47,8 @@ pub(crate) const EXECUTOR_ROUTE_RETIRED_MESSAGE: &str = "执行路径已退役";
 
 /// The route every new Run freezes.
 ///
-/// There is no process-level routing switch any more (A0 retired
-/// `FOX_EXECUTOR_ROUTE`): a new Authoritative Run and every child Run freeze
+/// There is no process-level routing switch any more (A0 retired the
+/// executor-route environment switch): a new Authoritative Run and every child Run freeze
 /// `PiNative`. A Legacy-authority binding never carries a route, because the
 /// Pi-native path reuses the Authoritative execution contract instead of adding
 /// a third authority.

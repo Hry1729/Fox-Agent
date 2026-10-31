@@ -6,7 +6,7 @@
 use std::process::Child;
 
 #[cfg(windows)]
-#[path = "kernel_model_worker_job.rs"]
+#[path = "process_tree_job.rs"]
 mod worker_job;
 
 pub(crate) struct ProcessJob {

@@ -30,9 +30,7 @@
 //!   [`MAX_CATALOG_PAGE`] entries with a short description each, so it can never
 //!   become a way to smuggle the whole catalog past the prompt budget.
 //!
-//! Integrated by the Kernel context-resource path
-//! (`kernel_gateway.rs::execute_context_resource`) and the legacy protocol
-//! path (`mod.rs::execute_skill_load_request`).
+//! Integrated by the protocol path (`mod.rs::execute_skill_load_request`).
 
 use crate::database::{Database, SkillActivationRecord};
 use crate::skills;

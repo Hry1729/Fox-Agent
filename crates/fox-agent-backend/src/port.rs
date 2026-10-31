@@ -41,8 +41,8 @@ impl AgentBackend {
     /// that a NEW conversation cannot be frozen to. Existing conversations of
     /// a hidden backend keep their binding and run as before.
     ///
-    /// Codex was hidden on 2026-10-24 because the outer SRT layer could not
-    /// run it reliably. The outer SRT layer is no longer applied to external
+    /// Codex was hidden on 2026-10-24 because Fox's outer sandbox layer could
+    /// not run it reliably. That layer is no longer applied to external
     /// backends (2026-10-26), so Codex is selectable again. Keep the list and
     /// `HIDDEN_AGENT_BACKENDS` in
     /// `apps/desktop/src/features/conversations/model/agent-backend.ts` in

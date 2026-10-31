@@ -79,7 +79,7 @@ describe('model', () => {
     expect(rows.map((row) => row.label)).toEqual(['请求审批', '帮我批准', '完全访问权限'])
     expect(rows[1]).toMatchObject({ disabled: true, reason: AUTO_REVIEW_REASON })
     // The Agent's native full access is selectable in place; Fox no longer
-    // adds or removes an outer SRT layer around it.
+    // adds or removes an outer sandbox of its own around it.
     expect(rows[2].disabled).toBe(false)
     expect(rows[2].reason).toBeNull()
     // A new conversation may pick it.

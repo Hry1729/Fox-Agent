@@ -591,7 +591,7 @@ async fn full_access_codex_and_dsh_requests_still_show_the_card_never_auto_allow
         let conversation = format!("c-d5-{}", backend.as_str());
         let run = format!("r-d5-{}", backend.as_str());
         // The Agent's own full mode is the stored choice; Fox's mode only
-        // says that it adds no outer SRT layer.
+        // says that it adds no outer sandbox of its own.
         let mut request = turn(&conversation, &run, "hello", backend, None);
         request.launch.native_permission = Some(full_mode.into());
         runtime.start_turn(request).unwrap();

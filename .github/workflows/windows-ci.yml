@@ -10,7 +10,7 @@ on:
     inputs:
       # Narrow manual re-check. Off (and absent on push / pull_request) means the
       # full workflow, unchanged. On: only the filtered Rust Host suite and the
-      # Agent Runtime standalone build + packaged Kernel worker test run; desktop
+      # Agent Runtime standalone build run; desktop
       # bun, agent backend (ACP), Zvec / ONNX smoke, Kernel core cargo tests, the
       # protocol check, the full Agent Runtime suite and the Host performance
       # baseline are skipped.
@@ -28,6 +28,17 @@ on:
         description: Targeted only. Also run the Agent backend (ACP) jobs, Windows and Linux (fox-agent-backend --features acp)
         type: boolean
         default: false
+      # runtime_package: build the Windows external-Agent runtime package from the
+      # pins in crates/fox-agent-backend/scripts/windows/runtime-package/ and
+      # upload it as an artifact (never a Release). Implies the runtime script tests.
+      runtime_package:
+        description: Build the Windows runtime package (artifact only, no Release)
+        type: boolean
+        default: false
+      runtime_package_version:
+        description: Version of the runtime package to build
+        type: string
+        default: '0.1.7'
 
 permissions:
   contents: read
@@ -302,6 +313,52 @@ jobs:
 
       - name: Test fox-agent-backend (acp)
         run: cargo test -p fox-agent-backend --features acp --no-fail-fast
+
+  # Plan B5: the runtime package scripts (pack/stage, model-adapter patches, the
+  # installer's enable script, the installer pin check) are tested on every full
+  # run; the package itself is built only on request (runtime_package=true).
+  runtime-package:
+    name: Runtime package scripts
+    if: ${{ !inputs.targeted || inputs.runtime_package }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test runtime package scripts
+        shell: pwsh
+        run: |
+          python -m unittest discover -s crates/fox-agent-backend/scripts/windows/tests -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node --test scripts/prepare-sandbox-installer.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File crates/fox-agent-backend/scripts/windows/tests/test-enable-faults.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build runtime package
+        if: ${{ inputs.runtime_package }}
+        shell: pwsh
+        run: ./crates/fox-agent-backend/scripts/windows/build-runtime-release.ps1 -Version '${{ inputs.runtime_package_version }}' -OutDir "$env:GITHUB_WORKSPACE\.runtime-package" -WorkDir 'C:\frt'
+
+      - name: Upload runtime package
+        if: ${{ inputs.runtime_package }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fox-sandbox-runtime-${{ inputs.runtime_package_version }}-windows-x64
+          path: .runtime-package/
+          retention-days: 90
+          compression-level: 0
 
   vector-runtime-smoke:
     name: Zvec offline smoke

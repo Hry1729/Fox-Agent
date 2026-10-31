@@ -17,7 +17,9 @@
        （srt.alreadyInstalled 为 false，且 SandboxUserSid / CreatedAt 与注册表一致）时，才用旧运行时
        自带的 srt 执行 windows-uninstall；否则保留并在结果 legacySrt 中写明原因；
        清理失败只记入 legacySrt 与日志，不中止运行时安装；
-    6. 删除运行时目录中已不使用的 srt\ 与 acp-bridge\（Fox 不再使用 SRT 沙箱；旧版运行时包仍带这两个目录）；
+    6. 删除运行时目录中已不使用的 srt\ 与 acp-bridge\（Fox 不再使用 SRT 沙箱；旧版运行时包仍带这两个目录）：
+       本次安装的版本目录总是删除；已安装的旧版本目录（如 0.1.6\）也删除（B5），除非第 5 步清理失败
+       （那时保留旧版本的 srt，供下次安装重试卸载）；
     7. 把结果写成 JSON（-ResultPath）。
 
   解压（第五轮修复）：先按包内条目名做路径长度检查（目标目录 + 相对路径 < -MaxPathLength，超出即失败并
@@ -351,6 +353,28 @@ function Find-FoxSrtReceipt([string] $RuntimeParent, [hashtable] $Registry) {
     return $null
 }
 
+function Remove-RetiredRuntimeTrees([string] $RuntimeParent, [string] $Target, [bool] $KeepOlder) {
+    # srt\ and acp-bridge\ that earlier runtime packages shipped (Fox no longer uses either).
+    # Always from the version being installed; from older installed versions too (B5), unless
+    # a legacy SRT clean-up failed: then their srt CLI is what the next install retries with.
+    $removed = @()
+    $dirs = @(Get-ChildItem -LiteralPath $RuntimeParent -Directory -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') } | ForEach-Object { $_.FullName })
+    foreach ($versionDir in $dirs) {
+        $isTarget = [System.IO.Path]::GetFullPath($versionDir).TrimEnd('\', '/') -eq [System.IO.Path]::GetFullPath($Target).TrimEnd('\', '/')
+        if (-not $isTarget -and $KeepOlder) { continue }
+        foreach ($name in $RetiredRuntimeDirs) {
+            $dir = Join-Path $versionDir $name
+            if (Test-Path -LiteralPath $dir) {
+                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+                $removed += $dir
+                Write-FoxLog "removed retired $dir"
+            }
+        }
+    }
+    if ($KeepOlder) { Write-FoxLog 'kept srt\ in older runtime versions: the legacy SRT clean-up failed and will retry with it' }
+    return $removed
+}
+
 function Find-LegacySrtCli([string] $RuntimeParent) {
     # The srt CLI and node of any installed runtime version that still has them.
     foreach ($dir in @(Get-ChildItem -LiteralPath $RuntimeParent -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
@@ -509,16 +533,10 @@ try {
         $result.legacySrtRecord = (Get-Content -LiteralPath $result.legacySrt.receipt -Raw -Encoding UTF8 | ConvertFrom-Json).srt
     }
 
-    # 6. Directories older runtime packages shipped and Fox no longer uses.
+    # 6. Directories older runtime packages shipped and Fox no longer uses: this version and
+    #    (unless the legacy clean-up failed and needs their srt to retry) older versions.
     $step = 'strip-retired'
-    foreach ($name in $RetiredRuntimeDirs) {
-        $dir = Join-Path $target $name
-        if (Test-Path -LiteralPath $dir) {
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
-            $result.removedRuntimeDirs += $dir
-            Write-FoxLog "removed retired $dir"
-        }
-    }
+    $result.removedRuntimeDirs += @(Remove-RetiredRuntimeTrees $runtimeParent $target ($result.legacySrt.decision -eq 'failed'))
 
     # 7. Result.
     $result.ok = $true

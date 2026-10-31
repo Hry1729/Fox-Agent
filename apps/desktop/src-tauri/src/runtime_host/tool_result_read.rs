@@ -17,9 +17,8 @@
 //!   recovered from here.
 //!
 //! Nothing here knows about approvals, UI, or transport: it prepares arguments and
-//! answers one question against the database. The Kernel context-resource path
-//! (`kernel_gateway.rs::execute_context_resource`) and the legacy protocol path
-//! (`mod.rs::execute_tool_result_read_request`) are the two integrated callers.
+//! answers one question against the database. The protocol path
+//! (`mod.rs::execute_tool_result_read_request`) is the integrated caller.
 
 use crate::database::Database;
 use serde_json::{json, Value};
