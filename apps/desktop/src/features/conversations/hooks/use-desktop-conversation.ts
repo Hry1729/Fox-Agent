@@ -1086,6 +1086,13 @@ export function useDesktopConversation(): DesktopConversationState {
     // Optimistic trace of this send, removed again if backend routing refuses it.
     let pendingMessageId: string | null = null
     let previousLastRun: RunRecord | null = detail?.lastRun ?? null
+    // 这次发送新建的空会话。Run 行写入之前失败时要把它当成没发生过。
+    let createdConversationId: string | null = null
+    let createdDraft: {
+      draft: ConversationDraftSnapshot
+      explicitBackend: AgentBackendId | null
+      nativePermission: string | null
+    } | null = null
     if (active) {
       // A conversation bound to a retired or switched-off backend is read-only
       // (history only): refuse locally, before anything optimistic, instead of
@@ -1116,6 +1123,19 @@ export function useDesktopConversation(): DesktopConversationState {
           .then((preferences) => newConversationBackend(preferences))
           .catch(() => draftAgentBackendRef.current)
         const nativePermission = backend === 'fox' ? undefined : draftNativePermissionRef.current ?? undefined
+        createdDraft = {
+          draft: {
+            agentId,
+            expertId: draft.expertId ?? draftExpertId ?? null,
+            projectRoot: draft.projectRoot ?? draftProjectRoot ?? null,
+            permissionMode: draft.permissionMode ?? draftPermissionMode ?? null,
+            knowledgeBases: (draft.knowledgeBases.length ? draft.knowledgeBases : draftKnowledgeBases).slice(),
+            knowledgeReferences: draft.knowledgeReferences ? draft.knowledgeReferences.slice() : undefined,
+            knowledgeNames: { ...(draft.knowledgeNames ?? {}) },
+          },
+          explicitBackend: explicitDraftBackendRef.current,
+          nativePermission: draftNativePermissionRef.current,
+        }
         const conversation = await desktopClient.createConversation({
           agentId,
           expertId: backend === 'fox' ? draft.expertId ?? draftExpertId ?? undefined : undefined,
@@ -1126,6 +1146,7 @@ export function useDesktopConversation(): DesktopConversationState {
           agentBackend: backend === 'fox' ? undefined : backend,
           ...(nativePermission ? { nativePermission } : {}),
         })
+        createdConversationId = conversation.id
         draftNativePermissionRef.current = null
         active = await desktopClient.loadConversation(conversation.id)
         if (selectionVersion === selectionVersionRef.current) {
@@ -1251,6 +1272,71 @@ export function useDesktopConversation(): DesktopConversationState {
     } catch (cause) {
       if (active) uiDispatchStartedRef.current.delete(active.conversation.id)
       const details = desktopErrorDetails(cause)
+      lastSendFailureRef.current = details.code && details.code !== 'unknown' ? `${details.code}: ${details.message}` : details.message
+      // 确认失败或会话里已有内容时不删，保持选中，并沿用原来的失败处理。
+      // 确认 / 删除本身的错误不能被后面的刷新吞掉。
+      let preserveUndoError = false
+      if (createdConversationId && createdDraft) {
+        const conversationId = createdConversationId
+        const draftSnapshot = createdDraft
+        setDetail((current) => current?.conversation.id === conversationId
+          ? withoutRefusedSend(current, pendingMessageId, previousLastRun)
+          : current)
+        let empty = false
+        try {
+          const loaded = await desktopClient.loadConversation(conversationId)
+          const persistedRunId = loaded.lastRun?.id ?? ''
+          const hasRun = Boolean(persistedRunId) && !persistedRunId.startsWith('pending-run-')
+          empty = (loaded.messages?.length ?? 0) === 0 && !hasRun
+        } catch (loadCause) {
+          const loadDetails = desktopErrorDetails(loadCause)
+          if (selectionVersion === selectionVersionRef.current) {
+            setError(loadDetails.message)
+            setErrorDetails(loadDetails)
+          }
+          preserveUndoError = true
+        }
+        if (empty) {
+          try {
+            // Host 的永久删除要求先移入回收站。
+            await desktopClient.deleteConversation(conversationId)
+            const purged = await desktopClient.purgeConversation(conversationId)
+            if (purged !== true) {
+              const purgeDetails = { code: 'conversation.purge_failed', message: '空对话没有删除', retryable: false }
+              if (selectionVersion === selectionVersionRef.current) {
+                setError(purgeDetails.message)
+                setErrorDetails(purgeDetails)
+              }
+              preserveUndoError = true
+            } else {
+              const stillThisSend = selectionVersion === selectionVersionRef.current
+                && activeConversationIdRef.current === conversationId
+              if (stillThisSend) {
+                restoreDraft(draftSnapshot.draft)
+                if (draftSnapshot.explicitBackend) setDraftAgentBackend(draftSnapshot.explicitBackend)
+                setDraftNativePermission(draftSnapshot.nativePermission)
+              }
+              try {
+                await refreshLifecycleLists()
+              } catch (refreshCause) {
+                const refreshDetails = desktopErrorDetails(refreshCause)
+                if (selectionVersion === selectionVersionRef.current) {
+                  setError(refreshDetails.message)
+                  setErrorDetails(refreshDetails)
+                }
+              }
+              return false
+            }
+          } catch (purgeCause) {
+            const purgeDetails = desktopErrorDetails(purgeCause)
+            if (selectionVersion === selectionVersionRef.current) {
+              setError(purgeDetails.message)
+              setErrorDetails(purgeDetails)
+            }
+            preserveUndoError = true
+          }
+        }
+      }
       if (isAgentBackendRefusalCode(details.code)) {
         // Backend routing refused before any message or run row was written:
         // drop the optimistic message and pending run, keep `error` null (this
@@ -1270,16 +1356,15 @@ export function useDesktopConversation(): DesktopConversationState {
         }
         return AGENT_BACKEND_REFUSED
       }
-      lastSendFailureRef.current = details.code && details.code !== 'unknown' ? `${details.code}: ${details.message}` : details.message
       if (active) await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
       await refreshList().catch(() => undefined)
-      if (selectionVersion === selectionVersionRef.current) {
+      if (!preserveUndoError && selectionVersion === selectionVersionRef.current) {
         setError(details.message)
         setErrorDetails(details)
       }
       return false
     }
-  }, [setDetail, applyDraft, defaultAgentId, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, initializeRuntime, refreshList, refreshSelectedConversation])
+  }, [setDetail, applyDraft, defaultAgentId, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, initializeRuntime, refreshLifecycleLists, refreshList, refreshSelectedConversation, restoreDraft, setDraftAgentBackend, setDraftNativePermission])
 
   const rerunFromMessage = useCallback(async (messageId: string, text: string, model?: string) => {
     const active = detail

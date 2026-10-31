@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { useDeveloperUi } from './developer-ui'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { parseQueryArguments, reconciliationReady } from '@/features/conversations/model/reconciliation'
 import type { ReconciliationDecision, ReconciliationOptions, ReconciliationView } from '@/features/conversations/model/reconciliation'
@@ -11,6 +12,7 @@ const decisionLabel = { executed: '已执行', not_executed: '未执行', unreso
 export function KernelReconciliationPanel({ conversationId, runId, onResumed }: {
   conversationId: string; runId: string; onResumed: () => Promise<void>
 }) {
+  const developerUi = useDeveloperUi()
   const [view, setView] = useState<ReconciliationView | null>(null)
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -41,7 +43,7 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
       <div><strong>{view ? '任务中断，部分操作结果待确认' : '恢复记录暂时无法读取'}</strong>{view && <p>核对结果</p>}</div>
       {view && <Button variant="outline" size="sm" onClick={() => setExpanded(value => !value)} aria-expanded={expanded} aria-controls={`reconciliation-${runId}`}>{expanded ? '收起' : '核对与恢复'}</Button>}
     </div>
-    {error && <p role="alert" className="fox-reconciliation-error">{error} <Button variant="ghost" size="sm" disabled={busy} onClick={() => void act(async () => { setView(await desktopClient.reconciliationLoad({ conversationId, runId })) })}>刷新</Button></p>}
+    {error && <p role="alert" className="fox-reconciliation-error">{developerUi || error === '核对记录暂时无法读取，请刷新重试。' ? error : '操作没有完成，请刷新后重试。'} <Button variant="ghost" size="sm" disabled={busy} onClick={() => void act(async () => { setView(await desktopClient.reconciliationLoad({ conversationId, runId })) })}>刷新</Button></p>}
     {expanded && view && <div id={`reconciliation-${runId}`} className="fox-reconciliation-body">
       <p>查询证据与人工确认会分别记录。恢复将创建关联的新任务，保留原任务记录。</p>
       {view.items.map((item, index) => {

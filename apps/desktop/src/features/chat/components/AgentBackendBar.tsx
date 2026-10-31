@@ -39,12 +39,12 @@ import './agent-backend-bar.css'
  * (install / log in / upgrade / retry). Fox never falls back to another
  * driver; this is the whole answer.
  */
-export function AgentBackendFailureNotice({ failure }: { failure: AgentBackendFailureHint }) {
+export function AgentBackendFailureNotice({ failure, developerUi = false }: { failure: AgentBackendFailureHint; developerUi?: boolean }) {
   return (
     <div className="fox-agent-backend-failure" role="alert" data-action={failure.action} data-code={failure.code}>
       <strong>{failure.label}</strong>
       <span>{failure.detail}</span>
-      <code>{failure.code}</code>
+      {developerUi && <code>{failure.code}</code>}
     </div>
   )
 }
@@ -114,9 +114,8 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
   const receiptNotice = importReceipt && importReceipt.length > 0
     ? <ImportReceiptNotice lines={importReceipt} onDismiss={onDismissImportReceipt} />
     : null
-  const refusalNotice = refusal
-    ? <span className="fox-agent-backend-notice fox-agent-backend-refusal" role="alert">{refusal}</span>
-    : null
+  // 发送被路由拒绝改走通知，栏上不再铺同一句。草稿栏仍保留这个空位，避免把拒绝画进新对话。
+  const refusalNotice = refusal ? null : null
   if (lockedBackend) {
     const access = agentBackendAccess(lockedBackend, status)
     const notice = agentBackendLockNotice(lockedBackend, access, status?.switchEnv)
@@ -137,7 +136,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
         )}
         {shownNotice}
         {developerUi && runnable && <CapabilityChips capabilities={capabilities} />}
-        {failure && <AgentBackendFailureNotice failure={failure} />}
+        {failure && <AgentBackendFailureNotice failure={failure} developerUi={developerUi} />}
         {userCard}
         {devCard}
         {receiptNotice}

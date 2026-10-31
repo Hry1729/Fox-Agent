@@ -55,7 +55,8 @@ describe('agentBackendFailureHint', () => {
     expect(agentBackendFailureHint(null)).toBeNull()
     expect(agentBackendFailureHint(undefined)).toBeNull()
     expect(agentBackendFailureHint('')).toBeNull()
-    expect(agentBackendFailureHint('agent_backend_turn_busy')).toBeNull()
+    // 发送失败要给人话：上一轮还在进行时可以等它结束再发，不再当作没有动作。
+    expect(agentBackendFailureHint('agent_backend_turn_busy')?.action).toBe('retry')
     expect(agentBackendFailureHint('something_else')).toBeNull()
   })
 

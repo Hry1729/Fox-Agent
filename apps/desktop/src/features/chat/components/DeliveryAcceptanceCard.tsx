@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { ShieldAlert, ShieldCheck, Check, X, RotateCcw } from 'lucide-react'
+import { useDeveloperUi } from '../developer-ui'
 import type {
   DeliveryAcceptanceDecision,
   DeliveryAcceptanceOutcome,
@@ -70,6 +71,7 @@ export function DeliveryAcceptanceCard({
   loadState,
   resolve,
 }: DeliveryAcceptanceCardProps) {
+  const developerUi = useDeveloperUi()
   const [state, setState] = useState<DeliveryAcceptanceState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -114,7 +116,7 @@ export function DeliveryAcceptanceCard({
   if (error && !state) {
     return (
       <section className="fox-delivery-acceptance is-error" role="alert">
-        <p>{error}</p>
+        <p>{developerUi ? error : '交付状态没有读出来，请重试。'}</p>
       </section>
     )
   }
@@ -164,7 +166,7 @@ export function DeliveryAcceptanceCard({
       {blocked && <p className="fox-delivery-acceptance-blocked">{blockedReason(state)}</p>}
       {error && (
         <p className="fox-delivery-acceptance-error" role="alert">
-          {error}
+          {developerUi ? error : '这次操作没有完成，请重试。'}
         </p>
       )}
 

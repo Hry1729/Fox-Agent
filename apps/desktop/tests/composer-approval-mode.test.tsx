@@ -171,9 +171,12 @@ describe('developer mode', () => {
 
   test('off: a login the user must fix is still shown', async () => {
     render(<AgentBackendPanel client={panelClient(false) as any} status={status} lockedBackend="pi" conversationId="c-pi" draftBackend="fox" developerUi={false} />)
-    await waitFor(() => expect(text()).toContain('这个后端还没有登录'))
-    expect(text()).toContain('从真实 HOME 导入')
+    await waitFor(() => expect(text()).toContain('pi 还没有登录'))
+    expect(text()).not.toContain('从真实 HOME 导入')
+    expect(text()).not.toContain('私有 HOME')
     expect(text()).not.toContain('已锁定')
+    fireEvent.click(screen.getByRole('button', { name: '用已有登录…' }))
+    expect(text()).toContain('从真实 HOME 导入')
   })
 
   test('on: the debugging details come back (still no sandbox chip, no second selector)', async () => {
