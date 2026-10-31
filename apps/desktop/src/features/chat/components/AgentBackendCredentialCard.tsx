@@ -11,7 +11,9 @@
 // the caller on the bar (settings batch, fix ②: the card used to echo it in
 // its own status line, which stayed after "知道了" and never timed out);
 // only an import ERROR is shown here.
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
   credentialCardModel,
   importConfirmationRows,
@@ -20,8 +22,16 @@ import {
   type ImportItem,
   type ImportReport,
 } from '@/features/conversations/model/agent-backend-onboarding'
+import type { AgentModelConnection } from './AgentModelConnectionCard'
 
-export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, onLoadCandidates, onImport, onChooseFox }: {
+function loginTitle(backend: string): string {
+  if (backend === 'deepseek') return 'dsh 还没有登录'
+  if (backend === 'pi') return 'pi 还没有登录'
+  if (backend === 'codex') return 'Codex 还没有登录'
+  return '这个 Agent 还没有登录'
+}
+
+export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, onLoadCandidates, onImport, onChooseFox, developerUi = false, modelConnection = null, modelForm = null, onOpenModelSettings }: {
   probe: CredentialProbe | null
   permission?: AgentBackendPermissionStatus | null
   onOpenFolder: () => Promise<unknown>
@@ -29,6 +39,12 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
   /** Copy the confirmed ids; `allProjects` = "套用到我所有项目"; `overwrite` = "覆盖已有登录". */
   onImport: (selected: string[], allProjects: boolean, overwrite: boolean, reuseForNewProjects: boolean) => Promise<ImportReport>
   onChooseFox?: (remember: boolean) => Promise<unknown>
+  /** 开发者模式默认展开已有登录的详情。 */
+  developerUi?: boolean
+  modelConnection?: AgentModelConnection | null
+  /** 缺模型地址时，主按钮展开这块现有表单。 */
+  modelForm?: ReactNode
+  onOpenModelSettings?: () => void
 }) {
   const card = credentialCardModel(probe, permission, true)
   const [candidates, setCandidates] = useState<ImportItem[] | null>(null)
@@ -38,6 +54,8 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
   const [reuseForNewProjects, setReuseForNewProjects] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [loginOpen, setLoginOpen] = useState(developerUi)
   if (!card) return null
   const run = async (action: () => Promise<void>) => {
     setBusy(true)
@@ -105,5 +123,39 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
       {message && <p role="alert" className="fox-agent-backend-credential-error">{message}</p>}
     </section>
   )
-  return card.kind === 'ready' ? <details><summary>Agent 配置来源与导入</summary>{content}</details> : content
+  if (card.kind === 'ready' && !modelForm) return <details><summary>Agent 配置来源与导入</summary>{content}</details>
+  if (card.kind !== 'missing' && !modelForm) return content
+  const fillAddress = modelConnection?.status === 'missing_address' || modelConnection?.status === 'choose_address'
+  const primaryLabel = fillAddress ? '填写 Anthropic 地址' : '去设置模型服务'
+  const openPrimary = () => {
+    if (fillAddress) setShowForm(true)
+    else onOpenModelSettings?.()
+  }
+  const details = developerUi || loginOpen
+    ? <div className="fox-agent-login-details">{content}</div>
+    : null
+  return (
+    <section className="fox-agent-login-card" aria-label={loginTitle(probe?.backend ?? '')}>
+      <div className="fox-agent-login-card-copy">
+        <strong>{card.kind === 'missing' ? loginTitle(probe?.backend ?? '') : '还没有可用的模型连接'}</strong>
+        <p>{fillAddress ? '还没有可用的模型地址，填写后才能发送。' : '还没有可用的模型连接。可以去设置，或用已有登录。'}</p>
+      </div>
+      <div className="fox-agent-login-card-actions">
+        <Button type="button" size="sm" onClick={openPrimary}>{primaryLabel}</Button>
+        <Button type="button" size="sm" variant="outline" onClick={() => setLoginOpen(true)}>用已有登录…</Button>
+      </div>
+      {showForm && modelForm}
+      {developerUi ? details : (
+        <Dialog open={loginOpen} onOpenChange={setLoginOpen}>
+          <DialogContent className="fox-agent-login-dialog sm:max-w-xl" aria-label="用已有登录">
+            <DialogHeader>
+              <DialogTitle>用已有登录</DialogTitle>
+              <DialogDescription>从已有登录里选择要复制的项目。</DialogDescription>
+            </DialogHeader>
+            {loginOpen ? <div className="fox-agent-login-details">{content}</div> : null}
+          </DialogContent>
+        </Dialog>
+      )}
+    </section>
+  )
 }

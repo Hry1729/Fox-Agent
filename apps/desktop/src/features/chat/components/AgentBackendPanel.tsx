@@ -98,6 +98,7 @@ export function AgentBackendPanel({
   failure = null,
   sessionTick = 0,
   developerUi: developerUiProp,
+  onOpenModelSettings,
 }: {
   client: AgentBackendPanelClient
   status: AgentBackendStatus | null
@@ -117,6 +118,8 @@ export function AgentBackendPanel({
   sessionTick?: number
   /** Developer mode override (tests); defaults to the 设置 / FOX_DEV_UI switch. */
   developerUi?: boolean
+  /** 「去设置模型服务」。 */
+  onOpenModelSettings?: () => void
 }) {
   const developerSwitch = useDeveloperUi()
   const developerUi = developerUiProp ?? developerSwitch
@@ -215,34 +218,34 @@ export function AgentBackendPanel({
   const card = useMemo(() => {
     if (!targetKey || !probe) return null
     const current: AgentBackendTarget = JSON.parse(targetKey)
-    const credentialCard = (
-      <AgentBackendCredentialCard
-        key={targetKey}
-        probe={probe}
-        permission={permission}
-        onOpenFolder={() => client.agentBackendOpenPrivateHome(current)}
-        onLoadCandidates={() => client.agentBackendImportCandidates(current)}
-        onChooseFox={client.agentBackendChooseFoxSource ? async remember => {
-          await client.agentBackendChooseFoxSource!(current, remember)
-          setOnboardingTick(tick => tick + 1)
-        } : undefined}
-        onImport={async (selected, allProjects, overwrite, reuseForNewProjects) => {
-          const report = await client.agentBackendImportCredentials(current, selected, allProjects, overwrite, reuseForNewProjects)
-          setReceipt({ key: targetKey, value: importReceiptLines(report) })
-          setOnboardingTick((tick) => tick + 1)
-          return report
-        }}
-      />
-    )
-    if (!probe.source?.choiceRequired && targetKey && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login') {
-      return <><AgentModelConnectionCard key={`${targetKey}:${modelConnection.providerId}`} backend={shownBackend} connection={modelConnection} onSave={async choice => {
-        const value = await client.agentBackendModelConnection!({ target: JSON.parse(targetKey), providerId: modelConnection.providerId ?? undefined, ...choice })
-        setConnectionOverride({ key: targetKey, tick: modelTick, value })
-        if (value.status === 'ready' || value.status === 'existing_login') window.dispatchEvent(new Event('fox:model-service-changed'))
-      }} /><details><summary>使用已有 Agent 登录</summary>{credentialCard}</details></>
-    }
-    return credentialCard
-  }, [client, targetKey, probe, permission, modelConnection, shownBackend, modelTick])
+    const needsModel = !probe.source?.choiceRequired && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login'
+    const modelForm = needsModel ? <AgentModelConnectionCard key={`${targetKey}:${modelConnection.providerId}`} backend={shownBackend} connection={modelConnection} onSave={async choice => {
+      const value = await client.agentBackendModelConnection!({ target: JSON.parse(targetKey), providerId: modelConnection.providerId ?? undefined, ...choice })
+      setConnectionOverride({ key: targetKey, tick: modelTick, value })
+      if (value.status === 'ready' || value.status === 'existing_login') window.dispatchEvent(new Event('fox:model-service-changed'))
+    }} /> : null
+    return <AgentBackendCredentialCard
+      key={targetKey}
+      probe={probe}
+      permission={permission}
+      developerUi={developerUi}
+      modelConnection={needsModel ? modelConnection : null}
+      modelForm={modelForm}
+      onOpenModelSettings={onOpenModelSettings}
+      onOpenFolder={() => client.agentBackendOpenPrivateHome(current)}
+      onLoadCandidates={() => client.agentBackendImportCandidates(current)}
+      onChooseFox={client.agentBackendChooseFoxSource ? async remember => {
+        await client.agentBackendChooseFoxSource!(current, remember)
+        setOnboardingTick(tick => tick + 1)
+      } : undefined}
+      onImport={async (selected, allProjects, overwrite, reuseForNewProjects) => {
+        const report = await client.agentBackendImportCredentials(current, selected, allProjects, overwrite, reuseForNewProjects)
+        setReceipt({ key: targetKey, value: importReceiptLines(report) })
+        setOnboardingTick((tick) => tick + 1)
+        return report
+      }}
+    />
+  }, [client, targetKey, probe, permission, modelConnection, shownBackend, modelTick, developerUi, onOpenModelSettings])
 
   const networkPanel = developerUi && external && capabilityConversationId && client.agentBackendNetworkStatus && client.agentBackendPreviewAction
     ? <AgentNetworkPanel key={capabilityConversationId} client={client as AgentNetworkClient} conversationId={capabilityConversationId} /> : null

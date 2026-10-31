@@ -17,6 +17,7 @@ import { notify as toast } from '@/features/notifications'
 import { Activity, AlertTriangle, ArrowLeft, BookOpen, Bot, Check, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, ExternalLink, FileEdit, FileText, FolderOpen, Folders, Globe2, LoaderCircle, Maximize2, Minimize2, PanelRight, Plus, RotateCcw, Search, ShieldCheck, Terminal, X } from 'lucide-react'
 import { type ReactNode, Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { commandOutput, isChangeOrCommandTool, isCommandTool, toolExecutionStatus, toolStatusLabel } from '../composer/fox-composer'
+import { useDeveloperUi } from '../developer-ui'
 import { type ChildAgentSelection, MarkdownResponse, type OpenFileTab, type RightMode } from '../fox-shared'
 import { compactValue, runtimeProcess } from '../timeline/fox-runtime-process-model'
 import { Workbench } from '../workbench'
@@ -454,11 +455,13 @@ function childRunFailureTitle(run: ChildRunRecord) {
   return '运行失败'
 }
 
-function childRunFailureMessage(run: ChildRunRecord) {
+function childRunFailureMessage(run: ChildRunRecord, developerUi: boolean) {
   // The concrete execution cap is internal accounting: the user reads that the
   // sub-task did not finish in time and that its result was not used.
   if (childRunFailureTitle(run) === '运行超时') return '子任务未在限定时间内完成，结果未采用'
-  return run.errorMessage ?? (run.status === 'interrupted' ? '运行意外中断，本次结果未采用' : '协作助手未返回可采用结果')
+  const human = run.status === 'interrupted' ? '运行意外中断，本次结果未采用' : '协作助手没有完成，结果未采用'
+  if (!developerUi) return human
+  return run.errorMessage ?? human
 }
 
 function childAgentVisualQaEnabled() {
@@ -549,6 +552,7 @@ function childUserMessageNeedsCollapse(content: string) {
 }
 
 function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildRunRecord; avatarIndex: number; onBack: () => void }) {
+  const developerUi = useDeveloperUi()
   const [childDetail, setChildDetail] = useState<ConversationDetail | null>(null)
   const [childDetailLoading, setChildDetailLoading] = useState(false)
   const [childDetailError, setChildDetailError] = useState<string | null>(null)
@@ -651,7 +655,7 @@ function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildR
         {childRunIsActive(run) && <div className="fox-agent-live-line"><LoaderCircle className="animate-spin" />协作助手正在运行，消息会自动更新</div>}
         {(run.status === 'failed' || run.status === 'interrupted') && <div className="fox-agent-run-error" role="alert">
           <AlertTriangle />
-          <div><strong>{childRunFailureTitle(run)}</strong><p>{childRunFailureMessage(run)}</p></div>
+          <div><strong>{childRunFailureTitle(run)}</strong><p>{childRunFailureMessage(run, developerUi)}</p></div>
         </div>}
       </div>
     </section>

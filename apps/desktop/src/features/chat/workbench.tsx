@@ -1508,8 +1508,9 @@ export function Workbench() {
       draftFullAccess={draftFullAccess}
       refusal={visibleAgentBackendRefusal}
       failure={agentBackendFailure}
+      onOpenModelSettings={handleOpenComposerModelSettings}
     />
-  ) : null, [desktopConversation.enabled, agentBackendStatus, lockedAgentBackend, openConversationId, draftAgentBackend, draftProjectId, draftProjectRoot, draftFullAccess, visibleAgentBackendRefusal, agentBackendFailure])
+  ) : null, [desktopConversation.enabled, agentBackendStatus, lockedAgentBackend, openConversationId, draftAgentBackend, draftProjectId, draftProjectRoot, draftFullAccess, visibleAgentBackendRefusal, agentBackendFailure, handleOpenComposerModelSettings])
   // Composer batch (2026-10-31): ONE approval mode selector, in the
   // composer, adapted to the shown backend. Every list comes from the Host
   // (`agent_backend_approval_modes` / `agent_backend_native_permissions`).

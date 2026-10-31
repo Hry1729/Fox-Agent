@@ -202,10 +202,11 @@ describe('① a new conversation never renders or loads a retired driver', () =>
     expect(screen.queryByLabelText('权限')).toBeNull()
     expect(screen.queryByText('隔离：Fox 不额外包装（Agent 原生）')).toBeNull()
 
-    // A refused send replaces the lock notice: one message, never two.
+    // 拒绝原因改走通知，栏上只保留只读说明，不再叠一条 alert。
     view.rerender(<Panel client={fake.client} backend="fox" locked="codex" conversationId="c-old-codex" refusal="Agent 后端「Codex」已在本版本退休" developerUi />)
-    expect(screen.getByRole('alert').textContent).toBe('Agent 后端「Codex」已在本版本退休')
-    expect(text()).not.toContain('只能查看历史')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(text()).toContain('只能查看历史')
+    expect(text()).not.toContain('Agent 后端「Codex」已在本版本退休')
   })
 
   test('a deepseek conversation shows DeepSeek, not the built-in driver', async () => {
