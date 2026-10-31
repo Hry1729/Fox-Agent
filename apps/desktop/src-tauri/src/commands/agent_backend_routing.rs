@@ -888,7 +888,7 @@ pub async fn agent_backend_native_permission_set(
     }
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
     let context = native_context(&state, backend, forbidden);
-    let mut mode = request.mode.as_deref().map(str::trim).unwrap_or_default().to_owned();
+    let mode = request.mode.as_deref().map(str::trim).unwrap_or_default().to_owned();
     if mode.is_empty() && request.conversation_id.is_none() && !request.default_only {
         if let Some(carry) = request.carry_tier.as_deref() {
             // The new conversation's Agent changed (or it was opened): carry
