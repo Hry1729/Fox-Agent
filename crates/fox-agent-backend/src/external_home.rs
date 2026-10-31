@@ -581,13 +581,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let private = PrivateDirs { private_home: root.path().join("home"), tmp_root: root.path().join("tmp") };
         let prepared = prepare_launch(spec(AgentBackend::Codex), "s1", &private, HostOs::Linux).unwrap();
-        assert!(root.path().join("home/.codex").is_dir());
+        assert!(root.path().join("home").join(".codex").is_dir());
         let env: BTreeMap<_, _> = prepared.spec.session_env.iter().cloned().collect();
         assert_eq!(env["HOME"], root.path().join("home").to_string_lossy());
-        assert_eq!(env["CODEX_HOME"], root.path().join("home/.codex").to_string_lossy());
-        assert_eq!(env["TMPDIR"], root.path().join("tmp/s1").to_string_lossy());
+        assert_eq!(env["CODEX_HOME"], root.path().join("home").join(".codex").to_string_lossy());
+        assert_eq!(env["TMPDIR"], root.path().join("tmp").join("s1").to_string_lossy());
         assert_eq!(prepared.mode, PermissionMode::FullAccess);
-        let temp = root.path().join("tmp/s1");
+        let temp = root.path().join("tmp").join("s1");
         assert!(temp.is_dir());
         drop(prepared);
         assert!(!temp.exists(), "the session temp goes away with the launch");
