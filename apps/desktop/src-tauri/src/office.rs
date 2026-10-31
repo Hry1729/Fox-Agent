@@ -1444,11 +1444,7 @@ fn invoke_with_stdin(binary: &Path, args: &[String], stdin_data: Option<&str>, c
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
+    fox_agent_backend::console::HideConsole::hide_console(&mut command);
     let mut child = command
         .spawn()
         .map_err(|e| format!("Office 启动失败: {e}"))?;

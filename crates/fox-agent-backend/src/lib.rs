@@ -47,6 +47,7 @@
 
 pub mod capability_view;
 pub mod config;
+pub mod console;
 pub mod credential_delete;
 pub mod credential_save;
 pub mod external_home;

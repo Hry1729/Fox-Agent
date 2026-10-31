@@ -1233,7 +1233,7 @@ pub struct SystemSpawner;
 /// CREATE_NO_WINDOW: the product default. A background job must not flash a
 /// console.
 #[cfg(windows)]
-pub const CREATE_NO_WINDOW_FLAG: u32 = 0x0800_0000;
+pub const CREATE_NO_WINDOW_FLAG: u32 = fox_agent_backend::console::CREATE_NO_WINDOW;
 
 #[cfg(windows)]
 pub(crate) const CREATE_SUSPENDED_FLAG: u32 = 0x0000_0004;
@@ -1309,6 +1309,7 @@ fn spawn_system_child(
     spec: &SpawnSpec,
     creation_flags: u32,
 ) -> io::Result<Box<dyn ChildHandle>> {
+    // console-policy: console mode set below from `creation_flags`.
     let mut command = std::process::Command::new(&spec.program);
     command
         .current_dir(&spec.cwd)
@@ -1323,6 +1324,9 @@ fn spawn_system_child(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // console-policy: the caller picks the console mode. `SystemSpawner`
+        // (production) passes CREATE_NO_WINDOW; `SystemSpawnerFlags` exists for
+        // the C-FINDING-01 console-mode matrix in tests/harness_process_jobs.rs.
         command.creation_flags(creation_flags | CREATE_SUSPENDED_FLAG);
     }
     #[cfg(not(windows))]
