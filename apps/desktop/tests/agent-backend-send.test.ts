@@ -13,6 +13,7 @@ import {
 } from '../src/features/chat/conversation-run-indicator'
 import {
   AGENT_BACKEND_REFUSED,
+  agentBackendInputLockedCode,
   agentBackendInputLockedReason,
   conversationAgentBackend,
   isAgentBackendRefusalCode,
@@ -29,9 +30,12 @@ import {
 // conversation-draft-selection.test.ts: the production hook body runs with
 // deterministic state slots and a fake Host; effects are not run.
 //
-// Single Pi mainline (product decision 2026-10-27): `agent_backend_retired` is
-// the refusal a retired backend produces, and a conversation frozen to one is
-// read-only, so a send is refused locally with that same code and wording.
+// Plan C1 (2026-10-31): the external Agents are back; the administrator can
+// still switch one off (`FOX_EXTERNAL_BACKENDS`), and the Host then refuses a
+// new conversation with `agent_backend_disabled`. A conversation frozen to a
+// backend that is switched off (or retired: the mechanism is kept) is
+// read-only, so a send is refused locally with the same code and wording.
+// Without a loaded Host status the mirror fails closed the same way.
 const source = readFileSync(new URL('../src/features/conversations/hooks/use-desktop-conversation.ts', import.meta.url), 'utf8')
 const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(source.indexOf('export function useDesktopConversation'), source.indexOf('export function latestMessage')).replace('export function', 'function'))
 
@@ -100,6 +104,7 @@ function harness(startRun: (request: any) => Promise<any>, options: {
     applyRunEventToOverlay,
     applyApprovalToOverlay,
     AGENT_BACKEND_REFUSED,
+    agentBackendInputLockedCode,
     agentBackendInputLockedReason,
     conversationAgentBackend,
     isAgentBackendRefusalCode,
@@ -119,9 +124,9 @@ function harness(startRun: (request: any) => Promise<any>, options: {
 const refusal = (code: string, message: string) => Object.assign(new Error(message), { code })
 
 describe('a send refused by backend routing leaves no optimistic trace', () => {
-  test('a new conversation that asks for a retired backend: the refusal is a routing refusal, not a failed run', async () => {
-    const refusalMessage = 'Agent 后端「pi」已在本版本退休：新会话只使用内置 Pi 驱动，不能再选择或启动它'
-    const h = harness(async () => { throw refusal('agent_backend_retired', refusalMessage) })
+  test('a new conversation that asks for a switched-off backend: the refusal is a routing refusal, not a failed run', async () => {
+    const refusalMessage = 'Agent 后端「pi」已被管理员关闭（FOX_EXTERNAL_BACKENDS），不能用于新会话'
+    const h = harness(async () => { throw refusal('agent_backend_disabled', refusalMessage) })
     h.render().setDraftAgentBackend('pi')
     const outcome = await h.render().send('你好')
     expect(outcome).toBe(AGENT_BACKEND_REFUSED)
@@ -134,18 +139,19 @@ describe('a send refused by backend routing leaves no optimistic trace', () => {
     // Not the generic 「处理失败」 state: one routing refusal instead.
     expect(state.error).toBeNull()
     expect(state.errorDetails).toBeNull()
-    expect(state.agentBackendRefusal).toEqual({ conversationId: 'conversation-new', code: 'agent_backend_retired', message: refusalMessage })
+    expect(state.agentBackendRefusal).toEqual({ conversationId: 'conversation-new', code: 'agent_backend_disabled', message: refusalMessage })
     expect(isAgentBackendRefusalCode(state.agentBackendRefusal?.code)).toBe(true)
     // Without a loaded Host status the open pi conversation fails closed as
-    // read-only with the retirement code: the next send never reaches the Host.
+    // read-only (switched off): the next send never reaches the Host.
     expect(await h.render().send('再试一次')).toBe(AGENT_BACKEND_REFUSED)
     expect(h.startRequests).toHaveLength(1)
-    expect(h.render().agentBackendRefusal?.code).toBe('agent_backend_retired')
-    expect(h.render().agentBackendRefusal?.message).toContain('退休')
+    expect(h.render().agentBackendRefusal?.code).toBe('agent_backend_disabled')
+    expect(h.render().agentBackendRefusal?.message).toContain('未启用')
+    expect(h.render().agentBackendRefusal?.message).not.toContain('退休')
     expect(h.render().detail?.messages).toEqual([])
   })
 
-  test('an existing conversation bound to a retired backend is read-only: nothing is sent', async () => {
+  test('an existing conversation bound to a switched-off backend is read-only: nothing is sent', async () => {
     const h = harness(async () => { throw new Error('startRun must not be called') })
     const previousRun = { id: 'run-old', status: 'completed', lastSeq: 3 }
     h.addConversation({
@@ -162,11 +168,12 @@ describe('a send refused by backend routing leaves no optimistic trace', () => {
     expect(state.detail?.lastRun).toBe(previousRun)
     expect(state.error).toBeNull()
     expect(state.agentBackendRefusal?.conversationId).toBe('ds-1')
-    // The retirement refusal, naming the conversation's own backend: it is
-    // never relabelled as the built-in Pi driver.
-    expect(state.agentBackendRefusal?.code).toBe('agent_backend_retired')
+    // The switched-off refusal, naming the conversation's own backend: it is
+    // never relabelled as the built-in Pi driver, and it is not a retirement.
+    expect(state.agentBackendRefusal?.code).toBe('agent_backend_disabled')
     expect(state.agentBackendRefusal?.message).toContain('DeepSeek')
-    expect(state.agentBackendRefusal?.message).toContain('退休')
+    expect(state.agentBackendRefusal?.message).toContain('未启用')
+    expect(state.agentBackendRefusal?.message).not.toContain('退休')
     expect(state.agentBackendRefusal?.message).not.toContain('内置')
   })
 

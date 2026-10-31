@@ -14,6 +14,8 @@ const { AgentBackendSettingsSection } = await import('../src/features/settings/a
 const { AgentBackendPanel } = await import('../src/features/chat/components/AgentBackendPanel')
 const { DEFAULT_AGENT_BACKEND_PREFERENCES } = await import('../src/features/conversations/model/agent-backend')
 const {
+  HOST_ANSWERED_BADGE,
+  LIVE_SWITCH_BADGE,
   NEXT_TURN_RESTART_BADGE,
   nativeAppliedNotice,
   nativeBackendName,
@@ -96,12 +98,19 @@ describe('model', () => {
     expect(nativePermissionChange(engineering, 'workspace-write').kind).toBe('confirm_revoke')
     expect(nativePermissionChange(view(dshCatalog), 'read-only').kind).toBe('apply')
     expect(nativePermissionChange(view(dshCatalog), 'workspace-write-never').kind).toBe('none')
+    // Plan C2: a project that already confirmed full access once is not asked again.
+    expect(nativePermissionChange(view(codexCatalog(), { draft: true, projectFullAccessConfirmed: true }), 'agent-full-access').kind).toBe('apply')
+    expect(nativePermissionChange(view(piCatalog, { projectFullAccessConfirmed: false }), 'full_access').kind).toBe('confirm_full_access')
   })
 
-  test('dsh is marked next-turn only mid-session; applied notices', () => {
+  test('mid-session timing badges: dsh next turn, Codex live, pi from the next request; none in a draft', () => {
     expect(nativeSwitchBadge(view(dshCatalog))).toBe(NEXT_TURN_RESTART_BADGE)
-    expect(nativeSwitchBadge(view(dshCatalog, { draft: true }))).toBeNull()
-    expect(nativeSwitchBadge(view(codexCatalog()))).toBeNull()
+    expect(nativeSwitchBadge(view(codexCatalog()))).toBe(LIVE_SWITCH_BADGE)
+    expect(nativeSwitchBadge(view(piCatalog))).toBe(HOST_ANSWERED_BADGE)
+    for (const catalog of [dshCatalog, codexCatalog(), piCatalog]) {
+      expect(nativeSwitchBadge(view(catalog, { draft: true }))).toBeNull()
+    }
+    expect(nativeAppliedNotice(view(piCatalog, { applied: 'applied' }))).toBe('已切换，从下一次请求起生效')
     expect(nativeAppliedNotice(view(dshCatalog, { applied: 'next_turn' }))).toContain('下一轮')
     expect(nativeAppliedNotice(view(codexCatalog(), { applied: 'applied' }))).toContain('立即生效')
     expect(nativeAppliedNotice(view(codexCatalog(), { applied: 'not_running' }))).toBeNull()
@@ -150,6 +159,7 @@ describe('picker', () => {
     expect(document.querySelector('[data-disabled-option="agent-full-access"]')).toBeNull()
     expect(Array.from(select.options).map((option) => option.disabled)).toEqual([false, true, false])
     expect(screen.queryByText(NEXT_TURN_RESTART_BADGE)).toBeNull()
+    expect(screen.getByText(LIVE_SWITCH_BADGE).getAttribute('data-native-badge')).toBe('live')
     // Picking it asks for the native risk confirmation and does not reach
     // the Host until confirmed.
     fireEvent.change(select, { target: { value: 'agent-full-access' } })
@@ -168,9 +178,9 @@ describe('picker', () => {
     expect(await screen.findByText('已保存，下一轮开始时重启 DeepSeek 生效')).toBeTruthy()
   })
 
-  test('new conversation: full access needs the risk confirmation', async () => {
+  test('new conversation: full access needs the risk confirmation, sent with the project and the confirmation', async () => {
     const { client, calls } = fakeClient(view(codexCatalog(false), { draft: true, fullAccessLockedReason: null }))
-    render(<AgentNativePermissionPicker client={client} conversationId={null} backend="codex" />)
+    render(<AgentNativePermissionPicker client={client} conversationId={null} backend="codex" projectId="p1" />)
     const select = await screen.findByLabelText('权限') as HTMLSelectElement
     fireEvent.change(select, { target: { value: 'agent-full-access' } })
     expect(calls).toHaveLength(0)
@@ -182,7 +192,16 @@ describe('picker', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull()
     fireEvent.change(select, { target: { value: 'agent-full-access' } })
     fireEvent.click(screen.getByText('确认使用完全访问'))
-    await waitFor(() => expect(calls).toEqual([{ backend: 'codex', mode: 'agent-full-access' }]))
+    await waitFor(() => expect(calls).toEqual([{ backend: 'codex', projectId: 'p1', mode: 'agent-full-access', confirmFullAccess: true }]))
+  })
+
+  test('new conversation in a project that already confirmed full access: applied without asking again', async () => {
+    const { client, calls } = fakeClient(view(piCatalog, { draft: true, fullAccessLockedReason: null, projectFullAccessConfirmed: true }))
+    render(<AgentNativePermissionPicker client={client} conversationId={null} backend="pi" projectId="p1" />)
+    const select = await screen.findByLabelText('权限') as HTMLSelectElement
+    fireEvent.change(select, { target: { value: 'full_access' } })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    await waitFor(() => expect(calls).toEqual([{ backend: 'pi', projectId: 'p1', mode: 'full_access' }]))
   })
 
   test('mid-session full access: leaving it goes through the revoke confirmation', async () => {
@@ -206,7 +225,7 @@ describe('picker', () => {
   })
 })
 
-describe('a retired conversation is read-only: no permission switch and no chips', () => {
+describe('a Host-retired conversation is read-only (retirement mechanism kept): no permission switch and no chips', () => {
   const status: AgentBackendStatus = {
     switchEnv: 'FOX_EXTERNAL_BACKENDS',
     anyExternalEnabled: false,
@@ -250,24 +269,25 @@ describe('a retired conversation is read-only: no permission switch and no chips
 })
 
 describe('settings', () => {
-  test('no per-Agent default permission rows: every external Agent is retired', async () => {
-    const calls: Array<NativePermissionRequest & { mode: string }> = []
+  test('per-Agent default permission rows (plan C2): Fox tiers in each Agent\'s names, full access left out, saved as defaultOnly', async () => {
+    const calls: Array<NativePermissionRequest & { mode?: string }> = []
+    const catalogs: Record<string, NativePermissionCatalog> = { codex: codexCatalog(), deepseek: dshCatalog, pi: piCatalog }
     const client = {
       agentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
       saveAgentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
       probeCodexResponses: async () => null,
-      agentBackendNativePermissions: async (request: NativePermissionRequest) => { calls.push(request as NativePermissionRequest & { mode: string }); throw new Error('must not be called') },
-      agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => { calls.push(request); throw new Error('must not be called') },
+      agentBackendNativePermissions: async (request: NativePermissionRequest) => { calls.push(request); return view(catalogs[request.backend!], { draft: true }) },
+      agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => { calls.push(request); return view(catalogs[request.backend!], { draft: true, current: request.mode }) },
     }
     render(<AgentBackendSettingsSection client={client} />)
-    // 设置 →「新会话使用的 Agent」is a plain statement (one supported driver),
-    // and an Agent's native default permission only ever applied to a NEW
-    // conversation of that Agent, so no retired driver offers one any more.
-    await waitFor(() => expect(document.body.textContent).toContain('新会话使用内置 Pi 驱动'))
-    await waitFor(() => expect(calls).toEqual([]))
-    expect(screen.queryByRole('combobox')).toBeNull()
-    expect(screen.queryByLabelText('Codex 默认权限')).toBeNull()
-    expect(screen.queryByLabelText('pi 默认权限')).toBeNull()
-    expect(screen.queryByLabelText('DeepSeek 默认权限')).toBeNull()
+    // 设置 →「新会话使用的 Agent」is a select again (Fox / Pi / Codex / DeepSeek).
+    await waitFor(() => expect(screen.getByLabelText('新会话使用的 Agent')).toBeTruthy())
+    expect(document.body.textContent).not.toContain('新会话使用内置 Pi 驱动')
+    await waitFor(() => expect(screen.getByLabelText('Codex 默认权限')).toBeTruthy())
+    expect(screen.getByLabelText('DeepSeek 默认权限')).toBeTruthy()
+    expect(screen.getByLabelText('Pi 默认权限')).toBeTruthy()
+    expect(calls.map((request) => request.backend).sort()).toEqual(['codex', 'deepseek', 'pi'])
+    // Codex's greyed tier keeps its reason in the row description.
+    expect(document.body.textContent).toContain(AUTO_REVIEW_REASON)
   })
 })

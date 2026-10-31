@@ -29,9 +29,34 @@ import {
 } from '../src/features/conversations/model/agent-backend'
 
 /**
- * The status the current Host reports (single Pi mainline): exactly one
- * supported backend and the three retired ones, which stay listed so the UI can
- * explain them.
+ * The status a C1 Host reports (plan C1, 2026-10-31): the built-in route and
+ * the three external Agents are supported, none is retired; `off` lists the
+ * backends the administrator switched off (`FOX_EXTERNAL_BACKENDS`).
+ */
+function c1Status(off: Array<'pi' | 'codex' | 'deepseek'> = []): AgentBackendStatus {
+  return {
+    switchEnv: 'FOX_EXTERNAL_BACKENDS',
+    anyExternalEnabled: off.length < 3,
+    supportedBackends: ['fox', 'pi', 'codex', 'deepseek'],
+    retiredBackends: [],
+    unknownEntries: [],
+    options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
+      backend,
+      enabled: !(off as string[]).includes(backend),
+      wired: true,
+      experimental: backend === 'deepseek',
+      hidden: false,
+      retired: false,
+      reason: (off as string[]).includes(backend) ? `已被管理员关闭（FOX_EXTERNAL_BACKENDS）` : null,
+    })),
+  }
+}
+
+/**
+ * A Host that RETIRES the three external backends (the single Pi mainline of
+ * 2026-10-27). No C1 Host does, but the retirement mechanism is kept for a
+ * backend that is really taken out of service, so the mirror must still honour
+ * a Host that declares one.
  */
 function status(): AgentBackendStatus {
   return {
@@ -72,6 +97,23 @@ function oldStatus(enabled: Array<'pi' | 'codex' | 'deepseek'> = []): AgentBacke
   }
 }
 
+/** C1 preferences: every backend usable unless switched off. */
+function c1Preferences(over: Partial<AgentBackendPreferences> = {}, off: Array<'pi' | 'codex' | 'deepseek'> = []): AgentBackendPreferences {
+  return {
+    ...DEFAULT_AGENT_BACKEND_PREFERENCES,
+    retiredBackends: [],
+    options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({
+      backend,
+      enabled: !(off as string[]).includes(backend),
+      experimental: backend === 'deepseek',
+      retired: false,
+      reason: (off as string[]).includes(backend) ? '已被管理员关闭（FOX_EXTERNAL_BACKENDS）' : null,
+    })),
+    ...over,
+  }
+}
+
+/** Preferences from a Host that retires the three external backends (mechanism kept). */
 function preferences(over: Partial<AgentBackendPreferences> = {}): AgentBackendPreferences {
   return {
     ...DEFAULT_AGENT_BACKEND_PREFERENCES,
@@ -86,16 +128,20 @@ function preferences(over: Partial<AgentBackendPreferences> = {}): AgentBackendP
   }
 }
 
-describe('single Pi mainline: one supported driver (product decision 2026-10-27)', () => {
-  test('the build mirrors the Host: one supported backend, three retired', () => {
-    expect(SUPPORTED_AGENT_BACKEND_IDS).toEqual(['fox'])
-    expect(RETIRED_AGENT_BACKEND_IDS).toEqual(['pi', 'codex', 'deepseek'])
-    expect(SELECTABLE_AGENT_BACKEND_IDS).toEqual(['fox'])
+describe('plan C1: the built-in route and the three external Agents', () => {
+  test('the build mirrors the Host: four supported backends, none retired, the mechanism kept', () => {
+    expect(SUPPORTED_AGENT_BACKEND_IDS).toEqual(['fox', 'pi', 'codex', 'deepseek'])
+    expect(RETIRED_AGENT_BACKEND_IDS).toEqual([])
+    expect(SELECTABLE_AGENT_BACKEND_IDS).toEqual(['fox', 'pi', 'codex', 'deepseek'])
     expect(isAgentBackendRetired('fox')).toBe(false)
-    for (const backend of RETIRED_AGENT_BACKEND_IDS) {
-      expect(isAgentBackendRetired(backend)).toBe(true)
+    for (const backend of ['pi', 'codex', 'deepseek'] as const) {
+      // Nothing is retired by this build or by a C1 Host ...
+      expect(isAgentBackendRetired(backend)).toBe(false)
+      expect(isAgentBackendRetired(backend, c1Status())).toBe(false)
+      // ... but a Host that declares a retirement is still honoured.
       expect(isAgentBackendRetired(backend, status())).toBe(true)
     }
+    expect(agentBackendRetiredIds(c1Status())).toEqual([])
     expect(AGENT_BACKEND_ERROR_CODES.retired).toBe('agent_backend_retired')
   })
 
@@ -105,58 +151,89 @@ describe('single Pi mainline: one supported driver (product decision 2026-10-27)
     expect(conversationAgentBackend({ agentBackend: 'codex' })).toBe('codex')
   })
 
-  test('an older Host is understood from enabled/wired without reviving a retired driver', () => {
+  test('an older Host is understood from enabled/wired; an enabled external Agent runs', () => {
     // Absent lists: the options say what cannot be used.
     expect(agentBackendRetiredIds(oldStatus())).toEqual(['pi', 'codex', 'deepseek'])
     expect(agentBackendRetiredIds(oldStatus(['pi']))).toEqual(['codex', 'deepseek'])
     expect(agentBackendOptionRetired({ backend: 'codex', enabled: false })).toBe(true)
     expect(agentBackendOptionRetired({ backend: 'codex', enabled: true })).toBe(false)
     expect(agentBackendOptionRetired({ backend: 'fox', enabled: false })).toBe(false)
-    // No status at all: this build's own list.
-    expect(agentBackendRetiredIds(null)).toEqual(['pi', 'codex', 'deepseek'])
-    // Even an older Host that still enables pi cannot make it runnable or pickable.
-    expect(agentBackendAccess('pi', oldStatus(['pi']))).toBe('read_only_retired')
-    expect(canPickAgentBackend('pi', oldStatus(['pi']))).toBe(false)
+    // No status at all: this build's own list, which is empty since C1.
+    expect(agentBackendRetiredIds(null)).toEqual([])
+    // An older Host that enables pi: pi runs and can be picked.
+    expect(agentBackendAccess('pi', oldStatus(['pi']))).toBe('runnable')
+    expect(canPickAgentBackend('pi', oldStatus(['pi']))).toBe(true)
+    expect(canPickAgentBackend('codex', oldStatus(['pi']))).toBe(false)
   })
 })
 
-describe('a new conversation: the built-in Pi path only', () => {
-  test('only the built-in route can be picked', () => {
+describe('a new conversation: Fox or an external Agent', () => {
+  test('every enabled backend can be picked; a switched-off one is greyed with its reason', () => {
     expect(canPickAgentBackend('fox', null)).toBe(true)
-    expect(canPickAgentBackend('fox', status())).toBe(true)
-    for (const backend of RETIRED_AGENT_BACKEND_IDS) {
+    for (const backend of ['fox', 'pi', 'codex', 'deepseek'] as const) {
+      expect(canPickAgentBackend(backend, c1Status())).toBe(true)
+    }
+    // Unknown status: only the built-in route (fails closed).
+    expect(canPickAgentBackend('pi', null)).toBe(false)
+    // The administrator switched codex off: it stays listed, greyed.
+    expect(canPickAgentBackend('codex', c1Status(['codex']))).toBe(false)
+    expect(agentBackendSettingRows(c1Preferences()).map((row) => [row.value, row.disabled, row.reason])).toEqual([
+      ['fox', false, null], ['pi', false, null], ['codex', false, null], ['deepseek', false, null],
+    ])
+    const off = agentBackendSettingRows(c1Preferences({}, ['codex']))
+    expect(off.map((row) => [row.value, row.disabled])).toEqual([['fox', false], ['pi', false], ['codex', true], ['deepseek', false]])
+    expect(off[2].reason).toContain('管理员关闭')
+    expect(off[3].label).toBe('DeepSeek（实验）')
+    // The saved choice is shown and used.
+    expect(agentBackendSettingValue(c1Preferences())).toBe('fox')
+    expect(agentBackendSettingValue(c1Preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' }))).toBe('codex')
+    // A retired backend (Host-declared) can be neither picked nor shown as the saved choice.
+    for (const backend of ['pi', 'codex', 'deepseek'] as const) {
       expect(canPickAgentBackend(backend, status())).toBe(false)
     }
-    expect(agentBackendSettingRows(preferences()).map((row) => [row.value, row.disabled, row.reason])).toEqual([['fox', false, null]])
-    expect(agentBackendSettingValue(preferences())).toBe('fox')
     expect(agentBackendSettingValue(preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' }))).toBe('fox')
   })
 
-  test('a saved retired preference is never applied to a new conversation', () => {
+  test('a saved choice is applied to a new conversation unless it is retired or switched off', () => {
     expect(newConversationBackend(null)).toBe('fox')
-    expect(newConversationBackend(preferences())).toBe('fox')
-    for (const backend of RETIRED_AGENT_BACKEND_IDS) {
+    expect(newConversationBackend(c1Preferences())).toBe('fox')
+    for (const backend of ['pi', 'codex', 'deepseek'] as const) {
+      expect(newConversationBackend(c1Preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe(backend)
+      // The Host answers Fox as effective when the saved one is switched off.
+      expect(newConversationBackend(c1Preferences({ defaultBackend: backend, effectiveBackend: 'fox' }, [backend]))).toBe('fox')
+      // A Host-declared retirement is never applied.
       const saved = preferences({ defaultBackend: backend, effectiveBackend: backend })
       expect(newConversationBackend(saved)).toBe('fox')
       expect(agentBackendSettingValue(saved)).toBe('fox')
     }
   })
 
-  test('the picker explanation is always the retirement one, and names the retired drivers', () => {
+  test('the picker explanation names retired drivers only when a Host declares them', () => {
     const reason = agentBackendPickerDisabledReason(status())
     expect(reason).toContain('退休')
     expect(reason).toContain('内置 Pi 驱动')
     expect(reason).toContain('Codex')
     expect(reason).toContain('DeepSeek')
+    const c1 = agentBackendPickerDisabledReason(c1Status(['pi', 'codex', 'deepseek']))
+    expect(c1).not.toContain('退休')
+    expect(c1).toContain('管理员关闭')
+    expect(c1).toContain('FOX_EXTERNAL_BACKENDS')
     expect(agentBackendPickerDisabledReason(oldStatus()).length).toBeGreaterThan(0)
-    expect(agentBackendPickerDisabledReason(null).length).toBeGreaterThan(0)
+    expect(agentBackendPickerDisabledReason(null)).not.toContain('退休')
   })
 
-  test('the settings statement and the saved-preference note', () => {
-    expect(agentBackendForcedOffNotice(preferences())).toContain('退休')
-    expect(agentBackendForcedOffNotice(preferences())).toContain('内置 Pi 驱动')
+  test('the forced-off statement and the saved-preference note', () => {
+    // FOX_EXTERNAL_BACKENDS is only an off switch: every external Agent off.
+    const forced = agentBackendForcedOffNotice(c1Preferences({ forcedOff: true }, ['pi', 'codex', 'deepseek']))
+    expect(forced).toContain('管理员关闭')
+    expect(forced).toContain('FOX_EXTERNAL_BACKENDS')
+    expect(forced).toContain('内置 Pi 驱动')
+    expect(agentBackendForcedOffNotice(c1Preferences())).toBeNull()
     expect(agentBackendForcedOffNotice(preferences({ forcedOff: false }))).toBeNull()
+    // No retirement note in a C1 Host, whatever was saved.
+    expect(agentBackendSavedRetiredNotice(c1Preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' }))).toBeNull()
     expect(agentBackendSavedRetiredNotice(preferences())).toBeNull()
+    // A Host that retires the saved one still gets the note.
     const saved = agentBackendSavedRetiredNotice(preferences({ defaultBackend: 'codex', effectiveBackend: 'fox' }))
     expect(saved).toContain('Codex')
     expect(saved).toContain('退休')
@@ -165,14 +242,31 @@ describe('a new conversation: the built-in Pi path only', () => {
   })
 })
 
-describe('an existing conversation of a retired driver', () => {
+describe('an existing conversation of an external Agent (C1)', () => {
+  test('runnable when enabled; read-only with the switched-off wording when off; fails closed without status', () => {
+    for (const backend of ['pi', 'codex', 'deepseek'] as const) {
+      expect(agentBackendAccess(backend, c1Status())).toBe('runnable')
+      expect(agentBackendInputLockedReason(backend, c1Status())).toBeNull()
+      expect(agentBackendAccess(backend, c1Status([backend]))).toBe('read_only_disabled')
+      expect(agentBackendAccess(backend, null)).toBe('read_only_disabled')
+      const reason = agentBackendInputLockedReason(backend, c1Status([backend]))!
+      expect(reason).toContain('未启用')
+      expect(reason).not.toContain('退休')
+      const notice = agentBackendLockNotice(backend, 'read_only_disabled', 'FOX_EXTERNAL_BACKENDS')!
+      expect(notice).toContain('FOX_EXTERNAL_BACKENDS')
+      expect(notice).toContain('只能查看历史')
+    }
+  })
+})
+
+describe('an existing conversation of a Host-retired driver (mechanism kept)', () => {
   test('reports read_only_retired and keeps its own name in the notice', () => {
     expect(agentBackendAccess('fox', null)).toBe('runnable')
     expect(agentBackendAccess('fox', status())).toBe('runnable')
-    for (const backend of RETIRED_AGENT_BACKEND_IDS) {
+    for (const backend of ['pi', 'codex', 'deepseek'] as const) {
       expect(agentBackendAccess(backend, status())).toBe('read_only_retired')
-      // Without a status the mirror still fails closed the same way.
-      expect(agentBackendAccess(backend, null)).toBe('read_only_retired')
+      // Without a status the mirror still fails closed (as switched off).
+      expect(agentBackendAccess(backend, null)).toBe('read_only_disabled')
       const notice = agentBackendLockNotice(backend, 'read_only_retired', 'FOX_EXTERNAL_BACKENDS')
       expect(notice).toContain('退休')
       expect(notice).toContain('只能查看历史')
@@ -192,7 +286,7 @@ describe('an existing conversation of a retired driver', () => {
   test('the composer lock reason uses the retirement wording', () => {
     expect(agentBackendInputLockedReason('fox', null)).toBeNull()
     expect(agentBackendInputLockedReason('fox', status())).toBeNull()
-    for (const backend of RETIRED_AGENT_BACKEND_IDS) {
+    for (const backend of ['pi', 'codex', 'deepseek'] as const) {
       const reason = agentBackendInputLockedReason(backend, status())!
       expect(reason).toContain('退休')
       expect(reason).toContain('只能查看历史')

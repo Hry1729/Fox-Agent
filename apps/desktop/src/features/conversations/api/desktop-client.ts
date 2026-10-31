@@ -798,10 +798,10 @@ export const desktopClient = {
   /** Per-agent native permission list (a conversation, or a new conversation's backend) and the current choice. */
   agentBackendNativePermissions: (request: NativePermissionRequest) =>
     command<NativePermissionView>('agent_backend_native_permissions', request),
-  /** Switch the native mode; mid-session full access is refused (only revoke). */
+  /** Switch the permission tier (plan C2: full access needs the first-time confirmation per project). */
   agentBackendNativePermissionSet: (request: NativePermissionRequest & { mode: string }) =>
     command<NativePermissionView>('agent_backend_native_permission_set', request),
-  /** Revoke full access mid-session (the backend restarts without it). */
+  /** Leave full access mid-session (Codex at once, pi from the next request, dsh restarts). */
   agentBackendRevokeFullAccess: (conversationId: string) =>
     command<{ outcome: string; stopConfirmed: boolean }>('agent_backend_revoke_full_access', { conversationId }),
   // Durably accept a supplementary request for the conversation's active

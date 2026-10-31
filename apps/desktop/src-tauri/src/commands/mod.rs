@@ -1683,6 +1683,29 @@ pub async fn conversation_create(
         Ok(grant) => grant,
         Err(refusal) => return Ok(ApiResponse::failure(refusal.code, refusal.message, false)),
     };
+    // Plan C2: starting in the Agent's own full access takes the same
+    // first-time second confirmation as a Fox conversation (per project). A
+    // pick in the new conversation's permission list was confirmed there; an
+    // explicit request needs a project that already confirmed it.
+    let full_access_project = if external_backend && native_full_access {
+        match state.database.project_by_id_or_root(None, project_root.as_deref()) {
+            Ok(project) => project.map(|(id, _)| id),
+            Err(error) => return Ok(storage_error(error)),
+        }
+    } else {
+        None
+    };
+    if external_backend
+        && native_full_access
+        && draft_full != Some(true)
+        && !full_access_project.as_deref().is_some_and(|project| state.database.project_full_access_confirmed(project).unwrap_or(false))
+    {
+        return Ok(ApiResponse::failure(
+            agent_backend_routing::FULL_ACCESS_CONFIRMATION_REQUIRED,
+            agent_backend_routing::full_access_confirmation_message(agent_backend),
+            false,
+        ));
+    }
     if external_backend && request.expert_id.is_some() {
         return Ok(ApiResponse::failure(
             "agent_backend_invalid",
@@ -1797,6 +1820,13 @@ pub async fn conversation_create(
         );
         if draft_full.is_some() {
             agent_backend_routing::clear_draft_full_access_choice(&state.database, agent_backend);
+        }
+        // A confirmed draft pick made before the project was known: the
+        // project remembers the confirmation now.
+        if draft_full == Some(true) && native_full_access {
+            if let Some(project) = full_access_project.as_deref() {
+                let _ = state.database.confirm_project_full_access(project);
+            }
         }
     }
     if let Some(expert_id) = request.expert_id.as_deref() {

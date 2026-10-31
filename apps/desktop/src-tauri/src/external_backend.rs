@@ -10,15 +10,18 @@
 //! * turns a native permission request into the existing approval card (a
 //!   Host tool call `agent_permission` pending approval + `approvals` row +
 //!   `fox://approval-requested`) and settles that row after the answer;
+//! * answers pi's gate requests with the Host approval engine first (plan
+//!   C2, [`crate::external_policy`]: the same engine, rules and block rules
+//!   as PiNative);
 //! * offers the commands' entry points (start / cancel / approve / close /
 //!   capabilities) and the startup / exit hooks.
 use crate::database::{ApiResponse, ApprovalDecision, Database, StartRunRequest, StartRunResult};
 use crate::runtime_host::RuntimeEventNotification;
 use fox_agent_backend::capability_view::{capability_view, CapabilityView};
-use fox_agent_backend::external::{AnswerOutcome, CancelOutcome, ExternalRuntime, ExternalSink, LaunchRequest, RevokeOutcome, TurnRequest};
+use fox_agent_backend::external::{AnswerOutcome, CancelOutcome, ExternalRuntime, ExternalSink, HostPermissionAnswer, LaunchRequest, RevokeOutcome, TurnRequest};
 use fox_agent_backend::external_launch::{HostLaunchConfig, HostLauncher};
 use fox_agent_backend::port::AgentBackend;
-use fox_agent_backend::projection::PermissionCard;
+use fox_agent_backend::projection::{PermissionCard, PermissionOption};
 use fox_agent_backend::external_home::LaunchDeclaration;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -97,6 +100,19 @@ impl ExternalSink for DesktopSink {
     /// under 自动 / 只读 (names and kinds only, never tool input).
     fn audit(&self, conversation_id: &str, backend: AgentBackend, event: &str, details: &Value) {
         let _ = self.database.append_agent_backend_audit(Some(conversation_id), backend.as_str(), event, details);
+    }
+
+    /// Plan C2: pi is answered by the Host approval engine (same as
+    /// PiNative); a failure to consult it is a fail-closed reject, never a
+    /// fallback to another rule set. Codex / dsh: their own approval.
+    fn host_permission_answer(&self, run_id: &str, conversation_id: &str, backend: AgentBackend, native_mode: &str, request: &Value, options: &[PermissionOption]) -> Option<HostPermissionAnswer> {
+        if backend != AgentBackend::Pi {
+            return None;
+        }
+        Some(match crate::external_policy::answer_pi_request(&self.database, run_id, conversation_id, native_mode, request, options) {
+            Ok(answer) => answer,
+            Err(error) => crate::external_policy::fail_closed(&error, options),
+        })
     }
 }
 
@@ -367,7 +383,8 @@ impl ExternalBackendHost {
             session_key: "planned".into(),
             full_access_granted: conversation_id.is_some_and(|id| self.database.conversation_full_access_granted(id).unwrap_or(false)),
             unified_login: None,
-            native_permission: None,
+            // Plan C2: the recorded mode follows the conversation's native mode.
+            native_permission: conversation_id.and_then(|id| crate::commands::agent_backend_routing::stored_conversation_native_mode(&self.database, id)),
         });
         let pi_launch = launcher.config.pi_launch();
         capability_view(backend, None, &LaunchDeclaration::declare(mode), pi_launch)
@@ -658,29 +675,49 @@ impl ExternalBackendHost {
         status
     }
 
-    /// Revoke full access mid-session (semantics A; enabling mid-session does
-    /// not exist). The grant is removed first, so a relaunch can only be
-    /// without full access; a live full-access process is then stopped
-    /// through `recheck_permission_mode` -> RestartWithoutFullAccess.
+    /// Revoke full access mid-session (plan C2: the Agent's own full-access
+    /// mode). The conversation's native mode is set back to the Agent's last
+    /// restricted choice (else its default) first, and any legacy grant row
+    /// is removed, so a relaunch can only be without full access. Then the
+    /// live session follows the Agent's way: Codex at once (`session/set_mode`),
+    /// pi from its next request, dsh is stopped
+    /// (`recheck_permission_mode` -> RestartWithoutFullAccess) and restarts at
+    /// the next turn.
     pub async fn revoke_full_access(&self, conversation_id: &str) -> ApiResponse<Value> {
+        use fox_agent_backend::native_permission as native;
         let request = match self.planned_request(conversation_id) {
             Ok(request) => request,
             Err(refusal) => return retype(refusal),
         };
-        match self.database.revoke_full_access_grant(conversation_id) {
-            Ok(true) => {}
-            Ok(false) => return failure("agent_backend_no_full_access", "本会话没有完全访问授权", false),
+        let native_full = native::is_full_access(request.backend, request.native_mode());
+        let legacy_grant = match self.database.revoke_full_access_grant(conversation_id) {
+            Ok(removed) => removed,
             Err(error) => return failure("storage.operation_failed", error, true),
+        };
+        if !native_full && !legacy_grant {
+            return failure("agent_backend_no_full_access", "本会话没有使用完全访问", false);
         }
-        let request = LaunchRequest { full_access_granted: false, ..request };
+        let context = request.native_context();
+        let restricted = crate::commands::agent_backend_routing::stored_last_native_mode(&self.database, request.backend)
+            .filter(|mode| !native::is_full_access(request.backend, mode))
+            .map(|mode| native::effective_mode(request.backend, Some(&mode), false, &context))
+            .unwrap_or_else(|| native::catalog(request.backend, &context).default_mode);
+        if native_full {
+            if let Err(error) = self.database.set_app_setting(&format!("{}{conversation_id}", crate::commands::agent_backend_routing::NATIVE_MODE_CONVERSATION_PREFIX), restricted) {
+                return failure("storage.operation_failed", error, true);
+            }
+        }
+        let request = LaunchRequest { full_access_granted: false, native_permission: Some(restricted.to_owned()), ..request };
         let outcome = self.runtime.revoke_full_access(&request).await;
-        let (label, confirmed) = match outcome {
-            RevokeOutcome::NotRunning => ("not_running", true),
-            RevokeOutcome::Unchanged => ("unchanged", true),
-            RevokeOutcome::RestartWithoutFullAccess { confirmed } => ("restart_without_full_access", confirmed),
+        let (label, confirmed, error) = match outcome {
+            RevokeOutcome::NotRunning => ("not_running", true, None),
+            RevokeOutcome::Unchanged => ("unchanged", true, None),
+            RevokeOutcome::RestartWithoutFullAccess { confirmed } => ("restart_without_full_access", confirmed, None),
+            RevokeOutcome::SwitchedLive => ("switched_live", true, None),
+            RevokeOutcome::SwitchFailed(message) => ("switch_failed", true, Some(message)),
         };
         let backend = self.database.conversation_agent_backend(conversation_id).ok().flatten().unwrap_or_default();
-        let details = json!({ "outcome": label, "stopConfirmed": confirmed });
+        let details = json!({ "outcome": label, "stopConfirmed": confirmed, "to": restricted, "error": error });
         let _ = self.database.append_agent_backend_audit(Some(conversation_id), &backend, "agent_backend.full_access_revoked", &details);
         ApiResponse::success(details)
     }

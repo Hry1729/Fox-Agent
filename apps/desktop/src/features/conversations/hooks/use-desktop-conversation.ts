@@ -11,7 +11,7 @@ import { withWorkspaceInitializationTimeout } from '../model/workspace-initializ
 import {
   AGENT_BACKEND_PREFERENCES_EVENT,
   AGENT_BACKEND_REFUSED,
-  agentBackendInputLockedReason,
+  agentBackendInputLockedCode, agentBackendInputLockedReason,
   newConversationBackend,
   isAgentBackendHidden,
   conversationAgentBackend,
@@ -1079,12 +1079,14 @@ export function useDesktopConversation(): DesktopConversationState {
     let pendingMessageId: string | null = null
     let previousLastRun: RunRecord | null = detail?.lastRun ?? null
     if (active) {
-      // A conversation bound to a RETIRED backend is read-only (history only):
-      // refuse locally, before anything optimistic, instead of send-then-refuse.
-      // The same code the Host answers with, so one notice covers both paths.
-      const lockedReason = agentBackendInputLockedReason(conversationAgentBackend(active.conversation), agentBackendStatusRef.current)
+      // A conversation bound to a retired or switched-off backend is read-only
+      // (history only): refuse locally, before anything optimistic, instead of
+      // send-then-refuse. The same code the Host answers with, so one notice
+      // covers both paths.
+      const lockedBackend = conversationAgentBackend(active.conversation)
+      const lockedReason = agentBackendInputLockedReason(lockedBackend, agentBackendStatusRef.current)
       if (lockedReason) {
-        setAgentBackendRefusal({ conversationId: active.conversation.id, code: 'agent_backend_retired', message: lockedReason })
+        setAgentBackendRefusal({ conversationId: active.conversation.id, code: agentBackendInputLockedCode(lockedBackend, agentBackendStatusRef.current), message: lockedReason })
         return AGENT_BACKEND_REFUSED
       }
     }
@@ -1111,8 +1113,8 @@ export function useDesktopConversation(): DesktopConversationState {
           projectRoot: draft.projectRoot ?? draftProjectRoot ?? undefined,
           permissionMode: draft.permissionMode ?? draftPermissionMode ?? undefined,
           // Absent for Fox so an older Host sees exactly the old request.
-          // Full access is NOT sent: the Host applies 设置 →「新外部会话使用
-          // 完全访问」itself (and ignores it under FORBIDDEN).
+          // Full access is NOT sent: a pick in the new conversation's
+          // permission list (confirmed there) is read by the Host itself.
           agentBackend: backend === 'fox' ? undefined : backend,
         })
         active = await desktopClient.loadConversation(conversation.id)

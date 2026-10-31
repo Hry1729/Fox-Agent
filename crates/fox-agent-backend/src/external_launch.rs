@@ -134,8 +134,37 @@ pub fn parse_extra_domains(value: Option<&str>) -> BTreeMap<AgentBackend, Vec<St
 }
 
 impl HostLaunchConfig {
-    pub fn runtime_proxy_adapter_verified(&self, backend: AgentBackend) -> bool {
-        crate::runtime_adapters::verified(&self.runtime_root, backend)
+    /// The pi-acp turn-outcome adaptation of the managed runtime matches its
+    /// build-time pin ([`crate::runtime_adapters::PI_TURN_OUTCOME_ADAPTER`]).
+    pub fn pi_turn_adapter_verified(&self) -> bool {
+        crate::runtime_adapters::verified_files(&self.runtime_root, &crate::runtime_adapters::PI_TURN_OUTCOME_ADAPTER)
+    }
+
+    /// What an external pi needs beyond being installed (plan C1/C2), checked
+    /// after [`Self::launch_spec_with`] found the program, so a pi that is not
+    /// installed is reported as such first:
+    ///
+    /// 1. Fox's approval gate (`pi-gate/`): pi has no permission system of its
+    ///    own, so without the gate its tools would run unasked and no Fox tier
+    ///    (只读 / 询问 / 自动 / 完全访问) could be enforced
+    ///    (`agent_backend_pi_gate_missing`).
+    /// 2. The pinned turn-outcome adaptation of pi-acp, so a model failure is
+    ///    reported instead of ending the turn silently
+    ///    (`agent_backend_runtime_adapter_missing`). An explicit
+    ///    `FOX_PI_ACP_PROGRAM` (development) is the developer's own pi-acp and
+    ///    is not checked against the package pins.
+    pub fn pi_preflight(&self, pi_launch: PiLaunch, adapter_verified: impl FnOnce() -> bool) -> Result<(), LaunchFailure> {
+        if pi_launch != PiLaunch::Gated {
+            return Err(LaunchFailure::new("agent_backend_pi_gate_missing", "pi 运行时缺少 Fox 审批拦截扩展（pi-gate），Fox 无法按所选权限档位应答 pi 的工具调用，已拒绝启动")
+                .remedy("安装或修复 Fox 外部运行时（安装包自带 pi-gate）后重试")
+                .detail(serde_json::json!({ "gate": self.pi_gate_script() })));
+        }
+        if crate::launch::program_override(AgentBackend::Pi).is_none() && !adapter_verified() {
+            return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "pi 运行时缺少已验证的模型错误适配（pi-acp fox-turn-outcome）")
+                .remedy("安装或修复 Fox 外部运行时后重试")
+                .detail(serde_json::json!({ "runtimeRoot": self.runtime_root, "files": crate::runtime_adapters::PI_TURN_OUTCOME_ADAPTER })));
+        }
+        Ok(())
     }
     /// Read the configuration from the process environment. `fox_data` is the
     /// app data directory.
@@ -191,15 +220,22 @@ impl HostLaunchConfig {
         policy
     }
 
-    /// Fox adds no outer layer around an external backend, so a launch
-    /// records [`PermissionMode::FullAccess`]: Fox itself restricts nothing.
-    /// It must never be used to replace the Agent's native permission mode.
+    /// Whether the conversation runs in its Agent's own full access (plan
+    /// C2): [`PermissionMode::FullAccess`] exactly when the effective native
+    /// mode is the Agent's full-access option (Codex `agent-full-access`, dsh
+    /// `danger-full-access`, pi `full_access`). Fox adds no outer layer; this
+    /// only records what the native mode is, so leaving full access can be
+    /// applied the Agent's way (dsh restarts, see
+    /// [`crate::native_permission::full_access_needs_restart`]).
     ///
-    /// `full_access_granted` and the engineering switch are retained in the
-    /// persisted data for compatibility, but they no longer decide whether
-    /// Fox wraps the process.
-    pub fn permission_mode(&self, _request: &LaunchRequest) -> PermissionMode {
-        PermissionMode::FullAccess
+    /// The legacy `full_access_granted` flag and the engineering switch no
+    /// longer decide anything here.
+    pub fn permission_mode(&self, request: &LaunchRequest) -> PermissionMode {
+        if crate::native_permission::is_full_access(request.backend, request.native_mode()) {
+            PermissionMode::FullAccess
+        } else {
+            PermissionMode::Standard
+        }
     }
 
     fn exe(&self, name: &str) -> String {
@@ -622,16 +658,15 @@ impl HostLauncher {
     async fn launch_now(config: HostLaunchConfig, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
         // Fox adds no sandbox around an external Agent: its own native
         // sandbox, approval and permission settings remain authoritative.
-        // The private HOME is Fox-managed.
-        let mode = PermissionMode::FullAccess;
-        if request.backend == AgentBackend::Pi && crate::launch::program_override(AgentBackend::Pi).is_none() && !config.runtime_proxy_adapter_verified(AgentBackend::Pi) {
-            return Err(LaunchFailure::new("agent_backend_runtime_adapter_missing", "pi 运行时缺少已验证的模型错误适配")
-                .remedy("安装或修复 Fox 外部运行时后重试"));
-        }
-        // The native mode is the user's stored per-Agent choice. `mode` here
-        // only records that Fox adds no outer layer; it is not folded into
-        // that choice.
+        // The private HOME is Fox-managed. `mode` only records whether the
+        // native mode is the Agent's full access.
+        let mode = config.permission_mode(&request);
+        // The native mode is the user's stored per-Agent choice. A pi that is
+        // not installed is refused here first (`agent_backend_not_installed`).
         let (mut spec, pi_launch) = config.launch_spec_with(request.backend, request.native_mode(), &request.project_root)?;
+        if request.backend == AgentBackend::Pi {
+            config.pi_preflight(pi_launch, || config.pi_turn_adapter_verified())?;
+        }
         // Unified login first: the Codex key goes into the backend's
         // environment only (never config.toml).
         if let Some(report) = config.apply_unified_login(&request)? {
@@ -760,12 +795,15 @@ mod tests {
     fn full_access_switch_parsing_is_compatible_but_does_not_add_a_wrapper() {
         let root = std::env::temp_dir().join("fox-ext-launch-mode");
         let mut config = config(&root);
-        let req = request(AgentBackend::Pi, &root);
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
+        let mut req = request(AgentBackend::Pi, &root);
+        // The engineering switch no longer decides anything: only the native mode.
+        assert_eq!(config.permission_mode(&req), PermissionMode::Standard);
         config.full_access = FullAccessSwitch::parse(Some("1"));
+        assert_eq!(config.permission_mode(&req), PermissionMode::Standard);
+        req.native_permission = Some("full_access".into());
         assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         config.full_access_forbidden = true;
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess, "FORBIDDEN is enforced by the catalog / the Host commands, not here");
         assert_eq!(FullAccessSwitch::parse(Some(" off ")), FullAccessSwitch::Off);
         assert_eq!(FullAccessSwitch::parse(None), FullAccessSwitch::Off);
     }
@@ -850,26 +888,65 @@ mod tests {
         assert!(crate::model_endpoint::import_approved(&config.state_root, AgentBackend::Pi, &home, &native).unwrap());
     }
 
-    /// The outer Fox layer is gone for every external backend. The old
-    /// full-access flag remains persisted data, but it must not decide
-    /// whether a process is wrapped and must not rewrite native permissions.
+    /// Plan C2: the recorded mode is FullAccess exactly when the native mode
+    /// is the Agent's own full access. The old full-access flag remains
+    /// persisted data; it never decides the mode and never rewrites a native
+    /// choice.
     #[test]
-    fn external_permission_mode_adds_no_fox_layer_and_keeps_native_choices() {
+    fn external_permission_mode_follows_the_agents_native_full_access() {
         let root = std::env::temp_dir().join("fox-ext-launch-grant");
         let mut config = config(&root);
         let mut req = request(AgentBackend::Deepseek, &root);
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
+        assert_eq!(config.permission_mode(&req), PermissionMode::Standard, "dsh default: workspace-write-never");
         req.full_access_granted = true;
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         config.full_access = FullAccessSwitch::All;
-        config.full_access_forbidden = true;
-        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
+        assert_eq!(config.permission_mode(&req), PermissionMode::Standard, "the legacy grant does not widen");
         req.native_permission = Some("workspace-write-never".into());
         assert_eq!(req.native_mode(), "workspace-write-never");
+        req.native_permission = Some("danger-full-access".into());
+        assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
         req.backend = AgentBackend::Codex;
         req.native_permission = Some("agent-full-access".into());
         assert_eq!(req.native_mode(), "agent-full-access");
         assert_eq!(config.permission_mode(&req), PermissionMode::FullAccess);
+        req.native_permission = Some("read-only".into());
+        assert_eq!(config.permission_mode(&req), PermissionMode::Standard);
+        req.backend = AgentBackend::Pi;
+        req.native_permission = Some("allow".into());
+        assert_eq!(config.permission_mode(&req), PermissionMode::Standard);
+    }
+
+    /// C1: an external pi is refused for what it really lacks, in order: not
+    /// installed, then Fox's approval gate, then the pinned turn-outcome
+    /// adaptation. (Before C1 the adaptation was checked before anything,
+    /// so a pi that was simply not installed read as "adapter missing".)
+    #[test]
+    fn pi_is_refused_for_what_it_really_lacks_in_order() {
+        let root = std::env::temp_dir().join(format!("fox-ext-launch-pi-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = config(&root);
+        if crate::launch::program_override(AgentBackend::Pi).is_some() {
+            eprintln!("SKIPPED: FOX_PI_ACP_PROGRAM is set");
+            return;
+        }
+        let failure = config.launch_spec_with(AgentBackend::Pi, "ask", &root.join("proj")).unwrap_err();
+        assert_eq!(failure.code, "agent_backend_not_installed", "not installed is said first");
+        let bin = root.join("runtime/backends/pi/node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("pi-acp"), "#!/bin/sh\n").unwrap();
+        let (_, launch) = config.launch_spec_with(AgentBackend::Pi, "ask", &root.join("proj")).unwrap();
+        assert_eq!(launch, PiLaunch::Stock);
+        let failure = config.pi_preflight(launch, || true).unwrap_err();
+        assert_eq!(failure.code, "agent_backend_pi_gate_missing", "no gate: no tier could be enforced");
+        std::fs::create_dir_all(root.join("runtime/pi-gate")).unwrap();
+        std::fs::write(root.join("runtime/pi-gate/pi-gated.sh"), "#!/bin/sh\n").unwrap();
+        let (spec, launch) = config.launch_spec_with(AgentBackend::Pi, "ask", &root.join("proj")).unwrap();
+        assert_eq!(launch, PiLaunch::Gated);
+        assert!(spec.session_env.iter().any(|(key, value)| key == "PI_ACP_PI_COMMAND" && value.ends_with("pi-gated.sh")));
+        assert_eq!(config.pi_preflight(launch, || false).unwrap_err().code, "agent_backend_runtime_adapter_missing");
+        assert!(!config.pi_turn_adapter_verified(), "the fake runtime does not carry the pinned adaptation");
+        assert_eq!(config.pi_preflight(launch, || true), Ok(()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1014,13 +1091,14 @@ mod tests {
         let mut config = config(&root);
         config.full_access = FullAccessSwitch::All;
         // Codex: no Fox runtime adapter is required, only a login in the
-        // private HOME (pi would be refused earlier for its missing adapter).
+        // private HOME.
         let bin = root.join("runtime").join("backends").join("codex").join("node_modules").join(".bin");
         std::fs::create_dir_all(&bin).unwrap();
         let script = bin.join("codex-acp");
         std::fs::write(&script, "#!/bin/sh\nprintf 'argv0=%s\\nHOME=%s\\nTMPDIR=%s\\nXDG_CONFIG_HOME=%s\\nCODEX_HOME=%s\\nPROXY=%s%s\\n' \"$0\" \"$HOME\" \"$TMPDIR\" \"$XDG_CONFIG_HOME\" \"$CODEX_HOME\" \"$NODE_USE_ENV_PROXY\" \"$CLAUDE_CODE_TMPDIR\" > \"$HOME/fox-env.txt\"\nexit 0\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let request = request(AgentBackend::Codex, &root);
+        let mut request = request(AgentBackend::Codex, &root);
+        request.native_permission = Some("agent-full-access".into());
         std::fs::create_dir_all(&request.project_root).unwrap();
         assert_eq!(config.permission_mode(&request), PermissionMode::FullAccess);
         let home = PrivateHomes::new(config.fox_data.join("agent-homes")).home_for(request.project_uuid.as_deref().unwrap(), AgentBackend::Codex).unwrap().path;

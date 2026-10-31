@@ -9,12 +9,12 @@
 use fox_agent_backend::acp::AcpConnection;
 use fox_agent_backend::capability_view::PiLaunch;
 use fox_agent_backend::external::{
-    AnswerOutcome, CancelOutcome, ExternalLauncher, ExternalRuntime, ExternalSink, LaunchFailure, LaunchRequest, Launched, NativeModeOutcome, RevokeOutcome, StartError,
-    TurnRequest,
+    AnswerOutcome, CancelOutcome, ExternalLauncher, ExternalRuntime, ExternalSink, HostPermissionAnswer, LaunchFailure, LaunchRequest, Launched, NativeModeOutcome,
+    RevokeOutcome, StartError, TurnRequest,
 };
 use fox_agent_backend::launch::LaunchSpec;
 use fox_agent_backend::port::{AgentBackend, StopConfirmation};
-use fox_agent_backend::projection::PermissionCard;
+use fox_agent_backend::projection::{AutoPermission, PermissionCard, PermissionOption};
 use fox_agent_backend::external_home::{LaunchDeclaration, PermissionMode};
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -27,6 +27,10 @@ struct Recorded {
     events: Vec<(String, Value)>,
     approvals: Vec<(String, String, PermissionCard)>,
     audits: Vec<(String, String, Value)>,
+    /// Plan C2: what the Host approval engine answers pi (None = no engine).
+    host_policy: Option<fn(&str) -> AutoPermission>,
+    /// (backend, native mode) of every request put to the engine.
+    policy_calls: Vec<(String, String)>,
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +52,18 @@ impl ExternalSink for Sink {
 
     fn audit(&self, conversation_id: &str, _backend: AgentBackend, event: &str, details: &Value) {
         self.0.lock().unwrap().audits.push((conversation_id.to_owned(), event.to_owned(), details.clone()));
+    }
+
+    fn host_permission_answer(&self, _run_id: &str, _conversation_id: &str, backend: AgentBackend, native_mode: &str, _request: &Value, options: &[PermissionOption]) -> Option<HostPermissionAnswer> {
+        let mut recorded = self.0.lock().unwrap();
+        let policy = recorded.host_policy?;
+        recorded.policy_calls.push((backend.as_str().to_owned(), native_mode.to_owned()));
+        let decision = match policy(native_mode) {
+            AutoPermission::Allow { .. } => AutoPermission::Allow { option_id: options.iter().find(|option| option.kind == "allow_once").unwrap().option_id.clone() },
+            AutoPermission::Reject { .. } => AutoPermission::Reject { option_id: options.iter().find(|option| option.kind == "reject_once").map(|option| option.option_id.clone()) },
+            AutoPermission::Ask => AutoPermission::Ask,
+        };
+        Some(HostPermissionAnswer { decision, policy: serde_json::json!({ "mode": native_mode, "class": "command" }) })
     }
 }
 
@@ -678,8 +694,10 @@ async fn closing_a_conversation_ends_its_pending_permission() {
 /// (`agent_backend_full_access_revoked`), its pending approval is settled (a
 /// late answer is never written), the process is stopped, and the next turn
 /// launches without full access, without replaying the cancelled one.
+/// dsh's full access lives in its process: leaving it stops dsh
+/// (RestartWithoutFullAccess) and the next turn relaunches in the new preset.
 #[tokio::test(flavor = "multi_thread")]
-async fn revoking_full_access_restarts_without_it_and_without_replay() {
+async fn revoking_dsh_full_access_restarts_without_it_and_without_replay() {
     if !node_available() {
         return;
     }
@@ -688,12 +706,17 @@ async fn revoking_full_access_restarts_without_it_and_without_replay() {
     let modes = Arc::clone(&launcher.modes);
     let launches = Arc::clone(&launcher.launches);
     let (runtime, sink) = new_runtime(launcher);
-    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::NotRunning);
-    runtime.start_turn(turn("c-rev", "r-rev-1", "hello", AgentBackend::Codex, None)).unwrap();
+    let dsh = |run: &str, mode: &str| {
+        let mut request = turn("c-rev", run, "hello", AgentBackend::Deepseek, None);
+        request.launch.native_permission = Some(mode.into());
+        request
+    };
+    assert_eq!(runtime.revoke_full_access(&dsh("r-x", "workspace-write").launch).await, RevokeOutcome::NotRunning);
+    runtime.start_turn(dsh("r-rev-1", "danger-full-access")).unwrap();
     let (_, approval, _) = sink.wait_approval(1).await;
-    // The Host withdraws the grant first, then asks the runtime to restart.
+    // The Host stores the restricted mode first, then asks the runtime to restart.
     revoked.store(true, Ordering::SeqCst);
-    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::RestartWithoutFullAccess { confirmed: true });
+    assert_eq!(runtime.revoke_full_access(&dsh("r-x", "workspace-write").launch).await, RevokeOutcome::RestartWithoutFullAccess { confirmed: true });
     // 13.19 fix ②: the stopped full-access process no longer reports its
     // declaration / handshake (the capability chip falls back to the planned
     // view, without full access); leaving full access still reads "next turn".
@@ -701,13 +724,15 @@ async fn revoking_full_access_restarts_without_it_and_without_replay() {
     assert!(!info.live);
     assert!(info.declaration.is_none(), "stale full-access declaration: {:?}", info.declaration);
     assert!(info.initialize_response.is_none() && info.capabilities.is_none());
-    assert_eq!(runtime.apply_native_mode("c-rev", "workspace-write").await, NativeModeOutcome::NextTurn);
+    assert_eq!(runtime.apply_native_mode("c-rev", "workspace-write").await, NativeModeOutcome::NotRunning, "stopped: the next launch reads the new preset");
     let terminal = sink.terminal("r-rev-1").await;
     assert_eq!(terminal["type"], "run.interrupted", "{terminal}");
     assert_eq!(terminal["code"], "agent_backend_full_access_revoked", "{terminal}");
     assert_eq!(runtime.answer(&approval, true), AnswerOutcome::NotPending, "a pending approval is settled, never written late");
     // Next turn: relaunched without full access; only the new prompt runs.
-    runtime.start_turn(turn("c-rev", "r-rev-2", "simple", AgentBackend::Codex, None)).unwrap();
+    let mut next = dsh("r-rev-2", "workspace-write");
+    next.prompt = "simple".into();
+    runtime.start_turn(next).unwrap();
     assert_eq!(sink.terminal("r-rev-2").await["type"], "run.completed");
     let launching = sink.wait_for("r-rev-2", "agent_backend.launching").await;
     assert_eq!(launching["mode"], "standard", "{launching}");
@@ -718,7 +743,90 @@ async fn revoking_full_access_restarts_without_it_and_without_replay() {
     let relaunched = runtime.session_info("c-rev").expect("session").declaration.expect("declaration after relaunch");
     assert_eq!(relaunched.mode, PermissionMode::Standard);
     // Already without full access: nothing to restart.
-    assert_eq!(runtime.revoke_full_access(&turn("c-rev", "r-x", "x", AgentBackend::Codex, None).launch).await, RevokeOutcome::Unchanged);
+    assert_eq!(runtime.revoke_full_access(&dsh("r-x", "workspace-write").launch).await, RevokeOutcome::Unchanged);
+    runtime.shutdown().await;
+}
+
+/// Codex leaves its own full access live (`session/set_mode`), no restart,
+/// the running turn keeps going.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_codex_full_access_switches_the_live_session() {
+    if !node_available() {
+        return;
+    }
+    let launcher = MockLauncher::default();
+    let launches = Arc::clone(&launcher.launches);
+    let (runtime, sink) = new_runtime(launcher);
+    let mut first = turn("c-rev-codex", "r-rc-1", "hello", AgentBackend::Codex, None);
+    first.launch.native_permission = Some("agent-full-access".into());
+    runtime.start_turn(first).unwrap();
+    let (_, approval, _) = sink.wait_approval(1).await;
+    let mut restricted = turn("c-rev-codex", "r-x", "x", AgentBackend::Codex, None);
+    restricted.launch.native_permission = Some("workspace-write".into());
+    assert_eq!(runtime.revoke_full_access(&restricted.launch).await, RevokeOutcome::SwitchedLive);
+    assert!(runtime.approval_pending(&approval), "the running turn was not cancelled");
+    assert_eq!(runtime.answer(&approval, true), AnswerOutcome::Written);
+    assert_eq!(sink.terminal("r-rc-1").await["type"], "run.completed");
+    assert_eq!(launches.load(Ordering::SeqCst), 1, "no restart");
+    let switched = sink.events("r-rc-1").into_iter().find(|event| event["type"] == "agent_backend.permission_mode_switched").expect("switched");
+    assert_eq!(switched["to"], "workspace-write");
+    assert_eq!(runtime.revoke_full_access(&restricted.launch).await, RevokeOutcome::Unchanged);
+    runtime.shutdown().await;
+}
+
+/// Plan C2: pi's gate requests are answered by the Host approval engine
+/// (the sink's), with the conversation's tier; Codex and dsh never are.
+#[tokio::test(flavor = "multi_thread")]
+async fn pi_requests_go_to_the_host_approval_engine_and_codex_dsh_never_do() {
+    if !node_available() {
+        return;
+    }
+    let (runtime, sink) = new_runtime(MockLauncher::default());
+    fn tier_policy(mode: &str) -> AutoPermission {
+        match mode {
+            "allow" | "full_access" => AutoPermission::Allow { option_id: String::new() },
+            "read_only" => AutoPermission::Reject { option_id: None },
+            _ => AutoPermission::Ask,
+        }
+    }
+    sink.0.lock().unwrap().host_policy = Some(tier_policy);
+    // 只读: the engine rejects; recorded as answered by the Host policy.
+    let mut read_only = turn("c-hp-ro", "r-hp-ro", "hello", AgentBackend::Pi, None);
+    read_only.launch.native_permission = Some("read_only".into());
+    runtime.start_turn(read_only).unwrap();
+    assert_eq!(sink.terminal("r-hp-ro").await["type"], "run.completed");
+    assert!(sink.text("r-hp-ro").ends_with("permission:reject"));
+    let answered = sink.events("r-hp-ro").into_iter().find(|event| event["type"] == "agent_backend.permission_auto_answered").expect("answered");
+    assert_eq!(answered["answeredBy"], "host_approval_policy");
+    assert_eq!(answered["policy"]["mode"], "read_only");
+    // 询问: the engine leaves it to the user: a card.
+    runtime.start_turn(turn("c-hp-ask", "r-hp-ask", "hello", AgentBackend::Pi, None)).unwrap();
+    let (run, approval, _) = sink.wait_approval(1).await;
+    assert_eq!(run, "r-hp-ask");
+    assert_eq!(runtime.answer(&approval, false), AnswerOutcome::Written);
+    assert!(sink.terminal("r-hp-ask").await["type"] == "run.completed");
+    // 自动 switched mid-session: the next request is answered by the new tier.
+    assert_eq!(runtime.apply_native_mode("c-hp-ask", "allow").await, NativeModeOutcome::Applied);
+    let mut next = turn("c-hp-ask", "r-hp-ask-2", "hello", AgentBackend::Pi, None);
+    next.launch.native_permission = Some("allow".into());
+    runtime.start_turn(next).unwrap();
+    assert_eq!(sink.terminal("r-hp-ask-2").await["type"], "run.completed");
+    assert!(sink.text("r-hp-ask-2").ends_with("permission:allow"));
+    // Codex / dsh: their own approval decides; the engine is never asked.
+    runtime.start_turn(turn("c-hp-codex", "r-hp-codex", "hello", AgentBackend::Codex, None)).unwrap();
+    let (run, approval, _) = sink.wait_approval(2).await;
+    assert_eq!(run, "r-hp-codex");
+    assert_eq!(runtime.answer(&approval, true), AnswerOutcome::Written);
+    sink.terminal("r-hp-codex").await;
+    let mut dsh = turn("c-hp-dsh", "r-hp-dsh", "hello", AgentBackend::Deepseek, None);
+    dsh.launch.native_permission = Some("workspace-write".into());
+    runtime.start_turn(dsh).unwrap();
+    let (run, approval, _) = sink.wait_approval(3).await;
+    assert_eq!(run, "r-hp-dsh");
+    assert_eq!(runtime.answer(&approval, true), AnswerOutcome::Written);
+    sink.terminal("r-hp-dsh").await;
+    let calls = sink.0.lock().unwrap().policy_calls.clone();
+    assert_eq!(calls, [("pi".to_owned(), "read_only".to_owned()), ("pi".to_owned(), "ask".to_owned()), ("pi".to_owned(), "allow".to_owned())]);
     runtime.shutdown().await;
 }
 
@@ -894,14 +1002,18 @@ async fn native_mode_changes_switch_codex_live_and_restart_dsh_next_turn() {
     let (runtime, sink) = new_runtime(launcher.clone());
     runtime.start_turn(turn("c-mode", "r-mode-1", "simple", AgentBackend::Codex, None)).unwrap();
     sink.terminal("r-mode-1").await;
-    assert_eq!(runtime.apply_native_mode("c-mode", "agent").await, fox_agent_backend::external::NativeModeOutcome::Applied);
+    assert_eq!(runtime.apply_native_mode("c-mode", "read-only").await, fox_agent_backend::external::NativeModeOutcome::Applied);
     let mut next = turn("c-mode", "r-mode-2", "simple", AgentBackend::Codex, None);
-    next.launch.native_permission = Some("agent".into());
+    next.launch.native_permission = Some("read-only".into());
     runtime.start_turn(next).unwrap();
     sink.terminal("r-mode-2").await;
     assert_eq!(launcher.launches.load(Ordering::SeqCst), 1, "Codex: no restart for a mode change");
     let audits = sink.0.lock().unwrap().audits.clone();
-    assert!(audits.iter().any(|(conversation, event, details)| conversation == "c-mode" && event == "agent_backend.permission_mode_switched" && details["to"] == "agent"));
+    assert!(audits.iter().any(|(conversation, event, details)| conversation == "c-mode" && event == "agent_backend.permission_mode_switched" && details["to"] == "read-only" && details["method"] == "session/set_mode"));
+    // Codex's own full access is switched live too (plan C2), no restart.
+    assert_eq!(runtime.apply_native_mode("c-mode", "agent-full-access").await, fox_agent_backend::external::NativeModeOutcome::Applied);
+    assert_eq!(runtime.apply_native_mode("c-mode", "workspace-write").await, fox_agent_backend::external::NativeModeOutcome::Applied);
+    assert_eq!(launcher.launches.load(Ordering::SeqCst), 1, "Codex: entering / leaving full access never restarts");
 
     runtime.start_turn(turn("c-dsh-mode", "r-dsh-1", "simple", AgentBackend::Deepseek, None)).unwrap();
     sink.terminal("r-dsh-1").await;

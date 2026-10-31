@@ -9,10 +9,10 @@ import { DEFAULT_AGENT_BACKEND_PREFERENCES } from '../../conversations/model/age
 
 const spies = []
 afterEach(() => { cleanup(); spies.splice(0).forEach(spy => spy.mockRestore()) })
-function fakeHost(defaultBackend = 'deepseek') {
+function fakeHost(defaultBackend = 'deepseek', retiredBackends = []) {
   const requests = []
   let conversation
-  spies.push(spyOn(desktopClient, 'agentBackendPreferences').mockResolvedValue({ ...DEFAULT_AGENT_BACKEND_PREFERENCES, defaultBackend, effectiveBackend: defaultBackend }))
+  spies.push(spyOn(desktopClient, 'agentBackendPreferences').mockResolvedValue({ ...DEFAULT_AGENT_BACKEND_PREFERENCES, defaultBackend, effectiveBackend: defaultBackend, retiredBackends }))
   spies.push(spyOn(desktopClient, 'createConversation').mockImplementation(async request => {
     requests.push(request)
     conversation = { ...request, id: 'new', agentId: 'fox-general', title: 'test', agentBackend: request.agentBackend ?? 'fox' }
@@ -41,17 +41,23 @@ for (const backend of ['fox', 'pi', 'codex', 'deepseek']) {
   })
 }
 
-test('starting another draft clears its override and never applies a retired saved default', async () => {
-  // The Host still reports the saved `deepseek` value, but a new conversation
-  // uses the built-in Pi route: a retired preference must not be applied
-  // behind the user's back, and neither may the previous draft's override.
+test('starting another draft clears its override and uses the saved default (plan C1)', async () => {
+  // 设置 →「新会话使用的 Agent」saved `deepseek` and the Host answers it as
+  // effective: the next draft uses it, not the previous draft's `pi` override.
   const requests = fakeHost('deepseek')
   const { result } = renderHook(() => useDesktopConversation())
   await act(async () => result.current.setDraftAgentBackend('pi'))
   await act(async () => { await result.current.createConversationForAgent('fox-general') })
   await act(async () => { await result.current.send('使用保存的默认值') })
-  // The default route travels as an absent field; anything else would be a
-  // retired driver applied without the user choosing it.
+  expect(requests[0].agentBackend).toBe('deepseek')
+})
+
+test('a Host-retired saved default is never applied (retirement mechanism kept)', async () => {
+  const requests = fakeHost('deepseek', ['deepseek'])
+  const { result } = renderHook(() => useDesktopConversation())
+  await act(async () => { await result.current.createConversationForAgent('fox-general') })
+  await act(async () => { await result.current.send('退休的默认值') })
+  // The default route travels as an absent field.
   expect(requests[0].agentBackend ?? 'fox').toBe('fox')
 })
 
@@ -69,12 +75,12 @@ test('project selected before switching Agent stays bound through repeated switc
   expect(requests[0].agentBackend).toBe('pi')
 })
 
-test('a saved codex default is not used for a new conversation', async () => {
+test('a saved codex default is used for a new conversation (plan C1)', async () => {
   const requests = fakeHost('codex')
   const { result } = renderHook(() => useDesktopConversation())
   await act(async () => { await result.current.createConversationForAgent('fox-general') })
   await act(async () => { await result.current.send('保存过 codex') })
-  expect(requests[0].agentBackend ?? 'fox').toBe('fox')
+  expect(requests[0].agentBackend).toBe('codex')
 })
 
 test('external creation does not submit a Fox-only expert binding', async () => {
@@ -88,15 +94,17 @@ test('external creation does not submit a Fox-only expert binding', async () => 
   expect(requests[0].expertId).toBeUndefined()
 })
 
-test('a single supported driver renders no Agent menu at all', async () => {
-  // One option is not a choice: the composer shows no picker even when an
-  // older Host still reports four rows. The retired rows are never offered.
-  const view = render(createElement(ComposerAgentPicker, { value: 'fox', status: { switchEnv: 'FOX_EXTERNAL_BACKENDS', anyExternalEnabled: true, unknownEntries: [], options: [
-    { backend: 'fox', enabled: true, wired: true, experimental: false, reason: null },
-    { backend: 'pi', enabled: true, wired: true, experimental: false, reason: null },
-    { backend: 'codex', enabled: false, wired: false, experimental: false, hidden: false, retired: true, reason: '本版本已退休' },
-    { backend: 'deepseek', enabled: false, wired: false, experimental: false, retired: true, reason: '本版本已退休' },
-  ] }, onSelect: () => { throw new Error('nothing can be selected') } }))
+test('the four choices render an Agent menu; only the built-in route left renders none', async () => {
+  // Plan C1: Fox / Pi / Codex / DeepSeek are offered.
+  const option = (backend, patch = {}) => ({ backend, enabled: true, wired: true, experimental: backend === 'deepseek', hidden: false, retired: false, reason: null, ...patch })
+  const c1 = { switchEnv: 'FOX_EXTERNAL_BACKENDS', anyExternalEnabled: true, unknownEntries: [], retiredBackends: [], options: ['fox', 'pi', 'codex', 'deepseek'].map(backend => option(backend)) }
+  const menu = render(createElement(ComposerAgentPicker, { value: 'fox', status: c1, onSelect: () => {} }))
+  expect(menu.getByRole('button', { name: '选择 Agent，当前 Fox' })).toBeTruthy()
+  menu.unmount()
+  // A Host that retired every external driver (mechanism kept): one option is
+  // not a choice, so the composer shows the label without a menu.
+  const retired = { ...c1, anyExternalEnabled: false, retiredBackends: ['pi', 'codex', 'deepseek'], options: ['fox', 'pi', 'codex', 'deepseek'].map(backend => option(backend, backend === 'fox' ? {} : { enabled: false, wired: false, retired: true, reason: '本版本已退休' })) }
+  const view = render(createElement(ComposerAgentPicker, { value: 'fox', status: retired, onSelect: () => { throw new Error('nothing can be selected') } }))
   expect(view.queryByRole('button', { name: /选择 Agent/ })).toBeNull()
   expect(view.getByText('Fox')).toBeTruthy()
   expect(view.queryByRole('menu')).toBeNull()
