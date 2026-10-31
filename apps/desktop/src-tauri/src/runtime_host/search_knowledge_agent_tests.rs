@@ -94,3 +94,49 @@ fn search_knowledge_tool_reports_index_not_ready_and_keeps_binding_isolation() {
     drop(store);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn doc3_keyword_retrieval_has_every_key_the_agent_mapping_reads() {
+    let (store, root) = temp_store("doc3-keys");
+    let (base_id, _, _) = base_with_document(&store, "契约", "keys.md", &["契约关键词命中"]);
+    let result = store
+        .search_retrieval_in_process(crate::local_knowledge_vector::KnowledgeRetrievalRequest {
+            knowledge_base_id: base_id,
+            query: "契约".to_owned(),
+            mode: Some("keyword".to_owned()),
+            limit: Some(5),
+        })
+        .unwrap();
+    assert!(result.get("mode").is_some());
+    assert_eq!(result["mode"], "keyword");
+    assert!(result.get("fusionVersion").is_some());
+    let items = result.get("items").and_then(Value::as_array).expect("items");
+    assert!(!items.is_empty(), "keyword retrieval must return the fixture hit");
+    for item in items {
+        assert!(item.get("chunkId").is_some(), "{item}");
+        assert!(item.get("score").is_some(), "{item}");
+        assert!(item.get("lexicalScore").is_some(), "{item}");
+    }
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn doc3_top_k_twenty_on_the_agent_path_reports_has_more() {
+    let (store, root) = temp_store("doc3-more");
+    let texts: Vec<String> = (0..25).map(|index| format!("契约片段{index:02}")).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let (base_id, _, _) = base_with_document(&store, "更多契约", "more.md", &refs);
+    let bindings = [binding(&base_id)];
+    let result = search(
+        &store,
+        &bindings,
+        json!({ "target": { "source": "local", "id": base_id }, "query": "契约", "topK": 20 }),
+    )
+    .unwrap();
+    let details = &result["details"];
+    assert_eq!(details["items"].as_array().map(Vec::len), Some(20));
+    assert_eq!(details["hasMore"], true);
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
