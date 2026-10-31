@@ -652,7 +652,7 @@ mod tests {
     fn wrapped_pi_dir_offers_the_inner_prefix_and_root_delete_stays_blocked() {
         let project = root();
         let cwd = project.to_string_lossy();
-        let wrapped = format!(r#"cd "{cwd}" && dir 2>&1; echo "EXIT_CODE: $?""#);
+        let wrapped = format!(r#"cd "{plain}" && dir 2>&1; echo "EXIT_CODE: $?""#);
         let request = gate("bash", json!({ "command": wrapped }));
         let (tool, decision) = decide_pi("ask", &request, Some(&project), Some(&home()), &[]);
         let answer = answer_from(&tool, &decision, &options(), true, Some(&wrapped), Some(&cwd));
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(answer.policy["command"], wrapped);
         assert_eq!(answer.policy["innerCommand"], "dir");
 
-        let deletion = format!(r#"cd "{cwd}" && rm -rf . 2>&1; echo $?"#);
+        let deletion = format!(r#"cd "{plain}" && rm -rf . 2>&1; echo $?"#);
         let request = gate("bash", json!({ "command": deletion }));
         let (tool, decision) = decide_pi(PI_FULL, &request, Some(&project), Some(&home()), &[]);
         assert!(decision.is_block(), "{:?}", decision.verdict);
@@ -682,6 +682,9 @@ mod tests {
         // 引擎会 canonicalize 项目根；命令里的 cwd 用同一条路径，cd 目标才能对上。
         let project = scratch.path().canonicalize().expect("canonical project");
         let cwd = project.to_str().expect("utf-8 project").to_owned();
+        // Windows 上 canonicalize 得到 `\\?\C:\...`；模型写的 cd 目标是普通路径。
+        // 双引号里的 `\\` 在 bash 里会被解码成一个反斜杠，所以 cd 目标用去掉前缀的普通路径。
+        let plain = cwd.strip_prefix(r"\\?\").unwrap_or(&cwd).to_owned();
         let conversation = database
             .create_conversation_with_backend(database.default_agent_id(), Some("pi-wrap"), Some(&cwd), Some("ask"), "pi")
             .expect("conversation")
@@ -690,7 +693,7 @@ mod tests {
         database
             .change_execution_policy_with_access(&conversation, "fox-1334-full", policy.version, "allow", true)
             .expect("full access");
-        let deletion = format!(r#"cd "{cwd}" && rm -rf . 2>&1; echo $?"#);
+        let deletion = format!(r#"cd "{plain}" && rm -rf . 2>&1; echo $?"#);
         let delete_request = gate_in(&project, "bash", json!({ "command": deletion }));
         let blocked = answer_pi_request(&database, "run-1", &conversation, PI_FULL, &delete_request, &options()).expect("blocked");
         assert!(matches!(blocked.decision, AutoPermission::Reject { .. }));
@@ -704,7 +707,7 @@ mod tests {
         database
             .change_execution_policy_with_access(&conversation, "fox-1334-ask", policy.version, "ask", false)
             .expect("back to ask");
-        let wrapped = format!(r#"cd "{cwd}" && dir 2>&1; echo "EXIT_CODE: $?""#);
+        let wrapped = format!(r#"cd "{plain}" && dir 2>&1; echo "EXIT_CODE: $?""#);
         let approval = pi_approval(&conversation, &wrapped, &cwd, &["allow_once", "allow_project_rule", "deny"]);
         allow_pi_with_project_rule(&database, &approval, "dir").expect("dir 覆盖内层");
         let again = gate_in(&project, "bash", json!({ "command": wrapped }));

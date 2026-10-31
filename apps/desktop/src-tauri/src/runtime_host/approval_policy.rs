@@ -682,8 +682,10 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         decision.findings.push("model_declared_high".into());
     }
     // 1. block: built-in dangerous deletions, then project block rules.
-    // block 先于 path_boundary，class 保持 Command。内置 block 始终看整条原文。
-    if let Some(block) = &analysis.block {
+    // block 先于 path_boundary，class 保持 Command。内置 block 始终看整条原文；
+    // 识别出包装时，内层单独分析命中的 block 也算（只会更严）。
+    let builtin_block = analysis.block.as_ref().or_else(|| inner_analysis.as_ref().and_then(|inner| inner.block.as_ref()));
+    if let Some(block) = builtin_block {
         decision.findings.push("builtin_block".into());
         decision.verdict = Verdict::Deny {
             code: "permission.blocked".into(),
@@ -2163,6 +2165,21 @@ mod tests {
         let outside = decide_win(r#"cd "D:\fox-test\测试项目" && type D:\other\x.txt 2>&1; echo $?"#, AccessMode::Auto, &[]);
         assert_eq!(verdict(&outside), "ask");
         assert_eq!(outside.class, ToolClass::PathBoundary, "{:?}", outside.findings);
+    }
+
+    /// 审查补充：包装里的删除，内层按 cwd 单独分析命中 block 也拒绝（任何方言下都不会漏）。
+    #[test]
+    fn exit_marker_wrapper_inner_block_is_enough_to_refuse() {
+        for mode in [AccessMode::ReadOnly, AccessMode::Ask, AccessMode::Auto, AccessMode::FullAccess] {
+            for command in [
+                r#"cd "D:\fox-test\测试项目" && rm -rf . 2>&1; echo "EXIT_CODE: $?""#,
+                r#"cd "D:\fox-test\测试项目" && rd /s /q . 2>&1; echo $?"#,
+            ] {
+                let decision = decide_win(command, mode, &[]);
+                assert!(decision.is_block(), "{mode:?} {command}: {:?}", decision.verdict);
+                assert!(decision.findings.iter().any(|finding| finding == "builtin_block"), "{:?}", decision.findings);
+            }
+        }
     }
 
     /// 与 Windows 盘符同一套规则，POSIX 的 `cd "/work/proj" && …` 也要剥内层。
