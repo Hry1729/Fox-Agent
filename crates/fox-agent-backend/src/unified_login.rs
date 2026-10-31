@@ -236,9 +236,9 @@ pub fn pi_literal(value: &str) -> String {
 
 /// The dsh base URL for this provider, or why there is none.
 pub fn deepseek_base_url(login: &UnifiedLogin) -> Result<String, String> {
-    let base = login.base_url.trim_end_matches('/');
     if login.api_type == "anthropic-messages" {
-        Ok(base.to_owned())
+        // 用户可能填的是完整端点（…/v1/messages）；dsh 自己补 /v1/messages，交给它根地址。
+        crate::model_url::sdk_base_url(crate::model_url::ANTHROPIC, &login.base_url)
     } else {
         Err("请在模型服务中为 DeepSeek 配置 Anthropic Messages 协议".to_owned())
     }
@@ -261,10 +261,12 @@ fn generated_files(backend: AgentBackend, login: &UnifiedLogin) -> Result<(Vec<(
     let key = login.api_key.expose();
     match backend {
         AgentBackend::Pi => {
+            // pi-ai 的 SDK 自己在根地址后拼端点路径；完整端点要先还原成根地址。
+            let base = crate::model_url::sdk_base_url(&login.api_type, &login.base_url)?;
             let models = serde_json::json!({
                 "providers": {
                     FOX_PROVIDER_ID: {
-                        "baseUrl": login.base_url.trim_end_matches('/'),
+                        "baseUrl": base,
                         "api": login.api_type,
                         "apiKey": pi_literal(key),
                         "models": [{ "id": login.model }],
@@ -298,7 +300,7 @@ fn generated_files(backend: AgentBackend, login: &UnifiedLogin) -> Result<(Vec<(
                 "{MANAGED_HEADER}\n# key 不写进本文件：Fox 启动 Codex 时通过环境变量 {CODEX_KEY_ENV} 注入。\nmodel = {}\nmodel_provider = \"{FOX_PROVIDER_ID}\"\n\n[model_providers.{FOX_PROVIDER_ID}]\nname = {}\nbase_url = {}\nwire_api = \"responses\"\nenv_key = \"{CODEX_KEY_ENV}\"\n# 网络不通时不长时间重试（Reconnecting…）：Fox 在沙箱里会立即结束本轮并给出被拦截的主机。\nrequest_max_retries = 2\nstream_max_retries = 2\n",
                 toml_string(&login.model),
                 toml_string(&format!("Fox 模型服务：{}", login.provider_name)),
-                toml_string(login.base_url.trim_end_matches('/')),
+                toml_string(&crate::model_url::sdk_base_url(crate::model_url::OPENAI_RESPONSES, &login.base_url)?),
             );
             Ok((vec![(CODEX_CONFIG, config)], vec![(CODEX_KEY_ENV.to_owned(), login.api_key.clone())]))
         }
@@ -476,6 +478,30 @@ mod tests {
             assert!(!text.contains(KEY), "{text}");
             assert!(!format!("{report:?}").contains(KEY));
         }
+    }
+
+    #[test]
+    fn full_endpoint_addresses_are_reduced_to_the_sdk_root() {
+        // 模型服务里填的是完整端点时，生成的配置给各后端根地址，避免 SDK 再拼一遍（/v1/messages/v1/messages）。
+        let home = temp_home("dsh-full-endpoint");
+        apply(AgentBackend::Deepseek, &home, &login("anthropic-messages", "https://token.sensenova.cn/v1/messages", None), false).unwrap();
+        let patch = std::fs::read_to_string(rel(&home, DSH_PATCH_ACP)).unwrap();
+        assert!(patch.contains("baseURL: 'https://token.sensenova.cn'"), "{patch}");
+        let home = temp_home("pi-full-anthropic");
+        apply(AgentBackend::Pi, &home, &login("anthropic-messages", "https://token.sensenova.cn/v1/messages", None), false).unwrap();
+        let models: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(rel(&home, PI_MODELS)).unwrap()).unwrap();
+        assert_eq!(models["providers"]["fox"]["baseUrl"], "https://token.sensenova.cn");
+        let home = temp_home("pi-full-chat");
+        apply(AgentBackend::Pi, &home, &login("openai-completions", "https://api.example.com/v1/chat/completions", None), false).unwrap();
+        let models: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(rel(&home, PI_MODELS)).unwrap()).unwrap();
+        assert_eq!(models["providers"]["fox"]["baseUrl"], "https://api.example.com/v1");
+        let home = temp_home("codex-full-responses");
+        apply(AgentBackend::Codex, &home, &login("openai-responses", "https://api.openai.com/v1/responses", Some(true)), false).unwrap();
+        let config = std::fs::read_to_string(rel(&home, CODEX_CONFIG)).unwrap();
+        assert!(config.contains("base_url = \"https://api.openai.com/v1\""), "{config}");
+        // 以 /messages 结尾但不是 /v1/messages 的端点无法交给 SDK，明确拒绝而不是猜。
+        let refused = deepseek_base_url(&login("anthropic-messages", "https://gw.example.com/anthropic/messages", None)).unwrap_err();
+        assert!(refused.starts_with(crate::model_url::ENDPOINT_NOT_SDK_COMPATIBLE), "{refused}");
     }
 
     #[test]

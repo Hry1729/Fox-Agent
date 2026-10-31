@@ -47,9 +47,9 @@ impl ModelServiceClient {
         let base = normalize_model_base_url(base_url)?;
         if model.trim().is_empty() { return Err("请先设置供应商的默认模型".into()); }
         let (endpoint, body) = match api_type {
-            "openai-responses" => (format!("{base}/responses"), serde_json::json!({"model": model, "input": "Reply only OK", "max_output_tokens": 1024, "store": false})),
+            "openai-responses" => (openai_responses_url(&base)?.to_string(), serde_json::json!({"model": model, "input": "Reply only OK", "max_output_tokens": 1024, "store": false})),
             "anthropic-messages" => (anthropic_messages_url(&base)?.to_string(), serde_json::json!({"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": "Reply only OK"}]})),
-            "openai-completions" => (format!("{base}/chat/completions"), serde_json::json!({"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": "Reply only OK"}]})),
+            "openai-completions" => (openai_chat_url(&base)?.to_string(), serde_json::json!({"model": model, "max_tokens": 1024, "messages": [{"role": "user", "content": "Reply only OK"}]})),
             _ => return Err("不支持此 API 协议".into()),
         };
         let mut request = self.http.post(endpoint).timeout(Duration::from_secs(90)).json(&body);
@@ -95,7 +95,7 @@ impl ModelServiceClient {
             }
             "openai-responses" => {
                 if requested_model_id.is_empty() { return Err("Responses 连接测试需要模型 ID".into()); }
-                let mut request = self.http.post(format!("{normalized}/responses"))
+                let mut request = self.http.post(openai_responses_url(&normalized)?)
                     .json(&serde_json::json!({"model": requested_model_id, "input": "Reply OK", "max_output_tokens": 32, "store": false}));
                 if let Some(key) = api_key.filter(|v| !v.trim().is_empty()) { request = request.bearer_auth(key); }
                 request.send().await
@@ -338,23 +338,33 @@ fn credential_entry(base_url: &str) -> Result<Entry, String> {
     Entry::new(CREDENTIAL_SERVICE, base_url).map_err(|error| error.to_string())
 }
 
+// 端点规则与运行时共用 fox_agent_backend::model_url：地址已是完整端点（…/v1/messages、
+// …/chat/completions、…/responses）时原样请求，不再拼接。Anthropic 地址还要先确认
+// 运行时 SDK 能按「根地址 + /v1/messages」用它，避免连接测试通过而运行时 404。
+fn parsed(url: Result<String, String>) -> Result<Url, String> {
+    Url::parse(&url?).map_err(|_| "模型 API 地址格式无效".to_owned())
+}
+
 fn models_url(base_url: &str) -> Result<Url, String> {
-    let mut url = Url::parse(base_url).map_err(|_| "模型 API 地址格式无效".to_owned())?;
-    let path = url.path().trim_end_matches('/');
-    url.set_path(&format!("{path}/models"));
-    Ok(url)
+    parsed(fox_agent_backend::model_url::openai_models_url(base_url))
+}
+
+fn openai_chat_url(base_url: &str) -> Result<Url, String> {
+    parsed(fox_agent_backend::model_url::openai_chat_url(base_url))
+}
+
+fn openai_responses_url(base_url: &str) -> Result<Url, String> {
+    parsed(fox_agent_backend::model_url::openai_responses_url(base_url))
 }
 
 fn anthropic_messages_url(base_url: &str) -> Result<Url, String> {
-    let mut url = Url::parse(base_url).map_err(|_| "模型 API 地址格式无效".to_owned())?;
-    let path = url.path().trim_end_matches('/');
-    let endpoint_path = if path.ends_with("/v1") {
-        format!("{path}/messages")
-    } else {
-        format!("{path}/v1/messages")
-    };
-    url.set_path(&endpoint_path);
-    Ok(url)
+    fox_agent_backend::model_url::sdk_base_url(fox_agent_backend::model_url::ANTHROPIC, base_url)?;
+    parsed(fox_agent_backend::model_url::anthropic_messages_url(base_url))
+}
+
+/// 交给 Agent 运行时（pi-ai SDK）的根地址；`base_url` 本身仍是凭据键，不改存储值。
+pub fn runtime_base_url(api_type: &str, base_url: &str) -> Result<String, String> {
+    fox_agent_backend::model_url::sdk_base_url(api_type, base_url)
 }
 
 fn is_private_or_local_host(host: &str) -> bool {
@@ -531,6 +541,19 @@ mod tests {
                 .as_str(),
             "https://api.example.com/v1/messages"
         );
+        // 完整端点不再重复拼接（之前得到 /v1/messages/v1/messages → 404）。
+        assert_eq!(
+            anthropic_messages_url("https://token.sensenova.cn/v1/messages").unwrap().as_str(),
+            "https://token.sensenova.cn/v1/messages"
+        );
+        assert!(anthropic_messages_url("https://gw.example.com/anthropic/messages")
+            .unwrap_err()
+            .starts_with(fox_agent_backend::model_url::ENDPOINT_NOT_SDK_COMPATIBLE));
+        assert_eq!(openai_chat_url("https://api.example.com/v1/chat/completions").unwrap().as_str(), "https://api.example.com/v1/chat/completions");
+        assert_eq!(models_url("https://api.example.com/v1/chat/completions").unwrap().as_str(), "https://api.example.com/v1/models");
+        assert_eq!(openai_responses_url("https://api.example.com/v1/responses").unwrap().as_str(), "https://api.example.com/v1/responses");
+        assert_eq!(runtime_base_url("anthropic-messages", "https://token.sensenova.cn/v1/messages").unwrap(), "https://token.sensenova.cn");
+        assert_eq!(runtime_base_url("openai-completions", "https://api.example.com/v1/chat/completions").unwrap(), "https://api.example.com/v1");
     }
 
     #[test]
@@ -615,6 +638,39 @@ mod tests {
         let mut truncated = chat.clone(); truncated["choices"][0]["finish_reason"] = serde_json::json!("length");
         assert!(!completed_output("openai-completions", &truncated));
         assert!(!completed_output("openai-completions", &serde_json::json!({"data":[{"id":"some-model"}]})));
+    }
+
+    #[test]
+    fn first_use_validation_accepts_full_endpoint_addresses_without_appending_again() {
+        for (api, suffix, body) in [
+            ("anthropic-messages", "/v1/messages", r#"{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"OK"}]}"#),
+            ("openai-completions", "/v1/chat/completions", r#"{"choices":[{"finish_reason":"stop","message":{"content":"OK"}}]}"#),
+            ("openai-responses", "/v1/responses", r#"{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}"#),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap(); assert!(n > 0); bytes.extend_from_slice(&chunk[..n]);
+                    let request = String::from_utf8_lossy(&bytes);
+                    if let Some((headers, content)) = request.split_once("\r\n\r\n") {
+                        let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_owned)).unwrap().trim().parse().unwrap();
+                        if content.len() >= length { break; }
+                    }
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                // 用户填的就是完整端点：请求行必须恰好是它，不能再拼一段。
+                assert!(request.starts_with(&format!("POST {suffix} HTTP/1.1")), "{request}");
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let result = tauri::async_runtime::block_on(ModelServiceClient::new().unwrap().test_output(&format!("http://{address}{suffix}"), Some("test-key"), api, "model"));
+            assert!(result.is_ok(), "{api}: {result:?}");
+            server.join().unwrap();
+        }
     }
 
     #[test]

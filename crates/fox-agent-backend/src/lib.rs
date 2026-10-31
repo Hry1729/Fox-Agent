@@ -56,6 +56,7 @@ pub mod launch;
 pub mod legacy;
 pub mod limits;
 pub mod model_endpoint;
+pub mod model_url;
 pub mod login_source;
 pub mod runtime_adapters;
 pub mod native_permission;

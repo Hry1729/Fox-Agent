@@ -2003,7 +2003,7 @@ impl RuntimeHost {
                 "executionProfile": execution_profile.initialize_fields()["executionProfile"].clone(),
                 "executionStrategy": execution_profile.initialize_fields()["executionStrategy"].clone(),
                 "modelService": {
-                    "baseUrl": model_service.base_url, "modelId": model_service.model_id,
+                    "baseUrl": crate::model_service::runtime_base_url(&model_service.api_type, &model_service.base_url)?, "modelId": model_service.model_id,
                     "apiType": model_service.api_type, "contextWindow": model_service.context_window,
                     "maxOutputTokens": effective_max_output_tokens, "supportsImageInput": model_service.supports_image_input,
                     "apiKey": crate::model_service::get_api_key(&model_service.base_url),
@@ -3474,7 +3474,7 @@ impl RuntimeHost {
         let response = self.send_request(
             RuntimeRequest::new("initialize").with_payload(json!({
                 "modelService": {
-                    "baseUrl": model_service.base_url,
+                    "baseUrl": crate::model_service::runtime_base_url(&model_service.api_type, &model_service.base_url)?,
                     "modelId": model_service.model_id,
                     "apiType": model_service.api_type,
                     "contextWindow": model_service.context_window,
