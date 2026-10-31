@@ -5,8 +5,8 @@
 //! from facts it can check itself:
 //!
 //! 1. **block** – built-in dangerous deletions (the project root, a drive or
-//!    filesystem root, the home directory) and the project's own `block`
-//!    rules. Refused in every mode, full access included.
+//!    filesystem root, the home directory, system directories) and the project's
+//!    own `block` rules. Refused in every mode, full access included.
 //! 2. **protected / outside paths** – `.git`, `.fox`, shell profiles, and any
 //!    path that leaves the project root. Only full access lets them through.
 //! 3. **mode** – read only / ask / auto / full access (see the table in
@@ -250,6 +250,10 @@ impl PolicyDecision {
     pub fn is_ask(&self) -> bool {
         matches!(self.verdict, Verdict::Ask)
     }
+    /// 内置 block 或项目 block 规则：拒绝码 `permission.blocked`。
+    pub fn is_block(&self) -> bool {
+        matches!(&self.verdict, Verdict::Deny { code, .. } if code == "permission.blocked")
+    }
     /// Short machine summary for the approval card's `policy` field.
     pub fn card_json(&self) -> Value {
         json!({
@@ -390,7 +394,9 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         decision.findings.push("model_declared_high".into());
     }
     // 1. block: built-in dangerous deletions, then project block rules.
+    // block 先于 path_boundary，class 保持 Command。
     if let Some(block) = &analysis.block {
+        decision.findings.push("builtin_block".into());
         decision.verdict = Verdict::Deny {
             code: "permission.blocked".into(),
             message: format!("[permission.blocked] {block}。这条内置禁止规则在任何模式下都生效（包括完全访问），命令没有执行。"),
@@ -402,6 +408,7 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         .find(|rule| segments.iter().any(|segment| rule_prefix_matches(rule, segment)))
     {
         decision.forcing_rule = Some(rule.clone());
+        decision.findings.push("project_block_rule".into());
         decision.verdict = Verdict::Deny {
             code: "permission.blocked".into(),
             message: format!("[permission.blocked] 本项目的禁止规则「{}」命中了这条命令，命令没有执行。", rule.pattern),
@@ -592,7 +599,12 @@ fn windows_syntax() -> bool {
 /// lines, honouring quotes. Backslash escapes only on non-Windows hosts
 /// (on Windows it is the path separator).
 fn tokenize(command: &str) -> Vec<Segment> {
-    let escapes = !windows_syntax();
+    tokenize_with(command, !windows_syntax())
+}
+
+/// 与 [`tokenize`] 相同，但由调用方指定是否处理反斜杠转义。
+/// Host 默认方言和另一种方言都会用来做 block 检测（pi 在 Windows 上实际是 bash）。
+fn tokenize_with(command: &str, escapes: bool) -> Vec<Segment> {
     let mut segments = Vec::new();
     let mut current = Segment::default();
     let mut word = String::new();
@@ -728,6 +740,12 @@ fn command_name(word: &str) -> String {
 
 const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "dash", "fish", "cmd", "powershell", "pwsh", "ksh"];
 const DELETE_COMMANDS: [&str; 8] = ["rm", "del", "erase", "rd", "rmdir", "remove-item", "ri", "rimraf"];
+/// cmd 内建和常见 Windows 程序。这些命令的 `/x`、`//x` 是开关，不是路径。
+const WINDOWS_NATIVE_COMMANDS: [&str; 44] = [
+    "dir", "del", "erase", "rd", "rmdir", "copy", "xcopy", "robocopy", "move", "ren", "rename", "type", "more", "findstr", "where",
+    "attrib", "tree", "cmd", "start", "tasklist", "taskkill", "ipconfig", "ping", "net", "sc", "reg", "icacls", "takeown", "cacls",
+    "fc", "comp", "chcp", "cls", "cd", "chdir", "pushd", "popd", "timeout", "schtasks", "wmic", "certutil", "bitsadmin", "shutdown", "format",
+];
 const FETCHERS: [&str; 7] = ["curl", "wget", "iwr", "invoke-webrequest", "irm", "invoke-restmethod", "fetch"];
 const INTERPRETERS: [&str; 8] = ["python", "python3", "node", "perl", "ruby", "iex", "invoke-expression", "php"];
 
@@ -807,7 +825,8 @@ fn segment_risk_with_signature(words: &[String], findings: &mut Vec<String>) -> 
             }
         }
         "del" | "erase" | "rd" | "rmdir" => {
-            if lower[1..].iter().any(|word| word == "/s") {
+            // `/s` 与 MSYS 双斜杠 `//s` 都是递归删除。
+            if lower[1..].iter().any(|word| is_recursive_windows_switch(word)) {
                 return high("recursive_delete", vec![head.clone(), "/s".into()]);
             }
         }
@@ -845,13 +864,45 @@ fn segment_risk_with_signature(words: &[String], findings: &mut Vec<String>) -> 
     (Risk::Low, None)
 }
 
+/// cmd 内建 / 常见 Windows 程序（按 [`command_name`] 比较）。
+fn is_windows_native_command(name: &str) -> bool {
+    WINDOWS_NATIVE_COMMANDS.contains(&name)
+}
+
+/// `/x`、`/xy`、`/x:value`，以及 MSYS 双斜杠 `//x`。
+/// 开关名由 1~3 个字母、数字或 `?` 组成，可带 `:值`。
+fn is_windows_switch(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    let body = if let Some(rest) = lower.strip_prefix("//") {
+        rest
+    } else if let Some(rest) = lower.strip_prefix('/') {
+        rest
+    } else {
+        return false;
+    };
+    if body.is_empty() || body.starts_with('/') {
+        return false;
+    }
+    let flag = body.split_once(':').map(|(flag, _)| flag).unwrap_or(body);
+    (1..=3).contains(&flag.len()) && flag.chars().all(|c| c.is_ascii_alphanumeric() || c == '?')
+}
+
+/// `del /s` 与 `rd //s` 都算递归删除。
+fn is_recursive_windows_switch(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    lower.starts_with('/') && lower.trim_start_matches('/') == "s"
+}
+
 /// The arguments a delete command removes (options and their values skipped).
 fn delete_targets(words: &[String]) -> Vec<String> {
     let words = effective_words(words);
     let Some(head) = words.first() else { return Vec::new() };
-    if !DELETE_COMMANDS.contains(&command_name(head).as_str()) {
+    let name = command_name(head);
+    if !DELETE_COMMANDS.contains(&name.as_str()) {
         return Vec::new();
     }
+    // 开关只对 del/erase/rd/rmdir 跳过（含 //x）。rm、remove-item、ri、rimraf 的 /x 是目标。
+    let windows_delete = matches!(name.as_str(), "del" | "erase" | "rd" | "rmdir");
     let mut targets = Vec::new();
     let mut index = 1;
     while index < words.len() {
@@ -868,8 +919,7 @@ fn delete_targets(words: &[String]) -> Vec<String> {
             targets.extend(words[index + 1..].iter().cloned());
             break;
         }
-        let windows_switch = lower.starts_with('/') && (2..=3).contains(&lower.len()) && lower[1..].chars().all(|c| c.is_ascii_alphabetic());
-        if lower.starts_with('-') || windows_switch {
+        if lower.starts_with('-') || (windows_delete && is_windows_switch(word)) {
             index += 1;
             continue;
         }
@@ -879,14 +929,65 @@ fn delete_targets(words: &[String]) -> Vec<String> {
     targets
 }
 
+/// `cd` / `chdir` / `pushd` / `set-location` / `sl` 的下一工作目录。
+/// `None` 表示这段不是切目录。无法解析（`-`、未知变量）时用文件系统根 `/`。
+fn directory_change(words: &[String], cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    let words = effective_words(words);
+    let name = words.first().map(|word| command_name(word)).unwrap_or_default();
+    if !matches!(name.as_str(), "cd" | "chdir" | "pushd" | "set-location" | "sl") {
+        return None;
+    }
+    let fallback = home.map(normalize).unwrap_or_else(|| PathBuf::from("/"));
+    let mut index = 1;
+    while index < words.len() {
+        let word = &words[index];
+        let lower = word.to_ascii_lowercase();
+        if lower == "-path" || lower == "-literalpath" {
+            return Some(match words.get(index + 1) {
+                Some(value) => cwd_after_cd(value, cwd, project_root, home),
+                None => fallback,
+            });
+        }
+        // `-` 是上一个目录，Host 看不到，后续按未知目录处理。
+        if word == "-" {
+            return Some(PathBuf::from("/"));
+        }
+        if is_windows_switch(word) || lower.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(cwd_after_cd(word, cwd, project_root, home));
+    }
+    Some(fallback)
+}
+
+/// `cd -` 和无法解析的变量都把后续 cwd 定为文件系统根。
+fn cwd_after_cd(target: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    if target == "-" {
+        PathBuf::from("/")
+    } else {
+        resolve_word(target, cwd, home, project_root)
+    }
+}
+
 fn analyze_command(command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> CommandAnalysis {
     let mut analysis = CommandAnalysis { segments: Vec::new(), risk: Risk::Low, findings: Vec::new(), block: None, path_boundary: false, opaque: false };
-    analyze_into(&mut analysis, command, cwd, project_root, home, 0);
+    let escapes = !windows_syntax();
+    analyze_into(&mut analysis, command, cwd, project_root, home, 0, escapes);
+    // 默认方言没命中 block 时，用另一种方言只补 block（路径边界和风险仍按默认方言）。
+    if analysis.block.is_none() {
+        let mut alternate = CommandAnalysis { segments: Vec::new(), risk: Risk::Low, findings: Vec::new(), block: None, path_boundary: false, opaque: false };
+        analyze_into(&mut alternate, command, cwd, project_root, home, 0, !escapes);
+        if alternate.block.is_some() {
+            analysis.block = alternate.block;
+        }
+    }
     analysis
 }
 
-fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>, depth: usize) {
-    let mut segments = tokenize(command);
+fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>, depth: usize, escapes: bool) {
+    let mut segments = tokenize_with(command, escapes);
+    let mut cwd_now = cwd.to_path_buf();
     let mut previous_head: Option<String> = None;
     for segment in segments.iter_mut() {
         let mut findings = Vec::new();
@@ -907,19 +1008,24 @@ fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, proje
             findings.push("command_substitution".into());
             analysis.opaque = true;
         }
-        // Built-in block: deleting the project root, a filesystem/drive root
-        // or the home directory (or anything above them).
+        // Built-in block: deleting the project root, a filesystem/drive root,
+        // the home directory (or anything above them), or a system directory.
         if analysis.block.is_none() {
             for target in delete_targets(&segment.words) {
-                if let Some(reason) = dangerous_delete_target(&target, cwd, project_root, home) {
+                if let Some(reason) = dangerous_delete_target(&target, &cwd_now, project_root, home) {
                     analysis.block = Some(reason);
                     break;
                 }
             }
         }
         // Paths: every argument and redirect target that names a path.
+        // Windows 原生命令的 /x、//x 是开关，不参与 path_boundary。
+        let windows_native = is_windows_native_command(&head);
         let path_words = words.iter().skip(1).chain(segment.redirects.iter());
         for word in path_words {
+            if windows_native && is_windows_switch(word) {
+                continue;
+            }
             let candidate = match word.split_once('=') {
                 Some((name, value)) if name.starts_with('-') => value,
                 _ => word.as_str(),
@@ -927,7 +1033,7 @@ fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, proje
             if !looks_like_path(candidate) {
                 continue;
             }
-            let resolved = resolve_word(candidate, cwd, home);
+            let resolved = resolve_word(candidate, &cwd_now, home, project_root);
             if let Some(finding) = path_boundary(&resolved, project_root, home) {
                 analysis.path_boundary = true;
                 if !findings.iter().any(|known| known == finding) {
@@ -936,24 +1042,35 @@ fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, proje
                 risk = Risk::High;
             }
         }
-        // `bash -c "..."`, `cmd /c ...`, `powershell -Command ...`: look inside.
+        // `bash -c "..."`、`cmd /c`、`cmd //c`、`powershell -Command`：看进去。
+        // `-EncodedCommand` 看不到内容，只标 opaque 且高风险。
         if SHELLS.contains(&head.as_str()) && depth < 2 {
-            if let Some(script) = nested_script(&words) {
-                analysis.opaque = true;
-                let mut nested = CommandAnalysis { segments: Vec::new(), risk: Risk::Low, findings: Vec::new(), block: None, path_boundary: false, opaque: false };
-                analyze_into(&mut nested, &script, cwd, project_root, home, depth + 1);
-                if nested.block.is_some() && analysis.block.is_none() {
-                    analysis.block = nested.block;
-                }
-                analysis.path_boundary |= nested.path_boundary;
-                if nested.risk == Risk::High {
+            match nested_script(&head, &words) {
+                Some(NestedScript::Opaque) => {
+                    analysis.opaque = true;
                     risk = Risk::High;
-                }
-                for finding in nested.findings {
-                    if !findings.contains(&finding) {
-                        findings.push(finding);
+                    if !findings.iter().any(|known| known == "encoded_command") {
+                        findings.push("encoded_command".into());
                     }
                 }
+                Some(NestedScript::Script(script)) => {
+                    analysis.opaque = true;
+                    let mut nested = CommandAnalysis { segments: Vec::new(), risk: Risk::Low, findings: Vec::new(), block: None, path_boundary: false, opaque: false };
+                    analyze_into(&mut nested, &script, &cwd_now, project_root, home, depth + 1, escapes);
+                    if nested.block.is_some() && analysis.block.is_none() {
+                        analysis.block = nested.block;
+                    }
+                    analysis.path_boundary |= nested.path_boundary;
+                    if nested.risk == Risk::High {
+                        risk = Risk::High;
+                    }
+                    for finding in nested.findings {
+                        if !findings.contains(&finding) {
+                            findings.push(finding);
+                        }
+                    }
+                }
+                None => {}
             }
         }
         segment.risk = risk;
@@ -966,20 +1083,41 @@ fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, proje
                 analysis.findings.push(finding);
             }
         }
+        if let Some(next) = directory_change(&words, &cwd_now, project_root, home) {
+            cwd_now = next;
+        }
         previous_head = Some(head);
     }
     analysis.segments.extend(segments);
 }
 
-fn nested_script(words: &[String]) -> Option<String> {
+enum NestedScript {
+    /// 看得见的脚本，继续分析。
+    Script(String),
+    /// `-EncodedCommand` / `-enc` / `-e`：内容不可见。
+    Opaque,
+}
+
+fn nested_script(head: &str, words: &[String]) -> Option<NestedScript> {
+    let powershell = matches!(head, "powershell" | "pwsh");
     let mut index = 1;
     while index < words.len() {
         let lower = words[index].to_ascii_lowercase();
-        if matches!(lower.as_str(), "-c" | "-lc" | "-ic" | "/c" | "/k" | "-command" | "-commandwithargs") || lower == "-encodedcommand" {
-            let rest = words[index + 1..].join(" ");
-            return (!rest.trim().is_empty()).then_some(rest);
+        // MSYS 把 `/c` 写成 `//c`，归一成单斜杠再认。
+        let normalized = if let Some(rest) = lower.strip_prefix("//") {
+            format!("/{rest}")
+        } else {
+            lower.clone()
+        };
+        if powershell && matches!(normalized.as_str(), "-encodedcommand" | "-enc" | "-e") {
+            return Some(NestedScript::Opaque);
         }
-        if lower.starts_with("-") || lower.starts_with('/') {
+        if matches!(normalized.as_str(), "-c" | "-lc" | "-ic" | "/c" | "/k" | "-command" | "-commandwithargs") {
+            let rest = words[index + 1..].join(" ");
+            return (!rest.trim().is_empty()).then_some(NestedScript::Script(rest));
+        }
+        // `cmd /d /s /c` 以及 `//d`、`//s`、`-NoProfile` 这类前置开关。
+        if lower.starts_with('-') || lower.starts_with('/') {
             index += 1;
             continue;
         }
@@ -1011,7 +1149,8 @@ fn is_absolute_word(word: &str) -> bool {
 
 /// Expand `~`, `$HOME`, `%USERPROFILE%`, `$env:USERPROFILE` and resolve the
 /// word lexically against `cwd`.
-fn resolve_word(word: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
+/// 当前目录或项目根是盘符路径时，把 MSYS / Cygwin / WSL 盘符路径映射成 `X:/...`。
+fn resolve_word(word: &str, cwd: &Path, home: Option<&Path>, project_root: Option<&Path>) -> PathBuf {
     let home_text = home.map(|home| home.to_string_lossy().into_owned());
     let mut text = word.to_owned();
     for variable in ["${HOME}", "$HOME", "%USERPROFILE%", "%HOMEPATH%", "$env:USERPROFILE", "$env:HOME", "%HOME%"] {
@@ -1027,11 +1166,65 @@ fn resolve_word(word: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
         // An unknown variable: the Host cannot tell where it points.
         return PathBuf::from("/");
     }
+    if drive_context(cwd, project_root) {
+        if let Some(mapped) = map_msys_drive(&text) {
+            text = mapped;
+        }
+    }
     if is_absolute_word(&text) {
         normalize(Path::new(&text))
     } else {
         normalize(&cwd.join(text))
     }
+}
+
+/// cwd 或项目根是 Windows 盘符路径（含 `\\?\C:\...`）。
+fn drive_context(cwd: &Path, project_root: Option<&Path>) -> bool {
+    path_is_drive(cwd) || project_root.is_some_and(path_is_drive)
+}
+
+fn path_is_drive(path: &Path) -> bool {
+    let text = path.to_string_lossy().replace('\\', "/");
+    if is_drive_path(&text) {
+        return true;
+    }
+    text.to_ascii_lowercase().strip_prefix("//?/").is_some_and(is_drive_path)
+}
+
+/// `/x`、`/x/...`、`/cygdrive/x/...`、`/mnt/x/...` → `X:/...`。`x` 必须是单个字母。
+fn map_msys_drive(text: &str) -> Option<String> {
+    let slash = text.replace('\\', "/");
+    let lower = slash.to_ascii_lowercase();
+    for prefix in ["/cygdrive/", "/mnt/"] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            return drive_from_rest(&slash[slash.len() - rest.len()..]);
+        }
+    }
+    let body = slash.strip_prefix('/')?;
+    if body.starts_with('/') {
+        return None;
+    }
+    drive_from_rest(body).filter(|_mapped| {
+        // `/x` 或 `/x/...`：第二个字符必须是结尾或 `/`，避免把 `/usr` 当成盘符。
+        let after_letter = body.chars().nth(1);
+        after_letter.is_none() || after_letter == Some('/')
+    })
+}
+
+fn drive_from_rest(rest: &str) -> Option<String> {
+    let mut chars = rest.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    let after = chars.as_str();
+    if after.is_empty() {
+        return Some(format!("{}:/", letter.to_ascii_uppercase()));
+    }
+    if !after.starts_with('/') {
+        return None;
+    }
+    Some(format!("{}:{}", letter.to_ascii_uppercase(), after))
 }
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
@@ -1071,7 +1264,11 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 fn components(path: &Path) -> Vec<String> {
+    let raw = path.to_string_lossy().replace('\\', "/");
     let text = normalize(path).to_string_lossy().into_owned();
+    // 盘符路径和 UNC 永远大小写不敏感（Linux CI 上的 Windows 路径测试也成立）。
+    // 普通 POSIX 路径仍只在 Windows 主机上折叠大小写。
+    let casefold = is_drive_path(&text) || is_unc_raw(&raw) || windows_syntax();
     let mut parts: Vec<String> = Vec::new();
     if is_drive_path(&text) {
         parts.push(text[..2].to_ascii_uppercase());
@@ -1080,9 +1277,18 @@ fn components(path: &Path) -> Vec<String> {
     }
     let body = if is_drive_path(&text) { &text[2..] } else { text.as_str() };
     parts.extend(body.split('/').filter(|part| !part.is_empty()).map(|part| {
-        if windows_syntax() { part.to_lowercase() } else { part.to_owned() }
+        if casefold { part.to_lowercase() } else { part.to_owned() }
     }));
     parts
+}
+
+/// `\\server\share` 或 `\\?\UNC\server\share`。
+fn is_unc_raw(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("//?/unc/") {
+        return true;
+    }
+    text.starts_with("//") && !lower.starts_with("//?/")
 }
 
 /// `inner` equals `outer` or sits below it.
@@ -1124,6 +1330,11 @@ fn path_boundary(path: &Path, project_root: Option<&Path>, _home: Option<&Path>)
     None
 }
 
+/// 本身及其内部都禁止删除的 POSIX 目录。
+const POSIX_SYSTEM_TREE: [&str; 13] = ["bin", "boot", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sbin", "sys", "usr", "System"];
+/// 只禁止删除目录本身（其上级已被根目录规则覆盖）。
+const POSIX_SYSTEM_SELF: [&str; 12] = ["var", "opt", "home", "Users", "root", "Applications", "Library", "private", "srv", "mnt", "media", "snap"];
+
 /// Built-in block for one delete target.
 fn dangerous_delete_target(target: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<String> {
     // `*`, `./*`, `~/*`, `/*`: a glob that empties the directory it names.
@@ -1133,7 +1344,7 @@ fn dangerous_delete_target(target: &str, cwd: &Path, project_root: Option<&Path>
         _ => (trimmed, false),
     };
     let dir_part = if dir_part.is_empty() { "/" } else { dir_part };
-    let resolved = resolve_word(dir_part, cwd, home);
+    let resolved = resolve_word(dir_part, cwd, home, project_root);
     let what = if glob { "清空" } else { "删除" };
     if is_filesystem_root(&resolved) {
         return Some(format!("禁止{what}盘符或文件系统根目录"));
@@ -1148,7 +1359,41 @@ fn dangerous_delete_target(target: &str, cwd: &Path, project_root: Option<&Path>
             return Some(format!("禁止{what}项目根目录"));
         }
     }
+    if is_system_directory(&resolved) {
+        return Some("禁止删除系统目录".into());
+    }
     None
+}
+
+/// Windows 系统目录（盘符路径）和 POSIX 系统目录。任何模式都拦。
+fn is_system_directory(path: &Path) -> bool {
+    let parts = components(path);
+    if parts.first().is_some_and(|part| is_drive_path(part)) {
+        return windows_system_directory(&parts);
+    }
+    if parts.first().map(String::as_str) == Some("/") {
+        return posix_system_directory(&parts);
+    }
+    false
+}
+
+fn windows_system_directory(parts: &[String]) -> bool {
+    let rest = &parts[1..];
+    let Some(first) = rest.first() else { return false };
+    if first.eq_ignore_ascii_case("windows") || first.eq_ignore_ascii_case("programdata") || first.eq_ignore_ascii_case("program files") || first.eq_ignore_ascii_case("program files (x86)") {
+        return true;
+    }
+    // `X:/Users` 本身，以及 `X:/Users/<用户>` 这一层（用户目录本身，不含其内部）。
+    first.eq_ignore_ascii_case("users") && rest.len() <= 2
+}
+
+fn posix_system_directory(parts: &[String]) -> bool {
+    let rest = &parts[1..];
+    let Some(first) = rest.first() else { return false };
+    if POSIX_SYSTEM_TREE.iter().any(|name| first.eq_ignore_ascii_case(name)) {
+        return true;
+    }
+    POSIX_SYSTEM_SELF.iter().any(|name| first.eq_ignore_ascii_case(name)) && rest.len() == 1
 }
 
 /// The current user's home directory, as the Host sees it.
@@ -1372,5 +1617,126 @@ mod tests {
         assert_eq!(command("run_command", "echo hi > ../escape.txt", AccessMode::Auto, &[]).class, ToolClass::PathBoundary);
         assert_eq!(verdict(&command("run_command", "echo hi > /dev/null", AccessMode::Auto, &[])), "allow");
         assert_eq!(verdict(&command("run_command", "curl https://example.com/a/b", AccessMode::Auto, &[])), "allow");
+    }
+
+    fn win_root() -> PathBuf {
+        PathBuf::from("D:/fox-test/测试项目")
+    }
+    fn win_home() -> PathBuf {
+        PathBuf::from("C:/Users/fox")
+    }
+    fn posix_root() -> PathBuf {
+        PathBuf::from("/work/proj")
+    }
+    fn posix_home() -> PathBuf {
+        PathBuf::from("/home/fox")
+    }
+    fn decide_at(project: &Path, home_dir: &Path, command: &str, mode: AccessMode) -> PolicyDecision {
+        let subject = ToolSubject::Command { command: command.into(), cwd: project.to_path_buf(), model_risk: None };
+        decide(&PolicyRequest { tool: "run_command", subject: &subject, mode, project_root: Some(project), home: Some(home_dir), rules: &[] })
+    }
+    fn assert_blocked_at(project: &Path, home_dir: &Path, command: &str) {
+        for mode in MODES {
+            let decision = decide_at(project, home_dir, command, mode);
+            assert!(decision.is_block(), "{command} in {mode:?} should block, got {:?}", decision.verdict);
+            assert_eq!(decision.class, ToolClass::Command, "{command} in {mode:?} stays Command");
+            assert!(decision.findings.iter().any(|finding| finding == "builtin_block"), "{command} findings {:?}", decision.findings);
+        }
+    }
+
+    /// 固定 Windows 盘符项目根，不依赖 cfg!(windows)，Linux CI 上也要拦住。
+    #[test]
+    fn builtin_block_stops_windows_project_root_deletes_in_every_mode() {
+        let project = win_root();
+        let home_dir = win_home();
+        for command in [
+            r"rmdir /s /q D:\fox-test\测试项目",
+            r"RMDIR /S /Q d:\FOX-TEST\测试项目",
+            r#"rd /s /q "D:\fox-test\测试项目\""#,
+            "rd /s /q D:/fox-test/测试项目/",
+            r"del /s /q D:\fox-test\测试项目",
+            r"del /s /q D:\fox-test\测试项目\*",
+            r"Remove-Item -Recurse -Force 'D:\fox-test\测试项目'",
+            r#"Remove-Item -LiteralPath "D:\fox-test\测试项目" -Recurse"#,
+            r#"powershell -Command "Remove-Item -Recurse -Force 'D:\fox-test\测试项目'""#,
+            r"cmd /c rmdir /s /q D:\fox-test\测试项目",
+            r#"cmd //c "rmdir /s /q D:\\fox-test\\测试项目""#,
+            "cmd.exe //c rd //s //q D:/fox-test/测试项目",
+            "rm -rf /d/fox-test/测试项目",
+            "rm -rf /cygdrive/d/fox-test/测试项目",
+            r#"rm -rf "D:/fox-test/测试项目""#,
+            "rm -rf .",
+            "rm -rf ./",
+            "rm -rf ..",
+            "rd /s /q .",
+            "rd /s /q ..",
+            "Remove-Item -Recurse .",
+            "cd .. && rm -rf 测试项目",
+            r"cd /d D:\fox-test && rd /s /q 测试项目",
+            "cd - && rm -rf .",
+            r"rd /s /q C:\Windows",
+            r#"rd /s /q "C:\Program Files""#,
+            r"Remove-Item -Recurse C:\Users\fox",
+            "rm -rf /c/Windows/System32",
+            "rm -rf /c",
+        ] {
+            assert_blocked_at(&project, &home_dir, command);
+        }
+        // 项目内部的删除不是 block：完全访问放行，自动档按高风险询问。
+        for command in ["rd /s /q build", "rm -rf node_modules", r"del /s /q dist\*.tmp", r"Remove-Item -Recurse .\out"] {
+            for (mode, want) in MODES.iter().zip(["deny", "ask", "ask", "allow"]) {
+                let decision = decide_at(&project, &home_dir, command, *mode);
+                assert!(!decision.is_block(), "{command} in {mode:?} must not be a block");
+                assert_eq!(verdict(&decision), want, "{command} in {mode:?}");
+            }
+        }
+        for command in ["dir", "dir /b", "dir /a /s src", "cmd /c dir", "cmd //c dir", "ls -la", "type README.md", "findstr /i foo *.txt"] {
+            let decision = decide_at(&project, &home_dir, command, AccessMode::Auto);
+            assert_eq!(verdict(&decision), "allow", "{command} should be a low-risk allow, class {:?} findings {:?}", decision.class, decision.findings);
+            assert_eq!(decision.risk, Risk::Low, "{command}");
+            assert_ne!(decision.class, ToolClass::PathBoundary, "{command}");
+        }
+        for command in ["ls /c", "cat /d/other/x.txt"] {
+            let decision = decide_at(&project, &home_dir, command, AccessMode::Auto);
+            assert_eq!(verdict(&decision), "ask", "{command}");
+            assert_eq!(decision.class, ToolClass::PathBoundary, "{command}");
+            assert!(!decision.is_block(), "{command}");
+        }
+        let encoded = decide_at(&project, &home_dir, "powershell -EncodedCommand ZQBjAGgAbwA=", AccessMode::Auto);
+        assert_eq!(verdict(&encoded), "ask");
+        assert_eq!(encoded.risk, Risk::High);
+        assert!(encoded.findings.iter().any(|finding| finding == "encoded_command"));
+        assert!(!encoded.is_block());
+        // 盘符 / UNC 比较大小写不敏感。
+        assert!(is_within(Path::new(r"D:\FOX-TEST\测试项目\a.txt"), Path::new(r"d:/fox-test/测试项目")));
+        assert!(is_within(Path::new(r"\\SRV\Share\X"), Path::new(r"\\srv\share")));
+    }
+
+    #[test]
+    fn builtin_block_stops_posix_roots_and_system_directories() {
+        let project = posix_root();
+        let home_dir = posix_home();
+        for command in [
+            "rm -rf /work/proj",
+            r#"rm -rf "/work/proj/""#,
+            "rm -rf /work",
+            "rm -rf ~",
+            "rm -rf $HOME",
+            "rm -rf /usr/lib/x",
+            "rm -rf /etc",
+        ] {
+            assert_blocked_at(&project, &home_dir, command);
+        }
+    }
+
+    #[test]
+    fn project_block_rules_are_marked_for_the_audit() {
+        let rules = [rule("b", RuleEffect::Block, "*", "terraform destroy")];
+        let decision = command("run_command", "terraform destroy -auto-approve", AccessMode::FullAccess, &rules);
+        assert!(decision.is_block());
+        assert!(decision.findings.iter().any(|finding| finding == "project_block_rule"));
+        assert!(!decision.findings.iter().any(|finding| finding == "builtin_block"));
+        assert_eq!(decision.class, ToolClass::Command);
+        assert_eq!(decision.forcing_rule.as_ref().map(|rule| rule.id.as_str()), Some("b"));
     }
 }
