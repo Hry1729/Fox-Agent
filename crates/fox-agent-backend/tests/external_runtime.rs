@@ -178,6 +178,7 @@ impl ExternalLauncher for MockLauncher {
                 declaration: LaunchDeclaration::declare(mode),
                 pi_launch: PiLaunch::Stock,
                 on_closed: Some(Box::new(move || { closed.fetch_add(1, Ordering::SeqCst); })),
+                fox_tools: None,
             })
         })
     }

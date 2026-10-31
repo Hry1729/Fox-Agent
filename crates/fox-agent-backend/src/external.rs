@@ -89,6 +89,11 @@ pub const PROMPT_FAILURE_SETTLE: Duration = Duration::from_millis(800);
 /// [`BackendEvent::LoadSettled`] fence (it is queued right behind the reply,
 /// so this only bounds a connection that died meanwhile).
 pub const LOAD_FENCE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest wait for `session/new` / `session/load` (fox-fix-pi): a backend
+/// that never opens its session (pi-acp waits on pi without a timeout of its
+/// own) ends the turn with `agent_backend_session_timeout` instead of
+/// holding it forever.
+pub const SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(120);
 /// Bound the initialization control request; prompts retain their normal
 /// long-running lifecycle and cancellation behavior.
 pub const MODEL_SELECTION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -148,6 +153,14 @@ pub struct Launched {
     pub pi_launch: PiLaunch,
     /// Runs after the connection was closed.
     pub on_closed: Option<Box<dyn FnOnce() + Send>>,
+    /// pi (plan C3, fox-fix-pi): the launch's Fox tool bridge token. The pi
+    /// extension lists the tools before pi answers pi-acp, so after the
+    /// session opened (or failed to) anything short of
+    /// [`crate::fox_mcp::McpProgress::Listed`] is
+    /// `agent_backend_fox_tools_unavailable`, never a pi without its tools.
+    /// `None` for Codex / dsh (their MCP clients start the relay on their
+    /// own schedule) and for launches without the bridge.
+    pub fox_tools: Option<crate::fox_mcp::McpProbe>,
 }
 
 /// Structured launch refusal / failure (codes of
@@ -239,6 +252,13 @@ pub mod failure_codes {
     pub const EXITED_ON_START: &str = "agent_backend_exited_on_start";
     /// The process died during a turn (retry).
     pub const EXITED: &str = "agent_backend_exited";
+    /// The Fox tool bridge could not be prepared, or (pi) the Fox tool
+    /// extension did not reach / finish the bridge handshake (install /
+    /// restart Fox).
+    pub const FOX_TOOLS_UNAVAILABLE: &str = "agent_backend_fox_tools_unavailable";
+    /// `session/new` / `session/load` unanswered within
+    /// [`super::SESSION_OPEN_TIMEOUT`] (retry).
+    pub const SESSION_TIMEOUT: &str = "agent_backend_session_timeout";
 }
 
 fn initialize_failure_code(code: crate::acp::InitializeFailureCode) -> (&'static str, String) {
@@ -657,6 +677,7 @@ struct Inner<S: ExternalSink, L: ExternalLauncher> {
     cancel_timeout: Duration,
     model_selection_timeout: Duration,
     idle_timeout: Duration,
+    session_open_timeout: Duration,
 }
 
 /// The Host's external backend runtime. Cheap to clone.
@@ -700,8 +721,15 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
 
     pub fn with_idle_timeout(sink: S, launcher: L, handle: tokio::runtime::Handle, cancel_timeout: Duration, model_selection_timeout: Duration, idle_timeout: Duration) -> Self {
         Self {
-            inner: Arc::new(Inner { sink, launcher, handle, sessions: Mutex::new(HashMap::new()), cancel_timeout, model_selection_timeout, idle_timeout }),
+            inner: Arc::new(Inner { sink, launcher, handle, sessions: Mutex::new(HashMap::new()), cancel_timeout, model_selection_timeout, idle_timeout, session_open_timeout: SESSION_OPEN_TIMEOUT }),
         }
+    }
+
+    /// Change [`SESSION_OPEN_TIMEOUT`] (tests). Only on a runtime that was
+    /// not cloned yet.
+    pub fn with_session_open_timeout(mut self, timeout: Duration) -> Self {
+        Arc::get_mut(&mut self.inner).expect("set before the runtime is shared").session_open_timeout = timeout;
+        self
     }
 
     pub fn sink(&self) -> &S {
@@ -973,7 +1001,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         self.emit(session, &run_id, json!({ "type": "agent_backend.launching", "agentBackend": session.backend.as_str(), "mode": desired.as_str() }));
         let launching = LaunchingGuard::begin(session);
         let launched = self.inner.launcher.launch(request.launch.clone()).await?;
-        let Launched { mut connection, mode, declaration, pi_launch, on_closed } = launched;
+        let Launched { mut connection, mode, declaration, pi_launch, on_closed, fox_tools } = launched;
         let connection_key = match self.inner.launcher.connection_key(&request.launch) {
             Ok(key) => key,
             Err(error) => {
@@ -1001,7 +1029,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         // this Fox), else the recorded one.
         let previous = lock(&session.state).native_session_id.clone().or_else(|| request.stored_native_session.clone());
         let cwd = request.launch.project_root.clone();
-        let (native, reopened, load_error) = match previous {
+        let session_open_timeout = self.inner.session_open_timeout;
+        let opened = tokio::time::timeout(session_open_timeout, async { match previous {
             Some(id) if can_load => {
                 // Everything from sending session/load until its reply (the
                 // replayed history, as session/update) is dropped here and
@@ -1053,7 +1082,44 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             }
             Some(_) => (connection.new_session(cwd.clone()).await, "new_without_history", None),
             None => (connection.new_session(cwd.clone()).await, "new", None),
+        } }).await;
+        let (native, reopened, load_error, open_timed_out) = match opened {
+            Ok((native, reopened, load_error)) => (native, reopened, load_error, false),
+            Err(_) => (Err(format!("session/new 或 session/load 超过 {} 秒没有应答", session_open_timeout.as_secs())), "timeout", None, true),
         };
+        // pi (fox-fix-pi): pi answers pi-acp only after the Fox tool extension
+        // listed the tools, so by now the bridge must have seen tools/list on
+        // this launch's token. Anything less (the extension could not reach
+        // the bridge, was refused, timed out, or pi never got that far) is a
+        // pi without the Fox tools: refuse, whatever pi-acp answered.
+        if let Some(probe) = fox_tools.as_ref() {
+            let progress = probe.progress();
+            if progress != crate::fox_mcp::McpProgress::Listed {
+                let pi_acp_error = native.as_ref().err().cloned();
+                let (_report, tail) = connection.close_with_report_and_tail().await;
+                if let Some(callback) = on_closed {
+                    callback();
+                }
+                let why = match progress {
+                    crate::fox_mcp::McpProgress::NotConnected => "pi 的 Fox 工具扩展没有连上 Host 工具桥",
+                    crate::fox_mcp::McpProgress::Connected => "pi 的 Fox 工具扩展连上了 Host 工具桥，但没有完成握手（initialize / tools/list）",
+                    _ => "Fox 工具桥令牌已失效",
+                };
+                return Err(LaunchFailure::new(failure_codes::FOX_TOOLS_UNAVAILABLE, format!("{why}，pi 无法使用交付文件、知识库和提问工具，已停止本次启动"))
+                    .remedy("重启 Fox 后重试；仍然失败时修复或重新安装 Fox 外部运行时")
+                    .detail(json!({ "bridge": progress.as_str(), "endpoint": probe.endpoint(), "sessionOpen": if open_timed_out { "timeout" } else if pi_acp_error.is_some() { "failed" } else { "ok" }, "piAcpError": pi_acp_error.map(|error| crate::acp::redact_diagnostic_tail(&error)) }))
+                    .with_stderr_tail(&tail, "session_failed"));
+            }
+        }
+        if open_timed_out {
+            let (_report, tail) = connection.close_with_report_and_tail().await;
+            if let Some(callback) = on_closed {
+                callback();
+            }
+            return Err(LaunchFailure::new(failure_codes::SESSION_TIMEOUT, format!("外部后端超过 {} 秒没有打开会话，已停止本次启动", session_open_timeout.as_secs()))
+                .remedy("重新发送；仍然失败时检查外部 Agent 的配置和登录")
+                .with_stderr_tail(&tail, "session_failed"));
+        }
         let native = match native {
             Ok(native) => native,
             Err(error) => {
@@ -1316,6 +1382,32 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             }
             BackendEvent::LoadSettled { .. } => {}
             BackendEvent::Update { update, .. } => {
+                // C3 (fox-fix-pi): codex-acp reports a skipped / failed Fox
+                // MCP server only here, asynchronously after session/new and
+                // often before the prompt fence. The Agent then has no Fox
+                // tools: fail the turn and stop the process (the next turn
+                // relaunches and is checked again), never run on without them.
+                if let Some((code, detail)) = crate::fox_mcp::agent_startup_failure(&update) {
+                    eprintln!("fox.external conversation={} agent_backend={} fox_tools_startup_failed={code}", session.conversation_id, session.backend.as_str());
+                    let message = if code == "agent_backend_fox_tools_rejected" {
+                        format!("外部 Agent 没有启动 Fox 工具（MCP）服务器：它自己的配置里已有名为 {} 的 MCP 服务器。{detail}", crate::fox_mcp::SERVER_NAME)
+                    } else {
+                        format!("外部 Agent 没能启动 Fox 工具（MCP）服务器：{detail}")
+                    };
+                    if let Some(run_id) = state.turn.as_ref().map(|turn| turn.run_id.clone()) {
+                        self.finish_turn(session, &mut state, &run_id, TurnTerminal::Failed { code: code.to_owned(), message }, json!({ "mcpServer": crate::fox_mcp::SERVER_NAME, "agentReport": detail }));
+                    }
+                    state.closing = true;
+                    let runtime = self.clone();
+                    let session = Arc::clone(session);
+                    self.inner.handle.spawn(async move {
+                        let report = runtime.stop_connection(&session, "fox tools not started by the agent").await;
+                        let mut state = lock(&session.state);
+                        state.stop_unconfirmed = report.is_some_and(|report| !report.confirmation.is_confirmed());
+                        state.closing = false;
+                    });
+                    return;
+                }
                 // Only output after this turn's prompt fence belongs to it.
                 let Some(turn) = state.turn.as_mut().filter(|turn| turn.prompt_sent && turn.prompt_fence_seen) else {
                     return;

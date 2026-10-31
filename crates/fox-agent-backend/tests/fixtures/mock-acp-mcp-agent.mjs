@@ -81,6 +81,14 @@ rl.on('line', async line => {
         await session.clients[0].ready
         const answer = await session.clients[0].request('tools/call', { name: tool, arguments: JSON.parse(rest.join(' ') || '{}') })
         text(sessionId, JSON.stringify(answer.result ?? { error: answer.error }))
+      } else if (prompt === 'startup-skipped') {
+        // What codex-acp 2.2.2 sends when its own config already defines a
+        // server of this name (McpStartupReporter.skipped rendered by
+        // AcpToolCallRenderer), then keeps the turn running.
+        const name = session.servers[0]?.name ?? 'fox_host_business_tools'
+        send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: `mcp_startup.${encodeURIComponent(name)}.0b1c`, kind: 'other', title: `mcp__${name}__startup`, status: 'failed',
+          content: [{ type: 'content', content: { type: 'text', text: `[codex-acp] MCP server \`${name}\` was not started, because the Codex config already defines an MCP server with this name. Codex uses its own entry, or no server if that entry is disabled.` } }] } } })
+        return
       } else if (prompt === 'ask') {
         await session.clients[0].ready
         await session.clients[0].request('tools/call', { name: 'ask_user', arguments: { questions: [{ question: 'Which format?', options: ['docx', 'pdf'] }] } })

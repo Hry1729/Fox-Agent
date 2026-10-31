@@ -791,9 +791,14 @@ impl HostLauncher {
         let cwd = request.project_root.clone();
         let connection = AcpConnection::spawn_prepared_detailed(prepared, &cwd).await?;
         let mut connection = connection;
-        let (on_closed, stdio) = match mcp {
-            Some(McpLaunch { guard, stdio }) => (Some(guard.into_on_closed()), stdio),
-            None => (None, None),
+        let (on_closed, stdio, fox_tools) = match mcp {
+            Some(McpLaunch { guard, stdio }) => {
+                // pi: the runtime checks the extension listed the tools once
+                // the session opened (fox-fix-pi).
+                let probe = (request.backend == AgentBackend::Pi).then(|| guard.bridge.probe(&guard.token));
+                (Some(guard.into_on_closed()), stdio, probe)
+            }
+            None => (None, None, None),
         };
         if let Some(server) = stdio {
             connection.set_mcp_servers(vec![server]);
@@ -824,7 +829,7 @@ impl HostLauncher {
             }
         });
         connection.events = rx;
-        Ok(Launched { connection, mode, declaration, pi_launch, on_closed })
+        Ok(Launched { connection, mode, declaration, pi_launch, on_closed, fox_tools })
     }
 }
 

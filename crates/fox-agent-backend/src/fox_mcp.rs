@@ -37,6 +37,7 @@
 //! `initialize`, an unknown tool or a Host refusal is reported as such.
 
 use futures::future::BoxFuture;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -367,6 +368,69 @@ struct Binding {
     conversation_id: String,
     backend: AgentBackend,
     revoked: CancellationToken,
+    progress: Arc<std::sync::atomic::AtomicU8>,
+}
+
+/// How far the Agent side of one launch's token got on the bridge
+/// (fox-fix-pi). The pi extension connects and lists the tools before pi
+/// answers pi-acp's first RPC, so once pi-acp's `session/new` returned (or
+/// failed) the Host can tell whether pi actually has the Fox tools instead of
+/// discovering it later as a silent turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpProgress {
+    /// Nothing connected with this token.
+    NotConnected,
+    /// Connected with the token, `tools/list` not answered yet.
+    Connected,
+    /// `tools/list` answered: the Agent has the Fox tools.
+    Listed,
+    /// The token was revoked (the launch is gone).
+    Revoked,
+}
+
+impl McpProgress {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            2 => Self::Listed,
+            1 => Self::Connected,
+            _ => Self::NotConnected,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotConnected => "not_connected",
+            Self::Connected => "connected",
+            Self::Listed => "listed",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+/// Reads [`McpProgress`] of one launch's token (handed to the runtime in
+/// [`crate::external::Launched::fox_tools`]).
+#[derive(Clone)]
+pub struct McpProbe {
+    bridge: McpBridge,
+    token: String,
+}
+
+impl McpProbe {
+    pub fn progress(&self) -> McpProgress {
+        match lock(&self.bridge.inner.tokens).get(&self.token) {
+            Some(binding) => McpProgress::from_u8(binding.progress.load(std::sync::atomic::Ordering::SeqCst)),
+            None => McpProgress::Revoked,
+        }
+    }
+    pub fn endpoint(&self) -> &str {
+        self.bridge.endpoint()
+    }
+}
+
+impl std::fmt::Debug for McpProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpProbe").field("endpoint", &self.bridge.endpoint()).field("progress", &self.progress()).finish()
+    }
 }
 
 struct BridgeInner {
@@ -427,7 +491,7 @@ impl McpBridge {
         let token = crate::launch::random_hex(32)?;
         lock(&self.inner.tokens).insert(
             token.clone(),
-            Binding { conversation_id: conversation_id.to_owned(), backend, revoked: CancellationToken::new() },
+            Binding { conversation_id: conversation_id.to_owned(), backend, revoked: CancellationToken::new(), progress: Arc::default() },
         );
         Ok(McpGrant { endpoint: self.inner.endpoint.clone(), token, conversation_id: conversation_id.to_owned(), backend })
     }
@@ -439,18 +503,25 @@ impl McpBridge {
         }
     }
 
+    /// A probe of how far `token`'s Agent got (fox-fix-pi).
+    pub fn probe(&self, token: &str) -> McpProbe {
+        McpProbe { bridge: self.clone(), token: token.to_owned() }
+    }
+
     /// Live tokens (tests and diagnostics).
     pub fn live_tokens(&self) -> usize {
         lock(&self.inner.tokens).len()
     }
 
-    fn claim(&self, token: &str) -> Option<(McpSession, CancellationToken)> {
+    fn claim(&self, token: &str) -> Option<(McpSession, CancellationToken, Arc<std::sync::atomic::AtomicU8>)> {
         let tokens = lock(&self.inner.tokens);
         let (key, binding) = tokens.iter().find(|(key, _)| constant_time_eq(key.as_bytes(), token.as_bytes()))?;
         let _ = key;
+        let _ = binding.progress.compare_exchange(0, 1, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
         Some((
             McpSession { conversation_id: binding.conversation_id.clone(), backend: binding.backend, initialized: false },
             binding.revoked.clone(),
+            Arc::clone(&binding.progress),
         ))
     }
 
@@ -482,7 +553,7 @@ impl McpBridge {
             Ok(Ok(true)) => serde_json::from_str::<Value>(first.trim()).ok().and_then(|value| value.get("foxMcpToken").and_then(Value::as_str).map(str::to_owned)),
             _ => None,
         };
-        let Some((mut session, revoked)) = token.as_deref().and_then(|token| self.claim(token)) else {
+        let Some((mut session, revoked, progress)) = token.as_deref().and_then(|token| self.claim(token)) else {
             let refusal = rpc_error(Value::Null, rpc_code::TOKEN_REFUSED, "fox_mcp_token_refused: the Fox tool bridge token is unknown or was revoked (the Agent process it was issued to has stopped)");
             let _ = write.write_all(format!("{refusal}\n").as_bytes()).await;
             let _ = write.shutdown().await;
@@ -528,9 +599,13 @@ impl McpBridge {
                     continue;
                 }
             };
+            let lists = message.get("method").and_then(Value::as_str) == Some("tools/list");
             match dispatch(&mut session, &message) {
                 Dispatch::None => {}
                 Dispatch::Reply(reply) => {
+                    if lists && reply.get("result").is_some() {
+                        progress.store(2, std::sync::atomic::Ordering::SeqCst);
+                    }
                     let _ = out_tx.send(reply);
                 }
                 Dispatch::Call { id, tool, arguments } => {
@@ -653,10 +728,14 @@ pub fn injection_for(backend: AgentBackend, grant: &McpGrant, node: &std::path::
     }
 }
 
-/// Codex: the `session/new` answer lists client MCP servers it dropped
-/// because the user's config already has one of that name
-/// (`skippedMcpServers`, top level or under `_meta`). The Fox server must not
-/// be among them.
+/// A `session/new` answer that lists the Fox server among skipped client MCP
+/// servers (`skippedMcpServers`, top level or under `_meta`).
+///
+/// fox-fix-pi (C3 review): the pinned codex-acp 2.2.2 never puts this in the
+/// answer. It keeps `skippedMcpServers` as internal session metadata and
+/// reports a skipped (or failed) server only later, as a `session/update`
+/// tool call; see [`agent_startup_failure`], which is the check that works.
+/// Kept for adapters that do answer with the list.
 pub fn skipped_by_agent(new_session_response: &Value) -> bool {
     let lists = [new_session_response.get("skippedMcpServers"), new_session_response.pointer("/_meta/skippedMcpServers")];
     lists.into_iter().flatten().filter_map(Value::as_array).flatten().any(|entry| {
@@ -664,9 +743,67 @@ pub fn skipped_by_agent(new_session_response: &Value) -> bool {
     })
 }
 
+/// Text codex-acp 2.2.2 writes when it did not start a client MCP server
+/// because the Codex config already defines one of that name
+/// (`McpStartupReporter.skipped`).
+pub const AGENT_SKIPPED_MARKER: &str = "because the Codex config already defines an MCP server with this name";
+
+/// codex-acp 2.2.2 (and dsh, which reports the same way when it does) tells
+/// the client about its MCP startup in `session/update`: one failed tool call
+/// per server it skipped or that failed to start, id
+/// `mcp_startup.<server>.<uuid>`, title `mcp__<server>__startup`, sent
+/// asynchronously after `session/new` answered. For the Fox server this means
+/// the Agent has no Fox tools: `Some((code, message))` with
+/// `agent_backend_fox_tools_rejected` when its own config shadows the Fox
+/// server (dedup by name; codex-acp skips that only with
+/// `DISABLE_MCP_CONFIG_FILTERING=true`) or `agent_backend_fox_tools_unavailable`
+/// when the relay failed to start.
+pub fn agent_startup_failure(update: &Value) -> Option<(&'static str, String)> {
+    let kind = update.get("sessionUpdate").and_then(Value::as_str)?;
+    if kind != "tool_call" && kind != "tool_call_update" {
+        return None;
+    }
+    let id_prefix = format!("mcp_startup.{SERVER_NAME}.");
+    let title = format!("mcp__{SERVER_NAME}__startup");
+    let ours = update.get("toolCallId").and_then(Value::as_str).is_some_and(|id| id.starts_with(&id_prefix))
+        || update.get("title").and_then(Value::as_str) == Some(title.as_str());
+    if !ours || update.get("status").and_then(Value::as_str) != Some("failed") {
+        return None;
+    }
+    let mut text = String::new();
+    for block in update.get("content").and_then(Value::as_array).into_iter().flatten() {
+        let inner = block.get("content").unwrap_or(block);
+        if let Some(part) = inner.get("text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(part);
+        }
+    }
+    let code = if text.contains(AGENT_SKIPPED_MARKER) { "agent_backend_fox_tools_rejected" } else { "agent_backend_fox_tools_unavailable" };
+    let text: String = text.chars().take(600).collect();
+    Some((code, text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_acp_startup_reports_for_the_fox_server_are_failures() {
+        let skipped = json!({ "sessionUpdate": "tool_call", "toolCallId": format!("mcp_startup.{SERVER_NAME}.6f0c"), "title": format!("mcp__{SERVER_NAME}__startup"), "kind": "other", "status": "failed",
+            "content": [{ "type": "content", "content": { "type": "text", "text": format!("[codex-acp] MCP server `{SERVER_NAME}` was not started, {AGENT_SKIPPED_MARKER}. Codex uses its own entry, or no server if that entry is disabled.") } }] });
+        let (code, text) = agent_startup_failure(&skipped).unwrap();
+        assert_eq!(code, "agent_backend_fox_tools_rejected");
+        assert!(text.contains(SERVER_NAME));
+        let failed = json!({ "sessionUpdate": "tool_call", "toolCallId": format!("mcp_startup.{SERVER_NAME}.1"), "status": "failed",
+            "content": [{ "type": "content", "content": { "type": "text", "text": "[codex-acp forwarded startup error] MCP server `fox_host_business_tools` failed to start: exit 3" } }] });
+        assert_eq!(agent_startup_failure(&failed).unwrap().0, "agent_backend_fox_tools_unavailable");
+        // Another server, a non-failed report, or an ordinary tool call: not ours.
+        assert!(agent_startup_failure(&json!({ "sessionUpdate": "tool_call", "toolCallId": "mcp_startup.other.1", "title": "mcp__other__startup", "status": "failed" })).is_none());
+        assert!(agent_startup_failure(&json!({ "sessionUpdate": "tool_call", "toolCallId": format!("mcp_startup.{SERVER_NAME}.2"), "status": "completed" })).is_none());
+        assert!(agent_startup_failure(&json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": AGENT_SKIPPED_MARKER } })).is_none());
+    }
 
     fn session() -> McpSession {
         McpSession { conversation_id: "c1".into(), backend: AgentBackend::Codex, initialized: false }

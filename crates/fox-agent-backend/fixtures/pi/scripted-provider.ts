@@ -14,6 +14,8 @@
  *  - GATEREAD:<token> -> one `read` tool call of fox-write-<token>.txt
  *  - GATESLEEP:<token> -> one bash call `sleep 299; echo fox-sleep-<token>`
  *      (long-running, for cancel / process-tree measurements)
+ *  - FOXTOOL:<name> -> one call of the Fox Host tool <name> (registered by
+ *      fox-mcp-tools.ts through the bridge)
  *  - anything else -> text "scripted hello"
  */
 import * as http from "node:http";
@@ -50,7 +52,7 @@ function respond(body: any, res: any) {
 		return;
 	}
 	const lastUser = [...messages].reverse().find((m) => m?.role === "user");
-	const match = /(GATE|GATEWRITE|GATEREAD|GATESLEEP):([A-Za-z0-9_-]+)/.exec(textOf(lastUser?.content));
+	const match = /(GATE|GATEWRITE|GATEREAD|GATESLEEP|FOXTOOL):([A-Za-z0-9_-]+)/.exec(textOf(lastUser?.content));
 	if (match) {
 		const kind = match[1];
 		const token = match[2];
@@ -62,6 +64,16 @@ function respond(body: any, res: any) {
 		} else if (kind === "GATEREAD") {
 			name = "read";
 			args = JSON.stringify({ path: `fox-write-${token}.txt` });
+		} else if (kind === "FOXTOOL") {
+			// A Fox Host tool registered by fox-mcp-tools.ts (token = tool name).
+			name = token;
+			args = JSON.stringify(
+				token === "present_files"
+					? { files: [{ path: "report.docx" }] }
+					: token === "ask_user"
+						? { questions: [{ question: "Which format?", options: ["docx", "pdf"] }] }
+						: {},
+			);
 		} else if (kind === "GATESLEEP") {
 			args = JSON.stringify({ command: `sleep 299; echo fox-sleep-${token}` });
 		}
