@@ -14,6 +14,7 @@ on:
       # bun, agent backend (ACP), Zvec / ONNX smoke, Kernel core cargo tests, the
       # protocol check, the full Agent Runtime suite and the Host performance
       # baseline are skipped.
+      # acp (targeted only): also run the Agent backend (ACP) job.
       targeted:
         description: Targeted run (filtered Rust Host + Runtime package only)
         type: boolean
@@ -22,6 +23,10 @@ on:
         description: Targeted only. Space-separated libtest name filters (substring, any match); empty = whole Host suite
         type: string
         default: 'runtime_host::delivery window_resize'
+      acp:
+        description: Targeted only. Also run the Agent backend (ACP) job (fox-agent-backend --features acp)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -250,10 +255,11 @@ jobs:
           if-no-files-found: ignore
 
   # External agent backends (ACP): fox-agent-backend with the acp feature.
-  # Real-backend tests stay gated off (FOX_TEST_REAL_ACP / FOX_TEST_REAL_SRT unset).
+  # Real-backend tests stay gated off (FOX_TEST_REAL_ACP unset). Runs on full
+  # runs, and on targeted runs when the acp input is set.
   agent-backend:
     name: Agent backend (ACP) tests
-    if: ${{ !inputs.targeted }}
+    if: ${{ !inputs.targeted || inputs.acp }}
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
