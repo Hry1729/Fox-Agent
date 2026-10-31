@@ -75,15 +75,15 @@ pub(crate) fn decode_text_bytes(bytes: &[u8]) -> (String, &'static str, bool) {
     (text.into_owned(), "gb18030", had_errors)
 }
 
-/// 编码不是 UTF-8 时，加在模型可见文本前面的一行说明。
+/// 只有 edit_file 不能直接修改的编码才在模型可见文本前加说明。
+/// 带 BOM 的 UTF-8 仍然是 edit_file 能改的文本，不加这行。
 fn model_encoding_notice(encoding: &str) -> Option<String> {
-    if encoding == "utf-8" {
-        None
-    } else {
-        Some(format!(
-            "[Fox：此文件按 {encoding} 解码显示（不是 UTF-8）。edit_file 不能直接修改它；需要修改时请先告诉用户。]\n"
-        ))
+    if !matches!(encoding, "gb18030" | "utf-16le" | "utf-16be") {
+        return None;
     }
+    Some(format!(
+        "[Fox：此文件按 {encoding} 解码显示（不是 UTF-8）。edit_file 不能直接修改它；需要修改时请先告诉用户。]\n"
+    ))
 }
 
 struct Gateway<'a> {
@@ -1224,5 +1224,21 @@ mod tests {
         assert_eq!(text, "中文");
         assert_eq!(encoding, "utf-8");
         assert!(!lossy);
+    }
+
+    /// UTF-8 BOM 能被 edit_file 修改，读给模型的文本前不加「不能直接修改」说明。
+    #[test]
+    fn tx8_utf8_bom_gets_no_edit_warning() {
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice("中文".as_bytes());
+        let (_text, encoding, lossy) = decode_text_bytes(&bom);
+        assert_eq!(encoding, "utf-8-bom");
+        assert!(!lossy);
+        assert!(model_encoding_notice(encoding).is_none());
+        assert!(model_encoding_notice("utf-8").is_none());
+        let warning = model_encoding_notice("gb18030").expect("gb18030 需要说明");
+        assert!(warning.contains("edit_file 不能直接修改它"));
+        assert!(model_encoding_notice("utf-16le").is_some());
+        assert!(model_encoding_notice("utf-16be").is_some());
     }
 }
