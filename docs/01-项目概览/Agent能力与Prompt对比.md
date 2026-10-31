@@ -17,9 +17,9 @@
 
 **本文的对比、排名和建议是 2026-08-24 至 2026-08-26 基于固定源码快照做的分析（见「对比基准」），之后没有重新分析，也没有重新核对 Maka、Kun、DeepSeek-Reasonix 和 OpenAI Codex 的新版本。** 2026-10-25 只按 `main` 当前代码更新了文中关于 Fox 的事实。与分析时相比，Fox 的主要变化：
 
-- **外层 Agent**：分析时 Fox 没有外层 Agent 选择。现在每个会话创建时选定一个外层 Agent：Fox（默认，Kernel / Authoritative）、DeepSeek Harness（dsh，实验）、pi；Codex 已作为外部 Agent 恢复可选。外部 Agent 都经 ACP v1 接入，由 Fox 直接启动，保留各自的原生沙箱/审批，权限按各自原生选项显示。本文对比的 “Codex” 指 OpenAI Codex 项目本身，不是 Fox 里的 Codex 外部 Agent。见 [Agent Runtime 架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
-- **执行路径**：Fox 会话默认由 Kernel / Authoritative 执行；`FOX_KERNEL_MODE=legacy` 只用于调试和兼容旧 Run。
-- **Child Run**：深度仍为 1；Kernel 路径**不再**单独限制 Child Run 的数量和同时运行数，单个时长默认 5 分钟、最长 15 分钟（见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md)）。下文“并发限制”“深度与并发较保守”等说法已按此修正。
+- **外层 Agent**（2026-10-31 更新）：Fox 会话由内置 PiNative 执行。外部 Agent（Pi、Codex、dsh）是可选后端，经 ACP v1 接入、保留各自的原生沙箱/审批，**计划在下一阶段恢复**，本版本仍处于退役状态、不可用。本文对比的 “Codex” 指 OpenAI Codex 项目本身，不是 Fox 里的 Codex 外部 Agent。见 [Agent Runtime 架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+- **执行路径**（2026-10-31 更新）：新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关；Kernel 执行循环已删除，历史 Kernel Run 显示为中断。Fox 自身不用沙箱，命令在 Fox Job 中执行，审批分只读 / 询问 / 自动 / 完全访问四档。
+- **Child Run**：深度仍为 1；子 Run 一律走 PiNative，不单独限制 Child Run 的数量和同时运行数，单个时长默认 5 分钟、最长 15 分钟（见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md)）。下文“并发限制”“深度与并发较保守”等说法已按此修正。
 - **数据库**：`fox.db` schema v97。
 - **Prompt 组装**：`services/agent-runtime/src/prompt-composer.mjs::composeFoxPrompt` 仍是系统提示的组装入口，Legacy 路径（`pi-runtime.mjs`）和 Kernel 路径（`pi-kernel-description.mjs`）都通过 `runtime-instructions.mjs::composeRuntimePrompt` 调用它；Kernel 路径的 Host 还会在系统提示末尾追加当前冻结清单下的运行时可用性说明（`apps/desktop/src-tauri/src/runtime_host/kernel_model_worker.rs`）。片段优先级已变化，见下文「分层 Prompt 组装器」。
 - **Prompt Registry**：`services/agent-runtime/src/prompt-registry.mjs` 已有 `PROMPT_REGISTRY_SCHEMA_VERSION = 1`、`createPromptExperiment`、`evaluatePromptExperiment`、`buildPromptCacheIdentity` 等代码。是否已形成下文 P0 建议中的完整实验产品面（事实表、报告、晋升门禁），本次**没有核实**，因此 P0 建议保持原文，不标为已完成。
