@@ -19,7 +19,7 @@ const { TooltipProvider } = await import('../src/components/ui/tooltip')
 const { FoxApprovalControl, NativeApprovalControl } = await import('../src/features/chat/composer/composer-approval-control')
 const { DEVELOPER_UI_KEY, persistDeveloperUi, readDeveloperUi } = await import('../src/features/chat/developer-ui')
 const { agentBackendCapabilityChips } = await import('../src/features/conversations/model/agent-backend')
-const { catalogRows, draftCarryTier, nativePendingNote, PENDING_NEXT_TURN_NOTE } = await import('../src/features/conversations/model/agent-native-permission')
+const { catalogRows, draftCarryTier, nativePendingNote, PENDING_NEXT_TURN_NOTE, refreshesNativePermission } = await import('../src/features/conversations/model/agent-native-permission')
 import type { AgentBackendCapabilities, AgentBackendStatus } from '../src/features/conversations/model/agent-backend'
 import type { FoxPermissionTier, NativePermissionCatalog, NativePermissionRequest, NativePermissionView } from '../src/features/conversations/model/agent-native-permission'
 
@@ -69,7 +69,7 @@ const foxTiers = (backend: string): NativePermissionCatalog => ({
 })
 
 /** A small Host: catalogs, stored modes and `mode_for_tier` (same rules as the Rust one). */
-function fakeHost({ openai = false, running = {} as Record<string, string> } = {}) {
+function fakeHost({ openai = false, running = {} as Record<string, string>, projectFullAccessConfirmed = false } = {}) {
   const catalogs: Record<string, NativePermissionCatalog> = { codex: codexCatalog(openai), deepseek: dshCatalog, pi: foxTiers('pi') }
   const stored: Record<string, string> = {}
   const calls: Array<NativePermissionRequest & { mode?: string }> = []
@@ -87,7 +87,7 @@ function fakeHost({ openai = false, running = {} as Record<string, string> } = {
       catalog, current, currentTier: catalog.options.find((option) => option.id === current)?.tier ?? null,
       running: live, pending: Boolean(live && live !== current),
       fullAccess: catalog.options.some((option) => option.id === current && option.fullAccess), fullAccessGranted: false, fullAccessForbidden: false,
-      draft: !request.conversationId, fullAccessLockedReason: null, projectFullAccessConfirmed: false,
+      draft: !request.conversationId, fullAccessLockedReason: null, projectFullAccessConfirmed,
     }
   }
   const client = {
@@ -237,6 +237,62 @@ describe('the composer approval selector', () => {
     expect(catalogRows(foxTiers('fox'), 'ask').map((row) => row.shortLabel)).toEqual(['只读', '询问', '自动', '完全'])
   })
 
+  test('「下一轮生效」在 tick 刷新后消失，同 key 刷新时按钮还在', async () => {
+    let pending = true
+    let release: ((view: NativePermissionView) => void) | null = null
+    const viewOf = (): NativePermissionView => ({
+      catalog: dshCatalog,
+      current: 'workspace-write',
+      running: pending ? 'read-only' : 'workspace-write',
+      pending,
+      fullAccess: false,
+      fullAccessGranted: false,
+      fullAccessForbidden: false,
+      draft: false,
+      fullAccessLockedReason: null,
+      projectFullAccessConfirmed: false,
+    })
+    let loads = 0
+    const client = {
+      agentBackendNativePermissions: async (_request: NativePermissionRequest) => {
+        loads += 1
+        if (loads === 1) return viewOf()
+        return new Promise<NativePermissionView>((resolve) => { release = resolve })
+      },
+      agentBackendNativePermissionSet: async () => viewOf(),
+    }
+    const ui = (tick: number) => (
+      <TooltipProvider>
+        <NativeApprovalControl client={client} conversationId="deepseek:c1" backend="deepseek" tick={tick} />
+      </TooltipProvider>
+    )
+    const rendered = render(ui(0))
+    await waitFor(() => expect(trigger()?.getAttribute('data-pending')).toBe('true'))
+    expect(trigger().textContent).toContain(PENDING_NEXT_TURN_NOTE)
+    pending = false
+    rendered.rerender(ui(1))
+    expect(trigger()).toBeTruthy()
+    expect(trigger().getAttribute('data-pending')).toBe('true')
+    expect(trigger().textContent).toContain(PENDING_NEXT_TURN_NOTE)
+    await act(async () => { release?.(viewOf()) })
+    await waitFor(() => expect(trigger()?.getAttribute('data-pending')).toBeNull())
+    expect(trigger().textContent).not.toContain(PENDING_NEXT_TURN_NOTE)
+  })
+
+  test('refreshesNativePermission：本会话的 session 与 Run 起止要刷新，别的会话和别的事件不要', () => {
+    const notice = (conversationId: string, type: string) => ({ conversationId, event: { type } })
+    expect(refreshesNativePermission(notice('c-1', 'agent_backend.session'), 'c-1')).toBe(true)
+    expect(refreshesNativePermission(notice('c-1', 'run.started'), 'c-1')).toBe(true)
+    expect(refreshesNativePermission(notice('c-1', 'run.completed'), 'c-1')).toBe(true)
+    expect(refreshesNativePermission(notice('c-1', 'run.failed'), 'c-1')).toBe(true)
+    expect(refreshesNativePermission(notice('c-1', 'run.cancelled'), 'c-1')).toBe(true)
+    expect(refreshesNativePermission(notice('c-1', 'run.interrupted'), 'c-1')).toBe(true)
+    expect(refreshesNativePermission(notice('c-2', 'agent_backend.session'), 'c-1')).toBe(false)
+    expect(refreshesNativePermission(notice('c-1', 'message.delta'), 'c-1')).toBe(false)
+    expect(refreshesNativePermission(notice('c-1', 'run.started'), null)).toBe(false)
+    expect(refreshesNativePermission(null, 'c-1')).toBe(false)
+  })
+
   test('the pending note is only for a live conversation', () => {
     const base = { catalog: dshCatalog, current: 'workspace-write', fullAccess: false, fullAccessGranted: false, fullAccessForbidden: false, fullAccessLockedReason: null }
     expect(nativePendingNote({ ...base, draft: false, pending: true })).toBe('下一轮生效')
@@ -299,5 +355,69 @@ describe('switching the Agent of a new conversation', () => {
     fireEvent.click(screen.getByText('确认使用完全访问权限'))
     await waitFor(() => expect(host.calls.some((call) => call.mode === 'agent-full-access' && call.confirmFullAccess === true)).toBe(true))
     await waitFor(() => expect(trigger()?.textContent).toBe('完全'))
+  })
+})
+
+describe('手动选择完全访问都走同一个确认框', () => {
+  function dialog(): HTMLElement {
+    const node = screen.getByRole('dialog')
+    expect(node.getAttribute('aria-label')).toBe('确认完全访问')
+    return node
+  }
+
+  async function openFullAccess(mode: string) {
+    openMenu(trigger())
+    const item = await waitFor(() => {
+      const node = document.querySelector(`[data-mode="${mode}"]`)
+      expect(node).toBeTruthy()
+      return node as HTMLElement
+    })
+    fireEvent.click(item)
+  }
+
+  test('Fox：确认框、取消不调用、确认带 confirmedFullAccess，且没有私有 HOME 说明', async () => {
+    const calls: Array<[string, { confirmedFullAccess?: boolean } | undefined]> = []
+    renderUi(<FoxApprovalControl catalog={foxTiers('fox')} value="ask" onChange={(mode, options) => { calls.push([mode, options]) }} />)
+    await openFullAccess('full_access')
+    const node = dialog()
+    expect(node.textContent).toContain('确认使用「完全访问」？')
+    expect(node.textContent).toContain('Fox 不额外包装')
+    expect(node.textContent).not.toContain('私有 HOME')
+    fireEvent.click(screen.getByText('取消'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(calls).toEqual([])
+    expect(trigger().getAttribute('data-current')).toBe('ask')
+    await openFullAccess('full_access')
+    fireEvent.click(screen.getByText('确认使用完全访问'))
+    expect(calls).toEqual([['full_access', { confirmedFullAccess: true }]])
+  })
+
+  test('Pi、Codex、dsh：同一个对话框；取消不调设置接口；确认带 confirmFullAccess；项目确认过也照样弹', async () => {
+    const cases = [
+      ['pi', 'full_access', '完全访问'],
+      ['codex', 'agent-full-access', '完全访问权限'],
+      ['deepseek', 'danger-full-access', '完全权限'],
+    ] as const
+    for (const confirmed of [false, true]) {
+      for (const [backend, mode, label] of cases) {
+        const host = fakeHost({ projectFullAccessConfirmed: confirmed })
+        renderUi(<NativeApprovalControl client={host.client} conversationId={null} backend={backend} projectId="p1" carryTier="" />)
+        await waitFor(() => expect(trigger()).toBeTruthy())
+        await openFullAccess(mode)
+        const node = dialog()
+        expect(node.textContent).toContain(`确认使用「${label}」？`)
+        expect(node.textContent).toContain('Fox 不额外包装')
+        expect(node.textContent).toContain('私有 HOME')
+        fireEvent.click(screen.getByText('取消'))
+        expect(screen.queryByRole('dialog')).toBeNull()
+        expect(host.calls.some((call) => call.mode === mode)).toBe(false)
+        expect(trigger().textContent).not.toBe('完全')
+        await openFullAccess(mode)
+        fireEvent.click(screen.getByText(`确认使用${label}`))
+        await waitFor(() => expect(host.calls.some((call) => call.mode === mode && call.confirmFullAccess === true)).toBe(true))
+        await waitFor(() => expect(trigger()?.textContent).toBe('完全'))
+        cleanup()
+      }
+    }
   })
 })

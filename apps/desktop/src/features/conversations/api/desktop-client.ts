@@ -694,7 +694,7 @@ export const desktopClient = {
   // non-Fox value while FOX_EXTERNAL_BACKENDS keeps it off.
   // `externalPermissionMode` (UX batch ②): external backends only, chosen once
   // and locked; `full_access` is refused when the Host forbids it.
-  createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode']; agentBackend?: AgentBackendId; externalPermissionMode?: ExternalPermissionMode }) =>
+  createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode']; agentBackend?: AgentBackendId; externalPermissionMode?: ExternalPermissionMode; nativePermission?: string }) =>
     command<ConversationSummary>('conversation_create', request),
   loadConversation: async (conversationId: string) => {
     const detail = await command<ConversationDetail>('conversation_load', { conversationId })
