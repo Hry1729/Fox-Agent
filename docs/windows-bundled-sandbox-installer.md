@@ -27,12 +27,12 @@ pnpm tauri:build:windows
   3. 设置运行时目录的访问权限：Administrators / SYSTEM 完全控制，Users 只读和执行；
   4. 创建 `%ProgramData%\Fox` 与 `%ProgramData%\Fox\sandbox`（外部 Agent 私有目录的根）；
   5. 清理旧版 Fox 自己安装的 SRT：只有旧版安装回执证明这份 SRT 是 Fox 装的（`srt.alreadyInstalled == false`，且 `SandboxUserSid`、`CreatedAt` 与注册表一致）时，才用旧运行时自带的 srt 执行 `windows-uninstall`，删除 `srt-sandbox` 账户、`sandbox-runtime-users` 组、WFP 出站过滤规则和 `HKLM\SOFTWARE\sandbox-runtime`，再删 `%ProgramData%\sandbox-runtime`；别的程序装的 SRT 保留（`legacySrt.decision = keep`）。清理失败只记入结果与日志（`legacySrt.decision = failed`，并把归属证明转存到新回执的 `legacySrtRecord`，下次安装重试），不中止安装；
-  6. 从本次安装的版本目录删除 `srt\` 和 `acp-bridge\`（`removedRuntimeDirs`）；
+  6. 从本次安装的版本目录和已安装的旧版本目录删除 `srt\` 和 `acp-bridge\`（`removedRuntimeDirs`；第 5 步失败时旧版本的 `srt\` 保留）；
   7. 写结果 JSON。
 - 安装日志位于 `%ProgramData%\Fox\logs\sandbox-installer-*.log`。失败时安装器显示该位置，不显示安装成功。
 - 成功记录写入运行时目录的 `.fox-installer-result.json`，由管理员拥有，普通用户只读。
 - 用户私有目录由非提权的 Fox 按当前用户创建。安装器不复制或修改模型密钥。
-- 旧版本目录（如 `sandbox-runtime\0.1.5\`）里的 `srt\` 不会被清理；是否清理整个旧版本目录留给 B5 决定。
+- 第 6 步（B5 起）也删除已安装旧版本目录（如 `sandbox-runtime\0.1.6\`）里的 `srt\`、`acp-bridge\`，旧版本目录的其余内容不动；只有第 5 步清理失败（`legacySrt.decision = failed`）时保留旧版本里的 `srt\`，供下次安装重试卸载。
 
 NSIS 没有事务回滚。运行时安装失败会停止后续应用安装；若此前选择卸载旧版，旧应用不会自动恢复。运行时脚本只回滚本次写入的运行时版本，不删除用户数据。
 

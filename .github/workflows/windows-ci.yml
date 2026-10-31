@@ -349,14 +349,16 @@ jobs:
       - name: Build runtime package
         if: ${{ inputs.runtime_package }}
         shell: pwsh
-        run: ./crates/fox-agent-backend/scripts/windows/build-runtime-release.ps1 -Version '${{ inputs.runtime_package_version }}' -OutDir "$env:GITHUB_WORKSPACE\.runtime-package" -WorkDir 'C:\frt'
+        run: ./crates/fox-agent-backend/scripts/windows/build-runtime-release.ps1 -Version '${{ inputs.runtime_package_version }}' -OutDir "$env:GITHUB_WORKSPACE\runtime-package-out" -WorkDir 'C:\frt'
 
       - name: Upload runtime package
         if: ${{ inputs.runtime_package }}
         uses: actions/upload-artifact@v4
         with:
           name: fox-sandbox-runtime-${{ inputs.runtime_package_version }}-windows-x64
-          path: .runtime-package/
+          # Not a dot directory: upload-artifact skips hidden files by default.
+          path: runtime-package-out/
+          if-no-files-found: error
           retention-days: 90
           compression-level: 0
 
