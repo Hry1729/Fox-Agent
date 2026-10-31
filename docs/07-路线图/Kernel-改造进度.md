@@ -42,7 +42,7 @@
 | --- | --- | --- |
 | [Issue #25](https://github.com/Hry1729/Fox-Agent/issues/25)：`attemptId` 由 Host 生成 | 未开始（Issue open） | `runtime_host/work_tools.rs` 仍用 `required_string(input, "attemptId")`。重名冲突目前作为可纠正错误返回模型，但会消耗连续拒绝预算 |
 | [Issue #24](https://github.com/Hry1729/Fox-Agent/issues/24)：模型自我验证证据 | 未开始（Issue open，方案待产品拍板） | `work_graph.rs` 的 `EVIDENCE_REFERENCE_PAIRS` 没有新增配对 |
-| 阶段 1 第 2 项：测试授权语义 | **未关闭** | `test_run` 的授权范围键仍是输入参数的哈希，审批卡可选「本会话允许」，没有绑定工作区修订或脚本内容。见[四 Agent 实施方案 · 阶段 1 逐项核对](../02-架构/四Agent改造实施方案-v0.3.1.md) |
+| 阶段 1 第 2 项：测试授权语义 | **按 A1 改写（2026-10-31）** | 按输入哈希的「本会话允许」已删除，`test_run` 与其他命令类工具一起由四档审批引擎判定；前缀规则不绑定脚本内容，靠审计追溯（已接受的取舍）。见[安全架构](../02-架构/安全架构.md#风险取舍用户已接受) |
 | 阶段 1 第 4 项：子进程收尾 | Windows 已关闭；非 Windows 残余 | Windows 用 Job Object 终止整棵进程树；非 Windows 只杀直接子进程 |
 | 阶段 4：Legacy / Shadow 清理 | 未开始 | 前置：确认没有需要 Legacy 兼容的旧 Run，以及 FoxBackend 的长期定位 |
 | 真实崩溃续跑端到端验收 | 待补 | 见上表 |
