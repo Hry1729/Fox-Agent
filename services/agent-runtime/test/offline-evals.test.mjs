@@ -140,7 +140,9 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   // 2026-10-22: toolCatalogHash moved with present_files (4b54e68) and the stable
   // prompt moved with the r16 delivery-target rules (0df9162), so the result
   // identity moved with both.
-  assert.equal(report.resultHash, '10e1fa777a5347e8546e629085c088368e2c7f4ded44af05de8c422ceded8102')
+  // 2026-10-31: the stable prompt moved with B4b (runtime-instructions.mjs,
+  // 1e2db797), so the result identity moved with it (main push CI 41170749997).
+  assert.equal(report.resultHash, 'cfc2910de618b81ae87cabe888b659b1ebaa7dccfd1c73c63dd049ab792e1a04')
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {
