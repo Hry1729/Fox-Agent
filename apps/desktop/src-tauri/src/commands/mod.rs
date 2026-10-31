@@ -1658,11 +1658,11 @@ pub async fn conversation_create(
     // outright, whatever the UI sent.
     // Settings batch, item 5: when the request does not say, a new external
     // conversation takes 设置 →「新外部会话使用完全访问」(off by default).
-    // Under FORBIDDEN the setting is ignored (sandboxed), never a refusal; an
+    // Under FORBIDDEN the setting is ignored (no grant), never a refusal; an
     // explicit `full_access` request is still refused there.
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
     // Per-agent permission list: an explicit pick in the new conversation's
-    // list (the Agent's full-access option, or any sandboxed option) wins
+    // list (the Agent's full-access option, or any other native option) wins
     // over the setting; read once here and cleared after creation.
     let draft_full = if external_backend && request.external_permission_mode.is_none() {
         agent_backend_routing::draft_full_access_choice(&state.database, agent_backend)
@@ -1670,7 +1670,7 @@ pub async fn conversation_create(
         None
     };
     let picker_mode = draft_full.map(|full| {
-        if full { fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS } else { fox_agent_backend::host_routing::NEW_MODE_SANDBOXED }
+        if full { fox_agent_backend::host_routing::NEW_MODE_FULL_ACCESS } else { fox_agent_backend::host_routing::NEW_MODE_STANDARD }
     });
     // The old Fox-wide "new external conversations use full access" setting
     // is no longer consulted: it was the outer SRT switch, not the Agent's

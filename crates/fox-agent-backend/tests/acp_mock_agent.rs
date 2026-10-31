@@ -104,7 +104,7 @@ async fn cancel_answers_pending_permissions_with_cancelled() {
 
 /// Revocation stop on a live connection: the pending permission is answered
 /// `cancelled`, in-flight work is `outcome_unknown`, the process is gone and
-/// the session waits for a sandboxed rebuild without replay.
+/// the session waits for a rebuild without full access, without replay.
 #[tokio::test(flavor = "multi_thread")]
 async fn revocation_stop_cancels_settles_and_kills_the_backend() {
     use fox_agent_backend::port::{RevokedSessionState, StopConfirmation};
@@ -115,6 +115,8 @@ async fn revocation_stop_cancels_settles_and_kills_the_backend() {
     let session = connection.new_session(std::env::temp_dir()).await.expect("session");
     connection.prompt(&session, "hello").unwrap();
     until(&mut connection, |event| matches!(event, BackendEvent::PermissionRequested { .. })).await;
+    // Checked after the stop on Unix (`kill -0`).
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let pid = connection.process_id().expect("pid");
     let mut pending = PendingRegistry::default();
     pending.open("prompt-1", 0);

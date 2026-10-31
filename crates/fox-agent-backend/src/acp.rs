@@ -167,6 +167,9 @@ pub struct AcpConnection {
     pub events: mpsc::UnboundedReceiver<BackendEvent>,
     pending: PendingPermissions,
     child_id: Option<u32>,
+    /// Session key of the previews this process serves (read on Windows only,
+    /// where the preview listeners are looked up).
+    #[cfg_attr(not(windows), allow(dead_code))]
     preview_key: String,
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
     /// Windows: the Job Object holding the backend tree (`None` elsewhere).
@@ -1593,7 +1596,7 @@ impl AcpConnection {
     }
 
     /// Revocation stop for a live connection: full access was withdrawn while
-    /// this process runs ([`crate::external_home::ModeRecheck::RestartSandboxed`]).
+    /// this process runs ([`crate::external_home::ModeRecheck::RestartWithoutFullAccess`]).
     ///
     /// 1. stopping state ([`Self::begin_stopping`]): new tasks refused, every
     ///    pending permission answered `cancelled`, late ones auto-cancelled;

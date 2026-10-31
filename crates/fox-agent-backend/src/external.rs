@@ -117,13 +117,11 @@ impl LaunchRequest {
         }
     }
 
-    /// The native mode a session of this request runs in.
-    ///
-    /// `mode` is accepted for API compatibility. It describes Fox's removed
-    /// outer SRT layer, so it must not rewrite the Agent's own stored
-    /// permission choice: removing the outer layer can never turn Codex or
-    /// dsh into full access.
-    pub fn native_mode(&self, _mode: PermissionMode) -> &'static str {
+    /// The native mode a session of this request runs in: the Agent's own
+    /// stored permission choice. Fox's [`PermissionMode`] never rewrites it;
+    /// a missing grant can never turn Codex or dsh into full access, nor the
+    /// other way round.
+    pub fn native_mode(&self) -> &'static str {
         crate::native_permission::effective_mode(self.backend, self.native_permission.as_deref(), false, &self.native_context())
     }
 }
@@ -366,14 +364,14 @@ impl StartError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevokeOutcome {
     /// No live process for the conversation: the next launch reads the
-    /// (already withdrawn) grant and starts in the sandbox.
+    /// (already withdrawn) grant and starts without full access.
     NotRunning,
-    /// The live process already runs sandboxed.
+    /// The live process already runs without full access.
     Unchanged,
-    /// The full-access process was stopped; the next turn starts in the
-    /// sandbox. `confirmed: false`: the stop was not confirmed and no
+    /// The full-access process was stopped; the next turn starts without
+    /// full access. `confirmed: false`: the stop was not confirmed and no
     /// relaunch will happen.
-    RestartSandboxed { confirmed: bool },
+    RestartWithoutFullAccess { confirmed: bool },
 }
 
 /// Result of [`ExternalRuntime::apply_native_mode`].
@@ -598,7 +596,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     pub fn start_turn(&self, request: TurnRequest) -> Result<(), StartError> {
         let backend = request.launch.backend;
         let session = self.session(&request.launch.conversation_id, backend);
-        let native_mode = request.launch.native_mode(self.inner.launcher.desired_mode(&request.launch));
+        let native_mode = request.launch.native_mode();
         {
             let mut state = lock(&session.state);
             if state.closing {
@@ -734,7 +732,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "撤销完全访问时，原进程未确认全部结束，不会在沙箱中重建")
                 .remedy(STOP_UNCONFIRMED_REMEDY));
         }
-        let wanted_native = request.launch.native_mode(desired);
+        let wanted_native = request.launch.native_mode();
         let wanted_key = self.inner.launcher.connection_key(&request.launch)?;
         let source_changed = {
             let state = lock(&session.state);
@@ -753,9 +751,9 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         };
         if live {
             // Tightening applies before the next continue (plan 6.5): a
-            // full-access process is stopped when the Host now wants the
-            // sandbox; never the other way round silently.
-            if running_mode == Some(PermissionMode::FullAccess) && desired == PermissionMode::Sandboxed {
+            // full-access process is stopped when the Host no longer grants
+            // full access; never the other way round silently.
+            if running_mode == Some(PermissionMode::FullAccess) && desired == PermissionMode::Standard {
                 let report = self.stop_connection(session, "full access withdrawn").await;
                 if let Some(report) = report {
                     if !report.confirmation.is_confirmed() {
@@ -915,7 +913,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             state.initialize_response = Some(initialize_response.clone());
             state.capabilities = Some(capabilities);
             state.mode = Some(mode);
-            state.native_mode = Some(request.launch.native_mode(mode).to_owned());
+            state.native_mode = Some(request.launch.native_mode().to_owned());
             state.connection_key = connection_key;
             state.model_host = self.inner.launcher.model_host(&request.launch);
             state.declaration = Some(declaration.clone());
@@ -933,7 +931,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 "reopened": reopened,
                 "loadError": load_error,
                 "mode": mode.as_str(),
-                "permissionMode": request.launch.native_mode(mode),
+                "permissionMode": request.launch.native_mode(),
                 "generation": generation,
                 "declaration": declaration,
                 "agentInfo": initialize_response.get("agentInfo").cloned().unwrap_or(Value::Null),
@@ -949,7 +947,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         // INITIAL_AGENT_MODE).
         if session.backend == AgentBackend::Codex && reopened == "load" {
             lock(&session.state).native_mode = None;
-            self.switch_codex_mode(session, &run_id, request.launch.native_mode(mode)).await?;
+            self.switch_codex_mode(session, &run_id, request.launch.native_mode()).await?;
         }
         Ok(())
     }
@@ -1398,8 +1396,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
 
     /// Revoke full access mid-session (UX batch ②, semantics A): the Host has
     /// already withdrawn the grant, so [`ExternalLauncher::desired_mode`]
-    /// now answers sandboxed. Uses [`crate::external_home::recheck_permission_mode`]:
-    /// on `RestartSandboxed` the running turn is cancelled (ended
+    /// now answers [`PermissionMode::Standard`]. Uses [`crate::external_home::recheck_permission_mode`]:
+    /// on `RestartWithoutFullAccess` the running turn is cancelled (ended
     /// `interrupted`, pending approvals settled `cancelled` by the stopping
     /// connection), the process tree is stopped and confirmed, and the next
     /// turn starts a new connection (nothing is replayed). An unconfirmed
@@ -1437,7 +1435,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             settings: std::collections::BTreeMap::from([(crate::external_home::SETTING_PERMISSION_MODE.to_owned(), desired.as_str().to_owned())]),
         };
         match crate::external_home::recheck_permission_mode(&policy, &snapshot, conversation_id, running) {
-            crate::external_home::ModeRecheck::RestartSandboxed(reason) => {
+            crate::external_home::ModeRecheck::RestartWithoutFullAccess(reason) => {
                 {
                     let mut state = lock(&session.state);
                     if let Some(run_id) = state.turn.as_ref().map(|turn| turn.run_id.clone()) {
@@ -1463,7 +1461,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 if !confirmed {
                     lock(&session.state).stop_unconfirmed = true;
                 }
-                RevokeOutcome::RestartSandboxed { confirmed }
+                RevokeOutcome::RestartWithoutFullAccess { confirmed }
             }
             _ => RevokeOutcome::Unchanged,
         }

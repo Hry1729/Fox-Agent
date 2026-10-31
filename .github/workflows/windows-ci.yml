@@ -14,7 +14,8 @@ on:
       # bun, agent backend (ACP), Zvec / ONNX smoke, Kernel core cargo tests, the
       # protocol check, the full Agent Runtime suite and the Host performance
       # baseline are skipped.
-      # acp (targeted only): also run the Agent backend (ACP) job.
+      # acp (targeted only): also run the Agent backend (ACP) jobs (Windows and
+      # Linux).
       targeted:
         description: Targeted run (filtered Rust Host + Runtime package only)
         type: boolean
@@ -24,7 +25,7 @@ on:
         type: string
         default: 'runtime_host::delivery window_resize'
       acp:
-        description: Targeted only. Also run the Agent backend (ACP) job (fox-agent-backend --features acp)
+        description: Targeted only. Also run the Agent backend (ACP) jobs, Windows and Linux (fox-agent-backend --features acp)
         type: boolean
         default: false
 
@@ -271,6 +272,33 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           key: agent-backend-acp
+
+      - name: Test fox-agent-backend (acp)
+        run: cargo test -p fox-agent-backend --features acp --no-fail-fast
+
+  # Plan B3: the external-backend layer builds and tests on Linux on its own
+  # (no desktop crate, no Windows-only code outside cfg(windows)).
+  agent-backend-linux:
+    name: Agent backend (ACP) tests (Linux)
+    if: ${{ !inputs.targeted || inputs.acp }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          key: agent-backend-acp-linux
 
       - name: Test fox-agent-backend (acp)
         run: cargo test -p fox-agent-backend --features acp --no-fail-fast

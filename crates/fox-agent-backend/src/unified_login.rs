@@ -425,7 +425,6 @@ pub fn remove_managed(backend: AgentBackend, home: &Path) -> Result<Vec<String>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::external_home::{HostOs, PermissionMode};
 
     const KEY: &str = "sk-unified-0123456789abcdef";
 
@@ -461,7 +460,7 @@ mod tests {
     }
 
     fn probe(backend: AgentBackend, home: &Path) -> crate::onboarding::CredentialProbe {
-        crate::onboarding::probe(backend, home, PermissionMode::FullAccess, HostOs::Linux, &no_env)
+        crate::onboarding::probe(backend, home, &no_env)
     }
 
     #[test]
@@ -517,12 +516,11 @@ mod tests {
         let env = std::fs::read_to_string(rel(&home, DSH_ENV)).unwrap();
         assert!(env.contains(&format!("DEEPSEEK_API_KEY={KEY}")));
         assert_eq!(probe(AgentBackend::Deepseek, &home).state, crate::onboarding::CredentialState::Ready);
-        // An Anthropic-compatible gateway (Magpie) is used as is; the loopback
-        // refusal of the sandbox then applies unchanged.
+        // An Anthropic-compatible gateway (Magpie) is used as is: a loopback
+        // base URL is not refused.
         let magpie = temp_home("dsh-magpie");
         apply(AgentBackend::Deepseek, &magpie, &login("anthropic-messages", "http://127.0.0.1:3425/v1", None), false).unwrap();
-        let sandboxed = crate::onboarding::probe(AgentBackend::Deepseek, &magpie, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
-        assert_eq!(sandboxed.state, crate::onboarding::CredentialState::LoopbackRequiresFullAccess);
+        assert_eq!(probe(AgentBackend::Deepseek, &magpie).state, crate::onboarding::CredentialState::Ready);
         // Another OpenAI-compatible vendor cannot drive dsh.
         let other = apply(AgentBackend::Deepseek, &temp_home("dsh-other"), &login("openai-completions", "https://dashscope.aliyuncs.com/compatible-mode/v1", None), false).unwrap();
         assert_eq!(other.outcome, Outcome::Unsupported);

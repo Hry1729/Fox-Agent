@@ -6,7 +6,7 @@
 // credential VALUE: the Host returns file names and key names only.
 
 /** `fox_agent_backend::onboarding::CredentialState`. */
-export type CredentialState = 'ready' | 'missing_credentials' | 'loopback_requires_full_access'
+export type CredentialState = 'ready' | 'missing_credentials'
 
 export interface ConfigTemplateFile { path: string; content: string }
 export interface ConfigTemplate { id: string; title: string; note: string; files: ConfigTemplateFile[] }
@@ -14,11 +14,9 @@ export interface ConfigTemplate { id: string; title: string; note: string; files
 /** Result of `agent_backend_credentials` (names only). */
 export interface CredentialProbe {
   backend: string
-  mode: 'sandboxed' | 'full_access' | string
   state: CredentialState
   privateHome: string
   credentialsPresent: boolean
-  loopbackBlocked: boolean
   presentKeys: string[]
   presentFiles: string[]
   requiredKeys: string[]
@@ -154,14 +152,19 @@ export interface AgentBackendPermissionStatus {
   forbiddenReason: string | null
   engineeringSwitch: boolean
   granted?: boolean
-  mode?: 'sandboxed' | 'full_access'
+  mode?: 'standard' | 'full_access'
   locked?: boolean
 }
 
-export type ExternalPermissionMode = 'sandboxed' | 'full_access'
+/**
+ * Fox-level permission of a new external conversation: `standard` (default,
+ * no full-access grant) or `full_access`. The Host still accepts the pre-B3
+ * name `sandboxed` for `standard`.
+ */
+export type ExternalPermissionMode = 'standard' | 'full_access'
 
 export const EXTERNAL_PERMISSION_MODE_LABELS: Record<ExternalPermissionMode, string> = {
-  sandboxed: '沙箱（默认）',
+  standard: '未授予完全访问（默认）',
   full_access: '完全访问',
 }
 
@@ -185,7 +188,7 @@ export const REVOKE_FULL_ACCESS_NOTICE = '切回受限权限会取消当前这�
 export function externalPermissionModeOptions(status: AgentBackendPermissionStatus | null | undefined): { value: ExternalPermissionMode; label: string; disabled: boolean; reason: string | null }[] {
   const forbidden = Boolean(status?.fullAccessForbidden)
   return [
-    { value: 'sandboxed', label: EXTERNAL_PERMISSION_MODE_LABELS.sandboxed, disabled: false, reason: null },
+    { value: 'standard', label: EXTERNAL_PERMISSION_MODE_LABELS.standard, disabled: false, reason: null },
     {
       value: 'full_access',
       label: EXTERNAL_PERMISSION_MODE_LABELS.full_access,
@@ -197,7 +200,7 @@ export function externalPermissionModeOptions(status: AgentBackendPermissionStat
 
 /** The mode a new conversation is created with: full access only when chosen AND allowed. */
 export function effectiveDraftPermissionMode(mode: ExternalPermissionMode, status: AgentBackendPermissionStatus | null | undefined): ExternalPermissionMode {
-  return mode === 'full_access' && !status?.fullAccessForbidden ? 'full_access' : 'sandboxed'
+  return mode === 'full_access' && !status?.fullAccessForbidden ? 'full_access' : 'standard'
 }
 
 /** Legacy lock-chip text; the bar now shows the Agent's native picker. */
@@ -207,7 +210,7 @@ export function permissionChipLabel(status: AgentBackendPermissionStatus | null 
 }
 
 export interface CredentialCardModel {
-  kind: 'missing' | 'loopback' | 'source' | 'ready'
+  kind: 'missing' | 'source' | 'ready'
   title: string
   description: string
   privateHome: string
@@ -220,13 +223,11 @@ export interface CredentialCardModel {
 }
 
 /**
- * The card for a probe, or null when the backend is ready. The two problems
- * are different cards with different actions: a missing login is fixed in the
- * private HOME (open folder / templates / import); a loopback gateway in the
- * sandbox needs full access (chosen when creating a conversation) or the
- * official endpoint.
+ * The card for a probe, or null when the backend is ready: a missing login is
+ * fixed in the private HOME (open folder / templates / import); a Pi probe
+ * may ask for its configuration source.
  */
-export function credentialCardModel(probe: CredentialProbe | null | undefined, permission?: AgentBackendPermissionStatus | null, showReady = false): CredentialCardModel | null {
+export function credentialCardModel(probe: CredentialProbe | null | undefined, _permission?: AgentBackendPermissionStatus | null, showReady = false): CredentialCardModel | null {
   if (!probe) return null
   if (probe.source?.choiceRequired || (showReady && probe.state === 'ready')) {
     return {
@@ -239,20 +240,6 @@ export function credentialCardModel(probe: CredentialProbe | null | undefined, p
     }
   }
   if (probe.state === 'ready') return null
-  if (probe.state === 'loopback_requires_full_access') {
-    const forbidden = Boolean(permission?.fullAccessForbidden)
-    return {
-      kind: 'loopback',
-      title: '本机网关连接未就绪',
-      description: 'DeepSeek 的 base URL 指向本机回环地址（如 Magpie）。Fox 不再为外部 Agent 添加 SRT 网络代理；请确认本机网关正在运行，或改用官方 https://api.deepseek.com/anthropic。',
-      privateHome: probe.privateHome,
-      requiredKeys: [],
-      requiredFiles: probe.presentFiles,
-      presentFiles: probe.presentFiles,
-      templates: probe.templates.filter((template) => template.id === 'deepseek_official'),
-      offerImport: false,
-    }
-  }
   const note = unifiedLoginNote(probe)
   const protocol = probe.backend === 'codex' ? 'OpenAI Responses' : probe.backend === 'deepseek' ? 'Anthropic Messages' : '兼容协议'
   return {

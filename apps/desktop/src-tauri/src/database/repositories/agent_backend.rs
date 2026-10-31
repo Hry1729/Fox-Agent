@@ -105,7 +105,7 @@ pub(crate) struct ExternalConversationContext {
 impl Database {
     /// Whether the user granted full access to this external conversation
     /// when creating it (v96, UX batch ②). A failed read is an error, which
-    /// the caller treats as "not granted" (fail-closed: sandboxed).
+    /// the caller treats as "not granted" (fail-closed: standard).
     pub(crate) fn conversation_full_access_granted(&self, conversation_id: &str) -> Result<bool, String> {
         self.with_connection(|connection| {
             connection

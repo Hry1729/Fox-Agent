@@ -660,8 +660,8 @@ impl ExternalBackendHost {
 
     /// Revoke full access mid-session (semantics A; enabling mid-session does
     /// not exist). The grant is removed first, so a relaunch can only be
-    /// sandboxed; a live full-access process is then stopped through
-    /// `recheck_permission_mode` -> RestartSandboxed.
+    /// without full access; a live full-access process is then stopped
+    /// through `recheck_permission_mode` -> RestartWithoutFullAccess.
     pub async fn revoke_full_access(&self, conversation_id: &str) -> ApiResponse<Value> {
         let request = match self.planned_request(conversation_id) {
             Ok(request) => request,
@@ -677,7 +677,7 @@ impl ExternalBackendHost {
         let (label, confirmed) = match outcome {
             RevokeOutcome::NotRunning => ("not_running", true),
             RevokeOutcome::Unchanged => ("unchanged", true),
-            RevokeOutcome::RestartSandboxed { confirmed } => ("restart_sandboxed", confirmed),
+            RevokeOutcome::RestartWithoutFullAccess { confirmed } => ("restart_without_full_access", confirmed),
         };
         let backend = self.database.conversation_agent_backend(conversation_id).ok().flatten().unwrap_or_default();
         let details = json!({ "outcome": label, "stopConfirmed": confirmed });

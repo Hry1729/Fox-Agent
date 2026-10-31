@@ -87,9 +87,9 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
     <>
       {NATIVE_PERMISSION_SETTING_BACKENDS.map(({ backend, label }) => {
         const view = views[backend]
-        const rows = nativePermissionRows(view, { sandboxedOnly: true })
+        const rows = nativePermissionRows(view, { restrictedOnly: true })
         if (!view || rows.length === 0) return null
-        const wanted = view.sandboxedMode ?? view.current
+        const wanted = view.restrictedMode ?? view.current
         const current = rows.some((row) => row.value === wanted) ? wanted : view.catalog.defaultMode
         const greyed = rows.filter((row) => row.disabled && row.reason)
         return (

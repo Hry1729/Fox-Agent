@@ -12,7 +12,7 @@
 
 - 本文描述 Fox 自己的 Agent（`conversations.agent_backend = 'fox'`）使用的协议：Host 与 Runtime Sidecar 之间的 `fox-runtime-jsonl`，以及 `--kernel-worker` 一次性模型进程协议。
 - **Kernel Authoritative 是默认执行路径**：未设置 `FOX_KERNEL_MODE` 时新 Run 冻结为 Authoritative（`runtime_host/kernel_authority.rs` 的 `select`）；`FOX_KERNEL_MODE=legacy` 才创建 Legacy 新 Run。已有 Run 沿用冻结的执行权。
-- 外部 Agent（pi、DeepSeek、Codex）**不使用本协议**：它们经 ACP（Agent Client Protocol）由 `crates/fox-agent-backend` 启动和驱动，Host 把 ACP 事件投影为 `run_events` 并通过 `fox://runtime-event` 推给前端。见 [Agent 运行时架构](../02-架构/Agent运行时架构.md) 与 `crates/fox-agent-backend/docs/sandbox.md`。
+- 外部 Agent（Pi、Codex、dsh；目前退役，计划在阶段三恢复）**不使用本协议**：它们经 ACP（Agent Client Protocol）由 `crates/fox-agent-backend` 启动和驱动，Host 把 ACP 事件投影为 `run_events` 并通过 `fox://runtime-event` 推给前端。见 [Agent 运行时架构](../02-架构/Agent运行时架构.md) 与 `crates/fox-agent-backend/docs/sandbox.md`。
 - 工具目录的事实源是 `packages/fox-engine-protocol/schema.json` 的 `toolContracts`（`RUNTIME_TOOL_CATALOG`），当前 73 个工具，分类与审批见[权限参考 · 工具目录](权限参考.md#工具目录)。
 
 ## Envelope
@@ -55,7 +55,7 @@ stdout 只能输出 Envelope；日志必须写 stderr。Host 校验 protocol/ver
 
 `RunControlBinding` 冻结 Run/Conversation、引擎、权威模式、执行 Profile、权限内容及哈希、只读执行位置和四类时间预算。Pi Legacy `prompt` 只接受 Legacy/Pi；显式空值、损坏绑定或不同身份拒绝。仅缺省字段保留旧 v1 兼容。
 
-Kernel 路径（当前默认）使用下列共享 DTO；它们由 `--kernel-worker` 进程处理，不是普通 Sidecar 命令，也不改变上文 Envelope 版本。Legacy 路径（`FOX_KERNEL_MODE=legacy`）仍使用下文「默认命令」：
+Kernel 路径（**已在 B1 删除**；新 Run 一律 PiNative，本段保留为历史）当时使用下列共享 DTO；它们由 `--kernel-worker` 进程处理，不是普通 Sidecar 命令，也不改变上文 Envelope 版本。Legacy 路径（`FOX_KERNEL_MODE=legacy`）仍使用下文「默认命令」：
 
 | DTO | 权威内容与约束 |
 |---|---|
@@ -176,7 +176,7 @@ Reviewer dispatch采用数据库exactly-once、物理at-least-once。启动恢�
 
 Run 分派和终态还会触发 `before_run/after_run` 审计，但不会新增 Runtime 可执行回调。Fox 不把任意 Hook 脚本、HTTP Header、MCP Session ID 或 OpenAPI 定义传入模型上下文。
 
-知识工具保持现有名称并使用 source-aware 参数。`list_knowledge_bases`、`search_knowledge` 和 `read_knowledge_document` 根据 `KnowledgeReference.source` 路由到本地或远程 Provider；历史只传 `knowledgeBaseId` 的请求按远程语义兼容。本地 `search_knowledge` 在资料库向量索引就绪且检索模式为 `vector` / `hybrid` 时返回 `mode`、`fusionVersion` 和每条的 `vectorScore` / `lexicalScore`；否则回退到 SQLite 关键词检索，并在 `fallback.reason` 中给出 `index_not_ready`、`keyword_mode` 或 `vector_search_failed`（附 `errorCode`）。`topK`、`maxChars` 在两条路径上按同一规则截断。Runtime 不直接调用任何 `local_knowledge_*` Tauri 命令。本地知识图谱尚不可用时，`query_knowledge_graph` 返回 `local_knowledge.graph_unavailable`，不能用空结果冒充“没有关系”。
+知识工具保持现有名称并使用 source-aware 参数。`list_knowledge_bases`、`search_knowledge` 和 `read_knowledge_document` 根据 `KnowledgeReference.source` 路由到本地或远程 Provider；历史只传 `knowledgeBaseId` 的请求按远程语义兼容。本地 `search_knowledge` 在资料库向量索引就绪且检索模式为 `vector` / `hybrid` 时返回 `mode`、`fusionVersion` 和每条的 `vectorScore` / `lexicalScore`；索引已就绪时向量 / 混合检索失败直接返回错误（R4，不再改用关键词检索）；只有索引尚未就绪或资料库为关键词模式时才走 SQLite 关键词检索，并在 `fallback.reason` 中给出 `index_not_ready`（附 `detail` 与说明文字）或 `keyword_mode`。`topK`、`maxChars` 在两条路径上按同一规则截断。Runtime 不直接调用任何 `local_knowledge_*` Tauri 命令。本地知识图谱尚不可用时，`query_knowledge_graph` 返回 `local_knowledge.graph_unavailable`，不能用空结果冒充“没有关系”。
 
 ### 通用 Host 工具
 
@@ -487,7 +487,7 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 
 初始化与批次请求上限均为 1 MiB；错误不包含原始凭证、历史或 Provider 响应。模型请求受冻结预算约束，Node 取消后仍等待引擎结束。
 
-Rust `KernelCoordinator::dispatch_stored_batch_with_worker` 是受控正式调用入口：只从 v55 `kernel_model_configs` 恢复模型/提示/工具描述/Profile 配置，核对内容哈希与持久 `prompt_config_hash` 后才进入 Outbox 领取事务；外部调用者不能传入当前配置作为替代。快照必须在 Run 启动前冻结，缺失或损坏不自动回填。凭证单独传入，不进入该配置哈希或命令行参数。`kernel.ready.adapterVersion` 必须与快照支持的 `pi-1.4.0/fox-kernel-worker-v1` 匹配。启动与管道写入、响应等待共享剩余 Run/模型预算；取消/超时清理并回收该次创建的子进程，不复用 Legacy 进程。不确定交付保持租约事实，不能因进程已退出就重播。
+（历史，`KernelCoordinator` 已在 B1 删除）Rust `KernelCoordinator::dispatch_stored_batch_with_worker` 当时是受控正式调用入口：只从 v55 `kernel_model_configs` 恢复模型/提示/工具描述/Profile 配置，核对内容哈希与持久 `prompt_config_hash` 后才进入 Outbox 领取事务；外部调用者不能传入当前配置作为替代。快照必须在 Run 启动前冻结，缺失或损坏不自动回填。凭证单独传入，不进入该配置哈希或命令行参数。`kernel.ready.adapterVersion` 必须与快照支持的 `pi-1.4.0/fox-kernel-worker-v1` 匹配。启动与管道写入、响应等待共享剩余 Run/模型预算；取消/超时清理并回收该次创建的子进程，不复用 Legacy 进程。不确定交付保持租约事实，不能因进程已退出就重播。
 
 Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session、批次及游标，拒绝超大帧、其他身份和非预期事件。模型响应仍经协调器同事务提交。配置内容可持久恢复，用于桌面 Authoritative 路径（当前默认）的批次及首轮派发。
 

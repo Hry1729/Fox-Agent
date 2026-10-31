@@ -72,7 +72,8 @@ pub struct NativePermissionCatalog {
     /// The Agent's display name in UI text ([`display_name`]).
     pub display_name: &'static str,
     pub options: Vec<NativePermissionOption>,
-    /// The sandboxed option a new session starts in when nothing was chosen.
+    /// The (non-full-access) native option a new session starts in when
+    /// nothing was chosen.
     pub default_mode: &'static str,
     pub switch_timing: SwitchTiming,
     /// What the UI must say about when a change applies.

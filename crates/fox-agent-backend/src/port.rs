@@ -306,7 +306,7 @@ impl EventIntake {
 }
 
 // ---------------------------------------------------------------------------
-// Revocation stop (full access withdrawn while the process runs unsandboxed)
+// Revocation stop (full access withdrawn while the process runs with it)
 // ---------------------------------------------------------------------------
 
 /// Whether the old process tree is known to have ended. The rule is "the
@@ -366,7 +366,7 @@ impl ProcessTreeStop {
 }
 
 /// What the Host must stop when [`crate::external_home::recheck_permission_mode`]
-/// returns `RestartSandboxed`. Implemented by the live connection
+/// returns `RestartWithoutFullAccess`. Implemented by the live connection
 /// ([`crate::acp::AcpConnection`] has an async equivalent, see
 /// `AcpConnection::stop_for_revocation`) and by mocks in tests.
 pub trait RevocationTarget {

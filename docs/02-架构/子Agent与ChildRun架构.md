@@ -40,9 +40,11 @@ sequenceDiagram
     H-->>P: childRuns + allTerminal
 ```
 
-### Kernel 路径与 Legacy 路径
+### 执行路径
 
-委派工具有两套 Host 实现：
+**2026-10-31 现状**：子 Run 一律冻结为 Authoritative + PiNative，只继承父 Run 的权限和预算，不继承执行器；统一在共享 Host 上用 `start_run_detached` 派发（`runtime_host/mod.rs::start_child_runtime_with_profile`，继承逻辑在 `kernel_authority::child_run_binding`），时长按 native model budget 判定。`kernel_delegation.rs` 已随 Kernel 执行循环在 B1 删除。
+
+以下是删除前的历史说明，委派工具当时有两套 Host 实现：
 
 - **Kernel 路径（默认）**：`apps/desktop/src-tauri/src/runtime_host/kernel_delegation.rs`。`child_run_start` / `team_member_start` 先在仓储层创建 Child Run（`database/repositories/child_runs.rs::create_child_run`），再把“启动 Child”登记为 Kernel Host Action（`WorkToolPostFinalizeDirective::StartChild`）。当前工具结算后，`runtime_host/kernel_host.rs` 才调用 `start_child_runtime` 启动 Child。取消同样先登记为 Host Action，再传播。参数错误按 `child.invalid_arguments` 作为工具结果返回模型；同一 Run 累计 3 次后返回 `child.correction_limit`。
 - **Legacy 路径**：`runtime_host/mod.rs` 内的同名工具分支，只在 `FOX_KERNEL_MODE=legacy` 时使用。
@@ -57,7 +59,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `child_agent_list` | 分别列出 Assistant/Worker 模板与可咨询 Expert | 返回 `agents` 和 `experts`，模板不是运行实例 |
 | `child_run_start` | 按 `worker` 或 `expert_consultation` 模式异步启动 Child Run | 两种身份字段互斥；咨询不改变主对话专家；同一 tool call 幂等 |
-| `child_run_collect` | 获取 1–8 个直属 Child Run 的状态和有限结果 | 只允许当前父 Run；最多等待 60 秒，Kernel 路径还受父 Run 剩余工具执行预算限制 |
+| `child_run_collect` | 获取 1–8 个直属 Child Run 的状态和有限结果 | 只允许当前父 Run；最多等待 60 秒，并受父 Run 剩余预算限制 |
 | `child_run_cancel` | 取消一个直属 Child Run | 只允许当前父 Run；进程取消与终态持久化同步 |
 
 Runtime 指令要求先批量 `start` 独立工作，再 `collect`，以获得真实并行；共享项目中的写任务不得重叠。模型不能自行提高并发、深度、运行时长或权限。Host 还会为 `child_worker` 与 `expert_consultation` 注入固定的 Runtime-authority `delegation_contract` 片段：隔离实例不是面向用户的 Lead，只处理委派目标，并以包含证据、假设、风险和下一步的自包含报告返回。该片段复用既有 `runtime` Typed Context 类型，不改变稳定 Prompt 版本或上下文 Schema 身份。

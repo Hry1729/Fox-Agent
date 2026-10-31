@@ -5,10 +5,8 @@
 //! in the user's real HOME is never used. This module lets the Host tell the
 //! user what is missing and copy a login over on request:
 //!
-//! * [`probe`] classifies a private HOME as [`CredentialState::Ready`],
-//!   [`CredentialState::MissingCredentials`] or
-//!   [`CredentialState::LoopbackRequiresFullAccess`] (DeepSeek with a loopback
-//!   base URL in sandboxed mode, refused at launch). It looks at file and key
+//! * [`probe`] classifies a private HOME as [`CredentialState::Ready`] or
+//!   [`CredentialState::MissingCredentials`]. It looks at file and key
 //!   NAMES only: values are read where a file has to be parsed, never
 //!   returned, logged or serialized.
 //! * [`import_candidates`] lists what the real HOME has that the backend
@@ -26,13 +24,12 @@
 //!   `.dsh/cordis.patch.yml` (docs/sandbox.md 13.12).
 //! * Codex (codex-acp): `CODEX_HOME=<home>/.codex`; `auth.json`
 //!   (`OPENAI_API_KEY` or ChatGPT `tokens`), `config.toml`; or the Host
-//!   environment's `OPENAI_API_KEY` (not passed into the Windows sandbox).
+//!   environment's `OPENAI_API_KEY`.
 //! * pi (pi-coding-agent 0.84.2, `dist/config.js` `getAgentDir()`):
 //!   `<home>/.pi/agent/` (`PI_CODING_AGENT_DIR` is not set by Fox);
 //!   `auth.json` (provider → `{type: "api_key", key}` / `{type: "oauth", ...}`),
 //!   `models.json` (custom providers, may carry `apiKey`), `settings.json`.
 use crate::port::AgentBackend;
-use crate::external_home::{HostOs, PermissionMode};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -46,11 +43,6 @@ pub enum CredentialState {
     Ready,
     /// Nothing the backend could log in with: show the guidance card.
     MissingCredentials,
-    /// Credentials present, but the DeepSeek base URL is loopback (a local
-    /// gateway such as Magpie) and the session is sandboxed: the launch is
-    /// refused (`agent_backend_loopback_requires_full_access`). Different
-    /// remedy: full access, or the official endpoint.
-    LoopbackRequiresFullAccess,
 }
 
 impl CredentialState {
@@ -58,7 +50,6 @@ impl CredentialState {
         match self {
             Self::Ready => "ready",
             Self::MissingCredentials => "missing_credentials",
-            Self::LoopbackRequiresFullAccess => "loopback_requires_full_access",
         }
     }
 }
@@ -70,7 +61,7 @@ impl CredentialState {
 pub struct ConfigTemplate {
     pub id: &'static str,
     pub title: &'static str,
-    /// Which permission modes it works in.
+    /// When to use it.
     pub note: &'static str,
     pub files: Vec<TemplateFile>,
 }
@@ -88,17 +79,13 @@ pub struct TemplateFile {
 #[serde(rename_all = "camelCase")]
 pub struct CredentialProbe {
     pub backend: String,
-    pub mode: String,
     pub state: CredentialState,
     pub private_home: PathBuf,
-    /// Whether a login the backend reads exists (independent of the loopback
-    /// problem, so both can be reported).
+    /// Whether a login the backend reads exists.
     pub credentials_present: bool,
-    /// This credential-only probe does not perform a sandbox request. A
+    /// This credential-only probe does not perform a model request. A
     /// successful Host-side supplier check cannot fill this with "reachable".
     pub model_connectivity: &'static str,
-    /// DeepSeek: a loopback base URL that sandboxed mode refuses.
-    pub loopback_blocked: bool,
     /// Key names found (in private files, or the Host environment).
     pub present_keys: Vec<String>,
     /// Files found, relative to the private HOME.
@@ -204,14 +191,14 @@ pub(crate) fn json_has_api_key(value: &serde_json::Value) -> bool {
     }
 }
 
-/// DeepSeek templates (docs/sandbox.md 13.12): Magpie (local gateway, full
-/// access only) and the official endpoint (both modes).
+/// DeepSeek templates (docs/sandbox.md 13.12): Magpie (local gateway) and the
+/// official endpoint.
 pub fn deepseek_templates() -> Vec<ConfigTemplate> {
     vec![
         ConfigTemplate {
             id: "deepseek_magpie",
             title: "经 Magpie 本机网关",
-            note: "只能在完全访问模式下使用（沙箱模式会在启动前拒绝本机回环地址）。model 写网关上的全名。",
+            note: "需要本机 Magpie 网关正在运行。model 写网关上的全名。",
             files: vec![
                 TemplateFile {
                     path: DSH_PATCH_ACP,
@@ -223,7 +210,7 @@ pub fn deepseek_templates() -> Vec<ConfigTemplate> {
         ConfigTemplate {
             id: "deepseek_official",
             title: "直连官方 api.deepseek.com",
-            note: "沙箱模式和完全访问都可以使用。",
+            note: "直接连接 DeepSeek 官方接口，不依赖本机网关。",
             files: vec![
                 TemplateFile {
                     path: DSH_PATCH_ACP,
@@ -235,15 +222,12 @@ pub fn deepseek_templates() -> Vec<ConfigTemplate> {
     ]
 }
 
-/// Classify `private_home` for `backend` in `mode`. `host_env` says which
-/// Host variables are set; on Windows sandboxed mode the Host environment
-/// never reaches the backend, so it does not count there.
-pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, os: HostOs, host_env: EnvPresence<'_>) -> CredentialProbe {
-    let env_reaches_backend = !(os == HostOs::Windows && mode == PermissionMode::Sandboxed);
+/// Classify `private_home` for `backend`. `host_env` says which Host
+/// variables are set (the Host environment reaches the backend process).
+pub fn probe(backend: AgentBackend, private_home: &Path, host_env: EnvPresence<'_>) -> CredentialProbe {
     let mut present_keys = Vec::new();
     let mut present_files = Vec::new();
     let mut credentials_present = false;
-    let mut loopback_blocked = false;
     let (required_keys, required_files, templates): (Vec<&str>, Vec<&str>, Vec<ConfigTemplate>) = match backend {
         AgentBackend::Deepseek => {
             let env_path = rel(private_home, DSH_ENV);
@@ -257,7 +241,7 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
                 }
             }
             credentials_present = names.iter().any(|name| name == "DEEPSEEK_API_KEY");
-            if env_reaches_backend && host_env("DEEPSEEK_API_KEY") && !credentials_present {
+            if host_env("DEEPSEEK_API_KEY") && !credentials_present {
                 present_keys.push("DEEPSEEK_API_KEY（Host 环境）".to_owned());
                 credentials_present = true;
             }
@@ -265,12 +249,6 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
                 if is_present_file(&rel(private_home, file)) {
                     present_files.push(file.to_owned());
                 }
-            }
-            if mode == PermissionMode::Sandboxed {
-                // The value is classified here and dropped; only the flag leaves.
-                loopback_blocked = crate::backends::deepseek::base_url_candidates(private_home, private_home)
-                    .iter()
-                    .any(|candidate| crate::model_endpoint::names_loopback(&candidate.value));
             }
             (vec!["DEEPSEEK_API_KEY"], vec![DSH_ENV, DSH_PATCH_ACP], deepseek_templates())
         }
@@ -283,7 +261,7 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
             if is_present_file(&rel(private_home, CODEX_CONFIG)) {
                 present_files.push(CODEX_CONFIG.to_owned());
             }
-            if env_reaches_backend && host_env("OPENAI_API_KEY") {
+            if host_env("OPENAI_API_KEY") {
                 present_keys.push("OPENAI_API_KEY（Host 环境）".to_owned());
                 credentials_present = true;
             }
@@ -316,19 +294,15 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
         CredentialState::Ready
     } else if !credentials_present {
         CredentialState::MissingCredentials
-    } else if loopback_blocked {
-        CredentialState::LoopbackRequiresFullAccess
     } else {
         CredentialState::Ready
     };
     CredentialProbe {
         backend: backend.as_str().to_owned(),
-        mode: mode.as_str().to_owned(),
         state,
         private_home: private_home.to_path_buf(),
         credentials_present,
         model_connectivity: "not_checked",
-        loopback_blocked,
         present_keys,
         present_files,
         required_keys: required_keys.into_iter().map(str::to_owned).collect(),
@@ -345,7 +319,7 @@ pub fn probe(backend: AgentBackend, private_home: &Path, mode: PermissionMode, o
 ///
 /// Only where the probe is authoritative:
 /// * DeepSeek: dsh needs `DEEPSEEK_API_KEY` (private `.dsh/.env`, or the Host
-///   environment where it reaches the backend);
+///   environment);
 /// * Codex: no usable `auth.json`, no `OPENAI_API_KEY` reaching the backend
 ///   AND no `config.toml` (a config may name another provider / key the probe
 ///   does not model, so its presence lets Codex start and decide);
@@ -870,67 +844,61 @@ mod tests {
         for backend in [AgentBackend::Deepseek, AgentBackend::Codex, AgentBackend::Pi] {
             let home = root.join(format!("empty-{}", backend.as_str()));
             std::fs::create_dir_all(&home).unwrap();
-            let probe = probe(backend, &home, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
+            let probe = probe(backend, &home, &no_env);
             assert_eq!(probe.state, CredentialState::MissingCredentials, "{backend:?}");
-            assert!(!probe.credentials_present && !probe.loopback_blocked);
+            assert!(!probe.credentials_present);
             assert!(!probe.required_files.is_empty());
         }
-        // DeepSeek ready (official endpoint) in the sandbox.
+        // DeepSeek ready (official endpoint).
         let ds = root.join("ds-official");
         write(&ds, DSH_ENV, "DEEPSEEK_API_KEY=sk-real-deepseek-0001\n");
         write(&ds, DSH_PATCH_ACP, "- id: llm-deepseek\n  config:\n    baseURL: https://api.deepseek.com/anthropic\n");
-        let ready = probe(AgentBackend::Deepseek, &ds, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
+        let ready = probe(AgentBackend::Deepseek, &ds, &no_env);
         assert_eq!(ready.state, CredentialState::Ready);
         assert_eq!(ready.present_keys, ["DEEPSEEK_API_KEY"]);
         assert_eq!(ready.present_files, [DSH_ENV, DSH_PATCH_ACP]);
         assert_eq!(ready.templates.len(), 2);
         assert_no_secret(&ready);
-        // DeepSeek + Magpie: refused in the sandbox, ready in full access.
+        // DeepSeek + Magpie (a loopback gateway): ready, Fox adds no layer
+        // that would refuse it; the base URL value is never echoed.
         let magpie = root.join("ds-magpie");
         write(&magpie, DSH_ENV, "MAGPIE_GATEWAY_KEY=magpie-real-0002\nDEEPSEEK_API_KEY=magpie\n");
         write(&magpie, DSH_PATCH_ACP, "- id: llm-deepseek\n  config:\n    baseURL: http://127.0.0.1:3425/v1\n");
-        let refused = probe(AgentBackend::Deepseek, &magpie, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
-        assert_eq!(refused.state, CredentialState::LoopbackRequiresFullAccess);
-        assert!(refused.credentials_present && refused.loopback_blocked);
-        let mut without_templates = refused.clone();
+        let gateway = probe(AgentBackend::Deepseek, &magpie, &no_env);
+        assert_eq!(gateway.state, CredentialState::Ready);
+        assert!(gateway.credentials_present);
+        let mut without_templates = gateway.clone();
         without_templates.templates.clear();
         let text = serde_json::to_string(&without_templates).unwrap();
         assert!(!text.contains("127.0.0.1") && !text.contains("3425"), "the base URL value is not echoed: {text}");
-        assert!(refused.present_keys.contains(&"MAGPIE_GATEWAY_KEY".to_owned()));
-        assert_no_secret(&refused);
-        let full = probe(AgentBackend::Deepseek, &magpie, PermissionMode::FullAccess, HostOs::Linux, &no_env);
-        assert_eq!(full.state, CredentialState::Ready);
-        assert!(!full.loopback_blocked);
-        // Loopback but no key: the missing login is reported first, both flags kept.
+        assert!(gateway.present_keys.contains(&"MAGPIE_GATEWAY_KEY".to_owned()));
+        assert_no_secret(&gateway);
+        // Loopback but no key: the missing login is reported.
         let both = root.join("ds-both");
         write(&both, DSH_PATCH_ACP, "- id: llm-deepseek\n  config:\n    baseURL: http://localhost:3425/v1\n");
-        let both = probe(AgentBackend::Deepseek, &both, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
-        assert_eq!(both.state, CredentialState::MissingCredentials);
-        assert!(both.loopback_blocked);
-        // Codex: auth.json with a key or tokens; Host env except in the Windows sandbox.
+        assert_eq!(probe(AgentBackend::Deepseek, &both, &no_env).state, CredentialState::MissingCredentials);
+        // Codex: auth.json with a key or tokens, or the Host environment.
         let codex = root.join("codex");
         write(&codex, CODEX_AUTH, r#"{"OPENAI_API_KEY":null,"tokens":{"refresh_token":"chatgpt-refresh-0004"}}"#);
-        let ready = probe(AgentBackend::Codex, &codex, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
+        let ready = probe(AgentBackend::Codex, &codex, &no_env);
         assert_eq!(ready.state, CredentialState::Ready);
         assert_no_secret(&ready);
         let bare = root.join("codex-env");
         std::fs::create_dir_all(&bare).unwrap();
         let env = |name: &str| name == "OPENAI_API_KEY";
-        assert_eq!(probe(AgentBackend::Codex, &bare, PermissionMode::Sandboxed, HostOs::Linux, &env).state, CredentialState::Ready);
-        assert_eq!(probe(AgentBackend::Codex, &bare, PermissionMode::Sandboxed, HostOs::Windows, &env).state, CredentialState::MissingCredentials);
-        assert_eq!(probe(AgentBackend::Codex, &bare, PermissionMode::FullAccess, HostOs::Windows, &env).state, CredentialState::Ready);
+        assert_eq!(probe(AgentBackend::Codex, &bare, &env).state, CredentialState::Ready);
         write(&bare, CODEX_AUTH, r#"{"OPENAI_API_KEY":""}"#);
-        assert_eq!(probe(AgentBackend::Codex, &bare, PermissionMode::Sandboxed, HostOs::Linux, &no_env).state, CredentialState::MissingCredentials);
+        assert_eq!(probe(AgentBackend::Codex, &bare, &no_env).state, CredentialState::MissingCredentials);
         // pi: auth.json providers / models.json apiKey.
         let pi = root.join("pi");
         write(&pi, PI_AUTH, r#"{"anthropic":{"type":"api_key","key":"sk-ant-real-0005"},"broken":{"type":"api_key","key":""}}"#);
-        let ready = probe(AgentBackend::Pi, &pi, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
+        let ready = probe(AgentBackend::Pi, &pi, &no_env);
         assert_eq!(ready.state, CredentialState::Ready);
         assert_eq!(ready.present_keys, ["auth.json: anthropic"]);
         assert_no_secret(&ready);
         let pi_models = root.join("pi-models");
         write(&pi_models, PI_MODELS, r#"{"providers":{"local":{"baseUrl":"http://x","apiKey":"pi-models-key-0006"}}}"#);
-        let ready = probe(AgentBackend::Pi, &pi_models, PermissionMode::Sandboxed, HostOs::Linux, &no_env);
+        let ready = probe(AgentBackend::Pi, &pi_models, &no_env);
         assert_eq!(ready.state, CredentialState::Ready);
         assert_no_secret(&ready);
         let _ = std::fs::remove_dir_all(&root);
@@ -1008,9 +976,12 @@ mod tests {
         write(&real, ".codex/config.toml", "model = \"o4\"\n");
         write(&real, ".codex/history.jsonl", "x");
         let real_home = RealHome { home: real.clone(), codex_home: None };
-        let codex: Vec<String> = import_candidates(AgentBackend::Codex, &real_home).into_iter().map(|item| item.destination).collect();
+        // The link is made on Unix only.
         #[cfg(unix)]
-        assert_eq!(codex, [CODEX_CONFIG], "a linked auth.json is not offered");
+        {
+            let codex: Vec<String> = import_candidates(AgentBackend::Codex, &real_home).into_iter().map(|item| item.destination).collect();
+            assert_eq!(codex, [CODEX_CONFIG], "a linked auth.json is not offered");
+        }
         // CODEX_HOME override.
         write(&root, "codex-home/auth.json", r#"{"OPENAI_API_KEY":"sk-openai-real-0003"}"#);
         let custom = RealHome { home: real.clone(), codex_home: Some(root.join("codex-home")) };
@@ -1020,7 +991,7 @@ mod tests {
         let report = import_into(AgentBackend::Codex, &custom, &["file:.codex/auth.json".to_owned()], &targets(std::slice::from_ref(&home)), ImportOptions::default()).unwrap();
         assert_eq!(report.files, [CODEX_AUTH]);
         assert_no_secret(&report.audit_event());
-        assert_eq!(probe(AgentBackend::Codex, &home, PermissionMode::Sandboxed, HostOs::Linux, &no_env).state, CredentialState::Ready);
+        assert_eq!(probe(AgentBackend::Codex, &home, &no_env).state, CredentialState::Ready);
         // pi whitelist.
         write(&real, PI_AUTH, r#"{"anthropic":{"type":"api_key","key":"sk-ant-real-0005"}}"#);
         write(&real, ".pi/agent/sessions/a.jsonl", "x");
@@ -1130,7 +1101,7 @@ mod tests {
         let root = scratch("launch-blocked");
         let empty = root.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        let blocked = |backend| launch_blocked_by_missing_login(&probe(backend, &empty, PermissionMode::Sandboxed, HostOs::Windows, &no_env));
+        let blocked = |backend| launch_blocked_by_missing_login(&probe(backend, &empty, &no_env));
         assert!(blocked(AgentBackend::Codex));
         assert!(blocked(AgentBackend::Deepseek));
         assert!(!blocked(AgentBackend::Pi), "pi may read keys the probe does not see");
@@ -1138,11 +1109,11 @@ mod tests {
         // Codex with a config.toml (may name another provider): let it start.
         let configured = root.join("configured");
         write(&configured, CODEX_CONFIG, "model_provider = \"azure\"\n");
-        assert!(!launch_blocked_by_missing_login(&probe(AgentBackend::Codex, &configured, PermissionMode::Sandboxed, HostOs::Windows, &no_env)));
+        assert!(!launch_blocked_by_missing_login(&probe(AgentBackend::Codex, &configured, &no_env)));
         // A login present: never blocked.
         let ready = root.join("ready");
         write(&ready, CODEX_AUTH, r#"{"OPENAI_API_KEY":"sk-openai-real-0003"}"#);
-        assert!(!launch_blocked_by_missing_login(&probe(AgentBackend::Codex, &ready, PermissionMode::Sandboxed, HostOs::Windows, &no_env)));
+        assert!(!launch_blocked_by_missing_login(&probe(AgentBackend::Codex, &ready, &no_env)));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

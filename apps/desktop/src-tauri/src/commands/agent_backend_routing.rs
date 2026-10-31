@@ -269,7 +269,7 @@ pub struct AgentBackendConversationRequest {
 pub fn agent_backend_network_status(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: AgentBackendConversationRequest) -> ApiResponse<crate::external_backend::NetworkStatus> {
     match external.network_status(&request.conversation_id) {
         Ok(status) => ApiResponse::success(status),
-        Err(error) => ApiResponse::failure("sandbox.network_status_failed", error, true),
+        Err(error) => ApiResponse::failure("agent_backend.network_status_failed", error, true),
     }
 }
 
@@ -286,7 +286,7 @@ pub async fn agent_backend_preview_action(external: tauri::State<'_, crate::exte
     Ok(match external.preview_action(&request.conversation_id, &request.preview, request.stop).await {
         Ok(_) if request.stop => ApiResponse::success(true),
         Ok(url) => super::external_url_open(super::OpenExternalUrlRequest { url }),
-        Err(error) => ApiResponse::failure("sandbox.preview_failed", error, true),
+        Err(error) => ApiResponse::failure("agent_backend.preview_failed", error, true),
     })
 }
 
@@ -377,7 +377,7 @@ pub fn agent_backend_permission_status(
     ApiResponse::success(external.permission_status(request.conversation_id.as_deref()))
 }
 
-/// Revoke full access mid-session (restarts the backend in the sandbox).
+/// Revoke full access mid-session (restarts the backend without it).
 #[tauri::command]
 pub async fn agent_backend_revoke_full_access(
     external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
@@ -618,12 +618,12 @@ pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> 
 //
 // * `agent_backend.native_mode.conversation.<id>`: the conversation's current
 //   native choice, including the Agent's own full-access mode.
-// * `agent_backend.native_mode.last.<backend>`: each Agent's last sandboxed
-//   choice, the starting point of its next new conversation.
+// * `agent_backend.native_mode.last.<backend>`: each Agent's last
+//   non-full-access choice, the starting point of its next new conversation.
 // * `agent_backend.native_mode.draft_full.<backend>`: `1` / `0` when the
 //   user picked (or left) the full-access option in a new conversation's
 //   list; read once at creation and cleared. Absent: the setting is ignored;
-//   the Agent's last sandboxed choice is the default.
+//   the Agent's last non-full-access choice is the default.
 
 pub(crate) const NATIVE_MODE_CONVERSATION_PREFIX: &str = "agent_backend.native_mode.conversation.";
 pub(crate) const NATIVE_MODE_LAST_PREFIX: &str = "agent_backend.native_mode.last.";
@@ -638,7 +638,7 @@ pub(crate) fn stored_conversation_native_mode(database: &crate::database::Databa
     non_empty_setting(database, &format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"))
 }
 
-/// The Agent's last sandboxed choice.
+/// The Agent's last non-full-access choice.
 pub(crate) fn stored_last_native_mode(database: &crate::database::Database, backend: AgentBackend) -> Option<String> {
     non_empty_setting(database, &format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()))
 }
@@ -655,7 +655,7 @@ pub(crate) fn clear_draft_full_access_choice(database: &crate::database::Databas
 
 /// Record a new conversation's starting native mode. An explicit full-access
 /// pick stores the Agent's own full mode; otherwise the Agent's last
-/// sandboxed choice is the starting point.
+/// non-full-access choice is the starting point.
 pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend, full_access: bool) {
     let mode = if full_access {
         fox_agent_backend::native_permission::full_access_mode(backend).map(str::to_owned)
@@ -680,7 +680,7 @@ pub struct NativePermissionRequest {
     /// The option to switch to (set only).
     #[serde(default)]
     pub mode: Option<String>,
-    /// 设置 → an Agent's default permission: remember the sandboxed choice
+    /// 设置 → an Agent's default permission: remember the non-full-access choice
     /// for its next new conversations only, leaving the one-shot draft pick
     /// (and 「新外部会话使用完全访问」) untouched. Full access is refused here.
     #[serde(default)]
@@ -745,7 +745,7 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
     };
     let current = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), false, &context);
     // The restricted choice behind a full-access selection, for settings.
-    let sandboxed = stored
+    let restricted = stored
         .as_deref()
         .filter(|mode| !fox_agent_backend::native_permission::is_full_access(backend, mode))
         .filter(|mode| catalog.options.iter().any(|option| option.id == *mode && !option.full_access && option.disabled_reason.is_none()))
@@ -755,7 +755,7 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
     ApiResponse::success(serde_json::json!({
         "catalog": catalog,
         "current": current,
-        "sandboxedMode": sandboxed,
+        "restrictedMode": restricted,
         "fullAccess": current_full,
         "fullAccessGranted": false,
         "fullAccessForbidden": forbidden,

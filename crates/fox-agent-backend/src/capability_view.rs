@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn stock_pi_never_claims_per_call_approval_and_gated_pi_does() {
-        let planned = LaunchDeclaration::declare(PermissionMode::Sandboxed);
+        let planned = LaunchDeclaration::declare(PermissionMode::Standard);
         let stock = capability_view(AgentBackend::Pi, None, &planned, PiLaunch::Stock);
         assert_eq!(stock.approval.summary, "审批：无逐次审批");
         assert!(stock.approval.detail.contains("不经 Fox 审批直接执行：读文件、写文件、命令、网络"));
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn deepseek_cancel_is_request_only_and_observability_unverified() {
-        let planned = LaunchDeclaration::declare(PermissionMode::Sandboxed);
+        let planned = LaunchDeclaration::declare(PermissionMode::Standard);
         let view = capability_view(AgentBackend::Deepseek, None, &planned, PiLaunch::Stock);
         assert_eq!(view.cancel.summary, "取消：仅发送请求");
         assert_eq!(view.observability.summary, "可观测：未验证");

@@ -31,11 +31,9 @@ const SECRET = 'sk-test-0123456789abcdef'
 function probe(overrides: Partial<CredentialProbe> = {}): CredentialProbe {
   return {
     backend: 'deepseek',
-    mode: 'sandboxed',
     state: 'missing_credentials',
     privateHome: '/fox/private-home/p1/deepseek',
     credentialsPresent: false,
-    loopbackBlocked: false,
     presentKeys: [],
     presentFiles: [],
     requiredKeys: ['DEEPSEEK_API_KEY'],
@@ -56,7 +54,7 @@ function noValue(model: unknown) {
   expect(JSON.stringify(model)).not.toMatch(/sk-[A-Za-z0-9]{8,}/)
 }
 
-describe('credentialCardModel: three probe states', () => {
+describe('credentialCardModel: probe states', () => {
   test('ready → no card', () => {
     expect(credentialCardModel(probe({ state: 'ready', credentialsPresent: true, presentKeys: ['DEEPSEEK_API_KEY'] }), allowed)).toBeNull()
     expect(credentialCardModel(null)).toBeNull()
@@ -76,24 +74,10 @@ describe('credentialCardModel: three probe states', () => {
     noValue(card)
   })
 
-  test('loopback_requires_full_access → different card: full access at creation or official endpoint, no import', () => {
-    const p = probe({ state: 'loopback_requires_full_access', credentialsPresent: true, loopbackBlocked: true, presentKeys: ['DEEPSEEK_API_KEY'], presentFiles: ['.dsh/.env'] })
-    const card = credentialCardModel(p, allowed)!
-    expect(card.kind).toBe('loopback')
-    expect(card.title).toBe('本机网关连接未就绪')
-    expect(card.description).toContain('Fox 不再为外部 Agent 添加 SRT 网络代理')
-    expect(card.description).toContain('https://api.deepseek.com/anthropic')
-    expect(card.offerImport).toBe(false)
-    expect(card.requiredKeys).toEqual([])
-    expect(card.templates.map((t) => t.id)).toEqual(['deepseek_official'])
-    noValue(card)
-  })
-
-  test('loopback no longer depends on a Fox full-access grant', () => {
-    const p = probe({ state: 'loopback_requires_full_access', loopbackBlocked: true })
-    const card = credentialCardModel(p, forbidden)!
-    expect(card.description).toContain('本机网关正在运行')
-    expect(card.description).not.toContain('新外部会话使用完全访问')
+  test('there is no loopback card any more: a loopback gateway is not refused', () => {
+    // The Host's CredentialState has only ready / missing_credentials.
+    const card = credentialCardModel(probe({ state: 'ready', credentialsPresent: true, presentKeys: ['DEEPSEEK_API_KEY'], presentFiles: ['.dsh/.env'] }), forbidden)
+    expect(card).toBeNull()
   })
 })
 
@@ -195,7 +179,7 @@ describe('probe target: the card shows before the first message (80b1622)', () =
 describe('permission mode (semantics A)', () => {
   test('full access option is disabled with the reason under FORBIDDEN', () => {
     const open = externalPermissionModeOptions(allowed)
-    expect(open.map((o) => [o.value, o.disabled])).toEqual([['sandboxed', false], ['full_access', false]])
+    expect(open.map((o) => [o.value, o.disabled])).toEqual([['standard', false], ['full_access', false]])
     const closed = externalPermissionModeOptions(forbidden)
     expect(closed[1]).toMatchObject({ value: 'full_access', disabled: true, reason: '管理员已禁止完全访问' })
     expect(externalPermissionModeOptions({ ...forbidden, forbiddenReason: null })[1].reason).toBe('本机已禁止完全访问')
@@ -203,14 +187,14 @@ describe('permission mode (semantics A)', () => {
 
   test('effective draft mode never sends full_access when forbidden', () => {
     expect(effectiveDraftPermissionMode('full_access', allowed)).toBe('full_access')
-    expect(effectiveDraftPermissionMode('full_access', forbidden)).toBe('sandboxed')
-    expect(effectiveDraftPermissionMode('sandboxed', allowed)).toBe('sandboxed')
+    expect(effectiveDraftPermissionMode('full_access', forbidden)).toBe('standard')
+    expect(effectiveDraftPermissionMode('standard', allowed)).toBe('standard')
   })
 
   test('the bar names the Agent-native boundary, not a Fox lock', () => {
     expect(permissionChipLabel(null)).toBeNull()
     expect(permissionChipLabel({ ...allowed, mode: 'full_access', granted: true, locked: true })).toBe('隔离：Fox 不额外包装（Agent 原生）')
-    expect(permissionChipLabel({ ...allowed, mode: 'sandboxed', locked: true })).toBe('隔离：Fox 不额外包装（Agent 原生）')
+    expect(permissionChipLabel({ ...allowed, mode: 'standard', locked: true })).toBe('隔离：Fox 不额外包装（Agent 原生）')
   })
 
   test('risk copy describes the Agent native mode and private HOME', () => {

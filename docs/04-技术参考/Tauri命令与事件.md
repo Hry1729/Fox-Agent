@@ -71,7 +71,9 @@ type ApiResponse<T> =
 `lifecycle_hook_save` 接受 `event/matcher/action/reason/enabled/priority`。事件为 `before_run|before_tool|after_tool|after_run`，动作为 `block|require_approval|annotate`；非 `before_tool` 只能使用 `annotate`。命令层拒绝未知枚举、空 matcher/reason 和超长输入。
 
 
-`approval_resolve` 接收 `{ approvalId, decision }`，其中 `decision` 为 `deny | allow_once | allow_conversation`。`allow_conversation` 会在同一事务中解决当前审批并写入当前会话的同名工具授权；后续调用仍需通过 Expert/Assistant allowlist、只读模式、路径边界和 Host 参数校验，只跳过该工具的交互式审批。
+`approval_resolve` 接收 `{ approvalId, decision }`，其中 `decision` 为 `deny | allow_once | allow_conversation`，可选值以审批请求的 `availableDecisions` 为准。Fox 自有工具（含命令类）只提供 `allow_once`、`allow_project_rule`、`deny`：`allow_project_rule` 走单独的 `approval_allow_project_rule` 命令，解决当前审批并写入一条项目前缀规则（前缀可由用户编辑，Host 校验它确实覆盖当前命令）。`allow_conversation` 只用于 MCP 等工具：在同一事务中解决当前审批并写入当前会话的同名工具授权；后续调用仍需通过 Expert/Assistant allowlist、只读模式、路径边界和 Host 参数校验。按输入哈希的会话授权已删除（A1）。
+
+A1 新增的权限命令：`conversation_permission_update` 接受四档模式（`read_only | ask | auto | full_access`；首次开启完全访问需要项目确认，否则返回 `permission.full_access_confirmation_required`）、`permission_rules_list` / `permission_rule_revoke`（设置页规则列表与撤销）、`approval_allow_project_rule`、`permission_audit_list`（Run 详情的自动放行审计）。
 
 本地文件目录命令只接受 Host 文件夹选择器返回的绝对路径。`file_source_add/rescan` 在阻塞线程中扫描普通目录，跳过符号链接、Fox 受管知识目录、不支持格式和超过 256 MB 的文件；`file_source_remove` 只删除 `knowledge.db` 中的来源及目录缓存，不删除用户文件。
 
@@ -99,8 +101,8 @@ type ApiResponse<T> =
 | `fox://child-run-updated` | `ChildRunNotification` | 按 `childRunId` 更新 Child Run 的 queued/running/terminal 状态、预算使用和有限结果 | 是 |
 | `fox://approval-requested` | `ApprovalRecord` | 展示待审批交互；历史外部审批记录不恢复退休驱动的执行权 | 是 |
 | `fox://approval-resolved` | `ApprovalRecord` | 同步审批终态 | 是 |
-| `fox://kernel-state-invalidated` | `KernelStateInvalidation { schemaVersion: 1 }` | Kernel 事实变化后通知前端重新读取 Kernel 快照（`kernel_state_publisher.rs`） | 是 |
-| `fox://kernel-model-preview` | `KernelModelPreview` | Kernel 模型请求的流式预览（`runtime_host/kernel_host.rs`） | 是 |
+| `fox://kernel-state-invalidated` | `KernelStateInvalidation { schemaVersion: 1 }` | Kernel 事实变化后通知前端重新读取 Kernel 快照（`kernel_state_publisher.rs`）；Kernel 执行循环删除后只剩初始一次失效通知 | 是 |
+| `fox://kernel-model-preview` | `KernelModelPreview` | 原 Kernel 模型请求的流式预览（`runtime_host/kernel_host.rs`）；Kernel 执行循环已删除，新 Run 不再发送 | 是 |
 | `fox://knowledge-download-progress` | `KnowledgeDownloadProgress` | 下载进度与终态 | 是 |
 | `fox://continuation-decision` | 续做对账决定 | 启动 / 后台续做对账扫描的决定（`runtime_host/mod.rs`） | 否（当前前端未监听） |
 | `fox://continuation-diagnostic` | 续做诊断（含 `code`） | 续做对账失败诊断，如 `runtime.continuation.reconciliation_scan_failed` | 否 |

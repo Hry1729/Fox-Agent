@@ -119,8 +119,12 @@ CREATE INDEX IF NOT EXISTS idx_agent_backend_audit_log_created
 /// Schema version the desktop records for [`FULL_ACCESS_MIGRATION_SQL`].
 pub const FULL_ACCESS_SCHEMA_VERSION: i64 = 96;
 
-/// Permission mode a retired external conversation was created with.
-pub const NEW_MODE_SANDBOXED: &str = "sandboxed";
+/// Permission mode a new external conversation can be created with: no
+/// full-access grant ([`crate::external_home::PermissionMode::Standard`]) or
+/// full access. The pre-B3 name of the first,
+/// [`crate::external_home::LEGACY_STANDARD_MODE`] (`"sandboxed"`), is still
+/// accepted.
+pub const NEW_MODE_STANDARD: &str = "standard";
 pub const NEW_MODE_FULL_ACCESS: &str = "full_access";
 
 /// Refusal code: full access requested where it cannot be granted.
@@ -144,7 +148,7 @@ pub fn is_supported(backend: AgentBackend) -> bool {
 }
 
 /// Whether a new conversation gets a full-access grant. `requested` is the
-/// UI's choice (absent = sandboxed). Full access is only for external
+/// UI's choice (absent = standard, no grant). Full access is only for external
 /// backends and is refused outright (not silently downgraded) when the
 /// machine forbids it (`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1`), so a UI that
 /// ignores the disabled option cannot get around it. With every external
@@ -158,14 +162,14 @@ pub struct ModeRefusal {
 pub fn decide_new_conversation_mode(requested: Option<&str>, backend: AgentBackend, forbidden: bool) -> Result<bool, ModeRefusal> {
     match requested.map(str::trim).filter(|value| !value.is_empty()) {
         None => Ok(false),
-        Some(NEW_MODE_SANDBOXED) => Ok(false),
+        Some(NEW_MODE_STANDARD | crate::external_home::LEGACY_STANDARD_MODE) => Ok(false),
         Some(NEW_MODE_FULL_ACCESS) if backend == AgentBackend::Fox => Err(ModeRefusal {
             code: RouteError::CODE_INVALID,
             message: "完全访问只适用于外部 Agent 后端，而本版本的会话使用内置 Pi 驱动".into(),
         }),
         Some(NEW_MODE_FULL_ACCESS) if forbidden => Err(ModeRefusal {
             code: CODE_FULL_ACCESS_FORBIDDEN,
-            message: "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），外部后端只能在沙箱中运行".into(),
+            message: "本机已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN=1），外部后端不能获得完全访问".into(),
         }),
         Some(NEW_MODE_FULL_ACCESS) => Ok(true),
         Some(other) => Err(ModeRefusal { code: RouteError::CODE_INVALID, message: format!("未知的权限模式：{other}") }),
@@ -686,9 +690,11 @@ mod tests {
     }
 
     #[test]
-    fn new_conversation_mode_is_sandboxed_by_default_and_forbidden_refuses_full_access() {
-        use super::{decide_new_conversation_mode as decide, CODE_FULL_ACCESS_FORBIDDEN};
+    fn new_conversation_mode_is_standard_by_default_and_full_access_is_refused() {
+        use super::decide_new_conversation_mode as decide;
         assert_eq!(decide(None, AgentBackend::Fox, false), Ok(false));
+        assert_eq!(decide(Some("standard"), AgentBackend::Fox, true), Ok(false));
+        // The pre-B3 name of the same choice is still accepted.
         assert_eq!(decide(Some("sandboxed"), AgentBackend::Fox, true), Ok(false));
         // Full access only ever applied to an external backend; the single
         // supported path refuses it instead of silently downgrading.

@@ -35,7 +35,7 @@ export const AGENT_BACKEND_LABELS: Record<AgentBackendId, string> = {
  * hidden backend still open, show their backend and run as before.
  *
  * Product decision 2026-10-24 hid Codex because of the outer SRT layer. That
- * layer now applies only to the Fox Agent, so Codex is offered again. Keep
+ * layer is gone (plan B2), so Codex is no longer hidden. Keep
  * this list and the Host's `AgentBackend::HIDDEN` in sync.
  */
 export const HIDDEN_AGENT_BACKENDS: readonly AgentBackendId[] = []
@@ -433,7 +433,7 @@ export function withoutRefusedSend<M extends { id: string }, R extends { id: str
 // ---------------------------------------------------------------------------
 // External backend wiring batch: the four effective capability dimensions
 // (`agent_backend_capabilities`, built by `fox_agent_backend::capability_view`
-// from the backend's measured declaration and the session's sandbox
+// from the backend's measured declaration and the session's launch
 // declaration). Display only.
 
 export interface AgentBackendCapabilityDimension {
@@ -443,7 +443,8 @@ export interface AgentBackendCapabilityDimension {
 
 export interface AgentBackendCapabilities {
   backend: AgentBackendId
-  mode: 'sandboxed' | 'full_access' | string
+  /** `standard` (no full access; `sandboxed` in data written before plan B3) or `full_access`. */
+  mode: 'standard' | 'full_access' | string
   /** `live`: from this session's launch; `planned`: before the first launch. */
   source: 'live' | 'planned' | string
   approval: AgentBackendCapabilityDimension

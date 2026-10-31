@@ -5,8 +5,8 @@
 //   Host greys (Codex「帮我批准」off OpenAI, FORBIDDEN, full access
 //   mid-session) shows its reason inline next to the picker.
 // * dsh: a mid-session change is marked「下一轮重启生效」.
-// * This is the Agent's own permission mode. Fox no longer adds an outer SRT
-//   sandbox; the confirmation explains the native consequences.
+// * This is the Agent's own permission mode; Fox adds no outer layer. The
+//   confirmation explains the native consequences.
 // * Keyed by target: a late answer for another conversation / backend is
 //   dropped. Every rule is enforced again by the Host.
 import { useCallback, useEffect, useRef, useState } from 'react'

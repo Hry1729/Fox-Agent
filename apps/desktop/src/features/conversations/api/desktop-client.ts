@@ -801,7 +801,7 @@ export const desktopClient = {
   /** Switch the native mode; mid-session full access is refused (only revoke). */
   agentBackendNativePermissionSet: (request: NativePermissionRequest & { mode: string }) =>
     command<NativePermissionView>('agent_backend_native_permission_set', request),
-  /** Revoke full access mid-session (the backend restarts in the sandbox). */
+  /** Revoke full access mid-session (the backend restarts without it). */
   agentBackendRevokeFullAccess: (conversationId: string) =>
     command<{ outcome: string; stopConfirmed: boolean }>('agent_backend_revoke_full_access', { conversationId }),
   // Durably accept a supplementary request for the conversation's active

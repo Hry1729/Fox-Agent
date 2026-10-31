@@ -1,3 +1,4 @@
+> **现状更正（2026-10-31，B4c）**：Kernel 执行循环已在 B1 删除（controller 驱动、`kernel_gateway`、`shadow_reconcile`、`kernel_coordinator/`、`kernel_model_worker`、`kernel_delegation`），Shadow 一并删除。新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关，失败不回退；历史 Kernel Run 在启动时标为中断。`crates/fox-agent-kernel` 只剩状态类型，用于读历史 Run。本文整体为历史方案。
 > **单 Pi 分支适用范围（2026-10-28）**：Kernel 改造历史方案。默认 Authoritative 与 Host 权威继续适用；多引擎目标和下方旧时点的 Pi / Codex / DeepSeek 可选说明已被单 Pi 分支收敛取代，不能据此启用退休引擎。阶段二与 C gap 未完成。
 > 当前状态与证据边界见[单 Pi 主线状态](../01-项目概览/单Pi主线状态.md)。以下历史正文保持原样。
 
