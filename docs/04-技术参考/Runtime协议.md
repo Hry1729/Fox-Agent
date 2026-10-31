@@ -12,7 +12,7 @@
 
 - 本文描述 Fox 自己的 Agent（`conversations.agent_backend = 'fox'`）使用的协议：Host 与 Runtime Sidecar 之间的 `fox-runtime-jsonl`，以及 `--kernel-worker` 一次性模型进程协议。
 - **Kernel Authoritative 是默认执行路径**：未设置 `FOX_KERNEL_MODE` 时新 Run 冻结为 Authoritative（`runtime_host/kernel_authority.rs` 的 `select`）；`FOX_KERNEL_MODE=legacy` 才创建 Legacy 新 Run。已有 Run 沿用冻结的执行权。
-- 外部 Agent（pi、DeepSeek、Codex）**不使用本协议**：它们经 ACP（Agent Client Protocol）由 `crates/fox-agent-backend` 启动和驱动，Host 把 ACP 事件投影为 `run_events` 并通过 `fox://runtime-event` 推给前端。见 [Agent 运行时架构](../02-架构/Agent运行时架构.md) 与 `crates/fox-agent-backend/docs/sandbox.md`。
+- 外部 Agent（Pi、Codex、dsh；目前退役，计划在阶段三恢复）**不使用本协议**：它们经 ACP（Agent Client Protocol）由 `crates/fox-agent-backend` 启动和驱动，Host 把 ACP 事件投影为 `run_events` 并通过 `fox://runtime-event` 推给前端。见 [Agent 运行时架构](../02-架构/Agent运行时架构.md) 与 `crates/fox-agent-backend/docs/sandbox.md`。
 - 工具目录的事实源是 `packages/fox-engine-protocol/schema.json` 的 `toolContracts`（`RUNTIME_TOOL_CATALOG`），当前 73 个工具，分类与审批见[权限参考 · 工具目录](权限参考.md#工具目录)。
 
 ## Envelope

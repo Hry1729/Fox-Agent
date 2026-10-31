@@ -12,7 +12,7 @@
 - `evals/fixtures/` 现有 8 组 Fixture；新增的三组（图评审验收、权限失败、恢复契约）见[可观测性与测试架构](../02-架构/可观测性与测试架构.md)。`evals/harness-v1/` 是另一套独立的 Harness，本次没有复核。
 - **129 个 case 的新基线没有重跑**，本页没有新的通过数，也没有新的 Hash。引用时只能写“2026-08-27 基线 121/121”，不能写成当前版本的结果。
 - 离线 Eval 不在 CI 中。Rust Host、Runtime、前端测试的命令已改为与 CI 一致，见[测试指南](测试指南.md)；下文结论摘要和复现命令里的测试数字、`cargo test --manifest-path ...` 写法都属于当时的基线。
-- 历史外部 Pi ACP、DeepSeek Harness、Codex 已退休，旧验证记录保留在 `crates/fox-agent-backend/docs/`。离线 Eval 不验证单 Pi 阶段二原生持久会话；Host 真实 SRT 仍需单独启用与验收。
+- 外部 Pi、DeepSeek Harness、Codex 目前退役（计划在阶段三恢复），旧验证记录保留在 `crates/fox-agent-backend/docs/`。离线 Eval 不验证单 Pi 阶段二原生持久会话，也不验证 Host 审批引擎的四档判定（由 Rust 单测与 13.31 人工复测覆盖）；Fox 不用沙箱。
 
 
 ## 结论摘要
@@ -94,7 +94,7 @@
 | Fox Planner/Goal Intent | 7/7 | Planner 触发和粘贴文本不误建 Goal 等历史回归 | 模型生成的计划质量和任务完成率 |
 | Fox Runtime Recovery Boundary | 5/5 | Session 消息清洗、工具关联保留、SQLite fallback 优先语义 | Host 重启、SQLite 回放、审批/Child Run 恢复成功率 |
 | Runtime Tool Catalog | 65/65 | 当前工具目录的名称唯一性、类别、执行位置和强制审批；Profile 暴露由 Runtime 回归另行约束 | 模型是否能正确选择工具、Host 是否实际授权执行 |
-| Permission/Failure Contract | 13/13 | Capability Manifest 的拒绝原因、v1/v2 兼容和 Work Loop 约束 | OS 沙箱、Tauri 权限或真实用户审批交互 |
+| Permission/Failure Contract | 13/13 | Capability Manifest 的拒绝原因、v1/v2 兼容和 Work Loop 约束 | Host 审批引擎、Tauri 权限或真实用户审批交互（Fox 不用 OS 沙箱） |
 
 这些用例测试的是 Harness 的确定性函数和契约。名称中的 `BFCL-style`、`AgentDojo-style` 表示参考了问题类型，不表示运行了官方评测器，也不能写成“BFCL 7/7”或“AgentDojo 4/4”。
 
