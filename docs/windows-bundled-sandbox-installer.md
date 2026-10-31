@@ -1,6 +1,6 @@
 # Windows 安装包与受管运行时
 
-> 现状（2026-10-31，B4c）：**Fox 已不用沙箱。** SRT、srt 账户、网络规则和 ACP stdio 桥已在 A1、B2 删除；Fox Host 命令在 Fox Job 中执行（见[安全架构](02-架构/安全架构.md)）。安装器里仍叫 “sandbox” 的脚本、环境变量和目录（`enable-sandbox.ps1`、`FOX_SANDBOX_RUNTIME_PACKAGE`、`%ProgramFiles%\Fox\sandbox-runtime`）只是历史命名，现在安装的是外部 Agent 用的受管运行时（Node 及外部 Agent 程序）。外部 Agent（Pi、Codex、dsh）计划在下一阶段恢复，目前不可用。本轮未构建或运行安装器。
+> 现状（2026-10-31，B4c）：**Fox 已不用沙箱。** SRT、srt 账户、网络规则和 ACP stdio 桥已在 A1、B2 删除；Fox Host 命令在 Fox Job 中执行（见[安全架构](02-架构/安全架构.md)）。安装器里仍叫 “sandbox” 的脚本、环境变量和目录（`enable-sandbox.ps1`、`FOX_SANDBOX_RUNTIME_PACKAGE`、`%ProgramFiles%\Fox\sandbox-runtime`）只是历史命名，现在安装的是外部 Agent 用的受管运行时（Node 及外部 Agent 程序）。外部 Agent（Pi、Codex、dsh）已在阶段三（C1–C4）恢复。
 
 `pnpm tauri:build:windows` 构建 x64 NSIS 安装包。安装器申请一次管理员授权，先安装受管运行时，再复制 Fox 应用文件。运行时安装失败时停止安装并返回非零退出码。
 
@@ -9,14 +9,14 @@
 先准备 `apps/desktop/src-tauri/windows/sandbox-release.json` 固定的运行时 ZIP，再执行：
 
 ```powershell
-$env:FOX_SANDBOX_RUNTIME_PACKAGE = 'D:\releases\fox-sandbox-runtime-0.1.6-windows-x64.zip'
+$env:FOX_SANDBOX_RUNTIME_PACKAGE = 'D:\releases\fox-sandbox-runtime-0.1.7-windows-x64.zip'
 pnpm install --frozen-lockfile
 pnpm tauri:build:windows
 ```
 
 构建脚本（`scripts/prepare-sandbox-installer.mjs`）检查 ZIP 的 SHA256、Host 的运行时版本（`launch.rs` 的 `RUNTIME_PACKAGE_VERSION`）和模型适配器固定哈希；任何一项不一致都会阻止构建。ACP bridge 的哈希校验已随 bridge 删除。生成目录 `resources/sandbox-installer` 不进入 Git。
 
-运行时包由 `build-runtime-package.py` 生成：不再打包 `srt\` 和 `acp-bridge\`，`pack` / `check` 遇到这两个目录直接拒绝。当前 pin 的 0.1.6 包是 B2 之前构建的，仍带 `srt\`；安装时第 6 步会把它删掉。在 Windows 上重建运行时包并同时更新 `sandbox-release.json`、`launch.rs` 的 `RUNTIME_PACKAGE_VERSION`、`build-runtime-package.py` 的 `DEFAULT_VERSION`，留给 B5。
+运行时包当前 pin 为 **0.1.7**（B5，SHA256 `8af08d0d580c7613ff90c3067de9a6b7b7c07d26ceea4515942d997fee961df1`）：不带 `srt\`、`acp-bridge\`；`pi-gate\` 含支持 `FOX_PI_MCP_EXTENSION` 的 `pi-gated.cmd`、`fox-approval-gate.ts` 和 Fox 工具扩展 `fox-mcp-tools.ts`。构建：`crates/fox-agent-backend/scripts/windows/build-runtime-release.ps1 -Version 0.1.7 -OutDir <目录>`（Windows），按 `scripts/windows/runtime-package/` 固定的 Node（`node.json`，含 SHA256）和各 Agent 的 `package-lock.json` 执行 `npm ci`，再由 `build-runtime-package.py` stage / pack（`pack` / `check` 遇到 `srt\`、`acp-bridge\` 或不支持 Fox 工具的 pi-gate 直接拒绝），最后按 Host 预检顺序检查包内布局。windows-ci 的 workflow_dispatch 输入 `runtime_package=true` 在 Windows runner 上执行同一脚本，只上传 artifact（`fox-sandbox-runtime-<版本>-windows-x64`，保留 90 天），不发 Release。0.1.7 来自 run 41176396662（artifact 13033915940），与 run 41174998479 独立构建的 SHA256 一致。换版本时同时更新 `sandbox-release.json`、`launch.rs` 的 `RUNTIME_PACKAGE_VERSION`、`build-runtime-package.py` 的 `DEFAULT_VERSION`（单测核对三者一致）。
 
 ## 安装
 
@@ -47,6 +47,6 @@ pwsh -File crates/fox-agent-backend/scripts/windows/tests/test-enable-faults.ps1
 python -m unittest crates/fox-agent-backend/scripts/windows/tests/test_build_runtime_package.py
 ```
 
-Hook 测试编译并运行不提权的隔离 NSIS 安装器，以假安装脚本检查非零退出和 `ok=false` 两条失败路径。以上脚本测试都不在 windows-ci 里。完整 UAC 安装、旧机器升级时的 SRT 清理、安装后的桌面启动和真实模型对话需要另行实测（清单见 B2 执行报告与 `crates/fox-agent-backend/docs/sandbox.md` 13.31）。
+Hook 测试编译并运行不提权的隔离 NSIS 安装器，以假安装脚本检查非零退出和 `ok=false` 两条失败路径。前三项（Python 单测、installer pin 检查、`test-enable-faults.ps1` 函数级模式）在 windows-ci 的 Runtime package scripts job 里跑（全量运行或 `runtime_package=true`）；hook 测试不在 CI 里。完整 UAC 安装、旧机器升级时的 SRT 清理、安装后的桌面启动和真实模型对话需要另行实测（清单见 `crates/fox-agent-backend/docs/sandbox.md` 13.31、13.32）。
 
 Tauri 安装钩子说明：[Windows Installer](https://v2.tauri.app/distribute/windows-installer/)。

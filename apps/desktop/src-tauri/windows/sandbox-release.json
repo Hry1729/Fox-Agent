@@ -1,7 +1,7 @@
 {
-  "version": "0.1.6",
+  "version": "0.1.7",
   "architecture": "x64",
-  "sha256": "c83bcee7e39d8ec42c4b6237e403fc3390b091e79a73a644e04b72bbfaf80e5f",
+  "sha256": "8af08d0d580c7613ff90c3067de9a6b7b7c07d26ceea4515942d997fee961df1",
   "adapters": {
     "backends/pi/node_modules/pi-acp/dist/index.js": "bb8c9785ce8dd5b88fdcfae4b12521ad8f4e433ba23d907109627018b328f7e3",
     "backends/pi/node_modules/pi-acp/dist/fox-turn-outcome.mjs": "a114e4f99ed0be6567ff1845cb6c3f412ac4491a0fab6cfc8241ec5f27a99f18",

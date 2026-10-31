@@ -187,11 +187,10 @@ export function createHostTools(requestHost) {
     {
       name: 'compute_job_start', label: 'Start or resume background computation',
       description: "Start bounded background attachment computation. For a new job supply idempotencyKey and params. Poll compute_job_status until terminal, then read compute_job_result. A paused job can be resumed using jobId only; never repeat completed writes. Background jobs always use chunked processing: code defines onChunk(chunk) and optional onFinish(). Use profile=large for large files. Whole-array scripts belong in synchronous attachment_compute. Run authorization and execution budget still apply.",
-      // Object-rooted, not a top-level union. The (since deleted) Kernel worker installed these
-      // schemas as proposal definitions and a `anyOf` at the root is not an
-      // installable function signature, so the union form made the whole
-      // `kernel.ready` handshake fail for every attachment-capable Run — the
-      // data-analysis scenario included. The two shapes stay mutually exclusive
+      // Object-rooted, not a top-level union: an `anyOf` at the root is not an
+      // installable function signature for every provider, and the union
+      // form once failed every attachment-capable Run — the data-analysis
+      // scenario included. The two shapes stay mutually exclusive
       // in the handler: `idempotencyKey` + `params` start a job, `jobId` alone
       // resumes one, and supplying neither is rejected there.
       parameters: Type.Object({

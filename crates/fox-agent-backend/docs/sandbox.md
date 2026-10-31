@@ -1839,7 +1839,7 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 > 承接 Fox 详细方案（2026-10-31）阶段二、三。本批之后：
 > - Kernel 执行循环、SRT 与整个 Fox 沙箱一族已从代码删除（B1、B2）；代码里只剩迁移和清理旧安装的部分（`enable-sandbox.ps1` 第 5、6 步）。
 > - 外部 Agent（Pi、Codex、dsh）解除退役（C1），按 Fox 四档审批映射到各自的原生档位（C2）；Fox 工具经本地 MCP 桥交给外部 Agent（C3）；启动失败直接报错并给出解决办法，不回退到 PiNative（C4）。
-> - Windows 外部运行时包升到 **0.1.7**（B5）：不再带 `srt\`、`acp-bridge\`；`pi-gate\` 里的 `pi-gated.cmd` 支持 `FOX_PI_MCP_EXTENSION`，并带 `fox-mcp-tools.ts`。旧的 0.1.6 包里的 pi-gate 不能加载 Fox 工具，Pi 会话会报 `agent_backend_fox_tools_unsupported`。
+> - Windows 外部运行时包升到 **0.1.7**（B5）：不再带 `srt\`、`acp-bridge\`；`pi-gate\` 里的 `pi-gated.cmd` 支持 `FOX_PI_MCP_EXTENSION`，并带 `fox-mcp-tools.ts`。旧的 0.1.6 包里的 pi-gate 不能加载 Fox 工具，Pi 会话会报 `agent_backend_fox_tools_unsupported`。0.1.7 的 SHA256 为 `8af08d0d580c7613ff90c3067de9a6b7b7c07d26ceea4515942d997fee961df1`，来自 windows-ci run 41176396662 的 artifact `fox-sandbox-runtime-0.1.7-windows-x64`（与 run 41174998479 的独立构建一致）。
 > - 运行时包由 `scripts/windows/build-runtime-release.ps1` 按 `scripts/windows/runtime-package/` 里固定的 Node 与各 Agent 的 lockfile 构建；windows-ci 的 `runtime_package=true` 在 Windows runner 上产出包（只上传 artifact，不发 Release）。
 > - 安装第 6 步除了本次安装的版本目录，也删除已安装旧版本目录（如 `0.1.6\`）里的 `srt\`、`acp-bridge\`；只有第 5 步（清理旧版 Fox 装的 SRT）失败时才保留旧版本里的 `srt\`，供下次安装重试卸载。
 

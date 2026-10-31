@@ -24,7 +24,7 @@
 
 ### Pi 1.4.0 升级核验（2026-10-27）
 
-- npm `latest` 与上游 `v1.4.0` 发布一致。三个 Pi SDK 包和受管原生 Pi 同步锁定 `1.4.0`，`pi-acp` 保持 `0.0.34`。Windows 运行时包版本为 `0.1.6`。
+- npm `latest` 与上游 `v1.4.0` 发布一致。三个 Pi SDK 包和受管原生 Pi 同步锁定 `1.4.0`，`pi-acp` 保持 `0.0.34`。Windows 运行时包版本为 `0.1.7`（B5：不带 srt，pi-gate 支持 Fox 工具扩展）。
 - Pi 1.4 将系统提示和工具声明放入消息记录，并从 `SessionManager` 重建请求。Fox 通过 Adapter 写入历史、补充要求、任务通知和审查提示；Kernel 保留 Host 冻结的工具集，供应商请求仍使用 Host 的严格参数 schema。
 - CLI 改用 `dist/bundle/cli.js`。模型代理补丁同时覆盖 SDK dispatcher 和 CLI bundle chunk，分别校验上游哈希及补丁后哈希。
 - 定向源码测试覆盖 Kernel、Legacy、历史恢复、通知跨轮保留、供应商协议、取消和工具审批。编译后 Runtime 的 5 项 HTTP 检查通过，另有侧车冒烟通过。未提供 Codex 外部二进制的检查保持跳过。

@@ -288,7 +288,7 @@ pub fn process_environment_for(windows: bool, spec: &LaunchSpec, parent: impl In
 /// when `FOX_RUNTIME_VERSION` / `FOX_RUNTIME_ROOT` are unset: this version
 /// directory if installed, else the newest installed one. Keep in step with
 /// `scripts/windows/build-runtime-package.py` `DEFAULT_VERSION`.
-pub const RUNTIME_PACKAGE_VERSION: &str = "0.1.6";
+pub const RUNTIME_PACKAGE_VERSION: &str = "0.1.7";
 
 /// `bytes` random bytes from the OS as lowercase hex.
 pub fn random_hex(bytes: usize) -> Result<String, String> {
