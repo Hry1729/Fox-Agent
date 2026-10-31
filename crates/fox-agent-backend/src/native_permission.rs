@@ -1,33 +1,34 @@
-//! Per-agent native permission list (权限按 Agent 原生列出).
+//! Per-agent native permission list mapped onto Fox's four tiers (plan C2).
 //!
-//! Each external Agent offers only the permission modes it really has, under
-//! its own names, and Fox stops translating its own 询问 / 自动 / 只读 onto
-//! Codex or dsh:
+//! Fox speaks four tiers: 只读 / 询问 / 自动 / 完全访问 ([`FoxTier`]). Each
+//! external Agent offers only the tiers it really has, each bound to one of
+//! its own native modes; a tier it lacks is listed greyed with the reason:
 //!
-//! * **Codex** (codex-acp 2.2.2 session modes): `workspace-write`
-//!   (「请求审批」, approvals `on-request` + reviewer `user`), `agent`
-//!   (「帮我批准」, `on-request` + `auto_review`: Codex asks its OpenAI
-//!   `codex-auto-review` model, so it is greyed for any other provider) and
-//!   `agent-full-access` (「完全访问权限」). Switched mid-session with
-//!   `session/set_mode`. `read-only` exists natively but is not offered.
-//! * **DeepSeek (dsh 0.2.1-rc.2)**: the preset / approval combinations of
-//!   [`crate::backends::deepseek::DshPreset`]. dsh has no `session/set_mode`
-//!   (-32601) and `set_config_option` covers only model / reasoning effort, so
-//!   a change takes effect when dsh restarts at the next turn.
-//! * **pi**: pi has no permission system; Fox's approval gate extension
-//!   raises every tool call and the Host answers it: 只读 / 询问 / 自动, plus
-//!   完全访问.
+//! | Fox 档位 | pi | Codex (codex-acp) | dsh |
+//! |---|---|---|---|
+//! | 只读 | Host 应答：读放行、其余拒绝 | `read-only` | `read-only` |
+//! | 询问 | Host 应答，规则同 PiNative | `workspace-write`，审批卡来自 request_permission | `workspace-write`（ask） |
+//! | 自动 | Host 应答，规则同 PiNative | 不提供（置灰：`agent` 由 OpenAI 自动审查模型代批） | `workspace-write-never` |
+//! | 完全访问 | Host 全部放行（block 规则仍生效） | `agent-full-access` | `danger-full-access` |
+//!
+//! * **pi** has no permission system of its own: Fox's approval gate
+//!   extension raises every tool call and the Host answers it with the same
+//!   approval engine as PiNative (`approval_policy`, project rules and block
+//!   rules included; the desktop implements
+//!   [`crate::external::ExternalSink::host_permission_answer`]). A change
+//!   applies from pi's next request.
+//! * **Codex** and **dsh** keep their own native sandbox and approval; Fox
+//!   does not imitate them. Fox only turns a `session/request_permission`
+//!   into an approval card. Codex switches at once (`session/set_mode`); dsh
+//!   has no `session/set_mode` (-32601), so a change takes effect when dsh
+//!   restarts at the next turn.
 //! * **Fox**: unchanged (its own execution mode in the composer).
 //!
-//! The full-access option of each external Agent is its own full-access
-//! mode: choosing it goes through the existing grant / confirmation / audit,
-//! choosing anything else while it is on revokes it. Fox adds no sandbox of
-//! its own around any option; each runs in the Agent's native sandbox.
-//!
-//! The Host's automatic answer to `session/request_permission`
-//! ([`answer`]) is only a fail-closed fallback: a request the native layer
-//! let through although the mode says nothing should ask is rejected, a mode
-//! that asks shows the card. Fox never auto-allows on behalf of Codex or dsh.
+//! The Host's automatic answer to `session/request_permission` for Codex and
+//! dsh ([`answer`]) is only a fail-closed fallback: a request the native
+//! layer let through although the mode says nothing should ask is rejected, a
+//! mode that asks shows the card. Fox never auto-allows on behalf of Codex or
+//! dsh.
 
 use crate::port::AgentBackend;
 use crate::projection::{auto_permission, AutoPermission, ExecutionMode, PermissionOption};
@@ -46,13 +47,49 @@ pub enum SwitchTiming {
     HostAnswered,
 }
 
+/// Fox's four permission tiers, the vocabulary every Agent's list is mapped
+/// onto (the same four as a Fox conversation's execution mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoxTier {
+    ReadOnly,
+    Ask,
+    Auto,
+    FullAccess,
+}
+
+impl FoxTier {
+    pub const ALL: [FoxTier; 4] = [Self::ReadOnly, Self::Ask, Self::Auto, Self::FullAccess];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    /// The tier's name in the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "只读",
+            Self::Ask => "询问",
+            Self::Auto => "自动",
+            Self::FullAccess => "完全访问",
+        }
+    }
+}
+
 /// One entry of an Agent's permission list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePermissionOption {
     /// Stored id (the Agent's own mode / preset name where it has one).
     pub id: &'static str,
-    /// Chinese label shown in the picker.
+    /// The Fox tier this option is ([`FoxTier`]).
+    pub tier: FoxTier,
+    /// Chinese label shown in the picker (the tier's name).
     pub label: &'static str,
     /// One-line explanation.
     pub description: &'static str,
@@ -71,6 +108,7 @@ pub struct NativePermissionCatalog {
     pub backend: &'static str,
     /// The Agent's display name in UI text ([`display_name`]).
     pub display_name: &'static str,
+    /// Always the four tiers in Fox order (只读, 询问, 自动, 完全访问).
     pub options: Vec<NativePermissionOption>,
     /// The (non-full-access) native option a new session starts in when
     /// nothing was chosen.
@@ -83,18 +121,16 @@ pub struct NativePermissionCatalog {
 /// What the catalog depends on besides the Agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CatalogContext {
-    /// Base URL of the provider the Agent uses through Fox's unified login:
-    /// the protocol address bound for this Agent, else the provider's own
-    /// base URL (13.19 fix ④). `None` (or a URL without a host): the provider
-    /// cannot be determined, and Codex「帮我批准」is greyed fail-closed
-    /// ([`CODEX_AUTO_REVIEW_UNKNOWN_REASON`]).
+    /// Base URL of the provider the Agent uses through Fox's unified login.
+    /// No option depends on it since plan C2 (Codex's `agent` mode is never
+    /// offered); kept for the callers that report it.
     pub provider_base_url: Option<String>,
     /// `FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN`: the full-access option is greyed.
     pub full_access_forbidden: bool,
 }
 
-pub const CODEX_AUTO_REVIEW_REASON: &str = "「帮我批准」由 Codex 调用 OpenAI 的 codex-auto-review 模型自动审查；当前供应商不是 OpenAI，会被拒绝";
-pub const CODEX_AUTO_REVIEW_UNKNOWN_REASON: &str = "「帮我批准」由 Codex 调用 OpenAI 的 codex-auto-review 模型自动审查；无法确定当前供应商的地址（模型服务未设默认供应商，或供应商没有填写地址），按安全默认不可用";
+/// Why Codex has no 自动 tier.
+pub const CODEX_NO_AUTO_TIER_REASON: &str = "Codex 没有与 Fox「自动」对等的档位：它的 agent 模式由 OpenAI 的 codex-auto-review 模型代你审批（需要 OpenAI），Fox 不提供";
 pub const FULL_ACCESS_FORBIDDEN_NOTE: &str = "管理员已禁止完全访问（FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN）";
 
 /// Whether `base_url` is an OpenAI API endpoint (`api.openai.com` or another
@@ -128,10 +164,11 @@ pub fn display_name(backend: AgentBackend) -> &'static str {
     }
 }
 
-fn option(id: &'static str, label: &'static str, description: &'static str, native: &'static str, full_access: bool) -> NativePermissionOption {
-    NativePermissionOption { id, label, description, native, full_access, disabled_reason: None }
+fn option(id: &'static str, tier: FoxTier, description: &'static str, native: &'static str) -> NativePermissionOption {
+    NativePermissionOption { id, tier, label: tier.label(), description, native, full_access: tier == FoxTier::FullAccess, disabled_reason: None }
 }
 
+pub const CODEX_READ_ONLY: &str = "read-only";
 pub const CODEX_ASK: &str = "workspace-write";
 pub const CODEX_AUTO_REVIEW: &str = "agent";
 pub const CODEX_FULL: &str = "agent-full-access";
@@ -146,20 +183,21 @@ pub fn catalog(backend: AgentBackend, context: &CatalogContext) -> NativePermiss
     let (mut options, default_mode, switch_timing, switch_note) = match backend {
         AgentBackend::Codex => (
             vec![
-                option(CODEX_ASK, "请求审批", "工作区内可写；越出沙箱的操作逐个请你批准", "workspace-write（on-request · 审批人 user）", false),
-                option(CODEX_AUTO_REVIEW, "帮我批准", "工作区内可写；越出沙箱的操作交给 Codex 的自动审查模型批准", "agent（on-request · 审批人 auto_review）", false),
-                option(CODEX_FULL, "完全访问权限", "不套沙箱、不再询问；即 Fox 的「完全访问」", "agent-full-access", true),
+                option(CODEX_READ_ONLY, FoxTier::ReadOnly, "Codex 原生只读沙箱；需要越权时由 Codex 发起审批，Fox 转成审批卡", "read-only（sandbox read-only · on-request · 审批人 user）"),
+                option(CODEX_ASK, FoxTier::Ask, "工作区内可写；越出沙箱的操作由 Codex 发起审批，Fox 转成审批卡请你批准", "workspace-write（on-request · 审批人 user）"),
+                option(CODEX_AUTO_REVIEW, FoxTier::Auto, "Codex 没有对等档位", "agent（on-request · 审批人 auto_review）"),
+                option(CODEX_FULL, FoxTier::FullAccess, "不套沙箱、不再询问；即 Fox 的「完全访问」", "agent-full-access"),
             ],
             CODEX_ASK,
             SwitchTiming::Live,
-            "会话中切换立即生效（session/set_mode）",
+            "切换立即生效（Codex session/set_mode）",
         ),
         AgentBackend::Deepseek => (
             vec![
-                option(DshPreset::ReadOnly.id(), "只读", "只读工作区，不询问，越权操作直接拒绝", "sandbox read-only · approval never", false),
-                option(DshPreset::WorkspaceWriteAsk.id(), "工作区可写（询问）", "工作区内可写；只在越出工作区时询问", "preset workspace-write（sandbox workspace-write · approval ask）", false),
-                option(DshPreset::WorkspaceWriteNever.id(), "工作区可写（不询问）", "工作区内可写；越出工作区的操作直接拒绝", "sandbox workspace-write · approval never", false),
-                option(DshPreset::DangerFullAccess.id(), "完全访问", "不套沙箱、不再询问；即 Fox 的「完全访问」", "preset danger-full-access（approval never）", true),
+                option(DshPreset::ReadOnly.id(), FoxTier::ReadOnly, "只读工作区，不询问，越权操作直接拒绝", "sandbox read-only · approval never"),
+                option(DshPreset::WorkspaceWriteAsk.id(), FoxTier::Ask, "工作区内可写；越出工作区时由 dsh 发起审批，Fox 转成审批卡", "preset workspace-write（sandbox workspace-write · approval ask）"),
+                option(DshPreset::WorkspaceWriteNever.id(), FoxTier::Auto, "工作区内可写、不询问；越出工作区的操作直接拒绝", "sandbox workspace-write · approval never"),
+                option(DshPreset::DangerFullAccess.id(), FoxTier::FullAccess, "不套沙箱、不再询问；即 Fox 的「完全访问」", "preset danger-full-access（approval never）"),
             ],
             // Default = what every dsh session ran in before the list
             // (approval never), so an existing runtime package keeps working.
@@ -169,14 +207,14 @@ pub fn catalog(backend: AgentBackend, context: &CatalogContext) -> NativePermiss
         ),
         AgentBackend::Pi => (
             vec![
-                option(PI_READ_ONLY, "只读", "只放行读取类工具，其余由 Fox 拒绝", "Fox 审批拦截扩展 · 只读", false),
-                option(PI_ASK, "询问", "每个工具调用都由你批准", "Fox 审批拦截扩展 · 询问", false),
-                option(PI_ALLOW, "自动", "Fox 按审批规则自动允许", "Fox 审批拦截扩展 · 自动", false),
-                option(PI_FULL, "完全访问", "Fox 全部自动允许（block 规则仍生效）；即 Fox 的「完全访问」", "Fox 审批拦截扩展 · 完全访问", true),
+                option(PI_READ_ONLY, FoxTier::ReadOnly, "只放行读取类工具，其余由 Fox 拒绝", "Fox 审批引擎 · 只读"),
+                option(PI_ASK, FoxTier::Ask, "与 Fox 内置会话同一套审批规则：写入和命令请你批准，命中项目规则的照规则处理", "Fox 审批引擎 · 询问"),
+                option(PI_ALLOW, FoxTier::Auto, "与 Fox 内置会话同一套审批规则：项目内写入和低风险命令自动允许，高风险和越出项目的仍会询问", "Fox 审批引擎 · 自动"),
+                option(PI_FULL, FoxTier::FullAccess, "Fox 全部自动允许（block 规则仍生效）；即 Fox 的「完全访问」", "Fox 审批引擎 · 完全访问"),
             ],
             PI_ASK,
             SwitchTiming::HostAnswered,
-            "由 Fox 作答：切换后从下一次工具调用起生效",
+            "由 Fox 审批引擎作答：切换后从 pi 的下一次请求起生效",
         ),
         AgentBackend::Fox => (Vec::new(), "", SwitchTiming::HostAnswered, ""),
     };
@@ -185,15 +223,16 @@ pub fn catalog(backend: AgentBackend, context: &CatalogContext) -> NativePermiss
             option.disabled_reason = Some(FULL_ACCESS_FORBIDDEN_NOTE.to_owned());
         }
         if backend == AgentBackend::Codex && option.id == CODEX_AUTO_REVIEW {
-            // Fail-closed: only a provider known to be OpenAI keeps it.
-            match context.provider_base_url.as_deref().and_then(host_of) {
-                Some(host) if host == "openai.com" || host.ends_with(".openai.com") => {}
-                Some(_) => option.disabled_reason = Some(CODEX_AUTO_REVIEW_REASON.to_owned()),
-                None => option.disabled_reason = Some(CODEX_AUTO_REVIEW_UNKNOWN_REASON.to_owned()),
-            }
+            // Plan C2: no peer of Fox's 自动; never offered, whatever the provider.
+            option.disabled_reason = Some(CODEX_NO_AUTO_TIER_REASON.to_owned());
         }
     }
     NativePermissionCatalog { backend: backend.as_str(), display_name: display_name(backend), options, default_mode, switch_timing, switch_note }
+}
+
+/// The Fox tier of `backend`'s option `id` (`None` for an unknown id).
+pub fn tier_of(backend: AgentBackend, id: &str) -> Option<FoxTier> {
+    catalog(backend, &CatalogContext::default()).options.into_iter().find(|option| option.id == id.trim()).map(|option| option.tier)
 }
 
 /// The full-access option of `backend`.
@@ -208,6 +247,14 @@ pub fn full_access_mode(backend: AgentBackend) -> Option<&'static str> {
 
 pub fn is_full_access(backend: AgentBackend, id: &str) -> bool {
     full_access_mode(backend) == Some(id.trim())
+}
+
+/// Whether the Agent's full access lives in its process, so leaving it needs
+/// a restart (dsh reads its preset only at start). Codex switches its own
+/// sandbox live (`session/set_mode`) and pi's full access is the Host's
+/// answer, so neither restarts.
+pub fn full_access_needs_restart(backend: AgentBackend) -> bool {
+    backend == AgentBackend::Deepseek
 }
 
 /// `id` names an option of `backend`'s list (enabled or not).
@@ -240,6 +287,7 @@ pub fn effective_mode(backend: AgentBackend, stored: Option<&str>, full_access: 
 pub fn codex_mode(id: &str) -> crate::backends::codex::CodexMode {
     use crate::backends::codex::CodexMode;
     match id.trim() {
+        CODEX_READ_ONLY => CodexMode::ReadOnly,
         CODEX_AUTO_REVIEW => CodexMode::AutoReview,
         CODEX_FULL => CodexMode::FullAccess,
         _ => CodexMode::WorkspaceWrite,
@@ -254,8 +302,8 @@ pub fn dsh_preset(id: &str) -> crate::backends::deepseek::DshPreset {
 
 /// How the Host answers a permission request that reached it in `mode`.
 ///
-/// * Codex `workspace-write` / `agent`: the card (the user is the approver,
-///   or the automatic reviewer escalated to the user).
+/// * Codex (every mode): the card. The user is the approver; in `read-only`
+///   and `workspace-write` every escalation Codex raises reaches the Host.
 /// * dsh sandboxed presets with approval `never` (read-only,
 ///   workspace-write-never): reject; the mode itself says escalations are
 ///   refused, so one the native layer let through is refused (fail-closed).
@@ -264,7 +312,11 @@ pub fn dsh_preset(id: &str) -> crate::backends::deepseek::DshPreset {
 ///   `danger-full-access`): nothing should ask; if something does, the card
 ///   (the mode does not require a refusal, and Fox never allows on Codex's or
 ///   dsh's behalf).
-/// * pi: Fox's gate, as before: 只读 / 询问 / 自动; 完全访问 = 自动.
+/// * pi: the built-in tier table ([`crate::projection::auto_permission`]):
+///   只读 / 询问 / 自动; 完全访问 = 自动. This is only what a sink WITHOUT a
+///   Host approval engine gets (tests); the desktop answers pi with the same
+///   approval engine as PiNative
+///   ([`crate::external::ExternalSink::host_permission_answer`]).
 /// * Fox / unknown: the card.
 pub fn answer(backend: AgentBackend, mode: &str, request: &Value, options: &[PermissionOption]) -> AutoPermission {
     let reject = || AutoPermission::Reject { option_id: crate::projection::reject_option(options).map(|option| option.option_id.clone()) };
@@ -303,51 +355,60 @@ mod tests {
     }
 
     #[test]
-    fn each_agent_lists_only_its_own_modes() {
+    fn each_agent_lists_the_four_fox_tiers_mapped_to_its_own_modes() {
         let context = CatalogContext::default();
         let ids = |backend| catalog(backend, &context).options.iter().map(|option| option.id).collect::<Vec<_>>();
-        assert_eq!(ids(AgentBackend::Codex), ["workspace-write", "agent", "agent-full-access"]);
+        assert_eq!(ids(AgentBackend::Codex), ["read-only", "workspace-write", "agent", "agent-full-access"]);
         assert_eq!(ids(AgentBackend::Deepseek), ["read-only", "workspace-write", "workspace-write-never", "danger-full-access"]);
         assert_eq!(ids(AgentBackend::Pi), ["read_only", "ask", "allow", "full_access"]);
         assert!(ids(AgentBackend::Fox).is_empty());
-        let labels = catalog(AgentBackend::Codex, &context).options.iter().map(|option| option.label).collect::<Vec<_>>();
-        assert_eq!(labels, ["请求审批", "帮我批准", "完全访问权限"]);
+        for backend in [AgentBackend::Codex, AgentBackend::Deepseek, AgentBackend::Pi] {
+            let catalog = catalog(backend, &context);
+            assert_eq!(catalog.options.iter().map(|option| option.tier).collect::<Vec<_>>(), FoxTier::ALL, "{backend:?}: Fox order");
+            assert_eq!(catalog.options.iter().map(|option| option.label).collect::<Vec<_>>(), ["只读", "询问", "自动", "完全访问"]);
+            assert_eq!(catalog.options.iter().filter(|option| option.full_access).map(|option| option.tier).collect::<Vec<_>>(), [FoxTier::FullAccess]);
+            assert_eq!(tier_of(backend, catalog.default_mode), Some(if backend == AgentBackend::Deepseek { FoxTier::Auto } else { FoxTier::Ask }));
+        }
         assert_eq!(catalog(AgentBackend::Codex, &context).switch_timing, SwitchTiming::Live);
+        assert!(catalog(AgentBackend::Codex, &context).switch_note.contains("立即生效"));
         assert_eq!(catalog(AgentBackend::Deepseek, &context).switch_timing, SwitchTiming::NextTurnRestart);
         assert!(catalog(AgentBackend::Deepseek, &context).switch_note.contains("下一轮"));
+        assert_eq!(catalog(AgentBackend::Pi, &context).switch_timing, SwitchTiming::HostAnswered);
+        assert!(catalog(AgentBackend::Pi, &context).switch_note.contains("下一次请求"));
         // Display names used in UI text (13.19 fix ①: no hard-coded "dsh").
         let names = [AgentBackend::Codex, AgentBackend::Deepseek, AgentBackend::Pi].map(|backend| catalog(backend, &context).display_name);
         assert_eq!(names, ["Codex", "DeepSeek", "pi"]);
         let json = serde_json::to_value(catalog(AgentBackend::Pi, &context)).unwrap();
         assert_eq!(json["displayName"], "pi");
+        assert_eq!(json["options"][2]["tier"], "auto");
+        assert_eq!(codex_mode("read-only"), crate::backends::codex::CodexMode::ReadOnly);
+        assert_eq!(codex_mode("agent-full-access"), crate::backends::codex::CodexMode::FullAccess);
+        assert_eq!(codex_mode("workspace-write"), crate::backends::codex::CodexMode::WorkspaceWrite);
+    }
+
+    /// Plan C2: Codex has no peer of Fox's 自动, whatever the provider.
+    #[test]
+    fn codex_auto_tier_is_always_greyed_with_its_reason() {
+        for url in [None, Some("https://api.openai.com/v1".to_owned()), Some("https://api.deepseek.com/v1".to_owned())] {
+            let context = CatalogContext { provider_base_url: url.clone(), ..Default::default() };
+            let codex = catalog(AgentBackend::Codex, &context);
+            let reasons = codex.options.iter().map(|option| option.disabled_reason.as_deref()).collect::<Vec<_>>();
+            assert_eq!(reasons, [None, None, Some(CODEX_NO_AUTO_TIER_REASON), None], "{url:?}");
+            // A stored `agent` (written by an older build) never runs: the default instead.
+            assert_eq!(effective_mode(AgentBackend::Codex, Some("agent"), false, &context), "workspace-write", "{url:?}");
+        }
+        // dsh / pi offer all four tiers.
+        assert!(catalog(AgentBackend::Deepseek, &CatalogContext::default()).options.iter().all(|option| option.disabled_reason.is_none()));
+        assert!(catalog(AgentBackend::Pi, &CatalogContext::default()).options.iter().all(|option| option.disabled_reason.is_none()));
+        assert!(!provider_is_openai("https://openai.com.evil.example/v1"));
+        assert!(provider_is_openai("https://API.OpenAI.com:443/v1"));
     }
 
     #[test]
-    fn codex_auto_review_is_greyed_for_non_openai_providers() {
-        let deepseek = CatalogContext { provider_base_url: Some("https://api.deepseek.com/v1".into()), ..Default::default() };
-        let codex = catalog(AgentBackend::Codex, &deepseek);
-        let auto = codex.options.iter().find(|option| option.id == "agent").unwrap();
-        assert!(auto.disabled_reason.as_deref().unwrap().contains("codex-auto-review"));
-        let openai = CatalogContext { provider_base_url: Some("https://api.openai.com/v1".into()), ..Default::default() };
-        assert!(catalog(AgentBackend::Codex, &openai).options.iter().all(|option| option.disabled_reason.is_none()));
-        // 13.19 fix ④: provider unknown (no default provider, no address,
-        // no host) = fail-closed, greyed with its own reason; the other two
-        // options stay available.
-        for unknown in [None, Some(String::new()), Some("not a url".to_owned())] {
-            let context = CatalogContext { provider_base_url: unknown.clone(), ..Default::default() };
-            let codex = catalog(AgentBackend::Codex, &context);
-            let reasons = codex.options.iter().map(|option| option.disabled_reason.as_deref()).collect::<Vec<_>>();
-            assert_eq!(reasons, [None, Some(CODEX_AUTO_REVIEW_UNKNOWN_REASON), None], "{unknown:?}");
-            assert_eq!(effective_mode(AgentBackend::Codex, Some("agent"), false, &context), "workspace-write", "{unknown:?}");
-        }
-        // dsh / pi lists do not depend on the provider.
-        assert!(catalog(AgentBackend::Deepseek, &CatalogContext::default()).options.iter().all(|option| option.disabled_reason.is_none()));
-        assert!(catalog(AgentBackend::Pi, &CatalogContext::default()).options.iter().all(|option| option.disabled_reason.is_none()));
-        // A greyed stored choice falls back to the default.
-        assert_eq!(effective_mode(AgentBackend::Codex, Some("agent"), false, &deepseek), "workspace-write");
-        assert_eq!(effective_mode(AgentBackend::Codex, Some("agent"), false, &openai), "agent");
-        assert!(!provider_is_openai("https://openai.com.evil.example/v1"));
-        assert!(provider_is_openai("https://API.OpenAI.com:443/v1"));
+    fn only_dsh_restarts_to_leave_full_access() {
+        assert!(full_access_needs_restart(AgentBackend::Deepseek));
+        assert!(!full_access_needs_restart(AgentBackend::Codex));
+        assert!(!full_access_needs_restart(AgentBackend::Pi));
     }
 
     #[test]
@@ -372,6 +433,7 @@ mod tests {
         let request = json!({ "toolCall": { "kind": "edit" } });
         let read = json!({ "toolCall": { "kind": "read" } });
         let options = options();
+        assert_eq!(answer(AgentBackend::Codex, "read-only", &request, &options), AutoPermission::Ask);
         assert_eq!(answer(AgentBackend::Codex, "workspace-write", &request, &options), AutoPermission::Ask);
         assert_eq!(answer(AgentBackend::Codex, "agent", &request, &options), AutoPermission::Ask);
         assert_eq!(answer(AgentBackend::Codex, "agent-full-access", &request, &options), AutoPermission::Ask);

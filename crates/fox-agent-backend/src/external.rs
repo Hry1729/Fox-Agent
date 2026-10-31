@@ -23,12 +23,15 @@
 //!   failure fails the run with the launcher's structured code.
 //! * **Stream**: `session/update` -> [`AcpProjector`] -> sink. Events of an
 //!   older connection generation are audit-only (plan 6.1 rule 3).
-//! * **Approvals**: `session/request_permission` -> approval card; the user's
-//!   answer is written as the native one-shot option (`allow_once` /
-//!   `reject_once`) and reported as written, never acknowledged (6.3 rule 3).
-//!   DeepSeek runs under the Host patch with approval policy `never`; a
-//!   request that still arrives is rejected by the Host
-//!   (`deepseek::host_permission_answer`), never shown as answerable.
+//! * **Approvals** (plan C2): `session/request_permission` -> approval card;
+//!   the user's answer is written as the native one-shot option (`allow_once`
+//!   / `reject_once`) and reported as written, never acknowledged (6.3 rule
+//!   3). pi's requests (Fox's approval gate) are first put to the Host's own
+//!   approval engine ([`ExternalSink::host_permission_answer`], the same
+//!   engine, rules and block rules as PiNative); only what it leaves to the
+//!   user becomes a card. Codex and dsh keep their own sandbox and approval:
+//!   a mode that asks shows the card, a dsh preset with approval `never`
+//!   rejects what still arrives (fail-closed), never shown as answerable.
 //!   Requests that arrive after a stop began are auto-cancelled by the
 //!   connection and only observed (`agent_backend.permission_auto_cancelled`).
 //! * **End**: the stop reason decides the terminal
@@ -48,6 +51,17 @@ use crate::acp::{AcpConnection, BackendEvent, TerminateReport};
 use crate::capability_view::PiLaunch;
 use crate::port::{AgentBackend, CapabilityDeclaration, StopConfirmation, STOP_UNCONFIRMED_REMEDY};
 use crate::projection::{allow_option, permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, PermissionCard, PermissionOption, TurnTerminal};
+
+/// What the Host's own approval engine answered for one permission request
+/// ([`ExternalSink::host_permission_answer`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostPermissionAnswer {
+    /// Allow / reject the native request now, or ask the user (card).
+    pub decision: AutoPermission,
+    /// Machine summary of the decision (mode, class, risk, findings, rule)
+    /// for the run event and the audit; never tool input.
+    pub policy: Value,
+}
 use crate::acp::WriteOutcome;
 use crate::external_home::{LaunchDeclaration, PermissionMode};
 use crate::settlement::{RunTerminal, TerminalArbiter};
@@ -329,6 +343,24 @@ pub trait ExternalSink: Send + Sync + 'static {
     /// and kinds only, never tool input). Default: nothing beyond the run
     /// event the runtime already emitted.
     fn audit(&self, _conversation_id: &str, _backend: AgentBackend, _event: &str, _details: &Value) {}
+    /// pi (plan C2): answer one request of Fox's approval gate with the
+    /// Host's approval engine, read against the conversation's tier
+    /// (`native_mode`), project rules and block rules as they are NOW. The
+    /// desktop always answers (an engine failure is a fail-closed reject).
+    /// `None` = this sink has no engine (tests); the runtime then uses the
+    /// built-in tier table ([`crate::native_permission::answer`]). Never
+    /// called for Codex or dsh: their own approval decides.
+    fn host_permission_answer(
+        &self,
+        _run_id: &str,
+        _conversation_id: &str,
+        _backend: AgentBackend,
+        _native_mode: &str,
+        _request: &Value,
+        _options: &[PermissionOption],
+    ) -> Option<HostPermissionAnswer> {
+        None
+    }
 }
 
 /// Why a turn could not start (nothing was emitted).
@@ -370,8 +402,15 @@ pub enum RevokeOutcome {
     Unchanged,
     /// The full-access process was stopped; the next turn starts without
     /// full access. `confirmed: false`: the stop was not confirmed and no
-    /// relaunch will happen.
+    /// relaunch will happen. Only for an Agent whose full access lives in its
+    /// process (dsh, [`crate::native_permission::full_access_needs_restart`]).
     RestartWithoutFullAccess { confirmed: bool },
+    /// The live session left full access without a restart (Codex
+    /// `session/set_mode`; pi: the Host answers by the new tier from the
+    /// next request).
+    SwitchedLive,
+    /// The live switch was refused; the next turn retries it.
+    SwitchFailed(String),
 }
 
 /// Result of [`ExternalRuntime::apply_native_mode`].
@@ -729,7 +768,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     async fn ensure_ready(&self, session: &Arc<Session>, request: &TurnRequest) -> Result<(), LaunchFailure> {
         let desired = self.inner.launcher.desired_mode(&request.launch);
         if lock(&session.state).stop_unconfirmed {
-            return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "撤销完全访问时，原进程未确认全部结束，不会在沙箱中重建")
+            return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "撤销完全访问时，原进程未确认全部结束，不会重建")
                 .remedy(STOP_UNCONFIRMED_REMEDY));
         }
         let wanted_native = request.launch.native_mode();
@@ -751,9 +790,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         };
         if live {
             // Tightening applies before the next continue (plan 6.5): a
-            // full-access process is stopped when the Host no longer grants
-            // full access; never the other way round silently.
-            if running_mode == Some(PermissionMode::FullAccess) && desired == PermissionMode::Standard {
+            // process whose full access lives in it (dsh) is stopped when the
+            // conversation left full access; never the other way round
+            // silently. Codex leaves it live (`session/set_mode`) and pi by
+            // the Host's next answer, below.
+            if running_mode == Some(PermissionMode::FullAccess)
+                && desired == PermissionMode::Standard
+                && crate::native_permission::full_access_needs_restart(session.backend)
+            {
                 let report = self.stop_connection(session, "full access withdrawn").await;
                 if let Some(report) = report {
                     if !report.confirmation.is_confirmed() {
@@ -791,7 +835,9 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     }
                     // pi / Fox: the Host answers; nothing to restart.
                     _ => {
-                        lock(&session.state).native_mode = Some(wanted_native.to_owned());
+                        let mut state = lock(&session.state);
+                        state.native_mode = Some(wanted_native.to_owned());
+                        state.mode = Some(desired);
                         return Ok(());
                     }
                 }
@@ -965,7 +1011,13 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let mode = crate::native_permission::codex_mode(wanted);
         match connection.set_mode(&native, mode.id()).await {
             Ok(()) => {
-                lock(&session.state).native_mode = Some(wanted.to_owned());
+                {
+                    let mut state = lock(&session.state);
+                    state.native_mode = Some(wanted.to_owned());
+                    // Codex's full access is its own mode: the live session
+                    // now records what it runs in.
+                    state.mode = Some(if crate::native_permission::is_full_access(session.backend, wanted) { PermissionMode::FullAccess } else { PermissionMode::Standard });
+                }
                 let details = json!({ "from": from, "to": wanted, "method": "session/set_mode" });
                 let mut event = details.clone();
                 event["type"] = json!("agent_backend.permission_mode_switched");
@@ -980,22 +1032,21 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
     }
 
-    /// The user changed the conversation's native permission mode. The
-    /// active turn answers later permission requests by the new mode at
-    /// once; a live Codex session is switched now (`session/set_mode`);
-    /// dsh restarts at the next turn; pi needs nothing else.
+    /// The user changed the conversation's native permission mode (plan
+    /// C2), full access included. The active turn answers later permission
+    /// requests by the new mode at once; a live Codex session is switched now
+    /// (`session/set_mode`); dsh restarts at the next turn; pi needs nothing
+    /// else (the Host answers its next request by the new tier).
     pub async fn apply_native_mode(&self, conversation_id: &str, wanted: &str) -> NativeModeOutcome {
         let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
             return NativeModeOutcome::NotRunning;
         };
         let (live, run_id, running) = {
             let mut state = lock(&session.state);
-            let full = state.mode == Some(PermissionMode::FullAccess);
-            let wanted_full = crate::native_permission::is_full_access(session.backend, wanted);
-            if full != wanted_full {
-                // Full access on / off is a different process (grant /
-                // revoke path), never a mode switch.
-                return NativeModeOutcome::NextTurn;
+            if session.backend == AgentBackend::Deepseek {
+                // dsh reads its preset only at start: the running turn keeps
+                // its preset; the next turn restarts dsh in the new one.
+                return if state.connection.is_some() { NativeModeOutcome::NextTurn } else { NativeModeOutcome::NotRunning };
             }
             if let Some(turn) = state.turn.as_mut() {
                 turn.native_mode = wanted.to_owned();
@@ -1015,7 +1066,9 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             },
             AgentBackend::Deepseek => NativeModeOutcome::NextTurn,
             _ => {
-                lock(&session.state).native_mode = Some(wanted.to_owned());
+                let mut state = lock(&session.state);
+                state.native_mode = Some(wanted.to_owned());
+                state.mode = Some(if crate::native_permission::is_full_access(session.backend, wanted) { PermissionMode::FullAccess } else { PermissionMode::Standard });
                 NativeModeOutcome::Applied
             }
         }
@@ -1105,12 +1158,20 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 let card = permission_card(&request);
                 let key = format!("acp-permission:{generation}:{native_request_id}");
                 let run_id = turn.run_id.clone();
-                // The Agent's own permission mode decides (per-agent list):
-                // a mode that asks shows the card; a mode in which nothing
-                // should ask rejects what still arrives (fail-closed); only
-                // pi's Fox gate answers 自动 / 只读 itself. Fox's own
-                // 询问 / 自动 / 只读 is never translated for Codex or dsh.
-                let decision = crate::native_permission::answer(session.backend, &turn.native_mode, &request, &card.options);
+                // Plan C2: pi's gate requests go to the Host's approval
+                // engine (same as PiNative); Codex / dsh keep their own
+                // approval: a mode that asks shows the card, a mode in which
+                // nothing should ask rejects what still arrives (fail-closed).
+                // Fox never auto-allows on behalf of Codex or dsh.
+                let host = if session.backend == AgentBackend::Pi {
+                    self.inner.sink.host_permission_answer(&run_id, &session.conversation_id, session.backend, &turn.native_mode, &request, &card.options)
+                } else {
+                    None
+                };
+                let (decision, policy) = match host {
+                    Some(answer) => (answer.decision, Some(answer.policy)),
+                    None => (crate::native_permission::answer(session.backend, &turn.native_mode, &request, &card.options), None),
+                };
                 if decision != AutoPermission::Ask {
                     let option = match &decision {
                         AutoPermission::Allow { option_id } => Some(option_id.as_str()),
@@ -1122,7 +1183,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         Ok(WriteOutcome::Unconfirmed) => "outcome_unknown",
                         Err(_) => "not_pending",
                     };
-                    let details = json!({
+                    let mut details = json!({
                         "permissionMode": turn.native_mode,
                         "decision": decision.decision(),
                         "toolKind": permission_tool_kind(&request),
@@ -1131,6 +1192,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                         "nativeAnswer": written,
                         "runId": run_id,
                     });
+                    if let Some(policy) = policy {
+                        details["answeredBy"] = json!("host_approval_policy");
+                        details["policy"] = policy;
+                    }
                     let mut event = details.clone();
                     event["type"] = json!("agent_backend.permission_auto_answered");
                     self.emit(session, &run_id, event);
@@ -1402,11 +1467,31 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     /// connection), the process tree is stopped and confirmed, and the next
     /// turn starts a new connection (nothing is replayed). An unconfirmed
     /// stop blocks any relaunch. `Unchanged` when nothing runs in full access.
+    ///
+    /// Plan C2: `request.native_permission` is the restricted mode the
+    /// conversation now runs in. An Agent whose full access does not live in
+    /// its process (Codex, pi) leaves it live ([`RevokeOutcome::SwitchedLive`]);
+    /// dsh is stopped ([`RevokeOutcome::RestartWithoutFullAccess`]).
     pub async fn revoke_full_access(&self, request: &LaunchRequest) -> RevokeOutcome {
         let conversation_id = request.conversation_id.as_str();
         let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
             return RevokeOutcome::NotRunning;
         };
+        if !crate::native_permission::full_access_needs_restart(session.backend) {
+            let running_full = {
+                let state = lock(&session.state);
+                state.connection.is_some() && state.mode == Some(PermissionMode::FullAccess)
+            };
+            if !running_full {
+                return RevokeOutcome::Unchanged;
+            }
+            return match self.apply_native_mode(conversation_id, request.native_mode()).await {
+                NativeModeOutcome::Applied => RevokeOutcome::SwitchedLive,
+                NativeModeOutcome::NotRunning => RevokeOutcome::NotRunning,
+                NativeModeOutcome::NextTurn => RevokeOutcome::Unchanged,
+                NativeModeOutcome::Failed(message) => RevokeOutcome::SwitchFailed(message),
+            };
+        }
         let outcome = self.revoke_running(&session, request).await;
         // 13.19 fix ②: a stopped process must not keep reporting its old
         // (full-access) declaration; the UI then shows the planned view until
