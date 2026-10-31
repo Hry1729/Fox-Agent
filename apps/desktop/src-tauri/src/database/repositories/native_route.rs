@@ -12,8 +12,47 @@ pub(super) fn writer_route(connection: &Connection, run_id: &str) -> rusqlite::R
         (ExecutionAuthority::Legacy, None) => Ok(WriterRoute::Legacy),
         (ExecutionAuthority::Authoritative, None) => Ok(WriterRoute::Kernel),
         (ExecutionAuthority::Authoritative, Some(ExecutorRoute::PiNative)) if binding.engine_id == "pi" => Ok(WriterRoute::PiNative),
-        _ => Err(projection_violation("unsupported frozen Run executor route".into())),
+        _ => Err(projection_violation(format!("{}: unsupported frozen Run executor route", run_control::BINDING_INTEGRITY_FAILED))),
     }
+}
+
+/// The writer route for a startup sweep or a recovery scan: `None` when the
+/// Run's frozen binding cannot be verified. Such a Run is never driven or
+/// recovered (every strict reader keeps refusing it); the sweep in
+/// [`interrupt_unverifiable_runs`] interrupts it so one bad historical row
+/// cannot fail the whole startup. A database fault still fails.
+pub(super) fn sweep_writer_route(connection: &Connection, run_id: &str) -> rusqlite::Result<Option<WriterRoute>> {
+    match writer_route(connection, run_id) {
+        Ok(route) => Ok(Some(route)),
+        Err(error) if run_control::binding_refusal(&error).is_some() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Startup: a Run whose frozen control binding fails verification (tampered,
+/// written by an older build in a format this build no longer accepts, or with
+/// an unknown route) is interrupted with a stable code and logged; it is not
+/// skipped past and never continued. Historical Runs that already reached a
+/// terminal state keep their own terminal facts (a graph child's terminal fact
+/// is immutable once reconciled); every reader still refuses them.
+pub(super) fn interrupt_unverifiable_runs(transaction: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<String>> {
+    let mut query = transaction.prepare(
+        "SELECT b.run_id,r.status FROM run_control_bindings b JOIN runs r ON r.id=b.run_id ORDER BY b.run_id")?;
+    let runs = query.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(query);
+    let mut refused = Vec::new();
+    for (run_id, status) in runs {
+        let error = match writer_route(transaction, &run_id) { Ok(_) => continue, Err(error) => error };
+        let Some((code, message)) = run_control::binding_refusal(&error) else { return Err(error) };
+        let interrupted = transaction.execute(
+            "UPDATE runs SET status='interrupted', finished_at=?2, error_code=?3, error_message=?4
+             WHERE id=?1 AND status IN ('queued','running','cancelling')",
+            params![run_id, now, code, message])? > 0;
+        eprintln!("fox.run_control binding_refused run={run_id} status={status} code={code} interrupted={interrupted} error={error}");
+        refused.push(run_id);
+    }
+    Ok(refused)
 }
 
 pub(super) fn require_host_writer(connection: &Connection, run_id: &str) -> rusqlite::Result<()> {
@@ -91,7 +130,7 @@ pub(super) fn retire_unrouted_kernel_runs(transaction: &Transaction<'_>, now: i6
     drop(query);
     let mut retired = Vec::new();
     for run_id in runs {
-        if writer_route(transaction, &run_id)? != WriterRoute::Kernel { continue; }
+        if sweep_writer_route(transaction, &run_id)? != Some(WriterRoute::Kernel) { continue; }
         super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;
         retire_kernel_run_row(transaction, &run_id, now)?;
         retired.push(run_id);
@@ -121,7 +160,7 @@ fn retire_delivery_review_kernel_runs(transaction: &Transaction<'_>, now: i64) -
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(query);
     for run_id in runs {
-        if writer_route(transaction, &run_id)? != WriterRoute::Kernel { continue; }
+        if sweep_writer_route(transaction, &run_id)? != Some(WriterRoute::Kernel) { continue; }
         super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;
         transaction.execute(
             "UPDATE runs SET finished_at=COALESCE(finished_at, ?2), error_code=?3, error_message=?4
@@ -137,7 +176,10 @@ pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64, re
     drop(query);
     transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS fox_restart_protected_runs(run_id TEXT PRIMARY KEY); DELETE FROM fox_restart_protected_runs;")?;
     for run_id in runs {
-        let route = writer_route(transaction, &run_id)?;
+        // An unverifiable binding is not protected: its Run was interrupted by
+        // `interrupt_unverifiable_runs`, and its open messages, tool calls and
+        // approvals settle with the generic restart repair.
+        let Some(route) = sweep_writer_route(transaction, &run_id)? else { continue };
         if route == WriterRoute::Kernel {
             super::kernel_projection::expire_inactive_approvals(transaction, Some(&run_id), now)?;
         }

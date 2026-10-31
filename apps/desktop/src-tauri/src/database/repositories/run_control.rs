@@ -11,13 +11,17 @@ fn encode(binding: &RunControlBinding) -> Result<String, String> {
     binding.validate()?;
     let permission = crate::canonical_json::to_string(&binding.permission).map_err(|e| e.to_string())?;
     if binding.permission_snapshot_id != content_hash(&permission) {
-        return Err("frozen permission hash does not match its content".into());
+        return Err(PERMISSION_HASH_MISMATCH.into());
     }
     crate::canonical_json::to_string(binding).map_err(|e| e.to_string())
 }
 
 pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> rusqlite::Result<Option<RunControlBinding>> {
-    let invalid = |message: String| rusqlite::Error::InvalidParameterName(message);
+    // Every refusal below names `run_control.binding_integrity_failed` (or the
+    // more specific legacy-format / unknown-route code) so the startup sweep can
+    // tell an unverifiable historical binding from a database fault and
+    // interrupt only that Run instead of failing the whole startup.
+    let invalid = |message: String| rusqlite::Error::InvalidParameterName(format!("{BINDING_INTEGRITY_FAILED}: {message}"));
     let row: Option<(String,String,String,String,String)> = connection.query_row(
         "SELECT conversation_id,authority,engine_id,binding_json,binding_hash FROM run_control_bindings WHERE run_id=?1", [run_id],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
@@ -26,7 +30,16 @@ pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> ru
     if content_hash(&json) != hash { return Err(invalid("persisted control binding hash mismatch".into())); }
     require_known_route(&json).map_err(invalid)?;
     let binding: RunControlBinding = serde_json::from_str(&json).map_err(|error| invalid(format!("corrupt control binding: {error}")))?;
-    encode(&binding).map_err(invalid)?;
+    if let Err(error) = encode(&binding) {
+        if error == PERMISSION_HASH_MISMATCH && legacy_permission_bytes_match(&json, &binding.permission_snapshot_id) {
+            // Intact, but frozen by a build that hashed the permission before
+            // canonical JSON (83c16042). Never continued: the user decided
+            // historical Runs are interrupted, not migrated.
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "{BINDING_LEGACY_FORMAT}: frozen permission was hashed in the pre-canonical format; this historical Run cannot continue")));
+        }
+        return Err(invalid(error));
+    }
     let expected_authority = match binding.authority { ExecutionAuthority::Legacy => "legacy", ExecutionAuthority::Authoritative => "authoritative" };
     let owner: String = connection.query_row("SELECT conversation_id FROM runs WHERE id=?1", [run_id], |row| row.get(0))?;
     if binding.run_id != run_id || binding.conversation_id != conversation || conversation != owner
@@ -36,8 +49,51 @@ pub(super) fn binding_in_connection(connection: &Connection, run_id: &str) -> ru
     Ok(Some(binding))
 }
 
+/// Stable code for a frozen control binding that fails its integrity check
+/// (stored hash, permission hash, identity columns, decode). Such a Run is
+/// refused by every reader; at startup it is interrupted with this code instead
+/// of failing the whole application.
+pub(crate) const BINDING_INTEGRITY_FAILED: &str = "run_control.binding_integrity_failed";
+pub(crate) const BINDING_INTEGRITY_FAILED_MESSAGE: &str = "运行控制绑定校验失败，此 Run 已中断，不能继续";
+
+/// Stable code for an intact binding frozen before canonical JSON (83c16042,
+/// 2026-10-21): its permission hash matches the stored bytes in the old
+/// field order, not the current canonical form. It is never continued.
+pub(crate) const BINDING_LEGACY_FORMAT: &str = "run_control.binding_legacy_format";
+pub(crate) const BINDING_LEGACY_FORMAT_MESSAGE: &str = "运行控制绑定为旧版格式，历史 Run 已中断，不能继续";
+
+const PERMISSION_HASH_MISMATCH: &str = "frozen permission hash does not match its content";
+
+/// Versioned check for bindings frozen before canonical JSON: those hashed
+/// `serde_json::to_string(&permission)` (struct field order) and stored the
+/// binding the same way, so the stored `permission` bytes are exactly what was
+/// hashed. Only the bytes are hashed; nothing is re-serialized or trusted.
+fn legacy_permission_bytes_match(json: &str, snapshot_id: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Stored<'a> { #[serde(borrow)] permission: &'a serde_json::value::RawValue }
+    serde_json::from_str::<Stored<'_>>(json)
+        .is_ok_and(|stored| content_hash(stored.permission.get()) == snapshot_id)
+}
+
+/// The stable code and user-facing reason for a Run whose frozen binding this
+/// build cannot verify, or `None` when `error` is not a binding refusal (a
+/// database fault, which must still fail loudly).
+pub(crate) fn binding_refusal(error: &rusqlite::Error) -> Option<(&'static str, &'static str)> {
+    let rusqlite::Error::InvalidParameterName(message) = error else { return None };
+    if message.starts_with(BINDING_LEGACY_FORMAT) {
+        Some((BINDING_LEGACY_FORMAT, BINDING_LEGACY_FORMAT_MESSAGE))
+    } else if message.starts_with(BINDING_INTEGRITY_FAILED) && message.contains(EXECUTOR_ROUTE_UNKNOWN) {
+        Some((EXECUTOR_ROUTE_UNKNOWN, EXECUTOR_ROUTE_UNKNOWN_MESSAGE))
+    } else if message.starts_with(BINDING_INTEGRITY_FAILED) {
+        Some((BINDING_INTEGRITY_FAILED, BINDING_INTEGRITY_FAILED_MESSAGE))
+    } else {
+        None
+    }
+}
+
 /// Stable refusal code for a frozen executor route this build does not know.
 pub(crate) const EXECUTOR_ROUTE_UNKNOWN: &str = "executor_route_unknown";
+pub(crate) const EXECUTOR_ROUTE_UNKNOWN_MESSAGE: &str = "执行路径无法识别，此 Run 已中断，不能继续";
 
 /// Terminal code and reason for a historical Kernel Run (Authoritative, no
 /// frozen route) found unfinished at startup. The Kernel loop is frozen: such

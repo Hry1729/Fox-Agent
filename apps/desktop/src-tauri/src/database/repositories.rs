@@ -62,6 +62,8 @@ pub(crate) use run_control::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESS
 mod native_route;
 #[cfg(test)]
 mod native_route_tests;
+#[cfg(test)]
+mod run_control_upgrade_tests;
 mod skill_activations;
 mod delivery_checks;
 pub(crate) use delivery_acceptance::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
@@ -1426,6 +1428,9 @@ impl Database {
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // One unverifiable historical binding must not fail startup: its
+            // Run is interrupted with a stable code and never continued.
+            native_route::interrupt_unverifiable_runs(&transaction, now)?;
             let retired = native_route::retire_unrouted_kernel_runs(&transaction, now)?;
             native_route::protect_restart_owners(&transaction, now, &retired)?;
             child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;

@@ -2943,8 +2943,16 @@ impl RuntimeHost {
             .map_err(|error| error.to_string())?;
         let mut delivered = 0;
         for intent in intents {
-            if self.signal_graph_child_cancel(&intent.child_run_id, true)? {
-                delivered += 1;
+            // Startup: one intent that cannot be delivered (for example a child
+            // whose frozen binding is refused) is logged and left undelivered;
+            // it must not fail the whole startup.
+            match self.signal_graph_child_cancel(&intent.child_run_id, true) {
+                Ok(true) => delivered += 1,
+                Ok(false) => {}
+                Err(error) => eprintln!(
+                    "[graph.cancel_intent_recovery_failed] child={} error={}",
+                    intent.child_run_id, error
+                ),
             }
         }
         Ok(delivered)

@@ -259,7 +259,7 @@ fn a0_startup_retirement_settles_the_kernel_read_model_and_leaves_other_routes_a
 }
 
 #[test]
-fn a0_startup_an_unknown_frozen_route_fails_startup_with_executor_route_unknown() {
+fn a0_startup_an_unknown_frozen_route_interrupts_only_that_run_with_executor_route_unknown() {
     let (db,run,_) = fixture(Some(ExecutorRoute::PiNative));
     db.with_connection(|connection| {
         let raw: String = connection.query_row("SELECT binding_json FROM run_control_bindings WHERE run_id=?1",[&run],|row|row.get(0))?;
@@ -268,9 +268,13 @@ fn a0_startup_an_unknown_frozen_route_fails_startup_with_executor_route_unknown(
         connection.execute("UPDATE run_control_bindings SET binding_json=?2,binding_hash=?3 WHERE run_id=?1",params![run,raw,hash])?;
         Ok(())
     }).unwrap();
-    let error = db.repair_interrupted_runs().unwrap_err();
-    assert!(error.contains("executor_route_unknown"),"{error}");
-    assert_eq!(status(&db,&run),"running");
+    // dbhash: one unverifiable binding no longer fails startup; its Run is
+    // interrupted with the stable code and stays refused.
+    db.repair_interrupted_runs().unwrap();
+    assert_eq!(terminal_fact(&db,&run).0,"interrupted");
+    assert_eq!(terminal_fact(&db,&run).1.as_deref(),Some("executor_route_unknown"));
+    assert!(db.run_control_binding(&run).unwrap_err().contains("executor_route_unknown"));
+    assert!(db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).is_err());
 }
 
 #[test]
@@ -309,8 +313,15 @@ fn corrupt_or_unsupported_native_bindings_cannot_enter_any_host_writer() {
         assert!(db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).is_err(),"{corruption}");
         assert!(db.mark_run_failed(&run,"test","failed").is_err(),"{corruption}");
         assert!(db.mark_run_interrupted(&run,"test","interrupted").is_err(),"{corruption}");
-        assert!(db.repair_interrupted_runs().is_err(),"{corruption}");
-        assert_eq!(status(&db,&run),"running");
+        // dbhash: startup succeeds and only this Run is interrupted with the
+        // integrity code; every writer keeps refusing it afterwards.
+        db.repair_interrupted_runs().unwrap();
+        db.audit_interrupted_tasks().unwrap();
+        assert_eq!(terminal_fact(&db,&run).0,"interrupted","{corruption}");
+        assert_eq!(terminal_fact(&db,&run).1.as_deref(),Some("run_control.binding_integrity_failed"),"{corruption}");
+        assert!(db.create_host_tool_call(&run,"call","read",&input(),"running",false).is_err(),"{corruption}");
+        assert!(db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).is_err(),"{corruption}");
+        assert!(db.run_control_binding(&run).unwrap_err().contains("run_control.binding_integrity_failed"),"{corruption}");
     }
 }
 
@@ -324,10 +335,13 @@ fn graph_host_recovery_includes_native_owners_and_refuses_corrupt_bindings() {
         }).unwrap();
         assert_eq!(rows,if route.is_some() {vec!["pending"]} else {Vec::new()});
         db.with_connection(|connection|connection.execute("UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",[&run])).unwrap();
-        assert!(db.with_connection(|connection| {
+        // dbhash: a refused binding is never recovered, and it no longer fails
+        // recovery (and so startup) for every other row.
+        assert_eq!(db.with_connection(|connection| {
             super::graph_lead::host_recovery_rows(connection,vec![(run.clone(),"pending")])
                 .map_err(|error|projection_violation(error.to_string()))
-        }).is_err());
+        }).unwrap(),Vec::<&str>::new());
+
     }
 }
 

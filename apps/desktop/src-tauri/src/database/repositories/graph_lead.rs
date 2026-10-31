@@ -2130,8 +2130,12 @@ impl Database {
 pub(super) fn host_recovery_rows<T>(connection:&Connection,rows:Vec<(String,T)>) -> Result<Vec<T>,RepositoryError> {
     let mut owned=Vec::new();
     for (run,row) in rows {
-        if super::native_route::writer_route(connection,&run).map_err(database_error)?!=super::native_route::WriterRoute::Kernel {
-            owned.push(row);
+        // A Run whose frozen binding cannot be verified is never recovered
+        // (startup interrupts it); it must not fail recovery of the others.
+        match super::native_route::sweep_writer_route(connection,&run).map_err(database_error)? {
+            Some(super::native_route::WriterRoute::Kernel) => {}
+            Some(_) => owned.push(row),
+            None => eprintln!("fox.run_control recovery_skipped run={run} reason=binding_refused"),
         }
     }
     Ok(owned)
