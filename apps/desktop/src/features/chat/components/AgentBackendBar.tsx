@@ -40,7 +40,7 @@ function CapabilityChips({ capabilities }: { capabilities: AgentBackendCapabilit
 }
 
 /** A neutral statement for older Hosts that do not send a native picker. */
-function NoFoxSandboxNote() {
+function NoFoxLayerNote() {
   return <span className="fox-agent-backend-chip" data-isolation="native">隔离：Fox 不额外包装（Agent 原生）</span>
 }
 
@@ -106,7 +106,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
           <Lock size={11} aria-hidden="true" />
           后端：{AGENT_BACKEND_LABELS[lockedBackend]}（已锁定）
         </span>
-        {access === 'runnable' && (permissionPicker ?? <NoFoxSandboxNote />)}
+        {access === 'runnable' && (permissionPicker ?? <NoFoxLayerNote />)}
         {refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)}
         {access === 'runnable' && <CapabilityChips capabilities={capabilities} />}
         {access === 'runnable' && credentialCard}

@@ -35,7 +35,7 @@ export const AGENT_BACKEND_LABELS: Record<AgentBackendId, string> = {
  * hidden backend still open, show their backend and run as before.
  *
  * Product decision 2026-10-24 hid Codex because of the outer SRT layer. That
- * layer now applies only to the Fox Agent, so Codex is offered again. Keep
+ * layer is gone (plan B2), so Codex is no longer hidden. Keep
  * this list and the Host's `AgentBackend::HIDDEN` in sync.
  */
 export const HIDDEN_AGENT_BACKENDS: readonly AgentBackendId[] = []

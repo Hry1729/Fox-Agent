@@ -269,7 +269,7 @@ pub struct AgentBackendConversationRequest {
 pub fn agent_backend_network_status(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: AgentBackendConversationRequest) -> ApiResponse<crate::external_backend::NetworkStatus> {
     match external.network_status(&request.conversation_id) {
         Ok(status) => ApiResponse::success(status),
-        Err(error) => ApiResponse::failure("sandbox.network_status_failed", error, true),
+        Err(error) => ApiResponse::failure("agent_backend.network_status_failed", error, true),
     }
 }
 
@@ -286,7 +286,7 @@ pub async fn agent_backend_preview_action(external: tauri::State<'_, crate::exte
     Ok(match external.preview_action(&request.conversation_id, &request.preview, request.stop).await {
         Ok(_) if request.stop => ApiResponse::success(true),
         Ok(url) => super::external_url_open(super::OpenExternalUrlRequest { url }),
-        Err(error) => ApiResponse::failure("sandbox.preview_failed", error, true),
+        Err(error) => ApiResponse::failure("agent_backend.preview_failed", error, true),
     })
 }
 
@@ -377,7 +377,7 @@ pub fn agent_backend_permission_status(
     ApiResponse::success(external.permission_status(request.conversation_id.as_deref()))
 }
 
-/// Revoke full access mid-session (restarts the backend in the sandbox).
+/// Revoke full access mid-session (restarts the backend without it).
 #[tauri::command]
 pub async fn agent_backend_revoke_full_access(
     external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
