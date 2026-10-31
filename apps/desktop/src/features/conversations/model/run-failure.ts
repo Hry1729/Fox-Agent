@@ -211,6 +211,7 @@ export function deriveRunTerminalStates(input: RunFailureInput): RunTerminalStat
   for (const run of input.persistedRuns ?? []) {
     const kind = kindForStatus(run.status)
     if (kind) {
+      // 持久化终态覆盖事件：Run 行是 interrupted 时，更早的 run.failed 不能把 kind 改回 failed。
       cancelled.delete(run.id)
       failures.set(run.id, withDiagnostic(failureFor(kind, run.errorCode, run.errorMessage), diagnostics.get(run.id) ?? null))
       continue

@@ -77,7 +77,9 @@ export function FoxAssistantMessage() {
   }
   const statusReason = status?.type === 'incomplete' ? status.reason : undefined
   const cancelled = statusReason === 'cancelled'
-  const failed = statusReason === 'error'
+  // 页脚以持久化 Run 的失败种类为准：interrupted 显示「运行中断」。
+  const interrupted = foxMessage?.failure?.kind === 'interrupted'
+  const failed = statusReason === 'error' && !interrupted
   const replyTime = createdAt instanceof Date
     ? createdAt.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
     : ''
@@ -97,6 +99,7 @@ export function FoxAssistantMessage() {
             <span>{assistantName || 'Fox 默认助手'}</span>
             <span>{replyTime}</span>
             {cancelled && <span className="fox-message-cancelled-meta">已取消</span>}
+            {interrupted && <span className="fox-message-failure-meta">运行中断</span>}
             {failed && <span className="fox-message-failure-meta">运行失败</span>}
           </div>
         </div>}

@@ -153,6 +153,28 @@ describe('deriveRunFailures', () => {
     })
   })
 
+  test('a persisted interrupted run wins over an older run.failed event', () => {
+    const failures = deriveRunFailures({
+      persistedRuns: [persistedRun({
+        id: 'run-interrupted',
+        status: 'interrupted',
+        errorCode: 'run_control.binding_integrity_failed',
+        errorMessage: '运行控制绑定校验失败，此 Run 已中断，不能继续',
+      })],
+      events: [{
+        runId: 'run-interrupted',
+        eventType: 'run.failed',
+        event: { type: 'run.failed', code: 'provider.timeout', message: '模型响应超时' },
+      }],
+    })
+
+    expect(failures.get('run-interrupted')).toEqual({
+      kind: 'interrupted',
+      code: 'run_control.binding_integrity_failed',
+      message: '运行控制绑定校验失败，此 Run 已中断，不能继续',
+    })
+  })
+
   test('falls back to a default message and code when the source omits them', () => {
     const failures = deriveRunFailures({
       events: [{ runId: 'run-1', eventType: 'run.interrupted', event: { type: 'run.interrupted' } }],
