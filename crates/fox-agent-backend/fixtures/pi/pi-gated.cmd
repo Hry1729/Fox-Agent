@@ -15,4 +15,8 @@ setlocal
 if not defined FOX_PI_BIN set "FOX_PI_BIN=pi"
 set "FOX_PI_TEST_EXT_ARGS="
 if defined FOX_PI_TEST_EXTENSION set "FOX_PI_TEST_EXT_ARGS=-e "%FOX_PI_TEST_EXTENSION%""
-"%FOX_PI_BIN%" --no-extensions -e "%~dp0fox-approval-gate.ts" %FOX_PI_TEST_EXT_ARGS% %FOX_PI_EXTRA_ARGS% %*
+rem Plan C3: when Fox sets FOX_PI_MCP_EXTENSION, the Fox tool extension (MCP
+rem bridge: present_files, knowledge, ask_user) is loaded after the gate.
+set "FOX_PI_MCP_EXT_ARGS="
+if defined FOX_PI_MCP_EXTENSION set "FOX_PI_MCP_EXT_ARGS=-e "%FOX_PI_MCP_EXTENSION%""
+"%FOX_PI_BIN%" --no-extensions -e "%~dp0fox-approval-gate.ts" %FOX_PI_MCP_EXT_ARGS% %FOX_PI_TEST_EXT_ARGS% %FOX_PI_EXTRA_ARGS% %*

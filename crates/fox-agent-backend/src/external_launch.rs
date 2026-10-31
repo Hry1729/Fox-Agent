@@ -636,11 +636,90 @@ fn host_login_reaches(probe: &crate::onboarding::CredentialProbe) -> bool {
 #[derive(Clone)]
 pub struct HostLauncher {
     pub config: HostLaunchConfig,
+    /// Plan C3: the Host's Fox tool MCP bridge. Every launch gets a fresh
+    /// token and the bridge is injected the way its Agent supports
+    /// ([`crate::fox_mcp::injection_for`]). `None` only in tests that do not
+    /// exercise the bridge.
+    pub mcp: Option<crate::fox_mcp::McpBridge>,
+}
+
+/// Revokes a launch's bridge token unless the launch succeeded (then the
+/// token lives until the process stops: [`Launched::on_closed`]).
+struct McpTokenGuard {
+    bridge: crate::fox_mcp::McpBridge,
+    token: String,
+    armed: bool,
+}
+
+impl McpTokenGuard {
+    fn into_on_closed(mut self) -> Box<dyn FnOnce() + Send> {
+        self.armed = false;
+        let bridge = self.bridge.clone();
+        let token = std::mem::take(&mut self.token);
+        Box::new(move || bridge.revoke(&token))
+    }
+}
+
+impl Drop for McpTokenGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.bridge.revoke(&self.token);
+        }
+    }
+}
+
+/// What a launch hands its Agent for the Fox tools.
+struct McpLaunch {
+    guard: McpTokenGuard,
+    stdio: Option<crate::fox_mcp::McpStdioServer>,
 }
 
 impl HostLauncher {
     pub fn new(config: HostLaunchConfig) -> Self {
-        Self { config }
+        Self { config, mcp: None }
+    }
+
+    /// [`Self::new`] with the Fox tool MCP bridge (plan C3).
+    pub fn with_mcp(config: HostLaunchConfig, bridge: crate::fox_mcp::McpBridge) -> Self {
+        Self { config, mcp: Some(bridge) }
+    }
+
+    /// Issue the launch's token and put the bridge where its Agent reads it:
+    /// Codex / dsh an ACP stdio MCP server (the relay, run by the runtime's
+    /// Node); pi the environment of the gated pi, which loads the Fox tool
+    /// extension. Nothing is launched without it (no silent "no tools").
+    fn prepare_mcp(config: &HostLaunchConfig, bridge: &crate::fox_mcp::McpBridge, request: &LaunchRequest, spec: &mut LaunchSpec) -> Result<McpLaunch, LaunchFailure> {
+        use crate::fox_mcp::{injection_for, write_assets, McpInjection, PI_EXTENSION_ENV};
+        let unavailable = |message: String| {
+            LaunchFailure::new("agent_backend_fox_tools_unavailable", message).remedy("安装或修复 Fox 外部运行时后重试")
+        };
+        let node = config.managed_node().ok_or_else(|| unavailable(format!("找不到运行 Fox 工具桥（MCP）的 Node：{}", config.runtime_root.display())))?;
+        if request.backend == AgentBackend::Pi {
+            // The installed gate must know how to load the Fox tool extension
+            // (runtime packages before C3 do not).
+            let gate = config.pi_gate_script();
+            let supports = std::fs::read_to_string(&gate).map(|text| text.contains(PI_EXTENSION_ENV)).unwrap_or(false);
+            if !supports {
+                return Err(LaunchFailure::new("agent_backend_fox_tools_unsupported", "已安装的 pi-gate 不支持加载 Fox 工具扩展（MCP 桥），pi 将无法使用交付文件、知识库和提问工具，已拒绝启动")
+                    .remedy("升级 Fox 外部运行时（新版运行时包自带支持 Fox 工具的 pi-gate）后重试")
+                    .detail(serde_json::json!({ "gate": gate })));
+            }
+        }
+        let assets = write_assets(&config.state_root).map_err(|error| unavailable(format!("无法准备 Fox 工具桥：{error}")))?;
+        let grant = bridge.issue(&request.conversation_id, request.backend).map_err(|error| unavailable(format!("无法签发 Fox 工具桥令牌：{error}")))?;
+        let guard = McpTokenGuard { bridge: bridge.clone(), token: grant.token.clone(), armed: true };
+        let stdio = match injection_for(request.backend, &grant, &node, &assets) {
+            Some(McpInjection::AcpStdio(server)) => Some(server),
+            Some(McpInjection::PiExtension { env }) => {
+                for (name, value) in env {
+                    spec.session_env.retain(|(key, _)| key != &name);
+                    spec.session_env.push((name, value));
+                }
+                None
+            }
+            None => return Err(LaunchFailure::new("agent_backend_invalid", "Fox 不经外部运行时启动")),
+        };
+        Ok(McpLaunch { guard, stdio })
     }
 
     /// Check the pinned adapter answered `initialize` (plan 7.3). A mismatch
@@ -655,7 +734,7 @@ impl HostLauncher {
         result.map_err(|error| LaunchFailure::new("agent_backend_version_mismatch", error))
     }
 
-    async fn launch_now(config: HostLaunchConfig, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
+    async fn launch_now(config: HostLaunchConfig, bridge: Option<crate::fox_mcp::McpBridge>, request: LaunchRequest) -> Result<Launched, LaunchFailure> {
         // Fox adds no sandbox around an external Agent: its own native
         // sandbox, approval and permission settings remain authoritative.
         // The private HOME is Fox-managed. `mode` only records whether the
@@ -681,6 +760,10 @@ impl HostLauncher {
         if let Some(refusal) = config.missing_login_refusal(&request) {
             return Err(refusal);
         }
+        let mcp = match bridge.as_ref() {
+            Some(bridge) => Some(Self::prepare_mcp(&config, bridge, &request, &mut spec)?),
+            None => None,
+        };
         let os = config.os;
         // The external process is a normal child of the Fox Host (Job Object /
         // process group) and keeps whatever native protection its Agent
@@ -690,8 +773,14 @@ impl HostLauncher {
         let declaration = prepared.declaration.clone();
         let cwd = request.project_root.clone();
         let connection = AcpConnection::spawn_prepared_detailed(prepared, &cwd).await?;
-        let on_closed: Option<Box<dyn FnOnce() + Send>> = None;
         let mut connection = connection;
+        let (on_closed, stdio) = match mcp {
+            Some(McpLaunch { guard, stdio }) => (Some(guard.into_on_closed()), stdio),
+            None => (None, None),
+        };
+        if let Some(server) = stdio {
+            connection.set_mcp_servers(vec![server]);
+        }
         // Peek at initialize (it is the first queued event) for the version
         // check without consuming it for the runtime.
         let mut events = connection.take_events();
@@ -755,7 +844,7 @@ impl ExternalLauncher for HostLauncher {
 
     fn launch(&self, request: LaunchRequest) -> BoxFuture<'static, Result<Launched, LaunchFailure>> {
         let config = self.config.clone();
-        Box::pin(Self::launch_now(config, request))
+        Box::pin(Self::launch_now(config, self.mcp.clone(), request))
     }
 }
 

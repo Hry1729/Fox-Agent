@@ -86,9 +86,14 @@ pub enum BackendEvent {
     Closed,
 }
 
+/// Error prefix of a `session/new` whose answer says the Agent skipped the
+/// Fox tool MCP server (Codex `skippedMcpServers`).
+pub const FOX_TOOLS_SKIPPED: &str = "fox_mcp_server_skipped";
+
 enum Command {
     NewSession {
         cwd: PathBuf,
+        mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// `session/load` (history replay arrives as `session/update` before the
@@ -96,6 +101,7 @@ enum Command {
     LoadSession {
         session_id: String,
         cwd: PathBuf,
+        mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Prompt {
@@ -181,6 +187,24 @@ pub struct AcpConnection {
     /// Per-session temp directory, removed when the connection goes away.
     temp: Option<crate::external_home::SessionTemp>,
     permission_mode: crate::external_home::PermissionMode,
+    /// Plan C3: MCP servers handed to the Agent in every `session/new` /
+    /// `session/load` (the Fox tool bridge for Codex / dsh).
+    mcp_servers: Vec<crate::fox_mcp::McpStdioServer>,
+}
+
+/// The ACP form of a Host stdio MCP server.
+fn acp_mcp_server(server: &crate::fox_mcp::McpStdioServer) -> agent_client_protocol::schema::v1::McpServer {
+    use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
+    McpServer::Stdio(
+        McpServerStdio::new(server.name.clone(), server.command.clone())
+            .args(server.args.clone())
+            .env(server.env.iter().map(|(name, value)| EnvVariable::new(name.clone(), value.clone())).collect()),
+    )
+}
+
+/// The wire JSON of the `mcpServers` a session request carries (tests).
+pub fn mcp_servers_json(servers: &[crate::fox_mcp::McpStdioServer]) -> Value {
+    serde_json::to_value(servers.iter().map(acp_mcp_server).collect::<Vec<_>>()).unwrap_or(Value::Null)
 }
 
 /// Whether a permission answer reached the native transport. ACP v1 has no
@@ -868,6 +892,16 @@ fn note(report: &mut TerminateReport, text: String) {
     report.notes.push(text);
 }
 
+/// L-3: run blocking stop work (process waits, Job Object polls) on the
+/// blocking pool so a stop never parks a runtime worker. A failed blocking
+/// task panics here: it only fails when the closure itself panicked.
+async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    }
+}
+
 /// Kill the backend tree. Unix: SIGKILL to the process group. Windows:
 /// `TerminateJobObject`; `taskkill /T /F` only as a fallback when there is no
 /// job or terminating it failed, with its exit status checked and recorded.
@@ -1091,24 +1125,33 @@ impl AcpConnection {
                     let _ = ready_tx.send(Ok(()));
                     while let Some(command) = command_rx.recv().await {
                         match command {
-                            Command::NewSession { cwd, reply } => {
+                            Command::NewSession { cwd, mcp_servers, reply } => {
                                 let cwd = crate::launch::backend_visible_path(&cwd);
+                                let offered_fox_tools = !mcp_servers.is_empty();
                                 let created = connection
-                                    .send_request(NewSessionRequest::new(cwd))
+                                    .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp_servers))
                                     .block_task()
                                     .await
-                                    .map(|response| response.session_id.to_string())
                                     .map_err(|error| {
                                         *lock_data(&session_error_data) = rpc_error_data_text(&error);
                                         rpc_error_summary(&error)
+                                    })
+                                    .and_then(|response| {
+                                        // Codex drops a client MCP server whose name its own config
+                                        // already uses; the Fox tools must not be silently missing.
+                                        let raw = serde_json::to_value(&response).unwrap_or(Value::Null);
+                                        if offered_fox_tools && crate::fox_mcp::skipped_by_agent(&raw) {
+                                            return Err(format!("{FOX_TOOLS_SKIPPED}: the Agent skipped the Fox tool MCP server `{}` (a server of that name exists in its own configuration)", crate::fox_mcp::SERVER_NAME));
+                                        }
+                                        Ok(response.session_id.to_string())
                                     });
                                 let _ = reply.send(created);
                             }
-                            Command::LoadSession { session_id, cwd, reply } => {
+                            Command::LoadSession { session_id, cwd, mcp_servers, reply } => {
                                 let cwd = crate::launch::backend_visible_path(&cwd);
                                 let fence_session = session_id.clone();
                                 let loaded = connection
-                                    .send_request(LoadSessionRequest::new(session_id, cwd))
+                                    .send_request(LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers))
                                     .block_task()
                                     .await
                                     .map(|_| ())
@@ -1260,6 +1303,7 @@ impl AcpConnection {
             rpc_error_data,
             temp: None,
             permission_mode: crate::external_home::PermissionMode::FullAccess,
+            mcp_servers: Vec::new(),
         })
     }
 
@@ -1284,13 +1328,24 @@ impl AcpConnection {
         self.permission_mode
     }
 
+    /// Plan C3: the MCP servers every later `session/new` / `session/load`
+    /// hands to the Agent (set by the launcher before the session opens).
+    pub fn set_mcp_servers(&mut self, servers: Vec<crate::fox_mcp::McpStdioServer>) {
+        self.mcp_servers = servers;
+    }
+
+    /// The MCP servers [`Self::set_mcp_servers`] recorded.
+    pub fn mcp_servers(&self) -> &[crate::fox_mcp::McpStdioServer] {
+        &self.mcp_servers
+    }
+
     pub async fn new_session(&self, cwd: PathBuf) -> Result<String, String> {
         if self.is_stopping() {
             return Err(STOPPING_REFUSAL.to_owned());
         }
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(Command::NewSession { cwd, reply })
+            .send(Command::NewSession { cwd, mcp_servers: self.mcp_servers.iter().map(acp_mcp_server).collect(), reply })
             .map_err(|_| "backend connection closed".to_string())?;
         response.await.map_err(|_| "backend connection closed".to_string())?
     }
@@ -1314,7 +1369,7 @@ impl AcpConnection {
         }
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(Command::LoadSession { session_id: session_id.to_owned(), cwd, reply })
+            .send(Command::LoadSession { session_id: session_id.to_owned(), cwd, mcp_servers: self.mcp_servers.iter().map(acp_mcp_server).collect(), reply })
             .map_err(|_| "backend connection closed".to_string())?;
         response.await.map_err(|_| "backend connection closed".to_string())?
     }
@@ -1486,7 +1541,8 @@ impl AcpConnection {
     /// backend's stdin closes), then the grace, then `TerminateJobObject` (taskkill only as a
     /// checked fallback), then `ActiveProcesses == 0` is polled.
     async fn terminate(self) -> TerminateReport {
-        let Self { commands, child, child_id, job, temp, .. } = self;
+        #[allow(unused_mut)]
+        let Self { commands, child, child_id, mut job, temp, .. } = self;
         let mut report = TerminateReport::default();
         #[cfg(windows)]
         drop(commands);
@@ -1508,7 +1564,16 @@ impl AcpConnection {
                 let late = crate::proctree::snapshot_tree(pid);
                 crate::proctree::merge(&mut report.tracked, late);
             }
-            kill_tree(pid, &job, &mut report);
+            // L-3: `taskkill` (Windows fallback) is a blocking process wait;
+            // it runs on the blocking pool, never on a runtime worker.
+            let (returned_job, returned_report) = run_blocking(move || {
+                let mut report = report;
+                kill_tree(pid, &job, &mut report);
+                (job, report)
+            })
+            .await;
+            job = returned_job;
+            report = returned_report;
         }
         let _ = child.kill().await;
         let _ = child.wait().await;
@@ -1535,12 +1600,20 @@ impl AcpConnection {
                 #[cfg(windows)]
                 {
                     let _ = pid;
-                    match &job {
-                        Some(job) => job.confirm_empty(crate::proctree::STOP_CONFIRM_TIMEOUT),
-                        None => crate::port::StopConfirmation::FailedOrUnconfirmed {
-                            reasons: vec!["no Job Object: taskkill /T /F cannot prove that every descendant ended".into()],
-                        },
-                    }
+                    // L-3: the Job Object poll sleeps between reads (up to
+                    // STOP_CONFIRM_TIMEOUT); off the runtime workers.
+                    let (returned_job, confirmation) = run_blocking(move || {
+                        let confirmation = match &job {
+                            Some(job) => job.confirm_empty(crate::proctree::STOP_CONFIRM_TIMEOUT),
+                            None => crate::port::StopConfirmation::FailedOrUnconfirmed {
+                                reasons: vec!["no Job Object: taskkill /T /F cannot prove that every descendant ended".into()],
+                            },
+                        };
+                        (job, confirmation)
+                    })
+                    .await;
+                    job = returned_job;
+                    confirmation
                 }
                 #[cfg(not(any(unix, windows)))]
                 {

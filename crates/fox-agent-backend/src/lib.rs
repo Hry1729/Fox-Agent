@@ -75,5 +75,7 @@ pub mod external;
 pub mod external_launch;
 #[cfg(feature = "acp")]
 pub mod preview;
+#[cfg(feature = "acp")]
+pub mod fox_mcp;
 
 pub mod backends;

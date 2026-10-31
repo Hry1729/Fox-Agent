@@ -411,6 +411,12 @@ pub enum RevokeOutcome {
     SwitchedLive,
     /// The live switch was refused; the next turn retries it.
     SwitchFailed(String),
+    /// L-1: the process was still starting. The launch is recorded as
+    /// overtaken by the revocation: when it comes up in full access it is
+    /// stopped before any prompt reaches it and its turn ends
+    /// `agent_backend_full_access_revoked`; the next turn starts without full
+    /// access.
+    LaunchAborted,
 }
 
 /// Result of [`ExternalRuntime::apply_native_mode`].
@@ -500,10 +506,17 @@ struct Turn {
     prompt_error: Option<String>,
     /// JSON-RPC `data` of the failed prompt (unredacted until the diagnostic).
     prompt_error_data: Option<String>,
+    /// L-1: [`SessionState::revoke_epoch`] when this turn was reserved. A
+    /// later revocation moves the session's epoch; a turn frozen with full
+    /// access then never starts a full-access process.
+    revoke_epoch: u64,
+    /// Plan C3: the Agent asked the user through the Fox `ask_user` tool; the
+    /// turn completes as `awaiting_user` (the question card stays open).
+    awaiting_user: bool,
 }
 
 impl Turn {
-    fn new(run_id: &str, native_mode: &str) -> Self {
+    fn new(run_id: &str, native_mode: &str, revoke_epoch: u64) -> Self {
         Self {
             last_activity: std::time::Instant::now(),
             active_tools: std::collections::HashSet::new(),
@@ -517,6 +530,8 @@ impl Turn {
             prompt_fence_seen: false,
             prompt_error: None,
             prompt_error_data: None,
+            revoke_epoch,
+            awaiting_user: false,
         }
     }
 }
@@ -544,13 +559,52 @@ struct SessionState {
     /// A full-access process stopped for revocation was not confirmed gone:
     /// no relaunch until Fox restarts.
     stop_unconfirmed: bool,
+    /// L-1: a process is being launched for this session.
+    launching: bool,
+    /// L-1: moves on every full-access revocation; compared with the turn's
+    /// copy before and after a launch.
+    revoke_epoch: u64,
 }
 
 struct Session {
     conversation_id: String,
     backend: AgentBackend,
     state: Mutex<SessionState>,
+    /// L-2: one launch per session at a time (held for the whole of
+    /// [`ExternalRuntime::ensure_ready`]).
+    launch_lock: tokio::sync::Mutex<()>,
 }
+
+/// L-1: clears [`SessionState::launching`] however the launch ends.
+struct LaunchingGuard<'a>(&'a Session);
+
+impl<'a> LaunchingGuard<'a> {
+    fn begin(session: &'a Session) -> Self {
+        lock(&session.state).launching = true;
+        Self(session)
+    }
+}
+
+impl Drop for LaunchingGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.state).launching = false;
+    }
+}
+
+/// Why a freshly launched process may not be installed in its session.
+fn launch_overtaken(session_in_map: bool, state: &SessionState, run_id: &str, launched_mode: PermissionMode) -> Option<LaunchFailure> {
+    if state.closing || !session_in_map {
+        return Some(LaunchFailure::new("agent_backend_session_closed", "外部后端会话在启动期间已关闭，新进程已停止"));
+    }
+    let turn_epoch = state.turn.as_ref().filter(|turn| turn.run_id == run_id).map(|turn| turn.revoke_epoch);
+    if launched_mode == PermissionMode::FullAccess && turn_epoch.is_some_and(|epoch| epoch != state.revoke_epoch) {
+        return Some(LaunchFailure::new(REVOKED_DURING_LAUNCH, "启动期间已撤销完全访问：以完全访问启动的进程已停止，本轮没有执行").remedy("请重新发送；下一轮将以撤销后的权限启动"));
+    }
+    None
+}
+
+/// L-1: code of a turn whose full-access launch was overtaken by a revocation.
+pub const REVOKED_DURING_LAUNCH: &str = "agent_backend_full_access_revoked";
 
 struct Inner<S: ExternalSink, L: ExternalLauncher> {
     sink: S,
@@ -618,7 +672,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     fn session(&self, conversation_id: &str, backend: AgentBackend) -> Arc<Session> {
         let mut sessions = lock(&self.inner.sessions);
         Arc::clone(sessions.entry(conversation_id.to_owned()).or_insert_with(|| {
-            Arc::new(Session { conversation_id: conversation_id.to_owned(), backend, state: Mutex::new(SessionState::default()) })
+            Arc::new(Session { conversation_id: conversation_id.to_owned(), backend, state: Mutex::new(SessionState::default()), launch_lock: tokio::sync::Mutex::new(()) })
         }))
     }
 
@@ -644,7 +698,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             if state.turn.is_some() {
                 return Err(StartError::TurnBusy);
             }
-            state.turn = Some(Turn::new(&request.run_id, native_mode));
+            let epoch = state.revoke_epoch;
+            state.turn = Some(Turn::new(&request.run_id, native_mode, epoch));
         }
         let started = json!({ "type": "run.started", "agentBackend": backend.as_str() });
         if let Err(error) = self.inner.sink.emit(&request.run_id, &session.conversation_id, started) {
@@ -674,7 +729,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let Some(turn) = state.turn.as_mut().filter(|turn| turn.run_id == run_id) else {
             return;
         };
-        let terminal = if terminal == TurnTerminal::Completed && !turn.projector.has_delivery() {
+        let awaiting_user = turn.awaiting_user && terminal == TurnTerminal::Completed;
+        let terminal = if terminal == TurnTerminal::Completed && !turn.projector.has_delivery() && !awaiting_user {
             if turn.cancel_requested { TurnTerminal::Cancelled } else {
                 TurnTerminal::Failed { code: "agent_backend_empty_output".into(), message: "外部 Agent 已结束本轮，但没有返回有效回答或完成工具交付；请检查模型连接后重试".into() }
             }
@@ -695,6 +751,11 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             _ => serde_json::Map::new(),
         };
         extra.insert("agentBackend".into(), json!(session.backend.as_str()));
+        if awaiting_user && terminal == TurnTerminal::Completed {
+            // Plan C3: the question card of `ask_user` stays open; the
+            // user's answer arrives as the next turn.
+            extra.insert("completionReason".into(), json!("awaiting_user"));
+        }
         if !turn.projector.notices().is_empty() {
             // Backend warnings taken out of the answer (diagnostics area).
             extra.insert("backendNotices".into(), Value::Array(turn.projector.notices().to_vec()));
@@ -766,7 +827,29 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     /// Live connection with an open native session, launching and reopening
     /// as needed.
     async fn ensure_ready(&self, session: &Arc<Session>, request: &TurnRequest) -> Result<(), LaunchFailure> {
+        // L-2: one launch per session at a time; a turn that waited here and
+        // ended meanwhile (cancel timer, close) starts nothing.
+        let _launch_lock = session.launch_lock.lock().await;
         let desired = self.inner.launcher.desired_mode(&request.launch);
+        {
+            let state = lock(&session.state);
+            if state.closing {
+                return Err(LaunchFailure::new("agent_backend_session_closed", "外部后端会话已关闭"));
+            }
+            let Some(turn) = state.turn.as_ref().filter(|turn| turn.run_id == request.run_id) else {
+                return Err(LaunchFailure::new("agent_backend_turn_ended", "本轮已结束，未启动外部后端"));
+            };
+            if turn.cancel_requested {
+                return Err(LaunchFailure::new("agent_backend_turn_ended", "本轮已取消，未启动外部后端"));
+            }
+            // L-1: full access was revoked after this turn was frozen with it:
+            // never start (or switch back to) a full-access process for it.
+            let frozen_full = desired == PermissionMode::FullAccess
+                || crate::native_permission::is_full_access(session.backend, request.launch.native_mode());
+            if frozen_full && turn.revoke_epoch != state.revoke_epoch {
+                return Err(LaunchFailure::new(REVOKED_DURING_LAUNCH, "本轮开始后已撤销完全访问，本轮不会以完全访问执行").remedy("请重新发送；下一轮将以撤销后的权限启动"));
+            }
+        }
         if lock(&session.state).stop_unconfirmed {
             return Err(LaunchFailure::new("agent_backend_stop_unconfirmed", "撤销完全访问时，原进程未确认全部结束，不会重建")
                 .remedy(STOP_UNCONFIRMED_REMEDY));
@@ -845,6 +928,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         }
         let run_id = request.run_id.clone();
         self.emit(session, &run_id, json!({ "type": "agent_backend.launching", "agentBackend": session.backend.as_str(), "mode": desired.as_str() }));
+        let launching = LaunchingGuard::begin(session);
         let launched = self.inner.launcher.launch(request.launch.clone()).await?;
         let Launched { mut connection, mode, declaration, pi_launch, on_closed } = launched;
         let connection_key = match self.inner.launcher.connection_key(&request.launch) {
@@ -934,6 +1018,11 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 if let Some(callback) = on_closed {
                     callback();
                 }
+                if error.starts_with(crate::acp::FOX_TOOLS_SKIPPED) {
+                    return Err(LaunchFailure::new("agent_backend_fox_tools_rejected", format!("外部 Agent 没有接受 Fox 工具（MCP）：{error}"))
+                        .remedy(format!("Codex 自己的配置里已有名为 {} 的 MCP 服务器；请在 Codex 配置中删除或改名后重试", crate::fox_mcp::SERVER_NAME))
+                        .with_stderr_tail(&tail, "session_failed"));
+                }
                 return Err(LaunchFailure::new("agent_backend_session_failed", format!("外部后端无法打开会话：{error}"))
                     .with_stderr_tail(&tail, "session_failed")
                     .with_rpc_error_data(data.as_deref()));
@@ -950,23 +1039,79 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             }
         }
         let connection = Arc::new(connection);
-        let generation = {
+        // L-1 / L-2: install only into a session that still exists, is not
+        // closing, and whose turn was not overtaken by a revocation;
+        // otherwise this process is stopped here (with its own cleanup) and
+        // never receives a prompt.
+        let installed = {
+            let in_map = lock(&self.inner.sessions).get(&session.conversation_id).is_some_and(|current| Arc::ptr_eq(current, session));
             let mut state = lock(&session.state);
-            state.generation += 1;
-            state.connection = Some(Arc::clone(&connection));
-            state.native_session_id = Some(native.clone());
-            state.native_session_open = true;
-            state.initialize_response = Some(initialize_response.clone());
-            state.capabilities = Some(capabilities);
-            state.mode = Some(mode);
-            state.native_mode = Some(request.launch.native_mode().to_owned());
-            state.connection_key = connection_key;
-            state.model_host = self.inner.launcher.model_host(&request.launch);
-            state.declaration = Some(declaration.clone());
-            state.pi_launch = Some(pi_launch);
-            state.on_closed = on_closed;
-            state.generation
+            match launch_overtaken(in_map, &state, &request.run_id, mode) {
+                Some(failure) => Err(failure),
+                None => {
+                    // Never orphan a connection installed by someone else.
+                    let previous = state.connection.take().map(|old| (old, state.on_closed.take()));
+                    Ok(previous)
+                }
+            }
         };
+        let previous = match installed {
+            Ok(previous) => previous,
+            Err(failure) => {
+                drop(launching);
+                let report = close_shared(connection).await;
+                if let Some(callback) = on_closed {
+                    callback();
+                }
+                audit_stop(session, &failure.code, &report);
+                return Err(failure);
+            }
+        };
+        if let Some((old, old_on_closed)) = previous {
+            let _ = close_shared(old).await;
+            if let Some(callback) = old_on_closed {
+                callback();
+            }
+        }
+        // Checked again in the lock that installs (the old connection's stop
+        // above awaited): a close or revocation in between still wins.
+        let mut on_closed = on_closed;
+        let model_host = self.inner.launcher.model_host(&request.launch);
+        let installed = {
+            let mut state = lock(&session.state);
+            match launch_overtaken(true, &state, &request.run_id, mode) {
+                Some(failure) => Err(failure),
+                None => {
+                    state.generation += 1;
+                    state.connection = Some(Arc::clone(&connection));
+                    state.native_session_id = Some(native.clone());
+                    state.native_session_open = true;
+                    state.initialize_response = Some(initialize_response.clone());
+                    state.capabilities = Some(capabilities);
+                    state.mode = Some(mode);
+                    state.native_mode = Some(request.launch.native_mode().to_owned());
+                    state.connection_key = connection_key;
+                    state.model_host = model_host;
+                    state.declaration = Some(declaration.clone());
+                    state.pi_launch = Some(pi_launch);
+                    state.on_closed = on_closed.take();
+                    Ok(state.generation)
+                }
+            }
+        };
+        let generation = match installed {
+            Ok(generation) => generation,
+            Err(failure) => {
+                drop(launching);
+                let report = close_shared(connection).await;
+                if let Some(callback) = on_closed {
+                    callback();
+                }
+                audit_stop(session, &failure.code, &report);
+                return Err(failure);
+            }
+        };
+        drop(launching);
         self.emit(
             session,
             &run_id,
@@ -1477,6 +1622,16 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
             return RevokeOutcome::NotRunning;
         };
+        {
+            // L-1: every revocation moves the epoch; a launch in flight (or a
+            // turn reserved with full access) can no longer start a
+            // full-access process.
+            let mut state = lock(&session.state);
+            state.revoke_epoch += 1;
+            if state.launching {
+                return RevokeOutcome::LaunchAborted;
+            }
+        }
         if !crate::native_permission::full_access_needs_restart(session.backend) {
             let running_full = {
                 let state = lock(&session.state);
@@ -1582,6 +1737,31 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             async move { runtime.close_conversation(&id, "Fox 退出").await.map(|report| (id, report)) }
         });
         futures::future::join_all(closes).await.into_iter().flatten().collect()
+    }
+
+    /// Plan C3: the Agent of `conversation_id` asked the user through the Fox
+    /// `ask_user` tool during `run_id`; that turn completes `awaiting_user`.
+    /// `false` when `run_id` is not the conversation's active turn.
+    pub fn mark_awaiting_user(&self, conversation_id: &str, run_id: &str) -> bool {
+        let Some(session) = lock(&self.inner.sessions).get(conversation_id).cloned() else {
+            return false;
+        };
+        let mut state = lock(&session.state);
+        match state.turn.as_mut().filter(|turn| turn.run_id == run_id) {
+            Some(turn) => {
+                turn.awaiting_user = true;
+                turn.last_activity = std::time::Instant::now();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The active turn's run id of `conversation_id`, if one runs.
+    pub fn active_run_of(&self, conversation_id: &str) -> Option<String> {
+        let session = lock(&self.inner.sessions).get(conversation_id).cloned()?;
+        let state = lock(&session.state);
+        state.turn.as_ref().map(|turn| turn.run_id.clone())
     }
 
     /// What is known about a conversation's backend session.
