@@ -176,7 +176,7 @@ Reviewer dispatch采用数据库exactly-once、物理at-least-once。启动恢�
 
 Run 分派和终态还会触发 `before_run/after_run` 审计，但不会新增 Runtime 可执行回调。Fox 不把任意 Hook 脚本、HTTP Header、MCP Session ID 或 OpenAPI 定义传入模型上下文。
 
-知识工具保持现有名称并使用 source-aware 参数。`list_knowledge_bases`、`search_knowledge` 和 `read_knowledge_document` 根据 `KnowledgeReference.source` 路由到本地或远程 Provider；历史只传 `knowledgeBaseId` 的请求按远程语义兼容。本地 `search_knowledge` 在资料库向量索引就绪且检索模式为 `vector` / `hybrid` 时返回 `mode`、`fusionVersion` 和每条的 `vectorScore` / `lexicalScore`；否则回退到 SQLite 关键词检索，并在 `fallback.reason` 中给出 `index_not_ready`、`keyword_mode` 或 `vector_search_failed`（附 `errorCode`）。`topK`、`maxChars` 在两条路径上按同一规则截断。Runtime 不直接调用任何 `local_knowledge_*` Tauri 命令。本地知识图谱尚不可用时，`query_knowledge_graph` 返回 `local_knowledge.graph_unavailable`，不能用空结果冒充“没有关系”。
+知识工具保持现有名称并使用 source-aware 参数。`list_knowledge_bases`、`search_knowledge` 和 `read_knowledge_document` 根据 `KnowledgeReference.source` 路由到本地或远程 Provider；历史只传 `knowledgeBaseId` 的请求按远程语义兼容。本地 `search_knowledge` 在资料库向量索引就绪且检索模式为 `vector` / `hybrid` 时返回 `mode`、`fusionVersion` 和每条的 `vectorScore` / `lexicalScore`；索引已就绪时向量 / 混合检索失败直接返回错误（R4，不再改用关键词检索）；只有索引尚未就绪或资料库为关键词模式时才走 SQLite 关键词检索，并在 `fallback.reason` 中给出 `index_not_ready`（附 `detail` 与说明文字）或 `keyword_mode`。`topK`、`maxChars` 在两条路径上按同一规则截断。Runtime 不直接调用任何 `local_knowledge_*` Tauri 命令。本地知识图谱尚不可用时，`query_knowledge_graph` 返回 `local_knowledge.graph_unavailable`，不能用空结果冒充“没有关系”。
 
 ### 通用 Host 工具
 
