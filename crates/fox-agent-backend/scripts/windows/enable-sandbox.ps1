@@ -337,10 +337,15 @@ function Find-FoxSrtReceipt([string] $RuntimeParent, [hashtable] $Registry) {
         $receipt = Join-Path $dir.FullName $InstallerReceiptName
         if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) { continue }
         try { $r = Get-Content -LiteralPath $receipt -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Write-FoxLog "unreadable receipt ${receipt}: $($_.Exception.Message)"; continue }
-        if (-not ($r.PSObject.Properties.Name -contains 'srt') -or -not $r.srt) { continue }
-        if ([bool] $r.srt.alreadyInstalled) { continue }
-        if ([string] $r.srt.sandboxUserSid -ne $Registry.sandboxUserSid) { continue }
-        if ("$($r.srt.createdAt)" -ne "$($Registry.createdAt)") { continue }
+        # Pre-B2 receipts carry srt; a B2+ receipt carries legacySrtRecord when a clean-up failed.
+        $record = $null
+        foreach ($key in @('srt', 'legacySrtRecord')) {
+            if (($r.PSObject.Properties.Name -contains $key) -and $r.$key) { $record = $r.$key; break }
+        }
+        if (-not $record) { continue }
+        if ([bool] $record.alreadyInstalled) { continue }
+        if ([string] $record.sandboxUserSid -ne $Registry.sandboxUserSid) { continue }
+        if ("$($record.createdAt)" -ne "$($Registry.createdAt)") { continue }
         return $receipt
     }
     return $null
@@ -406,7 +411,7 @@ function Remove-LegacyFoxSrt([string] $RuntimeParent) {
 }
 
 $script:FoxTestFaults = Get-FoxTestFault
-$result = @{ ok = $false; version = $Version; error = $null; primaryError = $null; cleanupErrors = @(); runtimeRoot = $null; privateBase = $null; extractMethod = $null; packagePaths = $null; removedRuntimeDirs = @(); legacySrt = $null; stagingDir = $null }
+$result = @{ ok = $false; version = $Version; error = $null; primaryError = $null; cleanupErrors = @(); runtimeRoot = $null; privateBase = $null; extractMethod = $null; packagePaths = $null; removedRuntimeDirs = @(); legacySrt = $null; legacySrtRecord = $null; stagingDir = $null }
 $staging = $null
 $backup = $null
 $installedNew = $false
@@ -497,6 +502,11 @@ try {
     } catch {
         $result.legacySrt = @{ found = $true; decision = 'failed'; error = $_.Exception.Message }
         Write-FoxLog "legacy SRT clean-up failed: $($_.Exception.Message)"
+    }
+    if ($result.legacySrt.decision -eq 'failed' -and $result.legacySrt.receipt) {
+        # Keep the proof that Fox made this SRT installation in the new receipt, so the next
+        # install can still remove it after the old receipt (and its runtime) is gone.
+        $result.legacySrtRecord = (Get-Content -LiteralPath $result.legacySrt.receipt -Raw -Encoding UTF8 | ConvertFrom-Json).srt
     }
 
     # 6. Directories older runtime packages shipped and Fox no longer uses.

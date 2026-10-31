@@ -69,7 +69,7 @@ class ExtendedPathTest(unittest.TestCase):
 class KeyTest(unittest.TestCase):
     def test_rel_key_normalizes_separators(self):
         self.assertEqual(brp.rel_key("node\\node.exe"), "node/node.exe")
-        self.assertEqual(brp.rel_key("./srt//a\\b/"), "srt/a/b")
+        self.assertEqual(brp.rel_key("./pkg//a\\b/"), "pkg/a/b")
         with self.assertRaises(SystemExit):
             brp.rel_key("a/../../x")
 
@@ -117,10 +117,6 @@ class VersionTest(unittest.TestCase):
         self.assertEqual(brp.DEFAULT_VERSION, match.group(1))
         self.assertEqual(brp.DEFAULT_VERSION, "0.1.6")
 
-    def test_srt_version_matches_the_rust_constant(self):
-        with open(os.path.join(brp.CRATE, "src", "sandbox.rs"), encoding="utf-8") as handle:
-            self.assertIn(f'pub const SRT_VERSION: &str = "{brp.SRT_VERSION}";', handle.read())
-
 
 class StagePackTest(unittest.TestCase):
     def setUp(self):
@@ -144,29 +140,20 @@ class StagePackTest(unittest.TestCase):
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "w") as handle:
                 handle.write("npm fixture")
-        srt = os.path.join("in", "srt")
-        os.makedirs(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist"))
-        with open(os.path.join(srt, "node_modules", "@anthropic-ai", "sandbox-runtime", "dist", "cli.js"), "w", newline="\n") as handle:
-            handle.write("// cli\n")
-        for key, content in [(brp.SRT_PACKAGE, json.dumps({"version": brp.SRT_VERSION})), (brp.SRT_HELPER, "MZ")]:
-            target = os.path.join("in", *key.split("/"))
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "w") as handle:
-                handle.write(content)
         deep_file = make_prefix(os.path.join("in", "pi"))
         self.assertGreater(len(os.path.abspath(deep_file)), 300, "the fixture must be past MAX_PATH")
 
         out = "stage"  # relative on purpose
         self.assertEqual(
-            brp.main(["stage", out, "--node-dir", node, "--srt-prefix", srt, "--backend", "pi=" + os.path.join("in", "pi"), "--prune-dts"]),
+            brp.main(["stage", out, "--node-dir", node, "--backend", "pi=" + os.path.join("in", "pi"), "--prune-dts"]),
             0,
         )
         keys = brp.list_files(out)
         deep_key = "backends/pi/" + "/".join(DEEP_PARTS) + "/dist-types/commands/GetRoleCredentialsCommand.js"
         self.assertIn(deep_key, keys)
         self.assertNotIn(deep_key[:-3] + ".d.ts", keys, "--prune-dts drops type files")
-        self.assertIn("acp-bridge/bridge.mjs", keys)
-        self.assertNotIn("acp-bridge/bridge.test.mjs", keys)
+        # No sandbox runtime and no Windows ACP bridge any more.
+        self.assertFalse(any(key.startswith(("srt/", "acp-bridge/")) for key in keys), keys)
         self.assertIn("dsh-patches/read-only.yml", keys)
         # The pi approval gate ships next to each other under pi-gate/.
         self.assertIn("pi-gate/pi-gated.cmd", keys)
@@ -204,26 +191,25 @@ class StagePackTest(unittest.TestCase):
         self.assertEqual(brp.main(["pack", out, "--version", "0.0.1", "--out", os.path.join("dist", "refused.zip")]), 1)
 
     def test_pack_reports_real_missing_files_only(self):
-        os.makedirs(os.path.join("pkg", "acp-bridge"))
-        shutil.copyfile(os.path.join(brp.ASSETS, "acp-bridge", "bridge.mjs"), os.path.join("pkg", "acp-bridge", "bridge.mjs"))
-        problems = brp.verify_layout("pkg")
+        os.makedirs(os.path.join("pkg", "node"))
+        with open(os.path.join("pkg", "node", "node.exe"), "wb") as handle:
+            handle.write(b"MZ")
         self.assertEqual(
-            problems,
-            [f"missing {name}" for name in brp.REQUIRED if name != "acp-bridge/bridge.mjs"],
+            brp.verify_layout("pkg"),
+            [f"missing {name}" for name in brp.REQUIRED if name != "node/node.exe"],
         )
-        with open(os.path.join("pkg", "acp-bridge", "bridge.mjs"), "a", newline="\n") as handle:
-            handle.write("// edited\n")
-        self.assertIn("acp-bridge/bridge.mjs differs", " ".join(brp.verify_layout("pkg")))
 
-    def test_old_or_malformed_srt_and_missing_helper_are_refused(self):
-        target = brp.child(brp.fs_path("pkg"), brp.SRT_PACKAGE)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        for content, expected in [(json.dumps({"version": "0.0.80"}), "srt must be"), ("broken", "invalid")]:
-            with open(target, "w") as handle:
-                handle.write(content)
-            problems = brp.verify_layout("pkg")
-            self.assertTrue(any(problem.startswith(expected) for problem in problems), problems)
-            self.assertIn(f"missing {brp.SRT_HELPER}", problems)
+    def test_srt_and_acp_bridge_trees_are_refused(self):
+        # A 0.1.6-style package still carries srt\ and acp-bridge\; a new one must not.
+        for key in ["srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js", "acp-bridge/bridge.mjs"]:
+            target = brp.child(brp.fs_path("pkg"), key)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", newline="\n") as handle:
+                handle.write("// retired\n")
+        problems = brp.verify_layout("pkg")
+        for tree in brp.RETIRED_TREES:
+            self.assertIn(f"{tree} must not be in the package (Fox no longer ships a sandbox runtime)", problems)
+        self.assertEqual(brp.RETIRED_TREES, ("srt/", "acp-bridge/"))
 
     def test_pi_gate_mismatch_is_refused(self):
         os.makedirs(os.path.join("pkg", "pi-gate"))

@@ -20,7 +20,7 @@ try {
         -ResultPath $resultPath -LogPath $logPath
     if ($LASTEXITCODE -ne 0) { throw "Sandbox setup exited with code $LASTEXITCODE. See $logPath" }
     $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-    if (-not $result.ok -or -not $result.runtimeRoot -or -not $result.srt) {
+    if (-not $result.ok -or -not $result.runtimeRoot) {
         throw 'Sandbox setup did not return a successful installation result.'
     }
     $programFilesDir = $env:ProgramW6432
@@ -30,14 +30,10 @@ try {
         throw 'Sandbox setup returned an unexpected runtime path or version.'
     }
     $receipt = Join-Path $expectedRoot '.fox-installer-result.json'
-    if (Test-Path -LiteralPath $receipt) {
-        $previous = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
-        if ($previous.ok -and $previous.srt -and
-            $previous.srt.sandboxUserSid -eq $result.srt.sandboxUserSid -and
-            $previous.srt.createdAt -eq $result.srt.createdAt -and
-            -not $previous.srt.alreadyInstalled) {
-            $result.srt.alreadyInstalled = $false
-        }
+    # A legacy SRT clean-up that did not finish does not stop the install; say so in the log.
+    if ($result.legacySrt -and $result.legacySrt.decision -eq 'failed') {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        Add-Content -LiteralPath $logPath -Value ("Installer: legacy SRT clean-up failed: " + $result.legacySrt.error) -Encoding UTF8
     }
     [System.IO.File]::WriteAllText($receipt, ($result | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     & "$env:SystemRoot\System32\icacls.exe" $receipt /reset /Q | Out-Null
