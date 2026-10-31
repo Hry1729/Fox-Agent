@@ -917,6 +917,31 @@ test('publishes source-aware schemas while keeping legacy knowledgeBaseId option
   assert.equal(readSchema.required?.includes('knowledgeBaseId') ?? false, false)
   assert.deepEqual(read.target, KNOWLEDGE_REFERENCE_SCHEMA)
   assert.equal(readSchema.required.includes('documentId'), true)
+  assert.equal(read.chunkId.type, 'string')
+  assert.equal(read.maxChars.type, 'integer')
+  assert.equal(read.maxChars.minimum, 1)
+  assert.equal(read.startChunkIndex.type, 'integer')
+  assert.equal(read.startChunkIndex.minimum, 0)
+  assert.equal(read.startOffset.type, 'integer')
+  assert.equal(read.startOffset.minimum, 0)
+  for (const name of ['chunkId', 'maxChars', 'startChunkIndex', 'startOffset']) {
+    assert.equal(readSchema.required?.includes(name) ?? false, false)
+  }
+  const readDescription = toolByName(tools, KNOWLEDGE_TOOL_NAMES.read).description
+  assert.match(readDescription, /chunkId applies only to a local knowledge base and reads a single chunk\./)
+  assert.match(readDescription, /maxChars is the maximum number of characters returned by this call\./)
+  assert.match(readDescription, /startChunkIndex applies only to a local knowledge base and continues from that chunk index, using nextChunkIndex from the previous result\./)
+  assert.match(readDescription, /startOffset applies only to a remote knowledge base and continues from that character offset, using nextOffset from the previous result\./)
+  assert.equal(Check(readSchema, {
+    documentId: 'document-1',
+    chunkId: 'chunk-1',
+    maxChars: 4,
+    startChunkIndex: 0,
+    startOffset: 8,
+  }), true)
+  assert.equal(Check(readSchema, { documentId: 'document-1', maxChars: 0 }), false)
+  assert.equal(Check(readSchema, { documentId: 'document-1', startChunkIndex: -1 }), false)
+  assert.equal(Check(readSchema, { documentId: 'document-1', startOffset: -1 }), false)
 
   assert.equal(graph.knowledgeBaseId.type, 'string')
   assert.equal(graph.targets.type, 'array')
@@ -951,6 +976,10 @@ test('forwards legacy and source-aware knowledge requests without renaming field
   await toolByName(tools, KNOWLEDGE_TOOL_NAMES.read).execute('source-aware-read', {
     target: { source: 'local', id: 'local-kb', revision: 'generation:3' },
     documentId: 'document-1',
+    chunkId: 'chunk-1',
+    maxChars: 4000,
+    startChunkIndex: 2,
+    startOffset: 80,
   })
 
   assert.deepEqual(requests, [
@@ -994,6 +1023,10 @@ test('forwards legacy and source-aware knowledge requests without renaming field
         input: {
           target: { source: 'local', id: 'local-kb', revision: 'generation:3' },
           documentId: 'document-1',
+          chunkId: 'chunk-1',
+          maxChars: 4000,
+          startChunkIndex: 2,
+          startOffset: 80,
         },
       },
     },
