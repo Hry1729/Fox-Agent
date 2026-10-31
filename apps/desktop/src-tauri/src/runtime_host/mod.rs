@@ -9018,7 +9018,12 @@ async fn execute_bound_knowledge_tool(
                 .and_then(Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok());
             ensure_bound(&target)?;
+            read_paging_matches_source(&target.source, input)?;
             if target.source == "local" {
+                let start_chunk_index = input
+                    .get("startChunkIndex")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok());
                 // 本地读文档是同步的，和检索一样放到阻塞线程池，避免卡住异步运行时。
                 let store = local_knowledge.clone();
                 let knowledge_base_id = target.id.clone();
@@ -9026,11 +9031,12 @@ async fn execute_bound_knowledge_tool(
                 let chunk_id = chunk_id.map(str::to_owned);
                 let reference = target.as_json();
                 let value = tauri::async_runtime::spawn_blocking(move || {
-                    store.read_document(
+                    store.read_document_page(
                         &knowledge_base_id,
                         &document_id,
                         chunk_id.as_deref(),
                         requested_max_chars,
+                        start_chunk_index,
                     )
                 })
                 .await
@@ -9286,6 +9292,18 @@ fn knowledge_tool_target(value: &Value) -> Result<KnowledgeToolTarget, String> {
     })
 }
 
+/// KB-8/KB-9: each source has its own continuation parameter. A parameter of
+/// the other source is refused instead of silently ignored.
+fn read_paging_matches_source(source: &str, input: &Value) -> Result<(), String> {
+    if source == "local" && input.get("startOffset").is_some_and(|value| !value.is_null()) {
+        return Err("[local_knowledge.invalid_request] startOffset applies only to remote knowledge bases; continue a local document with startChunkIndex (nextChunkIndex of the previous result)".to_owned());
+    }
+    if source != "local" && input.get("startChunkIndex").is_some_and(|value| !value.is_null()) {
+        return Err("[remote_knowledge.invalid_query] startChunkIndex applies only to local knowledge bases; continue a remote document with startOffset (nextOffset of the previous result)".to_owned());
+    }
+    Ok(())
+}
+
 fn remote_read_rejects_chunk_id(input: &Value) -> Result<(), String> {
     let chunk_id = input
         .get("chunkId")
@@ -9322,8 +9340,8 @@ fn structured_knowledge_error(message: &str) -> (&str, &str, bool) {
 #[cfg(test)]
 mod knowledge_tool_contract_tests {
     use super::{
-        has_explicit_knowledge_target, knowledge_tool_targets, remote_read_rejects_chunk_id,
-        structured_knowledge_error,
+        has_explicit_knowledge_target, knowledge_tool_targets, read_paging_matches_source,
+        remote_read_rejects_chunk_id, structured_knowledge_error,
     };
     use serde_json::json;
 
@@ -9406,6 +9424,17 @@ mod knowledge_tool_contract_tests {
         }
         assert!(structured_knowledge_error("[remote_knowledge.retrieval_unavailable] transient").2);
         assert!(!structured_knowledge_error("unsupported API").2);
+    }
+
+    #[test]
+    fn read_knowledge_document_refuses_the_other_sources_continuation() {
+        assert!(read_paging_matches_source("local", &json!({ "startChunkIndex": 2 })).is_ok());
+        assert!(read_paging_matches_source("remote", &json!({ "startOffset": 8 })).is_ok());
+        let local = read_paging_matches_source("local", &json!({ "startOffset": 8 })).unwrap_err();
+        assert_eq!(structured_knowledge_error(&local).0, "local_knowledge.invalid_request");
+        let remote = read_paging_matches_source("remote", &json!({ "startChunkIndex": 1 })).unwrap_err();
+        assert_eq!(structured_knowledge_error(&remote).0, "remote_knowledge.invalid_query");
+        assert!(!structured_knowledge_error(&remote).2);
     }
 
     #[test]
