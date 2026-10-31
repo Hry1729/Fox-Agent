@@ -11,7 +11,7 @@
 ## 范围
 
 - 本文描述 Fox 自己的 Agent（`conversations.agent_backend = 'fox'`）使用的协议：Host 与 Runtime Sidecar 之间的 `fox-runtime-jsonl`，以及 `--kernel-worker` 一次性模型进程协议。
-- **Kernel Authoritative 是默认执行路径**：未设置 `FOX_KERNEL_MODE` 时新 Run 冻结为 Authoritative（`runtime_host/kernel_authority.rs` 的 `select`）；`FOX_KERNEL_MODE=legacy` 才创建 Legacy 新 Run。已有 Run 沿用冻结的执行权。
+- Kernel 执行循环已在 B1 删除；新 Run 和子 Run 一律冻结为 PiNative（`apps/desktop/src-tauri/src/database/repositories/run_control.rs` 的 `new_run_executor_route`）；未结束的历史 Kernel Run 启动时标为 interrupted / `executor_route_retired`；不认识的 route 报 `executor_route_unknown`。「失败时回退 Kernel」不存在。Host 每次 prompt 都下发 `executionProfile`（不是 Worker 生命周期内固定）。
 - 外部 Agent（Pi、Codex、dsh；目前退役，计划在阶段三恢复）**不使用本协议**：它们经 ACP（Agent Client Protocol）由 `crates/fox-agent-backend` 启动和驱动，Host 把 ACP 事件投影为 `run_events` 并通过 `fox://runtime-event` 推给前端。见 [Agent 运行时架构](../02-架构/Agent运行时架构.md) 与 `crates/fox-agent-backend/docs/sandbox.md`。
 - 工具目录的事实源是 `packages/fox-engine-protocol/schema.json` 的 `toolContracts`（`RUNTIME_TOOL_CATALOG`），当前 73 个工具，分类与审批见[权限参考 · 工具目录](权限参考.md#工具目录)。
 
@@ -53,6 +53,8 @@ stdout 只能输出 Envelope；日志必须写 stderr。Host 校验 protocol/ver
 
 ### 冻结控制与受控 Kernel 交接
 
+Kernel 执行循环已删除（B1），本节以下为历史。
+
 `RunControlBinding` 冻结 Run/Conversation、引擎、权威模式、执行 Profile、权限内容及哈希、只读执行位置和四类时间预算。Pi Legacy `prompt` 只接受 Legacy/Pi；显式空值、损坏绑定或不同身份拒绝。仅缺省字段保留旧 v1 兼容。
 
 Kernel 路径（**已在 B1 删除**；新 Run 一律 PiNative，本段保留为历史）当时使用下列共享 DTO；它们由 `--kernel-worker` 进程处理，不是普通 Sidecar 命令，也不改变上文 Envelope 版本。Legacy 路径（`FOX_KERNEL_MODE=legacy`）仍使用下文「默认命令」：
@@ -93,9 +95,28 @@ Kernel 路径（**已在 B1 删除**；新 Run 一律 PiNative，本段保留为
 
 Host 只允许五个可穷举 Profile：`legacy`、`durable_v2_shadow`、`durable_v2`、`graph_readonly_preview`、`graph_reviewer_v1`。前四个是普通执行选择；`graph_reviewer_v1` 只能由 Host 内部创建的独立 Reviewer Child使用，固定 `completionAudit=strict_v2 / validationPolicy=high_risk_v1 / promptPolicy=graph_reviewer_v1 / continuation=disabled / graph=disabled / toolPolicy=graph_reviewer_read_only`。Profile 不接受任意布尔开关或混搭 Strategy。Host 默认发送 `legacy`，并逐字段校验 `ready.payload.executionProfile`、Graph 配置与 `continuationDecisionContract`；任一字段不一致时 Worker 初始化失败。`ready.capabilities.tools` 中每个工具必须属于所选 Profile allowlist，并在 `name/category/execution/approval` 上精确匹配 Host canonical catalog。
 
-Profile 在一个 Worker 生命周期内固定，不能逐 Run 热切换。`task_repair_escalate_start` 只出现在 `durable_v2` 的模型工具面。`graph_readonly_run` 只允许 `graph_readonly_preview`。持久 Host 工具 `graph_readonly_activate` / `graph_readonly_snapshot_get` / `graph_readonly_node_start` / `graph_readonly_node_finish` / `graph_readonly_node_cancel` / `graph_readonly_node_review` / `graph_readonly_accept` 只允许 `durable_v2` Lead；内部 Reviewer 看不到这些工具。`graph_reviewer_v1` Ready Manifest 必须精确只有 Runtime/preflight 的 `read/ls/find/grep`，`sideEffectsAllowed=false`，不允许 `continuation_propose`、Host审批工具、MCP、delegation或Work Tool。工具权限不是单门判断：当前 Worker Profile、Run 在 SQLite 的 Host 冻结 Profile和 `ready.capabilities.tools` 必须三方一致且都允许。v34 之前没有冻结快照的 Legacy Run 才可回退 Legacy，不能借此获得 Durable/Graph/Reviewer 权限。
+Host 每次 prompt 都下发 executionProfile。`task_repair_escalate_start` 只出现在 `durable_v2` 的模型工具面。`graph_readonly_run` 只允许 `graph_readonly_preview`。持久 Host 工具 `graph_readonly_activate` / `graph_readonly_snapshot_get` / `graph_readonly_node_start` / `graph_readonly_node_finish` / `graph_readonly_node_cancel` / `graph_readonly_node_review` / `graph_readonly_accept` 只允许 `durable_v2` Lead；内部 Reviewer 看不到这些工具。`graph_reviewer_v1` Ready Manifest 必须精确只有 Runtime/preflight 的 `read/ls/find/grep`，`sideEffectsAllowed=false`，不允许 `continuation_propose`、Host审批工具、MCP、delegation或Work Tool。工具权限不是单门判断：当前 Worker Profile、Run 在 SQLite 的 Host 冻结 Profile和 `ready.capabilities.tools` 必须三方一致且都允许。v34 之前没有冻结快照的 Legacy Run 才可回退 Legacy，不能借此获得 Durable/Graph/Reviewer 权限。
 
 Runtime 隐藏只减少模型暴露面，不构成权限事实。旧客户端、历史 transcript、恶意/失控模型或事件重放若直接提交上述 Workflow mutator，Host 必须再次绑定当前 Run 的权威 Profile 并拒绝，不能因请求绕过 Catalog 就执行。`durable_v2` 的动态 Execution Profile 指令会说明“接入统一 Attempt/Acceptance API 前暂不可用”；该说明属于动态尾部，不改变 `stable_v1` content/stable-prefix Hash。
+
+## PiNative 工具桥与模型准入协议
+
+`pi-native-tool-bridge.mjs` 的 `REQUEST_SCHEMAS` 键是下列前四条。其余消息以 `services/agent-runtime/src` 中实际出现的为准；方向按代码，不按旧的 Kernel 交接描述。
+
+- `tool_batch.register`：Runtime → Host。登记一批尚未执行的工具调用。主要字段 `runId`、`contextGeneration`、`calls[]`（`callId`、`tool`、`sourceOrder`、`inputDigest`）。Host：`native_tool_batch.rs`。
+- `tool_call.execute`：Runtime → Host。执行已登记批次中的一次调用。主要字段 `runId`、`batchId`、`callId`、`tool`、`input`。Host：`native_tool_batch.rs`。
+- `tool_call.close`：Runtime → Host。关闭没有执行到结果的位置。主要字段 `runId`、`batchId`、`callId`、`reason`（`unknown_tool` / `validation_failed` / `intercepted` / `aborted` / `not_started`）、`isError`。Host：`native_tool_batch.rs`。
+- `tool_call.cancel`：Runtime → Host。中止已开始或仍在等待的调用。主要字段 `runId`、`batchId`、`callId`。Host：`native_tool_batch.rs`。
+- `tool_call.facts`：Runtime → Host。恢复原生会话前，用 Host 事实对账已管理的工具调用。主要字段 `runId`、`contextGeneration`、`calls[]`（`callId`、`tool`、`inputDigest`、`hasResult`）。Host：`native_tool_batch.rs`（应答由 `native_recovery.rs` 生成）。
+- `model_request.admit`：Runtime → Host。模型请求发出前向 Host 申请准入。主要字段 `requestId`、`stage`、`maxOutputTokens`。Host：`native_model_budget.rs`。
+- `model_request.complete`：Runtime → Host。一次模型尝试结束后回写用量。主要字段 `requestId`、`inputTokens`、`outputTokens`、`status`。Host：`native_model_budget.rs`。
+- `native_batch.refused`：Host → Runtime。上述原生批次请求被拒绝时的响应类型（payload `isError: true`）。主要字段 `isError`、`error`，可带 `errorDetails.code`。Host：`native_tool_batch.rs`。
+- `run_released`：Runtime → Host（event）。已确认的 PiNative prompt 结束后释放 Run；Host 若尚未记下终态，则把该 Run 标为 interrupted / `runtime.released_without_terminal`。主要字段为信封上的 `conversationId`、`runtimeSessionId`、`runId`，以及 payload 的 `contextGeneration`。Host：`runtime_host/mod.rs`。
+- `session.close`：Host → Runtime。关闭当前 Worker 持有的该会话，Runtime 回应 `session_closed`。主要字段为信封上的 `conversationId`、`runtimeSessionId`。Host：`runtime_host/mod.rs`。
+- `usage.request`：Runtime → Host（`runtime_event`）。记录一次模型用量。主要字段 `record`（`schemaVersion`、`requestId`、`runId`、`attemptId`、`stage`、`outcome`、`usage`）。Host：`repositories.rs`（`apply_runtime_event` 交给 `model_usage.rs`）。
+- `context.compaction.failed`：Runtime → Host（`runtime_event`）。上下文压缩失败，或结束时没有结果。主要字段 `reason`、`aborted`、`willRetry`、`errorMessage`。Host：`repositories.rs`。
+
+`pi-runtime.mjs` 发出的 `session.native_*`：`session.native_not_open`（本 Run 的原生会话尚未打开）、`session.native_directory_unusable`（会话目录不可用）、`session.native_path_required`（恢复必须给出确切会话文件）、`session.native_missing`（会话文件不存在，或打开时按缺失归类）、`session.native_corrupt`（会话文件损坏，或打开失败且不是缺失）、`session.native_identity_mismatch`（文件属于另一个 session）、`session.native_conversation_mismatch`（文件属于另一个 conversation）。
 
 ## Runtime 到 Host 的请求
 
