@@ -1,24 +1,14 @@
-//! Compaction uses the existing event transaction and a single Run-owned intent.
-//! No mutable history table, credential snapshot or separate commit window.
-#[allow(unused_imports)]
-use crate::canonical_json::CanonicalJson;
+//! Read side of the Kernel context-budget report. The Kernel compaction writer
+//! was removed with the Kernel loop (B1); historical reports stay readable.
 use super::Database;
-use crate::kernel::{CompactionState, KernelPersistCommand, RunState};
-use crate::kernel_compaction::{self as context, CompactionPlan, CompactionResult};
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
 
 fn invalid(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         message.into(),
     )))
-}
-
-impl Database {
-
 }
 
 impl Database {

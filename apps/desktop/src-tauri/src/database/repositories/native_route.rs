@@ -48,14 +48,6 @@ fn waiting_approval(connection: &Connection, run_id: &str) -> rusqlite::Result<b
 }
 
 impl super::Database {
-    /// Whether startup retired this historical Kernel Run (A0). A retired Run
-    /// is never driven again, not even by a late background-job wake.
-    pub(crate) fn run_executor_route_retired(&self, run_id: &str) -> Result<bool,String> {
-        self.with_connection(|connection| connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND status='interrupted' AND error_code=?2)",
-            params![run_id, run_control::EXECUTOR_ROUTE_RETIRED], |row| row.get(0)))
-    }
-
     /// B1: settle one historical Kernel Run exactly like the startup
     /// retirement. Used when something tries to start or cancel a frozen Kernel
     /// Run after startup: the Kernel loop is gone, so nothing else may own it.

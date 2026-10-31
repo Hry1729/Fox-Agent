@@ -281,20 +281,9 @@ impl Database {
             [approval_id], |row| row.get(0)).optional())
     }
 
-    pub(crate) fn kernel_host_approval_target(
-        &self,
-        approval_id: &str,
-    ) -> Result<Option<(String, String)>, String> {
-        // A native approval is not a Kernel ticket. The route column is the
-        // same frozen fact the runtime uses; an absent executorRoute is the
-        // only shape the Kernel command queue understands.
-        self.with_connection(|connection| connection.query_row(
-            "SELECT t.run_id,t.runtime_tool_call_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
-             JOIN run_control_bindings b ON b.run_id=t.run_id WHERE a.id=?1 AND b.authority='authoritative'
-               AND json_extract(b.binding_json,'$.executorRoute') IS NULL",
-            [approval_id], |row| Ok((row.get(0)?,row.get(1)?))).optional())
-    }
-
+    /// Fixture helper only: production freezes the scope inside the continuation
+    /// transaction. Kept for the delivery typed-lane tests (removed with them in B4).
+    #[cfg(test)]
     pub(crate) fn freeze_kernel_host_scope(
         &self,
         run_id: &str,
@@ -333,102 +322,6 @@ impl Database {
             }
             tx.commit()?;
             Ok(scope)
-        })
-    }
-
-    pub(crate) fn kernel_host_recoverable_runs(&self) -> Result<Vec<String>, String> {
-        self.with_connection(|connection| {
-            let mut query = connection.prepare("SELECT b.run_id FROM run_control_bindings b JOIN runs legacy ON legacy.id=b.run_id
-                LEFT JOIN kernel_runs r ON r.run_id=b.run_id WHERE b.authority='authoritative'
-                AND legacy.status NOT IN ('completed','failed','cancelled','interrupted')
-                AND (r.state IS NULL OR r.state NOT IN ('completed','failed','cancelled','budget_exhausted','approval_expired')) ORDER BY b.created_at,b.run_id")?;
-            let rows = query.query_map([], |row| row.get(0))?.collect();
-            rows
-        })
-    }
-
-    /// Stable keys prevent double-click/reconnect from scheduling a second action.
-    /// An approval key is derived from its tool id, so conflicting decisions fail.
-    pub(crate) fn queue_kernel_host_command(
-        &self,
-        run_id: &str,
-        approval: Option<(&str, &str)>,
-    ) -> Result<bool, String> {
-        self.queue_kernel_host_command_versioned(run_id, approval, None)
-    }
-
-    fn queue_kernel_host_command_versioned(
-        &self,
-        run_id: &str,
-        approval: Option<(&str, &str)>,
-        ticket_version: Option<u64>,
-    ) -> Result<bool, String> {
-        let (mut key, kind, tool, decision) = if let Some((tool, decision)) = approval {
-            if tool.trim().is_empty()
-                || tool.len() > 512
-                || !matches!(decision, "allow_once" | "allow_conversation" | "denied")
-            {
-                return Err("invalid Kernel Host approval command".into());
-            }
-            (
-                format!("approval:{tool}"),
-                "approval",
-                Some(tool),
-                Some(decision),
-            )
-        } else {
-            ("cancel".into(), "cancel", None, None)
-        };
-        self.with_connection(|connection| {
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let policy_version:Option<u64>=if let Some(tool)=tool {
-                let stored:Option<u64>=tx.query_row("SELECT policy_version FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",params![run_id,tool],|r|r.get(0)).optional()?.flatten();
-                let current:Option<u64>=tx.query_row("SELECT p.version FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=?1",[run_id],|r|r.get(0)).optional()?;
-                if stored.is_none() || stored!=current || ticket_version.is_some_and(|version|Some(version)!=stored) {return Err(invalid("stale_approval: ticket policy version is not current"));}
-                let reissued:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_approval_history WHERE run_id=?1 AND tool_call_id=?2)",params![run_id,tool],|r|r.get(0))?;
-                if reissued && ticket_version.is_none() {return Err(invalid("stale_approval: reissued ticket requires its approval id"));}
-                key=format!("approval:{tool}:v{}",stored.unwrap_or_default());
-                stored
-            } else {None};
-            let existing: Option<(String,Option<String>,Option<String>)> = tx.query_row(
-                "SELECT kind,tool_call_id,decision FROM kernel_host_commands WHERE run_id=?1 AND command_key=?2",
-                params![run_id,key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
-            if let Some((old_kind,old_tool,old_decision)) = existing {
-                if old_kind != kind || old_tool.as_deref() != tool || old_decision.as_deref() != decision {
-                    return Err(invalid("conflicting Kernel Host command replay"));
-                }
-                return Ok(false);
-            }
-            let state: Option<(String,Option<i64>)> = tx.query_row(
-                "SELECT COALESCE(r.state,legacy.status),r.approval_deadline_wall_ms FROM run_control_bindings b
-                 JOIN runs legacy ON legacy.id=b.run_id LEFT JOIN kernel_runs r ON r.run_id=b.run_id
-                 WHERE b.run_id=?1 AND b.authority='authoritative'",
-                [run_id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-            let (state,deadline) = state.ok_or_else(|| invalid("Run is not owned by Kernel Host"))?;
-            if matches!(state.as_str(), "completed" | "failed" | "cancelled" | "budget_exhausted" | "approval_expired") {
-                return Err(invalid("Kernel Host Run is terminal"));
-            }
-            let now = now_ms();
-            if let Some(tool) = tool {
-                let repair_override: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_tool_calls
-                    WHERE run_id=?1 AND tool_call_id=?2 AND tool='task_repair_escalate_start')",
-                    params![run_id,tool],|row|row.get(0))?;
-                if repair_override && decision==Some("allow_conversation") {
-                    return Err(invalid("Task Repair budget override requires a one-time human decision"));
-                }
-                let cancelled: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_host_commands WHERE run_id=?1 AND kind='cancel')",
-                    [run_id], |row| row.get(0))?;
-                let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2 AND state='pending')",
-                    params![run_id,tool], |row| row.get(0))?;
-                // Approvals do not expire: the persisted anchor only has to exist.
-                if cancelled || state != "waiting_approval" || !pending || deadline.is_none() {
-                    return Err(invalid("Kernel approval is no longer actionable"));
-                }
-            }
-            tx.execute("INSERT INTO kernel_host_commands(run_id,command_key,kind,tool_call_id,decision,created_at,policy_version) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![run_id,key,kind,tool,decision,now,policy_version])?;
-            tx.commit()?;
-            Ok(true)
         })
     }
 
