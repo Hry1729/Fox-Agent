@@ -49,20 +49,44 @@ fn production_sources() -> Vec<PathBuf> {
     files
 }
 
-/// Lines before the first top-level `#[cfg(test)]` that introduces a module.
+/// The file's lines with every inline `#[cfg(test)] mod name { ... }` blanked
+/// out (line numbers kept). A module declaration (`mod x;`) is not blanked:
+/// its file is skipped by name (`*_tests.rs`) or scanned on its own.
 fn production_lines(text: &str) -> Vec<&str> {
-    let lines: Vec<&str> = text.lines().collect();
-    for (index, line) in lines.iter().enumerate() {
-        if line.trim_end() != "#[cfg(test)]" {
+    let mut lines: Vec<&str> = text.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        if lines[index].trim() != "#[cfg(test)]" {
+            index += 1;
             continue;
         }
-        let next = lines[index + 1..].iter().find(|line| {
+        let Some(offset) = lines[index + 1..].iter().position(|line| {
             let trimmed = line.trim();
             !trimmed.is_empty() && !trimmed.starts_with("#[") && !trimmed.starts_with("//")
-        });
-        if next.is_some_and(|line| line.starts_with("mod ") || line.starts_with("pub mod ") || line.starts_with("pub(crate) mod ")) {
-            return lines[..index].to_vec();
+        }) else {
+            break;
+        };
+        let item = index + 1 + offset;
+        let head = lines[item].trim();
+        let is_inline_module = (head.starts_with("mod ") || head.starts_with("pub mod ") || head.starts_with("pub(crate) mod ")) && head.ends_with('{');
+        if !is_inline_module {
+            index = item;
+            continue;
         }
+        // Blank to the matching close brace (to the end if it never closes).
+        let mut depth = 0i64;
+        let mut last = lines.len() - 1;
+        for (at, line) in lines.iter().enumerate().skip(item) {
+            depth += line.matches('{').count() as i64 - line.matches('}').count() as i64;
+            if depth <= 0 {
+                last = at;
+                break;
+            }
+        }
+        for line in &mut lines[index..=last] {
+            *line = "";
+        }
+        index = last + 1;
     }
     lines
 }
@@ -131,6 +155,9 @@ fn the_lint_reports_an_unhidden_launch() {
     let index = lines.iter().position(|line| line.contains("Command::new(")).unwrap();
     assert!(!lines[index..].iter().take(4).any(|line| line.contains("hide_console")));
     assert!(!has_policy_comment(&lines, index));
-    let test_only = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn g() { std::process::Command::new(\"x\").spawn(); }\n}\n";
-    assert_eq!(production_lines(test_only), vec!["fn f() {}"]);
+    let test_only = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn g() { std::process::Command::new(\"x\").spawn(); }\n}\nfn h() {}\n";
+    assert_eq!(production_lines(test_only), vec!["fn f() {}", "", "", "", "", "fn h() {}"]);
+    // A test module declared at the top does not hide the production code below it.
+    let declared = "#[cfg(test)]\nmod native_tests;\nfn p() { std::process::Command::new(\"x\"); }\n";
+    assert!(production_lines(declared).iter().any(|line| line.contains("Command::new")));
 }
