@@ -1348,14 +1348,20 @@ export function Workbench() {
       setChatState('running')
       const started = await desktopConversation.send(prompt, conversationModelOverride(activeAgent, model, yuxiModels.models), submittedFiles, runtimeText)
       if (started === AGENT_BACKEND_REFUSED) {
-        // Backend routing refused the send before anything was written: no
-        // optimistic turn, no "处理失败" header. The one refusal notice is
-        // shown by the backend bar inside the composer; the draft is kept.
+        // 路由拒绝没有写入消息。通知由 composer 发出，这里不留乐观消息，也不切到「处理失败」。
         setPendingUserMessage(null)
         setChatState('complete')
         return 'error' as const
       }
       if (!started) {
+        // 新对话在 Run 写入前失败时，send 已取消选中。清掉乐观消息，页面才仍是新对话。
+        if (!desktopConversation.selectedConversationId) {
+          setPendingUserMessage(null)
+          setEmptyConversation(true)
+          setActivePrompt('')
+          setChatState('complete')
+          return 'error' as const
+        }
         setPendingUserMessage((message) => message ? { ...message, status: 'failed', updatedAt: Date.now() } : message)
         setChatState('error')
         return 'error' as const
