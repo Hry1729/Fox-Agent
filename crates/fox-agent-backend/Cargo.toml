@@ -37,9 +37,10 @@ libc = "0.2"
 serde_json = "1"
 tempfile = "3"
 
-# Windows only: ownership / WRITE_DAC preflight and the exposure audit for the
-# srt sandbox (src/winacl.rs), and the Job Object that contains the backend
-# process tree (src/acp.rs). Already in the workspace lock.
+# Windows only: the Job Object that contains the backend process tree
+# (src/acp.rs), the current user's SID (src/external_home.rs), random bytes
+# (src/launch.rs) and the preview port owner lookup (src/preview.rs).
+# Already in the workspace lock.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
