@@ -16,8 +16,6 @@ use std::{
 #[path = "command_environment.rs"]
 mod command_environment;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// Per-stream hard retention for command output. Everything up to this cap is
@@ -1643,13 +1641,9 @@ fn run_contained(
     reap_finished_readers();
     let mut process = Command::new(&spawn_spec.program);
     crate::process_jobs::apply_spawn_arguments(&mut process, &spawn_spec);
+    // Windows: hidden console, started suspended for the Job Object.
     #[cfg(windows)]
-    {
-        process.creation_flags(
-            crate::process_jobs::CREATE_NO_WINDOW_FLAG
-                | crate::process_jobs::CREATE_SUSPENDED_FLAG,
-        );
-    }
+    fox_agent_backend::console::HideConsole::hide_console_with(&mut process, crate::process_jobs::CREATE_SUSPENDED_FLAG);
     // Unix: own process group so cancel, timeout and post-exit cleanup reach
     // descendants, the same scope the Windows Job Object gives.
     #[cfg(unix)]
@@ -1966,9 +1960,8 @@ pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
     // a timed-out compiler, shell script, or package manager cannot survive
     // invisibly after Fox reports the tool failure.
     let pid = child.id().to_string();
-    let _ = Command::new("taskkill")
+    let _ = fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("taskkill"))
         .args(["/PID", &pid, "/T", "/F"])
-        .creation_flags(0x0800_0000)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1990,7 +1983,7 @@ pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
 /// harmless no-op.
 #[cfg(not(windows))]
 pub(crate) fn kill_process_group(pid: u32) {
-    let _ = Command::new("kill")
+    let _ = fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("kill"))
         .args(["-KILL", "--", &format!("-{pid}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

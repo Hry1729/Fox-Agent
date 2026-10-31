@@ -69,10 +69,7 @@ impl OwnedStdio {
         let mut command = Command::new(&server.command);
         command.args(&server.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         if let Some(environment) = load_environment(&server.id) { command.envs(environment); }
-        #[cfg(windows)] {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
-        }
+        fox_agent_backend::console::HideConsole::hide_console(&mut command);
         let mut child = command.spawn().map_err(|_| "cannot start owned MCP server")?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or("missing owned MCP stdout")?;
