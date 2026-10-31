@@ -1537,12 +1537,8 @@
   text-align: left;
 }
 
-/* 项目下的对话：icon 盒子左缘对齐项目名文字起点
-   （inset + icon-box + icon-gap）。同一项目里的对话都用这一列，不再各自另缩进。
-   没有挂在项目下的对话仍和命令行、项目文件夹共用上面的 icon 中心线。 */
-.fox-project-conversation-row > .fox-sidebar-tree-main {
-  padding-left: calc(var(--fox-sidebar-inset) + var(--fox-sidebar-icon-box) + var(--fox-sidebar-icon-gap));
-}
+/* 项目下的对话不另缩进：状态图标和命令行、项目文件夹、顶层对话共用同一条 icon 中心线
+   （inset + icon-box / 2），层级靠项目名行的位置和分组间距表达。 */
 .fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
 .fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main { padding-right: var(--fox-sidebar-icon-gap); }
 
