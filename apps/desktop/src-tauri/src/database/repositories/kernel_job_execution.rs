@@ -242,6 +242,14 @@ impl Database {
              WHERE j.job_id=?1 AND r.status IN ('completed','failed','cancelled','interrupted'))",
             [id], |row| row.get(0)))
     }
+    /// Scoped read of a published job notice. Test-only: production writes
+    /// notices during settlement but no longer reads them (Kernel wake retired).
+    #[cfg(test)]
+    pub(crate) fn kernel_job_notice(&self, conversation:&str, run:&str, id:&str)
+        -> Result<Option<KernelJobNotice>,String> {
+        self.with_connection(|conn| read_notice(conn,&self.data_root_id,conversation,run,id))
+    }
+
     pub(crate) fn kernel_job_claim_attempt(&self, id: &str, attempt: u32) -> Result<JobSnapshot, String> {
         self.with_connection(|conn| {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -367,45 +375,6 @@ impl Database {
         })
     }
 
-    /// B1 internal scoped read. The caller supplies no root identity; a copied
-    /// database opened from another Host data root cannot consume old facts.
-    pub(crate) fn kernel_job_notice(&self, conversation:&str, run:&str, id:&str)
-        -> Result<Option<KernelJobNotice>,String> {
-        self.with_connection(|conn| read_notice(conn,&self.data_root_id,conversation,run,id))
-    }
-
-    /// Terminalize an expired job that has no executor. B2 will decide when to
-    /// call this; B1 never starts or replays the work while doing so.
-    pub(crate) fn kernel_job_expire_unowned(&self, conversation:&str, run:&str, id:&str)
-        -> Result<JobSnapshot,String> {
-        self.with_connection(|conn| {
-            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let job=read_snapshot(&tx,id)?;
-            if job.conversation_id!=conversation || job.run_id!=run {
-                return Err(invalid("job scope mismatch"));
-            }
-            if !matches!(job.state,JobState::Queued|JobState::Paused)
-                || !notice_enabled(&tx,&job)? {
-                return Err(invalid("job is not an experimental unowned compute job"));
-            }
-            let now=now_ms();
-            let changed=tx.execute(
-                "UPDATE kernel_jobs SET state='failed',error_code='job.deadline_exceeded',
-                 error_message='compute job deadline exceeded before execution',
-                 updated_at=?4,finished_at=?4,owner_pid=NULL,owner_started_at=NULL
-                 WHERE job_id=?1 AND run_id=?2 AND conversation_id=?3
-                   AND state IN ('queued','paused') AND owner_pid IS NULL
-                   AND owner_started_at IS NULL AND deadline_ms > 0 AND deadline_ms <= ?4",
-                params![id,run,conversation,now],
-            )?;
-            if changed!=1 { return Err(invalid("job is not expired and unowned")); }
-            insert_notice(&tx,&self.data_root_id,&job,JobState::Failed,now,None,
-                Some(("job.deadline_exceeded","compute job deadline exceeded before execution")),false)?;
-            let settled=read_snapshot(&tx,id)?;
-            tx.commit()?;
-            Ok(settled)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -550,16 +519,7 @@ mod notice_tests {
         f.db.kernel_job_request_cancel(&f.conversation,&paused).unwrap();
         assert_eq!(f.db.kernel_job_notice(&f.conversation,&f.run,&paused).unwrap().unwrap().terminal_state,JobState::Cancelled);
 
-        let expired=f.start("expired","attachment_compute",now_ms()-1);
-        assert_eq!(f.db.kernel_job_expire_unowned(&f.conversation,&f.run,&expired).unwrap().state,JobState::Failed);
-        assert_eq!(f.db.kernel_job_notice(&f.conversation,&f.run,&expired).unwrap().unwrap().error_code.as_deref(),Some("job.deadline_exceeded"));
-        assert!(f.db.kernel_job_expire_unowned(&f.conversation,&f.run,&expired).is_err());
-        let paused_expired=f.start("paused-expired","attachment_compute",now_ms()-1);
-        f.db.kernel_job_claim_attempt(&paused_expired,1).unwrap();
-        f.db.with_connection(|conn| conn.execute("UPDATE kernel_jobs SET state='paused',owner_pid=NULL,
-            owner_started_at=NULL WHERE job_id=?1",[&paused_expired])).unwrap();
-        assert_eq!(f.db.kernel_job_expire_unowned(&f.conversation,&f.run,&paused_expired).unwrap().state,JobState::Failed);
-        assert_eq!(notice_count(&f.db),6);
+        assert_eq!(notice_count(&f.db),4);
         f.finish();
     }
 

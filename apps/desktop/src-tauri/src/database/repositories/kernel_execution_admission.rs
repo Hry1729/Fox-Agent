@@ -63,16 +63,6 @@ fn action_class_str(value: ActionClass) -> &'static str {
     }
 }
 
-fn attempt_state_str(value: &AttemptState) -> &'static str {
-    match value {
-        AttemptState::Claimed => "claimed",
-        AttemptState::Completed => "completed",
-        AttemptState::Refused { .. } => "refused",
-        AttemptState::Launched => "launched",
-        AttemptState::Unknown => "unknown",
-    }
-}
-
 fn attempt_state_from_str(
     value: &str,
     refusal_code: Option<String>,

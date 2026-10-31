@@ -129,23 +129,6 @@ pub(crate) struct KernelHostCommand {
     pub policy_version: Option<u64>,
 }
 
-/// The run's own conversation, read inside the caller's transaction so the
-/// confirmation binds to the same scope the claim will enforce.
-fn conversation_of(
-    transaction: &rusqlite::Transaction<'_>,
-    run_id: &str,
-) -> Result<String, rusqlite::Error> {
-    transaction
-        .query_row(
-            "SELECT COALESCE((SELECT conversation_id FROM run_control_bindings WHERE run_id=?1),
-                             (SELECT conversation_id FROM runs WHERE id=?1))",
-            [run_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())
-        .map_err(rusqlite::Error::InvalidParameterName)
-}
-
 impl Database {
 
     /// Kernel already owns the execution clock (approval waits do not consume

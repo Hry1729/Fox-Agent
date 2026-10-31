@@ -203,22 +203,6 @@ pub(crate) struct OfficeWriteDetails<'a> {
     pub after_backup_path: Option<&'a str>,
 }
 
-/// The artifact lifecycle verdict for one verified Office write.
-///
-/// Derived from Host facts only — the frozen operation name and the verified
-/// target path relative to the authorized project root — so a connector result
-/// cannot promote an intermediate file to a deliverable, and the renderer never
-/// has to guess from a file extension.
-pub(crate) fn office_write_artifact_class(
-    project_root: &Path,
-    target: &Path,
-    tool: &str,
-) -> &'static str {
-    crate::runtime_host::artifact_store::classify(Some(project_root), target, tool, false)
-        .0
-        .as_str()
-}
-
 /// The Host-verified managed write behind one frozen dispatch.
 ///
 /// A managed write is identified from Host facts only: the real dispatch tool,

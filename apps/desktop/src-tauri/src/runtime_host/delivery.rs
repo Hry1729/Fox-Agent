@@ -2117,14 +2117,6 @@ pub(crate) fn stored_zip(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-/// Copy an existing OOXML package and add one stored part to it.
-#[cfg(test)]
-pub(crate) fn zip_with_extra_part(bytes: &[u8], name: &str, body: &str) -> Vec<u8> {
-    let mut entries = crate::local_knowledge_import::zip_entries(bytes).expect("read package");
-    entries.push((name.to_owned(), body.as_bytes().to_vec()));
-    stored_zip(&entries)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3209,43 +3201,6 @@ mod tests {
         let path = root.join(name);
         std::fs::write(&path, bytes).unwrap();
         path
-    }
-
-    /// A delivered workbook whose first column carries the given statement
-    /// lines, so a cross-artifact statistic can be stated by a *spreadsheet*
-    /// (the gate reads bound artifacts, not loose text files).
-    fn statement_workbook(lines: &[&str]) -> Vec<u8> {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/office-reading.xlsx");
-        let base = std::fs::read(&fixture).expect("test fixture workbook");
-        let mut entries =
-            crate::local_knowledge_import::zip_entries(&base).expect("fixture package");
-        let index = entries
-            .iter()
-            .position(|(name, _)| name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
-            .expect("fixture has a worksheet part");
-        let sheet = String::from_utf8_lossy(&entries[index].1).into_owned();
-        let start = sheet.find("<sheetData").expect("worksheet sheetData");
-        let end =
-            sheet.find("</sheetData>").expect("worksheet sheetData end") + "</sheetData>".len();
-        let escape = |value: &str| {
-            value
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-        };
-        let mut rows = String::from("<sheetData>");
-        for (position, line) in lines.iter().enumerate() {
-            let row = position + 1;
-            rows.push_str(&format!(
-                r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>{}</t></is></c></row>"#,
-                escape(line)
-            ));
-        }
-        rows.push_str("</sheetData>");
-        let rebuilt = format!("{}{}{}", &sheet[..start], rows, &sheet[end..]);
-        entries[index].1 = rebuilt.into_bytes();
-        stored_zip(&entries)
     }
 
     /// C1: one path can be named twice with two roles — read first, saved after.

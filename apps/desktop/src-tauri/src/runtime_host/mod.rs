@@ -6581,18 +6581,6 @@ fn mcp_permission_scope(tool: &str, input: &Value) -> Option<String> {
     ))
 }
 
-fn host_permission_scope(tool: &str, preview: &crate::tool_host::ToolPreview) -> Option<String> {
-    // Shell commands are deliberately one-shot. A command string is not a stable
-    // capability boundary and must never become a conversation-wide grant.
-    if tool == "run_command" {
-        return None;
-    }
-    Some(permission_scope_hash(
-        "host-target",
-        format!("{tool}\0{}", preview.target).as_bytes(),
-    ))
-}
-
 fn capability_permission_scope(tool: &str, input: &Value) -> Option<String> {
     let encoded = crate::canonical_json::to_vec(input).ok()?;
     Some(permission_scope_hash(
@@ -10076,29 +10064,6 @@ fn ensure_plan_approved_before_mutation(
     Ok(())
 }
 
-fn mark_crashed(state: &Arc<Mutex<RuntimeHostState>>, message: String) {
-    if let Ok(mut state) = state.lock() {
-        if state.state == "stopped" || state.state == "stopping" {
-            return;
-        }
-        state.state = "crashed".to_owned();
-        state.last_error = Some(message);
-    }
-}
-
-fn should_attempt_recovery(
-    message: &str,
-    stable_session: bool,
-    recovery_attempts: u8,
-    has_conversation: bool,
-) -> bool {
-    let contract_error = message.contains("protocol mismatch")
-        || message.contains("invalid JSONL")
-        || message.contains("oversized JSONL")
-        || message.contains("capability manifest");
-    !contract_error && stable_session && recovery_attempts == 0 && has_conversation
-}
-
 fn record_runtime_crash(
     _app: &AppHandle, _database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
     stdin: &Arc<Mutex<ChildStdin>>, message: String,
@@ -10116,19 +10081,7 @@ fn record_runtime_crash(
 #[cfg(test)]
 mod attachment_tests {
     use crate::canonical_json::CanonicalJson;
-    use super::{
-        apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx,
-        attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result,
-        create_fresh_host_tool_call, dispatch_created_work_child,
-        effective_digital_colleague_output_limit, ensure_plan_approved_before_mutation,
-        event_projection_failure_code, extract_docx_text, finalize_host_tool_execution,
-        inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes,
-        node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload,
-        pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package,
-        should_attempt_recovery, structured_runtime_error, validate_envelope_identity_scope,
-        validate_runtime_tool_authority, HostToolCallExecution, PendingApproval,
-        RuntimeToolIngress,
-    };
+    use super::{apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx, attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result, create_fresh_host_tool_call, dispatch_created_work_child, effective_digital_colleague_output_limit, ensure_plan_approved_before_mutation, event_projection_failure_code, extract_docx_text, finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes, node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope, validate_runtime_tool_authority, HostToolCallExecution, PendingApproval, RuntimeToolIngress};
     use crate::database::{
         AddEvidenceInput, AttachmentRecord, CreateGoalInput, CreateTaskInput, Database,
         EvidenceReferenceKind, EvidenceType, EvidenceValidityStatus, GoalStatus,
@@ -12783,40 +12736,6 @@ mod attachment_tests {
             redact_diagnostic_line("request failed api_key=secret token=another"),
             "request failed api_key=[REDACTED] token=[REDACTED]"
         );
-    }
-
-    #[test]
-    fn sidecar_recovery_is_single_attempt_and_contract_errors_are_fused() {
-        assert!(should_attempt_recovery(
-            "runtime process closed stdout",
-            true,
-            0,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime process closed stdout",
-            true,
-            1,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime protocol mismatch: old v0",
-            true,
-            0,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime emitted invalid JSONL",
-            true,
-            0,
-            true
-        ));
-        assert!(!should_attempt_recovery(
-            "runtime process closed stdout",
-            false,
-            0,
-            true
-        ));
     }
 
     #[test]

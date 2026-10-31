@@ -126,48 +126,6 @@ impl ArtifactStore {
         }
     }
 
-    /// Project-relative deliverable folder path (`fox/<name>`).
-    pub(crate) fn deliverable_relative_path(&self, slug: &str, conversation_id: &str) -> PathBuf {
-        Path::new(PROJECT_DELIVERABLE_DIR)
-            .join(self.deliverable_directory_name(slug, conversation_id))
-    }
-
-    /// Create the deliverable folder inside an already canonicalized project
-    /// root and return the absolute path. Idempotent: an existing folder for
-    /// this conversation is reused, so continuation and retry stay in one
-    /// user-visible result folder.
-    pub(crate) fn ensure_deliverable_root(
-        &self,
-        project_root: &Path,
-        slug: &str,
-        conversation_id: &str,
-    ) -> Result<PathBuf, String> {
-        let fox_dir = project_root.join(PROJECT_DELIVERABLE_DIR);
-        create_dir_checked(&fox_dir)?;
-        // Reuse the conversation's existing folder when one is already there,
-        // regardless of the date, so a task spanning midnight keeps one folder.
-        let suffix = format!("-{}", &short_conversation_id(conversation_id)[..12]);
-        if let Ok(entries) = fs::read_dir(&fox_dir) {
-            let mut reused: Vec<PathBuf> = entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.is_dir())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.ends_with(&suffix))
-                })
-                .collect();
-            reused.sort();
-            if let Some(existing) = reused.into_iter().next() {
-                return Ok(existing);
-            }
-        }
-        let directory = fox_dir.join(self.deliverable_directory_name(slug, conversation_id));
-        create_dir_checked(&directory)?;
-        Ok(directory)
-    }
-
     /// Host-private area for rendered previews of one conversation.
     pub(crate) fn preview_root(&self, conversation_id: &str) -> Result<PathBuf, String> {
         let root = self
@@ -1441,34 +1399,6 @@ mod tests {
             && date.bytes().all(|b| b.is_ascii_digit())
             && id.len() == 12
             && id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    }
-
-    #[test]
-    fn deliverable_root_is_stable_across_runs_and_isolated_across_conversations() {
-        let store = ArtifactStore::new(&temp_root("reuse"));
-        let project = temp_root("project");
-        let first = store
-            .ensure_deliverable_root(&project, "AGV", "conv-a")
-            .expect("create deliverable root");
-        // A second Run of the same task reuses the same user-visible folder.
-        let second = store
-            .ensure_deliverable_root(&project, "AGV", "conv-a")
-            .expect("reuse deliverable root");
-        assert_eq!(first, second);
-        assert!(first.starts_with(project.join(PROJECT_DELIVERABLE_DIR)));
-        // A different conversation never lands in the same folder.
-        let other = store
-            .ensure_deliverable_root(&project, "AGV", "conv-b")
-            .expect("other conversation root");
-        assert_ne!(first, other);
-        // Exactly two conversation folders exist.
-        let count = fs::read_dir(project.join(PROJECT_DELIVERABLE_DIR))
-            .unwrap()
-            .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .count();
-        assert_eq!(count, 2);
-        fs::remove_dir_all(&project).ok();
     }
 
     #[test]

@@ -119,21 +119,6 @@ impl Database {
         })
     }
 
-    /// Record the creation-time full-access grant (`conversation:<id>`).
-    /// Called once, right after the INSERT of the conversation.
-    pub(crate) fn grant_full_access_at_creation(&self, conversation_id: &str) -> Result<(), String> {
-        let now = chrono::Utc::now().timestamp_millis();
-        self.with_connection(|connection| {
-            connection
-                .execute(
-                    "INSERT INTO agent_backend_full_access_grants(grant_key, conversation_id, granted_at)
-                     VALUES ('conversation:' || ?1, ?1, ?2)",
-                    rusqlite::params![conversation_id, now],
-                )
-                .map(|_| ())
-        })
-    }
-
     /// Withdraw the grant (mid-session revocation). `true` when a grant was
     /// removed. There is no way to add one later.
     pub(crate) fn revoke_full_access_grant(&self, conversation_id: &str) -> Result<bool, String> {
@@ -538,25 +523,4 @@ mod tests {
 mod full_access_grant_tests {
     use crate::database::Database;
 
-    #[test]
-    fn grant_is_persisted_per_conversation_and_only_removable() {
-        let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        let a = database.create_conversation_with_backend(database.default_agent_id(), Some("a"), None, None, "deepseek").expect("a");
-        let b = database.create_conversation_with_backend(database.default_agent_id(), Some("b"), None, None, "deepseek").expect("b");
-        assert!(!database.conversation_full_access_granted(&a.id).unwrap(), "sandboxed by default");
-        database.grant_full_access_at_creation(&a.id).unwrap();
-        assert!(database.conversation_full_access_granted(&a.id).unwrap());
-        assert!(!database.conversation_full_access_granted(&b.id).unwrap(), "per conversation");
-        assert!(database.grant_full_access_at_creation(&a.id).is_err(), "one grant per conversation");
-        assert!(database.revoke_full_access_grant(&a.id).unwrap());
-        assert!(!database.revoke_full_access_grant(&a.id).unwrap());
-        assert!(!database.conversation_full_access_granted(&a.id).unwrap());
-        database
-            .append_agent_backend_audit(Some(&a.id), "deepseek", "agent_backend.credentials_imported", &serde_json::json!({ "files": [".dsh/.env"], "keys": ["DEEPSEEK_API_KEY"] }))
-            .unwrap();
-        let details: String = database
-            .with_connection(|connection| connection.query_row("SELECT details_json FROM agent_backend_audit_log", [], |row| row.get(0)))
-            .unwrap();
-        assert!(details.contains("DEEPSEEK_API_KEY") && !details.contains("sk-"));
-    }
 }

@@ -17,30 +17,10 @@ impl KernelChanges {
         receiver
     }
 
-    pub(crate) fn committed(&self) {
-        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).retain(|sender| {
-            !matches!(sender.try_send(()), Err(mpsc::TrySendError::Disconnected(_)))
-        });
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn slow_consumers_coalesce_all_runs_and_independent_subscribers_stay_live() {
-        let changes = KernelChanges::default();
-        let slow = changes.subscribe();
-        let fast = changes.subscribe();
-        fast.try_recv().unwrap();
-        for _ in 0..10_000 { changes.committed(); }
-        slow.try_recv().unwrap();
-        assert!(slow.try_recv().is_err());
-        fast.try_recv().unwrap();
-        drop(slow);
-        changes.committed();
-        fast.try_recv().unwrap();
-        assert_eq!(changes.subscribers.lock().unwrap().len(), 1);
-    }
 }

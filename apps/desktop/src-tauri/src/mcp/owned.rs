@@ -4,11 +4,6 @@ use super::*;
 use crate::kernel::CancellationToken;
 use std::time::Instant;
 
-pub(crate) fn execute_owned(server: &McpServerRecord, call: Option<(&str,&Value)>, token: &CancellationToken,
-    budget: Duration) -> Result<Value,String> {
-    execute_owned_checked(server, call, token, budget, false)
-}
-
 pub(crate) fn execute_owned_readonly(server: &McpServerRecord, call: Option<(&str,&Value)>, token: &CancellationToken,
     budget: Duration) -> Result<Value,String> {
     execute_owned_checked(server, call, token, budget, true)

@@ -813,53 +813,6 @@ pub(crate) fn bundled_install_request(raw: Value) -> Result<InstallExpertPackage
     Ok(install_request(&package, None))
 }
 
-/// Install one expert package from the bundled library, without the Tauri layer.
-///
-/// This is the same path the `expert_package_install` command takes — the same
-/// parse, the same resource preview, the same compatible/version/conflict
-/// refusals, and the same `install_expert_package_version` write. It exists so a
-/// non-UI entry point (the real acceptance harness) selects an expert through
-/// production code instead of writing an `agents` row by hand. `local_knowledge`
-/// is fed the caller's real view of available bases; an expert package that
-/// requires one is refused here exactly as it is in the application.
-pub(crate) fn install_bundled_expert(
-    database: &Database,
-    skills_dir: &std::path::Path,
-    local_knowledge: &dyn LocalKnowledgeIds,
-    bundled: &Value,
-    expert_id: &str,
-) -> Result<AgentRecord, String> {
-    let entry = bundled
-        .as_array()
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry["expertId"].as_str() == Some(expert_id))
-        })
-        .ok_or_else(|| format!("bundled expert `{expert_id}` was not found"))?;
-    let raw = entry
-        .get("package")
-        .cloned()
-        .ok_or_else(|| format!("bundled expert `{expert_id}` carries no package"))?;
-    let package = parse_package(raw).map_err(|error| format!("{error:?}"))?;
-    let preview = inspect(database, skills_dir, local_knowledge, &package)
-        .map_err(|error| format!("{}: {}", error.code, error.message))?;
-    if !preview.can_install {
-        // The missing categories are named: "one or more resources are
-        // unavailable" alone makes a refused installation unattributable.
-        return Err(format!(
-            "expert package cannot be installed: action={} missing={:?} warnings={:?}",
-            preview.action, preview.missing_resources, preview.warnings
-        ));
-    }
-    if preview.action == "no_change" {
-        return database
-            .get_agent_by_package_id(&package.package.id)?
-            .ok_or_else(|| "expert package was not found".to_owned());
-    }
-    database.install_expert_package_version(&install_request(&package, None))
-}
-
 #[tauri::command]
 pub fn expert_package_inspect(
     state: State<'_, AppState>,

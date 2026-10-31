@@ -63,13 +63,6 @@ pub(super) fn retired_route_error() -> String {
 }
 
 impl RunRoute {
-    /// The stable refusal code for a route this build cannot execute.
-    pub(super) fn refusal_reason(self) -> Option<&'static str> {
-        match self {
-            Self::Reject => Some(crate::database::EXECUTOR_ROUTE_UNKNOWN),
-            _ => None,
-        }
-    }
 }
 
 /// The binding a child Run freezes (A0).
@@ -194,7 +187,6 @@ mod tests {
     fn only_the_authoritative_pi_combination_routes_to_the_single_path() {
         let routed = binding(ExecutionAuthority::Authoritative, Some(ExecutorRoute::PiNative), "pi");
         assert!(matches!(resolve_run_route(Some(&routed)), RunRoute::PiNative));
-        assert_eq!(RunRoute::PiNative.refusal_reason(), None);
     }
 
     #[test]
@@ -210,8 +202,5 @@ mod tests {
                 "{engine} must not reach the single path"
             );
         }
-        assert_eq!(RunRoute::Reject.refusal_reason(), Some("executor_route_unknown"));
-        assert_eq!(RunRoute::Kernel.refusal_reason(), None);
-        assert_eq!(RunRoute::PiNative.refusal_reason(), None);
     }
 }

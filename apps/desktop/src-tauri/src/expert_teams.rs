@@ -81,10 +81,6 @@ pub fn is_team_tool(tool: &str) -> bool {
     TEAM_TOOLS.contains(&tool)
 }
 
-pub(crate) fn validate_team_definition(value: &Value) -> Result<(), String> {
-    parse_team(value.clone()).map(|_| ())
-}
-
 pub(crate) fn parse_team(value: Value) -> Result<TeamDefinition, String> {
     let encoded = crate::canonical_json::to_vec(&value).map_err(|error| error.to_string())?;
     if encoded.len() > MAX_TEAM_BYTES {

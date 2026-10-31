@@ -490,17 +490,6 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn child_budget_exceeded(&self, run_id: &str) -> Result<bool, String> {
-        self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT total_tokens >= max_total_tokens OR output_tokens >= max_output_tokens
-                 FROM child_run_delegations WHERE child_run_id = ?1",
-                [run_id],
-                |row| row.get(0),
-            )
-        })
-    }
-
     pub(crate) fn sync_child_run_terminal(&self, run_id: &str) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
@@ -1129,7 +1118,6 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert!(database.child_budget_exceeded(&child.child_run_id).unwrap());
         database
             .apply_runtime_event(&child.child_run_id, 5, &json!({"type":"run.completed"}))
             .expect("ordinary Child completion is not gated by cumulative usage");

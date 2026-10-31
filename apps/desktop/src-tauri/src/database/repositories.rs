@@ -175,12 +175,7 @@ pub use graph_lead::{
 };
 pub use work_events::WORK_EVENT_TYPES;
 #[allow(unused_imports)]
-pub use work_graph::{
-    AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository,
-    PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput,
-    StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository,
-    EVIDENCE_REFERENCE_PAIRS,
-};
+pub use work_graph::{AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository, PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput, StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository};
 
 const DEFAULT_AGENT_ID: &str = "fox-general";
 

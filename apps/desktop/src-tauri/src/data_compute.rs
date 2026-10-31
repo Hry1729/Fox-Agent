@@ -1265,10 +1265,6 @@ fn render_table(value: &Value, cancelled: &dyn Fn()->bool, deadline: Instant) ->
     Ok((csv.into_bytes(),contract))
 }
 
-pub(crate) fn parse_output_specs(value: Option<&Value>) -> Result<Vec<OutputSpec>, String> {
-    parse_output_specs_with_limits(value, &|| false, Instant::now() + Duration::from_millis(MAX_TIMEOUT_MS))
-}
-
 pub(crate) fn parse_output_specs_with_limits(value: Option<&Value>, cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<Vec<OutputSpec>, String> {
     let values = value
         .and_then(Value::as_array)

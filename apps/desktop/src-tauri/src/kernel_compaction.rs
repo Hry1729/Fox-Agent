@@ -598,27 +598,6 @@ pub(crate) fn bound_tool_text(
     Some(out)
 }
 
-/// Compatibility entry for call sites that do not yet carry the Host's trusted
-/// storage fact (e.g. `live.rs` until interface-request R4-A1 is wired). It is
-/// deliberately conservative: with no verified storage the projection keeps
-/// every byte and promises nothing, so behaviour is safe but large results stay
-/// unbounded. Switch call sites to `bound_tool_result_content_with_storage`
-/// once the fact is available.
-pub(crate) fn bound_tool_result_content(
-    tool: &str,
-    is_error: bool,
-    content: &Value,
-    reference: Option<&str>,
-) -> Option<Value> {
-    bound_tool_result_content_with_storage(
-        tool,
-        is_error,
-        content,
-        reference,
-        &ToolResultStorage::unknown(),
-    )
-}
-
 /// Bound a tool result's model-visible content while the source result object
 /// stays untouched. Receipt/approval/execution blocks and error results are
 /// preserved verbatim; only large re-readable reference output is replaced —
@@ -823,44 +802,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_tool_view_keeps_errors_receipts_and_non_reference_tools() {
-        let big = "x".repeat(50_000);
-        let big_content = json!([{"type":"text","text":big}]);
-        // Re-readable reference tool with a confirmed complete store is bounded.
-        let bounded = bound_tool_result_content_with_storage(
-            "office_help",
-            false,
-            &big_content,
-            Some(TEST_REF),
-            &stored_whole(big.len()),
-        )
-        .unwrap();
-        let text = bounded[0]["text"].as_str().unwrap();
-        assert!(text.len() < big.len());
-        assert!(text.contains("有界视图"));
-        assert!(text.contains("office_help"));
-        // Still a valid toolResult text block.
-        assert_eq!(bounded[0]["type"], "text");
-        // Without the storage fact nothing is bounded or promised: the compat
-        // entry reports "unchanged" (None), so the caller keeps every byte.
-        assert!(
-            bound_tool_result_content("office_help", false, &big_content, Some(TEST_REF)).is_none(),
-            "no verified storage means the projection declines and the payload is kept whole"
-        );
-        // Errors pass through verbatim so the model can correct them.
-        assert!(bound_tool_result_content("office_help", true, &big_content, None).is_none());
-        // Execution/fact tools are never bounded.
-        assert!(bound_tool_result_content("attachment_compute", false, &big_content, None).is_none());
-        assert!(bound_tool_result_content("write_file", false, &big_content, None).is_none());
-        // Receipt-bearing reference text is protected.
-        let receipt = json!([{"type":"text","text":format!("{big}\nFOX_EXECUTION_RECEIPT_V1 {{}}")}]);
-        assert!(bound_tool_result_content("read", false, &receipt, None).is_none());
-        // Small content is untouched.
-        let small = json!([{"type":"text","text":"short"}]);
-        assert!(bound_tool_result_content("office_help", false, &small, None).is_none());
-    }
-
-    #[test]
     fn storage_fact_decides_retrievability_instead_of_the_payload_size() {
         // Every one of these payload sizes used to be judged by the retired
         // 128 KiB inference; now only the Host fact decides.
@@ -1025,83 +966,6 @@ mod tests {
         // Incomplete identities have no reference.
         assert!(tool_result_ref("", "call").is_none());
         assert!(tool_result_ref("run", "").is_none());
-    }
-
-    #[test]
-    fn generic_mcp_results_are_never_bounded() {
-        // A generic call may describe a completed write: "call it again" is not
-        // a safe read, so the result must pass through verbatim.
-        let write_result = json!([{"type":"text","text": json!({
-            "operation": "created", "id": "example-only", "body": "x".repeat(12_000)
-        }).canonical_string()}]);
-        assert!(bound_tool_result_content("call_mcp_tool", false, &write_result, None).is_none());
-        // The tool listing itself is read-only reference material, but it is only
-        // bounded while Host keeps the whole of it — omitted entries have to stay
-        // reachable, otherwise the view would be dropping tools the model can
-        // neither see nor recover.
-        let listing = |tools: usize, description: usize| {
-            json!([{"type":"text","text": json!({"tools": (0..tools)
-                .map(|index| json!({"name": format!("mcp_{index}"), "description": "y".repeat(description)}))
-                .collect::<Vec<_>>()}).canonical_string()}])
-        };
-        // With the Host confirming it stored the whole listing, the view may be
-        // bounded and the note must say the reference actually reaches it.
-        let small = listing(60, 200);
-        let small_text = small[0]["text"].as_str().unwrap().to_owned();
-        let bounded = bound_tool_result_content_with_storage(
-            "list_mcp_tools",
-            false,
-            &small,
-            Some(TEST_REF),
-            &stored_whole(small_text.len()),
-        )
-        .unwrap();
-        let projected: Value = serde_json::from_str(bounded[0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            projected["foxModelView"]["retrievable"], json!(true),
-            "a result Host stored whole is recoverable, so the view may omit"
-        );
-        assert!(
-            projected["tools"].as_array().unwrap().len() <= 60,
-            "the projection stays valid JSON with a subset of entries"
-        );
-        // Without that fact nothing may be dropped or promised: the view may
-        // still shrink long field text, but every entry stays and the note must
-        // not tell the model it can read omitted bytes back.
-        let unverified = match bound_tool_result_content("list_mcp_tools", false, &small, None) {
-            Some(view) => serde_json::from_str::<Value>(view[0]["text"].as_str().unwrap()).unwrap(),
-            None => serde_json::from_str::<Value>(small[0]["text"].as_str().unwrap()).unwrap(),
-        };
-        assert_eq!(unverified["tools"].as_array().unwrap().len(), 60,
-            "no entry may be dropped without a trusted storage fact");
-        if unverified.get(STRUCT_VIEW_KEY).is_some() {
-            assert_eq!(unverified[STRUCT_VIEW_KEY]["retrievable"], json!(false));
-            assert_eq!(unverified[STRUCT_VIEW_KEY]["storageVerified"], json!(false));
-        }
-        assert!(small_text.len() > TOOL_VIEW_MAX_BYTES, "fixture must need a projection");
-        // A partial store (preview only) is equally unusable, whatever the size.
-        let huge = listing(300, 400);
-        let huge_text = huge[0]["text"].as_str().unwrap().to_owned();
-        let preview_only = match bound_tool_result_content_with_storage(
-            "list_mcp_tools",
-            false,
-            &huge,
-            None,
-            &ToolResultStorage {
-                stored: true,
-                stored_bytes: 131_072,
-                retrievable_bytes: 131_072,
-                ..Default::default()
-            },
-        ) {
-            Some(view) => serde_json::from_str::<Value>(view[0]["text"].as_str().unwrap()).unwrap(),
-            None => serde_json::from_str::<Value>(&huge_text).unwrap(),
-        };
-        assert_eq!(preview_only["tools"].as_array().unwrap().len(), 300,
-            "a preview-only store may not drop entries");
-        if preview_only.get(STRUCT_VIEW_KEY).is_some() {
-            assert_eq!(preview_only[STRUCT_VIEW_KEY]["retrievable"], json!(false));
-        }
     }
 
     #[test]

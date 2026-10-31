@@ -5,10 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const MAX_SKILL_BYTES: u64 = 128 * 1024;
-/// Initial skill-injection budget. **Units are Unicode scalar values
-/// (characters)**, never UTF-8 bytes and never model tokens; a Chinese
-/// character and an ASCII letter each cost 1 against this budget.
-const DEFAULT_SKILL_PROMPT_CHARS: usize = 8_000;
 /// The on-demand catalog must stay discoverable even when full texts do not
 /// fit; it is allowed this much of the initial budget.
 const SKILL_CATALOG_RESERVE_CHARS: usize = 3_200;
@@ -181,20 +177,6 @@ pub struct OnDemandSkill {
     pub tools_available: bool,
     pub chars: usize,
     pub bytes: usize,
-}
-
-pub fn enabled_skill_prompt(root: &Path, enabled: &[String]) -> Result<String, String> {
-    Ok(skill_prompt_plan(root, enabled, None, "", DEFAULT_SKILL_PROMPT_CHARS)?.prompt)
-}
-
-pub fn enabled_skill_prompt_for_context(
-    root: &Path,
-    enabled: &[String],
-    available_tools: Option<&HashSet<String>>,
-    task: &str,
-    max_chars: usize,
-) -> Result<String, String> {
-    Ok(skill_prompt_plan(root, enabled, available_tools, task, max_chars)?.prompt)
 }
 
 /// Compose the initial skill section: a full catalog plus full texts of the
@@ -1038,9 +1020,6 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert!(skills[0].record.valid);
         assert!(skills[0].record.enabled);
-        assert!(enabled_skill_prompt(&root, &["research".to_owned()])
-            .unwrap()
-            .contains("Use evidence"));
         let _ = std::fs::remove_dir_all(root);
     }
 
