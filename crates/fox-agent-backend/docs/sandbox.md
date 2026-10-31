@@ -1,6 +1,6 @@
 > **现已无沙箱（2026-10-31，B4c）**：Fox 已不再使用任何沙箱。SRT（sandbox-runtime）、`host_sandbox.rs` / `SrtHostBackend`、Windows ACL / 祖先 ACE / 所有权修复（`winacl` / `winancestor` / `winowner` / `winruntime`）、网络代理（`network.rs`、`network-host.mjs`、`reverse.rs`、`loopback.rs`）和 ACP stdio 桥（`bridge.rs`）已在 A1、B2 删除，运行时打包脚本不再打包 `srt\` 和 `acp-bridge\`。现在 Fox Host 命令在 **Fox Job**（Windows Job Object / 其他平台进程组）中以当前用户身份执行，安全靠四档审批（只读 / 询问 / 自动 / 完全访问）、block 规则、受保护路径、项目前缀规则和审计，见[安全架构](../../../docs/02-架构/安全架构.md)。外部 Agent（Pi、Codex、dsh）计划在下一阶段恢复，目前不可用。
 >
-> 本文件第 0–12 节和 13.1–13.30 的记录**保留为历史**，其中「当前」「生效」等字样只对应记录时点，不描述现状。**13.31** 是收尾批（A0–A2）的 Windows 复测清单，仍然有效。
+> 本文件第 0–12 节和 13.1–13.30 的记录**保留为历史**，其中「当前」「生效」等字样只对应记录时点，不描述现状。**13.31** 是收尾批（A0–A2）的 Windows 复测清单，**13.32** 是清理批（B1–B5）和外部 Agent 第一批（C1–C4）的 Windows 复测清单，两者都仍然有效。
 >
 > **单 Pi 分支适用范围（2026-10-28）**：下方各批次及旧“生效范围”说明保留原文。当前外部 Pi ACP、DeepSeek、Codex 已退休，不再由 Fox 启动；第 0 节涉及的共享 Host SRT 仍需保留。旧外部 SRT、ACP 和驱动实测结果只对应记录时点，不能用来宣称当前单 Pi 阶段二通过。
 > 当前状态与证据边界见[单 Pi 主线状态](../../../docs/01-项目概览/单Pi主线状态.md)。以下历史正文保持原样。
@@ -1833,3 +1833,57 @@ Linux 上的对应实测（供参考）：`tests/sandbox_srt.rs` 新增忽略用
 15. 恶意 git 配置不会被执行（TX-2，可选）
     - 步骤：在项目的 `.git\config` 里加 `[core] fsmonitor = "cmd /c echo pwned > D:\fox-test\pwned.txt"`，以及一条 `diff.textconv` / `filter` 配置；让 Agent 调用 `git_read` 看 status、diff、log。再让它用 `git_read` 读名为 `--output=x` 的 target。
     - 预期：`D:\fox-test\pwned.txt` 没有出现；git_read 正常返回结果；以 `-` 开头的 target 被拒绝。
+
+### 13.32 清理批（B1–B5）+ 外部 Agent 第一批（C1–C4）：Windows 复测清单（2026-10-31）
+
+> 承接 Fox 详细方案（2026-10-31）阶段二、三。本批之后：
+> - Kernel 执行循环、SRT 与整个 Fox 沙箱一族已从代码删除（B1、B2）；代码里只剩迁移和清理旧安装的部分（`enable-sandbox.ps1` 第 5、6 步）。
+> - 外部 Agent（Pi、Codex、dsh）解除退役（C1），按 Fox 四档审批映射到各自的原生档位（C2）；Fox 工具经本地 MCP 桥交给外部 Agent（C3）；启动失败直接报错并给出解决办法，不回退到 PiNative（C4）。
+> - Windows 外部运行时包升到 **0.1.7**（B5）：不再带 `srt\`、`acp-bridge\`；`pi-gate\` 里的 `pi-gated.cmd` 支持 `FOX_PI_MCP_EXTENSION`，并带 `fox-mcp-tools.ts`。旧的 0.1.6 包里的 pi-gate 不能加载 Fox 工具，Pi 会话会报 `agent_backend_fox_tools_unsupported`。
+> - 运行时包由 `scripts/windows/build-runtime-release.ps1` 按 `scripts/windows/runtime-package/` 里固定的 Node 与各 Agent 的 lockfile 构建；windows-ci 的 `runtime_package=true` 在 Windows runner 上产出包（只上传 artifact，不发 Release）。
+> - 安装第 6 步除了本次安装的版本目录，也删除已安装旧版本目录（如 `0.1.6\`）里的 `srt\`、`acp-bridge\`；只有第 5 步（清理旧版 Fox 装的 SRT）失败时才保留旧版本里的 `srt\`，供下次安装重试卸载。
+
+**一、Linux CI 已覆盖的部分（C5）**：`agent-backend-linux` 用三个 Agent 的 ACP 假进程跑启动、对话、审批卡、模式切换、MCP 工具调用和取消（`tests/external_runtime.rs`、`tests/fox_mcp_bridge.rs`）。Pi 的 MCP 工具调用经真实的 `fixtures/pi/pi-gated.sh` 加载真实的 `fox-mcp-tools.ts`。下面只列 Linux 测不到、必须在 Windows 上实测的项。
+
+**二、复测清单 13.32**（Windows 桌面构建，每项「通过 / 失败 + 截图 / 日志」）
+
+> - exe 必须复制到普通目录（例如 `D:\fox-test\`），以 **Medium 完整性**运行；不要直接从下载 / 解压目录（带 Low 完整性标签）运行。
+> - 安装包要用 0.1.7 运行时包构建（`FOX_SANDBOX_RUNTIME_PACKAGE` 指向 0.1.7 的 zip，SHA256 与 `sandbox-release.json` 一致）。
+> - 开测前备份 `fox.db`；第 1、2 项在装过 0.1.6 的机器上做一次、在干净机器上做一次。
+
+A. 安装与运行时包
+1. 新包安装后没有 srt：用 0.1.7 安装包完整安装。
+   - 预期：安装成功；`%ProgramFiles%\Fox\sandbox-runtime\0.1.7\` 下没有 `srt\`、`acp-bridge\`，有 `pi-gate\pi-gated.cmd`、`pi-gate\fox-approval-gate.ts`、`pi-gate\fox-mcp-tools.ts`；`pi-gated.cmd` 里能搜到 `FOX_PI_MCP_EXTENSION`；旧版本目录（如 `0.1.6\`）里的 `srt\`、`acp-bridge\` 也被删除，安装结果 JSON 的 `removedRuntimeDirs` 列出它们。
+2. 旧机器升级时的 SRT 清理（B2 遗留项合并）：在装过 0.1.5 / 0.1.6、SRT 由 Fox 安装的机器上安装 0.1.7。
+   - 预期：结果 JSON `legacySrt.decision = uninstall`；`net user srt-sandbox` 不存在、`sandbox-runtime-users` 组不存在、`HKLM\SOFTWARE\sandbox-runtime` 和 `%ProgramData%\sandbox-runtime` 已删除。SRT 不是 Fox 装的（或没有 Fox 回执）时为 `keep`，原样保留；人为让卸载失败时安装仍成功，日志有 `legacy SRT clean-up failed`，旧版本目录里的 `srt\` 保留。
+
+B. Pi（外部 pi，ACP）
+3. 预检顺序与 Fox 工具：新建 Pi 会话跑通一轮对话。然后依次（每次改完重启 Fox）删掉 `backends\pi`、`pi-gate\pi-gated.cmd`、pi-acp 适配文件 `backends\pi\node_modules\pi-acp\dist\fox-turn-outcome.mjs`；最后把 `pi-gated.cmd` 换回 0.1.6 版本。
+   - 预期：依次报 `agent_backend_not_installed` → `agent_backend_pi_gate_missing` → `agent_backend_runtime_adapter_missing` → `agent_backend_fox_tools_unsupported`（提示升级运行时），都不回退到 PiNative。完好时 Pi 能调用 `present_files`、`search_knowledge`，文件卡片和检索结果正常。
+4. Pi 四档：只读（写入被拒）、询问（写入和命令出审批卡）、自动（项目内写入自动放行、高风险仍询问）、完全访问（全部放行，但项目 block 规则和内置危险删除仍被拦）；项目里为 `run_command` 写的规则对 pi 的 bash 生效；会话中切档显示「下一次请求起生效」。
+
+C. Codex（codex-acp）
+5. 真实 codex-acp：只读 / 询问 / 完全访问三档可用，「自动」置灰并显示原因；会话中在「询问 ↔ 完全访问」之间切换立即生效（不重启，审计里有 `session/set_mode`）。
+6. Fox 工具：工具列表里有 5 个 Fox 工具（present_files、list_knowledge_bases、search_knowledge、read_knowledge_document、ask_user），`present_files`、`search_knowledge` 调用成功。在用户 Codex 配置里预置同名 `fox_host_business_tools` server 后启动，前端显示「修改 Agent 配置」（`agent_backend_fox_tools_rejected`）。
+
+D. dsh
+7. 真实 dsh：四档可用；会话中切换显示「下一轮重启生效」，下一轮确实以新预设重启；撤销完全访问时原进程完全结束后才重建。Fox 工具同第 6 项（5 个工具、present_files / search_knowledge 成功）。
+
+E. 外部 Agent 通用
+8. ask_user 往返：外部 Agent（三家各一次）调 ask_user → 本轮以等待用户结束、出现提问卡片 → 回答后作为下一轮发给同一会话，卡片关闭。
+9. 外部 Agent 完全访问的二次确认：每个项目第一次要确认，确认后同一项目新建会话不再询问；`FOX_EXTERNAL_FULL_ACCESS_FORBIDDEN` 时三家的完全访问都置灰。
+10. `FOX_EXTERNAL_BACKENDS`：未设置时四个选项都可选；设为 `0` 时外部三项置灰、设置页说明已关闭、已有外部会话只读；设为 `pi` 时只有 Pi 可选。
+11. 新会话选择器和设置：「新会话使用的 Agent」保存后下一次新建会话使用该后端；已有会话保持创建时的绑定。
+12. C4 失败提示：卸载 / 损坏运行时（`agent_backend_spawn_failed` 或 `not_installed`）、未登录（`exited_on_start` / `missing_credentials`）、启动中撤销完全访问（L-1：本轮以 `agent_backend_full_access_revoked` 结束，下一轮按撤销后的权限启动）、Windows 上停止外部会话不卡 UI（L-3）。
+
+F. 桌面主线（PiNative）与文件
+13. 运行状态（B4a）：运行开始、进行中、结束时状态都更新（打开会话读一次 + 运行中每 2.5 秒轮询）；打开已结束的会话看到最终状态；运行结束后不再轮询。
+14. 文件版本面板（B4a）：运行中产生新版本后，重新打开面板能看到。
+15. Office 措辞（B4a）：新的 Office 调用被拒绝显示 Host 诊断措辞；历史被拒的 Office 结果显示连接器措辞（预期副作用）；远端连接器伪造 `diagnosticSource: "host"` 不被当成 Host 诊断。
+16. 写入与编码（B4b）：exFAT 卷（不支持硬链接）上新建文件走 MoveFileExW，不覆盖、结果正确（TX-6）；写入成功并登记后项目目录不残留 `.fox-replace-*`，登记失败时材料全部保留（TX-5）；GBK 文件 read 正确解码并标 `encoding=GB18030`，edit_file 报明确的编码错误、不转码（TX-8）。
+17. UI 不卡（B4b）：点「允许」审批时 UI 不卡（AP-3）；设置页资料库检索测试不卡（KB-7）。
+
+G. 知识库与默认 feature 构建
+18. 默认 feature 构建（B4a / DOC-5）：用默认 feature（`local-embedding` + `zvec`）完整构建并启动，向量检索和本地资料库正常。
+19. 远程知识库原生索引不可用时返回 `remote_knowledge.index_unavailable`，不降级为关键词扫描（B4b）。
+20. 本地检索 worker 冷启动耗时（KB-6）：记录首次检索耗时，作为后续优化的基线。
