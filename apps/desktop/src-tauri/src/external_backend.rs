@@ -384,6 +384,12 @@ impl ExternalBackendHost {
         });
     }
 
+    /// The native permission mode the conversation's live process runs in
+    /// (None when no process is running).
+    pub(crate) fn running_native_mode(&self, conversation_id: &str) -> Option<String> {
+        self.runtime.session_info(conversation_id).filter(|info| info.live).and_then(|info| info.native_mode)
+    }
+
     /// The four capability dimensions for a conversation's backend: live
     /// when a session ran in this Fox process, planned otherwise.
     pub fn capabilities(&self, conversation_id: Option<&str>, backend: AgentBackend) -> CapabilityView {

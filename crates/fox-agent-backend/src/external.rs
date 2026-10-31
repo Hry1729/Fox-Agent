@@ -540,6 +540,10 @@ pub struct SessionInfo {
     pub pi_launch: PiLaunch,
     pub native_session_id: Option<String>,
     pub active_run: Option<String>,
+    /// The native permission mode the live process actually runs in (Codex
+    /// after `session/set_mode`, dsh as started). A stored choice that
+    /// differs is pending (dsh: next turn; Codex: a failed switch retried).
+    pub native_mode: Option<String>,
 }
 
 struct PendingApproval {
@@ -1915,6 +1919,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             pi_launch: state.pi_launch.unwrap_or(PiLaunch::Stock),
             native_session_id: state.native_session_id.clone(),
             active_run: state.turn.as_ref().map(|turn| turn.run_id.clone()),
+            native_mode: state.native_mode.clone(),
         })
     }
 

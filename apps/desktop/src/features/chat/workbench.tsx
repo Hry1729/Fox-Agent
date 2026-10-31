@@ -1,6 +1,8 @@
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { AgentBackendPanel } from './components/AgentBackendPanel'
-import { AGENT_BACKEND_REFUSED, agentBackendInputLockedReason, conversationAgentBackend } from '@/features/conversations/model/agent-backend'
+import { AGENT_BACKEND_REFUSED, agentBackendAccess, agentBackendInputLockedReason, conversationAgentBackend, isAgentBackendHidden, isAgentBackendRetired, NEW_CONVERSATION_AGENT_BACKEND, type AgentBackendId } from '@/features/conversations/model/agent-backend'
+import { approvalCatalogFor, foxTierOfAccessMode, type ApprovalModeLists, type FoxPermissionTier, type NativePermissionView } from '@/features/conversations/model/agent-native-permission'
+import { NativeApprovalControl } from './composer/composer-approval-control'
 import { type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { expertErrorMessage, expertInteractionLocked, latestExpertToolAvailability } from './components/expert-binding-ui'
 import { useGoalProgress } from './hooks/use-goal-progress'
@@ -1499,9 +1501,62 @@ export function Workbench() {
       failure={agentBackendFailure}
     />
   ) : null, [desktopConversation.enabled, agentBackendStatus, lockedAgentBackend, openConversationId, draftAgentBackend, draftProjectId, draftProjectRoot, draftFullAccess, visibleAgentBackendRefusal, agentBackendFailure])
+  // Composer batch (2026-10-31): ONE approval mode selector, in the
+  // composer, adapted to the shown backend. Every list comes from the Host
+  // (`agent_backend_approval_modes` / `agent_backend_native_permissions`).
+  const [approvalModeLists, setApprovalModeLists] = useState<ApprovalModeLists | null>(null)
+  useEffect(() => {
+    if (!desktopConversation.enabled) return
+    let disposed = false
+    const load = () => { desktopClient.agentBackendApprovalModes().then((lists) => { if (!disposed) setApprovalModeLists(lists) }).catch(() => {}) }
+    load()
+    window.addEventListener('fox:model-service-changed', load)
+    return () => { disposed = true; window.removeEventListener('fox:model-service-changed', load) }
+  }, [desktopConversation.enabled])
+  const foxApprovalCatalog = approvalCatalogFor(approvalModeLists, 'fox')
+  const shownDraftBackend: AgentBackendId = isAgentBackendHidden(draftAgentBackend, agentBackendStatus) || isAgentBackendRetired(draftAgentBackend, agentBackendStatus)
+    ? NEW_CONVERSATION_AGENT_BACKEND
+    : draftAgentBackend
+  const approvalBackend: AgentBackendId = lockedAgentBackend ?? shownDraftBackend
+  const approvalExternal = desktopConversation.enabled && approvalBackend !== 'fox' && agentBackendAccess(approvalBackend, agentBackendStatus) === 'runnable'
+  // The tier of the draft's current choice, carried when its Agent switches:
+  // Fox's composer mode, else the last list the external control showed.
+  const draftFoxMode = activeProject?.permissionMode ?? desktopConversation.draftPermissionMode
+  const lastDraftTier = useRef<{ backend: AgentBackendId; tier: FoxPermissionTier } | null>(null)
+  // Decided during render (not in an effect) so the control that mounts for
+  // the new Agent already carries the previous tier on its first request.
+  const draftCarry = useRef<{ backend: AgentBackendId; tier: FoxPermissionTier | '' } | null>(null)
+  const previousDraftBackend = useRef<AgentBackendId | null>(null)
+  if (lockedAgentBackend) {
+    previousDraftBackend.current = null
+    draftCarry.current = null
+  } else if (previousDraftBackend.current !== shownDraftBackend) {
+    const previous = previousDraftBackend.current
+    previousDraftBackend.current = shownDraftBackend
+    const tier: FoxPermissionTier | '' = previous === null ? ''
+      : previous === 'fox' ? foxTierOfAccessMode(draftFoxMode)
+      : lastDraftTier.current?.backend === previous ? lastDraftTier.current.tier : ''
+    draftCarry.current = { backend: shownDraftBackend, tier }
+  }
+  const handleApprovalView = useStableCallback((view: NativePermissionView) => {
+    if (view.draft && view.currentTier) lastDraftTier.current = { backend: view.catalog.backend as AgentBackendId, tier: view.currentTier }
+  })
+  const draftCarryTier: FoxPermissionTier | '' = draftCarry.current && draftCarry.current.backend === shownDraftBackend ? draftCarry.current.tier : ''
+  const approvalControl = useMemo(() => approvalExternal ? (
+    <NativeApprovalControl
+      key={lockedAgentBackend ? `conversation:${openConversationId}` : `draft:${approvalBackend}`}
+      client={desktopClient}
+      conversationId={lockedAgentBackend ? openConversationId : null}
+      backend={approvalBackend}
+      projectId={lockedAgentBackend ? null : draftProjectId}
+      carryTier={draftCarryTier}
+      disabled={chatState === 'running' && !lockedAgentBackend}
+      onView={handleApprovalView}
+    />
+  ) : undefined, [approvalExternal, lockedAgentBackend, openConversationId, approvalBackend, draftProjectId, draftCarryTier, chatState, handleApprovalView])
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
-    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={conversationAccessMode(desktopConversation.detail?.conversation) ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} sendFailureReason={desktopConversation.lastSendFailureReason} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
+    <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} approvalControl={approvalControl} foxApprovalCatalog={foxApprovalCatalog} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={timelineEmpty && (!desktopConversation.enabled || !desktopConversation.selectedConversationId)} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={conversationAccessMode(desktopConversation.detail?.conversation) ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} sendFailureReason={desktopConversation.lastSendFailureReason} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>
     </ComposerEntryContext.Provider>
   )
   const assistantUiThreadPanel = (

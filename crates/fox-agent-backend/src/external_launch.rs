@@ -1008,7 +1008,7 @@ mod tests {
         let root = std::env::temp_dir().join("fox-ext-launch-grant");
         let mut config = config(&root);
         let mut req = request(AgentBackend::Deepseek, &root);
-        assert_eq!(config.permission_mode(&req), PermissionMode::Standard, "dsh default: workspace-write-never");
+        assert_eq!(config.permission_mode(&req), PermissionMode::Standard, "dsh default: workspace-write (ask)");
         req.full_access_granted = true;
         config.full_access = FullAccessSwitch::All;
         assert_eq!(config.permission_mode(&req), PermissionMode::Standard, "the legacy grant does not widen");

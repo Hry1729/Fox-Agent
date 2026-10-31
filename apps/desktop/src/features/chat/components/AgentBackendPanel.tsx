@@ -20,9 +20,10 @@ import { AgentBackendBar } from './AgentBackendBar'
 import { AgentNetworkPanel } from './AgentNetworkPanel'
 import type { AgentNetworkClient } from '@/features/conversations/model/agent-network'
 import { AgentBackendCredentialCard } from './AgentBackendCredentialCard'
-import { AgentNativePermissionPicker } from './AgentNativePermissionPicker'
+import { useDeveloperUi } from '../developer-ui'
 import { AgentModelConnectionCard, type AgentModelConnection, type AgentModelConnectionRequest } from './AgentModelConnectionCard'
 import {
+  credentialCardModel,
   credentialProbeTarget,
   credentialProbeTargetKey,
   IMPORT_RECEIPT_VISIBLE_MS,
@@ -96,6 +97,7 @@ export function AgentBackendPanel({
   refusal = null,
   failure = null,
   sessionTick = 0,
+  developerUi: developerUiProp,
 }: {
   client: AgentBackendPanelClient
   status: AgentBackendStatus | null
@@ -113,7 +115,11 @@ export function AgentBackendPanel({
   failure?: import('@/features/conversations/model/agent-backend-failure').AgentBackendFailureHint | null
   /** Bumped by the caller to refresh everything (e.g. after a run). */
   sessionTick?: number
+  /** Developer mode override (tests); defaults to the 设置 / FOX_DEV_UI switch. */
+  developerUi?: boolean
 }) {
+  const developerSwitch = useDeveloperUi()
+  const developerUi = developerUiProp ?? developerSwitch
   // A hidden or retired backend passed by an older caller is shown, probed
   // and created as the built-in route: no login / permission prompt of such a
   // driver is ever rendered for a new conversation. A locked (existing)
@@ -202,6 +208,10 @@ export function AgentBackendPanel({
       })
   }, [client, capabilityConversationId])
 
+  // The login card is user-facing while the login needs action; the fold of
+  // a ready login (「Agent 配置来源与导入」) is a developer detail.
+  const connectionNeedsAction = Boolean(targetKey && probe && !probe.source?.choiceRequired && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login')
+  const loginReady = credentialCardModel(probe, permission, true)?.kind === 'ready' && !connectionNeedsAction
   const card = useMemo(() => {
     if (!targetKey || !probe) return null
     const current: AgentBackendTarget = JSON.parse(targetKey)
@@ -234,27 +244,7 @@ export function AgentBackendPanel({
     return credentialCard
   }, [client, targetKey, probe, permission, modelConnection, shownBackend, modelTick])
 
-  // Native permission list (its own loading; the cards above are untouched).
-  const nativeList = client.agentBackendNativePermissions
-  const nativeSet = client.agentBackendNativePermissionSet
-  const nativeClient = useMemo(() => (nativeList && nativeSet ? { agentBackendNativePermissions: nativeList, agentBackendNativePermissionSet: nativeSet } : null), [nativeList, nativeSet])
-  const permissionPicker = nativeClient && external
-    ? (
-      <AgentNativePermissionPicker
-        client={nativeClient}
-        conversationId={capabilityConversationId}
-        backend={shownBackend}
-        projectId={lockedBackend ? null : draftProjectId ?? null}
-        tick={sessionTick + onboardingTick}
-        onChanged={() => {
-          setOnboardingTick((tick) => tick + 1)
-          setPermissionTick((tick) => tick + 1)
-        }}
-      />
-    )
-    : null
-
-  const networkPanel = external && capabilityConversationId && client.agentBackendNetworkStatus && client.agentBackendPreviewAction
+  const networkPanel = developerUi && external && capabilityConversationId && client.agentBackendNetworkStatus && client.agentBackendPreviewAction
     ? <AgentNetworkPanel key={capabilityConversationId} client={client as AgentNetworkClient} conversationId={capabilityConversationId} /> : null
   return (
     <AgentBackendBar
@@ -267,8 +257,9 @@ export function AgentBackendPanel({
       capabilities={capabilities}
       permission={permission}
       onRevokeFullAccess={handleRevoke}
-      permissionPicker={permissionPicker}
-      credentialCard={networkPanel ? <>{card}{networkPanel}</> : card}
+      credentialCard={loginReady ? null : card}
+      developerDetails={(loginReady && card) || networkPanel ? <>{loginReady ? card : null}{networkPanel}</> : null}
+      developerUi={developerUi}
       importReceipt={visibleReceipt}
       onDismissImportReceipt={dismissReceipt}
     />

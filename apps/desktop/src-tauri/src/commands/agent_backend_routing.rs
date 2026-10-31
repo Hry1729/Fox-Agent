@@ -626,8 +626,12 @@ pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> 
 //
 // * `agent_backend.native_mode.conversation.<id>`: the conversation's current
 //   native choice, including the Agent's own full-access mode.
-// * `agent_backend.native_mode.last.<backend>`: each Agent's last
-//   non-full-access choice, the starting point of its next new conversation.
+// * `agent_backend.native_mode.last.<backend>`: each Agent's default
+//   non-full-access choice (设置 → 默认权限), the starting point of a new
+//   conversation that made no pick of its own.
+// * `agent_backend.native_mode.draft.<backend>`: the new conversation's own
+//   non-full-access pick (or the mode carried over when the user switched
+//   its Agent); consumed at creation.
 // * `agent_backend.native_mode.draft_full.<backend>`: `1` / `0` when the
 //   user picked (or left) the full-access option in a new conversation's
 //   list; read once at creation and cleared. Absent: the setting is ignored;
@@ -636,6 +640,12 @@ pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> 
 pub(crate) const NATIVE_MODE_CONVERSATION_PREFIX: &str = "agent_backend.native_mode.conversation.";
 pub(crate) const NATIVE_MODE_LAST_PREFIX: &str = "agent_backend.native_mode.last.";
 pub(crate) const NATIVE_MODE_DRAFT_FULL_PREFIX: &str = "agent_backend.native_mode.draft_full.";
+pub(crate) const NATIVE_MODE_DRAFT_PREFIX: &str = "agent_backend.native_mode.draft.";
+
+/// The new conversation's own (non-full-access) pick.
+pub(crate) fn stored_draft_native_mode(database: &crate::database::Database, backend: AgentBackend) -> Option<String> {
+    non_empty_setting(database, &format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()))
+}
 
 fn non_empty_setting(database: &crate::database::Database, key: &str) -> Option<String> {
     database.app_setting(key).ok().flatten().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
@@ -662,13 +672,15 @@ pub(crate) fn clear_draft_full_access_choice(database: &crate::database::Databas
 }
 
 /// Record a new conversation's starting native mode. An explicit full-access
-/// pick stores the Agent's own full mode; otherwise the Agent's last
-/// non-full-access choice is the starting point.
+/// pick stores the Agent's own full mode; otherwise the draft's own pick,
+/// else the Agent's default (设置). The draft pick is consumed.
 pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend, full_access: bool) {
+    let draft = stored_draft_native_mode(database, backend);
+    let _ = database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()), "");
     let mode = if full_access {
         fox_agent_backend::native_permission::full_access_mode(backend).map(str::to_owned)
     } else {
-        stored_last_native_mode(database, backend)
+        draft.or_else(|| stored_last_native_mode(database, backend))
     };
     if let Some(mode) = mode {
         if fox_agent_backend::native_permission::is_known(backend, &mode) {
@@ -701,6 +713,13 @@ pub struct NativePermissionRequest {
     /// time second confirmation as a Fox conversation, per project).
     #[serde(default)]
     pub confirm_full_access: bool,
+    /// A new conversation only, with no `mode`: the user switched its Agent
+    /// (or opened it). `""` = a fresh conversation (the Agent's default);
+    /// a Fox tier (`read_only` / `ask` / `auto` / `full_access`) = the tier
+    /// of the previous choice, mapped by `native_permission::mode_for_tier`.
+    /// Full access is never carried.
+    #[serde(default)]
+    pub carry_tier: Option<String>,
 }
 
 /// The project a native permission request is about (the conversation's, or
@@ -767,38 +786,51 @@ fn native_target(
                 let refusal = RouteError::Hidden(backend);
                 return Err(ApiResponse::failure(refusal.code(), refusal.message(), false));
             }
-            let stored = stored_last_native_mode(&state.database, backend);
-            let full = stored.as_deref().is_some_and(|mode| fox_agent_backend::native_permission::is_full_access(backend, mode));
+            let full = draft_full_access_choice(&state.database, backend) == Some(true);
             Ok((backend, full, false))
         }
     }
 }
 
 fn native_view(state: &AppState, external: &crate::external_backend::ExternalBackendHost, request: &NativePermissionRequest) -> ApiResponse<serde_json::Value> {
-    let (backend, _full, _granted) = match native_target(state, external, request) {
+    use fox_agent_backend::native_permission as native;
+    let (backend, draft_full, _granted) = match native_target(state, external, request) {
         Ok(target) => target,
         Err(refusal) => return refusal,
     };
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
     let context = native_context(state, backend, forbidden);
-    let catalog = fox_agent_backend::native_permission::catalog(backend, &context);
+    let catalog = native::catalog(backend, &context);
     let stored = match request.conversation_id.as_deref() {
         Some(id) => stored_conversation_native_mode(&state.database, id),
-        None => stored_last_native_mode(&state.database, backend),
+        None => stored_draft_native_mode(&state.database, backend).or_else(|| stored_last_native_mode(&state.database, backend)),
     };
-    let current = fox_agent_backend::native_permission::effective_mode(backend, stored.as_deref(), false, &context);
+    let draft = request.conversation_id.is_none();
+    // A draft's confirmed full-access pick is what creation will use.
+    let current = if draft && draft_full {
+        native::effective_mode(backend, native::full_access_mode(backend), false, &context)
+    } else {
+        native::effective_mode(backend, stored.as_deref(), false, &context)
+    };
     // The restricted choice behind a full-access selection, for settings.
     let restricted = stored
         .as_deref()
-        .filter(|mode| !fox_agent_backend::native_permission::is_full_access(backend, mode))
+        .filter(|mode| !native::is_full_access(backend, mode))
         .filter(|mode| catalog.options.iter().any(|option| option.id == *mode && !option.full_access && option.disabled_reason.is_none()))
         .unwrap_or(catalog.default_mode);
-    let current_full = fox_agent_backend::native_permission::is_full_access(backend, current);
-    let draft = request.conversation_id.is_none();
+    let current_full = native::is_full_access(backend, current);
+    let current_tier = catalog.options.iter().find(|option| option.id == current).map(|option| option.tier);
+    // What the live process really runs in; a different stored choice is
+    // pending (dsh until its next-turn restart, Codex after a failed switch).
+    let running = request.conversation_id.as_deref().and_then(|id| external.running_native_mode(id));
+    let pending = running.as_deref().is_some_and(|running| running != current);
     let project = native_project(state, request).ok().flatten();
     ApiResponse::success(serde_json::json!({
         "catalog": catalog,
         "current": current,
+        "currentTier": current_tier,
+        "running": running,
+        "pending": pending,
         "restrictedMode": restricted,
         "fullAccess": current_full,
         "fullAccessGranted": false,
@@ -810,6 +842,19 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
         // Plan C2: the first full access in a project asks once more.
         "projectFullAccessConfirmed": project_full_access_confirmed(state, project.as_deref()),
     }))
+}
+
+/// Every backend's approval mode list (id, full name, two-character short
+/// name, whether it needs the first-time confirmation, when a change
+/// applies), Fox / PiNative included: the one source the composer shows.
+#[tauri::command]
+pub fn agent_backend_approval_modes(state: State<'_, AppState>) -> ApiResponse<serde_json::Value> {
+    let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
+    let lists: Vec<_> = [AgentBackend::Fox, AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek]
+        .into_iter()
+        .map(|backend| fox_agent_backend::native_permission::approval_modes(backend, &native_context(&state, backend, forbidden)))
+        .collect();
+    ApiResponse::success(serde_json::json!({ "backends": lists }))
 }
 
 /// The open conversation's (or a new conversation's) permission list in its
@@ -843,7 +888,32 @@ pub async fn agent_backend_native_permission_set(
     }
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
     let context = native_context(&state, backend, forbidden);
-    let mode = request.mode.as_deref().map(str::trim).unwrap_or_default().to_owned();
+    let mut mode = request.mode.as_deref().map(str::trim).unwrap_or_default().to_owned();
+    if mode.is_empty() && request.conversation_id.is_none() && !request.default_only {
+        if let Some(carry) = request.carry_tier.as_deref() {
+            // The new conversation's Agent changed (or it was opened): carry
+            // the tier, never full access; drop any earlier full pick.
+            let from = native::FoxTier::parse(carry);
+            let carried = if from.is_none() {
+                // Fresh: the Agent's default (设置), else its catalog default.
+                native::effective_mode(backend, stored_last_native_mode(&state.database, backend).as_deref(), false, &context)
+            } else {
+                native::mode_for_tier(backend, from, &context)
+            };
+            // Full access is never carried; an option the list no longer
+            // offers (an older build's default) is not given to a new one.
+            let defaults = native::catalog(backend, &context);
+            let offered = defaults.options.iter().any(|option| option.id == carried && option.listed && !option.full_access && option.disabled_reason.is_none());
+            let carried = if offered { carried } else { defaults.default_mode };
+            let set = |key: String, value: &str| state.database.set_app_setting(&key, value);
+            let stored = set(format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()), carried)
+                .and_then(|_| set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "0"));
+            if let Err(error) = stored {
+                return Ok(storage_error(error));
+            }
+            return Ok(native_view(&state, &external, &request));
+        }
+    }
     let catalog = native::catalog(backend, &context);
     let Some(option) = catalog.options.iter().find(|option| option.id == mode) else {
         return Ok(ApiResponse::failure(RouteError::CODE_INVALID, format!("「{}」没有权限选项「{mode}」", backend.as_str()), false));
@@ -851,6 +921,11 @@ pub async fn agent_backend_native_permission_set(
     if let Some(reason) = &option.disabled_reason {
         let code = if option.full_access { host_routing::CODE_FULL_ACCESS_FORBIDDEN } else { "agent_backend_permission_unavailable" };
         return Ok(ApiResponse::failure(code, reason.clone(), false));
+    }
+    if !option.listed {
+        // An older build's mode keeps running where it is stored, but is
+        // never picked again.
+        return Ok(ApiResponse::failure("agent_backend_permission_unavailable", format!("「{}」已不再提供", option.label), false));
     }
     // Plan C2: the Agent's full access takes the same first-time second
     // confirmation as a Fox conversation, remembered per project.
@@ -885,7 +960,7 @@ pub async fn agent_backend_native_permission_set(
         let result = if option.full_access {
             set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "1")
         } else {
-            set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode)
+            set(format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()), &mode)
                 .and_then(|_| set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "0"))
         };
         if let Err(error) = result {
@@ -898,8 +973,8 @@ pub async fn agent_backend_native_permission_set(
     // choice and let the backend switch in its own way (Codex live, dsh on
     // restart, pi at the next request); there is no Fox full-access grant to
     // revoke and no outer sandbox to re-enter.
-    let stored = set(format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode)
-        .and_then(|_| set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode));
+    // The Agent's default (设置) is not rewritten by a mid-session switch.
+    let stored = set(format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode);
     if let Err(error) = stored {
         return Ok(storage_error(error));
     }
@@ -1125,6 +1200,25 @@ mod tests {
         assert!(!database.conversation_full_access_granted("c-full").unwrap(), "no Fox outer grant is created");
         seed_conversation_native_mode(&database, "c-restricted", AgentBackend::Codex, false);
         assert_eq!(stored_conversation_native_mode(&database, "c-restricted").as_deref(), Some("workspace-write"));
+    }
+
+    /// Composer batch: the new conversation's own pick (or the mode carried
+    /// when its Agent was switched) wins over the Agent's default and is
+    /// consumed by creation.
+    #[test]
+    fn the_draft_pick_seeds_the_conversation_and_is_consumed() {
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        database.set_app_setting("agent_backend.native_mode.last.deepseek", "read-only").unwrap();
+        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "workspace-write").unwrap();
+        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek).as_deref(), Some("workspace-write"));
+        seed_conversation_native_mode(&database, "c-draft", AgentBackend::Deepseek, false);
+        assert_eq!(stored_conversation_native_mode(&database, "c-draft").as_deref(), Some("workspace-write"));
+        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None, "consumed");
+        seed_conversation_native_mode(&database, "c-default", AgentBackend::Deepseek, false);
+        assert_eq!(stored_conversation_native_mode(&database, "c-default").as_deref(), Some("read-only"), "no pick: the Agent's default");
+        let request: NativePermissionRequest = serde_json::from_value(serde_json::json!({ "backend": "codex", "carryTier": "ask" })).unwrap();
+        assert_eq!(request.carry_tier.as_deref(), Some("ask"));
+        assert!(request.mode.is_none());
     }
 
     /// C1: the gate every new conversation goes through takes any supported

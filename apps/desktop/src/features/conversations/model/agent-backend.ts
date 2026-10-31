@@ -460,11 +460,15 @@ export interface AgentBackendCapabilities {
   warning: string | null
 }
 
-/** The four chips in a fixed order (approval, sandbox, cancel, observability). */
+/**
+ * The capability chips (developer UI only) in a fixed order: approval, cancel,
+ * observability. The sandbox dimension is no longer shown: Fox's outer
+ * sandbox (SRT) is gone and each Agent's own sandbox is its approval mode.
+ */
 export function agentBackendCapabilityChips(view: AgentBackendCapabilities | null | undefined): { key: string; label: string; title: string }[] {
   if (!view) return []
   const source = view.source === 'live' ? '' : '（启动前预估）'
-  return (['approval', 'sandbox', 'cancel', 'observability'] as const).map((key) => ({
+  return (['approval', 'cancel', 'observability'] as const).map((key) => ({
     key,
     label: view[key].summary,
     title: `${view[key].detail}${source}`,
