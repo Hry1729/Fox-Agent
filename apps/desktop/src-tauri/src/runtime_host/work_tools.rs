@@ -157,6 +157,7 @@ impl WorkToolError {
         self
     }
 
+    #[cfg(test)]
     /// True only for a failure that is known to have written nothing.
     pub fn is_rejected_before_execution(&self) -> bool {
         self.phase == WorkToolErrorPhase::Rejected
@@ -256,6 +257,7 @@ pub fn is_work_tool(tool: &str) -> bool {
     WORK_TOOLS.contains(&tool)
 }
 
+#[cfg(test)]
 pub fn execute(
     database: &Database,
     conversation_id: &str,

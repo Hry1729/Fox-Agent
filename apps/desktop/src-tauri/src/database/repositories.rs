@@ -4193,15 +4193,6 @@ impl Database {
             .ok_or_else(|| "saved MCP server could not be loaded".to_owned())
     }
 
-    pub fn record_mcp_status(
-        &self,
-        id: &str,
-        status: &str,
-        error: Option<&str>,
-    ) -> Result<(), String> {
-        self.record_mcp_health(id, status, error, None, None)
-    }
-
     pub fn record_mcp_health(
         &self,
         id: &str,

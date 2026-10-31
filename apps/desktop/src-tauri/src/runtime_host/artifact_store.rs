@@ -59,6 +59,7 @@ impl ArtifactClass {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn parse(value: &str) -> ArtifactClass {
         match value {
             "deliverable" => ArtifactClass::Deliverable,
@@ -697,6 +698,7 @@ impl StagingLedger {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn execution_id(&self) -> &str {
         &self.execution_id
     }
@@ -1095,6 +1097,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 /// Whether a project-relative path is a Host-managed transient name that must
 /// never be registered as a user artifact.
 ///

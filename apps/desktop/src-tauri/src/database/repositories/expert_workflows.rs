@@ -214,13 +214,6 @@ impl Database {
         })
     }
 
-    pub fn get_expert_workflow(
-        &self,
-        workflow_run_id: &str,
-    ) -> Result<Option<ExpertWorkflowSnapshot>, String> {
-        self.with_connection(|connection| load_workflow_snapshot(connection, workflow_run_id))
-    }
-
     pub fn start_expert_workflow_stage(
         &self,
         workflow_run_id: &str,

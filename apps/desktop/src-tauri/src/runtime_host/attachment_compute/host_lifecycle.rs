@@ -15,6 +15,7 @@ use std::{
 // Production types and repository methods; never a copied test repository.
 use crate::database::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
 
+#[cfg(test)]
 /// Reference scheme for a job result. The bytes live in the Host blob store;
 /// the reference is stable and resolvable through
 /// [`read_job_result`].
@@ -22,6 +23,7 @@ pub(crate) fn job_result_reference(job_id: &str) -> String {
     format!("fox-job-result://{job_id}")
 }
 
+#[cfg(test)]
 /// Resolve only the published, integrity-checked blob in the owning conversation.
 pub(crate) fn read_job_result(database: &Database, conversation_id: &str, job_id: &str) -> Result<Value, String> {
     database.kernel_job_result_value(conversation_id, job_id)
@@ -95,6 +97,7 @@ impl JobTokenRegistry {
         self.jobs.lock().unwrap().contains_key(job_id)
     }
 
+    #[cfg(test)]
     /// The token the executor is honouring (used by tests and by A's worker
     /// bookkeeping if it wants to observe the same identity).
     pub(crate) fn token_for(&self, job_id: &str) -> Option<crate::kernel::CancellationToken> {
@@ -138,6 +141,7 @@ impl HostJobLifecycle {
 }
 
 impl super::jobs::JobLifecyclePort for HostJobLifecycle {
+    #[cfg(test)]
     fn attempt(&self) -> u32 {
         self.attempt
     }

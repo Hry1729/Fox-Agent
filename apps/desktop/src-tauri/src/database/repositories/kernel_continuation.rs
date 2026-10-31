@@ -260,37 +260,6 @@ impl Database {
         })
     }
 
-    /// Conversation-level list of runs a user can still carry on, for the
-    /// continuation entry point in the UI.
-    pub fn kernel_list_continuable_runs(
-        &self,
-        conversation_id: &str,
-    ) -> Result<Vec<ContinuableRun>, String> {
-        let run_ids: Vec<String> = self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT p.run_id FROM kernel_run_progress p
-                   JOIN runs r ON r.id = p.run_id
-                  WHERE r.conversation_id = ?1
-                    AND p.continuable = 1
-                  ORDER BY p.created_at DESC
-                  LIMIT 20",
-            )?;
-            let rows = statement.query_map(params![conversation_id], |row| row.get::<_, String>(0))?;
-            let mut ids = Vec::new();
-            for row in rows {
-                ids.push(row?);
-            }
-            Ok(ids)
-        })?;
-        let mut out = Vec::new();
-        for run_id in run_ids {
-            if let Ok(run) = self.kernel_continuable_run(conversation_id, &run_id) {
-                out.push(run);
-            }
-        }
-        Ok(out)
-    }
-
     /// Re-verify the permission scope for a continuation attempt (#5/#6).
     ///
     /// A continuation must not silently inherit the source run's authorization:
@@ -377,33 +346,6 @@ impl Database {
             source_grant_count: source.permission.grants.len(),
             permission: binding.permission.clone(),
         })
-    }
-
-    /// The continuation prompt for a paused run: the source request plus the
-    /// banked progress as read-only facts. Built once so the prompt hash, the
-    /// frozen initial input and the message the user sees all agree.
-    pub fn kernel_continuation_prompt(
-        &self,
-        conversation_id: &str,
-        source_run_id: &str,
-    ) -> Result<String, String> {
-        let progress = self.kernel_continuable_run(conversation_id, source_run_id)?;
-        let original = self.with_connection(|connection| {
-            Ok(connection
-                .query_row(
-                    "SELECT content FROM messages WHERE run_id = ?1 AND role = 'user'
-                      ORDER BY created_at LIMIT 1",
-                    params![source_run_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .unwrap_or_default())
-        })?;
-        let prompt = continuation_prompt(source_run_id, &original, &progress);
-        if prompt.len() > 64_000 {
-            return Err("进度记录过大，无法建立续做任务".into());
-        }
-        Ok(prompt)
     }
 
     /// Insert the next attempt of a paused run (R2/R3) with the frozen artifacts
@@ -568,23 +510,6 @@ impl Database {
             )?;
             transaction.commit()?;
             Ok(started)
-        })
-    }
-
-    /// The frozen budget the user selected, for display next to the run.
-    pub fn kernel_run_budget_tier(&self, run_id: &str) -> Result<Option<(String, String)>, String> {
-        self.with_connection(|connection| {
-            let row: Option<(Option<String>, Option<String>)> = connection
-                .query_row(
-                    "SELECT budget_tier, budget_source FROM kernel_runs WHERE run_id = ?1",
-                    params![run_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            Ok(row.and_then(|(tier, source)| {
-                let tier = tier?;
-                Some((tier, source.unwrap_or_else(|| "default".into())))
-            }))
         })
     }
 

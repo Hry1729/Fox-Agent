@@ -517,9 +517,11 @@ impl LocalKnowledgeIds for crate::local_knowledge::LocalKnowledgeStore {
     }
 }
 
+#[cfg(test)]
 /// No local knowledge store at all: no bases are available.
 pub(crate) struct NoLocalKnowledge;
 
+#[cfg(test)]
 impl LocalKnowledgeIds for NoLocalKnowledge {
     fn base_ids(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())

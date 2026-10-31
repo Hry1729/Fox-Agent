@@ -523,18 +523,6 @@ impl Database {
         Ok(snapshot)
     }
 
-    /// The declared parameters of a job, for an executor that must re-run it.
-    pub fn kernel_job_params(&self, job_id: &str) -> Result<Value, String> {
-        self.with_connection(|connection| {
-            let body: String = connection.query_row(
-                "SELECT params_json FROM kernel_jobs WHERE job_id=?1",
-                params![job_id],
-                |row| row.get(0),
-            )?;
-            serde_json::from_str(&body)
-                .map_err(|error| rusqlite::Error::InvalidParameterName(format!("invalid job params: {error}")))
-        })
-    }
 }
 
 pub(super) fn read_snapshot(

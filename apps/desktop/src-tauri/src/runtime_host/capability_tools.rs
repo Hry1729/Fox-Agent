@@ -68,6 +68,7 @@ fn bounded_timeout(requested: Duration) -> Result<Duration,String> {
     })
 }
 
+#[cfg(test)]
 pub(super) fn execute_with_cancellation(action: PreparedCapabilityTool, token: &crate::kernel::CancellationToken, budget: Duration) -> Result<Value,String> {
     struct Restore(Option<(crate::kernel::CancellationToken,Instant)>);
     impl Drop for Restore {
@@ -183,6 +184,7 @@ impl PreparedCapabilityTool {
         }
     }
 
+    #[cfg(test)]
     pub fn requires_approval(&self) -> bool {
         matches!(
             self,

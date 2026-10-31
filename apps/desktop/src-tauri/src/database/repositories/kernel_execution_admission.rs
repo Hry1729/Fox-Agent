@@ -961,23 +961,6 @@ impl Database {
         })
     }
 
-    /// Withdraw every unconsumed replacement request in a conversation
-    /// immediately (a `deny`, or a tightening of the permission mode).
-    pub fn withdraw_whole_file_replacements(
-        &self,
-        conversation_id: &str,
-    ) -> Result<usize, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let withdrawn = revoke_replace_grants_in_tx(&transaction, conversation_id)
-                .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
-            transaction.commit()?;
-            Ok(withdrawn)
-        })
-    }
-
     /// The explicit human confirmation of one whole-file replacement. The only
     /// path that turns a `pending` request into an `approved` authorization.
     pub fn approve_whole_file_replacement(
@@ -1138,35 +1121,6 @@ impl Database {
                 now_ms(),
             )
             .map_err(rusqlite::Error::InvalidParameterName)?;
-            transaction.commit()?;
-            Ok(credential)
-        })
-    }
-
-    /// Issue (or idempotently re-read) the authoritative credential.
-    /// Issue (or re-read) the authoritative credential for one dispatch, in its
-    /// own `IMMEDIATE` transaction. The caller supplies only durable identity:
-    /// the run, the tool call, the tool and the canonical input.
-    pub fn issue_dispatch_credential(
-        &self,
-        run_id: &str,
-        tool_call_id: &str,
-        tool: &str,
-        canonical_input_json: &str,
-    ) -> Result<Option<ExecutionCredential>, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let credential = issue_dispatch_credential_in_tx(
-                &transaction,
-                run_id,
-                tool_call_id,
-                tool,
-                canonical_input_json,
-                now_ms(),
-            )
-            .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
             transaction.commit()?;
             Ok(credential)
         })
@@ -1549,26 +1503,6 @@ impl Database {
         })
     }
 
-    /// The durable (tool, canonical input) identity of one tool call. The
-    /// execution boundary presents exactly these strings back, so a re-serialized
-    /// payload can never fake a different intent digest.
-    pub fn tool_call_identity(
-        &self,
-        run_id: &str,
-        tool_call_id: &str,
-    ) -> Result<Option<(String, String)>, String> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    "SELECT tool, canonical_input_json FROM kernel_tool_calls
-                      WHERE run_id=?1 AND tool_call_id=?2",
-                    params![run_id, tool_call_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-        })
-    }
-
     /// Record an authoritative Host observation (durable read evidence).
     pub fn record_host_observation(
         &self,
@@ -1619,20 +1553,6 @@ impl Database {
             let transaction = connection.transaction()?;
             host_observation_for_version_in_tx(&transaction, run_id, target_identity, version)
                 .map_err(|error| rusqlite::Error::InvalidParameterName(error))
-        })
-    }
-
-    /// Every observation of one target in this run, newest first (REV-05
-    /// fragment-coverage checks and append-only assertions).
-    pub fn host_observations_for_target(
-        &self,
-        run_id: &str,
-        target_identity: &str,
-    ) -> Result<Vec<HostObservation>, String> {
-        self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            host_observations_for_target_in_tx(&transaction, run_id, target_identity)
-                .map_err(rusqlite::Error::InvalidParameterName)
         })
     }
 

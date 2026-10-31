@@ -793,6 +793,7 @@ enum GenerationStatus {
     Verified,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct MemoryGeneration {
     knowledge_base_id: String,
@@ -801,11 +802,13 @@ struct MemoryGeneration {
     status: GenerationStatus,
 }
 
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub struct MemoryVectorStore {
     generations: Arc<Mutex<BTreeMap<String, MemoryGeneration>>>,
 }
 
+#[cfg(test)]
 impl MemoryVectorStore {
     pub fn new() -> Self {
         Self::default()
@@ -821,6 +824,7 @@ impl MemoryVectorStore {
     }
 }
 
+#[cfg(test)]
 impl VectorStore for MemoryVectorStore {
     fn create_generation(
         &self,

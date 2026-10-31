@@ -358,6 +358,7 @@ impl<'a> SessionLifecycle<'a> {
         }
     }
 
+    #[cfg(test)]
     /// Open (or create) the conversation's Pi session.
     pub(crate) fn open(
         &self,

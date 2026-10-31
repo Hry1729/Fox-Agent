@@ -127,6 +127,7 @@ pub fn evaluate(input: WorkModeGateInput<'_>) -> GateEvaluation {
     )
 }
 
+#[cfg(test)]
 pub fn apply_user_request(
     database: &Database,
     conversation_id: &str,

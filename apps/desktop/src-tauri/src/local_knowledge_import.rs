@@ -87,11 +87,13 @@ where
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub struct ImportCancellationToken {
     cancelled: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
 impl ImportCancellationToken {
     pub fn new() -> Self {
         Self::default()
@@ -106,6 +108,7 @@ impl ImportCancellationToken {
     }
 }
 
+#[cfg(test)]
 impl ImportCancellation for ImportCancellationToken {
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
@@ -127,6 +130,7 @@ impl<'a> Default for ImportOptions<'a> {
 }
 
 impl<'a> ImportOptions<'a> {
+    #[cfg(test)]
     pub fn with_max_file_size(mut self, max_file_size: u64) -> Self {
         self.max_file_size = max_file_size;
         self
@@ -179,6 +183,7 @@ enum SpecializedDocumentKind {
     Xlsx,
 }
 
+#[cfg(test)]
 pub fn import_document(
     managed_root: impl AsRef<Path>,
     knowledge_base_id: &str,

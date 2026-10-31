@@ -188,6 +188,7 @@ impl PreparedToolAction {
         }
     }
 
+    #[cfg(test)]
     /// The file a write/edit will replace, used for Host-side version
     /// capture. Commands have no single managed target.
     pub fn target_path(&self) -> Option<&Path> {
@@ -403,6 +404,7 @@ pub(crate) fn execute_file_with_context(
         json!({"path":path,"bytes":content.len(),"operation":if expected == "missing" { "created" } else { "modified" },"readVersion":file_version(&content)})))
 }
 
+#[cfg(test)]
 pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
     execute_with_cancellation(action, None)
 }
@@ -987,6 +989,7 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
     Ok(())
 }
 
+#[cfg(test)]
 /// Replace `target` with the prepared `candidate` in place. The original is
 /// renamed to a Host-owned same-volume backup instead of being deleted, an
 /// applying record is flushed before the API call, and the outcome is judged
@@ -1168,6 +1171,7 @@ fn prepare_verified_preimage(
     Ok(())
 }
 
+#[cfg(test)]
 /// The in-place replace on platforms without `ReplaceFileW`: the Host builds
 /// and verifies the pre-image itself, then performs the single atomic rename.
 /// The verified backup is what makes `Committed` reachable, so a successful

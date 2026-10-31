@@ -622,6 +622,7 @@ pub(crate) fn safe_workspace(
     Ok(path)
 }
 
+#[cfg(test)]
 pub(crate) fn execute(
     database: &Database,
     attachments_dir: &Path,

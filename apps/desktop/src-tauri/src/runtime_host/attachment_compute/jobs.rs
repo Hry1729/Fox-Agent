@@ -84,6 +84,7 @@ impl PortError {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn cancelled(message: impl Into<String>) -> Self {
         Self {
             kind: PortErrorKind::Cancelled,
@@ -98,6 +99,7 @@ impl PortError {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn other(message: impl Into<String>) -> Self {
         Self {
             kind: PortErrorKind::Other,
@@ -283,6 +285,7 @@ impl JobTerminal {
 /// in-process, so the QuickJS interrupt covers it; process-spawning executors
 /// must call `tool_host::terminate_process_tree`).
 pub(crate) trait JobLifecyclePort: Send + Sync {
+    #[cfg(test)]
     /// Attempt fencing token for this execution. The adapter must fence every
     /// `report`/`settle` on `(job_id, attempt)` so a late report from an older
     /// attempt cannot touch a newer one.
@@ -518,6 +521,7 @@ fn finish_cancelled(port: &dyn JobLifecyclePort, fence: &AtomicBool) -> JobTermi
     }
 }
 
+#[cfg(test)]
 /// Spawn the runner on a named worker thread. Window A's `kernel_job_start`
 /// calls this after the job row exists; the thread owns exactly one execution
 /// and settles at most once.
