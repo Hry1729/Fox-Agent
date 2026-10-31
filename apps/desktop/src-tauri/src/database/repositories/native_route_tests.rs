@@ -149,16 +149,8 @@ fn native_ledger_projection_retains_the_full_large_host_result() {
 #[test]
 fn native_completion_requires_settled_host_business_state() {
     let (db,run,_) = fixture(Some(ExecutorRoute::PiNative));
-    db.with_connection(|connection| {
-        connection.execute("INSERT INTO delivery_checklist_items(run_id,item_key,display_name,checks_json,status,updated_at)
-            VALUES(?1,'slot:txt:1','report','[]','pending',1)",[&run])?;
-        Ok(())
-    }).unwrap();
-    assert!(db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).is_err());
-    db.with_connection(|connection| connection.execute("UPDATE delivery_checklist_items SET status='passed' WHERE run_id=?1",[&run])).unwrap();
-    db.with_connection(|connection| connection.execute("UPDATE delivery_checklist_items SET requirements_json='invalid' WHERE run_id=?1",[&run])).unwrap();
-    assert!(db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).is_err());
-    db.with_connection(|connection| connection.execute("UPDATE delivery_checklist_items SET requirements_json='[]' WHERE run_id=?1",[&run])).unwrap();
+    // Historical delivery checklist rows have no production writer since the
+    // typed delivery lane was removed; completion is gated on live Host state.
     let child_conversation=db.create_conversation("fox-general",Some("isolated child"),None,None).unwrap().id;
     let child = db.create_run(&child_conversation,"active child",None).unwrap().run.id;
     db.with_connection(|connection| connection.execute("UPDATE runs SET parent_run_id=?2 WHERE id=?1",params![child,run])).unwrap();
