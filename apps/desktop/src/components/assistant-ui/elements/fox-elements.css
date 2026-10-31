@@ -70,7 +70,7 @@
 .aui-composer-attachment strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .aui-composer-attachment small { display: block; color: var(--fox-muted); }
 .aui-composer-attachment button { display: grid; place-items: center; flex: 0 0 22px; width: 22px; height: 22px; border-radius: var(--fox-radius-small); }
-.aui-composer-model-trigger { display: flex; align-items: center; gap: 6px; max-width: 220px; height: 32px; padding: 0 8px; border-radius: var(--fox-radius-control); color: var(--fox-muted); font-size: 13px; }
+.aui-composer-model-trigger { display: flex; align-items: center; gap: var(--fox-space-s); max-width: 220px; height: var(--fox-control-md); padding: 0 var(--fox-space-m); border-radius: var(--fox-radius-control); color: var(--fox-muted); font-size: var(--fox-type-chrome); }
 .aui-composer-model-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aui-composer-model-trigger:disabled { opacity: .5; }
 .aui-model-menu { width: min(320px, calc(100vw - 32px)); padding: 6px; }

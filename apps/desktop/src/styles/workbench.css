@@ -5646,7 +5646,7 @@ img[src='/avatars/fox-assistant.png'] {
   border: 1px solid var(--fox-border);
   border-radius: 18px;
   background: color-mix(in oklch, var(--fox-card) 94%, transparent);
-  padding: 10px 8px 6px;
+  padding: var(--fox-space-l) var(--fox-space-m) var(--fox-space-s);
   /* One definition for the card's elevation, reused by every activation state. */
   --fox-composer-elevation: 0 10px 24px color-mix(in oklch, var(--fox-shadow-color) 6%, transparent), 0 2px 6px color-mix(in oklch, var(--fox-shadow-color) 2%, transparent);
   box-shadow: var(--fox-composer-elevation);
@@ -5699,24 +5699,24 @@ img[src='/avatars/fox-assistant.png'] {
   width: 100%;
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: var(--fox-space-xs);
   padding: 0;
 }
 
 .fox-composer-attachments > [data-slot] {
   max-width: 220px;
-  height: 28px;
+  height: var(--fox-inline-action-height);
   border: 1px solid color-mix(in oklch, var(--fox-border) 88%, var(--fox-card));
-  border-radius: 8px;
+  border-radius: var(--fox-radius-card);
   background: transparent;
-  padding: 0 4px;
+  padding: 0 var(--fox-space-xs);
   color: var(--fox-muted);
-  font-size: 12px;
+  font-size: var(--fox-type-caption);
 }
 
 .fox-composer-attachments button {
-  width: 19px;
-  height: 19px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
   display: grid;
   place-items: center;
   border: 0;
@@ -5755,7 +5755,8 @@ img[src='/avatars/fox-assistant.png'] {
   width: 100%;
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  align-items: center;
+  gap: var(--fox-space-xs);
   padding: 0;
 }
 
@@ -5799,16 +5800,16 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-composer-context > span {
-  height: 28px;
+  height: var(--fox-inline-action-height);
   display: flex;
   align-items: center;
-  gap: 5px;
-  border-radius: 8px;
+  gap: var(--fox-space-xs);
+  border-radius: var(--fox-radius-card);
   border: 1px solid color-mix(in oklch, var(--fox-border) 88%, var(--fox-card));
   background: transparent;
-  padding: 0 8px;
+  padding: 0 var(--fox-space-m);
   color: var(--fox-muted);
-  font-size: 12px;
+  font-size: var(--fox-type-caption);
 }
 
 .fox-composer-context > span svg:last-child {
@@ -5855,9 +5856,10 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-composer-project-bar {
-  margin: -18px 16px 0;
-  padding: 20px 8px 3px 3px;
+  margin: calc(-1 * var(--fox-space-2xl)) var(--fox-space-xl) 0;
+  padding: var(--fox-space-2xl) var(--fox-space-m) var(--fox-space-micro) var(--fox-space-micro);
   border: 1px solid var(--fox-border);
+  /* 下沿跟输入卡片的圆角衔接，现有圆角 token 对不上这个 16px。 */
   border-radius: 0 0 16px 16px;
   background: var(--fox-canvas);
 }
@@ -5867,13 +5869,13 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-composer-model-manage {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--fox-space-m);
   max-width: 100%;
-  min-height: 30px;
-  padding: 4px 8px;
-  border-radius: 7px;
+  min-height: var(--fox-control-md);
+  padding: var(--fox-space-xs) var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
   color: var(--fox-text);
-  font-size: 13px;
+  font-size: var(--fox-type-chrome);
   text-align: left;
 }
 
@@ -6307,12 +6309,12 @@ img[src='/avatars/fox-assistant.png'] {
   position: relative;
   z-index: 1;
   width: 100%;
-  min-height: 32px;
+  min-height: var(--fox-control-md);
   display: flex;
   flex-direction: row !important;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--fox-space-m);
   padding: 0 !important;
 }
 
@@ -6321,7 +6323,7 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--fox-space-micro);
 }
 
 .fox-composer-tools {
@@ -6331,33 +6333,32 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-composer-submit {
   flex: 1 1 0;
-  /* The send button is 30px and its beam paints a few px outside that; the
-     container must never shrink below it (a cramped toolbar used to clip the button
-     away) and must not clip the ring. The composer card itself already clips. */
-  min-width: 34px;
+  /* 发送按钮和「+」同高。光束会画出按钮外一圈，工具行不能比按钮更窄，
+     否则窄窗口会把按钮裁掉。卡片本身仍然负责裁切。 */
+  min-width: calc(var(--fox-control-md) + var(--fox-space-micro));
   justify-content: flex-end;
   overflow: visible;
 }
 
 .fox-composer-tools [data-slot='input-group-button']:first-child {
-  width: 32px !important;
-  height: 32px !important;
-  flex: 0 0 32px;
-  border-radius: 50% !important;
+  width: var(--fox-control-md) !important;
+  height: var(--fox-control-md) !important;
+  flex: 0 0 var(--fox-control-md);
+  border-radius: var(--fox-radius-pill) !important;
 }
 
 .fox-execution-control,
 .fox-agent-control {
   width: auto;
-  height: 30px;
-  gap: 5px;
+  height: var(--fox-control-md);
+  gap: var(--fox-space-xs);
   border: 0;
-  border-radius: 999px !important;
+  border-radius: var(--fox-radius-pill) !important;
   background: transparent;
-  padding-inline: 9px;
+  padding-inline: var(--fox-space-m);
   box-shadow: none;
   color: var(--fox-muted);
-  font-size: 12px;
+  font-size: var(--fox-type-caption);
 }
 
 .fox-execution-control {
@@ -6371,17 +6372,17 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-command-mode-chip {
-  height: 26px;
+  height: var(--fox-control-md);
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--fox-space-xs);
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--fox-radius-pill);
   background: color-mix(in srgb, var(--fox-accent-soft) 58%, var(--fox-card));
-  padding: 0 7px;
+  padding: 0 var(--fox-space-s);
   color: var(--fox-accent);
-  font-size: 12px;
+  font-size: var(--fox-type-caption);
   cursor: pointer;
 }
 
@@ -6391,9 +6392,9 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-command-mode-icon,
 .fox-command-mode-icon svg {
-  width: 11px;
-  height: 11px;
-  flex: 0 0 11px;
+  width: var(--fox-icon-size-compact);
+  height: var(--fox-icon-size-compact);
+  flex: 0 0 var(--fox-icon-size-compact);
 }
 
 .fox-command-mode-close {
@@ -6415,17 +6416,17 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-expert-chip {
   min-width: 0;
   max-width: min(190px, 28vw);
-  height: 30px;
+  height: var(--fox-control-md);
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--fox-space-xs);
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--fox-radius-pill);
   background: color-mix(in oklch, var(--fox-subtle) 76%, transparent);
-  padding: 0 7px 0 5px;
+  padding: 0 var(--fox-space-s) 0 var(--fox-space-xs);
   color: var(--fox-muted);
-  font-size: 12px;
+  font-size: var(--fox-type-caption);
   cursor: pointer;
 }
 
@@ -6437,7 +6438,9 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-expert-chip > svg {
-  flex: 0 0 12px;
+  width: var(--fox-icon-size-compact);
+  height: var(--fox-icon-size-compact);
+  flex: 0 0 var(--fox-icon-size-compact);
 }
 
 .fox-expert-chip:hover,
@@ -6453,9 +6456,9 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-expert-icon {
   position: relative;
-  width: 17px;
-  height: 17px;
-  flex: 0 0 auto;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  flex: 0 0 var(--fox-icon-size);
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -6758,18 +6761,18 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-send-button {
-  width: 30px !important;
-  height: 30px !important;
-  flex: 0 0 30px;
-  border-radius: 50% !important;
+  width: var(--fox-control-md) !important;
+  height: var(--fox-control-md) !important;
+  flex: 0 0 var(--fox-control-md);
+  border-radius: var(--fox-radius-pill) !important;
   background: var(--fox-send-surface) !important;
   color: var(--fox-send-ink) !important;
   box-shadow: none !important;
 }
 
 .fox-send-button svg {
-  width: 15px;
-  height: 15px;
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
 }
 
 .fox-send-button:hover {
@@ -10882,12 +10885,12 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 @container fox-composer (max-width: 760px) {
-  .fox-execution-control { padding-inline: 7px; }
+  .fox-execution-control { padding-inline: var(--fox-space-m); }
   .fox-expert-chip { max-width: min(150px, 25vw); }
-  .fox-model-control { width: max-content; max-width: min(220px, 40%); flex-basis: auto; padding-inline: 8px; }
-  .fox-agent-control { width: max-content; min-width: 0; max-width: min(160px, 30%); flex-basis: auto; padding-inline: 7px; }
+  .fox-model-control { width: max-content; max-width: min(220px, 40%); flex-basis: auto; padding-inline: var(--fox-space-m); }
+  .fox-agent-control { width: max-content; min-width: 0; max-width: min(160px, 30%); flex-basis: auto; padding-inline: var(--fox-space-m); }
   .fox-composer-tools,
-  .fox-composer-submit { gap: 3px; }
+  .fox-composer-submit { gap: var(--fox-space-micro); }
 }
 
 @container fox-composer (max-width: 620px) {
@@ -12424,18 +12427,19 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-composer-project-option > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fox-composer-project-option small { font-size: var(--fox-type-caption); }
 
-.fox-composer-tools [aria-label='添加内容'] svg { width: 18px; height: 18px; }
+.fox-composer-tools [aria-label='添加内容'] svg { width: var(--fox-icon-size); height: var(--fox-icon-size); }
 .fox-execution-control, .fox-expert-chip, .aui-composer-model-trigger { letter-spacing: 0; }
-.fox-execution-control { gap: 4px; padding-inline: 7px; }
-.fox-composer-submit .aui-composer-model-trigger { padding-inline: 7px; font-size: 12px; }
+.fox-execution-control { gap: var(--fox-space-xs); padding-inline: var(--fox-space-m); }
+.fox-composer-submit .aui-composer-model-trigger { padding-inline: var(--fox-space-m); font-size: var(--fox-type-chrome); }
 
 .fox-execution-control, .fox-expert-chip, .aui-composer-model-trigger { align-items: center; line-height: 1; }
-.fox-execution-control > span, .fox-expert-chip > span:not(.fox-expert-icon), .aui-composer-model-trigger > span { display: block; line-height: 18px; }
-.fox-execution-control > svg, .fox-expert-icon, .aui-composer-model-trigger > svg { display: block; flex-shrink: 0; }
-.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-height: 46px; padding: 6px 8px; border-radius: 28px; }
+.fox-execution-control > span, .fox-expert-chip > span:not(.fox-expert-icon), .aui-composer-model-trigger > span { display: block; line-height: 1; }
+.fox-execution-control > svg, .aui-composer-model-trigger > svg { display: block; flex-shrink: 0; width: var(--fox-icon-size-small); height: var(--fox-icon-size-small); }
+.fox-expert-icon { display: block; flex-shrink: 0; }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { display: grid; grid-template-columns: var(--fox-control-md) minmax(0, 1fr) auto auto; align-items: center; gap: var(--fox-space-m); min-height: calc(var(--fox-control-md) + var(--fox-space-l) + var(--fox-space-micro)); padding: var(--fox-space-s) var(--fox-space-m); border-radius: var(--fox-radius-pill); }
 .fox-composer-wrap.is-history .fox-prompt-toolbar,
 .fox-composer-wrap.is-history .fox-composer-tools { display: contents; }
-.fox-composer-wrap.is-history .fox-prompt-textarea { grid-column: 2; grid-row: 2; height: 32px; min-height: 32px !important; max-height: 160px; padding: 5px 0; line-height: 22px; align-self: center; }
+.fox-composer-wrap.is-history .fox-prompt-textarea { grid-column: 2; grid-row: 2; height: var(--fox-control-md); min-height: var(--fox-control-md) !important; max-height: 160px; padding: var(--fox-space-xs) 0; line-height: 22px; align-self: center; }
 .fox-composer-wrap.is-history [aria-label='添加内容'] { grid-column: 1; grid-row: 2; background: var(--fox-hover); border: 1px solid var(--fox-border); border-radius: 50%; }
 .fox-composer-wrap.is-history .fox-execution-control { grid-column: 3; grid-row: 2; }
 .fox-composer-wrap.is-history .fox-composer-submit { grid-column: 4; grid-row: 2; }
@@ -12444,17 +12448,16 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-history-menu-settings { display: grid; gap: 2px; border-top: 1px solid var(--fox-border); margin-top: 4px; padding-top: 4px; }
 .fox-history-menu-settings > button { width: 100%; max-width: none; justify-content: flex-start; min-height: 32px; border-radius: var(--fox-radius-control); padding-inline: 8px; }
 
-.fox-composer-wrap [aria-label='添加内容'] { width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.fox-composer-wrap [aria-label='添加内容'] { width: var(--fox-control-md); height: var(--fox-control-md); padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 .fox-composer-wrap [aria-label='添加内容'] svg,
-.fox-composer-wrap .lucide-arrow-up { width: 18px !important; height: 18px !important; }
+.fox-composer-wrap .lucide-arrow-up { width: var(--fox-icon-size) !important; height: var(--fox-icon-size) !important; }
 .fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { row-gap: 0; border-radius: 999px; }
-.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group']:has(.fox-composer-attachments > [data-slot]) { border-radius: 28px; row-gap: 8px; }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group']:has(.fox-composer-attachments > [data-slot]) { border-radius: 28px; row-gap: var(--fox-space-m); }
 
-/* Optical alignment for the Chinese font's higher glyph centre. */
-.fox-execution-control > span, .fox-expert-chip > span:not(.fox-expert-icon) { transform: translateY(1px); }
+/* 文字和图标都由工具行的 align-items: center 居中，不再单独下移 1px。 */
 .fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { border: 1px solid var(--fox-border); box-shadow: 0 2px 6px color-mix(in srgb, var(--fox-shadow-color) 6%, transparent); border-radius: 999px !important; }
 .fox-composer-wrap.is-history .fox-prompt-textarea { min-height: 0 !important; max-height: 140px; line-height: 22px; padding-block: 4px !important; field-sizing: fixed; }
-.fox-composer-wrap.is-history.is-expanded .fox-prompt-input > [data-slot='input-group'] { display: flex; flex-direction: column; gap: 8px; border-radius: 18px !important; }
+.fox-composer-wrap.is-history.is-expanded .fox-prompt-input > [data-slot='input-group'] { display: flex; flex-direction: column; gap: var(--fox-space-m); border-radius: 18px !important; }
 .fox-composer-wrap.is-history.is-expanded .fox-prompt-textarea { flex: none; width: 100%; }
 .fox-composer-wrap.is-history.is-expanded .fox-prompt-toolbar { display: flex; }
 .fox-composer-wrap.is-history.is-expanded .fox-composer-tools { display: flex; }
@@ -12463,10 +12466,10 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-user-message:not(.is-editing) { width: fit-content; max-width: 80%; }
 .fox-thread-msg.is-user .fox-user-bubble { width: fit-content; max-width: 80%; }
 
-.fox-composer-wrap.is-new-conversation [aria-label='添加内容'] { flex: 0 0 32px; width: 32px; height: 32px; margin-inline-end: -3px; border-radius: 50% !important; background: transparent; border: 0; box-shadow: none; }
+.fox-composer-wrap.is-new-conversation [aria-label='添加内容'] { flex: 0 0 var(--fox-control-md); width: var(--fox-control-md); height: var(--fox-control-md); margin-inline-end: 0; border-radius: var(--fox-radius-pill) !important; background: transparent; border: 0; box-shadow: none; }
 .fox-composer-wrap.is-new-conversation [aria-label='添加内容']:hover,
 .fox-composer-wrap.is-new-conversation [aria-label='添加内容'][data-state='open'] { background: var(--fox-hover); color: var(--fox-text); }
-.fox-composer-wrap.is-new-conversation [aria-label='添加内容'] svg { width: 16px !important; height: 16px !important; }
+.fox-composer-wrap.is-new-conversation [aria-label='添加内容'] svg { width: var(--fox-icon-size) !important; height: var(--fox-icon-size) !important; }
 .fox-sidebar-date-heading { display: flex; align-items: center; gap: var(--fox-sidebar-icon-gap); margin: var(--fox-space-l) 0 var(--fox-space-xs); padding-left: var(--fox-sidebar-inset); color: var(--fox-muted); font-size: var(--fox-type-caption); font-weight: 400; line-height: 20px; }
 .fox-sidebar-date-heading > svg { width: var(--fox-sidebar-icon-box); height: var(--fox-sidebar-icon-box); flex: 0 0 var(--fox-sidebar-icon-box); }
 .fox-sidebar-tree-main > .fox-sidebar-conversation-status { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 var(--fox-sidebar-icon-box); width: var(--fox-sidebar-icon-box); height: var(--fox-sidebar-icon-box); margin: 0; }

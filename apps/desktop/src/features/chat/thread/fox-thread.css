@@ -334,9 +334,10 @@
 .fox-composer-context-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--fox-space-xs);
   max-width: 240px;
-  padding: 3px 10px;
+  min-height: var(--fox-inline-action-height);
+  padding: var(--fox-space-micro) var(--fox-space-l);
   border: 0;
   border-radius: var(--fox-radius-pill);
   background: var(--muted);
@@ -360,7 +361,7 @@
   resize: none;
   border: 0;
   padding: 0;
-  min-height: calc(var(--fox-control-lg) - 8px);
+  min-height: var(--fox-inline-action-height);
   max-height: 220px;
   background: transparent;
   color: var(--foreground);
