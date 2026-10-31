@@ -29,9 +29,9 @@ pub(super) fn sweep_writer_route(connection: &Connection, run_id: &str) -> rusql
     }
 }
 
-/// Startup: a Run whose frozen control binding fails verification (tampered,
-/// written by an older build in a format this build no longer accepts, or with
-/// an unknown route) is interrupted with a stable code and logged; it is not
+/// Startup: a Run whose frozen control binding fails verification (corrupt,
+/// tampered, from an older development build, or with an unknown route) is
+/// interrupted with a stable code and logged; it is not
 /// skipped past and never continued. Historical Runs that already reached a
 /// terminal state keep their own terminal facts (a graph child's terminal fact
 /// is immutable once reconciled); every reader still refuses them.

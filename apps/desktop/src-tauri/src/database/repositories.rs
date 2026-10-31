@@ -63,7 +63,7 @@ mod native_route;
 #[cfg(test)]
 mod native_route_tests;
 #[cfg(test)]
-mod run_control_upgrade_tests;
+mod run_control_startup_tests;
 mod skill_activations;
 mod delivery_checks;
 pub(crate) use delivery_acceptance::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
