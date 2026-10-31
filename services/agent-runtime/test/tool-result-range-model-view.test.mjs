@@ -1,8 +1,5 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
-import { canonicalPermission } from '../src/control-binding.mjs'
-import { prepareKernelBatchResume } from '../src/pi-kernel-batch-resume.mjs'
 import {
   RESULT_REF_TOOL,
   READ_RESULT_CURSOR_MARKER,
@@ -14,10 +11,8 @@ import {
 import { defineFoxTool, adaptFoxToolToPi } from '../src/tool-adapter.mjs'
 import { convertMessages } from '../node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js'
 
-const sha256 = (value) => createHash('sha256').update(value, 'utf8').digest('hex')
 const model = { id: 'deterministic-fixture', provider: 'openai', api: 'openai-completions', input: ['text'], reasoning: false }
 
-const identity = { runId: 'kernel-run', conversationId: 'kernel-conversation', runtimeSessionId: 'kernel-session', executionProfileId: 'legacy' }
 
 // A fully-persistable payload: Chinese + emoji, big enough to need several pages
 // at `limit`, and small enough to stay under the 128 KiB storage cap.
@@ -72,159 +67,6 @@ function parseCursor(text) {
     return null
   }
 }
-
-function controlBinding() {
-  const permission = { mode: 'read_only', projectRoot: null, grants: [] }
-  return {
-    schemaVersion: 1, runId: identity.runId, conversationId: identity.conversationId,
-    engineId: 'pi', executionProfileId: identity.executionProfileId, authority: 'authoritative', readOnlyExecutor: 'rust',
-    permissionSnapshotId: `sha256:${sha256(JSON.stringify(canonicalPermission(permission)))}`, permission,
-    budgets: { modelRequestMs: 120_000, toolExecutionMs: 600_000, runExecutionMs: 1_800_000, approvalWaitMs: 300_000 },
-  }
-}
-
-test('batch resume: the cursor reaches the final model request and drives a >=3 page reconstruction', () => {
-  const source = buildSource()
-  const reference = toolResultRef('source-run', 'read-once')
-  const limit = 512
-
-  let offset = 0
-  let page = 0
-  const fragments = []
-  let history = [{ role: 'user', content: [{ type: 'text', text: 'read the whole stored result back' }] }]
-
-  while (true) {
-    page += 1
-    const callId = `range-read-${page}`
-    const hostResult = hostRead(source, reference, offset, limit)
-    const assistant = {
-      role: 'assistant', stopReason: 'toolUse', timestamp: page + 1,
-      content: [{ type: 'toolCall', id: callId, name: RESULT_REF_TOOL, arguments: { reference, offset, limit } }],
-    }
-    const frame = {
-      schemaVersion: 1, turnId: 'turn-1', batchId: `batch-${page}`,
-      idempotencyKey: `tool-batch-delivery:batch-${page}`, checkpointSeq: 8 + page,
-      history,
-      assistantMessage: assistant,
-      tools: [{ toolCallId: callId, tool: RESULT_REF_TOOL, sourceOrder: 0, canonicalInput: { reference, offset, limit }, state: 'completed', result: hostResult }],
-    }
-    const prepared = prepareKernelBatchResume({ ...identity, payload: { controlBinding: controlBinding(), batchResume: frame } }, identity)
-    const wire = convertMessages(model, { messages: prepared.messages }, {})
-    const toolMsg = wire.filter((message) => message.role === 'tool').at(-1)
-    const nav = parseCursor(toolMsg.content)
-    assert.ok(nav, `page ${page}: cursor block must reach the model request`)
-    assert.equal(nav.reference, reference)
-    assert.equal(nav.offset, offset)
-    assert.equal(nav.retrievable, true)
-    assert.equal(nav.truncated, false)
-    assert.equal(nav.nextOffset, hostResult.details.nextOffset)
-
-    // Accumulate the model-visible history so the next page replays prior reads.
-    history = [...history, assistant, prepared.messages.at(-1)]
-    fragments.push(Buffer.from(toolMsg.content).subarray(0, nav.returnedBytes).toString('utf8'))
-
-    if (nav.complete) break
-    assert.ok(nav.nextOffset > offset, `page ${page}: cursor must advance`)
-    offset = nav.nextOffset
-  }
-
-  assert.ok(page >= 3, `expected at least 3 pages, got ${page}`)
-  assert.equal(sha256(fragments.join('')), sha256(source), 'reconstructed hash must equal the source')
-  assert.equal(fragments.join(''), source)
-})
-
-test('stored results above every old size threshold are bounded and rebuild byte-exactly by paging', async () => {
-  // ABC review R4 acceptance: 140,000 B (>128 KiB), 200,000 B, and >1 MiB.
-  // Retrievability comes from the Host's storage fact, not from a size guess;
-  // the model view is bounded, the durable bytes rebuild with an identical
-  // SHA-256 through read_tool_result paging, and the source tool executes once.
-  const pageLimit = 64 * 1024 // Host range-read maximum per page (CONTRACTS §5)
-  for (const size of [140_000, 200_000, 1_600_000]) {
-    let executions = 0
-    const unit = '记录😀 data 中 '
-    const source = (() => {
-      let text = ''
-      while (Buffer.byteLength(text, 'utf8') < size) text += unit
-      return text
-    })()
-    const totalBytes = Buffer.byteLength(source, 'utf8')
-    assert.ok(totalBytes >= size, `fixture ${size}: must exceed the requested size`)
-
-    // The source tool runs exactly once; its complete result was stored by Host.
-    const sourceTool = defineFoxTool({
-      name: 'read',
-      label: 'Read file',
-      description: 'read a file',
-      parameters: { type: 'object' },
-      execute: () => {
-        executions += 1
-        return source
-      },
-    }, { source: 'fox-host', execution: 'host', trusted: true })
-    const reference = toolResultRef('source-run', 'read-once')
-    const raw = await sourceTool.execute('read-once', { path: 'big.txt' })
-    const storage = { stored: true, storedBytes: totalBytes, retrievableBytes: totalBytes }
-    const view = boundToolText('read', { text: raw, resultRef: reference, storage })
-    assert.ok(view !== null, `fixture ${totalBytes}: a stored result must be projected`)
-    assert.ok(Buffer.byteLength(view, 'utf8') <= 9_000,
-      `fixture ${totalBytes}: bounded view must stay in budget, got ${Buffer.byteLength(view, 'utf8')}`)
-    assert.ok(view.includes(reference), 'the view names the stable reference')
-    assert.ok(view.includes(RESULT_REF_TOOL), 'the view names the read-back tool')
-    assert.equal(executions, 1)
-
-    // Page the durable bytes back through read_tool_result and rebuild.
-    let offset = 0
-    let pages = 0
-    const fragments = []
-    let history = [{ role: 'user', content: [{ type: 'text', text: 'read the stored result back' }] }]
-    while (true) {
-      pages += 1
-      assert.ok(pages < 200, `fixture ${totalBytes}: paging must terminate`)
-      const callId = `size-${totalBytes}-page-${pages}`
-      const hostResult = hostRead(source, reference, offset, pageLimit)
-      const assistant = {
-        role: 'assistant', stopReason: 'toolUse', timestamp: pages + 1,
-        content: [{ type: 'toolCall', id: callId, name: RESULT_REF_TOOL, arguments: { reference, offset, limit: pageLimit } }],
-      }
-      const frame = {
-        schemaVersion: 1, turnId: 'turn-1', batchId: `batch-${totalBytes}-${pages}`,
-        idempotencyKey: `tool-batch-delivery:batch-${totalBytes}-${pages}`, checkpointSeq: 8 + pages,
-        history,
-        assistantMessage: assistant,
-        tools: [{
-          toolCallId: callId, tool: RESULT_REF_TOOL, sourceOrder: 0,
-          canonicalInput: { reference, offset, limit: pageLimit }, state: 'completed', result: hostResult,
-        }],
-      }
-      const prepared = prepareKernelBatchResume(
-        { ...identity, payload: { controlBinding: controlBinding(), batchResume: frame } }, identity)
-      const wire = convertMessages(model, { messages: prepared.messages }, {})
-      const toolMsg = wire.filter((message) => message.role === 'tool').at(-1)
-      const nav = parseCursor(toolMsg.content)
-      assert.ok(nav, `fixture ${totalBytes} page ${pages}: cursor must reach the model request`)
-      assert.equal(nav.retrievable, true)
-      fragments.push(Buffer.from(toolMsg.content).subarray(0, nav.returnedBytes).toString('utf8'))
-      // The resumed history carries the cursor (what the model actually keeps
-      // for a stored result), not the full page — a durable 64 KiB page per
-      // round would push the frame over its own 1 MiB bound.
-      history = [...history, assistant, {
-        role: 'toolResult',
-        toolCallId: callId,
-        toolName: RESULT_REF_TOOL,
-        isError: false,
-        content: [{ type: 'text', text: `${READ_RESULT_CURSOR_MARKER} ${JSON.stringify(nav)}` }],
-      }]
-      if (nav.complete) break
-      assert.ok(nav.nextOffset > offset, `fixture ${totalBytes} page ${pages}: cursor must advance`)
-      offset = nav.nextOffset
-    }
-    assert.equal(fragments.join(''), source, `fixture ${totalBytes}: paging must rebuild the exact text`)
-    assert.equal(sha256(fragments.join('')), sha256(source),
-      `fixture ${totalBytes}: rebuilt SHA-256 must equal the stored source`)
-    // read_tool_result paging never re-executes the source tool.
-    assert.equal(executions, 1, `fixture ${totalBytes}: the source tool must execute exactly once`)
-  }
-})
 
 test('without the storage fact the same oversized results are never dropped or promised', () => {
   // The rejected counterexample: a 200,000-byte result must not be reduced by

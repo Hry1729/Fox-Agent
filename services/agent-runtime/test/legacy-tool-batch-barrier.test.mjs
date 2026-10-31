@@ -3,8 +3,7 @@
 // pi-agent-core serializes a batch only when the Agent is configured
 // `toolExecution: 'sequential'`, or when some tool in the batch declares
 // `executionMode: 'sequential'` (dist/agent-loop.js:374-375); the option
-// defaults to 'parallel' (dist/agent.js:147). The Kernel loop does classify its
-// tools (pi-kernel-loop.mjs:137), but the Legacy host tools declare nothing, so
+// defaults to 'parallel' (dist/agent.js:147). The Legacy host tools declare nothing, so
 // a read and a write in the same batch are dispatched concurrently and the Host
 // answers them from a 32-thread pool with no ordering rule.
 //

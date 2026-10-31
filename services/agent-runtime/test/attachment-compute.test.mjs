@@ -3,9 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { Check } from 'typebox/value'
 import { createHostTools } from '../src/host-tools.mjs'
-import { describeKernelRun } from '../src/pi-kernel-description.mjs'
 import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from '../src/expert-package.mjs'
-import { RUNTIME_TOOL_CATALOG } from '../src/runtime-contract.mjs'
 
 const bundled=JSON.parse(readFileSync(new URL('../../../apps/desktop/src-tauri/resources/expert-library/bundled.json',import.meta.url),'utf8'))
 const data=bundled.find(entry=>entry.expertId==='fox-data-analyst').package
@@ -18,17 +16,6 @@ test('data expert exposes actual code computation without project or arbitrary s
   const effective=selectToolsForProjectContext(diagnoseToolsForAgentContext(catalog,defaultAssistant,expert).tools,{projectRoot:null,permissionMode:'read_only'}).tools
   assert.ok(effective.some(tool=>tool.name==='attachment_compute'))
   assert.ok(!effective.some(tool=>['run_command','write_file','tabular_data'].includes(tool.name)))
-  const describe=assistantPackage=>describeKernelRun({conversationId:'compute-test',payload:{executionProfileId:'legacy',modelService:{modelId:'test-model',apiType:'openai-completions'},supportedTools:RUNTIME_TOOL_CATALOG.map(t=>t.name),prompt:{systemPrompt:'Analyze the attached workbook',projectContext:{projectRoot:null,permissionMode:'read_only'},expertPackage:expert,assistantPackage}}})
-  const prepared=describe(defaultAssistant)
-  assert.ok(prepared.proposalTools.some(t=>t.name==='attachment_compute'))
-  assert.match(prepared.systemPrompt,/Never replace tool execution with mental arithmetic/)
-  assert.match(prepared.systemPrompt,/isolated conversation workspace are permitted/)
-  assert.match(prepared.systemPrompt,/Never call office_help directly/)
-  assert.ok(!prepared.proposalTools.some(t=>t.name==='office_help'))
-  assert.match(prepared.proposalTools.find(t=>t.name==='call_mcp_tool').description,/NOT top-level function names/)
-  assert.ok(!describe({packageManifest:{allowedTools:[]}}).proposalTools.some(t=>t.name==='attachment_compute'))
-  const beforeFix={packageManifest:{allowedTools:defaultAssistant.packageManifest.allowedTools.filter(name=>name!=='attachment_compute')}}
-  assert.ok(!describe(beforeFix).proposalTools.some(t=>t.name==='attachment_compute'))
 })
 
 test('compute schema accepts bounded code and forwards attachment IDs intact',async()=>{

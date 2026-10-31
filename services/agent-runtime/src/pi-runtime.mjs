@@ -18,7 +18,6 @@ import {
 } from './pi-adapter.mjs'
 import { createEnvelope, PROTOCOL_NAME, PROTOCOL_VERSION, validateEnvelope } from './protocol.mjs'
 import { validatePromptControl } from './control-binding.mjs'
-import { createKernelWorker } from './pi-kernel-worker.mjs'
 import { createPiEventMapper, sanitizeAssistantHistory } from './pi-event-mapper.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { createGraphReadonlyTools } from './graph-readonly-tools.mjs'
@@ -1164,10 +1163,8 @@ async function handleRequest(request) {
           runtimeVersion: `0.1.0+pi-${PI_PACKAGE_VERSION}`,
           capabilities: createCapabilityManifest({
             imageInput: modelProfile.supportsImageInput,
-            // The kernel worker splices directive steering into the live
-            // transcript (pi-kernel-loop / pi-kernel-batch-resume); on the
-            // legacy path the Host delivers the same text through frozen input
-            // messages, so mid-run additions are supported on every path.
+            // The Host delivers mid-run additions through frozen input
+            // messages, so steering is supported on every run.
             steering: true,
             tools: executionProfileCatalogTools(RUNTIME_TOOL_CATALOG, executionProfile),
           }),
@@ -1409,10 +1406,8 @@ const handleFatal = createFatalErrorHandler({
 process.on('uncaughtException', (error) => { handleFatal(error, 'uncaughtException') })
 process.on('unhandledRejection', (reason) => { handleFatal(reason, 'unhandledRejection') })
 
-const kernelWorker = process.argv.includes('--kernel-worker') ? createKernelWorker(write) : null
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
-if (kernelWorker) input.on('close', () => { void kernelWorker.close().catch(() => { process.exitCode = 1 }) })
-else input.on('close', () => { void shutdownOnHostGone() })
+input.on('close', () => { void shutdownOnHostGone() })
 
 // CX-1: stdin closing means the Host is gone (exit, crash or broken pipe).
 // Stop every Run and model stream now instead of spending tokens until the
@@ -1431,18 +1426,7 @@ async function shutdownOnHostGone() {
 }
 input.on('line', (line) => {
   try {
-    // Bounded normal Kernel frame (#14): 1 MiB of UTF-8 JSON per input line —
-    // the same bound and wording as `frame_limit_exceeded` on the Host side.
-    if (kernelWorker && Buffer.byteLength(line, 'utf8') > 1_048_576) {
-      throw new Error(
-        `kernel.frame_limit_exceeded: normal Kernel model frame is ${Buffer.byteLength(line, 'utf8') - 1_048_576} UTF-8 JSON bytes over the 1,048,576-byte limit; use references or pagination instead of enlarging the frame`,
-      )
-    }
     const message = JSON.parse(line)
-    if (kernelWorker) {
-      void kernelWorker.handle(message)
-      return
-    }
     if (message.kind === 'response' && message.requestId) {
       const pending = pendingHostRequests.get(message.requestId)
       if (pending) {
@@ -1459,10 +1443,6 @@ input.on('line', (line) => {
     }
     void handleRequest(message)
   } catch (error) {
-    if (kernelWorker) {
-      write(createEnvelope('event', 'fatal_error', { payload: { code: 'kernel.invalid_input', message: 'Invalid Kernel protocol input' } }))
-      return
-    }
     process.stderr.write(`[fox-pi-runtime] ${error instanceof Error ? error.message : String(error)}\n`)
   }
 })

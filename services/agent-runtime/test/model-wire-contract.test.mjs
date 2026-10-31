@@ -50,8 +50,8 @@ const TOOL_CONTEXT = Object.freeze({
 })
 
 /**
- * Build the model exactly the way production does: pi-runtime.mjs::createModel and
- * pi-kernel-worker.mjs both derive it from resolveModelProfile + transportProvider.
+ * Build the model exactly the way production does: pi-runtime.mjs::createModel
+ * derives it from resolveModelProfile + transportProvider.
  */
 function foxModel(config) {
   const profile = resolveModelProfile(config)
