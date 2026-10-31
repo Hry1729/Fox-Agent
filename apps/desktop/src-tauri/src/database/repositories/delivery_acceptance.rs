@@ -585,36 +585,6 @@ impl AcceptanceRow {
     }
 }
 
-/// The transaction-scoped half of
-/// [`Database::delivery_acceptance_projection`], so the terminal summary can read
-/// it inside the same transaction that writes the progress row.
-pub(crate) fn delivery_acceptance_projection(
-    connection: &rusqlite::Connection,
-    run_id: &str,
-) -> rusqlite::Result<Vec<(String, bool, bool)>> {
-    let mut statement = connection.prepare(
-        "SELECT c.item_key,
-                COALESCE(a.revoked_at IS NULL AND a.rejected_at IS NULL
-                         AND a.accepted_at > 0, 0),
-                COALESCE(a.rejected_at IS NOT NULL, 0)
-         FROM delivery_checklist_items c
-         LEFT JOIN delivery_acceptances a
-           ON a.run_id = c.run_id AND a.item_key = c.item_key
-         WHERE c.run_id = ?1
-         ORDER BY c.item_key",
-    )?;
-    let rows = statement
-        .query_map(params![run_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, bool>(1)?,
-                row.get::<_, bool>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 fn digest_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))

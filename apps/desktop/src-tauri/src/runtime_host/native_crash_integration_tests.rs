@@ -262,7 +262,6 @@ fn run_child() {
         thread::sleep(Duration::from_secs(60));
         panic!("parent did not crash its owned Host after the boundary");
     }
-    host.recover_kernel_runs_detached().unwrap();
     host.recover_native_approvals_detached().unwrap();
     let intent = read_json(&root.join("intent.json")).unwrap();
     let conversation = intent["conversationId"].as_str().unwrap();

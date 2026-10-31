@@ -222,14 +222,10 @@ fn a0_startup_unrouted_kernel_runs_refuse_host_writers_and_are_retired_at_startu
     assert!(db.mark_run_failed(&run,"test","failure").is_err());
     assert!(db.mark_run_interrupted(&run,"test","interruption").is_err());
     assert!(!db.apply_runtime_event(&run,1,&json!({"type":"run.completed"})).unwrap());
-    assert_eq!(db.kernel_host_recoverable_runs().unwrap(),vec![run.clone()]);
-    assert!(!db.run_executor_route_retired(&run).unwrap());
     db.repair_interrupted_runs().unwrap();
     // A0: the frozen Kernel loop never resumes it; it is interrupted with the
-    // retired-path reason and the Kernel recoverer no longer sees it.
+    // retired-path reason.
     assert_eq!(terminal_fact(&db,&run),("interrupted".into(),Some("executor_route_retired".into()),Some("执行路径已退役".into()),true));
-    assert!(db.run_executor_route_retired(&run).unwrap());
-    assert!(db.kernel_host_recoverable_runs().unwrap().is_empty());
     // Still a Kernel-owned read model: Host writers stay refused.
     assert!(db.mark_run_failed(&run,"test","failure").is_err());
     // A second startup is a no-op.
@@ -261,7 +257,6 @@ fn a0_startup_retirement_settles_the_kernel_read_model_and_leaves_other_routes_a
     let (native_db,native,_) = fixture(Some(ExecutorRoute::PiNative));
     native_db.repair_interrupted_runs().unwrap();
     assert_eq!(terminal_fact(&native_db,&native).1.as_deref(),Some("runtime.application_restarted"));
-    assert!(!native_db.run_executor_route_retired(&native).unwrap());
 
     db.repair_interrupted_runs().unwrap();
     assert_eq!(terminal_fact(&db,&kernel).1.as_deref(),Some("executor_route_retired"));
@@ -387,7 +382,6 @@ fn a0_startup_desktop_restart_shows_the_retired_kernel_run_and_continues_on_pi_n
     assert_eq!(last.status, "interrupted");
     assert_eq!(last.error_code.as_deref(), Some("executor_route_retired"));
     assert_eq!(last.error_message.as_deref(), Some("执行路径已退役"));
-    assert!(db.kernel_host_recoverable_runs().unwrap().is_empty());
     // The user continues in a new Run, which is frozen PiNative.
     let next = db.create_run(&conversation, "continue in a new Run", None).unwrap().run.id;
     let binding = db.freeze_default_run_control_for_engine(&next, "legacy", TimeBudgets::continuous(), "pi").unwrap();

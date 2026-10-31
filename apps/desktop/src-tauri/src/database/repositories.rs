@@ -41,7 +41,6 @@ mod expert_teams;
 mod expert_workflows;
 mod graph_lead;
 mod kernel;
-pub(crate) use kernel::ModelNoticeInput;
 mod kernel_compaction;
 pub(crate) mod kernel_authorization;
 pub(crate) mod kernel_continuation;
@@ -128,8 +127,7 @@ pub(crate) mod native_session_fault {
 }
 pub(crate) use managed_files::{ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput, RestoreClaim, RestoreRequestRecord};
 pub(crate) use run_steering::{
-    adopt_received_steering_in_tx, apply_delivered_steering_in_tx, cancel_open_steering_in_tx,
-    deliver_steering_in_tx, SteeringMessage, SteeringDecision, MAX_STEERING_FOLLOWUPS,
+    SteeringMessage, MAX_STEERING_FOLLOWUPS,
     STEERING_LANE_CURRENT, STEERING_LANE_NEXT_TURN,
 };
 pub(crate) use skill_activations::SkillActivationRecord;
@@ -322,7 +320,6 @@ pub struct Database {
     /// a restart measures idleness conservatively from the persisted model
     /// wall anchor until fresh progress arrives. Follows the KernelChanges
     /// precedent (process-local hub on the shared Database handle).
-    model_progress: Arc<Mutex<BTreeMap<String, i64>>>,
     /// Only grants created in this Host lifetime may cross Office run boundaries.
     office_reuse_grants: Arc<Mutex<Vec<kernel_authorization::ProcessOfficeGrant>>>,
 }
@@ -561,7 +558,6 @@ impl Database {
             connection: Arc::new(Mutex::new(connection)),
             data_root_id,
             kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
-            model_progress: Arc::new(Mutex::new(BTreeMap::new())),
             office_reuse_grants: Arc::new(Mutex::new(Vec::new())),
         };
         database.seed_builtin_agents()?;
@@ -653,38 +649,6 @@ impl Database {
 
     pub(crate) fn subscribe_kernel_changes(&self) -> std::sync::mpsc::Receiver<()> {
         self.kernel_changes.subscribe()
-    }
-
-    /// Record worker-observed model output for a Run (volatile timing signal).
-    /// Called by the display preview path for every accepted preview, including
-    /// tool-parameter-only progress that never appears as visible text. Entries
-    /// are consumed once by the coordinator tick that advances the controller;
-    /// terminal runs drop their entry. Best-effort and bounded: never blocks,
-    /// never persists, never fails the caller.
-    pub(crate) fn note_kernel_model_progress(&self, run_id: &str, wall_ms: i64) {
-        if let Ok(mut guard) = self.model_progress.lock() {
-            while guard.len() >= 8192 {
-                // Fail-safe bound; progress is best-effort and runs are few.
-                guard.pop_first();
-            }
-            guard.insert(run_id.to_owned(), wall_ms);
-        }
-    }
-
-    /// Take the pending progress wall timestamp for a Run, if any. Consume-once
-    /// semantics: every preview is folded into the controller exactly once, so
-    /// repeated ticks without fresh output correctly grow idleness.
-    pub(crate) fn consume_kernel_model_progress(&self, run_id: &str) -> Option<i64> {
-        self.model_progress
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.remove(run_id))
-    }
-
-    pub(crate) fn clear_kernel_model_progress(&self, run_id: &str) {
-        if let Ok(mut guard) = self.model_progress.lock() {
-            guard.remove(run_id);
-        }
     }
 
     pub fn default_agent_id(&self) -> &'static str {
@@ -2854,7 +2818,7 @@ impl Database {
             } else if approval.tool_name == "task_repair_escalate_start" || approval.request.get("wholeFileReplacement").is_some() {
                 false
             } else {
-                crate::runtime_host::shadow_reconcile::tool_operation_scope(&approval.tool_name, input, root).is_some()
+                crate::runtime_host::tool_operation_scope(&approval.tool_name, input, root).is_some()
             };
             if let Some(request) = approval.request.as_object_mut() {
                 request.insert("availableDecisions".into(), if reusable {
@@ -4528,24 +4492,6 @@ impl Database {
     ) -> Result<Option<super::ToolCallRecord>, String> {
         self.with_connection(|connection| {
             Ok(query_tool_call(connection, run_id, runtime_tool_call_id).optional()?)
-        })
-    }
-
-    pub(crate) fn list_runtime_tool_calls_for_run(
-        &self,
-        run_id: &str,
-    ) -> Result<Vec<super::ToolCallRecord>, String> {
-        self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
-                        status, result_json, error_message, execution_location, requires_approval,
-                        started_at, completed_at, updated_at, trace_id, span_id
-                 FROM tool_calls WHERE run_id = ?1 ORDER BY started_at ASC, rowid ASC",
-            )?;
-            let records = statement
-                .query_map([run_id], map_tool_call)?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(records)
         })
     }
 
@@ -10279,7 +10225,6 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-
     #[test]
     fn project_pinning_persists_and_opening_does_not_reorder_projects() {
         let (database, path) = test_database();
@@ -10339,7 +10284,6 @@ mod tests {
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
-
 
     #[test]
     fn sidebar_latest_run_does_not_wait_for_closed_or_empty_questions() {

@@ -28,7 +28,6 @@
 
 use super::*;
 use crate::kernel::{self, CancellationRegistry, TestClock};
-use crate::runtime_host::{kernel_coordinator::KernelCoordinator, kernel_gateway::GatewayPolicy};
 use fox_engine_protocol::{
     ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding,
     TimeBudgets,
@@ -84,7 +83,6 @@ struct Fixture {
     run: String,
     clock: TestClock,
     cancellation: CancellationRegistry,
-    policy: GatewayPolicy,
 }
 
 impl Fixture {
@@ -188,18 +186,10 @@ impl Fixture {
         };
         db.freeze_kernel_host_scope(&run, &scope).unwrap();
         let cancellation = CancellationRegistry::default();
-        KernelCoordinator::start_prepared(&db, &clock, &run, &cancellation).unwrap();
         let sessions = root.join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         fs::create_dir_all(root.join("storage")).unwrap();
-        let policy = GatewayPolicy {
-            binding,
-            scope,
-            database: Some(db.clone()),
-            sessions_dir: Some(sessions),
-            artifacts_dir: None,
-        };
-        Self { db, root, run, clock, cancellation, policy }
+        Self { db, root, run, clock, cancellation }
     }
 
     fn context(&self) -> Value {

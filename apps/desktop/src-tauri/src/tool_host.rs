@@ -1473,20 +1473,6 @@ pub(crate) fn command_spawn_spec(
     }
 }
 
-/// Explicit test injection for low-level command/output tests. This entry point
-/// and its caller-supplied proof do not exist in the production build.
-#[cfg(test)]
-pub(crate) fn execute_command_with_test_backend(
-    action: PreparedToolAction,
-    proof: &dyn crate::process_jobs::BackendCapabilityProof,
-) -> Result<Value, String> {
-    proof.availability().authorize().map_err(|error| error.reason().to_owned())?;
-    match action {
-        PreparedToolAction::RunCommand { command, cwd, timeout, .. } => execute_command(&command, &cwd, timeout, None),
-        _ => Err("test backend only accepts commands".into()),
-    }
-}
-
 /// What one contained process attempt produced: how it ended, both captured
 /// streams, and a wait failure when the exit could not be observed.
 struct ContainedRun {

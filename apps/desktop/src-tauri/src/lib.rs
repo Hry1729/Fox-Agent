@@ -46,13 +46,6 @@ mod yuxi;
 #[cfg(windows)]
 mod window_resize;
 
-// Package-2-D closeout: the injected U1 parked starting point for the isolated
-// acceptance run. Feature-gated so no normal production build carries it, and
-// exposed as a function rather than a module so the lib's own privacy is kept.
-#[cfg(feature = "kernel-acceptance")]
-mod closeout_fixture;
-#[cfg(feature = "kernel-acceptance")]
-pub use closeout_fixture::{build_u1_parked_fixture, dump_context_budget_reports};
 
 use app_state::AppState;
 use database::Database;
@@ -216,7 +209,6 @@ pub fn run() {
                 skills_dir.clone(),
                 yuxi_client.clone(),
             );
-            runtime_host.recover_shadow_observations();
             runtime_host.recover_active_graph_node_reviews()?;
             runtime_host.recover_active_graph_node_cancellations()?;
             runtime_host.recover_pending_graph_acceptances()?;
@@ -279,7 +271,6 @@ pub fn run() {
             // cache/knowledge-preview) is logged here and reported with its
             // path only when a preview uses the cache.
             let _ = maintenance::recover_knowledge_preview_cache_at_startup(&app.state::<AppState>());
-            app.state::<AppState>().runtime_host.recover_kernel_runs_detached()?;
             let retired_commands = app.state::<AppState>().runtime_host.retire_native_approval_commands()?;
             if retired_commands > 0 {
                 eprintln!("fox.approval_route retired {retired_commands} stale native Kernel approval command(s)");
@@ -438,9 +429,6 @@ pub fn run() {
             commands::kernel_reconciliation_query,
             commands::kernel_reconciliation_confirm,
             commands::kernel_reconciliation_resume,
-            commands::kernel_run_continuable,
-            commands::kernel_run_continuable_list,
-            commands::kernel_run_continue,
             commands::kernel_reliability_snapshot,
             commands::kernel_job_execute,
             commands::kernel_job_start,

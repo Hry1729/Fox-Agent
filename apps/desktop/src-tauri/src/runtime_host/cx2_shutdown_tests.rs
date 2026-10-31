@@ -38,8 +38,8 @@ fn cx2_shutdown_keeps_cleaning_after_a_failed_step_and_reports_errors_together()
     ghost.run.id = "cx2-ghost-run".to_owned();
     {
         let mut state = host.state.lock().unwrap();
-        state.queued_runs.push_back(QueuedRun { started: ghost, text: text.to_owned(), attachments: Vec::new(), kernel: false });
-        state.queued_runs.push_back(QueuedRun { started: started.clone(), text: text.to_owned(), attachments: Vec::new(), kernel: false });
+        state.queued_runs.push_back(QueuedRun { started: ghost, text: text.to_owned(), attachments: Vec::new() });
+        state.queued_runs.push_back(QueuedRun { started: started.clone(), text: text.to_owned(), attachments: Vec::new() });
     }
 
     let error = host.shutdown().expect_err("a failed step is reported, not swallowed");

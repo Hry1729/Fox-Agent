@@ -9,14 +9,10 @@ mod tool_result_read;
 mod skill_load;
 pub(crate) mod delivery;
 pub(crate) mod delivery_checks_v2;
-pub(crate) mod kernel_coordinator;
-mod kernel_model_worker;
 pub(crate) mod process_job;
 mod kernel_run_lock;
-mod run_admission;
 mod kernel_host;
 pub(crate) mod office_grants;
-mod waiting_jobs_wake;
 mod session_lifecycle;
 mod sidecar_sessions;
 
@@ -45,7 +41,6 @@ mod cx2_shutdown_tests;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
-mod kernel_gateway;
 mod mcp_catalog;
 
 pub(super) fn host_runtime_capabilities(manifest_hash: &str, profile_id: &str) -> Value {
@@ -53,12 +48,8 @@ pub(super) fn host_runtime_capabilities(manifest_hash: &str, profile_id: &str) -
     facts["tools"]["attachment_compute"]=json!({"availability":"available","projectPaths":true,"reportPdf":crate::report_pdf::availability()});
     facts
 }
-mod kernel_delegation;
 mod protocol;
 pub(crate) mod approval_policy;
-pub(crate) mod shadow_reconcile;
-#[cfg(test)]
-mod shadow_reconcile_tests;
 mod work_tools;
 /// Explicit final-file declaration. Distinct from `work_tools` (durable task
 /// state) and from `delivery` (content verification), because handing a file to
@@ -786,7 +777,6 @@ struct QueuedRun {
     started: StartRunResult,
     text: String,
     attachments: Vec<AttachmentRecord>,
-    kernel: bool,
 }
 
 struct RuntimeCommand {
@@ -812,13 +802,6 @@ fn node_dependency_is_available(script: &Path, package: &str) -> bool {
 
 struct RuntimeHostState {
     cancellation: crate::kernel::CancellationRegistry,
-    kernel_active_runs: HashSet<String>,
-    kernel_wake_inflight: HashSet<String>,
-    waiting_wakes: HashMap<String, waiting_jobs_wake::WakeSlot>,
-    #[cfg(test)]
-    auto_wake_disabled: HashSet<String>,
-    #[cfg(test)]
-    auto_wake_force_round: HashSet<String>,
     shutting_down: bool,
     state: String,
     worker: Option<WorkerHandle>,
@@ -834,14 +817,10 @@ struct RuntimeHostState {
     queue_dispatcher: bool,
     queue_changed: Arc<(Mutex<()>, Condvar)>,
     native_run_leases: HashMap<String, kernel_run_lock::KernelRunLock>,
-    dispatching_runs: HashMap<String, (String, bool)>,
+    dispatching_runs: HashMap<String, String>,
     cancelled_dispatches: HashSet<String>,
     recovery_attempts: u8,
     last_recovery_at: Option<i64>,
-    /// Per-legacy-run shadow contexts. These run the observation-only kernel
-    /// decision core and are fed legacy events; they never execute side
-    /// effects. Keyed by legacy run id.
-    shadow: Arc<shadow_reconcile::ShadowReconciler>,
 }
 
 /// Content-addressed shadow identity hash over the normalised CONTENT of a
@@ -850,83 +829,6 @@ struct RuntimeHostState {
 /// changes the hash.
 fn runtime_shadow_hash(seed: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())))
-}
-
-fn shadow_prompt_config_hash(snapshot: &Value) -> Result<String, String> {
-    let stable_prompt_hash = snapshot
-        .get("stablePromptHash")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            "run.request_snapshot omitted the non-empty stablePromptHash required by Kernel Shadow"
-                .to_owned()
-        })?;
-    let mut identity = serde_json::Map::new();
-    for key in [
-        "contextHash",
-        "contextSchemaHash",
-        "executionProfile",
-        "promptCacheIdentity",
-        "promptContentHash",
-        "promptDefinitionId",
-        "promptVersion",
-        "toolCatalogHash",
-    ] {
-        identity.insert(
-            key.to_owned(),
-            snapshot.get(key).cloned().unwrap_or(Value::Null),
-        );
-    }
-    identity.insert(
-        "stablePromptHash".to_owned(),
-        Value::String(stable_prompt_hash.to_owned()),
-    );
-    Ok(runtime_shadow_hash(&Value::Object(identity).canonical_string()))
-}
-
-fn shadow_permission_snapshot_id(permission_mode: &str, project_access: &str) -> String {
-    runtime_shadow_hash(&format!("permission|{permission_mode}|{project_access}"))
-}
-
-fn shadow_preflight_tool_call_id(envelope: &RuntimeEnvelope) -> Result<&str, &'static str> {
-    envelope
-        .payload
-        .as_ref()
-        .and_then(|payload| payload.get("toolCallId"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or("tool.preflight omitted a non-empty payload.toolCallId")
-}
-
-fn shadow_preflight_input(envelope: &RuntimeEnvelope, allowed: bool, payload: &Value) -> Value {
-    if allowed {
-        if let Some(input) = payload.get("input") {
-            return input.clone();
-        }
-    }
-    envelope
-        .payload
-        .as_ref()
-        .and_then(|request| request.get("input"))
-        .cloned()
-        .unwrap_or_else(|| json!({}))
-}
-
-fn runtime_tool_event_succeeded(payload: &Value) -> bool {
-    payload.get("type").and_then(Value::as_str) == Some("tool.completed")
-        && payload.get("isError").and_then(Value::as_bool) != Some(true)
-}
-
-fn shadow_legacy_tool_decision(
-    tool: &str,
-    execution_location: &str,
-    requires_approval: bool,
-) -> Result<&'static str, String> {
-    // Single source of truth: shared with the ShadowReconciler so the Host
-    // and the integration tests never maintain two classification lists.
-    shadow_reconcile::legacy_tool_decision(tool, execution_location, requires_approval)
 }
 
 struct AgentPromptContext {
@@ -1126,49 +1028,6 @@ pub(crate) fn conversation_prompt_context(
     }
 }
 
-/// The model-facing prompt payload of one Kernel Run.
-///
-/// One constructor for every entry point, so the keys and the reference data a
-/// Run receives cannot drift between the application start path and a non-UI
-/// caller such as the real acceptance harness.
-///
-/// Everything is borrowed: the caller keeps ownership of the same values for the
-/// Legacy prompt that follows, and the reference-data fields stay generic over
-/// `Serialize` exactly as the `json!` literal they replace did.
-pub(crate) struct KernelPromptPayload<'a, M, W, R> {
-    pub text: &'a str,
-    pub messages: &'a M,
-    pub images: &'a [Value],
-    pub context: &'a AgentPromptContext,
-    pub project_context: &'a Value,
-    pub work_snapshot: &'a W,
-    pub memory_context: &'a R,
-    pub max_prompt_tokens: i64,
-}
-
-pub(crate) fn kernel_prompt_payload<M, W, R>(payload: KernelPromptPayload<'_, M, W, R>) -> Value
-where
-    M: serde::Serialize,
-    W: serde::Serialize,
-    R: serde::Serialize,
-{
-    json!({
-        "text": payload.text,
-        "messages": payload.messages,
-        "images": payload.images,
-        "systemPrompt": payload.context.system_prompt,
-        "skillPrompt": payload.context.skill_prompt,
-        "assistantPackage": payload.context.assistant_package,
-        "expertPackage": payload.context.expert_package,
-        "expertBinding": payload.context.expert_binding_payload,
-        "runContext": payload.context.run_context,
-        "projectContext": payload.project_context,
-        "workSnapshot": payload.work_snapshot,
-        "memoryContext": payload.memory_context,
-        "promptBudget": {"maxPromptTokens": payload.max_prompt_tokens},
-    })
-}
-
 #[derive(Clone)]
 pub struct RuntimeHost {
     app: AppHandle,
@@ -1192,8 +1051,6 @@ pub struct RuntimeHost {
     digital_scheduler_started: Arc<AtomicBool>,
     digital_scheduler_stop: Arc<AtomicBool>,
     active_tool_handlers: Arc<AtomicUsize>,
-    root_run_admission: Arc<run_admission::Gate>,
-    child_run_admission: Arc<run_admission::Gate>,
     /// Pi-native batch positions: registration, the in-batch barrier and the
     /// cancel/close bookkeeping. Shared with the detached-dispatch clone so a
     /// child Run sees the same ledger its parent registered.
@@ -1232,25 +1089,17 @@ impl RuntimeHost {
     pub(crate) fn execute_job_operation(&self, conversation: &str, run_id: &str, tool: &str, input: &Value) -> Result<Value,String> {
         run_bound_conversation(&self.database,run_id,Some(conversation))?;
         let binding=self.database.run_control_binding(run_id)?.ok_or("job operation needs a frozen Run")?;
-        let elapsed=if binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none() {
-            let scope=self.database.kernel_host_scope(run_id)?;
-            if !scope.tool_names.contains(tool) {return Err("job operation is outside the frozen tool scope".into());}
-            if scope.lifecycle_hooks.iter().any(|h|h.event=="before_tool"&&matches!(h.action.as_str(),"block"|"require_approval")&&crate::lifecycle_hooks::matcher_matches(&h.matcher,tool)) {
-                return Err("job operation requires the existing tool approval workflow".into());
-            }
-            self.database.kernel_build_full_snapshot(run_id)?.running_elapsed_ms
-        } else {
-            self.ensure_runtime_tool_allowed(run_id,tool,RuntimeToolIngress::Execute).map_err(|(_,e)|e)?;
-            if binding.executor_route.is_some() { native_model_budget::elapsed_ms(&self.database, run_id)? } else { 0 }
-        };
+        if kernel_authority::is_retired_kernel(Some(&binding)) {
+            return Err(kernel_authority::retired_route_error());
+        }
+        self.ensure_runtime_tool_allowed(run_id,tool,RuntimeToolIngress::Execute).map_err(|(_,e)|e)?;
+        let elapsed=if binding.executor_route.is_some() { native_model_budget::elapsed_ms(&self.database, run_id)? } else { 0 };
         let token=self.state.lock().map_err(|_| "runtime state poisoned")?.cancellation.run_token(run_id).ok();
         let budget=std::time::Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, elapsed).max(0) as u64);
-        let host = self.clone();
-        let on_terminal = Arc::new(move |run: &str| { let _ = host.signal_waiting_run(run); });
         let wait = if tool == "compute_job_status" && input["waitMs"].as_u64().unwrap_or(0) > 0 {
             Some(SidecarExecutionWait::begin(&self.state, run_id)?)
         } else { None };
-        let result = background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget,Some(on_terminal));
+        let result = background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget,None);
         if let Some(wait) = wait { wait.resume()?; }
         result
     }
@@ -1375,13 +1224,6 @@ impl RuntimeHost {
             database: database.clone(),
             state: Arc::new(Mutex::new(RuntimeHostState {
                 cancellation: crate::kernel::CancellationRegistry::default(),
-                kernel_active_runs: HashSet::new(),
-                kernel_wake_inflight: HashSet::new(),
-                waiting_wakes: HashMap::new(),
-                #[cfg(test)]
-                auto_wake_disabled: HashSet::new(),
-                #[cfg(test)]
-                auto_wake_force_round: HashSet::new(),
                 shutting_down: false,
                 state: "stopped".to_owned(),
                 worker: None,
@@ -1401,7 +1243,6 @@ impl RuntimeHost {
                 cancelled_dispatches: HashSet::new(),
                 recovery_attempts: 0,
                 last_recovery_at: None,
-                shadow: Arc::new(shadow_reconcile::ShadowReconciler::new(database.clone())),
             })),
             run_transition: Arc::new(Mutex::new(())),
             worker_launch: Arc::new(Mutex::new(())),
@@ -1422,8 +1263,6 @@ impl RuntimeHost {
             digital_scheduler_started: Arc::new(AtomicBool::new(false)),
             digital_scheduler_stop: Arc::new(AtomicBool::new(false)),
             active_tool_handlers: Arc::new(AtomicUsize::new(0)),
-            root_run_admission: run_admission::Gate::new(),
-            child_run_admission: run_admission::Gate::new(),
             native_batches: Arc::new(native_tool_batch::SharedBatchRegistry::new()),
         };
         host.reconcile_continuation_proposals();
@@ -1597,7 +1436,7 @@ impl RuntimeHost {
     pub fn reload_configuration(&self) -> Result<(), String> {
         let active = {
             let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
-            !state.kernel_active_runs.is_empty() || !state.dispatching_runs.is_empty()
+            !state.dispatching_runs.is_empty()
                 || state.worker.as_ref().is_some_and(|w| !w.sessions.is_empty())
         };
         let active_children = self
@@ -1669,20 +1508,13 @@ impl RuntimeHost {
                 || error == kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
                 return result;
             }
-            let kernel_run = self.database.kernel_host_run_state(&started.run.id)
-                .ok().flatten().is_some();
-            let retire = !kernel_run || kernel_host::kernel_scope_should_retire(
-                &self.database, &started.run.id);
             if let Ok(mut state) = self.state.lock() {
-                if retire {
-                    state.cancellation.retire_run(&started.run.id);
-                    state.native_run_leases.remove(&started.run.id);
-                }
+                state.cancellation.retire_run(&started.run.id);
+                state.native_run_leases.remove(&started.run.id);
                 if let Some(worker) = state.worker.as_mut() {
                     worker.sessions.finish(&started.run.id);
                 }
-                if state.state == "busy" && state.kernel_active_runs.is_empty()
-                    && state.kernel_wake_inflight.is_empty()
+                if state.state == "busy"
                     && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
                     state.state = "ready".to_owned();
                 }
@@ -1692,234 +1524,7 @@ impl RuntimeHost {
         result
     }
 
-    /// Freeze an observation-only Kernel shadow context for a legacy run.
-    ///
-    /// This is the production Shadow entry point: it only records a frozen
-    /// `kernel_shadow_runs` row (kernel mode `shadow`). It does NOT run tools,
-    /// raise approvals, dispatch to the executable outbox, or touch the legacy
-    /// run. Any error is swallowed (logged into diagnostics) so Shadow can
-    /// never break the authoritative legacy path. Authoritative Kernel
-    /// execution remains disabled; there is no production caller that leases
-    /// `kernel_effect_outbox`.
-    fn bootstrap_shadow_context(
-        &self,
-        legacy_run_id: &str,
-        conversation_id: &str,
-        execution_profile_id: &str,
-        prompt_config_hash: &str,
-    ) {
-        if let Err(error) = self.try_bootstrap_shadow_context(
-            legacy_run_id,
-            conversation_id,
-            execution_profile_id,
-            prompt_config_hash,
-        ) {
-            // Shadow must never fail the legacy run; surface it in diagnostics only.
-            if let Ok(mut state) = self.state.lock() {
-                state.last_error = Some(format!("kernel shadow bootstrap skipped: {error}"));
-            }
-        }
-    }
-
-    fn bootstrap_shadow_context_from_request_snapshot(
-        &self,
-        legacy_run_id: &str,
-        conversation_id: &str,
-        snapshot: &Value,
-    ) {
-        let result = (|| -> Result<(String, String), String> {
-            let execution_profile_id = self
-                .database
-                .frozen_run_execution_profile_id(legacy_run_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    format!(
-                        "Run '{legacy_run_id}' has no frozen execution profile for Kernel Shadow"
-                    )
-                })?;
-            let prompt_config_hash = shadow_prompt_config_hash(snapshot)?;
-            Ok((execution_profile_id, prompt_config_hash))
-        })();
-        match result {
-            Ok((execution_profile_id, prompt_config_hash)) => self.bootstrap_shadow_context(
-                legacy_run_id,
-                conversation_id,
-                &execution_profile_id,
-                &prompt_config_hash,
-            ),
-            Err(error) => {
-                if let Ok(mut state) = self.state.lock() {
-                    state.last_error = Some(format!("kernel shadow bootstrap skipped: {error}"));
-                }
-            }
-        }
-    }
-
-    fn try_bootstrap_shadow_context(
-        &self,
-        legacy_run_id: &str,
-        conversation_id: &str,
-        execution_profile_id: &str,
-        prompt_config_hash: &str,
-    ) -> Result<(), String> {
-        let engine = "pi";
-        // Content-addressed identities: hash the actual frozen contract inputs
-        // (engine + manifest version; conversation/permission; profile/prompt)
-        // rather than emitting synthetic prefixes. These are observation
-        // hashes over stable contract identity, not user content or secrets.
-        let manifest_version = protocol::CAPABILITY_MANIFEST_VERSION as u32;
-        // Content-addressed hashes over the actual frozen contract CONTENT, not
-        // just identity tags, so changing permission scope, the capability set,
-        // or the prompt/profile changes the hash.
-        let capabilities_json = self
-            .shadow_capabilities_json()
-            .unwrap_or_else(|| format!("manifest-v{manifest_version}"));
-        let permission_snapshot = self
-            .database
-            .run_shadow_permission_snapshot(legacy_run_id, conversation_id)?;
-        let manifest_hash = runtime_shadow_hash(&format!(
-            "manifest|{engine}|v{manifest_version}|{capabilities_json}"
-        ));
-        let permission_snapshot_id = runtime_shadow_hash(&permission_snapshot.canonical_string());
-        let budgets = self.database.run_time_budgets(legacy_run_id)?;
-        let frozen = crate::kernel::RunFrozenConfig {
-            engine_id: engine.to_owned(),
-            kernel_mode: crate::kernel::KernelMode::Shadow.as_str().to_owned(),
-            capability_manifest_version: manifest_version,
-            capability_manifest_hash: manifest_hash.clone(),
-            permission_snapshot_id,
-            execution_profile_id: execution_profile_id.to_owned(),
-            prompt_config_hash: prompt_config_hash.to_owned(),
-            model_request_timeout_ms: budgets.model_request_ms,
-            model_first_response_ms: budgets.model_first_response_ms,
-            model_idle_ms: budgets.model_idle_ms,
-            tool_execution_timeout_ms: budgets.tool_execution_ms,
-            run_execution_budget_ms: budgets.run_execution_ms,
-            run_execution_limited: budgets.run_execution_limited,
-            approval_wait_timeout_ms: budgets.approval_wait_ms,
-            provider_max_retries: 2,
-            turn_max_retries: 0,
-            experimental_compute_job_notice: false,
-        };
-        self.shadow_reconciler()?.bootstrap_with_policy(
-            legacy_run_id,
-            conversation_id,
-            execution_profile_id,
-            frozen,
-            Some(permission_snapshot),
-        )
-    }
-
-    fn shadow_reconciler(&self) -> Result<Arc<shadow_reconcile::ShadowReconciler>, String> {
-        self.state
-            .lock()
-            .map(|state| state.shadow.clone())
-            .map_err(|_| "shadow host state lock poisoned".to_string())
-    }
-
-    fn report_shadow_result(&self, result: Result<(), String>) {
-        if let Err(error) = result {
-            if let Ok(mut state) = self.state.lock() {
-                state.last_error = Some(format!("kernel shadow observation failed: {error}"));
-            }
-        }
-    }
-
-    pub(crate) fn recover_shadow_observations(&self) {
-        self.report_shadow_result((|| self.shadow_reconciler()?.recover_all().map(|_| ()))());
-    }
-
-    /// Feed a legacy tool-batch decision into the run's shadow context, run the
-    /// shadow decision core over the same batch, and persist the comparison
-    /// record. Independent legacy tool facts (`legacy_tools`) are supplied by
-    /// the caller from what legacy actually decided. Never executes tools and
-    /// never affects the legacy run; failures are diagnostic-only.
-    /// Feed a single legacy tool.preflight decision into the shadow context.
-    /// The preflight is treated as a one-tool observation; legacy decision and
-    /// identity come from the real preflight (`allowed` + payload), kernel
-    /// decision from the shadow policy. Observation-only.
-    fn shadow_feed_preflight(
-        &self,
-        legacy_run_id: &str,
-        tool: &str,
-        envelope: &RuntimeEnvelope,
-        allowed: bool,
-        payload: &Value,
-    ) {
-        let nested_parent = envelope
-            .payload
-            .as_ref()
-            .filter(|request| {
-                request.get("observationScope").and_then(Value::as_str) == Some("nested")
-            })
-            .and_then(|request| request.get("parentToolCallId"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if let Some(parent_tool_call_id) = nested_parent {
-            let valid_graph_parent = self
-                .database
-                .get_runtime_tool_call(legacy_run_id, parent_tool_call_id)
-                .ok()
-                .flatten()
-                .is_some_and(|record| {
-                    record.tool_name == "graph_readonly_run"
-                        && record.execution_location == "runtime"
-                });
-            if valid_graph_parent {
-                // Graph preview node reads are internal to graph_readonly_run
-                // and have no top-level Runtime tool event to settle. The outer
-                // graph ToolCall is registered from its real projection.
-                return;
-            }
-        }
-        let tool_call_id = match shadow_preflight_tool_call_id(envelope) {
-            Ok(tool_call_id) => tool_call_id.to_owned(),
-            Err(error) => {
-                if let Ok(mut state) = self.state.lock() {
-                    state.last_error = Some(format!(
-                        "kernel shadow preflight observation skipped: {error}"
-                    ));
-                }
-                return;
-            }
-        };
-        // An allowed Host preflight may canonicalise or default arguments. Feed
-        // the approved payload.input as the actual legacy/kernel observation;
-        // blocked or malformed responses fall back to the requested input.
-        let input = shadow_preflight_input(envelope, allowed, payload);
-        // Legacy decision from the real preflight outcome.
-        let legacy_decision = if allowed {
-            "allow"
-        } else if payload
-            .get("decision")
-            .and_then(Value::as_str)
-            .is_some_and(|d| d.contains("approv") || d.contains("ask"))
-        {
-            "approval"
-        } else {
-            "deny"
-        };
-        self.report_shadow_result((|| {
-            let reconciler = self.shadow_reconciler()?;
-            if reconciler.context_state(legacy_run_id) == "absent" {
-                return Ok(());
-            }
-            let outcome = reconciler.feed_preflight(
-                legacy_run_id,
-                tool,
-                &tool_call_id,
-                input,
-                legacy_decision,
-            )?;
-            outcome.persist_error.map_or(Ok(()), Err)
-        })());
-    }
-
-    /// Normalised capability manifest content for the shadow identity hash.
-    /// Reads the live (effective) capability set so changing the manifest
-    /// changes the frozen manifest hash.
-    fn shadow_capabilities_json(&self) -> Option<String> {
+    fn capabilities_manifest_json(&self) -> Option<String> {
         let state = self.state.lock().ok()?;
         let caps = self.effective_capabilities(&state.capabilities);
         // Canonicalise (sort keys) via serde_json for a stable hash input.
@@ -1942,45 +1547,6 @@ impl RuntimeHost {
         Some(value.canonical_string())
     }
 
-    /// Feed a legacy terminal event into the run's shadow context and persist
-    /// the comparison; then drop the shadow context. `legacy_state` is the
-    /// legacy run STATE name (`completed` / `failed` / `cancelled`). The kernel
-    /// side is driven through the matching state machine transitions: a cancel
-    /// requires a prior `request_cancel`, and completed requires settled tools
-    /// (fed earlier via `shadow_feed_tool_settled`).
-    pub fn shadow_feed_terminal(
-        &self,
-        legacy_run_id: &str,
-        legacy_state: &str,
-        kernel_outcome: crate::kernel::RunOutcome,
-        _retry_timeout: crate::kernel::RetryTimeoutFacts,
-    ) {
-        self.report_shadow_result((|| {
-            let reconciler = self.shadow_reconciler()?;
-            if reconciler.context_state(legacy_run_id) == "absent" {
-                return Ok(());
-            }
-            let outcome = reconciler.terminal(legacy_run_id, legacy_state, kernel_outcome, true)?;
-            outcome.persist_error.map_or(Ok(()), Err)
-        })());
-    }
-
-    pub fn shadow_feed_tool_settled(
-        &self,
-        legacy_run_id: &str,
-        tool_call_id: &str,
-        ok: bool,
-        _result_json: &str,
-    ) {
-        self.report_shadow_result((|| {
-            let reconciler = self.shadow_reconciler()?;
-            if reconciler.context_state(legacy_run_id) == "absent" {
-                return Ok(());
-            }
-            reconciler.settle_applied_tool(legacy_run_id, tool_call_id, ok)
-        })());
-    }
-
     pub fn start_run_detached(
         &self,
         started: StartRunResult,
@@ -1988,20 +1554,21 @@ impl RuntimeHost {
         attachments: Vec<AttachmentRecord>,
     ) {
         let run_id = started.run.id.clone();
-        let route = (|| -> Result<bool, String> {
-            let binding = self.database.run_control_binding(&run_id)?;
-            let authority = kernel_authority::select(binding.as_ref().map(|b| b.authority))?;
-            let executor = match binding { Some(binding) => binding.executor_route, None => Database::new_run_executor_route(authority) };
-            Ok(authority == fox_engine_protocol::ExecutionAuthority::Authoritative && executor.is_none())
-        })();
-        let kernel = match route { Ok(kernel) => kernel, Err(error) => { self.record_start_failure(&started, error); return; } };
+        // B1: a frozen historical Kernel Run is never queued again.
+        match self.database.run_control_binding(&run_id) {
+            Ok(binding) if kernel_authority::is_retired_kernel(binding.as_ref()) => {
+                self.record_start_failure(&started, kernel_authority::retired_route_error());
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => { self.record_start_failure(&started, error); return; }
+        }
         let mut queued_at = None;
         if let Ok(mut state) = self.state.lock() {
             state.queued_runs.push_back(QueuedRun {
                 started,
                 text,
                 attachments,
-                kernel,
             });
             queued_at = Some(crate::database::now_ms());
         }
@@ -2043,20 +1610,19 @@ impl RuntimeHost {
             if state.shutting_down {
                 return;
             }
-            let starting = state.dispatching_runs.iter().filter(|(run, (_, kernel))|
-                !kernel && state.worker.as_ref().is_none_or(|w| w.sessions.by_run(run).is_none())).count();
+            let starting = state.dispatching_runs.keys().filter(|run|
+                state.worker.as_ref().is_none_or(|w| w.sessions.by_run(run).is_none())).count();
             let occupied = state.worker.as_ref().map(|w| w.sessions.occupied()).unwrap_or(0);
             let Some(index) = state.queued_runs.iter().position(|item| {
-                if item.kernel { return true; }
                 let conversation = &item.started.run.conversation_id;
                 occupied + starting < sidecar_sessions::ACTIVE_RUN_LIMIT
-                    && !state.dispatching_runs.values().any(|(id, _)| id == conversation)
+                    && !state.dispatching_runs.values().any(|id| id == conversation)
                     && state.worker.as_ref().is_none_or(|w| w.sessions.can_admit(conversation))
                     && !matches!(state.state.as_str(), "starting" | "stopping")
             }) else { return; };
             let Some(queued) = state.queued_runs.remove(index) else { return; };
             state.dispatching_runs.insert(queued.started.run.id.clone(),
-                (queued.started.run.conversation_id.clone(), queued.kernel));
+                queued.started.run.conversation_id.clone());
             (queued, crate::database::now_ms())
         };
         let (queued, granted_at) = queued;
@@ -2078,8 +1644,7 @@ impl RuntimeHost {
                 if let Err(error) = result {
                     if error == CANCELLED_BEFORE_SUBMISSION {
                         if let Ok(mut state) = runtime_host.state.lock() {
-                            if state.state == "busy" && state.kernel_active_runs.is_empty()
-                                && state.kernel_wake_inflight.is_empty()
+                            if state.state == "busy"
                                 && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
                                 state.state = "ready".to_owned();
                             }
@@ -2109,10 +1674,9 @@ impl RuntimeHost {
                     .worker
                     .as_ref()
                     .is_none_or(|worker| worker.sessions.by_run(run_id).is_none())
-                && !state.kernel_active_runs.contains(run_id)
             {
                 state.cancelled_dispatches.insert(run_id.to_owned());
-                state.dispatching_runs.get(run_id).map(|(conversation, _)| conversation.clone())
+                state.dispatching_runs.get(run_id).cloned()
             } else {
                 let Some(index) = state
                     .queued_runs
@@ -2154,8 +1718,12 @@ impl RuntimeHost {
 
     fn record_start_failure(&self, started: &StartRunResult, message: String) {
         if self.database.run_control_binding(&started.run.id).ok().flatten()
-            .is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
-            let _ = self.record_kernel_start_failure(&started.run.id);
+            .is_some_and(|binding| kernel_authority::is_retired_kernel(Some(&binding))) {
+            // B1: a historical Kernel Run refuses every legacy writer; it is
+            // settled exactly like the startup retirement instead.
+            if let Err(error) = self.database.retire_kernel_run(&started.run.id) {
+                eprintln!("retiring Kernel Run {} failed: {error}", started.run.id);
+            }
             return;
         }
         let (code, detail) = structured_runtime_error(&message);
@@ -2197,198 +1765,6 @@ impl RuntimeHost {
                 );
             }
         }
-        self.shadow_feed_terminal(
-            &started.run.id,
-            "failed",
-            crate::kernel::RunOutcome::Failed {
-                code: code.to_owned(),
-                message: detail.to_owned(),
-            },
-            Default::default(),
-        );
-    }
-
-    /// Continue a paused Kernel Run through the *normal* initialization path (R2).
-    ///
-    /// Order matters and is the whole point of the fix:
-    ///   1. re-verify the permission scope against live conversation state;
-    ///   2. resolve the runtime/model service and ask the Runtime for the model
-    ///      description — exactly what a fresh authoritative Run does;
-    ///   3. derive the prompt hash, the frozen initial input and the Host scope;
-    ///   4. only then insert the attempt, so the `kernel_runs` row is created with
-    ///      the real `prompt_config_hash` / `frozen_config_json` /
-    ///      `capability_manifest_hash` instead of placeholders;
-    ///   5. freeze the model config, initial input and scope, then drive it.
-    ///
-    /// The previous version inserted placeholder frozen values and never froze the
-    /// artifacts, so the production dispatch failed with
-    /// "Kernel model configuration is missing; no current-settings fallback".
-    #[allow(clippy::too_many_arguments)]
-    pub fn continue_kernel_run(
-        &self,
-        request: &crate::database::ContinuationRequest,
-    ) -> Result<StartRunResult, String> {
-        let source_binding = self
-            .database
-            .run_control_binding(&request.source_run_id)?
-            .ok_or("缺少冻结权限")?;
-        // 1. Permission is re-verified (and recorded) before anything is created.
-        let verified = self.database.re_verify_continuation_permission(
-            &request.source_run_id,
-            &request.conversation_id,
-        )?;
-        let prompt_text =
-            self.database
-                .kernel_continuation_prompt(&request.conversation_id, &request.source_run_id)?;
-        let budgets = crate::database::run_budget_for_tier(
-            source_binding.budgets.clone(),
-            request.tier,
-            request.custom_execution_ms,
-        )?;
-        // 2. The runtime description needs the real prompt/service pair.
-        let model_service = self
-            .database
-            .get_model_service()?
-            .ok_or_else(|| "model service is not configured".to_owned())?;
-        let effective_max_output_tokens = model_service.max_output_tokens;
-        let context_chars = model_service
-            .context_window
-            .saturating_sub(effective_max_output_tokens)
-            .max(4096)
-            .saturating_mul(3)
-            .clamp(12_000, 240_000) as usize;
-        let messages = self.database.runtime_prompt_context_budget(
-            &request.conversation_id,
-            240,
-            context_chars,
-        )?;
-        let context = self.agent_prompt_context(&request.conversation_id, &prompt_text, "primary")?;
-        let conversation_id = request.conversation_id.clone();
-        let mut project_context=project_context_for(&self.database,&self.sessions_dir,&conversation_id,&verified.permission);
-        // This new attempt inherits the source rows after preparation. Describe
-        // the same frozen targets before that insertion, without reparsing the
-        // generated continuation prompt or changing historical checklist rows.
-        project_context["deliveryTargets"]=delivery::frozen_delivery_reference(&self.database,&request.source_run_id,&project_context)?;
-        let prompt = json!({
-            "text": prompt_text,
-            "messages": messages,
-            "images": Vec::<Value>::new(),
-            "systemPrompt": context.system_prompt,
-            "skillPrompt": context.skill_prompt,
-            "assistantPackage": context.assistant_package,
-            "expertPackage": context.expert_package,
-            "expertBinding": context.expert_binding_payload,
-            "projectContext": project_context,
-            "workSnapshot": work_tools::snapshot(&self.database, &request.conversation_id)?,
-            "memoryContext": self.database.recall_memories(&request.conversation_id, None, &prompt_text, 8, 6_000)?,
-            "runContext": {
-                "runKind": "primary",
-                "runRole": "user_facing_lead",
-                "isUserFacingLead": true,
-            },
-            "promptBudget": {"maxPromptTokens": model_service
-                .context_window
-                .saturating_sub(effective_max_output_tokens)
-                .max(4096)},
-            "continuation": true,
-        });
-        let service = json!({
-            "baseUrl": model_service.base_url,
-            "modelId": model_service.model_id,
-            "apiType": model_service.api_type,
-            "contextWindow": model_service.context_window,
-            "maxOutputTokens": effective_max_output_tokens,
-            "supportsImageInput": model_service.supports_image_input,
-        });
-        let runtime = self.runtime_command()?;
-        // The description is bound to the *verified* binding, so the frozen scope
-        // and the tool catalog are derived from the re-verified permission.
-        let mut verified_binding = source_binding.clone();
-        verified_binding.run_id = request.source_run_id.clone();
-        verified_binding.permission = verified.permission.clone();
-        verified_binding.permission_snapshot_id = verified.permission_snapshot_id.clone();
-        verified_binding.budgets = budgets.clone();
-        let registry = crate::kernel::CancellationRegistry::default();
-        registry.register_run(&format!("continuation-describe:{}", request.source_run_id))?;
-        let token = registry.run_token(&format!(
-            "continuation-describe:{}",
-            request.source_run_id
-        ))?;
-        let mut supported = kernel_gateway::supported_tools();
-        // 3. Describe against the verified scope, exactly like a fresh start.
-        let mut config = {
-            let describe_binding = verified_binding.clone();
-            kernel_model_worker::describe(
-                &runtime,
-                &describe_binding,
-                service.clone(),
-                prompt.clone(),
-                std::mem::take(&mut supported),
-                &token,
-            )?
-        };
-        let scope =
-            kernel_gateway::freeze_scope(&self.database, &verified_binding, &prompt, &config)?;
-        let manifest_hash=runtime_shadow_hash(&crate::canonical_json::to_string(&scope).map_err(|_|"invalid resource scope")?);
-        kernel_model_worker::bind_runtime_capabilities(&mut config,&verified_binding,&manifest_hash);
-        let hash = config.hash()?;
-        let input = kernel_host::initial_input(&verified_binding, &prompt, &hash)?;
-        let frozen = crate::kernel::RunFrozenConfig {
-            engine_id: verified_binding.engine_id.clone(),
-            kernel_mode: "authoritative".into(),
-            capability_manifest_version: 2,
-            capability_manifest_hash: runtime_shadow_hash(
-                &crate::canonical_json::to_string(&scope).map_err(|_| "invalid resource scope")?,
-            ),
-            permission_snapshot_id: verified_binding.permission_snapshot_id.clone(),
-            execution_profile_id: verified_binding.execution_profile_id.clone(),
-            prompt_config_hash: hash.clone(),
-            model_request_timeout_ms: budgets.model_request_ms,
-            model_first_response_ms: budgets.model_first_response_ms,
-            model_idle_ms: budgets.model_idle_ms,
-            tool_execution_timeout_ms: budgets.tool_execution_ms,
-            run_execution_budget_ms: budgets.run_execution_ms,
-            run_execution_limited: budgets.run_execution_limited,
-            approval_wait_timeout_ms: budgets.approval_wait_ms,
-            provider_max_retries: 5,
-            turn_max_retries: 5,
-            experimental_compute_job_notice: false,
-        };
-        let prepared = crate::database::PreparedContinuation {
-            budgets: budgets.clone(),
-            prompt_config_hash: hash.clone(),
-            capability_manifest_hash: frozen.capability_manifest_hash.clone(),
-            frozen_config_json: crate::canonical_json::to_string(&frozen)
-                .map_err(|_| "invalid frozen Kernel Run")?,
-            artifacts: Some((config, input, scope)),
-            skill_activations: context.skill_activations,
-        };
-        // 4. The attempt row now carries the real frozen values.
-        let started =
-            self.database
-                .kernel_insert_continuation_attempt(request, &prompt_text, &prepared)?;
-        // All new-Run identities and frozen artifacts were committed atomically.
-        // 6. Start it detached, like every other Kernel start.
-        let ownership = kernel_host::acquire(&self.sessions_dir, &started.run.id)?;
-        let binding = self
-            .database
-            .run_control_binding(&started.run.id)?
-            .ok_or("续做任务缺少冻结绑定")?;
-        let host = self.clone_for_detached_dispatch();
-        let run_id = started.run.id.clone();
-        std::thread::spawn(move || {
-            if let Err(error) = host.start_kernel_run(ownership, &binding, prompt, service) {
-                if error != CANCELLED_BEFORE_SUBMISSION
-                    && error != kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
-                    // An Authoritative aggregate rejects the legacy failure
-                    // column update. Reacquire ownership and record a Kernel
-                    // terminal decision through the same recovery path used
-                    // for ordinary starts; never leave a created attempt stuck.
-                    let _ = host.record_kernel_start_failure(&run_id);
-                }
-            }
-        });
-        Ok(started)
     }
 
     /// A handle for a detached Kernel dispatch. The struct keeps no mutable
@@ -2414,8 +1790,6 @@ impl RuntimeHost {
             digital_scheduler_started: self.digital_scheduler_started.clone(),
             digital_scheduler_stop: self.digital_scheduler_stop.clone(),
             active_tool_handlers: self.active_tool_handlers.clone(),
-            root_run_admission: self.root_run_admission.clone(),
-            child_run_admission: self.child_run_admission.clone(),
             native_batches: self.native_batches.clone(),
         }
     }
@@ -2462,6 +1836,12 @@ impl RuntimeHost {
         if matches!(kernel_authority::resolve_run_route(frozen_binding.as_ref()), kernel_authority::RunRoute::Reject) {
             return Err(format!("{}: unsupported frozen executor", crate::database::EXECUTOR_ROUTE_UNKNOWN));
         }
+        // B1: the Kernel execution loop is gone. A frozen historical Kernel Run
+        // (Authoritative, no route) that is started again is refused, never
+        // driven on another path.
+        if kernel_authority::is_retired_kernel(frozen_binding.as_ref()) {
+            return Err(kernel_authority::retired_route_error());
+        }
         let authority = kernel_authority::select(
             frozen_binding.as_ref().map(|binding| binding.authority),
         )?;
@@ -2470,16 +1850,13 @@ impl RuntimeHost {
             None => Database::new_run_executor_route(authority),
         };
         let native = executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative);
-        let kernel = authority == fox_engine_protocol::ExecutionAuthority::Authoritative && !native;
-        let native_ownership = if native { Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?) } else { None };
-        let kernel_ownership = if kernel {
-            Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?)
-        } else { None };
-        if !kernel {
-            crate::lifecycle_hooks::run_event(&self.database,"before_run",&started.run.id,run_kind,
-                &json!({"conversationId":started.run.conversation_id,"runKind":run_kind,
-                    "depth":if run_kind=="child" {1} else {0}}))?;
+        if authority == fox_engine_protocol::ExecutionAuthority::Authoritative && !native {
+            return Err(kernel_authority::retired_route_error());
         }
+        let native_ownership = if native { Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?) } else { None };
+        crate::lifecycle_hooks::run_event(&self.database,"before_run",&started.run.id,run_kind,
+            &json!({"conversationId":started.run.conversation_id,"runKind":run_kind,
+                "depth":if run_kind=="child" {1} else {0}}))?;
         let execution_profile = if authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
             if let Some(binding) = &frozen_binding {
                 continuation::ExecutionProfileSelection::resolve(&binding.execution_profile_id)?
@@ -2493,11 +1870,6 @@ impl RuntimeHost {
         self.database
             .freeze_run_execution_profile(&started.run.id, execution_profile.id())
             .map_err(|error| error.to_string())?;
-        if kernel
-            && self.database.kernel_host_run_state(&started.run.id)?.is_some() {
-            let binding = frozen_binding.as_ref().ok_or("existing Kernel has no binding")?;
-            return self.start_kernel_run(kernel_ownership.ok_or("missing Kernel ownership")?, binding, Value::Null, Value::Null);
-        }
         let images = self.runtime_images(&started.run.conversation_id, attachments)?;
 
         let model_service = self
@@ -2571,10 +1943,9 @@ impl RuntimeHost {
             || control_binding.execution_profile_id != execution_profile.id() {
             return Err("Startup cannot replace the frozen Run engine/authority/profile/conversation".into());
         }
-        let runtime_session_id = if !kernel {
-            self.ensure_worker(&started.run.conversation_id)?;
-            self.open_runtime_session(&started.run.conversation_id, Some(&started.run.id))?.0
-        } else { String::new() };
+        self.ensure_worker(&started.run.conversation_id)?;
+        let runtime_session_id =
+            self.open_runtime_session(&started.run.conversation_id, Some(&started.run.id))?.0;
         let mut project_context = project_context_for(
             &self.database,&self.sessions_dir,&started.run.conversation_id,&control_binding.permission,
         );
@@ -2635,28 +2006,6 @@ impl RuntimeHost {
             skill_prompt,
             skill_activations,
         };
-        if let Some(ownership) = kernel_ownership {
-            // One payload constructor for every entry point, so what the model
-            // sees cannot drift between the application and a non-UI caller such
-            // as the real acceptance harness.
-            let prompt = kernel_prompt_payload(KernelPromptPayload {
-                text,
-                messages: &messages,
-                images: &images,
-                context: &context,
-                project_context: &project_context,
-                work_snapshot: &work_snapshot,
-                memory_context: &memory_context,
-                max_prompt_tokens: input_tokens,
-            });
-            for record in &context.skill_activations {
-                self.database.record_skill_activation(&started.run.id, Some(&started.run.conversation_id), record)?;
-            }
-            let service = json!({"baseUrl":model_service.base_url,"modelId":model_service.model_id,"apiType":model_service.api_type,
-                "contextWindow":model_service.context_window,"maxOutputTokens":effective_max_output_tokens,"supportsImageInput":model_service.supports_image_input});
-            return self.start_kernel_run(ownership, &control_binding, prompt, service);
-        }
-
         let _transition = self
             .run_transition
             .lock()
@@ -2710,7 +2059,7 @@ impl RuntimeHost {
                 "runContext": context.run_context,
                 "projectContext": project_context,
                 "controlBinding": control_binding,
-                "hostRuntimeCapabilities": host_runtime_capabilities(&runtime_shadow_hash(&format!("manifest|pi|v2|{}",self.shadow_capabilities_json().unwrap_or_default())), &control_binding.execution_profile_id),
+                "hostRuntimeCapabilities": host_runtime_capabilities(&runtime_shadow_hash(&format!("manifest|pi|v2|{}",self.capabilities_manifest_json().unwrap_or_default())), &control_binding.execution_profile_id),
                 "workSnapshot": work_snapshot,
                 "memoryContext": memory_context,
                 "promptBudget": { "maxPromptTokens": input_tokens },
@@ -3047,8 +2396,6 @@ impl RuntimeHost {
             self.database.freeze_run_control(&inherited)?;
         }
         let mut child_host = self.clone_for_detached_dispatch();
-        child_host.root_run_admission = self.root_run_admission.clone();
-        child_host.child_run_admission = self.child_run_admission.clone();
         child_host.run_budget_override = Some(child_run.budget.clone());
         child_host.enforce_count_budget_override = enforce_count_budget_override;
         if graph_review_request_id.is_some() {
@@ -3200,10 +2547,6 @@ impl RuntimeHost {
             self.skills_dir.clone(),
             self.yuxi_client.clone(),
         ) };
-        if !shared_native {
-            let shadow = self.shadow_reconciler()?;
-            managed_host.state.lock().map_err(|_| "managed host state lock poisoned")?.shadow = shadow;
-        }
         managed_host.run_budget_override = Some(ChildRunBudget {
             max_duration_ms: prepared.colleague.max_duration_ms,
             max_total_tokens: prepared.remaining_tokens.min(200_000),
@@ -3565,9 +2908,8 @@ impl RuntimeHost {
     }
 
     fn cancel_child_runtime(&self, child_run_id: &str) -> Result<bool, String> {
-        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
-            let host = self.child_hosts.lock().map_err(|_| "child runtime map is poisoned")?.get(child_run_id).cloned();
-            return host.as_ref().unwrap_or(self).cancel_run(child_run_id);
+        if kernel_authority::is_retired_kernel(self.database.run_control_binding(child_run_id)?.as_ref()) {
+            return self.database.retire_kernel_run(child_run_id);
         }
         if self
             .database
@@ -3576,14 +2918,6 @@ impl RuntimeHost {
             .is_none_or(run_status_is_terminal)
         {
             return Ok(false);
-        }
-        if let Some(child) = self.database.child_run(child_run_id)? {
-            if self.database.run_control_binding(&child.parent_run_id)?.is_some_and(|parent|
-                parent.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && parent.executor_route.is_none()) {
-                let _ownership = kernel_host::acquire(&self.sessions_dir,child_run_id)?;
-                if self.database.kernel_cancel_unstarted_child(&child.parent_run_id,child_run_id)? { return Ok(true); }
-                return Err("Kernel child preparation is changing; cancellation was not delegated to Legacy".into());
-            }
         }
         if self.database.mark_run_cancelling(child_run_id)?.is_none() {
             return Ok(false);
@@ -3765,34 +3099,19 @@ impl RuntimeHost {
             .database
             .get_expert_team(team_run_id)?
             .ok_or_else(|| "team.not_found".to_owned())?;
-        let kernel_parent = self.database.run_control_binding(&snapshot.run.parent_run_id)?
-            .filter(|binding|binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none());
         for member in &snapshot.members {
             if !run_status_is_terminal(&member.status) {
-                let result = self.cancel_child_runtime(&member.child_run_id);
-                if kernel_parent.is_some() { result?; }
+                let _ = self.cancel_child_runtime(&member.child_run_id);
             }
-        }
-        if let Some(binding) = kernel_parent {
-            let selected = snapshot.members.iter().map(|member|member.child_run_id.clone()).collect();
-            self.wait_kernel_selected_children(&binding,false,Some(&selected))?;
         }
         self.database.cancel_expert_team(team_run_id, reason)
     }
 
     pub fn cancel_run(&self, run_id: &str) -> Result<bool, String> {
-        if self.database.run_control_binding(run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
-            let queued = self.database.queue_kernel_host_command(run_id, None)?;
-            self.state.lock().map_err(|_| "runtime state lock poisoned")?.cancellation.request_run_cancel(run_id);
-            for child_run_id in self.database.active_child_run_ids(run_id)? {
-                if child_run_id != run_id { let _ = self.cancel_child_runtime(&child_run_id); }
-            }
-            if let Err(error)=self.signal_waiting_run(run_id) {
-                // The command is already durable. Startup recovery and the
-                // original deadline still provide a bounded retry path.
-                eprintln!("Kernel WaitingJobs cancel signal failed: {error}");
-            }
-            return Ok(queued);
+        if kernel_authority::is_retired_kernel(self.database.run_control_binding(run_id)?.as_ref()) {
+            // B1: no Kernel loop owns this Run any more. Settle it like the
+            // startup retirement; there is nothing left to signal.
+            return self.database.retire_kernel_run(run_id);
         }
         let _ = self
             .database
@@ -3887,22 +3206,10 @@ impl RuntimeHost {
                 crate::database::EXECUTOR_ROUTE_UNKNOWN,
             ));
         }
-        if !matches!(route.as_ref(), Some(kernel_authority::RunRoute::PiNative))
-            && self.database.kernel_host_approval_target(approval_id)?.is_some()
-        {
-            let decision = match decision {
-                ApprovalDecision::AllowOnce => "allow_once",
-                ApprovalDecision::AllowConversation => "allow_conversation",
-                ApprovalDecision::Deny => "denied",
-            };
-            // Enqueueing is only a queue command: the durable Kernel decision is
-            // applied by the consumer. The dedicated replacement request is
-            // therefore settled when the consumer acknowledges the command —
-            // `complete_kernel_host_command`, in the same transaction as the
-            // durable transition — so an ordinary decision, the dedicated
-            // authorization and an executable dispatch can never disagree.
-            let queued = self.database.queue_kernel_host_approval(approval_id, decision)?;
-            return Ok(queued);
+        if kernel_authority::is_retired_kernel(binding.as_ref()) {
+            // B1: a historical Kernel approval has no consumer left; startup
+            // already expired it. Never resolve it on another path.
+            return Err(kernel_authority::retired_route_error());
         }
         // B) `resolve_approval` settles the ordinary decision AND the dedicated
         // whole-file replacement authorization in ONE transaction, so the waiting
@@ -4024,7 +3331,12 @@ impl RuntimeHost {
             }
         };
         self.digital_scheduler_stop.store(true, Ordering::SeqCst);
-        note("stop_kernel_runs", self.stop_kernel_runs());
+        if let Ok(mut state) = self.state.lock() {
+            // The registration and dispatch checks use the same lock, so a
+            // cleanup callback setting the display state to ready cannot reopen
+            // admission.
+            state.shutting_down = true;
+        }
         let child_hosts = self
             .child_hosts
             .lock()
@@ -4033,17 +3345,6 @@ impl RuntimeHost {
             .collect::<Vec<_>>();
         for (run_id, child_host) in child_hosts {
             if Arc::ptr_eq(&self.state, &child_host.state) { continue; }
-            let kernel_child = match self.database.run_control_binding(&run_id) {
-                Ok(binding) => binding.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()),
-                Err(error) => {
-                    note(&format!("child {run_id} binding"), Err(error));
-                    false
-                }
-            };
-            if kernel_child {
-                note(&format!("child {run_id} stop_kernel_runs"), child_host.stop_kernel_runs());
-                continue;
-            }
             note(&format!("child {run_id} stop_worker"), child_host.stop_worker_with_shutdown(false));
             if self.database.native_run_waiting_approval(&run_id).unwrap_or(false) { continue; }
             note(&format!("child {run_id} mark_interrupted"), self.database.mark_run_interrupted(
@@ -4096,8 +3397,7 @@ impl RuntimeHost {
             state.native_run_leases.remove(run_id);
             state.queue_changed.1.notify_all();
             let removed = state.worker.as_mut().is_some_and(|worker| worker.sessions.finish(run_id));
-            if state.kernel_active_runs.is_empty() && state.kernel_wake_inflight.is_empty()
-                && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
+            if state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
                 state.state = "ready".to_owned();
             }
             removed
@@ -4257,8 +3557,7 @@ impl RuntimeHost {
             .state
             .lock()
             .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-        state.state = if state.kernel_active_runs.is_empty()
-            && state.kernel_wake_inflight.is_empty() { "ready" } else { "busy" }.to_owned();
+        state.state = "ready".to_owned();
         state.runtime = runtime;
         state.runtime_version = runtime_version;
         state.capabilities = capabilities;
@@ -4432,15 +3731,6 @@ impl RuntimeHost {
                             runtime_host.handle_worker_transport_crash(&stdin, write_error);
                             return;
                         }
-                        // Legacy denied the preflight. Feed the shadow so the
-                        // kernel-side decision is compared against a real deny.
-                        runtime_host.shadow_feed_preflight(
-                            run_id,
-                            tool,
-                            &envelope,
-                            false,
-                            &json!({ "decision": "deny", "code": code }),
-                        );
                         continue;
                     }
                     let input = envelope
@@ -4507,12 +3797,6 @@ impl RuntimeHost {
                         runtime_host.handle_worker_transport_crash(&stdin, error);
                         return;
                     }
-                    // Online Shadow feed: run the same preflight through the
-                    // observation-only kernel and persist a comparison record.
-                    // Independent legacy facts come from THIS real decision; the
-                    // kernel side is the shadow controller's own decision. No
-                    // side effects; failures never affect the legacy response.
-                    runtime_host.shadow_feed_preflight(run_id, tool, &envelope, allowed, &payload);
                     continue;
                 }
 
@@ -4897,18 +4181,6 @@ impl RuntimeHost {
                             if !applied {
                                 continue;
                             }
-                            if payload.get("type").and_then(Value::as_str)
-                                == Some("run.request_snapshot")
-                            {
-                                // Freeze Shadow only after the Runtime has
-                                // emitted the actual composed prompt identity.
-                                // This event precedes every Pi tool event.
-                                runtime_host.bootstrap_shadow_context_from_request_snapshot(
-                                    &run_id,
-                                    &conversation_id,
-                                    &payload,
-                                );
-                            }
                             if payload.get("type").and_then(Value::as_str).is_some_and(
                                 |event_type| {
                                     crate::database::WORK_EVENT_TYPES.contains(&event_type)
@@ -4921,11 +4193,6 @@ impl RuntimeHost {
                                     let _ = database.apply_work_event(&event);
                                 }
                             }
-                            runtime_host.report_shadow_result((|| {
-                                runtime_host
-                                    .shadow_reconciler()?
-                                    .observe_applied_event(&run_id, &payload)
-                            })());
                             let notification = RuntimeEventNotification {
                                 conversation_id,
                                 runtime_session_id: envelope.runtime_session_id.clone(),
@@ -5063,9 +4330,6 @@ impl RuntimeHost {
             if let Err(error) = result { eprintln!("runtime crash persistence failed for {run}: {error}"); }
             if let Ok(mut state) = self.state.lock() { state.native_run_leases.remove(&run); }
             self.cancel_pending_approvals_for_run(&run);
-            self.shadow_feed_terminal(&run, "failed", crate::kernel::RunOutcome::Failed {
-                code: "runtime.process_crashed".into(), message: message.clone(),
-            }, Default::default());
             let _ = self.app.emit("fox://runtime-event", RuntimeEventNotification {
                 conversation_id: session.conversation_id, runtime_session_id: Some(session.runtime_session_id),
                 run_id: run.clone(), seq: self.database.next_run_seq(&run).unwrap_or(1), timestamp: protocol::timestamp(),
@@ -7297,6 +6561,33 @@ impl ToolApprovalPolicy {
         }
         let summary = preview.command.clone().unwrap_or_else(|| preview.summary.clone());
         database.record_permission_audit(conversation_id, Some(run_id), Some(tool_call_id), tool, &self.decision, &summary)
+    }
+}
+
+/// The exact scope key a call is measured against, computed by the same Host
+/// helpers the approval policy uses. `None` means the call cannot be named
+/// exactly (for example a host command with no target), and therefore no grant
+/// may ever cover it. An approval-time grant is registered against exactly the
+/// key a later admission compares. (Moved here from the removed Kernel shadow
+/// reconciler in B1; the behaviour is unchanged.)
+pub(crate) fn tool_operation_scope(tool: &str, input: &Value, project_root: Option<&str>) -> Option<String> {
+    if matches!(tool, "write_file" | "edit_file") {
+        let root = project_root?;
+        // A grant names a target, not a read version or an edit match. Those
+        // independent preconditions are checked against Host observations at
+        // admission and again at commit.
+        let target = crate::tool_host::canonical_file_identity(
+            std::path::Path::new(root), input.get("path")?.as_str()?).ok()?;
+        Some(permission_scope_hash("host-target", format!("{tool}\0{target}").as_bytes()))
+    } else if tool == "run_command" {
+        None
+    } else if tool == "call_mcp_tool" {
+        if let Some(scope) = office_grants::reusable_edit_scope(input, project_root) {
+            return Some(scope.key);
+        }
+        mcp_permission_scope(tool, input)
+    } else {
+        capability_permission_scope(tool, input)
     }
 }
 
@@ -9588,7 +8879,6 @@ async fn execute_knowledge_tool_request(
     )
 }
 
-
 /// KB-1: the cancellation probe for one knowledge tool call. A Run that has no
 /// cancellation scope (already retired) is treated as cancelled.
 fn knowledge_retrieval_control(
@@ -10869,8 +10159,6 @@ mod attachment_tests {
         inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes,
         node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload,
         pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package,
-        runtime_tool_event_succeeded, shadow_legacy_tool_decision, shadow_permission_snapshot_id,
-        shadow_preflight_input, shadow_preflight_tool_call_id, shadow_prompt_config_hash,
         should_attempt_recovery, structured_runtime_error, validate_envelope_identity_scope,
         validate_runtime_tool_authority, HostToolCallExecution, PendingApproval,
         RuntimeToolIngress,
@@ -10894,117 +10182,6 @@ mod attachment_tests {
         sync::mpsc,
     };
     use uuid::Uuid;
-
-    #[test]
-    fn shadow_preflight_uses_payload_tool_call_identity_and_approved_input() {
-        let envelope: RuntimeEnvelope = serde_json::from_value(json!({
-            "protocol": "fox-agent-runtime",
-            "version": 1,
-            "kind": "request",
-            "id": "transport-request-id",
-            "type": "tool.preflight",
-            "requestId": "different-response-correlation-id",
-            "conversationId": "conversation-1",
-            "runtimeSessionId": "session-1",
-            "runId": "run-1",
-            "timestamp": "2026-09-07T00:00:00Z",
-            "payload": {
-                "toolCallId": "pi-tool-call-id",
-                "tool": "ls",
-                "input": {}
-            }
-        }))
-        .unwrap();
-        assert_eq!(
-            shadow_preflight_tool_call_id(&envelope).unwrap(),
-            "pi-tool-call-id"
-        );
-        let mut missing_payload_id = envelope.clone();
-        missing_payload_id
-            .payload
-            .as_mut()
-            .and_then(|payload| payload.as_object_mut())
-            .unwrap()
-            .remove("toolCallId");
-        assert!(shadow_preflight_tool_call_id(&missing_payload_id).is_err());
-        assert_eq!(
-            shadow_preflight_input(
-                &envelope,
-                true,
-                &json!({"decision":"allow","input":{"path":"."}}),
-            ),
-            json!({"path":"."})
-        );
-        assert_eq!(
-            shadow_preflight_input(
-                &envelope,
-                false,
-                &json!({"decision":"block","input":{"path":"ignored"}}),
-            ),
-            json!({})
-        );
-    }
-
-    #[test]
-    fn shadow_prompt_hash_tracks_runtime_prompt_identity_only() {
-        let snapshot = json!({
-            "type": "run.request_snapshot",
-            "stablePromptHash": "stable-a",
-            "contextHash": "context-a",
-            "promptDefinitionId": "fox-runtime",
-            "promptVersion": 7,
-            "promptContentHash": "content-a",
-            "contextSchemaHash": "schema-a",
-            "promptCacheIdentity": "cache-a",
-            "executionProfile": {"id":"durable_v2"},
-            "toolCatalogHash": "tools-a",
-            "promptDiagnostics": {"tokens": 123}
-        });
-        let base = shadow_prompt_config_hash(&snapshot).unwrap();
-        let mut diagnostics_only = snapshot.clone();
-        diagnostics_only["promptDiagnostics"] = json!({"tokens": 999});
-        assert_eq!(base, shadow_prompt_config_hash(&diagnostics_only).unwrap());
-        let mut prompt_changed = snapshot.clone();
-        prompt_changed["promptContentHash"] = json!("content-b");
-        assert_ne!(base, shadow_prompt_config_hash(&prompt_changed).unwrap());
-        let mut stable_changed = snapshot;
-        stable_changed["stablePromptHash"] = json!("stable-b");
-        assert_ne!(base, shadow_prompt_config_hash(&stable_changed).unwrap());
-        assert!(shadow_prompt_config_hash(&json!({"type":"run.request_snapshot"})).is_err());
-    }
-
-    #[test]
-    fn shadow_permission_hash_is_content_addressed_and_event_errors_fail() {
-        assert_eq!(
-            shadow_permission_snapshot_id("ask", "D:/project|ReadWrite"),
-            shadow_permission_snapshot_id("ask", "D:/project|ReadWrite")
-        );
-        assert_ne!(
-            shadow_permission_snapshot_id("ask", "D:/project|ReadWrite"),
-            shadow_permission_snapshot_id("read-only", "D:/project|ReadWrite")
-        );
-        assert!(runtime_tool_event_succeeded(
-            &json!({"type":"tool.completed","isError":false})
-        ));
-        assert!(!runtime_tool_event_succeeded(
-            &json!({"type":"tool.completed","isError":true})
-        ));
-        assert!(!runtime_tool_event_succeeded(
-            &json!({"type":"tool.failed"})
-        ));
-        assert_eq!(
-            shadow_legacy_tool_decision("write_file", "host", true).unwrap(),
-            "approval"
-        );
-        assert_eq!(
-            shadow_legacy_tool_decision("write_file", "runtime", false).unwrap(),
-            "deny"
-        );
-        assert_eq!(
-            shadow_legacy_tool_decision("graph_readonly_run", "runtime", false).unwrap(),
-            "allow"
-        );
-    }
 
     fn authority_manifest(tool_names: &[&str]) -> RuntimeCapabilityManifest {
         RuntimeCapabilityManifest {

@@ -1,7 +1,9 @@
 //! Request accounting is telemetry, not a second controller or budget authority.
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
+use super::now_ms;
+#[cfg(test)]
+use super::Database;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -74,6 +76,9 @@ pub(super) fn store(tx: &Transaction<'_>, run: &str, record: &Value) -> rusqlite
     tx.execute("INSERT INTO run_events(id,run_id,seq,event_type,event_json,created_at) VALUES(?1,?2,?3,'usage.request',?4,?5)",params![id,run,seq,payload,now_ms()])?;
     Ok(())
 }
+/// Test entry point for `store`; production records usage inside the native
+/// event transaction (the Kernel model worker that called this was removed in B1).
+#[cfg(test)]
 impl Database {
     pub(crate) fn record_model_usage(&self, run: &str, record: &Value) -> Result<(), String> {
         self.with_connection(|conn| {

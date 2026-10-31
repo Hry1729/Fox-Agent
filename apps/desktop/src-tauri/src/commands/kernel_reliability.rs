@@ -19,8 +19,7 @@ pub fn kernel_reliability_snapshot(state:State<'_,AppState>,request:ReliabilityR
         })?;
         let rows=jobs.iter().map(|id|state.database.kernel_job_snapshot(id)).collect::<Result<Vec<_>,_>>()?;
         let context=run.as_ref().map(|id|state.database.kernel_context_budget(&request.conversation_id,id)).transpose()?.flatten();
-        let continuable=state.database.kernel_list_continuable_runs(&request.conversation_id)?.into_iter().filter(|r|r.resumed_by_run_id.is_none()).collect::<Vec<_>>();
-        Ok(json!({"runId":run,"contextBudget":context,"jobs":rows,"continuable":continuable}))
+        Ok(json!({"runId":run,"contextBudget":context,"jobs":rows}))
     })();
     match result {Ok(value)=>ApiResponse::success(value),Err(e)=>ApiResponse::failure("kernel.reliability_unavailable",e,false)}
 }

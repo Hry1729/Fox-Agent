@@ -1,8 +1,6 @@
 pub(crate) mod agent_backend_routing;
-mod kernel_continuation;
 mod kernel_reliability;
 mod kernel_reconciliation;
-pub use kernel_continuation::*;
 pub use kernel_reliability::*;
 pub use kernel_reconciliation::*;
 #[allow(unused_imports)]
@@ -2399,9 +2397,8 @@ mod command_tests {
         assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || panic!("unbound Legacy Run must not route to Kernel")).unwrap(), None);
         db.freeze_kernel_run_control(&run.id, "legacy", fox_engine_protocol::TimeBudgets::default()).unwrap();
         assert!(db.mark_run_cancelling(&run.id).is_err());
-        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || db.queue_kernel_host_command(&run.id, None)).unwrap(), Some(true));
-        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || db.queue_kernel_host_command(&run.id, None)).unwrap(), Some(false));
-        assert_eq!(db.pending_kernel_host_commands(&run.id).unwrap().len(), 1);
+        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || Ok(true)).unwrap(), Some(true));
+        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || Ok(false)).unwrap(), Some(false));
         assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || Err("owner unavailable".into())).unwrap_err(), "owner unavailable");
         let detail = db.load_conversation(&conversation.id).unwrap();
         assert_eq!(detail.last_run.unwrap().status, "queued");

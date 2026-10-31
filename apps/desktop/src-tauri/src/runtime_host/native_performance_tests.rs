@@ -127,8 +127,7 @@ impl Drop for FixturePermit {
 fn terminal(status: &str) -> bool { matches!(status, "completed" | "cancelled" | "failed" | "interrupted") }
 fn ownership_released(host: &RuntimeHost, run: &str) -> bool {
     let state = host.state.lock().unwrap();
-    !state.kernel_active_runs.contains(run) && !state.kernel_wake_inflight.contains(run)
-        && !state.native_run_leases.contains_key(run) && !state.dispatching_runs.contains_key(run)
+    !state.native_run_leases.contains_key(run) && !state.dispatching_runs.contains_key(run)
         && state.worker.as_ref().is_none_or(|worker| worker.sessions.by_run(run).is_none())
 }
 
@@ -142,8 +141,7 @@ fn start_observer(host: RuntimeHost, observations: Observations, clock: Instant,
             for id in ids {
                 let active = {
                     let state = host.state.lock().unwrap();
-                    state.kernel_active_runs.contains(&id)
-                        || state.worker.as_ref().is_some_and(|worker|worker.sessions.by_run(&id).is_some())
+                    state.worker.as_ref().is_some_and(|worker|worker.sessions.by_run(&id).is_some())
                 };
                 if active {
                     if let Some(row) = observations.lock().unwrap().get_mut(&id) { row.host_active_ms.get_or_insert(elapsed(clock)); }

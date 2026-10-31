@@ -534,7 +534,6 @@ mod tests {
         let queued:i64=database.with_connection(|connection|connection.query_row(
             "SELECT COUNT(*) FROM kernel_host_commands",[],|row|row.get(0))).unwrap();
         assert_eq!(queued,0,"a native approval must not enter the Kernel command queue");
-        assert!(database.kernel_host_approval_target(&approval_id).unwrap().is_none());
     }
 
     #[test]
@@ -552,7 +551,6 @@ mod tests {
         let status:String=database.with_connection(|connection|connection.query_row(
             "SELECT status FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
         assert_eq!(status,"denied");
-        assert!(database.kernel_host_approval_target(&approval_id).unwrap().is_none());
         let command_count:i64=database.with_connection(|connection|connection.query_row(
             "SELECT COUNT(*) FROM kernel_host_commands",[],|row|row.get(0))).unwrap();
         assert_eq!(command_count,0);

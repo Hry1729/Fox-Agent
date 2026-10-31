@@ -350,30 +350,6 @@ pub(crate) mod test_hooks {
         *AT_SETTLE.lock().unwrap() = hook;
     }
 
-    /// Removes the per-Run gate when it drops, including while a parallel test
-    /// unwinds, so a gate can never leak into another Run's Jobs.
-    pub(crate) struct SettleGate {
-        run_id: String,
-    }
-
-    impl Drop for SettleGate {
-        fn drop(&mut self) {
-            with_run_gates(|gates| { gates.remove(&self.run_id); });
-        }
-    }
-
-    pub(crate) fn gate_at_settle_for_run(run_id: &str, hook: RunHook) -> SettleGate {
-        let previous = with_run_gates(|gates| gates.insert(run_id.to_owned(), hook));
-        assert!(previous.is_none(), "a settlement gate is already registered for this Run");
-        SettleGate { run_id: run_id.to_owned() }
-    }
-
-    /// Whether a per-Run settlement gate is registered right now. The cleanup
-    /// negative probe asserts the registration is gone after it unwinds.
-    pub(crate) fn settle_gate_registered(run_id: &str) -> bool {
-        with_run_gates(|gates| gates.contains_key(run_id))
-    }
-
     /// `job` is the settling Job identity, empty when the adapter cannot name
     /// it. A Run-scoped gate owns the settlement; every other Run keeps the
     /// original global hook.

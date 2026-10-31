@@ -380,26 +380,6 @@ pub(crate) mod finalize_fault {
         static DONE: Cell<usize> = const { Cell::new(0) };
     }
 
-    /// Arm the fault: the next finalize aborts once `count` updates were applied,
-    /// exactly like a process death inside the transaction (which therefore
-    /// rolls back as a whole — the caller only observes the abort).
-    pub(crate) fn abort_after(count: usize) {
-        ABORT_AFTER.with(|value| value.set(Some(count)));
-        DONE.with(|value| value.set(0));
-    }
-
-    pub(crate) fn disarm() {
-        ABORT_AFTER.with(|value| value.set(None));
-        DONE.with(|value| value.set(0));
-    }
-
-    /// Read-only probe for test diagnostics: `(armed limit, item updates counted
-    /// on this thread since arming)`. The fault fired iff `counted > limit`.
-    /// Must be read before `disarm`, which resets both.
-    pub(crate) fn observed() -> (Option<usize>, usize) {
-        (ABORT_AFTER.with(Cell::get), DONE.with(Cell::get))
-    }
-
     /// Called before each item update; returns true when this update must abort.
     pub(crate) fn should_abort() -> bool {
         DONE.with(|done| {
@@ -420,22 +400,6 @@ pub(crate) mod stage_fault {
     thread_local! {
         static ABORT_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
         static DONE: Cell<usize> = const { Cell::new(0) };
-    }
-
-    pub(crate) fn abort_after(count: usize) {
-        ABORT_AFTER.with(|value| value.set(Some(count)));
-        DONE.with(|value| value.set(0));
-    }
-
-    pub(crate) fn disarm() {
-        ABORT_AFTER.with(|value| value.set(None));
-        DONE.with(|value| value.set(0));
-    }
-
-    /// Read-only probe for test diagnostics: `(armed limit, stage rows counted
-    /// on this thread since arming)`. The fault fired iff `counted > limit`.
-    pub(crate) fn observed() -> (Option<usize>, usize) {
-        (ABORT_AFTER.with(Cell::get), DONE.with(Cell::get))
     }
 
     pub(crate) fn should_abort() -> bool {
@@ -475,16 +439,6 @@ fn same_delivery_artifact(left: &str, right: &str) -> bool {
     }
     let (short, long) = if left.len() <= right.len() { (left, right) } else { (right, left) };
     long.ends_with(short) && long.as_bytes()[long.len() - short.len() - 1] == b'/'
-}
-
-/// Cancellation is not a verification verdict. Preserve pending and checked_at
-/// while attaching a reason to every item which still needs verification.
-pub(super) fn cancelled_unverified(transaction: &rusqlite::Transaction<'_>, run_id: &str, now: i64) -> rusqlite::Result<()> {
-    transaction.execute("UPDATE delivery_checklist_items SET finding_json=?2, updated_at=?3
-        WHERE run_id=?1 AND status='pending' AND checked_at IS NULL AND finding_json IS NULL",
-        params![run_id, serde_json::json!({"reasonCode":"delivery.cancelled_unverified",
-            "reason":"运行已取消，此交付项未完成核验","verificationStatus":"unverified","cancelled":true}).canonical_string(), now])?;
-    Ok(())
 }
 
 impl Database {
@@ -1019,42 +973,6 @@ impl Database {
         })
     }
 
-    /// Retain a typed v2 verdict's **non-terminal** items on the pending path.
-    ///
-    /// A `Unconfirmed` delivery is neither a pass nor a failure. Writing it
-    /// through the terminal stage would be wrong in a specific, silent way: the
-    /// stage's `passed = 0` is finalized as `failed`, so "the content was never
-    /// verified" would become "the content failed". This writes the finding only
-    /// and leaves the status `pending`, which is the ledger's existing
-    /// non-terminal state — no new status string and no migration.
-    ///
-    /// The status is asserted in the `WHERE` clause so a row that already carries
-    /// a terminal verdict is never reopened by a retention write.
-    pub(crate) fn retain_pending_delivery_findings(
-        &self,
-        run_id: &str,
-        items: &[(String, String)],
-        now: i64,
-    ) -> Result<usize, String> {
-        if items.is_empty() {
-            return Ok(0);
-        }
-        self.with_connection(|conn| {
-            let transaction = conn.unchecked_transaction()?;
-            let mut written = 0usize;
-            for (item_key, finding) in items {
-                written += transaction.execute(
-                    "UPDATE delivery_checklist_items
-                     SET finding_json=?1, updated_at=?2
-                     WHERE run_id=?3 AND item_key=?4 AND status='pending'",
-                    params![finding, now, run_id, item_key],
-                )?;
-            }
-            transaction.commit()?;
-            Ok(written)
-        })
-    }
-
     pub(crate) fn delivery_checklist(
         &self,
         run_id: &str,
@@ -1083,27 +1001,6 @@ impl Database {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
-        })
-    }
-
-    pub(crate) fn record_delivery_repair_round(
-        &self,
-        run_id: &str,
-        findings_json: &str,
-        now: i64,
-    ) -> Result<i64, String> {
-        self.with_connection(|conn| {
-            let round = conn.query_row(
-                "SELECT COALESCE(MAX(round),0)+1 FROM delivery_repair_rounds WHERE run_id=?1",
-                params![run_id],
-                |row| row.get::<_, i64>(0),
-            )?;
-            conn.execute(
-                "INSERT INTO delivery_repair_rounds(run_id, round, findings_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![run_id, round, findings_json, now],
-            )?;
-            Ok(round)
         })
     }
 

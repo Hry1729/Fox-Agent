@@ -56,13 +56,6 @@ pub(crate) fn configured_engine() -> Result<String, String> {
     ))
 }
 
-/// A native engine executable is never captured any more: the only engine is
-/// Pi, which runs in the sidecar and has no native binary to attest.
-pub(crate) fn capture_native_adapter(engine: &str) -> Result<Option<NativeAdapterConfig>, String> {
-    if engine == SUPPORTED_KERNEL_ENGINE { return Ok(None); }
-    Err(retired_engine_error(engine))
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct KernelModelConfig {
@@ -303,15 +296,6 @@ mod tests {
         }
         for engine in ["gpt", "codex-cli", "pi-1.4.0"] {
             let refusal = with_engine_env(Some(engine), configured_engine).unwrap_err();
-            assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
-        }
-    }
-
-    #[test]
-    fn a_native_adapter_is_never_captured() {
-        assert_eq!(capture_native_adapter("pi"), Ok(None));
-        for engine in RETIRED_KERNEL_ENGINES {
-            let refusal = capture_native_adapter(engine).unwrap_err();
             assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
         }
     }

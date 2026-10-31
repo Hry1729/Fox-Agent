@@ -236,24 +236,6 @@ pub(super) fn execute_with_credential(
     (response, evidence, outcome)
 }
 
-/// Consumes the Host's non-cloneable first-claim capability. No model value
-/// can construct this token, and this adapter never claims a second time.
-pub(super) fn execute_authorized(
-    database: &Database, run_id: &str, input: &Value, root: &Path,
-    token: &CancellationToken, budget: Duration,
-    claim: super::kernel_host::ClaimedExecution,
-) -> (Result<Value, String>, ExecutionEvidence, CallOutcome) {
-    let mut evidence = ExecutionEvidence::NotStarted;
-    let mut outcome = CallOutcome::Completed;
-    let response = execute_inner(database, run_id, input, root, token, budget,
-        Arc::new(crate::process_jobs::FoxJobBackend), Some(claim.credential()),
-        &mut evidence, &mut outcome);
-    if let Err(error) = &response {
-        outcome = CallOutcome::Failed { code: error.clone() };
-    }
-    (response, evidence, outcome)
-}
-
 /// Field equality against durable authority, not digest self-consistency.
 /// This runs both before job creation and at the manager reception boundary.
 fn verify_start(
