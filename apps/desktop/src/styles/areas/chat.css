@@ -60,3 +60,120 @@
 .fox-message-failure-meta {
   color: var(--fox-muted);
 }
+
+/* C6：补充信息卡与审批卡同一套圆角、内边距和行距。旧规则把 chip 圆角写死，这里覆盖。 */
+.fox-prompt-shell.is-decision:has(.fox-question-decision-content),
+.fox-question-prompt {
+  border-radius: var(--fox-radius-composer);
+}
+
+.fox-decision-card:has(.fox-question-decision-content) {
+  padding: var(--fox-card-padding);
+}
+
+.fox-question-prompt {
+  padding: var(--fox-card-padding);
+}
+
+.fox-question-decision-content {
+  gap: var(--fox-space-l);
+}
+
+.fox-question-decision-content > header {
+  align-items: center;
+  gap: var(--fox-space-m);
+}
+
+.fox-question-decision-content > header > span {
+  width: var(--fox-icon-size-xl);
+  height: var(--fox-icon-size-xl);
+  flex-basis: var(--fox-icon-size-xl);
+  border-radius: var(--fox-radius-control);
+}
+
+.fox-question-decision-content > header > span > svg {
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
+}
+
+.fox-question-decision-content > header > div {
+  gap: var(--fox-space-micro);
+}
+
+.fox-question-decision-list {
+  gap: var(--fox-space-l);
+}
+
+.fox-question-field {
+  gap: var(--fox-space-s);
+}
+
+.fox-question-field > div {
+  gap: var(--fox-space-s);
+}
+
+.fox-question-decision-content .fox-question-suggestions {
+  gap: var(--fox-space-s) !important;
+}
+
+.fox-question-suggestions button,
+.fox-question-confirmation button,
+.fox-question-options button {
+  border-radius: var(--fox-radius-chip);
+}
+
+.fox-question-suggestions button,
+.fox-question-confirmation button {
+  height: var(--fox-control-sm);
+  min-height: var(--fox-control-sm);
+  padding-inline: var(--fox-space-l);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-question-options {
+  gap: var(--fox-space-s);
+  margin-top: var(--fox-space-l);
+}
+
+.fox-question-options button {
+  gap: var(--fox-space-m);
+  padding: var(--fox-space-s) var(--fox-space-m);
+  transition:
+    border-color var(--fox-duration-fast) var(--fox-ease-out),
+    background-color var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+.fox-question-options button:hover,
+.fox-question-options button:focus-visible {
+  transform: none;
+}
+
+.fox-question-decision-actions {
+  gap: var(--fox-space-m);
+}
+
+.fox-question-decision-content input {
+  min-height: var(--fox-field-height);
+  border-radius: var(--fox-radius-chip);
+}
+
+.fox-question-decision-actions > button {
+  min-height: var(--fox-control-md);
+  border-radius: var(--fox-radius-pill);
+  padding-inline: var(--fox-space-l);
+}
+
+.fox-question-suggestions button:focus-visible,
+.fox-question-confirmation button:focus-visible,
+.fox-question-decision-actions button:focus-visible,
+.fox-question-decision-content input:focus-visible,
+.fox-question-options button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-question-options button {
+    transition: none;
+  }
+}
