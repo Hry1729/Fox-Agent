@@ -15,8 +15,8 @@ function Switch({ className, size = 'default', onCheckedChange, asChild, childre
     data-size={size}
     onCheckedChange={(checked: boolean) => onCheckedChange?.(checked)}
     pressedWidth={size === 'sm' ? 14 : 16}
-    thumbClassName={size === 'sm' ? 'size-3' : 'size-3.5'}
-    className={cn('group/switch inline-flex px-0 shadow-none motion-reduce:transition-none after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:ring-2 focus-visible:ring-ring/30 aria-invalid:border-destructive aria-invalid:ring-2 aria-invalid:ring-destructive/20 data-disabled:cursor-not-allowed data-disabled:opacity-50', size === 'sm' ? 'h-[14px] w-[24px]' : 'h-[16.6px] w-[28px]', className)}
+    thumbClassName="bg-[var(--fox-settings-switch-thumb)] shadow-none"
+    className={cn('group/switch inline-flex border-transparent px-0 shadow-none motion-reduce:transition-none after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:ring-0 focus-visible:outline-none aria-invalid:border-destructive data-[unchecked]:bg-[var(--fox-settings-switch-off)] data-[unchecked]:border-[var(--fox-settings-switch-off)] dark:data-[unchecked]:bg-[var(--fox-settings-switch-off)] data-disabled:cursor-not-allowed data-disabled:opacity-100', className)}
   />
 }
 

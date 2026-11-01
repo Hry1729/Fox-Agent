@@ -3,3 +3,79 @@
    规则：只引用 globals.css / themes.css 里的设计 token（--fox-space-*、--fox-radius-*、--fox-type-*、
    --fox-icon-size-*、--fox-shadow-*、--fox-duration-* 等），不写裸 px / ms / 颜色值；
    0、1px 描边、百分比和 auto 除外。 */
+
+/* 开关尺寸与关闭态。轨道要比页面底和拇指都拉开（非文字对比 ≥ 3:1）。 */
+:root {
+  --fox-settings-switch-height-sm: calc(var(--fox-space-l) + var(--fox-space-micro));
+  --fox-settings-switch-width-sm: var(--fox-space-3xl);
+  --fox-settings-switch-height: var(--fox-space-xl);
+  --fox-settings-switch-width: calc(var(--fox-space-3xl) + var(--fox-space-xs));
+  --fox-settings-switch-thumb-sm: var(--fox-space-l);
+  --fox-settings-switch-thumb-size: calc(var(--fox-space-l) + var(--fox-space-micro));
+  --fox-settings-switch-travel-sm: calc(var(--fox-space-m) + var(--fox-space-micro));
+  --fox-settings-switch-travel: var(--fox-space-l);
+  /* 亮色：border-strong 偏浅，往前景色压一档，白拇指才站得住。 */
+  --fox-settings-switch-off: color-mix(in oklch, var(--fox-border-strong) 65%, var(--foreground) 35%);
+  --fox-settings-switch-thumb: var(--background);
+}
+
+.dark {
+  /* 暗色：border-strong 本身已经掺了前景色，再略提亮，避免和底融在一起。 */
+  --fox-settings-switch-off: color-mix(in oklch, var(--fox-border-strong) 72%, var(--foreground) 28%);
+  --fox-settings-switch-thumb: var(--foreground);
+}
+
+[data-slot='switch'] {
+  border-color: transparent;
+  transition: background-color var(--fox-duration-fast) var(--fox-ease-out), border-color var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+[data-slot='switch'][data-size='sm'] {
+  --fox-settings-switch-travel: var(--fox-settings-switch-travel-sm);
+  width: var(--fox-settings-switch-width-sm);
+  height: var(--fox-settings-switch-height-sm);
+}
+
+[data-slot='switch'][data-size='default'] {
+  width: var(--fox-settings-switch-width);
+  height: var(--fox-settings-switch-height);
+}
+
+[data-slot='switch'][data-unchecked],
+[data-slot='switch'][data-state='unchecked'] {
+  background-color: var(--fox-settings-switch-off);
+  border-color: var(--fox-settings-switch-off);
+}
+
+[data-slot='switch'] [data-slot='switch-thumb'] {
+  background-color: var(--fox-settings-switch-thumb);
+  transition: background-color var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+[data-slot='switch'][data-size='sm'] [data-slot='switch-thumb'] {
+  width: var(--fox-settings-switch-thumb-sm);
+  height: var(--fox-settings-switch-thumb-sm);
+}
+
+[data-slot='switch'][data-size='default'] [data-slot='switch-thumb'] {
+  width: var(--fox-settings-switch-thumb-size);
+  height: var(--fox-settings-switch-thumb-size);
+}
+
+[data-slot='switch'][data-checked] [data-slot='switch-thumb'],
+[data-slot='switch'][data-state='checked'] [data-slot='switch-thumb'] {
+  background-color: var(--primary-foreground);
+}
+
+[data-slot='switch']:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot='switch'],
+  [data-slot='switch'] [data-slot='switch-thumb'] {
+    transition: none;
+  }
+}
