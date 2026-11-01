@@ -1560,11 +1560,31 @@ export function useDesktopConversation(): DesktopConversationState {
       // The Host routes by the frozen value; sending it lets a stale view be
       // refused as misrouted instead of acting on another backend's run.
       await desktopClient.cancelRun(runId, frozenBackendFor(conversationId))
-      const deadline = Date.now() + 8_000
+      // 13.37：Host 收到停止就把 Run 记为 cancelling；立刻把这个状态放到界面上（「正在取消」），
+      // 后端确认、宽限和清扫在后台完成，期间每次读到状态变化都刷新一次。外部 Agent 最长要等
+      // 取消确认超时（15 秒）加清扫，所以这里的等待上限比它长。
+      const deadline = Date.now() + 20_000
       let persisted = await desktopClient.loadConversation(conversationId)
+      let shownStatus: string | undefined
+      const showProgress = (next: ConversationDetail) => {
+        const status = next.lastRun?.id === runId ? next.lastRun.status : undefined
+        if (status === shownStatus || activeConversationIdRef.current !== conversationId) return
+        shownStatus = status
+        setDetail((current) => {
+          if (current?.conversation.id !== conversationId) return current
+          const merged = mergeConversationDetail(next, current)
+          // 进入 cancelling 不产生 Run 事件、last_seq 不变，合并会保留旧的 running；以刚读到的 Host 状态为准。
+          if (status && merged.lastRun?.id === runId && next.lastRun && merged.lastRun.status !== status) {
+            return { ...merged, lastRun: { ...merged.lastRun, status, finishedAt: next.lastRun.finishedAt } }
+          }
+          return merged
+        })
+      }
+      showProgress(persisted)
       while (persisted.lastRun?.id === runId && runIsActive(persisted) && Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 100))
         persisted = await desktopClient.loadConversation(conversationId)
+        showProgress(persisted)
       }
       if (persisted.lastRun?.id === runId && runIsActive(persisted)) {
         const details = {

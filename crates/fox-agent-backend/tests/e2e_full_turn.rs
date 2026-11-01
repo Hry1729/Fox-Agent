@@ -625,6 +625,14 @@ async fn run_full_turn(backend: AgentBackend) {
         types_of(&third)
     );
     let swept = &third[swept_at];
+    // 13.37：清扫记录带上取消链路各段耗时，宽限期是固定的 CANCEL_SWEEP_GRACE。
+    let timing = &swept["timing"];
+    assert!(timing["confirmMs"].is_u64(), "cancel_swept 应记录确认耗时: {swept}");
+    assert!(
+        timing["graceMs"].as_u64().is_some_and(|grace| grace >= fox_agent_backend::external::CANCEL_SWEEP_GRACE.as_millis() as u64),
+        "宽限期耗时应不短于 CANCEL_SWEEP_GRACE: {swept}"
+    );
+    assert!(timing["sweepMs"].is_u64(), "cancel_swept 应记录清扫耗时: {swept}");
     let killed_count = swept["killed"]["count"]
         .as_u64()
         .unwrap_or_else(|| panic!("killed.count 缺失: {swept}"));

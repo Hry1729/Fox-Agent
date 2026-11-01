@@ -88,6 +88,23 @@ pub const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
 /// 取消已被后端确认、进程仍保留时，先等后端自己回收工具子进程，再由 Host 清扫本轮新进程。
 pub const CANCEL_SWEEP_GRACE: Duration = Duration::from_millis(1500);
 
+/// 13.37：取消链路的耗时记录（点停止 → 后端确认 → 宽限 → 清扫）。只做观测，不改变取消语义。
+#[derive(Debug, Clone, Copy)]
+struct CancelTiming {
+    requested_at: Option<std::time::Instant>,
+    confirmed_at: std::time::Instant,
+}
+
+impl CancelTiming {
+    fn details(&self, sweep_started: std::time::Instant) -> Value {
+        json!({
+            "confirmMs": self.requested_at.map(|requested| self.confirmed_at.saturating_duration_since(requested).as_millis() as u64),
+            "graceMs": sweep_started.saturating_duration_since(self.confirmed_at).as_millis() as u64,
+            "sweepMs": sweep_started.elapsed().as_millis() as u64,
+        })
+    }
+}
+
 /// How often the pump checks whether the backend process exited.
 pub const EXIT_POLL: Duration = Duration::from_millis(250);
 
@@ -261,6 +278,9 @@ pub mod failure_codes {
     pub const EXITED_ON_START: &str = "agent_backend_exited_on_start";
     /// The process died during a turn (retry).
     pub const EXITED: &str = "agent_backend_exited";
+    /// 13.37：dsh 的 Windows 写入沙箱给项目目录加授权（`grantWrite`）时被系统拒绝访问，
+    /// 随后进程退出。用户需要先拿到项目目录的权限，单纯重发不一定能解决。
+    pub const WORKSPACE_ACL_DENIED: &str = "agent_backend_workspace_acl_denied";
     /// The Fox tool bridge could not be prepared, or (pi) the Fox tool
     /// extension did not reach / finish the bridge handshake (install /
     /// restart Fox).
@@ -268,6 +288,45 @@ pub mod failure_codes {
     /// `session/new` / `session/load` unanswered within
     /// [`super::SESSION_OPEN_TIMEOUT`] (retry).
     pub const SESSION_TIMEOUT: &str = "agent_backend_session_timeout";
+}
+
+/// 13.37：后端在一轮进行中退出时的失败码和人话。dsh 的 Windows 写入沙箱
+/// （`@deepseek-ai/dsh-sandbox-windows-acl`）在第一次执行命令时给项目目录写 ACE 与 Low 完整性标签，
+/// `SetNamedSecurityInfoW` 被拒绝访问（Win32 5）时进程会退出；这里把它单独归类，说明原因和办法，
+/// 其余退出仍是 [`failure_codes::EXITED`]。只看已脱敏的 stderr 尾部，不改变退出的判定。
+pub fn backend_exit_failure(tail: &str) -> (&'static str, String) {
+    let acl_denied = tail.contains("grantWrite(")
+        && tail.contains("SetNamedSecurityInfoW")
+        && (tail.contains("Win32 5)") || tail.contains("0x00000005") || tail.contains("Access is denied") || tail.contains("拒绝访问"));
+    if acl_denied {
+        let path = tail
+            .split("grantWrite(")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+        let target = path.map(|path| format!("「{}」", crate::external::display_path(path))).unwrap_or_else(|| "项目目录".to_owned());
+        return (
+            failure_codes::WORKSPACE_ACL_DENIED,
+            format!(
+                "dsh 没能给{target}加上写入授权：Windows 拒绝访问。常见原因是这个目录或里面的文件属于管理员等其他账户（例如用管理员身份复制进来），当前用户无权修改它们的权限。请在该目录的「属性 → 安全 → 高级」里把所有者改为当前用户并勾选「替换子容器和对象的所有者」，或给当前用户完全控制，然后重新发送。"
+            ),
+        );
+    }
+    let message = if tail.trim().is_empty() {
+        "外部后端进程意外退出".to_owned()
+    } else {
+        format!("外部后端进程意外退出；后端输出（已脱敏）：{}", tail_chars(tail, 600))
+    };
+    (failure_codes::EXITED, format!("{message}（请重新发送；反复出现时查看诊断里的后端输出，或重新安装 Fox 外部运行时）"))
+}
+
+/// 展示用路径：去掉 Windows 的 verbatim 前缀（`\\?\`、`\\?\UNC\`）。执行用的路径不变。
+pub fn display_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
 }
 
 fn initialize_failure_code(code: crate::acp::InitializeFailureCode) -> (&'static str, String) {
@@ -603,6 +662,8 @@ struct Turn {
     baseline_seq: u64,
     /// 取消超时后会停掉整个连接，不再按基线清扫。
     skip_cancel_sweep: bool,
+    /// 13.37：用户点停止的时刻，用来记录取消链路各段耗时（确认、宽限、清扫）。
+    cancel_requested_at: Option<std::time::Instant>,
 }
 
 impl Turn {
@@ -625,6 +686,7 @@ impl Turn {
             process_baseline: None,
             baseline_seq: 0,
             skip_cancel_sweep: false,
+            cancel_requested_at: None,
         }
     }
 }
@@ -892,6 +954,19 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             .flatten();
         let sweep_seq = turn.baseline_seq;
         let sweep_generation = state.generation;
+        let cancel_requested_at = turn.cancel_requested_at;
+        if matches!(&terminal, TurnTerminal::Cancelled) {
+            if let Some(requested_at) = cancel_requested_at {
+                // 13.37：取消链路耗时第一段：点停止 → 后端确认本轮结束（或超时判定）。
+                eprintln!(
+                    "fox.external conversation={} run={run_id} agent_backend={} cancel_settled_ms={} sweep_pending={}",
+                    session.conversation_id,
+                    session.backend.as_str(),
+                    requested_at.elapsed().as_millis(),
+                    sweep.is_some()
+                );
+            }
+        }
         let terminal_event = terminal.event(Value::Object(extra));
         state.turn = None;
         for event in events {
@@ -901,7 +976,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             // 13.35：清扫结果（agent_backend.cancel_swept）必须在 Run 进入终态之前写入，
             // 终态之后 Host 拒收任何 Run 事件。终态事件交给清扫任务，清扫记录之后再发；
             // 任何一条路径（连接换代、会话已关）都保证终态一定发出。
-            Some(baseline) => self.schedule_cancel_sweep(session, run_id, sweep_generation, sweep_seq, baseline, terminal_event),
+            Some(baseline) => self.schedule_cancel_sweep(session, run_id, sweep_generation, sweep_seq, baseline, terminal_event, cancel_requested_at),
             None => self.emit(session, run_id, terminal_event),
         }
     }
@@ -1685,17 +1760,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     state.turn.as_ref().map(|turn| (turn.run_id.clone(), turn.prompt_error.clone(), turn.prompt_error_data.clone()))
                 {
                     let tail = connection.as_ref().map(|connection| connection.diagnostic_stderr_tail()).unwrap_or_default();
-                    let message = if tail.trim().is_empty() {
-                        "外部后端进程意外退出".to_owned()
-                    } else {
-                        format!("外部后端进程意外退出；后端输出（已脱敏）：{}", tail_chars(&tail, 600))
-                    };
-                    let message = format!("{message}（请重新发送；反复出现时查看诊断里的后端输出，或重新安装 Fox 外部运行时）");
+                    let (code, message) = backend_exit_failure(&tail);
                     self.finish_turn(
                         session,
                         &mut state,
                         &run_id,
-                        TurnTerminal::Failed { code: failure_codes::EXITED.into(), message },
+                        TurnTerminal::Failed { code: code.into(), message },
                         with_diagnostics(
                             json!({ "outcome": "unknown", "promptError": prompt_error }),
                             stderr_diagnostic(&tail, "backend_exited"),
@@ -1731,6 +1801,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 return CancelOutcome::NotActive;
             };
             turn.cancel_requested = true;
+            turn.cancel_requested_at.get_or_insert_with(std::time::Instant::now);
             turn.arbiter.request_cancel();
             turn.approvals.clear();
             (connection.filter(|_| turn.prompt_sent), native, generation)
@@ -1786,13 +1857,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     }
 
     /// 宽限期在定时器上等，真正的查进程和终止放在 blocking 线程，不占 tokio worker。
-    fn schedule_cancel_sweep(&self, session: &Session, run_id: &str, generation: u64, baseline_seq: u64, baseline: ProcessBaseline, terminal_event: Value) {
+    fn schedule_cancel_sweep(&self, session: &Session, run_id: &str, generation: u64, baseline_seq: u64, baseline: ProcessBaseline, terminal_event: Value, cancel_requested_at: Option<std::time::Instant>) {
         let runtime = self.clone();
         let conversation_id = session.conversation_id.clone();
         let backend = session.backend;
         let run_id = run_id.to_owned();
         self.inner.handle.spawn(async move {
-            let session = runtime.sweep_after_confirmed_cancel(conversation_id.clone(), run_id.clone(), generation, baseline_seq, baseline).await;
+            let confirmed_at = std::time::Instant::now();
+            let session = runtime.sweep_after_confirmed_cancel(conversation_id.clone(), run_id.clone(), generation, baseline_seq, baseline, CancelTiming { requested_at: cancel_requested_at, confirmed_at }).await;
             // 终态在清扫记录之后发出；会话已不在时直接交给 sink。
             match session {
                 Some(session) => runtime.emit(&session, &run_id, terminal_event),
@@ -1807,8 +1879,9 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
 
     /// 宽限期之后清扫本轮新进程并记录 `agent_backend.cancel_swept`。返回会话（还在时），
     /// 由调用方随后发出终态事件。
-    async fn sweep_after_confirmed_cancel(&self, conversation_id: String, run_id: String, generation: u64, baseline_seq: u64, baseline: ProcessBaseline) -> Option<Arc<Session>> {
+    async fn sweep_after_confirmed_cancel(&self, conversation_id: String, run_id: String, generation: u64, baseline_seq: u64, baseline: ProcessBaseline, timing: CancelTiming) -> Option<Arc<Session>> {
         tokio::time::sleep(CANCEL_SWEEP_GRACE).await;
+        let sweep_started = std::time::Instant::now();
         let session = lock(&self.inner.sessions).get(&conversation_id).cloned()?;
         let connection = {
             let state = lock(&session.state);
@@ -1836,7 +1909,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let state = lock(&session.state);
             state.generation == generation && state.connection.is_some() && outcome.stop_required()
         };
-        self.record_cancel_sweep(&session, &run_id, &outcome);
+        self.record_cancel_sweep(&session, &run_id, &outcome, Some(timing.details(sweep_started)));
         if stop {
             let reason = if outcome.no_baseline {
                 "取消后没有本轮进程基线，已停止后端"
@@ -1848,7 +1921,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         Some(session)
     }
 
-    fn record_cancel_sweep(&self, session: &Session, run_id: &str, outcome: &SweepOutcome) {
+    fn record_cancel_sweep(&self, session: &Session, run_id: &str, outcome: &SweepOutcome, timing: Option<Value>) {
         let mut details = json!({
             "killed": { "count": outcome.killed.len(), "pids": outcome.killed },
             "failed": outcome.failed,
@@ -1860,20 +1933,32 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let reason = outcome.failed.join("; ");
             details["reason"] = json!(if reason.is_empty() { "没有本轮进程基线".to_owned() } else { reason });
         }
+        let timing_line = timing.as_ref().map(|timing| {
+            format!(
+                " confirm_ms={} grace_ms={} sweep_ms={}",
+                timing["confirmMs"].as_u64().map(|value| value.to_string()).unwrap_or_else(|| "-".into()),
+                timing["graceMs"],
+                timing["sweepMs"]
+            )
+        });
+        if let Some(timing) = timing {
+            details["timing"] = timing;
+        }
         let mut event = details.clone();
         event["type"] = json!("agent_backend.cancel_swept");
         event["agentBackend"] = json!(session.backend.as_str());
         self.emit(session, run_id, event);
         self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.cancel_swept", &details);
         eprintln!(
-            "fox.external conversation={} agent_backend={} cancel_swept killed={} failed={} no_baseline={} outside_job={} outside_job_unverified={}",
+            "fox.external conversation={} agent_backend={} cancel_swept killed={} failed={} no_baseline={} outside_job={} outside_job_unverified={}{}",
             session.conversation_id,
             session.backend.as_str(),
             outcome.killed.len(),
             outcome.failed.len(),
             outcome.no_baseline,
             outcome.outside_job.len(),
-            outcome.outside_job_unverified.len()
+            outcome.outside_job_unverified.len(),
+            timing_line.unwrap_or_default()
         );
     }
 
@@ -2188,4 +2273,41 @@ async fn close_shared(mut connection: Arc<AcpConnection>) -> TerminateReport {
         reasons: vec!["connection still in use by another task; process killed when it is released".into()],
     };
     report
+}
+
+#[cfg(test)]
+mod exit_failure_tests {
+    use super::{backend_exit_failure, display_path, failure_codes};
+
+    #[test]
+    fn dsh_grant_write_access_denied_gets_its_own_code_and_plain_words() {
+        let tail = "windows-acl: init failed\nWin32Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(\\\\?\\D:\\fox-test\\测试项目)\n    at mergeAndApply (lib/types.js:480:2)";
+        let (code, message) = backend_exit_failure(tail);
+        assert_eq!(code, failure_codes::WORKSPACE_ACL_DENIED);
+        assert!(message.contains("「D:\\fox-test\\测试项目」"), "{message}");
+        assert!(!message.contains("\\\\?\\"), "展示时去掉 verbatim 前缀: {message}");
+        assert!(message.contains("拒绝访问") && message.contains("所有者"), "{message}");
+        assert!(!message.contains("SetNamedSecurityInfoW"), "人话里不带 API 名: {message}");
+    }
+
+    #[test]
+    fn other_exits_keep_the_generic_code() {
+        let (code, message) = backend_exit_failure("panic: something else");
+        assert_eq!(code, failure_codes::EXITED);
+        assert!(message.contains("panic: something else"), "{message}");
+        let (code, message) = backend_exit_failure("  ");
+        assert_eq!(code, failure_codes::EXITED);
+        assert!(message.starts_with("外部后端进程意外退出（"), "{message}");
+        // 其他 Win32 错误不归到授权被拒。
+        let (code, _) = backend_exit_failure("SetNamedSecurityInfoW failed (Win32 32): grantWrite(D:\\x)");
+        assert_eq!(code, failure_codes::EXITED);
+    }
+
+    #[test]
+    fn display_path_strips_only_the_verbatim_prefix() {
+        assert_eq!(display_path(r"\\?\D:\fox-test\p0.txt"), r"D:\fox-test\p0.txt");
+        assert_eq!(display_path(r"\\?\UNC\server\share\a.txt"), r"\\server\share\a.txt");
+        assert_eq!(display_path(r"D:\plain"), r"D:\plain");
+        assert_eq!(display_path("/home/u/x"), "/home/u/x");
+    }
 }
