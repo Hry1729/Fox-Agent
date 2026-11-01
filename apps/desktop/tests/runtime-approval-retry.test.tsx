@@ -33,8 +33,10 @@ test('a path-only permission uses the declared decision intersection and submits
     await act(async()=>root.render(<RuntimeApprovalPrompt approval={approval} onResolve={async(id,decision)=>{calls.push([id,decision]);return true}}/>))
     expect(host.querySelectorAll('[data-slot="permission-grant"]').length).toBe(1)
     expect(host.querySelector('[data-slot="approval-card"]')).toBeNull()
-    const buttons=[...host.querySelectorAll<HTMLButtonElement>('button')]
+    const buttons=[...host.querySelectorAll<HTMLButtonElement>('button')].filter(button => !button.classList.contains('fox-disclosure-trigger'))
     expect(buttons.map(button=>button.textContent)).toEqual(['拒绝','本对话内允许'])
+    expect(host.querySelector('.fox-disclosure-trigger')?.textContent).toContain('查看授权详情')
+    expect(host.querySelector('details')).toBeNull()
     await act(async()=>buttons[1].click())
     expect(calls).toEqual([['kernel-approval:read:v9','allow_conversation']])
     expect(buttons.every(button=>button.disabled)).toBe(true)
@@ -50,11 +52,12 @@ test('ordinary writes keep content and all declared choices in one ApprovalCard'
     expect(host.querySelectorAll('[data-slot="approval-card"]').length).toBe(1)
     expect(host.querySelector('[data-slot="permission-grant"]')).toBeNull()
     expect(host.querySelector('[aria-label="拟写入内容"]')?.textContent).toBe(approval.request.input && (approval.request.input as any).content)
-    expect(host.querySelector<HTMLDetailsElement>('.fox-approval-details-scroll')?.open).toBe(false)
+    expect(host.querySelector('.fox-approval-details-scroll')?.getAttribute('data-state')).toBe('closed')
+    expect(host.querySelector('details')).toBeNull()
     expect(host.textContent?.split('D:/project/报告.md').length).toBe(2)
     expect(host.querySelectorAll('.aui-ink-button').length).toBe(1)
     expect(host.querySelector('.aui-ink-button')?.textContent).toBe('只允许这一次')
-    expect([...host.querySelectorAll('button')].map(button=>button.textContent)).toEqual(['拒绝','本对话内允许','只允许这一次'])
+    expect([...host.querySelectorAll('button')].filter(button => !button.classList.contains('fox-disclosure-trigger')).map(button=>button.textContent)).toEqual(['拒绝','本对话内允许','只允许这一次'])
     expect(host.querySelector('.aui-approval-operation')?.textContent).toBe('D:/project/报告.md')
     expect(host.querySelector('[data-slot="approval-card"] > div:first-child')?.textContent).not.toContain('D:/project/报告.md')
     const button=[...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='本对话内允许')!
@@ -73,11 +76,14 @@ test('an existing-file replacement keeps the exact target and overwrite warning 
     const operation=card.querySelector('.aui-approval-operation')!
     expect(operation.textContent).toBe(target)
     expect(operation.closest('details')).toBeNull()
+    expect(operation.closest('.fox-disclosure')).toBeNull()
     const description=card.querySelector(':scope > p')!
     expect(description.textContent).toContain('替换全部内容')
     expect(description.closest('details')).toBeNull()
-    expect(host.querySelector<HTMLDetailsElement>('.fox-approval-details-scroll')?.open).toBe(false)
-    expect([...host.querySelectorAll('button')].map(button=>button.textContent)).toEqual(['拒绝','只允许这一次'])
+    expect(description.closest('.fox-disclosure')).toBeNull()
+    expect(host.querySelector('.fox-approval-details-scroll')?.getAttribute('data-state')).toBe('closed')
+    expect(host.querySelector('details')).toBeNull()
+    expect([...host.querySelectorAll('button')].filter(button => !button.classList.contains('fox-disclosure-trigger')).map(button=>button.textContent)).toEqual(['拒绝','只允许这一次'])
     expect(host.querySelector('.fox-approval-replacement')?.textContent).toContain('sha256:old')
   }finally{await act(async()=>root.unmount())}
 })
@@ -88,7 +94,7 @@ test('unknown or malformed permission decisions expose only deny', async () => {
     const calls: unknown[]=[]
     try {
       await act(async()=>root.render(<RuntimeApprovalPrompt approval={{id:'same-ticket',toolName:'read_file',request:{...request,input:{path:'D:/project/read.md'}}} as any} onResolve={async(id,decision)=>{calls.push([id,decision]);return true}}/>))
-      const buttons=[...host.querySelectorAll<HTMLButtonElement>('button')]
+      const buttons=[...host.querySelectorAll<HTMLButtonElement>('button')].filter(button => !button.classList.contains('fox-disclosure-trigger'))
       expect(buttons.map(button=>button.textContent)).toEqual(['拒绝'])
       await act(async()=>buttons[0].click())
       expect(calls).toEqual([['same-ticket','deny']])

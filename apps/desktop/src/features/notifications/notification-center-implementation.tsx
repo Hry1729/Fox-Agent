@@ -11,6 +11,8 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
+import { readDeveloperUi } from '@/features/chat/developer-ui'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import { type AppNotificationRecord, type NotificationPreferencesRecord } from '@/features/conversations/model/types'
 import { FOX_IN_APP_NOTIFICATION_EVENT, FOX_NOTIFICATIONS_CHANGED_EVENT, FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT, type InAppNotificationEventDetail, normalizeNotificationSoundId, notificationIsVisibleInContext, playNotificationSound, notify as toast } from '@/features/notifications'
 import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
@@ -18,6 +20,10 @@ import { AlertTriangle, Bell, CheckCheck, CircleDot, Eraser, ExternalLink, Folde
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 type ToastNotification = Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'> & Partial<AppNotificationRecord>
+
+function noticeError(cause: unknown, fallback: string) {
+  return userFacingError(desktopErrorDetails(cause).message, readDeveloperUi(), fallback)
+}
 const toastType: Record<AppNotificationRecord['kind'], ToastType> = { completed: 'success', failed: 'error', progress: 'loading', approval: 'warning', question: 'info' }
 
 function notificationFingerprint(item: AppNotificationRecord): string {
@@ -106,7 +112,7 @@ function NotificationCenterContent({
         setExpandedId(notification.id)
         if (notification.readAt == null) void desktopClient.setAppNotificationRead(notification.id, true)
           .then(() => window.dispatchEvent(new Event(FOX_NOTIFICATIONS_CHANGED_EVENT)))
-          .catch(cause => toast.error('标记通知已读失败', { description: desktopErrorDetails(cause).message }))
+          .catch(cause => toast.error('标记通知已读失败', { description: noticeError(cause, '请重试。') }))
       } } : undefined,
     })
   }, [showToast])
@@ -175,7 +181,7 @@ function NotificationCenterContent({
       setPreferences(nextPreferences)
       setError(null)
     } catch (cause) {
-      if (generation === loadGeneration.current) setError(desktopErrorDetails(cause).message)
+      if (generation === loadGeneration.current) setError(noticeError(cause, '通知没有同步成功，请重试。'))
     } finally {
       if (generation === loadGeneration.current) setLoading(false)
     }
@@ -225,7 +231,7 @@ function NotificationCenterContent({
       dismissToast(item.id)
       await load(true)
     } catch (cause) {
-      toast.error('标记通知已读失败', { description: desktopErrorDetails(cause).message })
+      toast.error('标记通知已读失败', { description: noticeError(cause, '请重试。') })
     }
   }
   const openItem = async (item: AppNotificationRecord) => {
@@ -238,7 +244,7 @@ function NotificationCenterContent({
       }
       await load(true)
     } catch (cause) {
-      toast.error('打开通知失败', { description: desktopErrorDetails(cause).message })
+      toast.error('打开通知失败', { description: noticeError(cause, '请重试。') })
     }
   }
   const openNotificationFile = async (item: AppNotificationRecord, reveal: boolean) => {
@@ -247,7 +253,7 @@ function NotificationCenterContent({
     try {
       await desktopClient.openDownloadedFile(path, reveal)
     } catch (cause) {
-      toast.error(reveal ? '无法打开所在文件夹' : '无法打开文件', { description: desktopErrorDetails(cause).message })
+      toast.error(reveal ? '无法打开所在文件夹' : '无法打开文件', { description: noticeError(cause, '请重试。') })
     }
   }
   const markAllRead = async () => {
@@ -256,7 +262,7 @@ function NotificationCenterContent({
       clearToastQueue()
       await load(true)
     } catch (cause) {
-      toast.error('全部标记已读失败', { description: desktopErrorDetails(cause).message })
+      toast.error('全部标记已读失败', { description: noticeError(cause, '请重试。') })
     }
   }
   const clearRead = async () => {
@@ -266,7 +272,7 @@ function NotificationCenterContent({
       setExpandedId(null)
       await load(true)
     } catch (cause) {
-      toast.error('清除已读通知失败', { description: desktopErrorDetails(cause).message })
+      toast.error('清除已读通知失败', { description: noticeError(cause, '请重试。') })
     }
   }
   const renderNotificationItem = (item: AppNotificationRecord) => {

@@ -219,7 +219,7 @@ export function AgentBackendPanel({
     if (!targetKey || !probe) return null
     const current: AgentBackendTarget = JSON.parse(targetKey)
     const needsModel = !probe.source?.choiceRequired && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login'
-    const modelForm = needsModel ? <AgentModelConnectionCard key={`${targetKey}:${modelConnection.providerId}`} backend={shownBackend} connection={modelConnection} onSave={async choice => {
+    const modelForm = needsModel ? <AgentModelConnectionCard key={`${targetKey}:${modelConnection.providerId}`} backend={shownBackend} connection={modelConnection} developerUi={developerUi} onSave={async choice => {
       const value = await client.agentBackendModelConnection!({ target: JSON.parse(targetKey), providerId: modelConnection.providerId ?? undefined, ...choice })
       setConnectionOverride({ key: targetKey, tick: modelTick, value })
       if (value.status === 'ready' || value.status === 'existing_login') window.dispatchEvent(new Event('fox:model-service-changed'))

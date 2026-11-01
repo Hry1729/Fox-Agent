@@ -228,8 +228,15 @@ describe('① a new conversation never renders or loads a retired driver', () =>
 describe('② the import receipt is rendered once, by the bar, and fully removed', () => {
   function ReceiptBar({ line }: { line: string }) {
     const [receipt, setReceipt] = React.useState<readonly string[] | null>([line])
-    return <AgentBackendBar status={status} lockedBackend="codex" draftBackend="fox" importReceipt={receipt} onDismissImportReceipt={() => setReceipt(null)} />
+    return <AgentBackendBar status={status} lockedBackend="codex" draftBackend="fox" developerUi importReceipt={receipt} onDismissImportReceipt={() => setReceipt(null)} />
   }
+
+  test('普通模式不显示导入回执里的私有 HOME 和文件名', () => {
+    const line = '已复制到 1 个项目的私有 HOME：auth.json'
+    render(<AgentBackendBar status={status} lockedBackend="codex" draftBackend="fox" developerUi={false} importReceipt={[line]} />)
+    expect(text()).not.toContain('私有 HOME')
+    expect(text()).not.toContain('auth.json')
+  })
 
   test('"知道了" removes the receipt TEXT from the DOM, not only the button', async () => {
     const line = '已复制到 1 个项目的私有 HOME：auth.json'

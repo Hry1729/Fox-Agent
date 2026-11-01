@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import type { AgentBackendTarget } from '@/features/conversations/model/agent-backend-onboarding'
 
 export interface AgentModelConnection {
@@ -18,10 +19,11 @@ export interface AgentModelConnectionRequest {
   baseUrl?: string
 }
 
-export function AgentModelConnectionCard({ backend, connection, onSave }: {
+export function AgentModelConnectionCard({ backend, connection, onSave, developerUi = false }: {
   backend: string
   connection: AgentModelConnection
   onSave: (choice: { baseUrl?: string; profileId?: string }) => Promise<void>
+  developerUi?: boolean
 }) {
   const [address, setAddress] = useState('')
   const [busy, setBusy] = useState(false)
@@ -29,7 +31,7 @@ export function AgentModelConnectionCard({ backend, connection, onSave }: {
   const save = async (choice: { baseUrl?: string; profileId?: string }) => {
     setBusy(true); setError(null)
     try { await onSave(choice) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    catch (cause) { setError(userFacingError(cause instanceof Error ? cause.message : String(cause), developerUi, '没有保存成功，请重试。')) }
     finally { setBusy(false) }
   }
   const agent = backend === 'deepseek' ? 'dsh' : backend === 'codex' ? 'Codex' : 'pi'
@@ -45,7 +47,7 @@ export function AgentModelConnectionCard({ backend, connection, onSave }: {
     {connection.status === 'choose_address' && <><strong>为 {agent} 选择地址</strong><p>「{connection.providerName}」有多个匹配地址。选择后会记住。</p>{connection.candidates.map(candidate => <Button key={candidate.id} variant="outline" size="sm" disabled={busy} onClick={() => void save({ profileId: candidate.id })}>{candidate.baseUrl} · {candidate.modelId}</Button>)}</>}
     {connection.status === 'missing_provider' && <p>请先在设置中选择模型供应商。</p>}
     {connection.status === 'missing_key' && <p>请在「{connection.providerName}」中填写 API Key。</p>}
-    {connection.status === 'verification_failed' && <><strong>连接尚未通过验证</strong><p>{connection.message}</p>{connection.providerName && <p>可在「{connection.providerName}」的高级设置中修改地址。</p>}<Button size="sm" variant="outline" disabled={busy} onClick={() => void save({})}>{busy ? '正在验证…' : '重试'}</Button></>}
+    {connection.status === 'verification_failed' && <><strong>连接尚未通过验证</strong><p>{developerUi ? (connection.message || '连接尚未通过验证。') : '连接尚未通过验证，请到模型服务里检查后再试。'}</p>{developerUi && connection.providerName && <p>可在「{connection.providerName}」的高级设置中修改地址。</p>}<Button size="sm" variant="outline" disabled={busy} onClick={() => void save({})}>{busy ? '正在验证…' : '重试'}</Button></>}
     {error && <p role="alert">{error}</p>}
   </section>
 }

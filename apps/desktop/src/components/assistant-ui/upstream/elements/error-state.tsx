@@ -3,6 +3,9 @@
 import type { ComponentProps } from "react";
 import { CircleAlertIcon, RefreshCwIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { FoxDisclosure } from "@/components/fox-ui/fox-disclosure";
+import { useDeveloperUi } from "@/features/chat/developer-ui";
+import { userFacingError } from "@/features/chat/send-failure-notice";
 import { ShimmerLabel } from "./surfaces";
 import { ERROR_DIAGNOSTIC_CLASS, ERROR_DIAGNOSTIC_STYLE } from "../../elements/error-diagnostic";
 
@@ -28,6 +31,8 @@ export function ErrorState({
   className,
   ...props
 }: ErrorStateProps) {
+  const developerUi = useDeveloperUi()
+  const calmDetail = userFacingError(detail, developerUi, "运行过程中遇到了问题。可以重试。")
   if (retrying) {
     return (
       <div
@@ -65,9 +70,9 @@ export function ErrorState({
       <div className="min-w-0 flex-1">
         <p className="font-medium text-red-600 dark:text-red-400">{title}</p>
         <p className="mt-0.5 text-[13px] leading-snug text-red-600/60 dark:text-red-400/60">
-          {detail}
+          {calmDetail}
         </p>
-        {diagnostic && <details><summary>查看错误详情</summary><pre className={ERROR_DIAGNOSTIC_CLASS} style={ERROR_DIAGNOSTIC_STYLE} tabIndex={0}>{diagnostic}</pre></details>}
+        {developerUi && diagnostic && <FoxDisclosure summary="查看错误详情"><pre className={ERROR_DIAGNOSTIC_CLASS} style={ERROR_DIAGNOSTIC_STYLE} tabIndex={0}>{diagnostic}</pre></FoxDisclosure>}
       </div>
       {onRetry && <button
         type="button"

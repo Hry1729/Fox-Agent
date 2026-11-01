@@ -13,10 +13,12 @@
 // only an import ERROR is shown here.
 import { useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { FoxDisclosure } from '@/components/fox-ui/fox-disclosure'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import {
   credentialCardModel,
   importConfirmationRows,
+  unifiedLoginNote,
   type AgentBackendPermissionStatus,
   type CredentialProbe,
   type ImportItem,
@@ -24,11 +26,22 @@ import {
 } from '@/features/conversations/model/agent-backend-onboarding'
 import type { AgentModelConnection } from './AgentModelConnectionCard'
 
-function loginTitle(backend: string): string {
-  if (backend === 'deepseek') return 'dsh 还没有登录'
-  if (backend === 'pi') return 'pi 还没有登录'
-  if (backend === 'codex') return 'Codex 还没有登录'
-  return '这个 Agent 还没有登录'
+function backendName(backend: string): string {
+  if (backend === 'deepseek') return 'dsh'
+  if (backend === 'pi') return 'pi'
+  if (backend === 'codex') return 'Codex'
+  return '这个 Agent'
+}
+
+/** 普通模式只有一句人话，按缺什么来说，不带路径和错误码。 */
+function loginSentence(backend: string, status: AgentModelConnection['status'] | undefined): string {
+  const name = backendName(backend)
+  if ((status === 'missing_address' || status === 'choose_address') && backend === 'deepseek') return `${name} 还没有登录，先在模型服务里配好 Anthropic 地址再发送。`
+  if (status === 'missing_address' || status === 'choose_address') return `${name} 还没有登录，先在模型服务里配好模型地址再发送。`
+  if (status === 'missing_key') return `${name} 还没有登录，先在模型服务里填好密钥再发送。`
+  if (status === 'missing_provider') return `${name} 还没有登录，先在模型服务里选择供应商再发送。`
+  if (status === 'verification_failed') return `${name} 的模型连接没有通过，请到模型服务里检查后再发送。`
+  return `${name} 还没有登录，先在模型服务里完成配置再发送。`
 }
 
 export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, onLoadCandidates, onImport, onChooseFox, developerUi = false, modelConnection = null, modelForm = null, onOpenModelSettings }: {
@@ -55,17 +68,17 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [showForm, setShowForm] = useState(false)
-  const [loginOpen, setLoginOpen] = useState(developerUi)
   if (!card) return null
   const run = async (action: () => Promise<void>) => {
     setBusy(true)
-    try { await action() } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
+    try { await action() } catch (error) { setMessage(userFacingError(error instanceof Error ? error.message : String(error), developerUi, '没有完成，请重试。')) } finally { setBusy(false) }
   }
   const rows = candidates ? importConfirmationRows(candidates) : []
   const content = (
     <section className="fox-agent-backend-credential-card" data-kind={card.kind} role="note" aria-label={card.title}>
       <strong>{card.title}</strong>
       <p>{card.description}</p>
+      {developerUi && unifiedLoginNote(probe, true) && <p>{unifiedLoginNote(probe, true)}</p>}
       {probe?.source?.model && <p>{probe.source.choiceRequired ? '原生配置模型' : '当前配置模型'}：{probe.source.provider ? `${probe.source.provider} / ` : ''}{probe.source.model}</p>}
       {probe?.source?.modelEndpoint && <p>模型端点：<code>{probe.source.modelEndpoint}</code></p>}
       {probe?.source?.choiceRequired && onChooseFox && <>
@@ -79,13 +92,12 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
       {card.requiredKeys.length > 0 && <p>需要的 key：{card.requiredKeys.join('、')}</p>}
       {card.requiredFiles.length > 0 && <p>读取的文件：{card.requiredFiles.join('、')}{card.presentFiles.length ? `（已有：${card.presentFiles.join('、')}）` : ''}</p>}
       {card.templates.map((template) => (
-        <details key={template.id}>
-          <summary>{template.title}</summary>
+        <FoxDisclosure key={template.id} summary={template.title}>
           <p>{template.note}</p>
           {template.files.map((file) => (
             <div key={file.path}><code>{file.path}</code><pre>{file.content}</pre></div>
           ))}
-        </details>
+        </FoxDisclosure>
       ))}
       {card.offerImport && (candidates === null
         ? <button type="button" disabled={busy} onClick={() => run(async () => { const items = await onLoadCandidates(); setCandidates(items); setSelected(probe?.source?.choiceRequired ? items.map(item => item.id) : []) })}>从真实 HOME 导入…</button>
@@ -123,39 +135,25 @@ export function AgentBackendCredentialCard({ probe, permission, onOpenFolder, on
       {message && <p role="alert" className="fox-agent-backend-credential-error">{message}</p>}
     </section>
   )
-  if (card.kind === 'ready' && !modelForm) return <details><summary>Agent 配置来源与导入</summary>{content}</details>
-  if (card.kind !== 'missing' && !modelForm) return content
-  const fillAddress = modelConnection?.status === 'missing_address' || modelConnection?.status === 'choose_address'
+  if (developerUi) {
+    if (card.kind === 'ready' && !modelForm) return <FoxDisclosure summary="Agent 配置来源与导入">{content}</FoxDisclosure>
+    return <div className="fox-agent-login-details">{content}{modelForm}</div>
+  }
+  if (card.kind === 'ready' && !modelForm) return null
+  const fillAddress = (modelConnection?.status === 'missing_address' || modelConnection?.status === 'choose_address') && (probe?.backend === 'deepseek' || !probe?.backend)
   const primaryLabel = fillAddress ? '填写 Anthropic 地址' : '去设置模型服务'
+  const sentence = loginSentence(probe?.backend ?? '', modelConnection?.status)
   const openPrimary = () => {
     if (fillAddress) setShowForm(true)
     else onOpenModelSettings?.()
   }
-  const details = developerUi || loginOpen
-    ? <div className="fox-agent-login-details">{content}</div>
-    : null
   return (
-    <section className="fox-agent-login-card" aria-label={loginTitle(probe?.backend ?? '')}>
-      <div className="fox-agent-login-card-copy">
-        <strong>{card.kind === 'missing' ? loginTitle(probe?.backend ?? '') : '还没有可用的模型连接'}</strong>
-        <p>{fillAddress ? '还没有可用的模型地址，填写后才能发送。' : '还没有可用的模型连接。可以去设置，或用已有登录。'}</p>
-      </div>
+    <section className="fox-agent-login-card" aria-label={sentence}>
+      <p className="fox-agent-login-card-copy">{sentence}</p>
       <div className="fox-agent-login-card-actions">
         <Button type="button" size="sm" onClick={openPrimary}>{primaryLabel}</Button>
-        <Button type="button" size="sm" variant="outline" onClick={() => setLoginOpen(true)}>用已有登录…</Button>
       </div>
       {showForm && modelForm}
-      {developerUi ? details : (
-        <Dialog open={loginOpen} onOpenChange={setLoginOpen}>
-          <DialogContent className="fox-agent-login-dialog sm:max-w-xl" aria-label="用已有登录">
-            <DialogHeader>
-              <DialogTitle>用已有登录</DialogTitle>
-              <DialogDescription>从已有登录里选择要复制的项目。</DialogDescription>
-            </DialogHeader>
-            {loginOpen ? <div className="fox-agent-login-details">{content}</div> : null}
-          </DialogContent>
-        </Dialog>
-      )}
     </section>
   )
 }

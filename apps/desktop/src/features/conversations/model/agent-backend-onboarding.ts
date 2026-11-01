@@ -37,10 +37,11 @@ export interface UnifiedLoginReport {
   reason: string | null
 }
 
-/** Why 模型服务 could not log this backend in, for the missing-login card (null when it can, or is not configured). */
-export function unifiedLoginNote(probe: CredentialProbe | null | undefined): string | null {
+/** 模型服务没能自动登录时的说明。普通模式只留人话；供应商名、英文原因和错误码只在开发者模式。 */
+export function unifiedLoginNote(probe: CredentialProbe | null | undefined, developerUi = false): string | null {
   const unified = probe?.unifiedLogin
   if (!unified || unified.outcome !== 'unsupported') return null
+  if (!developerUi) return '没能用模型服务自动登录。'
   return `没能用“模型服务”的供应商「${unified.provider}」自动登录：${unified.reason ?? '原因未知'}`
 }
 

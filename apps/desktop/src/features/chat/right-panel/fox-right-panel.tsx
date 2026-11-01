@@ -118,6 +118,7 @@ export function artifactProjectPath(artifact: ArtifactRecord, projectRoot: strin
 }
 
 function ProjectFilePreviewPane({ conversationId, path, displayPath }: { conversationId: string; path: string; displayPath: string }) {
+  const developerUi = useDeveloperUi()
   const [preview, setPreview] = useState<ProjectFilePreview | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -147,7 +148,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
       setApplications(response.applications)
       if (action === 'copy_path') toast.success('已复制受控路径')
     } catch (cause) {
-      toast.error(desktopErrorDetails(cause).message)
+      toast.error(developerUi ? desktopErrorDetails(cause).message : '文件操作没有完成')
     } finally {
       setBusyAction(null)
     }
@@ -159,7 +160,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
     try {
       await desktopClient.openProjectFolder(conversationId)
     } catch (cause) {
-      toast.error(desktopErrorDetails(cause).message)
+      toast.error(developerUi ? desktopErrorDetails(cause).message : '无法打开项目目录')
     } finally {
       setBusyAction(null)
     }
@@ -195,7 +196,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
         {loading
           ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取文件</div>
           : error
-            ? <div className="fox-result-unavailable"><AlertTriangle size={21} /><strong>预览失败</strong><span>{error}</span></div>
+            ? <div className="fox-result-unavailable"><AlertTriangle size={21} /><strong>预览失败</strong><span>{developerUi ? error : '文件没有预览出来，请重试。'}</span></div>
             : /\.html?$/i.test(path) && preview?.content ? <Suspense fallback={<pre>正在加载预览…</pre>}><HtmlFilePreview key={path} name={displayPath} content={preview.content} /></Suspense> : <pre>{preview?.content ?? ''}</pre>}
         {preview?.truncated && <small className="fox-result-truncated">预览已截断，仅显示文件开头部分。</small>}
       </div>
@@ -204,6 +205,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
 }
 
 function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: ConversationDetail | null; artifactId?: string | null; displayPath: string }) {
+  const developerUi = useDeveloperUi()
   const conversationId = detail?.conversation.id ?? null
   const artifact = detail?.artifacts.find((item) => item.id === artifactId) ?? null
   const [inspection, setInspection] = useState<ArtifactInspectResponse | null>(null)
@@ -317,7 +319,7 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
           {artifact.delivery ? <span>{artifactVerificationLabel(artifact.delivery.verificationStatus)}</span> : null}
         </div>}
         {artifact?.delivery?.summary ? <p className="fox-result-delivery-note">{safeDiagnosticText(artifact.delivery.summary)}</p> : null}
-        {error && <div className="fox-result-error" role="alert"><AlertTriangle size={15} /><div><strong>操作未能完成</strong><span>{error.message}</span>{error.retryable && <small>可以稍后重试。</small>}</div></div>}
+        {error && <div className="fox-result-error" role="alert"><AlertTriangle size={15} /><div><strong>操作未能完成</strong><span>{developerUi ? error.message : '这次没有完成，请重试。'}</span>{error.retryable && <small>可以稍后重试。</small>}</div></div>}
         {feedback && <p className="fox-result-feedback" role="status">{feedback}</p>}
         <div className="fox-result-raw">
           {inspection?.preview.available && inspection.preview.content !== null

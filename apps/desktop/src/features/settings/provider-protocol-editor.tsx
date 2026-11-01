@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
+import { readDeveloperUi } from '@/features/chat/developer-ui'
 import type { ProtocolProfile } from '@/features/conversations/model/types'
 import { isAgentBackendHidden } from '@/features/conversations/model/agent-backend'
 import type { SaveModelProviderInput } from './use-model-providers'
@@ -38,7 +39,7 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
       const result = await desktopClient.testModelService(profile.baseUrl, key || undefined, profile.apiType, profile.modelId || form.models.find(m => m.isDefault)?.modelId || form.models[0]?.modelId || '', form.id, profile.separateCredential ? profile.id : undefined)
       setResults(previous => ({ ...previous, [profile.id]: { identity: captured, text: `连接验证通过 · ${result.latencyMs} ms。尚未验证 Agent 的流式输出和工具调用。` } }))
     } catch (error) {
-      setResults(previous => ({ ...previous, [profile.id]: { identity: captured, text: `连接验证失败：${error instanceof Error ? error.message : String(error)}` } }))
+      setResults(previous => ({ ...previous, [profile.id]: { identity: captured, text: readDeveloperUi() ? `连接验证失败：${error instanceof Error ? error.message : String(error)}` : '连接验证失败，请检查地址后再试。' } }))
     } finally { setTesting(null) }
   }
   return <section className="fox-protocol-editor" aria-label="外部 Agent 协议配置">

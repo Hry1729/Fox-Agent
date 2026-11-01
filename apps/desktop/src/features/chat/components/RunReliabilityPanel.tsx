@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { FoxDisclosure } from '@/components/fox-ui/fox-disclosure'
+import { useDeveloperUi } from '@/features/chat/developer-ui'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import { desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 import type { ApiResponse } from '@/features/conversations/model/types'
 import { Button } from '@/components/ui/button'
@@ -16,6 +19,7 @@ async function call<T>(command: string, request: unknown): Promise<T> {
   return result.data
 }
 export function RunReliabilityPanel({ conversationId, active }: { conversationId?: string; active: boolean }) {
+  const developerUi = useDeveloperUi()
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [budget, setBudget] = useState<RunBudgetSelection>({ tier: 'standard' })
   const [error, setError] = useState<string | null>(null)
@@ -27,12 +31,12 @@ export function RunReliabilityPanel({ conversationId, active }: { conversationId
     let alive = true
     const load = async () => {
       try { const data = await call<Snapshot>('kernel_reliability_snapshot', { conversationId }); if (alive) { setSnapshot(data); setError(null) } }
-      catch (cause) { if (alive) setError(String(cause)) }
+      catch (cause) { if (alive) setError(userFacingError(String(cause), developerUi, '任务状态没有读出来，请重试。')) }
     }
     void load()
     const timer = window.setInterval(() => void load(), active ? 1500 : 5000)
     return () => { alive = false; window.clearInterval(timer) }
-  }, [conversationId, active])
+  }, [conversationId, active, developerUi])
   if (!conversationId || !desktopRuntimeAvailable) return null
   const select = (next: RunBudgetSelection) => { saveRunBudget(conversationId, next); setBudget(next) }
   const jobAction = async (job: JobSnapshot, tool: string, input: unknown) => {
@@ -41,10 +45,9 @@ export function RunReliabilityPanel({ conversationId, active }: { conversationId
   }
   const readPage = async (job: JobSnapshot, offset = 0) => {
     try { setPage(await jobAction(job, 'compute_job_result', { jobId: job.jobId, offset, limit: 16384 })); setError(null) }
-    catch (cause) { setError(String(cause)) }
+    catch (cause) { setError(userFacingError(String(cause), developerUi, '结果没有读出来，请重试。')) }
   }
-  return <details className="mx-3 my-2 rounded border p-2 text-sm">
-    <summary>任务预算与进度{snapshot?.jobs.some(j => j.state === 'running') ? ' · 有后台作业' : ''}</summary>
+  return <FoxDisclosure className="fox-run-reliability" summary={`任务预算与进度${snapshot?.jobs.some(j => j.state === 'running') ? ' · 有后台作业' : ''}`}>
     <div className="mt-2 space-y-3">
       <label className="flex items-center gap-2">下次任务预算
         <select aria-label="下次任务预算" disabled={active} value={budget.tier} onChange={e => select(e.target.value === 'custom' ? { tier: 'custom', customExecutionMs: 3600000 } : { tier: e.target.value as RunBudgetSelection['tier'] })}>
@@ -56,10 +59,10 @@ export function RunReliabilityPanel({ conversationId, active }: { conversationId
       {snapshot?.contextBudget && <ContextBudgetPanel budget={snapshot.contextBudget} />}
       {snapshot?.jobs.map(job => <div key={job.jobId}>
         <JobProgressCard snapshot={job} onCancel={async id => { await jobAction(job, 'compute_job_cancel', { jobId: id }) }} onViewResult={() => void readPage(job)} />
-        {job.resumable && <Button size="sm" disabled={!active || job.runId !== snapshot.runId} onClick={() => { void jobAction(job, 'compute_job_start', { jobId: job.jobId }).catch(cause => setError(String(cause))) }}>恢复任务</Button>}
+        {job.resumable && <Button size="sm" disabled={!active || job.runId !== snapshot.runId} onClick={() => { void jobAction(job, 'compute_job_start', { jobId: job.jobId }).catch(cause => setError(userFacingError(String(cause), developerUi, '没有恢复成功，请重试。'))) }}>恢复任务</Button>}
       </div>)}
       {page && <div><pre className="max-h-72 overflow-auto whitespace-pre-wrap">{page.content}</pre>{page.nextOffset !== null && <Button size="sm" onClick={() => { const job = snapshot?.jobs.find(j => j.jobId === page.jobId); if (job) void readPage(job, page.nextOffset!) }}>下一页</Button>}</div>}
       {error && <p role="alert" className="text-destructive">{error}</p>}
     </div>
-  </details>
+  </FoxDisclosure>
 }

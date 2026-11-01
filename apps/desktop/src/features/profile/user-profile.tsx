@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
+import { readDeveloperUi } from '@/features/chat/developer-ui'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import { profileAvatarUrls } from '@/generated/profile-avatars'
 
 const profileStorageKey = 'fox.profile.local'
@@ -109,7 +111,7 @@ export function UserProfileDialog({ open, onOpenChange, profile, detail, onSave 
       await onSave({ name: name.trim(), avatar })
       onOpenChange(false)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '个人资料保存失败')
+      setError(userFacingError(cause instanceof Error ? cause.message : '', readDeveloperUi(), '个人资料保存失败'))
     } finally {
       setSaving(false)
     }

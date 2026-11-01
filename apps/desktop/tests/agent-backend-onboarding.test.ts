@@ -304,9 +304,11 @@ describe('source assertions', () => {
 describe('unified login in the login card', () => {
   test('a provider that cannot drive the backend says why on the card; names only', () => {
     const unsupported = probe({ unifiedLogin: { backend: 'deepseek', outcome: 'unsupported', provider: 'DashScope', files: [], userFiles: [], reason: 'DeepSeek 后端（dsh）只支持 Anthropic Messages 协议' } })
-    expect(unifiedLoginNote(unsupported)).toBe('没能用“模型服务”的供应商「DashScope」自动登录：DeepSeek 后端（dsh）只支持 Anthropic Messages 协议')
+    expect(unifiedLoginNote(unsupported)).toBe('没能用模型服务自动登录。')
+    expect(unifiedLoginNote(unsupported, true)).toBe('没能用“模型服务”的供应商「DashScope」自动登录：DeepSeek 后端（dsh）只支持 Anthropic Messages 协议')
     const card = credentialCardModel(unsupported, allowed)!
-    expect(card.description).toContain('DashScope')
+    expect(card.description).toContain('没能用模型服务自动登录')
+    expect(card.description).not.toContain('DashScope')
     noValue(card)
     // Generated / unchanged: the Host already reports `ready`, so no card.
     expect(credentialCardModel(probe({ state: 'ready', credentialsPresent: true, unifiedLogin: { backend: 'pi', outcome: 'generated', provider: 'DeepSeek', files: ['.pi/agent/models.json'], userFiles: [], reason: null } }), allowed)).toBeNull()

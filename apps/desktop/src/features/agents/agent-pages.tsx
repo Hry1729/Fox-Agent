@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
+import { readDeveloperUi } from '@/features/chat/developer-ui'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { FoxEmptyState } from '@/components/fox-ui/empty-state'
@@ -727,7 +728,7 @@ export function useAgentEditor(enabled = true) {
   const mcpChoices: ExpertResourceChoice[] = mcpResource.items.map((item) => ({
     id: item.id,
     name: item.name,
-    description: item.lastError || `${item.command} ${item.args.join(' ')}`.trim(),
+    description: readDeveloperUi() ? (item.lastError || `${item.command} ${item.args.join(' ')}`.trim()) : (item.lastError ? '这个连接器暂时不可用。' : 'MCP 连接器'),
     badge: item.enabled ? item.status : '未启用',
     icon: <Globe2 />,
     disabled: !item.enabled,
@@ -990,7 +991,7 @@ function AgentCapabilitySection({ kind, editor, navigate, onCopy }: { kind: Expe
       const selected = editor.selectedResources('mcpServers')
       editor.mcpItems.forEach((item) => cards.push({
         id: item.id, name: item.name,
-        description: item.lastError || `${item.command} ${item.args.join(' ')}`.trim() || item.transport || 'MCP 连接器',
+        description: readDeveloperUi() ? (item.lastError || `${item.command} ${item.args.join(' ')}`.trim() || item.transport || 'MCP 连接器') : (item.lastError ? '这个连接器暂时不可用。' : 'MCP 连接器'),
         badges: [item.enabled ? (item.status || '已启用') : '未启用', item.toolCount != null ? `${item.toolCount} 工具` : ''].filter(Boolean),
         icon: <Globe2 />, checked: agent.isBuiltin ? item.enabled : selected.has(item.id),
         // 内置专家切换全局启停；本地专家勾选时会自动全局启用，取消仅移除声明。

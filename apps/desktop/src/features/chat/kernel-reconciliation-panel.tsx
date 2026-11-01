@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { FoxDisclosure } from '@/components/fox-ui/fox-disclosure'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import { useDeveloperUi } from './developer-ui'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { parseQueryArguments, reconciliationReady } from '@/features/conversations/model/reconciliation'
@@ -34,7 +36,7 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
   async function act(action: () => Promise<void>) {
     if (busy) return
     setBusy(true); setError(null)
-    try { await action() } catch (cause) { setError(cause instanceof Error ? cause.message : '操作未完成，请刷新后重试。') }
+    try { await action() } catch (cause) { setError(userFacingError(cause instanceof Error ? cause.message : '', developerUi, '操作未完成，请刷新后重试。')) }
     finally { setBusy(false) }
   }
   if (!view && !error || view?.items.length === 0) return null
@@ -53,7 +55,7 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
         const update = (value: Partial<typeof draft>) => setDrafts(current => ({ ...current, [item.effectKey]: { ...draft, ...value } }))
         return <div className="fox-reconciliation-item" key={item.effectKey}>
           <h3>{toolLabel[item.tool] ?? item.tool}{item.decision && <span>人工确认：{decisionLabel[item.decision]}</span>}</h3>
-          <details><summary>查看原操作</summary><pre>{JSON.stringify(item.input, null, 2)}</pre></details>
+          {developerUi && <FoxDisclosure summary="查看原操作"><pre>{JSON.stringify(item.input, null, 2)}</pre></FoxDisclosure>}
           <div className="fox-reconciliation-actions"><Button variant="outline" size="sm" disabled={busy || Boolean(view.recoveryRunId)} onClick={() => void act(async () => {
             const result = await desktopClient.reconciliationOptions(request(item.effectKey))
             setOptions(current => ({ ...current, [item.effectKey]: result }))
@@ -64,7 +66,7 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
             {option.kind === 'connector' && option.tools.length > 0 && <>
               <label htmlFor={`${fieldId}-tool`}>只读查询工具</label><select id={`${fieldId}-tool`} value={draft.tool} disabled={busy} onChange={event => update({ tool: event.target.value })}><option value="">请选择查询工具</option>{option.tools.map(tool => <option key={tool.name} value={tool.name}>{tool.description || tool.name}（{tool.name}）</option>)}</select>
               <label htmlFor={`${fieldId}-args`}>查询条件（JSON）</label><textarea id={`${fieldId}-args`} rows={3} value={draft.args} disabled={busy} onChange={event => update({ args: event.target.value })} />
-              {draft.tool && <details><summary>查看查询条件说明</summary><pre>{JSON.stringify(option.tools.find(tool => tool.name === draft.tool)?.inputSchema, null, 2)}</pre></details>}
+              {developerUi && draft.tool && <FoxDisclosure summary="查看查询条件说明"><pre>{JSON.stringify(option.tools.find(tool => tool.name === draft.tool)?.inputSchema, null, 2)}</pre></FoxDisclosure>}
             </>}
             {(option.kind === 'file' || option.kind === 'connector' && option.tools.length > 0) && <Button variant="outline" size="sm" disabled={busy || Boolean(view.recoveryRunId) || option.kind === 'connector' && !draft.tool} onClick={() => void act(async () => {
               const next = await desktopClient.reconciliationQuery({ ...request(item.effectKey), queryTool: draft.tool || undefined, arguments: option.kind === 'connector' ? parseQueryArguments(draft.args) : undefined })
@@ -73,7 +75,7 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
           </div>}
           {item.evidence && <div className="fox-reconciliation-evidence"><strong>查询结果</strong>
             {item.evidence.source === 'independent_file_read' && <p>{item.evidence.status === 'unavailable' ? '文件暂时无法核验。' : `已独立读取 ${item.evidence.bytes} 字节。${item.evidence.matchesSubmittedContent === true ? '内容与原提交一致。' : item.evidence.matchesSubmittedContent === false ? '内容与原提交不同。' : ''}`}</p>}
-            <p>{String(item.evidence.meaning ?? '')}</p><details><summary>查看详细查询记录</summary><pre>{JSON.stringify(item.evidence, null, 2)}</pre></details></div>}
+            <p>{userFacingError(String(item.evidence.meaning ?? ''), developerUi, '已记录查询结果。')}</p>{developerUi && <FoxDisclosure summary="查看详细查询记录"><pre>{JSON.stringify(item.evidence, null, 2)}</pre></FoxDisclosure>}</div>}
           <label htmlFor={`${fieldId}-decision`}>核对结论</label>
           <select id={`${fieldId}-decision`} value={draft.decision} disabled={busy || Boolean(view.recoveryRunId)} onChange={event => update({ decision: event.target.value as ReconciliationDecision })}><option value="">请选择核对结论</option><option value="executed">已执行</option><option value="not_executed">未执行</option><option value="unresolved">暂不恢复</option></select>
           <label htmlFor={`${fieldId}-note`}>核对依据</label><textarea id={`${fieldId}-note`} rows={3} maxLength={4096} value={draft.note} disabled={busy || Boolean(view.recoveryRunId)} placeholder="记录回执编号、查询结果或你在外部系统核对的情况。" onChange={event => update({ note: event.target.value })} />

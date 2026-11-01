@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { FoxDisclosure } from '@/components/fox-ui/fox-disclosure'
 import { Bot, ChevronRight, CircleStop, Clock3, Copy, FileText, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, RotateCcw, Send, ShieldCheck, Webhook } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Badge } from '@/components/ui/badge'
@@ -271,7 +272,7 @@ export function DigitalColleagueManager({ open, onOpenChange, experts }: Props) 
                     </div>
                   </Card>}
                 </div>
-                <details><summary>审计日志（{audit.length}）</summary><div className="fox-agent-resource-list">{audit.slice(0, 30).map((item) => <div key={item.id}><span><ShieldCheck /></span><p><b>{item.event} · {item.outcome}</b><small>{formatTime(item.createdAt)} · {item.actor}</small></p></div>)}</div></details>
+                <FoxDisclosure summary={`审计日志（${audit.length}）`}><div className="fox-agent-resource-list">{audit.slice(0, 30).map((item) => <div key={item.id}><span><ShieldCheck /></span><p><b>{item.event} · {item.outcome}</b><small>{formatTime(item.createdAt)} · {item.actor}</small></p></div>)}</div></FoxDisclosure>
               </section>
             </>}
           </TabsContent>

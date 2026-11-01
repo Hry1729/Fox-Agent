@@ -7,6 +7,9 @@
 // ticket in the same transaction that consumes it, so the prompt must never
 // invent, re-key, or reuse an approval identity of its own.
 import { useRef, useState, type ReactNode } from 'react'
+import { FoxDisclosure } from '@/components/fox-ui/fox-disclosure'
+import { useDeveloperUi } from '@/features/chat/developer-ui'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import { FilePen, FilePlus, Terminal, Trash2 } from 'lucide-react'
 import { ApprovalCard, PermissionGrant } from '@/components/assistant-ui/elements/approval-card'
 import { approvalPresentation } from '@/features/conversations/model/approval-presentation'
@@ -72,6 +75,7 @@ export function RuntimeApprovalPrompt({
   approval: ApprovalRecord
   onResolve: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>
 }) {
+  const developerUi = useDeveloperUi()
   const request = approval.request
   const presentation = approvalPresentation(approval)
   const allowedDecisions = allowedApprovalDecisions(request)
@@ -93,7 +97,7 @@ export function RuntimeApprovalPrompt({
       resolved = await desktopClient.approvalAllowProjectRule(approval.id, rulePrefix.trim())
       if (!resolved) setError('审批未处理成功，请重试。')
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '审批未处理成功，请重试。')
+      setError(userFacingError(cause instanceof Error ? cause.message : '', developerUi, '审批未处理成功，请重试。'))
     } finally {
       if (!resolved) {
         submittingRef.current = false
@@ -111,7 +115,7 @@ export function RuntimeApprovalPrompt({
       resolved = await resolveAllowedApprovalDecision(approval, decision, onResolve)
       if (!resolved) setError('审批未处理成功，请重试。')
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '审批未处理成功，请重试。')
+      setError(userFacingError(cause instanceof Error ? cause.message : '', developerUi, '审批未处理成功，请重试。'))
     } finally {
       if (!resolved) {
         submittingRef.current = false
@@ -125,7 +129,7 @@ export function RuntimeApprovalPrompt({
     const target = presentation.target
     return <PermissionGrant className="aui-permission-grant fox-confirmation fox-runtime-confirmation is-compact max-w-none" capability="读取文件" requester="Fox" reach={[target]} scope="pending" allowedScopes={scopes} busy={submitting}
       onGrant={scope => { const decision = scope === 'denied' ? 'deny' : scope === 'once' ? 'allow_once' : scope === 'conversation' ? 'allow_conversation' : null; if (decision) void resolve(decision) }}
-      detailsContent={<>{allowedDecisions.includes('allow_conversation') && <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>查看授权详情</summary><div role="region" aria-label="授权详情"><p>{presentation.summary}</p><p className="fox-approval-scope-note">“本次对话内允许”仅授权当前对话中的该工具和此目标，可随时撤销；权限模式变化后失效，不包含写入或执行命令。</p></div></details>}{error && <p role="alert" className="fox-approval-error">{error}</p>}</>} />
+      detailsContent={<>{allowedDecisions.includes('allow_conversation') && <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary="查看授权详情"><div role="region" aria-label="授权详情"><p>{presentation.summary}</p><p className="fox-approval-scope-note">“本次对话内允许”仅授权当前对话中的该工具和此目标，可随时撤销；权限模式变化后失效，不包含写入或执行命令。</p></div></FoxDisclosure>}{error && <p role="alert" className="fox-approval-error">{error}</p>}</>} />
   }
   const replacement = presentation.wholeFileReplacement
   const title = repairOverride ? '追加修复' : replacement ? replacement.baselineVersion === 'missing' ? '新建文件' : '替换文件'
@@ -156,7 +160,7 @@ export function RuntimeApprovalPrompt({
           <button type="button" disabled={submitting || !rulePrefix.trim()} onClick={() => void allowWithProjectRule()}>本项目总是允许「{rulePrefix.trim() || '…'}」</button>
           <small>按前缀匹配，复合命令每一段都要命中；高风险操作需要前缀写出它本身。可在设置里撤销。</small>
         </div>}
-        <details className="fox-approval-details-scroll fox-approval-disclosure"><summary>{presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}</summary>
+        <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary={presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}>
         <div role="region" aria-label="审批详情">
         {repairOverride && <div className={`fox-approval-context ${repairDetails ? '' : 'is-invalid'}`}>
           {repairDetails
@@ -175,8 +179,7 @@ export function RuntimeApprovalPrompt({
         {presentation.diff && <pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre>}
         {presentation.content !== undefined && <pre className="fox-approval-diff fox-approval-write-preview" aria-label="拟写入内容" tabIndex={0}><code>{presentation.content || '（空文件）'}</code></pre>}
         {presentation.wholeFileReplacement && <div className="fox-approval-replacement">
-          <details className="fox-approval-disclosure">
-            <summary>授权详情</summary>
+          <FoxDisclosure className="fox-approval-disclosure" summary="授权详情">
             <div className="fox-approval-context">
               <p><strong>用途：</strong>{presentation.wholeFileReplacement.purpose}（这不是普通写入审批）</p>
               <p><strong>基线版本：</strong><code>{presentation.wholeFileReplacement.baselineVersion}</code></p>
@@ -184,11 +187,11 @@ export function RuntimeApprovalPrompt({
               <p><strong>请求指纹：</strong><code>{presentation.wholeFileReplacement.requestDigest}</code></p>
               <small>授权绑定此文件、版本和内容；内容变化后需要重新确认。</small>
             </div>
-          </details>
+          </FoxDisclosure>
         </div>}
         {allowedDecisions.includes('allow_conversation') && !presentation.officeReuse && <div className="fox-approval-scope"><p className="fox-approval-scope-note">{conversationScopeNote}</p></div>}
         </div>
-        </details>
+        </FoxDisclosure>
         {error && <p role="alert" className="fox-approval-error">{error}</p>}
       </>}
     />

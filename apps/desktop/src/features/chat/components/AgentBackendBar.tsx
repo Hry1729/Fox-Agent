@@ -111,7 +111,7 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
   importReceipt?: readonly string[] | null
   onDismissImportReceipt?: () => void
 }) {
-  const receiptNotice = importReceipt && importReceipt.length > 0
+  const receiptNotice = developerUi && importReceipt && importReceipt.length > 0
     ? <ImportReceiptNotice lines={importReceipt} onDismiss={onDismissImportReceipt} />
     : null
   // 发送被路由拒绝改走通知，栏上不再铺同一句。草稿栏仍保留这个空位，避免把拒绝画进新对话。

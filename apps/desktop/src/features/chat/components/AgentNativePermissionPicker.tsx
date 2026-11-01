@@ -11,6 +11,8 @@
 // * Keyed by target: a late answer for another conversation / backend is
 //   dropped. Every rule is enforced again by the Host.
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useDeveloperUi } from '@/features/chat/developer-ui'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import { FULL_ACCESS_PRIVATE_HOME_NOTE } from '@/features/conversations/model/agent-backend-onboarding'
 import {
   nativeAppliedNotice,
@@ -46,6 +48,7 @@ export function AgentNativePermissionPicker({ client, conversationId, backend, p
   const [pending, setPending] = useState<{ key: string; mode: string; change: NativePermissionChange } | null>(null)
   const [message, setMessage] = useState<{ key: string; text: string; error: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
+  const developerUi = useDeveloperUi()
   const sequence = useRef(0)
 
   const request = useCallback((): NativePermissionRequest => (conversationId ? { conversationId } : { backend, projectId }), [conversationId, backend, projectId])
@@ -75,7 +78,7 @@ export function AgentNativePermissionPicker({ client, conversationId, backend, p
       setMessage(notice ? { key, text: notice, error: next.applied === 'failed' } : null)
       onChanged?.(next)
     } catch (cause) {
-      if (id === sequence.current) setMessage({ key, text: errorText(cause), error: true })
+      if (id === sequence.current) setMessage({ key, text: userFacingError(errorText(cause), developerUi, '权限没有改成，请重试。'), error: true })
     } finally {
       setBusy(false)
       setPending(null)

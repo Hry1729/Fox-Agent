@@ -105,7 +105,7 @@ export const AgentTool = memo(
         <AccordionTrigger className="px-3 py-2 text-sm hover:no-underline">
           {typeof tool.description === "string"
             ? tool.description
-            : "No description"}
+            : "没有说明"}
         </AccordionTrigger>
         <AccordionContent className="px-3 pb-3">
           <div className="rounded-md bg-muted/50">
@@ -125,7 +125,7 @@ export const AgentOutput = memo(
   ({ className, schema, ...props }: AgentOutputProps) => (
     <div className={cn("space-y-2", className)} {...props}>
       <span className="font-medium text-muted-foreground text-sm">
-        Output Schema
+        输出结构
       </span>
       <div className="rounded-md bg-muted/50">
         <CodeBlock code={schema} language="typescript" />

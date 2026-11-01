@@ -274,3 +274,68 @@
   height: var(--fox-icon-size-small);
   flex: 0 0 var(--fox-icon-size-small);
 }
+
+/* 折叠组件：替代原生 details。展开只转箭头，焦点用统一轮廓。 */
+.fox-disclosure {
+  display: grid;
+  gap: var(--fox-space-xs);
+  min-width: 0;
+}
+
+.fox-disclosure-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-xs);
+  width: 100%;
+  min-height: var(--fox-control-sm);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fox-text);
+  font-size: var(--fox-type-caption);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fox-disclosure-trigger:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+.fox-disclosure-chevron {
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
+  flex: 0 0 var(--fox-icon-size-small);
+  transition: transform var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+.fox-disclosure[data-state='open'] > .fox-disclosure-trigger .fox-disclosure-chevron {
+  transform: rotate(90deg);
+}
+
+.fox-disclosure-panel {
+  min-width: 0;
+}
+
+.fox-approval-disclosure.fox-disclosure {
+  border-top: 1px solid var(--fox-border);
+  padding-block: var(--fox-space-m);
+}
+
+.fox-runtime-confirmation.is-compact .fox-approval-disclosure.fox-disclosure {
+  border-top: 0;
+  padding-block: var(--fox-space-xs);
+}
+
+.fox-agent-login-card > .fox-agent-login-card-copy {
+  margin: 0;
+  color: var(--fox-text);
+  font-size: var(--fox-type-caption);
+  line-height: 1.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-disclosure-chevron {
+    transition: none;
+  }
+}

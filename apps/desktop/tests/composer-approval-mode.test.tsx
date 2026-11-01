@@ -175,8 +175,10 @@ describe('developer mode', () => {
     expect(text()).not.toContain('从真实 HOME 导入')
     expect(text()).not.toContain('私有 HOME')
     expect(text()).not.toContain('已锁定')
-    fireEvent.click(screen.getByRole('button', { name: '用已有登录…' }))
-    expect(text()).toContain('从真实 HOME 导入')
+    expect(text()).not.toContain('PI_API_KEY')
+    expect(screen.queryByRole('button', { name: '用已有登录…' })).toBeNull()
+    expect(screen.getByRole('button', { name: '去设置模型服务' })).toBeTruthy()
+    expect(document.querySelector('details')).toBeNull()
   })
 
   test('on: the debugging details come back (still no sandbox chip, no second selector)', async () => {

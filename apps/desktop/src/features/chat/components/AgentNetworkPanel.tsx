@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { FoxDisclosure } from '@/components/fox-ui/fox-disclosure'
+import { useDeveloperUi } from '@/features/chat/developer-ui'
+import { userFacingError } from '@/features/chat/send-failure-notice'
 import type { AgentNetworkClient, AgentNetworkStatus } from '@/features/conversations/model/agent-network'
 
 export function AgentNetworkPanel({ client, conversationId }: { client: AgentNetworkClient; conversationId: string }) {
@@ -7,11 +10,12 @@ export function AgentNetworkPanel({ client, conversationId }: { client: AgentNet
   const [error, setError] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const developerUi = useDeveloperUi()
   const busyRef = useRef(false)
   const refresh = useCallback(async () => {
     try { setStatus(await client.agentBackendNetworkStatus(conversationId)); setLoadError(null) }
-    catch (cause) { setLoadError(cause instanceof Error ? cause.message : String(cause)) }
-  }, [client, conversationId])
+    catch (cause) { setLoadError(userFacingError(cause instanceof Error ? cause.message : String(cause), developerUi, '预览列表没有读出来，请重试。')) }
+  }, [client, conversationId, developerUi])
   useEffect(() => {
     if (!open) return
     void refresh()
@@ -24,11 +28,10 @@ export function AgentNetworkPanel({ client, conversationId }: { client: AgentNet
     setError(null)
     setBusy(true)
     try { await action(); await refresh() }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    catch (cause) { setError(userFacingError(cause instanceof Error ? cause.message : String(cause), developerUi, '预览操作没有完成，请重试。')) }
     finally { busyRef.current = false; setBusy(false) }
   }
-  return <details className="fox-agent-network" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>本地预览</summary>
+  return <FoxDisclosure className="fox-agent-network" open={open} onOpenChange={setOpen} summary="本地预览">
     {open && <div className="fox-agent-network-content">
       <p>本地预览</p>
       {status && !status.previews.length && <p>未发现此会话的预览服务。启动后会自动出现在这里。</p>}
@@ -40,5 +43,5 @@ export function AgentNetworkPanel({ client, conversationId }: { client: AgentNet
       <p>端口由 Host 核验，只自动放行此会话进程的本地服务。预览随该 Agent 结束而停止。</p>
       {(error || loadError) && <p role="alert">{error || loadError}</p>}
     </div>}
-  </details>
+  </FoxDisclosure>
 }
