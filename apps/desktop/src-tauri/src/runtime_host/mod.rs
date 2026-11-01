@@ -27,6 +27,8 @@ mod native_approval_scope;
 #[cfg(test)]
 mod native_host_integration_tests;
 #[cfg(test)]
+mod e2e_full_turn_tests;
+#[cfg(test)]
 mod native_performance_tests;
 #[cfg(test)]
 mod native_crash_integration_tests;
