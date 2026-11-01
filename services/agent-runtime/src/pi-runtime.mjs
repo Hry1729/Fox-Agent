@@ -763,6 +763,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     filePlacement: buildFilePlacement(request.payload?.projectContext),
     workSnapshot: request.payload?.workSnapshot,
     memoryContext: request.payload?.memoryContext,
+    previousRunBackgroundJobs: request.payload?.previousRunBackgroundJobs ?? null,
     assistantPackage: request.payload?.assistantPackage,
     skillPrompt: request.payload?.skillPrompt,
     expertBinding: request.payload?.expertBinding,

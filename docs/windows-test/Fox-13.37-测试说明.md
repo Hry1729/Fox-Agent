@@ -119,9 +119,11 @@
 | B2-2 | 让 Codex 执行 `ping -n 60 127.0.0.1`，批准。命令开始后**不要停止**，先采集 `B2-2-running`（`-Baseline` 用 B2-1-before） | 摘要会列出 Codex 这一轮新起的进程。重点看每个进程的 `inFoxJob` 和 `account`。`SUSPECT ... reasons=viaSeclogon` 或 `accountMatch`（账户为 Codex 沙箱账户）说明有进程经 seclogon 逃出了 Job。**如实记录即可，这一步不判通过或失败** |
 | B2-3 | 点停止，等 3 秒，采集 `B2-3`（`-Baseline` 用 B2-1-before） | 和 Fox 相关的 `ALIVE` 行为 0。日志段有一行 `cancel_swept killed=N ... outside_job=M`：M>0 表示有 Job 外的后代被找到并处理；如果 `outside_job_unverified` 大于 0，请在备注里写明 |
 | B2-4 | 在同一会话再发一轮「回复 ok」 | 正常回复，不报后端退出。如果报错，附 `B2-4` 证据，以及日志里 `fox.external` 的最后 50 行（json 的 `foxExternalTail` 字段已经包含） |
-| B2-5 | 对照：新建 **dsh** 会话和 **Pi** 会话，各做一次 B2-2 到 B2-4（编号写成 B2-5d、B2-5p） | dsh 和 Pi 不经 seclogon，`suspectCount` 应为 0。停止后同样没有 `ALIVE` 行，下一轮正常 |
+| B2-5 | 对照：新建 **dsh** 会话和 **Pi** 会话，各做一次 B2-2 到 B2-4（编号写成 B2-5d、B2-5p）。**dsh 不用 ping**，改为让它执行 `powershell -NoProfile -Command "1..120 \| ForEach-Object { Start-Sleep -Seconds 1; $_ }"`（每秒输出一个数字，约 2 分钟）：dsh 的 Windows 写入沙箱用受限令牌运行命令，`ping` 在里面固定报 `General failure`，见下方说明 | dsh 和 Pi 不经 seclogon，`suspectCount` 应为 0。停止后同样没有 `ALIVE` 行，下一轮正常 |
 
 回传：B2-1 至 B2-5p，每项一行。B2-2 的备注里写清楚 suspect 的进程名、账户和 reasons。
+
+说明（fox-fix-1337-run）：dsh 在 `workspace-write` 下用自带的 Windows 写入沙箱（`@deepseek-ai/dsh-sandbox-windows-acl`，受限令牌 + Low 完整性）执行命令。13.37 实测里 `ping 127.0.0.1` 在这个沙箱里 100% 丢包（`transmit failed. General failure.`），按现象判断是 dsh 沙箱令牌下 ICMP 不可用（dsh 文档说明该沙箱只限制写入、不限制网络，所以属于它的副作用而非策略），不是 Fox 的网络策略，也不影响 dsh 的模型请求（模型请求由 dsh 进程本身发出，不在沙箱里）。需要长命令时用上面的 PowerShell 计数循环。
 
 ---
 

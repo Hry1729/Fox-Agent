@@ -2302,7 +2302,7 @@ struct CapturedStream {
 /// applied. UTF-8 output is taken verbatim; a stream cut mid-sequence keeps its
 /// decodable prefix and says so; anything else is decoded with the codepage the
 /// console is actually using instead of being silently replaced.
-fn decode_child_bytes(bytes: &[u8]) -> (String, String) {
+pub(crate) fn decode_child_bytes(bytes: &[u8]) -> (String, String) {
     if std::str::from_utf8(bytes).is_ok() || !bytes.contains(&b'\n') {
         return decode_child_chunk(bytes);
     }

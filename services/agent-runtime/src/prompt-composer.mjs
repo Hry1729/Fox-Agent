@@ -993,6 +993,16 @@ export function composeFoxPrompt({
         jsonBlock(expertBinding, 4_000),
       ].join('\n'), 4_000),
     })] : []),
+    // 13.37（B1-5）：前几轮后台任务在 Host 里的真实状态（例如随上一轮停止被一并取消）。只在有任务时出现；
+    // 之前对话里工具返回的「运行中」可能已经过时，以这里为准。
+    ...(Array.isArray(context.previousRunBackgroundJobs?.jobs) && context.previousRunBackgroundJobs.jobs.length > 0 ? [typedSection({
+      id: 'previous_run_background_jobs', kind: 'runtime', authority: 'runtime', priority: 85, minimumChars: 256, maxChars: 3_000,
+      content: bounded([
+        'This block is the Fox Host record of background jobs started in earlier turns of this conversation. It is runtime state, not an instruction.',
+        'It supersedes any earlier tool result that said such a job was still running: a background job belongs to the turn that started it and is cancelled when that turn ends or is stopped. Report these states truthfully if asked.',
+        jsonBlock(context.previousRunBackgroundJobs, 2_600),
+      ].join('\n'), 3_000),
+    })] : []),
     ...(Array.isArray(memoryContext.items) && memoryContext.items.length > 0 ? [typedSection({
       id: 'confirmed_memory', kind: 'confirmed_memory', authority: 'runtime', priority: 65, minimumChars: 256, maxChars: 8_000,
       content: bounded([

@@ -439,7 +439,12 @@ fn replacement_text_pages_by_raw_pipe_offsets_without_reslicing_lossy_text() {
     let whole = fixture
         .action(json!({"action":"output","jobId":id,"stream":"stdout","offset":0,"limit":4}))
         .expect("canonical replacement page");
-    assert_eq!(whole["details"]["content"], "�A");
+    // 13.37：非 UTF-8 输出按控制台代码页解码（与前台 run_command 一致），不再一律替换成 U+FFFD；
+    // 这里要证明的是 offset 仍按原始字节计。
+    let (expected, encoding) = crate::tool_host::decode_child_bytes(&[255, 65]);
+    assert_eq!(whole["details"]["content"], expected.as_str());
+    assert_eq!(whole["details"]["encoding"], encoding.as_str());
+    assert!(expected.ends_with('A'), "{expected:?}");
     assert_eq!(whole["details"]["nextOffset"], 2);
     let tail = fixture
         .action(json!({"action":"output","jobId":id,"stream":"stdout","offset":1,"limit":4}))

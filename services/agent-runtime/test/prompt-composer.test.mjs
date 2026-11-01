@@ -656,3 +656,13 @@ test('fails durable, shadow, and graph composition rather than dropping running 
     }), /work_snapshot_budget_too_small/, id)
   }
 })
+
+test('13.37 前几轮后台任务的真实状态单独成块，覆盖过时的「运行中」', () => {
+  const jobs = { note: 'host', jobs: [{ jobId: 'job:7bc9af45', kind: 'command', state: 'cancelled', runId: 'run-1', finishedAt: 1, errorCode: null }] }
+  const { prompt } = composeFoxPrompt({ systemPrompt: 'Fox', context: { permissionMode: 'ask', previousRunBackgroundJobs: jobs } })
+  assert.match(prompt, /background jobs started in earlier turns/)
+  assert.match(prompt, /"jobId": "job:7bc9af45"/)
+  assert.match(prompt, /"state": "cancelled"/)
+  const { prompt: without } = composeFoxPrompt({ systemPrompt: 'Fox', context: { permissionMode: 'ask', previousRunBackgroundJobs: null } })
+  assert.doesNotMatch(without, /background jobs started in earlier turns/)
+})

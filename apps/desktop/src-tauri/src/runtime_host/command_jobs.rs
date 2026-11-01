@@ -578,9 +578,12 @@ fn execute_inner(
         if end == start {
             end = start.saturating_add(4).min(bytes.len());
         }
+        // 13.37：中文 Windows 上 cmd 内建命令和 ping 等按 OEM 代码页（CP936）输出。与前台 run_command
+        // 同一套解码：先按 UTF-8，逐行回退到控制台代码页；offset 仍按原始字节计。
+        let (content, encoding) = crate::tool_host::decode_child_bytes(&bytes[start..end]);
         return Ok(result(
-            json!({"jobId":id,"state":row.state,"stream":stream,"content":String::from_utf8_lossy(&bytes[start..end]),
-            "offsetUnit":"raw_bytes","encoding":"utf8_lossy",
+            json!({"jobId":id,"state":row.state,"stream":stream,"content":content,
+            "offsetUnit":"raw_bytes","encoding":encoding,
             "offset":base+start as u64,"nextOffset":base+end as u64,
             "atEndOfAvailable":end==bytes.len(),"streamClosed":p["streamClosed"].as_bool().unwrap_or(row.state.is_terminal()),
             "lostBeforeOffset":base.saturating_sub(requested),"droppedBytes":p["droppedBytes"].as_u64().unwrap_or(0),

@@ -313,6 +313,32 @@ impl Database {
         Ok(out)
     }
 
+    /// 13.37（B1-5）：同一对话里最近几轮已经结束的 Run 启动过的后台任务，新到旧，最多 8 条。
+    /// 后台任务随它的 Run 结束（例如用户点停止）被取消时，模型上下文里最后一次工具结果还是
+    /// 「运行中」；下一轮开始前由 Host 把这些任务的真实状态交给模型。只读，不改任何任务。
+    pub fn recent_finished_run_jobs(&self, conversation_id: &str, current_run_id: &str) -> Result<Vec<JobSnapshot>, String> {
+        let ids: Vec<String> = self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT k.job_id FROM kernel_jobs k
+                 JOIN runs r ON r.id = k.run_id
+                 WHERE k.conversation_id = ?1 AND k.run_id <> ?2
+                   AND r.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+                   AND k.run_id IN (
+                       SELECT id FROM runs WHERE conversation_id = ?1 AND id <> ?2
+                       ORDER BY created_at DESC, rowid DESC LIMIT 3
+                   )
+                 ORDER BY k.created_at DESC, k.job_id LIMIT 8",
+            )?;
+            let rows = statement.query_map(params![conversation_id, current_run_id], |row| row.get::<_, String>(0))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                ids.push(row?);
+            }
+            Ok(ids)
+        })?;
+        ids.iter().map(|job_id| self.kernel_job_snapshot(job_id)).collect()
+    }
+
     /// Mark a queued job as running and hand it to this process.
     #[cfg(test)] // Legacy fixture setup only; production must claim a fenced attempt.
     pub fn kernel_job_mark_running(&self, job_id: &str) -> Result<JobSnapshot, String> {
@@ -594,6 +620,28 @@ mod tests {
             deadline_ms: None,
             progress_total: Some(10),
         }
+    }
+
+    #[test]
+    fn recent_finished_run_jobs_reports_the_real_state_of_a_cancelled_runs_jobs() {
+        let (db, root, first_run) = database();
+        let conversation_id: String = db
+            .with_connection(|connection| connection.query_row("SELECT conversation_id FROM runs WHERE id = ?1", [&first_run], |row| row.get(0)))
+            .unwrap();
+        let job = db.kernel_job_start(&start_request(&first_run, "bg-1", json!({"command": "ping -n 120 127.0.0.1"}))).unwrap();
+        let job_id = job.snapshot().job_id.clone();
+        // 运行中的这一轮自己看不到（它还没结束）。
+        assert!(db.recent_finished_run_jobs(&conversation_id, "another-run").unwrap().is_empty());
+        db.kernel_job_cancel(&job_id).unwrap();
+        db.with_connection(|connection| connection.execute("UPDATE runs SET status = 'cancelled', finished_at = 1 WHERE id = ?1", [&first_run]))
+            .unwrap();
+        let second_run = db.create_run(&conversation_id, "test", None).unwrap().run.id;
+        let jobs = db.recent_finished_run_jobs(&conversation_id, &second_run).unwrap();
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].job_id, job_id);
+        assert_eq!(jobs[0].run_id, first_run);
+        assert_eq!(jobs[0].state, JobState::Cancelled);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

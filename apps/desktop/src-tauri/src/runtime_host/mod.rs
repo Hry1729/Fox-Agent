@@ -1953,6 +1953,9 @@ impl RuntimeHost {
         // rounds and delivery review are retired.
         project_context["deliveryTargets"] =
             delivery::task_delivery_reference(text, &project_context);
+        // 13.37（B1-5）：后台任务属于启动它的那一轮，那一轮结束（例如点停止）时会被一并取消，
+        // 但模型上下文里最后一次工具结果仍是「运行中」。把最近几轮后台任务的真实状态交给这一轮。
+        let previous_run_jobs = previous_run_background_jobs(&self.database, &started.run.conversation_id, &started.run.id);
         // Host-decided placement for user-facing files. The folder is decided
         // once per (conversation, project) and persisted, so a continuation,
         // a retry on a later day and an application restart all land in the
@@ -2036,6 +2039,7 @@ impl RuntimeHost {
                 "hostRuntimeCapabilities": host_runtime_capabilities(&runtime_shadow_hash(&format!("manifest|pi|v2|{}",self.capabilities_manifest_json().unwrap_or_default())), &control_binding.execution_profile_id),
                 "workSnapshot": work_snapshot,
                 "memoryContext": memory_context,
+                "previousRunBackgroundJobs": previous_run_jobs,
                 "promptBudget": { "maxPromptTokens": input_tokens },
                 "runBudget": self.run_budget_override.as_ref().map(|budget| {
                     let mut payload = json!({ "maxDurationMs": budget.max_duration_ms });
@@ -8183,6 +8187,31 @@ fn execute_mcp_tool_request(
 ///
 /// No directory is created here. A read-only conversation that never produces a
 /// deliverable therefore still creates nothing on disk.
+/// 最近几轮已结束 Run 的后台任务的真实状态（Host 记录为准），没有任务时为 `None`。
+fn previous_run_background_jobs(database: &crate::database::Database, conversation_id: &str, run_id: &str) -> Option<Value> {
+    let jobs = match database.recent_finished_run_jobs(conversation_id, run_id) {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            eprintln!("[fox-host] 读取前几轮后台任务状态失败：{error}");
+            return None;
+        }
+    };
+    if jobs.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "note": "这些是前几轮启动的后台任务在 Host 里的当前真实状态，以此为准。之前对话里工具返回的「运行中」可能已经过时：后台任务属于启动它的那一轮，那一轮结束或被停止时它会被一并取消。",
+        "jobs": jobs.iter().map(|job| json!({
+            "jobId": job.job_id,
+            "kind": job.kind,
+            "state": job.state.as_str(),
+            "runId": job.run_id,
+            "finishedAt": job.finished_at,
+            "errorCode": job.error_code,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 fn project_context_for(
     database: &crate::database::Database,
     sessions_dir: &std::path::Path,
