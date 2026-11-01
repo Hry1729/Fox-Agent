@@ -177,3 +177,17 @@
     transition: none;
   }
 }
+
+/* C7：交付说明跟在卡片下方，左缘与卡片对齐，间距用 xs，不再向内缩进。 */
+.fox-message-artifact-trigger {
+  align-items: stretch;
+  gap: var(--fox-space-xs);
+}
+
+.fox-message-artifact-description {
+  margin: 0;
+  padding: 0;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-meta);
+  line-height: 1.4;
+}
