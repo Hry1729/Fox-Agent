@@ -21,3 +21,16 @@
 .fox-blue-avatar > [hidden] { display: none; }
 .fox-run-status-bar .fox-run-status-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .fox-run-status-time { flex: none; color: var(--fox-faint); font-variant-numeric: tabular-nums; }
+/* 失败时不再画狐狸头上的「!」字形，改用图标，尺寸走 token，颜色保持中性。 */
+.fox-run-status-alert {
+  width: var(--fox-icon-size-large);
+  height: var(--fox-icon-size-large);
+  flex: 0 0 var(--fox-icon-size-large);
+  display: grid;
+  place-items: center;
+  color: var(--fox-muted);
+}
+.fox-run-status-alert > svg {
+  width: var(--fox-icon-size-large);
+  height: var(--fox-icon-size-large);
+}

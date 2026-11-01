@@ -55,3 +55,8 @@
   height: var(--fox-icon-size);
   flex: 0 0 var(--fox-icon-size);
 }
+
+/* C4：错误框保留红色；页脚「运行失败 / 运行中断」改为中性色，避免和错误框重复报警。 */
+.fox-message-failure-meta {
+  color: var(--fox-muted);
+}
