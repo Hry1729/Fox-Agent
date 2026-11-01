@@ -147,8 +147,8 @@
     "tags tags";
   align-items: start;
   align-self: stretch;
-  column-gap: var(--fox-space-m);
-  row-gap: var(--fox-space-xs);
+  column-gap: var(--fox-space-m) !important; /* workspace-pages.css 的 .fox-shadcn-kb-card 有 gap:0!important */
+  row-gap: var(--fox-space-xs) !important;
   /* 100% 填满网格行：同行卡片等高，多出来的高度落在说明区，标签留在底部。 */
   height: 100% !important;
   padding: var(--fox-card-padding) !important;
