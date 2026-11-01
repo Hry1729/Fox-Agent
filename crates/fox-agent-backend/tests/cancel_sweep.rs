@@ -309,3 +309,122 @@ async fn wait_swept(sink: &Sink, run_id: &str) -> Value {
     }
     panic!("没有等到 agent_backend.cancel_swept: {:?}", sink.events(run_id));
 }
+
+/// `pid` 的直接子进程（Windows：Toolhelp；Linux：/proc）。
+fn children_of(pid: u32) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        assert!(snapshot != INVALID_HANDLE_VALUE, "CreateToolhelp32Snapshot 失败");
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = Vec::new();
+        let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while ok {
+            if entry.th32ParentProcessID == pid {
+                found.push(entry.th32ProcessID);
+            }
+            ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        unsafe { CloseHandle(snapshot) };
+        found
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(candidate) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else { continue };
+            if !process_ended(candidate) && parent_pid_or_zero(candidate) == pid {
+                found.push(candidate);
+            }
+        }
+        found
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pid;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parent_pid_or_zero(pid: u32) -> u32 {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return 0 };
+    let rest = stat.rfind(')').map(|index| &stat[index + 1..]).unwrap_or("");
+    rest.split_whitespace().nth(1).and_then(|value| value.parse().ok()).unwrap_or(0)
+}
+
+/// 13.35 P1：外部后端本轮起的 shell 再起的孙进程（Codex 实测是 pwsh -> PING.EXE），
+/// 取消后 3 秒内全部结束；`agent_backend.cancel_swept` 在 `run.cancelled` 之前发出
+/// （终态之后 Host 拒收 Run 事件），并且记下这些进程。
+#[tokio::test(flavor = "multi_thread")]
+async fn confirmed_cancel_sweeps_grandchildren_within_three_seconds_before_the_terminal() {
+    if !require_node() {
+        return;
+    }
+    let sink = Sink::default();
+    let launcher = MockLauncher::default();
+    let runtime = ExternalRuntime::with_cancel_timeout(sink.clone(), launcher.clone(), tokio::runtime::Handle::current(), Duration::from_secs(5));
+    runtime.start_turn(turn("grand", "grand", "spawn-grandchild")).unwrap();
+    let mut shell = 0u32;
+    for _ in 0..200 {
+        let reported = sink.text("grand");
+        if let Some(rest) = reported.split("shell:").nth(1) {
+            shell = rest.split(';').next().unwrap_or("").parse().unwrap_or_else(|error| panic!("shell pid: {error} in {reported}"));
+            break;
+        }
+        if reported.contains("spawn-failed") {
+            panic!("假 Agent 没能拉起 shell: {reported}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(shell != 0, "没有回报 shell pid: {}", sink.text("grand"));
+    // 等孙进程出现（ping / sleep；Windows 上 shell 还带一个 conhost.exe）。
+    let mut descendants = Vec::new();
+    for _ in 0..100 {
+        descendants = children_of(shell);
+        #[cfg(windows)]
+        descendants.retain(|pid| !console_hosts_of(&[shell]).contains(pid));
+        if !descendants.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!descendants.is_empty(), "shell {shell} 没有起孙进程");
+    let mut all = vec![shell];
+    all.extend(descendants.iter().copied());
+    let _reap = Reap(all.clone());
+    assert!(all.iter().all(|pid| !process_ended(*pid)), "取消前都应在: {all:?}");
+
+    let cancelled_at = std::time::Instant::now();
+    assert!(matches!(runtime.cancel("grand"), fox_agent_backend::external::CancelOutcome::Requested { .. }));
+    loop {
+        if all.iter().all(|pid| process_ended(*pid)) {
+            break;
+        }
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(3),
+            "取消 3 秒后仍有进程: {:?}",
+            all.iter().map(|pid| (*pid, process_ended(*pid))).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let terminal = wait_terminal(&sink, "grand").await;
+    assert_eq!(terminal["type"], "run.cancelled", "{terminal}");
+    let events = sink.events("grand");
+    let swept_at = events.iter().position(|event| event["type"] == "agent_backend.cancel_swept").unwrap_or_else(|| panic!("没有 cancel_swept: {events:?}"));
+    let terminal_at = events.iter().position(|event| event["type"] == "run.cancelled").unwrap();
+    assert!(swept_at < terminal_at, "cancel_swept 必须在 run.cancelled 之前: {events:?}");
+    let swept = &events[swept_at];
+    let killed: Vec<u32> = swept["killed"]["pids"].as_array().unwrap_or_else(|| panic!("killed.pids 缺失: {swept}"))
+        .iter().filter_map(|value| value.as_u64().map(|pid| pid as u32)).collect();
+    for pid in &all {
+        assert!(killed.contains(pid), "pid {pid} 应在 killed 里: {swept}");
+    }
+    assert!(swept["failed"].as_array().is_some_and(|failed| failed.is_empty()), "{swept}");
+    assert!(sink.audits().iter().any(|(_, event, _)| event == "agent_backend.cancel_swept"), "审计里应有 cancel_swept");
+    assert!(runtime.session_info("grand").unwrap().live, "后端连接应仍在");
+    runtime.shutdown().await;
+}

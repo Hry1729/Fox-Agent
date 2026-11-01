@@ -1,4 +1,5 @@
 // 假 ACP v1 后端：prompt 为 spawn-child 时拉起两个长驻子进程，取消时不杀它们（模拟 dsh）。
+// spawn-grandchild 时起一个 shell，由它再起长驻的 ping / sleep（孙进程，模拟 Codex 的 pwsh -> PING.EXE）。
 // hello 正常结束，用来确认取消清扫之后同一条连接还能用。
 import readline from 'node:readline'
 import { spawn } from 'node:child_process'
@@ -47,6 +48,19 @@ function startChild(detached) {
   })
 }
 
+// shell 子进程 -> ping/sleep 孙进程。回报 shell 的 pid，孙进程由测试按父进程找。
+function startShellWithGrandchild() {
+  return new Promise((resolve, reject) => {
+    const [command, args] = process.platform === 'win32'
+      ? ['cmd.exe', ['/d', '/s', '/c', 'ping -n 600 127.0.0.1 > nul']]
+      : ['/bin/sh', ['-c', 'sleep 600; :']]
+    const child = spawn(command, args, { stdio: 'ignore', windowsHide: true })
+    children.push(child)
+    child.once('error', reject)
+    child.once('spawn', () => (child.pid ? resolve(child.pid) : reject(new Error('shell has no pid'))))
+  })
+}
+
 async function spawnPair() {
   const first = await startChild(false)
   let second
@@ -92,6 +106,16 @@ rl.on('line', line => {
         if (!prompts.has(sessionId)) return
         text(sessionId, `pids:${pids[0]},${pids[1]}`)
         // 故意不结束这一轮，等 session/cancel。
+      }, error => {
+        if (!prompts.has(sessionId)) return
+        text(sessionId, `spawn-failed:${error && error.message ? error.message : error}`)
+        finish(sessionId, 'end_turn')
+      })
+    } else if (prompt === 'spawn-grandchild') {
+      startShellWithGrandchild().then(pid => {
+        process.stderr.write(`mock-acp-child-agent: shell ${pid}\n`)
+        if (!prompts.has(sessionId)) return
+        text(sessionId, `shell:${pid};`)
       }, error => {
         if (!prompts.has(sessionId)) return
         text(sessionId, `spawn-failed:${error && error.message ? error.message : error}`)

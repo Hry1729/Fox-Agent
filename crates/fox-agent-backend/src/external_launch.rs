@@ -429,7 +429,7 @@ impl HostLaunchConfig {
 pub const MISSING_CREDENTIALS: &str = "agent_backend_missing_credentials";
 
 /// Remedy of [`MISSING_CREDENTIALS`].
-pub const MISSING_CREDENTIALS_REMEDY: &str = "在输入框上方的登录卡片里打开私有 HOME 放入登录文件，或从真实 HOME 导入";
+pub const MISSING_CREDENTIALS_REMEDY: &str = "到「设置 → 模型服务」填写并测试当前供应商（Fox 会把它的地址和 Key 交给这个 Agent，不需要配置私有 HOME）；已有这个 Agent 自己的登录时，也可以在登录卡片里从真实 HOME 导入";
 
 /// Why the full-access choice is unavailable, for the new-conversation UI
 /// (`None` when it can be chosen).
@@ -561,7 +561,7 @@ impl HostLaunchConfig {
         Some(
             LaunchFailure::new(
                 MISSING_CREDENTIALS,
-                format!("外部后端「{}」还没有登录：Fox 为本项目准备的私有 HOME 里没有它读取的登录（{}）", request.backend.as_str(), probe.required_files.join("、")),
+                format!("外部后端「{}」还没有可用的登录：模型服务里没有可用于它、且已通过连接测试的供应商，它自己的登录文件也没有（{}）", request.backend.as_str(), probe.required_files.join("、")),
             )
             .remedy(MISSING_CREDENTIALS_REMEDY)
             .detail(serde_json::json!({

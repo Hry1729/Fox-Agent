@@ -383,7 +383,19 @@ impl ExternalBackendHost {
         };
         let target = AgentBackendTarget { conversation_id: Some(request.conversation_id.clone()), backend: None, project_id: None, project_root: None, full_access: false };
         match self.model_login_context(&target) {
-            Ok((_, false)) if self.unified_login(backend).is_none() => return failure("model.connection_required", "请先在后端栏补充或验证当前供应商的模型连接", true),
+            Ok((_, false)) if self.unified_login(backend).is_none() => {
+                // 13.35: say which step is missing. An edited provider (e.g. an
+                // added Anthropic address) needs a new connection test before a
+                // Run is created; the generic message hid that, and the send
+                // looked like it silently did nothing.
+                return match crate::external_model::external_login_gap(&self.database, backend) {
+                    Some(crate::external_model::LoginGap::Unverified) => failure("model.connection_unverified",
+                        "模型服务的配置改过了，当前地址还没有通过连接测试：请到模型服务重新测试连接，通过后再发送", true),
+                    Some(crate::external_model::LoginGap::ChooseAddress) => failure("model.connection_choose_address",
+                        "当前供应商有多个地址都能用于这个 Agent：请在后端栏选定一个地址后再发送", true),
+                    _ => failure("model.connection_required", "请先在后端栏补充或验证当前供应商的模型连接", true),
+                };
+            }
             Err(error) => return failure("model.connection_failed", error, true),
             _ => {}
         }

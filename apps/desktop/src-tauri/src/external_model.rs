@@ -72,6 +72,32 @@ pub fn external_login(database: &Database, backend: AgentBackend) -> Option<Unif
     login(&provider, &profiles[0])
 }
 
+/// Why [`external_login`] has nothing for `backend` (13.35). Lets a send that
+/// cannot start say what to do instead of a generic "no connection":
+/// editing the provider (for example adding an Anthropic address) changes its
+/// revision, so the earlier connection test no longer counts and the address
+/// must be tested again before the next send creates a Run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginGap {
+    /// No default provider, no address for this Agent's protocol, or no key.
+    Missing,
+    /// More than one address could serve this Agent; the user must pick one.
+    ChooseAddress,
+    /// Exactly one address, not (or no longer) verified by a connection test.
+    Unverified,
+}
+
+pub fn external_login_gap(database: &Database, backend: AgentBackend) -> Option<LoginGap> {
+    let Some(provider) = current(database).ok().flatten() else { return Some(LoginGap::Missing) };
+    let profiles = profiles(&provider, backend);
+    match profiles.len() {
+        0 => Some(LoginGap::Missing),
+        1 if !verified(database, &provider, &profiles[0]) => Some(LoginGap::Unverified),
+        1 => login(&provider, &profiles[0]).is_none().then_some(LoginGap::Missing),
+        _ => Some(LoginGap::ChooseAddress),
+    }
+}
+
 /// 13.19 fix ④: the provider address an Agent's native permission list
 /// depends on (Codex「帮我批准」is offered on OpenAI only). Unlike [`external_login`] it
 /// needs no key and no verification, so a new conversation's list is right
@@ -233,6 +259,28 @@ mod tests {
         profile.model_id = "two".into(); assert!(!verified(&db, &p, &profile));
         profile.model_id = "one".into(); profile.base_url.push_str("/changed"); assert!(!verified(&db, &p, &profile));
         profile.base_url = "https://example.com/v1".into(); p.updated_at += 1; assert!(!verified(&db, &p, &profile));
+        drop(db); let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn login_gap_names_the_missing_step_after_a_provider_edit() {
+        let path = std::env::temp_dir().join(format!("fox-protocol-gap-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(path.clone()).unwrap();
+        // No provider at all.
+        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::Missing));
+        // A provider with no Messages address: dsh has nothing to use.
+        let saved = db.save_model_provider(&provider()).unwrap();
+        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::Missing));
+        // The user adds an Anthropic address (13.35): the provider revision
+        // moves, nothing has tested the new address yet.
+        let mut edited = saved.clone();
+        edited.protocol_profiles = vec![endpoint("messages", "anthropic-messages")];
+        let edited = db.save_model_provider(&edited).unwrap();
+        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::Unverified));
+        // Two Messages addresses: a choice is needed first.
+        let mut two = edited.clone();
+        two.protocol_profiles.push(endpoint("messages-2", "anthropic-messages"));
+        db.save_model_provider(&two).unwrap();
+        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::ChooseAddress));
         drop(db); let _ = std::fs::remove_file(path);
     }
     #[test]

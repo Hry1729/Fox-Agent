@@ -64,4 +64,15 @@ describe('sendNotStartedNotice', () => {
     expect(notice.description).not.toContain('ECONNREFUSED')
     expect(notice.mergeKey).toBe('send-not-started:unknown')
   })
+
+  test('13.35：改过模型配置后未重新测试连接，提示去模型服务重新测试，不再像没反应', () => {
+    const notice = sendNotStartedNotice('model.connection_unverified', 'raw', { developerUi: false })
+    expect(notice.title).toBe('模型连接需要重新测试')
+    expect(notice.workspaceView).toBe('model-service')
+    expect(notice.description).toContain('重新测试连接')
+    expect(notice.description).not.toContain('model.connection_unverified')
+    const choose = sendNotStartedNotice('model.connection_choose_address', 'raw', { developerUi: false })
+    expect(choose.title).toBe('还没有可用的模型连接')
+    expect(choose.description).toContain('选定一个地址')
+  })
 })

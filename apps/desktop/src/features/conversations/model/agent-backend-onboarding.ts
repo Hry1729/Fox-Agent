@@ -241,11 +241,12 @@ export function credentialCardModel(probe: CredentialProbe | null | undefined, _
   }
   if (probe.state === 'ready') return null
   const note = unifiedLoginNote(probe)
-  const protocol = probe.backend === 'codex' ? 'OpenAI Responses' : probe.backend === 'deepseek' ? 'Anthropic Messages' : '兼容协议'
+  // 13.35：先指向模型服务（Fox 把供应商的地址和 Key 交给 Agent），私有 HOME 只作为已有自身登录时的备选。
+  const protocol = probe.backend === 'codex' ? 'OpenAI Responses' : probe.backend === 'deepseek' ? 'Anthropic Messages' : '任一协议（Chat Completions、Responses 或 Anthropic Messages）'
   return {
     kind: 'missing',
     title: '这个后端还没有登录',
-    description: `${note ? `${note}。` : `请在“设置 → 模型服务”添加 ${protocol} 配置并指定给此 Agent，保存 Key 后重试；也可以手动登录：`}外部后端只读取 Fox 为本项目准备的私有 HOME，你真实 HOME 里的登录在这里用不上。把需要的文件放进下面的文件夹，或从真实 HOME 导入。`,
+    description: `${note ? `${note}。` : `请到“设置 → 模型服务”填写并测试当前供应商的 ${protocol} 地址和 Key，Fox 会把它交给这个 Agent，不需要你配置私有 HOME。`}已有这个 Agent 自己的登录时，也可以从真实 HOME 导入（外部后端只读取 Fox 为本项目准备的私有 HOME，真实 HOME 里的登录不会直接生效）。`,
     privateHome: probe.privateHome,
     requiredKeys: probe.requiredKeys,
     requiredFiles: probe.requiredFiles,

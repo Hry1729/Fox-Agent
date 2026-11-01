@@ -4,7 +4,7 @@ import type { AgentBackendId } from '@/features/conversations/model/agent-backen
 import { agentBackendFailureHint } from '@/features/conversations/model/agent-backend-failure'
 import { notify } from '@/features/notifications'
 
-const MODEL_CONNECTION_CODES = new Set(['model.connection_required', 'model.connection_failed'])
+const MODEL_CONNECTION_CODES = new Set(['model.connection_required', 'model.connection_failed', 'model.connection_choose_address'])
 const LOGIN_CODES = new Set([
   'agent_backend_not_installed',
   'agent_backend_missing_credentials',
@@ -59,7 +59,10 @@ export function sendNotStartedNotice(
   let title = '发送未开始'
   let workspaceView: string | undefined
   let entityId: string | undefined
-  if (MODEL_CONNECTION_CODES.has(normalized)) {
+  if (normalized === 'model.connection_unverified') {
+    title = '模型连接需要重新测试'
+    workspaceView = 'model-service'
+  } else if (MODEL_CONNECTION_CODES.has(normalized)) {
     title = '还没有可用的模型连接'
     workspaceView = 'model-service'
   } else if (LOGIN_CODES.has(normalized)) {
