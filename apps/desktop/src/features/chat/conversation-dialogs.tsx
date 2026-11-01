@@ -162,7 +162,7 @@ export function ConversationManagementDialogs({ conversation, mode, busy, error,
     </Dialog>
     <Dialog open={mode === 'purge'} onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent className="fox-conversation-dialog fox-delete-dialog">
-        <DialogHeader><DialogTitle>永久删除对话？</DialogTitle><DialogDescription>“{conversation?.title}”及其消息、工具与审批记录、Fox 内部附件和未导出产物、Runtime Session，以及对应的远程线程（如有）将被永久删除。已导出到项目目录的文件不会受影响。此操作无法撤销。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>永久删除对话？</DialogTitle><DialogDescription>「{conversation?.title}」及其消息、工具与审批记录、Fox 内部附件和未导出产物、Runtime Session，以及对应的远程线程（如有）将被永久删除。已导出到项目目录的文件不会受影响。此操作无法撤销。</DialogDescription></DialogHeader>
         {error && <p className="fox-conversation-dialog-error" role="alert">{error}</p>}
         <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button variant="destructive" disabled={busy} onClick={onDelete}>{busy && <LoaderCircle className="animate-spin" />}永久删除</Button></DialogFooter>
       </DialogContent>
@@ -175,7 +175,7 @@ export function ProjectDeleteDialog({ project, busy, onClose, onDelete }: { proj
     <DialogContent className="fox-conversation-dialog">
       <DialogHeader>
         <DialogTitle>删除项目？</DialogTitle>
-        <DialogDescription>“{project?.name}”及其 {project?.items.length ?? 0} 个对话、消息、工具记录和 Fox 内部生成的文件将被删除。这里只会移除 Fox 中的项目记录，不会删除本机文件夹“{project?.root}”。此操作无法撤销。</DialogDescription>
+        <DialogDescription>「{project?.name}」及其 {project?.items.length ?? 0} 个对话、消息、工具记录和 Fox 内部生成的文件将被删除。这里只会移除 Fox 中的项目记录，不会删除本机文件夹“{project?.root}”。此操作无法撤销。</DialogDescription>
       </DialogHeader>
       <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button variant="destructive" disabled={busy} onClick={onDelete}>{busy && <LoaderCircle className="animate-spin" />}删除项目</Button></DialogFooter>
     </DialogContent>
