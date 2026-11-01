@@ -191,3 +191,86 @@
   font-size: var(--fox-type-meta);
   line-height: 1.4;
 }
+
+/* C8：代码块和表格工具栏与标题同一中线。按钮高度用小号控件，图标不再落在文字基线上。
+   表格规则多加一层消息祖先，避免被后加载的 message-response-controls.css 盖掉。 */
+.fox-collapsible-code-header,
+.fox-collapsible-code-title,
+.fox-collapsible-code-actions {
+  display: flex;
+  align-items: center;
+}
+
+.fox-collapsible-code-header,
+.fox-collapsible-code-title {
+  gap: var(--fox-space-s);
+}
+
+.fox-collapsible-code-header {
+  min-height: var(--fox-control-lg);
+}
+
+.fox-collapsible-code-actions {
+  gap: var(--fox-space-micro);
+}
+
+.fox-collapsible-code-title > svg,
+.fox-collapsible-code-actions button > svg {
+  display: block;
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
+  flex: 0 0 var(--fox-icon-size-small);
+}
+
+.fox-collapsible-code-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--fox-control-sm);
+  height: var(--fox-control-sm);
+  min-height: var(--fox-control-sm);
+  gap: var(--fox-space-xs);
+  padding-inline: var(--fox-space-s);
+  border-radius: var(--fox-radius-control);
+  font-size: var(--fox-type-micro);
+}
+
+.fox-collapsible-code-actions button:focus-visible,
+:is(.fox-thread, .fox-message, .fox-assistant-message) .fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) :is(button[title]):focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+:is(.fox-thread, .fox-message, .fox-assistant-message) .fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) {
+  display: flex;
+  align-items: center;
+  min-height: var(--fox-control-sm);
+  gap: var(--fox-space-xs);
+}
+
+:is(.fox-thread, .fox-message, .fox-assistant-message) .fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"])::before {
+  display: inline-flex;
+  align-items: center;
+  height: var(--fox-control-sm);
+  line-height: 1;
+}
+
+:is(.fox-thread, .fox-message, .fox-assistant-message) .fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) > button[title],
+:is(.fox-thread, .fox-message, .fox-assistant-message) .fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) > div > button[title] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--fox-control-sm);
+  height: var(--fox-control-sm);
+  min-width: var(--fox-control-sm);
+  min-height: var(--fox-control-sm);
+  padding: 0;
+  border-radius: var(--fox-radius-control);
+}
+
+:is(.fox-thread, .fox-message, .fox-assistant-message) .fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) > button[title] > svg,
+:is(.fox-thread, .fox-message, .fox-assistant-message) .fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) > div > button[title] > svg {
+  width: var(--fox-icon-size-small);
+  height: var(--fox-icon-size-small);
+  flex: 0 0 var(--fox-icon-size-small);
+}
