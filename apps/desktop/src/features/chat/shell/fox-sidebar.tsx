@@ -29,6 +29,7 @@ import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState
 import { type AssistantMode, IconButton, globalSearchKindLabel } from '../fox-shared'
 import { NotificationCenter } from './fox-notification-center'
 import { LOCAL_KNOWLEDGE_WORKSPACE_VIEWS } from '../workbench'
+import { userFacingCause } from '@/features/chat/send-failure-notice'
 
 const EMPTY_PROJECTS: readonly ProjectRecord[] = []
 
@@ -180,7 +181,7 @@ export function Sidebar({
       void onGlobalSearch(search.trim()).then((records) => {
         if (!cancelled) setSearchResults(records)
       }).catch((cause) => {
-        if (!cancelled) setSearchError(cause instanceof Error ? cause.message : '全局搜索失败，请稍后重试')
+        if (!cancelled) setSearchError(userFacingCause(cause, '全局搜索失败，请稍后重试'))
       })
     }, 180)
     return () => {

@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useDeveloperUi } from '@/features/chat/developer-ui'
 import { userFacingError } from '@/features/chat/send-failure-notice'
 import { FULL_ACCESS_PRIVATE_HOME_NOTE } from '@/features/conversations/model/agent-backend-onboarding'
+import { userFacingCause } from '@/features/chat/send-failure-notice'
 import {
   nativeAppliedNotice,
   nativePermissionChange,
@@ -30,7 +31,7 @@ export interface NativePermissionClient {
 }
 
 function errorText(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause)
+  return userFacingCause(cause)
 }
 
 export function AgentNativePermissionPicker({ client, conversationId, backend, projectId = null, tick = 0, onChanged }: {

@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import type { PermissionAuditRecord } from '@/features/conversations/model/types'
+import { userFacingCause } from '@/features/chat/send-failure-notice'
 
 const MODE_LABELS: Record<string, string> = { read_only: '只读', ask: '询问', auto: '自动', full_access: '完全访问' }
 const REASON_LABELS: Record<string, string> = { mode: '当前模式自动放行', full_access: '完全访问', rule: '命中项目规则', read: '读取' }
@@ -22,7 +23,7 @@ export function PermissionAuditList({ runId }: { runId: string | null | undefine
     if (!runId) return
     desktopClient.permissionAuditList({ runId, limit: 200 })
       .then(rows => { if (!cancelled) setEntries(rows) })
-      .catch(cause => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
+      .catch(cause => { if (!cancelled) setError(userFacingCause(cause)) })
     return () => { cancelled = true }
   }, [runId])
   if (!runId) return null

@@ -8,6 +8,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { TaskItem } from './TaskItem'
 import { Button } from '@/components/ui/button'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
+import { userFacingCause } from '@/features/chat/send-failure-notice'
 
 interface GoalProgressProps {
   data: GoalProgressData
@@ -47,7 +48,7 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
       }
       setResolvedWorkflowGateId(pendingWorkflowGate.id)
     } catch (cause) {
-      setWorkflowGateError(cause instanceof Error ? cause.message : String(cause))
+      setWorkflowGateError(userFacingCause(cause))
     } finally {
       setResolving(false)
     }
@@ -60,7 +61,7 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
       await desktopClient.cancelExpertTeam(expertTeam.run.id, '用户从工作进度卡停止专家团队')
       setCancelledTeamId(expertTeam.run.id)
     } catch (cause) {
-      setTeamError(cause instanceof Error ? cause.message : String(cause))
+      setTeamError(userFacingCause(cause))
     } finally {
       setResolving(false)
     }

@@ -55,6 +55,7 @@ import { MemoizedWindowTitlebar } from './shell/fox-window-titlebar'
 import { type RuntimeSource } from './timeline/fox-runtime-process-model'
 import './runtime-process-groups.css'
 import './runtime-process-row.css'
+import { userFacingCause } from '@/features/chat/send-failure-notice'
 
 const OnboardingPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.OnboardingPage })))
 
@@ -421,7 +422,7 @@ export function Workbench() {
       .then(setLocalKnowledgeBases)
       .catch((cause) => {
         setLocalKnowledgeBases([])
-        setKnowledgeDialogError(cause instanceof Error ? cause.message : String(cause))
+        setKnowledgeDialogError(userFacingCause(cause))
       })
       .finally(() => setLocalKnowledgeLoading(false))
   }, [knowledge.refresh])
@@ -861,7 +862,7 @@ export function Workbench() {
       if (!saved) throw new Error(desktopConversation.error ?? '无法保存资料库选择')
     } catch (cause) {
       setKnowledgeDialogBusy(false)
-      setKnowledgeDialogError(cause instanceof Error ? cause.message : String(cause))
+      setKnowledgeDialogError(userFacingCause(cause))
       return false
     }
     setKnowledgeDialogBusy(false)

@@ -3,6 +3,7 @@
 import type { AgentBackendId } from '@/features/conversations/model/agent-backend'
 import { agentBackendFailureHint } from '@/features/conversations/model/agent-backend-failure'
 import { notify } from '@/features/notifications'
+import { readDeveloperUi } from '@/features/chat/developer-ui'
 
 const MODEL_CONNECTION_CODES = new Set(['model.connection_required', 'model.connection_failed', 'model.connection_choose_address'])
 const LOGIN_CODES = new Set([
@@ -106,6 +107,12 @@ export function userFacingError(text: string | null | undefined, developerUi: bo
   if (!value) return fallback
   if (developerUi) return value
   return INTERNAL_SURFACE.test(value) ? fallback : value
+}
+
+/** 捕获到的异常转成界面文字：开发者模式原文，普通模式遇到调试信息改用 fallback。 */
+export function userFacingCause(cause: unknown, fallback = '这次没有完成，请重试。'): string {
+  const text = cause instanceof Error ? cause.message : cause == null ? '' : String(cause)
+  return userFacingError(text, readDeveloperUi(), fallback)
 }
 
 export function notifySendNotStarted(

@@ -21,6 +21,7 @@ import { useDeveloperUi } from '../developer-ui'
 import { type ChildAgentSelection, MarkdownResponse, type OpenFileTab, type RightMode } from '../fox-shared'
 import { compactValue, runtimeProcess } from '../timeline/fox-runtime-process-model'
 import { Workbench } from '../workbench'
+import { userFacingCause } from '@/features/chat/send-failure-notice'
 
 const ActivityDetailPanel = lazy(() => import('../components/ActivityDetailPanel').then((module) => ({ default: module.ActivityDetailPanel })))
 const HtmlFilePreview = lazy(() => import('../html-file-preview').then((module) => ({ default: module.HtmlFilePreview })))
@@ -132,7 +133,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
     setError(null)
     void desktopClient.readProjectFile(conversationId, path)
       .then((response) => { if (!cancelled) setPreview(response) })
-      .catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)) })
+      .catch((cause) => { if (!cancelled) setError(userFacingCause(cause)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     void desktopClient.projectFileAction(conversationId, path, 'inspect')
       .then((response) => { if (!cancelled) setApplications(response.applications) })
@@ -681,7 +682,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
       if (cancelled) return
       setProjectFiles(items)
     }).catch((cause) => {
-      if (!cancelled) setFileError(cause instanceof Error ? cause.message : String(cause))
+      if (!cancelled) setFileError(userFacingCause(cause))
     }).finally(() => { if (!cancelled) setFileLoading(false) })
     return () => { cancelled = true }
   }, [conversationId, mode])

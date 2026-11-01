@@ -37,6 +37,7 @@ import {
   type NativePermissionView,
 } from '@/features/conversations/model/agent-native-permission'
 import { type ComposerAccessMode, FOX_ACCESS_MODES } from '../access-mode'
+import { userFacingCause } from '@/features/chat/send-failure-notice'
 
 function tierIcon(tier: FoxPermissionTier | null, size?: number): ReactNode {
   switch (tier) {
@@ -186,7 +187,7 @@ export interface NativeApprovalClient {
 }
 
 function errorText(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause)
+  return userFacingCause(cause)
 }
 
 /**

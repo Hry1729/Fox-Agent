@@ -24,6 +24,12 @@ type ToastNotification = Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | '
 function noticeError(cause: unknown, fallback: string) {
   return userFacingError(desktopErrorDetails(cause).message, readDeveloperUi(), fallback)
 }
+
+/** 失败通知的正文在显示时再过一遍：普通模式不出现错误码、路径、密钥名；存档保留原文，开发者模式照常可见。 */
+function displayBody(item: Pick<AppNotificationRecord, 'kind' | 'body'>): string {
+  if (item.kind !== 'failed') return item.body
+  return userFacingError(item.body, readDeveloperUi(), '这次没有完成，请重试。')
+}
 const toastType: Record<AppNotificationRecord['kind'], ToastType> = { completed: 'success', failed: 'error', progress: 'loading', approval: 'warning', question: 'info' }
 
 function notificationFingerprint(item: AppNotificationRecord): string {
@@ -103,7 +109,7 @@ function NotificationCenterContent({
       id: notification.id,
       type: toastType[notification.kind],
       title: notification.title,
-      description: notification.body,
+      description: displayBody(notification),
       // Background progress should also leave the screen after a short wait; history stays in the center.
       duration: notification.kind === 'failed' || notification.kind === 'approval' ? 8000 : 5000,
       action: notification.sourceType ? { label: '查看', onClick: () => {
@@ -166,7 +172,7 @@ function NotificationCenterContent({
         if (shouldAlert.length && nextPreferences.sound) playNotificationSound(normalizeNotificationSoundId(nextPreferences.soundId))
         if (shouldAlert.length && nextPreferences.systemPopup && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
           const first = shouldAlert[0]
-          new Notification(first.title, { body: shouldAlert.length > 1 ? `${first.body}（另有 ${shouldAlert.length - 1} 条更新）` : first.body, tag: first.mergeKey })
+          new Notification(first.title, { body: shouldAlert.length > 1 ? `${displayBody(first)}（另有 ${shouldAlert.length - 1} 条更新）` : displayBody(first), tag: first.mergeKey })
         }
         for (const [id, fingerprint] of nextObserved) observedNotifications.current.set(id, fingerprint)
         while (observedNotifications.current.size > 500) {
@@ -300,7 +306,7 @@ function NotificationCenterContent({
 
       </div>
       {expanded && <div className="fox-notification-details">
-        <p>{item.body}</p>
+        <p>{displayBody(item)}</p>
         <footer><div>{canOpenDirectly && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, false)}><ExternalLink />打开文件</Button>}{downloadedFile && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, true)}><FolderOpen />打开所在文件夹</Button>}{item.workspaceView && <Button variant="outline" size="sm" onClick={() => void openItem(item)}><ExternalLink />{action}</Button>}</div></footer>
       </div>}
     </article>
