@@ -153,3 +153,42 @@
     transition: none;
   }
 }
+
+/* 引导页右侧插画和左卡同属一块表面，不再是一块纯灰。
+   旧规则带 !important，这里用更高特异度压过去。 */
+.fox-onboarding-screen > .fox-onboarding-shell {
+  background: var(--fox-card) !important;
+  border: 1px solid var(--fox-border) !important;
+  border-radius: var(--fox-radius-overlay);
+  box-shadow: var(--fox-shadow-lg);
+}
+
+.fox-onboarding-screen > .fox-onboarding-shell > .fox-onboarding-visual {
+  background: var(--fox-surface-muted) !important;
+  color: var(--fox-text) !important;
+  border-left: 1px solid var(--fox-border) !important;
+}
+
+.fox-onboarding-screen .fox-onboarding-visual-media strong {
+  color: var(--fox-text) !important;
+}
+
+.fox-onboarding-screen .fox-onboarding-visual-media span {
+  color: var(--fox-muted) !important;
+}
+
+.fox-onboarding-screen .fox-onboarding-prev:disabled {
+  opacity: 1 !important;
+  color: var(--fox-muted) !important;
+  background: var(--fox-surface-muted) !important;
+  border-color: var(--fox-border-strong) !important;
+}
+
+.fox-onboarding-screen .fox-onboarding-prev:focus-visible,
+.fox-onboarding-screen .fox-onboarding-next:focus-visible,
+.fox-onboarding-screen .fox-onboarding-skip:focus-visible,
+.fox-onboarding-screen .fox-onboarding-enter-button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+  box-shadow: none;
+}
