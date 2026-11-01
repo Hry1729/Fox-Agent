@@ -9,11 +9,11 @@
 
 ## 定位
 
-Tauri 后端是 Fox 的可信 Host：它连接 WebView、SQLite、文件系统、系统凭据库、Fox 会话的 Kernel 与 Node Agent Runtime、退休后端的历史兼容组件、知识库服务和 MCP。所有具有本地副作用的能力必须经过此层。
+Tauri 后端是 Fox 的可信 Host：它连接 WebView、SQLite、文件系统、系统凭据库、Fox 会话的 PiNative 与 Node Agent Runtime、外部 Agent（ACP）的进程管理、知识库服务和 MCP。所有具有本地副作用的能力必须经过此层。
 
 结论：
 - 启动时能就地降级的问题（Kernel 锁目录、本机资料库存储、预览缓存、缺失的 `agents` 行）不再中止启动；其余 setup 错误统一交给 `startup_failure.rs`，记录日志、在 Windows 上弹出「Fox 无法启动」并以退出码 1 结束，不再进入 tauri 的 `panic!`。
-- 单 Pi 准入与历史后端兼容的 Host 胶水在 `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs` 和 `apps/desktop/src-tauri/src/external_backend.rs`，决策与规则在 `crates/fox-agent-backend`，见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。
+- Agent 准入与外部 Agent 的 Host 胶水在 `apps/desktop/src-tauri/src/commands/agent_backend_routing.rs` 和 `apps/desktop/src-tauri/src/external_backend.rs`，决策与规则在 `crates/fox-agent-backend`，见 [Agent Runtime 架构 · 外层 Agent 后端](Agent运行时架构.md#外层-agent-后端四-agent)。
 
 ## 模块结构
 
