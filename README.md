@@ -8,16 +8,19 @@ Fox 不把 Agent 理解为“会调用几个工具的聊天机器人”。一次
 
 | Agent | 状态 | 说明 |
 | --- | --- | --- |
-| Fox（PiNative） | 内置主线，默认且唯一可用 | 新 Run 和子 Run 一律走 Authoritative + PiNative，没有路由开关，失败不回退。Kernel 执行循环已删除，历史 Kernel Run 显示为「已中断，可在新 Run 中继续」 |
-| Pi（外部，pi-acp） | 可选后端，**计划恢复** | 本版本仍处于退役状态：新会话不能选，旧会话只读 |
-| Codex（codex-acp） | 可选后端，**计划恢复** | 同上 |
-| DeepSeek Harness（dsh） | 可选后端，**计划恢复** | 同上 |
+| Fox（PiNative） | 内置主线，默认启用 | 新 Run 和子 Run 一律走 Authoritative + PiNative，没有路由开关，失败直接报错、不回退。Kernel 执行循环已删除，历史 Kernel Run 显示为「已中断，可在新 Run 中继续」 |
+| Pi（外部，pi-acp） | 可选接入，默认不启用 | 经 ACP 接入；工具调用由 pi-gate 交给 Fox 审批引擎，和 Fox 用同一套四档 |
+| Codex（codex-acp） | 可选接入，默认不启用 | 经 ACP 接入；使用 Codex 自己的沙箱和权限模式，审批请求在 Fox 里显示为审批卡 |
+| DeepSeek Harness（dsh） | 可选接入，默认不启用 | 经 ACP 接入（`dsh --profile acp`）；使用 dsh 自己的沙箱和权限模式 |
 
-- 外部 Agent 计划在下一阶段（阶段三）恢复：经 ACP v1 接入；外部 Pi 与 PiNative 共用 Fox 的审批引擎，Codex、dsh 使用各自的原生沙箱和审批。恢复前，源码里保留的 ACP 客户端、驱动和原生权限映射都不代表可用。
-- 管理员环境变量 `FOX_EXTERNAL_BACKENDS` 只保留诊断解析，不能启用外部 Agent。
+- 外部 Agent 走同一个通用 ACP 后端（`crates/fox-agent-backend`），第一批支持 Pi、Codex、dsh，各家差异放在 `src/backends/{pi,codex,deepseek}.rs`。Fox 的工具（交付文件卡、知识库查询、向用户提问）通过 MCP 桥接给外部 Agent（`src/fox_mcp.rs`）。
+- 默认只有 Fox。外部 Agent 要先由用户在电脑上安装和配置（Windows 上是受管运行时包，当前 0.1.8），再到「设置 → Agent」打开开关；开关旁显示「已检测到 / 未安装 / 未配置」。启用后才会出现在输入框的 Agent 选择器里。
+- 输入框上方不再有登录卡片。外部 Agent 没配好时发送，只弹一条通知，带「去设置」。
+- Pi 没选过配置来源时，默认使用 Fox 模型服务的 Key（写入该项目的私有 HOME 并记审计）；也可以在「设置 → Agent」切到本机 `~/.pi`。
+- 管理员环境变量 `FOX_EXTERNAL_BACKENDS` 只能关闭外部 Agent（未设置时不限制），不能代替用户的启用开关。
 - 模型 API Key 存在系统凭据库，按供应商 base URL 在本机全局共享。
 
-详见 [单 Pi 主线状态](docs/01-项目概览/单Pi主线状态.md) 与 [Agent Runtime 架构 · 外层 Agent 后端](docs/02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+详见 [单 Pi 主线状态](docs/01-项目概览/单Pi主线状态.md)（文件名沿用旧称，正文开头是现状）与 [Agent Runtime 架构 · 外层 Agent 后端](docs/02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
 
 ## 核心能力
 
@@ -68,9 +71,11 @@ Fox 不把 Agent 理解为“会调用几个工具的聊天机器人”。一次
 
 ## 安全与可信执行
 
-以下描述 Fox 会话；外部 Agent 会话（计划恢复）的边界见[安全架构](docs/02-架构/安全架构.md#外部-agent-会话计划恢复)。
+以下描述 Fox 会话；外部 Agent 会话的边界见[安全架构 · 外部 Agent 会话](docs/02-架构/安全架构.md#外部-agent-会话)。
 
-**Fox 不用沙箱。** 命令在 Fox Job 中以用户本人身份执行（Windows Job Object / 其他平台进程组），Fox Job 只负责超时、取消和清理整棵进程树。是否执行由 Host 的审批引擎决定，分四档：**只读、询问、自动、完全访问**；block 规则（删除盘符根、家目录、项目根等）在任何模式下都拒绝，`.git`、`.fox`、shell 配置等受保护路径和项目外路径只有完全访问能直接放行，项目可以设命令前缀规则（「本项目总是允许」），完全访问首次开启要二次确认，每次自动放行都写审计。这是有意的取舍：在自动和完全访问模式下，等同于用户本人执行；前缀规则可以被「先改脚本再执行」绕过，靠审计追溯。详见[安全架构 · 风险取舍](docs/02-架构/安全架构.md#风险取舍用户已接受)。
+**Fox 不用沙箱。** 旧的 SRT 沙箱已删除，命令放进 Fox Job，以用户本人身份执行（Windows Job Object / 其他平台进程组），Fox Job 只负责超时、取消和清理整棵进程树。是否执行由 Host 的审批引擎决定，分四档：**只读、询问、自动、完全访问**；block 规则（删除盘符根、家目录、项目根等）在所有档位（包括完全访问）都拒绝，`.git`、`.fox`、shell 配置等受保护路径和项目外路径只有完全访问能直接放行，项目可以设命令前缀规则（「本项目总是允许」），完全访问首次开启要二次确认，每次自动放行都写审计。这是有意的取舍：在自动和完全访问模式下，等同于用户本人执行；前缀规则可以被「先改脚本再执行」绕过，靠审计追溯。详见[安全架构 · 风险取舍](docs/02-架构/安全架构.md#风险取舍用户已接受)。
+
+外部 Agent 会话里，Pi 与 Fox 共用这套四档（block 规则同样生效）；Codex、dsh 的权限选项是它们自己的模式（Codex：请求审批 / 帮我批准 / 完全访问权限；dsh：仅可查看 / 工作区完全修改 / 完全权限），审批请求在 Fox 中显示为审批卡，Fox 不替它们自动允许。任何 Agent 第一次在某项目开启完全访问都要二次确认。
 
 模型不能直接访问操作系统。它只能提出结构化工具请求，请求必须依次通过工具白名单、Execution Profile、项目路径、参数约束、审批策略和 Host 状态校验，才会由 Tauri Host 执行。
 
@@ -95,14 +100,15 @@ Rust Host ── SQLite 产品事实
     ├─ Fox 会话：PiNative（Authoritative）→ JSONL Runtime 协议 → Node Agent Runtime ── 模型供应商
     │                                       ↓ Host Tool 请求 → 审批引擎（四档）
     │            Rust Host ── 项目文件 / 命令（Fox Job）/ 知识库 / MCP / OpenAPI / Keyring
-    └─ 外部 Agent 会话（计划恢复）：ACP v1 → Pi / Codex / dsh ── 模型供应商
+    └─ 外部 Agent 会话（可选，需在设置中启用）：通用 ACP 后端 → Pi / Codex / dsh ── 模型供应商
+                                       ↑ Fox 工具经 MCP 桥接（fox_mcp）
 ```
 
 | 模块 | 职责 |
 | --- | --- |
 | `apps/desktop` | React 前端、Tauri Host、SQLite Repository、权限和系统集成 |
 | `services/agent-runtime` | 模型循环、Prompt、Typed Context、Execution Profile、工具协议和离线 Eval |
-| `crates/fox-agent-backend` | 外层 Agent 后端：路由、ACP 客户端、外部 Agent 启动与私有 HOME、原生权限映射、凭据保存 / 删除规则（外部 Agent 计划恢复） |
+| `crates/fox-agent-backend` | 外层 Agent 后端：路由、通用 ACP 客户端、外部 Agent（Pi / Codex / dsh）启动与私有 HOME、Fox 工具 MCP 桥、原生权限映射、取消清扫、凭据保存 / 删除规则 |
 | `crates/fox-agent-kernel`、`crates/fox-engine-protocol` | Kernel 状态类型（执行循环已删除，用于读历史 Run 与 authority 状态）与引擎协议 |
 | `scripts` | 跨模块契约、Fixture、知识预览校验和构建辅助 |
 | `docs` | 产品介绍、架构、协议、开发指南、运维与路线图 |

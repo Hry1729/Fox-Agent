@@ -2,7 +2,7 @@
 
 > 状态：维护中<br>
 > 适用版本：Fox `0.1.x`<br>
-> 最后更新：2026-10-31（B4c：收尾与清理后的现状统一）
+> 最后更新：2026-11-01（外部 Agent 恢复为可选接入；migration-work/ 冻结规则）
 
 本目录面向参与 Fox 产品、设计、前端、桌面后端、Agent Runtime、测试和发布工作的工程师。文档描述当前代码事实、稳定设计边界和已经确认的演进方向，不把历史方案直接当成当前实现。
 
@@ -12,9 +12,9 @@
 
 其余文档只写各主题的技术正文。当「某结论现在算不算数」有疑问时，以该页为准，不要从各主题文档的历史段落里推断。
 
-**现状（2026-10-31）**：PiNative 是内置主线，新 Run 和子 Run 一律 Authoritative + PiNative，失败不回退；Kernel 执行循环已删除，历史 Kernel Run 显示为中断；外部 Agent（Pi、Codex、dsh）是可选后端，计划在下一阶段恢复，目前不可用；Fox 不用沙箱，命令在 Fox Job 中执行；审批分只读 / 询问 / 自动 / 完全访问四档；工具结果上限 64 KiB，超出用 `read_tool_result` 续读；检索失败直接报错，只有索引未就绪才降级为关键词检索并注明。详见[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)与[安全架构](02-架构/安全架构.md)。
+**现状（2026-11-01）**：Fox 内置 PiNative 是主线，新 Run 和子 Run 一律 Authoritative + PiNative，失败直接报错、不回退；Kernel 执行循环已删除，历史 Kernel Run 显示为中断。Fox 不用沙箱（SRT 已删除），命令放进 Fox Job 执行。外部 Agent 已恢复为可选接入：通用 ACP 后端，第一批支持 Pi、Codex、dsh，Fox 工具经 MCP 桥接；默认只有 Fox，用户先在电脑上安装和配置，再在「设置 → Agent」里启用；输入框上方不再有登录卡片；Pi 没选过配置来源时默认用 Fox 模型服务的 Key。审批分只读 / 询问 / 自动 / 完全访问四档，block 规则在所有档位生效，第一次开启完全访问要二次确认。运行时包 0.1.8；dsh 的 SenseNova 补丁尚未合入。详见[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)与[安全架构](02-架构/安全架构.md)。
 
-以下为 2026-10-28 的历史说明：当时文档对应单 Pi 主线：本地单 Pi 准入、退休外部会话只读、Yuxi 远程能力保留、Schema v99。Legacy 原生会话及重置、重跑、删除、恢复与拒绝错误重试已有[限定桌面验收](../apps/desktop/tests/acceptance/single-pi-20261027/RUN-20261028-terra.md)，**默认 Authoritative 原生会话接入仍未完成**。驱动与阶段状态统一见[单 Pi 主线状态](01-项目概览/单Pi主线状态.md)，证据口径见[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)。
+以下为 2026-10-28 的历史说明（其中「退休外部会话只读」「默认 Authoritative 原生会话接入仍未完成」都已不成立）：当时文档对应单 Pi 主线：本地单 Pi 准入、退休外部会话只读、Yuxi 远程能力保留、Schema v99。Legacy 原生会话及重置、重跑、删除、恢复与拒绝错误重试已有[限定桌面验收](../apps/desktop/tests/acceptance/single-pi-20261027/RUN-20261028-terra.md)，**默认 Authoritative 原生会话接入仍未完成**。驱动与阶段状态统一见[单 Pi 主线状态](01-项目概览/单Pi主线状态.md)，证据口径见[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)。
 
 本轮覆盖范围、改动清单、未改文件理由和保护检查见[单 Pi 文档同步复核](评审/单Pi文档同步复核-2026-10-28.md)。2026-10-26 的 144 个文件提交明细和历史失效引用另见[旧文档刷新复核](评审/文档刷新复核与文件清单-2026-10-26.md)。
 
@@ -68,7 +68,7 @@
 2. [总体架构](02-架构/总体架构.md)
 3. [对话系统架构](02-架构/对话系统架构.md)
 4. [智能体与模型架构](02-架构/智能体与模型架构.md)
-5. [Agent Runtime 架构](02-架构/Agent运行时架构.md)（含单 Pi 准入、历史后端只读与阶段二映射）
+5. [Agent Runtime 架构](02-架构/Agent运行时架构.md)（含外层 Agent 后端：Fox 与外部 ACP Agent）
 6. [Tauri 后端架构](02-架构/Tauri后端架构.md)
 7. [数据架构](02-架构/数据架构.md)
 8. [数据库结构](04-技术参考/数据库结构.md)
@@ -101,7 +101,7 @@
 | --- | --- | --- |
 | 修改消息发送、编辑、取消或恢复 | [对话系统架构](02-架构/对话系统架构.md) | [Tauri 命令与事件](04-技术参考/Tauri命令与事件.md) |
 | 接入新 Runtime、模型或 Provider | [智能体与模型架构](02-架构/智能体与模型架构.md)、[Agent Runtime 架构](02-架构/Agent运行时架构.md) | [Runtime 协议](04-技术参考/Runtime协议.md) |
-| 修改驱动准入、历史会话兼容或 Pi 原生映射 | [单 Pi 主线状态](01-项目概览/单Pi主线状态.md)、[Agent Runtime 架构](02-架构/Agent运行时架构.md#单-pi-驱动与历史兼容) | `host_routing.rs`、`kernel_model_config.rs`、`runtime_host/mod.rs` |
+| 修改 Agent 准入、外部 Agent（ACP）或 Pi 原生映射 | [单 Pi 主线状态](01-项目概览/单Pi主线状态.md)（文件名沿用旧称）、[Agent Runtime 架构 · 外层 Agent 后端](02-架构/Agent运行时架构.md#外层-agent-后端四-agent) | `host_routing.rs`、`external_backend.rs`、`fox_mcp.rs`、`runtime_host/mod.rs` |
 | 修改设置页 | [设置中心](03-产品与前端/设置中心.md) | 本页「设置页现状」、`apps/desktop/src/features/settings`、`apps/desktop/src/features/workspace/management-navigation.ts` |
 | 修改 Agent、默认助手或远程助手 | [智能体与模型架构](02-架构/智能体与模型架构.md) | [数据库结构](04-技术参考/数据库结构.md) |
 | 设计专家、工作流或子智能体团队 | [专家能力包架构](02-架构/专家能力包架构.md)、[专家工作流架构](02-架构/专家工作流架构.md) | [专家团队架构](02-架构/专家团队架构.md)、[子 Agent 与 Child Run 架构](02-架构/子Agent与ChildRun架构.md) |
@@ -164,7 +164,7 @@
 - [数字同事架构](02-架构/数字同事架构.md)
 - [Tauri 后端架构](02-架构/Tauri后端架构.md)
 - [Agent 运行时架构](02-架构/Agent运行时架构.md)
-- [四 Agent 改造实施方案 v0.3.1](02-架构/四Agent改造实施方案-v0.3.1.md)（历史方案原文；当前驱动准入已由单 Pi 分支取代）
+- [四 Agent 改造实施方案 v0.3.1](02-架构/四Agent改造实施方案-v0.3.1.md)（历史方案原文；当前准入见 Agent Runtime 架构）
 - [数据架构](02-架构/数据架构.md)
 - [项目与权限架构](02-架构/项目与权限架构.md)
 - [知识库集成架构](02-架构/知识库集成架构.md)
@@ -226,14 +226,14 @@
 
 #### Kernel 改造
 
-Kernel / Authoritative 已是 Fox 会话的默认执行路径；现状和余项以 [Kernel 改造进度](07-路线图/Kernel-改造进度.md) 为准，下列方案和验收文档顶部都加了 2026-10-25 的现状说明。
+Kernel 执行循环已删除，Fox 会话一律走 Authoritative + PiNative；下列方案和验收文档都是历史，顶部的现状说明以[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)为准。
 
 - [Kernel 改造进度](07-路线图/Kernel-改造进度.md)（当前状态）
 - [Kernel 原生引擎验收与回退](07-路线图/Kernel-原生引擎验收与回退.md)（机制有效，发布证据未齐）
 - [Kernel 新内核默认验收包](07-路线图/Kernel-新内核默认验收包.md)（已取代）
 - [Kernel 换电脑安装验收](07-路线图/Kernel-换电脑安装验收.md)（已过时）
 - [Kernel 统一控制架构改造方案](07-路线图/Fox%20Agent%20Kernel统一控制架构改造方案.md)（主体已实施）
-- [Fox Agent 与原生 Agent 双路线架构方案](07-路线图/Fox-Agent与原生Agent双路线架构方案.md)（历史双路线方案；当前外部驱动已退休）
+- [Fox Agent 与原生 Agent 双路线架构方案](07-路线图/Fox-Agent与原生Agent双路线架构方案.md)（历史双路线方案；外部 Agent 现为可选接入）
 - [Phase4B 受控权威切换设计草案](07-路线图/Phase4B-受控权威切换设计草案.md)（已被实际切换取代）
 - [本地知识库 BM25 向量与 RRF 实施计划（2026-09-14）](07-路线图/本地知识库-BM25向量与RRF-实施计划-2026-09-14.md)（未开始）
 
@@ -254,17 +254,19 @@ Kernel / Authoritative 已是 Fox 会话的默认执行路径；现状和余项�
 - [上港集团职工“五小”创新成果汇报稿（新版）](评审/上港集团职工“五小”创新成果汇报稿新版.md)
 - [上港集团职工“五小”创新成果推荐申报表](评审/上港集团职工“五小”创新成果推荐申报表.md)
 
-> 说明（2026-10-31）：`评审/`、`归档/`、`07-路线图/实施记录/`、`07-路线图/checkpoints/`、`f3-timeout-20260924/`、`releases/` 和仓库根目录的 `migration-work/`、`apps/desktop/tests/acceptance/` 都是历史记录，正文不改写。其中关于 SRT 沙箱、ACL、网络代理、`FOX_EXECUTOR_ROUTE` / Kernel 路由、Kernel 执行循环、按输入哈希的「本会话允许」和交付旧方案（清单、内容校验、逐项验收）的描述都只对应记录时点；现状见[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)。
+> 说明（2026-11-01）：`评审/`、`归档/`、`07-路线图/实施记录/`、`07-路线图/checkpoints/`、`f3-timeout-20260924/`、`releases/` 和仓库根目录的 `migration-work/`、`apps/desktop/tests/acceptance/` 都是历史记录，正文不改写。其中关于 SRT 沙箱、ACL、网络代理、`FOX_EXECUTOR_ROUTE` / Kernel 路由、Kernel 执行循环、外部 Agent 退役 / 计划恢复、输入框上方的登录卡片、按输入哈希的「本会话允许」和交付旧方案（清单、内容校验、逐项验收）的描述都只对应记录时点；现状见[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)。
+>
+> **`migration-work/` 是冻结的历史目录**：已经跟踪的摘要（S5 候选清单、CI 记录、验收记录等）保留原样，供链接追溯；以后不再往里加文件。新的取证材料、交接文档、候选构建（安装包、exe、dump 等）一律放在仓库外，例如 `D:\fox-archive\`。仓库的 `.gitignore` 已忽略 `migration-work/` 下新产生的未跟踪文件，以及 `*.dmp`、`*.msi`、文件名含 setup 的 exe / zip 和仓库根目录下的 exe，避免它们出现在 `git status` 里；已跟踪的文件不受影响。
 
 ### 测试候选与历史取证
 
 - [测试候选 fox-test-20260926-01](releases/fox-test-20260926-01/README.md)（源码测试候选，不是已发布安装包）
 - [F3 超时历史设计与取证归档](f3-timeout-20260924/README.md)
 
-### 外部 Agent 与历史沙箱复测（crate 内文档）
+### 外部 Agent 与人工复测（crate 内文档）
 
-- `crates/fox-agent-backend/docs/sandbox.md`：历史沙箱与人工复测批次（13.30 及以前为历史，现已无沙箱）；13.31 为当前 Windows 复测清单
-- `crates/fox-agent-backend/docs/codex.md`、`pi.md`、`deepseek.md`：外部 Agent 的历史接入证据；这三家计划在阶段三恢复，当前状态见单 Pi 主线状态
+- `crates/fox-agent-backend/docs/sandbox.md`：历史沙箱记录与人工复测批次（13.30 及以前为历史，现已无沙箱）；13.31 起是 Windows 复测清单，最新一节在文件末尾
+- `crates/fox-agent-backend/docs/codex.md`、`pi.md`、`deepseek.md`：外部 Agent 的接入说明与历史实测证据；三家已恢复为可选接入，各页开头是现状，当前状态汇总见[当前状态与核验基线](01-项目概览/当前状态与核验基线.md)
 
 仓库根目录的 UI 改造期阶段性文档（`STEP6-HANDOFF.md`、`UI-CHANGES-*.md` 等）已标为历史文档，清单见[架构文档导航 · 根目录历史文档](02-架构/架构文档导航.md#根目录历史文档)。
 

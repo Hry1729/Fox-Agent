@@ -45,3 +45,15 @@ apps/desktop/src-tauri/resources/sandbox-installer/
 # Local installers, screenshots, probe databases and generated acceptance output.
 # Reusable tests and release scripts belong in test/ and scripts/.
 /output/
+
+# migration-work/ is a frozen history directory: the summaries already tracked
+# stay tracked; new evidence, handoff notes and candidate builds live outside
+# the repo (for example D:\fox-archive\). Untracked new files there are ignored.
+/migration-work/**
+
+# Crash dumps and candidate installers/builds never belong in the repo.
+*.dmp
+*.msi
+*setup*.exe
+*-setup.zip
+/*.exe

@@ -1,10 +1,36 @@
 # 单 Pi 主线状态
 
-> 状态：维护中；默认 Authoritative + PiNative，已安装 v6 核心链路及两项补测通过，尚未发布<br>
-> 适用范围：S5 合并交付；v6 构建源码 `a952125d`，补测交接 HEAD `2e302344`<br>
-> 最后更新：2026-10-31（B4c：收尾与清理后的现状；保留此前历史正文）
+> 状态：维护中<br>
+> 适用范围：main（现状按 2026-11-01 的代码核对，基线 `bb6f88a9`）<br>
+> 最后更新：2026-11-01（外部 Agent 已恢复为可选接入；保留此前历史正文）
 
-## 当前结论（2026-10-31，收尾 A0–A3 与清理 B1/B2 之后，main `999bd912`）
+> **名称说明**：本页文件名沿用 2026-10-27「单 Pi 主线」时期的叫法，为避免链接失效不改名。现在 Fox 已不是「只有一个 Pi」：内置主线是 PiNative，外部 Agent（Pi、Codex、dsh）经通用 ACP 后端恢复为可选接入。下面「现状」一节是当前事实，其后各节都是历史记录。
+
+## 现状（2026-11-01）
+
+- **执行主线**：Fox 内置 PiNative 是主线。新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关；`FOX_EXECUTOR_ROUTE` 已删除，不认识的 route 直接报 `executor_route_unknown`。任何执行失败都直接报错，不回退到 Kernel、别的 Agent 或更宽松的路径。
+- **Kernel 执行循环已删除**：历史 Kernel Run 在启动时标为 `interrupted`（`executor_route_retired`，界面显示「执行路径已退役。已中断，可在新 Run 中继续」），不再续跑。Kernel 事实表只停用、不删，用于读历史。
+- **不用沙箱**：SRT、ACL、网络代理已删除。命令（`run_command`、后台命令作业、固定能力工具）放进 Fox Job，以当前用户身份执行（Windows Job Object / 其他平台进程组），Job 只负责超时、取消和清理进程树（`process_jobs.rs`）。
+- **外部 Agent 已恢复，可选接入**：通用 ACP 后端（`crates/fox-agent-backend`，共用 `acp.rs` / `external.rs`，各家差异在 `src/backends/{pi,codex,deepseek}.rs`），第一批支持 Pi（pi-acp）、Codex（codex-acp）、dsh（`dsh --profile acp`）。`host_routing.rs` 的 `SUPPORTED_BACKENDS` 为 Fox + 三家外部 Agent，`RETIRED_BACKENDS` 为空。Fox 工具经 MCP 桥接给外部 Agent（`src/fox_mcp.rs`：`present_files`、`list_knowledge_bases`、`search_knowledge`、`read_knowledge_document`、`ask_user`；Codex、dsh 经 ACP `session/new` 的 stdio 中继，Pi 经 pi 扩展）。
+- **默认只有 Fox**：外部 Agent 需要用户先在电脑上安装和配置（Windows 受管运行时包），再到「设置 → Agent」打开开关；开关旁显示「已检测到 / 未安装 / 未配置」。启用状态存在 WebView localStorage `fox.preferences.enabledExternalAgents`，默认为空；只有启用的外部 Agent 会出现在输入框的 Agent 选择器里，也只有它能成为新会话的 Agent。已停用 Agent 的旧会话仍可查看，发送时在本地拒绝（`agent_backend_user_disabled`）并提示去设置。`FOX_EXTERNAL_BACKENDS` 是管理员的关闭开关（未设置时不限制），只能关、不能代替用户启用。
+- **输入框上方没有登录卡片**：登录 / 配置卡已删除。外部 Agent 没配好时发送，只弹一条通知（「<Agent> 还没配置好」或「还没安装」），带「去设置」按钮。
+- **Pi 配置来源**：从没选过时，如果 Fox 模型服务能给 Pi 用，默认使用 Fox 模型服务的 Key（只写入该项目的私有 HOME，记审计 `agent_backend.pi_source_defaulted_to_fox`）；否则在建 Run 前拒绝（`agent_backend_pi_source_choice_required`）。可在「设置 → Agent → Pi 配置来源」切到本机 `~/.pi`。
+- **审批四档**：只读 / 询问 / 自动 / 完全访问。block 规则在所有档位（包括完全访问）都生效；每个项目第一次开启完全访问需要二次确认；每次自动放行写 `permission_audit`。外部 Pi 经 pi-gate 由 Fox 审批引擎作答，与 Fox 同一张表；Codex、dsh 使用各自的原生权限模式（Codex：请求审批 / 帮我批准 / 完全访问权限；dsh：仅可查看 / 工作区完全修改 / 完全权限），映射到四档，选项列表由 Host 的 `native_permission.rs` 统一提供；Fox 把它们的 `request_permission` 显示为审批卡，不替它们自动允许。
+- **端到端测试**：`crates/fox-agent-backend/tests/e2e_full_turn.rs` 的 `e2e_acp_full_turn_{pi,codex,dsh}`（审批、工具子进程、会话复用、取消清扫）；`apps/desktop/src-tauri/src/runtime_host/e2e_full_turn_tests.rs` 的 `e2e_fox_native_full_turn_approval_second_turn_and_cancel`（询问档审批 → 拒绝 → 第二轮 → 取消回收进程，仅 Windows CI）。
+- **运行时包 0.1.8**：`launch.rs` 的 `RUNTIME_PACKAGE_VERSION` 与 `apps/desktop/src-tauri/windows/sandbox-release.json` 都是 0.1.8（不带 `srt\`、`acp-bridge\`，含 pi-acp / pi 的 `windowsHide` 补丁）。安装目录沿用历史名 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`。
+- **dsh SenseNova 补丁未合入**：`dsh-messages-stream` 补丁只在分支 `feat/fox-runtime-dsh-messages`，main 的 `pins.json` 里没有，0.1.8 运行时包也不含；用 dsh 连 SenseNova 仍会失败。
+- **工具结果上限 64 KiB**：超出部分完整落盘，模型用 `read_tool_result` 按 `fox-result://` 引用续读；外部 Agent 经 MCP 桥拿到的结果用同一上限。
+- **检索**：本地知识库向量 / 混合检索失败直接报错；只有向量索引尚未就绪时才降级为关键词检索，并在结果 `fallback`（`index_not_ready`）中注明。
+- **数据库**：Schema v104（`DATABASE_SCHEMA_VERSION`）。
+- **仍开放**：Codex 中途起的常驻子进程会被取消清扫误杀；取消后立即开新一轮的宽限期怎么取舍；Codex / dsh 在完全访问下 Fox 看不到它们执行的命令；外部路径桌面层（DesktopSink → 数据库 → 审批结算）的 e2e 和桌面 crate 的 Linux CI 还没做；「自定义 ACP Agent」通用入口未实现。
+- **风险取舍**：命令安全只靠审批、规则和 Fox Job；自动和完全访问模式下等同于用户本人执行；前缀规则可被「先改脚本再执行」绕过，靠审计追溯。见[安全架构 · 风险取舍](../02-架构/安全架构.md#风险取舍用户已接受)。
+- **CI 与复测**：main `bb6f88a9` push 触发的全量 CI `41302190443` 全绿，详情见[当前状态与核验基线](当前状态与核验基线.md)。Windows 人工复测清单在 `crates/fox-agent-backend/docs/sandbox.md` 13.31 起各节（最新一节在文件末尾）。
+
+以下各节保留更早的结论和证据。其中「外部 Agent 退役 / 计划恢复」「SRT」「Kernel 路由」「会话授权」「登录卡片」等描述只适用于当时。
+
+## 历史结论（2026-10-31，收尾 A0–A3 与清理 B1/B2 之后，main `999bd912`）
+
+> 本节是 2026-10-31 的记录：当时外部 Agent 处于退役状态，已在 C1–C4 恢复，见上文「现状」。
 
 - **执行主线**：PiNative 是内置主线。新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关；`FOX_EXECUTOR_ROUTE` 已删除，不认识的 route 直接报 `executor_route_unknown`。
 - **Kernel 执行循环已删除**（B1）：历史 Kernel Run 在启动时标为 `interrupted`（`executor_route_retired`，界面显示「执行路径已退役。已中断，可在新 Run 中继续」），不再续跑；对它们的 start / approve / 执行 job 立即报 `executor_route_retired`。Kernel 事实表只停用、不删，用于读历史。
@@ -16,8 +42,6 @@
 - **检索**：本地知识库向量 / 混合检索失败直接报错；只有向量索引尚未就绪时才降级为关键词检索，并在结果 `fallback`（`index_not_ready`）中注明。
 - **风险取舍**：去掉 SRT 后命令安全只靠审批、规则和 Job；自动和完全访问模式下等同于用户本人执行；前缀规则可被「先改脚本再执行」绕过，靠审计追溯。见[安全架构 · 风险取舍](../02-架构/安全架构.md#风险取舍用户已接受)。
 - **CI**：A3 全量 CI `41143349823`（`c40b02e7`）全绿；B1 定向 `41150699693`、B2 定向 `41153130974` 通过。Windows 13.31 实测清单见 `crates/fox-agent-backend/docs/sandbox.md` 13.31 节。
-
-以下各节保留更早的结论和证据，其中关于 SRT、Kernel 路由、会话授权的描述只适用于当时。
 
 ## 历史结论（2026-10-30 S5 候选）
 
