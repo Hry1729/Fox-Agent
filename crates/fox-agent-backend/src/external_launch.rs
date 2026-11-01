@@ -475,6 +475,8 @@ impl HostLaunchConfig {
         let home = self.private_home_path(project_uuid, request.backend)?;
         let host_env = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
         let mut probe = crate::onboarding::probe(request.backend, &home, &host_env);
+        // UI 1103: 设置 → Agent shows「未安装」from the same check a launch uses.
+        probe.installed = Some(self.managed_program(request.backend).is_some());
         if request.backend == AgentBackend::Pi {
             let mut source = crate::login_source::status(&self.state_root, &home, self.native_login_home.as_ref())
                 .map_err(|e| LaunchFailure::new("agent_backend_source_failed", e))?;
@@ -946,6 +948,10 @@ mod tests {
         let mut req = request(AgentBackend::Deepseek, &root);
         let probe = config.credential_probe(&req).unwrap();
         assert_eq!(probe.state, crate::onboarding::CredentialState::MissingCredentials);
+        assert_eq!(probe.installed, Some(config.managed_program(AgentBackend::Deepseek).is_some()), "installed is the launch's own check");
+        if crate::launch::program_override(AgentBackend::Deepseek).is_none() {
+            assert_eq!(probe.installed, Some(false), "nothing is installed under the test runtime root");
+        }
         assert_eq!(probe.private_home, root.join("data/agent-homes/8f14e45f-ceea-467a-9a36-dedd4bea2543/deepseek"));
         let real = root.join("real");
         std::fs::create_dir_all(real.join(".dsh/profiles/acp")).unwrap();

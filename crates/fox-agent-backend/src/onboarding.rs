@@ -100,6 +100,9 @@ pub struct CredentialProbe {
     /// usable default provider. Names only.
     pub unified_login: Option<crate::unified_login::UnifiedReport>,
     pub source: Option<crate::login_source::SourceStatus>,
+    /// Whether the backend's program is installed (the same
+    /// `managed_program` check a launch uses); `None` when not looked at.
+    pub installed: Option<bool>,
 }
 
 /// Names of Host environment variables that are set (non-empty). Values are
@@ -310,6 +313,7 @@ pub fn probe(backend: AgentBackend, private_home: &Path, host_env: EnvPresence<'
         templates,
         unified_login: None,
         source: None,
+        installed: None,
     }
 }
 
