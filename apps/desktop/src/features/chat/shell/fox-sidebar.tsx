@@ -1,3 +1,4 @@
+import { formatClockTime } from '@/lib/time-format'
 import { sidebarDateGroups } from '../sidebar-date-groups'
 import '@/components/fox-ui/sidebar-list-pane.css'
 import { type ConversationRunIndicator } from '../conversation-run-indicator'
@@ -30,6 +31,11 @@ import { NotificationCenter } from './fox-notification-center'
 import { LOCAL_KNOWLEDGE_WORKSPACE_VIEWS } from '../workbench'
 
 const EMPTY_PROJECTS: readonly ProjectRecord[] = []
+
+/** 行内不再放时间；悬停标题时用 tooltip 看 24 小时制的最后消息时间。 */
+function sidebarConversationTooltip(title: string, time: string) {
+  return time ? `${title}\n最后消息 ${time}` : title
+}
 
 const KnowledgeResourceExplorer = lazy(() => import('@/features/knowledge/knowledge-resource-explorer').then((module) => ({ default: module.KnowledgeResourceExplorer })))
 
@@ -188,10 +194,9 @@ export function Sidebar({
       ? trashedConversations
       : runtimeConversations
   const conversationItems = useMemo(() => {
-    const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
     return lifecycleConversations?.map((item) => ({
       ...item,
-      time: item.lastMessageAt ? timeFormat.format(new Date(item.lastMessageAt)) : '',
+      time: item.lastMessageAt ? formatClockTime(item.lastMessageAt) : '',
       active: item.id === activeConversationId
     })) ?? []
   }, [lifecycleConversations, activeConversationId])
@@ -337,9 +342,8 @@ export function Sidebar({
                   <ContextMenu key={item.id}>
                     <ContextMenuTrigger asChild>
                       <SidebarMotionItem><div className={`fox-sidebar-tree-row fox-project-conversation-row ${item.active ? 'is-active' : ''}`}>
-                        <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
+                        <button type="button" className="fox-sidebar-tree-main" title={sidebarConversationTooltip(item.title, item.time)} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
                         <ConversationAttentionBadge indicator={runIndicators?.get(item.id)} />
-                        <span className="fox-sidebar-row-time">{item.time}</span>
                         <span className="fox-sidebar-row-actions">
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多项目对话操作"><MoreHorizontal size={13} /></Button></DropdownMenuTrigger>
@@ -383,13 +387,12 @@ export function Sidebar({
               </span>
             </div>
             <div className="fox-conversation-list">
-              {sidebarDateGroups(visibleConversations).map((group) => <section className="fox-sidebar-date-group" key={group.key}><h3 className="fox-sidebar-date-heading"><MessageCircleMore size={14} /><span>{group.label}</span></h3>{group.items.map((item) => (
+              {sidebarDateGroups(visibleConversations).map((group) => <section className="fox-sidebar-date-group" key={group.key}><h3 className="fox-sidebar-date-heading"><span>{group.label}</span></h3>{group.items.map((item) => (
                 <ContextMenu key={item.id}>
                   <ContextMenuTrigger asChild>
                     <SidebarMotionItem><div className={`fox-sidebar-tree-row ${item.active ? 'is-active' : ''}`}>
-                      <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
+                      <button type="button" className="fox-sidebar-tree-main" title={sidebarConversationTooltip(item.title, item.time)} onClick={() => onOpenConversation(item.id)}><ConversationRunStatus indicator={runIndicators?.get(item.id)} /><span>{item.title}</span></button>
                       <ConversationAttentionBadge indicator={runIndicators?.get(item.id)} />
-                      <span className="fox-sidebar-row-time">{item.time}</span>
                       <span className="fox-sidebar-row-actions">
                         <DropdownMenu>
                           <Tooltip><TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多操作"><MoreHorizontal size={13} /></Button></DropdownMenuTrigger></TooltipTrigger><TooltipContent side="right"><p>更多操作</p></TooltipContent></Tooltip>

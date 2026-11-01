@@ -1,11 +1,267 @@
-/* UI 1102 区域样式：侧栏（项目行、对话行、分组标题、通知中心、全局搜索）。
-   在 workbench.css / workspace-pages.css 之后加载，用来按区域收敛样式。
-   规则：只引用 globals.css / themes.css 里的设计 token（--fox-space-*、--fox-radius-*、--fox-type-*、
-   --fox-icon-size-*、--fox-shadow-*、--fox-duration-* 等），不写裸 px / ms / 颜色值；
-   0、1px 描边、百分比和 auto 除外。 */
+/* UI 1102 区域样式：侧栏（项目行、对话行、分组标题、日期分组、资料库树）。
+   在 workbench.css / workspace-pages.css 之后加载。组件自带的 fox-sidebar.css、
+   sidebar-list-pane.css、library-unification.css 更晚加载，这里用更长的祖先选择器压过它们。
+   只组合已有 token，不改 icon 中心线（inset + icon-box / 2）和动作列右缘（inset）。 */
 
-/* 「等你处理」徽标：文字用 --fox-warning-text，保证浅色下 ≥ 4.5:1。
-   fox-sidebar.css 随组件加载，选择器多一层以免被覆盖。 */
-.fox-sidebar-tree-row .fox-sidebar-attention {
+:root {
+  /* 对话行只有一个「…」。 */
+  --fox-sidebar-row-action-width: var(--fox-sidebar-action-size);
+  /* 项目行是「+」和「…」，中间留动作间距。 */
+  --fox-sidebar-project-actions-width: calc(var(--fox-sidebar-action-size) + var(--fox-sidebar-action-gap) + var(--fox-sidebar-action-size));
+  /* 「等你处理」四字，加上左右内边距和一档余量，避免字贴圆角。 */
+  --fox-sidebar-badge-width: calc(var(--fox-type-caption) * 4 + var(--fox-space-s) + var(--fox-space-s) + var(--fox-space-xs));
+  --fox-sidebar-pin-width: var(--fox-icon-size-compact);
+  /* 离开比进入快。 */
+  --fox-sidebar-duration-leave: calc(var(--fox-duration-fast) / 2);
+  /* 日期标题文字左缘 = 对话标题文字左缘。 */
+  --fox-sidebar-title-inset: calc(var(--fox-sidebar-inset) + var(--fox-sidebar-icon-box) + var(--fox-sidebar-icon-gap));
+}
+
+/* ---------- 项目行 / 对话行：动作浮在标题上，标题占满内容宽 ---------- */
+
+.fox-sidebar .fox-project-row,
+.fox-sidebar .fox-sidebar-tree-row {
+  --fox-sidebar-row-overlay: 0;
+  --fox-sidebar-mask-end: 0;
+}
+
+.fox-sidebar .fox-project-row {
+  position: relative;
+}
+
+.fox-sidebar .fox-project-row-main {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+/* 置顶钉不占标题宽度，锚在动作列右缘。 */
+.fox-sidebar .fox-project-row:has(svg[aria-label='已置顶项目']) {
+  --fox-sidebar-row-overlay: var(--fox-sidebar-pin-width);
+  --fox-sidebar-mask-end: calc(var(--fox-sidebar-pin-width) + var(--fox-sidebar-actions-fade));
+}
+
+.fox-sidebar .fox-project-row:is(:hover, :focus-within, :has([data-state='open'])) {
+  --fox-sidebar-row-overlay: var(--fox-sidebar-project-actions-width);
+  --fox-sidebar-mask-end: calc(var(--fox-sidebar-project-actions-width) + var(--fox-sidebar-actions-fade));
+}
+
+.fox-sidebar .fox-project-row:has(svg[aria-label='已置顶项目']):is(:hover, :focus-within, :has([data-state='open'])) {
+  --fox-sidebar-row-overlay: calc(var(--fox-sidebar-project-actions-width) + var(--fox-sidebar-pin-width));
+  --fox-sidebar-mask-end: calc(var(--fox-sidebar-project-actions-width) + var(--fox-sidebar-pin-width) + var(--fox-sidebar-actions-fade));
+}
+
+.fox-sidebar .fox-project-row-main > svg[aria-label='已置顶项目'] {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  inset-inline-end: 0;
+  width: var(--fox-sidebar-pin-width);
+  height: var(--fox-sidebar-pin-width);
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: transform var(--fox-sidebar-duration-leave) var(--fox-ease-out);
+}
+
+.fox-sidebar .fox-project-row:is(:hover, :focus-within, :has([data-state='open'])) .fox-project-row-main > svg[aria-label='已置顶项目'] {
+  transform: translateY(-50%) translateX(calc(-1 * var(--fox-sidebar-project-actions-width)));
+  transition-duration: var(--fox-duration-fast);
+}
+
+.fox-sidebar .fox-project-row > .fox-project-row-actions,
+.fox-sidebar .fox-sidebar-tree-row > .fox-sidebar-row-actions {
+  position: absolute;
+  z-index: 2;
+  inset-block: 0;
+  inset-inline-end: var(--fox-sidebar-inset);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin: 0;
+  opacity: 0;
+  visibility: visible;
+  pointer-events: none;
+  transition: opacity var(--fox-sidebar-duration-leave) var(--fox-ease-out);
+}
+
+.fox-sidebar .fox-project-row > .fox-project-row-actions {
+  width: var(--fox-sidebar-project-actions-width);
+  gap: var(--fox-sidebar-action-gap);
+}
+
+.fox-sidebar .fox-sidebar-tree-row > .fox-sidebar-row-actions {
+  width: var(--fox-sidebar-row-action-width);
+}
+
+.fox-sidebar .fox-project-row:is(:hover, :focus-within, :has([data-state='open'])) > .fox-project-row-actions,
+.fox-sidebar .fox-sidebar-tree-row:is(:hover, :focus-within, :has([data-state='open'])) > .fox-sidebar-row-actions {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-duration: var(--fox-duration-fast);
+}
+
+/* 对话标题右缘收到内容盒右缘（行右缘 − inset），不再给时间和动作留行内槽。 */
+.fox-sidebar .fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
+.fox-sidebar .fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main {
+  width: 100%;
+  min-width: 0;
+  padding-inline-end: 0;
+}
+
+/* 徽标常态贴行尾，和动作同一锚点；悬停时左移一个动作宽，不重排。 */
+.fox-sidebar .fox-sidebar-tree-row:has(.fox-sidebar-attention) {
+  --fox-sidebar-row-overlay: var(--fox-sidebar-badge-width);
+  --fox-sidebar-mask-end: calc(var(--fox-sidebar-badge-width) + var(--fox-sidebar-actions-fade));
+}
+
+.fox-sidebar .fox-sidebar-tree-row:is(:hover, :focus-within, :has([data-state='open'])) {
+  --fox-sidebar-row-overlay: var(--fox-sidebar-row-action-width);
+  --fox-sidebar-mask-end: calc(var(--fox-sidebar-row-action-width) + var(--fox-sidebar-actions-fade));
+}
+
+.fox-sidebar .fox-sidebar-tree-row:has(.fox-sidebar-attention):is(:hover, :focus-within, :has([data-state='open'])) {
+  --fox-sidebar-row-overlay: calc(var(--fox-sidebar-row-action-width) + var(--fox-sidebar-badge-width));
+  --fox-sidebar-mask-end: calc(var(--fox-sidebar-row-action-width) + var(--fox-sidebar-badge-width) + var(--fox-sidebar-actions-fade));
+}
+
+.fox-sidebar .fox-sidebar-tree-row > .fox-sidebar-attention {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  inset-inline-end: var(--fox-sidebar-inset);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: var(--fox-sidebar-badge-width);
+  height: var(--fox-sidebar-badge-height);
+  margin: 0;
+  padding: 0 var(--fox-space-s);
+  overflow: hidden;
+  border-radius: var(--fox-radius-pill);
+  background: color-mix(in oklch, var(--fox-warning) 14%, transparent);
   color: var(--fox-warning-text);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: transform var(--fox-sidebar-duration-leave) var(--fox-ease-out);
+}
+
+.fox-sidebar .fox-sidebar-tree-row:is(:hover, :focus-within, :has([data-state='open'])) > .fox-sidebar-attention {
+  transform: translateY(-50%) translateX(calc(-1 * var(--fox-sidebar-row-action-width)));
+  transition-duration: var(--fox-duration-fast);
+}
+
+/* 标题末尾按浮层宽度渐隐。没有浮层时不遮，静止标题保持全宽可读。 */
+.fox-sidebar .fox-project-row-main > strong,
+.fox-sidebar .fox-sidebar-tree-main > span:last-child {
+  mask-image: linear-gradient(to left, transparent var(--fox-sidebar-row-overlay), var(--fox-text) var(--fox-sidebar-mask-end));
+  -webkit-mask-image: linear-gradient(to left, transparent var(--fox-sidebar-row-overlay), var(--fox-text) var(--fox-sidebar-mask-end));
+}
+
+.fox-sidebar .fox-project-row:not(:hover):not(:focus-within):not(:has([data-state='open'])):not(:has(svg[aria-label='已置顶项目'])) > .fox-project-row-main > strong,
+.fox-sidebar .fox-sidebar-tree-row:not(:hover):not(:focus-within):not(:has([data-state='open'])):not(:has(.fox-sidebar-attention)) > .fox-sidebar-tree-main > span:last-child {
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+/* 焦点环内收，避免被行的 overflow 裁掉。 */
+.fox-sidebar .fox-project-row .fox-project-row-main:focus-visible,
+.fox-sidebar .fox-sidebar-tree-row .fox-sidebar-tree-main:focus-visible,
+.fox-sidebar .fox-project-row-actions .fox-icon-button:focus-visible,
+.fox-sidebar .fox-sidebar-row-actions .fox-icon-button:focus-visible,
+.fox-sidebar .fox-section-head .fox-icon-button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: calc(-1 * var(--fox-focus-width));
+}
+
+/* ---------- 分组标题：去掉暗色色带，只保留按钮自己的悬停 ---------- */
+
+.fox-sidebar .fox-sidebar-group-scroll .fox-sidebar-group-head {
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none;
+}
+
+/* ---------- 日期分组：纯文字小标题，左缘对齐对话标题 ---------- */
+
+.fox-sidebar .fox-conversation-list .fox-sidebar-date-heading {
+  display: block;
+  margin: 0;
+  padding: var(--fox-space-l) 0 var(--fox-space-xs);
+  padding-inline-start: var(--fox-sidebar-title-inset);
+  color: var(--fox-faint);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-regular);
+  line-height: 1.4;
+}
+
+.fox-sidebar .fox-conversation-list .fox-sidebar-date-heading > span {
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* ---------- 资料库侧栏树：行高和字重跟侧栏行，数字不贴字 ---------- */
+
+.fox-sidebar .fox-library-sidebar-tree :is([data-slot='folder'], [data-slot='file']) {
+  box-sizing: border-box;
+  min-height: var(--fox-sidebar-row-height);
+  align-items: center;
+  gap: var(--fox-sidebar-icon-gap);
+  padding: 0 var(--fox-sidebar-inset);
+}
+
+.fox-sidebar .fox-library-sidebar-tree :is([data-slot='folder-trigger'], .fox-animate-file-trigger) {
+  font-size: var(--fox-type-control);
+  font-weight: var(--fox-weight-regular);
+  color: var(--fox-muted);
+}
+
+.fox-sidebar .fox-library-sidebar-tree button[aria-current='page'],
+.fox-sidebar .fox-library-sidebar-tree button.is-library-active {
+  color: var(--fox-text);
+}
+
+.fox-sidebar .fox-library-sidebar-tree [data-slot='file-label'] {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--fox-space-s);
+  min-width: 0;
+  font-size: var(--fox-type-control);
+  font-weight: var(--fox-weight-regular);
+  line-height: 1.4;
+}
+
+.fox-sidebar .fox-library-sidebar-tree [data-slot='file-label'] > span {
+  min-width: 0;
+  font-weight: var(--fox-weight-regular);
+}
+
+.fox-sidebar .fox-library-sidebar-tree [data-slot='file-label'] > small {
+  flex: none;
+  margin-inline-start: 0;
+  color: var(--fox-faint);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-regular);
+  font-variant-numeric: tabular-nums;
+}
+
+.fox-sidebar .fox-library-sidebar-tree button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: calc(-1 * var(--fox-focus-width));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-sidebar :is(
+    .fox-project-row-actions,
+    .fox-sidebar-row-actions,
+    .fox-sidebar-attention,
+    .fox-project-row-main > svg[aria-label='已置顶项目']
+  ) {
+    transition: none !important;
+  }
 }

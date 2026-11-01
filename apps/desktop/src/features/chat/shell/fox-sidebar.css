@@ -108,8 +108,8 @@
 .fox-sidebar .fox-sidebar-command:focus-visible,
 .fox-sidebar .fox-sidebar-tree-main:focus-visible,
 .fox-sidebar .fox-project-row-main:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: -2px;
+  outline: var(--fox-focus-outline);
+  outline-offset: calc(-1 * var(--fox-focus-width));
 }
 .fox-arc-mode-tabs [role='tab'] svg {
   width: var(--fox-icon-size-small);
@@ -235,20 +235,7 @@
   }
 }
 
-/* "等你处理": a conversation with a pending approval. Approvals wait for the
-   user without expiring, so the marker stays until it is answered. */
-.fox-sidebar-attention {
-  flex: 0 0 auto;
-  align-self: center;
-  margin-right: 4px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--fox-warning, #d97706) 14%, transparent);
-  color: var(--fox-warning, #b45309);
-  font-size: var(--fox-type-caption);
-  line-height: 1.4;
-  white-space: nowrap;
-}
+/* 「等你处理」徽标的尺寸、定位和让位在 areas/sidebar.css，避免和浮层动作抢宽。 */
 
 /* ---------- Settings navigation ---------- */
 .fox-context-sidebar-nav.is-settings .fox-context-sidebar-group {
