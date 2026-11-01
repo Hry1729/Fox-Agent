@@ -48,6 +48,8 @@ Host 另有空交付兜底。只有启动信息、usage、reasoning 或空白内
 
 `scripts/windows/runtime_patches.py` 只处理构建副本。它分别检查 pi-acp 0.0.34、pi 0.84.2 和 dsh-http-proxy 0.2.1-rc.2 的上游 SHA-256，然后应用可审阅的文本补丁并复制小型适配模块。未知版本和未知源字节会被拒绝。
 
+dsh-llm-deepseek 0.2.1-rc.2 的 `lib/index.js` 另有一个补丁（`dsh-messages-stream`，分支 `feat/fox-runtime-dsh-messages`，未合入 main）。SenseNova 这类兼容 DeepSeek Messages 的服务，在 `content_block_start` 里可能缺 `text` 或 `thinking` 字段，或者把 `signature` 写成 `null`。上游遇到这种情况会以 `DeepSeek Messages expected a string field` 让整轮失败。补丁把缺失或为 null 的字段当作空串处理，内容仍从后续 delta 读取；完全没有 `signature` 时，和上游一样不写这个字段。上游源码按 LF 规范化后的 SHA-256 为 `eba35025…37d6`，打补丁后的固定值已写入 `pins.json`。要让它生效，需要构建新的运行时包；0.1.8 不含这个补丁。新包构建后，同时更新 `sandbox-release.json` 的版本、哈希和 `adapters`。在那之前，`prepare-sandbox-installer.mjs` 会因为 pins 与 release 不一致而拒绝构建安装包，这是有意设计的。
+
 `stage` 自动应用补丁。`pack` 和 Host 启动均根据源码中的 `runtime-assets/model-adapters/pins.json` 检查结果字节，运行时自己的 manifest 不能授予信任。旧 pi 运行时缺少补丁时提示安装 0.1.3；无须改变会话权限模式。已安装目录不会被原地修改。
 
 ## 验证边界（2026-10-25）

@@ -1,6 +1,8 @@
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -102,6 +104,112 @@ class ConsoleWindowPatchTest(unittest.TestCase):
                 self.assertEqual((package / 'x.js').read_text(encoding='utf-8'), upstream)
         finally:
             patches.PATCHES, patches.build_time_pins = original
+
+
+FIXTURES = Path(__file__).resolve().parent / 'fixtures'
+
+# Minimal stand-ins for the excerpt's imports (@deepseek-ai/dsh-llm, eventsource-parser).
+DSH_STREAM_HARNESS = r"""
+class LlmError extends Error { constructor(message, code, extra) { super(message); this.code = code; Object.assign(this, extra ?? {}); } }
+const ToolCallId = (value) => value;
+const ProviderRequestId = (value) => value;
+const isQuotaExceededError = () => false;
+const isContextWindowExceededError = () => false;
+class EventSourceParserStream extends TransformStream {
+  constructor({ onComment } = {}) {
+    let buffer = '';
+    const frame = (text, controller) => {
+      let event, data = [];
+      for (const line of text.split(/\r?\n/)) {
+        if (line.startsWith(':')) { onComment?.(line.slice(1)); continue; }
+        const at = line.indexOf(':');
+        const field = at < 0 ? line : line.slice(0, at);
+        const value = at < 0 ? '' : line.slice(at + 1).replace(/^ /, '');
+        if (field === 'event') event = value;
+        else if (field === 'data') data.push(value);
+      }
+      if (data.length) controller.enqueue({ event, data: data.join('\n') });
+    };
+    super({
+      transform(chunk, controller) {
+        buffer += chunk;
+        let match;
+        while ((match = /\r?\n\r?\n/.exec(buffer))) { frame(buffer.slice(0, match.index), controller); buffer = buffer.slice(match.index + match[0].length); }
+      },
+    });
+  }
+}
+"""
+
+# A SenseNova-style stream: content_block_start without "thinking" / "text",
+# "signature": null, the content arriving in deltas.
+DSH_STREAM_DRIVER = r"""
+const sse = [
+  ['message_start', { type: 'message_start', message: { usage: { input_tokens: 3, output_tokens: 0 } } }],
+  ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', signature: null } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '先想' } }],
+  ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+  ['content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text' } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '你好' } }],
+  ['content_block_stop', { type: 'content_block_stop', index: 1 }],
+  ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } }],
+  ['message_stop', { type: 'message_stop' }],
+].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('');
+const body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(sse)); controller.close(); } });
+const out = [];
+try {
+  for await (const chunk of translate(parseSse(body, () => {}), 'model-x')) out.push(chunk);
+  console.log(JSON.stringify({ ok: true, out }));
+} catch (error) {
+  console.log(JSON.stringify({ ok: false, message: error.message, code: error.code }));
+}
+"""
+
+
+@unittest.skipUnless(shutil.which('node'), 'node is required to run the dsh stream fixture')
+class DshMessagesStreamPatchTest(unittest.TestCase):
+    """fox-runtime-dsh-messages: missing text/thinking or null signature in content_block_start."""
+
+    def run_stream(self, source):
+        with tempfile.TemporaryDirectory() as tmp:
+            module = Path(tmp) / 'stream.mjs'
+            module.write_text(DSH_STREAM_HARNESS + source + '\nexport { parseSse, translate };\n', encoding='utf-8')
+            driver = Path(tmp) / 'driver.mjs'
+            driver.write_text("import { parseSse, translate } from './stream.mjs';\n" + DSH_STREAM_DRIVER, encoding='utf-8')
+            done = subprocess.run(['node', str(driver)], capture_output=True, text=True, encoding='utf-8', timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def fixture(self):
+        return (FIXTURES / 'dsh-llm-deepseek-0.2.1-rc.2-stream.js').read_text(encoding='utf-8').replace('\r\n', '\n')
+
+    def test_upstream_rejects_the_stream(self):
+        result = self.run_stream(self.fixture())
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'MALFORMED_RESPONSE')
+        self.assertIn('expected a string field', result['message'])
+
+    def test_patched_stream_reads_missing_fields_and_null_signature_as_empty(self):
+        result = self.run_stream(patches.patch_dsh_messages(self.fixture()))
+        self.assertTrue(result['ok'], result)
+        out = result['out']
+        deltas = [(c['type'], c.get('text')) for c in out if c['type'] in ('reasoning-delta', 'text-delta')]
+        self.assertEqual(deltas, [('reasoning-delta', '先想'), ('text-delta', '你好')])
+        ends = [c['block'] for c in out if c['type'] == 'block-end']
+        self.assertEqual(ends, [{'type': 'reasoning', 'text': '先想'}, {'type': 'text', 'text': '你好'}])
+        finish = out[-1]
+        self.assertEqual(finish['type'], 'finish')
+        self.assertEqual(finish['reason'], {'kind': 'stop'})
+        self.assertEqual(finish['replayState']['blocks'], [{'type': 'reasoning', 'signature': ''}, {'type': 'text'}])
+
+    def test_patch_anchors_match_once_and_the_entry_is_pinned(self):
+        patched = patches.patch_dsh_messages(self.fixture())
+        with self.assertRaisesRegex(ValueError, 'anchor differs'):
+            patches.patch_dsh_messages(patched)
+        item = next(i for i in patches.PATCHES if i['id'] == 'dsh-messages-stream')
+        self.assertEqual(item['version'], '0.2.1-rc.2')
+        pins = json.loads((patches.ASSETS / 'pins.json').read_text(encoding='utf-8'))['files']
+        self.assertIn(item['package'] + '/' + item['file'], pins)
 
 
 if __name__ == '__main__':
