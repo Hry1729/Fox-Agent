@@ -134,13 +134,41 @@ export function readStoredSeenChanges() {
   }
 }
 
+type ComposerReplyDetail = {
+  conversation?: { id?: string | null } | null
+  messages?: Array<{ role?: string; content?: string | null }>
+  toolCalls?: readonly unknown[] | null
+} | null | undefined
+
 /**
- * 当前会话有没有模型正文。流式增量、内核预览和落盘回复都写在 assistant 消息的
- * content 上（`streamingText` 也是从同一条消息读的）。`message.started` 和发送失败
- * 会先插入 content 为空的 assistant 行，那种占位不算回复，避免一按发送或失败就切成窄输入框。
+ * 模型是否已经开始回复。三条任一即可：assistant 有正文、出现 role 为 tool 的消息、
+ * 或 `toolCalls` 非空。Fox 经常先调工具、很久才出正文，这段时间输入框就要收成窄样式。
+ * `message.started` 和发送失败插入的空 assistant 行仍不算。
  */
-export function conversationHasModelReply(detail: { messages?: Array<{ role?: string; content?: string | null }> } | null | undefined) {
-  return detail?.messages?.some((message) => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim().length > 0) ?? false
+export function conversationHasModelReply(detail: ComposerReplyDetail) {
+  if (!detail) return false
+  if ((detail.toolCalls?.length ?? 0) > 0) return true
+  return detail.messages?.some((message) => {
+    if (message.role === 'tool') return true
+    return message.role === 'assistant' && typeof message.content === 'string' && message.content.trim().length > 0
+  }) ?? false
+}
+
+/**
+ * 桌面运行时：没有开始回复才用新对话高输入框。已选中会话但 detail 还不是这一条
+ * （null，或仍是上一条）时先保持已有对话形态，避免切换时闪出托盘。未选中不受影响。
+ * 未启用桌面运行时仍按时间线是否为空。
+ */
+export function composerUsesNewConversation(input: {
+  desktopEnabled: boolean
+  timelineEmpty: boolean
+  selectedConversationId?: string | null
+  detail?: ComposerReplyDetail
+}) {
+  if (!input.desktopEnabled) return input.timelineEmpty
+  const selectedId = input.selectedConversationId
+  if (selectedId && input.detail?.conversation?.id !== selectedId) return false
+  return !conversationHasModelReply(input.detail)
 }
 
 /** 会话创建后 Agent 已冻结：只展示名称，不能再打开菜单。 */

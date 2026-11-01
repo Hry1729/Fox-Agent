@@ -44,7 +44,7 @@ import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
 import { File, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { MemoizedComposer, conversationHasModelReply, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
+import { MemoizedComposer, composerUsesNewConversation, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
 import { ComposerEntryContext } from './composer/composer-entry-context'
 import { ConversationManagementDialogs, KnowledgeBindingDialog, ProjectDeleteDialog } from './conversation-dialogs'
 import { type AssistantMode, CONVERSATION_FORK_EVENT, type ChatState, type ChildAgentSelection, ComposerRuntimeContext, type ComposerRuntimeContextValue, EMPTY_CONVERSATION_ATTACHMENTS, EMPTY_CONVERSATION_MESSAGES, EMPTY_RUNTIME_APPROVALS, type OpenFileTab, type RightMode, TimelineRuntimeContext, type TimelineRuntimeContextValue, layoutStorage, readDefaultProjectPermission, readStoredBoolean, readStoredNumber, readStoredRightMode, readStoredRightTabs, recordRegionRender, useStableCallback } from './fox-shared'
@@ -1581,9 +1581,13 @@ export function Workbench() {
       onView={handleApprovalView}
     />
   ) : undefined, [approvalExternal, lockedAgentBackend, openConversationId, approvalBackend, draftProjectId, carryTier, nativePermissionTick, chatState, handleApprovalView])
-  // 没有模型正文之前保持新对话输入框。桌面运行时看 assistant 正文；未启用桌面运行时仍按时间线是否为空。
-  const hasModelReply = desktopConversation.enabled && conversationHasModelReply(desktopConversation.detail)
-  const composerNewConversation = desktopConversation.enabled ? !hasModelReply : timelineEmpty
+  // 没开始回复（正文、tool 消息或 toolCalls）之前保持新对话输入框；detail 还没对上选中会话时先用窄样式。
+  const composerNewConversation = composerUsesNewConversation({
+    desktopEnabled: desktopConversation.enabled,
+    timelineEmpty,
+    selectedConversationId: desktopConversation.selectedConversationId,
+    detail: desktopConversation.detail,
+  })
   // 会话已经创建则项目和 Agent 已冻结；未选中（含发送失败后恢复的草稿）仍可改。
   const composerEntryFrozen = Boolean(desktopConversation.enabled && desktopConversation.selectedConversationId)
   const composerPanel = (
