@@ -262,8 +262,17 @@ async fn confirmed_cancel_sweeps_new_children_and_keeps_the_backend() {
     killed_pids.sort_unstable();
     let mut expected = turn_pids.clone();
     expected.sort_unstable();
-    assert_eq!(killed_pids, expected, "killed 应正好是这两个子进程（Windows 上加它们的 conhost.exe）: {swept}");
-    assert_eq!(swept["killed"]["count"], expected.len(), "{swept}");
+    // 两个子进程必须由清扫结束。Windows 上它们的 conhost.exe 在最后一个客户端被结束后会自行退出：
+    // 清扫按 pid 顺序逐个结束，先结束客户端时 conhost 可能已经不在（terminate_member 返回 Ok(false)，
+    // 不算 killed），所以 conhost 只要求「要么被清扫结束，要么已经结束」，不要求一定出现在 killed 里。
+    assert!(child_pids.iter().all(|pid| killed_pids.contains(pid)), "killed 应包含这两个子进程: {swept}");
+    assert!(killed_pids.iter().all(|pid| expected.contains(pid)), "killed 只能是本轮的子进程（Windows 上加它们的 conhost.exe）: {swept}");
+    let host_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !expected.iter().all(|pid| process_ended(*pid)) {
+        assert!(std::time::Instant::now() < host_deadline, "本轮进程（含 conhost.exe）应全部结束: {:?} {swept}", expected.iter().map(|pid| (*pid, process_ended(*pid))).collect::<Vec<_>>());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(swept["killed"]["count"], killed_pids.len(), "{swept}");
     assert_eq!(swept["noBaseline"], false, "{swept}");
     assert!(swept["failed"].as_array().is_some_and(|failed| failed.is_empty()), "{swept}");
     let audits = sink.audits();
