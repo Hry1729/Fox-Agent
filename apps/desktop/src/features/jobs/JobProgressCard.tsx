@@ -54,7 +54,7 @@ export function JobProgressCard({ snapshot, className, onCancel, onViewResult }:
         {!terminal && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-hidden />}
         <span className="text-sm font-medium">{kindLabel(snapshot.kind)}</span>
         <Badge variant={snapshot.state === 'failed' ? 'destructive' : terminal ? 'secondary' : 'default'}>
-          {snapshot.cancelRequestedAt && !terminal ? '正在停止' : stateLabel(snapshot.state)}
+          {snapshot.cancelRequestedAt && !terminal ? '正在取消' : stateLabel(snapshot.state)}
         </Badge>
         <span className="ml-auto text-xs text-muted-foreground">作业 {snapshot.jobId.slice(0, 8)}</span>
       </div>

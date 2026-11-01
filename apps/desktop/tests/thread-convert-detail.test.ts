@@ -264,6 +264,44 @@ describe('deriveFoxThreadMessages', () => {
     expect(textOf(foxes[1])).toBe('写到一半')
   })
 
+  test('13.37 外部 Agent 取消：只跑了工具、没有 assistant 行的 Run 取消后仍保留工具记录', () => {
+    const toolEvents = (runId: string, base: number): RunEventRecord[] => [
+      { ...event(base + 1, 'tool.started', { toolCallId: `${runId}-t`, tool: 'bash', input: { command: 'ping -n 60 127.0.0.1' } }), runId },
+      { ...event(base + 2, 'tool.updated', { toolCallId: `${runId}-t`, tool: 'bash', output: '来自 127.0.0.1 的回复' }), runId },
+      { ...event(base + 3, 'run.cancelled', {}), runId },
+    ]
+    const foxes = deriveFoxThreadMessages({
+      detail: detail({
+        messages: [
+          message({ id: 'u1', role: 'user', content: '运行 ping', runId: 'r1', ordinal: 1 }),
+          message({ id: 'u2', role: 'user', content: '再来一次', runId: 'r2', ordinal: 2 }),
+        ],
+        runtimeEvents: [...toolEvents('r1', 0), ...toolEvents('r2', 10)],
+        lastRun: run({ id: 'r2', status: 'cancelled', lastSeq: 13 }),
+        runs: [run({ id: 'r1', status: 'cancelled', lastSeq: 3 }), run({ id: 'r2', status: 'cancelled', lastSeq: 13 })],
+      }),
+    })
+    expect(foxes.map((fox) => fox.id)).toEqual(['u1', 'assistant-r1', 'u2', 'assistant-r2'])
+    for (const fox of [foxes[1], foxes[3]]) {
+      expect(fox.cancelled).toBe(true)
+      expect(fox.status).toBe('cancelled')
+      expect(fox.failure).toBeNull()
+      expect(processPart(fox)!.data.tools).toHaveLength(1)
+    }
+  })
+
+  test('13.37 取消的 Run 没有任何过程事件时不补空消息', () => {
+    const foxes = deriveFoxThreadMessages({
+      detail: detail({
+        messages: [message({ id: 'u1', role: 'user', content: '停', runId: 'r1', ordinal: 1 })],
+        runtimeEvents: [event(1, 'run.cancelled', {})],
+        lastRun: run({ id: 'r1', status: 'cancelled', lastSeq: 1 }),
+        runs: [run({ id: 'r1', status: 'cancelled', lastSeq: 1 })],
+      }),
+    })
+    expect(foxes.map((fox) => fox.id)).toEqual(['u1'])
+  })
+
   test('流式中：运行中的 run 生成合成 assistant 消息，且只有它随流式变化', () => {
     const base = detail({
       messages: [message({ id: 'm1', role: 'user', content: '写一首诗', ordinal: 1 })],

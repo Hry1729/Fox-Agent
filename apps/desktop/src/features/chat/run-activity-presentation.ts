@@ -126,10 +126,10 @@ export function presentRunActivity(events: readonly RunEventRecord[], options: {
   if (terminal) {
     const outcome = terminal === 'completed' || terminal === 'cancelled' || terminal === 'interrupted' ? terminal : 'failed'
     return { ...base, active: false, urgent: true, outcome,
-      label: { completed: '已完成', cancelled: '已停止', interrupted: '已中断', failed: '处理失败' }[outcome],
+      label: { completed: '已完成', cancelled: '已取消', interrupted: '已中断', failed: '处理失败' }[outcome],
       animation: outcome === 'completed' ? 'happy' : outcome === 'cancelled' ? 'idle' : 'alerting' }
   }
-  if (state === 'cancelling') return result('正在停止', 'loading', true)
+  if (state === 'cancelling') return result('正在取消', 'loading', true)
   if (options.approvalPending || state === 'waiting_approval') return result('等待你的确认', 'listening', true)
   if (options.questionPending) return result('等待你的回答', 'listening', true)
   if (state === 'retry_scheduled') return result('等待重试', 'humming', true)

@@ -28,9 +28,9 @@ test('an unselected run cannot acquire status from another conversation or prose
 test.each([
   ['queued', '等待开始', 'humming'], ['created', '等待开始', 'humming'],
   ['waiting_approval', '等待你的确认', 'listening'], ['retry_scheduled', '等待重试', 'humming'],
-  ['compacting', '正在整理上下文', 'loading'], ['cancelling', '正在停止', 'loading'],
+  ['compacting', '正在整理上下文', 'loading'], ['cancelling', '正在取消', 'loading'],
   ['completed', '已完成', 'happy'], ['failed', '处理失败', 'alerting'],
-  ['cancelled', '已停止', 'idle'], ['interrupted', '已中断', 'alerting'],
+  ['cancelled', '已取消', 'idle'], ['interrupted', '已中断', 'alerting'],
   ['budget_exhausted', '处理失败', 'alerting'], ['approval_expired', '处理失败', 'alerting'],
 ])('persisted state %s maps to its own presentation', (state, label, animation) => {
   expect(present([], state)).toMatchObject({ label, animation })
@@ -70,7 +70,7 @@ test('approval and questions outrank tools, while terminal state closes both', (
   const events = [start, event(2, 'tool.started', { toolCallId: 't', tool: 'write_file' })]
   expect(presentRunActivity(events, { runId: 'r', approvalPending: true }).label).toBe('等待你的确认')
   expect(presentRunActivity(events, { runId: 'r', questionPending: true }).label).toBe('等待你的回答')
-  expect(presentRunActivity(events, { runId: 'r', state: 'cancelled', approvalPending: true, questionPending: true }).label).toBe('已停止')
+  expect(presentRunActivity(events, { runId: 'r', state: 'cancelled', approvalPending: true, questionPending: true }).label).toBe('已取消')
 })
 
 test('completed and failed compaction do not pretend to be reasoning or terminal run failure', () => {
@@ -122,5 +122,5 @@ test('Kernel streaming previews are displayed only while their checkpoint owns t
   const stale = { ...answer, kernelSnapshot: { ...answer.kernelSnapshot!, lastEventSeq: '5' } }
   expect(presentConversationActivity(stale, 'c').animation).toBe('receiving')
   const stopped = { ...answer, kernelSnapshot: { ...answer.kernelSnapshot!, state: 'cancelled' as const, terminalWritten: true } }
-  expect(presentConversationActivity(stopped, 'c').label).toBe('已停止')
+  expect(presentConversationActivity(stopped, 'c').label).toBe('已取消')
 })

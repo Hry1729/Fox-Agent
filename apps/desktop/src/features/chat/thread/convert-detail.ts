@@ -137,7 +137,25 @@ export function deriveFoxThreadMessages(input: FoxThreadInput, cache: FoxThreadC
   if (syntheticRunId && !messages.some((message) => message.role === 'assistant' && message.runId === syntheticRunId)) {
     messages.push(syntheticAssistantMessage(detail, syntheticRunId, activeRunId ? streamingText : '', runTerminalStates, artifactsByRun, cache, Boolean(activeRunId)))
   }
+  // 13.37：外部 Agent（Pi、dsh）这一轮只跑了工具、还没写正文时没有 assistant 行。取消后它不再是
+  // 活动 Run，原先就整轮消失，只剩「已取消 · 时长」。和 Fox 原生一样保留已生成的工具记录：
+  // 每个已取消、有过程事件却没有 assistant 行的 Run，都在它自己的用户消息后面补一条。
+  for (const run of cancelledRunsWithoutAssistant(detail, runTerminalStates, messages, activeRunId)) {
+    const synthetic = syntheticAssistantMessage(detail, run.id, '', runTerminalStates, artifactsByRun, cache, false, run.startedAt)
+    if (!synthetic.content.length) continue
+    const anchor = messages.findLastIndex((message) => message.runId === run.id)
+    if (anchor >= 0) messages.splice(anchor + 1, 0, synthetic)
+    else messages.push(synthetic)
+  }
   return messages
+}
+
+function cancelledRunsWithoutAssistant(detail: ConversationDetail, runTerminalStates: RunTerminalStates, messages: FoxThreadMessage[], activeRunId: string | null) {
+  const runs = new Map<string, RunRecord>()
+  for (const run of [...(detail.runs ?? []), ...(detail.lastRun ? [detail.lastRun] : [])]) runs.set(run.id, run)
+  return [...runs.values()].filter((run) => run.id !== activeRunId
+    && runTerminalStates.cancelled.has(run.id)
+    && !messages.some((message) => message.role === 'assistant' && message.runId === run.id))
 }
 
 // --- internal helpers (all pure) -------------------------------------------
@@ -291,11 +309,13 @@ function syntheticAssistantMessage(
   artifactsByRun: Map<string, ArtifactRecord[]>,
   cache: FoxThreadCache,
   isActiveRun: boolean,
+  runStartedAt?: number | null,
 ): FoxThreadMessage {
   const version = runVersion(detail.runtimeEvents, runId)
   const failure = runTerminalStates.failures.get(runId) ?? null
   const cancelled = runTerminalStates.cancelled.has(runId)
-  const status = isActiveRun ? 'streaming' : failure?.kind ?? 'completed'
+  const status = isActiveRun ? 'streaming' : failure?.kind ?? (cancelled ? 'cancelled' : 'completed')
+  const createdAt = runStartedAt ?? detail.lastRun?.startedAt ?? Date.now()
   const key = `assistant-${runId}:${status}:${isActiveRun}:${streamingText}:${version}:${JSON.stringify(failure)}:${cancelled}:${JSON.stringify(artifactsByRun.get(runId) ?? [])}`
   const cached = cache.get(`assistant-${runId}`)
   if (cached && cached.key === key) return cached.message
@@ -311,11 +331,11 @@ function syntheticAssistantMessage(
   if (runArtifacts?.length) parts.push({ type: 'data-fox-artifacts', data: runArtifacts })
   if (failure) parts.push({ type: 'data-fox-error', data: failure })
   const fox: FoxThreadMessage = {
-    source: { id: `assistant-${runId}`, timelineKey: `assistant-run-${runId}`, conversationId: detail.conversation.id, role: 'assistant', runId, kind: 'text', content: streamingText, status, ordinal: detail.messages.length + 1, createdAt: detail.lastRun?.startedAt ?? Date.now(), updatedAt: eventsForRun.at(-1)?.createdAt ?? Date.now() },
+    source: { id: `assistant-${runId}`, timelineKey: `assistant-run-${runId}`, conversationId: detail.conversation.id, role: 'assistant', runId, kind: 'text', content: streamingText, status, ordinal: detail.messages.length + 1, createdAt, updatedAt: eventsForRun.at(-1)?.createdAt ?? Date.now() },
     id: `assistant-${runId}`,
     role: 'assistant',
     runId,
-    createdAt: detail.lastRun?.startedAt ?? Date.now(),
+    createdAt,
     status,
     isActiveRun,
     revision: key,
