@@ -229,6 +229,49 @@ impl Database {
         })
     }
 
+    /// Admit one Host resource call for a Run frozen under any authority.
+    ///
+    /// A PiNative Run (every Run created since A0) is Authoritative but has no
+    /// Kernel aggregate: its binding never gets a `kernel_runs` row and nothing
+    /// drives a Kernel state machine for it. Kernel admission above therefore
+    /// always found no owner and refused, which is why a background
+    /// `run_command start` failed with "resource admission requires an active
+    /// Kernel owner" right after its approval had been granted and claimed.
+    ///
+    /// For PiNative the owner is the Run row itself: the call is admitted only
+    /// while `runs.status='running'`, through the same managed quota and
+    /// child-budget checks. The approval is not re-decided here — the caller
+    /// has already consumed it (or the audited auto-allow) before issuing the
+    /// Execute credential, so admission strictly follows the decision. A
+    /// historical unrouted Authoritative binding keeps the strict Kernel check
+    /// (and is retired anyway); a Legacy binding is not admitted here.
+    pub(crate) fn host_validate_resource_acquisition_for(
+        &self,
+        run_id: &str,
+        tool: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(binding) = self.run_control_binding(run_id)? else {
+            return Err("resource admission requires a frozen Run".into());
+        };
+        match (binding.authority, binding.executor_route) {
+            (fox_engine_protocol::ExecutionAuthority::Authoritative,
+             Some(fox_engine_protocol::ExecutorRoute::PiNative)) => self.with_connection(|connection| {
+                let tx = connection.transaction()?;
+                let exhausted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM child_run_delegations d
+                    WHERE d.child_run_id=?1 AND (d.total_tokens>=d.max_total_tokens OR d.output_tokens>=d.max_output_tokens
+                    OR (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id=d.child_run_id)>d.max_tool_calls))",
+                    [run_id], |row| row.get(0))?;
+                if exhausted { return Err(invalid("child cumulative budget exhausted")); }
+                // Requires runs.status='running'; a cancelled or finished Run refuses.
+                super::validate_managed_tool_acquisition_with_clock(&tx, run_id, now_ms(), false, false)?;
+                tx.commit()
+            }),
+            (fox_engine_protocol::ExecutionAuthority::Authoritative, None) =>
+                self.kernel_validate_resource_acquisition_for(run_id, tool),
+            (fox_engine_protocol::ExecutionAuthority::Legacy, _) => Ok(()),
+        }
+    }
+
     /// Routing only, never sufficient authorization to dispatch an effect.
     pub(crate) fn kernel_host_run_state(&self, run_id: &str) -> Result<Option<String>, String> {
         self.with_connection(|connection| {

@@ -741,7 +741,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn empty_later_baseline() -> ProcessBaseline {
     #[cfg(windows)]
     {
-        ProcessBaseline::Pids(Vec::new())
+        ProcessBaseline::Pids { pids: Vec::new(), since: 0 }
     }
     #[cfg(unix)]
     {
@@ -863,7 +863,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             return;
         }
         turn.arbiter.commit(terminal_kind, unknown);
-        let mut events = turn.projector.finish();
+        let events = turn.projector.finish();
         let mut extra = match extra {
             Value::Object(map) => map,
             _ => serde_json::Map::new(),
@@ -889,13 +889,17 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             .flatten();
         let sweep_seq = turn.baseline_seq;
         let sweep_generation = state.generation;
-        events.push(terminal.event(Value::Object(extra)));
+        let terminal_event = terminal.event(Value::Object(extra));
         state.turn = None;
         for event in events {
             self.emit(session, run_id, event);
         }
-        if let Some(baseline) = sweep {
-            self.schedule_cancel_sweep(session, run_id, sweep_generation, sweep_seq, baseline);
+        match sweep {
+            // 13.35：清扫结果（agent_backend.cancel_swept）必须在 Run 进入终态之前写入，
+            // 终态之后 Host 拒收任何 Run 事件。终态事件交给清扫任务，清扫记录之后再发；
+            // 任何一条路径（连接换代、会话已关）都保证终态一定发出。
+            Some(baseline) => self.schedule_cancel_sweep(session, run_id, sweep_generation, sweep_seq, baseline, terminal_event),
+            None => self.emit(session, run_id, terminal_event),
         }
     }
 
@@ -1763,29 +1767,36 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     }
 
     /// 宽限期在定时器上等，真正的查进程和终止放在 blocking 线程，不占 tokio worker。
-    fn schedule_cancel_sweep(&self, session: &Session, run_id: &str, generation: u64, baseline_seq: u64, baseline: ProcessBaseline) {
+    fn schedule_cancel_sweep(&self, session: &Session, run_id: &str, generation: u64, baseline_seq: u64, baseline: ProcessBaseline, terminal_event: Value) {
         let runtime = self.clone();
         let conversation_id = session.conversation_id.clone();
+        let backend = session.backend;
         let run_id = run_id.to_owned();
         self.inner.handle.spawn(async move {
-            runtime.sweep_after_confirmed_cancel(conversation_id, run_id, generation, baseline_seq, baseline).await;
+            let session = runtime.sweep_after_confirmed_cancel(conversation_id.clone(), run_id.clone(), generation, baseline_seq, baseline).await;
+            // 终态在清扫记录之后发出；会话已不在时直接交给 sink。
+            match session {
+                Some(session) => runtime.emit(&session, &run_id, terminal_event),
+                None => {
+                    if let Err(error) = runtime.inner.sink.emit(&run_id, &conversation_id, terminal_event) {
+                        eprintln!("fox.external conversation={conversation_id} run={run_id} agent_backend={} emit_failed={error:?}", backend.as_str());
+                    }
+                }
+            }
         });
     }
 
-    async fn sweep_after_confirmed_cancel(&self, conversation_id: String, run_id: String, generation: u64, baseline_seq: u64, baseline: ProcessBaseline) {
+    /// 宽限期之后清扫本轮新进程并记录 `agent_backend.cancel_swept`。返回会话（还在时），
+    /// 由调用方随后发出终态事件。
+    async fn sweep_after_confirmed_cancel(&self, conversation_id: String, run_id: String, generation: u64, baseline_seq: u64, baseline: ProcessBaseline) -> Option<Arc<Session>> {
         tokio::time::sleep(CANCEL_SWEEP_GRACE).await;
-        let Some(session) = lock(&self.inner.sessions).get(&conversation_id).cloned() else {
-            return;
-        };
+        let session = lock(&self.inner.sessions).get(&conversation_id).cloned()?;
         let connection = {
             let state = lock(&session.state);
             // 超时或关闭已经停掉这条连接：整棵树会由那条路径杀掉。
-            if state.generation != generation {
-                return;
-            }
-            let Some(connection) = state.connection.clone() else { return };
-            connection
+            if state.generation != generation { None } else { state.connection.clone() }
         };
+        let Some(connection) = connection else { return Some(session) };
         let session_for_later = Arc::clone(&session);
         let outcome = AcpConnection::sweep_retained_children(connection, baseline, move || {
             let state = lock(&session_for_later.state);
@@ -1815,6 +1826,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             };
             let _ = self.stop_connection(&session, reason).await;
         }
+        Some(session)
     }
 
     fn record_cancel_sweep(&self, session: &Session, run_id: &str, outcome: &SweepOutcome) {
@@ -1822,6 +1834,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             "killed": { "count": outcome.killed.len(), "pids": outcome.killed },
             "failed": outcome.failed,
             "noBaseline": outcome.no_baseline,
+            "outsideJob": { "count": outcome.outside_job.len(), "pids": outcome.outside_job },
+            "outsideJobUnverified": { "count": outcome.outside_job_unverified.len(), "pids": outcome.outside_job_unverified },
         });
         if outcome.no_baseline || !outcome.failed.is_empty() {
             let reason = outcome.failed.join("; ");
@@ -1833,12 +1847,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         self.emit(session, run_id, event);
         self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.cancel_swept", &details);
         eprintln!(
-            "fox.external conversation={} agent_backend={} cancel_swept killed={} failed={} no_baseline={}",
+            "fox.external conversation={} agent_backend={} cancel_swept killed={} failed={} no_baseline={} outside_job={} outside_job_unverified={}",
             session.conversation_id,
             session.backend.as_str(),
             outcome.killed.len(),
             outcome.failed.len(),
-            outcome.no_baseline
+            outcome.no_baseline,
+            outcome.outside_job.len(),
+            outcome.outside_job_unverified.len()
         );
     }
 

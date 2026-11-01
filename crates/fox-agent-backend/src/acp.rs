@@ -943,9 +943,10 @@ pub struct NoJob;
 /// 一轮 prompt 发出前的进程树。查询失败是 `Unavailable`，不是空列表。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProcessBaseline {
-    /// Windows：Job 内的 pid。只在 Windows 上构造。
+    /// Windows：Job 内的 pid，以及记基线的时刻（FILETIME）。只在 Windows 上构造。
+    /// 时刻用来认出本轮新起、但已不在 Job 里的后代进程（13.35）。
     #[cfg_attr(not(windows), allow(dead_code))]
-    Pids(Vec<u32>),
+    Pids { pids: Vec<u32>, since: u64 },
     /// Unix：pid + 启动时间。只在 Unix 上构造。
     #[cfg_attr(not(unix), allow(dead_code))]
     Tree(Vec<crate::proctree::ProcIdentity>),
@@ -959,11 +960,16 @@ pub(crate) struct SweepOutcome {
     pub killed: Vec<u32>,
     pub failed: Vec<String>,
     pub no_baseline: bool,
+    /// Windows：其中不在 Job 里、按父进程链认出的本轮后代（已计入 `killed`）。
+    pub outside_job: Vec<u32>,
+    /// Windows：挂在后端进程下、不在 Job 中、读不到创建时间（多为其他账户的进程）。
+    /// 无法判断是否本轮进程，只记录不结束，也不因此停掉后端。
+    pub outside_job_unverified: Vec<u32>,
 }
 
 impl SweepOutcome {
     fn fail(reason: impl Into<String>) -> Self {
-        Self { killed: Vec::new(), failed: vec![reason.into()], no_baseline: false }
+        Self { killed: Vec::new(), failed: vec![reason.into()], no_baseline: false, outside_job: Vec::new(), outside_job_unverified: Vec::new() }
     }
 
     pub(crate) fn stop_required(&self) -> bool {
@@ -981,7 +987,7 @@ fn restrict_later_pids(targets: &mut Vec<u32>, later: Option<&ProcessBaseline>) 
     let later = later?;
     match later {
         ProcessBaseline::Unavailable { reason } => Some(SweepOutcome::fail(format!("后续轮次没有进程基线，无法安全清扫：{reason}"))),
-        ProcessBaseline::Pids(allow) => {
+        ProcessBaseline::Pids { pids: allow, .. } => {
             targets.retain(|pid| allow.contains(pid));
             None
         }
@@ -999,7 +1005,7 @@ fn restrict_later_tree(targets: &mut Vec<crate::proctree::ProcIdentity>, later: 
             targets.retain(|identity| allow.iter().any(|known| known.pid == identity.pid && known.start == identity.start));
             None
         }
-        ProcessBaseline::Pids(_) => Some(SweepOutcome::fail("后续轮次的基线不是 Unix 进程树")),
+        ProcessBaseline::Pids { .. } => Some(SweepOutcome::fail("后续轮次的基线不是 Unix 进程树")),
     }
 }
 
@@ -1778,9 +1784,11 @@ impl AcpConnection {
             let Some(job) = self.job.as_ref() else {
                 return ProcessBaseline::Unavailable { reason: "后端不在 Job Object 中，无法记录本轮进程基线".into() };
             };
+            // 时刻先于 Job 列表取，宁可把记基线前一瞬间起的进程算作本轮。
+            let since = crate::proctree::filetime_now();
             return match job.process_ids() {
                 Ok(pids) if pids.is_empty() => ProcessBaseline::Unavailable { reason: "Job 进程列表为空，无法作为本轮基线".into() },
-                Ok(pids) => ProcessBaseline::Pids(pids),
+                Ok(pids) => ProcessBaseline::Pids { pids, since },
                 Err(reason) => ProcessBaseline::Unavailable { reason: format!("读取 Job 进程列表失败：{reason}") },
             };
         }
@@ -1814,14 +1822,14 @@ impl AcpConnection {
 
     fn sweep_blocking(&self, baseline: &ProcessBaseline, later_of: impl FnMut() -> Option<ProcessBaseline>) -> SweepOutcome {
         if let ProcessBaseline::Unavailable { reason } = baseline {
-            return SweepOutcome { killed: Vec::new(), failed: vec![reason.clone()], no_baseline: true };
+            return SweepOutcome { killed: Vec::new(), failed: vec![reason.clone()], no_baseline: true, outside_job: Vec::new(), outside_job_unverified: Vec::new() };
         }
         #[cfg(windows)]
         {
-            let ProcessBaseline::Pids(pids) = baseline else {
+            let ProcessBaseline::Pids { pids, since } = baseline else {
                 return SweepOutcome::fail("Windows 上的基线必须是 Job pid 列表");
             };
-            return self.sweep_windows(pids, later_of);
+            return self.sweep_windows(pids, *since, later_of);
         }
         #[cfg(unix)]
         {
@@ -1838,7 +1846,7 @@ impl AcpConnection {
     }
 
     #[cfg(windows)]
-    fn sweep_windows(&self, baseline: &[u32], mut later_of: impl FnMut() -> Option<ProcessBaseline>) -> SweepOutcome {
+    fn sweep_windows(&self, baseline: &[u32], since: u64, mut later_of: impl FnMut() -> Option<ProcessBaseline>) -> SweepOutcome {
         let Some(job) = self.job.as_ref() else {
             return SweepOutcome::fail("后端不在 Job Object 中，无法清扫");
         };
@@ -1850,8 +1858,12 @@ impl AcpConnection {
         if let Some(root) = self.child_id {
             targets.retain(|pid| *pid != root);
         }
+        // 13.35：Job 之外、但按父进程链挂在 Job 成员下面、且在本轮基线之后创建的进程。
+        // 由服务代为创建的进程（Secondary Logon 等）不进 Job，只看 Job 列表会漏掉它们。
+        let table = crate::proctree::system_process_table();
         // 快照之后再读后续轮次的基线，新一轮在此之后才启动的进程不在那份基线里。
-        if let Some(outcome) = restrict_later_pids(&mut targets, later_of().as_ref()) {
+        let later = later_of();
+        if let Some(outcome) = restrict_later_pids(&mut targets, later.as_ref()) {
             return outcome;
         }
         let mut killed = Vec::new();
@@ -1863,9 +1875,35 @@ impl AcpConnection {
                 Err(reason) => failed.push(reason),
             }
         }
+        let mut outside_job = Vec::new();
+        let mut outside_job_unverified = Vec::new();
+        match table {
+            Err(reason) => failed.push(format!("读取系统进程表失败，无法检查 Job 外的本轮进程：{reason}")),
+            Ok(table) => {
+                let mut found = crate::proctree::outside_job_descendants(&current, &table, since);
+                // 已有更新的一轮：它记基线之后才创建的进程归那一轮。
+                if let Some(ProcessBaseline::Pids { since: later_since, .. }) = later.as_ref() {
+                    found.targets.retain(|row| row.created.is_some_and(|created| created < *later_since));
+                }
+                // 先杀子孙、后杀祖先没有必要：每个都按 pid + 创建时间单独结束。
+                for row in &found.targets {
+                    let Some(created) = row.created else { continue };
+                    match crate::proctree::terminate_verified(row.pid, created, SWEEP_KILL_WAIT) {
+                        Ok(true) => {
+                            killed.push(row.pid);
+                            outside_job.push(row.pid);
+                        }
+                        Ok(false) => {}
+                        Err(reason) => failed.push(format!("{}（{}，不在 Job 中）", reason, row.name)),
+                    }
+                }
+                outside_job_unverified = found.unverifiable.iter().map(|row| row.pid).collect();
+            }
+        }
         killed.sort_unstable();
         killed.dedup();
-        SweepOutcome { killed, failed, no_baseline: false }
+        outside_job.sort_unstable();
+        SweepOutcome { killed, failed, no_baseline: false, outside_job, outside_job_unverified }
     }
 
     #[cfg(unix)]
@@ -1885,7 +1923,7 @@ impl AcpConnection {
         let (mut killed, failed) = crate::proctree::kill_sweep_targets(&targets);
         killed.sort_unstable();
         killed.dedup();
-        SweepOutcome { killed, failed, no_baseline: false }
+        SweepOutcome { killed, failed, no_baseline: false, outside_job: Vec::new(), outside_job_unverified: Vec::new() }
     }
 
     #[cfg(unix)]

@@ -782,3 +782,109 @@ fn admitted_backend_snapshot_cannot_change_between_manager_and_spawner() {
     let matching = SnapshotBackendProof { provider: authorized_proof(), expected_digest: "command-jobs-adapter-tests".into() };
     assert!(matching.availability().is_available());
 }
+
+/// A PiNative Run (Authoritative, routed, no Kernel aggregate) in ask mode with
+/// one background `run_command start` Host row awaiting approval.
+///
+/// The binding is frozen first, exactly as production does at Run start, so the
+/// approval, the claim, the credential and the admission all happen against the
+/// routed binding.
+fn native_ask_fixture(label: &str, call: &str, input: &Value) -> (Database, PathBuf, String, String, String) {
+    use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
+    let root = std::env::temp_dir().join(format!("fox-native-bg-{label}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("create native fixture root");
+    let root_text = root.to_string_lossy().into_owned();
+    let database = Database::open(root.join("facts.db")).expect("open real sqlite fixture");
+    let conversation = database
+        .create_conversation(database.default_agent_id(), None, Some(&root_text), Some("ask"))
+        .expect("create conversation").id;
+    let run = database.create_run(&conversation, "native background command", None).expect("create run").run.id;
+    database.with_connection(|connection| {
+        connection.execute("UPDATE runs SET status='running',started_at=?2 WHERE id=?1",
+            rusqlite::params![run, crate::database::now_ms()])?;
+        Ok(())
+    }).unwrap();
+    let permission = FrozenPermission { mode: PermissionMode::Ask, project_root: Some(root_text),
+        grants: Vec::new(), approval_epoch: None };
+    database.freeze_run_control(&RunControlBinding {
+        schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
+        run_id: run.clone(), conversation_id: conversation.clone(), engine_id: "pi".into(),
+        execution_profile_id: "native-bg-test".into(), authority: ExecutionAuthority::Authoritative,
+        executor_route: Some(ExecutorRoute::PiNative), read_only_executor: ResourceExecutor::Rust,
+        permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+        permission, budgets: TimeBudgets::default(),
+    }).unwrap();
+    let record = database.create_host_tool_call(&run, call, "run_command", input, "pending", true).unwrap();
+    let approval = database.create_approval(&record.id, "background command",
+        &json!({"availableDecisions":["allow_once","deny"]})).unwrap();
+    (database, root, conversation, run, approval.id)
+}
+
+#[cfg(windows)]
+const LONG_COMMAND: &str = "ping -n 120 127.0.0.1 > nul";
+#[cfg(not(windows))]
+const LONG_COMMAND: &str = "sleep 120";
+
+/// 13.35 P1: a background start on a PiNative Run, approved by the user, must be
+/// admitted (it used to fail with "resource admission requires an active Kernel
+/// owner" because PiNative Runs have no Kernel aggregate) and must stay
+/// controllable: status and cancel are admitted, and the job ends Cancelled.
+#[test]
+fn native_background_start_after_approval_is_admitted_and_can_be_stopped() {
+    let call = "native-bg-start";
+    let input = json!({"action":"start","command":LONG_COMMAND,"timeoutSeconds":120});
+    let (database, root, conversation, run, approval) = native_ask_fixture("e2e", call, &input);
+
+    // Before the approval there is no Host decision and so no credential.
+    let version = database.execution_policy(&conversation).unwrap().version;
+    assert!(database.issue_legacy_command_credential(&run, call, version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
+        .is_err(), "no credential, and so no admission, before the approval");
+
+    database.resolve_approval(&approval, crate::database::ApprovalDecision::AllowOnce).unwrap()
+        .expect("approval resolves");
+    assert!(database.claim_approved_tool_call(&run, call).unwrap(), "approved call is claimed");
+    let credential = database.issue_legacy_command_credential(&run, call, version,
+        crate::process_jobs::FOX_JOB_BACKEND_DIGEST).expect("credential from the claimed approval");
+    assert_eq!(database.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest,
+        "native-bg-host").unwrap(), fox_engine_protocol::AttemptOutcome::Claimed);
+
+    let registry = CancellationRegistry::default();
+    registry.register_run(&run).unwrap();
+    let token = registry.run_token(&run).unwrap();
+    let (started, evidence, outcome) = execute_with_credential(&database, &run, &input, &root, &token,
+        Duration::from_secs(120), &credential);
+    let started = started.expect("approved background start is admitted");
+    assert_eq!(evidence, ExecutionEvidence::Started, "{started}");
+    assert!(matches!(outcome, CallOutcome::Completed), "{outcome:?}");
+    let id = job_id(&started).to_owned();
+
+    let status = execute(&database, &run, &json!({"action":"status","jobId":id}), &root, &token,
+        Duration::from_secs(5)).expect("status is admitted on the PiNative Run");
+    assert!(status["details"]["state"].is_string(), "{status}");
+    execute(&database, &run, &json!({"action":"cancel","jobId":id}), &root, &token, Duration::from_secs(5))
+        .expect("cancel is admitted on the PiNative Run");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let terminal = loop {
+        let row = database.kernel_job_snapshot(&id).unwrap();
+        if row.state.is_terminal() { break row; }
+        assert!(Instant::now() < deadline, "job did not stop: {row:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(terminal.state, JobState::Cancelled);
+}
+
+/// The PiNative admission owner is the Run row: once the Run is no longer
+/// running, a new background call is refused instead of being admitted.
+#[test]
+fn native_background_admission_refuses_once_the_run_is_not_running() {
+    let input = json!({"action":"start","command":"echo late","timeoutSeconds":30});
+    let (database, _root, _conversation, run, _approval) = native_ask_fixture("ended", "late", &input);
+    database.host_validate_resource_acquisition_for(&run, Some("run_command"))
+        .expect("a running PiNative Run admits");
+    database.with_connection(|connection| {
+        connection.execute("UPDATE runs SET status='cancelled',finished_at=1 WHERE id=?1", [&run])?;
+        Ok(())
+    }).unwrap();
+    let refused = database.host_validate_resource_acquisition_for(&run, Some("run_command")).unwrap_err();
+    assert!(refused.contains("requires running Run"), "{refused}");
+}

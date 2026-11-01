@@ -170,6 +170,177 @@ pub fn sweep_pid_targets(baseline: &[u32], current: &[u32]) -> Vec<u32> {
     targets
 }
 
+/// One row of a whole-system process table (Windows Toolhelp snapshot).
+/// `created` is the creation time (FILETIME, 100 ns since 1601); `None` when
+/// the process could not be opened for `PROCESS_QUERY_LIMITED_INFORMATION`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemProcess {
+    pub pid: u32,
+    pub parent: u32,
+    pub name: String,
+    pub created: Option<u64>,
+}
+
+/// What the out-of-Job pass found (13.35).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutsideDescendants {
+    /// Not in the Job, descended (by parent links) from a Job member, created
+    /// at or after the turn baseline: started during this turn and escaped.
+    pub targets: Vec<SystemProcess>,
+    /// Same ancestry, but the creation time could not be read (another user's
+    /// process, e.g. a sandbox account): cannot be attributed to this turn and
+    /// almost certainly cannot be terminated either. Reported, never guessed.
+    pub unverifiable: Vec<SystemProcess>,
+}
+
+/// Processes that left the backend's Job but still descend from one of its
+/// members, created during this turn.
+///
+/// A Job only holds processes created by its members through the normal
+/// creation path. A process started on a member's behalf by a service
+/// (Secondary Logon / `CreateProcessWithLogonW`, as Codex's elevated Windows
+/// sandbox does for `codex-command-runner`) is outside the Job; when Windows
+/// records the member as its parent it is found here by walking parent links.
+///
+/// Every link is checked against pid reuse: a child must not be older than the
+/// parent it names. `since` excludes anything that already existed before the
+/// prompt (a session-level helper started in an earlier turn is kept).
+pub fn outside_job_descendants(members: &[u32], table: &[SystemProcess], since: u64) -> OutsideDescendants {
+    use std::collections::HashMap;
+    let by_pid: HashMap<u32, &SystemProcess> = table.iter().map(|row| (row.pid, row)).collect();
+    let mut found = OutsideDescendants::default();
+    for row in table {
+        if members.contains(&row.pid) || row.pid == 0 {
+            continue;
+        }
+        // Walk up at most 32 links until a Job member, a missing parent, a
+        // reused pid or a cycle ends the chain.
+        let mut child = row;
+        let mut linked = false;
+        for _ in 0..32 {
+            if child.parent == 0 || child.parent == child.pid {
+                break;
+            }
+            let Some(parent) = by_pid.get(&child.parent) else { break };
+            if let (Some(child_created), Some(parent_created)) = (child.created, parent.created) {
+                if child_created < parent_created {
+                    break; // the named parent is a newer process with a reused pid
+                }
+            }
+            if members.contains(&parent.pid) {
+                linked = true;
+                break;
+            }
+            child = parent;
+        }
+        if !linked {
+            continue;
+        }
+        match row.created {
+            Some(created) if created >= since => found.targets.push(row.clone()),
+            Some(_) => {}
+            None => found.unverifiable.push(row.clone()),
+        }
+    }
+    found.targets.sort_by_key(|row| row.pid);
+    found.unverifiable.sort_by_key(|row| row.pid);
+    found
+}
+
+/// Windows: the current time as FILETIME (100 ns since 1601), comparable with
+/// process creation times.
+#[cfg(windows)]
+pub fn filetime_now() -> u64 {
+    let mut now = windows_sys::Win32::Foundation::FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime(&mut now) };
+    (u64::from(now.dwHighDateTime) << 32) | u64::from(now.dwLowDateTime)
+}
+
+/// Windows: creation time of `pid` (FILETIME), `None` when it cannot be opened.
+#[cfg(windows)]
+pub fn process_created(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let zero = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero(), zero(), zero(), zero());
+    let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+    unsafe { CloseHandle(handle) };
+    (ok != 0).then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// Windows: the whole process table with creation times (Toolhelp snapshot).
+#[cfg(windows)]
+pub fn system_process_table() -> Result<Vec<SystemProcess>, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(format!("CreateToolhelp32Snapshot(processes) 失败 (Win32 {})", unsafe { GetLastError() }));
+    }
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut rows = Vec::new();
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while ok {
+        let len = entry.szExeFile.iter().position(|unit| *unit == 0).unwrap_or(entry.szExeFile.len());
+        rows.push(SystemProcess {
+            pid: entry.th32ProcessID,
+            parent: entry.th32ParentProcessID,
+            name: String::from_utf16_lossy(&entry.szExeFile[..len]),
+            created: None,
+        });
+        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    for row in &mut rows {
+        row.created = process_created(row.pid);
+    }
+    Ok(rows)
+}
+
+/// Windows: terminate `pid` only if it is still the process created at
+/// `created` (pid reuse guard). `Ok(false)`: already gone or reused.
+#[cfg(windows)]
+pub fn terminate_verified(pid: u32, created: u64, wait: Duration) -> Result<bool, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, FILETIME, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        let error = unsafe { GetLastError() };
+        if error == ERROR_INVALID_PARAMETER {
+            return Ok(false);
+        }
+        return Err(format!("OpenProcess({pid}) 失败 (Win32 {error})，Job 外的本轮进程无法结束"));
+    }
+    struct Close(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for Close {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+    let _close = Close(handle);
+    let zero = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut c, mut e, mut k, mut u) = (zero(), zero(), zero(), zero());
+    if unsafe { GetProcessTimes(handle, &mut c, &mut e, &mut k, &mut u) } == 0
+        || ((u64::from(c.dwHighDateTime) << 32) | u64::from(c.dwLowDateTime)) != created
+    {
+        return Ok(false);
+    }
+    if unsafe { TerminateProcess(handle, 1) } == 0 {
+        return Err(format!("TerminateProcess({pid}) 失败 (Win32 {})", unsafe { GetLastError() }));
+    }
+    let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX);
+    if unsafe { WaitForSingleObject(handle, millis) } == WAIT_OBJECT_0 {
+        Ok(true)
+    } else {
+        Err(format!("pid {pid} 在 {} ms 内没有退出", wait.as_millis()))
+    }
+}
+
 /// 进程已经结束：不存在，或（Linux）已经是僵尸。
 ///
 /// 取消清扫杀掉的工具子进程，父进程是后端自己，后端不 `wait` 时会变成僵尸。
@@ -386,6 +557,39 @@ pub fn confirm_tree_gone(pgid: u32, tracked: &[ProcIdentity], timeout: Duration)
 
 #[cfg(test)]
 mod tests {
+    use super::{outside_job_descendants, SystemProcess};
+
+    fn row(pid: u32, parent: u32, created: Option<u64>) -> SystemProcess {
+        SystemProcess { pid, parent, name: format!("p{pid}"), created }
+    }
+
+    #[test]
+    fn outside_job_descendants_follow_parent_links_from_job_members_created_this_turn() {
+        // 10 = backend root (Job), 11 = codex app-server (Job).
+        // 20 = runner outside the Job, parent 11, created this turn; 21 = pwsh, 22 = PING.
+        // 30 = older helper outside the Job (before the baseline): kept.
+        // 40 = unrelated process; 50 = parent pid reused by a newer process.
+        let table = vec![
+            row(10, 1, Some(100)), row(11, 10, Some(110)),
+            row(20, 11, Some(500)), row(21, 20, Some(510)), row(22, 21, Some(520)),
+            row(30, 11, Some(200)),
+            row(40, 1, Some(600)),
+            row(50, 11, Some(50)),
+            row(60, 11, None),
+        ];
+        let found = outside_job_descendants(&[10, 11], &table, 400);
+        assert_eq!(found.targets.iter().map(|row| row.pid).collect::<Vec<_>>(), vec![20, 21, 22]);
+        assert_eq!(found.unverifiable.iter().map(|row| row.pid).collect::<Vec<_>>(), vec![60]);
+    }
+
+    #[test]
+    fn outside_job_descendants_stop_at_reused_pids_and_cycles() {
+        // 70 names 11 as parent but is older than 11: pid reuse, not a descendant.
+        let table = vec![row(11, 10, Some(300)), row(70, 11, Some(250)), row(80, 81, Some(900)), row(81, 80, Some(900))];
+        let found = outside_job_descendants(&[11], &table, 0);
+        assert!(found.targets.is_empty(), "{found:?}");
+    }
+
     use super::*;
 
     #[test]

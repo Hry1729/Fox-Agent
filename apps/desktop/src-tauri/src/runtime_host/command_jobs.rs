@@ -259,9 +259,7 @@ fn verify_start(
         || credential.policy_snapshot_id != binding.permission_snapshot_id {
         return Err("credential_mismatch: frozen run scope differs".into());
     }
-    if binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
-        database.kernel_validate_resource_acquisition_for(run_id, Some("run_command"))?;
-    }
+    database.host_validate_resource_acquisition_for(run_id, Some("run_command"))?;
     let row = database.read_execution_attempt(run_id, &credential.dispatch_id)?
         .ok_or("credential_mismatch: no Host claim exists")?;
     if row.state != AttemptState::Claimed || row.params_hash != credential.intent_digest
@@ -329,9 +327,7 @@ fn execute_inner(
     {
         return Err("[tool.permission_denied] command project differs from the frozen Run".into());
     }
-    if binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
-        database.kernel_validate_resource_acquisition_for(run_id, Some("run_command"))?;
-    }
+    database.host_validate_resource_acquisition_for(run_id, Some("run_command"))?;
     let action = input["action"].as_str().unwrap();
     let id = if action == "start" {
         if budget.is_zero() {

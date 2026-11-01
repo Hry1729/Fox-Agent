@@ -7243,6 +7243,10 @@ impl Database {
                     "Runtime event '{event_type}' is not allowed after Run '{run_id}' reached terminal status '{run_status}'"
                 )));
             }
+            // `agent_backend.cancel_swept` is the external Host's record of the
+            // turn-process sweep after a confirmed cancel. It is written while
+            // the Run is still cancelling, before its terminal (13.35), so
+            // it is kept here instead of being dropped.
             if run_status == "cancelling"
                 && !matches!(
                     event_type,
@@ -7251,6 +7255,7 @@ impl Database {
                         | "run.cancelled"
                         | "run.interrupted"
                         | "run.failed"
+                        | "agent_backend.cancel_swept"
                 )
             {
                 transaction.rollback()?;
