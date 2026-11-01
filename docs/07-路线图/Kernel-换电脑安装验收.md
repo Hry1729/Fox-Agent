@@ -56,4 +56,4 @@
 
 填写测试包中的 `验收记录.md`，并保留错误提示与截图。无需发送模型密钥或完整业务数据库。
 
-Windows 安装包构建入口为 `pnpm tauri:build:windows`。构建前从已安装的 Visual Studio x64 CRT 再分发目录准备运行库；可用 `FOX_WINDOWS_CRT_DIR` 显式指定目录。安装器配置单独加载，避免给普通 Cargo 测试或其他平台增加 Windows DLL 要求。本轮 Zvec 下载受网络限制，构建显式复用了已验证的同版本本机预构建目录；新的构建机仍需能取得匹配的官方 Zvec 库。
+Windows 安装包构建入口为 `pnpm tauri:build:windows`。构建前从已安装的 Visual Studio x64 CRT 再分发目录准备运行库；可用 `FOX_WINDOWS_CRT_DIR` 显式指定目录；自动探测只认 VS 2022 的 `Microsoft.VC143.CRT`，用 VS 2026 构建时必须用它指定（见 [Windows 安装包与受管运行时](../windows-bundled-sandbox-installer.md)）。安装器配置单独加载，避免给普通 Cargo 测试或其他平台增加 Windows DLL 要求。本轮 Zvec 下载受网络限制，构建显式复用了已验证的同版本本机预构建目录；新的构建机仍需能取得匹配的官方 Zvec 库。

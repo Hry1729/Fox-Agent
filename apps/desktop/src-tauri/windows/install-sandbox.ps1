@@ -19,7 +19,9 @@ try {
         -PackagePath $PackagePath -ExpectedSha256 $ExpectedSha256 -Version $Version `
         -ResultPath $resultPath -LogPath $logPath
     if ($LASTEXITCODE -ne 0) { throw "Sandbox setup exited with code $LASTEXITCODE. See $logPath" }
-    $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+    # enable-sandbox.ps1 writes UTF-8 without a BOM; Windows PowerShell 5.1 (the NSIS hook's
+    # host) would read it as the ANSI code page without -Encoding UTF8.
+    $result = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $result.ok -or -not $result.runtimeRoot) {
         throw 'Sandbox setup did not return a successful installation result.'
     }

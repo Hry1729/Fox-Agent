@@ -14,13 +14,21 @@ pnpm install --frozen-lockfile
 pnpm tauri:build:windows
 ```
 
+Visual C++ 运行库由 `scripts/prepare-windows-runtime.mjs` 从本机 Visual Studio 的再分发目录复制。自动探测只找 `VC\Redist\MSVC\<版本>\x64\Microsoft.VC143.CRT`（VS 2022 的目录名）；用 VS 2026 构建时这个目录名不同，自动探测会失败，需要用 `FOX_WINDOWS_CRT_DIR` 指定实际的 x64 CRT 目录，例如：
+
+```powershell
+$env:FOX_WINDOWS_CRT_DIR = 'C:\Program Files\Microsoft Visual Studio\18\Community\VC\Redist\MSVC\<版本>\x64\<实际的 CRT 目录>'
+```
+
+指定的目录仍须包含 `msvcp140.dll`、`msvcp140_1.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`，且都是 x64 PE，否则构建停止。
+
 构建脚本（`scripts/prepare-sandbox-installer.mjs`）检查 ZIP 的 SHA256、Host 的运行时版本（`launch.rs` 的 `RUNTIME_PACKAGE_VERSION`）和模型适配器固定哈希；任何一项不一致都会阻止构建。ACP bridge 的哈希校验已随 bridge 删除。生成目录 `resources/sandbox-installer` 不进入 Git。
 
 运行时包当前 pin 为 **0.1.8**（SHA256 `0f9c199da3aed28b3ccdc52885c04a49548c79f65e98a89106836e50e35d397f`）：在 0.1.7 基础上给 pi-acp 0.0.34（6 处 spawn）和 pi 1.4.0 bundle（7 处）加 `windowsHide`；不带 `srt\`、`acp-bridge\`；`pi-gate\` 含支持 `FOX_PI_MCP_EXTENSION` 的 `pi-gated.cmd`、`fox-approval-gate.ts` 和 Fox 工具扩展 `fox-mcp-tools.ts`。构建：`crates/fox-agent-backend/scripts/windows/build-runtime-release.ps1 -Version 0.1.8 -OutDir <目录>`（Windows），按 `scripts/windows/runtime-package/` 固定的 Node（`node.json`，含 SHA256）和各 Agent 的 `package-lock.json` 执行 `npm ci`，再由 `build-runtime-package.py` stage / pack（`pack` / `check` 遇到 `srt\`、`acp-bridge\` 或不支持 Fox 工具的 pi-gate 直接拒绝），最后按 Host 预检顺序检查包内布局。windows-ci 的 workflow_dispatch 输入 `runtime_package=true` 在 Windows runner 上执行同一脚本，只上传 artifact（`fox-sandbox-runtime-<版本>-windows-x64`，保留 90 天），不发 Release。0.1.8 来自 run 41223685857（artifact 13051856517，2027-01-30 过期）；之前的 0.1.7（`8af08d0d…`）来自 run 41176396662。换版本时同时更新 `sandbox-release.json`、`launch.rs` 的 `RUNTIME_PACKAGE_VERSION`、`build-runtime-package.py` 的 `DEFAULT_VERSION`（单测核对三者一致）。
 
 ## 安装
 
-- NSIS 使用 `perMachine`，通过 `NSIS_HOOK_PREINSTALL` 调用 64 位 Windows PowerShell 运行 `enable-sandbox.ps1`。运行时 ZIP 随安装器分发，不需要另行下载或手动运行脚本。
+- NSIS 使用 `perMachine`，通过 `NSIS_HOOK_PREINSTALL` 调用 `%WINDIR%\SysNative\WindowsPowerShell\v1.0\powershell.exe`，也就是 64 位的 **Windows PowerShell 5.1**（不是 PowerShell 7 / `pwsh`，即使机器上装了 7 也不会用）。`install-sandbox.ps1` 再用同一个 5.1 运行 `enable-sandbox.ps1`。两个脚本都以 `#Requires -Version 5.1` 开头，只能用 5.1 支持的语法（不能用 `??`、`?.`、`&&`、`-AsHashtable`、`utf8NoBOM` 等）；读写不带 BOM 的 UTF-8 文件时要显式写 `-Encoding UTF8`，因为 5.1 默认按 ANSI 代码页读。运行时 ZIP 随安装器分发，不需要另行下载或手动运行脚本。
 - `enable-sandbox.ps1` 依次：
   1. 校验 ZIP 的 SHA256（先复制到仅管理员可写的暂存目录再校验）；
   2. 解压并安装到 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`（同哈希时跳过，失败回滚）；
@@ -43,10 +51,10 @@ NSIS 没有事务回滚。运行时安装失败会停止后续应用安装；若
 ```powershell
 node --test scripts/prepare-sandbox-installer.test.mjs
 node scripts/test-sandbox-installer-hook.mjs
-pwsh -File crates/fox-agent-backend/scripts/windows/tests/test-enable-faults.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File crates/fox-agent-backend/scripts/windows/tests/test-enable-faults.ps1
 python -m unittest crates/fox-agent-backend/scripts/windows/tests/test_build_runtime_package.py
 ```
 
-Hook 测试编译并运行不提权的隔离 NSIS 安装器，以假安装脚本检查非零退出和 `ok=false` 两条失败路径。前三项（Python 单测、installer pin 检查、`test-enable-faults.ps1` 函数级模式）在 windows-ci 的 Runtime package scripts job 里跑（全量运行或 `runtime_package=true`）；hook 测试不在 CI 里。完整 UAC 安装、旧机器升级时的 SRT 清理、安装后的桌面启动和真实模型对话需要另行实测（清单见 `crates/fox-agent-backend/docs/sandbox.md` 13.31、13.32）。
+`test-enable-faults.ps1` 要用 `powershell.exe`（5.1）跑，和安装器实际使用的版本一致，CI 也是这样跑的；用 `pwsh` 跑通过不能说明安装器里能跑。Hook 测试编译并运行不提权的隔离 NSIS 安装器，以假安装脚本检查非零退出和 `ok=false` 两条失败路径。前三项（Python 单测、installer pin 检查、`test-enable-faults.ps1` 函数级模式）在 windows-ci 的 Runtime package scripts job 里跑（全量运行或 `runtime_package=true`）；hook 测试不在 CI 里。完整 UAC 安装、旧机器升级时的 SRT 清理、安装后的桌面启动和真实模型对话需要另行实测（清单见 `crates/fox-agent-backend/docs/sandbox.md` 13.31、13.32）。
 
 Tauri 安装钩子说明：[Windows Installer](https://v2.tauri.app/distribute/windows-installer/)。

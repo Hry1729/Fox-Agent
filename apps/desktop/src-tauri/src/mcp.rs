@@ -21,8 +21,10 @@ const CREDENTIAL_SERVICE: &str = "com.fox.agent.mcp";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 #[cfg(not(test))]
 const TIMEOUT: Duration = Duration::from_secs(15);
+// Windows CI runners start a Node stdio server in several seconds; 2 s timed out
+// lists_and_calls_tools_through_one_persistent_stdio_session intermittently.
 #[cfg(test)]
-const TIMEOUT: Duration = Duration::from_secs(2);
+const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TOOLS: usize = 200;
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
