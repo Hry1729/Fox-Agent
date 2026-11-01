@@ -232,9 +232,9 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
     return () => observer.disconnect()
   }, [dark])
   const steps = [
-    { title: '连接模型服务', description: '配置 Fox 原生 Agent 使用的模型、API 协议与上下文能力。', ready: Boolean(model.service), action: () => navigate('settings-models'), actionLabel: model.service ? '检查模型配置' : '配置模型服务' },
-    { title: '连接资料库服务', description: '连接本机或局域网服务，启用远程专家、资料库和知识图谱。', ready: Boolean(yuxi.service), action: () => navigate('settings-yuxi'), actionLabel: yuxi.service ? '检查资料库连接' : '配置资料库服务' },
-    { title: '开始使用 Fox', description: '模型服务是原生专家的必要条件；资料库服务可以稍后连接。', ready: Boolean(model.service), action: () => onExit('completed'), actionLabel: '开始使用' },
+    { title: '连接模型服务', short: '模型', description: '配置 Fox 原生 Agent 使用的模型、API 协议与上下文能力。', ready: Boolean(model.service), action: () => navigate('settings-models'), actionLabel: model.service ? '检查模型配置' : '配置模型服务' },
+    { title: '连接资料库服务', short: '资料库', description: '连接本机或局域网服务，启用远程专家、资料库和知识图谱。', ready: Boolean(yuxi.service), action: () => navigate('settings-yuxi'), actionLabel: yuxi.service ? '检查资料库连接' : '配置资料库服务' },
+    { title: '开始使用 Fox', short: '开始', description: '模型服务是原生专家的必要条件；资料库服务可以稍后连接。', ready: Boolean(model.service), action: () => onExit('completed'), actionLabel: '开始使用' },
   ]
   const current = steps[step]
   const statusCopy = step === 0
@@ -283,7 +283,7 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
         <header className="fox-onboarding-brand"><span><img src="/mascot/fox/idle/fox_sit_nicely.png" alt="" />Fox</span></header>
         <main className="fox-onboarding-form">
           <div className="fox-onboarding-card">
-            <Stepper className="fox-onboarding-stepper" label="Fox 设置进度" completeLabel="设置完成" steps={steps.map((item, index) => ({ id: String(index), label: item.title }))} current={step} details="current" onStepSelect={(index) => { setStepDirection(index >= step ? 1 : -1); setStep(index) }} />
+            <Stepper className="fox-onboarding-stepper" label="Fox 设置进度" completeLabel="设置完成" steps={steps.map((item, index) => ({ id: String(index), label: item.short }))} current={step} details="current" onStepSelect={(index) => { setStepDirection(index >= step ? 1 : -1); setStep(index) }} />
             <div className="fox-onboarding-step-viewport">
               <AnimatePresence initial={false} mode="sync" custom={stepDirection}>
                 <motion.div
