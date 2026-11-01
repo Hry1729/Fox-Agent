@@ -48,3 +48,10 @@
     transition: none;
   }
 }
+
+/* C3：审批卡图标尺寸走 token。组件样式后加载，多一层祖先提高优先级。 */
+.fox-runtime-confirmation .fox-approval-card-icon {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  flex: 0 0 var(--fox-icon-size);
+}

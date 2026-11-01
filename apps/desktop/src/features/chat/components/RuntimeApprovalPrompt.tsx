@@ -6,7 +6,8 @@
 // approval is the versioned ticket the Host minted; the Host re-checks that exact
 // ticket in the same transaction that consumes it, so the prompt must never
 // invent, re-key, or reuse an approval identity of its own.
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
+import { FilePen, FilePlus, Terminal, Trash2 } from 'lucide-react'
 import { ApprovalCard, PermissionGrant } from '@/components/assistant-ui/elements/approval-card'
 import { approvalPresentation } from '@/features/conversations/model/approval-presentation'
 import {
@@ -38,6 +39,20 @@ export function commandPolicyNote(request: Record<string, unknown>): string | nu
 }
 
 const conversationScopeNote = '“本次对话内允许”只登记本对话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者对话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。'
+
+/** 审批卡图标只跟随标题：命令仍用终端，新建用加号，写入用笔，删除用垃圾桶。 */
+function approvalCardIcon(title: string, toolName: string): ReactNode {
+  const className = 'fox-approval-card-icon'
+  if (title === '执行命令') return <Terminal className={className} aria-hidden="true" />
+  if (title === '删除文件') return <Trash2 className={className} aria-hidden="true" />
+  if (title === '新建文件' || (title === '写入文件' && /create/i.test(toolName) && !/write|edit|save|patch/i.test(toolName))) {
+    return <FilePlus className={className} aria-hidden="true" />
+  }
+  if (title === '写入文件' || title === '替换文件' || title === '修改文档' || title === '追加修复') {
+    return <FilePen className={className} aria-hidden="true" />
+  }
+  return <Terminal className={className} aria-hidden="true" />
+}
 
 /** Only a path-only read request uses the permission surface; mutations retain their operation review. */
 function isReadScopeRequest(approval: ApprovalRecord, presentation: ReturnType<typeof approvalPresentation>) {
@@ -115,7 +130,8 @@ export function RuntimeApprovalPrompt({
   const replacement = presentation.wholeFileReplacement
   const title = repairOverride ? '追加修复' : replacement ? replacement.baselineVersion === 'missing' ? '新建文件' : '替换文件'
     : presentation.officeReuse ? '修改文档' : presentation.command ? '执行命令' : presentation.content !== undefined ? '写入文件'
-      : /delete|remove/i.test(approval.toolName) ? '删除文件' : '执行操作'
+      : /delete|remove/i.test(approval.toolName) ? '删除文件'
+        : /write|create|edit|save|patch/i.test(approval.toolName) ? '写入文件' : '执行操作'
   const operationSummary = presentation.content !== undefined ? `拟写入 ${presentation.content.split('\n').length} 行。`
     : (presentation.summary || approval.toolName).replaceAll(presentation.target, '此目标')
   const briefScope = repairOverride ? repairDetails ? '仅追加本次修复。' : '审批详情不完整，请拒绝后重新发起。'
@@ -126,7 +142,7 @@ export function RuntimeApprovalPrompt({
   const target = replacement?.targetIdentity ?? presentation.officeReuse?.target ?? presentation.target
   const operation = presentation.command && presentation.command !== target ? `${target}\n${presentation.command}` : target
   return (
-    <ApprovalCard state="request" title={title} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
+    <ApprovalCard state="request" title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
       onDeny={() => void resolve('deny')}
       onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
       onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}

@@ -102,7 +102,7 @@ export function ApprovalCard({
               : "bg-foreground/[0.05] text-muted-foreground",
           )}
         >
-          {icon ?? <TerminalIcon className="size-4" />}
+          {icon ?? <TerminalIcon className="fox-approval-card-icon" />}
         </span>
         <div className="flex flex-col">
           <p id={titleId} className="text-[13.5px] font-medium">
