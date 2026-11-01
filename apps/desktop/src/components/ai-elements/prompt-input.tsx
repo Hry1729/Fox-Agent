@@ -1270,12 +1270,37 @@ export const PromptInputActionMenuTrigger = ({
 export type PromptInputActionMenuContentProps = ComponentProps<
   typeof DropdownMenuContent
 >;
+// 输入卡里的菜单向上弹出时，底边落在输入卡上沿之上，不盖住正在输入的文字。
+// 触发按钮在输入卡外（如项目条）时保持默认间距。
+const COMPOSER_MENU_GAP = 6;
 export const PromptInputActionMenuContent = ({
   className,
+  side,
+  sideOffset,
   ...props
-}: PromptInputActionMenuContentProps) => (
-  <DropdownMenuContent align="start" className={cn(className)} {...props} />
-);
+}: PromptInputActionMenuContentProps) => {
+  const [clearOffset, setClearOffset] = useState<number | null>(null);
+  // Radix 的 Portal 在挂载后一帧才渲染内容，所以用回调 ref 在节点出现时量。
+  const measure = useCallback((node: HTMLDivElement | null) => {
+    if (!node || side !== "top" || sideOffset !== undefined) return;
+    const triggerId = node.getAttribute("aria-labelledby");
+    const trigger = triggerId ? document.getElementById(triggerId) : null;
+    const card = trigger?.closest('[data-slot="input-group"]');
+    if (!trigger || !card) return;
+    const distance = trigger.getBoundingClientRect().top - card.getBoundingClientRect().top;
+    if (distance > 0) setClearOffset(Math.round(distance) + COMPOSER_MENU_GAP);
+  }, [side, sideOffset]);
+  return (
+    <DropdownMenuContent
+      ref={measure}
+      align="start"
+      side={side}
+      sideOffset={sideOffset ?? clearOffset ?? undefined}
+      className={cn(className)}
+      {...props}
+    />
+  );
+};
 
 export type PromptInputActionMenuItemProps = ComponentProps<
   typeof DropdownMenuItem
