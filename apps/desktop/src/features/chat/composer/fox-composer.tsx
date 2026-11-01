@@ -778,7 +778,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
           <PromptInputTools className="fox-composer-tools">
             <PromptInputActionMenu modal={false}>
               <PromptInputActionMenuTrigger tooltip="添加内容" aria-label="添加内容"><Plus size={18} /></PromptInputActionMenuTrigger>
-              <PromptInputActionMenuContent className={`fox-add-menu ${!newConversation ? 'fox-history-add-menu' : ''}`}>
+              <PromptInputActionMenuContent side="top" className={`fox-add-menu ${!newConversation ? 'fox-history-add-menu' : ''}`}>
                 <PromptInputActionAddAttachments label="添加附件" />
                 <PromptInputActionMenuItem onSelect={openKnowledge}><Library />添加资料库</PromptInputActionMenuItem>
                 {!newConversation && <div className="fox-history-menu-settings">{expertControl}{modelControl}</div>}

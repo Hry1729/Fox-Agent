@@ -3,3 +3,255 @@
    规则：只引用 globals.css / themes.css 里的设计 token（--fox-space-*、--fox-radius-*、--fox-type-*、
    --fox-icon-size-*、--fox-shadow-*、--fox-duration-* 等），不写裸 px / ms / 颜色值；
    0、1px 描边、百分比和 auto 除外。 */
+
+:root {
+  /* 外框 1px 描边算进内边距：视觉内边距仍是 --fox-composer-inset，内卡圆角用 -inner，内外同心。 */
+  --fox-composer-frame-padding: calc(var(--fox-composer-inset) - 1px);
+  /* 菜单宽度由控件高度和间距推出。 */
+  --fox-composer-menu-min-width: calc(var(--fox-menu-item-height) * 6);
+  --fox-composer-execution-min-width: calc(var(--fox-menu-item-height) * 7 + var(--fox-space-m));
+  --fox-composer-menu-width: calc(var(--fox-space-8xl) * 4 + var(--fox-space-xs));
+  --fox-composer-picker-width: calc(var(--fox-space-8xl) * 5);
+  --fox-composer-menu-max-width: calc(var(--fox-space-8xl) * 4 + var(--fox-space-4xl) + var(--fox-space-m));
+  /* 发送按钮禁用：muted 表面，不再沿用浅色主按钮。 */
+  --fox-composer-send-disabled-bg: color-mix(in oklch, var(--muted) 78%, var(--fox-card));
+}
+
+/* I1 新对话外框（含项目条）与内卡同心；亮暗描边都用 --fox-border。 */
+.fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) {
+  padding: var(--fox-composer-frame-padding);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-composer);
+  background: var(--fox-accent-surface);
+}
+
+.fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-border-beam {
+  border-radius: var(--fox-radius-composer-inner);
+}
+
+.fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-input > [data-slot='input-group'] {
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-composer-inner) !important;
+  background: var(--fox-card);
+  transition: border-color var(--fox-duration-base) var(--fox-ease-out), box-shadow var(--fox-duration-base) var(--fox-ease-out), background-color var(--fox-duration-base) var(--fox-ease-out);
+}
+
+/* 顶部渐变会在暗色里叠出第二道边。 */
+.fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-input > [data-slot='input-group']::before {
+  content: none;
+}
+
+.fox-composer-draft-footer {
+  min-height: var(--fox-control-md);
+  padding: var(--fox-space-xs) 0 var(--fox-space-l);
+  gap: var(--fox-space-m);
+}
+
+.fox-composer-project-bar .fox-composer-project-trigger {
+  border-radius: var(--fox-radius-pill);
+}
+
+/* 历史单行的圆形添加按钮改走胶囊 token，形状不变。 */
+.fox-composer-wrap.is-history [aria-label='添加内容'] {
+  border-radius: var(--fox-radius-pill);
+}
+
+/* I2 / I5 档位、模型、Agent、+ 菜单同一套浮层。 */
+:is(.fox-add-menu, .fox-execution-menu, .fox-composer-agent-menu, .fox-composer-picker-menu) {
+  padding: var(--fox-popover-padding);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-large);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--fox-shadow-popover);
+  gap: 0;
+}
+
+:is(.fox-add-menu, .fox-execution-menu, .fox-composer-agent-menu, .fox-composer-picker-menu) :is([data-slot='dropdown-menu-item'], [data-slot='command-item'], .fox-composer-project-add, .fox-composer-model-manage) {
+  min-height: var(--fox-menu-item-height);
+  gap: var(--fox-space-m);
+  padding-block: 0;
+  padding-inline: var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
+  font-size: var(--fox-type-chrome);
+  transition: background-color var(--fox-duration-fast) var(--fox-ease-out), color var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+:is(.fox-add-menu, .fox-execution-menu, .fox-composer-agent-menu, .fox-composer-picker-menu) :is([data-slot='dropdown-menu-item'], [data-slot='command-item'], .fox-composer-project-add, .fox-composer-model-manage) > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  margin: 0;
+  flex: none;
+}
+
+:is(.fox-add-menu, .fox-execution-menu, .fox-composer-agent-menu, .fox-composer-picker-menu) :is([data-slot='dropdown-menu-item'], [data-slot='command-item'], .fox-composer-project-add, .fox-composer-model-manage):focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: calc(-1 * var(--fox-focus-offset));
+}
+
+:is(.fox-add-menu, .fox-execution-menu, .fox-composer-agent-menu) [data-slot='dropdown-menu-label'] {
+  padding: var(--fox-space-m) var(--fox-space-m) var(--fox-space-xs);
+  color: var(--fox-faint);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-add-menu.fox-execution-menu[data-backend] {
+  width: max-content;
+  min-width: var(--fox-composer-execution-min-width);
+  max-width: min(var(--fox-composer-menu-max-width), calc(100vw - var(--fox-space-4xl)));
+}
+
+.fox-add-menu:not(.fox-execution-menu) {
+  width: max-content;
+  min-width: var(--fox-composer-menu-min-width);
+  max-width: min(var(--fox-composer-picker-width), calc(100vw - var(--fox-space-4xl)));
+}
+
+.fox-composer-agent-menu {
+  width: min(var(--fox-composer-menu-width), calc(100vw - var(--fox-space-4xl)));
+  max-width: calc(100vw - var(--fox-space-4xl));
+}
+
+.fox-history-add-menu .fox-history-menu-settings {
+  gap: var(--fox-space-micro);
+  margin-top: var(--fox-space-xs);
+  padding-top: var(--fox-space-xs);
+  border-top: 1px solid var(--fox-border);
+}
+
+.fox-history-add-menu .fox-history-menu-settings > button {
+  min-height: var(--fox-menu-item-height);
+  padding-inline: var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
+}
+
+/* I3 模型菜单：标题弱化，管理模型是脚部动作。fox-elements.css 后加载，这里多一层类。 */
+.aui-model-menu.fox-composer-picker-menu {
+  width: min(var(--fox-composer-picker-width), calc(100vw - var(--fox-space-4xl)));
+  padding: var(--fox-popover-padding);
+  border-radius: var(--fox-radius-large);
+  box-shadow: var(--fox-shadow-popover);
+  gap: 0;
+  overflow: hidden;
+}
+
+.fox-composer-picker-menu .aui-model-menu-heading,
+.fox-composer-picker-menu [cmdk-group-heading] {
+  margin: 0;
+  padding: var(--fox-space-m) var(--fox-space-m) var(--fox-space-xs);
+  color: var(--fox-faint);
+  font-size: var(--fox-type-caption);
+  font-weight: var(--fox-weight-medium);
+  line-height: 1.4;
+}
+
+.fox-composer-picker-menu .fox-composer-model-note {
+  margin: 0;
+  padding: 0 var(--fox-space-m) var(--fox-space-s);
+  color: var(--fox-muted);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-composer-picker-menu [cmdk-item] {
+  min-height: var(--fox-menu-item-height);
+  padding-block: 0;
+  padding-inline: var(--fox-space-m);
+  gap: var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
+}
+
+.fox-composer-picker-menu [cmdk-input-wrapper] {
+  margin: 0 0 var(--fox-space-xs);
+}
+
+.fox-composer-picker-menu .fox-composer-project-option {
+  gap: var(--fox-space-micro);
+}
+
+.fox-composer-picker-menu .fox-composer-model-manage {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-m);
+  width: auto;
+  min-height: var(--fox-menu-item-height);
+  margin: var(--fox-space-xs) calc(-1 * var(--fox-popover-padding)) calc(-1 * var(--fox-popover-padding));
+  padding: var(--fox-space-xs) calc(var(--fox-popover-padding) + var(--fox-space-m));
+  border: 0;
+  border-top: 1px solid var(--fox-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--fox-text);
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fox-composer-picker-menu .fox-composer-model-manage::before {
+  content: "";
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  flex: none;
+  background-color: currentColor;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 7h-9'/%3E%3Cpath d='M14 17H5'/%3E%3Ccircle cx='17' cy='17' r='3'/%3E%3Ccircle cx='7' cy='7' r='3'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 7h-9'/%3E%3Cpath d='M14 17H5'/%3E%3Ccircle cx='17' cy='17' r='3'/%3E%3Ccircle cx='7' cy='7' r='3'/%3E%3C/svg%3E");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+
+.fox-composer-picker-menu .fox-composer-model-manage:hover {
+  background: var(--fox-hover);
+}
+
+.fox-composer-picker-menu .fox-composer-model-manage:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: calc(-1 * var(--fox-focus-offset));
+}
+
+.fox-composer-picker-menu .fox-composer-project-add {
+  width: 100%;
+  margin-top: var(--fox-space-xs);
+}
+
+/* I4 暗色禁用发送按钮不再是浅色圆。启用态仍走 send surface。 */
+@layer components {
+  .fox-composer-wrap .fox-send-button:disabled {
+    background: var(--fox-composer-send-disabled-bg) !important;
+    color: var(--fox-faint) !important;
+    opacity: 1 !important;
+  }
+}
+
+/* 放在层外，盖过按钮组件的 disabled:pointer-events-none / cursor-not-allowed。 */
+.fox-composer-wrap .fox-send-button:disabled {
+  cursor: default;
+  pointer-events: auto;
+}
+
+.fox-composer-wrap :is(.fox-send-button, [aria-label='添加内容'], .fox-execution-control, .aui-composer-model-trigger, .fox-composer-agent-trigger, .fox-composer-project-trigger):focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+.fox-composer-agent-trigger:focus-visible,
+.fox-composer-project-trigger:focus-visible,
+.fox-composer-project-add:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-composer-wrap.is-new-conversation .fox-prompt-input > [data-slot='input-group'],
+  .fox-composer-wrap .fox-send-button,
+  :is(.fox-add-menu, .fox-execution-menu, .fox-composer-agent-menu, .fox-composer-picker-menu),
+  :is(.fox-add-menu, .fox-execution-menu, .fox-composer-agent-menu, .fox-composer-picker-menu) :is([data-slot='dropdown-menu-item'], [data-slot='command-item'], .fox-composer-project-add, .fox-composer-model-manage) {
+    transition: none;
+    animation: none;
+  }
+}

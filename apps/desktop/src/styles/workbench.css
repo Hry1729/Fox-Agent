@@ -12484,9 +12484,9 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-sidebar-flyout .fox-sidebar-collapsed-run:not([data-run-indicator]) { visibility: hidden; }
 
 @layer components {
-  .fox-composer-wrap .fox-send-button {
-    background: var(--primary) !important;
-    color: #fff !important;
+  .fox-composer-wrap .fox-send-button:not(:disabled) {
+    background: var(--fox-send-surface) !important;
+    color: var(--fox-send-ink) !important;
   }
 }
 

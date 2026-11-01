@@ -73,7 +73,7 @@ function ApprovalMenu({ backend, rows, current, disabled, tooltip, note, onPick 
         <span>{active?.shortLabel ?? '审批'}</span>
         {note && <small className="fox-execution-control-note">{note}</small>}
       </PromptInputActionMenuTrigger>
-      <PromptInputActionMenuContent className="fox-add-menu fox-execution-menu" data-backend={backend}>
+      <PromptInputActionMenuContent side="top" className="fox-add-menu fox-execution-menu" data-backend={backend}>
         {rows.map((row) => (
           <PromptInputActionMenuItem key={row.value} data-mode={row.value} disabled={row.disabled} title={row.title} onSelect={() => { if (!row.disabled) onPick(row.value) }}>
             {rowIcon(row, backend)}

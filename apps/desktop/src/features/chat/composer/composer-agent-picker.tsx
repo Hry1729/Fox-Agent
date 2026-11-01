@@ -26,7 +26,7 @@ export function ComposerAgentPicker({ value, status, disabled, onSelect }: {
   }
   return <DropdownMenu>
     <DropdownMenuTrigger asChild><button type="button" className="fox-composer-agent-trigger" data-agent-backend={value} disabled={disabled} aria-label={`选择 Agent，当前 ${AGENT_BACKEND_LABELS[value]}`}><span>{AGENT_BACKEND_LABELS[value]}</span><ChevronDown size={13} /></button></DropdownMenuTrigger>
-    <DropdownMenuContent align="end" side="bottom" className="fox-composer-agent-menu">
+    <DropdownMenuContent align="end" side="top" className="fox-composer-agent-menu">
       <DropdownMenuLabel>本次新对话</DropdownMenuLabel>
       {choices.map(backend => {
         const option = status?.options.find(item => item.backend === backend)
