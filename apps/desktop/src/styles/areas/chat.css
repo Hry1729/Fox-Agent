@@ -3,3 +3,48 @@
    规则：只引用 globals.css / themes.css 里的设计 token（--fox-space-*、--fox-radius-*、--fox-type-*、
    --fox-icon-size-*、--fox-shadow-*、--fox-duration-* 等），不写裸 px / ms / 颜色值；
    0、1px 描边、百分比和 auto 除外。 */
+
+/* C1：回合标记用 token 尺寸。命中区域固定，悬停只拉长内部短线，不撑开轨道。 */
+.fox-chat-stage .fox-conversation-marks {
+  gap: var(--fox-space-xs);
+  padding: var(--fox-space-m) var(--fox-space-xs);
+}
+
+.fox-chat-stage .fox-conversation-marks button {
+  width: var(--fox-icon-size-large);
+  height: var(--fox-space-m);
+  padding: 0;
+}
+
+.fox-chat-stage .fox-conversation-marks button span {
+  width: var(--fox-space-s);
+  height: var(--fox-space-micro);
+  border-radius: var(--fox-radius-pill);
+  opacity: 1;
+  transition:
+    width var(--fox-duration-fast) var(--fox-ease-out),
+    opacity var(--fox-duration-fast) var(--fox-ease-out),
+    background-color var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+.fox-chat-stage .fox-conversation-marks button:hover span,
+.fox-chat-stage .fox-conversation-marks button:focus-visible span {
+  width: var(--fox-space-l);
+  opacity: 1;
+}
+
+.fox-chat-stage .fox-conversation-marks button.is-active span {
+  width: var(--fox-space-xl);
+  opacity: 1;
+}
+
+.fox-chat-stage .fox-conversation-marks button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-chat-stage .fox-conversation-marks button span {
+    transition: none;
+  }
+}

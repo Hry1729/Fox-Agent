@@ -85,7 +85,8 @@ export function ConversationTurnRail({ messages, artifacts }: { messages: Conver
     return () => observer.disconnect()
   }, [turns])
 
-  if (!turns.length) return null
+  // 只有一轮时左侧短横线会像误放的字符，至少两轮才显示回合导航。
+  if (turns.length < 2) return null
   const hovered = turns.find((turn) => turn.user.id === hoveredId)
   const scrollToTurn = (messageId: string) => {
     setActiveId(messageId)
