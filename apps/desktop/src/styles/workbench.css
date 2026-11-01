@@ -3116,7 +3116,7 @@ button.fox-chat-project-row:disabled {
   max-width: 100%;
   margin-left: auto !important;
   border: 0;
-  border-radius: 18px !important;
+  border-radius: var(--fox-radius-bubble) !important;
   background: var(--fox-user) !important;
   padding: 11px 16px !important;
   color: var(--fox-user-foreground);
@@ -4808,7 +4808,7 @@ img[src='/avatars/fox-assistant.png'] {
   margin-left: auto !important;
   gap: 8px;
   border: 0;
-  border-radius: 18px !important;
+  border-radius: var(--fox-radius-bubble) !important;
   background: var(--fox-user) !important;
   padding: 11px 12px 10px !important;
   color: var(--fox-user-foreground);
@@ -4885,16 +4885,14 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) {
-  --fox-composer-inset: 4px;
-  --fox-composer-radius: 20px;
   padding: var(--fox-composer-inset);
+  border-radius: var(--fox-radius-composer);
   border: 0;
-  border-radius: var(--fox-composer-radius);
   background: var(--fox-accent-surface);
 }
 
 .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-input > [data-slot='input-group'] {
-  border-radius: var(--fox-composer-radius) !important;
+  border-radius: var(--fox-radius-composer-inner) !important;
 }
 
 .fox-composer-draft-footer {
@@ -4944,7 +4942,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-prompt-shell.is-decision {
   min-height: 150px;
   border: 1px solid color-mix(in srgb, var(--fox-accent) 24%, var(--fox-border));
-  border-radius: 24px;
+  border-radius: var(--fox-radius-composer);
   background: color-mix(in srgb, var(--fox-card) 97%, var(--brand-soft) 3%);
   box-shadow: 0 12px 30px color-mix(in srgb, var(--fox-text) 10%, transparent);
   animation: foxQuestionDrawerIn 180ms cubic-bezier(.2,.8,.2,1);
@@ -4952,7 +4950,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-prompt-shell.is-decision.is-approval {
   border: 1px solid var(--fox-border);
-  border-radius: 20px;
+  border-radius: var(--fox-radius-composer);
   background: var(--fox-card);
   box-shadow: none;
 }
@@ -5649,7 +5647,7 @@ img[src='/avatars/fox-assistant.png'] {
   min-height: 96px;
   overflow: hidden;
   border: 1px solid var(--fox-border);
-  border-radius: 18px;
+  border-radius: var(--fox-radius-composer);
   background: color-mix(in oklch, var(--fox-card) 94%, transparent);
   padding: var(--fox-space-l) var(--fox-space-m) var(--fox-space-s);
   /* One definition for the card's elevation, reused by every activation state. */
@@ -5865,7 +5863,7 @@ img[src='/avatars/fox-assistant.png'] {
   padding: var(--fox-space-2xl) var(--fox-space-m) var(--fox-space-micro) var(--fox-space-micro);
   border: 1px solid var(--fox-border);
   /* 下沿跟输入卡片的圆角衔接，现有圆角 token 对不上这个 16px。 */
-  border-radius: 0 0 16px 16px;
+  border-radius: 0 0 var(--fox-radius-composer-inner) var(--fox-radius-composer-inner);
   background: var(--fox-canvas);
 }
 
@@ -12456,13 +12454,13 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-composer-wrap [aria-label='添加内容'] { width: var(--fox-control-md); height: var(--fox-control-md); padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 .fox-composer-wrap [aria-label='添加内容'] svg,
 .fox-composer-wrap .lucide-arrow-up { width: var(--fox-icon-size) !important; height: var(--fox-icon-size) !important; }
-.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { row-gap: 0; border-radius: 999px; }
-.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group']:has(.fox-composer-attachments > [data-slot]) { border-radius: 28px; row-gap: var(--fox-space-m); }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { row-gap: 0; border-radius: var(--fox-radius-pill); }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group']:has(.fox-composer-attachments > [data-slot]) { border-radius: var(--fox-radius-composer); row-gap: var(--fox-space-m); }
 
 /* 文字和图标都由工具行的 align-items: center 居中，不再单独下移 1px。 */
-.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { border: 1px solid var(--fox-border); box-shadow: 0 2px 6px color-mix(in srgb, var(--fox-shadow-color) 6%, transparent); border-radius: 999px !important; }
+.fox-composer-wrap.is-history .fox-prompt-input > [data-slot='input-group'] { border: 1px solid var(--fox-border); box-shadow: 0 2px 6px color-mix(in srgb, var(--fox-shadow-color) 6%, transparent); border-radius: var(--fox-radius-pill) !important; }
 .fox-composer-wrap.is-history .fox-prompt-textarea { min-height: 0 !important; max-height: 140px; line-height: 22px; padding-block: 4px !important; field-sizing: fixed; }
-.fox-composer-wrap.is-history.is-expanded .fox-prompt-input > [data-slot='input-group'] { display: flex; flex-direction: column; gap: var(--fox-space-m); border-radius: 18px !important; }
+.fox-composer-wrap.is-history.is-expanded .fox-prompt-input > [data-slot='input-group'] { display: flex; flex-direction: column; gap: var(--fox-space-m); border-radius: var(--fox-radius-composer) !important; }
 .fox-composer-wrap.is-history.is-expanded .fox-prompt-textarea { flex: none; width: 100%; }
 .fox-composer-wrap.is-history.is-expanded .fox-prompt-toolbar { display: flex; }
 .fox-composer-wrap.is-history.is-expanded .fox-composer-tools { display: flex; }

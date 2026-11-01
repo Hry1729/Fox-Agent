@@ -1,0 +1,5 @@
+/* UI 1102 区域样式：输入框与选择器（输入卡片、工具行、模型 / 专家 / 档位 / 项目 / Agent 选择器、附件）。
+   在 workbench.css / workspace-pages.css 之后加载，用来按区域收敛样式。
+   规则：只引用 globals.css / themes.css 里的设计 token（--fox-space-*、--fox-radius-*、--fox-type-*、
+   --fox-icon-size-*、--fox-shadow-*、--fox-duration-* 等），不写裸 px / ms / 颜色值；
+   0、1px 描边、百分比和 auto 除外。 */

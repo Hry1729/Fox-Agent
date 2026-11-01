@@ -90,11 +90,15 @@
   --fox-thinking-text: var(--muted-foreground);
   --fox-thinking-shimmer: color-mix(in oklch, var(--brand) 80%, var(--background));
   --fox-thinking-shimmer-soft: color-mix(in oklch, var(--brand) 45%, var(--background));
-  --fox-faint: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
+  /* 浅色下第三级文字（分组标题、时间、快捷键）原来是 72% 透明，侧栏上只有 2.7:1。
+     改成不透明的 muted，在 background / card / sidebar 上都 ≥ 4.5:1；层级靠字号区分。 */
+  --fox-faint: var(--muted-foreground);
   --fox-accent: var(--fox-blue);
   --fox-accent-soft: var(--fox-blue-soft);
   --fox-success: var(--success);
   --fox-warning: var(--warning);
+  /* 小号文字用的警示色：浅色下纯 warning 在浅底上只有 3.9:1，往前景色压一点到 ≥ 4.5:1。 */
+  --fox-warning-text: color-mix(in oklch, var(--warning) 72%, var(--foreground));
   --fox-surface-subtle: color-mix(in oklch, var(--fox-panel) 32%, var(--fox-card));
   --fox-surface-muted: color-mix(in srgb, var(--fox-panel) 48%, var(--fox-card));
   --fox-surface-strong: color-mix(in srgb, var(--fox-panel) 58%, var(--fox-card));
@@ -185,6 +189,47 @@
   --fox-weight-bold: 600;
   --fox-transition-fast: 120ms ease;
   --fox-transition-base: 160ms ease;
+  /* ── UI 1102 设计 token（只增不改：新代码和各区域修复只引用这些名字，不再写裸数值）── */
+  /* 字号：最小字号 11px，不再出现 9 / 9.5 / 10 / 10.5px。 */
+  --fox-type-micro: calc(11px * var(--fox-text-scale));
+  /* 图标：16 / 14 / 12 之外补两档。 */
+  --fox-icon-size-large: 20px;
+  --fox-icon-size-xl: 24px;
+  /* 圆角语义层：输入框和替代输入框的决策卡共用一档，随主题的 large 圆角变化；
+     内层卡片与外框同心（外框圆角 - 内边距）。单行输入框用胶囊。 */
+  --fox-composer-inset: var(--fox-space-xs);
+  --fox-radius-composer: calc(var(--fox-radius-large) + var(--fox-space-m));
+  --fox-radius-composer-inner: calc(var(--fox-radius-composer) - var(--fox-composer-inset));
+  --fox-radius-bubble: var(--fox-radius-composer-inner);
+  --fox-radius-chip: var(--fox-radius-control);
+  /* 阴影：popover / 浮层统一用 md，拖起的卡片用 lg。 */
+  --fox-shadow-popover: var(--fox-shadow-md);
+  --fox-shadow-raised: var(--fox-shadow-lg);
+  /* 焦点：所有可交互元素 focus-visible 用同一圈。 */
+  --fox-focus-width: 2px;
+  --fox-focus-offset: 2px;
+  --fox-focus-outline: var(--fox-focus-width) solid var(--ring);
+  --fox-focus-shadow: 0 0 0 3px var(--fox-focus-ring);
+  /* 动效：常规状态切换 120–160ms，浮层出现 240ms；离开比进入快。 */
+  --fox-duration-fast: 120ms;
+  --fox-duration-base: 160ms;
+  --fox-duration-slow: 240ms;
+  --fox-ease-out: cubic-bezier(.16, 1, .3, 1);
+  --fox-ease-standard: cubic-bezier(.2, 0, 0, 1);
+  /* 侧栏行：动作浮层（+ / …）悬停时盖在标题末尾，渐隐宽度和行高、徽标高度统一。 */
+  --fox-sidebar-actions-fade: var(--fox-space-3xl);
+  --fox-sidebar-badge-height: var(--fox-badge-height);
+  /* 页面骨架：页面内边距、分区间距、卡片内边距、表单行高。 */
+  --fox-page-padding-x: var(--fox-space-4xl);
+  --fox-page-padding-y: var(--fox-space-3xl);
+  --fox-section-gap: var(--fox-space-3xl);
+  --fox-card-padding: var(--fox-space-xl);
+  --fox-field-height: var(--fox-control-md);
+  /* 浮层与弹窗。 */
+  --fox-dialog-padding: var(--fox-space-3xl);
+  --fox-dialog-gap: var(--fox-space-xl);
+  --fox-popover-padding: var(--fox-space-xs);
+  --fox-menu-item-height: var(--fox-control-md);
 }
 
 .fox-library-card {
@@ -208,6 +253,7 @@
   /* Opaque, so contrast does not depend on the surface underneath: keeps 12px
      secondary text at or above 4.5:1 on background, card, popover and muted. */
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 88%, var(--background));
+  --fox-warning-text: var(--warning);
   /* 16% brand is invisible on a dark surface; the highlight needs more of it. */
   --fox-mark: color-mix(in oklch, var(--brand) 28%, transparent);
   --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--fox-shadow-color) 30%, transparent);

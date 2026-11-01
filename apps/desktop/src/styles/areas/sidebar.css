@@ -1,0 +1,11 @@
+/* UI 1102 区域样式：侧栏（项目行、对话行、分组标题、通知中心、全局搜索）。
+   在 workbench.css / workspace-pages.css 之后加载，用来按区域收敛样式。
+   规则：只引用 globals.css / themes.css 里的设计 token（--fox-space-*、--fox-radius-*、--fox-type-*、
+   --fox-icon-size-*、--fox-shadow-*、--fox-duration-* 等），不写裸 px / ms / 颜色值；
+   0、1px 描边、百分比和 auto 除外。 */
+
+/* 「等你处理」徽标：文字用 --fox-warning-text，保证浅色下 ≥ 4.5:1。
+   fox-sidebar.css 随组件加载，选择器多一层以免被覆盖。 */
+.fox-sidebar-tree-row .fox-sidebar-attention {
+  color: var(--fox-warning-text);
+}

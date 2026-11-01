@@ -6,6 +6,12 @@ import { applyStoredTextScale } from './features/settings/text-scale'
 import { applyStoredColorTheme } from './features/settings/color-theme'
 import './styles/workbench.css'
 import './styles/workspace-pages.css'
+// UI 1102：按区域收敛的样式，放在旧样式之后加载。
+import './styles/areas/sidebar.css'
+import './styles/areas/chat.css'
+import './styles/areas/composer.css'
+import './styles/areas/pages.css'
+import './styles/areas/settings.css'
 
 document.addEventListener('contextmenu', (event) => event.preventDefault())
 

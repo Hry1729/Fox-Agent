@@ -39,7 +39,8 @@
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  /* 0.556 在侧栏底色上只有 4.4:1，压到 0.54 后 ≥ 4.6:1（与 mist 主题同一明度）。 */
+  --muted-foreground: oklch(0.54 0 0);
   --accent: oklch(0.955 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
