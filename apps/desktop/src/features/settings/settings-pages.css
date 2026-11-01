@@ -35,27 +35,42 @@
   font-size: var(--fox-type-chrome) !important;
 }
 
-/* Section card */
-.fox-settings-layout .fox-settings-section {
-  margin-bottom: var(--fox-space-xl);
-  padding: var(--fox-space-xl) !important;
+/* 分区骨架与「模型 / 插件」的无框分组一致：标题下一条分隔线，组间用 section-gap，不再套卡片。 */
+.fox-settings-layout > main > .fox-settings-section {
+  --card-spacing: 0;
+  margin: 0;
+  gap: 0;
+  padding: 0 !important;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.fox-settings-layout > main > .fox-settings-section + .fox-settings-section {
+  margin-top: var(--fox-section-gap);
 }
 
 .fox-settings-layout .fox-settings-section-head {
-  min-height: var(--fox-control-md);
-  align-items: flex-start !important;
+  min-height: var(--fox-inline-action-height);
+  align-items: center !important;
   gap: var(--fox-space-l);
-  margin-bottom: var(--fox-space-m);
+  margin-bottom: 0;
+  padding-bottom: var(--fox-space-s);
+  border-bottom: 1px solid var(--fox-border);
 }
 
 .fox-settings-layout .fox-settings-section-head:last-child {
   margin-bottom: 0;
+  border-bottom: 0;
+  padding-bottom: 0;
 }
 
 .fox-settings-layout .fox-settings-section-head h2 {
   margin: 0;
-  font-size: var(--fox-type-title) !important;
-  font-weight: 600;
+  font-size: var(--fox-type-chrome) !important;
+  font-weight: var(--fox-weight-semibold);
   line-height: 1.5;
 }
 

@@ -51,7 +51,7 @@
 
 /* ---------- Groups ---------- */
 .fox-settings-page .fox-settings-group + .fox-settings-group {
-  margin-top: var(--fox-space-4xl);
+  margin-top: var(--fox-section-gap);
 }
 
 .fox-settings-page .fox-settings-group {
