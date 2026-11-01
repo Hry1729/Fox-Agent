@@ -335,6 +335,8 @@ enum HostToolCallExecution {
     Replay(Value),
 }
 
+pub(crate) const CONFIGURATION_BUSY: &str = "模型配置不能在 Agent 正在运行时修改";
+
 fn structured_runtime_error(message: &str) -> (&str, &str) {
     let Some(rest) = message.strip_prefix('[') else {
         return ("runtime.start_failed", message);
@@ -1417,7 +1419,12 @@ impl RuntimeHost {
         }
     }
 
-    pub fn reload_configuration(&self) -> Result<(), String> {
+    /// Read-only form of the check [`Self::reload_configuration`] makes: a
+    /// model configuration change must be refused BEFORE anything is
+    /// written while a Fox Run is active (e2e-1101: the provider save used to
+    /// write the provider, its key and the model service, and only then
+    /// report 「不能在 Agent 正在运行时修改」).
+    pub fn ensure_configuration_reloadable(&self) -> Result<(), String> {
         let active = {
             let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
             !state.dispatching_runs.is_empty()
@@ -1429,8 +1436,13 @@ impl RuntimeHost {
             .map_err(|_| "child runtime map is poisoned".to_owned())?
             .len();
         if active || active_children > 0 {
-            return Err("模型配置不能在 Agent 正在运行时修改".to_owned());
+            return Err(CONFIGURATION_BUSY.to_owned());
         }
+        Ok(())
+    }
+
+    pub fn reload_configuration(&self) -> Result<(), String> {
+        self.ensure_configuration_reloadable()?;
         self.stop_worker()?;
         let mut state = self
             .state
@@ -1859,7 +1871,7 @@ impl RuntimeHost {
         let model_service = self
             .database
             .get_model_service()?
-            .ok_or_else(|| "model service is not configured".to_owned())?;
+            .ok_or_else(|| format!("[model.connection_required] {}", crate::commands::FOX_MODEL_SERVICE_MISSING))?;
         let count_budget_override = self
             .run_budget_override
             .as_ref()

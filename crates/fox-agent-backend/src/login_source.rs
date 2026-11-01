@@ -109,7 +109,7 @@ pub fn status(state: &Path, home: &Path, real: Option<&RealHome>) -> Result<Sour
 
 pub fn prepare(state: &Path, home: &Path, real: Option<&RealHome>) -> Result<(), String> {
     let source = status(state, home, real)?;
-    if source.choice_required { return Err(if source.source_changed { "原生 Pi 配置已变化，请在 Agent 栏重新确认配置来源" } else { "发现原生 Pi 配置，请在 Agent 栏选择导入或使用 Fox 模型服务" }.into()); }
+    if source.choice_required { return Err(if source.source_changed { "原生 Pi 配置已变化：请到「设置 → 模型服务」配置并测试一个供应商（Fox 会把它交给 Pi），再发送" } else { "发现原生 Pi 配置，但还没有确认配置来源：请到「设置 → 模型服务」配置并测试一个供应商（Fox 会把它交给 Pi），再发送" }.into()); }
     if !source.reusable { return Ok(()); }
     let choices: Choices = statefile::read_json(&path(state))?;
     let snapshot = choices.reuse.ok_or("配置来源已变化，请重试")?;

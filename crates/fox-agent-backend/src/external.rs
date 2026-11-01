@@ -276,7 +276,7 @@ fn initialize_failure_code(code: crate::acp::InitializeFailureCode) -> (&'static
         Code::SpawnFailed => (failure_codes::SPAWN_FAILED, "外部 Agent 进程无法启动：请重新安装或修复 Fox 外部运行时后重试".to_owned()),
         Code::BackendExitedBeforeInitialize => (
             failure_codes::EXITED_ON_START,
-            "外部 Agent 启动后立即退出：先查看诊断里的后端输出；多数是未登录或运行时损坏，请在登录卡片完成登录，或重新安装 Fox 外部运行时".to_owned(),
+            "外部 Agent 启动后立即退出：先查看诊断里的后端输出；多数是模型服务没配好或运行时损坏，请到「设置 → 模型服务」配置并测试供应商，或重新安装 Fox 外部运行时".to_owned(),
         ),
         Code::InitializeTimeout => (
             failure_codes::START_TIMEOUT,
@@ -540,6 +540,9 @@ pub enum AnswerOutcome {
     Unconfirmed,
     /// Not (or no longer) waiting: cancelled, answered, or the turn ended.
     NotPending,
+    /// The user allowed, but the backend offered no "allow once" option: the
+    /// request was answered `cancelled` (refused), never widened to "always".
+    NoAllowOnce,
 }
 
 /// What the UI may know about a conversation's backend session.
@@ -1744,20 +1747,36 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             let still_running = {
                 let mut state = lock(&session.state);
                 let running = state.turn.as_ref().is_some_and(|turn| turn.run_id == run_id) && state.generation == generation;
-                if running {
-                    if let Some(turn) = state.turn.as_mut() {
-                        // 接下来 stop_connection 会杀掉整棵树，不再按基线清扫。
-                        turn.skip_cancel_sweep = true;
-                    }
+                let prompt_sent = state.turn.as_ref().is_some_and(|turn| turn.prompt_sent);
+                if running && !prompt_sent {
+                    // e2e-1101: cancelled while the backend was still being
+                    // launched: no prompt reached it and no process is
+                    // stopped here (a launch that completes later keeps its
+                    // connection for the next turn). Say exactly that.
                     runtime.finish_turn(
                         &session,
                         &mut state,
                         &run_id,
                         TurnTerminal::Cancelled,
-                        json!({ "outcome": "unknown", "reason": "取消请求在限定时间内未得到外部后端确认，结果未知；已结束该后端进程" }),
+                        json!({ "outcome": "not_started", "reason": "取消时外部后端还在启动，本轮没有开始执行" }),
                     );
+                    false
+                } else {
+                    if running {
+                        if let Some(turn) = state.turn.as_mut() {
+                            // 接下来 stop_connection 会杀掉整棵树，不再按基线清扫。
+                            turn.skip_cancel_sweep = true;
+                        }
+                        runtime.finish_turn(
+                            &session,
+                            &mut state,
+                            &run_id,
+                            TurnTerminal::Cancelled,
+                            json!({ "outcome": "unknown", "reason": "取消请求在限定时间内未得到外部后端确认，结果未知；已结束该后端进程" }),
+                        );
+                    }
+                    running
                 }
-                running
             };
             if still_running {
                 let _ = runtime.stop_connection(&session, "cancel not confirmed").await;
@@ -1878,9 +1897,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             };
             let option = if approved { allow_option(&pending.options) } else { reject_option(&pending.options) };
             if approved && option.is_none() {
-                // No native "allow once": never widened to "always".
+                // No native "allow once": never widened to "always". The
+                // request is answered `cancelled`, i.e. refused.
                 let _ = connection.answer_permission(&pending.native_id, None);
-                return AnswerOutcome::NotPending;
+                return AnswerOutcome::NoAllowOnce;
             }
             return match connection.answer_permission(&pending.native_id, option.map(|option| option.option_id.as_str())) {
                 Ok(WriteOutcome::Written) => AnswerOutcome::Written,

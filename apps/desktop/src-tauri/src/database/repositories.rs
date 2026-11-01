@@ -13,7 +13,7 @@ use super::{
     PluginInstallationRecord, PluginKind, PluginOrigin, ProviderModelRecord,
     RecoverableExternalRunRecord, RunEventRecord, RunRecord, RuntimePromptMessage,
     RuntimeSessionFileRecord, RuntimeSessionRecord, RuntimeSessionStatus, SaveAgentRequest,
-    StartRunResult,
+    CreateRunError, StartRunResult,
     ToolCallRecord, ToolResultRange,
     YuxiAgentRecord,
     YuxiConnectionTest, YuxiServiceRecord,
@@ -5449,13 +5449,55 @@ impl Database {
         text: &str,
         requested_model: Option<&str>,
     ) -> Result<StartRunResult, String> {
+        self.create_run_checked(conversation_id, text, requested_model)
+            .map_err(|error| error.to_string())
+    }
+
+    /// `create_run` for the send entries: says why no Run was written. A
+    /// conversation that still has an unfinished Run (for example an external
+    /// Run that is still `cancelling` while its turn processes are swept) is
+    /// [`CreateRunError::ConversationBusy`], a missing / archived / trashed
+    /// conversation [`CreateRunError::ConversationNotFound`]; neither writes
+    /// a Run or a message. Before this the send showed rusqlite's
+    /// "Query is not read-only" as「无法写入数据库」.
+    pub fn create_run_checked(
+        &self,
+        conversation_id: &str,
+        text: &str,
+        requested_model: Option<&str>,
+    ) -> Result<StartRunResult, CreateRunError> {
         let clean_text = text.trim();
         if clean_text.is_empty() {
-            return Err("message text cannot be empty".to_owned());
+            return Err(CreateRunError::Storage("message text cannot be empty".to_owned()));
         }
-
-        self.with_connection(|connection| {
+        let mut outcome: Option<CreateRunError> = None;
+        let result = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            let open = transaction
+                .query_row(
+                    "SELECT 1 FROM conversations WHERE id = ?1 AND archived = 0 AND trashed_at IS NULL",
+                    [conversation_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !open {
+                outcome = Some(CreateRunError::ConversationNotFound);
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            let active: Option<String> = transaction
+                .query_row(
+                    "SELECT status FROM runs
+                     WHERE conversation_id = ?1 AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+                     LIMIT 1",
+                    [conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(status) = active {
+                outcome = Some(CreateRunError::ConversationBusy { status });
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let started = create_run_in_transaction(
                 &transaction,
                 conversation_id,
@@ -5464,7 +5506,12 @@ impl Database {
             )?;
             transaction.commit()?;
             Ok(started)
-        })
+        });
+        match (result, outcome) {
+            (Ok(started), _) => Ok(started),
+            (Err(_), Some(error)) => Err(error),
+            (Err(error), None) => Err(CreateRunError::Storage(error)),
+        }
     }
 
     pub fn create_goal_continuation_run(

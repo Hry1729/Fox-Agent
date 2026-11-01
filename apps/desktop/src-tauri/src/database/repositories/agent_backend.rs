@@ -292,6 +292,52 @@ mod tests {
         assert_eq!(database.approval_agent_backend("missing").unwrap(), None);
     }
 
+    /// e2e-1101: a send into a conversation whose last Run is still
+    /// cancelling (or into an archived one) is refused with its own reason and
+    /// writes no Run and no message (it used to read「无法写入数据库…」).
+    #[test]
+    fn create_run_checked_refuses_busy_and_archived_conversations_without_writing() {
+        use crate::database::CreateRunError;
+        let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let pi = database
+            .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
+            .expect("pi conversation");
+        let first = database.create_run_checked(&pi.id, "hello", None).expect("first run");
+        database.mark_run_cancelling(&first.run.id).expect("cancelling");
+        let counts = |database: &Database| -> (i64, i64) {
+            database
+                .with_connection(|connection| {
+                    Ok((
+                        connection.query_row("SELECT COUNT(*) FROM runs WHERE conversation_id = ?1", [&pi.id], |row| row.get(0))?,
+                        connection.query_row("SELECT COUNT(*) FROM messages WHERE conversation_id = ?1", [&pi.id], |row| row.get(0))?,
+                    ))
+                })
+                .unwrap()
+        };
+        let before = counts(&database);
+        let busy = database.create_run_checked(&pi.id, "again", None).expect_err("busy");
+        assert!(matches!(&busy, CreateRunError::ConversationBusy { status } if status == "cancelling"), "{busy:?}");
+        assert_eq!(busy.refusal().map(|(code, _)| code), Some("run.conversation_busy"));
+        assert!(!busy.refusal().unwrap().1.contains("数据库"));
+        assert_eq!(counts(&database), before, "no Run and no message written");
+        // The legacy String form keeps working for its callers.
+        assert!(database.create_run(&pi.id, "again", None).is_err());
+
+        database
+            .record_external_event(&first.run.id, &serde_json::json!({ "type": "run.cancelled" }))
+            .expect("cancelled");
+        database.create_run_checked(&pi.id, "after cancel", None).expect("a settled conversation takes the next send");
+
+        let fox = database
+            .create_conversation(database.default_agent_id(), Some("fox"), None, None)
+            .expect("fox conversation");
+        database.archive_conversation(&fox.id).expect("archive");
+        let archived = database.create_run_checked(&fox.id, "hi", None).expect_err("archived");
+        assert_eq!(archived, CreateRunError::ConversationNotFound);
+        assert_eq!(archived.refusal().map(|(code, _)| code), Some("conversation.not_found"));
+        assert_eq!(database.create_run_checked("missing", "hi", None).expect_err("missing"), CreateRunError::ConversationNotFound);
+    }
+
     #[test]
     fn external_lookups_read_context_native_session_and_left_runs() {
         let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");

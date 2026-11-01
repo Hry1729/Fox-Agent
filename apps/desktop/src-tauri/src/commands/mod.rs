@@ -2639,6 +2639,39 @@ mod command_tests {
     }
 }
 
+/// The send refusal for a Run that could not be created
+/// (`Database::create_run_checked`): a busy or missing conversation gets its
+/// own code; storage errors keep `run.create_failed`.
+pub(crate) fn create_run_refusal<T: serde::Serialize>(
+    data_dir: &std::path::Path,
+    error: &crate::database::CreateRunError,
+) -> ApiResponse<T> {
+    match error.refusal() {
+        Some((code, message)) => ApiResponse::failure(code, message, code == "run.conversation_busy"),
+        None => ApiResponse::failure(
+            "run.create_failed",
+            crate::data_paths::run_create_failure(data_dir, &error.to_string()),
+            false,
+        ),
+    }
+}
+
+pub(crate) const FOX_MODEL_SERVICE_MISSING: &str =
+    "还没有配置模型服务：请先到「设置 → 模型服务」添加并测试一个供应商，再发送";
+
+/// `Some(refusal)` when a Fox Run cannot start for lack of a model service
+/// (`Ok(false)`) or the lookup failed. Only presence is checked here; a
+/// missing key surfaces as the model error of the Run itself.
+pub(crate) fn fox_model_service_refusal<T: serde::Serialize>(
+    configured: Result<bool, String>,
+) -> Option<ApiResponse<T>> {
+    match configured {
+        Ok(true) => None,
+        Ok(false) => Some(ApiResponse::failure("model.connection_required", FOX_MODEL_SERVICE_MISSING, true)),
+        Err(error) => Some(ApiResponse::failure("storage.operation_failed", error, true)),
+    }
+}
+
 #[tauri::command]
 pub fn run_start(
     app: AppHandle,
@@ -2704,19 +2737,23 @@ pub fn run_start(
             return ApiResponse::failure("attachment.image_invalid", error, false);
         }
     }
-    let started = match state.database.create_run(
+    // A Fox (PiNative) Run needs a model service. Without one the Run used
+    // to be created and then failed with an English "model service is not
+    // configured" (`runtime.start_failed`); refuse the send instead, before
+    // any Run or message is written, with the code the UI already maps to
+    // 「去模型服务」.
+    if runtime.runtime_type != "yuxi" {
+        if let Some(refusal) = fox_model_service_refusal(state.database.get_model_service().map(|service| service.is_some())) {
+            return refusal;
+        }
+    }
+    let started = match state.database.create_run_checked(
         &request.conversation_id,
         &request.text,
         request.model.as_deref(),
     ) {
         Ok(started) => started,
-        Err(error) => {
-            return ApiResponse::failure(
-                "run.create_failed",
-                crate::data_paths::run_create_failure(&state.data_dir, &error),
-                false,
-            )
-        }
+        Err(error) => return create_run_refusal(&state.data_dir, &error),
     };
 
     // #6: record the user's explicit budget choice before dispatch, so the frozen
@@ -5999,6 +6036,16 @@ pub fn model_providers_list(state: State<'_, AppState>) -> ApiResponse<Vec<Model
     }
 }
 
+/// A reload that fails AFTER the change was written (a Run started in the
+/// short window after the busy check): say that the change is saved.
+fn configuration_saved_but_busy(error: &str) -> String {
+    if error == crate::runtime_host::CONFIGURATION_BUSY {
+        "配置已保存，但 Fox 正在运行一轮，新配置会在这一轮结束后生效".to_owned()
+    } else {
+        format!("配置已保存，但 Fox 运行时没有重新加载：{error}")
+    }
+}
+
 #[tauri::command]
 pub fn model_provider_save(
     state: State<'_, AppState>,
@@ -6159,6 +6206,14 @@ pub fn model_provider_save(
         created_at: 0,
         updated_at: 0,
     };
+    // e2e-1101: a change to the default provider reloads the Fox runtime
+    // below; refuse it while a Fox Run is active BEFORE writing anything, so
+    // a 「不能在运行时修改」 answer never follows a save that did happen.
+    if provider.is_default {
+        if let Err(error) = state.runtime_host.ensure_configuration_reloadable() {
+            return ApiResponse::failure("model.runtime_busy", error, true);
+        }
+    }
     let saved = match fox_agent_backend::credential_save::save_with_keys(
         &mut crate::model_service::KeyringStore,
         &key_plan,
@@ -6203,7 +6258,7 @@ pub fn model_provider_save(
                 return storage_error(error);
             }
             if let Err(error) = state.runtime_host.reload_configuration() {
-                return ApiResponse::failure("model.runtime_busy", error, true);
+                return ApiResponse::failure("model.runtime_busy", configuration_saved_but_busy(&error), true);
             }
         }
     }
@@ -6249,6 +6304,13 @@ pub fn model_provider_delete(
     let Some(provider) = provider else {
         return ApiResponse::success(false);
     };
+    // e2e-1101: deleting the default provider reloads the Fox runtime below;
+    // refuse it while a Fox Run is active before anything is deleted.
+    if provider.is_default {
+        if let Err(error) = state.runtime_host.ensure_configuration_reloadable() {
+            return ApiResponse::failure("model.runtime_busy", error, true);
+        }
+    }
     // Record first, then its Keys (base_url + protocol Keys); a failed Key
     // delete never restores the record and is audited as a warning
     // (fox_agent_backend::credential_delete, sandbox.md 13.22).
@@ -6274,7 +6336,7 @@ pub fn model_provider_delete(
         }
     }
     if outcome.record_deleted && provider.is_default {
-        if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", error, true); }
+        if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", configuration_saved_but_busy(&error), true); }
         warn_managed_model_cleanup(&external, "model_provider_delete");
     }
     ApiResponse::success(outcome.record_deleted)
@@ -6451,5 +6513,37 @@ pub async fn model_service_test(
             if !is_profile_test { let _ = state.database.record_model_connection_failure(&base_url); }
             Ok(ApiResponse::failure("model.connection_failed", error, true))
         }
+    }
+}
+
+#[cfg(test)]
+mod e2e1101_send_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn send_refusals_name_the_reason_instead_of_a_database_error() {
+        let data = std::env::temp_dir();
+        let busy: ApiResponse<()> = create_run_refusal(&data, &crate::database::CreateRunError::ConversationBusy { status: "cancelling".into() });
+        let error = busy.error.expect("refused");
+        assert_eq!(error.code, "run.conversation_busy");
+        assert!(error.retryable);
+        assert!(!error.message.contains("数据库"), "{}", error.message);
+        let missing: ApiResponse<()> = create_run_refusal(&data, &crate::database::CreateRunError::ConversationNotFound);
+        assert_eq!(missing.error.expect("refused").code, "conversation.not_found");
+        let storage: ApiResponse<()> = create_run_refusal(&data, &crate::database::CreateRunError::Storage("disk full".into()));
+        assert_eq!(storage.error.expect("refused").code, "run.create_failed");
+
+        assert!(fox_model_service_refusal::<()>(Ok(true)).is_none());
+        let none = fox_model_service_refusal::<()>(Ok(false)).expect("refused").error.expect("error");
+        assert_eq!(none.code, "model.connection_required");
+        assert!(none.message.contains("设置 → 模型服务"));
+        assert_eq!(fox_model_service_refusal::<()>(Err("locked".into())).expect("refused").error.expect("error").code, "storage.operation_failed");
+    }
+
+    #[test]
+    fn a_reload_failure_after_saving_says_the_change_was_saved() {
+        let busy = configuration_saved_but_busy(crate::runtime_host::CONFIGURATION_BUSY);
+        assert!(busy.starts_with("配置已保存"), "{busy}");
+        assert!(configuration_saved_but_busy("worker stop failed").starts_with("配置已保存"));
     }
 }

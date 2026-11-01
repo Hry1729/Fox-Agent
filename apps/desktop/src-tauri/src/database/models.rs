@@ -2170,6 +2170,43 @@ pub struct StartRunResult {
     pub attachments: Vec<AttachmentRecord>,
 }
 
+/// Why `Database::create_run_checked` wrote no Run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateRunError {
+    /// The conversation still has a Run in `status` (queued / running /
+    /// cancelling / awaiting_confirmation).
+    ConversationBusy { status: String },
+    /// No such conversation, or it is archived / in the trash.
+    ConversationNotFound,
+    /// Anything else (storage).
+    Storage(String),
+}
+
+impl CreateRunError {
+    /// The send refusal for the busy / not-found cases; `None` for storage
+    /// errors, which keep the `run.create_failed` path.
+    pub fn refusal(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::ConversationBusy { .. } => Some((
+                "run.conversation_busy",
+                "这个对话上一轮还没结束（可能正在停止），请等它结束后再发送",
+            )),
+            Self::ConversationNotFound => Some(("conversation.not_found", "对话不存在或已归档，无法发送")),
+            Self::Storage(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CreateRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConversationBusy { status } => write!(formatter, "conversation has an unfinished run ({status})"),
+            Self::ConversationNotFound => formatter.write_str("conversation not found, archived or trashed"),
+            Self::Storage(error) => formatter.write_str(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RewindRunRequest {

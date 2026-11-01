@@ -266,6 +266,57 @@ pub(crate) fn import_home_targets(all_projects: bool, project_uuid: Option<&str>
     vec![(id.to_owned(), label)]
 }
 
+/// The Agent's name in user-facing sentences.
+fn agent_label(backend: AgentBackend) -> &'static str {
+    match backend {
+        AgentBackend::Pi => "Pi",
+        AgentBackend::Codex => "Codex",
+        AgentBackend::Deepseek => "DeepSeek",
+        AgentBackend::Fox => "Fox",
+    }
+}
+
+/// Send refusal for a missing / unverified / ambiguous model connection of an
+/// external Agent. Every sentence points at 「设置 → 模型服务」: the composer's
+/// backend bar and login cards no longer exist (UI 1103), and the address an
+/// Agent uses is chosen there (「用作 X 默认协议」 on the protocol address).
+pub(crate) fn login_gap_failure(gap: Option<crate::external_model::LoginGap>, backend: AgentBackend) -> (&'static str, String) {
+    use crate::external_model::LoginGap;
+    let name = agent_label(backend);
+    match gap {
+        Some(LoginGap::Unverified) => ("model.connection_unverified",
+            "模型服务的配置改过了，当前地址还没有通过连接测试：请到「设置 → 模型服务」重新测试连接，通过后再发送".to_owned()),
+        Some(LoginGap::ChooseAddress) => ("model.connection_choose_address",
+            format!("当前供应商有多个地址都能给 {name} 用：请到「设置 → 模型服务」，在要用的地址上打开「用作 {name} 默认协议」后再发送")),
+        _ => ("model.connection_required", "请先到「设置 → 模型服务」配置并测试当前供应商，再发送".to_owned()),
+    }
+}
+
+/// What to do with Pi's pending 「配置来源」 choice before a send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PiSourceStep {
+    /// Nothing pending.
+    Proceed,
+    /// Never chosen, and 模型服务 can serve Pi: use it for this project's
+    /// private HOME (not remembered as the default; recorded in the audit).
+    DefaultToFox,
+    /// The confirmed native source changed, or 模型服务 cannot serve Pi.
+    Refuse,
+}
+
+pub(crate) fn pi_source_step(choice_required: bool, source_changed: bool, fox_login_ready: bool) -> PiSourceStep {
+    if !choice_required {
+        PiSourceStep::Proceed
+    } else if !source_changed && fox_login_ready {
+        PiSourceStep::DefaultToFox
+    } else {
+        PiSourceStep::Refuse
+    }
+}
+
+pub(crate) const PI_SOURCE_CHOICE_REQUIRED: &str = "agent_backend_pi_source_choice_required";
+pub(crate) const PI_SOURCE_CHOICE_MESSAGE: &str = "Pi 的配置来源需要确认：请先到「设置 → 模型服务」配置并测试一个供应商（Fox 会把它交给 Pi），再发送";
+
 /// Carry a refusal over to another payload type.
 fn retype<T: serde::Serialize>(refusal: ApiResponse<()>) -> ApiResponse<T> {
     match refusal.error {
@@ -382,28 +433,37 @@ impl ExternalBackendHost {
             Err(refusal) => return retype(refusal),
         };
         let target = AgentBackendTarget { conversation_id: Some(request.conversation_id.clone()), backend: None, project_id: None, project_root: None, full_access: false };
+        // e2e-1101: Pi's 「配置来源」 choice (Fox 模型服务 or the native ~/.pi
+        // config) is settled here, before any Run exists. The UI that offered
+        // the choice is gone (UI 1103 removed the login cards above the
+        // composer), so a pending choice would fail every send afterwards.
+        if backend == AgentBackend::Pi {
+            if let Err(refusal) = self.settle_pi_source(&target) {
+                return retype(refusal);
+            }
+        }
         match self.model_login_context(&target) {
             Ok((_, false)) if self.unified_login(backend).is_none() => {
                 // 13.35: say which step is missing. An edited provider (e.g. an
                 // added Anthropic address) needs a new connection test before a
                 // Run is created; the generic message hid that, and the send
                 // looked like it silently did nothing.
-                return match crate::external_model::external_login_gap(&self.database, backend) {
-                    Some(crate::external_model::LoginGap::Unverified) => failure("model.connection_unverified",
-                        "模型服务的配置改过了，当前地址还没有通过连接测试：请到模型服务重新测试连接，通过后再发送", true),
-                    Some(crate::external_model::LoginGap::ChooseAddress) => failure("model.connection_choose_address",
-                        "当前供应商有多个地址都能用于这个 Agent：请在后端栏选定一个地址后再发送", true),
-                    _ => failure("model.connection_required", "请先在后端栏补充或验证当前供应商的模型连接", true),
-                };
+                let (code, message) = login_gap_failure(crate::external_model::external_login_gap(&self.database, backend), backend);
+                return failure(code, message, true);
             }
             Err(error) => return failure("model.connection_failed", error, true),
             _ => {}
         }
-        let started = match self.database.create_run(&request.conversation_id, &request.text, request.model.as_deref()) {
-            Ok(started) => started,
-            Err(error) => return failure("run.create_failed", crate::data_paths::run_create_failure(&self.data_dir, &error), false),
+        // A storage error here is not "no earlier session": starting a new
+        // native session would silently drop the conversation's history.
+        let stored = match self.database.latest_native_session(&request.conversation_id) {
+            Ok(stored) => stored,
+            Err(error) => return failure("storage.operation_failed", format!("无法读取这个对话的外部会话记录：{error}"), true),
         };
-        let stored = self.database.latest_native_session(&request.conversation_id).ok().flatten();
+        let started = match self.database.create_run_checked(&request.conversation_id, &request.text, request.model.as_deref()) {
+            Ok(started) => started,
+            Err(error) => return crate::commands::create_run_refusal(&self.data_dir, &error),
+        };
         let turn = TurnRequest {
             run_id: started.run.id.clone(),
             prompt: request.runtime_text.clone().unwrap_or_else(|| request.text.clone()),
@@ -499,6 +559,7 @@ impl ExternalBackendHost {
                 AnswerOutcome::Written => "response_written",
                 AnswerOutcome::Unconfirmed => "outcome_unknown",
                 AnswerOutcome::NotPending => "not_pending",
+                AnswerOutcome::NoAllowOnce => "refused_no_allow_once",
             },
         });
         let key = self
@@ -513,7 +574,9 @@ impl ExternalBackendHost {
                     let _ = self.database.complete_host_tool_call(&resolved.run_id, &key, Some(&result), None);
                 }
             } else {
-                let message = if approved {
+                let message = if approved && outcome == AnswerOutcome::NoAllowOnce {
+                    "这个 Agent 没有提供「只允许这一次」选项，已按拒绝处理"
+                } else if approved {
                     "已批准，但外部后端已不在等待这次审批（结果未知）"
                 } else {
                     approval_outcome_label(&resolved.status)
@@ -579,6 +642,37 @@ impl ExternalBackendHost {
     /// the backend's own config / environment.
     fn unified_login(&self, backend: AgentBackend) -> Option<fox_agent_backend::unified_login::UnifiedLogin> {
         crate::external_model::external_login(&self.database, backend)
+    }
+
+    /// e2e-1101: settle Pi's pending 「配置来源」 choice before a send (see
+    /// [`pi_source_step`]). Defaulting to 模型服务 only scopes this project's
+    /// private HOME (`choose_fox(.., remember = false)`) and is audited.
+    fn settle_pi_source(&self, target: &AgentBackendTarget) -> Result<(), ApiResponse<()>> {
+        let request = self.target_request(target)?;
+        let launcher = self.runtime.launcher();
+        let config = &launcher.config;
+        let home = config
+            .private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), AgentBackend::Pi)
+            .map_err(|error| failure(PI_SOURCE_CHOICE_REQUIRED, format!("无法确定 Pi 的私有目录：{}", error.message), true))?;
+        let source = fox_agent_backend::login_source::status(&config.state_root, &home, Self::real_home().as_ref())
+            .map_err(|error| failure(PI_SOURCE_CHOICE_REQUIRED, format!("无法读取 Pi 的配置来源：{error}"), true))?;
+        let fox_login = self.unified_login(AgentBackend::Pi);
+        match pi_source_step(source.choice_required, source.source_changed, fox_login.is_some()) {
+            PiSourceStep::Proceed => Ok(()),
+            PiSourceStep::Refuse => Err(failure(PI_SOURCE_CHOICE_REQUIRED, PI_SOURCE_CHOICE_MESSAGE, true)),
+            PiSourceStep::DefaultToFox => {
+                fox_agent_backend::login_source::choose_fox(&config.state_root, &home, false)
+                    .map_err(|error| failure(PI_SOURCE_CHOICE_REQUIRED, format!("无法记录 Pi 的配置来源：{error}"), true))?;
+                let login = fox_login.as_ref();
+                let details = json!({
+                    "provider": login.map(|login| login.provider_name.clone()),
+                    "model": login.map(|login| login.model.clone()),
+                    "nativeAvailable": source.native_available,
+                });
+                let _ = self.database.append_agent_backend_audit(target.conversation_id.as_deref(), AgentBackend::Pi.as_str(), "agent_backend.pi_source_defaulted_to_fox", &details);
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn model_login_context(&self, target: &AgentBackendTarget) -> Result<(AgentBackend, bool), String> {
@@ -954,6 +1048,44 @@ mod tests {
     use super::{approval_outcome_label, authorized_root, external_permission_request, import_home_targets};
     use fox_agent_backend::projection::{PermissionCard, PermissionOption};
     use serde_json::json;
+
+    /// e2e-1101: the composer's backend bar / login cards are gone (UI 1103);
+    /// every model-connection refusal of an external Agent points at
+    /// 「设置 → 模型服务」 and names the Agent where the address is chosen.
+    #[test]
+    fn login_gap_refusals_point_at_model_settings_never_at_removed_ui() {
+        use crate::external_model::LoginGap;
+        use fox_agent_backend::port::AgentBackend;
+        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+            for gap in [None, Some(LoginGap::Missing), Some(LoginGap::Unverified), Some(LoginGap::ChooseAddress)] {
+                let (code, message) = super::login_gap_failure(gap, backend);
+                assert!(code.starts_with("model.connection_"), "{code}");
+                for removed in ["后端栏", "Agent 栏", "登录卡片"] {
+                    assert!(!message.contains(removed), "{message}");
+                }
+                assert!(message.contains("设置 → 模型服务"), "{message}");
+            }
+        }
+        let (code, message) = super::login_gap_failure(Some(LoginGap::ChooseAddress), AgentBackend::Deepseek);
+        assert_eq!(code, "model.connection_choose_address");
+        assert!(message.contains("用作 DeepSeek 默认协议"), "{message}");
+        assert_eq!(super::login_gap_failure(Some(LoginGap::Unverified), AgentBackend::Pi).0, "model.connection_unverified");
+        assert_eq!(super::login_gap_failure(Some(LoginGap::Missing), AgentBackend::Pi).0, "model.connection_required");
+        assert!(!super::PI_SOURCE_CHOICE_MESSAGE.contains("Agent 栏"));
+    }
+
+    /// e2e-1101: a Pi source choice never made defaults to 模型服务 when it can
+    /// serve Pi; a changed confirmed source or no usable 模型服务 refuses the
+    /// send before a Run exists; nothing pending proceeds.
+    #[test]
+    fn pi_source_defaults_to_fox_only_when_never_chosen_and_fox_is_ready() {
+        use super::{pi_source_step, PiSourceStep};
+        assert_eq!(pi_source_step(false, false, false), PiSourceStep::Proceed);
+        assert_eq!(pi_source_step(false, true, true), PiSourceStep::Proceed);
+        assert_eq!(pi_source_step(true, false, true), PiSourceStep::DefaultToFox);
+        assert_eq!(pi_source_step(true, false, false), PiSourceStep::Refuse);
+        assert_eq!(pi_source_step(true, true, true), PiSourceStep::Refuse, "a changed confirmed import is never overridden");
+    }
 
     #[test]
     fn expired_approvals_read_expired_not_user_denied() {

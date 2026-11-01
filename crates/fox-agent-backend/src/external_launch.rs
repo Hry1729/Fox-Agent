@@ -416,7 +416,7 @@ impl HostLaunchConfig {
                 && crate::model_endpoint::pi_provider_domains(native.provider.as_deref().unwrap_or_default()).is_some_and(|hosts| hosts.contains(&endpoint.host.as_str())) && endpoint.port == 443;
             if trusted.as_ref() == Some(endpoint) || imported || explicit || built_in || selected_pi_builtin { return Ok(Some(endpoint.clone())); }
             return Err(LaunchFailure::new("agent_backend_model_endpoint_unapproved", format!("原生模型配置选择了 {}，但没有匹配的 Host 网络授权，或导入后配置已变化", endpoint.entry))
-                .remedy("保留当前原生配置。在登录卡片中重新导入真实 HOME 的模型和设置文件；已有文件需明确选择覆盖。也可在 Fox 模型服务中选择同一端点")
+                .remedy("保留当前原生配置。可以在「设置 → 模型服务」中配置同一端点并测试，Fox 会把它交给这个 Agent")
                 .detail(serde_json::json!({"endpoint":endpoint.entry,"credentialsAreNotReachability":true})));
         }
         Ok(self.unified_login_host(request, home).and_then(|_| trusted))
@@ -429,7 +429,7 @@ impl HostLaunchConfig {
 pub const MISSING_CREDENTIALS: &str = "agent_backend_missing_credentials";
 
 /// Remedy of [`MISSING_CREDENTIALS`].
-pub const MISSING_CREDENTIALS_REMEDY: &str = "到「设置 → 模型服务」填写并测试当前供应商（Fox 会把它的地址和 Key 交给这个 Agent，不需要配置私有 HOME）；已有这个 Agent 自己的登录时，也可以在登录卡片里从真实 HOME 导入";
+pub const MISSING_CREDENTIALS_REMEDY: &str = "到「设置 → 模型服务」填写并测试当前供应商（Fox 会把它的地址和 Key 交给这个 Agent，不需要配置私有 HOME）";
 
 /// Why the full-access choice is unavailable, for the new-conversation UI
 /// (`None` when it can be chosen).
