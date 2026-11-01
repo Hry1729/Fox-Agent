@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { createElement } from 'react'
 import { act, cleanup, fireEvent, render, renderHook, waitFor } from '@testing-library/react'
 import { ComposerAgentPicker } from '../src/features/chat/composer/composer-agent-picker'
@@ -6,9 +6,14 @@ import { ExpertBindingChip } from '../src/features/chat/components/ExpertBinding
 import { desktopClient } from '../src/features/conversations/api/desktop-client'
 import { useDesktopConversation } from '../src/features/conversations/hooks/use-desktop-conversation'
 import { DEFAULT_AGENT_BACKEND_PREFERENCES } from '../src/features/conversations/model/agent-backend'
+import { ENABLED_EXTERNAL_AGENTS_KEY } from '../src/features/conversations/model/external-agent-enablement'
 
 const spies = []
-afterEach(() => { cleanup(); spies.splice(0).forEach(spy => spy.mockRestore()) })
+// UI 1103: external Agents are off until enabled in 设置 → Agent. These tests
+// cover routing, so all three are enabled; default-off is covered in
+// agent-backend.test.ts and agent-backend-send.test.ts.
+beforeEach(() => { window.localStorage.setItem(ENABLED_EXTERNAL_AGENTS_KEY, JSON.stringify(['pi', 'codex', 'deepseek'])) })
+afterEach(() => { cleanup(); spies.splice(0).forEach(spy => spy.mockRestore()); window.localStorage.removeItem(ENABLED_EXTERNAL_AGENTS_KEY) })
 function fakeHost(defaultBackend = 'deepseek', retiredBackends = []) {
   const requests = []
   let conversation
@@ -94,21 +99,20 @@ test('external creation does not submit a Fox-only expert binding', async () => 
   expect(requests[0].expertId).toBeUndefined()
 })
 
-test('the four choices render an Agent menu; only the built-in route left renders none', async () => {
+test('the four choices render an Agent menu; with only the built-in route left it still opens one', async () => {
   // Plan C1: Fox / Pi / Codex / DeepSeek are offered.
   const option = (backend, patch = {}) => ({ backend, enabled: true, wired: true, experimental: backend === 'deepseek', hidden: false, retired: false, reason: null, ...patch })
   const c1 = { switchEnv: 'FOX_EXTERNAL_BACKENDS', anyExternalEnabled: true, unknownEntries: [], retiredBackends: [], options: ['fox', 'pi', 'codex', 'deepseek'].map(backend => option(backend)) }
   const menu = render(createElement(ComposerAgentPicker, { value: 'fox', status: c1, onSelect: () => {} }))
   expect(menu.getByRole('button', { name: '选择 Agent，当前 Fox' })).toBeTruthy()
   menu.unmount()
-  // A Host that retired every external driver (mechanism kept): one option is
-  // not a choice, so the composer shows the label without a menu.
+  // UI 1103: a Host that retired every external driver (mechanism kept) leaves
+  // Fox only, and the picker still opens a menu: Fox plus the hint where to
+  // enable more (设置 → Agent).
   const retired = { ...c1, anyExternalEnabled: false, retiredBackends: ['pi', 'codex', 'deepseek'], options: ['fox', 'pi', 'codex', 'deepseek'].map(backend => option(backend, backend === 'fox' ? {} : { enabled: false, wired: false, retired: true, reason: '本版本已退休' })) }
-  const view = render(createElement(ComposerAgentPicker, { value: 'fox', status: retired, onSelect: () => { throw new Error('nothing can be selected') } }))
-  expect(view.queryByRole('button', { name: /选择 Agent/ })).toBeNull()
-  expect(view.getByText('Fox')).toBeTruthy()
-  expect(view.queryByRole('menu')).toBeNull()
-  expect(view.getByLabelText('当前 Agent：Fox').tagName).toBe('SPAN')
+  const view = render(createElement(ComposerAgentPicker, { value: 'fox', status: retired, onSelect: () => {} }))
+  expect(view.container.textContent).toBe('Fox')
+  expect(view.getByRole('button', { name: '选择 Agent，当前 Fox' }).getAttribute('data-agent-backend')).toBe('fox')
 })
 
 test('only the new-conversation expert entry opens selection directly', () => {
