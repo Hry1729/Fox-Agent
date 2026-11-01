@@ -713,13 +713,16 @@
   color: inherit;
 }
 .fox-agent-backend-settings-note {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--muted-foreground);
+  margin: var(--fox-space-xs) 0 0;
+  font-size: var(--fox-type-caption);
+  line-height: 1.6;
+  color: var(--fox-faint);
 }
-.fox-agent-backend-settings-note li { list-style: disc inside; }
+.fox-agent-backend-settings-note p {
+  margin: 0;
+}
 .fox-agent-backend-settings-error {
-  margin: 4px 0 0;
-  font-size: 12px;
+  margin: var(--fox-space-xs) 0 0;
+  font-size: var(--fox-type-caption);
   color: var(--destructive);
 }

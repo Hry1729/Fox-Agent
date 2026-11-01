@@ -174,9 +174,9 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
       </SettingsRow>
       {forcedOff && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">{forcedOff}</p>}
       {!forcedOff && unavailableReasons.length > 0 && (
-        <ul className="fox-settings-footnote fox-agent-backend-settings-note" aria-label="不可用的 Agent">
-          {unavailableReasons.map((row) => <li key={row.value}>{row.label}：{row.reason}</li>)}
-        </ul>
+        <div className="fox-settings-footnote fox-agent-backend-settings-note" role="note" aria-label="不可用的 Agent">
+          {unavailableReasons.map((row) => <p key={row.value}>{row.label}：{row.reason}</p>)}
+        </div>
       )}
       {savedRetired && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note" data-retired-default={preferences?.defaultBackend}>{savedRetired}</p>}
       {preferences && !savedRetired && selected !== effective && (
