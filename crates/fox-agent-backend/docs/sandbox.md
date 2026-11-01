@@ -1,9 +1,11 @@
-> **现已无沙箱（2026-10-31，B4c）**：Fox 已不再使用任何沙箱。SRT（sandbox-runtime）、`host_sandbox.rs` / `SrtHostBackend`、Windows ACL / 祖先 ACE / 所有权修复（`winacl` / `winancestor` / `winowner` / `winruntime`）、网络代理（`network.rs`、`network-host.mjs`、`reverse.rs`、`loopback.rs`）和 ACP stdio 桥（`bridge.rs`）已在 A1、B2 删除，运行时打包脚本不再打包 `srt\` 和 `acp-bridge\`。现在 Fox Host 命令在 **Fox Job**（Windows Job Object / 其他平台进程组）中以当前用户身份执行，安全靠四档审批（只读 / 询问 / 自动 / 完全访问）、block 规则、受保护路径、项目前缀规则和审计，见[安全架构](../../../docs/02-架构/安全架构.md)。外部 Agent（Pi、Codex、dsh）计划在下一阶段恢复，目前不可用。
+> **现已无沙箱（2026-10-31，B4c）**：Fox 已不再使用任何沙箱。SRT（sandbox-runtime）、`host_sandbox.rs` / `SrtHostBackend`、Windows ACL / 祖先 ACE / 所有权修复（`winacl` / `winancestor` / `winowner` / `winruntime`）、网络代理（`network.rs`、`network-host.mjs`、`reverse.rs`、`loopback.rs`）和 ACP stdio 桥（`bridge.rs`）已在 A1、B2 删除，运行时打包脚本不再打包 `srt\` 和 `acp-bridge\`。现在 Fox Host 命令在 **Fox Job**（Windows Job Object / 其他平台进程组）中以当前用户身份执行，安全靠四档审批（只读 / 询问 / 自动 / 完全访问）、block 规则、受保护路径、项目前缀规则和审计，见[安全架构](../../../docs/02-架构/安全架构.md)。外部 Agent（Pi、Codex、dsh）当时计划恢复，现已恢复为可选接入（见下方 2026-11-01 现状）。
 >
 > 本文件第 0–12 节和 13.1–13.30 的记录**保留为历史**，其中「当前」「生效」等字样只对应记录时点，不描述现状。**13.31** 是收尾批（A0–A2）的 Windows 复测清单，**13.32** 是清理批（B1–B5）和外部 Agent 第一批（C1–C4）的 Windows 复测清单，两者都仍然有效。
 >
+> **现状（2026-11-01）**：外部 Agent（Pi、Codex、dsh）已在 C1–C4 恢复为可选接入：通用 ACP 后端，Fox 工具经 MCP 桥接，默认只有 Fox，用户先在电脑上安装和配置，再在「设置 → Agent」启用；输入框上方不再有登录卡片；Pi 没选过配置来源时默认用 Fox 模型服务的 Key。运行时包为 0.1.8。13.31 起各节（最新一节在文件末尾）是复测清单，更新的复测说明可能放在仓库外。下面「单 Pi 分支适用范围」一段是 2026-10-28 的旧说明。汇总见[当前状态与核验基线](../../../docs/01-项目概览/当前状态与核验基线.md)。
+>
 > **单 Pi 分支适用范围（2026-10-28，旧说明；其中外部 Agent「退休 / 只读」已不成立）**：下方各批次及旧“生效范围”说明保留原文。当前外部 Pi ACP、DeepSeek、Codex 已退休，不再由 Fox 启动；第 0 节涉及的共享 Host SRT 仍需保留。旧外部 SRT、ACP 和驱动实测结果只对应记录时点，不能用来宣称当前单 Pi 阶段二通过。
-> 当前状态与证据边界见[单 Pi 主线状态](../../../docs/01-项目概览/单Pi主线状态.md)。以下历史正文保持原样。
+> 当时的状态与证据边界见[单 Pi 主线状态](../../../docs/01-项目概览/单Pi主线状态.md)的历史各节。以下历史正文保持原样。
 
 # SRT 与外部 Agent 历史记录、人工复测批次
 

@@ -1,16 +1,17 @@
-> **现状（2026-10-31，B4c）**：本页是外部 Agent 的历史接入与实测记录，正文保持原样。现状：
-> - 内置主线是 PiNative；外部 Pi、Codex、dsh 目前处于退役状态（旧会话只读，入口返回 `agent_backend_retired`），**计划在下一阶段（阶段三）恢复**为可选后端，现在不可用。
-> - Fox 自身已不用沙箱：SRT、Windows ACL、网络代理、ACP stdio 桥已在 A1、B2 删除，运行时打包脚本不再打包 srt；命令在 Fox Job 中执行。下文凡写「在 srt 沙箱里运行」「共享 Host SRT」「网络审批」的内容都只是当时的记录。
-> - 外部 Agent 恢复后，Codex、dsh 使用各自自带的原生沙箱和审批（属于它们自己的功能），外部 Pi 与 PiNative 共用 Fox 的四档审批引擎。
-> 当前状态见[单 Pi 主线状态](../../../docs/01-项目概览/单Pi主线状态.md)与[安全架构](../../../docs/02-架构/安全架构.md)。
+> **现状（2026-11-01）**：本页正文是外部 Agent 的接入与实测记录，按时间保留，其中「当前」字样只对应记录时点。现状：
+> - 内置主线是 PiNative。外部 Pi、Codex、dsh **已恢复为可选接入**：经通用 ACP 后端（`acp.rs` / `external.rs`，各家差异在 `src/backends/`），默认只有 Fox，用户先在电脑上安装和配置（Windows 受管运行时包 0.1.8），再在「设置 → Agent」打开开关；输入框上方不再有登录卡片。
+> - Fox 自身已不用沙箱：SRT、Windows ACL、网络代理、ACP stdio 桥已在 A1、B2 删除；外部 Agent 进程放进 Job Object / 进程组，取消时清扫本轮进程。下文凡写「在 srt 沙箱里运行」「共享 Host SRT」「网络审批」的内容都只是当时的记录。
+> - Fox 工具经 MCP 桥给外部 Agent（`src/fox_mcp.rs`）。整轮 e2e：`tests/e2e_full_turn.rs` 的 `e2e_acp_full_turn_{pi,codex,dsh}`。
+> - **Codex（codex-acp 2.2.2）**：已恢复为可选接入，不再隐藏（`AgentBackend::HIDDEN` 为空）。权限选项：请求审批 / 帮我批准 / 完全访问权限（`session/set_mode` 立即生效；「帮我批准」在供应商不是 OpenAI 时置灰）。模型走「模型服务」里明确选中的 `openai-responses` 协议。Fox 工具经 ACP `session/new` 的 `mcpServers`（stdio 中继）接入。已知缺口：中途起的常驻子进程会被取消清扫误杀；完全访问下 Fox 看不到它执行的命令。
+> 汇总见[当前状态与核验基线](../../../docs/01-项目概览/当前状态与核验基线.md)与[安全架构](../../../docs/02-架构/安全架构.md)。
 >
 > 2026-10-28 的旧说明（保留）： **单 Pi 分支适用范围（2026-10-28）**：旧外部驱动、受管运行时或外层 SRT 的设计与实测快照。当前外部 Pi ACP、DeepSeek、Codex 已退休，历史只读，执行返回 agent_backend_retired；下文的安装、启用、审批和继续运行步骤不能用于当前产品路径。（当时共享 Host SRT 仍保留；现已删除。）
 
 # CodexBackend（codex-acp）阶段 0 证据与能力声明
 
-## 当前状态（2026-10-24）
+## 2026-10-24 状态（历史）
 
-> 本节是当前事实；下文第 1 节起是 2026-10-19 的阶段 0 证据原文，未改动。
+> 本节是当时的事实（现状见页首）；下文第 1 节起是 2026-10-19 的阶段 0 证据原文，未改动。
 
 - **已实现，暂时隐藏**。产品内置的 Agent 是 Fox、DeepSeek Harness（dsh）和 pi；Codex 以后与其他 ACP Agent 一起通过「自定义 ACP Agent」通用入口由用户自行安装接入（**待办 / 规划中**）。
 - 隐藏开关集中在一处：`AgentBackend::HIDDEN`（`src/port.rs`），前端镜像 `HIDDEN_AGENT_BACKENDS`（`apps/desktop/src/features/conversations/model/agent-backend.ts`）。删掉这两处的 `codex` 即可恢复。
