@@ -169,15 +169,13 @@ describe('developer mode', () => {
     expect(document.querySelector('.fox-agent-backend-bar')).toBeNull()
   })
 
-  test('off: a login the user must fix is still shown', async () => {
+  test('off: UI 1103 - no login card above the composer, nothing at all for a runnable conversation', async () => {
     render(<AgentBackendPanel client={panelClient(false) as any} status={status} lockedBackend="pi" conversationId="c-pi" draftBackend="fox" developerUi={false} />)
-    await waitFor(() => expect(text()).toContain('pi 还没有登录'))
-    expect(text()).not.toContain('从真实 HOME 导入')
-    expect(text()).not.toContain('私有 HOME')
-    expect(text()).not.toContain('已锁定')
-    expect(text()).not.toContain('PI_API_KEY')
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(text()).toBe('')
+    expect(text()).not.toContain('pi 还没有登录')
     expect(screen.queryByRole('button', { name: '用已有登录…' })).toBeNull()
-    expect(screen.getByRole('button', { name: '去设置模型服务' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '去设置模型服务' })).toBeNull()
     expect(document.querySelector('details')).toBeNull()
   })
 
@@ -188,7 +186,8 @@ describe('developer mode', () => {
     expect(text()).toContain('可确认')
     expect(text()).toContain('工具起止')
     expect(text()).not.toContain('Fox 外层无')
-    await waitFor(() => expect(text()).toContain('Agent 配置来源与导入'))
+    // UI 1103: the configuration source / import fold left with the login card (设置 → Agent has the Pi source switch).
+    expect(text()).not.toContain('Agent 配置来源与导入')
     expect(text()).toContain('本地预览')
     expect(screen.queryByLabelText('权限')).toBeNull()
   })

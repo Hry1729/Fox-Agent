@@ -282,6 +282,8 @@ describe('settings', () => {
       agentBackendNativePermissions: async (request: NativePermissionRequest) => { calls.push(request); return view(catalogs[request.backend!], { draft: true }) },
       agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => { calls.push(request); return view(catalogs[request.backend!], { draft: true, current: request.mode }) },
     }
+    // UI 1103: the rows are offered for the external Agents the user enabled in 设置 → Agent.
+    window.localStorage.setItem('fox.preferences.enabledExternalAgents', JSON.stringify(['pi', 'codex', 'deepseek']))
     render(<AgentBackendSettingsSection client={client} />)
     // 设置 →「新会话使用的 Agent」is a select again (Fox / Pi / Codex / DeepSeek).
     await waitFor(() => expect(screen.getByLabelText('新会话使用的 Agent')).toBeTruthy())
