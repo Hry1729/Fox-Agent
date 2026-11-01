@@ -143,3 +143,13 @@
   background: var(--fox-card) !important;
   border-color: var(--fox-danger-border) !important;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot='dialog-content'],
+  [data-slot='dialog-overlay'],
+  [data-slot='alert-dialog-content'],
+  [data-slot='alert-dialog-overlay'] {
+    animation: none;
+    transition: none;
+  }
+}
