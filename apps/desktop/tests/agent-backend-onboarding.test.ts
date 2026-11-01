@@ -2,7 +2,7 @@
 // Model behaviour (three probe states, their copy and actions, names only)
 // plus source assertions on AgentBackendBar / AgentBackendCredentialCard.
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import {
   credentialCardModel,
   credentialProbeTarget,
@@ -221,7 +221,7 @@ describe('permission mode (semantics A)', () => {
 
 describe('source assertions', () => {
   const bar = readFileSync(new URL('../src/features/chat/components/AgentBackendBar.tsx', import.meta.url), 'utf8')
-  const card = readFileSync(new URL('../src/features/chat/components/AgentBackendCredentialCard.tsx', import.meta.url), 'utf8')
+  const panel = readFileSync(new URL('../src/features/chat/components/AgentBackendPanel.tsx', import.meta.url), 'utf8')
 
   const settings = readFileSync(new URL('../src/features/settings/agent-backend-settings.tsx', import.meta.url), 'utf8')
 
@@ -236,21 +236,17 @@ describe('source assertions', () => {
     expect(bar).not.toContain('{permissionPicker}')
   })
 
-  const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
   const client = readFileSync(new URL('../src/features/conversations/api/desktop-client.ts', import.meta.url), 'utf8')
 
-  const panel = readFileSync(new URL('../src/features/chat/components/AgentBackendPanel.tsx', import.meta.url), 'utf8')
 
   test('a new conversation renders no login card and no permission chip: one supported driver', () => {
     // The only login / permission UI a new conversation could show belongs to an
     // external driver, and the single Pi mainline retired every one of them
     // (2026-10-27). The card stays wired for the records already made - an open
     // conversation - and is never offered for a new conversation.
-    expect(bar).toContain('const userCard = runnable ? credentialCard : null')
     expect(bar).not.toContain('新会话：')
     const draft = bar.slice(bar.indexOf('data-access="draft"'))
     expect(draft).toContain('{refusalNotice}')
-    expect(draft).not.toContain('{credentialCard}')
     expect(draft).not.toContain('permissionPicker')
     // A retired backend picked by an older caller is shown and created as the
     // built-in route, so it is never probed for credentials.
@@ -258,45 +254,20 @@ describe('source assertions', () => {
     expect(panel).toContain("agentBackendAccess(shownBackend, status) === 'runnable'")
   })
 
-  test('the import receipt is rendered once, by the bar, keyed to its target', () => {
-    expect(bar).toContain('function ImportReceiptNotice(')
-    expect(bar).toContain('aria-label="导入回执"')
-    // One render site: a new conversation has no login card, so the only bar
-    // that can carry a receipt is an open conversation's.
-    expect(bar.match(/\{receiptNotice\}/g)?.length).toBe(1)
-    expect(panel).toContain('setReceipt({ key: targetKey, value: importReceiptLines(report) })')
-    expect(panel).toContain('importReceipt={visibleReceipt}')
-    expect(panel).toContain('IMPORT_RECEIPT_VISIBLE_MS')
-    expect(workbench).toContain('<AgentBackendPanel')
-    // The card no longer echoes a successful import (fix ②).
-    expect(card).not.toContain('importReceipt(')
-    expect(IMPORT_RECEIPT_VISIBLE_MS).toBeGreaterThanOrEqual(10_000)
-  })
-
-  test('the panel probes a new conversation by backend + project, with no conversation needed', () => {
-    expect(panel).toContain('credentialProbeTarget({')
-    expect(panel).toContain('client.agentBackendCredentials(JSON.parse(key) as AgentBackendTarget)')
-    expect(panel).toContain('key={targetKey}')
+  test('UI 1103: 设置 → Agent probes each external Agent by backend, with no conversation needed', () => {
+    expect(settings).toContain('const target: AgentBackendTarget = { backend, fullAccess: false }')
+    expect(settings).toContain('credentials(target)')
     expect(client).toContain("command<CredentialProbe>('agent_backend_credentials', target)")
     expect(client).toContain('{ ...target, selected, allProjects, overwrite, reuseForNewProjects }')
   })
 
-  test('AgentBackendCredentialCard: 覆盖已有登录 is explicit and off by default', () => {
-    expect(card).toContain('const [overwrite, setOverwrite] = useState(false)')
-    expect(card).toContain('覆盖已有登录')
-    expect(card).toContain('onImport(selected, allProjects, overwrite, reuseForNewProjects)')
-    expect(card).toContain('默认跳过已经有这些文件或 key 的项目（包括本项目），不会覆盖。')
-  })
-
-  test('AgentBackendCredentialCard: open folder, import confirmation by name, 套用到我所有项目', () => {
-    expect(card).toContain('打开文件夹')
-    expect(card).toContain('从真实 HOME 导入…')
-    expect(card).toContain('importConfirmationRows(candidates)')
-    expect(card).toContain('只复制，不引用；只显示文件名和 key 名')
-    expect(card).toContain('套用到我所有项目')
-    expect(card).toContain('disabled={busy || selected.length === 0}')
-    // No value is ever read or rendered: only names / destinations from the Host.
-    expect(card).not.toMatch(/\.value\b(?!s)/)
+  test('UI 1103: the login card above the composer is gone; nothing above the composer probes or imports a login', () => {
+    expect(existsSync(new URL('../src/features/chat/components/AgentBackendCredentialCard.tsx', import.meta.url))).toBe(false)
+    expect(panel).not.toContain('AgentBackendCredentialCard')
+    expect(panel).not.toContain('agentBackendCredentials')
+    expect(panel).not.toContain('agentBackendImportCredentials')
+    expect(bar).not.toContain('credentialCard')
+    expect(bar).not.toContain('importReceipt')
   })
 })
 

@@ -95,6 +95,8 @@ function NotificationCenterContent({
   const loadGeneration = useRef(0)
   const openCenter = useRef(onOpenChange)
   openCenter.current = onOpenChange
+  const navigateRef = useRef(onNavigate)
+  navigateRef.current = onNavigate
   // Persistent record IDs retarget the same Arc card. Repeated refreshes must not restart its timer.
   const enqueueToast = useCallback((notification: ToastNotification) => {
     const fingerprint = JSON.stringify([notification.kind, notification.severity, notification.title, notification.body, notification.progress, notification.status])
@@ -112,7 +114,14 @@ function NotificationCenterContent({
       description: displayBody(notification),
       // Background progress should also leave the screen after a short wait; history stays in the center.
       duration: notification.kind === 'failed' || notification.kind === 'approval' ? 8000 : 5000,
-      action: notification.sourceType ? { label: '查看', onClick: () => {
+      // UI 1103: a notice that points at a settings page (an external Agent
+      // not set up, 模型服务) gets its own「去设置」button, straight there.
+      action: notification.workspaceView && (notification.workspaceView.startsWith('settings') || notification.workspaceView === 'model-service') ? { label: notificationDestination({ ...notification, workspaceView: notification.workspaceView } as AppNotificationRecord).action, onClick: () => {
+        navigateRef.current(notification.workspaceView as WorkspaceView, notification.entityId ?? undefined)
+        if (notification.readAt == null && notification.sourceType) void desktopClient.setAppNotificationRead(notification.id, true)
+          .then(() => window.dispatchEvent(new Event(FOX_NOTIFICATIONS_CHANGED_EVENT)))
+          .catch(() => {})
+      } } : notification.sourceType ? { label: '查看', onClick: () => {
         openCenter.current(true)
         setUnreadOnly(false)
         setExpandedId(notification.id)

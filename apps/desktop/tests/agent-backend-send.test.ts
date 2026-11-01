@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { AGENT_DISABLED_CODE, AGENT_DISABLED_NOTICE, enabledOrFox, isAgentEnabled } from '../src/features/conversations/model/external-agent-enablement'
 import { readFileSync } from 'node:fs'
 import { resolveConversationAgentId } from '../src/features/conversations/model/agent-initialization'
 import { knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../src/features/conversations/api/desktop-client'
@@ -43,7 +44,12 @@ function harness(startRun: (request: any) => Promise<any>, options: {
   rewindRun?: (request: any) => Promise<any>
   loadConversation?: (id: string) => Promise<any>
   mergeDetail?: typeof mergeConversationDetail
+  /** UI 1103: external Agents enabled in 设置 → Agent (default: all three). */
+  enabledAgents?: readonly string[]
+  /** The Host reports every external backend as runnable (no administrator switch-off). */
+  hostRunnable?: boolean
 } = {}) {
+  const enabledAgents = options.enabledAgents ?? ['pi', 'codex', 'deepseek']
   const slots: any[] = []
   let cursor = 0
   const slot = (initial: any) => {
@@ -119,13 +125,21 @@ function harness(startRun: (request: any) => Promise<any>, options: {
     applyApprovalToOverlay,
     AGENT_BACKEND_REFUSED,
     agentBackendInputLockedCode,
-    agentBackendInputLockedReason,
+    agentBackendInputLockedReason: options.hostRunnable ? () => null : agentBackendInputLockedReason,
     conversationAgentBackend,
     isAgentBackendRefusalCode,
     withoutRefusedSend,
     AGENT_BACKEND_PREFERENCES_EVENT,
-    newConversationBackend,
+    // UI 1103: these routing tests run with every external Agent enabled in
+    // 设置 → Agent (the behaviour they pin down); the opt-in itself is
+    // covered by its own tests.
+    newConversationBackend: (preferences: any, enabled: readonly string[] = enabledAgents) => newConversationBackend(preferences, enabled),
     isAgentBackendHidden,
+    isAgentEnabled: (backend: string, enabled: readonly string[] = enabledAgents) => isAgentEnabled(backend, enabled),
+    enabledOrFox: (backend: any, enabled: readonly string[] = enabledAgents) => enabledOrFox(backend, enabled),
+    useEnabledExternalAgents: () => enabledAgents,
+    AGENT_DISABLED_CODE,
+    AGENT_DISABLED_NOTICE,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
   return {
@@ -188,6 +202,28 @@ describe('a send refused by backend routing leaves no optimistic trace', () => {
     expect(state.agentBackendRefusal?.message).toContain('未启用')
     expect(state.agentBackendRefusal?.message).not.toContain('退休')
     expect(state.agentBackendRefusal?.message).not.toContain('内置')
+  })
+
+  test('UI 1103: a conversation whose Agent the user turned off stays readable; a send is refused with one notice and nothing optimistic', async () => {
+    const h = harness(async () => { throw new Error('startRun must not be called') }, { enabledAgents: ['pi'], hostRunnable: true })
+    const previousRun = { id: 'run-old', status: 'completed', lastSeq: 3 }
+    h.addConversation({
+      conversation: { id: 'ds-2', agentId: 'fox-general', agentBackend: 'deepseek', permissionMode: 'ask' },
+      messages: [{ id: 'm-1', role: 'user', content: '旧消息', ordinal: 1 }],
+      attachments: [], knowledgeBindings: [], expertBindings: [], lastRun: previousRun,
+    })
+    await h.render().openConversation('ds-2')
+    expect(h.render().detail?.conversation.id).toBe('ds-2')
+    const outcome = await h.render().send('还能发吗')
+    expect(outcome).toBe(AGENT_BACKEND_REFUSED)
+    expect(h.startRequests).toHaveLength(0)
+    const state = h.render()
+    expect(state.detail?.messages.map((message: any) => message.id)).toEqual(['m-1'])
+    expect(state.detail?.lastRun).toBe(previousRun)
+    expect(state.error).toBeNull()
+    // No refusal on the bar above the composer: the composer turns this into one notification.
+    expect(state.agentBackendRefusal).toBeNull()
+    expect(state.lastSendFailureReason()).toBe(`${AGENT_DISABLED_CODE}: ${AGENT_DISABLED_NOTICE}`)
   })
 
   test('any other start failure on an existing conversation keeps the error path unchanged', async () => {

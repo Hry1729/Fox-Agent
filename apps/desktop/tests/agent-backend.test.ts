@@ -28,6 +28,10 @@ import {
   type AgentBackendStatus,
 } from '../src/features/conversations/model/agent-backend'
 
+import { enabledOrFox, isAgentEnabled } from '../src/features/conversations/model/external-agent-enablement'
+// UI 1103: these tests pin the routing rules with every external Agent enabled in 设置 → Agent.
+const ALL_AGENTS = ['pi', 'codex', 'deepseek'] as const
+
 /**
  * The status a C1 Host reports (plan C1, 2026-10-31): the built-in route and
  * the three external Agents are supported, none is retired; `off` lists the
@@ -168,6 +172,18 @@ describe('plan C1: the built-in route and the three external Agents', () => {
 })
 
 describe('a new conversation: Fox or an external Agent', () => {
+  test('UI 1103: external Agents are opt-in; nothing enabled means Fox only', () => {
+    const saved = c1Preferences({ defaultBackend: 'deepseek', effectiveBackend: 'deepseek' })
+    expect(newConversationBackend(saved, [])).toBe('fox')
+    expect(agentBackendSettingValue(saved, [])).toBe('fox')
+    expect(agentBackendSettingRows(saved, []).map((row) => row.value)).toEqual(['fox'])
+    expect(agentBackendSettingRows(saved, ['codex']).map((row) => row.value)).toEqual(['fox', 'codex'])
+    expect(newConversationBackend(saved, ['deepseek'])).toBe('deepseek')
+    expect(enabledOrFox('codex', [])).toBe('fox')
+    expect(enabledOrFox('codex', ['codex'])).toBe('codex')
+    expect(isAgentEnabled('fox', [])).toBe(true)
+  })
+
   test('every enabled backend can be picked; a switched-off one is greyed with its reason', () => {
     expect(canPickAgentBackend('fox', null)).toBe(true)
     for (const backend of ['fox', 'pi', 'codex', 'deepseek'] as const) {
@@ -177,34 +193,34 @@ describe('a new conversation: Fox or an external Agent', () => {
     expect(canPickAgentBackend('pi', null)).toBe(false)
     // The administrator switched codex off: it stays listed, greyed.
     expect(canPickAgentBackend('codex', c1Status(['codex']))).toBe(false)
-    expect(agentBackendSettingRows(c1Preferences()).map((row) => [row.value, row.disabled, row.reason])).toEqual([
+    expect(agentBackendSettingRows(c1Preferences(), ALL_AGENTS).map((row) => [row.value, row.disabled, row.reason])).toEqual([
       ['fox', false, null], ['pi', false, null], ['codex', false, null], ['deepseek', false, null],
     ])
-    const off = agentBackendSettingRows(c1Preferences({}, ['codex']))
+    const off = agentBackendSettingRows(c1Preferences({}, ['codex']), ALL_AGENTS)
     expect(off.map((row) => [row.value, row.disabled])).toEqual([['fox', false], ['pi', false], ['codex', true], ['deepseek', false]])
     expect(off[2].reason).toContain('管理员关闭')
     expect(off[3].label).toBe('DeepSeek（实验）')
     // The saved choice is shown and used.
-    expect(agentBackendSettingValue(c1Preferences())).toBe('fox')
-    expect(agentBackendSettingValue(c1Preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' }))).toBe('codex')
+    expect(agentBackendSettingValue(c1Preferences(), ALL_AGENTS)).toBe('fox')
+    expect(agentBackendSettingValue(c1Preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' }), ALL_AGENTS)).toBe('codex')
     // A retired backend (Host-declared) can be neither picked nor shown as the saved choice.
     for (const backend of ['pi', 'codex', 'deepseek'] as const) {
       expect(canPickAgentBackend(backend, status())).toBe(false)
     }
-    expect(agentBackendSettingValue(preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' }))).toBe('fox')
+    expect(agentBackendSettingValue(preferences({ defaultBackend: 'codex', effectiveBackend: 'codex' }), ALL_AGENTS)).toBe('fox')
   })
 
   test('a saved choice is applied to a new conversation unless it is retired or switched off', () => {
-    expect(newConversationBackend(null)).toBe('fox')
-    expect(newConversationBackend(c1Preferences())).toBe('fox')
+    expect(newConversationBackend(null, ALL_AGENTS)).toBe('fox')
+    expect(newConversationBackend(c1Preferences(), ALL_AGENTS)).toBe('fox')
     for (const backend of ['pi', 'codex', 'deepseek'] as const) {
-      expect(newConversationBackend(c1Preferences({ defaultBackend: backend, effectiveBackend: backend }))).toBe(backend)
+      expect(newConversationBackend(c1Preferences({ defaultBackend: backend, effectiveBackend: backend }), ALL_AGENTS)).toBe(backend)
       // The Host answers Fox as effective when the saved one is switched off.
-      expect(newConversationBackend(c1Preferences({ defaultBackend: backend, effectiveBackend: 'fox' }, [backend]))).toBe('fox')
+      expect(newConversationBackend(c1Preferences({ defaultBackend: backend, effectiveBackend: 'fox' }, [backend]), ALL_AGENTS)).toBe('fox')
       // A Host-declared retirement is never applied.
       const saved = preferences({ defaultBackend: backend, effectiveBackend: backend })
-      expect(newConversationBackend(saved)).toBe('fox')
-      expect(agentBackendSettingValue(saved)).toBe('fox')
+      expect(newConversationBackend(saved, ALL_AGENTS)).toBe('fox')
+      expect(agentBackendSettingValue(saved, ALL_AGENTS)).toBe('fox')
     }
   })
 

@@ -1,9 +1,14 @@
-// 普通模式的 dsh 未登录卡不能露出路径、密钥名、网关和错误码，也不能留下原生 details。
+// 普通模式下，外部 Agent 没配好时用户能看到的地方都不能露出路径、密钥名、网关和错误码，也不能留下原生 details。
+// UI 1103 起输入框上方不再有登录卡，这些地方是：设置 → Agent 的外部 Agent 行、发送没开始时的那一条通知，
+// 以及输入框上方的 Agent 栏（普通模式下应当是空的）。
 import { expect, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { AgentBackendCredentialCard } from '../src/features/chat/components/AgentBackendCredentialCard'
+import { AgentBackendSettingsSection } from '../src/features/settings/agent-backend-settings'
+import { AgentBackendPanel } from '../src/features/chat/components/AgentBackendPanel'
+import { sendNotStartedNotice } from '../src/features/chat/send-failure-notice'
+import { DEFAULT_AGENT_BACKEND_PREFERENCES, type AgentBackendStatus } from '../src/features/conversations/model/agent-backend'
 import type { CredentialProbe } from '../src/features/conversations/model/agent-backend-onboarding'
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
@@ -33,58 +38,80 @@ const probe = {
     reason: 'provider.protocol_missing: no anthropic-messages profile',
   },
   source: null,
+  installed: true,
 } as CredentialProbe
 
-const leaks = ['DEEPSEEK_API_KEY', '.dsh/', '私有 HOME', 'Magpie', 'model.connection_required', 'provider.protocol_missing']
+const leaks = ['DEEPSEEK_API_KEY', '.dsh/', '私有 HOME', 'Magpie', 'model.connection_required', 'provider.protocol_missing', 'agent_backend_', 'D:\\', 'cordis']
 
-async function renderCard(developerUi: boolean) {
+const status: AgentBackendStatus = {
+  switchEnv: 'FOX_EXTERNAL_BACKENDS',
+  anyExternalEnabled: true,
+  supportedBackends: ['fox', 'pi', 'codex', 'deepseek'],
+  retiredBackends: [],
+  options: (['fox', 'pi', 'codex', 'deepseek'] as const).map((backend) => ({ backend, enabled: true, wired: true, experimental: backend !== 'fox', hidden: false, retired: false, reason: null })),
+  unknownEntries: [],
+}
+
+async function mount(node: React.ReactNode) {
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  await act(async () => root.render(
-    <AgentBackendCredentialCard
-      probe={probe}
-      developerUi={developerUi}
-      modelConnection={{ status: 'missing_address', providerId: null, providerName: 'SenseNova', apiType: 'anthropic-messages', candidates: [], message: 'model.connection_required' }}
-      onOpenFolder={async () => undefined}
-      onLoadCandidates={async () => []}
-      onImport={async () => ({ backend: 'deepseek', homes: 0, files: [], keys: [], skipped: [] })}
-      onOpenModelSettings={() => undefined}
-    />,
-  ))
+  await act(async () => root.render(node))
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
   return {
-    text: host.textContent ?? '',
-    details: host.querySelectorAll('details').length,
-    buttons: [...host.querySelectorAll('button')].map((button) => button.textContent),
+    host,
     unmount: async () => { await act(async () => root.unmount()); host.remove() },
   }
 }
 
-test('普通模式的 dsh 未登录卡只有一句人话和一个按钮', async () => {
-  const view = await renderCard(false)
+test('设置 → Agent 的外部 Agent 行只有状态和开关，不露出调试信息', async () => {
+  const view = await mount(<AgentBackendSettingsSection
+    client={{
+      agentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
+      saveAgentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
+      probeCodexResponses: async () => null,
+      agentBackendCredentials: async () => probe,
+      agentBackendModelConnection: async () => ({ status: 'missing_address', providerId: null, providerName: 'SenseNova', apiType: 'anthropic-messages', candidates: [], message: 'model.connection_required' }),
+    }}
+    onOpenModelSettings={() => undefined}
+  />)
   try {
-    expect(view.text).toContain('dsh 还没有登录，先在模型服务里配好 Anthropic 地址再发送。')
-    expect(view.buttons).toEqual(['填写 Anthropic 地址'])
-    expect(view.text).not.toContain('用已有登录')
-    for (const leak of leaks) expect(view.text).not.toContain(leak)
-    expect(view.details).toBe(0)
+    const text = view.host.textContent ?? ''
+    expect(text).toContain('未配置')
+    expect(text).toContain('去模型服务配置')
+    for (const leak of leaks) expect(text).not.toContain(leak)
+    expect(view.host.querySelectorAll('details').length).toBe(0)
   } finally {
     await view.unmount()
   }
 })
 
-test('开发者模式看得到登录细节，但不用原生 details', async () => {
-  const view = await renderCard(true)
-  try {
-    expect(view.text).toContain('DEEPSEEK_API_KEY')
-    expect(view.text).toContain('.dsh/')
-    expect(view.text).toContain('私有 HOME')
-    expect(view.text).toContain('Magpie')
-    expect(view.text).toContain('provider.protocol_missing')
-    expect(view.text).toContain('从真实 HOME 导入')
-    expect(view.details).toBe(0)
-    expect(view.text).toContain('经 Magpie 本机网关')
-  } finally {
-    await view.unmount()
+test('普通模式下输入框上方没有任何外部 Agent 卡片', async () => {
+  const client = {
+    agentBackendCapabilities: async () => { throw new Error('not in normal mode') },
+    agentBackendPermissionStatus: async () => ({ fullAccessForbidden: false, forbiddenReason: null, engineeringSwitch: false }),
+    agentBackendRevokeFullAccess: async () => ({}),
+    listenRuntimeEvents: async () => () => {},
+  }
+  for (const locked of [null, 'deepseek'] as const) {
+    const view = await mount(<AgentBackendPanel client={client} status={status} lockedBackend={locked} conversationId={locked ? 'c-ds' : null} draftBackend="deepseek" developerUi={false} />)
+    try {
+      expect(view.host.textContent ?? '').toBe('')
+      expect(view.host.querySelectorAll('details, button').length).toBe(0)
+    } finally {
+      await view.unmount()
+    }
+  }
+})
+
+test('外部 Agent 没配好时的那一条通知是人话，带去设置的入口', () => {
+  const raw = 'model.connection_required: 请先在后端栏补充或验证当前供应商的模型连接 D:\\fox-test\\agent-homes DEEPSEEK_API_KEY .dsh/.env Magpie'
+  for (const code of ['model.connection_required', 'agent_backend_missing_credentials', 'agent_backend_not_installed', 'agent_backend_exited_on_start', 'agent_backend_pi_source_choice_required', 'agent_backend_user_disabled']) {
+    const notice = sendNotStartedNotice(code, raw, { backend: 'deepseek', developerUi: false })
+    for (const leak of leaks) {
+      expect(notice.title).not.toContain(leak)
+      expect(notice.description).not.toContain(leak)
+    }
+    expect(notice.workspaceView).toBe('settings-ai')
   }
 })

@@ -192,3 +192,16 @@
   outline-offset: var(--fox-focus-offset);
   box-shadow: none;
 }
+
+/* UI 1103：设置 → Agent 的外部 Agent 行。状态点和文字一行，去模型服务与开关并排。 */
+.fox-agent-backend-settings .fox-external-agent-row .fox-settings-row-control {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-s);
+}
+
+.fox-agent-backend-settings .fox-external-agent-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fox-space-xs);
+}

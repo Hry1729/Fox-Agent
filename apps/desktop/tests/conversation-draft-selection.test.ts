@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { AGENT_DISABLED_CODE, AGENT_DISABLED_NOTICE, enabledOrFox, isAgentEnabled } from '../src/features/conversations/model/external-agent-enablement'
 import { readFileSync } from 'node:fs'
 import { resolveConversationAgentId } from '../src/features/conversations/model/agent-initialization'
 import { knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../src/features/conversations/api/desktop-client'
@@ -26,7 +27,7 @@ import {
 const source = readFileSync(new URL('../src/features/conversations/hooks/use-desktop-conversation.ts', import.meta.url), 'utf8')
 const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(source.indexOf('export function useDesktopConversation'), source.indexOf('export function latestMessage')).replace('export function', 'function'))
 
-function harness() {
+function harness(enabledAgents: readonly string[] = ['pi', 'codex', 'deepseek']) {
   const slots: any[] = []
   let cursor = 0
   const slot = (initial: any) => {
@@ -101,8 +102,16 @@ function harness() {
     isAgentBackendRefusalCode,
     withoutRefusedSend,
     AGENT_BACKEND_PREFERENCES_EVENT,
-    newConversationBackend,
+    // UI 1103: these routing tests run with every external Agent enabled in
+    // 设置 → Agent (the behaviour they pin down); the opt-in itself is
+    // covered by its own tests.
+    newConversationBackend: (preferences: any, enabled: readonly string[] = enabledAgents) => newConversationBackend(preferences, enabled),
     isAgentBackendHidden,
+    isAgentEnabled: (backend: string, enabled: readonly string[] = enabledAgents) => isAgentEnabled(backend, enabled),
+    enabledOrFox: (backend: any, enabled: readonly string[] = enabledAgents) => enabledOrFox(backend, enabled),
+    useEnabledExternalAgents: () => enabledAgents,
+    AGENT_DISABLED_CODE,
+    AGENT_DISABLED_NOTICE,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
   return {

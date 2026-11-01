@@ -33,17 +33,51 @@ describe('sendNotStartedNotice', () => {
     expect(created.description).not.toContain('run.create_failed')
   })
 
-  test('未登录类带上后端名，有对话时打开对话，没有对话时去 Agent 设置', () => {
+  test('UI 1103：外部 Agent 没配好只弹一条通知，带后端名，按钮去 设置 → Agent', () => {
     const named = sendNotStartedNotice('agent_backend_missing_credentials', '未登录', { backend: 'deepseek', conversationId: 'c-1', developerUi: false })
-    expect(named.title).toBe('dsh 还没有登录')
-    expect(named.workspaceView).toBe('chat')
-    expect(named.entityId).toBe('c-1')
+    expect(named.title).toBe('dsh 还没配置好')
+    expect(named.workspaceView).toBe('settings-ai')
     expect(named.description).not.toContain('agent_backend_missing_credentials')
+    expect(named.description).not.toContain('登录卡片')
+
+    const model = sendNotStartedNotice('model.connection_required', '请先到「设置 → 模型服务」配置', { backend: 'codex', developerUi: false })
+    expect(model.title).toBe('Codex 还没配置好')
+    expect(model.workspaceView).toBe('settings-ai')
 
     const installed = sendNotStartedNotice('agent_backend_not_installed', '没有安装', { backend: 'pi', developerUi: false })
-    expect(installed.title).toBe('pi 还没有登录')
+    expect(installed.title).toBe('pi 还没安装')
     expect(installed.workspaceView).toBe('settings-ai')
     expect(installed.entityId).toBeUndefined()
+
+    const source = sendNotStartedNotice('agent_backend_pi_source_choice_required', 'raw', { backend: 'pi', developerUi: false })
+    expect(source.title).toBe('Pi 的配置来源需要确认')
+    expect(source.workspaceView).toBe('settings-ai')
+
+    const disabled = sendNotStartedNotice('agent_backend_user_disabled', '该 Agent 已停用，可在设置中启用', { backend: 'deepseek', developerUi: false })
+    expect(disabled.title).toBe('dsh 已停用')
+    expect(disabled.description).toBe('该 Agent 已停用，可在设置中启用。')
+    expect(disabled.workspaceView).toBe('settings-ai')
+
+    // 多地址：用 Host 的那句人话（「用作 X 默认协议」），按钮去模型服务。
+    const choose = sendNotStartedNotice('model.connection_choose_address', '当前供应商有多个地址都能给 DeepSeek 用：请到「设置 → 模型服务」，在要用的地址上打开「用作 DeepSeek 默认协议」后再发送', { backend: 'deepseek', developerUi: false })
+    expect(choose.title).toBe('模型服务有多个地址')
+    expect(choose.description).toContain('用作 DeepSeek 默认协议')
+    expect(choose.workspaceView).toBe('model-service')
+  })
+
+  test('e2e-1101 的新错误码各有一句人话', () => {
+    const busy = sendNotStartedNotice('run.conversation_busy', 'raw', { developerUi: false })
+    expect(busy.title).toBe('上一条还在处理')
+    expect(busy.description).toContain('等它结束')
+    expect(busy.description).not.toContain('run.conversation_busy')
+    const gone = sendNotStartedNotice('conversation.not_found', 'raw', { developerUi: false })
+    expect(gone.title).toBe('这个对话已不存在')
+    expect(gone.description).toContain('新建')
+    // Fox 未配模型时 Host 在建 Run 前就拒绝：去模型服务。
+    const fox = sendNotStartedNotice('model.connection_required', 'raw', { backend: 'fox', developerUi: false })
+    expect(fox.title).toBe('还没有可用的模型连接')
+    expect(fox.workspaceView).toBe('model-service')
+    expect(fox.description).toContain('设置 → 模型服务')
   })
 
   test('developerUi 为 false 时详情不含错误码，为 true 时含错误码和原始信息', () => {
@@ -73,6 +107,6 @@ describe('sendNotStartedNotice', () => {
     expect(notice.description).not.toContain('model.connection_unverified')
     const choose = sendNotStartedNotice('model.connection_choose_address', 'raw', { developerUi: false })
     expect(choose.title).toBe('还没有可用的模型连接')
-    expect(choose.description).toContain('选定一个地址')
+    expect(choose.description).toContain('用作默认协议')
   })
 })
