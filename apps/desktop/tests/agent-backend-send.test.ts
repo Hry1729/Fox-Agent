@@ -210,6 +210,24 @@ describe('a send refused by backend routing leaves no optimistic trace', () => {
   })
 })
 
+describe('a start failure on an existing conversation clears the optimistic placeholder', () => {
+  test('model.connection_required leaves no pending message or 「等待开始」 run behind', async () => {
+    const h = harness(async () => { throw refusal('model.connection_required', '需要模型连接') }, { mergeDetail: mergeConversationDetail })
+    h.addConversation({
+      conversation: { id: 'ds-2', agentId: 'fox-general', agentBackend: 'fox', permissionMode: 'ask' },
+      messages: [{ id: 'm-1', role: 'user', content: '旧消息', ordinal: 1, createdAt: 1, updatedAt: 1 }],
+      attachments: [], knowledgeBindings: [], expertBindings: [], runtimeEvents: [], toolCalls: [], approvals: [], artifacts: [], lastRun: null,
+    })
+    await h.render().openConversation('ds-2')
+    const outcome = await h.render().send('请执行 dir 命令')
+    expect(outcome).toBe(false)
+    const state = h.render()
+    expect(state.detail?.messages.map((message: any) => message.id)).toEqual(['m-1'])
+    expect(state.detail?.lastRun ?? null).toBeNull()
+    expect(state.lastSendFailureReason()).toBe('model.connection_required: 需要模型连接')
+  })
+})
+
 describe('a new conversation that fails before a run row is rolled back', () => {
   test('startRun throwing model.connection_required purges the empty chat and restores the draft', async () => {
     const h = harness(async () => { throw refusal('model.connection_required', '需要模型连接') })

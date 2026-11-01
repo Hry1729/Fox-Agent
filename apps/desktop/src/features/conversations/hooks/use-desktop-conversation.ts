@@ -1356,7 +1356,15 @@ export function useDesktopConversation(): DesktopConversationState {
         }
         return AGENT_BACKEND_REFUSED
       }
-      if (active) await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
+      if (active) {
+        // 发送没开始（startRun 抛错）：先撤掉乐观的用户消息和「等待开始」占位 Run，
+        // 否则合并刷新会把它们留下，消息流一直停在等待开始。Host 真写下的消息和 Run 由刷新带回。
+        const failedConversationId = active.conversation.id
+        setDetail((current) => current?.conversation.id === failedConversationId
+          ? withoutRefusedSend(current, pendingMessageId, previousLastRun)
+          : current)
+        await refreshSelectedConversation(failedConversationId).catch(() => undefined)
+      }
       await refreshList().catch(() => undefined)
       if (!preserveUndoError && selectionVersion === selectionVersionRef.current) {
         setError(details.message)
