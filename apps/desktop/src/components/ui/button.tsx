@@ -5,13 +5,13 @@ import { Slot } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "group/button inline-flex shrink-0 cursor-pointer items-center justify-center rounded-[var(--fox-radius-control)] border border-transparent bg-clip-padding font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:[outline:var(--fox-focus-outline)] focus-visible:[outline-offset:var(--fox-focus-offset)] focus-visible:ring-0 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+  "group/button inline-flex shrink-0 cursor-pointer items-center justify-center rounded-[var(--fox-radius-control)] border border-transparent bg-clip-padding font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:[outline:var(--fox-focus-outline)] focus-visible:[outline-offset:var(--fox-focus-offset)] focus-visible:ring-0 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:cursor-not-allowed disabled:!opacity-100 disabled:text-[var(--fox-muted)] aria-invalid:border-destructive aria-invalid:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        default: "bg-primary !text-primary-foreground hover:bg-primary/80",
+        default: "bg-primary !text-primary-foreground hover:bg-primary/80 disabled:!bg-[var(--fox-surface-strong)] disabled:!text-[var(--fox-muted)]",
         outline:
-          "border-border hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground dark:bg-input/30",
+          "border-border hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground dark:bg-input/30 disabled:!border-[var(--fox-border-strong)] disabled:!bg-transparent disabled:!text-[var(--fox-muted)]",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-accent aria-expanded:bg-accent aria-expanded:text-accent-foreground",
         ghost:
@@ -20,7 +20,7 @@ const buttonVariants = cva(
         // red fill read as pink across whole buttons; the red is now carried by the
         // border, the label and the icon, and only the interaction states add tint.
         destructive:
-          "border-destructive/35 bg-card text-destructive hover:border-destructive/55 hover:bg-destructive/10 focus-visible:border-destructive/60 focus-visible:ring-destructive/25 active:bg-destructive/15 dark:border-destructive/40 dark:bg-card dark:hover:border-destructive/65 dark:hover:bg-destructive/18 dark:focus-visible:border-destructive/70 dark:focus-visible:ring-destructive/35",
+          "border-destructive/35 bg-card text-destructive hover:border-destructive/55 hover:bg-destructive/10 focus-visible:border-destructive/60 focus-visible:ring-destructive/25 active:bg-destructive/15 dark:border-destructive/40 dark:bg-card dark:hover:border-destructive/65 dark:hover:bg-destructive/18 dark:focus-visible:border-destructive/70 dark:focus-visible:ring-destructive/35 disabled:!text-destructive",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

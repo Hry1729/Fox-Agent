@@ -55,8 +55,9 @@ describe('public destructive styling', () => {
     expect(tokens.some((token) => token.startsWith('focus-visible:ring-destructive/'))).toBe(true)
     expect(tokens.some((token) => token.startsWith('dark:hover:bg-destructive/'))).toBe(true)
     expect(tokens.some((token) => token.startsWith('dark:border-destructive/'))).toBe(true)
-    // Disabled feedback comes from the shared base, not from a red fill.
-    expect(tokens).toContain('disabled:opacity-50')
+    // 禁用不再用整颗按钮 50% 透明度（灰底灰字），危险色仍留在文字上，而不是红底。
+    expect(tokens).toContain('disabled:!opacity-100')
+    expect(tokens).toContain('disabled:!text-destructive')
   })
 
   test('the destructive button stays neutral while disabled', () => {

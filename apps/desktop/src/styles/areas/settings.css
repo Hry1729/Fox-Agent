@@ -117,3 +117,29 @@
   outline-offset: var(--fox-focus-offset);
   box-shadow: none;
 }
+
+/* 弹窗里的禁用按钮：降低饱和，文字仍可读。!important 用来压过按钮上的 !text。 */
+[data-slot='dialog-content'] [data-slot='button']:disabled,
+[data-slot='alert-dialog-content'] [data-slot='button']:disabled {
+  opacity: 1 !important;
+  color: var(--fox-muted) !important;
+}
+
+[data-slot='dialog-content'] [data-slot='button'][data-variant='default']:disabled,
+[data-slot='alert-dialog-content'] [data-slot='button'][data-variant='default']:disabled {
+  background: var(--fox-surface-strong) !important;
+  border-color: var(--fox-border-strong) !important;
+}
+
+[data-slot='dialog-content'] [data-slot='button'][data-variant='outline']:disabled,
+[data-slot='alert-dialog-content'] [data-slot='button'][data-variant='outline']:disabled {
+  background: transparent !important;
+  border-color: var(--fox-border-strong) !important;
+}
+
+[data-slot='dialog-content'] [data-slot='button'][data-variant='destructive']:disabled,
+[data-slot='alert-dialog-content'] [data-slot='button'][data-variant='destructive']:disabled {
+  color: var(--destructive) !important;
+  background: var(--fox-card) !important;
+  border-color: var(--fox-danger-border) !important;
+}
