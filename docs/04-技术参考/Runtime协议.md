@@ -12,7 +12,7 @@
 
 - 本文描述 Fox 自己的 Agent（`conversations.agent_backend = 'fox'`）使用的协议：Host 与 Runtime Sidecar 之间的 `fox-runtime-jsonl`，以及 `--kernel-worker` 一次性模型进程协议。
 - Kernel 执行循环已在 B1 删除；新 Run 和子 Run 一律冻结为 PiNative（`apps/desktop/src-tauri/src/database/repositories/run_control.rs` 的 `new_run_executor_route`）；未结束的历史 Kernel Run 启动时标为 interrupted / `executor_route_retired`；不认识的 route 报 `executor_route_unknown`。「失败时回退 Kernel」不存在。Host 每次 prompt 都下发 `executionProfile`（不是 Worker 生命周期内固定）。
-- 外部 Agent（Pi、Codex、dsh；目前退役，计划在阶段三恢复）**不使用本协议**：它们经 ACP（Agent Client Protocol）由 `crates/fox-agent-backend` 启动和驱动，Host 把 ACP 事件投影为 `run_events` 并通过 `fox://runtime-event` 推给前端。见 [Agent 运行时架构](../02-架构/Agent运行时架构.md) 与 `crates/fox-agent-backend/docs/sandbox.md`。
+- 外部 Agent（Pi、Codex、dsh；可选接入，需在「设置 → Agent」启用）**不使用本协议**：它们经 ACP（Agent Client Protocol）由 `crates/fox-agent-backend` 启动和驱动，Host 把 ACP 事件投影为 `run_events` 并通过 `fox://runtime-event` 推给前端。见 [Agent 运行时架构](../02-架构/Agent运行时架构.md) 与 `crates/fox-agent-backend/docs/sandbox.md`。
 - 工具目录的事实源是 `packages/fox-engine-protocol/schema.json` 的 `toolContracts`（`RUNTIME_TOOL_CATALOG`），当前 73 个工具，分类与审批见[权限参考 · 工具目录](权限参考.md#工具目录)。
 
 ## Envelope

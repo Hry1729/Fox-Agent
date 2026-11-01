@@ -55,7 +55,7 @@ type ApiResponse<T> =
 
 相比本文 2026-08-24 版的命令表，新增或改名的主要有：
 
-- 历史外部 Agent 命令（`agent_backend_*`，14 个）仍有注册，用于兼容设置、状态、凭据、权限和协议探测。命令存在不代表后端可执行；当前准入以 `BackendSwitch` 的退休判定为准。
+- 外部 Agent 命令（`agent_backend_*`）用于设置、状态、凭据探测与导入、Pi 配置来源、原生权限和协议探测。外部 Agent 是否能新建会话由用户的启用开关（前端）和 `host_routing.rs`（Host）共同决定。
 - 项目管理：`projects_set_pinned`、`projects_management_list`、`project_path_update`、`project_archive`、`project_root_open`、`project_delete`、`project_folder_open`、`project_file_action`。
 - 会话：归档 / 回收站列表、置顶、归档 / 取消归档、恢复、分叉、彻底删除，以及会话级权限 `conversation_permission_state` / `conversation_permission_update`。
 - Run：`run_rewind`、`child_run_cancel_by_user`、Steering（`run_steering_*`）、交付验收（`delivery_acceptance_*`）、受管文件版本与恢复、`plan_revision_resolve`、`goal_delete`、`goal_running_set`。
@@ -64,7 +64,7 @@ type ApiResponse<T> =
 - 本机资料库：删除资料库、目录、存储路径重置（`local_knowledge_storage_path_reset`）；本机向量模型与检索测试（`local_embedding_*`、`local_knowledge_index_start`、`local_knowledge_retrieval_*`）。
 - 文档活动命令改名为 `knowledge_document_reading_state_save`、`knowledge_document_bookmark_save/delete`、`knowledge_document_annotation_save/delete`。
 
-`conversation_create` 保留 `agentBackend` 参数，但当前只准入 `fox`；`pi` / `deepseek` / `codex` 返回 `agent_backend_retired`。历史行保持原值与冻结约束；`run_start`、`run_cancel`、`approval_resolve`、`run_resume` 对退休后端同样拒绝。旧 `externalPermissionMode`、HIDDEN 列表和管理员环境变量不能绕过退休判定。错误码见[错误与状态参考](错误与状态.md#外部-agent-后端)。
+`conversation_create` 的 `agentBackend` 参数可为 `fox` 或外部 Agent `pi` / `deepseek` / `codex`；前端只会传 Fox 或已在「设置 → Agent」启用的外部 Agent。会话创建后冻结，`run_start`、`run_cancel`、`approval_resolve`、`run_resume` 都按冻结值路由，错投返回 `agent_backend_misrouted`。错误码见[错误与状态参考](错误与状态.md)。
 
 `mcp_server_save` 的 `transport` 为 `stdio|streamable_http|openapi`。stdio 使用 `command/args/credentials`；HTTP 使用 `endpointUrl/credentials`；OpenAPI 使用 `definition` 和可选 `endpointUrl` 覆盖。`credentials` 只写入 Keyring，不在读取结果中回传。
 
@@ -96,10 +96,10 @@ A1 新增的权限命令：`conversation_permission_update` 接受四档模式�
 
 | 事件 | Payload | 用途 | 前端监听 |
 | --- | --- | --- | --- |
-| `fox://runtime-event` | `RuntimeEventNotification` | 文本、推理、工具、来源和 Run 状态；旧外部事件结构保留兼容，当前不启动退休驱动 | 是 |
+| `fox://runtime-event` | `RuntimeEventNotification` | 文本、推理、工具、来源和 Run 状态；外部 Agent 的 ACP 事件投影为同一结构 | 是 |
 | `fox://work-event` | `WorkEventRecord` | Goal、Task 和 Evidence 的实时投影；按 conversation sequence 去重 | 是 |
 | `fox://child-run-updated` | `ChildRunNotification` | 按 `childRunId` 更新 Child Run 的 queued/running/terminal 状态、预算使用和有限结果 | 是 |
-| `fox://approval-requested` | `ApprovalRecord` | 展示待审批交互；历史外部审批记录不恢复退休驱动的执行权 | 是 |
+| `fox://approval-requested` | `ApprovalRecord` | 展示待审批交互；外部 Agent 的审批请求也经此展示 | 是 |
 | `fox://approval-resolved` | `ApprovalRecord` | 同步审批终态 | 是 |
 | `fox://kernel-state-invalidated` | `KernelStateInvalidation { schemaVersion: 1 }` | Kernel 事实变化后通知前端重新读取 Kernel 快照（`kernel_state_publisher.rs`）；Kernel 执行循环删除后只剩初始一次失效通知 | 是 |
 | `fox://kernel-model-preview` | `KernelModelPreview` | 原 Kernel 模型请求的流式预览（`runtime_host/kernel_host.rs`）；Kernel 执行循环已删除，新 Run 不再发送 | 是 |
