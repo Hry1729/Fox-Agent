@@ -51,6 +51,15 @@
   border-radius: var(--fox-radius-pill);
 }
 
+/* 已创建会话的项目只展示，悬停不再变成可点的底。 */
+.fox-composer-project-trigger.fox-composer-project-static {
+  cursor: default;
+}
+
+.fox-composer-project-trigger.fox-composer-project-static:hover {
+  background: unset;
+}
+
 /* 历史单行的圆形添加按钮改走胶囊 token，形状不变。 */
 .fox-composer-wrap.is-history [aria-label='添加内容'] {
   border-radius: var(--fox-radius-pill);

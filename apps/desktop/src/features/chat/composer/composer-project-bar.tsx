@@ -5,15 +5,22 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import type { ProjectRecord } from '@/features/conversations/model/types'
 import { normalizeProjectRoot } from '../project-access-dialog-state'
 
-export function ComposerProjectBar({ projectRoot, projects, onSelect, onAdd }: {
+export function ComposerProjectBar({ projectRoot, projects, onSelect, onAdd, locked = false }: {
   projectRoot?: string | null
   projects: ProjectRecord[]
   onSelect: (project: ProjectRecord) => void
   onAdd: () => void
+  /** 会话已创建：只展示这个会话的项目，不能再换。 */
+  locked?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const selected = projects.find(project => normalizeProjectRoot(project.rootPath) === normalizeProjectRoot(projectRoot ?? ''))
   const name = selected?.name || projectRoot?.split(/[\\/]/).filter(Boolean).at(-1) || '选择项目'
+  if (locked) {
+    return <div className="fox-composer-project-bar">
+      <span className="fox-composer-project-trigger fox-composer-project-static" data-project-frozen="true" title="对话创建后不能更换项目" aria-label={`当前项目：${name}`}><FolderOpen size={16} /><span>{name}</span></span>
+    </div>
+  }
   return <div className="fox-composer-project-bar">
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild><button type="button" className="fox-composer-project-trigger" title={projectRoot ?? '选择已有项目或添加项目'}><FolderOpen size={16} /><span>{name}</span><ChevronDown size={13} /></button></PopoverTrigger>

@@ -4900,8 +4900,8 @@ img[src='/avatars/fox-assistant.png'] {
   align-items: center;
   justify-content: space-between;
   gap: var(--fox-space-m);
-  min-height: 32px;
-  padding: 2px 2px 0;
+  min-height: var(--fox-control-md);
+  padding: var(--fox-space-xs) 0 var(--fox-space-l);
 }
 
 .fox-composer-draft-footer .fox-composer-project-bar {
