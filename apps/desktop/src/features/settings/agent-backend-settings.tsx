@@ -11,7 +11,7 @@
 //
 // Saved by the Host (`agent_backend_preferences_save`, `app_settings`); a
 // change is broadcast so the open draft re-probes its login at once.
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -129,7 +129,7 @@ function NativePermissionDefaults({ client, enabled }: { client: AgentBackendSet
 export type ExternalAgentState = 'checking' | 'detected' | 'not_installed' | 'not_configured'
 
 export const EXTERNAL_AGENT_STATE_LABELS: Record<ExternalAgentState, string> = {
-  checking: '正在检测…',
+  checking: '检测中',
   detected: '已检测到',
   not_installed: '未安装',
   not_configured: '未配置',
@@ -152,32 +152,71 @@ export function externalAgentState(probe: CredentialProbe | null | undefined, co
 
 interface ExternalAgentProbe { probe: CredentialProbe | null; connection: AgentModelConnection | null; failed: boolean }
 
+/**
+ * 13.37: one Agent's status, in the Host's own order. The model connection
+ * comes FIRST: it tests the address when needed and writes the Fox login
+ * into the Agent's private HOME (`prepare_model_login`); the login probe read
+ * before that step reports the HOME as not configured. Reading both at once
+ * (the 1103 version) showed 「未配置」 until the next visit of the page.
+ */
+export async function probeExternalAgent(client: Pick<AgentBackendSettingsClient, 'agentBackendCredentials' | 'agentBackendModelConnection'>, backend: AgentBackendId): Promise<ExternalAgentProbe> {
+  const credentials = client.agentBackendCredentials
+  if (!credentials) return { probe: null, connection: null, failed: true }
+  const target: AgentBackendTarget = { backend, fullAccess: false }
+  const connection = client.agentBackendModelConnection ? await client.agentBackendModelConnection({ target }).catch(() => null) : null
+  try {
+    return { probe: await credentials(target), connection, failed: false }
+  } catch {
+    return { probe: null, connection, failed: true }
+  }
+}
+
 /** The external Agents with an enable switch, their status and Pi's configuration source. */
 function ExternalAgentRows({ client, enabled, onOpenModelSettings }: { client: AgentBackendSettingsClient; enabled: readonly string[]; onOpenModelSettings?: () => void }) {
   const [probes, setProbes] = useState<Partial<Record<string, ExternalAgentProbe>>>({})
-  const [tick, setTick] = useState(0)
+  const [checking, setChecking] = useState<Partial<Record<string, boolean>>>({})
   const [sourceBusy, setSourceBusy] = useState(false)
   const [sourceError, setSourceError] = useState<string | null>(null)
-  useEffect(() => {
-    const refresh = () => setTick((value) => value + 1)
-    window.addEventListener('fox:model-service-changed', refresh)
-    return () => window.removeEventListener('fox:model-service-changed', refresh)
-  }, [])
-  useEffect(() => {
-    const credentials = client.agentBackendCredentials
-    if (!credentials) return
-    let cancelled = false
-    for (const backend of EXTERNAL_AGENT_IDS) {
-      const target: AgentBackendTarget = { backend, fullAccess: false }
-      Promise.all([
-        credentials(target),
-        client.agentBackendModelConnection ? client.agentBackendModelConnection({ target }).catch(() => null) : Promise.resolve(null),
-      ])
-        .then(([probe, connection]) => { if (!cancelled) setProbes((current) => ({ ...current, [backend]: { probe, connection, failed: false } })) })
-        .catch(() => { if (!cancelled) setProbes((current) => ({ ...current, [backend]: { probe: null, connection: null, failed: true } })) })
+  // Only the newest probe of each Agent may write its row.
+  const generation = useRef<Record<string, number>>({})
+
+  const inFlight = useRef<Record<string, boolean>>({})
+
+  /** `quiet`: a focus / visibility refresh, skipped for an Agent already being checked. */
+  const recheck = useCallback((backends: readonly AgentBackendId[], quiet = false) => {
+    if (!client.agentBackendCredentials) return
+    for (const backend of backends) {
+      if (quiet && inFlight.current[backend]) continue
+      inFlight.current[backend] = true
+      const id = (generation.current[backend] ?? 0) + 1
+      generation.current[backend] = id
+      setChecking((current) => ({ ...current, [backend]: true }))
+      void probeExternalAgent(client, backend).then((result) => {
+        if (generation.current[backend] !== id) return
+        inFlight.current[backend] = false
+        setProbes((current) => ({ ...current, [backend]: result }))
+        setChecking((current) => ({ ...current, [backend]: false }))
+      })
     }
-    return () => { cancelled = true }
-  }, [client, tick])
+  }, [client])
+
+  // Every row on first show; then again whenever 模型服务 changes, and when
+  // the window or the page comes back into view (the user configured the
+  // Agent or the model service somewhere else in the meantime).
+  useEffect(() => {
+    recheck(EXTERNAL_AGENT_IDS)
+    const all = () => recheck(EXTERNAL_AGENT_IDS)
+    const regained = () => recheck(EXTERNAL_AGENT_IDS, true)
+    const visible = () => { if (document.visibilityState === 'visible') regained() }
+    window.addEventListener('fox:model-service-changed', all)
+    window.addEventListener('focus', regained)
+    document.addEventListener('visibilitychange', visible)
+    return () => {
+      window.removeEventListener('fox:model-service-changed', all)
+      window.removeEventListener('focus', regained)
+      document.removeEventListener('visibilitychange', visible)
+    }
+  }, [recheck])
   if (!client.agentBackendCredentials) return null
 
   const piSource = probes.pi?.probe?.source ?? null
@@ -195,7 +234,7 @@ function ExternalAgentRows({ client, enabled, onOpenModelSettings }: { client: A
         const items = await client.agentBackendImportCandidates(target)
         await client.agentBackendImportCredentials(target, items.map((item) => item.id), true, true, true)
       }
-      setTick((value) => value + 1)
+      recheck(['pi'])
     } catch {
       setSourceError(next === 'fox' ? '没能切换到 Fox 模型服务，请重试。' : '没能切换到本机 ~/.pi，请确认本机已有 Pi 的配置后重试。')
     } finally {
@@ -207,7 +246,7 @@ function ExternalAgentRows({ client, enabled, onOpenModelSettings }: { client: A
     <>
       {EXTERNAL_AGENT_IDS.map((backend) => {
         const entry = probes[backend]
-        const state = externalAgentState(entry?.probe, entry?.connection, entry?.failed)
+        const state: ExternalAgentState = checking[backend] ? 'checking' : externalAgentState(entry?.probe, entry?.connection, entry?.failed)
         const label = EXTERNAL_AGENT_SETTING_LABELS[backend]
         const on = isAgentEnabled(backend, enabled)
         return (
@@ -218,7 +257,11 @@ function ExternalAgentRows({ client, enabled, onOpenModelSettings }: { client: A
             description={<span className="fox-external-agent-state" data-external-agent-state={state}><i className={state === 'detected' ? 'fox-settings-dot is-ok' : 'fox-settings-dot is-empty'} aria-hidden="true" />{EXTERNAL_AGENT_STATE_LABELS[state]}</span>}
           >
             {onOpenModelSettings && <Button type="button" variant="ghost" size="sm" onClick={onOpenModelSettings}>去模型服务配置</Button>}
-            <Switch checked={on} aria-label={`启用 ${label}`} data-external-agent={backend} onCheckedChange={(value) => setExternalAgentEnabled(backend, value)} />
+            <Switch checked={on} aria-label={`启用 ${label}`} data-external-agent={backend} onCheckedChange={(value) => {
+              setExternalAgentEnabled(backend, value)
+              // Turning an Agent on checks it at once (「检测中」 until the Host answers).
+              if (value) recheck([backend])
+            }} />
           </SettingsRow>
         )
       })}

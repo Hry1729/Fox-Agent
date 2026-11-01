@@ -37,9 +37,10 @@ const HINTS: Record<string, { action: AgentBackendFailureAction; detail: string 
   agent_backend_attachments_unsupported: { action: 'retry', detail: '这个 Agent 不能带附件发送：去掉附件后再发。' },
   agent_backend_turn_busy: { action: 'retry', detail: '上一轮还没结束：等它完成或先取消，再发送。' },
   'run.create_failed': { action: 'retry', detail: '消息没有发出去，草稿已保留。' },
-  'model.connection_required': { action: 'login', detail: '还没有可用的模型连接：先到「设置 → 模型服务」配置并测试一个供应商，再发送。' },
+  // 13.37: the Host's own sentences (FOX_MODEL_SERVICE_MISSING / login_gap_failure), word for word.
+  'model.connection_required': { action: 'login', detail: '还没有配置模型服务：请先到「设置 → 模型服务」添加并测试一个供应商，再发送。' },
   'model.connection_failed': { action: 'login', detail: '模型连接没有通过：请到模型服务里检查供应商和地址后再发送。' },
-  'model.connection_unverified': { action: 'login', detail: '模型服务的配置改过了，当前地址还没有通过连接测试：请到模型服务重新测试连接，通过后再发送。' },
+  'model.connection_unverified': { action: 'login', detail: '模型服务的配置改过了，当前地址还没有通过连接测试：请到「设置 → 模型服务」重新测试连接，通过后再发送。' },
   'model.connection_choose_address': { action: 'login', detail: '当前供应商有多个地址都能用于这个 Agent：到「设置 → 模型服务」，在要用的地址上打开「用作默认协议」后再发送。' },
   agent_backend_exited_on_start: { action: 'login', detail: 'Agent 启动后立即退出，多数是未登录或运行时损坏：先完成登录；仍失败请重新安装外部运行时。' },
   agent_backend_version_mismatch: { action: 'upgrade', detail: '已安装的 Agent 版本与本版 Fox 锁定的不一致：升级（或重新安装）Fox 外部运行时。' },

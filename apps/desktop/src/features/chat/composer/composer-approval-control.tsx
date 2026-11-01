@@ -67,8 +67,9 @@ function ApprovalMenu({ backend, rows, current, disabled, tooltip, note, onPick 
   onPick: (value: string) => void
 }) {
   const active = rows.find((row) => row.value === current) ?? null
+  // 13.37 B4-6: non-modal like the「+」menu next to it (see the report).
   return (
-    <PromptInputActionMenu>
+    <PromptInputActionMenu modal={false}>
       <PromptInputActionMenuTrigger className="fox-execution-control" data-backend={backend} data-current={current} data-pending={note ? 'true' : undefined} disabled={disabled} tooltip={tooltip} aria-label={`审批模式：${active?.label ?? current}${note ? `（${note}）` : ''}`}>
         {active ? rowIcon(active, backend, 14) : <CircleHelp size={14} />}
         <span>{active?.shortLabel ?? '审批'}</span>

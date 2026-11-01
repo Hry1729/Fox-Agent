@@ -51,13 +51,62 @@ fn cache_key(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> Strin
     format!("model.protocol.{}.{}.{}", provider.id, profile.api_type, profile.id)
 }
 
+/// The pre-13.38 cache value: valid only until the next save of the provider
+/// (any save, a passing connection test too, moved `updated_at`). Still
+/// honoured so an upgrade does not ask for every address to be tested again.
 fn cache_value(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> String {
-    // The revision invalidates validation on credential edits as well as address/model edits.
     crate::canonical_json::to_string(&(profile.base_url.as_str(), profile.model_id.as_str(), provider.updated_at)).expect("connection identity serializes")
 }
 
+/// The Key an address is used with: its own Key, or the provider's.
+fn credential_ref(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> String {
+    if profile.separate_credential { provider_protocol::credential_id(&provider.id, &profile.id) } else { provider.base_url.clone() }
+}
+
+fn credential_revision_key(credential: &str) -> String {
+    format!("model.credential_revision.{credential}")
+}
+
+/// Changes whenever the Key behind `credential` is written or deleted, so a
+/// connection test of the old Key no longer counts.
+fn credential_revision(database: &Database, credential: &str) -> String {
+    database.app_setting(&credential_revision_key(credential)).ok().flatten().unwrap_or_else(|| "0".to_owned())
+}
+
+/// 13.38: a Key behind `credential` was written or deleted.
+pub fn bump_credential_revision(database: &Database, credential: &str) -> Result<(), String> {
+    database.set_app_setting(&credential_revision_key(credential), &uuid::Uuid::new_v4().to_string())
+}
+
+/// What a passing connection test proves: this protocol, at this address,
+/// with this model, using this saved Key (13.37 B3-2).
+fn verification_key(api_type: &str, base_url: &str, model_id: &str, credential: &str) -> String {
+    format!("model.verified.{}", crate::canonical_json::to_string(&(api_type, base_url, model_id, credential)).expect("connection identity serializes"))
+}
+
+/// Remember a passing connection test of exactly this connection. Unlike the
+/// pre-13.38 cache it survives a save of the provider that leaves the
+/// address, the model and the Key unchanged; changing any of them asks again.
+pub fn record_verified_connection(database: &Database, api_type: &str, base_url: &str, model_id: &str, credential: &str) -> Result<(), String> {
+    database.set_app_setting(&verification_key(api_type, base_url, model_id, credential), &credential_revision(database, credential))
+}
+
 fn verified(database: &Database, provider: &ModelProviderRecord, profile: &ProtocolProfile) -> bool {
-    trusted(profile) || database.app_setting(&cache_key(provider, profile)).ok().flatten().as_deref() == Some(cache_value(provider, profile).as_str())
+    if trusted(profile) { return true; }
+    let credential = credential_ref(provider, profile);
+    let key = verification_key(&profile.api_type, &profile.base_url, &profile.model_id, &credential);
+    if database.app_setting(&key).ok().flatten().as_deref() == Some(credential_revision(database, &credential).as_str()) { return true; }
+    database.app_setting(&cache_key(provider, profile)).ok().flatten().as_deref() == Some(cache_value(provider, profile).as_str())
+}
+
+/// The connection a passing `model_service_test` checked. `credential` is the
+/// saved Key it used (`None`: a Key typed into the form that is not saved
+/// yet, which proves nothing about what a send will use).
+pub fn record_connection_test(database: &Database, api_type: &str, base_url: &str, model_id: &str, credential: Option<&str>) -> Result<(), String> {
+    let Some(credential) = credential else { return Ok(()) };
+    let model_id = crate::model_service::normalize_model_id(base_url, model_id);
+    if base_url.trim().is_empty() || model_id.trim().is_empty() { return Ok(()); }
+    record_verified_connection(database, api_type, base_url, &model_id, credential)
 }
 
 fn login(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> Option<UnifiedLogin> {
@@ -162,7 +211,7 @@ async fn resolve(state: &AppState, external: &crate::external_backend::ExternalB
         // A late probe cannot validate a supplier that changed while the request was running.
         let latest = current(&state.database)?.ok_or("当前供应商已清空")?;
         if latest.id != provider.id || latest.updated_at != provider.updated_at { return Err("供应商配置已改变，请重试".into()); }
-        state.database.set_app_setting(&cache_key(&provider, profile), &cache_value(&provider, profile))?;
+        record_verified_connection(&state.database, &profile.api_type, &profile.base_url, &profile.model_id, &credential_ref(&provider, profile))?;
     }
     external.prepare_model_login(&request.target)?;
     view.status = "ready".into();
@@ -259,6 +308,44 @@ mod tests {
         profile.model_id = "two".into(); assert!(!verified(&db, &p, &profile));
         profile.model_id = "one".into(); profile.base_url.push_str("/changed"); assert!(!verified(&db, &p, &profile));
         profile.base_url = "https://example.com/v1".into(); p.updated_at += 1; assert!(!verified(&db, &p, &profile));
+        drop(db); let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn a_passing_test_of_the_saved_connection_survives_a_resave_but_not_a_key_change() {
+        // 13.37 B3-2: 「验证此协议」 passed, the user saved the provider again,
+        // and the next dsh send still said the connection needed a test.
+        let path = std::env::temp_dir().join(format!("fox-protocol-verified-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(path.clone()).unwrap();
+        let mut p = provider();
+        p.protocol_profiles = vec![endpoint("messages", "anthropic-messages")];
+        let saved = db.save_model_provider(&p).unwrap();
+        let profile = profiles(&saved, AgentBackend::Deepseek).remove(0);
+        assert_eq!(profile.model_id, "default-model");
+        assert!(!verified(&db, &saved, &profile));
+        // The protocol test used the provider's saved Key (credential = its base URL).
+        record_connection_test(&db, "anthropic-messages", "https://example.com/v1", "default-model", Some(saved.base_url.as_str())).unwrap();
+        assert!(verified(&db, &saved, &profile));
+        // Saving again (no Key, address or model change) keeps it.
+        let resaved = db.save_model_provider(&saved).unwrap();
+        let profile = profiles(&resaved, AgentBackend::Deepseek).remove(0);
+        assert!(verified(&db, &resaved, &profile));
+        // Another model, another address: not this test.
+        let mut other = profile.clone(); other.model_id = "other-model".into(); assert!(!verified(&db, &resaved, &other));
+        let mut moved = profile.clone(); moved.base_url = "https://example.com/v2".into(); assert!(!verified(&db, &resaved, &moved));
+        // A new Key for the provider: the old test no longer counts.
+        bump_credential_revision(&db, &resaved.base_url).unwrap();
+        assert!(!verified(&db, &resaved, &profile));
+        // A typed Key that is not saved proves nothing.
+        record_connection_test(&db, "anthropic-messages", "https://example.com/v1", "default-model", None).unwrap();
+        assert!(!verified(&db, &resaved, &profile));
+        // A separate protocol Key has its own revision.
+        let mut separate = profile.clone(); separate.separate_credential = true;
+        let credential = provider_protocol::credential_id(&resaved.id, &separate.id);
+        record_connection_test(&db, "anthropic-messages", "https://example.com/v1", "default-model", Some(credential.as_str())).unwrap();
+        assert!(verified(&db, &resaved, &separate));
+        assert!(!verified(&db, &resaved, &profile));
+        bump_credential_revision(&db, &credential).unwrap();
+        assert!(!verified(&db, &resaved, &separate));
         drop(db); let _ = std::fs::remove_file(path);
     }
     #[test]

@@ -6222,11 +6222,20 @@ pub fn model_provider_save(
         Ok(saved) => saved,
         Err(error) => return credential_save_error(error),
     };
+    // A changed Key invalidates every connection test made with the old one.
+    let mut changed_keys: Vec<String> = key_plan.before_record.iter().map(|(id, _)| id.clone()).chain(key_plan.after_record.iter().cloned()).collect();
     for old in &old_profiles {
         if old.separate_credential && !saved.protocol_profiles.iter().any(|p| p.id == old.id && p.separate_credential) {
-            if let Err(error) = clear_api_key(&fox_agent_backend::provider_protocol::credential_id(&saved.id, &old.id)) {
+            let credential = fox_agent_backend::provider_protocol::credential_id(&saved.id, &old.id);
+            if let Err(error) = clear_api_key(&credential) {
                 return ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但旧协议凭据清理失败：{error}"), true);
             }
+            changed_keys.push(credential);
+        }
+    }
+    for credential in &changed_keys {
+        if let Err(error) = crate::external_model::bump_credential_revision(&state.database, credential) {
+            return storage_error(format!("配置已保存，但连接测试记录没有更新：{error}"));
         }
     }
     let cleanup = request.clear_api_key || saved.is_default;
@@ -6327,6 +6336,12 @@ pub fn model_provider_delete(
         Ok(outcome) => outcome,
         Err(error) => return storage_error(error),
     };
+    if outcome.record_deleted {
+        // A provider created later at the same address must be tested again.
+        for credential in &key_ids {
+            let _ = crate::external_model::bump_credential_revision(&state.database, credential);
+        }
+    }
     if let Some(audit) = outcome.audit(&provider.id) {
         if audit.warning {
             eprintln!("fox.model provider_key_delete_failed keys_left={}", outcome.key_failures.len());
@@ -6413,6 +6428,9 @@ pub fn model_service_save(
         || state.database.save_model_service(&record),
     ) {
         Ok(mut service) => {
+            for credential in key_plan.before_record.iter().map(|(id, _)| id).chain(key_plan.after_record.iter()) {
+                let _ = crate::external_model::bump_credential_revision(&state.database, credential);
+            }
             if request.clear_api_key {
                 warn_managed_model_cleanup(&external, "model_service_save");
             }
@@ -6450,6 +6468,7 @@ pub async fn model_service_test(
     request: TestModelServiceRequest,
 ) -> Result<ApiResponse<ModelConnectionTest>, String> {
     let is_profile_test = request.credential_provider_id.is_some() || request.api_type.as_deref() == Some("openai-responses");
+    // The saved Key this test may use: (its id, its value).
     let profile_credential = request.credential_provider_id.as_ref().and_then(|id| {
         let provider = state.database.list_model_providers().ok()?.into_iter().find(|p| &p.id == id)?;
         let credential = match request.credential_profile_id.as_ref() {
@@ -6459,19 +6478,23 @@ pub async fn model_service_test(
             }
             None => provider.base_url,
         };
-        get_api_key(&credential)
+        get_api_key(&credential).map(|key| (credential, key))
     });
+    // 13.37 B3-2: the saved Key the test really used, if any. A passing test
+    // of exactly that connection is remembered, so the next send of an
+    // external Agent no longer says 「模型连接需要重新测试」.
+    let mut tested_credential: Option<String> = None;
     let (base_url, api_key, api_type, model_id) = match request.base_url {
         Some(base_url) => {
             let normalized = match normalize_model_base_url(&base_url) {
                 Ok(url) => url,
                 Err(error) => return Ok(ApiResponse::failure("model.invalid_url", error, false)),
             };
-            let key = request
-                .api_key
-                .filter(|value| !value.trim().is_empty())
-                .or(profile_credential)
-                .or_else(|| if request.credential_provider_id.is_none() && request.credential_profile_id.is_none() { get_api_key(&normalized) } else { None });
+            let saved = profile_credential.or_else(|| if request.credential_provider_id.is_none() && request.credential_profile_id.is_none() { get_api_key(&normalized).map(|key| (normalized.clone(), key)) } else { None });
+            let typed = request.api_key.filter(|value| !value.trim().is_empty());
+            // A typed Key counts only when it is the saved one.
+            tested_credential = saved.as_ref().filter(|(_, key)| typed.as_deref().is_none_or(|typed| typed.trim() == key.trim())).map(|(credential, _)| credential.clone());
+            let key = typed.or(saved.map(|(_, key)| key));
             (
                 normalized,
                 key,
@@ -6507,6 +6530,9 @@ pub async fn model_service_test(
     match result {
         Ok(result) => {
             if !is_profile_test { let _ = state.database.record_model_connection_test(&result); }
+            if let Err(error) = crate::external_model::record_connection_test(&state.database, &api_type, &base_url, &model_id, tested_credential.as_deref()) {
+                eprintln!("fox.model verification_record_failed error={error:?}");
+            }
             Ok(ApiResponse::success(result))
         }
         Err(error) => {

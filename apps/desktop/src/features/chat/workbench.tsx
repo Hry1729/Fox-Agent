@@ -44,7 +44,7 @@ import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
 import { File, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { MemoizedComposer, composerUsesNewConversation, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
+import { MemoizedComposer, composerUsesNewConversation, conversationHasModelReply, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
 import { ComposerEntryContext } from './composer/composer-entry-context'
 import { ConversationManagementDialogs, KnowledgeBindingDialog, ProjectDeleteDialog } from './conversation-dialogs'
 import { type AssistantMode, CONVERSATION_FORK_EVENT, type ChatState, type ChildAgentSelection, ComposerRuntimeContext, type ComposerRuntimeContextValue, EMPTY_CONVERSATION_ATTACHMENTS, EMPTY_CONVERSATION_MESSAGES, EMPTY_RUNTIME_APPROVALS, type OpenFileTab, type RightMode, TimelineRuntimeContext, type TimelineRuntimeContextValue, layoutStorage, readDefaultProjectPermission, readStoredBoolean, readStoredNumber, readStoredRightMode, readStoredRightTabs, recordRegionRender, useStableCallback } from './fox-shared'
@@ -1285,16 +1285,40 @@ export function Workbench() {
   const handleComposerProject = useStableCallback(() => {
     void addProject()
   })
+  // 13.37 (B2-5p): a selected conversation that has no reply yet keeps the
+  // new-conversation tray, and its project and Agent can still be changed
+  // (UI 1103 had locked them). A change turns it back into a draft with that
+  // choice; once the model has replied, both are fixed.
+  const unrepliedSelection = (): boolean => Boolean(desktopConversation.selectedConversationId)
+    && desktopConversation.detail?.conversation.id === desktopConversation.selectedConversationId
+    && !conversationHasModelReply(desktopConversation.detail)
   const handleEntryProjectSelect = useStableCallback((project: ProjectRecord) => {
-    if (desktopConversation.selectedConversationId) return
-    desktopConversation.selectProject(canonicalProjectRoot(project.rootPath), project.permissionMode)
+    const root = canonicalProjectRoot(project.rootPath)
+    if (desktopConversation.selectedConversationId) {
+      if (unrepliedSelection()) void desktopConversation.detachUnrepliedConversation({ projectRoot: root, permissionMode: project.permissionMode })
+      return
+    }
+    desktopConversation.selectProject(root, project.permissionMode)
   })
   const handleEntryProjectAdd = useStableCallback(async () => {
-    if (desktopConversation.selectedConversationId) return
+    if (desktopConversation.selectedConversationId && !unrepliedSelection()) return
     const selected = await pickProjectFolder()
     if (!selected) return
     const selection = selectProjectRoot(selected, projects, readDefaultProjectPermission())
+    if (desktopConversation.selectedConversationId) {
+      if (unrepliedSelection()) void desktopConversation.detachUnrepliedConversation({ projectRoot: selection.path, permissionMode: selection.permissionMode })
+      return
+    }
     desktopConversation.selectProject(selection.path, selection.permissionMode)
+  })
+  const handleEntryAgentSelect = useStableCallback((backend: AgentBackendId) => {
+    if (desktopConversation.selectedConversationId) {
+      if (unrepliedSelection() && desktopConversation.detail && conversationAgentBackend(desktopConversation.detail.conversation) !== backend) {
+        void desktopConversation.detachUnrepliedConversation({ backend })
+      }
+      return
+    }
+    desktopConversation.setDraftAgentBackend(backend)
   })
   const handleViewDefaultExpert = useStableCallback(() => {
     if (activeAgent) setExpertDetailId(activeAgent.id)
@@ -1469,7 +1493,7 @@ export function Workbench() {
   // legacy composer talks to `useDesktopConversation()` directly, and the
   // assistant-ui thread subscribes to the same store, so sends from this one
   // instance stream into whichever message list is mounted.
-  const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings, draftAgentBackend: desktopConversation.draftAgentBackend, agentBackendStatus: desktopConversation.agentBackendStatus, onSelectAgentBackend: desktopConversation.setDraftAgentBackend }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings, desktopConversation.draftAgentBackend, desktopConversation.agentBackendStatus, desktopConversation.setDraftAgentBackend])
+  const composerEntry = useMemo(() => ({ projects, defaultExpert: activeAgent, onSelectProject: handleEntryProjectSelect, onAddProject: handleEntryProjectAdd, onViewDefaultExpert: handleViewDefaultExpert, onOpenModelSettings: handleOpenComposerModelSettings, draftAgentBackend: desktopConversation.draftAgentBackend, agentBackendStatus: desktopConversation.agentBackendStatus, onSelectAgentBackend: handleEntryAgentSelect }), [projects, activeAgent, handleEntryProjectSelect, handleEntryProjectAdd, handleViewDefaultExpert, handleOpenComposerModelSettings, desktopConversation.draftAgentBackend, desktopConversation.agentBackendStatus, handleEntryAgentSelect])
   // Plan v0.3.1 5.4 / 6.6: pick the backend for a new conversation, or show the
   // open conversation's frozen backend as locked. Only in the desktop runtime.
   // Fix 1 (Windows acceptance of 3a82f5d): the bar is rendered INSIDE the
@@ -1585,8 +1609,9 @@ export function Workbench() {
     selectedConversationId: desktopConversation.selectedConversationId,
     detail: desktopConversation.detail,
   })
-  // 会话已经创建则项目和 Agent 已冻结；未选中（含发送失败后恢复的草稿）仍可改。
-  const composerEntryFrozen = Boolean(desktopConversation.enabled && desktopConversation.selectedConversationId)
+  // 13.37：模型开始回复后项目和 Agent 才冻结；新对话、发送失败后恢复的草稿、
+  // 已选中但还没回复过的会话都能改（改动会把它变回草稿，见 handleEntryProjectSelect）。
+  const composerEntryFrozen = Boolean(desktopConversation.enabled && desktopConversation.selectedConversationId && !composerNewConversation)
   const composerPanel = (
     <ComposerEntryContext.Provider value={composerEntry}>
     <Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer topSlot={agentBackendBar} approvalControl={approvalControl} foxApprovalCatalog={foxApprovalCatalog} inputLockedReason={composerInputLockedReason} initialAttachments={composerInitialAttachments} onInitialAttachmentsConsumed={handleInitialAttachmentsConsumed} resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} newConversation={composerNewConversation} entryFrozen={composerEntryFrozen} boundAgentBackend={lockedAgentBackend} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={conversationAccessMode(desktopConversation.detail?.conversation) ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? activeRuntimeApprovals : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopBusy} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} sendFailureReason={desktopConversation.lastSendFailureReason} noticeBackend={lockedAgentBackend ?? shownDraftBackend} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler>

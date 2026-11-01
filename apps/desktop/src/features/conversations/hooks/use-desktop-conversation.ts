@@ -151,6 +151,12 @@ interface DesktopConversationState {
   restoreConversation: (conversationId: string) => Promise<boolean>
   deleteConversation: (conversationId: string) => Promise<ConversationDeleteResult>
   purgeConversation: (conversationId: string) => Promise<ConversationDeleteResult>
+  /**
+   * 13.37: the selected conversation has no reply yet; changing its project
+   * or Agent turns it back into a draft with that change (the Agent is fixed
+   * once a conversation exists). An empty one (no message, no Run) is removed.
+   */
+  detachUnrepliedConversation: (change: { projectRoot?: string | null; permissionMode?: ProjectRecord['permissionMode'] | null; backend?: AgentBackendId }) => Promise<boolean>
   /** Reset the model context (new Pi session); the chat itself is kept. */
   resetConversationContext: (conversationId: string) => Promise<{ ok: boolean; error: string | null }>
   forkConversation: (messageId: string, title?: string) => Promise<ConversationSummary | null>
@@ -732,6 +738,37 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [refreshLifecycleLists])
 
+  const detachUnrepliedConversation = useCallback(async (change: { projectRoot?: string | null; permissionMode?: ProjectRecord['permissionMode'] | null; backend?: AgentBackendId }) => {
+    const current = detail
+    if (!current || current.conversation.id !== activeConversationIdRef.current || runIsActive(current)) return false
+    const conversationId = current.conversation.id
+    const draft = currentDraft()
+    const backend = change.backend ?? conversationAgentBackend(current.conversation)
+    applyDraft({
+      ...draft,
+      projectRoot: change.projectRoot !== undefined ? change.projectRoot : draft.projectRoot,
+      permissionMode: change.permissionMode !== undefined ? change.permissionMode : draft.permissionMode,
+    })
+    clearSelection(true)
+    setDraftAgentBackend(backend)
+    setDraftNativePermission(null)
+    setError(null)
+    setErrorDetails(null)
+    const persistedRunId = current.lastRun?.id ?? ''
+    const empty = current.messages.length === 0 && (!persistedRunId || persistedRunId.startsWith('pending-run-'))
+    if (empty) {
+      try {
+        // Host 的永久删除要求先移入回收站。
+        await desktopClient.deleteConversation(conversationId)
+        await desktopClient.purgeConversation(conversationId)
+      } catch {
+        // The empty conversation stays in the list; the draft is already the user's.
+      }
+      await refreshLifecycleLists().catch(() => undefined)
+    }
+    return true
+  }, [applyDraft, clearSelection, currentDraft, detail, refreshLifecycleLists, setDraftAgentBackend, setDraftNativePermission])
+
   const resetConversationContext = useCallback(async (conversationId: string) => {
     try {
       // A reset is refused while a Run is active; the Host returns a stable
@@ -1114,7 +1151,10 @@ export function useDesktopConversation(): DesktopConversationState {
       const lockedBackend = conversationAgentBackend(active.conversation)
       const lockedReason = agentBackendInputLockedReason(lockedBackend, agentBackendStatusRef.current)
       if (lockedReason) {
-        setAgentBackendRefusal({ conversationId: active.conversation.id, code: agentBackendInputLockedCode(lockedBackend, agentBackendStatusRef.current), message: lockedReason })
+        const lockedCode = agentBackendInputLockedCode(lockedBackend, agentBackendStatusRef.current)
+        setAgentBackendRefusal({ conversationId: active.conversation.id, code: lockedCode, message: lockedReason })
+        // 13.37: every refused send carries its reason, so the composer's notice is never a stale one.
+        lastSendFailureRef.current = `${lockedCode}: ${lockedReason}`
         return AGENT_BACKEND_REFUSED
       }
       // UI 1103: the user turned this conversation's Agent off in 设置 → Agent.
@@ -1855,12 +1895,13 @@ export function useDesktopConversation(): DesktopConversationState {
     restoreConversation,
     deleteConversation,
     purgeConversation,
+    detachUnrepliedConversation,
     resetConversationContext,
     forkConversation,
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [agentBackendStatus, agentBackendPreferences, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, draftExternalPermissionMode, setDraftExternalPermissionMode, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, lastSendFailureReason, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, resetConversationContext, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setDraftNativePermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [agentBackendStatus, agentBackendPreferences, agentBackendRefusal, draftAgentBackend, setDraftAgentBackend, draftExternalPermissionMode, setDraftExternalPermissionMode, currentDraft, restoreDraft, changeExpert, acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationDraftWithKnowledge, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detachUnrepliedConversation, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot, error, errorDetails, lastSendFailureReason, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, resetConversationContext, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setDraftNativePermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

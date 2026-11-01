@@ -24,7 +24,7 @@ const NOTIFICATION_REFRESH_RUNTIME_EVENTS = new Set([
 ])
 
 export interface InAppNotificationEventDetail {
-  notification: Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'>
+  notification: Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'> & Partial<Pick<AppNotificationRecord, 'workspaceView' | 'entityId' | 'mergeKey'>>
   soundId?: NotificationSoundId
   forceSound?: boolean
 }
@@ -38,6 +38,34 @@ export interface AppNotificationOptions {
   entityId?: string
   status?: string
   localFile?: { path: string; canOpenDirectly: boolean }
+  /**
+   * Show the toast now, from the page, instead of waiting for the next
+   * notification-center refresh to spot the stored record (13.37). The stored
+   * copy is still written, and that refresh does not toast it a second time.
+   */
+  toastNow?: boolean
+}
+
+const DIRECT_TOAST_WINDOW_MS = 15_000
+const directToasts = new Map<string, number>()
+
+/** A toast shown directly for this merge key a moment ago (its stored copy is not toasted again). */
+export function directToastRecently(mergeKey: string | null | undefined, now = Date.now()): boolean {
+  if (!mergeKey) return false
+  const at = directToasts.get(mergeKey)
+  return at !== undefined && now - at < DIRECT_TOAST_WINDOW_MS
+}
+
+function showDirectToast(kind: AppNotificationRecord['kind'], title: string, body: string, options: AppNotificationOptions) {
+  if (typeof window === 'undefined') return
+  const now = Date.now()
+  if (options.mergeKey) directToasts.set(options.mergeKey, now)
+  for (const [key, at] of directToasts) if (now - at >= DIRECT_TOAST_WINDOW_MS) directToasts.delete(key)
+  const detail: InAppNotificationEventDetail = {
+    // A fresh id every time: the same refusal twice is two toasts, never a silent merge.
+    notification: { id: `direct-${options.mergeKey ?? 'notice'}-${now}-${Math.random().toString(36).slice(2, 6)}`, kind, title, body, workspaceView: options.workspaceView ?? null, entityId: options.entityId ?? null, mergeKey: options.mergeKey },
+  }
+  window.dispatchEvent(new CustomEvent<InAppNotificationEventDetail>(FOX_IN_APP_NOTIFICATION_EVENT, { detail }))
 }
 
 export interface NotificationVisibilityContext {
@@ -92,7 +120,9 @@ export async function publishAppNotification(
           : '操作完成'
   const body = description || rawMessage
 
+  if (options.toastNow) showDirectToast(kind, title, body, options)
   if (!desktopRuntimeAvailable) {
+    if (options.toastNow) return
     const detail: InAppNotificationEventDetail = {
       notification: { id: options.mergeKey ?? options.sourceId ?? `browser-notification-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, title, body },
     }

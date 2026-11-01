@@ -1,4 +1,5 @@
-// 发送没开始时只进通知中心：标题和正文是一句人话，错误码与原始信息只在开发者模式的详情里。
+// 发送没开始：马上弹一条看得见的 toast（带「去设置」类按钮），同时记一条到通知中心。
+// 标题和正文是一句人话，错误码与原始信息只在开发者模式的详情里。
 // 文案句子复用 agent-backend-failure 的映射，这里只决定标题、入口和要不要带上错误码。
 import type { AgentBackendId } from '@/features/conversations/model/agent-backend'
 import { agentBackendFailureHint } from '@/features/conversations/model/agent-backend-failure'
@@ -14,8 +15,11 @@ const NOT_SET_UP_CODES = new Set([
   'agent_backend_pi_source_choice_required',
   'model.connection_required',
   'model.connection_choose_address',
-  'model.connection_unverified',
 ])
+
+/** 13.37: Fox's refusal without a model service, as the Host words it (`FOX_MODEL_SERVICE_MISSING`). */
+export const FOX_MODEL_SERVICE_MISSING_TITLE = '还没有配置模型服务'
+export const FOX_MODEL_SERVICE_MISSING_BODY = '请先到「设置 → 模型服务」添加并测试一个供应商，再发送。'
 export interface SendNotStartedNotice {
   title: string
   description: string
@@ -79,6 +83,12 @@ export function sendNotStartedNotice(
     title = 'Pi 的配置来源需要确认'
     description = '到设置里的 Pi 选择用 Fox 模型服务还是本机 ~/.pi，再发送。'
     workspaceView = 'settings-ai'
+  } else if (normalized === 'model.connection_unverified') {
+    // 13.37 B3-1: an edited provider (e.g. a new Anthropic address) needs a
+    // new connection test. This is the model service's step, for Fox and for
+    // every external Agent alike, so it is never「<Agent> 还没配置好」.
+    title = '模型连接需要重新测试'
+    workspaceView = 'model-service'
   } else if (external && normalized === 'model.connection_choose_address') {
     title = '模型服务有多个地址'
     description = userFacingError(raw.replace(/^[a-z_.]+:\s*/, ''), false, sentence)
@@ -87,8 +97,10 @@ export function sendNotStartedNotice(
     title = `${name} 还没配置好`
     description = `先在电脑上装好并配置 ${name}，或在模型服务里配好供应商，再到设置里检查。`
     workspaceView = 'settings-ai'
-  } else if (normalized === 'model.connection_unverified') {
-    title = '模型连接需要重新测试'
+  } else if (normalized === 'model.connection_required') {
+    // Fox without a model service (P0-1): the Host's sentence.
+    title = FOX_MODEL_SERVICE_MISSING_TITLE
+    description = FOX_MODEL_SERVICE_MISSING_BODY
     workspaceView = 'model-service'
   } else if (MODEL_CONNECTION_CODES.has(normalized)) {
     title = '还没有可用的模型连接'
@@ -147,10 +159,14 @@ export function notifySendNotStarted(
   options: SendNotStartedOptions = {},
 ): string {
   const notice = sendNotStartedNotice(code, message, options)
+  // 13.37 (P0-1, B3-2): a refused send always shows a toast right away. The
+  // notification-center copy alone only lit the red dot, and a second
+  // identical refusal merged into it without any visible reaction.
   return notify.error(notice.title, {
     description: notice.description,
     mergeKey: notice.mergeKey,
     workspaceView: notice.workspaceView,
     entityId: notice.entityId,
+    toastNow: true,
   })
 }

@@ -14,7 +14,7 @@ import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable } from '@/f
 import { readDeveloperUi } from '@/features/chat/developer-ui'
 import { userFacingError } from '@/features/chat/send-failure-notice'
 import { type AppNotificationRecord, type NotificationPreferencesRecord } from '@/features/conversations/model/types'
-import { FOX_IN_APP_NOTIFICATION_EVENT, FOX_NOTIFICATIONS_CHANGED_EVENT, FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT, type InAppNotificationEventDetail, normalizeNotificationSoundId, notificationIsVisibleInContext, playNotificationSound, notify as toast } from '@/features/notifications'
+import { FOX_IN_APP_NOTIFICATION_EVENT, FOX_NOTIFICATIONS_CHANGED_EVENT, FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT, type InAppNotificationEventDetail, directToastRecently, normalizeNotificationSoundId, notificationIsVisibleInContext, playNotificationSound, notify as toast } from '@/features/notifications'
 import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
 import { AlertTriangle, Bell, CheckCheck, CircleDot, Eraser, ExternalLink, FolderOpen, MoreHorizontal, RotateCcw, Bot, Database, ListTodo, MessageSquare, Settings } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -176,7 +176,8 @@ function NotificationCenterContent({
       const nextObserved = new Map(presentedItems.map((item) => [item.id, notificationFingerprint(item)]))
       if (observedNotifications.current) {
         const changed = presentedItems.filter((item) => item.readAt == null && observedNotifications.current?.get(item.id) !== notificationFingerprint(item))
-        const shouldAlert = changed.filter((item) => !(nextPreferences.quietProgress && item.kind === 'progress'))
+        // A refusal the page already toasted directly (toastNow) is only recorded here.
+        const shouldAlert = changed.filter((item) => !(nextPreferences.quietProgress && item.kind === 'progress') && !directToastRecently(item.mergeKey))
         shouldAlert.slice(0, 12).reverse().forEach((item) => enqueueToast(item))
         if (shouldAlert.length && nextPreferences.sound) playNotificationSound(normalizeNotificationSoundId(nextPreferences.soundId))
         if (shouldAlert.length && nextPreferences.systemPopup && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
