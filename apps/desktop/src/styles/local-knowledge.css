@@ -10,7 +10,7 @@
 .fox-local-kb-content {
   width: min(var(--fox-content-max), 100%);
   margin-inline: auto;
-  padding: var(--fox-space-4xl) var(--fox-space-3xl) var(--fox-space-6xl);
+  padding: var(--fox-page-padding-y) var(--fox-page-padding-x);
 }
 
 /* 页面级只归一化默认尺寸（原型 .btn / .ib = 32px）；
@@ -2469,7 +2469,7 @@
 /* 原型 .home：720 内容宽居中，正文区上方再多 40px（.page 已有 32px） */
 .fox-local-kb-home-content {
   width: min(768px, 100%);
-  padding-top: 72px;
+  padding-top: calc(var(--fox-page-padding-y) + var(--fox-space-6xl));
 }
 
 .fox-kb-home-jobline {
@@ -2541,7 +2541,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--fox-space-xs) var(--fox-space-2xl);
-  margin: var(--fox-space-l) 2px 0;
+  margin: var(--fox-space-xl) 0 0;
   color: var(--fox-muted);
   font-size: var(--fox-type-caption);
 }
@@ -2558,13 +2558,18 @@
 }
 .fox-kb-home-try button svg { width: 13px; height: 13px; color: var(--fox-faint); }
 .fox-kb-home-try button:hover { color: var(--fox-text); }
+.fox-kb-home-try button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+  border-radius: var(--fox-radius-small);
+}
 
 /* 原型 .shead：区块标题 14/600 + 右侧 12px 链接 */
 .fox-kb-home-shead {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: var(--fox-space-5xl) 0 var(--fox-space-xs);
+  margin: var(--fox-section-gap) 0 var(--fox-space-m);
 }
 .fox-kb-home-shead h3 { margin: 0; font-size: var(--fox-type-caption); font-weight: var(--fox-weight-medium); color: var(--fox-muted); }
 .fox-kb-home-shead button {
@@ -2580,6 +2585,11 @@
 }
 .fox-kb-home-shead button svg { width: 14px; height: 14px; }
 .fox-kb-home-shead button:hover { color: var(--fox-text); }
+.fox-kb-home-shead button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+  border-radius: var(--fox-radius-small);
+}
 
 .fox-kb-home-foot {
   display: flex;
@@ -4004,7 +4014,7 @@
 }
 
 @media (max-width: 760px) {
-  .fox-local-kb-content { padding: 22px 16px 34px; }
+  .fox-local-kb-content { padding: var(--fox-page-padding-y) var(--fox-space-xl); }
   .fox-local-kb-embedded-toolbar { align-items: flex-start; flex-direction: column; }
   .fox-local-kb-embedded-toolbar > div { width: 100%; flex-wrap: wrap; }
   .fox-local-kb-header { align-items: flex-start; flex-direction: column; }
@@ -5056,6 +5066,8 @@
 
 /* 页头 .ph + .lead：副标题只跟标题差 4px，下面一块自己带上边距 */
 .fox-local-kb-header { margin-bottom: 0; }
+.fox-local-kb-list-content > .fox-local-kb-header { margin-bottom: var(--fox-space-l); }
+.fox-local-kb-content.fox-local-kb-list-content { width: min(var(--fox-content-max), 100%); }
 .fox-local-kb-header p { margin: var(--fox-space-xs) 0 0; }
 .fox-local-kb-header-main { gap: var(--fox-space-m); }
 .fox-local-kb-header-actions { gap: var(--fox-space-m); }
@@ -5245,7 +5257,7 @@
 .fox-local-kb-job-line:last-child { border-bottom: 0; }
 .fox-local-kb-job-line-name { font-size: var(--fox-type-chrome); font-weight: 400; color: var(--fox-text); }
 .fox-local-kb-job-line-kb { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fox-muted); }
-.fox-local-kb-job-line-time { min-width: 0; text-align: right; color: var(--fox-faint); }
+.fox-local-kb-job-line-time { min-width: 0; text-align: right; color: var(--fox-muted); font-variant-numeric: tabular-nums; }
 
 /* ---------- 向量模型 ---------- */
 
@@ -5268,9 +5280,9 @@
 /* ---------- 阅读页（原型 .rtop / .article / .rtoc） ---------- */
 
 /* 读正文时不再受 820 的列宽限制：原型 win 1280 - side 232 = 1048，
-   工具条贴住内容区左右与顶部，跳出 .fox-local-kb-content 的 32/24 内边距。 */
+   工具条贴住内容区左右与顶部，负边距抵消 .fox-local-kb-content 的页面内边距。 */
 .fox-local-kb-detail-content:has(.fox-kb-reader) { width: min(1048px, 100%); }
-.fox-kb-reader { margin: calc(-1 * var(--fox-space-4xl)) calc(-1 * var(--fox-space-3xl)) 0; }
+.fox-kb-reader { margin: calc(-1 * var(--fox-page-padding-y)) calc(-1 * var(--fox-page-padding-x)) 0; }
 .fox-kb-reader-bar { min-height: 52px; padding: var(--fox-space-s) var(--fox-space-xl); margin-bottom: 0; border-bottom: 1px solid var(--fox-border); }
 .fox-local-kb-document-reader { min-height: 0; }
 .fox-local-kb-document-reader-meta {

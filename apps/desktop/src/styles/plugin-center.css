@@ -20,8 +20,8 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: var(--fox-space-xl);
-  padding: var(--fox-space-4xl) var(--fox-space-3xl) var(--fox-space-2xl);
+  gap: var(--fox-space-l);
+  padding: var(--fox-page-padding-y) var(--fox-page-padding-x) 0;
 }
 
 .fox-plugin-topbar > [data-slot='tabs'] {
@@ -52,29 +52,29 @@
   margin-left: auto;
 }
 
-/* Segmented kind switcher: the stock shadcn Tabs shape on graphite tokens, */
-/* matching the shared segmented filter used on the knowledge pages. */
+/* 分段种类切换：与设置页分段控件同高、同圆角。 */
 .fox-plugin-kind-tabs {
   width: max-content;
   height: var(--fox-control-md) !important;
   gap: var(--fox-space-micro) !important;
-  padding: 3px !important;
+  padding: var(--fox-space-micro) !important;
   border: 0;
-  border-radius: var(--fox-radius-card) !important;
+  border-radius: var(--fox-radius-control) !important;
   background: var(--muted) !important;
 }
 
 .fox-plugin-kind-tabs [data-slot='tabs-trigger'] {
-  min-width: 72px;
+  height: 100%;
+  min-width: max-content;
   flex: 0 0 auto;
   gap: var(--fox-space-s);
   padding-inline: var(--fox-space-l);
   border: 1px solid transparent;
-  border-radius: var(--fox-radius-control);
+  border-radius: var(--fox-pages-segment-radius-inner, var(--fox-radius-control));
   color: var(--muted-foreground);
   background: transparent;
   box-shadow: none;
-  font-size: var(--fox-type-chrome);
+  font-size: var(--fox-type-meta);
   font-weight: var(--fox-weight-medium);
 }
 
@@ -85,6 +85,11 @@
 
 .fox-plugin-kind-tabs [data-slot='tabs-trigger']:hover {
   color: var(--foreground);
+}
+
+.fox-plugin-kind-tabs [data-slot='tabs-trigger']:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
 }
 
 .fox-plugin-kind-tabs [data-slot='tabs-trigger'][data-active],
@@ -129,11 +134,15 @@
 }
 
 .fox-plugin-content {
-  padding: 0 var(--fox-space-3xl) var(--fox-space-6xl);
+  padding: var(--fox-section-gap) var(--fox-page-padding-x) var(--fox-page-padding-y);
 }
 
 .fox-plugin-section {
-  margin-top: var(--fox-space-2xl);
+  margin-top: 0;
+}
+
+.fox-plugin-section + .fox-plugin-section {
+  margin-top: var(--fox-section-gap);
 }
 
 .fox-plugin-section-heading {
@@ -310,8 +319,8 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: var(--fox-space-xl);
-  padding: var(--fox-space-4xl) var(--fox-space-3xl) var(--fox-space-2xl);
+  gap: var(--fox-space-l);
+  padding: var(--fox-page-padding-y) var(--fox-page-padding-x) 0;
 }
 
 .fox-plugin-installed-page-header > [data-slot='tabs'] {
@@ -414,7 +423,7 @@
 }
 
 .fox-plugin-installed-content {
-  padding: 0 var(--fox-space-3xl) var(--fox-space-6xl);
+  padding: var(--fox-section-gap) var(--fox-page-padding-x) var(--fox-page-padding-y);
 }
 
 .fox-plugin-installed-grid {

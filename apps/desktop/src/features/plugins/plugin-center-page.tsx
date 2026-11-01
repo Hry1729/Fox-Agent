@@ -210,7 +210,7 @@ function ScopeDialog({
 }
 
 function EmptyState({ title, search = false }: { title: string; search?: boolean }) {
-  return <FoxEmptyState variant={search ? 'search' : 'empty'} icon={<PackagePlus />} title={title} description={search ? '调整关键词或分类后再试。' : '安装插件后，可以在这里管理启用状态和使用范围。'} />
+  return <FoxEmptyState className="fox-page-empty" variant={search ? 'search' : 'empty'} title={title} description={search ? '调整关键词或分类后再试。' : '安装插件后，可以在这里管理启用状态和使用范围。'} />
 }
 
 export function PluginCenterPage({ gateway: providedGateway, initialKind, initialTab, onAddPlugin, onConfigureAgent, className }: PluginCenterPageProps) {
@@ -373,7 +373,7 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, initia
         {policyOpen
           ? <div className="fox-settings-layout fox-plugin-policy"><main><LifecycleHooksSection /></main></div>
           : <>
-        {error && <FoxEmptyState variant="error" icon={<CircleAlert />} title="插件加载失败" description={error} action={<Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button>} />}
+        {error && <FoxEmptyState className="fox-page-empty" variant="error" title="插件加载失败" description={error} action={<Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button>} />}
         <main className="fox-plugin-installed-content">
           {loading && !installed.length
             ? <SkeletonContent label="正在加载已安装插件…" lines={4} avatar />
@@ -403,7 +403,7 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, initia
         </Tabs>
       </header>
 
-      {error && <FoxEmptyState variant="error" icon={<CircleAlert />} title="插件加载失败" description={error} action={<Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button>} />}
+      {error && <FoxEmptyState className="fox-page-empty" variant="error" title="插件加载失败" description={error} action={<Button type="button" variant="outline" size="sm" onClick={() => void reload()}>重试</Button>} />}
 
       <main className="fox-plugin-content">
         {loading && !catalog.length

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Users, Wrench } from 'lucide-react'
+import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -29,6 +29,7 @@ import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { knowledgeReferencesFromDeclaration, remoteKnowledgeReference, resolveExpertKnowledgeDeclaration, toPersistedExpertManifest } from './expert-knowledge'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { rememberPluginReturn } from '@/features/settings/settings-shared'
+import { formatDateTime, formatShortDateTime } from '@/lib/time-format'
 
 const fallbackAgent: AgentRecord = { id: 'fox-general', name: 'Fox 通用助手', description: 'Fox 默认通用专家', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '', isBuiltin: true, packageVersion: '1.0.0', packageSource: 'builtin', packageId: null, packageHash: null, packageManifest: {}, capabilities: ['files', 'tools', 'reasoning'], resources: { tools: [{ id: 'files', name: '文件读写', description: '读取和处理已授权项目文件' }, { id: 'tools', name: '本机工具', description: '调用 Fox Runtime 提供的本机工具' }, { id: 'reasoning', name: '任务推理', description: '规划并执行多步骤任务' }], knowledges: [], mcps: [], skills: [] }, configurableItems: {}, isDefault: true, available: true }
 
@@ -76,7 +77,7 @@ const memoryStateLabels: Record<MemoryEntityRecord['state'], string> = {
 }
 
 function memoryTime(value: number | null) {
-  return value ? new Date(value).toLocaleString('zh-CN') : '从未'
+  return value ? formatDateTime(value) : '从未'
 }
 
 function AgentMemoryManager({ agent }: { agent: AgentRecord }) {
@@ -227,7 +228,7 @@ function AgentMemoryManager({ agent }: { agent: AgentRecord }) {
     return `项目 · ${projects.find((project) => project.id === memory.scopeKey)?.name ?? memory.scopeKey}`
   }
 
-  if (!desktopRuntimeAvailable) return <FoxEmptyState icon={<Brain />} title="仅桌面版可用" description="长期记忆由 Fox Host 本机治理，不会同步到网页 Runtime。" />
+  if (!desktopRuntimeAvailable) return <FoxEmptyState title="仅桌面版可用" description="长期记忆由 Fox Host 本机治理，不会同步到网页 Runtime。" />
 
   return <div className="fox-memory-manager">
     <div className="fox-memory-toolbar">
@@ -235,7 +236,7 @@ function AgentMemoryManager({ agent }: { agent: AgentRecord }) {
       <Button size="sm" onClick={openCreate}><Plus size={14} />添加记忆</Button>
     </div>
     <Card className="fox-memory-privacy-note"><Brain size={18} /><p><b>长期记忆</b><span>模型只能提交候选；只有已确认且启用的条目会被有界召回。Fox 不会自动保存整段对话。{agent.runtimeType !== 'pi' ? ' 当前远程 Runtime 仅支持查看和治理，尚不注入本机记忆。' : ''}</span></p></Card>
-    {loading ? <SkeletonContent label="正在读取记忆…" lines={4} /> : loadError ? <FoxEmptyState variant="error" icon={<Brain />} title="记忆加载失败" description={loadError} action={<Button variant="outline" size="sm" onClick={() => void refresh().catch((cause) => setLoadError(cause instanceof Error ? cause.message : String(cause)))}>重试</Button>} /> : visibleMemories.length === 0 ? <FoxEmptyState variant={query.trim() ? 'search' : 'empty'} icon={<Brain />} title={query.trim() ? '没有匹配的记忆' : '暂无记忆'} description={query.trim() ? '换个关键词再试。' : '你可以主动创建；Agent 提交的候选也会出现在这里等待确认。'} /> : <div className="fox-memory-list">{visibleMemories.map((memory) => <Card key={memory.id} className={`fox-memory-card is-${memory.state}`}>
+    {loading ? <SkeletonContent label="正在读取记忆…" lines={4} /> : loadError ? <FoxEmptyState variant="error" title="记忆加载失败" description={loadError} action={<Button variant="outline" size="sm" onClick={() => void refresh().catch((cause) => setLoadError(cause instanceof Error ? cause.message : String(cause)))}>重试</Button>} /> : visibleMemories.length === 0 ? <FoxEmptyState variant={query.trim() ? 'search' : 'empty'} title={query.trim() ? '没有匹配的记忆' : '暂无记忆'} description={query.trim() ? '换个关键词再试。' : '你可以主动创建；Agent 提交的候选也会出现在这里等待确认。'} /> : <div className="fox-memory-list">{visibleMemories.map((memory) => <Card key={memory.id} className={`fox-memory-card is-${memory.state}`}>
       <header><div><Badge variant={memory.state === 'conflict' ? 'destructive' : 'secondary'}>{memoryStateLabels[memory.state]}</Badge><span>{memoryKindLabels[memory.kind]}</span><span>{scopeName(memory)}</span></div>{memory.state === 'confirmed' && <Switch checked={memory.enabled} aria-label={`${memory.canonicalKey} 记忆启用状态`} onCheckedChange={(enabled) => void mutate(() => desktopClient.setMemoryEnabled(memory.id, enabled, memory.version), enabled ? '记忆已启用' : '记忆已禁用')} />}</header>
       <h3>{memory.canonicalKey}</h3><p>{memory.content}</p>
       {memory.evidenceExcerpt && <blockquote>证据：{memory.evidenceExcerpt}</blockquote>}
@@ -393,7 +394,7 @@ function AgentWorkRecord({ agentId, conversationsOnly = false }: { agentId: stri
     }
   }, [conversations])
 
-  const conversationList = record.recent.length ? record.recent.map((conversation) => <div key={conversation.id} className="fox-agent-task-row"><span className="fox-agent-task-icon"><MessageSquareText /></span><span className="fox-agent-task-copy"><b>{conversation.title}</b><small><Folder />{conversation.projectRoot?.split(/[\\/]/).filter(Boolean).at(-1) ?? '未关联项目'}</small></span><Badge variant="secondary"><CheckCircle2 />已完成</Badge><time>{new Date(conversation.lastMessageAt ?? conversation.updatedAt).toLocaleDateString('zh-CN')}</time></div>) : <p>还没有对话任务。</p>
+  const conversationList = record.recent.length ? record.recent.map((conversation) => <div key={conversation.id} className="fox-agent-task-row"><span className="fox-agent-task-icon"><MessageSquareText /></span><span className="fox-agent-task-copy"><b>{conversation.title}</b><small><Folder />{conversation.projectRoot?.split(/[\\/]/).filter(Boolean).at(-1) ?? '未关联项目'}</small></span><Badge variant="secondary"><CheckCircle2 />已完成</Badge><time>{formatShortDateTime(conversation.lastMessageAt ?? conversation.updatedAt)}</time></div>) : <p>还没有对话任务。</p>
 
   if (conversationsOnly) {
     return <Card className="fox-agent-work-card fox-agent-section-card"><div className="fox-agent-work-head"><h2>工作记录</h2></div><div className="fox-agent-work-list is-section-list">{conversationList}</div></Card>
@@ -1202,18 +1203,22 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
       <section className="fox-page-content fox-agent-list-page">
         <div className="fox-page-intro fox-list-page-intro"><h1>选择一个专家</h1><label className="fox-list-page-search"><Search size={14} /><Input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索专家" placeholder="搜索专家" /></label></div>
         <div className="fox-page-toolbar fox-agent-toolbar">
-          <Select value={availability} onValueChange={(value) => setAvailability(value as typeof availability)}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="available">可使用</SelectItem><SelectItem value="unavailable">不可用</SelectItem></SelectContent></Select>
-          <Select value={environment} onValueChange={(value) => setEnvironment(value as typeof environment)}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部环境</SelectItem><SelectItem value="local">本机</SelectItem><SelectItem value="knowledge">资料库</SelectItem></SelectContent></Select>
-          <Select value={category} onValueChange={setCategory}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部分类</SelectItem>{agentCategoryOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
-          <span className="fox-agent-result-count">{filteredCards.length} 个结果</span>
-          <Button variant="outline" size="sm" className="fox-agent-refresh" disabled={resource.syncing} title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}</Button>
-          <input ref={packageInputRef} hidden type="file" accept=".foxexpert,.json,application/json" onChange={(event) => void inspectPackageFile(event.target.files?.[0])} />
-          <Button variant="outline" size="sm" disabled={packageBusy || !desktopRuntimeAvailable} onClick={() => packageInputRef.current?.click()}>{packageBusy ? <LoaderCircle className="animate-spin" /> : <FileUp size={14} />}导入能力包</Button>
-          <Button variant="outline" size="sm" disabled={!desktopRuntimeAvailable} onClick={() => setDigitalColleaguesOpen(true)}><Clock3 size={14} />数字同事</Button>
-          <Button size="sm" onClick={openCreate}><Plus size={14} />新建专家</Button>
+          <div className="fox-agent-toolbar-filters">
+            <Select value={availability} onValueChange={(value) => setAvailability(value as typeof availability)}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="available">可使用</SelectItem><SelectItem value="unavailable">不可用</SelectItem></SelectContent></Select>
+            <Select value={environment} onValueChange={(value) => setEnvironment(value as typeof environment)}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部环境</SelectItem><SelectItem value="local">本机</SelectItem><SelectItem value="knowledge">资料库</SelectItem></SelectContent></Select>
+            <Select value={category} onValueChange={setCategory}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部分类</SelectItem>{agentCategoryOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
+            <span className="fox-agent-result-count">{filteredCards.length} 个结果</span>
+          </div>
+          <div className="fox-agent-toolbar-actions">
+            <Button variant="outline" size="icon" className="fox-agent-refresh" disabled={resource.syncing} title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}</Button>
+            <input ref={packageInputRef} hidden type="file" accept=".foxexpert,.json,application/json" onChange={(event) => void inspectPackageFile(event.target.files?.[0])} />
+            <Button variant="outline" disabled={packageBusy || !desktopRuntimeAvailable} onClick={() => packageInputRef.current?.click()}>{packageBusy ? <LoaderCircle className="animate-spin" /> : <FileUp />}导入能力包</Button>
+            <Button variant="outline" disabled={!desktopRuntimeAvailable} onClick={() => setDigitalColleaguesOpen(true)}><Clock3 />数字同事</Button>
+            <Button onClick={openCreate}><Plus />新建专家</Button>
+          </div>
         </div>
         {resource.error && <FoxEmptyState variant="error" title="专家加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void resource.refresh()}>重试</Button>} />}
-        {resource.loading && cards.length === 0 ? <SkeletonContent label="正在加载专家…" lines={4} avatar /> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onViewDetail={() => openView(agent)} />)}</div> : !resource.error && <FoxEmptyState variant={cards.length ? 'search' : 'empty'} icon={<Users />} title={cards.length ? '没有符合当前筛选条件的专家' : '暂无可用专家'} description={cards.length ? '调整关键词、状态、环境或分类后再试。' : '新建专家，或导入专家能力包后开始使用。'} action={<Button variant="outline" size="sm" onClick={openCreate}><Plus size={14} />新建专家</Button>} />}
+        {resource.loading && cards.length === 0 ? <SkeletonContent label="正在加载专家…" lines={4} avatar /> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onViewDetail={() => openView(agent)} />)}</div> : !resource.error && <FoxEmptyState className="fox-page-empty" variant={cards.length ? 'search' : 'empty'} title={cards.length ? '没有符合当前筛选条件的专家' : '暂无可用专家'} description={cards.length ? '调整关键词、状态、环境或分类后再试。' : '新建专家，或导入专家能力包后开始使用。'} action={<Button onClick={openCreate}><Plus />新建专家</Button>} />}
       </section>
       <DigitalColleagueManager open={digitalColleaguesOpen} onOpenChange={setDigitalColleaguesOpen} experts={resource.agents} />
       <AgentDetailDialog agent={detailAgent} open={detailOpen} onOpenChange={setDetailOpen} onManage={enterManage} onUse={(agent) => { setDetailOpen(false); navigate('chat', agent.id) }} />
@@ -1347,7 +1352,7 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
                   {agent.runtimeType === 'pi' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void editor.exportPackage()}><Download size={13} />导出专家</Button>}
                   {!agent.isBuiltin && <Button variant="outline" size="sm" className="fox-agent-manage-zone-danger" disabled={editor.saving} onClick={() => void deleteManage()}><Trash2 size={13} />删除专家</Button>}
                 </div>
-                {editor.editing?.packageSource === 'imported' && <div className="fox-agent-manage-versions"><h3><History size={14} />不可变版本记录</h3><div className="fox-agent-resource-list">{editor.packageVersions.map((item) => <div key={item.id}><span><History /></span><p><b>v{item.version}<em>{item.status === 'active' ? '当前' : '历史'}</em></b><small>SHA-256 {item.packageHash.slice(0, 16)}… · {new Date(item.activatedAt).toLocaleString('zh-CN')}</small></p>{item.status !== 'active' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void rollbackManage(item.version)}><RotateCcw size={13} />恢复版本</Button>}</div>)}{!editor.packageVersions.length && <p className="fox-agent-resource-empty">正在读取版本历史…</p>}</div></div>}
+                {editor.editing?.packageSource === 'imported' && <div className="fox-agent-manage-versions"><h3><History size={14} />不可变版本记录</h3><div className="fox-agent-resource-list">{editor.packageVersions.map((item) => <div key={item.id}><span><History /></span><p><b>v{item.version}<em>{item.status === 'active' ? '当前' : '历史'}</em></b><small>SHA-256 {item.packageHash.slice(0, 16)}… · {formatDateTime(item.activatedAt)}</small></p>{item.status !== 'active' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void rollbackManage(item.version)}><RotateCcw size={13} />恢复版本</Button>}</div>)}{!editor.packageVersions.length && <p className="fox-agent-resource-empty">正在读取版本历史…</p>}</div></div>}
               </Card>
             </section>
             <AgentProfileEditDialog editor={editor} open={profileOpen} onOpenChange={setProfileOpen} onSaved={refreshAfterSave} />

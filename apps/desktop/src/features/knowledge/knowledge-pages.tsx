@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, LogIn, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RefreshCw, RotateCcw, Search, Server, Sparkles, X } from 'lucide-react'
+import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RefreshCw, RotateCcw, Search, Sparkles, X } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { ExpandingSearch } from '@/components/arc/expanding-search/expanding-search'
@@ -27,12 +27,13 @@ import { YUXI_LOGIN_RETURN_KEY, YUXI_SERVICE_RETURN_KEY } from './knowledge-navi
 import { LibraryFileManager, LibraryViewSwitch } from '@/features/local-knowledge/library-file-manager'
 import { remoteLibraryFiles, type LibraryFile } from '@/features/local-knowledge/library-file-model'
 import { ArrowLeft } from 'lucide-react'
+import { formatDateTime, formatShortDateTime } from '@/lib/time-format'
 
 const MAX_LOCAL_OPEN_BYTES = 500 * 1024 * 1024
 
 function asCard(item: KnowledgeBaseRecord, index: number): KnowledgeCardData {
   const progress = item.fileCount > 0 ? Math.round(item.processedCount / item.fileCount * 100) : item.status === 'active' ? 100 : 0
-  return { ...item, types: item.kbType || '资料库', progress, agents: 0, recent: item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : '来自资料库服务', tone: ['blue', 'violet', 'green', 'amber', 'gray'][index % 5] }
+  return { ...item, types: item.kbType || '资料库', progress, agents: 0, recent: item.updatedAt ? (formatShortDateTime(item.updatedAt) || '来自资料库服务') : '来自资料库服务', tone: ['blue', 'violet', 'green', 'amber', 'gray'][index % 5] }
 }
 
 function contentText(value: unknown): string {
@@ -83,11 +84,11 @@ export function KnowledgeListPage({ sidebarCollapsed, onSidebar, navigate }: { s
           <Button variant="outline" size="sm" className="fox-agent-refresh" title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}><RefreshCw /></Button>
         </div>
         {(yuxi.loading || yuxiUser.loading || (yuxiUser.user && resource.loading && resource.items.length === 0)) && <SkeletonContent label="正在读取远程资料库…" lines={4} avatar />}
-        {resource.error && yuxiUser.user && <FoxEmptyState variant="error" title="远程资料库加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void resource.refresh()}>重试</Button>} />}
-        {!yuxi.loading && !yuxi.service && <FoxEmptyState icon={<Server />} title="先连接资料库服务，再登录账户" description="先连接资料库服务，再登录账户访问资料。" action={<Button onClick={openService}>配置服务</Button>} />}
-        {!yuxi.loading && yuxi.service && !yuxiUser.loading && !yuxiUser.user && <FoxEmptyState variant={yuxiUser.error ? 'error' : 'empty'} icon={<LogIn />} title={connected ? '资料库服务已连接，账户尚未登录' : '需要登录资料库'} description={yuxiUser.error ?? '浏览器中的登录态不会与 Fox 自动共享，请在 Fox 中登录一次。'} action={<Button onClick={openLogin}>登录账户</Button>} />}
-        {!resource.loading && !resource.error && yuxiUser.user && resource.items.length === 0 && <FoxEmptyState title="当前账户没有可查看的资料库" description="请确认账户权限，或在资料库服务中添加资料。" />}
-        {!resource.loading && !resource.error && yuxiUser.user && resource.items.length > 0 && cards.length === 0 && <FoxEmptyState variant="search" title="没有符合当前筛选条件的资料库" description={query.trim() ? `没有匹配“${query.trim()}”的资料库。` : '调整状态、类型或内容筛选后再试。'} action={<Button variant="outline" size="sm" onClick={() => { setQuery(''); setStatusFilter('all'); setTypeFilter('all'); setContentFilter('all') }}>清空筛选</Button>} />}
+        {resource.error && yuxiUser.user && <FoxEmptyState className="fox-page-empty" variant="error" title="远程资料库加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void resource.refresh()}>重试</Button>} />}
+        {!yuxi.loading && !yuxi.service && <FoxEmptyState className="fox-page-empty" title="先连接资料库服务，再登录账户" description="连接并登录后，才能浏览你有权限的资料。" action={<Button onClick={openService}>配置服务</Button>} />}
+        {!yuxi.loading && yuxi.service && !yuxiUser.loading && !yuxiUser.user && <FoxEmptyState className="fox-page-empty" variant={yuxiUser.error ? 'error' : 'empty'} title={connected ? '资料库服务已连接，账户尚未登录' : '需要登录资料库'} description={yuxiUser.error ?? '浏览器中的登录不会自动带入 Fox，请在这里登录一次。'} action={<Button onClick={openLogin}>登录账户</Button>} />}
+        {!resource.loading && !resource.error && yuxiUser.user && resource.items.length === 0 && <FoxEmptyState className="fox-page-empty" title="当前账户没有可查看的资料库" description="请确认账户权限，或在资料库服务中添加资料。" />}
+        {!resource.loading && !resource.error && yuxiUser.user && resource.items.length > 0 && cards.length === 0 && <FoxEmptyState className="fox-page-empty" variant="search" title="没有符合当前筛选条件的资料库" description={query.trim() ? `没有匹配「${query.trim()}」的资料库。` : '调整状态、类型或内容筛选后再试。'} action={<Button variant="outline" size="sm" onClick={() => { setQuery(''); setStatusFilter('all'); setTypeFilter('all'); setContentFilter('all') }}>清空筛选</Button>} />}
         <div className="fox-entity-grid fox-shadcn-entity-grid fox-knowledge-grid">{cards.map((knowledge) => <KnowledgeCard key={knowledge.id} knowledge={knowledge} onOpen={() => navigate('knowledge-detail', knowledge.id)} />)}</div>
       </section>
     </WorkspacePage>
@@ -286,7 +287,7 @@ export function KnowledgeGraphPage({ sidebarCollapsed, onSidebar, navigate, know
 }
 
 function formatSize(bytes: number) { if (!bytes) return '0 B'; if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB` }
-function formatDate(value: string | null) { if (!value) return '未知时间'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString() }
+function formatDate(value: string | null) { if (!value) return '未知时间'; return formatDateTime(value) || value }
 function documentKind(document: KnowledgeDocumentRecord) { if (document.isFolder) return '文件夹'; const extension = document.name.split('.').pop()?.toLowerCase(); return ({ pdf: 'PDF 文档', doc: 'Word 文档', docx: 'Word 文档', xls: 'Excel 表格', xlsx: 'Excel 表格', csv: 'CSV 数据', md: 'Markdown', txt: '文本文件', json: 'JSON 数据', png: '图片', jpg: '图片', jpeg: '图片', webp: '图片' } as Record<string, string>)[extension ?? ''] ?? '文档' }
 interface GraphNodeRecord { id: string; label: string; type: string; properties: Record<string, unknown> }
 interface GraphEdgeRecord { id: string; source: string; target: string; label: string; properties: Record<string, unknown> }

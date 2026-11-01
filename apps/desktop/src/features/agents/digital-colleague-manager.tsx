@@ -24,6 +24,7 @@ import type {
 } from '@/features/conversations/model/types'
 import { remoteKnowledgeReference } from './expert-knowledge'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
+import { formatDateTime } from '@/lib/time-format'
 
 interface Props {
   open: boolean
@@ -43,7 +44,7 @@ const triggerStatusLabel: Record<DigitalColleagueTriggerRecord['status'], string
 }
 
 function formatTime(value: number | null) {
-  return value ? new Date(value).toLocaleString('zh-CN') : '—'
+  return value ? formatDateTime(value) : '—'
 }
 
 function formatTriggerDuration(trigger: DigitalColleagueTriggerRecord) {

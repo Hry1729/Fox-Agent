@@ -1,5 +1,5 @@
 import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
-import { AlertCircle, ArrowLeft, ArrowRight, ArrowUpDown, BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, ChevronsUpDown, Clock3, Copy, Cpu, CornerDownLeft, Database, Download, ExternalLink, Eye, FileQuestion, FileStack, FileText, FlaskConical, Folder, FolderInput, FolderOpen, FolderPlus, Gauge, HardDrive, History, Info, Layers3, ListFilter, ListTodo, LoaderCircle, MessageCircle, MoreHorizontal, PackageOpen, Pause, Pencil, Plus, Quote, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Star, Trash2, Upload, WandSparkles, X, XCircle } from 'lucide-react'
+import { AlertCircle, ArrowLeft, ArrowRight, ArrowUpDown, BookOpen, Brain, CheckCircle2, ChevronDown, ChevronRight, ChevronsUpDown, Clock3, Copy, Cpu, CornerDownLeft, Download, ExternalLink, Eye, FileQuestion, FileStack, FileText, FlaskConical, Folder, FolderInput, FolderOpen, FolderPlus, Gauge, HardDrive, History, Info, Layers3, ListFilter, ListTodo, LoaderCircle, MessageCircle, MoreHorizontal, PackageOpen, Pause, Pencil, Plus, Quote, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Star, Trash2, Upload, WandSparkles, X, XCircle } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ExpandingSearch } from '@/components/arc/expanding-search/expanding-search'
 import { FileDropzone, type FileDropzoneItem } from '@/components/arc/file-dropzone/file-dropzone'
@@ -44,6 +44,7 @@ import { LocalFolderSection, LocalFolderDetailPage, LOCAL_FOLDERS_CHANGED } from
 import { Laptop } from 'lucide-react'
 import type { NavigateWorkspace } from '@/features/workspace/types'
 import '@/styles/local-knowledge.css'
+import { formatClockTime, formatShortDateTime } from '@/lib/time-format'
 
 const KnowledgePdfViewer = lazy(() => import('@/features/knowledge/knowledge-pdf-viewer'))
 const KnowledgeDocxViewer = lazy(() => import('@/features/knowledge/knowledge-docx-viewer'))
@@ -253,20 +254,21 @@ type EmbeddedLocalKnowledgeNavigationProps = LocalKnowledgeNavigationProps & { e
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return '尚未记录'
-  return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return formatShortDateTime(value) || '尚未记录'
 }
 
 function formatRelativeDate(value: string | null | undefined): string {
   if (!value) return '尚未记录'
   const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '尚未记录'
   const today = new Date()
   const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
   const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
   const dayDelta = Math.round((startOfToday - startOfDate) / 86_400_000)
-  const time = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  const time = formatClockTime(date)
   if (dayDelta === 0) return `今天 ${time}`
   if (dayDelta === 1) return `昨天 ${time}`
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
+  return formatShortDateTime(date) || '尚未记录'
 }
 
 function displayLocalPath(value: string): string {
@@ -482,11 +484,11 @@ function LocalKnowledgeLoading() {
 }
 
 function LocalKnowledgeError({ message, onRetry }: { message: string; onRetry?: () => void }) {
-  return <FoxEmptyState variant="error" icon={<AlertCircle />} title="资料库加载失败" description={message} action={onRetry && <Button size="sm" variant="outline" onClick={onRetry}>重试</Button>} />
+  return <FoxEmptyState className="fox-page-empty" variant="error" title="资料库加载失败" description={message} action={onRetry && <Button size="sm" variant="outline" onClick={onRetry}>重试</Button>} />
 }
 
 function LocalKnowledgeEmpty({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
-  return <FoxEmptyState variant="empty" icon={<Database />} title={title} description={description} action={action} />
+  return <FoxEmptyState className="fox-page-empty" variant="empty" title={title} description={description} action={action} />
 }
 
 function isSelectableEmbeddingModel(model: LocalEmbeddingModel) {
@@ -1661,7 +1663,7 @@ function KnowledgeBaseSearch({ gateway, base, hint, initialQuery = '', omni = fa
       </DropdownMenu>
     </div>}
     {error && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{error}</p>}
-    {searched && !running && !error && items.length === 0 && <FoxEmptyState variant="search" icon={<Search />} title="没有找到相关内容" description="换个说法再试试。" action={<Button variant="outline" size="sm" onClick={clearSearch}>清空搜索</Button>} />}
+    {searched && !running && !error && items.length === 0 && <FoxEmptyState className="fox-page-empty" variant="search" title="没有找到相关内容" description="换个说法再试试。" action={<Button variant="outline" size="sm" onClick={clearSearch}>清空搜索</Button>} />}
     {items.map((item, index) => <article className="fox-kb-hit" key={item.chunkId} tabIndex={0} onClick={() => onOpenDocument(item.documentId)} onKeyDown={(event) => { if (event.key === 'Enter') onOpenDocument(item.documentId) }}>
       <header>
         <LocalFileTypeIcon extension={item.documentName.split('.').pop() ?? ''} />
@@ -2594,7 +2596,7 @@ function JobTimelineItem({ job, knowledgeBaseName, expanded, onToggle, onCancel,
     <i className={cn('fox-status-dot', partial ? 'is-warning' : 'is-ok')} aria-hidden="true" />
     <span className="fox-local-kb-job-line-name">{knowledgeJobHistoryTitle(job)}</span>
     <span className="fox-local-kb-job-line-kb">{knowledgeBaseName}</span>
-    <time className="fox-local-kb-job-line-time">{new Date(job.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
+    <time className="fox-local-kb-job-line-time">{formatClockTime(job.updatedAt)}</time>
   </div>
   return <article className={cn('fox-local-kb-job-row', `is-${bucket}`, expanded && 'is-expanded')}>
     <button type="button" className="fox-local-kb-job-row-head" aria-expanded={expanded} onClick={onToggle}>
