@@ -5,13 +5,17 @@ import { agentBackendFailureHint } from '@/features/conversations/model/agent-ba
 import { notify } from '@/features/notifications'
 import { readDeveloperUi } from '@/features/chat/developer-ui'
 
-const MODEL_CONNECTION_CODES = new Set(['model.connection_required', 'model.connection_failed', 'model.connection_choose_address'])
-const LOGIN_CODES = new Set([
-  'agent_backend_not_installed',
+const MODEL_CONNECTION_CODES = new Set(['model.connection_required', 'model.connection_failed', 'model.connection_choose_address', 'model.connection_unverified'])
+// An external Agent that is not set up yet (UI 1103: no login card above the
+// composer any more; one notice with「去设置」 to 设置 → Agent).
+const NOT_SET_UP_CODES = new Set([
   'agent_backend_missing_credentials',
   'agent_backend_exited_on_start',
+  'agent_backend_pi_source_choice_required',
+  'model.connection_required',
+  'model.connection_choose_address',
+  'model.connection_unverified',
 ])
-
 export interface SendNotStartedNotice {
   title: string
   description: string
@@ -57,23 +61,45 @@ export function sendNotStartedNotice(
   const raw = message?.trim() ?? ''
   const hint = agentBackendFailureHint(normalized)
   const sentence = hint?.detail || '消息没有发出去，草稿已保留。'
+  const external = Boolean(options.backend && options.backend !== 'fox')
+  const name = agentBackendShortName(options.backend)
   let title = '发送未开始'
+  let description = sentence
   let workspaceView: string | undefined
   let entityId: string | undefined
-  if (normalized === 'model.connection_unverified') {
+  if (normalized === 'agent_backend_user_disabled') {
+    title = `${name} 已停用`
+    description = '该 Agent 已停用，可在设置中启用。'
+    workspaceView = 'settings-ai'
+  } else if (external && normalized === 'agent_backend_not_installed') {
+    title = `${name} 还没安装`
+    description = `这台电脑上还没有装好 ${name}。装好后到设置里检查它的状态。`
+    workspaceView = 'settings-ai'
+  } else if (external && normalized === 'agent_backend_pi_source_choice_required') {
+    title = 'Pi 的配置来源需要确认'
+    description = '到设置里的 Pi 选择用 Fox 模型服务还是本机 ~/.pi，再发送。'
+    workspaceView = 'settings-ai'
+  } else if (external && normalized === 'model.connection_choose_address') {
+    title = '模型服务有多个地址'
+    description = userFacingError(raw.replace(/^[a-z_.]+:\s*/, ''), false, sentence)
+    workspaceView = 'model-service'
+  } else if (external && NOT_SET_UP_CODES.has(normalized)) {
+    title = `${name} 还没配置好`
+    description = `先在电脑上装好并配置 ${name}，或在模型服务里配好供应商，再到设置里检查。`
+    workspaceView = 'settings-ai'
+  } else if (normalized === 'model.connection_unverified') {
     title = '模型连接需要重新测试'
     workspaceView = 'model-service'
   } else if (MODEL_CONNECTION_CODES.has(normalized)) {
     title = '还没有可用的模型连接'
     workspaceView = 'model-service'
-  } else if (LOGIN_CODES.has(normalized)) {
-    title = `${agentBackendShortName(options.backend)} 还没有登录`
-    if (options.conversationId) {
-      workspaceView = 'chat'
-      entityId = options.conversationId
-    } else {
-      workspaceView = 'settings-ai'
-    }
+  } else if (normalized === 'agent_backend_not_installed' || normalized === 'agent_backend_missing_credentials' || normalized === 'agent_backend_exited_on_start') {
+    title = `${name} 还没配置好`
+    workspaceView = 'settings-ai'
+  } else if (normalized === 'run.conversation_busy') {
+    title = '上一条还在处理'
+  } else if (normalized === 'conversation.not_found') {
+    title = '这个对话已不存在'
   } else if (normalized === 'agent_backend_project_required') {
     title = '项目文件夹不可访问'
     workspaceView = 'settings-projects'
@@ -87,8 +113,8 @@ export function sendNotStartedNotice(
     title = hint.label
   }
   const detail = options.developerUi
-    ? [sentence, [normalized !== 'unknown' ? normalized : '', raw].filter(Boolean).join('：')].filter(Boolean).join('\n')
-    : sentence
+    ? [description, [normalized !== 'unknown' ? normalized : '', raw].filter(Boolean).join('：')].filter(Boolean).join('\n')
+    : description
   return {
     title,
     description: detail,

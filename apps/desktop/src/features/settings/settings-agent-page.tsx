@@ -245,7 +245,7 @@ export function AgentSettingsPage({ sidebarCollapsed, onSidebar, navigate, secti
     : '新对话和专家未指定模型时使用'
 
   return <WorkspacePage title="Agent" subtitle="助手、专家与项目权限" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
-    <SettingsPageLayout title="Agent" description="配置通用助手、专家、新会话使用的 Agent 和项目权限。">
+    <SettingsPageLayout title="Agent" description="配置通用助手、专家、外部 Agent 和项目权限。">
       <SettingsGroup title="通用助手">
         <div className="fox-settings-providers">
           <div className="fox-settings-provider">
@@ -269,7 +269,7 @@ export function AgentSettingsPage({ sidebarCollapsed, onSidebar, navigate, secti
         </SettingsRow>
       </SettingsGroup>
 
-      {desktopRuntimeAvailable && <AgentBackendSettingsSection client={desktopClient} />}
+      {desktopRuntimeAvailable && <AgentBackendSettingsSection client={desktopClient} onOpenModelSettings={() => navigate('settings-models')} />}
 
       <SettingsGroup title="专家" aside={<>{experts.length > 0 && <span>{experts.length} 个专家</span>}<Button type="button" variant="ghost" size="sm" onClick={() => navigate('agents')}>专家中心<ChevronRight /></Button></>}>
         {agents.loading && experts.length === 0 && <p className="fox-settings-empty"><LoaderCircle className="animate-spin" /> 正在读取专家…</p>}

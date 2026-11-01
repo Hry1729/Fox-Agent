@@ -24,6 +24,8 @@ export interface CredentialProbe {
   templates: ConfigTemplate[]
   /** Settings batch, item 6: what the unified login (Fox「模型服务」) does at the next launch; absent / null without a usable default provider. */
   unifiedLogin?: UnifiedLoginReport | null
+  /** UI 1103: whether the Agent's program is installed (the launch's own check); absent from older Hosts. */
+  installed?: boolean | null
   source?: { choiceRequired: boolean; nativeAvailable: boolean; reusable: boolean; sourceChanged: boolean; current: string; provider?: string | null; model?: string | null; modelEndpoint: string | null } | null
 }
 

@@ -15,6 +15,8 @@
 // an old conversation that used the Codex model adapter is still a `fox`
 // conversation.
 
+import { isAgentEnabled, readEnabledExternalAgents } from './external-agent-enablement'
+
 export type AgentBackendId = 'fox' | 'pi' | 'codex' | 'deepseek'
 
 export const AGENT_BACKEND_IDS: readonly AgentBackendId[] = ['fox', 'pi', 'codex', 'deepseek']
@@ -312,22 +314,24 @@ export const DEFAULT_AGENT_BACKEND_PREFERENCES: AgentBackendPreferences = {
  * The backend a NEW conversation uses: the Host's effective backend unless
  * this build hides or retires it, then the built-in Fox route.
  */
-export function newConversationBackend(preferences: AgentBackendPreferences | null | undefined): AgentBackendId {
+export function newConversationBackend(preferences: AgentBackendPreferences | null | undefined, enabled: readonly string[] = readEnabledExternalAgents()): AgentBackendId {
   const value = preferences?.effectiveBackend
-  if (isAgentBackendId(value) && !isAgentBackendHidden(value) && !isAgentBackendRetired(value, preferences)) return value
+  // UI 1103: an external Agent the user has not enabled in 设置 → Agent is never a new conversation's Agent.
+  if (isAgentBackendId(value) && !isAgentBackendHidden(value) && !isAgentBackendRetired(value, preferences) && isAgentEnabled(value, enabled)) return value
   return NEW_CONVERSATION_AGENT_BACKEND
 }
 
 /** The value the「新会话使用的 Agent」select shows: a saved retired backend shows as what is effective. */
-export function agentBackendSettingValue(preferences: AgentBackendPreferences | null | undefined): AgentBackendId {
+export function agentBackendSettingValue(preferences: AgentBackendPreferences | null | undefined, enabled: readonly string[] = readEnabledExternalAgents()): AgentBackendId {
   const saved = preferences?.defaultBackend
-  if (isAgentBackendId(saved) && !isAgentBackendHidden(saved) && !isAgentBackendRetired(saved, preferences)) return saved
-  return newConversationBackend(preferences)
+  if (isAgentBackendId(saved) && !isAgentBackendHidden(saved) && !isAgentBackendRetired(saved, preferences) && isAgentEnabled(saved, enabled)) return saved
+  return newConversationBackend(preferences, enabled)
 }
 
 /** Rows of the「新会话使用的 Agent」select. */
-export function agentBackendSettingRows(preferences: AgentBackendPreferences | null | undefined): { value: AgentBackendId; label: string; disabled: boolean; reason: string | null }[] {
-  return SELECTABLE_AGENT_BACKEND_IDS.map((backend) => {
+export function agentBackendSettingRows(preferences: AgentBackendPreferences | null | undefined, enabled: readonly string[] = readEnabledExternalAgents()): { value: AgentBackendId; label: string; disabled: boolean; reason: string | null }[] {
+  // UI 1103: only Fox and the external Agents the user enabled.
+  return SELECTABLE_AGENT_BACKEND_IDS.filter((backend) => isAgentEnabled(backend, enabled)).map((backend) => {
     if (backend === 'fox') return { value: backend, label: AGENT_BACKEND_LABELS.fox, disabled: false, reason: null }
     const option = preferences?.options.find((item) => item.backend === backend)
     const disabled = !option?.enabled

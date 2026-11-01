@@ -7,6 +7,7 @@ import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '../model/pendin
 import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
 import type { ExternalPermissionMode } from '../model/agent-backend-onboarding'
+import { AGENT_DISABLED_CODE, AGENT_DISABLED_NOTICE, enabledOrFox, isAgentEnabled, useEnabledExternalAgents } from '../model/external-agent-enablement'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
 import {
   AGENT_BACKEND_PREFERENCES_EVENT,
@@ -257,7 +258,8 @@ export function useDesktopConversation(): DesktopConversationState {
   const explicitDraftBackendRef = useRef<AgentBackendId | null>(null)
   const setDraftAgentBackend = useCallback((picked: AgentBackendId) => {
     // A hidden backend (HIDDEN_AGENT_BACKENDS) is never a new conversation's backend.
-    const backend: AgentBackendId = isAgentBackendHidden(picked) ? 'fox' : picked
+    // UI 1103: nor is an external Agent the user has not enabled in 设置 → Agent.
+    const backend: AgentBackendId = isAgentBackendHidden(picked) ? 'fox' : enabledOrFox(picked)
     explicitDraftBackendRef.current = backend
     draftAgentBackendRef.current = backend
     setDraftAgentBackendState(backend)
@@ -291,6 +293,17 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [setDraftExternalPermissionMode])
   const agentBackendStatusRef = useRef<AgentBackendStatus | null>(null)
   agentBackendStatusRef.current = agentBackendStatus
+  // UI 1103: turning an external Agent off in 设置 → Agent takes it out of the
+  // open draft at once; turning one on lets the saved default apply again.
+  const enabledExternalAgents = useEnabledExternalAgents()
+  useEffect(() => {
+    const explicit = explicitDraftBackendRef.current
+    if (explicit !== null && !isAgentEnabled(explicit, enabledExternalAgents)) explicitDraftBackendRef.current = null
+    const backend = explicitDraftBackendRef.current ?? newConversationBackend(agentBackendPreferences, enabledExternalAgents)
+    if (draftAgentBackendRef.current === backend) return
+    draftAgentBackendRef.current = backend
+    setDraftAgentBackendState(backend)
+  }, [enabledExternalAgents, agentBackendPreferences])
   const [agentBackendRefusal, setAgentBackendRefusal] = useState<AgentBackendRefusal | null>(null)
   const [draftKnowledgeBases, setDraftKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
   const [draftKnowledgeReferences, setDraftKnowledgeReferences] = useState<KnowledgeReference[] | undefined>(undefined)
@@ -1104,6 +1117,13 @@ export function useDesktopConversation(): DesktopConversationState {
         setAgentBackendRefusal({ conversationId: active.conversation.id, code: agentBackendInputLockedCode(lockedBackend, agentBackendStatusRef.current), message: lockedReason })
         return AGENT_BACKEND_REFUSED
       }
+      // UI 1103: the user turned this conversation's Agent off in 设置 → Agent.
+      // The conversation stays readable; a send is refused here, before
+      // anything optimistic, and the composer shows one notice with「去设置」.
+      if (!isAgentEnabled(lockedBackend)) {
+        lastSendFailureRef.current = `${AGENT_DISABLED_CODE}: ${AGENT_DISABLED_NOTICE}`
+        return AGENT_BACKEND_REFUSED
+      }
     }
     try {
       if (!active) {
@@ -1118,10 +1138,10 @@ export function useDesktopConversation(): DesktopConversationState {
           applyDraft({ ...draft, agentId })
         }
         // An explicit choice belongs to this draft; otherwise refresh the saved default.
-        const backend: AgentBackendId = explicitDraftBackendRef.current ?? await Promise.resolve()
+        const backend: AgentBackendId = enabledOrFox(explicitDraftBackendRef.current ?? await Promise.resolve()
           .then(() => desktopClient.agentBackendPreferences())
           .then((preferences) => newConversationBackend(preferences))
-          .catch(() => draftAgentBackendRef.current)
+          .catch(() => draftAgentBackendRef.current))
         const nativePermission = backend === 'fox' ? undefined : draftNativePermissionRef.current ?? undefined
         createdDraft = {
           draft: {

@@ -12,7 +12,12 @@
 // Saved by the Host (`agent_backend_preferences_save`, `app_settings`); a
 // change is broadcast so the open draft re-probes its login at once.
 import { useCallback, useEffect, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import type { AgentModelConnection, AgentModelConnectionRequest } from '@/features/chat/components/AgentModelConnectionCard'
+import type { AgentBackendTarget, CredentialProbe, ImportItem, ImportReport } from '@/features/conversations/model/agent-backend-onboarding'
+import { EXTERNAL_AGENT_IDS, isAgentEnabled, setExternalAgentEnabled, useEnabledExternalAgents } from '@/features/conversations/model/external-agent-enablement'
 import { SettingsGroup, SettingsRow } from './settings-layout'
 import {
   AGENT_BACKEND_PREFERENCES_EVENT,
@@ -41,6 +46,13 @@ export interface AgentBackendSettingsClient {
   /** Per-agent native permission list; absent = no「默认权限」rows. */
   agentBackendNativePermissions?: (request: NativePermissionRequest) => Promise<NativePermissionView>
   agentBackendNativePermissionSet?: (request: NativePermissionRequest & { mode: string }) => Promise<NativePermissionView>
+  /** UI 1103: the existing login probe, read for each external Agent's status. */
+  agentBackendCredentials?: (target: AgentBackendTarget) => Promise<CredentialProbe>
+  agentBackendModelConnection?: (request: AgentModelConnectionRequest) => Promise<AgentModelConnection>
+  /** Pi's「配置来源」: Fox 模型服务, or the native ~/.pi imported for every project. */
+  agentBackendChooseFoxSource?: (target: AgentBackendTarget, remember: boolean) => Promise<unknown>
+  agentBackendImportCandidates?: (target: AgentBackendTarget) => Promise<ImportItem[]>
+  agentBackendImportCredentials?: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite?: boolean, reuseForNewProjects?: boolean) => Promise<ImportReport>
 }
 
 /**
@@ -59,7 +71,7 @@ export const NATIVE_PERMISSION_SETTING_BACKENDS: readonly { backend: AgentBacken
  * default; it stays an explicit per-conversation choice in the Agent's own
  * picker.
  */
-function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClient }) {
+function NativePermissionDefaults({ client, enabled }: { client: AgentBackendSettingsClient; enabled: readonly string[] }) {
   const list = client.agentBackendNativePermissions
   const set = client.agentBackendNativePermissionSet
   const [views, setViews] = useState<Partial<Record<AgentBackendId, NativePermissionView>>>({})
@@ -77,7 +89,7 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
   if (!list || !set) return null
   return (
     <>
-      {NATIVE_PERMISSION_SETTING_BACKENDS.map(({ backend, label }) => {
+      {NATIVE_PERMISSION_SETTING_BACKENDS.filter(({ backend }) => isAgentEnabled(backend, enabled)).map(({ backend, label }) => {
         const view = views[backend]
         const rows = nativePermissionRows(view, { restrictedOnly: true })
         if (!view || rows.length === 0) return null
@@ -113,13 +125,126 @@ function NativePermissionDefaults({ client }: { client: AgentBackendSettingsClie
   )
 }
 
+/** 设置 → Agent: what each external Agent's row says about it (UI 1103). */
+export type ExternalAgentState = 'checking' | 'detected' | 'not_installed' | 'not_configured'
+
+export const EXTERNAL_AGENT_STATE_LABELS: Record<ExternalAgentState, string> = {
+  checking: '正在检测…',
+  detected: '已检测到',
+  not_installed: '未安装',
+  not_configured: '未配置',
+}
+
+export const EXTERNAL_AGENT_SETTING_LABELS: Record<string, string> = { pi: 'Pi', codex: 'Codex', deepseek: 'DeepSeek（dsh）' }
+
+/**
+ * The state from the Host's existing probes: `installed` of the login probe
+ * (the launch's own check), its `state`, and the model connection.
+ */
+export function externalAgentState(probe: CredentialProbe | null | undefined, connection: AgentModelConnection | null | undefined, failed = false): ExternalAgentState {
+  if (failed) return 'not_configured'
+  if (!probe) return 'checking'
+  if (probe.installed === false) return 'not_installed'
+  const connectionReady = !connection || connection.status === 'ready' || connection.status === 'existing_login'
+  if (probe.state === 'ready' && !probe.source?.choiceRequired && connectionReady) return 'detected'
+  return 'not_configured'
+}
+
+interface ExternalAgentProbe { probe: CredentialProbe | null; connection: AgentModelConnection | null; failed: boolean }
+
+/** The external Agents with an enable switch, their status and Pi's configuration source. */
+function ExternalAgentRows({ client, enabled, onOpenModelSettings }: { client: AgentBackendSettingsClient; enabled: readonly string[]; onOpenModelSettings?: () => void }) {
+  const [probes, setProbes] = useState<Partial<Record<string, ExternalAgentProbe>>>({})
+  const [tick, setTick] = useState(0)
+  const [sourceBusy, setSourceBusy] = useState(false)
+  const [sourceError, setSourceError] = useState<string | null>(null)
+  useEffect(() => {
+    const refresh = () => setTick((value) => value + 1)
+    window.addEventListener('fox:model-service-changed', refresh)
+    return () => window.removeEventListener('fox:model-service-changed', refresh)
+  }, [])
+  useEffect(() => {
+    const credentials = client.agentBackendCredentials
+    if (!credentials) return
+    let cancelled = false
+    for (const backend of EXTERNAL_AGENT_IDS) {
+      const target: AgentBackendTarget = { backend, fullAccess: false }
+      Promise.all([
+        credentials(target),
+        client.agentBackendModelConnection ? client.agentBackendModelConnection({ target }).catch(() => null) : Promise.resolve(null),
+      ])
+        .then(([probe, connection]) => { if (!cancelled) setProbes((current) => ({ ...current, [backend]: { probe, connection, failed: false } })) })
+        .catch(() => { if (!cancelled) setProbes((current) => ({ ...current, [backend]: { probe: null, connection: null, failed: true } })) })
+    }
+    return () => { cancelled = true }
+  }, [client, tick])
+  if (!client.agentBackendCredentials) return null
+
+  const piSource = probes.pi?.probe?.source ?? null
+  const piNative = piSource?.current === 'native' || piSource?.current === 'reused_native'
+  const choosePiSource = async (next: 'fox' | 'native') => {
+    const target: AgentBackendTarget = { backend: 'pi', fullAccess: false }
+    setSourceBusy(true)
+    setSourceError(null)
+    try {
+      if (next === 'fox') {
+        if (!client.agentBackendChooseFoxSource) return
+        await client.agentBackendChooseFoxSource(target, true)
+      } else {
+        if (!client.agentBackendImportCandidates || !client.agentBackendImportCredentials) return
+        const items = await client.agentBackendImportCandidates(target)
+        await client.agentBackendImportCredentials(target, items.map((item) => item.id), true, true, true)
+      }
+      setTick((value) => value + 1)
+    } catch {
+      setSourceError(next === 'fox' ? '没能切换到 Fox 模型服务，请重试。' : '没能切换到本机 ~/.pi，请确认本机已有 Pi 的配置后重试。')
+    } finally {
+      setSourceBusy(false)
+    }
+  }
+
+  return (
+    <>
+      {EXTERNAL_AGENT_IDS.map((backend) => {
+        const entry = probes[backend]
+        const state = externalAgentState(entry?.probe, entry?.connection, entry?.failed)
+        const label = EXTERNAL_AGENT_SETTING_LABELS[backend]
+        const on = isAgentEnabled(backend, enabled)
+        return (
+          <SettingsRow
+            key={backend}
+            className="fox-external-agent-row"
+            title={label}
+            description={<span className="fox-external-agent-state" data-external-agent-state={state}><i className={state === 'detected' ? 'fox-settings-dot is-ok' : 'fox-settings-dot is-empty'} aria-hidden="true" />{EXTERNAL_AGENT_STATE_LABELS[state]}</span>}
+          >
+            {onOpenModelSettings && <Button type="button" variant="ghost" size="sm" onClick={onOpenModelSettings}>去模型服务配置</Button>}
+            <Switch checked={on} aria-label={`启用 ${label}`} data-external-agent={backend} onCheckedChange={(value) => setExternalAgentEnabled(backend, value)} />
+          </SettingsRow>
+        )
+      })}
+      {piSource && (piSource.nativeAvailable || piNative) && (
+        <SettingsRow className="fox-external-agent-row" title="Pi 配置来源" description={piSource.sourceChanged ? '本机 ~/.pi 的配置已变化，请重新选择。' : '没选过时默认用 Fox 模型服务的 Key。'}>
+          <Select value={piNative ? 'native' : 'fox'} disabled={sourceBusy} onValueChange={(value) => void choosePiSource(value === 'native' ? 'native' : 'fox')}>
+            <SelectTrigger className="fox-settings-agent-select" aria-label="Pi 配置来源"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="fox">Fox 模型服务</SelectItem>
+              <SelectItem value="native" disabled={!piSource.nativeAvailable}>本机 ~/.pi</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+      )}
+      {sourceError && <p className="fox-settings-error fox-agent-backend-settings-error" role="alert">{sourceError}</p>}
+    </>
+  )
+}
+
 /** Broadcast a preferences change (the open draft re-probes on it). */
 export function dispatchAgentBackendPreferencesChanged(preferences: AgentBackendPreferences) {
   if (typeof window === 'undefined') return
   window.dispatchEvent(new CustomEvent(AGENT_BACKEND_PREFERENCES_EVENT, { detail: preferences }))
 }
 
-export function AgentBackendSettingsSection({ client }: { client: AgentBackendSettingsClient }) {
+export function AgentBackendSettingsSection({ client, onOpenModelSettings }: { client: AgentBackendSettingsClient; onOpenModelSettings?: () => void }) {
   const [preferences, setPreferences] = useState<AgentBackendPreferences | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -146,15 +271,17 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
     }
   }, [client])
 
-  const rows = agentBackendSettingRows(preferences)
+  const enabled = useEnabledExternalAgents()
+  const rows = agentBackendSettingRows(preferences, enabled)
   const forcedOff = agentBackendForcedOffNotice(preferences)
   const savedRetired = agentBackendSavedRetiredNotice(preferences)
-  const selected = agentBackendSettingValue(preferences)
+  const selected = agentBackendSettingValue(preferences, enabled)
   const effective = isAgentBackendId(preferences?.effectiveBackend) ? preferences.effectiveBackend : 'fox'
   const unavailableReasons = rows.filter((row) => row.disabled && row.reason)
   return (
-    <SettingsGroup title="Agent 驱动" className="fox-agent-backend-settings" aside={<span>只影响之后新建的会话</span>}>
-      <SettingsRow title="新会话使用的 Agent" description="默认 Fox（内置 PiNative）；也可选外部 Agent：Pi、Codex、DeepSeek（dsh）。会话创建后不能更换，已有会话保留创建时的绑定。">
+    <SettingsGroup title="Agent 驱动" className="fox-agent-backend-settings" aside={<span>外部 Agent 需要你先在电脑上安装并配置好，启用后才会出现在对话的 Agent 选择里</span>}>
+      <ExternalAgentRows client={client} enabled={enabled} onOpenModelSettings={onOpenModelSettings} />
+      <SettingsRow title="新会话使用的 Agent" description="默认 Fox；启用的外部 Agent 也可以选。会话创建后不能更换 Agent。">
         <Select
           value={selected}
           disabled={!preferences || saving}
@@ -179,10 +306,10 @@ export function AgentBackendSettingsSection({ client }: { client: AgentBackendSe
         </div>
       )}
       {savedRetired && <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note" data-retired-default={preferences?.defaultBackend}>{savedRetired}</p>}
-      {preferences && !savedRetired && selected !== effective && (
+      {preferences && !savedRetired && selected !== effective && isAgentEnabled(effective, enabled) && (
         <p className="fox-settings-footnote fox-agent-backend-settings-note" role="note">已保存的选择当前不可用，新会话暂时使用 {AGENT_BACKEND_LABELS[effective]}。</p>
       )}
-      <NativePermissionDefaults client={client} />
+      <NativePermissionDefaults client={client} enabled={enabled} />
       {error && <p className="fox-settings-error fox-agent-backend-settings-error" role="alert">{error}</p>}
     </SettingsGroup>
   )

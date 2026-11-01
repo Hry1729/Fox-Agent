@@ -1,52 +1,28 @@
-// Settings batch (13.15 re-test fixes ① ② + item 4): everything the
-// composer's top slot shows for the outer Agent backend, with its own data
-// loading, so the rules can be tested without the workbench.
+// Everything the composer's top slot shows for the outer Agent backend, with
+// its own data loading, so the rules can be tested without the workbench.
 //
-// * A new conversation uses the composer's selection (`draftBackend`);
-//   an open conversation shows
-//   its frozen backend (`lockedBackend`).
-// * Every async result (capability chips, permission status, login probe) is
-//   stored WITH the key of the target it was asked for and only shown while
-//   that key is still the current one; a late answer for an older target is
-//   dropped by request sequence. So switching backend / project never shows
-//   the previous backend's card or chips, not even for one render.
-// * The login card is keyed by its target (React `key`): a new target mounts
-//   a fresh card with no local message / candidates of the old one.
-// * A successful import's receipt is shown ONCE, on the bar (the card no
-//   longer echoes it); "知道了" or 30 s removes the whole notice. An import
-//   error still shows inside the card.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+// UI 1103: external Agents are opt-in (设置 → Agent). Their login and
+// configuration live there; nothing about a login is shown above the
+// composer any more, in normal or developer mode. What is left: the
+// read-only notice of a locked conversation and, in developer mode, the
+// locked-backend chip, the capability chips and the local preview.
+//
+// Every async result (capability chips, permission status) is stored WITH
+// the key of the target it was asked for and only shown while that key is
+// still the current one; a late answer for an older target is dropped.
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AgentBackendBar } from './AgentBackendBar'
 import { AgentNetworkPanel } from './AgentNetworkPanel'
 import type { AgentNetworkClient } from '@/features/conversations/model/agent-network'
-import { AgentBackendCredentialCard } from './AgentBackendCredentialCard'
 import { useDeveloperUi } from '../developer-ui'
-import { AgentModelConnectionCard, type AgentModelConnection, type AgentModelConnectionRequest } from './AgentModelConnectionCard'
-import {
-  credentialCardModel,
-  credentialProbeTarget,
-  credentialProbeTargetKey,
-  IMPORT_RECEIPT_VISIBLE_MS,
-  importReceiptLines,
-  type AgentBackendPermissionStatus,
-  type AgentBackendTarget,
-  type CredentialProbe,
-  type ImportItem,
-  type ImportReport,
-} from '@/features/conversations/model/agent-backend-onboarding'
+import type { AgentBackendPermissionStatus } from '@/features/conversations/model/agent-backend-onboarding'
 import type { NativePermissionRequest, NativePermissionView } from '@/features/conversations/model/agent-native-permission'
 import { agentBackendAccess, isAgentBackendHidden, isAgentBackendRetired, NEW_CONVERSATION_AGENT_BACKEND, refreshesAgentBackendCapabilities, type AgentBackendCapabilities, type AgentBackendId, type AgentBackendStatus } from '@/features/conversations/model/agent-backend'
 
 /** The Host calls the panel needs (a subset of `desktopClient`). */
 export interface AgentBackendPanelClient extends Partial<AgentNetworkClient> {
-  agentBackendModelConnection?: (request: AgentModelConnectionRequest) => Promise<AgentModelConnection>
   agentBackendCapabilities: (backend: AgentBackendId, conversationId?: string | null) => Promise<AgentBackendCapabilities>
   agentBackendPermissionStatus: (conversationId?: string | null) => Promise<AgentBackendPermissionStatus>
-  agentBackendCredentials: (target: AgentBackendTarget) => Promise<CredentialProbe>
-  agentBackendImportCandidates: (target: AgentBackendTarget) => Promise<ImportItem[]>
-  agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite?: boolean, reuseForNewProjects?: boolean) => Promise<ImportReport>
-  agentBackendChooseFoxSource?: (target: AgentBackendTarget, remember: boolean) => Promise<unknown>
-  agentBackendOpenPrivateHome: (target: AgentBackendTarget) => Promise<unknown>
   agentBackendRevokeFullAccess: (conversationId: string) => Promise<unknown>
   /** Per-agent native permission list; absent = the old full-access chip. */
   agentBackendNativePermissions?: (request: NativePermissionRequest) => Promise<NativePermissionView>
@@ -91,14 +67,11 @@ export function AgentBackendPanel({
   lockedBackend,
   conversationId,
   draftBackend: pickedDraftBackend,
-  draftProjectId = null,
-  draftProjectRoot = null,
   draftFullAccess = false,
   refusal = null,
   failure = null,
   sessionTick = 0,
   developerUi: developerUiProp,
-  onOpenModelSettings,
 }: {
   client: AgentBackendPanelClient
   status: AgentBackendStatus | null
@@ -107,8 +80,6 @@ export function AgentBackendPanel({
   conversationId: string | null
   /** Backend selected in the new-conversation composer. */
   draftBackend: AgentBackendId
-  draftProjectId?: string | null
-  draftProjectRoot?: string | null
   /** Legacy Fox full-access preference; kept only for older Hosts. */
   draftFullAccess?: boolean
   refusal?: string | null
@@ -118,8 +89,6 @@ export function AgentBackendPanel({
   sessionTick?: number
   /** Developer mode override (tests); defaults to the 设置 / FOX_DEV_UI switch. */
   developerUi?: boolean
-  /** 「去设置模型服务」。 */
-  onOpenModelSettings?: () => void
 }) {
   const developerSwitch = useDeveloperUi()
   const developerUi = developerUiProp ?? developerSwitch
@@ -172,35 +141,6 @@ export function AgentBackendPanel({
     return client.agentBackendPermissionStatus(id)
   }, [client]))
 
-  // The draft's mode is the setting as the Host applies it (FORBIDDEN never
-  // grants it); the probe of a draft uses it. Nothing of a read-only (retired)
-  // conversation is probed: there is no runtime, so there is no login card.
-  const target = external ? credentialProbeTarget({
-    lockedBackend,
-    conversationId,
-    draftBackend,
-    draftProjectId,
-    draftProjectRoot,
-    draftFullAccess,
-  }) : null
-  const targetKey = credentialProbeTargetKey(target)
-  const modelTick = sessionTick + onboardingTick
-  const [connectionOverride, setConnectionOverride] = useState<(Keyed<AgentModelConnection> & { tick: number }) | null>(null)
-  const loadedConnection = useKeyedResource(client.agentBackendModelConnection ? targetKey : '', modelTick, useCallback((key: string) => client.agentBackendModelConnection!({ target: JSON.parse(key) as AgentBackendTarget }).catch((error): AgentModelConnection => ({ status: 'verification_failed', providerId: null, providerName: null, apiType: '', candidates: [], message: error instanceof Error ? error.message : String(error) })), [client]))
-  const modelConnection = connectionOverride?.key === targetKey && connectionOverride.tick === modelTick ? connectionOverride.value : loadedConnection
-  const probe = useKeyedResource(targetKey, sessionTick + onboardingTick + (modelConnection?.status === 'ready' ? 1 : 0), useCallback((key: string) => client.agentBackendCredentials(JSON.parse(key) as AgentBackendTarget), [client]))
-
-  const [receipt, setReceipt] = useState<Keyed<string[]> | null>(null)
-  useEffect(() => {
-    if (!receipt) return
-    const timer = setTimeout(() => setReceipt(null), IMPORT_RECEIPT_VISIBLE_MS)
-    return () => clearTimeout(timer)
-  }, [receipt])
-  // A receipt belongs to the target it was made for.
-  useEffect(() => { setReceipt((current) => (current && current.key !== targetKey ? null : current)) }, [targetKey])
-  const visibleReceipt = receipt && receipt.key === targetKey ? receipt.value : null
-  const dismissReceipt = useCallback(() => setReceipt(null), [])
-
   const handleRevoke = useCallback(() => {
     if (!capabilityConversationId) return
     client.agentBackendRevokeFullAccess(capabilityConversationId)
@@ -210,42 +150,6 @@ export function AgentBackendPanel({
         setPermissionTick((tick) => tick + 1)
       })
   }, [client, capabilityConversationId])
-
-  // The login card is user-facing while the login needs action; the fold of
-  // a ready login (「Agent 配置来源与导入」) is a developer detail.
-  const connectionNeedsAction = Boolean(targetKey && probe && !probe.source?.choiceRequired && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login')
-  const loginReady = credentialCardModel(probe, permission, true)?.kind === 'ready' && !connectionNeedsAction
-  const card = useMemo(() => {
-    if (!targetKey || !probe) return null
-    const current: AgentBackendTarget = JSON.parse(targetKey)
-    const needsModel = !probe.source?.choiceRequired && modelConnection && modelConnection.status !== 'ready' && modelConnection.status !== 'existing_login'
-    const modelForm = needsModel ? <AgentModelConnectionCard key={`${targetKey}:${modelConnection.providerId}`} backend={shownBackend} connection={modelConnection} developerUi={developerUi} onSave={async choice => {
-      const value = await client.agentBackendModelConnection!({ target: JSON.parse(targetKey), providerId: modelConnection.providerId ?? undefined, ...choice })
-      setConnectionOverride({ key: targetKey, tick: modelTick, value })
-      if (value.status === 'ready' || value.status === 'existing_login') window.dispatchEvent(new Event('fox:model-service-changed'))
-    }} /> : null
-    return <AgentBackendCredentialCard
-      key={targetKey}
-      probe={probe}
-      permission={permission}
-      developerUi={developerUi}
-      modelConnection={needsModel ? modelConnection : null}
-      modelForm={modelForm}
-      onOpenModelSettings={onOpenModelSettings}
-      onOpenFolder={() => client.agentBackendOpenPrivateHome(current)}
-      onLoadCandidates={() => client.agentBackendImportCandidates(current)}
-      onChooseFox={client.agentBackendChooseFoxSource ? async remember => {
-        await client.agentBackendChooseFoxSource!(current, remember)
-        setOnboardingTick(tick => tick + 1)
-      } : undefined}
-      onImport={async (selected, allProjects, overwrite, reuseForNewProjects) => {
-        const report = await client.agentBackendImportCredentials(current, selected, allProjects, overwrite, reuseForNewProjects)
-        setReceipt({ key: targetKey, value: importReceiptLines(report) })
-        setOnboardingTick((tick) => tick + 1)
-        return report
-      }}
-    />
-  }, [client, targetKey, probe, permission, modelConnection, shownBackend, modelTick, developerUi, onOpenModelSettings])
 
   const networkPanel = developerUi && external && capabilityConversationId && client.agentBackendNetworkStatus && client.agentBackendPreviewAction
     ? <AgentNetworkPanel key={capabilityConversationId} client={client as AgentNetworkClient} conversationId={capabilityConversationId} /> : null
@@ -260,11 +164,8 @@ export function AgentBackendPanel({
       capabilities={capabilities}
       permission={permission}
       onRevokeFullAccess={handleRevoke}
-      credentialCard={loginReady ? null : card}
-      developerDetails={(loginReady && card) || networkPanel ? <>{loginReady ? card : null}{networkPanel}</> : null}
+      developerDetails={networkPanel}
       developerUi={developerUi}
-      importReceipt={visibleReceipt}
-      onDismissImportReceipt={dismissReceipt}
     />
   )
 }

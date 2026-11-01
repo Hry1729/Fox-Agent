@@ -9,9 +9,9 @@
 // * capability chips, the login card and the import receipt stay wired for the
 //   records already made (nothing of theirs is loaded for a retired backend).
 //
-// Composer batch (2026-10-31): the bar is for what the user must act on
-// (a refused send, a failed turn with its action, a read-only conversation,
-// a missing login / model connection, an import receipt). The debugging
+// Composer batch (2026-10-31) / UI 1103: the bar only says that a
+// conversation is read-only. Login and configuration live in 设置 → Agent;
+// a send that cannot start gives one notification with「去设置」. The debugging
 // details - the locked-backend chip, the capability chips, the configuration
 // source / import fold of a ready login and the local preview - are shown
 // only in developer mode (`developerUi`). The approval mode selector lives in
@@ -63,22 +63,7 @@ function CapabilityChips({ capabilities }: { capabilities: AgentBackendCapabilit
   )
 }
 
-/**
- * The last import receipt, kept on the bar after the login card is gone (a
- * successful import turns the probe ready and the card disappears with its
- * own message). Names only; dismissible; the caller clears it after a while.
- */
-function ImportReceiptNotice({ lines, onDismiss }: { lines: readonly string[]; onDismiss?: () => void }) {
-  if (lines.length === 0) return null
-  return (
-    <div className="fox-agent-backend-receipt" role="status" aria-label="导入回执">
-      {lines.map((line) => <span key={line}>{line}</span>)}
-      {onDismiss && <button type="button" onClick={onDismiss} aria-label="关闭导入回执">知道了</button>}
-    </div>
-  )
-}
-
-export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, failure = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker: _permissionPicker = null, credentialCard = null, developerDetails = null, developerUi = false, importReceipt = null, onDismissImportReceipt }: {
+export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFullAccess = false, refusal = null, failure = null, capabilities = null, permission = null, onRevokeFullAccess, permissionPicker: _permissionPicker = null, developerDetails = null, developerUi = false }: {
   status: AgentBackendStatus | null
   /** The frozen backend of the open conversation; null for a new conversation. */
   lockedBackend: AgentBackendId | null
@@ -101,19 +86,11 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
   onRevokeFullAccess?: () => void
   /** Retained for callers; the approval selector now lives in the composer. */
   permissionPicker?: ReactNode
-  /** Login guidance the user must act on (missing login / model connection). Always shown. */
-  credentialCard?: ReactNode
-  /** Developer-only details (configuration source / import of a ready login, local preview). */
+  /** Developer-only details (local preview). */
   developerDetails?: ReactNode
   /** Developer mode: show the backend chip, capability chips and `developerDetails`. */
   developerUi?: boolean
-  /** Last successful import receipt, shown once, here. */
-  importReceipt?: readonly string[] | null
-  onDismissImportReceipt?: () => void
 }) {
-  const receiptNotice = developerUi && importReceipt && importReceipt.length > 0
-    ? <ImportReceiptNotice lines={importReceipt} onDismiss={onDismissImportReceipt} />
-    : null
   // 发送被路由拒绝改走通知，栏上不再铺同一句。草稿栏仍保留这个空位，避免把拒绝画进新对话。
   const refusalNotice = refusal ? null : null
   if (lockedBackend) {
@@ -123,9 +100,12 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
     if (lockedBackend === 'fox') return null
     const runnable = access === 'runnable'
     const shownNotice = refusalNotice ?? (notice && <span className="fox-agent-backend-notice">{notice}</span>)
-    const userCard = runnable ? credentialCard : null
     const devCard = runnable && developerUi ? developerDetails : null
-    if (!developerUi && !shownNotice && !failure && !userCard && !receiptNotice) return null
+    // UI 1103: no login / configuration card above the composer, in either
+    // mode. A failed turn is reported in the message stream and by one
+    // notification; its hint here is a developer detail.
+    const failureNotice = developerUi && failure ? <AgentBackendFailureNotice failure={failure} developerUi /> : null
+    if (!developerUi && !shownNotice) return null
     return (
       <div className="fox-agent-backend-bar" data-access={access} data-developer-ui={developerUi ? 'true' : undefined} role="status">
         {developerUi && (
@@ -136,10 +116,8 @@ export function AgentBackendBar({ status, lockedBackend, draftBackend, draftFull
         )}
         {shownNotice}
         {developerUi && runnable && <CapabilityChips capabilities={capabilities} />}
-        {failure && <AgentBackendFailureNotice failure={failure} developerUi={developerUi} />}
-        {userCard}
+        {failureNotice}
         {devCard}
-        {receiptNotice}
       </div>
     )
   }
