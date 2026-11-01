@@ -1,192 +1,19 @@
 // UX batch ①②: login guidance + permission mode of an external backend.
-// Model behaviour (three probe states, their copy and actions, names only)
-// plus source assertions on AgentBackendBar / AgentBackendCredentialCard.
+// Permission-mode model plus source assertions (UI 1103: the login card is gone).
 import { describe, expect, test } from 'bun:test'
 import { existsSync, readFileSync } from 'node:fs'
 import {
-  credentialCardModel,
-  credentialProbeTarget,
-  credentialProbeTargetKey,
-  IMPORT_RECEIPT_VISIBLE_MS,
-  importReceiptLines,
   effectiveDraftPermissionMode,
   externalPermissionModeOptions,
   FULL_ACCESS_PRIVATE_HOME_NOTE,
   FULL_ACCESS_RISK_POINTS,
-  importConfirmationRows,
-  importReceipt,
-  backupDirectoryLabel,
   permissionChipLabel,
   REVOKE_FULL_ACCESS_NOTICE,
   type AgentBackendPermissionStatus,
-  type CredentialProbe,
-  type ImportItem,
-  unifiedLoginNote,
 } from '../src/features/conversations/model/agent-backend-onboarding'
-
-// A value that must never reach the UI model. The Host never sends one; the
-// probe below carries it nowhere either, and every rendered string is checked.
-const SECRET = 'sk-test-0123456789abcdef'
-
-function probe(overrides: Partial<CredentialProbe> = {}): CredentialProbe {
-  return {
-    backend: 'deepseek',
-    state: 'missing_credentials',
-    privateHome: '/fox/private-home/p1/deepseek',
-    credentialsPresent: false,
-    presentKeys: [],
-    presentFiles: [],
-    requiredKeys: ['DEEPSEEK_API_KEY'],
-    requiredFiles: ['.dsh/.env'],
-    templates: [
-      { id: 'deepseek_official', title: '官方端点', note: '把 key 填进 .dsh/.env', files: [{ path: '.dsh/.env', content: 'DEEPSEEK_API_KEY=<你的 key>' }] },
-      { id: 'magpie_loopback', title: '本机 Magpie', note: '需要完全访问', files: [{ path: '.dsh/.env', content: 'DEEPSEEK_BASE_URL=http://127.0.0.1:8080' }] },
-    ],
-    ...overrides,
-  }
-}
 
 const allowed: AgentBackendPermissionStatus = { fullAccessForbidden: false, forbiddenReason: null, engineeringSwitch: false }
 const forbidden: AgentBackendPermissionStatus = { fullAccessForbidden: true, forbiddenReason: '管理员已禁止完全访问', engineeringSwitch: false }
-
-function noValue(model: unknown) {
-  expect(JSON.stringify(model)).not.toContain(SECRET)
-  expect(JSON.stringify(model)).not.toMatch(/sk-[A-Za-z0-9]{8,}/)
-}
-
-describe('credentialCardModel: probe states', () => {
-  test('ready → no card', () => {
-    expect(credentialCardModel(probe({ state: 'ready', credentialsPresent: true, presentKeys: ['DEEPSEEK_API_KEY'] }), allowed)).toBeNull()
-    expect(credentialCardModel(null)).toBeNull()
-  })
-
-  test('missing_credentials → private HOME, required names, templates, import offered', () => {
-    const card = credentialCardModel(probe(), allowed)!
-    expect(card.kind).toBe('missing')
-    expect(card.title).toBe('这个后端还没有登录')
-    expect(card.description).toContain('私有 HOME')
-    expect(card.description).toContain('从真实 HOME 导入')
-    expect(card.privateHome).toBe('/fox/private-home/p1/deepseek')
-    expect(card.requiredKeys).toEqual(['DEEPSEEK_API_KEY'])
-    expect(card.requiredFiles).toEqual(['.dsh/.env'])
-    expect(card.templates.map((t) => t.id)).toEqual(['deepseek_official', 'magpie_loopback'])
-    expect(card.offerImport).toBe(true)
-    noValue(card)
-  })
-
-  test('there is no loopback card any more: a loopback gateway is not refused', () => {
-    // The Host's CredentialState has only ready / missing_credentials.
-    const card = credentialCardModel(probe({ state: 'ready', credentialsPresent: true, presentKeys: ['DEEPSEEK_API_KEY'], presentFiles: ['.dsh/.env'] }), forbidden)
-    expect(card).toBeNull()
-  })
-})
-
-describe('import confirmation and receipt: names only', () => {
-  const items: ImportItem[] = [
-    { id: 'file:.dsh/cordis.patch.yml', kind: 'file', name: 'cordis.patch.yml', destination: '.dsh/cordis.patch.yml' },
-    { id: 'env:DEEPSEEK_API_KEY', kind: 'env_key', name: 'DEEPSEEK_API_KEY', destination: '.dsh/.env' },
-  ]
-
-  test('rows show file / key names and destinations', () => {
-    const rows = importConfirmationRows(items)
-    expect(rows.map((r) => r.id)).toEqual(['file:.dsh/cordis.patch.yml', 'env:DEEPSEEK_API_KEY'])
-    expect(rows[0].label).toBe('cordis.patch.yml')
-    expect(rows[1].label).toBe('DEEPSEEK_API_KEY（.dsh/.env 中的一行）')
-    expect(rows[1].detail).toBe('复制到私有 HOME 的 .dsh/.env')
-    noValue(rows)
-  })
-
-  test('receipt: one project vs all projects, skipped count, nothing copied', () => {
-    expect(importReceipt({ backend: 'deepseek', homes: 1, files: ['.dsh/cordis.patch.yml'], keys: ['DEEPSEEK_API_KEY'], skipped: [] }))
-      .toBe('已复制到本项目的私有 HOME：cordis.patch.yml、DEEPSEEK_API_KEY')
-    expect(importReceipt({ backend: 'codex', homes: 3, files: ['.codex/auth.json'], keys: [], skipped: ['x'] }))
-      .toBe('已复制到 3 个项目的私有 HOME：auth.json；1 项已不在可导入列表中，未复制')
-    expect(importReceipt({ backend: 'pi', homes: 1, files: [], keys: [], skipped: [] })).toBe('没有复制任何内容')
-  })
-
-  // 80b1622 acceptance: "已复制到15 个项目" had no space; the count is the
-  // projects actually written, and every number is spaced from its CJK text.
-  test('receipt: spaced count of the projects actually written', () => {
-    const line = importReceipt({ backend: 'codex', homes: 16, homesWritten: 15, files: ['.codex/auth.json'], keys: [], skipped: [] })
-    expect(line).toBe('已复制到 15 个项目的私有 HOME：auth.json')
-    for (const text of importReceiptLines({ backend: 'codex', homes: 16, homesWritten: 15, files: ['.codex/auth.json'], keys: [], skipped: ['a', 'b'], skippedExisting: [{ project: 'p1', label: '主项目', items: ['.codex/auth.json'] }] })) {
-      expect(text).not.toMatch(/[\u4e00-\u9fff]\d|\d[\u4e00-\u9fff]/)
-    }
-  })
-
-  test('receipt: existing logins kept are listed by project and file; nothing written says so', () => {
-    const lines = importReceiptLines({
-      backend: 'codex', homes: 3, homesWritten: 1, overwrite: false, files: ['.codex/auth.json'], keys: [], skipped: [],
-      skippedExisting: [
-        { project: 'p1', label: '主项目', items: ['.codex/auth.json'] },
-        { project: 'p2', label: '第二个项目', items: ['.codex/auth.json', '.codex/config.toml'] },
-      ],
-      backups: [],
-    })
-    expect(lines).toEqual([
-      '已复制到 1 个项目的私有 HOME：auth.json',
-      '已有登录，未覆盖 2 个项目：主项目（auth.json）、第二个项目（auth.json、config.toml）',
-    ])
-    expect(importReceiptLines({ backend: 'deepseek', homes: 1, homesWritten: 0, files: [], keys: [], skipped: [], skippedExisting: [{ project: 'p1', label: '主项目', items: ['DEEPSEEK_API_KEY'] }] }))
-      .toEqual(['没有复制任何内容', '已有登录，未覆盖 1 个项目：主项目（DEEPSEEK_API_KEY）'])
-  })
-
-  // Settings batch, item 3: the receipt names the backup RELATIVE to the
-  // private HOME (no SID / profile path), the same form as the audit.
-  test('receipt: overwrite names the backup location relative to the private HOME', () => {
-    const report = {
-      backend: 'codex', homes: 1, homesWritten: 1, overwrite: true, files: ['.codex/auth.json'], keys: [], skipped: [], skippedExisting: [],
-      backups: [{ project: 'p1', label: '主项目', directory: '.fox-credential-backups/20261022-084512', items: ['.codex/auth.json'] }],
-    }
-    expect(importReceiptLines(report, { windows: true })[1]).toBe('已覆盖 主项目 的 auth.json，原文件备份在私有 HOME 下的 .fox-credential-backups\\20261022-084512')
-    expect(importReceiptLines(report, { windows: false })[1]).toBe('已覆盖 主项目 的 auth.json，原文件备份在私有 HOME 下的 .fox-credential-backups/20261022-084512')
-    // An older Host that still sent the absolute path: only the relative tail is shown.
-    const legacy = { ...report, backups: [{ ...report.backups[0], directory: 'C:\\ProgramData\\Fox\\sandbox\\S-1-5-21-1\\homes\\p1\\codex\\.fox-credential-backups\\20261022-084512' }] }
-    const line = importReceiptLines(legacy, { windows: true })[1]
-    expect(line).toBe('已覆盖 主项目 的 auth.json，原文件备份在私有 HOME 下的 .fox-credential-backups\\20261022-084512')
-    expect(line).not.toContain('S-1-5-21')
-    expect(line).not.toContain('ProgramData')
-    expect(backupDirectoryLabel('/home/u/.local/share/fox/sandbox-homes/p1/codex/.fox-credential-backups/20261022-084512-2', false)).toBe('.fox-credential-backups/20261022-084512-2')
-    noValue(importReceiptLines(report))
-  })
-})
-
-describe('probe target: the card shows before the first message (80b1622)', () => {
-  test('a new conversation with an external backend and a project is probed by backend + project', () => {
-    expect(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'codex', draftProjectId: 'p1', draftProjectRoot: 'D:/proj', draftFullAccess: false }))
-      .toEqual({ backend: 'codex', projectId: 'p1', projectRoot: 'D:/proj', fullAccess: false })
-    expect(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'deepseek', draftProjectRoot: 'D:/proj', draftFullAccess: true }))
-      .toEqual({ backend: 'deepseek', projectRoot: 'D:/proj', fullAccess: true })
-  })
-
-  test('Fox has no probe; a locked conversation is probed by id', () => {
-    expect(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'fox', draftProjectId: 'p1' })).toBeNull()
-    expect(credentialProbeTarget({ lockedBackend: 'codex', conversationId: 'c1', draftBackend: 'fox' })).toEqual({ conversationId: 'c1' })
-    expect(credentialProbeTarget({ lockedBackend: 'fox', conversationId: 'c1', draftBackend: 'codex', draftProjectId: 'p1' })).toBeNull()
-  })
-
-  test('a draft without a project probes the default home', () => {
-    expect(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'codex' }))
-      .toEqual({ backend: 'codex', fullAccess: false })
-    expect(credentialProbeTarget({
-      lockedBackend: null,
-      conversationId: null,
-      draftBackend: 'pi',
-      draftProjectId: null,
-      draftProjectRoot: '',
-      draftFullAccess: true,
-    })).toEqual({ backend: 'pi', fullAccess: true })
-  })
-
-  test('the key changes with the target only', () => {
-    const a = credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'codex', draftProjectId: 'p1' })
-    const b = credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'codex', draftProjectId: 'p1' })
-    expect(credentialProbeTargetKey(a)).toBe(credentialProbeTargetKey(b))
-    expect(credentialProbeTargetKey(a)).not.toBe(credentialProbeTargetKey(credentialProbeTarget({ lockedBackend: null, conversationId: null, draftBackend: 'pi', draftProjectId: 'p1' })))
-    expect(credentialProbeTargetKey(null)).toBe('')
-    expect(JSON.parse(credentialProbeTargetKey(a))).toEqual(a)
-  })
-})
 
 describe('permission mode (semantics A)', () => {
   test('full access option is disabled with the reason under FORBIDDEN', () => {
@@ -268,23 +95,5 @@ describe('source assertions', () => {
     expect(panel).not.toContain('agentBackendImportCredentials')
     expect(bar).not.toContain('credentialCard')
     expect(bar).not.toContain('importReceipt')
-  })
-})
-
-// Settings batch, item 6: the unified login (Fox「模型服务」) as the card sees it.
-describe('unified login in the login card', () => {
-  test('a provider that cannot drive the backend says why on the card; names only', () => {
-    const unsupported = probe({ unifiedLogin: { backend: 'deepseek', outcome: 'unsupported', provider: 'DashScope', files: [], userFiles: [], reason: 'DeepSeek 后端（dsh）只支持 Anthropic Messages 协议' } })
-    expect(unifiedLoginNote(unsupported)).toBe('没能用模型服务自动登录。')
-    expect(unifiedLoginNote(unsupported, true)).toBe('没能用“模型服务”的供应商「DashScope」自动登录：DeepSeek 后端（dsh）只支持 Anthropic Messages 协议')
-    const card = credentialCardModel(unsupported, allowed)!
-    expect(card.description).toContain('没能用模型服务自动登录')
-    expect(card.description).not.toContain('DashScope')
-    noValue(card)
-    // Generated / unchanged: the Host already reports `ready`, so no card.
-    expect(credentialCardModel(probe({ state: 'ready', credentialsPresent: true, unifiedLogin: { backend: 'pi', outcome: 'generated', provider: 'DeepSeek', files: ['.pi/agent/models.json'], userFiles: [], reason: null } }), allowed)).toBeNull()
-    // No 模型服务: the card points at it as the first fix.
-    expect(credentialCardModel(probe(), allowed)!.description).toContain('设置 → 模型服务')
-    expect(unifiedLoginNote(probe({ unifiedLogin: null }))).toBeNull()
   })
 })

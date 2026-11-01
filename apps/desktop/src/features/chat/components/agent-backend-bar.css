@@ -105,33 +105,6 @@
   cursor: help;
 }
 
-/* Import receipt (80b1622 acceptance): kept on the bar after the login card
-   disappears; wraps inside the composer width, names only. */
-.fox-agent-backend-receipt {
-  display: flex;
-  flex: 1 1 100%;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 8px;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.fox-agent-backend-receipt > span {
-  flex: 1 1 100%;
-  min-width: 0;
-}
-
-.fox-agent-backend-receipt > button {
-  font: inherit;
-  color: inherit;
-  background: transparent;
-  border: 1px solid currentColor;
-  border-radius: 6px;
-  padding: 0 6px;
-  opacity: 0.85;
-  cursor: pointer;
-}
 .fox-agent-network { margin-block: 6px; font-size: 12px; color: var(--fox-text-secondary, inherit); }
 .fox-agent-network summary { cursor: pointer; padding-block: 4px; }
 .fox-agent-network-content { display: grid; gap: 8px; padding-block: 8px; }
@@ -140,69 +113,3 @@
 .fox-agent-network-row code { overflow-wrap: anywhere; }
 .fox-agent-network-row button { padding: 3px 8px; border: 1px solid var(--fox-border, rgba(127, 127, 127, 0.3)); border-radius: 6px; background: transparent; color: inherit; }
 .fox-agent-network-row button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
-
-/* 未登录时只留一行标题、一句说明和按钮；私有 HOME 等详情进对话框。 */
-.fox-agent-login-card {
-  flex: 1 1 100%;
-  display: grid;
-  gap: 8px;
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  margin: 2px 0;
-  padding: 10px 12px;
-  border: 1px solid var(--fox-border);
-  border-radius: var(--fox-radius-card, 12px);
-  background: var(--fox-card);
-  color: var(--fox-text);
-}
-.fox-agent-login-card-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-.fox-agent-login-card-copy strong {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.4;
-}
-.fox-agent-login-card-copy p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--fox-text-secondary);
-}
-.fox-agent-login-card-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.fox-agent-login-details {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  font-size: 12px;
-  line-height: 1.45;
-}
-.fox-agent-login-details .fox-agent-backend-credential-card,
-.fox-agent-login-details .fox-agent-model-card {
-  display: grid;
-  gap: 8px;
-}
-.fox-agent-login-details p,
-.fox-agent-login-details pre {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.fox-agent-model-card {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  font-size: 12px;
-}
-.fox-agent-model-card p { margin: 0; }
-.fox-agent-model-card label {
-  display: grid;
-  gap: 4px;
-}

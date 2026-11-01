@@ -327,13 +327,6 @@
   padding-block: var(--fox-space-xs);
 }
 
-.fox-agent-login-card > .fox-agent-login-card-copy {
-  margin: 0;
-  color: var(--fox-text);
-  font-size: var(--fox-type-caption);
-  line-height: 1.45;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .fox-disclosure-chevron {
     transition: none;

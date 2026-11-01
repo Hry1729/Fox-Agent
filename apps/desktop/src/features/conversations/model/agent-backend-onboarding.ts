@@ -39,14 +39,6 @@ export interface UnifiedLoginReport {
   reason: string | null
 }
 
-/** 模型服务没能自动登录时的说明。普通模式只留人话；供应商名、英文原因和错误码只在开发者模式。 */
-export function unifiedLoginNote(probe: CredentialProbe | null | undefined, developerUi = false): string | null {
-  const unified = probe?.unifiedLogin
-  if (!unified || unified.outcome !== 'unsupported') return null
-  if (!developerUi) return '没能用模型服务自动登录。'
-  return `没能用“模型服务”的供应商「${unified.provider}」自动登录：${unified.reason ?? '原因未知'}`
-}
-
 /** One whitelisted item of the real HOME (`agent_backend_import_candidates`). */
 export interface ImportItem {
   id: string
@@ -67,25 +59,6 @@ export interface ImportSkip { project: string; label: string; items: string[] }
  * user's SID / profile).
  */
 export interface ImportBackup { project: string; label: string; directory: string; items: string[] }
-
-/** Folder (under the private HOME) that holds overwritten logins. */
-export const CREDENTIAL_BACKUP_DIR = '.fox-credential-backups'
-
-function hostIsWindows(): boolean {
-  return typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '')
-}
-
-/**
- * The backup location as the receipt shows it: relative to the private HOME
- * (`.fox-credential-backups\<时间戳>` on Windows), never an absolute path
- * even if an older Host sent one.
- */
-export function backupDirectoryLabel(directory: string, windows = hostIsWindows()): string {
-  const normalized = directory.replace(/\\/g, '/')
-  const at = normalized.lastIndexOf(`${CREDENTIAL_BACKUP_DIR}/`)
-  const relative = at >= 0 ? normalized.slice(at) : `${CREDENTIAL_BACKUP_DIR}/${normalized.split('/').filter(Boolean).pop() ?? ''}`
-  return windows ? relative.replace(/\//g, '\\') : relative
-}
 
 /** Audit record returned by `agent_backend_import_credentials` (names only). */
 export interface ImportReport {
@@ -112,42 +85,6 @@ export interface ImportReport {
 export type AgentBackendTarget =
   | { conversationId: string }
   | { backend: string; projectId?: string; projectRoot?: string; fullAccess?: boolean }
-
-/**
- * The probe target of the shown backend: the open conversation when it is
- * locked to an external backend; else, for a new conversation with an
- * external backend picked, its project (id or root, both optional) and draft
- * mode. Null only for Fox. 没选项目时不带 projectId / projectRoot，Host 用默认对话目录的共用 HOME。
- */
-export function credentialProbeTarget(input: {
-  lockedBackend: string | null
-  conversationId: string | null
-  draftBackend: string
-  draftProjectId?: string | null
-  draftProjectRoot?: string | null
-  draftFullAccess?: boolean
-}): AgentBackendTarget | null {
-  if (input.lockedBackend) {
-    return input.lockedBackend !== 'fox' && input.conversationId ? { conversationId: input.conversationId } : null
-  }
-  if (input.draftBackend === 'fox') return null
-  const projectId = input.draftProjectId || undefined
-  const projectRoot = input.draftProjectRoot || undefined
-  return {
-    backend: input.draftBackend,
-    ...(projectId ? { projectId } : {}),
-    ...(projectRoot ? { projectRoot } : {}),
-    fullAccess: Boolean(input.draftFullAccess),
-  }
-}
-
-/** Stable key of a target (effect dependency). */
-export function credentialProbeTargetKey(target: AgentBackendTarget | null): string {
-  return target ? JSON.stringify(target) : ''
-}
-
-/** How long the import receipt stays on the bar after the card is gone. */
-export const IMPORT_RECEIPT_VISIBLE_MS = 30_000
 
 /** `agent_backend_permission_status`. */
 export interface AgentBackendPermissionStatus {
@@ -210,93 +147,4 @@ export function effectiveDraftPermissionMode(mode: ExternalPermissionMode, statu
 export function permissionChipLabel(status: AgentBackendPermissionStatus | null | undefined): string | null {
   if (!status?.mode) return null
   return '隔离：Fox 不额外包装（Agent 原生）'
-}
-
-export interface CredentialCardModel {
-  kind: 'missing' | 'source' | 'ready'
-  title: string
-  description: string
-  privateHome: string
-  requiredKeys: string[]
-  requiredFiles: string[]
-  presentFiles: string[]
-  templates: ConfigTemplate[]
-  /** Offer "从真实 HOME 导入" (missing login only). */
-  offerImport: boolean
-}
-
-/**
- * The card for a probe, or null when the backend is ready: a missing login is
- * fixed in the private HOME (open folder / templates / import); a Pi probe
- * may ask for its configuration source.
- */
-export function credentialCardModel(probe: CredentialProbe | null | undefined, _permission?: AgentBackendPermissionStatus | null, showReady = false): CredentialCardModel | null {
-  if (!probe) return null
-  if (probe.source?.choiceRequired || (showReady && probe.state === 'ready')) {
-    return {
-      kind: probe.source?.choiceRequired ? 'source' : 'ready',
-      title: probe.source?.choiceRequired ? '选择 Pi 配置来源' : 'Agent 配置来源',
-      description: probe.source?.sourceChanged ? '原生 Pi 配置已变化。请重新确认导入，或选择 Fox 模型服务。'
-        : probe.source?.choiceRequired ? '发现本机原生 Pi 配置。确认导入后，当前项目可使用相同的模型和登录。'
-        : probe.source?.current === 'native' || probe.source?.current === 'reused_native' ? '当前使用项目中的原生 Agent 配置。可在这里重新导入。' : '当前配置已就绪。可在这里导入原生 Agent 配置。',
-      privateHome: probe.privateHome, requiredKeys: [], requiredFiles: [], presentFiles: probe.presentFiles, templates: [], offerImport: true,
-    }
-  }
-  if (probe.state === 'ready') return null
-  const note = unifiedLoginNote(probe)
-  // 13.35：先指向模型服务（Fox 把供应商的地址和 Key 交给 Agent），私有 HOME 只作为已有自身登录时的备选。
-  const protocol = probe.backend === 'codex' ? 'OpenAI Responses' : probe.backend === 'deepseek' ? 'Anthropic Messages' : '任一协议（Chat Completions、Responses 或 Anthropic Messages）'
-  return {
-    kind: 'missing',
-    title: '这个后端还没有登录',
-    description: `${note ? `${note}。` : `请到“设置 → 模型服务”填写并测试当前供应商的 ${protocol} 地址和 Key，Fox 会把它交给这个 Agent，不需要你配置私有 HOME。`}已有这个 Agent 自己的登录时，也可以从真实 HOME 导入（外部后端只读取 Fox 为本项目准备的私有 HOME，真实 HOME 里的登录不会直接生效）。`,
-    privateHome: probe.privateHome,
-    requiredKeys: probe.requiredKeys,
-    requiredFiles: probe.requiredFiles,
-    presentFiles: probe.presentFiles,
-    templates: probe.templates,
-    offerImport: true,
-  }
-}
-
-/** Rows of the import confirmation: names only (the Host never sends values). */
-export function importConfirmationRows(items: readonly ImportItem[]): { id: string; label: string; detail: string }[] {
-  return items.map((item) => ({
-    id: item.id,
-    label: item.kind === 'env_key' ? `${item.name}（${item.destination} 中的一行）` : item.name,
-    detail: `复制到私有 HOME 的 ${item.destination}`,
-  }))
-}
-
-const baseName = (path: string) => path.split('/').pop() ?? path
-
-/**
- * Receipt lines after an import (names only, no value). Shown OUTSIDE the
- * card: a successful import turns the probe ready and the card disappears.
- */
-export function importReceiptLines(report: ImportReport, options: { windows?: boolean } = {}): string[] {
-  const names = [...report.files.map(baseName), ...report.keys]
-  const written = report.homesWritten ?? (names.length ? report.homes : 0)
-  const lines: string[] = []
-  if (names.length && written > 0) {
-    const where = report.homes > 1 ? ` ${written} 个项目的私有 HOME` : '本项目的私有 HOME'
-    lines.push(`已复制到${where}：${names.join('、')}`)
-  } else {
-    lines.push('没有复制任何内容')
-  }
-  const kept = report.skippedExisting ?? []
-  if (kept.length) {
-    const projects = kept.map((skip) => `${skip.label}（${skip.items.map(baseName).join('、')}）`)
-    lines.push(`已有登录，未覆盖 ${kept.length} 个项目：${projects.join('、')}`)
-  }
-  for (const backup of report.backups ?? []) {
-    lines.push(`已覆盖 ${backup.label} 的 ${backup.items.map(baseName).join('、')}，原文件备份在私有 HOME 下的 ${backupDirectoryLabel(backup.directory, options.windows)}`)
-  }
-  if (report.skipped.length) lines.push(`${report.skipped.length} 项已不在可导入列表中，未复制`)
-  return lines
-}
-
-/** One-line receipt after an import (names only). */
-export function importReceipt(report: ImportReport, options: { windows?: boolean } = {}): string {
-  return importReceiptLines(report, options).join('；')
 }
