@@ -48,6 +48,7 @@ const HINTS: Record<string, { action: AgentBackendFailureAction; detail: string 
   agent_backend_fox_tools_unsupported: { action: 'upgrade', detail: '已安装的 pi-gate 不支持 Fox 工具：升级 Fox 外部运行时。' },
   agent_backend_start_timeout: { action: 'retry', detail: 'Agent 没有在限定时间内完成启动：重新发送；反复出现时检查安全软件拦截或重新安装外部运行时。' },
   agent_backend_exited: { action: 'retry', detail: 'Agent 进程在这一轮中途退出：重新发送；反复出现时查看诊断里的后端输出。' },
+  agent_backend_workspace_acl_denied: { action: 'retry', detail: 'dsh 没能给项目目录加上写入授权（Windows 拒绝访问）：多半是项目目录或其中的文件属于管理员等其他账户。请在该目录的「属性 → 安全 → 高级」里把所有者改为当前用户（含子项），或给当前用户完全控制，然后重新发送。' },
   agent_backend_response_timeout: { action: 'retry', detail: 'Agent 长时间没有进展：检查模型连接后重新发送。' },
   agent_backend_session_timeout: { action: 'retry', detail: 'Agent 长时间没有打开会话，本次启动已停止：重新发送；仍失败请查看诊断里的后端输出。' },
   agent_backend_session_failed: { action: 'retry', detail: 'Agent 无法打开会话：重新发送；仍失败请查看诊断里的后端输出。' },

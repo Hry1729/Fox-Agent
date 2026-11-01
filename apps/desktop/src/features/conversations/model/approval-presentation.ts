@@ -8,6 +8,18 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
+/**
+ * 13.37：展示用路径。去掉 Windows verbatim 前缀（`\\?\D:\…` → `D:\…`，`\\?\UNC\server\…` → `\\server\…`），
+ * 一段文字里出现几处都去掉。只用于审批卡的显示；Host 执行和审批绑定用的路径不经过这里。
+ */
+export function displayPath(value: string): string {
+  return value.replace(/\\\\\?\\UNC\\/g, '\\\\').replace(/\\\\\?\\(?=[A-Za-z]:)/g, '')
+}
+
+function shown(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : displayPath(value)
+}
+
 /** Presentation only: never changes approval policy or the tool arguments. */
 export function approvalPresentation(approval: Pick<ApprovalRecord, 'request' | 'toolName' | 'requestedAction'>) {
   const request = approval.request
@@ -15,9 +27,9 @@ export function approvalPresentation(approval: Pick<ApprovalRecord, 'request' | 
   const replacement = wholeFileReplacementBinding(request)
   return {
     title: text(request.title) ?? (replacement ? replacement.baselineVersion === 'missing' ? '允许 Fox 写入新文件？' : '允许 Fox 替换整个文件？' : '允许 Fox 执行此操作？'),
-    target: text(request.target) ?? text(input.path) ?? text(input.file_path) ?? text(request.cwd) ?? text(input.cwd) ?? approval.toolName,
-    summary: text(request.summary) ?? (replacement ? '请核对目标文件和拟写入内容。' : approval.requestedAction),
-    command: text(request.command) ?? text(input.command),
+    target: shown(text(request.target) ?? text(input.path) ?? text(input.file_path) ?? text(request.cwd) ?? text(input.cwd)) ?? approval.toolName,
+    summary: shown(text(request.summary)) ?? (replacement ? '请核对目标文件和拟写入内容。' : shown(approval.requestedAction)),
+    command: shown(text(request.command) ?? text(input.command)),
     diff: text(request.diff) ?? text(input.diff),
     content: text(input.content),
     // The purpose-specific whole-file replacement binding, when this approval is

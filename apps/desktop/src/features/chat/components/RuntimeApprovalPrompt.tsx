@@ -12,7 +12,7 @@ import { useDeveloperUi } from '@/features/chat/developer-ui'
 import { userFacingError } from '@/features/chat/send-failure-notice'
 import { FilePen, FilePlus, Terminal, Trash2 } from 'lucide-react'
 import { ApprovalCard, PermissionGrant } from '@/components/assistant-ui/elements/approval-card'
-import { approvalPresentation } from '@/features/conversations/model/approval-presentation'
+import { approvalPresentation, displayPath } from '@/features/conversations/model/approval-presentation'
 import {
   allowedApprovalDecisions,
   isRepairOverrideApproval,
@@ -143,7 +143,7 @@ export function RuntimeApprovalPrompt({
       : replacement ? '替换全部内容；授权绑定此版本与内容。'
         : presentation.officeReuse ? `仅此文件的 ${presentation.officeReuse.selectors.length} 处位置和属性；对话授权可撤销。`
           : allowedDecisions.includes('allow_conversation') ? '对话授权仅限此工具和此目标，可撤销。' : '仅授权本次操作。'
-  const target = replacement?.targetIdentity ?? presentation.officeReuse?.target ?? presentation.target
+  const target = displayPath(replacement?.targetIdentity ?? presentation.officeReuse?.target ?? presentation.target)
   const operation = presentation.command && presentation.command !== target ? `${target}\n${presentation.command}` : target
   return (
     <ApprovalCard state="request" title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
