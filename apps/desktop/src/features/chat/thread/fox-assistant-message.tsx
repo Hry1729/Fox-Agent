@@ -16,6 +16,7 @@ import { FeedbackDialog as FeedbackDialogSurface } from '@/components/assistant-
 import { StoppedRun } from '@/components/assistant-ui/elements/error-state'
 import { ErrorPrompt } from '../demo/fox-demo-prompts'
 import { hasRunFailureDiagnostic, runFailureDetailText } from '../../conversations/model/run-failure'
+import { formatDateTime } from '@/lib/time-format'
 
 const FOX_PART_COMPONENTS = {
   Text: FoxTextPart,
@@ -80,9 +81,7 @@ export function FoxAssistantMessage() {
   // 页脚以持久化 Run 的失败种类为准：interrupted 显示「运行中断」。
   const interrupted = foxMessage?.failure?.kind === 'interrupted'
   const failed = statusReason === 'error' && !interrupted
-  const replyTime = createdAt instanceof Date
-    ? createdAt.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-    : ''
+  const replyTime = createdAt instanceof Date ? formatDateTime(createdAt) : ''
   return (
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
       <MessagePrimitive.Root className="fox-thread-msg is-assistant">

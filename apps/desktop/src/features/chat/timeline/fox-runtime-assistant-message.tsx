@@ -23,6 +23,7 @@ import { type RuntimeSource, runtimeProcess } from './fox-runtime-process-model'
 import { RuntimeProcess, useLiveNow } from './fox-runtime-process-view'
 import { RuntimeSources } from './fox-runtime-sources'
 import { splitAssistantContent } from './fox-assistant-content'
+import { formatDateTime } from '@/lib/time-format'
 
 export type RuntimeGroupHelpers = typeof import('../runtime-process-groups')
 
@@ -103,7 +104,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
     : cancelled || message.status === 'cancelled' ? '过程已取消'
       : message.status === 'interrupted' ? '过程已中断'
         : modelWaiting ? modelWaitingTitle(modelWaiting) : runInProgress || running ? '正在处理' : '处理过程'
-  const replyTime = new Date(message.updatedAt || message.createdAt).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const replyTime = formatDateTime(message.updatedAt || message.createdAt)
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [feedbackCategory, setFeedbackCategory] = useState<'irrelevant' | 'code_error' | 'misunderstanding' | 'other'>('irrelevant')
