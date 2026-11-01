@@ -109,3 +109,11 @@
     transition: none;
   }
 }
+
+/* 弹窗按钮焦点只用一圈，去掉叠在一起的粗环。 */
+[data-slot='dialog-content'] [data-slot='button']:focus-visible,
+[data-slot='alert-dialog-content'] [data-slot='button']:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+  box-shadow: none;
+}
