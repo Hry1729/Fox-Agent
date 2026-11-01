@@ -79,3 +79,33 @@
     transition: none;
   }
 }
+
+/* 设置导航选中态：亮色暗色、各子页共用同一块底和同一档字重。
+   多一层 .fox-sidebar，盖过懒加载 fox-sidebar.css 里的白卡 / 灰底两套规则。 */
+.fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command {
+  transition: background-color var(--fox-duration-fast) var(--fox-ease-out), color var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+.fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+.fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active,
+.fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active:hover,
+.dark .fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active,
+.dark .fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active:hover {
+  background: var(--fox-accent-soft);
+  color: var(--fox-text);
+  box-shadow: none;
+}
+
+.fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command.is-active > span {
+  font-weight: var(--fox-weight-semibold);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-shell .fox-sidebar .fox-context-sidebar-nav.is-settings .fox-sidebar-command {
+    transition: none;
+  }
+}
