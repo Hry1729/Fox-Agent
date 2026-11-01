@@ -17,7 +17,7 @@
 
 **本文的对比、排名和建议是 2026-08-24 至 2026-08-26 基于固定源码快照做的分析（见「对比基准」），之后没有重新分析，也没有重新核对 Maka、Kun、DeepSeek-Reasonix 和 OpenAI Codex 的新版本。** 2026-10-25 只按 `main` 当前代码更新了文中关于 Fox 的事实。与分析时相比，Fox 的主要变化：
 
-- **外层 Agent**（2026-10-31 更新）：Fox 会话由内置 PiNative 执行。外部 Agent（Pi、Codex、dsh）是可选后端，经 ACP v1 接入、保留各自的原生沙箱/审批，**计划在下一阶段恢复**，本版本仍处于退役状态、不可用。本文对比的 “Codex” 指 OpenAI Codex 项目本身，不是 Fox 里的 Codex 外部 Agent。见 [Agent Runtime 架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
+- **外层 Agent**（2026-11-01 更新）：Fox 会话由内置 PiNative 执行。外部 Agent（Pi、Codex、dsh）是可选接入，经通用 ACP 后端接入，默认不启用，需在「设置 → Agent」里打开；Pi 用 Fox 的四档审批，Codex、dsh 保留各自的原生沙箱和权限模式。本文对比的 “Codex” 指 OpenAI Codex 项目本身，不是 Fox 里的 Codex 外部 Agent。见 [Agent Runtime 架构 · 外层 Agent 后端](../02-架构/Agent运行时架构.md#外层-agent-后端四-agent)。
 - **执行路径**（2026-10-31 更新）：新 Run 和子 Run 一律 Authoritative + PiNative，没有路由开关；Kernel 执行循环已删除，历史 Kernel Run 显示为中断。Fox 自身不用沙箱，命令在 Fox Job 中执行，审批分只读 / 询问 / 自动 / 完全访问四档。
 - **Child Run**：深度仍为 1；子 Run 一律走 PiNative，不单独限制 Child Run 的数量和同时运行数，单个时长默认 5 分钟、最长 15 分钟（见[子 Agent 与 Child Run 架构](../02-架构/子Agent与ChildRun架构.md)）。下文“并发限制”“深度与并发较保守”等说法已按此修正。
 - **数据库**：`fox.db` schema v97。

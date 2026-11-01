@@ -3,14 +3,14 @@
 > 状态：生效<br>
 > 适用版本：Fox `0.1.x`<br>
 > 维护范围：面向用户、评审与工程师解释 Fox 如何限制 Agent 权限<br>
-> 最后更新：2026-10-31（B4c：去掉 SRT、四档审批、风险取舍）
+> 最后更新：2026-11-01（外部 Agent 恢复为可选接入；去掉 SRT、四档审批、风险取舍）
 
 ## 核心结论
 
 Fox 不把模型当作可信程序。会话分两类，安全边界不同：
 
 - **Fox 会话**（默认）：模型只能生成文字或提出结构化工具请求；文件、程序、数据库、知识库和 MCP 操作都由 Tauri Host 执行。Host 根据用户授权、项目范围、Execution Profile、工具协议、参数、四档审批（只读 / 询问 / 自动 / 完全访问）和任务状态决定是否执行。Fox 不用沙箱：放行的命令在 Fox Job 中以当前用户身份执行。
-- **外部 Agent 会话**（Pi / Codex / dsh）：可选后端，计划在下一阶段恢复；本版本仍处于退役状态，旧会话只读，执行入口返回 `agent_backend_retired`。Yuxi 远程知识库与远程专家保留，不属于这组退休后端。
+- **外部 Agent 会话**（Pi / Codex / dsh）：可选接入，默认不启用，用户先在电脑上安装和配置，再在「设置 → Agent」里打开。经通用 ACP 后端接入；Pi 的工具调用交给 Fox 审批引擎，Codex、dsh 用它们自己的沙箱和权限模式，审批请求在 Fox 中显示为审批卡。Fox 的工具经 MCP 桥给外部 Agent，每个调用仍回到 Host 校验。Yuxi 远程知识库与远程专家保留，是另一条边界。
 
 限制工具只是第一层。Fox 会话还通过路径隔离、权限交集、审批绑定、资源预算、状态机、Evidence、独立 Reviewer、持久审计和 fail-closed 恢复共同约束 Agent。
 
@@ -154,9 +154,9 @@ SQLite 保存 Run、ToolCall、Approval、Attempt、Evidence、Reviewer decision
 
 ## 外部 Agent 会话的边界
 
-外部 Pi、Codex、dsh 是可选后端，计划在下一阶段（阶段三）恢复；本版本仍处于退役状态，历史会话只读。`FOX_EXTERNAL_BACKENDS`、旧偏好和直接 IPC 都不能启用它们；不能通过调整原生权限绕过拒绝。恢复后，外部 Pi 与 PiNative 共用同一套审批引擎；Codex、dsh 使用它们自带的原生沙箱和审批（属于它们自己的功能），Fox 只把审批请求转成审批卡。
+外部 Pi、Codex、dsh 是可选接入：默认只有 Fox，只有用户在「设置 → Agent」启用的外部 Agent 才能新建会话；会话的 Agent 创建后不能改，失败不回退到 PiNative。外部 Pi 经 pi-gate 与 PiNative 共用同一套四档审批引擎（block 规则在所有档位生效）；Codex、dsh 使用它们自带的原生沙箱和权限模式（属于它们自己的功能），Fox 把审批请求转成审批卡，不替它们自动允许。任何 Agent 第一次在某项目开启完全访问都要二次确认。已知缺口：Codex、dsh 在完全访问下，Fox 看不到它们执行的命令。
 
-Fox 自身的 SRT 已删除；外部后端的兼容模块与凭据保留。Yuxi 远程服务保持独立边界。阶段二 Pi 原生会话的恢复和落盘保证尚未闭合，不能将契约目标写成已验收承诺，见[单 Pi 主线状态](单Pi主线状态.md)。
+Fox 自身的 SRT 已删除，外部 Agent 进程也不套 Fox 的沙箱，只放进 Job（Windows）/ 进程组（Unix）便于取消时清扫。外部 Agent 的登录放在 Fox 管理的私有 HOME（按项目 × Agent 一份）。Yuxi 远程服务保持独立边界。现状汇总见[当前状态与核验基线](当前状态与核验基线.md)。
 
 ## 常见追问
 
@@ -209,6 +209,6 @@ Fox 采用纵深防御，但有下列边界（2026-10-31 对照代码）：
 - `apps/desktop/src-tauri/src/database/repositories/graph_lead.rs`：Graph、Reviewer 与 Acceptance。
 - `services/agent-runtime/src/execution-profile.mjs`：Runtime Profile 与工具裁剪。
 - `services/agent-runtime/src/prompt-registry.mjs`、`typed-context.mjs`：Prompt 和不可信上下文边界。
-- `crates/fox-agent-backend/src/{host_routing,external_launch,external_home,native_permission,credential_save,credential_delete}.rs`、`apps/desktop/src-tauri/src/external_backend.rs`：外部 Agent 会话（计划恢复）。
+- `crates/fox-agent-backend/src/{host_routing,acp,external,external_launch,external_home,fox_mcp,native_permission,credential_save,credential_delete}.rs`、`apps/desktop/src-tauri/src/external_backend.rs`：外部 Agent 会话。
 
 详细工程设计见[安全架构](../02-架构/安全架构.md)、[项目与权限架构](../02-架构/项目与权限架构.md)、[Agent 运行时架构](../02-架构/Agent运行时架构.md)和[权限参考](../04-技术参考/权限参考.md)。
