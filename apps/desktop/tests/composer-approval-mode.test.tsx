@@ -8,6 +8,7 @@
 // * a new conversation carries the previous choice's tier when its Agent is
 //   switched; the Host maps it and never selects full access.
 import { afterEach, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
@@ -226,6 +227,17 @@ describe('the composer approval selector', () => {
     const rows = catalogRows(codexCatalog(false), 'read-only')
     expect(rows.map((row) => row.value)).toEqual(['workspace-write', 'agent', 'agent-full-access', 'read-only'])
     expect(rows[3]).toMatchObject({ disabled: true, label: '只读（旧设置）' })
+  })
+
+  test('13.37 B4-6: the menu is non-modal like the「+」menu (no page-wide pointer lock) and opens on a pointer press', async () => {
+    renderUi(<FoxApprovalControl catalog={foxTiers('fox')} value="ask" />)
+    fireEvent.pointerDown(trigger(), { button: 0, ctrlKey: false, pointerType: 'mouse' })
+    await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeTruthy())
+    expect(trigger().getAttribute('aria-expanded')).toBe('true')
+    expect(document.body.style.pointerEvents).not.toBe('none')
+    expect(document.querySelector('[role="menu"]')?.textContent).toContain('完全访问')
+    const source = readFileSync(new URL('../src/features/chat/composer/composer-approval-control.tsx', import.meta.url), 'utf8')
+    expect(source).toContain('<PromptInputActionMenu modal={false}>')
   })
 
   test('pi and Fox use Fox\'s four modes', async () => {

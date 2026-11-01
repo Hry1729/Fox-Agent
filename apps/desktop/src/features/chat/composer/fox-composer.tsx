@@ -171,7 +171,15 @@ export function composerUsesNewConversation(input: {
   return !conversationHasModelReply(input.detail)
 }
 
-/** 会话创建后 Agent 已冻结：只展示名称，不能再打开菜单。 */
+/**
+ * 13.37：托盘上的项目和 Agent 什么时候不能再换。只有模型已经开始回复（不再是新对话形态）
+ * 的已选中会话才冻结；新对话、发送失败后恢复的草稿、已选中但还没回复过的会话都能改。
+ */
+export function composerEntryFrozen(input: { desktopEnabled: boolean; selectedConversationId?: string | null; newConversation: boolean }) {
+  return Boolean(input.desktopEnabled && input.selectedConversationId && !input.newConversation)
+}
+
+/** 模型回复后 Agent 已冻结：只展示名称，不能再打开菜单。 */
 function FrozenConversationAgent({ backend }: { backend: AgentBackendId }) {
   const label = AGENT_BACKEND_LABELS[backend]
   return (

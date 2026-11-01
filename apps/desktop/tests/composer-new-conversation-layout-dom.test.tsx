@@ -9,7 +9,7 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 const React = await import('react')
 const { cleanup, render } = await import('@testing-library/react')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
-const { MemoizedComposer, composerUsesNewConversation, conversationHasModelReply } = await import('../src/features/chat/composer/fox-composer')
+const { MemoizedComposer, composerEntryFrozen, composerUsesNewConversation, conversationHasModelReply } = await import('../src/features/chat/composer/fox-composer')
 const { ComposerEntryContext } = await import('../src/features/chat/composer/composer-entry-context')
 import type { ProjectRecord } from '../src/features/conversations/model/types'
 import type { AgentBackendId } from '../src/features/conversations/model/agent-backend'
@@ -71,7 +71,7 @@ describe('新对话输入框形态', () => {
     expect(view.container.querySelector('[data-project-frozen]')).toBeNull()
   })
 
-  test('已选中但没有模型回复时仍是新对话托盘，项目和 Agent 不可切换', () => {
+  test('13.37：已选中但没有模型回复时仍是新对话托盘，项目和 Agent 都还能换（1103 的只读托盘已撤回）', () => {
     const detail = {
       conversation: { id: 'conv-empty' },
       messages: [
@@ -81,11 +81,14 @@ describe('新对话输入框形态', () => {
       toolCalls: [],
     }
     expect(conversationHasModelReply(detail)).toBe(false)
-    expect(composerUsesNewConversation({ desktopEnabled: true, timelineEmpty: true, selectedConversationId: 'conv-empty', detail })).toBe(true)
+    const newConversation = composerUsesNewConversation({ desktopEnabled: true, timelineEmpty: true, selectedConversationId: 'conv-empty', detail })
+    expect(newConversation).toBe(true)
+    const frozen = composerEntryFrozen({ desktopEnabled: true, selectedConversationId: 'conv-empty', newConversation })
+    expect(frozen).toBe(false)
     const view = render(
       <Harness
-        newConversation={!conversationHasModelReply(detail)}
-        entryFrozen
+        newConversation={newConversation}
+        entryFrozen={frozen}
         boundAgentBackend="deepseek"
         projectRoot="D:/测试/项目甲"
       />,
@@ -94,13 +97,24 @@ describe('新对话输入框形态', () => {
     expect(wrap?.classList.contains('is-new-conversation')).toBe(true)
     expect(wrap?.classList.contains('is-history')).toBe(false)
     expect(view.container.querySelector('.fox-composer-draft-footer')).not.toBeNull()
-    expect(view.queryByRole('button', { name: /选择 Agent/ })).toBeNull()
-    const agent = view.getByTitle('对话创建后不能更换 Agent')
-    expect(agent.textContent).toBe('DeepSeek')
+    // The picker shows the conversation's own Agent, and opens.
+    const agent = view.getByRole('button', { name: /选择 Agent，当前 DeepSeek/ })
     expect(agent.getAttribute('data-agent-backend')).toBe('deepseek')
-    expect(view.queryByRole('button', { name: /项目甲|选择项目/ })).toBeNull()
-    const project = view.getByTitle('对话创建后不能更换项目')
-    expect(project.textContent).toContain('项目甲')
+    expect(view.container.querySelector('[data-agent-frozen]')).toBeNull()
+    expect(view.container.querySelector('[data-project-frozen]')).toBeNull()
+    const project = view.getByRole('button', { name: /项目甲/ })
+    expect(project.getAttribute('aria-haspopup')).toBe('dialog')
+  })
+
+  test('13.37：模型回复以后才冻结项目和 Agent；未选中的草稿从不冻结', () => {
+    expect(composerEntryFrozen({ desktopEnabled: true, selectedConversationId: 'conv', newConversation: false })).toBe(true)
+    expect(composerEntryFrozen({ desktopEnabled: true, selectedConversationId: 'conv', newConversation: true })).toBe(false)
+    expect(composerEntryFrozen({ desktopEnabled: true, selectedConversationId: null, newConversation: true })).toBe(false)
+    expect(composerEntryFrozen({ desktopEnabled: false, selectedConversationId: 'conv', newConversation: false })).toBe(false)
+    // A replied conversation that somehow renders the tray still shows its values read-only.
+    const view = render(<Harness newConversation entryFrozen boundAgentBackend="pi" projectRoot="D:/测试/项目甲" />)
+    expect(view.getByTitle('对话创建后不能更换 Agent').getAttribute('data-agent-backend')).toBe('pi')
+    expect(view.getByTitle('对话创建后不能更换项目').textContent).toContain('项目甲')
   })
 
   test('只有工具调用时收成窄输入框且没有托盘', () => {

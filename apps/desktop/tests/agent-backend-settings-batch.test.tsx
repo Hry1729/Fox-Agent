@@ -428,6 +428,46 @@ describe('⑤ UI 1103: external Agents are enabled by the user in 设置 → Age
     expect(JSON.parse(window.localStorage.getItem(ENABLED_EXTERNAL_AGENTS_KEY) ?? '[]')).toEqual(['codex'])
   })
 
+  test('13.37: turning an Agent on checks it at once (「检测中」, then 「已检测到」), the connection before the login probe; focus checks again', async () => {
+    // The Host writes the Fox login into the private HOME while answering the
+    // model connection; a login probe read before that says 「未配置」.
+    let prepared = false
+    const order: string[] = []
+    let release: (() => void) | null = null
+    const client = {
+      agentBackendPreferences: async () => c1Preferences(),
+      saveAgentBackendPreferences: async () => c1Preferences(),
+      probeCodexResponses: async () => null,
+      agentBackendModelConnection: async ({ target }: { target: AgentBackendTarget }) => {
+        order.push(`connection:${target.backend}`)
+        if (target.backend === 'deepseek' && prepared === false && order.filter((item) => item === 'connection:deepseek').length > 1) {
+          await new Promise<void>((resolve) => { release = resolve })
+          prepared = true
+        }
+        return { status: 'ready' as const, providerId: 'p', providerName: 'P', apiType: 'anthropic-messages', candidates: [], message: null }
+      },
+      agentBackendCredentials: async (target: AgentBackendTarget) => {
+        order.push(`credentials:${target.backend}`)
+        if (target.backend === 'deepseek' && !prepared) return probe('deepseek', { state: 'missing_credentials', credentialsPresent: false })
+        return probe(target.backend ?? 'pi')
+      },
+    }
+    render(<AgentBackendSettingsSection client={client} />)
+    const state = () => screen.getByRole('switch', { name: '启用 DeepSeek（dsh）' }).closest('.fox-settings-row')?.querySelector('[data-external-agent-state]')?.textContent
+    await waitFor(() => expect(state()).toBe('未配置'))
+    // Each Agent: model connection first, then the login probe.
+    for (const backend of ['pi', 'codex', 'deepseek']) expect(order.indexOf(`connection:${backend}`)).toBeLessThan(order.indexOf(`credentials:${backend}`))
+    fireEvent.click(screen.getByRole('switch', { name: '启用 DeepSeek（dsh）' }))
+    await waitFor(() => expect(state()).toBe('检测中'))
+    await act(async () => { release?.() })
+    await waitFor(() => expect(state()).toBe('已检测到'))
+    // The window regains focus: every row is checked again, no page switch needed.
+    const before = order.length
+    act(() => { window.dispatchEvent(new Event('focus')) })
+    await waitFor(() => expect(order.length).toBeGreaterThanOrEqual(before + 6))
+    await waitFor(() => expect(state()).toBe('已检测到'))
+  })
+
   test('the composer picker lists Fox only by default, and Codex once it is enabled', async () => {
     const view = render(<ComposerAgentPicker value="fox" status={c1Status()} onSelect={() => {}} />)
     expect(view.getByRole('button', { name: '选择 Agent，当前 Fox' })).toBeTruthy()

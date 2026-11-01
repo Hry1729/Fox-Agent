@@ -3,8 +3,10 @@ import { sendNotStartedNotice } from '../src/features/chat/send-failure-notice'
 
 describe('sendNotStartedNotice', () => {
   test('模型连接失败进模型服务，上一轮忙碌和项目文件夹各有一句人话', () => {
+    // 13.37 P0-1: Fox without a model service uses the Host's own sentence.
     const connection = sendNotStartedNotice('model.connection_required', '需要连接', { developerUi: false })
-    expect(connection.title).toBe('还没有可用的模型连接')
+    expect(connection.title).toBe('还没有配置模型服务')
+    expect(connection.description).toBe('请先到「设置 → 模型服务」添加并测试一个供应商，再发送。')
     expect(connection.workspaceView).toBe('model-service')
     expect(connection.mergeKey).toBe('send-not-started:model.connection_required')
     expect(connection.description).not.toContain('model.connection_required')
@@ -75,7 +77,7 @@ describe('sendNotStartedNotice', () => {
     expect(gone.description).toContain('新建')
     // Fox 未配模型时 Host 在建 Run 前就拒绝：去模型服务。
     const fox = sendNotStartedNotice('model.connection_required', 'raw', { backend: 'fox', developerUi: false })
-    expect(fox.title).toBe('还没有可用的模型连接')
+    expect(fox.title).toBe('还没有配置模型服务')
     expect(fox.workspaceView).toBe('model-service')
     expect(fox.description).toContain('设置 → 模型服务')
   })
@@ -108,5 +110,16 @@ describe('sendNotStartedNotice', () => {
     const choose = sendNotStartedNotice('model.connection_choose_address', 'raw', { developerUi: false })
     expect(choose.title).toBe('还没有可用的模型连接')
     expect(choose.description).toContain('用作默认协议')
+  })
+
+  test('13.37 B3-1：dsh / Pi / Codex 的地址没重新测试，同样提示去模型服务重新测试，不再说「还没配置好」', () => {
+    for (const backend of ['deepseek', 'pi', 'codex', 'fox']) {
+      const notice = sendNotStartedNotice('model.connection_unverified', 'model.connection_unverified: 模型服务的配置改过了', { backend, developerUi: false })
+      expect(notice.title).toBe('模型连接需要重新测试')
+      expect(notice.workspaceView).toBe('model-service')
+      expect(notice.description).toBe('模型服务的配置改过了，当前地址还没有通过连接测试：请到「设置 → 模型服务」重新测试连接，通过后再发送。')
+      expect(notice.description).not.toContain('还没配置好')
+      expect(notice.description).not.toContain('model.connection_unverified')
+    }
   })
 })
