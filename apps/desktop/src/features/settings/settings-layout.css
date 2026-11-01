@@ -933,8 +933,8 @@
   min-height: 0;
   flex: 1;
   overflow-y: auto;
-  margin: 0 -16px;
-  padding: 0 16px;
+  margin: 0 calc(-1 * var(--fox-dialog-padding));
+  padding: 0 var(--fox-dialog-padding);
   font-size: var(--fox-type-chrome);
   line-height: 1.5;
 }
@@ -966,8 +966,8 @@
 
 .fox-provider-add-dialog .fox-provider-dialog-foot {
   flex: none;
-  margin: 0 -16px -16px;
-  padding: 12px 16px;
+  margin: 0 calc(-1 * var(--fox-dialog-padding)) calc(-1 * var(--fox-dialog-padding));
+  padding: var(--fox-space-l) var(--fox-dialog-padding);
   border-top: 1px solid var(--border);
 }
 

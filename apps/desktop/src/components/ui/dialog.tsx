@@ -38,8 +38,8 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-x-0 bottom-0 top-[var(--fox-titlebar-height,0px)] isolate z-[100] duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
-        "bg-black/20 supports-backdrop-filter:backdrop-blur-xs dark:bg-black/50",
+        "fixed inset-x-0 bottom-0 top-[var(--fox-titlebar-height,0px)] isolate z-[100] duration-[var(--fox-duration-fast)] data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "bg-[var(--fox-scrim)] supports-backdrop-filter:backdrop-blur-xs",
         className
       )}
       {...props}
@@ -64,7 +64,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-[calc(50%_+_var(--fox-titlebar-height,0px)_/_2)] left-1/2 z-[100] grid max-h-[calc(100vh_-_48px_-_var(--fox-titlebar-height,0px))] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-hidden rounded-[var(--fox-radius-overlay)] border border-border bg-popover p-4 text-[length:var(--fox-type-body)]/relaxed text-popover-foreground shadow-[var(--fox-shadow)] duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "fixed top-[calc(50%_+_var(--fox-titlebar-height,0px)_/_2)] left-1/2 z-[100] grid max-h-[calc(100vh_-_var(--fox-space-6xl)_-_var(--fox-titlebar-height,0px))] w-full max-w-[calc(100%_-_var(--fox-space-4xl))] -translate-x-1/2 -translate-y-1/2 gap-[var(--fox-dialog-gap)] overflow-hidden rounded-[var(--fox-radius-overlay)] border border-border bg-popover p-[var(--fox-dialog-padding)] text-[length:var(--fox-type-body)] leading-[1.7] text-popover-foreground shadow-[var(--fox-shadow)] duration-[var(--fox-duration-fast)] outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}
@@ -77,7 +77,7 @@ function DialogContent({
           <DialogPrimitive.Close data-slot="dialog-close" asChild>
             <Button
               variant="ghost"
-              className="absolute top-2 right-2"
+              className="absolute top-[var(--fox-space-m)] right-[var(--fox-space-m)]"
               size="icon"
               aria-label="关闭弹窗"
             >
@@ -96,7 +96,7 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-1", className)}
+      className={cn("flex flex-col gap-[var(--fox-space-xs)]", className)}
       {...props}
     />
   )
@@ -114,7 +114,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end",
+        "flex flex-col-reverse gap-[var(--fox-space-m)] sm:flex-row sm:items-center sm:justify-end",
         className
       )}
       {...props}
