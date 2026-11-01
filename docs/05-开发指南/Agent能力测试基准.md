@@ -12,7 +12,7 @@
 - `evals/fixtures/` 现有 8 组 Fixture；新增的三组（图评审验收、权限失败、恢复契约）见[可观测性与测试架构](../02-架构/可观测性与测试架构.md)。`evals/harness-v1/` 是另一套独立的 Harness，本次没有复核。
 - **129 个 case 的新基线没有重跑**，本页没有新的通过数，也没有新的 Hash。引用时只能写“2026-08-27 基线 121/121”，不能写成当前版本的结果。
 - 离线 Eval 不在 CI 中。Rust Host、Runtime、前端测试的命令已改为与 CI 一致，见[测试指南](测试指南.md)；下文结论摘要和复现命令里的测试数字、`cargo test --manifest-path ...` 写法都属于当时的基线。
-- 外部 Pi、DeepSeek Harness、Codex 目前退役（计划在阶段三恢复），旧验证记录保留在 `crates/fox-agent-backend/docs/`。离线 Eval 不验证单 Pi 阶段二原生持久会话，也不验证 Host 审批引擎的四档判定（由 Rust 单测与 13.31 人工复测覆盖）；Fox 不用沙箱。
+- 外部 Pi、DeepSeek Harness、Codex 已恢复为可选接入，整轮行为由 `crates/fox-agent-backend/tests/e2e_full_turn.rs` 的 `e2e_acp_full_turn_{pi,codex,dsh}` 覆盖，旧验证记录保留在 `crates/fox-agent-backend/docs/`。离线 Eval 不验证 Pi 原生持久会话（由 `e2e_fox_native_full_turn_approval_second_turn_and_cancel` 覆盖），也不验证 Host 审批引擎的四档判定（由 Rust 单测与 13.31 人工复测覆盖）；Fox 不用沙箱。
 
 
 ## 结论摘要
