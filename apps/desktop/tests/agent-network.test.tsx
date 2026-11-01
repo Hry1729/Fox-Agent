@@ -18,7 +18,7 @@ test('preview actions preserve conversation and Host preview identity', async ()
   }
   try {
     await act(async () => root.render(<AgentNetworkPanel client={client} conversationId="conversation-one" />))
-    await act(async () => { const details = host.querySelector('details')!; details.open = true; details.dispatchEvent(new Event('toggle')); await new Promise(resolve => setTimeout(resolve, 20)) })
+    await act(async () => { const trigger = host.querySelector<HTMLButtonElement>('.fox-agent-network .fox-disclosure-trigger')!; trigger.click(); await new Promise(resolve => setTimeout(resolve, 20)) })
     const button = (label: string) => [...host.querySelectorAll('button')].find(button => button.textContent === label)!
     expect(host.textContent).not.toContain('网络授权')
     await act(async () => button('打开预览').click())
