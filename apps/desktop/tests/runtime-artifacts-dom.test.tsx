@@ -39,7 +39,9 @@ describe('reply file results', () => {
     const delivered = within(results).getByRole('region', { name: '交付文件' })
     const card = within(delivered).getByRole('button', { name: /AGV报告.pdf/ })
     expect(card.getAttribute('title')).toBe(pdf.storagePath)
-    expect(card.textContent).toContain('Fox 内部文件')
+    // UI 1104-05：chip 只画类型徽标、文件名和大小；来源说明留给读屏（aria-description）。
+    expect(card.textContent).not.toContain('Fox 内部文件')
+    expect(card.getAttribute('aria-description')).toBe('Fox 内部文件')
     expect(screen.queryByRole('button', { name: /chart-1.svg/ })).toBeNull()
     expect(screen.getByRole('button', { name: /过程文件/ }).textContent).toContain('4')
     fireEvent.click(card)
@@ -106,9 +108,9 @@ describe('reply file results', () => {
     fireEvent.click(process)
     expect(screen.getByRole('region', { name: '过程文件' })).toBeTruthy()
     expect(view.container.querySelector('[data-slot="file-root"]')).not.toBeNull()
-    expect(view.container.querySelector('[data-slot="file-icon"] svg')).not.toBeNull()
+    expect(view.container.querySelector('[data-slot="file-type"]')?.textContent).toBe('CSV')
     expect(view.container.querySelector('[data-slot="file-name"]')?.textContent).toBe('计算.csv')
-    expect(view.container.querySelector('[data-slot="file-size"]')?.textContent).toBe('1.0 KB')
+    expect(view.container.querySelector('[data-slot="file-size"]')?.textContent).toBe('1.0KB')
     fireEvent.click(screen.getByRole('button', { name: /计算.csv/ }))
     expect(opened).toBe(record)
   })
@@ -133,7 +135,7 @@ describe('reply file results', () => {
     expect(titled).toContain(longPath)
   })
 
-  test('the compact declared row shows filename, size and the model note, never delivery metadata', () => {
+  test('the flat chip shows type, filename and compact size; the model note is for screen readers only, never delivery metadata', () => {
     const published = declared({
       ...artifact('deliverable', 'deliverable', 'slides_outline.json'),
       byteSize: 4012,
@@ -145,8 +147,10 @@ describe('reply file results', () => {
     render(React.createElement(RuntimeArtifacts, { artifacts: [published] }))
     const card = screen.getByRole('button', { name: /slides_outline\.json/ })
     expect(card.getAttribute('title')).toBe(published.storagePath)
-    expect(card.querySelector('.fox-message-artifact-description')?.textContent).toBe('幻灯片大纲')
-    expect(card.querySelector('[data-slot="file-size"]')?.textContent).toBe('3.9 KB')
+    expect(card.getAttribute('aria-description')).toBe('幻灯片大纲')
+    expect(card.textContent).not.toContain('幻灯片大纲')
+    expect(card.querySelector('[data-slot="file-type"]')?.textContent).toBe('JSON')
+    expect(card.querySelector('[data-slot="file-size"]')?.textContent).toBe('3.9KB')
     expect(card.querySelector('[data-slot="file-name"]')?.parentElement).toBe(card.querySelector('[data-slot="file-size"]')?.parentElement)
     for (const leaked of ['4012', 'v3', '验收通过', '已发布到项目', '新建', '验收']) {
       expect(card.textContent).not.toContain(leaked)
@@ -168,7 +172,7 @@ describe('reply file results', () => {
       expect(card.textContent).not.toContain(leaked)
       expect(card.getAttribute('title')).not.toContain(leaked)
     }
-    expect(card.textContent).toContain('项目文件')
+    expect(card.getAttribute('aria-description')).toBe('项目文件')
     // The detail panel still names the verdict, and says checking content, not publishing.
     expect(artifactVerificationLabel('failed')).toBe('内容需核对')
     expect(artifactVerificationLabel('declared')).toBe('交付文件')
@@ -191,7 +195,7 @@ describe('reply file results', () => {
     expect(screen.getAllByRole('button', { name: /交付数据.csv/ })).toHaveLength(1)
   })
 
-  test('a long filename keeps its full tooltip and shares a column with the independent size row', () => {
+  test('a long filename stays one line in the chip, its full path one hover away, next to the size', () => {
     const name='审批验证_保留完整中文文件名_approval_execution_integration_repeated_checks_20261011.py'
     const record=declared({...artifact('long-name','process',name),byteSize:127})
     let opened: ArtifactRecord | undefined
@@ -200,10 +204,11 @@ describe('reply file results', () => {
     const filename=card.querySelector('[data-slot="file-name"]')!
     const size=card.querySelector('[data-slot="file-size"]')!
     expect(filename.textContent).toBe(name)
-    expect(filename.getAttribute('title')).toBe(name)
-    expect(size.textContent).toBe('127 B')
-    expect(filename.parentElement).toBe(size.parentElement)
-    expect(view.container.querySelector('.aui-file-open-icon')).not.toBeNull()
+    expect(card.getAttribute('title')).toBe(record.storagePath)
+    expect(size.textContent).toBe('127B')
+    expect(filename.parentElement).toBe(card)
+    expect(size.parentElement).toBe(card)
+    expect(view.container.querySelector('[data-slot="file-type"]')?.textContent).toBe('PY')
     fireEvent.click(card)
     expect(opened).toBe(record)
   })
