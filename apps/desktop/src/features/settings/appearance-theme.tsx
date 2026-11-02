@@ -67,7 +67,7 @@ function ThemeOption({ selected, onSelect, swatch, label, description, icon }: {
 
 function OptionGroup({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="mb-4 flex flex-col gap-2">
+    <div className="fox-appearance-option-group mb-4 flex flex-col gap-2">
       <span className="text-[length:var(--fox-type-caption)]! font-medium text-muted-foreground">{label}</span>
       <div role="radiogroup" aria-label={label} className="grid grid-cols-3 gap-2">{children}</div>
     </div>

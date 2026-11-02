@@ -109,15 +109,15 @@
 }
 
 .fox-settings-layout .fox-setting-row b,
-.fox-settings-layout .fox-profile-setting b {
+:is(.fox-settings-layout, .fox-settings-page) .fox-profile-setting b {
   font-size: var(--fox-type-workbench) !important;
   font-weight: 500;
   line-height: 1.43;
 }
 
 .fox-settings-layout .fox-setting-row small,
-.fox-settings-layout .fox-profile-setting small,
-.fox-settings-layout .fox-profile-setting em {
+:is(.fox-settings-layout, .fox-settings-page) .fox-profile-setting small,
+:is(.fox-settings-layout, .fox-settings-page) .fox-profile-setting em {
   color: var(--muted-foreground);
   font-size: var(--fox-type-caption) !important;
   line-height: 1.5;
@@ -248,13 +248,13 @@
   border-color: var(--ring);
 }
 
-.fox-settings-layout .fox-notification-sound-control {
+:is(.fox-settings-layout, .fox-settings-page) .fox-notification-sound-control {
   min-width: 0;
   gap: 12px;
 }
 
 /* Profile */
-.fox-settings-layout .fox-profile-setting {
+:is(.fox-settings-layout, .fox-settings-page) .fox-profile-setting {
   gap: 12px;
 }
 

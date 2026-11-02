@@ -80,6 +80,40 @@
   display: none;
 }
 
+/* 使用情况组本身就是一组卡片（使用记录、专家使用、Token 构成……），每张卡片自带边框；
+   再套一层组框会变成双重边框，所以这一组只保留框外标题，不画组框。 */
+/* 通用页（UI 1104-08 改用同一套分组）：个人资料、明暗 / 配色卡片和读取中提示不是 SettingsRow，
+   在组框里补上和行一样的上下内距与分隔线。 */
+.fox-settings-page .fox-settings-group-body > :is(.fox-profile-setting, .fox-notification-settings-loading) {
+  padding-block: var(--fox-space-l);
+}
+
+.fox-settings-page .fox-settings-group-body > .fox-profile-setting {
+  display: flex;
+  align-items: center;
+}
+
+.fox-settings-page .fox-settings-group-body > .fox-appearance-option-group:first-child {
+  padding-top: var(--fox-space-l);
+}
+
+.fox-settings-page .fox-settings-group-body > .fox-appearance-option-group:has(+ .fox-settings-row) {
+  margin-bottom: 0;
+  padding-bottom: var(--fox-space-l);
+  border-bottom: 1px solid var(--fox-settings-hairline);
+}
+
+.fox-settings-page .fox-settings-usage-group > .fox-settings-group-body {
+  padding-inline: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.fox-settings-page .fox-settings-usage-group > .fox-settings-group-body > .fox-settings-group-lead:first-child {
+  margin-top: 0;
+}
+
 .fox-shell .fox-settings-page .fox-settings-group-head h2,
 .fox-settings-page .fox-settings-group-head h2 {
   margin: 0;

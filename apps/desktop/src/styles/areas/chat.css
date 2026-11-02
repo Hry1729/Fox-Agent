@@ -459,17 +459,17 @@
 
 .fox-artifact-chip-type {
   flex: none;
-  min-width: calc(var(--fox-control-md) + var(--fox-space-xs));
+  min-width: var(--fox-control-md);
   padding: var(--fox-space-micro) var(--fox-space-s);
-  border: 1px solid var(--fox-border);
+  border: 1px solid var(--fox-border-strong);
   border-radius: var(--fox-radius-small);
   background: transparent;
   color: var(--fox-muted);
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: inherit;
   font-size: var(--fox-type-micro);
-  font-weight: var(--fox-weight-medium);
+  font-weight: var(--fox-weight-semibold);
   line-height: 1.3;
-  letter-spacing: .02em;
+  letter-spacing: .01em;
   text-align: center;
 }
 

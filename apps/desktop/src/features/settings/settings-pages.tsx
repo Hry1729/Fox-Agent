@@ -70,14 +70,7 @@ import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { promptDialog } from '@/components/ui/prompt-dialog'
 import { DUPLICATE_SERVICE_URL_TEXT, findDuplicateServiceUrl } from './provider-errors'
 
-function SettingsScaffold({ title, kicker, description, children }: { title: string; kicker: string; description: string; children: ReactNode }) {
-  void kicker
-  return <div className="fox-settings-layout"><main><header><h1>{title}</h1><p>{description}</p></header>{children}</main></div>
-}
 
-function PreferenceRow({ title, description, children }: { title: string; description: string; children: ReactNode }) {
-  return <div className="fox-setting-row fox-setting-row-bordered"><span><b>{title}</b><small>{description}</small></span>{children}</div>
-}
 
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferencesRecord = {
   systemPopup: false,
@@ -140,17 +133,16 @@ function NotificationSettingsSection() {
   }
 
   if (!preferences) {
-    return <Card className="fox-settings-section fox-notification-settings"><div className="fox-notification-settings-loading"><LoaderCircle className="animate-spin" />正在读取通知设置</div></Card>
+    return <SettingsGroup title="通知" className="fox-notification-settings"><div className="fox-notification-settings-loading"><LoaderCircle className="animate-spin" />正在读取通知设置</div></SettingsGroup>
   }
 
   const soundId = normalizeNotificationSoundId(preferences.soundId)
-  return <Card className="fox-settings-section fox-notification-settings">
-    <div className="fox-settings-section-head"><div><h2>通知</h2><p>管理通知展示、提示音与普通进度的打扰程度。</p></div><Button variant="outline" size="sm" onClick={() => dispatchNotificationPreview(soundId)}><BellRing />测试通知</Button></div>
-    <PreferenceRow title="桌面通知" description="允许 Fox 同时发送操作系统通知"><Switch checked={preferences.systemPopup} disabled={saving} onCheckedChange={(value) => void updatePreferences({ systemPopup: value })} /></PreferenceRow>
-    <PreferenceRow title="提示音" description="为需要关注的通知播放提示音"><div className="fox-notification-sound-control">{preferences.sound && <Select value={soundId} disabled={saving} onValueChange={(value) => { const next = normalizeNotificationSoundId(value); playNotificationSound(next); void updatePreferences({ soundId: next }) }}><SelectTrigger className="fox-settings-select" aria-label="提示音"><Volume2 /><SelectValue /></SelectTrigger><SelectContent>{NOTIFICATION_SOUND_OPTIONS.map((option) => <SelectItem key={option.id} value={option.id} title={option.description}>{option.label}</SelectItem>)}</SelectContent></Select>}<Switch checked={preferences.sound} disabled={saving} onCheckedChange={(value) => void updatePreferences({ sound: value })} /></div></PreferenceRow>
-    <PreferenceRow title="未读红点" description="有未读通知时在右上角显示红点"><Switch checked={preferences.badge} disabled={saving} onCheckedChange={(value) => void updatePreferences({ badge: value })} /></PreferenceRow>
-    <PreferenceRow title="减少打扰" description="合并普通进度通知，审批、提问和失败仍会提醒"><Switch checked={preferences.quietProgress} disabled={saving} onCheckedChange={(value) => void updatePreferences({ quietProgress: value })} /></PreferenceRow>
-  </Card>
+  return <SettingsGroup title="通知" className="fox-notification-settings" aside={<Button variant="outline" size="sm" onClick={() => dispatchNotificationPreview(soundId)}><BellRing />测试通知</Button>}>
+    <SettingsRow title="桌面通知" description="允许 Fox 同时发送操作系统通知"><Switch checked={preferences.systemPopup} disabled={saving} onCheckedChange={(value) => void updatePreferences({ systemPopup: value })} /></SettingsRow>
+    <SettingsRow title="提示音" description="为需要关注的通知播放提示音"><div className="fox-notification-sound-control">{preferences.sound && <Select value={soundId} disabled={saving} onValueChange={(value) => { const next = normalizeNotificationSoundId(value); playNotificationSound(next); void updatePreferences({ soundId: next }) }}><SelectTrigger className="fox-settings-select" aria-label="提示音"><Volume2 /><SelectValue /></SelectTrigger><SelectContent>{NOTIFICATION_SOUND_OPTIONS.map((option) => <SelectItem key={option.id} value={option.id} title={option.description}>{option.label}</SelectItem>)}</SelectContent></Select>}<Switch checked={preferences.sound} disabled={saving} onCheckedChange={(value) => void updatePreferences({ sound: value })} /></div></SettingsRow>
+    <SettingsRow title="未读红点" description="有未读通知时在右上角显示红点"><Switch checked={preferences.badge} disabled={saving} onCheckedChange={(value) => void updatePreferences({ badge: value })} /></SettingsRow>
+    <SettingsRow title="减少打扰" description="合并普通进度通知，审批、提问和失败仍会提醒"><Switch checked={preferences.quietProgress} disabled={saving} onCheckedChange={(value) => void updatePreferences({ quietProgress: value })} /></SettingsRow>
+  </SettingsGroup>
 }
 
 export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDark }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; dark: boolean; onDark: () => void }) {
@@ -178,13 +170,13 @@ export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDa
 
   return (
     <WorkspacePage title="通用" subtitle="外观设置" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
-      <SettingsScaffold kicker="桌面偏好" title="通用" description="调整个人资料、外观和通知方式。">
-          <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>个人资料</h2><p>设置 Fox 在这台设备上显示的头像与用户名。</p></div><div className="fox-profile-setting-actions"><Button variant="outline" size="sm" onClick={() => setProfileDialogOpen(true)}><Pencil />编辑信息</Button>{!yuxiUser.user && <Button variant="outline" size="sm" onClick={() => navigate('login')}>登录账户</Button>}</div></div><div className="fox-profile-setting"><Avatar><AvatarImage src={profile.avatar} alt="" /><AvatarFallback>{profileFallback}</AvatarFallback></Avatar><span><b>{profileName}</b><small>{yuxiUser.user?.uid ?? 'fox-local'}</small><em>{profileDetail}</em></span></div></Card>
-          <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>外观</h2><p>保持 Fox 的主题、字体和界面密度一致。</p></div></div><AppearanceThemeControls dark={dark} onDarkChange={(next) => { if (next !== dark) onDark() }} colorTheme={colorTheme} onColorThemeChange={changeColorTheme} /><PreferenceRow title="文字大小" description="调整 Fox 各界面的文字显示比例"><div className="fox-text-scale-control"><span className="fox-text-scale-a is-small" aria-hidden="true">A</span><ElasticSlider className="fox-settings-text-slider" label="文字大小" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} largeStep={5} marks={[100]} value={textScale} showValue={false} format={(value) => `${value}%`} onValueChange={changeTextScale} /><span className="fox-text-scale-a is-large" aria-hidden="true">A</span><div className="fox-text-scale-stepper"><Button type="button" variant="ghost" size="icon" aria-label="缩小文字" onClick={() => changeTextScale(textScale - 5)}><Minus /></Button><label><input type="number" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} value={textScale} aria-label="文字大小百分比" onChange={(event) => changeTextScale(Number(event.target.value))} /><span>%</span></label><Button type="button" variant="ghost" size="icon" aria-label="放大文字" onClick={() => changeTextScale(textScale + 5)}><Plus /></Button></div></div></PreferenceRow><PreferenceRow title="过程详情" description="选择希望看到多少工具调用细节"><Select value={processDisplayMode} onValueChange={(value) => persistProcessDisplayMode(value as ProcessDisplayMode)}><SelectTrigger className="fox-settings-select" aria-label="过程详情"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="compact">简洁</SelectItem><SelectItem value="standard">标准</SelectItem><SelectItem value="detailed">详细</SelectItem><SelectItem value="verbose">详细</SelectItem></SelectContent></Select></PreferenceRow></Card>
+      <SettingsPageLayout title="通用" description="调整个人资料、外观和通知方式。">
+          <SettingsGroup title="个人资料" aside={<div className="fox-profile-setting-actions"><Button variant="outline" size="sm" onClick={() => setProfileDialogOpen(true)}><Pencil />编辑信息</Button>{!yuxiUser.user && <Button variant="outline" size="sm" onClick={() => navigate('login')}>登录账户</Button>}</div>}><div className="fox-profile-setting"><Avatar><AvatarImage src={profile.avatar} alt="" /><AvatarFallback>{profileFallback}</AvatarFallback></Avatar><span><b>{profileName}</b><small>{yuxiUser.user?.uid ?? 'fox-local'}</small><em>{profileDetail}</em></span></div></SettingsGroup>
+          <SettingsGroup title="外观"><AppearanceThemeControls dark={dark} onDarkChange={(next) => { if (next !== dark) onDark() }} colorTheme={colorTheme} onColorThemeChange={changeColorTheme} /><SettingsRow title="文字大小" description="调整 Fox 各界面的文字显示比例"><div className="fox-text-scale-control"><span className="fox-text-scale-a is-small" aria-hidden="true">A</span><ElasticSlider className="fox-settings-text-slider" label="文字大小" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} largeStep={5} marks={[100]} value={textScale} showValue={false} format={(value) => `${value}%`} onValueChange={changeTextScale} /><span className="fox-text-scale-a is-large" aria-hidden="true">A</span><div className="fox-text-scale-stepper"><Button type="button" variant="ghost" size="icon" aria-label="缩小文字" onClick={() => changeTextScale(textScale - 5)}><Minus /></Button><label><input type="number" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} value={textScale} aria-label="文字大小百分比" onChange={(event) => changeTextScale(Number(event.target.value))} /><span>%</span></label><Button type="button" variant="ghost" size="icon" aria-label="放大文字" onClick={() => changeTextScale(textScale + 5)}><Plus /></Button></div></div></SettingsRow><SettingsRow title="过程详情" description="选择希望看到多少工具调用细节"><Select value={processDisplayMode} onValueChange={(value) => persistProcessDisplayMode(value as ProcessDisplayMode)}><SelectTrigger className="fox-settings-select" aria-label="过程详情"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="compact">简洁</SelectItem><SelectItem value="standard">标准</SelectItem><SelectItem value="detailed">详细</SelectItem><SelectItem value="verbose">详细</SelectItem></SelectContent></Select></SettingsRow></SettingsGroup>
           <NotificationSettingsSection />
-          <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>开始设置</h2></div></div><PreferenceRow title="重新设置" description="检查模型服务、资料库连接和 Fox 的基础使用方式"><Button variant="outline" size="sm" onClick={() => navigate('onboarding')}><Sparkles />打开向导</Button></PreferenceRow></Card>
+          <SettingsGroup title="开始设置"><SettingsRow title="重新设置" description="检查模型服务、资料库连接和 Fox 的基础使用方式"><Button variant="outline" size="sm" onClick={() => navigate('onboarding')}><Sparkles />打开向导</Button></SettingsRow></SettingsGroup>
         <UserProfileDialog open={profileDialogOpen} onOpenChange={setProfileDialogOpen} profile={profile} detail={profileDetail} onSave={async (next) => { await saveProfile(next); toast.success('个人资料已更新') }} />
-      </SettingsScaffold>
+      </SettingsPageLayout>
     </WorkspacePage>
   )
 }
