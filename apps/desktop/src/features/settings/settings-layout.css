@@ -65,7 +65,19 @@
   gap: var(--fox-space-l);
   min-height: var(--fox-inline-action-height);
   padding-bottom: var(--fox-space-s);
-  border-bottom: 1px solid var(--border);
+}
+
+/* UI 1104-08 分组容器：标题在外、行在圆角边框里；最后一行不画分隔线。 */
+.fox-settings-page .fox-settings-group-body {
+  min-width: 0;
+  padding-inline: var(--fox-space-xl);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-card);
+  background: var(--card);
+}
+
+.fox-settings-page .fox-settings-group-body:empty {
+  display: none;
 }
 
 .fox-shell .fox-settings-page .fox-settings-group-head h2,

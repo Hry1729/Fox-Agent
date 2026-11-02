@@ -15,6 +15,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey, type RunSteeringLane } from '@/features/conversations/api/desktop-client'
+import { knowledgeChipName } from '../../composer/knowledge-chip-name'
 import { type KnowledgeReference, type ProjectRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
 import { ArrowUp, Check, ChevronDown, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Terminal, X } from 'lucide-react'
@@ -99,11 +100,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
   const selectedKnowledgeReferenceKeys = new Set(configuredKnowledgeReferences.map(knowledgeReferenceKey))
   const knowledgeChips = configuredKnowledgeReferences.map((reference) => ({
     key: knowledgeReferenceKey(reference),
-    name: runtimeContext.knowledgeReferenceNames?.[knowledgeReferenceKey(reference)]
-      ?? (reference.source === 'local' ? runtimeContext.localKnowledgeBases?.find((item) => item.id === reference.id)?.name
-        : runtimeContext.remoteKnowledgeBases?.find((item) => item.id === reference.id)?.name)
-      ?? enabledKnowledgeBindings.find((binding) => knowledgeReferenceKey(knowledgeReferenceFromLegacyBinding(binding)) === knowledgeReferenceKey(reference))?.knowledgeBaseName
-      ?? reference.id,
+    name: knowledgeChipName(reference, { names: runtimeContext.knowledgeReferenceNames, localKnowledgeBases: runtimeContext.localKnowledgeBases, remoteKnowledgeBases: runtimeContext.remoteKnowledgeBases, bindings: enabledKnowledgeBindings }),
   }))
   const openKnowledge = onKnowledge ?? runtimeContext.onKnowledge
 

@@ -332,3 +332,163 @@
     transition: none;
   }
 }
+
+/* UI 1104-07 审批卡移入对话流：和消息同一列宽，排在消息之后、运行状态之前；输入框保持独立。 */
+.fox-thread-approval {
+  width: var(--fox-chat-column-width);
+  max-width: none;
+  margin: var(--fox-space-l) auto 0;
+  min-width: 0;
+}
+
+.fox-thread-approval > .fox-runtime-confirmation {
+  width: 100%;
+  max-width: none;
+  border-radius: var(--fox-radius-card);
+}
+
+/* 「本项目总是允许此开头的命令…」收在「查看操作详情」里：标题、输入框、说明、按钮各占一行，左缘对齐。 */
+.fox-approval-project-rule {
+  display: grid;
+  gap: var(--fox-space-m);
+  min-width: 0;
+  padding-top: var(--fox-space-m);
+}
+
+.fox-approval-project-rule > label {
+  display: grid;
+  gap: var(--fox-space-xs);
+  min-width: 0;
+  color: var(--fox-text);
+  font-size: var(--fox-type-meta);
+}
+
+.fox-approval-project-rule input {
+  width: 100%;
+  min-width: 0;
+  height: var(--fox-control-md);
+  padding: 0 var(--fox-space-m);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-control);
+  background: var(--background);
+  color: var(--fox-text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fox-type-meta);
+}
+
+.fox-approval-project-rule input:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+.fox-approval-project-rule > small {
+  display: block;
+  margin: 0;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-meta);
+  line-height: 1.6;
+}
+
+.fox-approval-project-rule > button {
+  justify-self: start;
+  max-width: 100%;
+  min-height: var(--fox-control-md);
+  padding: 0 var(--fox-space-l);
+  overflow: hidden;
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-pill);
+  background: var(--secondary);
+  color: var(--fox-text);
+  font-size: var(--fox-type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-approval-project-rule > button:hover:not(:disabled) {
+  background: var(--fox-hover);
+}
+
+.fox-approval-project-rule > button:disabled {
+  opacity: .5;
+}
+
+.fox-approval-project-rule > button:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+/* UI 1104-05 交付文件：简约扁平的横向 chip（按用户给的 Claude 截图）。
+   白底 + 1px 浅灰边框，左边描边类型徽标（大写扩展名、等宽小字、无底色），中间文件名，右边弱化色大小。
+   多个文件横向排列、放不下换行；不再有「交付文件 N」标题和卡片下方说明。 */
+.fox-artifact-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fox-space-m);
+  width: 100%;
+  min-width: 0;
+  margin-top: var(--fox-space-m);
+}
+
+.fox-artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fox-space-m);
+  max-width: 100%;
+  height: calc(var(--fox-control-md) + var(--fox-space-xs));
+  padding: 0 var(--fox-space-l) 0 var(--fox-space-s);
+  border: 1px solid var(--fox-border);
+  border-radius: calc(var(--fox-radius-control) + var(--fox-space-xs));
+  background: var(--fox-card);
+  color: var(--fox-text);
+  font-size: var(--fox-type-control);
+  font-weight: var(--fox-weight-regular);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--fox-duration-fast) var(--fox-ease-out), background-color var(--fox-duration-fast) var(--fox-ease-out);
+}
+
+.fox-artifact-chip:hover {
+  border-color: var(--fox-border-strong);
+  background: var(--fox-hover);
+}
+
+.fox-artifact-chip:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+.fox-artifact-chip-type {
+  flex: none;
+  min-width: calc(var(--fox-control-md) + var(--fox-space-xs));
+  padding: var(--fox-space-micro) var(--fox-space-s);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-small);
+  background: transparent;
+  color: var(--fox-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fox-type-micro);
+  font-weight: var(--fox-weight-medium);
+  line-height: 1.3;
+  letter-spacing: .02em;
+  text-align: center;
+}
+
+.fox-artifact-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-artifact-chip-size {
+  flex: none;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-artifact-chip {
+    transition: none;
+  }
+}

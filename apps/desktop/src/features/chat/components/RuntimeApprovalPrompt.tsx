@@ -151,17 +151,18 @@ export function RuntimeApprovalPrompt({
       onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
       onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
       detailsContent={<>
+        {/* UI 1104-07：卡片主体只留目录、命令和「拒绝 / 只允许这一次」；Host 说明和「本项目总是允许」收进详情。 */}
+        <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary={presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}>
+        <div role="region" aria-label="审批详情">
         {policyNote && <p className="fox-approval-scope-note fox-approval-host-note">{policyNote}</p>}
         {ruleOffer && <div className="fox-approval-project-rule">
           <label>
             <span>本项目总是允许以此开头的命令</span>
             <input aria-label="项目规则前缀" value={rulePrefix} disabled={submitting} onChange={event => setRulePrefix(event.currentTarget.value)} />
           </label>
-          <button type="button" disabled={submitting || !rulePrefix.trim()} onClick={() => void allowWithProjectRule()}>本项目总是允许「{rulePrefix.trim() || '…'}」</button>
           <small>按前缀匹配，复合命令每一段都要命中；高风险操作需要前缀写出它本身。可在设置里撤销。</small>
+          <button type="button" disabled={submitting || !rulePrefix.trim()} onClick={() => void allowWithProjectRule()}>本项目总是允许「{rulePrefix.trim() || '…'}」</button>
         </div>}
-        <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary={presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}>
-        <div role="region" aria-label="审批详情">
         {repairOverride && <div className={`fox-approval-context ${repairDetails ? '' : 'is-invalid'}`}>
           {repairDetails
             ? <><p><strong>为什么还要再修一次：</strong>{repairDetails.rootCause}</p><p><strong>关联的审查问题：</strong>{repairDetails.findingIds.join('、')}</p></>

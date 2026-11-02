@@ -1,6 +1,5 @@
 import { useId, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import { File as MessageFile } from '@/components/assistant-ui/elements/file'
 import type { ArtifactRecord } from '@/features/conversations/model/types'
 
 /**
@@ -80,25 +79,40 @@ export function artifactSummaryLine(artifact: ArtifactRecord) {
   return artifact.artifactOrigin === 'host_private' ? 'Fox 内部文件' : '项目文件'
 }
 
+/** UI 1104-05：chip 右侧的大小，紧凑写法（17KB、677B），和 Claude 的交付文件一致。 */
+export function compactFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)}KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+/** chip 左侧的类型徽标：大写扩展名（HTML / SVG / TXT），没有扩展名时写 FILE。 */
+export function artifactTypeBadge(artifact: ArtifactRecord) {
+  const extension = artifactFileExtension(artifact)
+  if (!extension || extension.length > 5 || !/^[a-z0-9]+$/.test(extension)) return 'FILE'
+  return extension.toUpperCase()
+}
+
+/**
+ * One delivered file as a flat chip: outlined type badge, name, muted size.
+ * The model's note and the storage path stay one hover away (title), so the
+ * chip row reads like a list of files rather than a stack of cards.
+ */
 function ArtifactResultCard({ artifact, onOpenArtifact }: { artifact: ArtifactRecord; onOpenArtifact?: (artifact: ArtifactRecord) => void }) {
+  const path = artifact.storagePath ?? artifact.displayName
+  const note = artifactSummaryLine(artifact)
   return (
     <button
       type="button"
-      className="fox-message-artifact-trigger"
-      title={artifact.storagePath ?? artifact.displayName}
+      className="fox-artifact-chip"
+      data-slot="file-root"
+      title={path}
+      aria-description={note || undefined}
       onClick={() => onOpenArtifact?.(artifact)}
     >
-      <MessageFile
-        className="fox-message-artifact"
-        title={artifact.storagePath ?? artifact.displayName}
-        name={artifact.displayName}
-        mediaType={artifact.mediaType}
-        bytes={artifact.byteSize}
-        canOpen={Boolean(onOpenArtifact)}
-      />
-      {artifactSummaryLine(artifact) ? (
-        <span className="fox-message-artifact-description">{artifactSummaryLine(artifact)}</span>
-      ) : null}
+      <span className="fox-artifact-chip-type" data-slot="file-type" aria-hidden="true">{artifactTypeBadge(artifact)}</span>
+      <span className="fox-artifact-chip-name" data-slot="file-name">{artifact.displayName}</span>
+      {artifact.byteSize != null && <span className="fox-artifact-chip-size" data-slot="file-size">{compactFileSize(artifact.byteSize)}</span>}
     </button>
   )
 }
@@ -160,8 +174,7 @@ export function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: Art
     <section className="fox-message-file-results" aria-label="文件结果">
       {deliverables.length > 0 && (
         <div className="fox-message-artifact-group-content" role="region" aria-label="交付文件">
-          <div className="fox-message-file-results-head"><strong>交付文件</strong><span>{deliverables.length}</span></div>
-          <div className="fox-message-artifacts">
+          <div className="fox-artifact-chips">
             {deliverables.map((artifact) => (
               <ArtifactResultCard key={artifact.id} artifact={artifact} onOpenArtifact={onOpenArtifact} />
             ))}
@@ -177,7 +190,7 @@ export function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: Art
         hidden={openGroup !== 'process'}
       >
         {openGroup === 'process' && (
-          <div className="fox-message-artifacts">
+          <div className="fox-artifact-chips">
             {processFiles.map((artifact) => (
               <ArtifactResultCard key={artifact.id} artifact={artifact} onOpenArtifact={onOpenArtifact} />
             ))}

@@ -131,7 +131,11 @@
 .aui-error-state details { margin-top: 6px; color: var(--fox-muted); font-size: 12px; }
 .aui-error-state pre, .aui-error-diagnostic { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-height: 20rem; overflow-x: hidden; overflow-y: auto; margin: 6px 0 0; }
 .aui-error-state > button { flex: 0 0 auto; }
-.aui-stopped-run { display: flex; align-items: center; gap: 6px; color: var(--fox-muted); font-size: 12px; margin-top: 8px; }
+/* UI 1104-04：取消状态靠左排在对话列里（不再居中的小胶囊），和思维链行共用 15px 图标列、6px 间距和文字起点。 */
+.aui-stopped-run { display: flex; align-items: stretch; gap: 6px; color: var(--fox-muted); font-size: 12px; margin-top: 8px; }
+.aui-stopped-run > div { justify-content: flex-start; }
+.aui-stopped-run > div > span { display: grid; grid-template-columns: 15px minmax(0, 1fr); align-items: center; column-gap: 6px; min-height: 24px; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--fox-muted); font-family: inherit; font-size: 13.5px; letter-spacing: normal; }
+.aui-stopped-run > div > span > svg { width: 15px; height: 15px; justify-self: center; }
 .aui-message-actions > button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border-radius: var(--fox-radius-control); color: var(--fox-muted); }
 .aui-message-actions > button:hover, .aui-message-actions > button[aria-pressed='true'] { background: var(--fox-hover); color: var(--fox-text); }
 .aui-message-actions > button:disabled { opacity: .45; }

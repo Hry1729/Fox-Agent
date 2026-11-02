@@ -41,10 +41,20 @@
   content: none;
 }
 
+/* UI 1104-01 托盘底栏 32px：外框 1px + 外框内距 3px + 底栏内距 2px，
+   悬停底色离外框两侧和底部都是 6px；项目和 Agent 胶囊同为 28px。输入区高度不受影响。 */
 .fox-composer-draft-footer {
   min-height: var(--fox-control-md);
-  padding: var(--fox-space-xs) 0 var(--fox-space-l);
+  padding: var(--fox-space-micro);
   gap: var(--fox-space-m);
+}
+
+.fox-composer-draft-footer :is(.fox-composer-project-trigger, .fox-composer-agent-trigger) {
+  height: var(--fox-control-sm);
+  min-height: var(--fox-control-sm);
+  padding-block: 0;
+  padding-inline: var(--fox-space-m);
+  border-radius: var(--fox-radius-pill);
 }
 
 .fox-composer-project-bar .fox-composer-project-trigger {
@@ -120,6 +130,34 @@
 .fox-composer-agent-menu {
   width: min(var(--fox-composer-menu-width), calc(100vw - var(--fox-space-4xl)));
   max-width: calc(100vw - var(--fox-space-4xl));
+}
+
+/* UI 1104-02 Agent 菜单：名称和说明同一行，说明用弱化文字色；不可选的行说明可以换行。 */
+.fox-composer-agent-menu .fox-composer-agent-option {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-m);
+}
+
+.fox-composer-agent-menu .fox-composer-agent-option > span {
+  flex: none;
+}
+
+.fox-composer-agent-menu .fox-composer-agent-option > small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fox-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-composer-agent-menu [data-disabled] .fox-composer-agent-option {
+  flex-wrap: wrap;
+  row-gap: var(--fox-space-xs);
+}
+
+.fox-composer-agent-menu [data-disabled] .fox-composer-agent-option > small {
+  white-space: normal;
 }
 
 .fox-history-add-menu .fox-history-menu-settings {
@@ -226,6 +264,62 @@
 .fox-composer-picker-menu .fox-composer-project-add {
   width: 100%;
   margin-top: var(--fox-space-xs);
+}
+
+/* UI 1104-03 项目菜单：搜索框、列表和底部动作只留菜单这一层 8px 外距；
+   项目行和「添加项目」行图标都在外距 + 8px 处，文字都在图标后 8px；分隔线上下各 8px。 */
+.fox-composer-project-menu.fox-composer-picker-menu {
+  padding: var(--fox-space-m);
+  gap: 0;
+}
+
+.fox-composer-project-menu > [data-slot='command'] {
+  padding: 0;
+  background: transparent;
+}
+
+.fox-composer-project-menu.fox-composer-picker-menu [data-slot='command-input-wrapper'] {
+  margin: 0 0 var(--fox-space-xs);
+  padding: 0;
+}
+
+.fox-composer-project-menu [data-slot='command-group'],
+.fox-composer-project-menu [data-slot='command-group'] > [cmdk-group-items] {
+  padding: 0;
+}
+
+.fox-composer-project-menu.fox-composer-picker-menu [cmdk-group-heading] {
+  padding: var(--fox-space-m) var(--fox-space-m) var(--fox-space-s);
+  line-height: var(--fox-space-xl);
+}
+
+.fox-composer-project-menu.fox-composer-picker-menu [data-slot='command-item'] {
+  min-height: calc(var(--fox-control-lg) + var(--fox-space-l) + var(--fox-space-xs));
+  padding: var(--fox-space-m);
+  gap: var(--fox-space-m);
+}
+
+.fox-composer-project-menu.fox-composer-picker-menu .fox-composer-project-option {
+  gap: var(--fox-space-micro);
+}
+
+.fox-composer-project-menu [data-slot='command-separator'] {
+  margin: var(--fox-space-m) 0;
+}
+
+.fox-composer-project-menu.fox-composer-picker-menu .fox-composer-project-add {
+  width: 100%;
+  min-height: var(--fox-control-lg);
+  margin: 0;
+  padding: 0 var(--fox-space-m);
+  gap: var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
+}
+
+.fox-composer-project-menu :is([data-slot='command-item'], .fox-composer-project-add) > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  flex: none;
 }
 
 /* I4 暗色禁用发送按钮不再是浅色圆。启用态仍走 send surface。 */

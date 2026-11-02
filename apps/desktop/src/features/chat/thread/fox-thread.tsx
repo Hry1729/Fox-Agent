@@ -11,6 +11,8 @@ import './fox-thread.css'
 
 export interface FoxThreadProps {
   statusBar?: import('react').ReactNode
+  /** UI 1104-07：待处理的审批卡，排在消息之后、运行状态之前，跟着对话一起滚动。 */
+  approvalSlot?: import('react').ReactNode
   fox: FoxThreadContextValue
   /** Opening suggestions for the empty state (expert-defined or default). */
   suggestions?: string[]
@@ -75,7 +77,7 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  * at the mount site, so switching conversations rebuilds the runtime state
  * instead of mixing message streams.
  */
-export default function FoxThread({ statusBar, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
+export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
   return (
     <FoxThreadContext.Provider value={fox}>
       <div className="fox-thread">
@@ -91,6 +93,7 @@ export default function FoxThread({ statusBar, fox, suggestions, onStart, planRe
             <ThreadPrimitive.If empty={false}>
               <div className="fox-thread-date"><span>今天</span></div>
               <ThreadPrimitive.Messages components={{ UserMessage: FoxUserMessage, AssistantMessage: FoxAssistantMessage }} />
+              {approvalSlot && <div className="fox-thread-approval">{approvalSlot}</div>}
               {statusBar}
             </ThreadPrimitive.If>
           </ThreadPrimitive.Viewport>

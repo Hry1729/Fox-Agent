@@ -1,6 +1,6 @@
 "use client";
 
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { ArrowRightIcon, SquareIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { field, mono } from "./surfaces";
@@ -10,6 +10,7 @@ export function StoppedRun({
   reason,
   onContinue,
   onDiscard,
+  icon,
   className,
   ...props
 }: Omit<
@@ -18,6 +19,8 @@ export function StoppedRun({
 > & {
   words: readonly string[];
   reason: string;
+  /** Replaces the default filled square in front of the reason. */
+  icon?: ReactNode;
   onContinue?: () => void;
   onDiscard?: () => void;
 }) {
@@ -44,7 +47,7 @@ export function StoppedRun({
             "text-muted-foreground inline-flex items-center gap-1.5 rounded-full px-2.5 py-1",
           )}
         >
-          <SquareIcon className="size-2.5 fill-current" />
+          {icon ?? <SquareIcon className="size-2.5 fill-current" />}
           {reason}
         </span>
 

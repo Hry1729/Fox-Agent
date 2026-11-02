@@ -4,8 +4,8 @@ import './settings-layout.css'
 
 /**
  * Shared settings page frame: one page title with a single line of description,
- * then quiet groups (title + hairline) of hairline-divided rows. Rows put the
- * name and one sentence on the left and the control on the right; no cards.
+ * then groups whose title sits above a rounded frame of hairline-divided rows.
+ * Rows put the name and one sentence on the left and the control on the right.
  */
 export function SettingsPageLayout({ title, description, actions, className, children }: { title: string; description: string; actions?: ReactNode; className?: string; children: ReactNode }) {
   return <div className={cn('fox-settings-page', className)}>
@@ -20,7 +20,8 @@ export function SettingsPageLayout({ title, description, actions, className, chi
 export function SettingsGroup({ id, title, aside, className, children }: { id?: string; title: string; aside?: ReactNode; className?: string; children: ReactNode }) {
   return <section id={id} className={cn('fox-settings-group', className)} aria-label={title}>
     <div className="fox-settings-group-head"><h2>{title}</h2>{aside && <div className="fox-settings-group-aside">{aside}</div>}</div>
-    {children}
+    {/* UI 1104-08：组标题在圆角边框外左上角，组内各行装在边框里，行之间用轻分隔线。 */}
+    <div className="fox-settings-group-body">{children}</div>
   </section>
 }
 
