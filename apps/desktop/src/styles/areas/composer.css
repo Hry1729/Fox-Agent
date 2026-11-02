@@ -358,3 +358,42 @@
     animation: none;
   }
 }
+
+/* UI 1104-06 附件与资料库引用：两种 chip 用同一套主题 token（高度、圆角、描边、字号、颜色）。
+   圆角与输入框同心：chip 圆角 = 所在输入框的圆角 − 输入框左右内距（--fox-space-m）。
+   新对话页输入框嵌在浅灰托盘里，圆角是 composer-inner，chip 跟着小一档。 */
+.fox-prompt-input > [data-slot='input-group'] {
+  --fox-composer-group-radius: var(--fox-radius-composer);
+}
+
+.fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-input > [data-slot='input-group'] {
+  --fox-composer-group-radius: var(--fox-radius-composer-inner);
+}
+
+.fox-composer-wrap .fox-composer-attachments.fox-composer-selection-row > :is(button:not(.fox-composer-overflow), .fox-composer-attachment) {
+  height: var(--fox-control-md);
+  min-height: var(--fox-control-md);
+  gap: var(--fox-space-s);
+  padding-inline: var(--fox-space-l);
+  border: 1px solid color-mix(in oklch, var(--fox-border) 88%, var(--fox-card));
+  border-radius: calc(var(--fox-composer-group-radius) - var(--fox-space-m));
+  background: transparent;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-meta);
+  font-weight: 400;
+}
+
+.fox-composer-wrap .fox-composer-attachments.fox-composer-selection-row > .fox-composer-attachment {
+  padding-inline: var(--fox-space-s) var(--fox-space-xs);
+}
+
+.fox-composer-wrap .fox-composer-attachments.fox-composer-selection-row > :is(button:not(.fox-composer-overflow), .fox-composer-attachment):hover {
+  border-color: var(--fox-border-strong);
+  background: transparent;
+  color: var(--fox-text);
+}
+
+.fox-composer-wrap .fox-composer-attachments.fox-composer-selection-row > .fox-composer-overflow {
+  height: var(--fox-control-md);
+  border-radius: calc(var(--fox-composer-group-radius) - var(--fox-space-m));
+}

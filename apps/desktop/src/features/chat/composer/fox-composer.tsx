@@ -61,7 +61,7 @@ function ComposerAttachmentPreview({ knowledgeChips = [], onKnowledge }: { knowl
     const label = chip.name
     items.push(<button type="button" key={chip.key} className="is-authorized is-knowledge" onClick={onKnowledge} title={label}><Library size={13} /><span>{label}</span><Check size={12} /></button>)
   })
-  attachments.files.forEach((file) => items.push(<Attachment key={file.id} data={file} onRemove={() => attachments.remove(file.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove label="移除附件" /></Attachment>))
+  attachments.files.forEach((file) => items.push(<Attachment key={file.id} className="fox-composer-attachment" data={file} onRemove={() => attachments.remove(file.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove label="移除附件" /></Attachment>))
   if (!items.length) return null
   const labels = [...knowledgeChips.map((chip) => chip.name), ...attachments.files.map((file) => file.filename || '附件')]
   return (
