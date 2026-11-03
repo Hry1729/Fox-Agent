@@ -5151,7 +5151,7 @@ mod b5_1338_tests {
     use super::*;
 
     fn project() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("fox-b5-1338-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("fox-b5-1338-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         root.canonicalize().unwrap()
     }
