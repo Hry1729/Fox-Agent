@@ -893,3 +893,50 @@ fn native_background_admission_refuses_once_the_run_is_not_running() {
     let refused = database.host_validate_resource_acquisition_for(&run, Some("run_command")).unwrap_err();
     assert!(refused.contains("requires running Run"), "{refused}");
 }
+
+#[test]
+fn r1_4_final_state_note_says_final_not_sampled() {
+    let (final_cancelled, label, note) = final_state_note(JobState::Cancelled, &Value::Null);
+    assert!(final_cancelled);
+    assert_eq!(label, "已取消");
+    assert!(note.contains("最终状态") && note.contains("不是抽样"), "{note}");
+    let (done, label, _) = final_state_note(JobState::Completed, &json!(0));
+    assert!(done);
+    assert_eq!(label, "已结束（退出码 0）");
+    let (_, label, _) = final_state_note(JobState::Failed, &json!(1));
+    assert_eq!(label, "已结束，失败（退出码 1）");
+    let (running, label, note) = final_state_note(JobState::Running, &Value::Null);
+    assert!(!running);
+    assert_eq!(label, "运行中");
+    assert!(!note.contains("不是抽样"));
+}
+
+#[test]
+fn r1_4_a_later_run_in_the_same_conversation_reads_but_cannot_cancel_earlier_jobs() {
+    let fixture = Fixture::new("previous-run-read");
+    let first = fixture.start("bg", "ping -n 60 127.0.0.1").expect("start");
+    let id = job_id(&first).to_owned();
+    fixture.action(json!({"action":"cancel","jobId":id})).expect("cancel");
+    assert_eq!(fixture.wait_terminal(&id).state, JobState::Cancelled);
+    let status = fixture.action(json!({"action":"status","jobId":id})).expect("own status");
+    assert_eq!(status["details"]["final"], true);
+    assert_eq!(status["details"]["stateLabel"], "已取消");
+    assert!(status["details"]["note"].as_str().unwrap().contains("不是抽样"));
+
+    let conversation_id = fixture.database.run_control_binding(&fixture.run_id).unwrap().unwrap().conversation_id;
+    fixture.database.mark_run_failed(&fixture.run_id, "test.done", "first run ended").expect("end first run");
+    let later = fixture.database.create_run(&conversation_id, "later run", None).expect("later run").run.id;
+    fixture.database.freeze_legacy_run_control(&later, "command-adapter-test").expect("freeze later run");
+    let registry = CancellationRegistry::default();
+    registry.register_run(&later).expect("register later run");
+    let token = registry.run_token(&later).expect("later token");
+    let read = execute(&fixture.database, &later, &json!({"action":"status","jobId":id}), &fixture.root, &token, Duration::from_secs(5))
+        .expect("same conversation may read an earlier job's status");
+    assert_eq!(read["details"]["state"], "cancelled");
+    assert_eq!(read["details"]["final"], true);
+    execute(&fixture.database, &later, &json!({"action":"output","jobId":id,"stream":"stdout"}), &fixture.root, &token, Duration::from_secs(5))
+        .expect("same conversation may read an earlier job's output");
+    let denied = execute(&fixture.database, &later, &json!({"action":"cancel","jobId":id}), &fixture.root, &token, Duration::from_secs(5))
+        .expect_err("writes stay scoped to the job's own Run");
+    assert!(denied.contains("outside this Run"), "{denied}");
+}

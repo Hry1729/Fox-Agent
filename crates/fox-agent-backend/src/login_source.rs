@@ -26,6 +26,9 @@ pub struct SourceStatus {
     pub native_available: bool,
     pub reusable: bool,
     pub source_changed: bool,
+    /// 13.38（B3-4）：这个项目（或全局默认）明确选过「模型服务」。`current == "fox"` 而它为假时，
+    /// 是没有任何选择、默认落到 Fox 模型服务上。
+    pub fox_chosen: bool,
     pub current: String,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -100,6 +103,7 @@ pub fn status(state: &Path, home: &Path, real: Option<&RealHome>) -> Result<Sour
     Ok(SourceStatus {
         choice_required: !own && !fox && !reusable && (native_available || source_changed),
         native_available, reusable, source_changed,
+        fox_chosen: fox,
         current: if own { "native" } else if reusable { "reused_native" } else { "fox" }.into(),
         provider: native.as_ref().and_then(|native| native.provider.clone()),
         model: native.as_ref().and_then(|native| native.model.clone()),
@@ -172,6 +176,21 @@ mod tests {
         assert!(status(&state, &fresh, Some(&real)).unwrap().choice_required);
         choose_fox(&state, &home, true).unwrap();
         assert!(!status(&state, &fresh, Some(&real)).unwrap().choice_required);
+    }
+    #[test]
+    fn no_native_config_and_no_choice_reads_as_implicit_fox_until_chosen() {
+        // 13.38（B3-4）：本机没有 Pi 配置、从没选过来源：current 是 fox，但 fox_chosen 为假（Host 据此写审计）。
+        let dir = tempfile::tempdir().unwrap();
+        let empty = RealHome { home: dir.path().join("empty-real"), codex_home: None };
+        std::fs::create_dir_all(&empty.home).unwrap();
+        let (state, home) = (dir.path().join("state"), dir.path().join("project"));
+        let before = status(&state, &home, Some(&empty)).unwrap();
+        assert!(!before.choice_required);
+        assert_eq!(before.current, "fox");
+        assert!(!before.fox_chosen);
+        choose_fox(&state, &home, false).unwrap();
+        let after = status(&state, &home, Some(&empty)).unwrap();
+        assert!(after.fox_chosen && after.current == "fox");
     }
     #[test]
     fn partial_selection_cannot_approve_reuse() {

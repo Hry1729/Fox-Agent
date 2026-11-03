@@ -8243,15 +8243,27 @@ fn previous_run_background_jobs(database: &crate::database::Database, conversati
         return None;
     }
     Some(json!({
-        "note": "这些是前几轮启动的后台任务在 Host 里的当前真实状态，以此为准。之前对话里工具返回的「运行中」可能已经过时：后台任务属于启动它的那一轮，那一轮结束或被停止时它会被一并取消。",
-        "jobs": jobs.iter().map(|job| json!({
-            "jobId": job.job_id,
-            "kind": job.kind,
-            "state": job.state.as_str(),
-            "runId": job.run_id,
-            "finishedAt": job.finished_at,
-            "errorCode": job.error_code,
-        })).collect::<Vec<_>>(),
+        "note": "这些是前几轮启动的后台任务在 Host 里的最终状态（不是抽样），以此为准，可以直接据此回答。之前对话里工具返回的「运行中」已经过时：后台任务属于启动它的那一轮，那一轮结束或被停止时它会被一并取消。需要输出时可以用 run_command 的 status / output 只读查询（cancel 只能作用于本轮的任务）。",
+        "jobs": jobs.iter().map(|job| {
+            // 命令任务的退出码在它的结果 / 检查点里；读不到就不写。
+            let exit_code = if job.kind == "command" {
+                let stored = if job.result_ref.is_some() { database.kernel_job_result_value(&job.conversation_id, &job.job_id).ok() }
+                    else { job.cursor.as_deref().and_then(|cursor| serde_json::from_str::<Value>(cursor).ok()) };
+                stored.map(|value| value["exitCode"].clone()).unwrap_or(Value::Null)
+            } else { Value::Null };
+            let (is_final, label, _) = command_jobs::final_state_note(job.state, &exit_code);
+            json!({
+                "exitCode": exit_code,
+                "jobId": job.job_id,
+                "kind": job.kind,
+                "state": job.state.as_str(),
+                "stateLabel": label,
+                "final": is_final,
+                "runId": job.run_id,
+                "finishedAt": job.finished_at,
+                "errorCode": job.error_code,
+            })
+        }).collect::<Vec<_>>(),
     }))
 }
 

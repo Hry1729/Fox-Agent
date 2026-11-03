@@ -159,12 +159,40 @@ fn public_status(database: &Database, row: &crate::database::JobSnapshot) -> Res
             "droppedBytes":p["droppedBytes"].as_u64().unwrap_or(0),
             "streamClosed":p["streamClosed"].as_bool().unwrap_or(row.state.is_terminal())})
     };
+    let (is_final, label, note) = final_state_note(row.state, &snapshot["exitCode"]);
     Ok(json!({"jobId":row.job_id,"state":row.state,"exitCode":snapshot["exitCode"],
         "errorCode":row.error_code.as_deref().or(snapshot["errorCode"].as_str()),
         "stdout":stream("stdout"),"stderr":stream("stderr"),
         "cancelRequested":row.cancel_requested_at.is_some(),
         "cancelRequestedAt":row.cancel_requested_at,"cancelAcknowledgedAt":row.cancel_acknowledged_at,
-        "resumable":row.resumable}))
+        "resumable":row.resumable,
+        "final":is_final,"stateLabel":label,"note":note}))
+}
+
+/// 13.38（R1-4）：给模型看的明确终态说明。终态（已取消 / 已结束 / 失败）是 Host 记录的最终状态，
+/// 不是抽样，之后不会再变；只有运行中的任务是「当前状态」。返回 `(是否终态, 中文状态, 说明)`。
+pub(crate) fn final_state_note(state: JobState, exit_code: &Value) -> (bool, String, String) {
+    let exit = exit_code.as_i64();
+    let label = match state {
+        JobState::Cancelled => "已取消".to_owned(),
+        JobState::Completed => match exit {
+            Some(code) => format!("已结束（退出码 {code}）"),
+            None => "已结束".to_owned(),
+        },
+        JobState::Failed => match exit {
+            Some(code) => format!("已结束，失败（退出码 {code}）"),
+            None => "已结束，失败".to_owned(),
+        },
+        JobState::Queued => "排队中".to_owned(),
+        JobState::Running => "运行中".to_owned(),
+        JobState::Paused => "已暂停".to_owned(),
+    };
+    if state.is_terminal() {
+        let note = format!("这是 Host 记录的最终状态，不是抽样：该后台任务{label}，不会再变化，进程已不在运行。可以据此下结论。");
+        (true, label, note)
+    } else {
+        (false, label.clone(), format!("该后台任务目前{label}，这是此刻的状态，之后还会变化。"))
+    }
 }
 
 fn stop_failed(manager: &ProcessJobManager, local: &str, db: &Database, job: &str, reason: &str) {
@@ -530,9 +558,13 @@ fn execute_inner(
         input["jobId"].as_str().unwrap().to_owned()
     };
     let mut row = database.kernel_job_snapshot(&id)?;
+    // 13.38（R1-4）：同一会话里，后面的一轮可以只读查询前几轮后台任务的 status / output
+    // （任务属于启动它的那一轮，那一轮结束时已被一并取消，这里只是读它的最终状态和输出）；
+    // cancel 等写操作仍然只能作用于本 Run 的任务。
+    let read_only = matches!(action, "status" | "output");
     if row.kind != "command"
-        || row.run_id != run_id
         || row.conversation_id != binding.conversation_id
+        || (row.run_id != run_id && !read_only)
     {
         return Err("[tool.permission_denied] command job is outside this Run".into());
     }

@@ -304,9 +304,11 @@ pub(crate) enum PiSourceStep {
     Refuse,
 }
 
-pub(crate) fn pi_source_step(choice_required: bool, source_changed: bool, fox_login_ready: bool) -> PiSourceStep {
+/// `implicit_fox`：没有待确认的选择，也从没选过来源，本机也没有 Pi 原生配置，当前来源只是
+/// 默认落到「模型服务」上（13.38 B3-4）。这时 Fox 模型服务可用就按 DefaultToFox 记下并写审计。
+pub(crate) fn pi_source_step(choice_required: bool, source_changed: bool, fox_login_ready: bool, implicit_fox: bool) -> PiSourceStep {
     if !choice_required {
-        PiSourceStep::Proceed
+        if implicit_fox && fox_login_ready { PiSourceStep::DefaultToFox } else { PiSourceStep::Proceed }
     } else if !source_changed && fox_login_ready {
         PiSourceStep::DefaultToFox
     } else {
@@ -657,7 +659,8 @@ impl ExternalBackendHost {
         let source = fox_agent_backend::login_source::status(&config.state_root, &home, Self::real_home().as_ref())
             .map_err(|error| failure(PI_SOURCE_CHOICE_REQUIRED, format!("无法读取 Pi 的配置来源：{error}"), true))?;
         let fox_login = self.unified_login(AgentBackend::Pi);
-        match pi_source_step(source.choice_required, source.source_changed, fox_login.is_some()) {
+        let implicit_fox = !source.choice_required && source.current == "fox" && !source.fox_chosen;
+        match pi_source_step(source.choice_required, source.source_changed, fox_login.is_some(), implicit_fox) {
             PiSourceStep::Proceed => Ok(()),
             PiSourceStep::Refuse => Err(failure(PI_SOURCE_CHOICE_REQUIRED, PI_SOURCE_CHOICE_MESSAGE, true)),
             PiSourceStep::DefaultToFox => {
@@ -668,6 +671,8 @@ impl ExternalBackendHost {
                     "provider": login.map(|login| login.provider_name.clone()),
                     "model": login.map(|login| login.model.clone()),
                     "nativeAvailable": source.native_available,
+                    // choice_pending：本机有 Pi 原生配置但没选；no_source_chosen：什么都没配，默认用模型服务。
+                    "reason": if source.choice_required { "choice_pending" } else { "no_source_chosen" },
                 });
                 let _ = self.database.append_agent_backend_audit(target.conversation_id.as_deref(), AgentBackend::Pi.as_str(), "agent_backend.pi_source_defaulted_to_fox", &details);
                 Ok(())
@@ -1080,11 +1085,14 @@ mod tests {
     #[test]
     fn pi_source_defaults_to_fox_only_when_never_chosen_and_fox_is_ready() {
         use super::{pi_source_step, PiSourceStep};
-        assert_eq!(pi_source_step(false, false, false), PiSourceStep::Proceed);
-        assert_eq!(pi_source_step(false, true, true), PiSourceStep::Proceed);
-        assert_eq!(pi_source_step(true, false, true), PiSourceStep::DefaultToFox);
-        assert_eq!(pi_source_step(true, false, false), PiSourceStep::Refuse);
-        assert_eq!(pi_source_step(true, true, true), PiSourceStep::Refuse, "a changed confirmed import is never overridden");
+        assert_eq!(pi_source_step(false, false, false, false), PiSourceStep::Proceed);
+        assert_eq!(pi_source_step(false, true, true, false), PiSourceStep::Proceed);
+        assert_eq!(pi_source_step(true, false, true, false), PiSourceStep::DefaultToFox);
+        assert_eq!(pi_source_step(true, false, false, false), PiSourceStep::Refuse);
+        assert_eq!(pi_source_step(true, true, true, false), PiSourceStep::Refuse, "a changed confirmed import is never overridden");
+        // 13.38（B3-4）：什么来源都没选、本机也没有 Pi 配置，模型服务可用：默认到模型服务并写审计。
+        assert_eq!(pi_source_step(false, false, true, true), PiSourceStep::DefaultToFox);
+        assert_eq!(pi_source_step(false, false, false, true), PiSourceStep::Proceed, "模型服务不可用时照旧（之后由缺凭据拒绝）");
     }
 
     #[test]
