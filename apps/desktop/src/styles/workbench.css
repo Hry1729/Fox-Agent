@@ -2429,17 +2429,27 @@ button.fox-chat-project-row:disabled {
 }
 
 /* A disabled menu row says why it is disabled; a tooltip cannot be reached on a
-   disabled item, so the reason is rendered inline and truncated. */
+   disabled item, so the reason is rendered under the label (13.38: inline it
+   squeezed the label onto two lines and cut the reason off). It starts under
+   the label text: 16px icon + 8px gap. */
+:is(.fox-top-menu, .fox-conversation-menu, .fox-window-menu-content) :is([data-slot='dropdown-menu-item'], [data-slot='dropdown-menu-sub-trigger']):has(> .fox-menu-hint) {
+  flex-wrap: wrap;
+  row-gap: 0;
+  height: auto;
+  min-height: 32px;
+  padding-block: 6px;
+  white-space: nowrap;
+}
+
 .fox-menu-hint {
-  margin-inline-start: auto;
-  max-width: 210px;
-  overflow: hidden;
+  flex-basis: 100%;
+  max-width: 240px;
+  padding-inline-start: 24px;
   color: var(--fox-muted);
   font-size: 11px;
-  line-height: 1.3;
-  text-align: end;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  text-align: start;
+  white-space: normal;
 }
 
 /* Shell menus (title bar, sidebar, chat title, composer "+", profile) share one

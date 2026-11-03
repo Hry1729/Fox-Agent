@@ -44,6 +44,8 @@ describe('sendNotStartedNotice', () => {
       expect(notice.description).toContain('草稿已保留')
       expect(notice.description).not.toContain('127.0.0.1')
       expect(notice.description).not.toContain('model.connection_unreachable')
+      // toast 正文最多三行（约 27 个汉字），超出会被截断：标题和按钮已说明去哪里改，正文只留一句。
+      expect(notice.description.length).toBeLessThanOrEqual(27)
     }
     const developer = sendNotStartedNotice('model.connection_unreachable', raw, { developerUi: true })
     expect(developer.description).toContain('model.connection_unreachable')

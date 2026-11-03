@@ -1358,7 +1358,9 @@ export function Workbench() {
   const handleTopbarChangeProject = useStableCallback(async (conversation: ConversationSummary, projectRoot: string | null, permissionMode?: ProjectRecord['permissionMode']) => {
     const changed = await desktopConversation.changeConversationProject(conversation.id, projectRoot, permissionMode ?? readDefaultProjectPermission())
     if (changed.ok) {
-      const name = projectRoot ? projectRoot.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) : null
+      // The project's own name when it is a known project (its folder name otherwise).
+      const known = projectRoot ? projects.find((project) => canonicalProjectRoot(project.rootPath) === canonicalProjectRoot(projectRoot)) : undefined
+      const name = projectRoot ? known?.name ?? projectRoot.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) : null
       toast.success(name ? `已换到项目「${name}」` : '已取消绑定项目')
       return
     }
